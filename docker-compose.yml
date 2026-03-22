@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: nest-practice
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secreto
+      POSTGRES_DB: nest-practice
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

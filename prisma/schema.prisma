@@ -1,0 +1,87 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// PRODUCT MODEL
+// ============================================================================
+// El modelo de Prisma representa la TABLA en la base de datos.
+// 
+// NOTA: Esto es INFRASTRUCTURE, no dominio.
+// El dominio tiene sus propias entidades (Product) que son independientes.
+//
+// En algunos enfoques (Domain-Driven Design con ORMs como Prisma),
+// el modelo de DB puede reflejar la entidad de dominio. En otros,
+// son completamente separados.
+//
+// PARA ESTE EJEMPLO: Usamos enfoque pragmático donde el modelo Prisma
+// representa la estructura de persistencia.
+// ============================================================================
+
+model Product {
+  id        String   @id // UUID
+  name      String
+  price     Int      // Stored in cents (integer) - Money Value Object pattern
+  currency  String   // USD, EUR, ARS, MXN
+  sku       String   @unique
+  stock     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  orderItems OrderItem[]
+
+  @@map("products")
+}
+
+// ============================================================================
+// ORDER MODEL
+// ============================================================================
+
+model Order {
+  id           String      @id // UUID
+  customerName String
+  status       String      // DRAFT, PENDING, COMPLETED, CANCELLED
+  createdAt    DateTime    @default(now())
+  completedAt  DateTime?
+
+  // Relations
+  items OrderItem[]
+
+  @@map("orders")
+}
+
+// ============================================================================
+// ORDER ITEM MODEL
+// ============================================================================
+// Relación: Order 1:N OrderItems
+//           Product 1:N OrderItems
+// 
+// NOTA: OrderItem es parte del Aggregate Order, pero en Prisma
+//modelamos como tabla separada por practicidad.
+// En DDD puro, OrderItem podría no tener su propia tabla.
+// ============================================================================
+
+model OrderItem {
+  id            String  @id @default(uuid())
+  orderId       String
+  productId     String
+  productName   String
+  quantity      Int
+  unitPriceCents Int    // Stored in cents
+  unitPriceCurrency String
+  
+  // Relations
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@map("order_items")
+}
