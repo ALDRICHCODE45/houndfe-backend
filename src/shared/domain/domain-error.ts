@@ -43,3 +43,36 @@ export class InvalidArgumentError extends DomainError {
     super(message, code);
   }
 }
+
+export class InvalidCredentialsError extends DomainError {
+  constructor() {
+    super('Invalid email or password', 'INVALID_CREDENTIALS');
+  }
+}
+
+export class UserInactiveError extends DomainError {
+  constructor() {
+    super('User account is inactive', 'USER_INACTIVE');
+  }
+}
+
+export class InvalidRefreshTokenError extends DomainError {
+  constructor() {
+    super('Invalid or expired refresh token', 'INVALID_REFRESH_TOKEN');
+  }
+}
+
+export class InsufficientPermissionsError extends DomainError {
+  constructor() {
+    super('Insufficient permissions', 'INSUFFICIENT_PERMISSIONS');
+  }
+}
+
+export class SystemRoleProtectedError extends DomainError {
+  constructor(roleName: string) {
+    super(
+      `System role "${roleName}" cannot be deleted`,
+      'SYSTEM_ROLE_PROTECTED',
+    );
+  }
+}

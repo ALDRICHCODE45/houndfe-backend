@@ -22,6 +22,11 @@ import {
   EntityAlreadyExistsError,
   BusinessRuleViolationError,
   InvalidArgumentError,
+  InvalidCredentialsError,
+  UserInactiveError,
+  InvalidRefreshTokenError,
+  InsufficientPermissionsError,
+  SystemRoleProtectedError,
 } from '../domain/domain-error';
 
 @Catch(DomainError)
@@ -47,11 +52,16 @@ export class DomainExceptionFilter implements ExceptionFilter {
   /**
    * Maps domain error types to HTTP status codes.
    *
-   * EntityNotFoundError     → 404
-   * EntityAlreadyExistsError → 409
+   * EntityNotFoundError        → 404
+   * EntityAlreadyExistsError   → 409
    * BusinessRuleViolationError → 422
-   * InvalidArgumentError    → 400
-   * Default                 → 500
+   * InvalidArgumentError       → 400
+   * InvalidCredentialsError    → 401
+   * UserInactiveError          → 401
+   * InvalidRefreshTokenError   → 401
+   * InsufficientPermissionsError → 403
+   * SystemRoleProtectedError   → 422
+   * Default                    → 500
    */
   private getHttpStatus(exception: DomainError): number {
     if (exception instanceof EntityNotFoundError) return HttpStatus.NOT_FOUND;
@@ -61,6 +71,15 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception instanceof InvalidArgumentError)
       return HttpStatus.BAD_REQUEST;
+    if (exception instanceof InvalidCredentialsError)
+      return HttpStatus.UNAUTHORIZED;
+    if (exception instanceof UserInactiveError) return HttpStatus.UNAUTHORIZED;
+    if (exception instanceof InvalidRefreshTokenError)
+      return HttpStatus.UNAUTHORIZED;
+    if (exception instanceof InsufficientPermissionsError)
+      return HttpStatus.FORBIDDEN;
+    if (exception instanceof SystemRoleProtectedError)
+      return HttpStatus.UNPROCESSABLE_ENTITY;
     return HttpStatus.INTERNAL_SERVER_ERROR;
   }
 }

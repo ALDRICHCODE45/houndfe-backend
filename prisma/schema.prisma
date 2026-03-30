@@ -85,3 +85,88 @@ model OrderItem {
 
   @@map("order_items")
 }
+
+// ============================================================================
+// USER MODEL
+// ============================================================================
+// User table for authentication and authorization.
+// Part of the auth bounded context.
+// ============================================================================
+
+model User {
+  id                  String    @id                // UUID from crypto.randomUUID()
+  email               String    @unique
+  hashedPassword      String
+  name                String
+  isActive            Boolean   @default(true)
+  hashedRefreshToken  String?                      // nullable — null when logged out
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  // Relations
+  roles UserRole[]
+
+  @@map("users")
+}
+
+// ============================================================================
+// RBAC MODELS
+// ============================================================================
+// Permission, Role, RolePermission, UserRole models for authorization.
+// Part of the auth bounded context.
+// ============================================================================
+
+model Permission {
+  id          String   @id @default(uuid())
+  subject     String
+  action      String
+  description String?
+  createdAt   DateTime @default(now())
+
+  // Relations
+  roles RolePermission[]
+
+  @@unique([subject, action])
+  @@map("permissions")
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@map("roles")
+}
+
+model RolePermission {
+  id           String @id @default(uuid())
+  roleId       String
+  permissionId String
+
+  // Relations
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id     String @id @default(uuid())
+  userId String
+  roleId String
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@map("user_roles")
+}
