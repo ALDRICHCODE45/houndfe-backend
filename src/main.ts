@@ -26,6 +26,9 @@ async function bootstrap() {
   // Global exception filter — maps DomainErrors to HTTP responses
   app.useGlobalFilters(new DomainExceptionFilter());
 
+  // CORS — permite todas las origenes (solo para desarrollo)
+  app.enableCors();
+
   const port = process.env.PORT ?? 3000;
   await app.listen(port);
   logger.log(`Application running on http://localhost:${port}`);
