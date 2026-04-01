@@ -243,6 +243,69 @@ Cada vez que usas `POST /auth/refresh`, el servidor:
 
 ---
 
+### `GET /auth/me/permissions` — Obtener permisos efectivos del usuario actual
+
+**Autenticacion:** `Bearer <accessToken>`
+
+Devuelve los permisos efectivos del usuario autenticado, deduplicados y con orden estable. Pensado para que el frontend aplique autorizacion UI (sidebar, rutas, botones).
+
+```typescript
+// Response 200
+{
+  permissions: Array<{
+    subject: string;  // 'Product' | 'Order' | 'User' | 'Role' | 'all'
+    action: string;   // 'create' | 'read' | 'update' | 'delete' | 'manage'
+  }>;
+  permissionCodes: string[];  // ['create:Product', 'read:Order', 'manage:all', ...]
+}
+```
+
+**Ejemplo de request:**
+
+```bash
+curl -s http://localhost:3000/auth/me/permissions \
+  -H "Authorization: Bearer <accessToken>" | jq
+```
+
+**Ejemplo de response (usuario con rol Super Admin):**
+
+```json
+{
+  "permissions": [{ "subject": "all", "action": "manage" }],
+  "permissionCodes": ["manage:all"]
+}
+```
+
+**Ejemplo de response (usuario con permisos granulares):**
+
+```json
+{
+  "permissions": [
+    { "subject": "Order", "action": "read" },
+    { "subject": "Product", "action": "create" },
+    { "subject": "Product", "action": "read" },
+    { "subject": "Product", "action": "update" }
+  ],
+  "permissionCodes": [
+    "read:Order",
+    "create:Product",
+    "read:Product",
+    "update:Product"
+  ]
+}
+```
+
+**Uso recomendado en frontend:**
+
+1. Llamar a `GET /auth/me/permissions` despues del login.
+2. Guardar `permissionCodes` en el store global.
+3. Usar un helper `userCan(action, subject)` que verifique contra los codes (ver seccion 12.5).
+4. Opcionalmente, usar CASL en el cliente con el array `permissions` para evaluaciones complejas.
+
+**Errores:** `401` si no hay token o es invalido.
+
+---
+
 ### `POST /auth/logout` — Cerrar sesion
 
 **Autenticacion:** `Bearer <accessToken>`
@@ -701,6 +764,7 @@ Referencia rapida de que permiso necesita cada endpoint:
 | `POST /auth/login`                   | POST   | Ninguno           |
 | `POST /auth/refresh`                 | POST   | Ninguno           |
 | `GET /auth/me`                       | GET    | Solo JWT          |
+| `GET /auth/me/permissions`           | GET    | Solo JWT          |
 | `POST /auth/logout`                  | POST   | Solo JWT          |
 | `GET /admin/users`                   | GET    | `read:User`       |
 | `GET /admin/users/:id`               | GET    | `read:User`       |
@@ -745,6 +809,18 @@ interface AuthTokens {
   accessToken: string;
   refreshToken: string;
 }
+
+/** Response from GET /auth/me/permissions */
+interface UserPermissionsResponse {
+  permissions: Array<{
+    subject: AppSubjects;
+    action: AppActions;
+  }>;
+  permissionCodes: string[]; // formato 'action:subject' (ej: 'read:User', 'manage:all')
+}
+
+type AppActions = 'create' | 'read' | 'update' | 'delete' | 'manage';
+type AppSubjects = 'Product' | 'Order' | 'User' | 'Role' | 'all';
 
 // ============================================
 // Admin Types
@@ -1099,30 +1175,30 @@ DESACTIVAR USUARIO:
 
 ### 12.5 Proteccion de Rutas en el Frontend
 
-Para proteger rutas en el frontend basandose en permisos, se recomienda:
+Para proteger rutas en el frontend basandose en permisos:
 
 ```typescript
-// 1. Despues del login, obtener los permisos del usuario
-//    Opcion A: Decodificar el JWT (solo tiene userId y email, NO permisos)
-//    Opcion B: Hacer GET /auth/me + consultar roles/permisos
+// 1. Despues del login, obtener permisos efectivos del usuario
+const response = await fetch('/auth/me/permissions', {
+  headers: { Authorization: `Bearer ${accessToken}` },
+});
+const { permissions, permissionCodes } = await response.json();
 
-// 2. Guardar permisos en el store global
+// 2. Guardar permissionCodes en el store global
+// permissionCodes = ['read:Order', 'create:Product', 'read:Product', ...]
 
-// 3. Crear helper de verificacion
+// 3. Crear helper de verificacion con permissionCodes
 function userCan(action: string, subject: string): boolean {
-  const permissions = getUserPermissions(); // desde tu store
+  const codes = getPermissionCodes(); // desde tu store
 
   // Verificar permiso exacto
-  if (permissions.some((p) => p.action === action && p.subject === subject))
-    return true;
+  if (codes.includes(`${action}:${subject}`)) return true;
 
   // Verificar 'manage' sobre el subject
-  if (permissions.some((p) => p.action === 'manage' && p.subject === subject))
-    return true;
+  if (codes.includes(`manage:${subject}`)) return true;
 
   // Verificar 'manage:all' (super admin)
-  if (permissions.some((p) => p.action === 'manage' && p.subject === 'all'))
-    return true;
+  if (codes.includes('manage:all')) return true;
 
   return false;
 }

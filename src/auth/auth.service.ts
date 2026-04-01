@@ -29,6 +29,10 @@ import {
 } from '../shared/domain/domain-error';
 import type { JwtTokenPayload } from './interfaces/jwt-payload.interface';
 import type ms from 'ms';
+import {
+  CaslAbilityFactory,
+  type EffectivePermission,
+} from './authorization/casl-ability.factory';
 
 export interface AuthTokens {
   accessToken: string;
@@ -37,6 +41,11 @@ export interface AuthTokens {
 
 export interface AuthResponse extends AuthTokens {
   user: ReturnType<User['toResponse']>;
+}
+
+export interface UserPermissionsResponse {
+  permissions: EffectivePermission[];
+  permissionCodes: string[];
 }
 
 /** Bcrypt salt rounds for refresh token hashing. */
@@ -49,6 +58,7 @@ export class AuthService {
     private readonly userRepo: IUserRepository,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly caslAbilityFactory: CaslAbilityFactory,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponse> {
@@ -137,6 +147,17 @@ export class AuthService {
     const user = await this.userRepo.findById(userId);
     if (!user) throw new EntityNotFoundError('User', userId);
     return user.toResponse();
+  }
+
+  async getUserPermissions(userId: string): Promise<UserPermissionsResponse> {
+    const permissions =
+      await this.caslAbilityFactory.getEffectivePermissions(userId);
+
+    if (!permissions) throw new EntityNotFoundError('User', userId);
+
+    const permissionCodes = permissions.map((p) => `${p.action}:${p.subject}`);
+
+    return { permissions, permissionCodes };
   }
 
   private async generateTokens(

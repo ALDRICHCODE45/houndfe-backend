@@ -18,6 +18,7 @@ import {
   AuthService,
   type AuthResponse,
   type AuthTokens,
+  type UserPermissionsResponse,
 } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -52,6 +53,14 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   getProfile(@CurrentUser() user: AuthenticatedUser) {
     return this.authService.getProfile(user.userId);
+  }
+
+  @Get('me/permissions')
+  @UseGuards(JwtAuthGuard)
+  getUserPermissions(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<UserPermissionsResponse> {
+    return this.authService.getUserPermissions(user.userId);
   }
 
   @Post('logout')

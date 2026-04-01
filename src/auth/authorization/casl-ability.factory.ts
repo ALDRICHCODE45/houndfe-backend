@@ -8,6 +8,7 @@
  * - Flatten permissions from all roles
  * - Build CASL ability using AbilityBuilder
  * - Handle 'manage' on 'all' for super admin
+ * - Expose effective permissions for frontend consumption
  *
  * PERFORMANCE: Single Prisma query with nested includes per request.
  * Lazy loading (no caching yet — deferred for later optimization).
@@ -17,6 +18,12 @@ import { Injectable } from '@nestjs/common';
 import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import type { AppAbility, AppActions, AppSubjects } from './domain/permission';
+
+/** Effective permission for a user — deduplicated and sorted. */
+export interface EffectivePermission {
+  subject: AppSubjects;
+  action: AppActions;
+}
 
 @Injectable()
 export class CaslAbilityFactory {
@@ -30,8 +37,66 @@ export class CaslAbilityFactory {
    */
   async createForUser(userId: string): Promise<AppAbility> {
     const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+    const permissions = await this.queryUserPermissions(userId);
 
-    // Single query with nested includes: user → roles → role → permissions → permission
+    if (!permissions) {
+      // User not found → return empty ability (no permissions)
+      return build();
+    }
+
+    for (const permission of permissions) {
+      can(permission.action, permission.subject);
+    }
+
+    return build();
+  }
+
+  /**
+   * Returns the effective permissions for a user — deduplicated and deterministically sorted.
+   *
+   * Reuses the same user → roles → permissions query as createForUser().
+   * Used by GET /auth/me/permissions for frontend consumption.
+   *
+   * @param userId - The user's ID
+   * @returns Deduplicated permissions sorted by action:subject, or null if user not found
+   */
+  async getEffectivePermissions(
+    userId: string,
+  ): Promise<EffectivePermission[] | null> {
+    const raw = await this.queryUserPermissions(userId);
+
+    // null means user was not found (preserve distinction for error handling upstream)
+    if (raw === null) return null;
+
+    // Deduplicate using Set with "action:subject" key
+    const seen = new Set<string>();
+    const unique: EffectivePermission[] = [];
+
+    for (const perm of raw) {
+      const key = `${perm.action}:${perm.subject}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push({ subject: perm.subject, action: perm.action });
+      }
+    }
+
+    // Deterministic sort: action ASC, then subject ASC
+    unique.sort((a, b) => {
+      const actionCmp = a.action.localeCompare(b.action);
+      return actionCmp !== 0 ? actionCmp : a.subject.localeCompare(b.subject);
+    });
+
+    return unique;
+  }
+
+  /**
+   * Queries all permissions for a user via roles (single Prisma query).
+   *
+   * @returns Flattened permission array, or null if user not found
+   */
+  private async queryUserPermissions(
+    userId: string,
+  ): Promise<EffectivePermission[] | null> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -51,24 +116,13 @@ export class CaslAbilityFactory {
       },
     });
 
-    if (!user) {
-      // User not found → return empty ability (no permissions)
-      return build();
-    }
+    if (!user) return null;
 
-    // Flatten all permissions from all roles
-    const permissions = user.roles.flatMap((userRole) =>
+    return user.roles.flatMap((userRole) =>
       userRole.role.permissions.map((rolePermission) => ({
         action: rolePermission.permission.action as AppActions,
         subject: rolePermission.permission.subject as AppSubjects,
       })),
     );
-
-    // Build ability rules
-    for (const permission of permissions) {
-      can(permission.action, permission.subject);
-    }
-
-    return build();
   }
 }
