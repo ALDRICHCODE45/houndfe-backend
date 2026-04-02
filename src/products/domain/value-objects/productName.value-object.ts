@@ -1,15 +1,16 @@
 /**
  * VALUE OBJECT: ProductName
  *
- * Immutable representation of ProductName values.
- * Stores product names in string to avoid business logic issues
- *
- * @example
- *   const price = new ProductName('ProductName')
- *   const doubled = price.isValie(); // true -> false
+ * Immutable representation of a product name.
+ * Business rules:
+ * - Required, non-empty
+ * - Between 1 and 100 characters (relaxed from original 4-30 limit)
+ * - Cannot be only numbers
  */
-
-import { BusinessRuleViolationError, InvalidArgumentError } from 'src/shared';
+import {
+  BusinessRuleViolationError,
+  InvalidArgumentError,
+} from '../../../shared/domain/domain-error';
 
 export class ProductName {
   private readonly name: string;
@@ -18,33 +19,27 @@ export class ProductName {
     this.name = name;
   }
 
-  public static create(name: string) {
-    if (!name.trim()) {
+  public static create(name: string): ProductName {
+    if (!name?.trim()) {
       throw new InvalidArgumentError('Product name is required');
-    }
-
-    if (name.length <= 3) {
-      throw new BusinessRuleViolationError(
-        'Product Name must have at least 4 characteres',
-        'INVALID_PRODUC_NAME',
-      );
-    }
-
-    if (name.length >= 31) {
-      throw new BusinessRuleViolationError(
-        'Product Name must have maximum 30 characteres',
-        'INVALID_PRODUC_NAME',
-      );
     }
 
     const cleanName = name.trim().replace(/\s+/g, ' ');
 
-    if (/^\d+$/.test(cleanName)) {
+    if (cleanName.length > 100) {
       throw new BusinessRuleViolationError(
-        'Product Name cannot have only numbers',
-        'INVALID_PRODUC_NAME',
+        'Product name must have maximum 100 characters',
+        'INVALID_PRODUCT_NAME',
       );
     }
+
+    if (/^\d+$/.test(cleanName)) {
+      throw new BusinessRuleViolationError(
+        'Product name cannot have only numbers',
+        'INVALID_PRODUCT_NAME',
+      );
+    }
+
     return new ProductName(cleanName);
   }
 
@@ -52,7 +47,11 @@ export class ProductName {
     return this.name;
   }
 
-  static fromPersistence(data: { name: string }) {
+  static fromPersistence(data: { name: string }): ProductName {
     return new ProductName(data.name);
+  }
+
+  equals(other: ProductName): boolean {
+    return this.name === other.name;
   }
 }

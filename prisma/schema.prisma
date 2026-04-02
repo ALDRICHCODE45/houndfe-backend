@@ -11,35 +11,255 @@ datasource db {
 }
 
 // ============================================================================
-// PRODUCT MODEL
-// ============================================================================
-// El modelo de Prisma representa la TABLA en la base de datos.
-// 
-// NOTA: Esto es INFRASTRUCTURE, no dominio.
-// El dominio tiene sus propias entidades (Product) que son independientes.
-//
-// En algunos enfoques (Domain-Driven Design con ORMs como Prisma),
-// el modelo de DB puede reflejar la entidad de dominio. En otros,
-// son completamente separados.
-//
-// PARA ESTE EJEMPLO: Usamos enfoque pragmático donde el modelo Prisma
-// representa la estructura de persistencia.
+// ENUMS
 // ============================================================================
 
-model Product {
-  id        String   @id // UUID
-  name      String
-  price     Int      // Stored in cents (integer) - Money Value Object pattern
-  currency  String   // USD, EUR, ARS, MXN
-  sku       String   @unique
-  stock     Int      @default(0)
+enum ProductType {
+  PRODUCT
+  SERVICE
+}
+
+enum UnitOfMeasure {
+  UNIDAD
+  CAJA
+  BOLSA
+  METRO
+  CENTIMETRO
+  KILOGRAMO
+  GRAMO
+  LITRO
+}
+
+enum IvaRate {
+  IVA_16
+  IVA_8
+  IVA_0
+  IVA_EXENTO
+}
+
+enum IepsRate {
+  NO_APLICA
+  IEPS_160
+  IEPS_53
+  IEPS_50
+  IEPS_30_4
+  IEPS_30
+  IEPS_26_5
+  IEPS_25
+  IEPS_9
+  IEPS_8
+  IEPS_7
+  IEPS_6
+  IEPS_3
+  IEPS_0
+}
+
+enum PurchaseCostMode {
+  NET
+  GROSS
+}
+
+// ============================================================================
+// CATEGORY
+// ============================================================================
+
+model Category {
+  id        String   @id @default(uuid())
+  name      String   @unique
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  products Product[]
+
+  @@map("categories")
+}
+
+// ============================================================================
+// PRODUCT MODEL (rewritten)
+// ============================================================================
+
+model Product {
+  id                       String          @id @default(uuid())
+  name                     String
+  location                 String?
+  description              String?
+  type                     ProductType     @default(PRODUCT)
+  sku                      String?         @unique
+  barcode                  String?         @unique
+  unit                     UnitOfMeasure   @default(UNIDAD)
+  satKey                   String?
+
+  // Category (nullable — deleting category sets this to null)
+  categoryId               String?
+  category                 Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  // Visibility / POS flags
+  sellInPos                Boolean         @default(true)
+  includeInOnlineCatalog   Boolean         @default(true)
+
+  // Taxes
+  chargeProductTaxes       Boolean         @default(true)
+  ivaRate                  IvaRate         @default(IVA_16)
+  iepsRate                 IepsRate        @default(NO_APLICA)
+
+  // Purchase cost
+  purchaseCostMode         PurchaseCostMode @default(NET)
+  purchaseNetCostCents     Int             @default(0)
+  purchaseGrossCostCents   Int             @default(0)
+
+  // Inventory (applies when product has no variants)
+  useStock                 Boolean         @default(true)
+  useLotsAndExpirations    Boolean         @default(false)
+  quantity                 Int             @default(0)
+  minQuantity              Int             @default(0)
+
+  // Has variants flag
+  hasVariants              Boolean         @default(false)
+
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+
   // Relations
-  orderItems OrderItem[]
+  orderItems    OrderItem[]
+  images        ProductImage[]
+  variants      Variant[]
+  lots          Lot[]
+  priceLists    PriceList[]
 
   @@map("products")
+}
+
+// ============================================================================
+// PRODUCT IMAGE
+// ============================================================================
+
+model ProductImage {
+  id        String   @id @default(uuid())
+  productId String
+  variantId String?
+  url       String
+  isMain    Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  product Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant Variant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@map("product_images")
+}
+
+// ============================================================================
+// VARIANT (simple by value — no cartesian combinations)
+// ============================================================================
+
+model Variant {
+  id        String  @id @default(uuid())
+  productId String
+  name      String
+  option    String?
+  value     String?
+  sku       String? @unique
+  barcode   String? @unique
+  quantity  Int     @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product      Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  images       ProductImage[]
+  variantPrices VariantPrice[]
+
+  @@map("variants")
+}
+
+// ============================================================================
+// VARIANT PRICE — per variant per price list
+// ============================================================================
+
+model VariantPrice {
+  id          String @id @default(uuid())
+  variantId   String
+  priceListId String
+  priceCents  Int
+
+  variant   Variant   @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  priceList PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+  tierPrices VariantTierPrice[]
+
+  @@unique([variantId, priceListId])
+  @@map("variant_prices")
+}
+
+model VariantTierPrice {
+  id             String @id @default(uuid())
+  variantPriceId String
+  minQuantity    Int
+  priceCents     Int
+
+  variantPrice VariantPrice @relation(fields: [variantPriceId], references: [id], onDelete: Cascade)
+
+  @@unique([variantPriceId, minQuantity])
+  @@map("variant_tier_prices")
+}
+
+// ============================================================================
+// LOT (inventory lots with expiration)
+// ============================================================================
+
+model Lot {
+  id              String    @id @default(uuid())
+  productId       String
+  lotNumber       String
+  quantity        Int       @default(0)
+  manufactureDate DateTime?
+  expirationDate  DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // lotNumber unique per product
+  @@unique([productId, lotNumber])
+  @@map("lots")
+}
+
+// ============================================================================
+// PRICE LIST
+// ============================================================================
+
+model PriceList {
+  id         String  @id @default(uuid())
+  productId  String
+  name       String
+  priceCents Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product       Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  tierPrices    TierPrice[]
+  variantPrices VariantPrice[]
+
+  // Each product has unique price list names
+  @@unique([productId, name])
+  @@map("price_lists")
+}
+
+// ============================================================================
+// TIER PRICE (quantity-based tiers within a price list)
+// ============================================================================
+
+model TierPrice {
+  id          String @id @default(uuid())
+  priceListId String
+  minQuantity Int
+  priceCents  Int
+
+  priceList PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+
+  // Unique threshold per price list
+  @@unique([priceListId, minQuantity])
+  @@map("tier_prices")
 }
 
 // ============================================================================
@@ -62,13 +282,6 @@ model Order {
 // ============================================================================
 // ORDER ITEM MODEL
 // ============================================================================
-// Relación: Order 1:N OrderItems
-//           Product 1:N OrderItems
-// 
-// NOTA: OrderItem es parte del Aggregate Order, pero en Prisma
-//modelamos como tabla separada por practicidad.
-// En DDD puro, OrderItem podría no tener su propia tabla.
-// ============================================================================
 
 model OrderItem {
   id            String  @id @default(uuid())
@@ -89,21 +302,17 @@ model OrderItem {
 // ============================================================================
 // USER MODEL
 // ============================================================================
-// User table for authentication and authorization.
-// Part of the auth bounded context.
-// ============================================================================
 
 model User {
-  id                  String    @id                // UUID from crypto.randomUUID()
+  id                  String    @id
   email               String    @unique
   hashedPassword      String
   name                String
   isActive            Boolean   @default(true)
-  hashedRefreshToken  String?                      // nullable — null when logged out
+  hashedRefreshToken  String?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  // Relations
   roles UserRole[]
 
   @@map("users")
@@ -111,9 +320,6 @@ model User {
 
 // ============================================================================
 // RBAC MODELS
-// ============================================================================
-// Permission, Role, RolePermission, UserRole models for authorization.
-// Part of the auth bounded context.
 // ============================================================================
 
 model Permission {
@@ -123,7 +329,6 @@ model Permission {
   description String?
   createdAt   DateTime @default(now())
 
-  // Relations
   roles RolePermission[]
 
   @@unique([subject, action])
@@ -138,7 +343,6 @@ model Role {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Relations
   permissions RolePermission[]
   users       UserRole[]
 
@@ -150,7 +354,6 @@ model RolePermission {
   roleId       String
   permissionId String
 
-  // Relations
   role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
   permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
@@ -163,7 +366,6 @@ model UserRole {
   userId String
   roleId String
 
-  // Relations
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
 

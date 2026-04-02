@@ -1,10 +1,10 @@
 /**
  * ProductsModule - NestJS module for the Products bounded context.
  *
- * This is where Dependency Inversion happens:
- * - Domain defines IProductRepository (port)
- * - We register PrismaProductRepository (adapter)
- * - NestJS injects the adapter when the port is requested
+ * Registers:
+ * - PrismaProductRepository as IProductRepository adapter
+ * - ProductsService for product + subresource CRUD
+ * - ProductsController for HTTP endpoints
  *
  * Exports ProductsService so other modules (Orders) can use it.
  */
@@ -23,6 +23,6 @@ import { PRODUCT_REPOSITORY } from './domain/product.repository';
       useClass: PrismaProductRepository,
     },
   ],
-  exports: [ProductsService], // Other modules use the SERVICE, not the repo directly
+  exports: [ProductsService],
 })
 export class ProductsModule {}

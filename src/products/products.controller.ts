@@ -2,14 +2,14 @@
  * ProductsController - HTTP Adapter (Driver Port).
  *
  * Translates HTTP requests to service calls.
- * Thin layer: validates input (via DTOs + ValidationPipe),
- * delegates to service, returns response.
+ * Handles: Product CRUD + subresources (variants, lots, price lists, images).
  */
 import {
   Controller,
   Get,
   Post,
   Patch,
+  Put,
   Delete,
   Body,
   Param,
@@ -20,10 +20,20 @@ import {
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { CreateVariantDto, UpdateVariantDto } from './dto/variant.dto';
+import { CreateLotDto, UpdateLotDto } from './dto/lot.dto';
+import { CreatePriceListDto, UpdatePriceListDto } from './dto/price-list.dto';
+import { CreateImageDto } from './dto/image.dto';
+import {
+  BulkUpsertVariantPricesDto,
+  UpsertVariantPriceDto,
+} from './dto/variant-price.dto';
 
 @Controller('products')
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
+
+  // ==================== Product CRUD ====================
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
@@ -32,7 +42,6 @@ export class ProductsController {
   }
 
   @Get()
-  @HttpCode(HttpStatus.OK)
   findAll() {
     return this.productsService.findAll();
   }
@@ -54,5 +63,187 @@ export class ProductsController {
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.remove(id);
+  }
+
+  // ==================== Variants ====================
+
+  @Post(':id/variants')
+  @HttpCode(HttpStatus.CREATED)
+  addVariant(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateVariantDto,
+  ) {
+    return this.productsService.addVariant(id, dto);
+  }
+
+  @Get(':id/variants')
+  getVariants(@Param('id', ParseUUIDPipe) id: string) {
+    return this.productsService.getVariants(id);
+  }
+
+  @Patch(':id/variants/:variantId')
+  updateVariant(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+    @Body() dto: UpdateVariantDto,
+  ) {
+    return this.productsService.updateVariant(id, variantId, dto);
+  }
+
+  @Delete(':id/variants/:variantId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removeVariant(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+  ) {
+    return this.productsService.removeVariant(id, variantId);
+  }
+
+  @Get(':productId/variants/:variantId/prices')
+  getVariantPrices(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+  ) {
+    return this.productsService.getVariantPrices(productId, variantId);
+  }
+
+  @Put(':productId/variants/:variantId/prices/:priceListId')
+  upsertVariantPrice(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+    @Param('priceListId', ParseUUIDPipe) priceListId: string,
+    @Body() dto: UpsertVariantPriceDto,
+  ) {
+    return this.productsService.upsertVariantPrice(
+      productId,
+      variantId,
+      priceListId,
+      dto,
+    );
+  }
+
+  @Delete(':productId/variants/:variantId/prices/:priceListId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removeVariantPrice(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+    @Param('priceListId', ParseUUIDPipe) priceListId: string,
+  ) {
+    return this.productsService.removeVariantPrice(
+      productId,
+      variantId,
+      priceListId,
+    );
+  }
+
+  @Put(':productId/variants/:variantId/prices')
+  bulkUpsertVariantPrices(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+    @Body() dto: BulkUpsertVariantPricesDto,
+  ) {
+    return this.productsService.bulkUpsertVariantPrices(
+      productId,
+      variantId,
+      dto,
+    );
+  }
+
+  // ==================== Lots ====================
+
+  @Post(':id/lots')
+  @HttpCode(HttpStatus.CREATED)
+  addLot(@Param('id', ParseUUIDPipe) id: string, @Body() dto: CreateLotDto) {
+    return this.productsService.addLot(id, dto);
+  }
+
+  @Get(':id/lots')
+  getLots(@Param('id', ParseUUIDPipe) id: string) {
+    return this.productsService.getLots(id);
+  }
+
+  @Patch(':id/lots/:lotId')
+  updateLot(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('lotId', ParseUUIDPipe) lotId: string,
+    @Body() dto: UpdateLotDto,
+  ) {
+    return this.productsService.updateLot(id, lotId, dto);
+  }
+
+  @Delete(':id/lots/:lotId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removeLot(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('lotId', ParseUUIDPipe) lotId: string,
+  ) {
+    return this.productsService.removeLot(id, lotId);
+  }
+
+  // ==================== Price Lists ====================
+
+  @Post(':id/price-lists')
+  @HttpCode(HttpStatus.CREATED)
+  addPriceList(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreatePriceListDto,
+  ) {
+    return this.productsService.addPriceList(id, dto);
+  }
+
+  @Get(':id/price-lists')
+  getPriceLists(@Param('id', ParseUUIDPipe) id: string) {
+    return this.productsService.getPriceLists(id);
+  }
+
+  @Patch(':id/price-lists/:priceListId')
+  updatePriceList(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('priceListId', ParseUUIDPipe) priceListId: string,
+    @Body() dto: UpdatePriceListDto,
+  ) {
+    return this.productsService.updatePriceList(id, priceListId, dto);
+  }
+
+  @Delete(':id/price-lists/:priceListId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removePriceList(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('priceListId', ParseUUIDPipe) priceListId: string,
+  ) {
+    return this.productsService.removePriceList(id, priceListId);
+  }
+
+  // ==================== Images ====================
+
+  @Post(':id/images')
+  @HttpCode(HttpStatus.CREATED)
+  addImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateImageDto,
+  ) {
+    return this.productsService.addImage(id, dto);
+  }
+
+  @Get(':id/images')
+  getImages(@Param('id', ParseUUIDPipe) id: string) {
+    return this.productsService.getImages(id);
+  }
+
+  @Patch(':id/images/:imageId/main')
+  setMainImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('imageId', ParseUUIDPipe) imageId: string,
+  ) {
+    return this.productsService.setMainImage(id, imageId);
+  }
+
+  @Delete(':id/images/:imageId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removeImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('imageId', ParseUUIDPipe) imageId: string,
+  ) {
+    return this.productsService.removeImage(id, imageId);
   }
 }

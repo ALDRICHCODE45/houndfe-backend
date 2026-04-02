@@ -5,14 +5,16 @@
  * NestJS EventEmitter dispatches them; listeners react.
  *
  * Naming convention: past tense (something that already happened).
+ *
+ * NOTE: Events are not emitted in this CRUD-first iteration.
+ * Kept for backward compatibility with listener registrations.
  */
 
 export class ProductCreatedEvent {
   constructor(
     public readonly productId: string,
     public readonly name: string,
-    public readonly sku: string,
-    public readonly stock: number,
+    public readonly sku: string | null,
   ) {}
 }
 

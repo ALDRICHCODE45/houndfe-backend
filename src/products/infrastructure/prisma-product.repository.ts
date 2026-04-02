@@ -2,15 +2,13 @@
  * ADAPTER: PrismaProductRepository
  *
  * Concrete implementation of IProductRepository using Prisma.
- *
  * Translates between domain entities and database records.
- * Contains mappers that convert DB rows ↔ domain objects.
  */
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { Product } from '../domain/product.entity';
 import type { IProductRepository } from '../domain/product.repository';
-import type { Currency } from '../../shared/domain/value-objects/money.value-object';
+import type { Product as PrismaProduct } from '@prisma/client';
 
 @Injectable()
 export class PrismaProductRepository implements IProductRepository {
@@ -28,17 +26,16 @@ export class PrismaProductRepository implements IProductRepository {
     return data ? this.toDomain(data) : null;
   }
 
+  async findByBarcode(barcode: string): Promise<Product | null> {
+    const data = await this.prisma.product.findUnique({
+      where: { barcode },
+    });
+    return data ? this.toDomain(data) : null;
+  }
+
   async findAll(): Promise<Product[]> {
     const data = await this.prisma.product.findMany({
       orderBy: { createdAt: 'desc' },
-    });
-    return data.map((d) => this.toDomain(d));
-  }
-
-  async findInStock(): Promise<Product[]> {
-    const data = await this.prisma.product.findMany({
-      where: { stock: { gt: 0 } },
-      orderBy: { name: 'asc' },
     });
     return data.map((d) => this.toDomain(d));
   }
@@ -49,18 +46,53 @@ export class PrismaProductRepository implements IProductRepository {
       where: { id: p.id },
       update: {
         name: p.name,
-        price: p.price,
-        currency: p.currency,
-        stock: p.stock,
+        location: p.location,
+        description: p.description,
+        type: p.type as any,
+        sku: p.sku,
+        barcode: p.barcode,
+        unit: p.unit as any,
+        satKey: p.satKey,
+        categoryId: p.categoryId,
+        sellInPos: p.sellInPos,
+        includeInOnlineCatalog: p.includeInOnlineCatalog,
+        chargeProductTaxes: p.chargeProductTaxes,
+        ivaRate: p.ivaRate as any,
+        iepsRate: p.iepsRate as any,
+        purchaseCostMode: p.purchaseCostMode as any,
+        purchaseNetCostCents: p.purchaseNetCostCents,
+        purchaseGrossCostCents: p.purchaseGrossCostCents,
+        useStock: p.useStock,
+        useLotsAndExpirations: p.useLotsAndExpirations,
+        quantity: p.quantity,
+        minQuantity: p.minQuantity,
+        hasVariants: p.hasVariants,
         updatedAt: new Date(),
       },
       create: {
         id: p.id,
         name: p.name,
-        price: p.price,
-        currency: p.currency,
+        location: p.location,
+        description: p.description,
+        type: p.type as any,
         sku: p.sku,
-        stock: p.stock,
+        barcode: p.barcode,
+        unit: p.unit as any,
+        satKey: p.satKey,
+        categoryId: p.categoryId,
+        sellInPos: p.sellInPos,
+        includeInOnlineCatalog: p.includeInOnlineCatalog,
+        chargeProductTaxes: p.chargeProductTaxes,
+        ivaRate: p.ivaRate as any,
+        iepsRate: p.iepsRate as any,
+        purchaseCostMode: p.purchaseCostMode as any,
+        purchaseNetCostCents: p.purchaseNetCostCents,
+        purchaseGrossCostCents: p.purchaseGrossCostCents,
+        useStock: p.useStock,
+        useLotsAndExpirations: p.useLotsAndExpirations,
+        quantity: p.quantity,
+        minQuantity: p.minQuantity,
+        hasVariants: p.hasVariants,
       },
     });
     return this.toDomain(saved);
@@ -70,23 +102,79 @@ export class PrismaProductRepository implements IProductRepository {
     await this.prisma.product.delete({ where: { id } });
   }
 
-  private toDomain(data: {
-    id: string;
-    name: string;
-    price: number;
-    currency: string;
-    sku: string;
-    stock: number;
-    createdAt: Date;
-    updatedAt: Date;
-  }): Product {
+  async isSkuTaken(
+    sku: string,
+    exclude?: { productId?: string; variantId?: string },
+  ): Promise<boolean> {
+    const upper = sku.toUpperCase();
+
+    // Check products table — exclude the product being updated (if any)
+    const productMatch = await this.prisma.product.findFirst({
+      where: {
+        sku: upper,
+        ...(exclude?.productId ? { id: { not: exclude.productId } } : {}),
+      },
+    });
+    if (productMatch) return true;
+
+    // Check variants table — exclude only the specific variant being updated (if any)
+    const variantMatch = await this.prisma.variant.findFirst({
+      where: {
+        sku: upper,
+        ...(exclude?.variantId ? { id: { not: exclude.variantId } } : {}),
+      },
+    });
+    return !!variantMatch;
+  }
+
+  async isBarcodeTaken(
+    barcode: string,
+    exclude?: { productId?: string; variantId?: string },
+  ): Promise<boolean> {
+    // Check products table — exclude the product being updated (if any)
+    const productMatch = await this.prisma.product.findFirst({
+      where: {
+        barcode,
+        ...(exclude?.productId ? { id: { not: exclude.productId } } : {}),
+      },
+    });
+    if (productMatch) return true;
+
+    // Check variants table — exclude only the specific variant being updated (if any)
+    const variantMatch = await this.prisma.variant.findFirst({
+      where: {
+        barcode,
+        ...(exclude?.variantId ? { id: { not: exclude.variantId } } : {}),
+      },
+    });
+    return !!variantMatch;
+  }
+
+  private toDomain(data: PrismaProduct): Product {
     return Product.fromPersistence({
       id: data.id,
       name: data.name,
-      priceAmount: data.price / 100,
-      priceCurrency: data.currency as Currency,
+      location: data.location,
+      description: data.description,
+      type: data.type,
       sku: data.sku,
-      stock: data.stock,
+      barcode: data.barcode,
+      unit: data.unit,
+      satKey: data.satKey,
+      categoryId: data.categoryId,
+      sellInPos: data.sellInPos,
+      includeInOnlineCatalog: data.includeInOnlineCatalog,
+      chargeProductTaxes: data.chargeProductTaxes,
+      ivaRate: data.ivaRate,
+      iepsRate: data.iepsRate,
+      purchaseCostMode: data.purchaseCostMode,
+      purchaseNetCostCents: data.purchaseNetCostCents,
+      purchaseGrossCostCents: data.purchaseGrossCostCents,
+      useStock: data.useStock,
+      useLotsAndExpirations: data.useLotsAndExpirations,
+      quantity: data.quantity,
+      minQuantity: data.minQuantity,
+      hasVariants: data.hasVariants,
       createdAt: data.createdAt,
       updatedAt: data.updatedAt,
     });

@@ -48,12 +48,17 @@ export class OrdersService {
       const productResponse = await this.productsService.findOne(
         itemDto.productId,
       );
+
+      // Get price from PUBLICO price list (first/default)
+      const publicoList = productResponse.priceLists?.find(
+        (pl: any) => pl.name === 'PUBLICO',
+      );
+      const priceCents = publicoList?.priceCents ?? 0;
+      const priceDecimal = priceCents / 100;
+
       const { Money } =
         await import('../shared/domain/value-objects/money.value-object');
-      const unitPrice = Money.fromDecimal(
-        productResponse.price.amount,
-        productResponse.price.currency,
-      );
+      const unitPrice = Money.fromDecimal(priceDecimal, 'MXN');
 
       const orderItem = OrderItem.create(
         productResponse.id,
