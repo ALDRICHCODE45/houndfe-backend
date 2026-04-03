@@ -77,6 +77,10 @@ export class CreateProductDto {
 
   @IsOptional()
   @IsBoolean()
+  requiresPrescription?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
   chargeProductTaxes?: boolean;
 
   @IsOptional()

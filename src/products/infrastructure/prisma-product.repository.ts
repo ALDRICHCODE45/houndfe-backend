@@ -164,6 +164,7 @@ export class PrismaProductRepository implements IProductRepository {
       categoryId: data.categoryId,
       sellInPos: data.sellInPos,
       includeInOnlineCatalog: data.includeInOnlineCatalog,
+      requiresPrescription: data.requiresPrescription,
       chargeProductTaxes: data.chargeProductTaxes,
       ivaRate: data.ivaRate,
       iepsRate: data.iepsRate,

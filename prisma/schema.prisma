@@ -96,6 +96,7 @@ model Product {
   // Visibility / POS flags
   sellInPos                Boolean         @default(true)
   includeInOnlineCatalog   Boolean         @default(true)
+  requiresPrescription     Boolean         @default(false)
 
   // Taxes
   chargeProductTaxes       Boolean         @default(true)

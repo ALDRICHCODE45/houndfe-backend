@@ -62,6 +62,7 @@ export interface ProductProps {
   categoryId: string | null;
   sellInPos: boolean;
   includeInOnlineCatalog: boolean;
+  requiresPrescription: boolean;
   chargeProductTaxes: boolean;
   ivaRate: IvaRate;
   iepsRate: IepsRate;
@@ -88,6 +89,7 @@ export class Product {
   public categoryId: string | null;
   public sellInPos: boolean;
   public includeInOnlineCatalog: boolean;
+  public requiresPrescription: boolean;
   public chargeProductTaxes: boolean;
   public ivaRate: IvaRate;
   public iepsRate: IepsRate;
@@ -113,6 +115,7 @@ export class Product {
     this.categoryId = props.categoryId;
     this.sellInPos = props.sellInPos;
     this.includeInOnlineCatalog = props.includeInOnlineCatalog;
+    this.requiresPrescription = props.requiresPrescription;
     this.chargeProductTaxes = props.chargeProductTaxes;
     this.ivaRate = props.ivaRate;
     this.iepsRate = props.iepsRate;
@@ -141,6 +144,7 @@ export class Product {
     categoryId?: string | null;
     sellInPos?: boolean;
     includeInOnlineCatalog?: boolean;
+    requiresPrescription?: boolean;
     chargeProductTaxes?: boolean;
     ivaRate?: IvaRateValue;
     iepsRate?: IepsRateValue;
@@ -201,6 +205,7 @@ export class Product {
       categoryId: params.categoryId ?? null,
       sellInPos: params.sellInPos ?? true,
       includeInOnlineCatalog: params.includeInOnlineCatalog ?? true,
+      requiresPrescription: params.requiresPrescription ?? false,
       chargeProductTaxes: params.chargeProductTaxes ?? true,
       ivaRate,
       iepsRate,
@@ -229,6 +234,7 @@ export class Product {
     categoryId: string | null;
     sellInPos: boolean;
     includeInOnlineCatalog: boolean;
+    requiresPrescription: boolean;
     chargeProductTaxes: boolean;
     ivaRate: string;
     iepsRate: string;
@@ -256,6 +262,7 @@ export class Product {
       categoryId: data.categoryId,
       sellInPos: data.sellInPos,
       includeInOnlineCatalog: data.includeInOnlineCatalog,
+      requiresPrescription: data.requiresPrescription,
       chargeProductTaxes: data.chargeProductTaxes,
       ivaRate: IvaRate.fromPersistence(data.ivaRate),
       iepsRate: IepsRate.fromPersistence(data.iepsRate),
@@ -357,6 +364,7 @@ export class Product {
       categoryId: this.categoryId,
       sellInPos: this.sellInPos,
       includeInOnlineCatalog: this.includeInOnlineCatalog,
+      requiresPrescription: this.requiresPrescription,
       chargeProductTaxes: this.chargeProductTaxes,
       ivaRate: this.ivaRate.value,
       iepsRate: this.iepsRate.value,
@@ -385,6 +393,7 @@ export class Product {
       categoryId: this.categoryId,
       sellInPos: this.sellInPos,
       includeInOnlineCatalog: this.includeInOnlineCatalog,
+      requiresPrescription: this.requiresPrescription,
       chargeProductTaxes: this.chargeProductTaxes,
       ivaRate: this.ivaRate.value,
       iepsRate: this.iepsRate.value,

@@ -93,6 +93,7 @@ function makePersistenceProduct(
     categoryId: null,
     sellInPos: true,
     includeInOnlineCatalog: true,
+    requiresPrescription: false,
     chargeProductTaxes: true,
     ivaRate: 'IVA_16',
     iepsRate: 'NO_APLICA',

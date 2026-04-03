@@ -67,6 +67,7 @@ export class ProductsService {
       categoryId: dto.categoryId,
       sellInPos: dto.sellInPos,
       includeInOnlineCatalog: dto.includeInOnlineCatalog,
+      requiresPrescription: dto.requiresPrescription,
       chargeProductTaxes: dto.chargeProductTaxes,
       ivaRate: dto.ivaRate as IvaRateValue | undefined,
       iepsRate: dto.iepsRate as IepsRateValue | undefined,
@@ -128,6 +129,7 @@ export class ProductsService {
         categoryId: product.categoryId,
         sellInPos: product.sellInPos,
         includeInOnlineCatalog: product.includeInOnlineCatalog,
+        requiresPrescription: product.requiresPrescription,
         chargeProductTaxes: product.chargeProductTaxes,
         ivaRate: product.ivaRate,
         iepsRate: product.iepsRate,
@@ -207,6 +209,8 @@ export class ProductsService {
     if (dto.sellInPos !== undefined) product.sellInPos = dto.sellInPos;
     if (dto.includeInOnlineCatalog !== undefined)
       product.includeInOnlineCatalog = dto.includeInOnlineCatalog;
+    if (dto.requiresPrescription !== undefined)
+      product.requiresPrescription = dto.requiresPrescription;
     if (dto.chargeProductTaxes !== undefined)
       product.chargeProductTaxes = dto.chargeProductTaxes;
     if (dto.useStock !== undefined) product.useStock = dto.useStock;
