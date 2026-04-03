@@ -94,6 +94,19 @@ async function main() {
   });
   console.log('  Assigned "Super Admin" role to admin user');
 
+  // 6. Ensure default global PUBLICO price list exists
+  const publicoPriceList = await prisma.globalPriceList.upsert({
+    where: { name: 'PUBLICO' },
+    update: { isDefault: true },
+    create: {
+      name: 'PUBLICO',
+      isDefault: true,
+    },
+  });
+  console.log(
+    `  Global price list "PUBLICO" -> ${publicoPriceList.id} (default)`,
+  );
+
   console.log('\n--- Seed completed ---');
   console.log(`\n  Email:    ${ADMIN_USER.email}`);
   console.log(`  Password: ${ADMIN_USER.password}`);

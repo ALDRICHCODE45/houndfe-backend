@@ -129,7 +129,7 @@ export class CreateProductDto {
   @IsBoolean()
   hasVariants?: boolean;
 
-  // Default price (PUBLICO list) in cents
+  // Selling price — redirected to PUBLICO (default) price list. Not a product column.
   @IsOptional()
   @IsNumber()
   @Min(0)

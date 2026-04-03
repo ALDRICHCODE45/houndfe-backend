@@ -161,6 +161,8 @@ model Variant {
   sku       String? @unique
   barcode   String? @unique
   quantity  Int     @default(0)
+  minQuantity Int   @default(0)
+  purchaseNetCostCents Int?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -224,24 +226,40 @@ model Lot {
 }
 
 // ============================================================================
+// GLOBAL PRICE LIST (business-level price list catalog)
+// ============================================================================
+
+model GlobalPriceList {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  priceLists PriceList[]
+
+  @@map("global_price_lists")
+}
+
+// ============================================================================
 // PRICE LIST
 // ============================================================================
 
 model PriceList {
-  id         String  @id @default(uuid())
-  productId  String
-  name       String
-  priceCents Int
+  id                String @id @default(uuid())
+  productId         String
+  globalPriceListId String
+  priceCents        Int
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  product       Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
-  tierPrices    TierPrice[]
-  variantPrices VariantPrice[]
+  product         Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  globalPriceList GlobalPriceList @relation(fields: [globalPriceListId], references: [id], onDelete: Cascade)
+  tierPrices      TierPrice[]
+  variantPrices   VariantPrice[]
 
-  // Each product has unique price list names
-  @@unique([productId, name])
+  @@unique([productId, globalPriceListId])
   @@map("price_lists")
 }
 

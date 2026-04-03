@@ -51,6 +51,8 @@ Documento técnico basado en código actual (`src/products`, `prisma/schema.pris
   - `sku?` (unique global)
   - `barcode?` (unique global)
   - `quantity` (default 0)
+  - `minQuantity` (default 0)
+  - `purchaseNetCostCents?` (nullable; `null` = hereda costo neto del producto)
   - timestamps
 
 ## Lot
@@ -65,15 +67,24 @@ Documento técnico basado en código actual (`src/products`, `prisma/schema.pris
   - timestamps
 - Restricción: `@@unique([productId, lotNumber])`
 
+## GlobalPriceList
+
+- Tabla: `global_price_lists`
+- Campos:
+  - `id`
+  - `name` (unique global)
+  - `isDefault` (solo `PUBLICO` = `true`)
+  - timestamps
+
 ## PriceList
 
 - Tabla: `price_lists`
 - Campos:
   - `id`, `productId` (FK cascade)
-  - `name`
+  - `globalPriceListId` (FK cascade a `global_price_lists`)
   - `priceCents`
   - timestamps
-- Restricción: `@@unique([productId, name])`
+- Restricción: `@@unique([productId, globalPriceListId])`
 
 ## VariantPrice
 
@@ -207,6 +218,8 @@ Documento técnico basado en código actual (`src/products`, `prisma/schema.pris
   - `sku?: string`
   - `barcode?: string`
   - `quantity?: number` (`>= 0`)
+  - `minQuantity?: number` (`>= 0`)
+  - `purchaseNetCostCents?: number \| null` (`>= 0`; `null` restaura herencia)
 - `UpdateVariantDto`: todos opcionales, mismas reglas.
 
 Regla adicional en servicio (no solo DTO):
@@ -223,18 +236,21 @@ Regla adicional en servicio (no solo DTO):
   - `expirationDate: string` (`IsDateString`, requerido)
 - `UpdateLotDto`: opcionales (`quantity`, `manufactureDate`, `expirationDate`).
 
-## Price Lists
+## Price Lists (nivel producto)
 
 - `TierPriceDto`
   - `minQuantity: int` (`IsInt`, `>= 0`)
   - `priceCents: number` (`>= 0`)
-- `CreatePriceListDto`
-  - `name: string` requerido (`maxLength(50)`)
-  - `priceCents: number` requerido (`>= 0`)
-  - `tierPrices?: TierPriceDto[]`
 - `UpdatePriceListDto`
   - `priceCents?: number` (`>= 0`)
   - `tierPrices?: TierPriceDto[]` (si viene, reemplaza todos)
+
+## Global Price Lists
+
+- `CreatePriceListDto` (`/price-lists`)
+  - `name: string` requerido (`maxLength(50)`)
+- `UpdatePriceListDto` (`/price-lists/:id`)
+  - `name?: string` (`maxLength(50)`)
 
 ## Images
 
@@ -304,12 +320,19 @@ Base: `/products`
 
 ## Listas de precios
 
-| Método   | Path                                     | Body                 | Respuesta                                  |
-| -------- | ---------------------------------------- | -------------------- | ------------------------------------------ |
-| `POST`   | `/products/:id/price-lists`              | `CreatePriceListDto` | `201`, price list enriquecida con `margin` |
-| `GET`    | `/products/:id/price-lists`              | —                    | `200`, listas enriquecidas con `margin`    |
-| `PATCH`  | `/products/:id/price-lists/:priceListId` | `UpdatePriceListDto` | `200`, lista enriquecida                   |
-| `DELETE` | `/products/:id/price-lists/:priceListId` | —                    | `204`, sin body                            |
+| Método  | Path                                     | Body                 | Respuesta                               |
+| ------- | ---------------------------------------- | -------------------- | --------------------------------------- |
+| `GET`   | `/products/:id/price-lists`              | —                    | `200`, listas enriquecidas con `margin` |
+| `PATCH` | `/products/:id/price-lists/:priceListId` | `UpdatePriceListDto` | `200`, lista enriquecida                |
+
+## Catálogo global de listas de precios
+
+| Método   | Path               | Body       | Respuesta                                          |
+| -------- | ------------------ | ---------- | -------------------------------------------------- |
+| `GET`    | `/price-lists`     | —          | `200`, listas globales                             |
+| `POST`   | `/price-lists`     | `{ name }` | `201`, crea catálogo + PriceList/VariantPrice en 0 |
+| `PATCH`  | `/price-lists/:id` | `{ name }` | `200`, renombra lista global (no default)          |
+| `DELETE` | `/price-lists/:id` | —          | `204`, borra global + cascadas                     |
 
 ## Imágenes
 
@@ -326,10 +349,17 @@ Base: `/products`
 
 ## `GET /products` (lista)
 
-Devuelve `product.toResponse()` por ítem:
+Devuelve `product.toResponse()` por ítem, más campos calculados de precio y agregados de variantes:
 
 - Datos del producto
+- `priceCents: number` → precio de venta calculado desde la lista PUBLICO (`isDefault=true`). No es columna, es campo virtual.
+- `priceDecimal: number` → `priceCents / 100`
 - `purchaseCost` calculado (`mode`, `netCents`, `grossCents`, `netDecimal`, `grossDecimal`)
+- Si `hasVariants=true`:
+  - `variantStockTotal: number` → suma de `quantity` de todas las variantes del producto
+  - `variantCount: number` → cantidad total de variantes del producto
+- Si `hasVariants=false`:
+  - no se incluyen claves `variantStockTotal` ni `variantCount`
 - **No incluye** `priceLists`, `variants`, `images`, `lots`
 
 ## `GET /products/:id`, `POST /products`, `PATCH /products/:id` (detalle)
@@ -337,9 +367,13 @@ Devuelve `product.toResponse()` por ítem:
 Devuelve:
 
 - Todo lo de `toResponse()`
+- `priceCents: number` → precio de venta calculado desde la lista PUBLICO (`isDefault=true`)
+- `priceDecimal: number` → `priceCents / 100`
 - `priceLists[]` (con `tierPrices[]`, `priceDecimal`, `margin`)
 - `variants[]` (si `hasVariants=true`; si no, `[]`) con:
   - `option`, `value`
+  - `minQuantity`
+  - `purchaseNetCostCents` (raw) + `purchaseNetCostDecimal`
   - `variantPrices[]` enriquecidos (`priceListName`, `priceDecimal`, `margin`, `tierPrices[]`)
 - `images[]` (solo imágenes de producto nivel raíz: `variantId=null`)
 - `lots[]` (si `useLotsAndExpirations=true`; si no, `[]`)
@@ -425,6 +459,13 @@ La misma fórmula de margen se aplica a:
 - `VariantPrice.priceCents`
 - `VariantTierPrice.priceCents`
 
+Con diferencia de costo base:
+
+- `enrichPriceListResponse(...)` (nivel producto) **siempre** usa `product.purchaseCost.netCents`.
+- `enrichVariantPriceResponse(...)` (nivel variante) usa:
+  - `netCostCents = variant.purchaseNetCostCents ?? product.purchaseCost.netCents`
+  - Es decir: si la variante define override, el margen sale de ese costo; si no, hereda del producto.
+
 Importante: porcentaje es entero redondeado (`Math.round`), no decimal.
 
 ## 7.3 Semántica de `tierPrices` en upsert de precio por variante
@@ -460,8 +501,10 @@ Reglas operativas:
 - No se pueden crear lotes si `useLotsAndExpirations=false` (`LOTS_NOT_ENABLED`).
 - No se pueden crear lotes si `hasVariants=true` (`PRODUCT_HAS_VARIANTS`).
 - Al crear primera variante, backend activa `hasVariants=true` y re-normaliza inventario.
+- Si `product.useStock=false`, cualquier `variant.minQuantity` se normaliza a `0` al crear/editar variante.
+- Si `PATCH /products/:id` cambia `useStock` a `false`, backend ejecuta cascade `updateMany` para forzar `variant.minQuantity=0` en todas las variantes del producto.
 - Al crear variante, backend auto-crea `VariantPrice` en `0` para todas las listas del producto.
-- Al crear lista de precios, backend auto-crea `VariantPrice` en `0` para todas las variantes del producto.
+- Al crear lista global (`POST /price-lists`), backend auto-crea `PriceList` en `0` para todos los productos y `VariantPrice` en `0` para todas las variantes.
 
 ---
 
@@ -484,7 +527,7 @@ Reglas operativas:
    - lectura: `GET /products/:id/variants/:variantId/prices`
    - upsert individual: `PUT /products/:id/variants/:variantId/prices/:priceListId`
    - upsert bulk: `PUT /products/:id/variants/:variantId/prices`
-4. Listas adicionales: `POST /products/:id/price-lists`.
+4. Listas adicionales globales: `POST /price-lists`.
 5. Imágenes: `POST /products/:id/images`.
 6. Para refrescar pantalla completa: `GET /products/:id`.
 
@@ -498,8 +541,8 @@ Reglas operativas:
 
 ## 10) Caveats conocidos (para evitar sorpresas)
 
-1. **`PUBLICO` no se puede borrar** (`DEFAULT_PRICE_LIST_PROTECTED`).
-2. `PATCH /products/:id` con `priceCents` solo actualiza lista `PUBLICO`.
+1. **`PUBLICO` no se puede borrar ni renombrar** (`DEFAULT_PRICE_LIST_PROTECTED`).
+2. `PATCH /products/:id` con `priceCents` solo actualiza la lista global default (`isDefault=true`, normalmente `PUBLICO`).
 3. `GET /products/:id` trae `images` solo de ámbito producto (`variantId=null`), no las de variante.
 4. `categoryId` no se valida previamente en servicio de productos; depende de FK DB.
 5. `variantId` en imágenes se valida contra pertenencia real al producto (`VARIANT_PRODUCT_MISMATCH`).

@@ -9,6 +9,7 @@ Fuente de verdad: backend actual (`products` + `categories`).
 
 - Productos: `/products`
 - Categorías: `/categories`
+- Catálogo global de listas de precio: `/price-lists`
 
 ---
 
@@ -32,7 +33,7 @@ Fuente de verdad: backend actual (`products` + `categories`).
    - `GET /products/:id/variants/:variantId/prices`
    - `PUT /products/:id/variants/:variantId/prices/:priceListId`
    - `PUT /products/:id/variants/:variantId/prices` (bulk)
-6. Cargar listas de precios extra → `POST /products/:id/price-lists`
+6. Cargar listas de precios extra (globales) → `POST /price-lists`
 7. Cargar imágenes → `POST /products/:id/images`
 8. Refrescar detalle completo → `GET /products/:id`
 
@@ -53,6 +54,9 @@ Fuente de verdad: backend actual (`products` + `categories`).
   - forzar `quantity = 0`
   - forzar `minQuantity = 0`
 
+- Si `useStock = false` en producto con variantes:
+  - backend normaliza `variant.minQuantity = 0` (aunque envíes otro valor)
+
 - Si `useLotsAndExpirations = true` (con `useStock=true` y `hasVariants=false`):
   - `quantity` del producto debe ir en `0`
   - stock real se maneja con lotes
@@ -61,10 +65,14 @@ Fuente de verdad: backend actual (`products` + `categories`).
 ### Precios
 
 - Siempre existe lista `PUBLICO`.
-- `priceCents` en `POST/PATCH /products` afecta solo `PUBLICO`.
-- Listas adicionales se crean por endpoint separado.
+- `priceCents` **no es columna** del producto — es un campo calculado desde la lista `PUBLICO`.
+- En las respuestas (`GET /products`, `GET /products/:id`, `POST`, `PATCH`) el producto incluye `priceCents` y `priceDecimal` calculados desde PUBLICO.
+- `priceCents` en `POST/PATCH /products` se redirige internamente a la lista `PUBLICO`.
+- Listas adicionales se crean globalmente (`POST /price-lists`).
 - Al crear variante, backend crea `VariantPrice=0` para todas las listas del producto.
-- Al crear lista nueva, backend crea `VariantPrice=0` para todas las variantes del producto.
+- Al crear lista global nueva, backend crea:
+  - `PriceList=0` para todos los productos
+  - `VariantPrice=0` para todas las variantes
 - En upsert de precio por variante:
   - `tierPrices` omitido = no tocar tiers
   - `tierPrices: []` = limpiar tiers
@@ -147,7 +155,9 @@ Fuente de verdad: backend actual (`products` + `categories`).
   "value": "Mediano",
   "sku": "PLAY-M",
   "barcode": "770000000001",
-  "quantity": 30
+  "quantity": 30,
+  "minQuantity": 5,
+  "purchaseNetCostCents": 4500
 }
 ```
 
@@ -159,7 +169,9 @@ Fuente de verdad: backend actual (`products` + `categories`).
   "value": "Grande",
   "sku": "PLAY-G",
   "barcode": "770000000002",
-  "quantity": 12
+  "quantity": 12,
+  "minQuantity": 2,
+  "purchaseNetCostCents": null
 }
 ```
 
@@ -168,6 +180,9 @@ Fuente de verdad: backend actual (`products` + `categories`).
 - Al crear primera variante, backend mantiene consistencia de inventario a nivel producto.
 - No usar lotes en productos con variantes.
 - Si enviás `option + value`, backend guarda `name = value`.
+- `purchaseNetCostCents` en variante es opcional:
+  - `null` (o ausente) = hereda costo de compra neto del producto
+  - número `>= 0` = override por variante
 - Se auto-crean cruces de precios por variante para todas las listas existentes (inician en 0).
 
 ---
@@ -229,26 +244,21 @@ Fuente de verdad: backend actual (`products` + `categories`).
 
 ## E. Listas de precio y precios por cantidad
 
-### Crear lista adicional
+### Crear lista adicional global
 
-`POST /products/:id/price-lists`
+`POST /price-lists`
 
 ```json
 {
-  "name": "Mayoreo",
-  "priceCents": 42000,
-  "tierPrices": [
-    { "minQuantity": 0, "priceCents": 42000 },
-    { "minQuantity": 10, "priceCents": 39000 }
-  ]
+  "name": "Mayoreo"
 }
 ```
 
 ### Reglas
 
 - `minQuantity` de tiers: entero, `>= 0`, único, estrictamente ascendente.
-- No se puede borrar `PUBLICO`.
-- Al crear una lista nueva, backend auto-crea el precio por variante en 0 para todas las variantes existentes.
+- No se puede borrar ni renombrar `PUBLICO`.
+- Al crear una lista nueva, backend auto-crea price lists/variant prices en 0 de forma masiva.
 
 ### Precios por variante (single upsert)
 
@@ -342,7 +352,7 @@ Fuente de verdad: backend actual (`products` + `categories`).
 ## Pantalla: listas de precio
 
 - `422 DEFAULT_PRICE_LIST_PROTECTED`
-  - intentaste borrar `PUBLICO`
+  - intentaste borrar o renombrar `PUBLICO`
 - `422 INVALID_TIER_SEQUENCE`
   - tiers repetidos / no ascendentes
 
@@ -395,11 +405,15 @@ Fuente de verdad: backend actual (`products` + `categories`).
 ## 7) "Do this, not that"
 
 - ✅ Usar `GET /products` para grilla (liviano).
+  - Cuando `hasVariants=true`, la grilla recibe además:
+    - `variantStockTotal` (suma de stock de variantes)
+    - `variantCount` (cantidad de variantes)
+  - Cuando `hasVariants=false`, esos campos no vienen en el JSON.
 - ✅ Usar `GET /products/:id` para editar detalle.
 - ✅ Después de operaciones complejas (variantes/lotes/precios), refrescar detalle.
 
 - ❌ No asumir que `quantity` representa stock real cuando hay lotes.
-- ❌ No intentar borrar lista `PUBLICO`.
+- ❌ No intentar renombrar o borrar lista `PUBLICO`.
 - ❌ No mandar `variantId` cualquiera al subir imagen.
 
 ---

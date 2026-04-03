@@ -68,6 +68,47 @@ function makeProduct(id = PRODUCT_ID) {
   return Product.create({ id, name: 'Product 1' });
 }
 
+function makePersistenceProduct(
+  overrides: Partial<{
+    id: string;
+    name: string;
+    quantity: number;
+    hasVariants: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+  }> = {},
+) {
+  const now = new Date('2026-04-01T10:00:00.000Z');
+
+  return {
+    id: overrides.id ?? 'prod-default',
+    name: overrides.name ?? 'Producto',
+    location: null,
+    description: null,
+    type: 'PRODUCT',
+    sku: null,
+    barcode: null,
+    unit: 'UNIDAD',
+    satKey: null,
+    categoryId: null,
+    sellInPos: true,
+    includeInOnlineCatalog: true,
+    chargeProductTaxes: true,
+    ivaRate: 'IVA_16',
+    iepsRate: 'NO_APLICA',
+    purchaseCostMode: 'NET',
+    purchaseNetCostCents: 0,
+    purchaseGrossCostCents: 0,
+    useStock: true,
+    useLotsAndExpirations: false,
+    quantity: overrides.quantity ?? 0,
+    minQuantity: 0,
+    hasVariants: overrides.hasVariants ?? false,
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now,
+  };
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 describe('ProductsService — updateVariant uniqueness', () => {
@@ -181,6 +222,197 @@ describe('ProductsService — updateVariant uniqueness', () => {
   });
 });
 
+describe('ProductsService — findAll variant aggregates', () => {
+  it('should return variantStockTotal=30 and variantCount=2 for product with variants', async () => {
+    const repo = makeMockRepo();
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            ...makePersistenceProduct({
+              id: 'prod-variants-2',
+              hasVariants: true,
+              quantity: 0,
+            }),
+            _count: { variants: 2 },
+            variants: [{ quantity: 10 }, { quantity: 20 }],
+          },
+        ]),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+
+    const [result] = await service.findAll();
+
+    expect(result.hasVariants).toBe(true);
+    expect(result).toHaveProperty('variantStockTotal', 30);
+    expect(result).toHaveProperty('variantCount', 2);
+    expect(repo.findAll).not.toHaveBeenCalled();
+  });
+
+  it('should return zero aggregates when hasVariants=true and product has no variants', async () => {
+    const repo = makeMockRepo();
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            ...makePersistenceProduct({
+              id: 'prod-variants-0',
+              hasVariants: true,
+              quantity: 0,
+            }),
+            _count: { variants: 0 },
+            variants: [],
+          },
+        ]),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+
+    const [result] = await service.findAll();
+
+    expect(result.hasVariants).toBe(true);
+    expect(result).toHaveProperty('variantStockTotal', 0);
+    expect(result).toHaveProperty('variantCount', 0);
+  });
+
+  it('should omit variant aggregate keys when hasVariants=false', async () => {
+    const repo = makeMockRepo();
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            ...makePersistenceProduct({
+              id: 'prod-no-variants',
+              hasVariants: false,
+              quantity: 33,
+            }),
+            _count: { variants: 0 },
+            variants: [],
+          },
+        ]),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+
+    const [result] = await service.findAll();
+
+    expect(result.hasVariants).toBe(false);
+    expect(result.quantity).toBe(33);
+    expect(result).not.toHaveProperty('variantStockTotal');
+    expect(result).not.toHaveProperty('variantCount');
+  });
+
+  it('should compute aggregates independently for multiple products', async () => {
+    const repo = makeMockRepo();
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            ...makePersistenceProduct({
+              id: 'prod-a',
+              hasVariants: true,
+              quantity: 0,
+            }),
+            _count: { variants: 2 },
+            variants: [{ quantity: 5 }, { quantity: 7 }],
+          },
+          {
+            ...makePersistenceProduct({
+              id: 'prod-b',
+              hasVariants: true,
+              quantity: 0,
+            }),
+            _count: { variants: 3 },
+            variants: [{ quantity: 1 }, { quantity: 2 }, { quantity: 3 }],
+          },
+          {
+            ...makePersistenceProduct({
+              id: 'prod-c',
+              hasVariants: false,
+              quantity: 11,
+            }),
+            _count: { variants: 0 },
+            variants: [],
+          },
+        ]),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+
+    const [productA, productB, productC] = await service.findAll();
+
+    expect(productA.id).toBe('prod-a');
+    expect(productA).toHaveProperty('variantStockTotal', 12);
+    expect(productA).toHaveProperty('variantCount', 2);
+
+    expect(productB.id).toBe('prod-b');
+    expect(productB).toHaveProperty('variantStockTotal', 6);
+    expect(productB).toHaveProperty('variantCount', 3);
+
+    expect(productC.id).toBe('prod-c');
+    expect(productC).not.toHaveProperty('variantStockTotal');
+    expect(productC).not.toHaveProperty('variantCount');
+  });
+});
+
+describe('ProductsService — priceCents from PUBLICO list', () => {
+  it('findAll should include priceCents and priceDecimal from PUBLICO list', async () => {
+    const repo = makeMockRepo();
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            ...makePersistenceProduct({
+              id: 'prod-publico-price',
+              hasVariants: false,
+              quantity: 10,
+            }),
+            _count: { variants: 0 },
+            variants: [],
+            priceLists: [{ priceCents: 30000 }],
+          },
+        ]),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    const [result] = await service.findAll();
+
+    expect(result).toHaveProperty('priceCents', 30000);
+    expect(result).toHaveProperty('priceDecimal', 300);
+  });
+
+  it('findAll should default priceCents to 0 when no PUBLICO list found', async () => {
+    const repo = makeMockRepo();
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            ...makePersistenceProduct({
+              id: 'prod-no-publico-price',
+              hasVariants: false,
+            }),
+            _count: { variants: 0 },
+            variants: [],
+            priceLists: [],
+          },
+        ]),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    const [result] = await service.findAll();
+
+    expect(result).toHaveProperty('priceCents', 0);
+    expect(result).toHaveProperty('priceDecimal', 0);
+  });
+});
+
 describe('ProductsService — image ownership validation', () => {
   it('should reject image creation when variant does not belong to product', async () => {
     const repo = makeMockRepo({
@@ -229,7 +461,7 @@ describe('ProductsService — pricing contract math', () => {
       {
         id: 'pl-1',
         productId: PRODUCT_ID,
-        name: 'PUBLICO',
+        globalPriceList: { name: 'PUBLICO' },
         priceCents: 1999,
         tierPrices: [
           { id: 't1', minQuantity: 0, priceCents: 1500 },
@@ -342,52 +574,525 @@ describe('ProductsService — variant price matrix auto-create', () => {
     });
   });
 
-  it('should create zeroed variant prices for all existing variants on price list creation', async () => {
+  it('should create product price lists for all global lists', async () => {
+    const savedProduct = makeProduct();
+    const repo = makeMockRepo({
+      save: jest.fn().mockResolvedValue(savedProduct),
+    });
+
+    const prisma = {
+      globalPriceList: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'gl-publico', isDefault: true },
+          { id: 'gl-mayoreo', isDefault: false },
+        ]),
+      },
+      priceList: {
+        createMany: jest.fn().mockResolvedValue({ count: 2 }),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    jest
+      .spyOn(service as any, 'buildFullResponse')
+      .mockResolvedValue({ id: PRODUCT_ID });
+
+    await service.create({ name: 'Producto', priceCents: 1999 });
+
+    expect(prisma.priceList.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          productId: PRODUCT_ID,
+          globalPriceListId: 'gl-publico',
+          priceCents: 1999,
+        },
+        {
+          productId: PRODUCT_ID,
+          globalPriceListId: 'gl-mayoreo',
+          priceCents: 0,
+        },
+      ],
+    });
+  });
+
+  it('update should redirect priceCents to PUBLICO list', async () => {
+    const product = makeProduct();
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(product),
+      save: jest.fn().mockResolvedValue(product),
+    });
+
+    const prisma = {
+      globalPriceList: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'gl-publico' }),
+      },
+      priceList: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    jest
+      .spyOn(service as any, 'buildFullResponse')
+      .mockResolvedValue({ id: PRODUCT_ID });
+
+    await service.update(PRODUCT_ID, { priceCents: 50000 });
+
+    expect(prisma.globalPriceList.findFirst).toHaveBeenCalledWith({
+      where: { isDefault: true },
+      select: { id: true },
+    });
+    expect(prisma.priceList.updateMany).toHaveBeenCalledWith({
+      where: {
+        productId: PRODUCT_ID,
+        globalPriceListId: 'gl-publico',
+      },
+      data: { priceCents: 50000 },
+    });
+  });
+});
+
+describe('ProductsService — variant minQuantity and purchase cost', () => {
+  it('should create variant with explicit minQuantity', async () => {
     const repo = makeMockRepo({
       findById: jest.fn().mockResolvedValue(makeProduct()),
     });
 
     const tx = {
-      priceList: {
-        create: jest.fn().mockResolvedValue({
-          id: 'pl-new',
-          productId: PRODUCT_ID,
-          name: 'MAYOREO',
-          priceCents: 5000,
-          tierPrices: [],
-        }),
-      },
       variant: {
-        findMany: jest
-          .fn()
-          .mockResolvedValue([{ id: VARIANT_A_ID }, { id: VARIANT_B_ID }]),
+        create: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: data.name,
+            option: data.option,
+            value: data.value,
+            sku: data.sku,
+            barcode: data.barcode,
+            quantity: data.quantity,
+            minQuantity: data.minQuantity,
+            purchaseNetCostCents: data.purchaseNetCostCents,
+          }),
+        ),
+      },
+      priceList: {
+        findMany: jest.fn().mockResolvedValue([]),
       },
       variantPrice: {
         createMany: jest.fn(),
       },
+      product: {
+        update: jest.fn(),
+      },
     };
 
     const prisma = {
-      priceList: {
-        findUnique: jest.fn().mockResolvedValue(null),
-      },
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
     const service = createService(repo, prisma);
 
-    await service.addPriceList(PRODUCT_ID, {
-      name: 'MAYOREO',
-      priceCents: 5000,
-      tierPrices: [],
+    const created: any = await service.addVariant(PRODUCT_ID, {
+      name: 'Rojo',
+      minQuantity: 5,
     });
 
-    expect(tx.variantPrice.createMany).toHaveBeenCalledWith({
-      data: [
-        { variantId: VARIANT_A_ID, priceListId: 'pl-new', priceCents: 0 },
-        { variantId: VARIANT_B_ID, priceListId: 'pl-new', priceCents: 0 },
-      ],
+    expect(created.minQuantity).toBe(5);
+  });
+
+  it('should default minQuantity to zero when omitted', async () => {
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(makeProduct()),
     });
+
+    const tx = {
+      variant: {
+        create: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: data.name,
+            sku: data.sku,
+            barcode: data.barcode,
+            quantity: data.quantity,
+            minQuantity: data.minQuantity,
+            purchaseNetCostCents: data.purchaseNetCostCents,
+          }),
+        ),
+      },
+      priceList: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      variantPrice: {
+        createMany: jest.fn(),
+      },
+      product: {
+        update: jest.fn(),
+      },
+    };
+
+    const prisma = {
+      $transaction: jest.fn(async (callback: any) => callback(tx)),
+    } as any;
+
+    const service = createService(repo, prisma);
+
+    const created: any = await service.addVariant(PRODUCT_ID, {
+      name: 'Rojo',
+    });
+
+    expect(created.minQuantity).toBe(0);
+  });
+
+  it('should normalize variant minQuantity to zero when product useStock is false', async () => {
+    const repo = makeMockRepo({
+      findById: jest
+        .fn()
+        .mockResolvedValue(
+          Product.create({ id: PRODUCT_ID, name: 'P1', useStock: false }),
+        ),
+    });
+
+    const tx = {
+      variant: {
+        create: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: data.name,
+            quantity: data.quantity,
+            minQuantity: data.minQuantity,
+            purchaseNetCostCents: data.purchaseNetCostCents,
+            sku: data.sku,
+            barcode: data.barcode,
+          }),
+        ),
+      },
+      priceList: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      variantPrice: {
+        createMany: jest.fn(),
+      },
+      product: {
+        update: jest.fn(),
+      },
+    };
+
+    const prisma = {
+      $transaction: jest.fn(async (callback: any) => callback(tx)),
+    } as any;
+
+    const service = createService(repo, prisma);
+
+    const created: any = await service.addVariant(PRODUCT_ID, {
+      name: 'Rojo',
+      minQuantity: 9,
+    });
+
+    expect(created.minQuantity).toBe(0);
+  });
+
+  it('should update variant minQuantity', async () => {
+    const repo = makeMockRepo();
+
+    const prisma = {
+      variant: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: VARIANT_A_ID,
+          productId: PRODUCT_ID,
+          name: 'Red',
+          option: null,
+          value: null,
+          sku: 'SKU-RED',
+          barcode: 'BC-RED',
+          quantity: 10,
+          minQuantity: 1,
+          purchaseNetCostCents: null,
+          product: { useStock: true },
+        }),
+        update: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: 'Red',
+            option: null,
+            value: null,
+            sku: 'SKU-RED',
+            barcode: 'BC-RED',
+            quantity: 10,
+            minQuantity: data.minQuantity,
+            purchaseNetCostCents: null,
+          }),
+        ),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    const updated: any = await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+      minQuantity: 10,
+    });
+
+    expect(updated.minQuantity).toBe(10);
+  });
+
+  it('should cascade minQuantity reset on product useStock false', async () => {
+    const repo = makeMockRepo({
+      findById: jest
+        .fn()
+        .mockResolvedValue(
+          Product.create({ id: PRODUCT_ID, name: 'P1', useStock: true }),
+        ),
+      save: jest.fn().mockResolvedValue(makeProduct()),
+    });
+
+    const prisma = {
+      variant: {
+        updateMany: jest.fn().mockResolvedValue({ count: 2 }),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    jest
+      .spyOn(service as any, 'buildFullResponse')
+      .mockResolvedValue({ id: PRODUCT_ID });
+
+    await service.update(PRODUCT_ID, { useStock: false });
+
+    expect(prisma.variant.updateMany).toHaveBeenCalledWith({
+      where: { productId: PRODUCT_ID },
+      data: { minQuantity: 0 },
+    });
+  });
+
+  it('should return purchaseNetCostCents null and null decimal when omitted', async () => {
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(makeProduct()),
+    });
+
+    const tx = {
+      variant: {
+        create: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: data.name,
+            quantity: data.quantity,
+            minQuantity: data.minQuantity,
+            purchaseNetCostCents: data.purchaseNetCostCents,
+            sku: data.sku,
+            barcode: data.barcode,
+          }),
+        ),
+      },
+      priceList: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      variantPrice: {
+        createMany: jest.fn(),
+      },
+      product: {
+        update: jest.fn(),
+      },
+    };
+
+    const prisma = {
+      $transaction: jest.fn(async (callback: any) => callback(tx)),
+    } as any;
+
+    const service = createService(repo, prisma);
+    const created = await service.addVariant(PRODUCT_ID, { name: 'Rojo' });
+
+    expect(created.purchaseNetCostCents).toBeNull();
+    expect(created.purchaseNetCostDecimal).toBeNull();
+  });
+
+  it('should return purchaseNetCostDecimal from variant override cost', async () => {
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(makeProduct()),
+    });
+
+    const tx = {
+      variant: {
+        create: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: data.name,
+            quantity: data.quantity,
+            minQuantity: data.minQuantity,
+            purchaseNetCostCents: data.purchaseNetCostCents,
+            sku: data.sku,
+            barcode: data.barcode,
+          }),
+        ),
+      },
+      priceList: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      variantPrice: {
+        createMany: jest.fn(),
+      },
+      product: {
+        update: jest.fn(),
+      },
+    };
+
+    const prisma = {
+      $transaction: jest.fn(async (callback: any) => callback(tx)),
+    } as any;
+
+    const service = createService(repo, prisma);
+    const created = await service.addVariant(PRODUCT_ID, {
+      name: 'Rojo',
+      purchaseNetCostCents: 4500,
+    });
+
+    expect(created.purchaseNetCostCents).toBe(4500);
+    expect(created.purchaseNetCostDecimal).toBe(45);
+  });
+
+  it('should calculate variant margin using variant purchase cost override', () => {
+    const repo = makeMockRepo();
+    const prisma = makeMockPrisma();
+    const service = createService(repo, prisma);
+    const product = Product.create({
+      id: PRODUCT_ID,
+      name: 'P1',
+      purchaseCostMode: 'NET',
+      purchaseCostValue: 3000,
+    });
+
+    const enriched = (service as any).enrichVariantPriceResponse(
+      {
+        id: 'vp-1',
+        variantId: VARIANT_A_ID,
+        priceListId: 'pl-1',
+        priceCents: 9900,
+        priceList: { id: 'pl-1', globalPriceList: { name: 'PUBLICO' } },
+        tierPrices: [{ id: 'vt-1', minQuantity: 0, priceCents: 9900 }],
+      },
+      product,
+      4500,
+    );
+
+    expect(enriched.margin.amountCents).toBe(5400);
+    expect(enriched.tierPrices[0].margin.amountCents).toBe(5400);
+  });
+
+  it('should calculate variant margin using product purchase cost when override is null', () => {
+    const repo = makeMockRepo();
+    const prisma = makeMockPrisma();
+    const service = createService(repo, prisma);
+    const product = Product.create({
+      id: PRODUCT_ID,
+      name: 'P1',
+      purchaseCostMode: 'NET',
+      purchaseCostValue: 3000,
+    });
+
+    const enriched = (service as any).enrichVariantPriceResponse(
+      {
+        id: 'vp-1',
+        variantId: VARIANT_A_ID,
+        priceListId: 'pl-1',
+        priceCents: 9900,
+        priceList: { id: 'pl-1', globalPriceList: { name: 'PUBLICO' } },
+        tierPrices: [],
+      },
+      product,
+      null,
+    );
+
+    expect(enriched.margin.amountCents).toBe(6900);
+  });
+
+  it('should update variant purchaseNetCostCents with zero', async () => {
+    const repo = makeMockRepo();
+
+    const prisma = {
+      variant: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: VARIANT_A_ID,
+          productId: PRODUCT_ID,
+          name: 'Red',
+          option: null,
+          value: null,
+          sku: 'SKU-RED',
+          barcode: 'BC-RED',
+          quantity: 10,
+          minQuantity: 1,
+          purchaseNetCostCents: 4500,
+          product: { useStock: true },
+        }),
+        update: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: 'Red',
+            option: null,
+            value: null,
+            sku: 'SKU-RED',
+            barcode: 'BC-RED',
+            quantity: 10,
+            minQuantity: 1,
+            purchaseNetCostCents: data.purchaseNetCostCents,
+          }),
+        ),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    const updated = await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+      purchaseNetCostCents: 0,
+    });
+
+    expect(updated.purchaseNetCostCents).toBe(0);
+    expect(updated.purchaseNetCostDecimal).toBe(0);
+  });
+
+  it('should update variant purchaseNetCostCents with null to inherit product cost', async () => {
+    const repo = makeMockRepo();
+
+    const prisma = {
+      variant: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: VARIANT_A_ID,
+          productId: PRODUCT_ID,
+          name: 'Red',
+          option: null,
+          value: null,
+          sku: 'SKU-RED',
+          barcode: 'BC-RED',
+          quantity: 10,
+          minQuantity: 1,
+          purchaseNetCostCents: 4500,
+          product: { useStock: true },
+        }),
+        update: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            id: VARIANT_A_ID,
+            productId: PRODUCT_ID,
+            name: 'Red',
+            option: null,
+            value: null,
+            sku: 'SKU-RED',
+            barcode: 'BC-RED',
+            quantity: 10,
+            minQuantity: 1,
+            purchaseNetCostCents: data.purchaseNetCostCents,
+          }),
+        ),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    const updated = await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+      purchaseNetCostCents: null,
+    });
+
+    expect(updated.purchaseNetCostCents).toBeNull();
+    expect(updated.purchaseNetCostDecimal).toBeNull();
   });
 });
 
@@ -414,13 +1119,11 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
           .mockResolvedValue({ id: VARIANT_A_ID, productId: PRODUCT_ID }),
       },
       priceList: {
-        findUnique: jest
-          .fn()
-          .mockResolvedValue({
-            id: 'pl-1',
-            productId: PRODUCT_ID,
-            name: 'VIP',
-          }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'pl-1',
+          productId: PRODUCT_ID,
+          globalPriceList: { isDefault: false },
+        }),
       },
       variantPrice: {
         findUnique: jest.fn().mockResolvedValue({
@@ -428,7 +1131,7 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
           variantId: VARIANT_A_ID,
           priceListId: 'pl-1',
           priceCents: 1200,
-          priceList: { id: 'pl-1', name: 'VIP' },
+          priceList: { id: 'pl-1', globalPriceList: { name: 'VIP' } },
           tierPrices: [],
         }),
       },
@@ -502,7 +1205,7 @@ describe('ProductsService — variant price delete protection', () => {
         findUnique: jest.fn().mockResolvedValue({
           id: 'pl-publico',
           productId: PRODUCT_ID,
-          name: 'PUBLICO',
+          globalPriceList: { isDefault: true },
         }),
       },
       variantPrice: {

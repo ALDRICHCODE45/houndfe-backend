@@ -12,7 +12,7 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateVariantDto, UpdateVariantDto } from './dto/variant.dto';
 import { CreateLotDto, UpdateLotDto } from './dto/lot.dto';
-import { CreatePriceListDto, UpdatePriceListDto } from './dto/price-list.dto';
+import { UpdatePriceListDto } from './dto/price-list.dto';
 import { CreateImageDto } from './dto/image.dto';
 import {
   BulkUpsertVariantPricesDto,
@@ -30,8 +30,6 @@ import type { IepsRateValue } from './domain/value-objects/ieps-rate.value-objec
 import type { PurchaseCostModeValue } from './domain/value-objects/purchase-cost.value-object';
 import type { ProductType, UnitOfMeasure } from './domain/product.entity';
 import { Prisma } from '@prisma/client';
-
-const DEFAULT_PRICE_LIST_NAME = 'PUBLICO';
 
 @Injectable()
 export class ProductsService {
@@ -85,22 +83,88 @@ export class ProductsService {
 
     const saved = await this.productRepo.save(product);
 
-    // Create default PUBLICO price list
-    const priceCents = dto.priceCents ?? 0;
-    await this.prisma.priceList.create({
-      data: {
-        productId: saved.id,
-        name: DEFAULT_PRICE_LIST_NAME,
-        priceCents,
-      },
+    const globalLists = await this.prisma.globalPriceList.findMany({
+      select: { id: true, isDefault: true },
     });
+
+    if (globalLists.length) {
+      await this.prisma.priceList.createMany({
+        data: globalLists.map((globalList) => ({
+          productId: saved.id,
+          globalPriceListId: globalList.id,
+          priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
+        })),
+      });
+    }
 
     return this.buildFullResponse(saved.id);
   }
 
   async findAll() {
-    const products = await this.productRepo.findAll();
-    return products.map((p) => p.toResponse());
+    const products = await this.prisma.product.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        _count: { select: { variants: true } },
+        variants: { select: { quantity: true } },
+        priceLists: {
+          where: { globalPriceList: { isDefault: true } },
+          select: { priceCents: true },
+          take: 1,
+        },
+      },
+    });
+
+    return products.map((product) => {
+      const baseResponse = Product.fromPersistence({
+        id: product.id,
+        name: product.name,
+        location: product.location,
+        description: product.description,
+        type: product.type,
+        sku: product.sku,
+        barcode: product.barcode,
+        unit: product.unit,
+        satKey: product.satKey,
+        categoryId: product.categoryId,
+        sellInPos: product.sellInPos,
+        includeInOnlineCatalog: product.includeInOnlineCatalog,
+        chargeProductTaxes: product.chargeProductTaxes,
+        ivaRate: product.ivaRate,
+        iepsRate: product.iepsRate,
+        purchaseCostMode: product.purchaseCostMode,
+        purchaseNetCostCents: product.purchaseNetCostCents,
+        purchaseGrossCostCents: product.purchaseGrossCostCents,
+        useStock: product.useStock,
+        useLotsAndExpirations: product.useLotsAndExpirations,
+        quantity: product.quantity,
+        minQuantity: product.minQuantity,
+        hasVariants: product.hasVariants,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt,
+      }).toResponse();
+
+      const publicoPriceCents = product.priceLists?.[0]?.priceCents ?? 0;
+      const responseWithPublicPrice = {
+        ...baseResponse,
+        priceCents: publicoPriceCents,
+        priceDecimal: publicoPriceCents / 100,
+      };
+
+      if (!responseWithPublicPrice.hasVariants) {
+        return responseWithPublicPrice;
+      }
+
+      const variantStockTotal = product.variants.reduce(
+        (total, variant) => total + variant.quantity,
+        0,
+      );
+
+      return {
+        ...responseWithPublicPrice,
+        variantStockTotal,
+        variantCount: product._count.variants,
+      };
+    });
   }
 
   async findOne(id: string) {
@@ -110,6 +174,7 @@ export class ProductsService {
   async update(id: string, dto: UpdateProductDto) {
     const product = await this.productRepo.findById(id);
     if (!product) throw new EntityNotFoundError('Product', id);
+    const previousUseStock = product.useStock;
 
     // SKU uniqueness check — exclude this product only
     if (dto.sku !== undefined && dto.sku !== null) {
@@ -177,14 +242,31 @@ export class ProductsService {
 
     // Update default price list if priceCents provided
     if (dto.priceCents !== undefined) {
-      await this.prisma.priceList.updateMany({
-        where: { productId: id, name: DEFAULT_PRICE_LIST_NAME },
-        data: { priceCents: dto.priceCents },
+      const defaultGlobalList = await this.prisma.globalPriceList.findFirst({
+        where: { isDefault: true },
+        select: { id: true },
       });
+
+      if (defaultGlobalList) {
+        await this.prisma.priceList.updateMany({
+          where: {
+            productId: id,
+            globalPriceListId: defaultGlobalList.id,
+          },
+          data: { priceCents: dto.priceCents },
+        });
+      }
     }
 
     product.updatedAt = new Date();
     await this.productRepo.save(product);
+
+    if (dto.useStock === false && previousUseStock !== false) {
+      await this.prisma.variant.updateMany({
+        where: { productId: id },
+        data: { minQuantity: 0 },
+      });
+    }
 
     return this.buildFullResponse(id);
   }
@@ -226,6 +308,11 @@ export class ProductsService {
           sku: dto.sku?.trim().toUpperCase() || null,
           barcode: dto.barcode?.trim() || null,
           quantity: dto.quantity ?? 0,
+          minQuantity: this.normalizeVariantMinQuantity(
+            product.useStock,
+            dto.minQuantity,
+          ),
+          purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
         },
       });
 
@@ -259,7 +346,7 @@ export class ProductsService {
       return createdVariant;
     });
 
-    return variant;
+    return this.enrichVariantCostResponse(variant);
   }
 
   async getVariants(productId: string) {
@@ -271,9 +358,11 @@ export class ProductsService {
       include: {
         images: true,
         variantPrices: {
-          orderBy: { priceList: { name: 'asc' } },
+          orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
           include: {
-            priceList: { select: { name: true } },
+            priceList: {
+              select: { globalPriceList: { select: { name: true } }, id: true },
+            },
             tierPrices: { orderBy: { minQuantity: 'asc' } },
           },
         },
@@ -293,6 +382,9 @@ export class ProductsService {
   ) {
     const variant = await this.prisma.variant.findFirst({
       where: { id: variantId, productId },
+      include: {
+        product: { select: { useStock: true } },
+      },
     });
     if (!variant) throw new EntityNotFoundError('Variant', variantId);
 
@@ -310,35 +402,47 @@ export class ProductsService {
       if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
     }
 
-    return this.prisma.variant.update({
-      where: { id: variantId },
-      data: {
-        ...(dto.name !== undefined ||
-        dto.option !== undefined ||
-        dto.value !== undefined
-          ? {
-              name: this.resolveVariantName(
-                dto.name ?? variant.name,
-                dto.option !== undefined ? dto.option : variant.option,
-                dto.value !== undefined ? dto.value : variant.value,
-              ),
-            }
-          : {}),
-        ...(dto.option !== undefined
-          ? { option: dto.option?.trim() || null }
-          : {}),
-        ...(dto.value !== undefined
-          ? { value: dto.value?.trim() || null }
-          : {}),
-        ...(dto.sku !== undefined
-          ? { sku: dto.sku?.trim().toUpperCase() || null }
-          : {}),
-        ...(dto.barcode !== undefined
-          ? { barcode: dto.barcode?.trim() || null }
-          : {}),
-        ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
-      },
-    });
+    const variantUsesStock = variant.product?.useStock ?? true;
+
+    return this.prisma.variant
+      .update({
+        where: { id: variantId },
+        data: {
+          ...(dto.name !== undefined ||
+          dto.option !== undefined ||
+          dto.value !== undefined
+            ? {
+                name: this.resolveVariantName(
+                  dto.name ?? variant.name,
+                  dto.option !== undefined ? dto.option : variant.option,
+                  dto.value !== undefined ? dto.value : variant.value,
+                ),
+              }
+            : {}),
+          ...(dto.option !== undefined
+            ? { option: dto.option?.trim() || null }
+            : {}),
+          ...(dto.value !== undefined
+            ? { value: dto.value?.trim() || null }
+            : {}),
+          ...(dto.sku !== undefined
+            ? { sku: dto.sku?.trim().toUpperCase() || null }
+            : {}),
+          ...(dto.barcode !== undefined
+            ? { barcode: dto.barcode?.trim() || null }
+            : {}),
+          ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
+          ...(variantUsesStock
+            ? dto.minQuantity !== undefined
+              ? { minQuantity: dto.minQuantity }
+              : {}
+            : { minQuantity: 0 }),
+          ...(dto.purchaseNetCostCents !== undefined
+            ? { purchaseNetCostCents: dto.purchaseNetCostCents }
+            : {}),
+        },
+      })
+      .then((updatedVariant) => this.enrichVariantCostResponse(updatedVariant));
   }
 
   async removeVariant(productId: string, variantId: string) {
@@ -370,14 +474,20 @@ export class ProductsService {
     const prices = await this.prisma.variantPrice.findMany({
       where: { variantId: variant.id },
       include: {
-        priceList: { select: { id: true, name: true } },
+        priceList: {
+          select: { id: true, globalPriceList: { select: { name: true } } },
+        },
         tierPrices: { orderBy: { minQuantity: 'asc' } },
       },
-      orderBy: { priceList: { name: 'asc' } },
+      orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
     });
 
     return prices.map((price) =>
-      this.enrichVariantPriceResponse(price, product),
+      this.enrichVariantPriceResponse(
+        price,
+        product,
+        variant.purchaseNetCostCents,
+      ),
     );
   }
 
@@ -430,7 +540,9 @@ export class ProductsService {
     const updated = await this.prisma.variantPrice.findUnique({
       where: { variantId_priceListId: { variantId: variant.id, priceListId } },
       include: {
-        priceList: { select: { id: true, name: true } },
+        priceList: {
+          select: { id: true, globalPriceList: { select: { name: true } } },
+        },
         tierPrices: { orderBy: { minQuantity: 'asc' } },
       },
     });
@@ -442,7 +554,11 @@ export class ProductsService {
       );
     }
 
-    return this.enrichVariantPriceResponse(updated, product);
+    return this.enrichVariantPriceResponse(
+      updated,
+      product,
+      variant.purchaseNetCostCents,
+    );
   }
 
   async bulkUpsertVariantPrices(
@@ -532,7 +648,7 @@ export class ProductsService {
     );
     const priceList = await this.ensurePriceList(productId, priceListId);
 
-    if (priceList.name === DEFAULT_PRICE_LIST_NAME) {
+    if (priceList.globalPriceList.isDefault) {
       throw new BusinessRuleViolationError(
         'Cannot delete the default PUBLICO price list',
         'DEFAULT_PRICE_LIST_PROTECTED',
@@ -641,72 +757,17 @@ export class ProductsService {
 
   // ==================== Price Lists ====================
 
-  async addPriceList(productId: string, dto: CreatePriceListDto) {
-    const product = await this.productRepo.findById(productId);
-    if (!product) throw new EntityNotFoundError('Product', productId);
-
-    const name = dto.name.trim();
-    const existing = await this.prisma.priceList.findUnique({
-      where: { productId_name: { productId, name } },
-    });
-    if (existing) {
-      throw new EntityAlreadyExistsError('PriceList', name);
-    }
-
-    // Validate tier prices
-    if (dto.tierPrices?.length) {
-      this.validateTierPrices(dto.tierPrices);
-    }
-
-    const priceList = await this.prisma.$transaction(async (tx) => {
-      const createdPriceList = await tx.priceList.create({
-        data: {
-          productId,
-          name,
-          priceCents: dto.priceCents,
-          ...(dto.tierPrices?.length
-            ? {
-                tierPrices: {
-                  create: dto.tierPrices.map((t) => ({
-                    minQuantity: t.minQuantity,
-                    priceCents: t.priceCents,
-                  })),
-                },
-              }
-            : {}),
-        },
-        include: { tierPrices: { orderBy: { minQuantity: 'asc' } } },
-      });
-
-      const variants = await tx.variant.findMany({
-        where: { productId },
-        select: { id: true },
-      });
-
-      if (variants.length) {
-        await tx.variantPrice.createMany({
-          data: variants.map((variant) => ({
-            variantId: variant.id,
-            priceListId: createdPriceList.id,
-            priceCents: 0,
-          })),
-        });
-      }
-
-      return createdPriceList;
-    });
-
-    return this.enrichPriceListResponse(priceList, product);
-  }
-
   async getPriceLists(productId: string) {
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
     const lists = await this.prisma.priceList.findMany({
       where: { productId },
-      include: { tierPrices: { orderBy: { minQuantity: 'asc' } } },
-      orderBy: { name: 'asc' },
+      include: {
+        tierPrices: { orderBy: { minQuantity: 'asc' } },
+        globalPriceList: { select: { name: true } },
+      },
+      orderBy: { globalPriceList: { name: 'asc' } },
     });
 
     return lists.map((pl) => this.enrichPriceListResponse(pl, product));
@@ -747,26 +808,13 @@ export class ProductsService {
             }
           : {}),
       },
-      include: { tierPrices: { orderBy: { minQuantity: 'asc' } } },
+      include: {
+        tierPrices: { orderBy: { minQuantity: 'asc' } },
+        globalPriceList: { select: { name: true } },
+      },
     });
 
     return this.enrichPriceListResponse(updated, product);
-  }
-
-  async removePriceList(productId: string, priceListId: string) {
-    const priceList = await this.prisma.priceList.findFirst({
-      where: { id: priceListId, productId },
-    });
-    if (!priceList) throw new EntityNotFoundError('PriceList', priceListId);
-
-    if (priceList.name === DEFAULT_PRICE_LIST_NAME) {
-      throw new BusinessRuleViolationError(
-        'Cannot delete the default PUBLICO price list',
-        'DEFAULT_PRICE_LIST_PROTECTED',
-      );
-    }
-
-    await this.prisma.priceList.delete({ where: { id: priceListId } });
   }
 
   // ==================== Images ====================
@@ -913,7 +961,7 @@ export class ProductsService {
 
     const variant = await this.prisma.variant.findUnique({
       where: { id: variantId },
-      select: { id: true, productId: true },
+      select: { id: true, productId: true, purchaseNetCostCents: true },
     });
     if (!variant) throw new EntityNotFoundError('Variant', variantId);
 
@@ -930,7 +978,11 @@ export class ProductsService {
   private async ensurePriceList(productId: string, priceListId: string) {
     const priceList = await this.prisma.priceList.findUnique({
       where: { id: priceListId },
-      select: { id: true, productId: true, name: true },
+      select: {
+        id: true,
+        productId: true,
+        globalPriceList: { select: { isDefault: true } },
+      },
     });
     if (!priceList) throw new EntityNotFoundError('PriceList', priceListId);
 
@@ -950,7 +1002,9 @@ export class ProductsService {
       variantId: string;
       priceListId: string;
       priceCents: number;
-      priceList: { id: string; name: string } | { name: string };
+      priceList:
+        | { id: string; globalPriceList: { name: string } }
+        | { globalPriceList: { name: string } };
       tierPrices: Array<{
         id: string;
         minQuantity: number;
@@ -958,15 +1012,17 @@ export class ProductsService {
       }>;
     },
     product: Product,
+    variantPurchaseNetCostCents: number | null,
   ) {
-    const netCostCents = product.purchaseCost.netCents;
+    const netCostCents =
+      variantPurchaseNetCostCents ?? product.purchaseCost.netCents;
     const marginCents = variantPrice.priceCents - netCostCents;
 
     return {
       id: variantPrice.id,
       variantId: variantPrice.variantId,
       priceListId: variantPrice.priceListId,
-      priceListName: variantPrice.priceList.name,
+      priceListName: variantPrice.priceList.globalPriceList.name,
       priceCents: variantPrice.priceCents,
       priceDecimal: variantPrice.priceCents / 100,
       margin: {
@@ -1004,6 +1060,8 @@ export class ProductsService {
       sku: string | null;
       barcode: string | null;
       quantity: number;
+      minQuantity?: number;
+      purchaseNetCostCents?: number | null;
       createdAt: Date;
       updatedAt: Date;
       images: unknown[];
@@ -1012,7 +1070,9 @@ export class ProductsService {
         variantId: string;
         priceListId: string;
         priceCents: number;
-        priceList: { id: string; name: string } | { name: string };
+        priceList:
+          | { id: string; globalPriceList: { name: string } }
+          | { globalPriceList: { name: string } };
         tierPrices: Array<{
           id: string;
           minQuantity: number;
@@ -1025,10 +1085,44 @@ export class ProductsService {
     product: Product,
   ) {
     return {
-      ...variant,
+      ...this.enrichVariantCostResponse(variant),
+      minQuantity: variant.minQuantity ?? 0,
       variantPrices: variant.variantPrices.map((vp) =>
-        this.enrichVariantPriceResponse(vp, product),
+        this.enrichVariantPriceResponse(
+          vp,
+          product,
+          variant.purchaseNetCostCents ?? null,
+        ),
       ),
+    };
+  }
+
+  private normalizeVariantMinQuantity(
+    useStock: boolean,
+    minQuantity?: number,
+  ): number {
+    if (!useStock) return 0;
+    return minQuantity ?? 0;
+  }
+
+  private enrichVariantCostResponse<T extends object>(
+    variant: T,
+  ): T & {
+    purchaseNetCostCents: number | null;
+    purchaseNetCostDecimal: number | null;
+  } {
+    const purchaseNetCostCents =
+      (variant as { purchaseNetCostCents?: number | null })
+        .purchaseNetCostCents ?? null;
+
+    return {
+      ...variant,
+      purchaseNetCostCents,
+      purchaseNetCostDecimal:
+        purchaseNetCostCents === null ? null : purchaseNetCostCents / 100,
+    } as T & {
+      purchaseNetCostCents: number | null;
+      purchaseNetCostDecimal: number | null;
     };
   }
 
@@ -1068,7 +1162,7 @@ export class ProductsService {
     priceList: {
       id: string;
       productId: string;
-      name: string;
+      globalPriceList: { name: string };
       priceCents: number;
       tierPrices: Array<{
         id: string;
@@ -1086,6 +1180,7 @@ export class ProductsService {
 
     return {
       ...priceList,
+      name: priceList.globalPriceList.name,
       priceDecimal: priceList.priceCents / 100,
       margin: {
         amountCents: marginCents,
@@ -1121,8 +1216,11 @@ export class ProductsService {
     const [priceLists, variants, images, lots] = await Promise.all([
       this.prisma.priceList.findMany({
         where: { productId },
-        include: { tierPrices: { orderBy: { minQuantity: 'asc' } } },
-        orderBy: { name: 'asc' },
+        include: {
+          tierPrices: { orderBy: { minQuantity: 'asc' } },
+          globalPriceList: { select: { name: true, isDefault: true } },
+        },
+        orderBy: { globalPriceList: { name: 'asc' } },
       }),
       product.hasVariants
         ? this.prisma.variant.findMany({
@@ -1130,9 +1228,14 @@ export class ProductsService {
             include: {
               images: true,
               variantPrices: {
-                orderBy: { priceList: { name: 'asc' } },
+                orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
                 include: {
-                  priceList: { select: { name: true, id: true } },
+                  priceList: {
+                    select: {
+                      id: true,
+                      globalPriceList: { select: { name: true } },
+                    },
+                  },
                   tierPrices: { orderBy: { minQuantity: 'asc' } },
                 },
               },
@@ -1152,8 +1255,13 @@ export class ProductsService {
         : Promise.resolve([]),
     ]);
 
+    const publicoPriceCents =
+      priceLists.find((pl) => pl.globalPriceList?.isDefault)?.priceCents ?? 0;
+
     return {
       ...product.toResponse(),
+      priceCents: publicoPriceCents,
+      priceDecimal: publicoPriceCents / 100,
       priceLists: priceLists.map((pl) =>
         this.enrichPriceListResponse(pl, product),
       ),

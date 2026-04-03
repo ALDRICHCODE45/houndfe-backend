@@ -29,10 +29,11 @@ En creación/edición de producto se puede configurar:
   - `quantity`
   - `minQuantity`
   - `hasVariants`
-  - En variantes, el stock se maneja por `variant.quantity`
+  - En variantes, el stock se maneja por `variant.quantity` + `variant.minQuantity`
 - **Precios de venta**
-  - `priceCents` (precio de lista por defecto `PUBLICO`)
-  - Listas adicionales por endpoint separado (`/price-lists`) con escalas (`tierPrices`)
+  - `priceCents` → campo **calculado** desde la lista global por defecto `PUBLICO` (no es columna del producto)
+  - Listas adicionales por endpoint global (`/price-lists`)
+  - Escalas (`tierPrices`) por producto/lista (`PATCH /products/:id/price-lists/:priceListId`)
   - Precios por variante por lista (`/variants/:variantId/prices`) con escalas por variante
 - **Medios**
   - Imágenes de producto y de variante
@@ -44,19 +45,22 @@ En creación/edición de producto se puede configurar:
 
 > Clave: estas dependencias se aplican en dominio/servicio; frontend debe reflejarlas para evitar sorpresas.
 
-| Campo/toggle origen                            | Si está en este valor                           | Impacto automático en otros campos                                                         | Por qué                                                         |
-| ---------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| `useStock`                                     | `false`                                         | Fuerza `useLotsAndExpirations=false`, `quantity=0`, `minQuantity=0`                        | Sin control de stock no tiene sentido lotes ni umbral mínimo    |
-| `hasVariants`                                  | `true`                                          | Fuerza `useLotsAndExpirations=false`, `quantity=0`, `minQuantity=0` en nivel producto      | El stock pasa a manejarse por variante                          |
-| `useLotsAndExpirations`                        | `true` (y `useStock=true`, `hasVariants=false`) | Fuerza `quantity=0` (pero **no** fuerza `minQuantity=0`)                                   | El inventario disponible sale de lotes, no de stock directo     |
-| Crear variante (`POST /products/:id/variants`) | Siempre                                         | Si producto no tenía variantes, backend setea `hasVariants=true` y re-normaliza inventario | Consistencia: producto con variantes no usa stock directo/lotes |
-| Crear variante (`POST /products/:id/variants`) | Siempre                                         | Auto-crea `VariantPrice(priceCents=0)` para **todas** las listas del producto              | Mantener matriz completa variante × lista en UI                 |
-| Eliminar última variante                       | Queda `0` variantes                             | Backend setea `hasVariants=false`                                                          | Mantener flag consistente con datos reales                      |
-| Crear lista (`POST /products/:id/price-lists`) | Siempre                                         | Auto-crea `VariantPrice(priceCents=0)` para **todas** las variantes existentes             | Mantener matriz completa variante × lista en UI                 |
-| Crear lote (`POST /products/:id/lots`)         | `useLotsAndExpirations=false`                   | Rechaza operación (`LOTS_NOT_ENABLED`)                                                     | No se permiten lotes sin toggle activo                          |
-| Crear lote (`POST /products/:id/lots`)         | `hasVariants=true`                              | Rechaza operación (`PRODUCT_HAS_VARIANTS`)                                                 | No hay lotes en productos con variantes                         |
-| Crear imagen con `isMain=true`                 | Siempre                                         | Limpia main previo en mismo ámbito (`variantId` igual o `null`)                            | Debe haber una sola imagen principal por ámbito                 |
-| `priceCents` en crear/editar producto          | Informado                                       | Afecta **solo** lista `PUBLICO`                                                            | `PUBLICO` es la lista base del producto                         |
+| Campo/toggle origen                                    | Si está en este valor                           | Impacto automático en otros campos                                                                             | Por qué                                                          |
+| ------------------------------------------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `useStock`                                             | `false`                                         | Fuerza `useLotsAndExpirations=false`, `quantity=0`, `minQuantity=0`                                            | Sin control de stock no tiene sentido lotes ni umbral mínimo     |
+| `hasVariants`                                          | `true`                                          | Fuerza `useLotsAndExpirations=false`, `quantity=0`, `minQuantity=0` en nivel producto                          | El stock pasa a manejarse por variante                           |
+| `useLotsAndExpirations`                                | `true` (y `useStock=true`, `hasVariants=false`) | Fuerza `quantity=0` (pero **no** fuerza `minQuantity=0`)                                                       | El inventario disponible sale de lotes, no de stock directo      |
+| Crear variante (`POST /products/:id/variants`)         | Siempre                                         | Si producto no tenía variantes, backend setea `hasVariants=true` y re-normaliza inventario                     | Consistencia: producto con variantes no usa stock directo/lotes  |
+| Crear variante (`POST /products/:id/variants`)         | Siempre                                         | Auto-crea `VariantPrice(priceCents=0)` para **todas** las listas del producto                                  | Mantener matriz completa variante × lista en UI                  |
+| Eliminar última variante                               | Queda `0` variantes                             | Backend setea `hasVariants=false`                                                                              | Mantener flag consistente con datos reales                       |
+| Crear lista global (`POST /price-lists`)               | Siempre                                         | Auto-crea `PriceList(priceCents=0)` para **todos** los productos + `VariantPrice(priceCents=0)` para variantes | Mantener matriz completa producto/variante × lista               |
+| Crear lote (`POST /products/:id/lots`)                 | `useLotsAndExpirations=false`                   | Rechaza operación (`LOTS_NOT_ENABLED`)                                                                         | No se permiten lotes sin toggle activo                           |
+| Crear lote (`POST /products/:id/lots`)                 | `hasVariants=true`                              | Rechaza operación (`PRODUCT_HAS_VARIANTS`)                                                                     | No hay lotes en productos con variantes                          |
+| Crear imagen con `isMain=true`                         | Siempre                                         | Limpia main previo en mismo ámbito (`variantId` igual o `null`)                                                | Debe haber una sola imagen principal por ámbito                  |
+| `priceCents` en crear/editar producto                  | Informado                                       | Afecta **solo** lista `PUBLICO`                                                                                | `PUBLICO` es la lista base del producto                          |
+| Crear/editar variante con `useStock=false` en producto | Siempre                                         | Backend normaliza `variant.minQuantity=0`                                                                      | Si no hay control de stock, umbral mínimo por variante no aplica |
+| `variant.purchaseNetCostCents`                         | `null`/omitido                                  | Margen por variante usa costo neto del producto                                                                | Herencia de costo por defecto                                    |
+| `variant.purchaseNetCostCents`                         | número `>= 0`                                   | Margen por variante usa costo neto de la variante                                                              | Permite override por variante                                    |
 
 ---
 
@@ -78,10 +82,13 @@ Defaults efectivos en backend al crear producto:
 - `quantity = 0`
 - `minQuantity = 0`
 - `hasVariants = false`
-- Se crea automáticamente lista de precios `PUBLICO` con:
-  - `priceCents = dto.priceCents` o `0` si no se envía
+- En variantes: `minQuantity = 0` por defecto
+- En variantes: `purchaseNetCostCents = null` por defecto (hereda costo de producto)
+- Al crear producto, se crean price lists para **todas** las `GlobalPriceList` existentes:
+  - si la lista es default (`PUBLICO`), usa `dto.priceCents` o `0`
+  - las demás listas inician en `0`
 - Al crear variante, se crean automáticamente precios de variante en `0` para todas las listas del producto.
-- Al crear una nueva lista de precios, se crean automáticamente precios de variante en `0` para todas las variantes del producto.
+- Al crear una nueva lista global, se crean automáticamente price lists y precios de variante en `0` para toda la base.
 
 ---
 
@@ -114,7 +121,7 @@ Defaults efectivos en backend al crear producto:
 
 1. `POST /products` con datos base.
 2. Si usa stock directo: mantener `hasVariants=false`, `useStock=true`, `useLotsAndExpirations=false`, gestionar `quantity/minQuantity`.
-3. Si requiere listas adicionales: `POST /products/:id/price-lists`.
+3. Si requiere listas adicionales: `POST /price-lists`.
 4. Si requiere imágenes: `POST /products/:id/images`.
 
 ### 2) Crear producto con variantes
@@ -140,7 +147,7 @@ Errores representativos que frontend debería mapear:
 - `ENTITY_ALREADY_EXISTS` (409)
   - SKU duplicado
   - Barcode duplicado
-  - Lista de precios duplicada por nombre dentro del producto
+  - Lista global de precios duplicada por nombre
   - Lote duplicado por `lotNumber` dentro del producto
 - `ENTITY_NOT_FOUND` (404)
   - Producto/variante/lote/lista/imagen inexistente
@@ -149,7 +156,7 @@ Errores representativos que frontend debería mapear:
 - `PRODUCT_HAS_VARIANTS` (422)
   - Intento de crear lotes en producto con variantes
 - `DEFAULT_PRICE_LIST_PROTECTED` (422)
-  - Intento de borrar `PUBLICO`
+  - Intento de borrar o renombrar `PUBLICO`
 - `PRICE_LIST_PRODUCT_MISMATCH` (422)
   - Se intentó usar una lista que no pertenece al producto
 - `INVALID_TIER_SEQUENCE` (422)
@@ -177,5 +184,5 @@ Formato de error de dominio:
 ## Lo que NO está en alcance hoy
 
 - Comportamiento especial por `type=SERVICE`: hoy se persiste el tipo, pero **no** hay reglas diferenciales de inventario/precio por ser servicio.
-- Reasignar/renombrar lista `PUBLICO`: hoy no se borra y no hay endpoint para renombrarla.
+- Reasignar lista default a otra distinta de `PUBLICO`: hoy no hay endpoint para mutar `isDefault`.
 - Validación previa de existencia de `categoryId` en servicio de productos: se depende de FK de DB (si mandás un id inválido, puede fallar a nivel persistencia).

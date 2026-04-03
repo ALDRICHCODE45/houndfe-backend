@@ -34,6 +34,16 @@ export class CreateVariantDto {
   @IsNumber()
   @Min(0)
   quantity?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minQuantity?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  purchaseNetCostCents?: number | null;
 }
 
 export class UpdateVariantDto {
@@ -64,4 +74,14 @@ export class UpdateVariantDto {
   @IsNumber()
   @Min(0)
   quantity?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minQuantity?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  purchaseNetCostCents?: number | null;
 }

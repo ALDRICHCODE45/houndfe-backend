@@ -22,7 +22,7 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateVariantDto, UpdateVariantDto } from './dto/variant.dto';
 import { CreateLotDto, UpdateLotDto } from './dto/lot.dto';
-import { CreatePriceListDto, UpdatePriceListDto } from './dto/price-list.dto';
+import { UpdatePriceListDto } from './dto/price-list.dto';
 import { CreateImageDto } from './dto/image.dto';
 import {
   BulkUpsertVariantPricesDto,
@@ -182,15 +182,6 @@ export class ProductsController {
 
   // ==================== Price Lists ====================
 
-  @Post(':id/price-lists')
-  @HttpCode(HttpStatus.CREATED)
-  addPriceList(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: CreatePriceListDto,
-  ) {
-    return this.productsService.addPriceList(id, dto);
-  }
-
   @Get(':id/price-lists')
   getPriceLists(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.getPriceLists(id);
@@ -203,15 +194,6 @@ export class ProductsController {
     @Body() dto: UpdatePriceListDto,
   ) {
     return this.productsService.updatePriceList(id, priceListId, dto);
-  }
-
-  @Delete(':id/price-lists/:priceListId')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  removePriceList(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Param('priceListId', ParseUUIDPipe) priceListId: string,
-  ) {
-    return this.productsService.removePriceList(id, priceListId);
   }
 
   // ==================== Images ====================
