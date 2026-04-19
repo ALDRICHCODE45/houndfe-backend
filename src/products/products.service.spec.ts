@@ -576,12 +576,12 @@ describe('ProductsService — variant price matrix auto-create', () => {
   });
 
   it('should create product price lists for all global lists', async () => {
-    const savedProduct = makeProduct();
-    const repo = makeMockRepo({
-      save: jest.fn().mockResolvedValue(savedProduct),
-    });
+    const repo = makeMockRepo();
 
-    const prisma = {
+    const tx = {
+      product: {
+        create: jest.fn().mockResolvedValue({ id: PRODUCT_ID }),
+      },
       globalPriceList: {
         findMany: jest.fn().mockResolvedValue([
           { id: 'gl-publico', isDefault: true },
@@ -591,6 +591,10 @@ describe('ProductsService — variant price matrix auto-create', () => {
       priceList: {
         createMany: jest.fn().mockResolvedValue({ count: 2 }),
       },
+    };
+
+    const prisma = {
+      $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
     const service = createService(repo, prisma);
@@ -600,19 +604,19 @@ describe('ProductsService — variant price matrix auto-create', () => {
 
     await service.create({ name: 'Producto', priceCents: 1999 });
 
-    expect(prisma.priceList.createMany).toHaveBeenCalledWith({
-      data: [
-        {
-          productId: PRODUCT_ID,
-          globalPriceListId: 'gl-publico',
-          priceCents: 1999,
-        },
-        {
-          productId: PRODUCT_ID,
-          globalPriceListId: 'gl-mayoreo',
-          priceCents: 0,
-        },
-      ],
+    expect(tx.priceList.createMany).toHaveBeenCalledTimes(1);
+    const callData = tx.priceList.createMany.mock.calls[0][0].data;
+    expect(callData).toHaveLength(2);
+    // Same productId for both entries
+    expect(callData[0].productId).toBe(callData[1].productId);
+    // Correct global list mappings and prices
+    expect(callData[0]).toMatchObject({
+      globalPriceListId: 'gl-publico',
+      priceCents: 1999,
+    });
+    expect(callData[1]).toMatchObject({
+      globalPriceListId: 'gl-mayoreo',
+      priceCents: 0,
     });
   });
 

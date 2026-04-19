@@ -42,17 +42,164 @@ export class ProductsService {
   // ==================== Product CRUD ====================
 
   async create(dto: CreateProductDto) {
-    // SKU uniqueness
+    // ── Pre-validation: context checks before touching DB ──
+
+    const hasVariants = dto.hasVariants ?? false;
+    const useLotsAndExpirations = dto.useLotsAndExpirations ?? false;
+
+    if (dto.variants?.length && !hasVariants) {
+      throw new InvalidArgumentError(
+        'variants: Cannot provide variants when hasVariants is false',
+      );
+    }
+
+    if (dto.lots?.length && (!useLotsAndExpirations || hasVariants)) {
+      throw new InvalidArgumentError(
+        'lots: Lots require useLotsAndExpirations=true and hasVariants=false',
+      );
+    }
+
+    // ── Pre-validation: intra-batch SKU/barcode uniqueness ──
+
+    const skuSet = new Set<string>();
+    const barcodeSet = new Set<string>();
+
+    if (dto.sku) skuSet.add(dto.sku.trim().toUpperCase());
+    if (dto.barcode) barcodeSet.add(dto.barcode.trim());
+
+    if (dto.variants?.length) {
+      for (let i = 0; i < dto.variants.length; i++) {
+        const v = dto.variants[i];
+        if (v.sku) {
+          const upper = v.sku.trim().toUpperCase();
+          if (skuSet.has(upper)) {
+            throw new InvalidArgumentError(
+              `variants[${i}].sku: Duplicate SKU "${v.sku}" within the same request`,
+            );
+          }
+          skuSet.add(upper);
+        }
+        if (v.barcode) {
+          const trimmed = v.barcode.trim();
+          if (barcodeSet.has(trimmed)) {
+            throw new InvalidArgumentError(
+              `variants[${i}].barcode: Duplicate barcode "${v.barcode}" within the same request`,
+            );
+          }
+          barcodeSet.add(trimmed);
+        }
+      }
+    }
+
+    // ── Pre-validation: inline images — first isMain wins ──
+
+    if (dto.images?.length) {
+      let mainFound = false;
+      for (let i = 0; i < dto.images.length; i++) {
+        if (dto.images[i].isMain) {
+          if (mainFound) dto.images[i].isMain = false;
+          else mainFound = true;
+        }
+      }
+    }
+
+    // ── Pre-validation: duplicate priceListId ──
+
+    if (dto.priceLists?.length) {
+      const plIds = new Set<string>();
+      for (let i = 0; i < dto.priceLists.length; i++) {
+        if (plIds.has(dto.priceLists[i].priceListId)) {
+          throw new InvalidArgumentError(
+            `priceLists[${i}].priceListId: Duplicate priceListId "${dto.priceLists[i].priceListId}" within the same request`,
+          );
+        }
+        plIds.add(dto.priceLists[i].priceListId);
+      }
+    }
+
+    // ── Pre-validation: DB uniqueness for product-level SKU/barcode ──
+
     if (dto.sku) {
       const taken = await this.productRepo.isSkuTaken(dto.sku);
       if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
     }
-
-    // Barcode uniqueness
     if (dto.barcode) {
       const taken = await this.productRepo.isBarcodeTaken(dto.barcode);
       if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
     }
+
+    // ── Pre-validation: DB uniqueness for variant SKUs/barcodes ──
+
+    if (dto.variants?.length) {
+      for (let i = 0; i < dto.variants.length; i++) {
+        const v = dto.variants[i];
+        if (v.sku) {
+          const taken = await this.productRepo.isSkuTaken(v.sku);
+          if (taken) {
+            throw new InvalidArgumentError(
+              `variants[${i}].sku: SKU "${v.sku}" already exists`,
+            );
+          }
+        }
+        if (v.barcode) {
+          const taken = await this.productRepo.isBarcodeTaken(v.barcode);
+          if (taken) {
+            throw new InvalidArgumentError(
+              `variants[${i}].barcode: Barcode "${v.barcode}" already exists`,
+            );
+          }
+        }
+      }
+    }
+
+    // ── Pre-validation: variant names ──
+
+    if (dto.variants?.length) {
+      for (let i = 0; i < dto.variants.length; i++) {
+        const v = dto.variants[i];
+        try {
+          this.resolveVariantName(v.name, v.option, v.value);
+        } catch {
+          throw new InvalidArgumentError(
+            `variants[${i}]: name is required when option/value are not both provided`,
+          );
+        }
+      }
+    }
+
+    // ── Pre-validation: tier prices ──
+
+    if (dto.priceLists?.length) {
+      for (let i = 0; i < dto.priceLists.length; i++) {
+        const pl = dto.priceLists[i];
+        if (pl.tierPrices?.length) {
+          try {
+            this.validateTierPrices(pl.tierPrices);
+          } catch (e) {
+            throw new InvalidArgumentError(
+              `priceLists[${i}].tierPrices: ${(e as Error).message}`,
+            );
+          }
+        }
+      }
+    }
+
+    // ── Pre-validation: lot number uniqueness within batch ──
+
+    if (dto.lots?.length) {
+      const lotNumbers = new Set<string>();
+      for (let i = 0; i < dto.lots.length; i++) {
+        const trimmed = dto.lots[i].lotNumber.trim();
+        if (lotNumbers.has(trimmed)) {
+          throw new InvalidArgumentError(
+            `lots[${i}].lotNumber: Duplicate lot number "${trimmed}" within the same request`,
+          );
+        }
+        lotNumbers.add(trimmed);
+      }
+    }
+
+    // ── Build domain entity ──
 
     const product = Product.create({
       id: crypto.randomUUID(),
@@ -83,23 +230,177 @@ export class ProductsService {
       hasVariants: dto.hasVariants,
     });
 
-    const saved = await this.productRepo.save(product);
+    // ── Atomic transaction: create product + all sub-resources ──
 
-    const globalLists = await this.prisma.globalPriceList.findMany({
-      select: { id: true, isDefault: true },
+    const productId = product.id;
+    const p = product.toPersistence();
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Create product
+      await tx.product.create({
+        data: {
+          id: p.id,
+          name: p.name,
+          location: p.location,
+          description: p.description,
+          type: p.type as any,
+          sku: p.sku,
+          barcode: p.barcode,
+          unit: p.unit as any,
+          satKey: p.satKey,
+          categoryId: p.categoryId,
+          brandId: p.brandId,
+          sellInPos: p.sellInPos,
+          includeInOnlineCatalog: p.includeInOnlineCatalog,
+          requiresPrescription: p.requiresPrescription,
+          chargeProductTaxes: p.chargeProductTaxes,
+          ivaRate: p.ivaRate as any,
+          iepsRate: p.iepsRate as any,
+          purchaseCostMode: p.purchaseCostMode as any,
+          purchaseNetCostCents: p.purchaseNetCostCents,
+          purchaseGrossCostCents: p.purchaseGrossCostCents,
+          useStock: p.useStock,
+          useLotsAndExpirations: p.useLotsAndExpirations,
+          quantity: p.quantity,
+          minQuantity: p.minQuantity,
+          hasVariants: p.hasVariants,
+        },
+      });
+
+      // 2. Create default price lists for all global price lists
+      const globalLists = await tx.globalPriceList.findMany({
+        select: { id: true, isDefault: true },
+      });
+
+      if (globalLists.length) {
+        await tx.priceList.createMany({
+          data: globalLists.map((globalList) => ({
+            productId,
+            globalPriceListId: globalList.id,
+            priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
+          })),
+        });
+      }
+
+      // 3. Create inline variants (if provided)
+      if (dto.variants?.length) {
+        const priceLists = await tx.priceList.findMany({
+          where: { productId },
+          select: { id: true },
+        });
+
+        for (const variantDto of dto.variants) {
+          const resolvedName = this.resolveVariantName(
+            variantDto.name,
+            variantDto.option,
+            variantDto.value,
+          );
+
+          const createdVariant = await tx.variant.create({
+            data: {
+              productId,
+              name: resolvedName,
+              option: variantDto.option?.trim() || null,
+              value: variantDto.value?.trim() || null,
+              sku: variantDto.sku?.trim().toUpperCase() || null,
+              barcode: variantDto.barcode?.trim() || null,
+              quantity: variantDto.quantity ?? 0,
+              minQuantity: this.normalizeVariantMinQuantity(
+                product.useStock,
+                variantDto.minQuantity,
+              ),
+              purchaseNetCostCents: variantDto.purchaseNetCostCents ?? null,
+            },
+          });
+
+          // Create variant price entries for each product price list
+          if (priceLists.length) {
+            await tx.variantPrice.createMany({
+              data: priceLists.map((pl) => ({
+                variantId: createdVariant.id,
+                priceListId: pl.id,
+                priceCents: 0,
+              })),
+            });
+          }
+        }
+      }
+
+      // 4. Create inline lots (if provided)
+      if (dto.lots?.length) {
+        await tx.lot.createMany({
+          data: dto.lots.map((lotDto) => ({
+            productId,
+            lotNumber: lotDto.lotNumber.trim(),
+            quantity: lotDto.quantity ?? 0,
+            manufactureDate: lotDto.manufactureDate
+              ? new Date(lotDto.manufactureDate)
+              : null,
+            expirationDate: new Date(lotDto.expirationDate),
+          })),
+        });
+      }
+
+      // 5. Apply inline price list overrides (if provided)
+      if (dto.priceLists?.length) {
+        // Validate that all referenced global price lists exist
+        const globalPlIds = dto.priceLists.map((pl) => pl.priceListId);
+        const existingGlobals = await tx.globalPriceList.findMany({
+          where: { id: { in: globalPlIds } },
+          select: { id: true },
+        });
+        const existingGlobalIds = new Set(existingGlobals.map((g) => g.id));
+
+        for (let i = 0; i < dto.priceLists.length; i++) {
+          if (!existingGlobalIds.has(dto.priceLists[i].priceListId)) {
+            throw new InvalidArgumentError(
+              `priceLists[${i}].priceListId: Global price list "${dto.priceLists[i].priceListId}" not found`,
+            );
+          }
+        }
+
+        // Apply price overrides to the product's price lists
+        for (const plDto of dto.priceLists) {
+          const priceList = await tx.priceList.findFirst({
+            where: { productId, globalPriceListId: plDto.priceListId },
+          });
+
+          if (priceList) {
+            await tx.priceList.update({
+              where: { id: priceList.id },
+              data: {
+                priceCents: plDto.priceCents,
+                ...(plDto.tierPrices !== undefined
+                  ? {
+                      tierPrices: {
+                        deleteMany: {},
+                        create: (plDto.tierPrices ?? []).map((t) => ({
+                          minQuantity: t.minQuantity,
+                          priceCents: t.priceCents,
+                        })),
+                      },
+                    }
+                  : {}),
+              },
+            });
+          }
+        }
+      }
+
+      // 6. Create inline images (if provided)
+      if (dto.images?.length) {
+        await tx.productImage.createMany({
+          data: dto.images.map((imgDto, index) => ({
+            productId,
+            url: imgDto.url,
+            isMain: imgDto.isMain ?? false,
+            sortOrder: imgDto.sortOrder ?? index,
+          })),
+        });
+      }
     });
 
-    if (globalLists.length) {
-      await this.prisma.priceList.createMany({
-        data: globalLists.map((globalList) => ({
-          productId: saved.id,
-          globalPriceListId: globalList.id,
-          priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
-        })),
-      });
-    }
-
-    return this.buildFullResponse(saved.id);
+    return this.buildFullResponse(productId);
   }
 
   async findAll() {
