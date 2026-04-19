@@ -68,6 +68,10 @@ export class CreateProductDto {
   categoryId?: string;
 
   @IsOptional()
+  @IsString()
+  brandId?: string;
+
+  @IsOptional()
   @IsBoolean()
   sellInPos?: boolean;
 

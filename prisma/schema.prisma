@@ -75,6 +75,21 @@ model Category {
 }
 
 // ============================================================================
+// BRAND
+// ============================================================================
+
+model Brand {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@map("brands")
+}
+
+// ============================================================================
 // PRODUCT MODEL (rewritten)
 // ============================================================================
 
@@ -92,6 +107,10 @@ model Product {
   // Category (nullable — deleting category sets this to null)
   categoryId               String?
   category                 Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  // Brand (nullable — deleting brand sets this to null)
+  brandId                  String?
+  brand                    Brand?          @relation(fields: [brandId], references: [id], onDelete: SetNull)
 
   // Visibility / POS flags
   sellInPos                Boolean         @default(true)

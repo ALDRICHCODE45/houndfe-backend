@@ -65,6 +65,7 @@ export class ProductsService {
       unit: (dto.unit as UnitOfMeasure) ?? undefined,
       satKey: dto.satKey,
       categoryId: dto.categoryId,
+      brandId: dto.brandId,
       sellInPos: dto.sellInPos,
       includeInOnlineCatalog: dto.includeInOnlineCatalog,
       requiresPrescription: dto.requiresPrescription,
@@ -105,6 +106,8 @@ export class ProductsService {
     const products = await this.prisma.product.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
+        category: { select: { id: true, name: true } },
+        brand: { select: { id: true, name: true } },
         _count: { select: { variants: true } },
         variants: { select: { quantity: true } },
         priceLists: {
@@ -127,6 +130,7 @@ export class ProductsService {
         unit: product.unit,
         satKey: product.satKey,
         categoryId: product.categoryId,
+        brandId: product.brandId,
         sellInPos: product.sellInPos,
         includeInOnlineCatalog: product.includeInOnlineCatalog,
         requiresPrescription: product.requiresPrescription,
@@ -148,6 +152,8 @@ export class ProductsService {
       const publicoPriceCents = product.priceLists?.[0]?.priceCents ?? 0;
       const responseWithPublicPrice = {
         ...baseResponse,
+        category: product.category ?? null,
+        brand: product.brand ?? null,
         priceCents: publicoPriceCents,
         priceDecimal: publicoPriceCents / 100,
       };
@@ -206,6 +212,7 @@ export class ProductsService {
     if (dto.satKey !== undefined) product.satKey = dto.satKey || null;
     if (dto.categoryId !== undefined)
       product.categoryId = dto.categoryId || null;
+    if (dto.brandId !== undefined) product.brandId = dto.brandId || null;
     if (dto.sellInPos !== undefined) product.sellInPos = dto.sellInPos;
     if (dto.includeInOnlineCatalog !== undefined)
       product.includeInOnlineCatalog = dto.includeInOnlineCatalog;
@@ -1217,7 +1224,14 @@ export class ProductsService {
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
-    const [priceLists, variants, images, lots] = await Promise.all([
+    const [relations, priceLists, variants, images, lots] = await Promise.all([
+      this.prisma.product.findUnique({
+        where: { id: productId },
+        select: {
+          category: { select: { id: true, name: true } },
+          brand: { select: { id: true, name: true } },
+        },
+      }),
       this.prisma.priceList.findMany({
         where: { productId },
         include: {
@@ -1264,6 +1278,8 @@ export class ProductsService {
 
     return {
       ...product.toResponse(),
+      category: relations?.category ?? null,
+      brand: relations?.brand ?? null,
       priceCents: publicoPriceCents,
       priceDecimal: publicoPriceCents / 100,
       priceLists: priceLists.map((pl) =>

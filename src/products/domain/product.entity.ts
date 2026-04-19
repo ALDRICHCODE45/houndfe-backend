@@ -9,7 +9,7 @@
  * - sku/barcode optional but globally unique (enforced at app layer)
  * - sellInPos, includeInOnlineCatalog, useStock, chargeProductTaxes default true
  * - when hasVariants=true, inventory section only exposes useStock
- * - brand removed
+ * - brand optional (same pattern as category)
  * - quantity/minQuantity only relevant when no variants and useStock
  */
 import { ProductName } from './value-objects/productName.value-object';
@@ -60,6 +60,7 @@ export interface ProductProps {
   unit: UnitOfMeasure;
   satKey: string | null;
   categoryId: string | null;
+  brandId: string | null;
   sellInPos: boolean;
   includeInOnlineCatalog: boolean;
   requiresPrescription: boolean;
@@ -87,6 +88,7 @@ export class Product {
   public unit: UnitOfMeasure;
   public satKey: string | null;
   public categoryId: string | null;
+  public brandId: string | null;
   public sellInPos: boolean;
   public includeInOnlineCatalog: boolean;
   public requiresPrescription: boolean;
@@ -113,6 +115,7 @@ export class Product {
     this.unit = props.unit;
     this.satKey = props.satKey;
     this.categoryId = props.categoryId;
+    this.brandId = props.brandId;
     this.sellInPos = props.sellInPos;
     this.includeInOnlineCatalog = props.includeInOnlineCatalog;
     this.requiresPrescription = props.requiresPrescription;
@@ -142,6 +145,7 @@ export class Product {
     unit?: UnitOfMeasure;
     satKey?: string | null;
     categoryId?: string | null;
+    brandId?: string | null;
     sellInPos?: boolean;
     includeInOnlineCatalog?: boolean;
     requiresPrescription?: boolean;
@@ -203,6 +207,7 @@ export class Product {
       unit,
       satKey: params.satKey ?? null,
       categoryId: params.categoryId ?? null,
+      brandId: params.brandId ?? null,
       sellInPos: params.sellInPos ?? true,
       includeInOnlineCatalog: params.includeInOnlineCatalog ?? true,
       requiresPrescription: params.requiresPrescription ?? false,
@@ -232,6 +237,7 @@ export class Product {
     unit: string;
     satKey: string | null;
     categoryId: string | null;
+    brandId: string | null;
     sellInPos: boolean;
     includeInOnlineCatalog: boolean;
     requiresPrescription: boolean;
@@ -260,6 +266,7 @@ export class Product {
       unit: data.unit as UnitOfMeasure,
       satKey: data.satKey,
       categoryId: data.categoryId,
+      brandId: data.brandId,
       sellInPos: data.sellInPos,
       includeInOnlineCatalog: data.includeInOnlineCatalog,
       requiresPrescription: data.requiresPrescription,
@@ -362,6 +369,7 @@ export class Product {
       unit: this.unit,
       satKey: this.satKey,
       categoryId: this.categoryId,
+      brandId: this.brandId,
       sellInPos: this.sellInPos,
       includeInOnlineCatalog: this.includeInOnlineCatalog,
       requiresPrescription: this.requiresPrescription,
@@ -391,6 +399,7 @@ export class Product {
       unit: this.unit,
       satKey: this.satKey,
       categoryId: this.categoryId,
+      brandId: this.brandId,
       sellInPos: this.sellInPos,
       includeInOnlineCatalog: this.includeInOnlineCatalog,
       requiresPrescription: this.requiresPrescription,
