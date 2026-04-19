@@ -257,6 +257,7 @@ model GlobalPriceList {
   updatedAt DateTime @updatedAt
 
   priceLists PriceList[]
+  customers  Customer[]
 
   @@map("global_price_lists")
 }
@@ -409,4 +410,62 @@ model UserRole {
 
   @@unique([userId, roleId])
   @@map("user_roles")
+}
+
+// ============================================================================
+// CUSTOMER
+// ============================================================================
+
+model Customer {
+  id                    String   @id @default(uuid())
+  firstName             String
+  lastName              String?
+  phoneCountryCode      String?
+  phone                 String?
+  email                 String?
+  comments              String?
+
+  // Price list assignment (optional — auto-apply on sales)
+  globalPriceListId     String?
+  globalPriceList       GlobalPriceList? @relation(fields: [globalPriceListId], references: [id], onDelete: SetNull)
+
+  // Billing data (all optional as a group)
+  businessName          String?
+  fiscalZipCode         String?
+  rfc                   String?
+  fiscalRegime          String?
+  billingStreet         String?
+  billingExteriorNumber String?
+  billingInteriorNumber String?
+  billingZipCode        String?
+  billingNeighborhood   String?
+  billingMunicipality   String?
+  billingCity           String?
+  billingState          String?
+
+  addresses             CustomerAddress[]
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@map("customers")
+}
+
+model CustomerAddress {
+  id               String   @id @default(uuid())
+  customerId       String
+  customer         Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  street           String
+  exteriorNumber   String?
+  interiorNumber   String?
+  zipCode          String?
+  neighborhood     String?
+  municipality     String?
+  city             String?
+  state            String?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("customer_addresses")
 }
