@@ -8,6 +8,7 @@
  * - ProductsModule: Products bounded context
  * - OrdersModule: Orders bounded context
  * - AuthModule: Authentication bounded context
+ * - PromotionsModule: Promotions bounded context
  */
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
@@ -22,6 +23,7 @@ import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { PriceListsModule } from './price-lists/price-lists.module';
 import { CustomersModule } from './customers/customers.module';
+import { PromotionsModule } from './promotions/promotions.module';
 
 @Module({
   imports: [
@@ -50,6 +52,7 @@ import { CustomersModule } from './customers/customers.module';
     AdminModule,
     PriceListsModule,
     CustomersModule,
+    PromotionsModule,
   ],
 })
 export class AppModule {}

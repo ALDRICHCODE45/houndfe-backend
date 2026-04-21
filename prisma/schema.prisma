@@ -60,6 +60,61 @@ enum PurchaseCostMode {
 }
 
 // ============================================================================
+// PROMOTIONS ENUMS
+// ============================================================================
+
+enum PromotionType {
+  PRODUCT_DISCOUNT
+  ORDER_DISCOUNT
+  BUY_X_GET_Y
+  ADVANCED
+}
+
+enum PromotionMethod {
+  AUTOMATIC
+  MANUAL
+}
+
+enum PromotionStatus {
+  ACTIVE
+  SCHEDULED
+  ENDED
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum PromotionTargetType {
+  CATEGORIES
+  BRANDS
+  PRODUCTS
+}
+
+enum CustomerScope {
+  ALL
+  REGISTERED_ONLY
+  SPECIFIC
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum TargetSide {
+  DEFAULT
+  BUY
+  GET
+}
+
+// ============================================================================
 // CATEGORY
 // ============================================================================
 
@@ -256,8 +311,9 @@ model GlobalPriceList {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  priceLists PriceList[]
-  customers  Customer[]
+  priceLists        PriceList[]
+  customers         Customer[]
+  promotionPriceLists PromotionPriceList[]
 
   @@map("global_price_lists")
 }
@@ -444,6 +500,7 @@ model Customer {
   billingState          String?
 
   addresses             CustomerAddress[]
+  promotionCustomers    PromotionCustomer[]
 
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -468,4 +525,101 @@ model CustomerAddress {
   updatedAt        DateTime @updatedAt
 
   @@map("customer_addresses")
+}
+
+// ============================================================================
+// PROMOTIONS
+// ============================================================================
+
+model Promotion {
+  id                     String              @id @default(uuid())
+  title                  String
+  type                   PromotionType
+  method                 PromotionMethod
+  status                 PromotionStatus     @default(ACTIVE)
+  startDate              DateTime?
+  endDate                DateTime?
+  customerScope          CustomerScope       @default(ALL)
+
+  // PRODUCT_DISCOUNT + ORDER_DISCOUNT
+  discountType           DiscountType?
+  discountValue          Int?
+
+  // ORDER_DISCOUNT only
+  minPurchaseAmountCents Int?
+
+  // PRODUCT_DISCOUNT + BUY_X_GET_Y
+  appliesTo              PromotionTargetType?
+
+  // BUY_X_GET_Y + ADVANCED
+  buyQuantity            Int?
+  getQuantity            Int?
+  getDiscountPercent     Int?
+
+  // ADVANCED only
+  buyTargetType          PromotionTargetType?
+  getTargetType          PromotionTargetType?
+
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+
+  // Relations
+  targetItems            PromotionTargetItem[]
+  customers              PromotionCustomer[]
+  priceLists             PromotionPriceList[]
+  daysOfWeek             PromotionDayOfWeek[]
+
+  @@index([type])
+  @@index([method])
+  @@index([status, startDate, endDate])
+  @@map("promotions")
+}
+
+model PromotionTargetItem {
+  id          String              @id @default(uuid())
+  promotionId String
+  side        TargetSide          @default(DEFAULT)
+  targetType  PromotionTargetType
+  targetId    String
+
+  promotion   Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  @@unique([promotionId, side, targetType, targetId])
+  @@index([targetType, targetId])
+  @@map("promotion_target_items")
+}
+
+model PromotionCustomer {
+  id          String @id @default(uuid())
+  promotionId String
+  customerId  String
+
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  customer  Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([promotionId, customerId])
+  @@map("promotion_customers")
+}
+
+model PromotionPriceList {
+  id                String @id @default(uuid())
+  promotionId       String
+  globalPriceListId String
+
+  promotion       Promotion       @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  globalPriceList GlobalPriceList @relation(fields: [globalPriceListId], references: [id], onDelete: Cascade)
+
+  @@unique([promotionId, globalPriceListId])
+  @@map("promotion_price_lists")
+}
+
+model PromotionDayOfWeek {
+  id          String    @id @default(uuid())
+  promotionId String
+  day         DayOfWeek
+
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  @@unique([promotionId, day])
+  @@map("promotion_days_of_week")
 }

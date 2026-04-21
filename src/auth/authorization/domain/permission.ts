@@ -16,7 +16,13 @@ import { MongoAbility } from '@casl/ability';
 export type AppActions = 'create' | 'read' | 'update' | 'delete' | 'manage';
 
 /** All possible subjects (resources) in the application. */
-export type AppSubjects = 'Product' | 'Order' | 'User' | 'Role' | 'all';
+export type AppSubjects =
+  | 'Product'
+  | 'Order'
+  | 'User'
+  | 'Role'
+  | 'Promotion'
+  | 'all';
 
 /** CASL ability type for the application. */
 export type AppAbility = MongoAbility<[AppActions, AppSubjects]>;
@@ -71,4 +77,27 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'Role', action: 'update', description: 'Update roles' },
   { subject: 'Role', action: 'delete', description: 'Delete roles' },
   { subject: 'Role', action: 'manage', description: 'Full role management' },
+
+  // Promotion permissions
+  {
+    subject: 'Promotion',
+    action: 'create',
+    description: 'Create new promotions',
+  },
+  { subject: 'Promotion', action: 'read', description: 'View promotions' },
+  {
+    subject: 'Promotion',
+    action: 'update',
+    description: 'Update promotions',
+  },
+  {
+    subject: 'Promotion',
+    action: 'delete',
+    description: 'Delete promotions',
+  },
+  {
+    subject: 'Promotion',
+    action: 'manage',
+    description: 'Full promotion management',
+  },
 ];
