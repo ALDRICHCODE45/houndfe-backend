@@ -22,6 +22,7 @@ export type AppSubjects =
   | 'User'
   | 'Role'
   | 'Promotion'
+  | 'Customer'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -99,5 +100,28 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'Promotion',
     action: 'manage',
     description: 'Full promotion management',
+  },
+
+  // Customer permissions
+  {
+    subject: 'Customer',
+    action: 'create',
+    description: 'Create new customers',
+  },
+  { subject: 'Customer', action: 'read', description: 'View customers' },
+  {
+    subject: 'Customer',
+    action: 'update',
+    description: 'Update customers',
+  },
+  {
+    subject: 'Customer',
+    action: 'delete',
+    description: 'Delete customers',
+  },
+  {
+    subject: 'Customer',
+    action: 'manage',
+    description: 'Full customer management',
   },
 ];
