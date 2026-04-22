@@ -19,6 +19,7 @@ export type AppActions = 'create' | 'read' | 'update' | 'delete' | 'manage';
 export type AppSubjects =
   | 'Product'
   | 'Order'
+  | 'Sale'
   | 'User'
   | 'Role'
   | 'Promotion'
@@ -124,4 +125,11 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     action: 'manage',
     description: 'Full customer management',
   },
+
+  // Sale permissions
+  { subject: 'Sale', action: 'create', description: 'Create new sales' },
+  { subject: 'Sale', action: 'read', description: 'View sales' },
+  { subject: 'Sale', action: 'update', description: 'Update sales' },
+  { subject: 'Sale', action: 'delete', description: 'Delete sales' },
+  { subject: 'Sale', action: 'manage', description: 'Full sale management' },
 ];

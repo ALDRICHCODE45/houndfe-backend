@@ -115,6 +115,14 @@ enum TargetSide {
 }
 
 // ============================================================================
+// SALES ENUMS
+// ============================================================================
+
+enum SaleStatus {
+  DRAFT
+}
+
+// ============================================================================
 // CATEGORY
 // ============================================================================
 
@@ -196,6 +204,7 @@ model Product {
 
   // Relations
   orderItems    OrderItem[]
+  saleItems     SaleItem[]
   images        ProductImage[]
   variants      Variant[]
   lots          Lot[]
@@ -244,6 +253,7 @@ model Variant {
   product      Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
   images       ProductImage[]
   variantPrices VariantPrice[]
+  saleItems    SaleItem[]
 
   @@map("variants")
 }
@@ -395,6 +405,51 @@ model OrderItem {
 }
 
 // ============================================================================
+// SALE MODEL (POS Sales)
+// ============================================================================
+
+model Sale {
+  id        String     @id @default(uuid())
+  userId    String
+  status    SaleStatus @default(DRAFT)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  // Relations
+  user  User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  items SaleItem[]
+
+  @@index([userId, status])
+  @@map("sales")
+}
+
+// ============================================================================
+// SALE ITEM MODEL
+// ============================================================================
+
+model SaleItem {
+  id                String   @id @default(uuid())
+  saleId            String
+  productId         String
+  variantId         String?
+  productName       String
+  variantName       String?
+  quantity          Int
+  unitPriceCents    Int
+  unitPriceCurrency String   @default("MXN")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variant Variant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@index([saleId])
+  @@map("sale_items")
+}
+
+// ============================================================================
 // USER MODEL
 // ============================================================================
 
@@ -409,6 +464,7 @@ model User {
   updatedAt           DateTime  @updatedAt
 
   roles UserRole[]
+  sales Sale[]
 
   @@map("users")
 }

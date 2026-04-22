@@ -1593,4 +1593,165 @@ export class ProductsService {
       lots,
     };
   }
+
+  // ==================== POS Helpers ====================
+
+  /**
+   * Get product/variant info for POS sale (price, names)
+   * Returns frozen price snapshot and display names.
+   *
+   * Validates:
+   * - Product exists
+   * - Product is enabled for POS
+   * - Product/variant combination is valid
+   * - Variant exists if required
+   *
+   * @param productId - Product ID
+   * @param variantId - Variant ID (required if product has variants, forbidden otherwise)
+   * @returns Product info with price snapshot
+   * @throws EntityNotFoundError if product or variant doesn't exist
+   * @throws BusinessRuleViolationError if product/variant combination is invalid or not enabled for POS
+   */
+  async getProductInfoForSale(
+    productId: string,
+    variantId: string | null,
+  ): Promise<{
+    productId: string;
+    productName: string;
+    variantId: string | null;
+    variantName: string | null;
+    unitPriceCents: number;
+  }> {
+    // Fetch product
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+    });
+
+    if (!product) {
+      throw new EntityNotFoundError('Product', productId);
+    }
+
+    // Validate POS enabled
+    if (!product.sellInPos) {
+      throw new BusinessRuleViolationError(
+        `Product ${productId} is not enabled for POS sales`,
+      );
+    }
+
+    // Validate variant requirement
+    if (product.hasVariants && !variantId) {
+      throw new BusinessRuleViolationError(
+        `Product ${productId} has variants, you must specify a variant`,
+      );
+    }
+
+    if (!product.hasVariants && variantId) {
+      throw new BusinessRuleViolationError(
+        `Product ${productId} does not have variants`,
+      );
+    }
+
+    // If variant is required, fetch it
+    if (variantId) {
+      const variant = await this.prisma.variant.findFirst({
+        where: { id: variantId, productId },
+      });
+
+      if (!variant) {
+        throw new EntityNotFoundError('Variant', variantId);
+      }
+
+      // Fetch variant price from default price list
+      const variantPrice = await this.prisma.variantPrice.findFirst({
+        where: {
+          variantId,
+          priceList: {
+            globalPriceList: { isDefault: true },
+          },
+        },
+      });
+
+      return {
+        productId,
+        productName: product.name,
+        variantId,
+        variantName: variant.name,
+        unitPriceCents: variantPrice?.priceCents ?? 0,
+      };
+    }
+
+    // No variant - fetch product price from default price list
+    const priceList = await this.prisma.priceList.findFirst({
+      where: {
+        productId,
+        globalPriceList: { isDefault: true },
+      },
+    });
+
+    return {
+      productId,
+      productName: product.name,
+      variantId: null,
+      variantName: null,
+      unitPriceCents: priceList?.priceCents ?? 0,
+    };
+  }
+
+  /**
+   * Check stock availability for a product/variant
+   * Returns availability status and current stock level.
+   *
+   * Note: This is a READ-ONLY check, it does NOT reserve stock.
+   *
+   * @param productId - Product ID
+   * @param variantId - Variant ID (null if product has no variants)
+   * @param requestedQuantity - Quantity to check
+   * @returns Availability status and current stock
+   * @throws EntityNotFoundError if product doesn't exist
+   */
+  async checkStockAvailability(
+    productId: string,
+    variantId: string | null,
+    requestedQuantity: number,
+  ): Promise<{
+    available: boolean;
+    currentStock: number | null;
+  }> {
+    // Fetch product
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+    });
+
+    if (!product) {
+      throw new EntityNotFoundError('Product', productId);
+    }
+
+    // If product doesn't use stock, always available
+    if (!product.useStock) {
+      return {
+        available: true,
+        currentStock: null,
+      };
+    }
+
+    // If product has variants, check variant stock
+    if (product.hasVariants && variantId) {
+      const variant = await this.prisma.variant.findFirst({
+        where: { id: variantId, productId },
+      });
+
+      const currentStock = variant?.quantity ?? 0;
+      return {
+        available: currentStock >= requestedQuantity,
+        currentStock,
+      };
+    }
+
+    // No variants - check product stock
+    const currentStock = product.quantity ?? 0;
+    return {
+      available: currentStock >= requestedQuantity,
+      currentStock,
+    };
+  }
 }
