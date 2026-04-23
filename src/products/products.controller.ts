@@ -16,7 +16,16 @@ import {
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
+  UseGuards,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
+import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -30,6 +39,7 @@ import {
 } from './dto/variant-price.dto';
 
 @Controller('products')
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
@@ -37,21 +47,25 @@ export class ProductsController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['create', 'Product'])
   create(@Body() dto: CreateProductDto) {
     return this.productsService.create(dto);
   }
 
   @Get()
+  @RequirePermissions(['read', 'Product'])
   findAll() {
     return this.productsService.findAll();
   }
 
   @Get(':id')
+  @RequirePermissions(['read', 'Product'])
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.findOne(id);
   }
 
   @Patch(':id')
+  @RequirePermissions(['update', 'Product'])
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateProductDto,
@@ -61,6 +75,7 @@ export class ProductsController {
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['delete', 'Product'])
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.remove(id);
   }
@@ -198,8 +213,47 @@ export class ProductsController {
 
   // ==================== Images ====================
 
+  /**
+   * POST /products/:id/images - Upload product image (multipart)
+   * Spec: R6 (S15, S16) - Upload product image via file storage
+   */
+  @Post(':id/images/upload')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['update', 'Product'])
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadProductImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productsService.uploadProductImage(id, file, user.userId);
+  }
+
+  /**
+   * POST /products/:id/variants/:variantId/images - Upload variant image (multipart)
+   * Spec: R7 (S18, S19) - Upload variant image via file storage
+   */
+  @Post(':id/variants/:variantId/images/upload')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['update', 'Product'])
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadVariantImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.productsService.uploadVariantImage(
+      id,
+      variantId,
+      file,
+      user.userId,
+    );
+  }
+
   @Post(':id/images')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['update', 'Product'])
   addImage(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateImageDto,
@@ -208,11 +262,13 @@ export class ProductsController {
   }
 
   @Get(':id/images')
+  @RequirePermissions(['read', 'Product'])
   getImages(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.getImages(id);
   }
 
   @Patch(':id/images/:imageId/main')
+  @RequirePermissions(['update', 'Product'])
   setMainImage(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('imageId', ParseUUIDPipe) imageId: string,
@@ -222,6 +278,7 @@ export class ProductsController {
 
   @Delete(':id/images/:imageId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['update', 'Product'])
   removeImage(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('imageId', ParseUUIDPipe) imageId: string,

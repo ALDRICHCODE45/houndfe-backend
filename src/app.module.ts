@@ -25,6 +25,7 @@ import { PriceListsModule } from './price-lists/price-lists.module';
 import { CustomersModule } from './customers/customers.module';
 import { PromotionsModule } from './promotions/promotions.module';
 import { SalesModule } from './sales/sales.module';
+import { FilesModule } from './files/files.module';
 
 @Module({
   imports: [
@@ -37,6 +38,13 @@ import { SalesModule } from './sales/sales.module';
         JWT_REFRESH_SECRET: Joi.string().required().min(32),
         JWT_ACCESS_EXPIRATION: Joi.string().default('15m'),
         JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
+        SPACES_ENDPOINT: Joi.string().uri().required(),
+        SPACES_REGION: Joi.string().required(),
+        SPACES_BUCKET: Joi.string().required(),
+        SPACES_ACCESS_KEY_ID: Joi.string().required(),
+        SPACES_SECRET_ACCESS_KEY: Joi.string().required(),
+        SPACES_PUBLIC_BASE_URL: Joi.string().uri().required(),
+        SPACES_UPLOAD_MAX_MB: Joi.number().integer().min(1).max(100).default(10),
       }),
     }),
 
@@ -55,6 +63,7 @@ import { SalesModule } from './sales/sales.module';
     CustomersModule,
     PromotionsModule,
     SalesModule,
+    FilesModule,
   ],
 })
 export class AppModule {}

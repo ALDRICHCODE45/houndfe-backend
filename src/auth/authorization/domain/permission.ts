@@ -24,6 +24,7 @@ export type AppSubjects =
   | 'Role'
   | 'Promotion'
   | 'Customer'
+  | 'File'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -132,4 +133,10 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'Sale', action: 'update', description: 'Update sales' },
   { subject: 'Sale', action: 'delete', description: 'Delete sales' },
   { subject: 'Sale', action: 'manage', description: 'Full sale management' },
+
+  // File permissions
+  { subject: 'File', action: 'create', description: 'Upload files' },
+  { subject: 'File', action: 'read', description: 'View files' },
+  { subject: 'File', action: 'delete', description: 'Delete files' },
+  { subject: 'File', action: 'manage', description: 'Full file management' },
 ];

@@ -57,11 +57,25 @@ function makeMockPrisma() {
   } as any;
 }
 
+function makeMockFilesService() {
+  return {
+    uploadAndRegister: jest.fn(),
+    delete: jest.fn(),
+    findById: jest.fn(),
+    findByIds: jest.fn(),
+  } as any;
+}
+
 function createService(
   repo: IProductRepository,
   prisma: ReturnType<typeof makeMockPrisma>,
+  filesService?: ReturnType<typeof makeMockFilesService>,
 ) {
-  return new ProductsService(repo, prisma as any);
+  return new ProductsService(
+    repo,
+    prisma as any,
+    filesService ?? makeMockFilesService(),
+  );
 }
 
 function makeProduct(id = PRODUCT_ID) {
@@ -1228,5 +1242,77 @@ describe('ProductsService — variant price delete protection', () => {
     });
 
     expect(prisma.variantPrice.delete).not.toHaveBeenCalled();
+  });
+});
+
+// ── Image deletion with file storage integration ──────────────────────
+
+describe('ProductsService - Image deletion with file storage', () => {
+  it('should delete associated FileObject when removing image with fileId', async () => {
+    // Arrange
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(makeProduct()),
+    });
+
+    const mockFilesService = {
+      delete: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const prisma = {
+      productImage: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'img-1',
+          productId: PRODUCT_ID,
+          fileId: 'file-123',
+          url: 'https://example.com/image.jpg',
+        }),
+        delete: jest.fn().mockResolvedValue(undefined),
+      },
+    } as any;
+
+    const service = new ProductsService(repo, prisma, mockFilesService as any);
+
+    // Act
+    await service.removeImage(PRODUCT_ID, 'img-1');
+
+    // Assert
+    expect(prisma.productImage.delete).toHaveBeenCalledWith({
+      where: { id: 'img-1' },
+    });
+    expect(mockFilesService.delete).toHaveBeenCalledWith('file-123');
+  });
+
+  it('should NOT call FilesService when removing image without fileId (legacy URL-only)', async () => {
+    // Arrange
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(makeProduct()),
+    });
+
+    const mockFilesService = {
+      delete: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const prisma = {
+      productImage: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'img-2',
+          productId: PRODUCT_ID,
+          fileId: null,
+          url: 'https://example.com/legacy.jpg',
+        }),
+        delete: jest.fn().mockResolvedValue(undefined),
+      },
+    } as any;
+
+    const service = new ProductsService(repo, prisma, mockFilesService as any);
+
+    // Act
+    await service.removeImage(PRODUCT_ID, 'img-2');
+
+    // Assert
+    expect(prisma.productImage.delete).toHaveBeenCalledWith({
+      where: { id: 'img-2' },
+    });
+    expect(mockFilesService.delete).not.toHaveBeenCalled();
   });
 });

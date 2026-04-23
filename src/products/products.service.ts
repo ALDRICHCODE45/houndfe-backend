@@ -8,6 +8,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Product } from './domain/product.entity';
 import type { IProductRepository } from './domain/product.repository';
 import { PRODUCT_REPOSITORY } from './domain/product.repository';
+import { FilesService } from '../files/files.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateVariantDto, UpdateVariantDto } from './dto/variant.dto';
@@ -37,6 +38,7 @@ export class ProductsService {
     @Inject(PRODUCT_REPOSITORY)
     private readonly productRepo: IProductRepository,
     private readonly prisma: PrismaService,
+    private readonly filesService: FilesService,
   ) {}
 
   // ==================== Product CRUD ====================
@@ -1223,7 +1225,127 @@ export class ProductsService {
       where: { id: imageId, productId },
     });
     if (!image) throw new EntityNotFoundError('ProductImage', imageId);
+
+    // Delete the ProductImage record
     await this.prisma.productImage.delete({ where: { id: imageId } });
+
+    // Delete associated FileObject if fileId exists
+    if (image.fileId) {
+      await this.filesService.delete(image.fileId);
+    }
+  }
+
+  /**
+   * Upload product image via multipart file (R6: S15, S16)
+   */
+  async uploadProductImage(
+    productId: string,
+    file: Express.Multer.File,
+    uploadedBy: string,
+  ) {
+    // Verify product exists
+    const product = await this.productRepo.findById(productId);
+    if (!product) throw new EntityNotFoundError('Product', productId);
+
+    // Upload file to storage and register in files module
+    const fileObject = await this.filesService.uploadAndRegister({
+      buffer: file.buffer,
+      mimeType: file.mimetype,
+      originalName: file.originalname,
+      ownerType: 'Product',
+      ownerId: productId,
+      uploadedBy,
+    });
+
+    // Get current max sortOrder
+    const maxSortImage = await this.prisma.productImage.findFirst({
+      where: { productId, variantId: null },
+      orderBy: { sortOrder: 'desc' },
+      select: { sortOrder: true },
+    });
+
+    const nextSortOrder = maxSortImage ? maxSortImage.sortOrder + 1 : 0;
+
+    // Create ProductImage record linked to FileObject
+    const productImage = await this.prisma.productImage.create({
+      data: {
+        productId,
+        fileId: fileObject.id,
+        url: fileObject.url,
+        isMain: false,
+        sortOrder: nextSortOrder,
+      },
+    });
+
+    return {
+      id: productImage.id,
+      fileId: productImage.fileId,
+      url: productImage.url,
+      isMain: productImage.isMain,
+      sortOrder: productImage.sortOrder,
+    };
+  }
+
+  /**
+   * Upload variant image via multipart file (R7: S18, S19)
+   */
+  async uploadVariantImage(
+    productId: string,
+    variantId: string,
+    file: Express.Multer.File,
+    uploadedBy: string,
+  ) {
+    // Verify product exists
+    const product = await this.productRepo.findById(productId);
+    if (!product) throw new EntityNotFoundError('Product', productId);
+
+    // Verify variant exists and belongs to product
+    const variant = await this.prisma.variant.findFirst({
+      where: { id: variantId, productId },
+    });
+    if (!variant) {
+      throw new EntityNotFoundError('Variant', variantId);
+    }
+
+    // Upload file to storage and register in files module
+    const fileObject = await this.filesService.uploadAndRegister({
+      buffer: file.buffer,
+      mimeType: file.mimetype,
+      originalName: file.originalname,
+      ownerType: 'ProductVariant',
+      ownerId: variantId,
+      uploadedBy,
+    });
+
+    // Get current max sortOrder for this variant
+    const maxSortImage = await this.prisma.productImage.findFirst({
+      where: { productId, variantId },
+      orderBy: { sortOrder: 'desc' },
+      select: { sortOrder: true },
+    });
+
+    const nextSortOrder = maxSortImage ? maxSortImage.sortOrder + 1 : 0;
+
+    // Create ProductImage record linked to FileObject
+    const productImage = await this.prisma.productImage.create({
+      data: {
+        productId,
+        variantId,
+        fileId: fileObject.id,
+        url: fileObject.url,
+        isMain: false,
+        sortOrder: nextSortOrder,
+      },
+    });
+
+    return {
+      id: productImage.id,
+      fileId: productImage.fileId,
+      url: productImage.url,
+      isMain: productImage.isMain,
+      sortOrder: productImage.sortOrder,
+      variantId: productImage.variantId,
+    };
   }
 
   // ==================== Stock operations (backward compat) ====================

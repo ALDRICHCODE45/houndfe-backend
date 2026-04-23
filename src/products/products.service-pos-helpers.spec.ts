@@ -43,11 +43,20 @@ function makeMockPrisma(overrides: any = {}) {
   };
 }
 
+function makeMockFilesService() {
+  return {
+    uploadAndRegister: jest.fn(),
+    delete: jest.fn(),
+    findById: jest.fn(),
+    findByIds: jest.fn(),
+  } as any;
+}
+
 function createService(
   repo: IProductRepository,
   prisma: ReturnType<typeof makeMockPrisma>,
 ) {
-  return new ProductsService(repo, prisma);
+  return new ProductsService(repo, prisma, makeMockFilesService());
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
