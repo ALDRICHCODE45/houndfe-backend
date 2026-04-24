@@ -1792,7 +1792,9 @@ export class ProductsService {
           },
           priceLists: {
             where: { globalPriceList: { isDefault: true } },
-            include: { globalPriceList: { select: { name: true } } },
+            include: {
+              globalPriceList: { select: { name: true, isDefault: true } },
+            },
             take: 1,
           },
           variants: {
@@ -1805,7 +1807,11 @@ export class ProductsService {
                 where: { priceList: { globalPriceList: { isDefault: true } } },
                 include: {
                   priceList: {
-                    select: { globalPriceList: { select: { name: true } } },
+                    select: {
+                      globalPriceList: {
+                        select: { name: true, isDefault: true },
+                      },
+                    },
                   },
                 },
                 take: 1,
@@ -1900,15 +1906,13 @@ export class ProductsService {
    * Returns price object or fallback to 0.
    */
   private resolveDefaultPrice(priceLists: any[]): any {
-    const defaultPriceList = priceLists.find(
-      (pl) => pl.globalPriceList?.isDefault,
-    );
-    const priceCents = defaultPriceList?.priceCents ?? 0;
+    const defaultEntry = priceLists[0];
+    const priceCents = defaultEntry?.priceCents ?? 0;
 
     return {
       priceCents,
       priceDecimal: priceCents / 100,
-      priceListName: 'PUBLICO',
+      priceListName: defaultEntry?.globalPriceList?.name ?? 'PUBLICO',
     };
   }
 
@@ -1917,15 +1921,14 @@ export class ProductsService {
    * Returns price object or fallback to 0.
    */
   private resolveVariantDefaultPrice(variantPrices: any[]): any {
-    const defaultVariantPrice = variantPrices.find(
-      (vp) => vp.priceList?.globalPriceList?.isDefault,
-    );
-    const priceCents = defaultVariantPrice?.priceCents ?? 0;
+    const defaultEntry = variantPrices[0];
+    const priceCents = defaultEntry?.priceCents ?? 0;
 
     return {
       priceCents,
       priceDecimal: priceCents / 100,
-      priceListName: 'PUBLICO',
+      priceListName:
+        defaultEntry?.priceList?.globalPriceList?.name ?? 'PUBLICO',
     };
   }
 
