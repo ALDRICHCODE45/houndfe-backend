@@ -89,7 +89,10 @@ describe('ProductsService — Product Image Upload', () => {
       const uploadedBy = 'user-1';
       const file = createMockFile('product-image.jpg', 'image/jpeg');
 
-      const mockProduct = Product.create({ id: productId, name: 'Test Product' });
+      const mockProduct = Product.create({
+        id: productId,
+        name: 'Test Product',
+      });
       repo.findById.mockResolvedValueOnce(mockProduct);
 
       const mockFileObject = FileObject.create({
@@ -119,7 +122,11 @@ describe('ProductsService — Product Image Upload', () => {
       });
 
       // Act
-      const result = await service.uploadProductImage(productId, file, uploadedBy);
+      const result = await service.uploadProductImage(
+        productId,
+        file,
+        uploadedBy,
+      );
 
       // Assert
       expect(result).toEqual({
@@ -157,7 +164,10 @@ describe('ProductsService — Product Image Upload', () => {
       const file1 = createMockFile('image1.jpg', 'image/jpeg');
       const file2 = createMockFile('image2.jpg', 'image/jpeg');
 
-      const mockProduct = Product.create({ id: productId, name: 'Test Product' });
+      const mockProduct = Product.create({
+        id: productId,
+        name: 'Test Product',
+      });
       repo.findById.mockResolvedValue(mockProduct);
 
       const mockFileObject1 = FileObject.create({
@@ -207,8 +217,16 @@ describe('ProductsService — Product Image Upload', () => {
       });
 
       // Act
-      const result1 = await service.uploadProductImage(productId, file1, uploadedBy);
-      const result2 = await service.uploadProductImage(productId, file2, uploadedBy);
+      const result1 = await service.uploadProductImage(
+        productId,
+        file1,
+        uploadedBy,
+      );
+      const result2 = await service.uploadProductImage(
+        productId,
+        file2,
+        uploadedBy,
+      );
 
       // Assert
       expect(result1.sortOrder).toBe(0);
@@ -238,7 +256,10 @@ describe('ProductsService — Product Image Upload', () => {
       const uploadedBy = 'user-1';
       const file = createMockFile('variant-image.jpg', 'image/jpeg');
 
-      const mockProduct = Product.create({ id: productId, name: 'Test Product' });
+      const mockProduct = Product.create({
+        id: productId,
+        name: 'Test Product',
+      });
       repo.findById.mockResolvedValueOnce(mockProduct);
 
       prisma.variant.findFirst.mockResolvedValueOnce({
@@ -308,7 +329,10 @@ describe('ProductsService — Product Image Upload', () => {
       const uploadedBy = 'user-1';
       const file = createMockFile();
 
-      const mockProduct = Product.create({ id: productId, name: 'Test Product' });
+      const mockProduct = Product.create({
+        id: productId,
+        name: 'Test Product',
+      });
       repo.findById.mockResolvedValueOnce(mockProduct);
 
       prisma.variant.findFirst.mockResolvedValueOnce(null); // Variant not found for this product

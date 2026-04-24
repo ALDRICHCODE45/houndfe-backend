@@ -44,7 +44,11 @@ import { FilesModule } from './files/files.module';
         SPACES_ACCESS_KEY_ID: Joi.string().required(),
         SPACES_SECRET_ACCESS_KEY: Joi.string().required(),
         SPACES_PUBLIC_BASE_URL: Joi.string().uri().required(),
-        SPACES_UPLOAD_MAX_MB: Joi.number().integer().min(1).max(100).default(10),
+        SPACES_UPLOAD_MAX_MB: Joi.number()
+          .integer()
+          .min(1)
+          .max(100)
+          .default(10),
       }),
     }),
 

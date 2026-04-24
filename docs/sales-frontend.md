@@ -571,7 +571,178 @@ curl -X DELETE http://localhost:3000/sales/drafts/SALE_ID \
 
 ---
 
-## 10) Roadmap: lo que viene en proximas versiones
+## 10) Busqueda de catalogo POS
+
+### 10.1) Endpoint de busqueda
+
+```
+GET /sales/pos-catalog
+```
+
+**Permiso**: `read:Sale`
+
+**Query params**:
+
+| Parametro | Tipo | Requerido | Default | Descripcion |
+|-----------|------|-----------|---------|-------------|
+| `q` | `string` | NO | - | Termino de busqueda (nombre, SKU, barcode de productos o variantes). Max 100 caracteres. |
+| `limit` | `number` | NO | `25` | Cantidad de items por pagina. Min 1, Max 50. |
+| `offset` | `number` | NO | `0` | Saltar N items (paginacion). Min 0. |
+| `categoryId` | `string` (UUID) | NO | - | Filtrar por categoria especifica. |
+| `brandId` | `string` (UUID) | NO | - | Filtrar por marca especifica. |
+
+**Response** `200 OK`:
+
+```json
+{
+  "items": [
+    {
+      "id": "producto-uuid",
+      "name": "Aspirina 500mg",
+      "sku": "ASP-500",
+      "barcode": "7501234567890",
+      "unit": "UNIDAD",
+      "hasVariants": false,
+      "useStock": true,
+      "category": {
+        "id": "cat-uuid",
+        "name": "Medicamentos"
+      },
+      "brand": {
+        "id": "brand-uuid",
+        "name": "Bayer"
+      },
+      "mainImage": "https://example.com/aspirina-main.jpg",
+      "images": [
+        "https://example.com/aspirina-main.jpg",
+        "https://example.com/aspirina-2.jpg"
+      ],
+      "price": {
+        "priceCents": 4998,
+        "priceDecimal": 49.98,
+        "priceListName": "PUBLICO"
+      },
+      "stock": {
+        "quantity": 120,
+        "minQuantity": 10
+      },
+      "variants": []
+    },
+    {
+      "id": "camisa-uuid",
+      "name": "Camisa",
+      "sku": "CAM-001",
+      "barcode": null,
+      "unit": "UNIDAD",
+      "hasVariants": true,
+      "useStock": true,
+      "category": {
+        "id": "cat-ropa-uuid",
+        "name": "Ropa"
+      },
+      "brand": null,
+      "mainImage": "https://example.com/camisa-main.jpg",
+      "images": ["https://example.com/camisa-main.jpg"],
+      "price": null,
+      "stock": null,
+      "variants": [
+        {
+          "id": "variant-roja-m-uuid",
+          "name": "Roja M",
+          "sku": "CAM-R-M",
+          "barcode": "7509876543210",
+          "mainImage": "https://example.com/camisa-roja.jpg",
+          "price": {
+            "priceCents": 29900,
+            "priceDecimal": 299.00,
+            "priceListName": "PUBLICO"
+          },
+          "stock": {
+            "quantity": 5,
+            "minQuantity": 2
+          }
+        }
+      ]
+    }
+  ],
+  "total": 42,
+  "limit": 25,
+  "offset": 0
+}
+```
+
+### 10.2) Reglas del catalogo POS
+
+- **Solo productos con `sellInPos = true`**: Este endpoint solo devuelve productos habilitados para punto de venta.
+- **Busqueda amplia**: El parametro `q` busca en nombre, SKU y barcode tanto de productos como de variantes.
+- **Precio default (PUBLICO)**: Todos los precios vienen de la lista de precios por defecto (normalmente `PUBLICO`).
+- **Imagenes**: Campo `images[]` esta limitado a maximo 5 imagenes ordenadas por importancia. `mainImage` es la imagen principal (puede ser `null`).
+- **Productos con variantes**: Si `hasVariants=true`, el precio y stock del producto es `null`. Los precios y stock reales estan en cada variante dentro del array `variants[]`.
+- **Productos sin stock**: Si `useStock=false`, el campo `stock` es `null` tanto a nivel producto como variante.
+- **Paginacion**: Usa `limit` y `offset` para paginar. El campo `total` indica la cantidad total de resultados que coinciden con la busqueda.
+
+### 10.3) Ejemplos con cURL
+
+**Buscar por nombre:**
+
+```bash
+curl "http://localhost:3000/sales/pos-catalog?q=Aspirina" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Buscar por SKU:**
+
+```bash
+curl "http://localhost:3000/sales/pos-catalog?q=ASP-500" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Filtrar por categoria:**
+
+```bash
+curl "http://localhost:3000/sales/pos-catalog?categoryId=cat-uuid&limit=50" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Paginacion:**
+
+```bash
+curl "http://localhost:3000/sales/pos-catalog?limit=25&offset=25" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Catalogo completo (sin filtro):**
+
+```bash
+curl "http://localhost:3000/sales/pos-catalog" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### 10.4) Migracion desde `GET /products`
+
+> **Nota importante**: Si actualmente usas `GET /products` para buscar productos en el POS, migra a `GET /sales/pos-catalog`. Este nuevo endpoint esta optimizado para punto de venta con:
+
+- Filtro automatico de `sellInPos = true`
+- Respuesta mas ligera (solo campos necesarios para POS)
+- Precios ya resueltos desde lista PUBLICO (no necesitas calcular)
+- Imagenes pre-limitadas a 5
+- Variantes incluidas con precio y stock en una sola llamada
+- Mismo permiso que otros endpoints de ventas (`read:Sale`)
+
+**Diferencias clave:**
+
+| Aspecto | `GET /products` (admin) | `GET /sales/pos-catalog` (POS) |
+|---------|------------------------|--------------------------------|
+| **Permiso** | `read:Product` | `read:Sale` |
+| **Filtro POS** | Manual (`sellInPos` no filtrado) | Automatico (`sellInPos=true`) |
+| **Precio** | Campo `priceCents` en producto, sin info de lista | Objeto `price` con `priceCents`, `priceDecimal`, `priceListName` |
+| **Variantes** | No incluidas en respuesta de lista | Incluidas con precio/stock resuelto |
+| **Imagenes** | Solo campo `mainImage` en lista | Array `images[]` (max 5) + `mainImage` |
+| **Uso** | Administracion de catalogo | Punto de venta |
+
+---
+
+## 11) Roadmap: lo que viene en proximas versiones
 
 Las siguientes funcionalidades se implementaran de forma incremental en versiones futuras. El diseno actual del backend esta preparado para extenderlas sin romper lo existente:
 

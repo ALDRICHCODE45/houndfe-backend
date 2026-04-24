@@ -578,4 +578,50 @@ describe('SalesService', () => {
       expect(saleRepo.save).toHaveBeenCalledTimes(6);
     });
   });
+
+  describe('searchPosCatalog', () => {
+    it('should delegate to ProductsService.searchForPOS', async () => {
+      // Arrange
+      const mockCatalogResponse = {
+        items: [
+          {
+            id: 'prod-1',
+            name: 'Aspirina',
+            sku: 'ASP-500',
+            barcode: '7501234567890',
+            unit: 'PIEZA',
+            hasVariants: false,
+            useStock: true,
+            category: { id: 'cat-1', name: 'Medicamentos' },
+            brand: { id: 'brand-1', name: 'Bayer' },
+            mainImage: 'https://example.com/asp.jpg',
+            images: ['https://example.com/asp.jpg'],
+            price: {
+              priceCents: 5000,
+              priceDecimal: 50,
+              priceListName: 'PUBLICO',
+            },
+            stock: { quantity: 120, minQuantity: 10 },
+            variants: [],
+          },
+        ],
+        total: 1,
+        limit: 25,
+        offset: 0,
+      };
+
+      productsService.searchForPOS = jest
+        .fn()
+        .mockResolvedValue(mockCatalogResponse);
+
+      const dto = { q: 'Aspirina', limit: 25, offset: 0 };
+
+      // Act
+      const result = await service.searchPosCatalog(dto);
+
+      // Assert
+      expect(result).toEqual(mockCatalogResponse);
+      expect(productsService.searchForPOS).toHaveBeenCalledWith(dto);
+    });
+  });
 });

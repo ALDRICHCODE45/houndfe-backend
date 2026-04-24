@@ -11,7 +11,11 @@ import { ProductsController } from './products.controller';
 import { ProductsService } from './products.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
-import { ExecutionContext, UnauthorizedException, ForbiddenException } from '@nestjs/common';
+import {
+  ExecutionContext,
+  UnauthorizedException,
+  ForbiddenException,
+} from '@nestjs/common';
 
 describe('ProductsController — Image Upload RBAC', () => {
   let controller: ProductsController;
@@ -52,7 +56,7 @@ describe('ProductsController — Image Upload RBAC', () => {
       // This confirms that the controller declares guards that can be overridden
       expect(jwtAuthGuard).toBeDefined();
       expect(permissionsGuard).toBeDefined();
-      
+
       // Verify the guards' canActivate methods are mocked (proof they're registered)
       expect(jwtAuthGuard.canActivate).toBeDefined();
       expect(permissionsGuard.canActivate).toBeDefined();

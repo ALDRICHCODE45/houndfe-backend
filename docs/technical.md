@@ -539,7 +539,141 @@ Reglas operativas:
 
 ---
 
-## 10) Caveats conocidos (para evitar sorpresas)
+## 10) Modulo de Ventas — POS Catalog Search
+
+### 10.1) Arquitectura
+
+El modulo de ventas expone un endpoint de busqueda de catalogo optimizado para punto de venta (`GET /sales/pos-catalog`). Aunque el catalogo vive en el dominio de Products, la busqueda se expone bajo el namespace `sales` para:
+
+1. Alinearse con el contexto de uso (POS = herramienta de ventas)
+2. Unificar permisos bajo `read:Sale` (mismo permiso que draft management)
+3. Permitir politicas futuras especificas de POS sin tocar el modulo de productos
+
+**Flujo de datos:**
+
+```
+HTTP GET /sales/pos-catalog?q=...
+  │
+  ▼
+SalesCatalogController (@Controller('sales'))
+  │  [JwtAuthGuard + PermissionsGuard: read:Sale]
+  │
+  ▼
+SalesService.searchPosCatalog(dto)  [facade — validaciones POS]
+  │
+  ▼
+ProductsService.searchForPOS(dto)  [query + mapping core]
+  │
+  ▼
+PrismaService
+  WHERE sellInPos = true
+  AND (q search across product.name, sku, barcode + variant fields)
+  AND optional categoryId/brandId filters
+  INCLUDE: category, brand, images (take 5), variants.images, variants.variantPrices, priceLists
+  │
+  ▼
+Mapping in-memory:
+  - Resolve mainImage (first isMain or first by sortOrder)
+  - Resolve default price from PUBLICO price list (isDefault=true)
+  - Cap images[] to 5
+  - Map variants with per-variant price/stock
+  │
+  ▼
+Response: { items: PosCatalogItem[], total, limit, offset }
+```
+
+**Separacion de concerns:**
+
+- `SalesCatalogController` (Sales namespace): HTTP adapter, guards, DTO binding
+- `SalesService`: Facade — punto de extension para logica POS futura (ej: filtro por sucursal)
+- `ProductsService`: Query y mapeo de catalogo — reutilizable para otros contextos
+- `PrismaService`: Persistencia
+
+### 10.2) Filtros y paginacion
+
+| Parametro | Tipo | Default | Validacion | Proposito |
+|---|---|---|---|---|
+| `q` | `string?` | - | `maxLength(100)` | Busqueda full-text sobre `product.name`, `product.sku`, `product.barcode`, `variant.name`, `variant.sku`, `variant.barcode` (case-insensitive, `contains`) |
+| `limit` | `number?` | `25` | `min(1)`, `max(50)` | Items por pagina (hard cap en 50 para proteger performance) |
+| `offset` | `number?` | `0` | `min(0)` | Paginacion offset-based (autocomplete UX necesita `total`) |
+| `categoryId` | `UUID?` | - | `IsUUID` | Filtro opcional por categoria |
+| `brandId` | `UUID?` | - | `IsUUID` | Filtro opcional por marca |
+
+**Invariante**: Solo productos con `sellInPos = true` son incluidos (filtro siempre aplicado).
+
+**Estrategia de busqueda**: Prisma `contains` mode sobre multiples campos con `OR`. No hay fuzzy search ni ranking en v1 (puede agregarse con FTS5 o Typesense en v2).
+
+### 10.3) Resolucion de precio default
+
+El precio devuelto en `price.priceCents` se resuelve de la siguiente forma:
+
+1. Buscar en `priceLists[]` del producto la entrada donde `globalPriceList.isDefault = true` (normalmente `PUBLICO`)
+2. Si existe, usar `priceList.priceCents`
+3. Si no existe, devolver `0` (fallback safe; no rompe el contrato)
+
+Para variantes:
+
+1. Buscar en `variant.variantPrices[]` la entrada donde `priceList.globalPriceList.isDefault = true`
+2. Si existe, usar `variantPrice.priceCents`
+3. Si no existe, devolver `0`
+
+**Nota**: `priceDecimal = priceCents / 100` (calculado en el mapper).  
+**Nota**: `priceListName` siempre es el nombre de la lista global default (ej: `"PUBLICO"`).
+
+### 10.4) Resolucion de imagenes
+
+**Main image:**
+
+- Si existe imagen con `isMain = true` (a nivel producto o variante segun corresponda), usar su `url`
+- Si no, usar la primera imagen ordenada por `sortOrder asc`
+- Si no hay imagenes, devolver `null`
+
+**Images array:**
+
+- Ordenar por `isMain desc`, `sortOrder asc`
+- Tomar las primeras 5 (hard cap)
+- Devolver como array de URLs (strings)
+
+**Variantes:**
+
+- Cada variante tiene su propio `mainImage` resuelto desde `product_images WHERE variantId = variant.id`
+- Si la variante no tiene imagenes propias, `mainImage = null` (NO hereda del producto)
+
+### 10.5) Comportamiento de stock
+
+- Si `product.useStock = false`: `stock = null` a nivel producto
+- Si `product.hasVariants = true`: `stock = null` a nivel producto (el stock real esta en las variantes)
+- Si `product.useStock = true` y `hasVariants = false`: `stock = { quantity, minQuantity }`
+- Para variantes: si `product.useStock = false`, entonces `variant.stock = null` (normalizado en DB)
+
+### 10.6) RBAC y permisos
+
+**Permiso requerido:** `read:Sale`
+
+**Rationale:**
+
+- El catalogo POS es una herramienta de **ventas**, no de administracion de productos
+- Los cajeros necesitan buscar productos para armar ventas, pero no necesitan editar el catalogo
+- El permiso `read:Sale` ya se usa en `GET /sales/drafts` (listar borradores del usuario)
+- Alinear permisos bajo `Sale` permite asignar un solo permiso para todo el flujo POS (borradores + catalogo)
+- Los administradores de productos usan `GET /products` con permiso `read:Product` (endpoint separado, sin filtro POS)
+
+**Compatibilidad:**
+
+- Roles con `read:Sale` → acceso a catalogo POS (ej: cajeros, vendedores)
+- Roles con `manage:Sale` → acceso a catalogo POS + draft management completo
+- Roles con solo `read:Product` → NO tienen acceso a catalogo POS (por diseño; deben usar `/products`)
+- Roles con `manage:all` (Super Admin) → acceso a todo
+
+**No-goals:**
+
+- No se introduce dependencia de `read:Product` en el modulo Sales
+- No se modifica el contrato de `GET /products` (sigue siendo endpoint de administracion)
+- No se mezclan permisos de admin y POS en el mismo endpoint
+
+---
+
+## 11) Caveats conocidos (para evitar sorpresas)
 
 1. **`PUBLICO` no se puede borrar ni renombrar** (`DEFAULT_PRICE_LIST_PROTECTED`).
 2. `PATCH /products/:id` con `priceCents` solo actualiza la lista global default (`isDefault=true`, normalmente `PUBLICO`).

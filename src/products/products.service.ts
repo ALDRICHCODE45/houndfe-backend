@@ -1716,6 +1716,219 @@ export class ProductsService {
     };
   }
 
+  // ==================== POS Catalog Search ====================
+
+  /**
+   * Search products for POS catalog endpoint.
+   * Returns paginated POS-optimized product data.
+   *
+   * Filters:
+   * - sellInPos=true (always applied)
+   * - q: search across product name, SKU, barcode + variant fields
+   * - categoryId, brandId: optional filters
+   *
+   * @param dto - Search params with pagination
+   * @returns Paginated POS catalog response
+   */
+  async searchForPOS(dto: {
+    q?: string;
+    limit?: number;
+    offset?: number;
+    categoryId?: string;
+    brandId?: string;
+  }) {
+    const limit = dto.limit ?? 25;
+    const offset = dto.offset ?? 0;
+
+    // Build WHERE clause
+    const where: any = {
+      sellInPos: true,
+    };
+
+    // Search query: across product name, SKU, barcode + variant fields
+    if (dto.q) {
+      const searchTerm = `%${dto.q}%`;
+      where.OR = [
+        { name: { contains: dto.q, mode: 'insensitive' } },
+        { sku: { contains: dto.q, mode: 'insensitive' } },
+        { barcode: { contains: dto.q, mode: 'insensitive' } },
+        {
+          variants: {
+            some: {
+              OR: [
+                { name: { contains: dto.q, mode: 'insensitive' } },
+                { sku: { contains: dto.q, mode: 'insensitive' } },
+                { barcode: { contains: dto.q, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+      ];
+    }
+
+    // Category filter
+    if (dto.categoryId) {
+      where.categoryId = dto.categoryId;
+    }
+
+    // Brand filter
+    if (dto.brandId) {
+      where.brandId = dto.brandId;
+    }
+
+    // Execute queries in parallel
+    const [products, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        take: limit,
+        skip: offset,
+        include: {
+          category: { select: { id: true, name: true } },
+          brand: { select: { id: true, name: true } },
+          images: {
+            orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+            take: 5,
+            where: { variantId: null },
+          },
+          priceLists: {
+            where: { globalPriceList: { isDefault: true } },
+            include: { globalPriceList: { select: { name: true } } },
+            take: 1,
+          },
+          variants: {
+            include: {
+              images: {
+                orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+                take: 5,
+              },
+              variantPrices: {
+                where: { priceList: { globalPriceList: { isDefault: true } } },
+                include: {
+                  priceList: {
+                    select: { globalPriceList: { select: { name: true } } },
+                  },
+                },
+                take: 1,
+              },
+            },
+          },
+        },
+        orderBy: { name: 'asc' },
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+
+    // Map to POS catalog items
+    const items = products.map((product) => this.mapPosCatalogItem(product));
+
+    return {
+      items,
+      total,
+      limit,
+      offset,
+    };
+  }
+
+  /**
+   * Map a Prisma product to POS catalog item format.
+   * Handles variants, images, prices, and stock.
+   */
+  private mapPosCatalogItem(product: any): any {
+    // Resolve main image and images array
+    const mainImage =
+      product.images.find((img: any) => img.isMain)?.url ??
+      product.images[0]?.url ??
+      null;
+    const images = product.images.slice(0, 5).map((img: any) => img.url);
+
+    // Resolve default price for product (if no variants)
+    const price = product.hasVariants
+      ? null
+      : this.resolveDefaultPrice(product.priceLists);
+
+    // Resolve stock for product (if no variants)
+    const stock = product.hasVariants
+      ? null
+      : product.useStock
+        ? {
+            quantity: product.quantity ?? 0,
+            minQuantity: product.minQuantity ?? 0,
+          }
+        : null;
+
+    // Map variants
+    const variants = product.hasVariants
+      ? product.variants.map((variant: any) => ({
+          id: variant.id,
+          name: variant.name,
+          sku: variant.sku,
+          barcode: variant.barcode,
+          mainImage:
+            variant.images.find((img: any) => img.isMain)?.url ??
+            variant.images[0]?.url ??
+            null,
+          price: this.resolveVariantDefaultPrice(variant.variantPrices),
+          stock: product.useStock
+            ? {
+                quantity: variant.quantity ?? 0,
+                minQuantity: variant.minQuantity ?? 0,
+              }
+            : null,
+        }))
+      : [];
+
+    return {
+      id: product.id,
+      name: product.name,
+      sku: product.sku,
+      barcode: product.barcode,
+      unit: product.unit,
+      hasVariants: product.hasVariants,
+      useStock: product.useStock,
+      category: product.category,
+      brand: product.brand,
+      mainImage,
+      images,
+      price,
+      stock,
+      variants,
+    };
+  }
+
+  /**
+   * Resolve default (PUBLICO) price for a product.
+   * Returns price object or fallback to 0.
+   */
+  private resolveDefaultPrice(priceLists: any[]): any {
+    const defaultPriceList = priceLists.find(
+      (pl) => pl.globalPriceList?.isDefault,
+    );
+    const priceCents = defaultPriceList?.priceCents ?? 0;
+
+    return {
+      priceCents,
+      priceDecimal: priceCents / 100,
+      priceListName: 'PUBLICO',
+    };
+  }
+
+  /**
+   * Resolve default (PUBLICO) price for a variant.
+   * Returns price object or fallback to 0.
+   */
+  private resolveVariantDefaultPrice(variantPrices: any[]): any {
+    const defaultVariantPrice = variantPrices.find(
+      (vp) => vp.priceList?.globalPriceList?.isDefault,
+    );
+    const priceCents = defaultVariantPrice?.priceCents ?? 0;
+
+    return {
+      priceCents,
+      priceDecimal: priceCents / 100,
+      priceListName: 'PUBLICO',
+    };
+  }
+
   // ==================== POS Helpers ====================
 
   /**

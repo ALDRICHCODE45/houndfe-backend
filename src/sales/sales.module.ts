@@ -10,6 +10,7 @@
  */
 import { Module } from '@nestjs/common';
 import { SalesController } from './sales.controller';
+import { SalesCatalogController } from './sales-catalog.controller';
 import { SalesService } from './sales.service';
 import { PrismaSaleRepository } from './infrastructure/prisma-sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
@@ -18,7 +19,7 @@ import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [ProductsModule, AuthModule],
-  controllers: [SalesController],
+  controllers: [SalesController, SalesCatalogController],
   providers: [
     SalesService,
     {

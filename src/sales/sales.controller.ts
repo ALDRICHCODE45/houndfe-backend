@@ -75,12 +75,7 @@ export class SalesController {
     @Body() dto: UpdateItemQuantityDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.salesService.updateItemQuantity(
-      id,
-      user.userId,
-      itemId,
-      dto,
-    );
+    return this.salesService.updateItemQuantity(id, user.userId, itemId, dto);
   }
 
   /**

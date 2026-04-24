@@ -73,7 +73,7 @@ function createService(
 ) {
   return new ProductsService(
     repo,
-    prisma as any,
+    prisma,
     filesService ?? makeMockFilesService(),
   );
 }

@@ -221,9 +221,7 @@ export class CustomersService {
     return this.prisma.customerAddress.update({
       where: { id: addressId },
       data: {
-        ...(dto.street !== undefined
-          ? { street: dto.street.trim() }
-          : {}),
+        ...(dto.street !== undefined ? { street: dto.street.trim() } : {}),
         ...(dto.exteriorNumber !== undefined
           ? { exteriorNumber: dto.exteriorNumber?.trim() || null }
           : {}),
@@ -239,9 +237,7 @@ export class CustomersService {
         ...(dto.municipality !== undefined
           ? { municipality: dto.municipality?.trim() || null }
           : {}),
-        ...(dto.city !== undefined
-          ? { city: dto.city?.trim() || null }
-          : {}),
+        ...(dto.city !== undefined ? { city: dto.city?.trim() || null } : {}),
         ...(dto.state !== undefined ? { state: dto.state || null } : {}),
       },
     });

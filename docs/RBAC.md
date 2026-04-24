@@ -733,6 +733,13 @@ Array<{
 | 19  | `Role`    | `update` | Editar roles y asignar permisos |
 | 20  | `Role`    | `delete` | Eliminar roles                  |
 | 21  | `Role`    | `manage` | Gestion total de roles          |
+| 22  | `Sale`    | `create` | Crear ventas/borradores         |
+| 23  | `Sale`    | `read`   | Ver ventas y catalogo POS       |
+| 24  | `Sale`    | `update` | Modificar items de venta        |
+| 25  | `Sale`    | `delete` | Eliminar ventas/borradores      |
+| 26  | `Sale`    | `manage` | Gestion total de ventas         |
+
+> **Nota sobre catalogo POS**: El endpoint `GET /sales/pos-catalog` requiere permiso `read:Sale` (no `read:Product`). Esto es intencional — el catalogo POS es una herramienta de ventas, no de administracion de productos. Ver seccion "POS Catalog RBAC Rationale" mas abajo para detalles.
 
 ### Semantica de `manage`
 
@@ -779,6 +786,7 @@ Referencia rapida de que permiso necesita cada endpoint:
 | `PATCH /admin/roles/:id/permissions` | PATCH  | `update:Role`     |
 | `DELETE /admin/roles/:id`            | DELETE | `delete:Role`     |
 | `GET /admin/permissions`             | GET    | `read:Role`       |
+| `GET /sales/pos-catalog`             | GET    | `read:Sale`       |
 
 ---
 
@@ -1241,6 +1249,48 @@ pnpm exec prisma db seed
 Los 21 permisos se crean automaticamente cada vez que el servidor arranca (via `PermissionSeeder` en `OnApplicationBootstrap`). Es idempotente — se puede reiniciar el servidor sin problemas.
 
 El rol "Super Admin" tambien se crea/actualiza automaticamente con el permiso `manage:all`.
+
+---
+
+## POS Catalog RBAC Rationale
+
+### Contexto
+
+El endpoint `GET /sales/pos-catalog` permite buscar productos habilitados para punto de venta (`sellInPos = true`). Expuesto bajo el namespace `sales` en vez de `products`.
+
+### Decision: `read:Sale` (no `read:Product`)
+
+**Fundamento:**
+
+1. **Contexto de uso**: El catalogo POS es una herramienta de **ventas**, no de administracion de productos. Los cajeros lo usan para buscar productos y armar ventas.
+2. **Alineacion de permisos**: Los endpoints de ventas (`GET /sales/drafts`, `POST /sales/drafts/:id/items`) ya usan permisos `Sale`. Mantener `read:Sale` para catalogo POS unifica permisos en un solo subject.
+3. **Separacion de roles**: Un cajero necesita `read:Sale` para operar el POS, pero NO necesita `read:Product` (que es permiso de administracion de catalogo). Permitir que cajeros accedan al catalogo POS sin otorgar permisos de admin.
+4. **No-breaking**: Los administradores de productos siguen usando `GET /products` con `read:Product`. Ese endpoint sigue sin cambios. No hay mezcla de permisos.
+
+**Comparacion:**
+
+| Endpoint | Permiso | Audiencia | Filtro `sellInPos` | Campos devueltos |
+|---|---|---|---|---|
+| `GET /products` | `read:Product` | Administradores de catalogo | No (muestra todos los productos) | Completo (incluye costos, margenes, configuracion fiscal) |
+| `GET /sales/pos-catalog` | `read:Sale` | Cajeros y vendedores POS | Si (solo `sellInPos=true`) | Optimizado POS (precio publico, stock, imagenes limitadas) |
+
+**Roles esperados:**
+
+- **Cajero**: `read:Sale`, `create:Sale`, `update:Sale` → puede buscar catalogo POS y armar ventas
+- **Vendedor**: `read:Sale`, `create:Sale`, `update:Sale`, `delete:Sale` → puede gestionar ventas completas + catalogo POS
+- **Admin de productos**: `manage:Product` → administra catalogo via `/products`, NO necesita acceder al POS
+- **Super Admin**: `manage:all` → acceso a todo
+
+**Ventajas:**
+
+- Un cajero puede operar el POS completo con un solo subject (`Sale`)
+- No se otorgan permisos de edicion de productos a roles que solo venden
+- Escalable: futuras features POS (ej: filtro por sucursal, precios por cliente) se agregan bajo `Sale` sin tocar `Product`
+
+**Alternativas descartadas:**
+
+- Usar `read:Product` → Obliga a otorgar permisos de admin a cajeros (violacion de least privilege)
+- Crear subject `PosCatalog` → Fragmenta permisos innecesariamente; el POS ya esta bajo `Sale`
 
 ---
 

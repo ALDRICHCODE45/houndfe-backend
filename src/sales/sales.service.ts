@@ -258,4 +258,18 @@ export class SalesService {
     const sales = await this.saleRepo.findDraftsByUserId(userId);
     return sales.map((sale) => sale.toResponse());
   }
+
+  /**
+   * Search POS catalog (facade to ProductsService).
+   * Delegates to ProductsService.searchForPOS.
+   */
+  async searchPosCatalog(dto: {
+    q?: string;
+    limit?: number;
+    offset?: number;
+    categoryId?: string;
+    brandId?: string;
+  }) {
+    return this.productsService.searchForPOS(dto);
+  }
 }
