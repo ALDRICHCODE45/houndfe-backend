@@ -92,6 +92,16 @@ export class SalesController {
     return this.salesService.clearItems(id, user.userId);
   }
 
+  @Delete(':id/items/:itemId')
+  @RequirePermissions(['update', 'Sale'])
+  removeItem(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.removeItem(id, user.userId, itemId);
+  }
+
   /**
    * DELETE /sales/drafts/:id — Delete a draft sale
    */

@@ -366,6 +366,70 @@ describe('Sale Entity', () => {
     });
   });
 
+  describe('removeItem - remove one item from sale', () => {
+    it('should remove only the selected item and preserve others', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      const itemToKeepId = '550e8400-e29b-41d4-a716-446655440020';
+      const itemToRemoveId = '550e8400-e29b-41d4-a716-446655440021';
+
+      sale.addItem({
+        id: itemToKeepId,
+        saleId: BASE_SALE_ID,
+        productId: 'prod-keep',
+        variantId: null,
+        productName: 'Keep product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: itemToRemoveId,
+        saleId: BASE_SALE_ID,
+        productId: 'prod-remove',
+        variantId: null,
+        productName: 'Remove product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 2000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      sale.removeItem(itemToRemoveId);
+
+      expect(sale.items).toHaveLength(1);
+      expect(sale.items[0].id).toBe(itemToKeepId);
+      expect(sale.items[0].productId).toBe('prod-keep');
+    });
+
+    it('should throw SALE_ITEM_NOT_FOUND when item does not belong to sale', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      sale.addItem({
+        id: '550e8400-e29b-41d4-a716-446655440022',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-only',
+        variantId: null,
+        productName: 'Only product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 3000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      expect(() => sale.removeItem('550e8400-e29b-41d4-a716-446655449999')).toThrow(
+        new BusinessRuleViolationError('SALE_ITEM_NOT_FOUND', 'SALE_ITEM_NOT_FOUND'),
+      );
+    });
+  });
+
   describe('toResponse - convert to API response', () => {
     it('should return response with all sale fields', () => {
       const sale = Sale.create({

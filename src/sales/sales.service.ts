@@ -24,6 +24,7 @@ import {
   SaleItemPriceOverriddenEvent,
   SaleItemDiscountAppliedEvent,
   SaleItemDiscountRemovedEvent,
+  SaleItemRemovedEvent,
 } from './domain/events/sale.events';
 import type { AddItemDto } from './dto/add-item.dto';
 import type { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
@@ -227,6 +228,29 @@ export class SalesService {
     this.eventEmitter.emit(
       'sale.cleared',
       new SaleClearedEvent(saleId, clearedItemCount),
+    );
+
+    return sale.toResponse();
+  }
+
+  async removeItem(saleId: string, actorId: string, itemId: string) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    sale.removeItem(itemId);
+    await this.saleRepo.save(sale);
+    this.eventEmitter.emit(
+      'sale.item.removed',
+      new SaleItemRemovedEvent(saleId, itemId, actorId, new Date()),
     );
 
     return sale.toResponse();

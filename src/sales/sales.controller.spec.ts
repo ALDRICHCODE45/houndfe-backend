@@ -16,6 +16,7 @@ function makeMockSalesService() {
     openDraft: jest.fn(),
     addItem: jest.fn(),
     updateItemQuantity: jest.fn(),
+    removeItem: jest.fn(),
     clearItems: jest.fn(),
     deleteDraft: jest.fn(),
     getUserDrafts: jest.fn(),
@@ -145,6 +146,35 @@ describe('SalesController', () => {
 
       expect(result).toEqual(mockSale);
       expect(service.clearItems).toHaveBeenCalledWith('sale-4', 'user-1');
+    });
+  });
+
+  describe('DELETE /sales/drafts/:id/items/:itemId', () => {
+    it('should delegate single-item deletion to service and forward response', async () => {
+      const mockSale = {
+        id: 'sale-4b',
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-remaining',
+            productId: 'prod-remaining',
+            quantity: 1,
+          },
+        ],
+      };
+
+      service.removeItem.mockResolvedValue(mockSale);
+
+      const user = makeMockUser('user-1');
+      const result = await controller.removeItem('sale-4b', 'item-removed', user);
+
+      expect(result).toEqual(mockSale);
+      expect(service.removeItem).toHaveBeenCalledWith(
+        'sale-4b',
+        'user-1',
+        'item-removed',
+      );
     });
   });
 

@@ -79,3 +79,12 @@ export class SaleItemDiscountRemovedEvent {
     public readonly occurredAt: Date,
   ) {}
 }
+
+export class SaleItemRemovedEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly itemId: string,
+    public readonly actorId: string,
+    public readonly occurredAt: Date,
+  ) {}
+}

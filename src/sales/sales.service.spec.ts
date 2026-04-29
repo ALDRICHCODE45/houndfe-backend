@@ -532,6 +532,121 @@ describe('SalesService', () => {
     });
   });
 
+  describe('removeItem', () => {
+    it('should remove item, persist, emit event, and return updated sale response', async () => {
+      const sale = Sale.create({ id: 'sale-remove-1', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-keep',
+        saleId: 'sale-remove-1',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Keep',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-remove',
+        saleId: 'sale-remove-1',
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'Remove',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 2000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      const result = await service.removeItem(
+        'sale-remove-1',
+        'user-1',
+        'item-remove',
+      );
+
+      expect(result.id).toBe('sale-remove-1');
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].id).toBe('item-keep');
+      expect(saleRepo.save).toHaveBeenCalledWith(expect.any(Sale));
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.item.removed',
+        expect.objectContaining({
+          saleId: 'sale-remove-1',
+          itemId: 'item-remove',
+          actorId: 'user-1',
+        }),
+      );
+    });
+
+    it('should throw SALE_NOT_FOUND when sale does not exist', async () => {
+      saleRepo.findById.mockResolvedValue(null);
+
+      await expect(
+        service.removeItem('sale-remove-404', 'user-1', 'item-remove'),
+      ).rejects.toThrow(
+        new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND'),
+      );
+    });
+
+    it('should throw SALE_NOT_DRAFT when sale status is not DRAFT', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-remove-not-draft',
+        userId: 'user-1',
+        status: 'COMPLETED' as any,
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.removeItem('sale-remove-not-draft', 'user-1', 'item-remove'),
+      ).rejects.toThrow(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+    });
+
+    it('should throw SALE_UPDATE_FORBIDDEN when actor is not owner', async () => {
+      const sale = Sale.create({ id: 'sale-remove-forbidden', userId: 'owner-1' });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.removeItem('sale-remove-forbidden', 'user-2', 'item-remove'),
+      ).rejects.toThrow(
+        new BusinessRuleViolationError(
+          'SALE_UPDATE_FORBIDDEN',
+          'SALE_UPDATE_FORBIDDEN',
+        ),
+      );
+    });
+
+    it('should throw SALE_ITEM_NOT_FOUND when item is not in sale', async () => {
+      const sale = Sale.create({ id: 'sale-remove-no-item', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-existing',
+        saleId: 'sale-remove-no-item',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Existing',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 500,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.removeItem('sale-remove-no-item', 'user-1', 'item-missing'),
+      ).rejects.toThrow(
+        new BusinessRuleViolationError(
+          'SALE_ITEM_NOT_FOUND',
+          'SALE_ITEM_NOT_FOUND',
+        ),
+      );
+    });
+  });
+
   describe('deleteDraft', () => {
     it('should delete draft and emit event', async () => {
       const sale = Sale.create({ id: 'sale-9', userId: 'user-1' });

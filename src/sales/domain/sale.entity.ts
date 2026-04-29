@@ -125,6 +125,18 @@ export class Sale {
     this._items = [];
   }
 
+  removeItem(itemId: string): void {
+    const itemIndex = this._items.findIndex((item) => item.id === itemId);
+    if (itemIndex === -1) {
+      throw new BusinessRuleViolationError(
+        'SALE_ITEM_NOT_FOUND',
+        'SALE_ITEM_NOT_FOUND',
+      );
+    }
+
+    this._items.splice(itemIndex, 1);
+  }
+
   overrideItemPrice(itemId: string, input: OverrideSaleItemPriceInput): void {
     const item = this._items.find((i) => i.id === itemId);
     if (!item) {

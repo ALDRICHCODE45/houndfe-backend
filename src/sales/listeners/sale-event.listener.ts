@@ -4,6 +4,7 @@ import {
   SaleItemDiscountAppliedEvent,
   SaleItemDiscountRemovedEvent,
   SaleItemPriceOverriddenEvent,
+  SaleItemRemovedEvent,
 } from '../domain/events/sale.events';
 
 @Injectable()
@@ -45,6 +46,17 @@ export class SaleEventListener {
   onSaleItemDiscountRemoved(event: SaleItemDiscountRemovedEvent) {
     this.logger.log({
       type: 'sale.item.discount.removed',
+      saleId: event.saleId,
+      itemId: event.itemId,
+      actorId: event.actorId,
+      occurredAt: event.occurredAt,
+    });
+  }
+
+  @OnEvent('sale.item.removed')
+  onSaleItemRemoved(event: SaleItemRemovedEvent) {
+    this.logger.log({
+      type: 'sale.item.removed',
       saleId: event.saleId,
       itemId: event.itemId,
       actorId: event.actorId,
