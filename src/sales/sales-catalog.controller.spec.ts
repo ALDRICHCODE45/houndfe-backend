@@ -151,11 +151,9 @@ describe('SalesCatalogController', () => {
       } as ExecutionContext;
 
       // Mock the guard to throw like it would in production
-      (permissionsGuard.canActivate as jest.Mock).mockImplementationOnce(
-        () => {
-          throw new ForbiddenException('Insufficient permissions');
-        },
-      );
+      (permissionsGuard.canActivate as jest.Mock).mockImplementationOnce(() => {
+        throw new ForbiddenException('Insufficient permissions');
+      });
 
       expect(() => permissionsGuard.canActivate(mockContext)).toThrow(
         ForbiddenException,

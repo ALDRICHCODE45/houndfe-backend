@@ -342,4 +342,55 @@ describe('ProductsService — POS Helpers', () => {
       ).rejects.toThrow(EntityNotFoundError);
     });
   });
+
+  describe('price override helpers', () => {
+    it('getApplicablePrices should apply tier threshold and base fallback', async () => {
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([
+        {
+          id: 'pl-1',
+          priceCents: 1000,
+          tierPrices: [
+            { minQuantity: 3, priceCents: 900 },
+            { minQuantity: 10, priceCents: 800 },
+          ],
+          globalPriceList: { name: 'PUBLICO' },
+        },
+      ]);
+
+      const q2 = await service.getApplicablePrices('prod-1', null, 2);
+      const q3 = await service.getApplicablePrices('prod-1', null, 3);
+
+      expect(q2[0].priceCents).toBe(1000);
+      expect(q3[0].priceCents).toBe(900);
+    });
+
+    it('getApplicablePrices should filter by variant when variantId is provided', async () => {
+      prisma.variantPrice = {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            priceListId: 'pl-1',
+            priceCents: 1200,
+            tierPrices: [{ minQuantity: 5, priceCents: 1100 }],
+            priceList: { globalPriceList: { name: 'MAYOREO' } },
+          },
+        ]),
+      };
+
+      const prices = await service.getApplicablePrices('prod-2', 'var-2', 6);
+      expect(prices).toHaveLength(1);
+      expect(prices[0]).toMatchObject({
+        priceListId: 'pl-1',
+        priceListName: 'MAYOREO',
+        priceCents: 1100,
+      });
+    });
+
+    it('resolveListPrice should reject missing list', async () => {
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
+
+      await expect(
+        service.resolveListPrice('missing', 'prod-3', null, 1),
+      ).rejects.toThrow(/INVALID_PRICE_LIST_FOR_ITEM/);
+    });
+  });
 });

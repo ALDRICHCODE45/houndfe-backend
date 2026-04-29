@@ -19,6 +19,10 @@ function makeMockSalesService() {
     clearItems: jest.fn(),
     deleteDraft: jest.fn(),
     getUserDrafts: jest.fn(),
+    getAvailablePrices: jest.fn(),
+    overrideItemPrice: jest.fn(),
+    applyItemDiscount: jest.fn(),
+    removeItemDiscount: jest.fn(),
   } as any;
 }
 
@@ -180,6 +184,71 @@ describe('SalesController', () => {
 
       expect(result).toEqual(mockDrafts);
       expect(service.getUserDrafts).toHaveBeenCalledWith('user-1');
+    });
+  });
+
+  describe('GET /sales/drafts/:id/items/:itemId/available-prices', () => {
+    it('should delegate to service', async () => {
+      service.getAvailablePrices.mockResolvedValue({
+        saleId: 's',
+        itemId: 'i',
+        prices: [],
+      });
+      const user = makeMockUser('user-1');
+      const result = await controller.getAvailablePrices('s', 'i', user);
+      expect(result).toEqual({ saleId: 's', itemId: 'i', prices: [] });
+      expect(service.getAvailablePrices).toHaveBeenCalledWith(
+        's',
+        'i',
+        'user-1',
+      );
+    });
+  });
+
+  describe('PATCH /sales/drafts/:id/items/:itemId/price', () => {
+    it('should delegate price override to service', async () => {
+      service.overrideItemPrice.mockResolvedValue({ id: 's', items: [] });
+      const user = makeMockUser('user-1');
+      const dto = { customPriceCents: 1200 };
+      const result = await controller.overrideItemPrice(
+        's',
+        'i',
+        dto as any,
+        user,
+      );
+      expect(result).toEqual({ id: 's', items: [] });
+      expect(service.overrideItemPrice).toHaveBeenCalledWith(
+        's',
+        'i',
+        dto,
+        'user-1',
+      );
+    });
+  });
+
+  describe('PATCH /sales/drafts/:id/items/:itemId/discount', () => {
+    it('should delegate discount apply to service', async () => {
+      service.applyItemDiscount.mockResolvedValue({ id: 's', items: [] });
+      const user = makeMockUser('user-1');
+      const dto = { type: 'amount', amountCents: 100, discountTitle: 'promo' };
+      const result = await controller.applyItemDiscount('s', 'i', dto as any, user);
+      expect(result).toEqual({ id: 's', items: [] });
+      expect(service.applyItemDiscount).toHaveBeenCalledWith(
+        's',
+        'i',
+        dto,
+        'user-1',
+      );
+    });
+  });
+
+  describe('DELETE /sales/drafts/:id/items/:itemId/discount', () => {
+    it('should delegate discount removal to service', async () => {
+      service.removeItemDiscount.mockResolvedValue({ id: 's', items: [] });
+      const user = makeMockUser('user-1');
+      const result = await controller.removeItemDiscount('s', 'i', user);
+      expect(result).toEqual({ id: 's', items: [] });
+      expect(service.removeItemDiscount).toHaveBeenCalledWith('s', 'i', 'user-1');
     });
   });
 });

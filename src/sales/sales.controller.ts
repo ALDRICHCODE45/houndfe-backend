@@ -25,6 +25,8 @@ import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface
 import { SalesService } from './sales.service';
 import { AddItemDto } from './dto/add-item.dto';
 import { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
+import { OverrideItemPriceDto } from './dto/override-item-price.dto';
+import { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 
 @Controller('sales/drafts')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -101,5 +103,47 @@ export class SalesController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.salesService.deleteDraft(id, user.userId);
+  }
+
+  @Get(':id/items/:itemId/available-prices')
+  @RequirePermissions(['update', 'Sale'])
+  getAvailablePrices(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.getAvailablePrices(id, itemId, user.userId);
+  }
+
+  @Patch(':id/items/:itemId/price')
+  @RequirePermissions(['update', 'Sale'])
+  overrideItemPrice(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Body() dto: OverrideItemPriceDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.overrideItemPrice(id, itemId, dto, user.userId);
+  }
+
+  @Patch(':id/items/:itemId/discount')
+  @RequirePermissions(['update', 'Sale'])
+  applyItemDiscount(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Body() dto: ApplyItemDiscountDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.applyItemDiscount(id, itemId, dto, user.userId);
+  }
+
+  @Delete(':id/items/:itemId/discount')
+  @RequirePermissions(['update', 'Sale'])
+  removeItemDiscount(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.removeItemDiscount(id, itemId, user.userId);
   }
 }

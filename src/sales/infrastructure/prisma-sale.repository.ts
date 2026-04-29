@@ -58,6 +58,21 @@ export class PrismaSaleRepository implements ISaleRepository {
           quantity: item.quantity,
           unitPriceCents: item.unitPriceCents,
           unitPriceCurrency: item.unitPriceCurrency,
+          originalPriceCents: item.originalPriceCents,
+          priceSource:
+            item.priceSource === 'default'
+              ? 'DEFAULT'
+              : item.priceSource === 'price_list'
+                ? 'PRICE_LIST'
+                : 'CUSTOM',
+          appliedPriceListId: item.appliedPriceListId,
+          customPriceCents: item.customPriceCents,
+          discountType: item.discountType,
+          discountValue: item.discountValue,
+          discountAmountCents: item.discountAmountCents,
+          prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+          discountTitle: item.discountTitle,
+          discountedAt: item.discountedAt,
         })),
       });
     } else {
@@ -91,6 +106,20 @@ export class PrismaSaleRepository implements ISaleRepository {
         quantity: item.quantity,
         unitPriceCents: item.unitPriceCents,
         unitPriceCurrency: item.unitPriceCurrency,
+        originalPriceCents: item.originalPriceCents,
+        priceSource: item.priceSource?.toLowerCase() as
+          | 'default'
+          | 'price_list'
+          | 'custom'
+          | undefined,
+        appliedPriceListId: item.appliedPriceListId,
+        customPriceCents: item.customPriceCents,
+        discountType: item.discountType as 'amount' | 'percentage' | null,
+        discountValue: item.discountValue,
+        discountAmountCents: item.discountAmountCents,
+        prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+        discountTitle: item.discountTitle,
+        discountedAt: item.discountedAt,
       })),
       createdAt: saleData.createdAt,
       updatedAt: saleData.updatedAt,
@@ -122,6 +151,20 @@ export class PrismaSaleRepository implements ISaleRepository {
           quantity: item.quantity,
           unitPriceCents: item.unitPriceCents,
           unitPriceCurrency: item.unitPriceCurrency,
+          originalPriceCents: item.originalPriceCents,
+          priceSource: item.priceSource?.toLowerCase() as
+            | 'default'
+            | 'price_list'
+            | 'custom'
+            | undefined,
+          appliedPriceListId: item.appliedPriceListId,
+          customPriceCents: item.customPriceCents,
+          discountType: item.discountType as 'amount' | 'percentage' | null,
+          discountValue: item.discountValue,
+          discountAmountCents: item.discountAmountCents,
+          prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+          discountTitle: item.discountTitle,
+          discountedAt: item.discountedAt,
         })),
         createdAt: saleData.createdAt,
         updatedAt: saleData.updatedAt,

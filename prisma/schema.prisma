@@ -122,6 +122,17 @@ enum SaleStatus {
   DRAFT
 }
 
+enum SaleItemPriceSource {
+  DEFAULT
+  PRICE_LIST
+  CUSTOM
+}
+
+enum SaleItemDiscountType {
+  amount
+  percentage
+}
+
 // ============================================================================
 // CATEGORY
 // ============================================================================
@@ -461,6 +472,16 @@ model SaleItem {
   quantity          Int
   unitPriceCents    Int
   unitPriceCurrency String   @default("MXN")
+  originalPriceCents Int?
+  priceSource SaleItemPriceSource?
+  appliedPriceListId String?
+  customPriceCents Int?
+  discountType SaleItemDiscountType?
+  discountValue Int?
+  discountAmountCents Int?
+  prePriceCentsBeforeDiscount Int?
+  discountTitle String?
+  discountedAt DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

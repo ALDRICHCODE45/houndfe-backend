@@ -251,4 +251,201 @@ describe('SaleItem Entity', () => {
       expect(response.unitPriceCurrency).toBe('MXN');
     });
   });
+
+  describe('overridePrice - override item unit price', () => {
+    it('should override using price list and preserve original price immutability', () => {
+      const item = SaleItem.create({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: '550e8400-e29b-41d4-a716-446655440000',
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      item.overridePrice({
+        priceCents: 4500,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-1',
+        customPriceCents: null,
+      });
+
+      expect(item.unitPriceCents).toBe(4500);
+      expect(item.originalPriceCents).toBe(5000);
+      expect(item.priceSource).toBe('price_list');
+      expect(item.appliedPriceListId).toBe('list-1');
+      expect(item.customPriceCents).toBeNull();
+
+      item.overridePrice({
+        priceCents: 4300,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-2',
+        customPriceCents: null,
+      });
+
+      expect(item.unitPriceCents).toBe(4300);
+      expect(item.originalPriceCents).toBe(5000);
+      expect(item.appliedPriceListId).toBe('list-2');
+    });
+
+    it('should override using custom price and clear applied list', () => {
+      const item = SaleItem.create({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: '550e8400-e29b-41d4-a716-446655440000',
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      item.overridePrice({
+        priceCents: 12345,
+        priceSource: 'custom',
+        appliedPriceListId: null,
+        customPriceCents: 12345,
+      });
+
+      expect(item.unitPriceCents).toBe(12345);
+      expect(item.priceSource).toBe('custom');
+      expect(item.customPriceCents).toBe(12345);
+      expect(item.appliedPriceListId).toBeNull();
+    });
+
+    it('should reject invalid override payload combinations', () => {
+      const item = SaleItem.create({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: '550e8400-e29b-41d4-a716-446655440000',
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      expect(() =>
+        item.overridePrice({
+          priceCents: 1,
+          priceSource: 'custom',
+          appliedPriceListId: 'list-1',
+          customPriceCents: 1,
+        }),
+      ).toThrow(InvalidArgumentError);
+
+      expect(() =>
+        item.overridePrice({
+          priceCents: 1,
+          priceSource: 'price_list',
+          appliedPriceListId: null,
+          customPriceCents: null,
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    it('should clear active discount fields when overriding price', () => {
+      const item = SaleItem.create({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: '550e8400-e29b-41d4-a716-446655440000',
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      item.applyDiscount({ type: 'percentage', percent: 20, discountTitle: 'Promo' });
+      item.overridePrice({
+        priceCents: 900,
+        priceSource: 'custom',
+        appliedPriceListId: null,
+        customPriceCents: 900,
+      });
+
+      expect(item.discountType).toBeNull();
+      expect(item.discountValue).toBeNull();
+      expect(item.discountAmountCents).toBeNull();
+      expect(item.prePriceCentsBeforeDiscount).toBeNull();
+      expect(item.discountTitle).toBeNull();
+      expect(item.discountedAt).toBeNull();
+    });
+  });
+
+  describe('discount behavior', () => {
+    it('applies percentage discount and stores metadata', () => {
+      const item = SaleItem.create({
+        id: 'i1', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
+        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+      });
+
+      item.applyDiscount({ type: 'percentage', percent: 15, discountTitle: '15 off' });
+
+      expect(item.unitPriceCents).toBe(850);
+      expect(item.discountType).toBe('percentage');
+      expect(item.discountValue).toBe(15);
+      expect(item.discountAmountCents).toBe(150);
+      expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+      expect(item.discountTitle).toBe('15 off');
+      expect(item.discountedAt).toBeInstanceOf(Date);
+    });
+
+    it('replaces discount from original baseline (no stacking)', () => {
+      const item = SaleItem.create({
+        id: 'i2', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
+        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+      });
+
+      item.applyDiscount({ type: 'percentage', percent: 10 });
+      item.applyDiscount({ type: 'amount', amountCents: 200 });
+
+      expect(item.unitPriceCents).toBe(800);
+      expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+      expect(item.discountAmountCents).toBe(200);
+    });
+
+    it('rejects 100% discount', () => {
+      const item = SaleItem.create({
+        id: 'i3', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
+        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+      });
+
+      expect(() => item.applyDiscount({ type: 'percentage', percent: 100 })).toThrow(
+        /DISCOUNT_PERCENT_INVALID/,
+      );
+    });
+
+    it('rejects amount that leaves price below 1', () => {
+      const item = SaleItem.create({
+        id: 'i4', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
+        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+      });
+
+      expect(() => item.applyDiscount({ type: 'amount', amountCents: 1000 })).toThrow(
+        /DISCOUNT_AMOUNT_INVALID/,
+      );
+    });
+
+    it('removeDiscount restores price and is idempotent', () => {
+      const item = SaleItem.create({
+        id: 'i5', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
+        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+      });
+
+      item.applyDiscount({ type: 'amount', amountCents: 200 });
+      item.removeDiscount();
+      item.removeDiscount();
+
+      expect(item.unitPriceCents).toBe(1000);
+      expect(item.discountType).toBeNull();
+      expect(item.discountTitle).toBeNull();
+    });
+  });
 });

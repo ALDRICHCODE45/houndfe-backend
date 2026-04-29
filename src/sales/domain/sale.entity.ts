@@ -2,7 +2,12 @@ import {
   InvalidArgumentError,
   BusinessRuleViolationError,
 } from '../../shared/domain/domain-error';
-import { SaleItem, SaleItemProps } from './sale-item.entity';
+import {
+  SaleItem,
+  SaleItemProps,
+  OverrideSaleItemPriceInput,
+  ApplySaleItemDiscountInput,
+} from './sale-item.entity';
 
 export type SaleStatus = 'DRAFT';
 
@@ -118,6 +123,40 @@ export class Sale {
    */
   clearItems(): void {
     this._items = [];
+  }
+
+  overrideItemPrice(itemId: string, input: OverrideSaleItemPriceInput): void {
+    const item = this._items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new BusinessRuleViolationError(
+        'SALE_ITEM_NOT_FOUND',
+        'SALE_ITEM_NOT_FOUND',
+      );
+    }
+
+    item.overridePrice(input);
+  }
+
+  applyItemDiscount(itemId: string, input: ApplySaleItemDiscountInput): void {
+    const item = this._items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new BusinessRuleViolationError(
+        'SALE_ITEM_NOT_FOUND',
+        'SALE_ITEM_NOT_FOUND',
+      );
+    }
+    item.applyDiscount(input);
+  }
+
+  removeItemDiscount(itemId: string): void {
+    const item = this._items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new BusinessRuleViolationError(
+        'SALE_ITEM_NOT_FOUND',
+        'SALE_ITEM_NOT_FOUND',
+      );
+    }
+    item.removeDiscount();
   }
 
   toResponse() {

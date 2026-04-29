@@ -67,6 +67,10 @@ describe('PrismaSaleRepository', () => {
             quantity: 2,
             unitPriceCents: 1000,
             unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
           },
         ],
       };
@@ -100,6 +104,16 @@ describe('PrismaSaleRepository', () => {
             quantity: 2,
             unitPriceCents: 1000,
             unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            discountType: null,
+            discountValue: null,
+            discountAmountCents: null,
+            prePriceCentsBeforeDiscount: null,
+            discountTitle: null,
+            discountedAt: null,
           },
         ],
       });
@@ -149,6 +163,10 @@ describe('PrismaSaleRepository', () => {
             quantity: 1,
             unitPriceCents: 500,
             unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
           },
         ],
       };
@@ -181,6 +199,16 @@ describe('PrismaSaleRepository', () => {
             quantity: 1,
             unitPriceCents: 500,
             unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            discountType: null,
+            discountValue: null,
+            discountAmountCents: null,
+            prePriceCentsBeforeDiscount: null,
+            discountTitle: null,
+            discountedAt: null,
           },
         ],
       });
@@ -255,6 +283,44 @@ describe('PrismaSaleRepository', () => {
       const result = await repo.findById('nonexistent');
 
       expect(result).toBeNull();
+    });
+
+    it('roundtrips discount fields including discountTitle', async () => {
+      const mockSaleData = {
+        id: 'sale-disc',
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date('2026-04-01'),
+        updatedAt: new Date('2026-04-01'),
+        items: [
+          {
+            id: 'item-disc',
+            saleId: 'sale-disc',
+            productId: 'prod-3',
+            variantId: null,
+            productName: 'Product 3',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 800,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            discountType: 'percentage',
+            discountValue: 20,
+            discountAmountCents: 200,
+            prePriceCentsBeforeDiscount: 1000,
+            discountTitle: 'Promo',
+            discountedAt: new Date('2026-04-01'),
+          },
+        ],
+      };
+
+      prisma.sale.findUnique.mockResolvedValue(mockSaleData);
+      const result = await repo.findById('sale-disc');
+      expect(result?.items[0].discountType).toBe('percentage');
+      expect(result?.items[0].discountTitle).toBe('Promo');
     });
   });
 

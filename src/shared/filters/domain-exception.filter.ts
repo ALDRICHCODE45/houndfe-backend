@@ -64,6 +64,21 @@ export class DomainExceptionFilter implements ExceptionFilter {
    * Default                    → 500
    */
   private getHttpStatus(exception: DomainError): number {
+    if (exception.code === 'SALE_UPDATE_FORBIDDEN') return HttpStatus.FORBIDDEN;
+    if (exception.code === 'SALE_NOT_FOUND') return HttpStatus.NOT_FOUND;
+    if (exception.code === 'SALE_ITEM_NOT_FOUND') return HttpStatus.NOT_FOUND;
+    if (exception.code === 'SALE_NOT_DRAFT') return HttpStatus.CONFLICT;
+    if (exception.code === 'INVALID_PRICE_OVERRIDE_INPUT')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'INVALID_PRICE_LIST_FOR_ITEM')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'INVALID_DISCOUNT_INPUT')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'DISCOUNT_PERCENT_INVALID')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'DISCOUNT_AMOUNT_INVALID')
+      return HttpStatus.BAD_REQUEST;
+
     if (exception instanceof EntityNotFoundError) return HttpStatus.NOT_FOUND;
     if (exception instanceof EntityAlreadyExistsError)
       return HttpStatus.CONFLICT;

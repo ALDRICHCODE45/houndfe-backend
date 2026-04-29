@@ -30,6 +30,8 @@ function makeMockProductsService() {
   return {
     getProductInfoForSale: jest.fn(),
     checkStockAvailability: jest.fn(),
+    getApplicablePrices: jest.fn(),
+    resolveListPrice: jest.fn(),
   } as any;
 }
 
@@ -60,6 +62,47 @@ describe('SalesService', () => {
     productsService = makeMockProductsService();
     eventEmitter = makeMockEventEmitter();
     service = createService(saleRepo, productsService, eventEmitter);
+  });
+
+  describe('item discount use-cases', () => {
+    it('applies item discount and emits event', async () => {
+      const sale = Sale.create({ id: 'sale-discount', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-1', saleId: 'sale-discount', productId: 'prod-1', variantId: null,
+        productName: 'Prod', variantName: null, quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      const result = await service.applyItemDiscount('sale-discount', 'item-1', {
+        type: 'percentage',
+        percent: 15,
+        discountTitle: 'promo',
+      }, 'user-1');
+
+      expect(result.items[0].discountType).toBe('percentage');
+      expect(result.items[0].discountTitle).toBe('promo');
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.item.discount.applied',
+        expect.objectContaining({ saleId: 'sale-discount', itemId: 'item-1' }),
+      );
+    });
+
+    it('removes item discount and emits event', async () => {
+      const sale = Sale.create({ id: 'sale-discount-2', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-1', saleId: 'sale-discount-2', productId: 'prod-1', variantId: null,
+        productName: 'Prod', variantName: null, quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+      });
+      sale.applyItemDiscount('item-1', { type: 'amount', amountCents: 100 });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      const result = await service.removeItemDiscount('sale-discount-2', 'item-1', 'user-1');
+      expect(result.items[0].discountType).toBeNull();
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.item.discount.removed',
+        expect.objectContaining({ saleId: 'sale-discount-2', itemId: 'item-1' }),
+      );
+    });
   });
 
   describe('openDraft', () => {
@@ -622,6 +665,136 @@ describe('SalesService', () => {
       // Assert
       expect(result).toEqual(mockCatalogResponse);
       expect(productsService.searchForPOS).toHaveBeenCalledWith(dto);
+    });
+  });
+
+  describe('price override use cases', () => {
+    it('getAvailablePrices should return mapped prices with isCurrent', async () => {
+      const sale = Sale.create({ id: 'sale-av', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-av',
+        saleId: 'sale-av',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getApplicablePrices.mockResolvedValue([
+        { priceListId: 'pl-1', priceListName: 'PUBLICO', priceCents: 1000 },
+      ]);
+
+      const result = await service.getAvailablePrices(
+        'sale-av',
+        'item-av',
+        'user-1',
+      );
+      expect(result.prices[0].isCurrent).toBe(true);
+    });
+
+    it('getAvailablePrices should match current by appliedPriceListId first', async () => {
+      const sale = Sale.create({ id: 'sale-av2', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-av2',
+        saleId: 'sale-av2',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.overrideItemPrice('item-av2', {
+        priceCents: 950,
+        priceSource: 'price_list',
+        appliedPriceListId: 'pl-2',
+        customPriceCents: null,
+      });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getApplicablePrices.mockResolvedValue([
+        { priceListId: 'pl-1', priceListName: 'PUBLICO', priceCents: 950 },
+        { priceListId: 'pl-2', priceListName: 'MAYOREO', priceCents: 950 },
+      ]);
+
+      const result = await service.getAvailablePrices(
+        'sale-av2',
+        'item-av2',
+        'user-1',
+      );
+      expect(
+        result.prices.find((p) => p.priceListId === 'pl-1')?.isCurrent,
+      ).toBe(false);
+      expect(
+        result.prices.find((p) => p.priceListId === 'pl-2')?.isCurrent,
+      ).toBe(true);
+    });
+
+    it('getAvailablePrices should fallback to unitPrice match when appliedPriceListId is null', async () => {
+      const sale = Sale.create({ id: 'sale-av3', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-av3',
+        saleId: 'sale-av3',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getApplicablePrices.mockResolvedValue([
+        { priceListId: 'pl-1', priceListName: 'PUBLICO', priceCents: 1000 },
+        { priceListId: 'pl-2', priceListName: 'MAYOREO', priceCents: 900 },
+      ]);
+
+      const result = await service.getAvailablePrices(
+        'sale-av3',
+        'item-av3',
+        'user-1',
+      );
+      expect(
+        result.prices.find((p) => p.priceListId === 'pl-1')?.isCurrent,
+      ).toBe(true);
+      expect(
+        result.prices.find((p) => p.priceListId === 'pl-2')?.isCurrent,
+      ).toBe(false);
+    });
+
+    it('overrideItemPrice should emit one audit event', async () => {
+      const sale = Sale.create({ id: 'sale-ov', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-ov',
+        saleId: 'sale-ov',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.save.mockResolvedValue(sale);
+      productsService.resolveListPrice.mockResolvedValue(900);
+
+      await service.overrideItemPrice(
+        'sale-ov',
+        'item-ov',
+        { priceListId: 'pl-1' },
+        'user-1',
+      );
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.item.price.overridden',
+        expect.any(Object),
+      );
     });
   });
 });

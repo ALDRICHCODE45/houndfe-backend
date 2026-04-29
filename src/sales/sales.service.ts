@@ -21,9 +21,15 @@ import {
   SaleItemQuantityChangedEvent,
   SaleClearedEvent,
   SaleDraftDeletedEvent,
+  SaleItemPriceOverriddenEvent,
+  SaleItemDiscountAppliedEvent,
+  SaleItemDiscountRemovedEvent,
 } from './domain/events/sale.events';
 import type { AddItemDto } from './dto/add-item.dto';
 import type { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
+import type { OverrideItemPriceDto } from './dto/override-item-price.dto';
+import type { AvailablePricesResponseDto } from './dto/available-prices-response.dto';
+import type { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 
 @Injectable()
 export class SalesService {
@@ -271,5 +277,199 @@ export class SalesService {
     brandId?: string;
   }) {
     return this.productsService.searchForPOS(dto);
+  }
+
+  async getAvailablePrices(
+    saleId: string,
+    itemId: string,
+    actorId: string,
+  ): Promise<AvailablePricesResponseDto> {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    const item = sale.items.find((i) => i.id === itemId);
+    if (!item)
+      throw new BusinessRuleViolationError(
+        'SALE_ITEM_NOT_FOUND',
+        'SALE_ITEM_NOT_FOUND',
+      );
+
+    const prices = await this.productsService.getApplicablePrices(
+      item.productId,
+      item.variantId,
+      item.quantity,
+    );
+
+    return {
+      saleId,
+      itemId,
+      prices: prices.map((p) => ({
+        ...p,
+        currency: 'MXN' as const,
+        // Strategy: when item comes from price-list override, current marker is strict by applied list id.
+        // Otherwise (default/custom paths with null list id), fallback to matching current unit price.
+        isCurrent:
+          item.appliedPriceListId !== null
+            ? item.appliedPriceListId === p.priceListId
+            : item.unitPriceCents === p.priceCents,
+      })),
+    };
+  }
+
+  async overrideItemPrice(
+    saleId: string,
+    itemId: string,
+    dto: OverrideItemPriceDto,
+    actorId: string,
+  ) {
+    if (
+      (dto.priceListId && dto.customPriceCents) ||
+      (!dto.priceListId && !dto.customPriceCents)
+    ) {
+      throw new BusinessRuleViolationError('INVALID_PRICE_OVERRIDE_INPUT');
+    }
+
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+    const item = sale.items.find((i) => i.id === itemId);
+    if (!item)
+      throw new BusinessRuleViolationError(
+        'SALE_ITEM_NOT_FOUND',
+        'SALE_ITEM_NOT_FOUND',
+      );
+
+    const previous = item.unitPriceCents;
+    if (dto.priceListId) {
+      const resolved = await this.productsService.resolveListPrice(
+        dto.priceListId,
+        item.productId,
+        item.variantId,
+        item.quantity,
+      );
+      sale.overrideItemPrice(itemId, {
+        priceCents: resolved,
+        priceSource: 'price_list',
+        appliedPriceListId: dto.priceListId,
+        customPriceCents: null,
+      });
+    } else {
+      sale.overrideItemPrice(itemId, {
+        priceCents: dto.customPriceCents!,
+        priceSource: 'custom',
+        appliedPriceListId: null,
+        customPriceCents: dto.customPriceCents!,
+      });
+    }
+
+    await this.saleRepo.save(sale);
+    const updated = sale.items.find((i) => i.id === itemId)!;
+    this.eventEmitter.emit(
+      'sale.item.price.overridden',
+      new SaleItemPriceOverriddenEvent(
+        saleId,
+        itemId,
+        actorId,
+        previous,
+        updated.unitPriceCents,
+        updated.priceSource === 'price_list' ? 'price_list' : 'custom',
+        updated.appliedPriceListId,
+        updated.customPriceCents,
+        new Date(),
+      ),
+    );
+
+    return sale.toResponse();
+  }
+
+  async applyItemDiscount(
+    saleId: string,
+    itemId: string,
+    dto: ApplyItemDiscountDto,
+    actorId: string,
+  ) {
+    if (
+      (dto.type === 'amount' && dto.amountCents === undefined) ||
+      (dto.type === 'percentage' && dto.percent === undefined) ||
+      (dto.amountCents !== undefined && dto.percent !== undefined)
+    ) {
+      throw new BusinessRuleViolationError(
+        'INVALID_DISCOUNT_INPUT',
+        'INVALID_DISCOUNT_INPUT',
+      );
+    }
+
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    sale.applyItemDiscount(itemId, {
+      type: dto.type,
+      amountCents: dto.amountCents,
+      percent: dto.percent,
+      discountTitle: dto.title ?? dto.discountTitle,
+    });
+    await this.saleRepo.save(sale);
+
+    const updated = sale.items.find((i) => i.id === itemId)!;
+    this.eventEmitter.emit(
+      'sale.item.discount.applied',
+      new SaleItemDiscountAppliedEvent(
+        saleId,
+        itemId,
+        actorId,
+        updated.discountType!,
+        updated.discountValue!,
+        updated.discountAmountCents!,
+        updated.discountTitle,
+        new Date(),
+      ),
+    );
+
+    return sale.toResponse();
+  }
+
+  async removeItemDiscount(saleId: string, itemId: string, actorId: string) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    sale.removeItemDiscount(itemId);
+    await this.saleRepo.save(sale);
+    this.eventEmitter.emit(
+      'sale.item.discount.removed',
+      new SaleItemDiscountRemovedEvent(saleId, itemId, actorId, new Date()),
+    );
+
+    return sale.toResponse();
   }
 }

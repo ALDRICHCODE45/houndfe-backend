@@ -263,6 +263,55 @@ describe('Sale Entity', () => {
         InvalidArgumentError,
       );
     });
+
+    it('should keep discount metadata unchanged when quantity changes', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      const itemId = '550e8400-e29b-41d4-a716-446655440012';
+      sale.addItem({
+        id: itemId,
+        saleId: BASE_SALE_ID,
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      sale.applyItemDiscount(itemId, {
+        type: 'percentage',
+        percent: 10,
+        discountTitle: 'Promo',
+      });
+
+      const discountBeforeUpdate = {
+        discountType: sale.items[0].discountType,
+        discountValue: sale.items[0].discountValue,
+        discountAmountCents: sale.items[0].discountAmountCents,
+        prePriceCentsBeforeDiscount: sale.items[0].prePriceCentsBeforeDiscount,
+        discountTitle: sale.items[0].discountTitle,
+        discountedAt: sale.items[0].discountedAt,
+      };
+
+      sale.updateItemQuantity(itemId, 5);
+
+      expect(sale.items[0].quantity).toBe(5);
+      expect(sale.items[0].discountType).toBe(discountBeforeUpdate.discountType);
+      expect(sale.items[0].discountValue).toBe(discountBeforeUpdate.discountValue);
+      expect(sale.items[0].discountAmountCents).toBe(
+        discountBeforeUpdate.discountAmountCents,
+      );
+      expect(sale.items[0].prePriceCentsBeforeDiscount).toBe(
+        discountBeforeUpdate.prePriceCentsBeforeDiscount,
+      );
+      expect(sale.items[0].discountTitle).toBe(discountBeforeUpdate.discountTitle);
+      expect(sale.items[0].discountedAt).toBe(discountBeforeUpdate.discountedAt);
+    });
   });
 
   describe('clearItems - remove all items from sale', () => {
@@ -344,6 +393,90 @@ describe('Sale Entity', () => {
       expect(response.items).toHaveLength(1);
       expect(response.items[0].productId).toBe('prod-001');
       expect(response.items[0].quantity).toBe(2);
+    });
+  });
+
+  describe('overrideItemPrice', () => {
+    it('should delegate override to selected item', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      const itemId = '550e8400-e29b-41d4-a716-446655440010';
+      sale.addItem({
+        id: itemId,
+        saleId: BASE_SALE_ID,
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      sale.overrideItemPrice(itemId, {
+        priceCents: 4500,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-1',
+        customPriceCents: null,
+      });
+
+      expect(sale.items[0].unitPriceCents).toBe(4500);
+      expect(sale.items[0].priceSource).toBe('price_list');
+    });
+
+    it('should throw SALE_ITEM_NOT_FOUND when item is missing', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      expect(() =>
+        sale.overrideItemPrice('missing-item', {
+          priceCents: 4500,
+          priceSource: 'price_list',
+          appliedPriceListId: 'list-1',
+          customPriceCents: null,
+        }),
+      ).toThrow(BusinessRuleViolationError);
+      expect(() =>
+        sale.overrideItemPrice('missing-item', {
+          priceCents: 4500,
+          priceSource: 'price_list',
+          appliedPriceListId: 'list-1',
+          customPriceCents: null,
+        }),
+      ).toThrow(/SALE_ITEM_NOT_FOUND/);
+    });
+  });
+
+  describe('item discounts', () => {
+    it('applies discount to selected item', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-discount',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      sale.applyItemDiscount('item-discount', { type: 'amount', amountCents: 100 });
+      expect(sale.items[0].discountType).toBe('amount');
+      expect(sale.items[0].unitPriceCents).toBe(900);
+    });
+
+    it('throws SALE_ITEM_NOT_FOUND for missing item', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      expect(() =>
+        sale.applyItemDiscount('missing', { type: 'amount', amountCents: 100 }),
+      ).toThrow(BusinessRuleViolationError);
     });
   });
 });

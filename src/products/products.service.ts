@@ -1934,6 +1934,86 @@ export class ProductsService {
 
   // ==================== POS Helpers ====================
 
+  async getApplicablePrices(
+    productId: string,
+    variantId: string | null,
+    quantity: number,
+  ): Promise<
+    Array<{ priceListId: string; priceListName: string; priceCents: number }>
+  > {
+    if (variantId) {
+      const variantPrices = await this.prisma.variantPrice.findMany({
+        where: { variantId },
+        include: {
+          tierPrices: { orderBy: { minQuantity: 'asc' } },
+          priceList: {
+            include: { globalPriceList: { select: { name: true } } },
+          },
+        },
+      });
+
+      return variantPrices.map((vp: any) => ({
+        priceListId: vp.priceListId,
+        priceListName: vp.priceList.globalPriceList.name,
+        priceCents: this.selectEffectivePrice(
+          vp.priceCents,
+          vp.tierPrices,
+          quantity,
+        ),
+      }));
+    }
+
+    const priceLists = await this.prisma.priceList.findMany({
+      where: { productId },
+      include: {
+        tierPrices: { orderBy: { minQuantity: 'asc' } },
+        globalPriceList: { select: { name: true } },
+      },
+    });
+
+    return priceLists.map((pl: any) => ({
+      priceListId: pl.id,
+      priceListName: pl.globalPriceList.name,
+      priceCents: this.selectEffectivePrice(
+        pl.priceCents,
+        pl.tierPrices,
+        quantity,
+      ),
+    }));
+  }
+
+  async resolveListPrice(
+    priceListId: string,
+    productId: string,
+    variantId: string | null,
+    quantity: number,
+  ): Promise<number> {
+    const candidates = await this.getApplicablePrices(
+      productId,
+      variantId,
+      quantity,
+    );
+    const selected = candidates.find((c) => c.priceListId === priceListId);
+    if (!selected) {
+      throw new BusinessRuleViolationError(
+        'INVALID_PRICE_LIST_FOR_ITEM',
+        'INVALID_PRICE_LIST_FOR_ITEM',
+      );
+    }
+    return selected.priceCents;
+  }
+
+  private selectEffectivePrice(
+    basePriceCents: number,
+    tiers: Array<{ minQuantity: number; priceCents: number }>,
+    quantity: number,
+  ): number {
+    const tier = [...tiers]
+      .filter((t) => quantity >= t.minQuantity)
+      .sort((a, b) => b.minQuantity - a.minQuantity)[0];
+    return tier?.priceCents ?? basePriceCents;
+  }
+
   /**
    * Get product/variant info for POS sale (price, names)
    * Returns frozen price snapshot and display names.
