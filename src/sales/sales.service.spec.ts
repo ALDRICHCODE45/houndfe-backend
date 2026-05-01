@@ -105,6 +105,161 @@ describe('SalesService', () => {
     });
   });
 
+  describe('global discount use-cases', () => {
+    it('applies global discount, emits per-item applied events, and returns skippedItems', async () => {
+      const sale = Sale.create({ id: 'sale-global', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-eligible',
+        saleId: 'sale-global',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-skipped',
+        saleId: 'sale-global',
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'Prod 2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 300,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      const result = await service.applyGlobalDiscount(
+        'sale-global',
+        { type: 'amount', amountCents: 500 },
+        'user-1',
+      );
+
+      expect(result.skippedItems).toEqual([
+        { itemId: 'item-skipped', reason: 'DISCOUNT_AMOUNT_INVALID' },
+      ]);
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.item.discount.applied',
+        expect.objectContaining({ saleId: 'sale-global', itemId: 'item-eligible' }),
+      );
+    });
+
+    it('throws SALE_NOT_FOUND when sale does not exist', async () => {
+      saleRepo.findById.mockResolvedValue(null);
+
+      await expect(
+        service.applyGlobalDiscount(
+          'missing-sale',
+          { type: 'percentage', percent: 10 },
+          'user-1',
+        ),
+      ).rejects.toThrow('SALE_NOT_FOUND');
+    });
+
+    it('throws SALE_NOT_DRAFT when sale status is not draft', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-non-draft',
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      Object.defineProperty(sale, 'status', { value: 'CLOSED' });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.applyGlobalDiscount(
+          'sale-non-draft',
+          { type: 'percentage', percent: 10 },
+          'user-1',
+        ),
+      ).rejects.toThrow('SALE_NOT_DRAFT');
+    });
+
+    it('throws SALE_UPDATE_FORBIDDEN when actor does not own sale', async () => {
+      const sale = Sale.create({ id: 'sale-owned', userId: 'user-1' });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.applyGlobalDiscount(
+          'sale-owned',
+          { type: 'percentage', percent: 10 },
+          'user-2',
+        ),
+      ).rejects.toThrow('SALE_UPDATE_FORBIDDEN');
+    });
+
+    it('removes global discount and emits removed event for previously discounted items only', async () => {
+      const sale = Sale.create({ id: 'sale-remove-global', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-discounted',
+        saleId: 'sale-remove-global',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-not-discounted',
+        saleId: 'sale-remove-global',
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'Prod 2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 800,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.applyItemDiscount('item-discounted', { type: 'amount', amountCents: 100 });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      const result = await service.removeGlobalDiscount('sale-remove-global', 'user-1');
+
+      expect(result.items[0].discountType).toBeNull();
+      expect(result.items[1].discountType).toBeNull();
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.item.discount.removed',
+        expect.objectContaining({
+          saleId: 'sale-remove-global',
+          itemId: 'item-discounted',
+        }),
+      );
+    });
+
+    it('removeGlobalDiscount is idempotent when no discounts exist', async () => {
+      const sale = Sale.create({ id: 'sale-remove-idempotent', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-plain',
+        saleId: 'sale-remove-idempotent',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      const result = await service.removeGlobalDiscount(
+        'sale-remove-idempotent',
+        'user-1',
+      );
+
+      expect(result.items[0].discountType).toBeNull();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+  });
+
   describe('openDraft', () => {
     it('should create a new draft sale and emit event', async () => {
       const userId = 'user-1';

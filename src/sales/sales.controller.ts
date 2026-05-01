@@ -156,4 +156,23 @@ export class SalesController {
   ) {
     return this.salesService.removeItemDiscount(id, itemId, user.userId);
   }
+
+  @Patch(':id/discount')
+  @RequirePermissions(['update', 'Sale'])
+  applyGlobalDiscount(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ApplyItemDiscountDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.applyGlobalDiscount(id, dto, user.userId);
+  }
+
+  @Delete(':id/discount')
+  @RequirePermissions(['update', 'Sale'])
+  removeGlobalDiscount(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.removeGlobalDiscount(id, user.userId);
+  }
 }

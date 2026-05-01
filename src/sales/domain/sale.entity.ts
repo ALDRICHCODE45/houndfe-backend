@@ -25,6 +25,11 @@ export interface SaleFromPersistenceProps {
   updatedAt: Date;
 }
 
+export interface DiscountApplicationResult {
+  sale: Sale;
+  skippedItems: Array<{ itemId: string; reason: string }>;
+}
+
 /**
  * Sale Aggregate Root - manages POS sale drafts
  *
@@ -160,6 +165,38 @@ export class Sale {
     item.applyDiscount(input);
   }
 
+  applyGlobalDiscount(
+    input: ApplySaleItemDiscountInput,
+  ): DiscountApplicationResult {
+    const skippedItems: Array<{ itemId: string; reason: string }> = [];
+
+    for (const item of this._items) {
+      try {
+        item.applyDiscount(input);
+      } catch (error) {
+        if (
+          input.type === 'amount' &&
+          ((error instanceof BusinessRuleViolationError &&
+            error.code === 'DISCOUNT_AMOUNT_INVALID') ||
+            (error instanceof InvalidArgumentError &&
+              error.message === 'DISCOUNT_AMOUNT_INVALID'))
+        ) {
+          skippedItems.push({
+            itemId: item.id,
+            reason: 'DISCOUNT_AMOUNT_INVALID',
+          });
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    return {
+      sale: this,
+      skippedItems,
+    };
+  }
+
   removeItemDiscount(itemId: string): void {
     const item = this._items.find((i) => i.id === itemId);
     if (!item) {
@@ -169,6 +206,14 @@ export class Sale {
       );
     }
     item.removeDiscount();
+  }
+
+  removeGlobalDiscount(): Sale {
+    for (const item of this._items) {
+      item.removeDiscount();
+    }
+
+    return this;
   }
 
   toResponse() {

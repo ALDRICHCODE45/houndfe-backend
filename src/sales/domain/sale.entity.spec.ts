@@ -543,4 +543,147 @@ describe('Sale Entity', () => {
       ).toThrow(BusinessRuleViolationError);
     });
   });
+
+  describe('global discounts', () => {
+    it('applies percentage discount to all items and returns empty skippedItems', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-global-1',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-global-2',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'P2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 2000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      const result = sale.applyGlobalDiscount({ type: 'percentage', percent: 10 });
+
+      expect(result.sale).toBe(sale);
+      expect(result.skippedItems).toEqual([]);
+      expect(result.sale.items[0].unitPriceCents).toBe(900);
+      expect(result.sale.items[1].unitPriceCents).toBe(1800);
+    });
+
+    it('skips amount underflow items and keeps them unchanged', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-global-ok',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-ok',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-global-skip',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-skip',
+        variantId: null,
+        productName: 'P2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 300,
+        unitPriceCurrency: 'MXN',
+      });
+
+      const result = sale.applyGlobalDiscount({ type: 'amount', amountCents: 500 });
+
+      expect(result.skippedItems).toEqual([
+        { itemId: 'item-global-skip', reason: 'DISCOUNT_AMOUNT_INVALID' },
+      ]);
+      expect(result.sale.items[0].unitPriceCents).toBe(500);
+      expect(result.sale.items[1].unitPriceCents).toBe(300);
+      expect(result.sale.items[1].discountType).toBeNull();
+    });
+
+    it('replaces existing item discounts using baseline price', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-global-replace',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-replace',
+        variantId: null,
+        productName: 'P3',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      sale.applyItemDiscount('item-global-replace', {
+        type: 'percentage',
+        percent: 10,
+      });
+
+      const result = sale.applyGlobalDiscount({ type: 'percentage', percent: 20 });
+
+      expect(result.skippedItems).toEqual([]);
+      expect(result.sale.items[0].prePriceCentsBeforeDiscount).toBe(1000);
+      expect(result.sale.items[0].unitPriceCents).toBe(800);
+      expect(result.sale.items[0].discountValue).toBe(20);
+    });
+
+    it('succeeds on empty sales with no skipped items', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+
+      const result = sale.applyGlobalDiscount({ type: 'percentage', percent: 10 });
+
+      expect(result.sale).toBe(sale);
+      expect(result.skippedItems).toEqual([]);
+      expect(result.sale.items).toEqual([]);
+    });
+
+    it('removes discounts from all items and is idempotent', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-remove-1',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-remove-2',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'P2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 800,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.applyGlobalDiscount({ type: 'amount', amountCents: 100 });
+
+      const result = sale.removeGlobalDiscount();
+      expect(result).toBe(sale);
+      expect(result.items[0].discountType).toBeNull();
+      expect(result.items[1].discountType).toBeNull();
+      expect(result.items[0].unitPriceCents).toBe(1000);
+      expect(result.items[1].unitPriceCents).toBe(800);
+
+      expect(() => sale.removeGlobalDiscount()).not.toThrow();
+    });
+  });
 });

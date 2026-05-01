@@ -24,6 +24,8 @@ function makeMockSalesService() {
     overrideItemPrice: jest.fn(),
     applyItemDiscount: jest.fn(),
     removeItemDiscount: jest.fn(),
+    applyGlobalDiscount: jest.fn(),
+    removeGlobalDiscount: jest.fn(),
   } as any;
 }
 
@@ -279,6 +281,34 @@ describe('SalesController', () => {
       const result = await controller.removeItemDiscount('s', 'i', user);
       expect(result).toEqual({ id: 's', items: [] });
       expect(service.removeItemDiscount).toHaveBeenCalledWith('s', 'i', 'user-1');
+    });
+  });
+
+  describe('PATCH /sales/drafts/:id/discount', () => {
+    it('should delegate global discount apply to service', async () => {
+      service.applyGlobalDiscount.mockResolvedValue({
+        sale: { id: 's', items: [] },
+        skippedItems: [],
+      });
+
+      const user = makeMockUser('user-1');
+      const dto = { type: 'percentage', percent: 10 };
+      const result = await controller.applyGlobalDiscount('s', dto as any, user);
+
+      expect(result).toEqual({ sale: { id: 's', items: [] }, skippedItems: [] });
+      expect(service.applyGlobalDiscount).toHaveBeenCalledWith('s', dto, 'user-1');
+    });
+  });
+
+  describe('DELETE /sales/drafts/:id/discount', () => {
+    it('should delegate global discount removal to service', async () => {
+      service.removeGlobalDiscount.mockResolvedValue({ id: 's', items: [] });
+
+      const user = makeMockUser('user-1');
+      const result = await controller.removeGlobalDiscount('s', user);
+
+      expect(result).toEqual({ id: 's', items: [] });
+      expect(service.removeGlobalDiscount).toHaveBeenCalledWith('s', 'user-1');
     });
   });
 });

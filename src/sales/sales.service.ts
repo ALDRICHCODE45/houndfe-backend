@@ -496,4 +496,97 @@ export class SalesService {
 
     return sale.toResponse();
   }
+
+  async applyGlobalDiscount(
+    saleId: string,
+    dto: ApplyItemDiscountDto,
+    actorId: string,
+  ) {
+    if (
+      (dto.type === 'amount' && dto.amountCents === undefined) ||
+      (dto.type === 'percentage' && dto.percent === undefined) ||
+      (dto.amountCents !== undefined && dto.percent !== undefined)
+    ) {
+      throw new BusinessRuleViolationError(
+        'INVALID_DISCOUNT_INPUT',
+        'INVALID_DISCOUNT_INPUT',
+      );
+    }
+
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    const result = sale.applyGlobalDiscount({
+      type: dto.type,
+      amountCents: dto.amountCents,
+      percent: dto.percent,
+      discountTitle: dto.title ?? dto.discountTitle,
+    });
+    await this.saleRepo.save(sale);
+
+    const skippedIds = new Set(result.skippedItems.map((item) => item.itemId));
+    for (const item of sale.items) {
+      if (skippedIds.has(item.id) || !item.discountType || !item.discountValue) {
+        continue;
+      }
+
+      this.eventEmitter.emit(
+        'sale.item.discount.applied',
+        new SaleItemDiscountAppliedEvent(
+          saleId,
+          item.id,
+          actorId,
+          item.discountType,
+          item.discountValue,
+          item.discountAmountCents!,
+          item.discountTitle,
+          new Date(),
+        ),
+      );
+    }
+
+    return {
+      sale: result.sale.toResponse(),
+      skippedItems: result.skippedItems,
+    };
+  }
+
+  async removeGlobalDiscount(saleId: string, actorId: string) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    const discountedItemIds = sale.items
+      .filter((item) => item.discountType !== null)
+      .map((item) => item.id);
+
+    sale.removeGlobalDiscount();
+    await this.saleRepo.save(sale);
+
+    for (const itemId of discountedItemIds) {
+      this.eventEmitter.emit(
+        'sale.item.discount.removed',
+        new SaleItemDiscountRemovedEvent(saleId, itemId, actorId, new Date()),
+      );
+    }
+
+    return sale.toResponse();
+  }
 }
