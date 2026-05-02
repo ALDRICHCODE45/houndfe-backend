@@ -7,6 +7,7 @@ import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ISaleRepository } from '../domain/sale.repository';
 import { Sale } from '../domain/sale.entity';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
@@ -32,12 +33,11 @@ export class PrismaSaleRepository implements ISaleRepository {
     if (!existing) {
       // Create new sale
       await prisma.sale.create({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           id: sale.id,
           userId: sale.userId,
           ...saleData,
-        },
+        } as Prisma.SaleUncheckedCreateInput,
       });
     } else {
       // Update existing sale
@@ -50,7 +50,6 @@ export class PrismaSaleRepository implements ISaleRepository {
     // Create items
     if (sale.items.length > 0) {
       await prisma.saleItem.createMany({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: sale.items.map((item) => ({
           id: item.id,
           saleId: sale.id,
@@ -76,7 +75,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
-        })),
+        })) as Prisma.SaleItemCreateManyInput[],
       });
     } else {
       // Explicitly handle empty items (for clearItems case)

@@ -25,6 +25,7 @@ import {
 import { CreateRoleDto } from './dto/create-role.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 import { AssignPermissionsDto } from './dto/assign-permissions.dto';
+import type { AppActions, AppSubjects } from '../auth/authorization/domain/permission';
 
 @Injectable()
 export class AdminRoleService {
@@ -61,8 +62,8 @@ export class AdminRoleService {
         description: r.description,
         isSystem: r.isSystem,
         permissions: r.permissions.map((rp) => ({
-          subject: rp.permission.subject as any,
-          action: rp.permission.action as any,
+          subject: rp.permission.subject as AppSubjects,
+          action: rp.permission.action as AppActions,
           description: rp.permission.description ?? '',
         })),
         createdAt: r.createdAt,
@@ -119,8 +120,8 @@ export class AdminRoleService {
       description: saved.description,
       isSystem: saved.isSystem,
       permissions: saved.permissions.map((rp) => ({
-        subject: rp.permission.subject as any,
-        action: rp.permission.action as any,
+        subject: rp.permission.subject as AppSubjects,
+        action: rp.permission.action as AppActions,
         description: rp.permission.description ?? '',
       })),
       createdAt: saved.createdAt,

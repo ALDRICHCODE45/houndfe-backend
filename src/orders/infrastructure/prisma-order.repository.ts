@@ -7,6 +7,7 @@ import { Order, OrderStatus } from '../domain/order.entity';
 import { OrderItem } from '../domain/order-item.value-object';
 import type { Currency } from '../../shared/domain/value-objects/money.value-object';
 import type { IOrderRepository } from '../domain/order.repository';
+import { Prisma } from '@prisma/client';
 
 interface OrderItemPrisma {
   id: string;
@@ -55,20 +56,18 @@ export class PrismaOrderRepository implements IOrderRepository {
     await prisma.order.upsert({
       where: { id: order.id },
       update: { status: order.status, completedAt: order.completedAt },
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       create: {
         id: order.id,
         customerName: order.customerName,
         status: order.status,
         completedAt: order.completedAt,
-      },
+      } as Prisma.OrderUncheckedCreateInput,
     });
 
     // Replace items (delete + recreate)
     await prisma.orderItem.deleteMany({ where: { orderId: order.id } });
     if (order.items.length > 0) {
       await prisma.orderItem.createMany({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: order.items.map((item) => ({
           id: crypto.randomUUID(),
           orderId: order.id,
@@ -77,7 +76,7 @@ export class PrismaOrderRepository implements IOrderRepository {
           quantity: item.quantity,
           unitPriceCents: Math.round(item.unitPrice.amount * 100),
           unitPriceCurrency: item.unitPrice.currency,
-        })),
+        })) as Prisma.OrderItemCreateManyInput[],
       });
     }
 

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { Customer } from '../domain/customer.entity';
 import type { ICustomerRepository } from '../domain/customer.repository';
-import type { Customer as PrismaCustomer } from '@prisma/client';
+import { Prisma, type Customer as PrismaCustomer } from '@prisma/client';
 
 @Injectable()
 export class PrismaCustomerRepository implements ICustomerRepository {
@@ -49,7 +49,6 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         billingState: p.billingState,
         updatedAt: new Date(),
       },
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       create: {
         id: p.id,
         firstName: p.firstName,
@@ -71,7 +70,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         billingMunicipality: p.billingMunicipality,
         billingCity: p.billingCity,
         billingState: p.billingState,
-      },
+      } as Prisma.CustomerUncheckedCreateInput,
     });
     return this.toDomain(saved);
   }

@@ -8,6 +8,7 @@ import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { IFileRepository } from '../domain/file.repository';
 import { FileObject } from '../domain/file-object.entity';
 import { FileNotFoundError } from '../domain/errors';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class PrismaFileRepository implements IFileRepository {
@@ -16,7 +17,6 @@ export class PrismaFileRepository implements IFileRepository {
   async save(file: FileObject): Promise<FileObject> {
     const prisma = this.tenantPrisma.getClient();
     const persisted = await prisma.fileObject.create({
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         id: file.id,
         storageKey: file.storageKey,
@@ -27,7 +27,7 @@ export class PrismaFileRepository implements IFileRepository {
         ownerId: file.ownerId,
         uploadedBy: file.uploadedBy,
         createdAt: file.createdAt,
-      },
+      } as Prisma.FileObjectUncheckedCreateInput,
     });
 
     return FileObject.create({

@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import type { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../tenant/tenant-cls-store.interface';
 import { TENANT_SCOPED_MODELS } from '../tenant/tenant-scoped-models.constant';
@@ -14,6 +14,26 @@ const READ_OPERATIONS = new Set([
 
 const toDelegateName = (model: string) =>
   `${model.charAt(0).toLowerCase()}${model.slice(1)}`;
+
+type TenantScopedDelegate = {
+  findFirst: (args: unknown) => Prisma.PrismaPromise<unknown>;
+  findFirstOrThrow: (args: unknown) => Prisma.PrismaPromise<unknown>;
+};
+
+const getTenantScopedDelegate = (
+  base: PrismaClient,
+  model: string,
+): TenantScopedDelegate => {
+  const delegate = (base as unknown as Record<string, TenantScopedDelegate>)[
+    toDelegateName(model)
+  ];
+
+  if (!delegate) {
+    throw new Error(`Prisma delegate not found for model: ${model}`);
+  }
+
+  return delegate;
+};
 
 export function createTenantScopedPrisma(
   base: PrismaClient,
@@ -38,12 +58,12 @@ export function createTenantScopedPrisma(
         }
 
         if (operation === 'findUnique') {
-          const delegate = (base as any)[toDelegateName(model)];
+          const delegate = getTenantScopedDelegate(base, model);
           return delegate.findFirst({ ...(args ?? {}), where: { ...(args?.where ?? {}), tenantId } });
         }
 
         if (operation === 'findUniqueOrThrow') {
-          const delegate = (base as any)[toDelegateName(model)];
+          const delegate = getTenantScopedDelegate(base, model);
           return delegate.findFirstOrThrow({
             ...(args ?? {}),
             where: { ...(args?.where ?? {}), tenantId },

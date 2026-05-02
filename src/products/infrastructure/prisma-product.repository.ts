@@ -8,7 +8,15 @@ import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { Product } from '../domain/product.entity';
 import type { IProductRepository } from '../domain/product.repository';
-import type { Product as PrismaProduct } from '@prisma/client';
+import {
+  Prisma,
+  ProductType,
+  UnitOfMeasure,
+  IvaRate,
+  IepsRate,
+  PurchaseCostMode,
+  type Product as PrismaProduct,
+} from '@prisma/client';
 
 @Injectable()
 export class PrismaProductRepository implements IProductRepository {
@@ -53,10 +61,10 @@ export class PrismaProductRepository implements IProductRepository {
         name: p.name,
         location: p.location,
         description: p.description,
-        type: p.type as any,
+        type: p.type as ProductType,
         sku: p.sku,
         barcode: p.barcode,
-        unit: p.unit as any,
+        unit: p.unit as UnitOfMeasure,
         satKey: p.satKey,
         categoryId: p.categoryId,
         brandId: p.brandId,
@@ -64,9 +72,9 @@ export class PrismaProductRepository implements IProductRepository {
         includeInOnlineCatalog: p.includeInOnlineCatalog,
         requiresPrescription: p.requiresPrescription,
         chargeProductTaxes: p.chargeProductTaxes,
-        ivaRate: p.ivaRate as any,
-        iepsRate: p.iepsRate as any,
-        purchaseCostMode: p.purchaseCostMode as any,
+        ivaRate: p.ivaRate as IvaRate,
+        iepsRate: p.iepsRate as IepsRate,
+        purchaseCostMode: p.purchaseCostMode as PurchaseCostMode,
         purchaseNetCostCents: p.purchaseNetCostCents,
         purchaseGrossCostCents: p.purchaseGrossCostCents,
         useStock: p.useStock,
@@ -76,16 +84,15 @@ export class PrismaProductRepository implements IProductRepository {
         hasVariants: p.hasVariants,
         updatedAt: new Date(),
       },
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       create: {
         id: p.id,
         name: p.name,
         location: p.location,
         description: p.description,
-        type: p.type as any,
+        type: p.type as ProductType,
         sku: p.sku,
         barcode: p.barcode,
-        unit: p.unit as any,
+        unit: p.unit as UnitOfMeasure,
         satKey: p.satKey,
         categoryId: p.categoryId,
         brandId: p.brandId,
@@ -93,9 +100,9 @@ export class PrismaProductRepository implements IProductRepository {
         includeInOnlineCatalog: p.includeInOnlineCatalog,
         requiresPrescription: p.requiresPrescription,
         chargeProductTaxes: p.chargeProductTaxes,
-        ivaRate: p.ivaRate as any,
-        iepsRate: p.iepsRate as any,
-        purchaseCostMode: p.purchaseCostMode as any,
+        ivaRate: p.ivaRate as IvaRate,
+        iepsRate: p.iepsRate as IepsRate,
+        purchaseCostMode: p.purchaseCostMode as PurchaseCostMode,
         purchaseNetCostCents: p.purchaseNetCostCents,
         purchaseGrossCostCents: p.purchaseGrossCostCents,
         useStock: p.useStock,
@@ -103,7 +110,7 @@ export class PrismaProductRepository implements IProductRepository {
         quantity: p.quantity,
         minQuantity: p.minQuantity,
         hasVariants: p.hasVariants,
-      },
+      } as Prisma.ProductUncheckedCreateInput,
     });
     return this.toDomain(saved);
   }

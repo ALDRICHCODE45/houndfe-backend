@@ -11,6 +11,7 @@ import {
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
 import { PrismaService } from '../shared/prisma/prisma.service';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class CustomersService {
@@ -51,13 +52,11 @@ export class CustomersService {
 
     await this.prisma.$transaction(async (tx) => {
       await tx.customer.create({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
-        data: p,
+        data: p as Prisma.CustomerUncheckedCreateInput,
       });
 
       if (dto.addresses?.length) {
         await tx.customerAddress.createMany({
-          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: dto.addresses.map((addr) => ({
             customerId,
             street: addr.street.trim(),
@@ -68,7 +67,7 @@ export class CustomersService {
             municipality: addr.municipality?.trim() || null,
             city: addr.city?.trim() || null,
             state: addr.state ?? null,
-          })),
+          })) as Prisma.CustomerAddressCreateManyInput[],
         });
       }
     });
@@ -188,7 +187,6 @@ export class CustomersService {
     if (!customer) throw new EntityNotFoundError('Customer', customerId);
 
     return this.prisma.customerAddress.create({
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         customerId,
         street: dto.street.trim(),
@@ -199,7 +197,7 @@ export class CustomersService {
         municipality: dto.municipality?.trim() || null,
         city: dto.city?.trim() || null,
         state: dto.state ?? null,
-      },
+      } as Prisma.CustomerAddressUncheckedCreateInput,
     });
   }
 

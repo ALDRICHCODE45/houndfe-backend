@@ -20,6 +20,9 @@ import { PlaceOrderDto } from './dto/place-order.dto';
 import { ProductsService } from '../products/products.service';
 import { EntityNotFoundError } from '../shared/domain/domain-error';
 
+type ProductResponse = Awaited<ReturnType<ProductsService['findOne']>>;
+type ProductPriceList = NonNullable<ProductResponse['priceLists']>[number];
+
 @Injectable()
 export class OrdersService {
   constructor(
@@ -51,7 +54,7 @@ export class OrdersService {
 
       // Get price from PUBLICO price list (first/default)
       const publicoList = productResponse.priceLists?.find(
-        (pl: any) => pl.name === 'PUBLICO',
+        (pl: ProductPriceList) => pl.name === 'PUBLICO',
       );
       const priceCents = publicoList?.priceCents ?? 0;
       const priceDecimal = priceCents / 100;

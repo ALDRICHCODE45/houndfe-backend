@@ -8,6 +8,7 @@ import {
 } from '../shared/domain/domain-error';
 import { CreatePriceListDto } from './dto/create-price-list.dto';
 import { UpdatePriceListDto } from './dto/update-price-list.dto';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class PriceListsService {
@@ -28,8 +29,7 @@ export class PriceListsService {
     }
 
     const existing = await prisma.globalPriceList.findUnique({
-      // @ts-expect-error tenant-scoped unique handled by Prisma tenant extension
-      where: { name },
+      where: { name } as unknown as Prisma.GlobalPriceListWhereUniqueInput,
       select: { id: true },
     });
     if (existing) {
@@ -38,8 +38,7 @@ export class PriceListsService {
 
     return prisma.$transaction(async (tx) => {
       const createdGlobalList = await tx.globalPriceList.create({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
-        data: { name },
+        data: { name } as Prisma.GlobalPriceListUncheckedCreateInput,
       });
 
       const products = await tx.product.findMany({
@@ -48,12 +47,11 @@ export class PriceListsService {
 
       if (products.length) {
         await tx.priceList.createMany({
-          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: products.map((product) => ({
             productId: product.id,
             globalPriceListId: createdGlobalList.id,
             priceCents: 0,
-          })),
+          })) as Prisma.PriceListCreateManyInput[],
         });
 
         const productsWithVariants = products
@@ -99,8 +97,7 @@ export class PriceListsService {
 
             if (variantPricesData.length) {
               await tx.variantPrice.createMany({
-                // @ts-expect-error tenantId auto-injected by Prisma tenant extension
-                data: variantPricesData,
+                data: variantPricesData as Prisma.VariantPriceCreateManyInput[],
               });
             }
           }
@@ -135,8 +132,7 @@ export class PriceListsService {
 
     if (name) {
       const duplicate = await prisma.globalPriceList.findUnique({
-        // @ts-expect-error tenant-scoped unique handled by Prisma tenant extension
-        where: { name },
+        where: { name } as unknown as Prisma.GlobalPriceListWhereUniqueInput,
         select: { id: true },
       });
 

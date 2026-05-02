@@ -30,7 +30,59 @@ import type { IvaRateValue } from './domain/value-objects/iva-rate.value-object'
 import type { IepsRateValue } from './domain/value-objects/ieps-rate.value-object';
 import type { PurchaseCostModeValue } from './domain/value-objects/purchase-cost.value-object';
 import type { ProductType, UnitOfMeasure } from './domain/product.entity';
-import { Prisma } from '@prisma/client';
+import {
+  Prisma,
+  ProductType as PrismaProductType,
+  UnitOfMeasure as PrismaUnitOfMeasure,
+  IvaRate as PrismaIvaRate,
+  IepsRate as PrismaIepsRate,
+  PurchaseCostMode as PrismaPurchaseCostMode,
+} from '@prisma/client';
+
+const POS_CATALOG_INCLUDE = Prisma.validator<Prisma.ProductInclude>()({
+  category: { select: { id: true, name: true } },
+  brand: { select: { id: true, name: true } },
+  images: {
+    orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+    take: 5,
+    where: { variantId: null },
+  },
+  priceLists: {
+    where: { globalPriceList: { isDefault: true } },
+    include: {
+      globalPriceList: { select: { name: true, isDefault: true } },
+    },
+    take: 1,
+  },
+  variants: {
+    include: {
+      images: {
+        orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+        take: 5,
+      },
+      variantPrices: {
+        where: { priceList: { globalPriceList: { isDefault: true } } },
+        include: {
+          priceList: {
+            select: {
+              globalPriceList: {
+                select: { name: true, isDefault: true },
+              },
+            },
+          },
+        },
+        take: 1,
+      },
+    },
+  },
+});
+
+type PosCatalogProduct = Prisma.ProductGetPayload<{
+  include: typeof POS_CATALOG_INCLUDE;
+}>;
+type PosCatalogVariant = PosCatalogProduct['variants'][number];
+type PosCatalogPriceList = PosCatalogProduct['priceLists'][number];
+type PosCatalogVariantPrice = PosCatalogVariant['variantPrices'][number];
 
 @Injectable()
 export class ProductsService {
@@ -240,16 +292,15 @@ export class ProductsService {
     await this.prisma.$transaction(async (tx) => {
       // 1. Create product
       await tx.product.create({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           id: p.id,
           name: p.name,
           location: p.location,
           description: p.description,
-          type: p.type as any,
+          type: p.type as PrismaProductType,
           sku: p.sku,
           barcode: p.barcode,
-          unit: p.unit as any,
+          unit: p.unit as PrismaUnitOfMeasure,
           satKey: p.satKey,
           categoryId: p.categoryId,
           brandId: p.brandId,
@@ -257,9 +308,9 @@ export class ProductsService {
           includeInOnlineCatalog: p.includeInOnlineCatalog,
           requiresPrescription: p.requiresPrescription,
           chargeProductTaxes: p.chargeProductTaxes,
-          ivaRate: p.ivaRate as any,
-          iepsRate: p.iepsRate as any,
-          purchaseCostMode: p.purchaseCostMode as any,
+          ivaRate: p.ivaRate as PrismaIvaRate,
+          iepsRate: p.iepsRate as PrismaIepsRate,
+          purchaseCostMode: p.purchaseCostMode as PrismaPurchaseCostMode,
           purchaseNetCostCents: p.purchaseNetCostCents,
           purchaseGrossCostCents: p.purchaseGrossCostCents,
           useStock: p.useStock,
@@ -267,7 +318,7 @@ export class ProductsService {
           quantity: p.quantity,
           minQuantity: p.minQuantity,
           hasVariants: p.hasVariants,
-        },
+        } as Prisma.ProductUncheckedCreateInput,
       });
 
       // 2. Create default price lists for all global price lists
@@ -277,12 +328,11 @@ export class ProductsService {
 
       if (globalLists.length) {
         await tx.priceList.createMany({
-          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: globalLists.map((globalList) => ({
             productId,
             globalPriceListId: globalList.id,
             priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
-          })),
+          })) as Prisma.PriceListCreateManyInput[],
         });
       }
 
@@ -301,7 +351,6 @@ export class ProductsService {
           );
 
           const createdVariant = await tx.variant.create({
-            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: {
               productId,
               name: resolvedName,
@@ -315,18 +364,17 @@ export class ProductsService {
                 variantDto.minQuantity,
               ),
               purchaseNetCostCents: variantDto.purchaseNetCostCents ?? null,
-            },
+            } as Prisma.VariantUncheckedCreateInput,
           });
 
           // Create variant price entries for each product price list
           if (priceLists.length) {
             await tx.variantPrice.createMany({
-              // @ts-expect-error tenantId auto-injected by Prisma tenant extension
               data: priceLists.map((pl) => ({
                 variantId: createdVariant.id,
                 priceListId: pl.id,
                 priceCents: 0,
-              })),
+              })) as Prisma.VariantPriceCreateManyInput[],
             });
           }
         }
@@ -335,7 +383,6 @@ export class ProductsService {
       // 4. Create inline lots (if provided)
       if (dto.lots?.length) {
         await tx.lot.createMany({
-          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: dto.lots.map((lotDto) => ({
             productId,
             lotNumber: lotDto.lotNumber.trim(),
@@ -344,7 +391,7 @@ export class ProductsService {
               ? new Date(lotDto.manufactureDate)
               : null,
             expirationDate: new Date(lotDto.expirationDate),
-          })),
+          })) as Prisma.LotCreateManyInput[],
         });
       }
 
@@ -375,7 +422,6 @@ export class ProductsService {
           if (priceList) {
             await tx.priceList.update({
               where: { id: priceList.id },
-              // @ts-expect-error tenantId auto-injected by Prisma tenant extension
               data: {
                 priceCents: plDto.priceCents,
                 ...(plDto.tierPrices !== undefined
@@ -385,7 +431,7 @@ export class ProductsService {
                         create: (plDto.tierPrices ?? []).map((t) => ({
                           minQuantity: t.minQuantity,
                           priceCents: t.priceCents,
-                        })),
+                        })) as Prisma.TierPriceUncheckedCreateWithoutPriceListInput[],
                       },
                     }
                   : {}),
@@ -398,13 +444,12 @@ export class ProductsService {
       // 6. Create inline images (if provided)
       if (dto.images?.length) {
         await tx.productImage.createMany({
-          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: dto.images.map((imgDto, index) => ({
             productId,
             url: imgDto.url,
             isMain: imgDto.isMain ?? false,
             sortOrder: imgDto.sortOrder ?? index,
-          })),
+          })) as Prisma.ProductImageCreateManyInput[],
         });
       }
     });
@@ -621,7 +666,6 @@ export class ProductsService {
 
     const variant = await this.prisma.$transaction(async (tx) => {
       const createdVariant = await tx.variant.create({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           productId,
           name: resolvedName,
@@ -635,7 +679,7 @@ export class ProductsService {
             dto.minQuantity,
           ),
           purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
-        },
+        } as Prisma.VariantUncheckedCreateInput,
       });
 
       const priceLists = await tx.priceList.findMany({
@@ -645,12 +689,11 @@ export class ProductsService {
 
       if (priceLists.length) {
         await tx.variantPrice.createMany({
-          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: priceLists.map((pl) => ({
             variantId: createdVariant.id,
             priceListId: pl.id,
             priceCents: 0,
-          })),
+          })) as Prisma.VariantPriceCreateManyInput[],
         });
       }
 
@@ -834,14 +877,13 @@ export class ProductsService {
       const variantPrice = await tx.variantPrice.upsert({
         where: {
           variantId_priceListId: { variantId: variant.id, priceListId },
-        } as any,
+        } as unknown as Prisma.VariantPriceWhereUniqueInput,
         update: { priceCents: dto.priceCents },
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         create: {
           variantId: variant.id,
           priceListId,
           priceCents: dto.priceCents,
-        },
+        } as Prisma.VariantPriceUncheckedCreateInput,
       });
 
       if (dto.tierPrices !== undefined) {
@@ -851,19 +893,20 @@ export class ProductsService {
 
         if (dto.tierPrices.length) {
           await tx.variantTierPrice.createMany({
-            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: dto.tierPrices.map((tier) => ({
               variantPriceId: variantPrice.id,
               minQuantity: tier.minQuantity,
               priceCents: tier.priceCents,
-            })),
+            })) as Prisma.VariantTierPriceCreateManyInput[],
           });
         }
       }
     });
 
     const updated = await this.prisma.variantPrice.findUnique({
-      where: { variantId_priceListId: { variantId: variant.id, priceListId } } as any,
+      where: {
+        variantId_priceListId: { variantId: variant.id, priceListId },
+      } as unknown as Prisma.VariantPriceWhereUniqueInput,
       include: {
         priceList: {
           select: { id: true, globalPriceList: { select: { name: true } } },
@@ -932,14 +975,13 @@ export class ProductsService {
               variantId: variant.id,
               priceListId: item.priceListId,
             },
-          } as any,
+          } as unknown as Prisma.VariantPriceWhereUniqueInput,
           update: { priceCents: item.priceCents },
-          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           create: {
             variantId: variant.id,
             priceListId: item.priceListId,
             priceCents: item.priceCents,
-          },
+          } as Prisma.VariantPriceUncheckedCreateInput,
         });
 
         if (item.tierPrices !== undefined) {
@@ -949,12 +991,11 @@ export class ProductsService {
 
           if (item.tierPrices.length) {
             await tx.variantTierPrice.createMany({
-              // @ts-expect-error tenantId auto-injected by Prisma tenant extension
               data: item.tierPrices.map((tier) => ({
                 variantPriceId: variantPrice.id,
                 minQuantity: tier.minQuantity,
                 priceCents: tier.priceCents,
-              })),
+              })) as Prisma.VariantTierPriceCreateManyInput[],
             });
           }
         }
@@ -983,7 +1024,9 @@ export class ProductsService {
     }
 
     const variantPrice = await this.prisma.variantPrice.findUnique({
-      where: { variantId_priceListId: { variantId: variant.id, priceListId } } as any,
+      where: {
+        variantId_priceListId: { variantId: variant.id, priceListId },
+      } as unknown as Prisma.VariantPriceWhereUniqueInput,
       select: { id: true },
     });
 
@@ -1028,7 +1071,6 @@ export class ProductsService {
     }
 
     return this.prisma.lot.create({
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         productId,
         lotNumber: dto.lotNumber.trim(),
@@ -1037,7 +1079,7 @@ export class ProductsService {
           ? new Date(dto.manufactureDate)
           : null,
         expirationDate: new Date(dto.expirationDate),
-      },
+      } as Prisma.LotUncheckedCreateInput,
     });
   }
 
@@ -1122,7 +1164,6 @@ export class ProductsService {
     // Update price and replace tiers if provided
     const updated = await this.prisma.priceList.update({
       where: { id: priceListId },
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         ...(dto.priceCents !== undefined ? { priceCents: dto.priceCents } : {}),
         ...(dto.tierPrices !== undefined
@@ -1132,7 +1173,7 @@ export class ProductsService {
                 create: dto.tierPrices.map((t) => ({
                   minQuantity: t.minQuantity,
                   priceCents: t.priceCents,
-                })),
+                })) as Prisma.TierPriceUncheckedCreateWithoutPriceListInput[],
               },
             }
           : {}),
@@ -1143,7 +1184,7 @@ export class ProductsService {
       },
     });
 
-    return this.enrichPriceListResponse(updated as any, product);
+    return this.enrichPriceListResponse(updated, product);
   }
 
   // ==================== Images ====================
@@ -1176,14 +1217,13 @@ export class ProductsService {
 
     try {
       return await this.prisma.productImage.create({
-        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           productId,
           variantId: dto.variantId ?? null,
           url: dto.url,
           isMain: dto.isMain ?? false,
           sortOrder: dto.sortOrder ?? 0,
-        },
+        } as Prisma.ProductImageUncheckedCreateInput,
       });
     } catch (error) {
       if (this.isMainImageUniqueConstraintError(error)) {
@@ -1284,14 +1324,13 @@ export class ProductsService {
 
     // Create ProductImage record linked to FileObject
     const productImage = await this.prisma.productImage.create({
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         productId,
         fileId: fileObject.id,
         url: fileObject.url,
         isMain: false,
         sortOrder: nextSortOrder,
-      },
+      } as Prisma.ProductImageUncheckedCreateInput,
     });
 
     return {
@@ -1345,7 +1384,6 @@ export class ProductsService {
 
     // Create ProductImage record linked to FileObject
     const productImage = await this.prisma.productImage.create({
-      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         productId,
         variantId,
@@ -1353,7 +1391,7 @@ export class ProductsService {
         url: fileObject.url,
         isMain: false,
         sortOrder: nextSortOrder,
-      },
+      } as Prisma.ProductImageUncheckedCreateInput,
     });
 
     return {
@@ -1759,7 +1797,7 @@ export class ProductsService {
     const offset = dto.offset ?? 0;
 
     // Build WHERE clause
-    const where: any = {
+    const where: Prisma.ProductWhereInput = {
       sellInPos: true,
     };
 
@@ -1801,41 +1839,7 @@ export class ProductsService {
         take: limit,
         skip: offset,
         include: {
-          category: { select: { id: true, name: true } },
-          brand: { select: { id: true, name: true } },
-          images: {
-            orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
-            take: 5,
-            where: { variantId: null },
-          },
-          priceLists: {
-            where: { globalPriceList: { isDefault: true } },
-            include: {
-              globalPriceList: { select: { name: true, isDefault: true } },
-            },
-            take: 1,
-          },
-          variants: {
-            include: {
-              images: {
-                orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
-                take: 5,
-              },
-              variantPrices: {
-                where: { priceList: { globalPriceList: { isDefault: true } } },
-                include: {
-                  priceList: {
-                    select: {
-                      globalPriceList: {
-                        select: { name: true, isDefault: true },
-                      },
-                    },
-                  },
-                },
-                take: 1,
-              },
-            },
-          },
+          ...POS_CATALOG_INCLUDE,
         },
         orderBy: { name: 'asc' },
       }),
@@ -1860,43 +1864,7 @@ export class ProductsService {
   async findOneForPOS(productId: string) {
     const product = await this.prisma.product.findFirst({
       where: { id: productId, sellInPos: true },
-      include: {
-        category: { select: { id: true, name: true } },
-        brand: { select: { id: true, name: true } },
-        images: {
-          orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
-          take: 5,
-          where: { variantId: null },
-        },
-        priceLists: {
-          where: { globalPriceList: { isDefault: true } },
-          include: {
-            globalPriceList: { select: { name: true, isDefault: true } },
-          },
-          take: 1,
-        },
-        variants: {
-          include: {
-            images: {
-              orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
-              take: 5,
-            },
-            variantPrices: {
-              where: { priceList: { globalPriceList: { isDefault: true } } },
-              include: {
-                priceList: {
-                  select: {
-                    globalPriceList: {
-                      select: { name: true, isDefault: true },
-                    },
-                  },
-                },
-              },
-              take: 1,
-            },
-          },
-        },
-      },
+      include: POS_CATALOG_INCLUDE,
     });
 
     if (!product) return null;
@@ -1908,13 +1876,13 @@ export class ProductsService {
    * Map a Prisma product to POS catalog item format.
    * Handles variants, images, prices, and stock.
    */
-  private mapPosCatalogItem(product: any): any {
+  private mapPosCatalogItem(product: PosCatalogProduct) {
     // Resolve main image and images array
     const mainImage =
-      product.images.find((img: any) => img.isMain)?.url ??
+      product.images.find((img) => img.isMain)?.url ??
       product.images[0]?.url ??
       null;
-    const images = product.images.slice(0, 5).map((img: any) => img.url);
+    const images = product.images.slice(0, 5).map((img) => img.url);
 
     // Resolve default price for product (if no variants)
     const price = product.hasVariants
@@ -1934,13 +1902,13 @@ export class ProductsService {
 
     // Map variants
     const variants = product.hasVariants
-      ? product.variants.map((variant: any) => ({
+      ? product.variants.map((variant) => ({
           id: variant.id,
           name: variant.name,
           sku: variant.sku,
           barcode: variant.barcode,
           mainImage:
-            variant.images.find((img: any) => img.isMain)?.url ??
+            variant.images.find((img) => img.isMain)?.url ??
             variant.images[0]?.url ??
             null,
           price: this.resolveVariantDefaultPrice(variant.variantPrices),
@@ -1978,7 +1946,7 @@ export class ProductsService {
    * Resolve default (PUBLICO) price for a product.
    * Returns price object or fallback to 0.
    */
-  private resolveDefaultPrice(priceLists: any[]): any {
+  private resolveDefaultPrice(priceLists: PosCatalogPriceList[]) {
     const defaultEntry = priceLists[0];
     const priceCents = defaultEntry?.priceCents ?? 0;
 
@@ -1993,7 +1961,7 @@ export class ProductsService {
    * Resolve default (PUBLICO) price for a variant.
    * Returns price object or fallback to 0.
    */
-  private resolveVariantDefaultPrice(variantPrices: any[]): any {
+  private resolveVariantDefaultPrice(variantPrices: PosCatalogVariantPrice[]) {
     const defaultEntry = variantPrices[0];
     const priceCents = defaultEntry?.priceCents ?? 0;
 
@@ -2025,7 +1993,7 @@ export class ProductsService {
         },
       });
 
-      return variantPrices.map((vp: any) => ({
+      return variantPrices.map((vp) => ({
         priceListId: vp.priceListId,
         priceListName: vp.priceList.globalPriceList.name,
         priceCents: this.selectEffectivePrice(
@@ -2044,7 +2012,7 @@ export class ProductsService {
       },
     });
 
-    return priceLists.map((pl: any) => ({
+    return priceLists.map((pl) => ({
       priceListId: pl.id,
       priceListName: pl.globalPriceList.name,
       priceCents: this.selectEffectivePrice(
