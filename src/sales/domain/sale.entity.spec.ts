@@ -640,6 +640,156 @@ describe('Sale Entity', () => {
       expect(result.sale.items[0].discountValue).toBe(20);
     });
 
+    it('skips already-discounted items when strategy is skip', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-already-discounted',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-no-discount',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'P2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 2000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      // Apply individual discount to first item
+      sale.applyItemDiscount('item-already-discounted', {
+        type: 'percentage',
+        percent: 10,
+      });
+
+      // Apply global with skip strategy
+      const result = sale.applyGlobalDiscount({
+        type: 'percentage',
+        percent: 20,
+        strategy: 'skip',
+      });
+
+      // First item should keep its original 10% discount
+      expect(result.sale.items[0].discountValue).toBe(10);
+      expect(result.sale.items[0].unitPriceCents).toBe(900);
+      // First item should appear in skippedItems with ALREADY_DISCOUNTED reason
+      expect(result.skippedItems).toEqual(
+        expect.arrayContaining([
+          { itemId: 'item-already-discounted', reason: 'ALREADY_DISCOUNTED' },
+        ]),
+      );
+
+      // Second item should get the global 20% discount
+      expect(result.sale.items[1].discountValue).toBe(20);
+      expect(result.sale.items[1].unitPriceCents).toBe(1600);
+    });
+
+    it('replaces all discounts when strategy is replace (default)', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-has-discount',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      sale.applyItemDiscount('item-has-discount', {
+        type: 'percentage',
+        percent: 10,
+      });
+
+      // Default strategy (no strategy field) = replace
+      const result = sale.applyGlobalDiscount({
+        type: 'percentage',
+        percent: 20,
+      });
+
+      // Should be replaced with 20%
+      expect(result.sale.items[0].discountValue).toBe(20);
+      expect(result.sale.items[0].unitPriceCents).toBe(800);
+      expect(result.skippedItems).toEqual([]);
+    });
+
+    it('replaces all discounts when strategy is explicitly replace', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-explicit-replace',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      sale.applyItemDiscount('item-explicit-replace', {
+        type: 'amount',
+        amountCents: 100,
+      });
+
+      const result = sale.applyGlobalDiscount({
+        type: 'percentage',
+        percent: 15,
+        strategy: 'replace',
+      });
+
+      expect(result.sale.items[0].discountValue).toBe(15);
+      expect(result.sale.items[0].unitPriceCents).toBe(850);
+      expect(result.skippedItems).toEqual([]);
+    });
+
+    it('applies to all items when strategy is skip but no items have discounts', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-skip-clean-1',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-skip-clean-2',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'P2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 2000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      const result = sale.applyGlobalDiscount({
+        type: 'percentage',
+        percent: 10,
+        strategy: 'skip',
+      });
+
+      expect(result.skippedItems).toEqual([]);
+      expect(result.sale.items[0].unitPriceCents).toBe(900);
+      expect(result.sale.items[1].unitPriceCents).toBe(1800);
+    });
+
     it('succeeds on empty sales with no skipped items', () => {
       const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
 

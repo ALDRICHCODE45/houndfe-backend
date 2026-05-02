@@ -194,6 +194,61 @@ describe('SalesService', () => {
       ).rejects.toThrow('SALE_UPDATE_FORBIDDEN');
     });
 
+    it('skips already-discounted items when strategy is skip and only emits events for newly discounted', async () => {
+      const sale = Sale.create({ id: 'sale-skip-strat', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-has-discount',
+        saleId: 'sale-skip-strat',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.addItem({
+        id: 'item-no-discount',
+        saleId: 'sale-skip-strat',
+        productId: 'prod-2',
+        variantId: null,
+        productName: 'Prod 2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 2000,
+        unitPriceCurrency: 'MXN',
+      });
+      // Apply individual discount to first item
+      sale.applyItemDiscount('item-has-discount', { type: 'percentage', percent: 10 });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      const result = await service.applyGlobalDiscount(
+        'sale-skip-strat',
+        { type: 'percentage', percent: 20, strategy: 'skip' },
+        'user-1',
+      );
+
+      // First item skipped — keeps its 10% discount
+      expect(result.skippedItems).toEqual(
+        expect.arrayContaining([
+          { itemId: 'item-has-discount', reason: 'ALREADY_DISCOUNTED' },
+        ]),
+      );
+      expect(result.sale.items[0].discountValue).toBe(10);
+      expect(result.sale.items[0].unitPriceCents).toBe(900);
+
+      // Second item gets the 20% global discount
+      expect(result.sale.items[1].discountValue).toBe(20);
+      expect(result.sale.items[1].unitPriceCents).toBe(1600);
+
+      // Only one event emitted (for the item that received the discount)
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.item.discount.applied',
+        expect.objectContaining({ saleId: 'sale-skip-strat', itemId: 'item-no-discount' }),
+      );
+    });
+
     it('removes global discount and emits removed event for previously discounted items only', async () => {
       const sale = Sale.create({ id: 'sale-remove-global', userId: 'user-1' });
       sale.addItem({

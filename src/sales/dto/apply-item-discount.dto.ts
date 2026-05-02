@@ -32,4 +32,8 @@ export class ApplyItemDiscountDto {
   @IsOptional()
   @IsString()
   title?: string;
+
+  @IsOptional()
+  @IsIn(['replace', 'skip'])
+  strategy?: 'replace' | 'skip';
 }

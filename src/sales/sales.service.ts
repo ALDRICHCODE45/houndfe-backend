@@ -530,6 +530,7 @@ export class SalesService {
       amountCents: dto.amountCents,
       percent: dto.percent,
       discountTitle: dto.title ?? dto.discountTitle,
+      strategy: dto.strategy,
     });
     await this.saleRepo.save(sale);
 

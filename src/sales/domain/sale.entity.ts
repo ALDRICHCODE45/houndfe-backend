@@ -169,8 +169,17 @@ export class Sale {
     input: ApplySaleItemDiscountInput,
   ): DiscountApplicationResult {
     const skippedItems: Array<{ itemId: string; reason: string }> = [];
+    const strategy = input.strategy ?? 'replace';
 
     for (const item of this._items) {
+      if (strategy === 'skip' && item.discountType !== null) {
+        skippedItems.push({
+          itemId: item.id,
+          reason: 'ALREADY_DISCOUNTED',
+        });
+        continue;
+      }
+
       try {
         item.applyDiscount(input);
       } catch (error) {

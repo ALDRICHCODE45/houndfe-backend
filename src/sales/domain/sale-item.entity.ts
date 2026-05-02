@@ -27,6 +27,7 @@ export interface ApplySaleItemDiscountInput {
   amountCents?: number;
   percent?: number;
   discountTitle?: string;
+  strategy?: 'replace' | 'skip';
 }
 
 export interface OverrideSaleItemPriceInput {
