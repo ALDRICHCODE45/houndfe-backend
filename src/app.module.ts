@@ -57,6 +57,7 @@ import { TenantsModule } from './tenants/tenants.module';
     // Infrastructure
     EventEmitterModule.forRoot(),
     ClsModule.forRoot({
+      global: true,
       middleware: {
         mount: true,
       },
