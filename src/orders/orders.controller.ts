@@ -11,11 +11,15 @@ import {
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
 import { PlaceOrderDto } from './dto/place-order.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 
 @Controller('orders')
+@UseGuards(JwtAuthGuard, TenantContextGuard)
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 

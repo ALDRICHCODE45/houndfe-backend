@@ -1,5 +1,4 @@
 import { PrismaPromotionRepository } from './prisma-promotion.repository';
-import { PrismaService } from '../../shared/prisma/prisma.service';
 
 type PrismaRepoMock = {
   promotion: {
@@ -36,12 +35,19 @@ function makePrisma(): PrismaRepoMock {
 }
 
 describe('PrismaPromotionRepository', () => {
+  function makeTenantPrismaMock() {
+    const client = makePrisma();
+    return {
+      getClient: jest.fn().mockReturnValue(client),
+      client,
+    };
+  }
+
   describe('findAll()', () => {
     it('should include customerScope in where clause when provided', async () => {
-      const prisma = makePrisma();
-      const repo = new PrismaPromotionRepository(
-        prisma as unknown as PrismaService,
-      );
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      const repo = new PrismaPromotionRepository(tenantPrisma as any);
 
       await repo.findAll({ page: 1, limit: 20, customerScope: 'SPECIFIC' });
 
@@ -50,15 +56,15 @@ describe('PrismaPromotionRepository', () => {
       const findManyWhere = findManyArgs.where as Record<string, unknown>;
       const countWhere = countArgs.where as Record<string, unknown>;
 
+      expect(tenantPrisma.getClient).toHaveBeenCalled();
       expect(findManyWhere.customerScope).toBe('SPECIFIC');
       expect(countWhere.customerScope).toBe('SPECIFIC');
     });
 
     it('should compose combined filters (type/status/method/search/customerScope) into query', async () => {
-      const prisma = makePrisma();
-      const repo = new PrismaPromotionRepository(
-        prisma as unknown as PrismaService,
-      );
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      const repo = new PrismaPromotionRepository(tenantPrisma as any);
 
       await repo.findAll({
         page: 2,
@@ -97,10 +103,9 @@ describe('PrismaPromotionRepository', () => {
 
   describe('delete()', () => {
     it('should rely on DB cascade by deleting parent promotion row', async () => {
-      const prisma = makePrisma();
-      const repo = new PrismaPromotionRepository(
-        prisma as unknown as PrismaService,
-      );
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      const repo = new PrismaPromotionRepository(tenantPrisma as any);
 
       await repo.delete('promo-1');
 

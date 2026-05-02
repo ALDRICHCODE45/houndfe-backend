@@ -6,7 +6,7 @@ import {
 } from '../shared/domain/domain-error';
 
 function makeService(prisma: any) {
-  return new PriceListsService(prisma);
+  return new PriceListsService({ getClient: jest.fn().mockReturnValue(prisma) } as any);
 }
 
 describe('PriceListsService', () => {

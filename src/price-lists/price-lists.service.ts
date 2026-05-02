@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
   BusinessRuleViolationError,
   EntityAlreadyExistsError,
@@ -11,21 +11,23 @@ import { UpdatePriceListDto } from './dto/update-price-list.dto';
 
 @Injectable()
 export class PriceListsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   async findAll() {
-    return this.prisma.globalPriceList.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    return prisma.globalPriceList.findMany({
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
     });
   }
 
   async create(dto: CreatePriceListDto) {
+    const prisma = this.tenantPrisma.getClient();
     const name = dto.name.trim();
     if (!name) {
       throw new InvalidArgumentError('Price list name cannot be empty');
     }
 
-    const existing = await this.prisma.globalPriceList.findUnique({
+    const existing = await prisma.globalPriceList.findUnique({
       where: { name },
       select: { id: true },
     });
@@ -33,7 +35,7 @@ export class PriceListsService {
       throw new EntityAlreadyExistsError('GlobalPriceList', name);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    return prisma.$transaction(async (tx) => {
       const createdGlobalList = await tx.globalPriceList.create({
         data: { name },
       });
@@ -104,7 +106,8 @@ export class PriceListsService {
   }
 
   async update(id: string, dto: UpdatePriceListDto) {
-    const globalPriceList = await this.prisma.globalPriceList.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const globalPriceList = await prisma.globalPriceList.findUnique({
       where: { id },
       select: { id: true, isDefault: true },
     });
@@ -125,7 +128,7 @@ export class PriceListsService {
     }
 
     if (name) {
-      const duplicate = await this.prisma.globalPriceList.findUnique({
+      const duplicate = await prisma.globalPriceList.findUnique({
         where: { name },
         select: { id: true },
       });
@@ -135,7 +138,7 @@ export class PriceListsService {
       }
     }
 
-    return this.prisma.globalPriceList.update({
+    return prisma.globalPriceList.update({
       where: { id },
       data: {
         ...(name ? { name } : {}),
@@ -144,7 +147,8 @@ export class PriceListsService {
   }
 
   async remove(id: string): Promise<void> {
-    const globalPriceList = await this.prisma.globalPriceList.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const globalPriceList = await prisma.globalPriceList.findUnique({
       where: { id },
       select: { id: true, isDefault: true },
     });
@@ -159,6 +163,6 @@ export class PriceListsService {
       );
     }
 
-    await this.prisma.globalPriceList.delete({ where: { id } });
+    await prisma.globalPriceList.delete({ where: { id } });
   }
 }

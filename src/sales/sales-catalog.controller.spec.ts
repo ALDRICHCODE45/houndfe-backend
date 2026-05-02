@@ -7,6 +7,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { SalesCatalogController } from './sales-catalog.controller';
 import { SalesService } from './sales.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import {
   ExecutionContext,
@@ -44,6 +45,8 @@ describe('SalesCatalogController', () => {
       ],
     })
       .overrideGuard(JwtAuthGuard)
+      .useValue({ canActivate: jest.fn(() => true) })
+      .overrideGuard(TenantContextGuard)
       .useValue({ canActivate: jest.fn(() => true) })
       .overrideGuard(PermissionsGuard)
       .useValue({ canActivate: jest.fn(() => true) })

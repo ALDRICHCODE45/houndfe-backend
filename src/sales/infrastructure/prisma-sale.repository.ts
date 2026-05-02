@@ -4,22 +4,23 @@
  * Implements persistence operations for Sales using Prisma ORM.
  */
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ISaleRepository } from '../domain/sale.repository';
 import { Sale } from '../domain/sale.entity';
 
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   async save(sale: Sale): Promise<Sale> {
+    const prisma = this.tenantPrisma.getClient();
     // Check if sale exists
-    const existing = await this.prisma.sale.findUnique({
+    const existing = await prisma.sale.findUnique({
       where: { id: sale.id },
     });
 
     // Delete existing items (we'll recreate them from domain state)
-    await this.prisma.saleItem.deleteMany({
+    await prisma.saleItem.deleteMany({
       where: { saleId: sale.id },
     });
 
@@ -30,7 +31,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
     if (!existing) {
       // Create new sale
-      await this.prisma.sale.create({
+      await prisma.sale.create({
         data: {
           id: sale.id,
           userId: sale.userId,
@@ -39,7 +40,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       });
     } else {
       // Update existing sale
-      await this.prisma.sale.update({
+      await prisma.sale.update({
         where: { id: sale.id },
         data: saleData,
       });
@@ -47,7 +48,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
     // Create items
     if (sale.items.length > 0) {
-      await this.prisma.saleItem.createMany({
+      await prisma.saleItem.createMany({
         data: sale.items.map((item) => ({
           id: item.id,
           saleId: sale.id,
@@ -77,7 +78,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       });
     } else {
       // Explicitly handle empty items (for clearItems case)
-      await this.prisma.saleItem.createMany({ data: [] });
+      await prisma.saleItem.createMany({ data: [] });
     }
 
     // Reload and return
@@ -85,7 +86,8 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async findById(id: string): Promise<Sale | null> {
-    const saleData = await this.prisma.sale.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const saleData = await prisma.sale.findUnique({
       where: { id },
       include: { items: true },
     });
@@ -127,7 +129,8 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async findDraftsByUserId(userId: string): Promise<Sale[]> {
-    const sales = await this.prisma.sale.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const sales = await prisma.sale.findMany({
       where: {
         userId,
         status: 'DRAFT',
@@ -173,7 +176,8 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async delete(id: string): Promise<void> {
-    await this.prisma.sale.delete({
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.sale.delete({
       where: { id },
     });
   }

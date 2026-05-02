@@ -164,6 +164,47 @@ model Brand {
 }
 
 // ============================================================================
+// TENANT
+// ============================================================================
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  address   String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships          TenantMembership[]
+  roles                Role[]
+  products             Product[]
+  variants             Variant[]
+  lots                 Lot[]
+  productImages        ProductImage[]
+  fileObjects          FileObject[]
+  globalPriceLists     GlobalPriceList[]
+  priceLists           PriceList[]
+  tierPrices           TierPrice[]
+  variantPrices        VariantPrice[]
+  variantTierPrices    VariantTierPrice[]
+  orders               Order[]
+  orderItems           OrderItem[]
+  sales                Sale[]
+  saleItems            SaleItem[]
+  customers            Customer[]
+  customerAddresses    CustomerAddress[]
+  promotions           Promotion[]
+  promotionTargetItems PromotionTargetItem[]
+  promotionCustomers   PromotionCustomer[]
+  promotionPriceLists  PromotionPriceList[]
+  promotionDaysOfWeek  PromotionDayOfWeek[]
+
+  @@map("tenants")
+}
+
+// ============================================================================
 // PRODUCT MODEL (rewritten)
 // ============================================================================
 
@@ -173,8 +214,11 @@ model Product {
   location                 String?
   description              String?
   type                     ProductType     @default(PRODUCT)
-  sku                      String?         @unique
-  barcode                  String?         @unique
+  // Unique per tenant — enforced via application layer or raw SQL partial index
+  sku                      String?
+  // Unique per tenant — enforced via application layer or raw SQL partial index
+  barcode                  String?
+  tenantId                 String
   unit                     UnitOfMeasure   @default(UNIDAD)
   satKey                   String?
 
@@ -214,6 +258,7 @@ model Product {
   updatedAt                DateTime        @updatedAt
 
   // Relations
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   orderItems    OrderItem[]
   saleItems     SaleItem[]
   images        ProductImage[]
@@ -221,6 +266,7 @@ model Product {
   lots          Lot[]
   priceLists    PriceList[]
 
+  @@index([tenantId])
   @@map("products")
 }
 
@@ -237,12 +283,15 @@ model FileObject {
   ownerType   String?
   ownerId     String?
   uploadedBy  String?
+  tenantId    String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   productImage ProductImage?
 
   @@index([ownerType, ownerId])
+  @@index([tenantId])
   @@map("files")
 }
 
@@ -258,12 +307,15 @@ model ProductImage {
   url       String
   isMain    Boolean  @default(false)
   sortOrder Int      @default(0)
+  tenantId  String
   createdAt DateTime @default(now())
 
+  tenant  Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
   variant Variant?    @relation(fields: [variantId], references: [id], onDelete: Cascade)
   file    FileObject? @relation(fields: [fileId], references: [id], onDelete: SetNull)
 
+  @@index([tenantId])
   @@map("product_images")
 }
 
@@ -277,19 +329,24 @@ model Variant {
   name      String
   option    String?
   value     String?
-  sku       String? @unique
-  barcode   String? @unique
+  // Unique per tenant — enforced via application layer or raw SQL partial index
+  sku       String?
+  // Unique per tenant — enforced via application layer or raw SQL partial index
+  barcode   String?
+  tenantId  String
   quantity  Int     @default(0)
   minQuantity Int   @default(0)
   purchaseNetCostCents Int?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product      Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
   images       ProductImage[]
   variantPrices VariantPrice[]
   saleItems    SaleItem[]
 
+  @@index([tenantId])
   @@map("variants")
 }
 
@@ -302,12 +359,15 @@ model VariantPrice {
   variantId   String
   priceListId String
   priceCents  Int
+  tenantId    String
 
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   variant   Variant   @relation(fields: [variantId], references: [id], onDelete: Cascade)
   priceList PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
   tierPrices VariantTierPrice[]
 
-  @@unique([variantId, priceListId])
+  @@unique([tenantId, variantId, priceListId])
+  @@index([tenantId])
   @@map("variant_prices")
 }
 
@@ -316,10 +376,13 @@ model VariantTierPrice {
   variantPriceId String
   minQuantity    Int
   priceCents     Int
+  tenantId       String
 
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   variantPrice VariantPrice @relation(fields: [variantPriceId], references: [id], onDelete: Cascade)
 
-  @@unique([variantPriceId, minQuantity])
+  @@unique([tenantId, variantPriceId, minQuantity])
+  @@index([tenantId])
   @@map("variant_tier_prices")
 }
 
@@ -331,6 +394,7 @@ model Lot {
   id              String    @id @default(uuid())
   productId       String
   lotNumber       String
+  tenantId        String
   quantity        Int       @default(0)
   manufactureDate DateTime?
   expirationDate  DateTime
@@ -338,10 +402,12 @@ model Lot {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   // lotNumber unique per product
   @@unique([productId, lotNumber])
+  @@index([tenantId])
   @@map("lots")
 }
 
@@ -351,15 +417,19 @@ model Lot {
 
 model GlobalPriceList {
   id        String   @id @default(uuid())
-  name      String   @unique
+  name      String
   isDefault Boolean  @default(false)
+  tenantId  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  tenant            Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   priceLists        PriceList[]
   customers         Customer[]
   promotionPriceLists PromotionPriceList[]
 
+  @@unique([tenantId, name])
+  @@index([tenantId])
   @@map("global_price_lists")
 }
 
@@ -372,16 +442,19 @@ model PriceList {
   productId         String
   globalPriceListId String
   priceCents        Int
+  tenantId          String
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product         Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
   globalPriceList GlobalPriceList @relation(fields: [globalPriceListId], references: [id], onDelete: Cascade)
   tierPrices      TierPrice[]
   variantPrices   VariantPrice[]
 
-  @@unique([productId, globalPriceListId])
+  @@unique([tenantId, productId, globalPriceListId])
+  @@index([tenantId])
   @@map("price_lists")
 }
 
@@ -394,11 +467,14 @@ model TierPrice {
   priceListId String
   minQuantity Int
   priceCents  Int
+  tenantId    String
 
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   priceList PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
 
   // Unique threshold per price list
-  @@unique([priceListId, minQuantity])
+  @@unique([tenantId, priceListId, minQuantity])
+  @@index([tenantId])
   @@map("tier_prices")
 }
 
@@ -410,12 +486,16 @@ model Order {
   id           String      @id // UUID
   customerName String
   status       String      // DRAFT, PENDING, COMPLETED, CANCELLED
+  tenantId     String
   createdAt    DateTime    @default(now())
   completedAt  DateTime?
 
   // Relations
-  items OrderItem[]
+  tenant Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items  OrderItem[]
 
+  @@index([tenantId])
+  @@index([tenantId, status])
   @@map("orders")
 }
 
@@ -431,11 +511,14 @@ model OrderItem {
   quantity      Int
   unitPriceCents Int    // Stored in cents
   unitPriceCurrency String
+  tenantId          String
   
   // Relations
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id])
 
+  @@index([tenantId])
   @@map("order_items")
 }
 
@@ -447,13 +530,17 @@ model Sale {
   id        String     @id @default(uuid())
   userId    String
   status    SaleStatus @default(DRAFT)
+  tenantId  String
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
   // Relations
-  user  User       @relation(fields: [userId], references: [id], onDelete: Restrict)
-  items SaleItem[]
+  tenant Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  items  SaleItem[]
 
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
   @@index([userId, status])
   @@map("sales")
 }
@@ -482,15 +569,18 @@ model SaleItem {
   prePriceCentsBeforeDiscount Int?
   discountTitle String?
   discountedAt DateTime?
+  tenantId          String
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   // Relations
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
   variant Variant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
 
   @@index([saleId])
+  @@index([tenantId])
   @@map("sale_items")
 }
 
@@ -508,8 +598,8 @@ model User {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  roles UserRole[]
-  sales Sale[]
+  tenantMemberships TenantMembership[]
+  sales             Sale[]
 
   @@map("users")
 }
@@ -533,14 +623,19 @@ model Permission {
 
 model Role {
   id          String   @id @default(uuid())
-  name        String   @unique
+  name        String
+  tenantId    String?
   description String?
   isSystem    Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  permissions RolePermission[]
-  users       UserRole[]
+  tenant             Tenant?             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions        RolePermission[]
+  tenantMemberships  TenantMembership[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
 
   @@map("roles")
 }
@@ -557,16 +652,19 @@ model RolePermission {
   @@map("role_permissions")
 }
 
-model UserRole {
-  id     String @id @default(uuid())
-  userId String
-  roleId String
+model TenantMembership {
+  id       String @id @default(uuid())
+  userId   String
+  tenantId String
+  roleId   String
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, roleId])
-  @@map("user_roles")
+  @@unique([userId, tenantId, roleId])
+  @@index([tenantId])
+  @@map("tenant_memberships")
 }
 
 // ============================================================================
@@ -581,6 +679,9 @@ model Customer {
   phone                 String?
   email                 String?
   comments              String?
+  tenantId              String
+
+  tenant                Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // Price list assignment (optional — auto-apply on sales)
   globalPriceListId     String?
@@ -606,12 +707,15 @@ model Customer {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
+  @@index([tenantId])
   @@map("customers")
 }
 
 model CustomerAddress {
   id               String   @id @default(uuid())
   customerId       String
+  tenantId         String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer         Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   street           String
   exteriorNumber   String?
@@ -625,6 +729,7 @@ model CustomerAddress {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
+  @@index([tenantId])
   @@map("customer_addresses")
 }
 
@@ -660,16 +765,19 @@ model Promotion {
   // ADVANCED only
   buyTargetType          PromotionTargetType?
   getTargetType          PromotionTargetType?
+  tenantId               String
 
   createdAt              DateTime            @default(now())
   updatedAt              DateTime            @updatedAt
 
+  tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   // Relations
   targetItems            PromotionTargetItem[]
   customers              PromotionCustomer[]
   priceLists             PromotionPriceList[]
   daysOfWeek             PromotionDayOfWeek[]
 
+  @@index([tenantId])
   @@index([type])
   @@index([method])
   @@index([status, startDate, endDate])
@@ -682,10 +790,13 @@ model PromotionTargetItem {
   side        TargetSide          @default(DEFAULT)
   targetType  PromotionTargetType
   targetId    String
+  tenantId    String
 
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   promotion   Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
 
   @@unique([promotionId, side, targetType, targetId])
+  @@index([tenantId])
   @@index([targetType, targetId])
   @@map("promotion_target_items")
 }
@@ -694,11 +805,14 @@ model PromotionCustomer {
   id          String @id @default(uuid())
   promotionId String
   customerId  String
+  tenantId    String
 
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
   customer  Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@unique([promotionId, customerId])
+  @@index([tenantId])
   @@map("promotion_customers")
 }
 
@@ -706,11 +820,14 @@ model PromotionPriceList {
   id                String @id @default(uuid())
   promotionId       String
   globalPriceListId String
+  tenantId          String
 
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   promotion       Promotion       @relation(fields: [promotionId], references: [id], onDelete: Cascade)
   globalPriceList GlobalPriceList @relation(fields: [globalPriceListId], references: [id], onDelete: Cascade)
 
   @@unique([promotionId, globalPriceListId])
+  @@index([tenantId])
   @@map("promotion_price_lists")
 }
 
@@ -718,9 +835,12 @@ model PromotionDayOfWeek {
   id          String    @id @default(uuid())
   promotionId String
   day         DayOfWeek
+  tenantId    String
 
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
 
   @@unique([promotionId, day])
+  @@index([tenantId])
   @@map("promotion_days_of_week")
 }

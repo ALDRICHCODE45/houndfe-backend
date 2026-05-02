@@ -10,6 +10,7 @@ import { FileObject } from '../domain/file-object.entity';
 describe('PrismaFileRepository', () => {
   let repository: PrismaFileRepository;
   let mockPrismaService: any;
+  let mockTenantPrisma: any;
 
   beforeEach(() => {
     mockPrismaService = {
@@ -21,7 +22,11 @@ describe('PrismaFileRepository', () => {
       },
     };
 
-    repository = new PrismaFileRepository(mockPrismaService);
+    mockTenantPrisma = {
+      getClient: jest.fn().mockReturnValue(mockPrismaService),
+    };
+
+    repository = new PrismaFileRepository(mockTenantPrisma);
   });
 
   describe('save', () => {
@@ -57,6 +62,7 @@ describe('PrismaFileRepository', () => {
 
       // Assert
       expect(result.id).toBe('file-123');
+      expect(mockTenantPrisma.getClient).toHaveBeenCalled();
       expect(mockPrismaService.fileObject.create).toHaveBeenCalledWith({
         data: {
           id: 'file-123',

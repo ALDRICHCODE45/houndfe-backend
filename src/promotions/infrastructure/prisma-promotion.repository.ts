@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { Promotion } from '../domain/promotion.entity';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import type {
@@ -31,14 +31,15 @@ type PromotionWithRelations = Prisma.PromotionGetPayload<{
 
 @Injectable()
 export class PrismaPromotionRepository implements IPromotionRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   // ============================================================
   // save — upsert promotion + replace all join rows atomically
   // ============================================================
   async save(promotion: Promotion): Promise<Promotion> {
+    const prisma = this.tenantPrisma.getClient();
     try {
-      const saved = await this.prisma.$transaction(async (tx) => {
+      const saved = await prisma.$transaction(async (tx) => {
         // Upsert the main promotion row
         await tx.promotion.upsert({
           where: { id: promotion.id },
@@ -161,7 +162,8 @@ export class PrismaPromotionRepository implements IPromotionRepository {
   // findById — full include
   // ============================================================
   async findById(id: string): Promise<Promotion | null> {
-    const data = await this.prisma.promotion.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.promotion.findUnique({
       where: { id },
       include: PROMOTION_INCLUDE,
     });
@@ -172,6 +174,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
   // findAll — dynamic where + pagination
   // ============================================================
   async findAll(query: PromotionFindAllQuery): Promise<PromotionFindAllResult> {
+    const prisma = this.tenantPrisma.getClient();
     const {
       page,
       limit,
@@ -230,14 +233,14 @@ export class PrismaPromotionRepository implements IPromotionRepository {
     }
 
     const [rows, total] = await Promise.all([
-      this.prisma.promotion.findMany({
+      prisma.promotion.findMany({
         where,
         skip,
         take: limit,
         orderBy: { [sortBy]: sortOrder },
         include: PROMOTION_INCLUDE,
       }),
-      this.prisma.promotion.count({ where }),
+      prisma.promotion.count({ where }),
     ]);
 
     return {
@@ -250,7 +253,8 @@ export class PrismaPromotionRepository implements IPromotionRepository {
   // delete — hard delete (cascade handles join tables)
   // ============================================================
   async delete(id: string): Promise<void> {
-    await this.prisma.promotion.delete({ where: { id } });
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.promotion.delete({ where: { id } });
   }
 
   // ============================================================
@@ -261,7 +265,8 @@ export class PrismaPromotionRepository implements IPromotionRepository {
     status: 'ENDED' | 'ACTIVE' | 'SCHEDULED',
     endDate?: Date | null,
   ): Promise<void> {
-    await this.prisma.promotion.update({
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.promotion.update({
       where: { id },
       data: {
         status,

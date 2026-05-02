@@ -19,6 +19,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
 import { AdminUserService } from './admin-user.service';
@@ -28,7 +29,7 @@ import { AssignRolesDto } from './dto/assign-roles.dto';
 import { PaginationQueryDto } from './dto/pagination-query.dto';
 
 @Controller('admin/users')
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class AdminUserController {
   constructor(private readonly adminUserService: AdminUserService) {}
 

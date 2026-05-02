@@ -17,6 +17,7 @@ import {
 import {
   AuthService,
   type AuthResponse,
+  type LoginResponse,
   type AuthTokens,
   type UserPermissionsResponse,
 } from './auth.service';
@@ -26,6 +27,8 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import type { AuthenticatedUser } from './interfaces/jwt-payload.interface';
+import { SelectTenantDto } from './dto/select-tenant.dto';
+import { SwitchTenantDto } from './dto/switch-tenant.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -39,8 +42,24 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto): Promise<AuthResponse> {
+  login(@Body() dto: LoginDto): Promise<LoginResponse> {
     return this.authService.login(dto);
+  }
+
+  @Post('select-tenant')
+  @HttpCode(HttpStatus.OK)
+  selectTenant(@Body() dto: SelectTenantDto): Promise<AuthResponse> {
+    return this.authService.selectTenant(dto);
+  }
+
+  @Post('switch-tenant')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  switchTenant(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: SwitchTenantDto,
+  ): Promise<AuthTokens> {
+    return this.authService.switchTenant(user, dto);
   }
 
   @Post('refresh')
@@ -52,7 +71,7 @@ export class AuthController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   getProfile(@CurrentUser() user: AuthenticatedUser) {
-    return this.authService.getProfile(user.userId);
+    return this.authService.getProfile(user.userId, user.tenantId);
   }
 
   @Get('me/permissions')
@@ -60,7 +79,7 @@ export class AuthController {
   getUserPermissions(
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<UserPermissionsResponse> {
-    return this.authService.getUserPermissions(user.userId);
+    return this.authService.getUserPermissions(user);
   }
 
   @Post('logout')

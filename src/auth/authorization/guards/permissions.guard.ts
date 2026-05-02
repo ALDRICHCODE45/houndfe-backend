@@ -57,7 +57,10 @@ export class PermissionsGuard implements CanActivate {
     }
 
     // 5. Build CASL ability for this user
-    const ability = await this.caslAbilityFactory.createForUser(user.userId);
+    const ability = await this.caslAbilityFactory.createForUser(user.userId, {
+      tenantId: user.tenantId,
+      isSuperAdmin: user.isSuperAdmin,
+    });
 
     // 6. Check each required permission
     for (const [action, subject] of requiredPermissions) {

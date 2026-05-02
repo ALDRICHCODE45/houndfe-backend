@@ -4,17 +4,18 @@
  * Persists FileObject entities using Prisma ORM.
  */
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { IFileRepository } from '../domain/file.repository';
 import { FileObject } from '../domain/file-object.entity';
 import { FileNotFoundError } from '../domain/errors';
 
 @Injectable()
 export class PrismaFileRepository implements IFileRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   async save(file: FileObject): Promise<FileObject> {
-    const persisted = await this.prisma.fileObject.create({
+    const prisma = this.tenantPrisma.getClient();
+    const persisted = await prisma.fileObject.create({
       data: {
         id: file.id,
         storageKey: file.storageKey,
@@ -42,7 +43,8 @@ export class PrismaFileRepository implements IFileRepository {
   }
 
   async findById(id: string): Promise<FileObject | null> {
-    const record = await this.prisma.fileObject.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const record = await prisma.fileObject.findUnique({
       where: { id },
     });
 
@@ -64,7 +66,8 @@ export class PrismaFileRepository implements IFileRepository {
   }
 
   async findByIds(ids: string[]): Promise<FileObject[]> {
-    const records = await this.prisma.fileObject.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const records = await prisma.fileObject.findMany({
       where: { id: { in: ids } },
     });
 
@@ -84,8 +87,9 @@ export class PrismaFileRepository implements IFileRepository {
   }
 
   async delete(id: string): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
     try {
-      await this.prisma.fileObject.delete({
+      await prisma.fileObject.delete({
         where: { id },
       });
     } catch (error) {
@@ -97,7 +101,8 @@ export class PrismaFileRepository implements IFileRepository {
   }
 
   async findByOwner(ownerType: string, ownerId: string): Promise<FileObject[]> {
-    const records = await this.prisma.fileObject.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const records = await prisma.fileObject.findMany({
       where: {
         ownerType,
         ownerId,

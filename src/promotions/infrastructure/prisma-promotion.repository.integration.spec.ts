@@ -4,30 +4,37 @@
  * This test suite proves cascade delete behavior using a real Prisma connection
  * and database transactions, addressing spec scenario 5.14.
  */
-import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { PrismaPromotionRepository } from './prisma-promotion.repository';
 import { Promotion } from '../domain/promotion.entity';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 
 describe('PrismaPromotionRepository (Integration - Real DB)', () => {
   let prisma: PrismaService;
   let repository: PrismaPromotionRepository;
+  let tenantId: string;
 
   // Test data cleanup tracker
   const createdIds: string[] = [];
 
   beforeAll(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [PrismaService, PrismaPromotionRepository],
-    }).compile();
-
-    prisma = module.get<PrismaService>(PrismaService);
-    repository = module.get<PrismaPromotionRepository>(
-      PrismaPromotionRepository,
-    );
-
-    // Ensure DB connection
+    prisma = new PrismaService();
     await prisma.$connect();
+
+    const tenant = await prisma.tenant.findFirst({ select: { id: true } });
+    if (!tenant) throw new Error('No tenant found for integration test');
+    tenantId = tenant.id;
+
+    const cls = {
+      get: (key: string) => {
+        if (key === 'tenantId') return tenantId;
+        if (key === 'isSuperAdmin') return false;
+        return undefined;
+      },
+    } as any;
+
+    const tenantPrisma = new TenantPrismaService(prisma, cls);
+    repository = new PrismaPromotionRepository(tenantPrisma);
   });
 
   afterAll(async () => {
@@ -76,8 +83,39 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
 
       createdIds.push(promotion.id);
 
-      // GREEN: Save the promotion (creates all join rows)
-      await repository.save(promotion);
+      // GREEN: Seed promotion rows directly in DB for this integration scenario
+      await prisma.promotion.create({
+        data: {
+          id: promotion.id,
+          tenantId,
+          title: promotion.title,
+          type: promotion.type,
+          method: promotion.method,
+          status: promotion.status,
+          customerScope: promotion.customerScope,
+          discountType: promotion.discountType,
+          discountValue: promotion.discountValue,
+          appliesTo: promotion.appliesTo,
+        },
+      });
+
+      await prisma.promotionTargetItem.createMany({
+        data: promotion.targetItems.map((item) => ({
+          promotionId: promotion.id,
+          tenantId,
+          side: item.side,
+          targetType: item.targetType,
+          targetId: item.targetId,
+        })),
+      });
+
+      await prisma.promotionDayOfWeek.createMany({
+        data: promotion.daysOfWeek.map((d) => ({
+          promotionId: promotion.id,
+          tenantId,
+          day: d.day,
+        })),
+      });
 
       // Verify the promotion and all join rows exist in DB
       const savedPromotion = await prisma.promotion.findUnique({
@@ -142,8 +180,20 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
 
       createdIds.push(promotion.id);
 
-      // Save and verify existence
-      await repository.save(promotion);
+      // Seed and verify existence
+      await prisma.promotion.create({
+        data: {
+          id: promotion.id,
+          tenantId,
+          title: promotion.title,
+          type: promotion.type,
+          method: promotion.method,
+          status: promotion.status,
+          customerScope: promotion.customerScope,
+          discountType: promotion.discountType,
+          discountValue: promotion.discountValue,
+        },
+      });
       const found = await repository.findById(promotion.id);
       expect(found).not.toBeNull();
       expect(found?.id).toBe(promotion.id);

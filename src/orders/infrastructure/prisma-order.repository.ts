@@ -2,7 +2,7 @@
  * ADAPTER: PrismaOrderRepository
  */
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { Order, OrderStatus } from '../domain/order.entity';
 import { OrderItem } from '../domain/order-item.value-object';
 import type { Currency } from '../../shared/domain/value-objects/money.value-object';
@@ -20,10 +20,11 @@ interface OrderItemPrisma {
 
 @Injectable()
 export class PrismaOrderRepository implements IOrderRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   async findById(id: string): Promise<Order | null> {
-    const data = await this.prisma.order.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.order.findUnique({
       where: { id },
       include: { items: true },
     });
@@ -31,7 +32,8 @@ export class PrismaOrderRepository implements IOrderRepository {
   }
 
   async findByStatus(status: OrderStatus): Promise<Order[]> {
-    const data = await this.prisma.order.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.order.findMany({
       where: { status },
       include: { items: true },
       orderBy: { createdAt: 'desc' },
@@ -40,7 +42,8 @@ export class PrismaOrderRepository implements IOrderRepository {
   }
 
   async findAll(): Promise<Order[]> {
-    const data = await this.prisma.order.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.order.findMany({
       include: { items: true },
       orderBy: { createdAt: 'desc' },
     });
@@ -48,7 +51,8 @@ export class PrismaOrderRepository implements IOrderRepository {
   }
 
   async save(order: Order): Promise<Order> {
-    await this.prisma.order.upsert({
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.order.upsert({
       where: { id: order.id },
       update: { status: order.status, completedAt: order.completedAt },
       create: {
@@ -60,9 +64,9 @@ export class PrismaOrderRepository implements IOrderRepository {
     });
 
     // Replace items (delete + recreate)
-    await this.prisma.orderItem.deleteMany({ where: { orderId: order.id } });
+    await prisma.orderItem.deleteMany({ where: { orderId: order.id } });
     if (order.items.length > 0) {
-      await this.prisma.orderItem.createMany({
+      await prisma.orderItem.createMany({
         data: order.items.map((item) => ({
           id: crypto.randomUUID(),
           orderId: order.id,
@@ -79,7 +83,8 @@ export class PrismaOrderRepository implements IOrderRepository {
   }
 
   async delete(id: string): Promise<void> {
-    await this.prisma.order.delete({ where: { id } });
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.order.delete({ where: { id } });
   }
 
   private toDomain(data: {

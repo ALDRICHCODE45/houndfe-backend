@@ -1316,3 +1316,62 @@ describe('ProductsService - Image deletion with file storage', () => {
     expect(mockFilesService.delete).not.toHaveBeenCalled();
   });
 });
+
+describe('ProductsService - tenant-scoped create contract', () => {
+  it('creates a product without tenantId in DTO input', async () => {
+    const repo = makeMockRepo({
+      isSkuTaken: jest.fn().mockResolvedValue(false),
+      isBarcodeTaken: jest.fn().mockResolvedValue(false),
+      save: jest.fn(async (p) => p),
+      findById: jest.fn().mockResolvedValue(makeProduct('prod-created')),
+    });
+
+    const prisma = {
+      $transaction: jest.fn().mockImplementation(async (cb: any) =>
+        cb({
+          product: { create: jest.fn().mockResolvedValue({}) },
+          variant: { create: jest.fn() },
+          lot: { create: jest.fn() },
+          globalPriceList: { findMany: jest.fn().mockResolvedValue([]) },
+          priceList: { create: jest.fn() },
+          variantPrice: { create: jest.fn() },
+          productImage: { create: jest.fn() },
+        }),
+      ),
+      product: {
+        update: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue({
+          category: null,
+          brand: null,
+        }),
+      },
+      priceList: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn() },
+      variant: {
+        findFirst: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
+        update: jest.fn(),
+      },
+      lot: {
+        findFirst: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
+        update: jest.fn(),
+        create: jest.fn(),
+      },
+      productImage: {
+        findFirst: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
+        delete: jest.fn(),
+        create: jest.fn(),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+
+    await service.create({
+      name: 'Sin Tenant ID',
+    } as any);
+
+    expect(prisma.$transaction).toHaveBeenCalled();
+    expect(repo.save).not.toHaveBeenCalled();
+  });
+});

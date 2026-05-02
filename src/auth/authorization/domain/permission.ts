@@ -22,6 +22,7 @@ export type AppSubjects =
   | 'Sale'
   | 'User'
   | 'Role'
+  | 'Tenant'
   | 'Promotion'
   | 'Customer'
   | 'File'
@@ -80,6 +81,12 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'Role', action: 'update', description: 'Update roles' },
   { subject: 'Role', action: 'delete', description: 'Delete roles' },
   { subject: 'Role', action: 'manage', description: 'Full role management' },
+
+  // Tenant permissions
+  { subject: 'Tenant', action: 'create', description: 'Create new tenants' },
+  { subject: 'Tenant', action: 'read', description: 'View tenants' },
+  { subject: 'Tenant', action: 'update', description: 'Update tenants' },
+  { subject: 'Tenant', action: 'delete', description: 'Deactivate tenants' },
 
   // Promotion permissions
   {

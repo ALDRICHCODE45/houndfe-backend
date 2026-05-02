@@ -11,7 +11,12 @@
  *
  * DOES NOT contain business logic (that's in User entity and VOs).
  */
-import { Inject, Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Inject,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
@@ -33,6 +38,10 @@ import {
   CaslAbilityFactory,
   type EffectivePermission,
 } from './authorization/casl-ability.factory';
+import { PrismaService } from '../shared/prisma/prisma.service';
+import type { AuthenticatedUser } from './interfaces/jwt-payload.interface';
+import type { SelectTenantDto } from './dto/select-tenant.dto';
+import type { SwitchTenantDto } from './dto/switch-tenant.dto';
 
 export interface AuthTokens {
   accessToken: string;
@@ -42,6 +51,40 @@ export interface AuthTokens {
 export interface AuthResponse extends AuthTokens {
   user: ReturnType<User['toResponse']>;
 }
+
+export interface TenantSummary {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface LoginSuccessResponse extends AuthTokens {
+  requiresTenantSelection: false;
+  user: ReturnType<User['toResponse']>;
+  tenants: TenantSummary[];
+}
+
+export interface LoginTenantSelectionResponse {
+  requiresTenantSelection: true;
+  user: ReturnType<User['toResponse']>;
+  tenants: TenantSummary[];
+  tempToken: string;
+  expiresIn: 300;
+}
+
+export type LoginResponse = LoginSuccessResponse | LoginTenantSelectionResponse;
+
+type AuthContext = {
+  tenantId: string | null;
+  tenantSlug: string | null;
+  isSuperAdmin: boolean;
+};
+
+type TenantSelectionTokenPayload = {
+  sub: string;
+  email: string;
+  purpose: 'tenant-selection';
+};
 
 export interface UserPermissionsResponse {
   permissions: EffectivePermission[];
@@ -59,6 +102,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly caslAbilityFactory: CaslAbilityFactory,
+    private readonly prisma: PrismaService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponse> {
@@ -77,7 +121,11 @@ export class AuthService {
     });
 
     const saved = await this.userRepo.save(user);
-    const tokens = await this.generateTokens(saved.id, saved.email.value);
+    const tokens = await this.generateTokens(saved.id, saved.email.value, {
+      tenantId: null,
+      tenantSlug: null,
+      isSuperAdmin: false,
+    });
     await this.updateRefreshTokenHash(saved.id, tokens.refreshToken);
 
     return {
@@ -86,7 +134,7 @@ export class AuthService {
     };
   }
 
-  async login(dto: LoginDto): Promise<AuthResponse> {
+  async login(dto: LoginDto): Promise<LoginResponse> {
     const email = Email.create(dto.email);
     const user = await this.userRepo.findByEmail(email);
 
@@ -99,13 +147,175 @@ export class AuthService {
       throw new InvalidCredentialsError(); // Don't reveal account is deactivated
     }
 
-    const tokens = await this.generateTokens(user.id, user.email.value);
+    const memberships = await this.prisma.tenantMembership.findMany({
+      where: { userId: user.id },
+      include: {
+        tenant: true,
+        role: true,
+      },
+    });
+
+    const activeMemberships = memberships.filter((m) => m.tenant.isActive);
+    const tenants = activeMemberships.map((m) => ({
+      id: m.tenant.id,
+      name: m.tenant.name,
+      slug: m.tenant.slug,
+    }));
+
+    const hasGlobalSuperAdminRole = await this.prisma.role.findFirst({
+      where: {
+        tenantId: null,
+        tenantMemberships: {
+          some: { userId: user.id },
+        },
+        OR: [
+          { isSystem: true, name: 'Super Admin' },
+          {
+            permissions: {
+              some: {
+                permission: {
+                  subject: 'all',
+                  action: 'manage',
+                },
+              },
+            },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (hasGlobalSuperAdminRole) {
+      const authContext: AuthContext = {
+        tenantId: null,
+        tenantSlug: null,
+        isSuperAdmin: true,
+      };
+      const tokens = await this.generateTokens(user.id, user.email.value, authContext);
+      await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
+
+      return {
+        requiresTenantSelection: false,
+        ...tokens,
+        tenants,
+        user: user.toResponse(),
+      };
+    }
+
+    if (activeMemberships.length === 1) {
+      const selected = activeMemberships[0];
+      const authContext: AuthContext = {
+        tenantId: selected.tenant.id,
+        tenantSlug: selected.tenant.slug,
+        isSuperAdmin: false,
+      };
+      const tokens = await this.generateTokens(user.id, user.email.value, authContext);
+      await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
+
+      return {
+        requiresTenantSelection: false,
+        ...tokens,
+        tenants,
+        user: user.toResponse(),
+      };
+    }
+
+    if (activeMemberships.length > 1) {
+      const tempToken = await this.generateTenantSelectionToken(
+        user.id,
+        user.email.value,
+      );
+
+      return {
+        requiresTenantSelection: true,
+        user: user.toResponse(),
+        tenants,
+        tempToken,
+        expiresIn: 300,
+      };
+    }
+
+    throw new ForbiddenException('User does not belong to an active tenant');
+  }
+
+  async selectTenant(dto: SelectTenantDto): Promise<AuthResponse> {
+    const payload = await this.verifyTenantSelectionToken(dto.tempToken);
+
+    const membership = await this.prisma.tenantMembership.findFirst({
+      where: {
+        userId: payload.sub,
+        tenantId: dto.tenantId,
+      },
+      include: {
+        tenant: true,
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenException('User does not belong to the selected tenant');
+    }
+
+    if (!membership.tenant.isActive) {
+      throw new ForbiddenException('Selected tenant is inactive');
+    }
+
+    const user = await this.userRepo.findById(payload.sub);
+    if (!user) throw new InvalidCredentialsError();
+
+    const authContext: AuthContext = {
+      tenantId: membership.tenant.id,
+      tenantSlug: membership.tenant.slug,
+      isSuperAdmin: false,
+    };
+
+    const tokens = await this.generateTokens(user.id, user.email.value, authContext);
     await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
 
     return {
       ...tokens,
       user: user.toResponse(),
     };
+  }
+
+  async switchTenant(
+    currentUser: AuthenticatedUser,
+    dto: SwitchTenantDto,
+  ): Promise<AuthTokens> {
+    if (!currentUser.isSuperAdmin) {
+      throw new ForbiddenException('Only super admins can switch tenant context');
+    }
+
+    let authContext: AuthContext;
+    if (!dto.tenantId) {
+      authContext = {
+        tenantId: null,
+        tenantSlug: null,
+        isSuperAdmin: true,
+      };
+    } else {
+      const tenant = await this.prisma.tenant.findUnique({
+        where: { id: dto.tenantId },
+      });
+
+      if (!tenant || !tenant.isActive) {
+        throw new ForbiddenException('Target tenant is missing or inactive');
+      }
+
+      authContext = {
+        tenantId: tenant.id,
+        tenantSlug: tenant.slug,
+        isSuperAdmin: true,
+      };
+    }
+
+    const tokens = await this.generateTokens(
+      currentUser.userId,
+      currentUser.email,
+      authContext,
+    );
+    await this.updateRefreshTokenHash(currentUser.userId, tokens.refreshToken);
+
+    return tokens;
   }
 
   async refreshTokens(refreshToken: string): Promise<AuthTokens> {
@@ -129,7 +339,13 @@ export class AuthService {
     const isValid = await bcrypt.compare(refreshToken, user.hashedRefreshToken);
     if (!isValid) throw new InvalidCredentialsError();
 
-    const tokens = await this.generateTokens(user.id, user.email.value);
+    const authContext: AuthContext = {
+      tenantId: payload.tenantId,
+      tenantSlug: payload.tenantSlug,
+      isSuperAdmin: payload.isSuperAdmin,
+    };
+
+    const tokens = await this.generateTokens(user.id, user.email.value, authContext);
     await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
 
     return tokens;
@@ -143,17 +359,51 @@ export class AuthService {
     await this.userRepo.save(user);
   }
 
-  async getProfile(userId: string): Promise<ReturnType<User['toResponse']>> {
+  async getProfile(userId: string, tenantId?: string | null): Promise<{
+    id: string;
+    email: string;
+    name: string;
+    isActive: boolean;
+    createdAt: string;
+    tenant: TenantSummary | null;
+    memberships: TenantSummary[];
+  }> {
     const user = await this.userRepo.findById(userId);
     if (!user) throw new EntityNotFoundError('User', userId);
-    return user.toResponse();
+
+    const memberships = await this.prisma.tenantMembership.findMany({
+      where: { userId },
+      include: { tenant: true },
+    });
+
+    const activeMemberships = memberships
+      .filter((membership) => membership.tenant.isActive)
+      .map((membership) => ({
+        id: membership.tenant.id,
+        name: membership.tenant.name,
+        slug: membership.tenant.slug,
+      }));
+
+    const currentTenant =
+      tenantId == null
+        ? null
+        : activeMemberships.find((membership) => membership.id === tenantId) ?? null;
+
+    return {
+      ...user.toResponse(),
+      tenant: currentTenant,
+      memberships: activeMemberships,
+    };
   }
 
-  async getUserPermissions(userId: string): Promise<UserPermissionsResponse> {
+  async getUserPermissions(user: AuthenticatedUser): Promise<UserPermissionsResponse> {
     const permissions =
-      await this.caslAbilityFactory.getEffectivePermissions(userId);
+      await this.caslAbilityFactory.getEffectivePermissions(user.userId, {
+        tenantId: user.tenantId,
+        isSuperAdmin: user.isSuperAdmin,
+      });
 
-    if (!permissions) throw new EntityNotFoundError('User', userId);
+    if (!permissions) throw new EntityNotFoundError('User', user.userId);
 
     const permissionCodes = permissions.map((p) => `${p.action}:${p.subject}`);
 
@@ -163,8 +413,15 @@ export class AuthService {
   private async generateTokens(
     userId: string,
     email: string,
+    authContext: AuthContext,
   ): Promise<AuthTokens> {
-    const payload: JwtTokenPayload = { sub: userId, email };
+    const payload: JwtTokenPayload = {
+      sub: userId,
+      email,
+      tenantId: authContext.tenantId,
+      tenantSlug: authContext.tenantSlug,
+      isSuperAdmin: authContext.isSuperAdmin,
+    };
 
     const accessExpiration = this.configService.get<ms.StringValue>(
       'JWT_ACCESS_EXPIRATION',
@@ -187,6 +444,43 @@ export class AuthService {
     ]);
 
     return { accessToken, refreshToken };
+  }
+
+  private async generateTenantSelectionToken(
+    userId: string,
+    email: string,
+  ): Promise<string> {
+    const payload: TenantSelectionTokenPayload = {
+      sub: userId,
+      email,
+      purpose: 'tenant-selection',
+    };
+
+    return this.jwtService.signAsync(payload, {
+      secret: this.configService.getOrThrow<string>('JWT_SECRET'),
+      expiresIn: '5m',
+    });
+  }
+
+  private async verifyTenantSelectionToken(
+    tempToken: string,
+  ): Promise<TenantSelectionTokenPayload> {
+    try {
+      const payload = await this.jwtService.verifyAsync<TenantSelectionTokenPayload>(
+        tempToken,
+        {
+          secret: this.configService.getOrThrow<string>('JWT_SECRET'),
+        },
+      );
+
+      if (payload.purpose !== 'tenant-selection') {
+        throw new UnauthorizedException('Invalid token purpose');
+      }
+
+      return payload;
+    } catch {
+      throw new UnauthorizedException('Invalid or expired temp token');
+    }
   }
 
   private async updateRefreshTokenHash(

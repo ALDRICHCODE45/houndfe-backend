@@ -9,12 +9,16 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  UseGuards,
 } from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PriceListsService } from './price-lists.service';
 import { CreatePriceListDto } from './dto/create-price-list.dto';
 import { UpdatePriceListDto } from './dto/update-price-list.dto';
 
 @Controller('price-lists')
+@UseGuards(JwtAuthGuard, TenantContextGuard)
 export class PriceListsController {
   constructor(private readonly priceListsService: PriceListsService) {}
 

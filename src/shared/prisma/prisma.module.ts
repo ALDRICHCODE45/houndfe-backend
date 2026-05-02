@@ -5,11 +5,14 @@
  * without explicitly importing this module.
  */
 import { Global, Module } from '@nestjs/common';
+import { ClsModule } from 'nestjs-cls';
 import { PrismaService } from './prisma.service';
+import { TenantPrismaService } from './tenant-prisma.service';
 
 @Global()
 @Module({
-  providers: [PrismaService],
-  exports: [PrismaService],
+  imports: [ClsModule],
+  providers: [PrismaService, TenantPrismaService],
+  exports: [PrismaService, TenantPrismaService],
 })
 export class DatabaseModule {}

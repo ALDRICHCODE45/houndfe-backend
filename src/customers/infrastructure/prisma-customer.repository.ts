@@ -1,28 +1,31 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { Customer } from '../domain/customer.entity';
 import type { ICustomerRepository } from '../domain/customer.repository';
 import type { Customer as PrismaCustomer } from '@prisma/client';
 
 @Injectable()
 export class PrismaCustomerRepository implements ICustomerRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   async findById(id: string): Promise<Customer | null> {
-    const data = await this.prisma.customer.findUnique({ where: { id } });
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.customer.findUnique({ where: { id } });
     return data ? this.toDomain(data) : null;
   }
 
   async findAll(): Promise<Customer[]> {
-    const data = await this.prisma.customer.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.customer.findMany({
       orderBy: { createdAt: 'desc' },
     });
     return data.map((d) => this.toDomain(d));
   }
 
   async save(customer: Customer): Promise<Customer> {
+    const prisma = this.tenantPrisma.getClient();
     const p = customer.toPersistence();
-    const saved = await this.prisma.customer.upsert({
+    const saved = await prisma.customer.upsert({
       where: { id: p.id },
       update: {
         firstName: p.firstName,
@@ -73,7 +76,8 @@ export class PrismaCustomerRepository implements ICustomerRepository {
   }
 
   async delete(id: string): Promise<void> {
-    await this.prisma.customer.delete({ where: { id } });
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.customer.delete({ where: { id } });
   }
 
   private toDomain(data: PrismaCustomer): Customer {

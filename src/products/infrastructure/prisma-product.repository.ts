@@ -5,44 +5,49 @@
  * Translates between domain entities and database records.
  */
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { Product } from '../domain/product.entity';
 import type { IProductRepository } from '../domain/product.repository';
 import type { Product as PrismaProduct } from '@prisma/client';
 
 @Injectable()
 export class PrismaProductRepository implements IProductRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   async findById(id: string): Promise<Product | null> {
-    const data = await this.prisma.product.findUnique({ where: { id } });
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.product.findUnique({ where: { id } });
     return data ? this.toDomain(data) : null;
   }
 
   async findBySku(sku: string): Promise<Product | null> {
-    const data = await this.prisma.product.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.product.findUnique({
       where: { sku: sku.toUpperCase() },
     });
     return data ? this.toDomain(data) : null;
   }
 
   async findByBarcode(barcode: string): Promise<Product | null> {
-    const data = await this.prisma.product.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.product.findUnique({
       where: { barcode },
     });
     return data ? this.toDomain(data) : null;
   }
 
   async findAll(): Promise<Product[]> {
-    const data = await this.prisma.product.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.product.findMany({
       orderBy: { createdAt: 'desc' },
     });
     return data.map((d) => this.toDomain(d));
   }
 
   async save(product: Product): Promise<Product> {
+    const prisma = this.tenantPrisma.getClient();
     const p = product.toPersistence();
-    const saved = await this.prisma.product.upsert({
+    const saved = await prisma.product.upsert({
       where: { id: p.id },
       update: {
         name: p.name,
@@ -103,7 +108,8 @@ export class PrismaProductRepository implements IProductRepository {
   }
 
   async delete(id: string): Promise<void> {
-    await this.prisma.product.delete({ where: { id } });
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.product.delete({ where: { id } });
   }
 
   async isSkuTaken(
@@ -113,7 +119,8 @@ export class PrismaProductRepository implements IProductRepository {
     const upper = sku.toUpperCase();
 
     // Check products table — exclude the product being updated (if any)
-    const productMatch = await this.prisma.product.findFirst({
+    const prisma = this.tenantPrisma.getClient();
+    const productMatch = await prisma.product.findFirst({
       where: {
         sku: upper,
         ...(exclude?.productId ? { id: { not: exclude.productId } } : {}),
@@ -122,7 +129,7 @@ export class PrismaProductRepository implements IProductRepository {
     if (productMatch) return true;
 
     // Check variants table — exclude only the specific variant being updated (if any)
-    const variantMatch = await this.prisma.variant.findFirst({
+    const variantMatch = await prisma.variant.findFirst({
       where: {
         sku: upper,
         ...(exclude?.variantId ? { id: { not: exclude.variantId } } : {}),
@@ -136,7 +143,8 @@ export class PrismaProductRepository implements IProductRepository {
     exclude?: { productId?: string; variantId?: string },
   ): Promise<boolean> {
     // Check products table — exclude the product being updated (if any)
-    const productMatch = await this.prisma.product.findFirst({
+    const prisma = this.tenantPrisma.getClient();
+    const productMatch = await prisma.product.findFirst({
       where: {
         barcode,
         ...(exclude?.productId ? { id: { not: exclude.productId } } : {}),
@@ -145,7 +153,7 @@ export class PrismaProductRepository implements IProductRepository {
     if (productMatch) return true;
 
     // Check variants table — exclude only the specific variant being updated (if any)
-    const variantMatch = await this.prisma.variant.findFirst({
+    const variantMatch = await prisma.variant.findFirst({
       where: {
         barcode,
         ...(exclude?.variantId ? { id: { not: exclude.variantId } } : {}),

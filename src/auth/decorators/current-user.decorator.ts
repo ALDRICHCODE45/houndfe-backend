@@ -18,6 +18,14 @@ import type { AuthenticatedUser } from '../interfaces/jwt-payload.interface';
 export const CurrentUser = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): AuthenticatedUser => {
     const request = ctx.switchToHttp().getRequest<Request>();
-    return request.user as AuthenticatedUser;
+    const user = request.user as AuthenticatedUser;
+
+    return {
+      userId: user.userId,
+      email: user.email,
+      tenantId: user.tenantId,
+      tenantSlug: user.tenantSlug,
+      isSuperAdmin: user.isSuperAdmin,
+    };
   },
 );

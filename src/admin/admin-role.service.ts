@@ -9,11 +9,14 @@
  * DOES NOT contain business logic (that's in Role entity).
  */
 import { Inject, Injectable } from '@nestjs/common';
+import { ClsService } from 'nestjs-cls';
 import type { IRoleRepository } from '../auth/authorization/domain/role.repository';
 import type { IPermissionRepository } from '../auth/authorization/domain/permission.repository';
 import { ROLE_REPOSITORY } from '../auth/authorization/domain/role.repository';
 import { PERMISSION_REPOSITORY } from '../auth/authorization/domain/permission.repository';
 import { Role } from '../auth/authorization/domain/role.entity';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
 import {
   EntityNotFoundError,
   EntityAlreadyExistsError,
@@ -30,6 +33,8 @@ export class AdminRoleService {
     private readonly roleRepo: IRoleRepository,
     @Inject(PERMISSION_REPOSITORY)
     private readonly permissionRepo: IPermissionRepository,
+    private readonly tenantPrisma: TenantPrismaService,
+    private readonly cls: ClsService<TenantClsStore>,
   ) {}
 
   async findAll(): Promise<
@@ -38,10 +43,32 @@ export class AdminRoleService {
       userCount: number;
     }>
   > {
-    const result = await this.roleRepo.findAllWithCounts();
+    const { tenantId, isSuperAdmin } = this.cls.get();
+    const prisma = this.tenantPrisma.getClient();
+    const where = isSuperAdmin && tenantId === null ? {} : { tenantId };
+    const result = await prisma.role.findMany({
+      where,
+      include: {
+        permissions: { include: { permission: true } },
+        _count: { select: { tenantMemberships: true } },
+      },
+    });
+
     return result.map((r) => ({
-      role: r.role.toResponse(),
-      userCount: r.userCount,
+      role: Role.fromPersistence({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        isSystem: r.isSystem,
+        permissions: r.permissions.map((rp) => ({
+          subject: rp.permission.subject as any,
+          action: rp.permission.action as any,
+          description: rp.permission.description ?? '',
+        })),
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      }).toResponse(),
+      userCount: r._count.tenantMemberships,
     }));
   }
 
@@ -52,8 +79,19 @@ export class AdminRoleService {
   }
 
   async create(dto: CreateRoleDto): Promise<ReturnType<Role['toResponse']>> {
+    const { tenantId, isSuperAdmin } = this.cls.get();
+    const prisma = this.tenantPrisma.getClient();
+    const targetTenantId = isSuperAdmin && tenantId === null ? null : tenantId;
+
     // Validate name unique
-    const existing = await this.roleRepo.findByName(dto.name);
+    const existing = await prisma.role.findUnique({
+      where: {
+        tenantId_name: {
+          tenantId: targetTenantId,
+          name: dto.name,
+        },
+      },
+    });
     if (existing) throw new EntityAlreadyExistsError('Role', dto.name);
 
     const role = Role.create({
@@ -62,8 +100,33 @@ export class AdminRoleService {
       description: dto.description,
     });
 
-    const saved = await this.roleRepo.save(role);
-    return saved.toResponse();
+    const saved = await prisma.role.create({
+      data: {
+        id: role.id,
+        name: role.name,
+        description: role.description,
+        isSystem: role.isSystem,
+        tenantId: targetTenantId,
+      },
+      include: {
+        permissions: { include: { permission: true } },
+      },
+    });
+
+    const domain = Role.fromPersistence({
+      id: saved.id,
+      name: saved.name,
+      description: saved.description,
+      isSystem: saved.isSystem,
+      permissions: saved.permissions.map((rp) => ({
+        subject: rp.permission.subject as any,
+        action: rp.permission.action as any,
+        description: rp.permission.description ?? '',
+      })),
+      createdAt: saved.createdAt,
+      updatedAt: saved.updatedAt,
+    });
+    return domain.toResponse();
   }
 
   async update(

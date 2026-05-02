@@ -25,6 +25,11 @@ export interface EffectivePermission {
   action: AppActions;
 }
 
+export interface AbilityContext {
+  tenantId: string | null;
+  isSuperAdmin: boolean;
+}
+
 @Injectable()
 export class CaslAbilityFactory {
   constructor(private readonly prisma: PrismaService) {}
@@ -35,9 +40,15 @@ export class CaslAbilityFactory {
    * @param userId - The user's ID
    * @returns AppAbility instance with all user permissions
    */
-  async createForUser(userId: string): Promise<AppAbility> {
+  async createForUser(userId: string, context: AbilityContext): Promise<AppAbility> {
     const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
-    const permissions = await this.queryUserPermissions(userId);
+
+    if (context.isSuperAdmin && context.tenantId === null) {
+      can('manage', 'all');
+      return build();
+    }
+
+    const permissions = await this.queryUserPermissions(userId, context.tenantId);
 
     if (!permissions) {
       // User not found → return empty ability (no permissions)
@@ -62,8 +73,13 @@ export class CaslAbilityFactory {
    */
   async getEffectivePermissions(
     userId: string,
+    context: AbilityContext,
   ): Promise<EffectivePermission[] | null> {
-    const raw = await this.queryUserPermissions(userId);
+    if (context.isSuperAdmin && context.tenantId === null) {
+      return [{ action: 'manage', subject: 'all' }];
+    }
+
+    const raw = await this.queryUserPermissions(userId, context.tenantId);
 
     // null means user was not found (preserve distinction for error handling upstream)
     if (raw === null) return null;
@@ -96,19 +112,18 @@ export class CaslAbilityFactory {
    */
   private async queryUserPermissions(
     userId: string,
+    tenantId: string | null,
   ): Promise<EffectivePermission[] | null> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
+    if (!tenantId) return [];
+
+    const membership = await this.prisma.tenantMembership.findFirst({
+      where: { userId, tenantId },
       include: {
-        roles: {
+        role: {
           include: {
-            role: {
+            permissions: {
               include: {
-                permissions: {
-                  include: {
-                    permission: true,
-                  },
-                },
+                permission: true,
               },
             },
           },
@@ -116,13 +131,11 @@ export class CaslAbilityFactory {
       },
     });
 
-    if (!user) return null;
+    if (!membership) return [];
 
-    return user.roles.flatMap((userRole) =>
-      userRole.role.permissions.map((rolePermission) => ({
+    return membership.role.permissions.map((rolePermission) => ({
         action: rolePermission.permission.action as AppActions,
         subject: rolePermission.permission.subject as AppSubjects,
-      })),
-    );
+      }));
   }
 }

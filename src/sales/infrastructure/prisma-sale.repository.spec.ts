@@ -24,18 +24,58 @@ function makeMockPrisma() {
   } as any;
 }
 
+function makeTenantPrismaMock() {
+  const client = makeMockPrisma();
+  return {
+    getClient: jest.fn().mockReturnValue(client),
+    client,
+  };
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 describe('PrismaSaleRepository', () => {
+  let tenantPrisma: ReturnType<typeof makeTenantPrismaMock>;
   let prisma: ReturnType<typeof makeMockPrisma>;
   let repo: PrismaSaleRepository;
 
   beforeEach(() => {
-    prisma = makeMockPrisma();
-    repo = new PrismaSaleRepository(prisma);
+    tenantPrisma = makeTenantPrismaMock();
+    prisma = tenantPrisma.client;
+    repo = new PrismaSaleRepository(tenantPrisma as any);
+  });
+
+  it('uses tenant-scoped prisma client', async () => {
+    prisma.sale.findUnique.mockResolvedValue(null);
+    await repo.findById('missing-sale');
+    expect(tenantPrisma.getClient).toHaveBeenCalled();
   });
 
   describe('save', () => {
+    it('creates sale without requiring tenantId in payload', async () => {
+      const sale = Sale.create({ id: 'sale-tenantless', userId: 'user-1' });
+
+      prisma.sale.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'sale-tenantless',
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [],
+        });
+      prisma.sale.create.mockResolvedValue({ id: 'sale-tenantless' });
+
+      await repo.save(sale);
+
+      expect(prisma.sale.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.not.objectContaining({ tenantId: expect.anything() }),
+        }),
+      );
+    });
+
     it('should create a new sale with items', async () => {
       const sale = Sale.create({ id: 'sale-1', userId: 'user-1' });
       sale.addItem({
