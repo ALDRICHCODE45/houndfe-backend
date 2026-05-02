@@ -1836,6 +1836,57 @@ export class ProductsService {
   }
 
   /**
+   * Get a single product by ID for POS detail view.
+   * Reuses the same Prisma include and mapping as searchForPOS.
+   */
+  async findOneForPOS(productId: string) {
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, sellInPos: true },
+      include: {
+        category: { select: { id: true, name: true } },
+        brand: { select: { id: true, name: true } },
+        images: {
+          orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+          take: 5,
+          where: { variantId: null },
+        },
+        priceLists: {
+          where: { globalPriceList: { isDefault: true } },
+          include: {
+            globalPriceList: { select: { name: true, isDefault: true } },
+          },
+          take: 1,
+        },
+        variants: {
+          include: {
+            images: {
+              orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+              take: 5,
+            },
+            variantPrices: {
+              where: { priceList: { globalPriceList: { isDefault: true } } },
+              include: {
+                priceList: {
+                  select: {
+                    globalPriceList: {
+                      select: { name: true, isDefault: true },
+                    },
+                  },
+                },
+              },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    if (!product) return null;
+
+    return this.mapPosCatalogItem(product);
+  }
+
+  /**
    * Map a Prisma product to POS catalog item format.
    * Handles variants, images, prices, and stock.
    */
@@ -1859,6 +1910,7 @@ export class ProductsService {
         ? {
             quantity: product.quantity ?? 0,
             minQuantity: product.minQuantity ?? 0,
+            location: product.location ?? null,
           }
         : null;
 
@@ -1878,6 +1930,7 @@ export class ProductsService {
             ? {
                 quantity: variant.quantity ?? 0,
                 minQuantity: variant.minQuantity ?? 0,
+                location: product.location ?? null,
               }
             : null,
         }))
@@ -1886,11 +1939,13 @@ export class ProductsService {
     return {
       id: product.id,
       name: product.name,
+      description: product.description ?? null,
       sku: product.sku,
       barcode: product.barcode,
       unit: product.unit,
       hasVariants: product.hasVariants,
       useStock: product.useStock,
+      enabledForPos: product.sellInPos ?? true,
       category: product.category,
       brand: product.brand,
       mainImage,

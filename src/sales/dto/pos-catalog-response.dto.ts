@@ -12,6 +12,7 @@ export interface PosCatalogPrice {
 export interface PosCatalogStock {
   quantity: number;
   minQuantity: number;
+  location: string | null;
 }
 
 export interface PosCatalogVariant {
@@ -37,11 +38,13 @@ export interface PosCatalogBrand {
 export interface PosCatalogItem {
   id: string;
   name: string;
+  description: string | null;
   sku: string | null;
   barcode: string | null;
   unit: string | null;
   hasVariants: boolean;
   useStock: boolean;
+  enabledForPos: boolean;
   category: PosCatalogCategory | null;
   brand: PosCatalogBrand | null;
   mainImage: string | null;

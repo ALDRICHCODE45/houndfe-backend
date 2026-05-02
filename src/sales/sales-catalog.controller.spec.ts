@@ -19,6 +19,7 @@ import {
 function makeMockSalesService() {
   return {
     searchPosCatalog: jest.fn(),
+    getProductDetail: jest.fn(),
   } as any;
 }
 
@@ -111,6 +112,34 @@ describe('SalesCatalogController', () => {
       await controller.searchPosCatalog(dto);
 
       expect(service.searchPosCatalog).toHaveBeenCalledWith(dto);
+    });
+  });
+
+  describe('GET /sales/pos-catalog/:productId', () => {
+    it('should return single product detail', async () => {
+      const mockProduct = {
+        id: 'prod-1',
+        name: 'Alimento para perro',
+        description: 'Premium dog food',
+        sku: 'ALI-001',
+        enabledForPos: true,
+        stock: { quantity: 15, minQuantity: 5, location: 'Estante B' },
+      };
+
+      service.getProductDetail.mockResolvedValue(mockProduct);
+
+      const result = await controller.getProductDetail('prod-1');
+
+      expect(result).toEqual(mockProduct);
+      expect(service.getProductDetail).toHaveBeenCalledWith('prod-1');
+    });
+
+    it('should pass through productId to service', async () => {
+      service.getProductDetail.mockResolvedValue({ id: 'prod-xyz' });
+
+      await controller.getProductDetail('prod-xyz');
+
+      expect(service.getProductDetail).toHaveBeenCalledWith('prod-xyz');
     });
   });
 

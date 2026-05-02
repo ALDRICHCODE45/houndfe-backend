@@ -993,6 +993,31 @@ describe('SalesService', () => {
     });
   });
 
+  describe('getProductDetail', () => {
+    it('should delegate to ProductsService.findOneForPOS and return result', async () => {
+      const mockProduct = {
+        id: 'prod-1',
+        name: 'Alimento',
+        description: 'Premium',
+        enabledForPos: true,
+      };
+      productsService.findOneForPOS = jest.fn().mockResolvedValue(mockProduct);
+
+      const result = await service.getProductDetail('prod-1');
+
+      expect(result).toEqual(mockProduct);
+      expect(productsService.findOneForPOS).toHaveBeenCalledWith('prod-1');
+    });
+
+    it('should throw EntityNotFoundError when product not found', async () => {
+      productsService.findOneForPOS = jest.fn().mockResolvedValue(null);
+
+      await expect(service.getProductDetail('missing-id')).rejects.toThrow(
+        /Product.*missing-id.*not found/,
+      );
+    });
+  });
+
   describe('price override use cases', () => {
     it('getAvailablePrices should return mapped prices with isCurrent', async () => {
       const sale = Sale.create({ id: 'sale-av', userId: 'user-1' });

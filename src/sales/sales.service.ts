@@ -303,6 +303,18 @@ export class SalesService {
     return this.productsService.searchForPOS(dto);
   }
 
+  /**
+   * Get single product detail for POS (facade to ProductsService).
+   * Delegates to ProductsService.findOneForPOS.
+   */
+  async getProductDetail(productId: string) {
+    const product = await this.productsService.findOneForPOS(productId);
+    if (!product) {
+      throw new EntityNotFoundError('Product', productId);
+    }
+    return product;
+  }
+
   async getAvailablePrices(
     saleId: string,
     itemId: string,

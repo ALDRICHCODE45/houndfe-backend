@@ -26,6 +26,7 @@ function makeMockPrisma() {
   return {
     product: {
       findMany: jest.fn(),
+      findFirst: jest.fn(),
       count: jest.fn(),
     },
   };
@@ -109,6 +110,7 @@ describe('ProductsService — searchForPOS', () => {
     expect(result.items[0].stock).toEqual({
       quantity: 120,
       minQuantity: 10,
+      location: null,
     });
   });
 
@@ -347,5 +349,157 @@ describe('ProductsService — searchForPOS', () => {
       priceDecimal: 0,
       priceListName: 'PUBLICO',
     });
+  });
+});
+
+describe('ProductsService — findOneForPOS', () => {
+  let repo: ReturnType<typeof makeMockRepo>;
+  let prisma: ReturnType<typeof makeMockPrisma>;
+  let service: ProductsService;
+
+  beforeEach(() => {
+    repo = makeMockRepo();
+    prisma = makeMockPrisma();
+    service = createService(repo, prisma);
+  });
+
+  it('should return a single product with description, location, and enabledForPos', async () => {
+    const mockProduct = {
+      id: 'prod-1',
+      name: 'Alimento para perro',
+      description: 'Alimento premium para perros adultos',
+      sku: 'ALI-001',
+      barcode: '7501234567890',
+      unit: 'UNIDAD',
+      hasVariants: false,
+      useStock: true,
+      quantity: 15,
+      minQuantity: 5,
+      location: 'Estante B',
+      sellInPos: true,
+      category: { id: 'cat-1', name: 'Alimento' },
+      brand: { id: 'brand-1', name: 'PERRO FELIZ' },
+      images: [{ url: 'https://cdn.example.com/main.jpg', isMain: true }],
+      priceLists: [
+        {
+          priceCents: 40000,
+          globalPriceList: { name: 'PUBLICO', isDefault: true },
+        },
+      ],
+      variants: [],
+    };
+
+    prisma.product.findFirst.mockResolvedValue(mockProduct);
+
+    const result = await service.findOneForPOS('prod-1');
+
+    expect(result).not.toBeNull();
+    expect(result.id).toBe('prod-1');
+    expect(result.name).toBe('Alimento para perro');
+    expect(result.description).toBe('Alimento premium para perros adultos');
+    expect(result.enabledForPos).toBe(true);
+    expect(result.stock).toEqual({
+      quantity: 15,
+      minQuantity: 5,
+      location: 'Estante B',
+    });
+    expect(result.price).toEqual({
+      priceCents: 40000,
+      priceDecimal: 400,
+      priceListName: 'PUBLICO',
+    });
+  });
+
+  it('should return null when product not found or not sellInPos', async () => {
+    prisma.product.findFirst.mockResolvedValue(null);
+
+    const result = await service.findOneForPOS('missing-id');
+
+    expect(result).toBeNull();
+    expect(prisma.product.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'missing-id', sellInPos: true },
+      }),
+    );
+  });
+
+  it('should include variants with stock.location from product', async () => {
+    const mockProduct = {
+      id: 'prod-2',
+      name: 'Camisa',
+      description: null,
+      sku: null,
+      barcode: null,
+      unit: 'PIEZA',
+      hasVariants: true,
+      useStock: true,
+      quantity: 0,
+      minQuantity: 0,
+      location: 'Rack A',
+      sellInPos: true,
+      category: null,
+      brand: null,
+      images: [],
+      priceLists: [],
+      variants: [
+        {
+          id: 'var-1',
+          name: 'Roja M',
+          sku: 'CAM-R-M',
+          barcode: null,
+          quantity: 10,
+          minQuantity: 2,
+          images: [],
+          variantPrices: [
+            {
+              priceCents: 15000,
+              priceList: {
+                globalPriceList: { name: 'PUBLICO', isDefault: true },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    prisma.product.findFirst.mockResolvedValue(mockProduct);
+
+    const result = await service.findOneForPOS('prod-2');
+
+    expect(result.hasVariants).toBe(true);
+    expect(result.description).toBeNull();
+    expect(result.variants[0].stock).toEqual({
+      quantity: 10,
+      minQuantity: 2,
+      location: 'Rack A',
+    });
+  });
+
+  it('should return null description when product has no description', async () => {
+    const mockProduct = {
+      id: 'prod-3',
+      name: 'Simple Product',
+      sku: null,
+      barcode: null,
+      unit: 'PIEZA',
+      hasVariants: false,
+      useStock: false,
+      quantity: 0,
+      minQuantity: 0,
+      sellInPos: true,
+      category: null,
+      brand: null,
+      images: [],
+      priceLists: [],
+      variants: [],
+    };
+
+    prisma.product.findFirst.mockResolvedValue(mockProduct);
+
+    const result = await service.findOneForPOS('prod-3');
+
+    expect(result.description).toBeNull();
+    expect(result.stock).toBeNull();
+    expect(result.enabledForPos).toBe(true);
   });
 });
