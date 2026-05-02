@@ -38,6 +38,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
   // ============================================================
   async save(promotion: Promotion): Promise<Promotion> {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     try {
       const saved = await prisma.$transaction(async (tx) => {
         // Upsert the main promotion row
@@ -61,6 +62,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             getDiscountPercent: promotion.getDiscountPercent,
             buyTargetType: promotion.buyTargetType,
             getTargetType: promotion.getTargetType,
+            tenantId,
           } as Prisma.PromotionUncheckedCreateInput,
           update: {
             title: promotion.title,
@@ -93,6 +95,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
               side: item.side,
               targetType: item.targetType,
               targetId: item.targetId,
+              tenantId,
             })) as Prisma.PromotionTargetItemCreateManyInput[],
           });
         }
@@ -105,6 +108,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             data: promotion.customers.map((c) => ({
               promotionId: promotion.id,
               customerId: c.customerId,
+              tenantId,
             })) as Prisma.PromotionCustomerCreateManyInput[],
           });
         }
@@ -117,6 +121,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             data: promotion.priceLists.map((pl) => ({
               promotionId: promotion.id,
               globalPriceListId: pl.globalPriceListId,
+              tenantId,
             })) as Prisma.PromotionPriceListCreateManyInput[],
           });
         }
@@ -129,6 +134,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             data: promotion.daysOfWeek.map((d) => ({
               promotionId: promotion.id,
               day: d.day,
+              tenantId,
             })) as Prisma.PromotionDayOfWeekCreateManyInput[],
           });
         }

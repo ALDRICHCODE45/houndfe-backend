@@ -17,6 +17,7 @@ function makeTenantPrismaMock() {
 
   return {
     getClient: jest.fn().mockReturnValue(client),
+    getTenantId: jest.fn().mockReturnValue('tenant-1'),
     client,
   };
 }
@@ -62,7 +63,7 @@ describe('PrismaProductRepository tenant scoping', () => {
     expect(tenantPrisma.getClient).toHaveBeenCalled();
     expect(tenantPrisma.client.product.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        create: expect.not.objectContaining({ tenantId: expect.anything() }),
+        create: expect.objectContaining({ tenantId: 'tenant-1' }),
       }),
     );
   });

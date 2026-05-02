@@ -24,6 +24,7 @@ describe('PrismaFileRepository', () => {
 
     mockTenantPrisma = {
       getClient: jest.fn().mockReturnValue(mockPrismaService),
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
     };
 
     repository = new PrismaFileRepository(mockTenantPrisma);
@@ -73,6 +74,7 @@ describe('PrismaFileRepository', () => {
           ownerType: 'Product',
           ownerId: 'prod-1',
           uploadedBy: 'user-1',
+          tenantId: 'tenant-1',
           createdAt: new Date('2026-04-22T00:00:00Z'),
         },
       });

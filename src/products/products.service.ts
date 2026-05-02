@@ -26,6 +26,7 @@ import {
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
 import { PrismaService } from '../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type { IvaRateValue } from './domain/value-objects/iva-rate.value-object';
 import type { IepsRateValue } from './domain/value-objects/ieps-rate.value-object';
 import type { PurchaseCostModeValue } from './domain/value-objects/purchase-cost.value-object';
@@ -91,11 +92,13 @@ export class ProductsService {
     private readonly productRepo: IProductRepository,
     private readonly prisma: PrismaService,
     private readonly filesService: FilesService,
+    private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
   // ==================== Product CRUD ====================
 
   async create(dto: CreateProductDto) {
+    const tenantId = this.tenantPrisma.getTenantId();
     // ── Pre-validation: context checks before touching DB ──
 
     const hasVariants = dto.hasVariants ?? false;
@@ -289,7 +292,7 @@ export class ProductsService {
     const productId = product.id;
     const p = product.toPersistence();
 
-    await this.prisma.$transaction(async (tx) => {
+    await this.tenantPrisma.getClient().$transaction(async (tx) => {
       // 1. Create product
       await tx.product.create({
         data: {
@@ -318,6 +321,7 @@ export class ProductsService {
           quantity: p.quantity,
           minQuantity: p.minQuantity,
           hasVariants: p.hasVariants,
+          tenantId,
         } as Prisma.ProductUncheckedCreateInput,
       });
 
@@ -329,11 +333,12 @@ export class ProductsService {
       if (globalLists.length) {
         await tx.priceList.createMany({
           data: globalLists.map((globalList) => ({
-            productId,
-            globalPriceListId: globalList.id,
-            priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
-          })) as Prisma.PriceListCreateManyInput[],
-        });
+              productId,
+              globalPriceListId: globalList.id,
+              priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
+              tenantId,
+            })) as Prisma.PriceListCreateManyInput[],
+          });
       }
 
       // 3. Create inline variants (if provided)
@@ -364,6 +369,7 @@ export class ProductsService {
                 variantDto.minQuantity,
               ),
               purchaseNetCostCents: variantDto.purchaseNetCostCents ?? null,
+              tenantId,
             } as Prisma.VariantUncheckedCreateInput,
           });
 
@@ -374,6 +380,7 @@ export class ProductsService {
                 variantId: createdVariant.id,
                 priceListId: pl.id,
                 priceCents: 0,
+                tenantId,
               })) as Prisma.VariantPriceCreateManyInput[],
             });
           }
@@ -391,6 +398,7 @@ export class ProductsService {
               ? new Date(lotDto.manufactureDate)
               : null,
             expirationDate: new Date(lotDto.expirationDate),
+            tenantId,
           })) as Prisma.LotCreateManyInput[],
         });
       }
@@ -431,6 +439,7 @@ export class ProductsService {
                         create: (plDto.tierPrices ?? []).map((t) => ({
                           minQuantity: t.minQuantity,
                           priceCents: t.priceCents,
+                          tenantId,
                         })) as Prisma.TierPriceUncheckedCreateWithoutPriceListInput[],
                       },
                     }
@@ -449,6 +458,7 @@ export class ProductsService {
             url: imgDto.url,
             isMain: imgDto.isMain ?? false,
             sortOrder: imgDto.sortOrder ?? index,
+            tenantId,
           })) as Prisma.ProductImageCreateManyInput[],
         });
       }
@@ -646,6 +656,7 @@ export class ProductsService {
   // ==================== Variants ====================
 
   async addVariant(productId: string, dto: CreateVariantDto) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
@@ -664,7 +675,7 @@ export class ProductsService {
       dto.value,
     );
 
-    const variant = await this.prisma.$transaction(async (tx) => {
+    const variant = await this.tenantPrisma.getClient().$transaction(async (tx) => {
       const createdVariant = await tx.variant.create({
         data: {
           productId,
@@ -679,6 +690,7 @@ export class ProductsService {
             dto.minQuantity,
           ),
           purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
+          tenantId,
         } as Prisma.VariantUncheckedCreateInput,
       });
 
@@ -693,6 +705,7 @@ export class ProductsService {
             variantId: createdVariant.id,
             priceListId: pl.id,
             priceCents: 0,
+            tenantId,
           })) as Prisma.VariantPriceCreateManyInput[],
         });
       }
@@ -863,6 +876,7 @@ export class ProductsService {
     priceListId: string,
     dto: UpsertVariantPriceDto,
   ) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const { product, variant } = await this.ensureProductAndVariant(
       productId,
       variantId,
@@ -873,7 +887,7 @@ export class ProductsService {
       this.validateTierPrices(dto.tierPrices);
     }
 
-    await this.prisma.$transaction(async (tx) => {
+    await this.tenantPrisma.getClient().$transaction(async (tx) => {
       const variantPrice = await tx.variantPrice.upsert({
         where: {
           variantId_priceListId: { variantId: variant.id, priceListId },
@@ -883,6 +897,7 @@ export class ProductsService {
           variantId: variant.id,
           priceListId,
           priceCents: dto.priceCents,
+          tenantId,
         } as Prisma.VariantPriceUncheckedCreateInput,
       });
 
@@ -897,6 +912,7 @@ export class ProductsService {
               variantPriceId: variantPrice.id,
               minQuantity: tier.minQuantity,
               priceCents: tier.priceCents,
+              tenantId,
             })) as Prisma.VariantTierPriceCreateManyInput[],
           });
         }
@@ -934,6 +950,7 @@ export class ProductsService {
     variantId: string,
     dto: BulkUpsertVariantPricesDto,
   ) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const { variant } = await this.ensureProductAndVariant(
       productId,
       variantId,
@@ -967,7 +984,7 @@ export class ProductsService {
       }
     }
 
-    await this.prisma.$transaction(async (tx) => {
+    await this.tenantPrisma.getClient().$transaction(async (tx) => {
       for (const item of dto.prices) {
         const variantPrice = await tx.variantPrice.upsert({
           where: {
@@ -981,6 +998,7 @@ export class ProductsService {
             variantId: variant.id,
             priceListId: item.priceListId,
             priceCents: item.priceCents,
+            tenantId,
           } as Prisma.VariantPriceUncheckedCreateInput,
         });
 
@@ -995,6 +1013,7 @@ export class ProductsService {
                 variantPriceId: variantPrice.id,
                 minQuantity: tier.minQuantity,
                 priceCents: tier.priceCents,
+                tenantId,
               })) as Prisma.VariantTierPriceCreateManyInput[],
             });
           }
@@ -1043,6 +1062,7 @@ export class ProductsService {
   // ==================== Lots ====================
 
   async addLot(productId: string, dto: CreateLotDto) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
@@ -1079,6 +1099,7 @@ export class ProductsService {
           ? new Date(dto.manufactureDate)
           : null,
         expirationDate: new Date(dto.expirationDate),
+        tenantId,
       } as Prisma.LotUncheckedCreateInput,
     });
   }
@@ -1148,6 +1169,7 @@ export class ProductsService {
     priceListId: string,
     dto: UpdatePriceListDto,
   ) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
@@ -1173,6 +1195,7 @@ export class ProductsService {
                 create: dto.tierPrices.map((t) => ({
                   minQuantity: t.minQuantity,
                   priceCents: t.priceCents,
+                  tenantId,
                 })) as Prisma.TierPriceUncheckedCreateWithoutPriceListInput[],
               },
             }
@@ -1190,6 +1213,7 @@ export class ProductsService {
   // ==================== Images ====================
 
   async addImage(productId: string, dto: CreateImageDto) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
@@ -1223,6 +1247,7 @@ export class ProductsService {
           url: dto.url,
           isMain: dto.isMain ?? false,
           sortOrder: dto.sortOrder ?? 0,
+          tenantId,
         } as Prisma.ProductImageUncheckedCreateInput,
       });
     } catch (error) {
@@ -1299,6 +1324,7 @@ export class ProductsService {
     file: Express.Multer.File,
     uploadedBy: string,
   ) {
+    const tenantId = this.tenantPrisma.getTenantId();
     // Verify product exists
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
@@ -1330,6 +1356,7 @@ export class ProductsService {
         url: fileObject.url,
         isMain: false,
         sortOrder: nextSortOrder,
+        tenantId,
       } as Prisma.ProductImageUncheckedCreateInput,
     });
 
@@ -1351,6 +1378,7 @@ export class ProductsService {
     file: Express.Multer.File,
     uploadedBy: string,
   ) {
+    const tenantId = this.tenantPrisma.getTenantId();
     // Verify product exists
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
@@ -1391,6 +1419,7 @@ export class ProductsService {
         url: fileObject.url,
         isMain: false,
         sortOrder: nextSortOrder,
+        tenantId,
       } as Prisma.ProductImageUncheckedCreateInput,
     });
 

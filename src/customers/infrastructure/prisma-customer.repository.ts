@@ -24,6 +24,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
 
   async save(customer: Customer): Promise<Customer> {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     const p = customer.toPersistence();
     const saved = await prisma.customer.upsert({
       where: { id: p.id },
@@ -70,6 +71,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         billingMunicipality: p.billingMunicipality,
         billingCity: p.billingCity,
         billingState: p.billingState,
+        tenantId,
       } as Prisma.CustomerUncheckedCreateInput,
     });
     return this.toDomain(saved);

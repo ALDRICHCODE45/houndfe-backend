@@ -54,6 +54,7 @@ export class PrismaProductRepository implements IProductRepository {
 
   async save(product: Product): Promise<Product> {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     const p = product.toPersistence();
     const saved = await prisma.product.upsert({
       where: { id: p.id },
@@ -110,6 +111,7 @@ export class PrismaProductRepository implements IProductRepository {
         quantity: p.quantity,
         minQuantity: p.minQuantity,
         hasVariants: p.hasVariants,
+        tenantId,
       } as Prisma.ProductUncheckedCreateInput,
     });
     return this.toDomain(saved);

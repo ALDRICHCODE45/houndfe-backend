@@ -6,7 +6,10 @@ import {
 } from '../shared/domain/domain-error';
 
 function makeService(prisma: any) {
-  return new PriceListsService({ getClient: jest.fn().mockReturnValue(prisma) } as any);
+  return new PriceListsService({
+    getClient: jest.fn().mockReturnValue(prisma),
+    getTenantId: jest.fn().mockReturnValue('tenant-1'),
+  } as any);
 }
 
 describe('PriceListsService', () => {
@@ -73,14 +76,34 @@ describe('PriceListsService', () => {
     expect(created.name).toBe('Mayorista');
     expect(tx.priceList.createMany).toHaveBeenCalledWith({
       data: [
-        { productId: 'p1', globalPriceListId: 'gl-1', priceCents: 0 },
-        { productId: 'p2', globalPriceListId: 'gl-1', priceCents: 0 },
+        {
+          productId: 'p1',
+          globalPriceListId: 'gl-1',
+          priceCents: 0,
+          tenantId: 'tenant-1',
+        },
+        {
+          productId: 'p2',
+          globalPriceListId: 'gl-1',
+          priceCents: 0,
+          tenantId: 'tenant-1',
+        },
       ],
     });
     expect(tx.variantPrice.createMany).toHaveBeenCalledWith({
       data: [
-        { variantId: 'v1', priceListId: 'pl-p1', priceCents: 0 },
-        { variantId: 'v2', priceListId: 'pl-p1', priceCents: 0 },
+        {
+          variantId: 'v1',
+          priceListId: 'pl-p1',
+          priceCents: 0,
+          tenantId: 'tenant-1',
+        },
+        {
+          variantId: 'v2',
+          priceListId: 'pl-p1',
+          priceCents: 0,
+          tenantId: 'tenant-1',
+        },
       ],
     });
   });

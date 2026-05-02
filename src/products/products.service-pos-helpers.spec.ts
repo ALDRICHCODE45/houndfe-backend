@@ -56,7 +56,10 @@ function createService(
   repo: IProductRepository,
   prisma: ReturnType<typeof makeMockPrisma>,
 ) {
-  return new ProductsService(repo, prisma, makeMockFilesService());
+  return new ProductsService(repo, prisma, makeMockFilesService(), {
+    getTenantId: jest.fn().mockReturnValue('tenant-1'),
+    getClient: jest.fn().mockReturnValue(prisma),
+  } as any);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

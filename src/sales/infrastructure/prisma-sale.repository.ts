@@ -15,6 +15,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async save(sale: Sale): Promise<Sale> {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     // Check if sale exists
     const existing = await prisma.sale.findUnique({
       where: { id: sale.id },
@@ -36,6 +37,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         data: {
           id: sale.id,
           userId: sale.userId,
+          tenantId,
           ...saleData,
         } as Prisma.SaleUncheckedCreateInput,
       });
@@ -75,6 +77,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
+          tenantId,
         })) as Prisma.SaleItemCreateManyInput[],
       });
     } else {

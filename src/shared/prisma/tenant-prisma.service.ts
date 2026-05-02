@@ -14,4 +14,12 @@ export class TenantPrismaService {
   getClient() {
     return createTenantScopedPrisma(this.prisma, this.cls);
   }
+
+  getTenantId(): string {
+    const tenantId = this.cls.get('tenantId');
+    if (!tenantId) {
+      throw new Error('Tenant context required');
+    }
+    return tenantId;
+  }
 }

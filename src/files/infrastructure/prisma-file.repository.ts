@@ -16,6 +16,7 @@ export class PrismaFileRepository implements IFileRepository {
 
   async save(file: FileObject): Promise<FileObject> {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     const persisted = await prisma.fileObject.create({
       data: {
         id: file.id,
@@ -26,6 +27,7 @@ export class PrismaFileRepository implements IFileRepository {
         ownerType: file.ownerType,
         ownerId: file.ownerId,
         uploadedBy: file.uploadedBy,
+        tenantId,
         createdAt: file.createdAt,
       } as Prisma.FileObjectUncheckedCreateInput,
     });

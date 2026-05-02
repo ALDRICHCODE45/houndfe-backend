@@ -53,6 +53,7 @@ export class PrismaOrderRepository implements IOrderRepository {
 
   async save(order: Order): Promise<Order> {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     await prisma.order.upsert({
       where: { id: order.id },
       update: { status: order.status, completedAt: order.completedAt },
@@ -61,6 +62,7 @@ export class PrismaOrderRepository implements IOrderRepository {
         customerName: order.customerName,
         status: order.status,
         completedAt: order.completedAt,
+        tenantId,
       } as Prisma.OrderUncheckedCreateInput,
     });
 
@@ -76,6 +78,7 @@ export class PrismaOrderRepository implements IOrderRepository {
           quantity: item.quantity,
           unitPriceCents: Math.round(item.unitPrice.amount * 100),
           unitPriceCurrency: item.unitPrice.currency,
+          tenantId,
         })) as Prisma.OrderItemCreateManyInput[],
       });
     }

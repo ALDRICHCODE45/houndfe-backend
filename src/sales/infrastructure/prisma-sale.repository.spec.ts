@@ -28,6 +28,7 @@ function makeTenantPrismaMock() {
   const client = makeMockPrisma();
   return {
     getClient: jest.fn().mockReturnValue(client),
+    getTenantId: jest.fn().mockReturnValue('tenant-1'),
     client,
   };
 }
@@ -71,7 +72,7 @@ describe('PrismaSaleRepository', () => {
 
       expect(prisma.sale.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.not.objectContaining({ tenantId: expect.anything() }),
+          data: expect.objectContaining({ tenantId: 'tenant-1' }),
         }),
       );
     });
@@ -130,6 +131,7 @@ describe('PrismaSaleRepository', () => {
           id: 'sale-1',
           userId: 'user-1',
           status: 'DRAFT',
+          tenantId: 'tenant-1',
         },
       });
       expect(prisma.saleItem.createMany).toHaveBeenCalledWith({
@@ -154,6 +156,7 @@ describe('PrismaSaleRepository', () => {
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,
+            tenantId: 'tenant-1',
           },
         ],
       });
@@ -249,6 +252,7 @@ describe('PrismaSaleRepository', () => {
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,
+            tenantId: 'tenant-1',
           },
         ],
       });

@@ -71,10 +71,15 @@ function createService(
   prisma: ReturnType<typeof makeMockPrisma>,
   filesService?: ReturnType<typeof makeMockFilesService>,
 ) {
+  const tenantPrisma = {
+    getTenantId: jest.fn().mockReturnValue('tenant-1'),
+    getClient: jest.fn().mockReturnValue(prisma),
+  } as any;
   return new ProductsService(
     repo,
     prisma,
     filesService ?? makeMockFilesService(),
+    tenantPrisma,
   );
 }
 
@@ -583,8 +588,18 @@ describe('ProductsService — variant price matrix auto-create', () => {
 
     expect(tx.variantPrice.createMany).toHaveBeenCalledWith({
       data: [
-        { variantId: VARIANT_A_ID, priceListId: 'pl-publico', priceCents: 0 },
-        { variantId: VARIANT_A_ID, priceListId: 'pl-mayoreo', priceCents: 0 },
+        {
+          variantId: VARIANT_A_ID,
+          priceListId: 'pl-publico',
+          priceCents: 0,
+          tenantId: 'tenant-1',
+        },
+        {
+          variantId: VARIANT_A_ID,
+          priceListId: 'pl-mayoreo',
+          priceCents: 0,
+          tenantId: 'tenant-1',
+        },
       ],
     });
   });
@@ -1201,8 +1216,18 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
     });
     expect(tx.variantTierPrice.createMany).toHaveBeenCalledWith({
       data: [
-        { variantPriceId: 'vp-1', minQuantity: 0, priceCents: 1200 },
-        { variantPriceId: 'vp-1', minQuantity: 10, priceCents: 1000 },
+        {
+          variantPriceId: 'vp-1',
+          minQuantity: 0,
+          priceCents: 1200,
+          tenantId: 'tenant-1',
+        },
+        {
+          variantPriceId: 'vp-1',
+          minQuantity: 10,
+          priceCents: 1000,
+          tenantId: 'tenant-1',
+        },
       ],
     });
   });
@@ -1270,7 +1295,10 @@ describe('ProductsService - Image deletion with file storage', () => {
       },
     } as any;
 
-    const service = new ProductsService(repo, prisma, mockFilesService as any);
+    const service = new ProductsService(repo, prisma, mockFilesService as any, {
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      getClient: jest.fn().mockReturnValue(prisma),
+    } as any);
 
     // Act
     await service.removeImage(PRODUCT_ID, 'img-1');
@@ -1304,7 +1332,10 @@ describe('ProductsService - Image deletion with file storage', () => {
       },
     } as any;
 
-    const service = new ProductsService(repo, prisma, mockFilesService as any);
+    const service = new ProductsService(repo, prisma, mockFilesService as any, {
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      getClient: jest.fn().mockReturnValue(prisma),
+    } as any);
 
     // Act
     await service.removeImage(PRODUCT_ID, 'img-2');

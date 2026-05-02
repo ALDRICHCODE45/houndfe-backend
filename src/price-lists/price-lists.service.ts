@@ -23,6 +23,7 @@ export class PriceListsService {
 
   async create(dto: CreatePriceListDto) {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     const name = dto.name.trim();
     if (!name) {
       throw new InvalidArgumentError('Price list name cannot be empty');
@@ -38,7 +39,7 @@ export class PriceListsService {
 
     return prisma.$transaction(async (tx) => {
       const createdGlobalList = await tx.globalPriceList.create({
-        data: { name } as Prisma.GlobalPriceListUncheckedCreateInput,
+        data: { name, tenantId } as Prisma.GlobalPriceListUncheckedCreateInput,
       });
 
       const products = await tx.product.findMany({
@@ -51,6 +52,7 @@ export class PriceListsService {
             productId: product.id,
             globalPriceListId: createdGlobalList.id,
             priceCents: 0,
+            tenantId,
           })) as Prisma.PriceListCreateManyInput[],
         });
 
@@ -89,6 +91,7 @@ export class PriceListsService {
                   variantId: variant.id,
                   priceListId,
                   priceCents: 0,
+                  tenantId,
                 };
               })
               .filter(

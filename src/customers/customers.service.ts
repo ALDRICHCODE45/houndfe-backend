@@ -11,6 +11,7 @@ import {
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
 import { PrismaService } from '../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { Prisma } from '@prisma/client';
 
 @Injectable()
@@ -19,11 +20,13 @@ export class CustomersService {
     @Inject(CUSTOMER_REPOSITORY)
     private readonly customerRepo: ICustomerRepository,
     private readonly prisma: PrismaService,
+    private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
   // ==================== Customer CRUD ====================
 
   async create(dto: CreateCustomerDto) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const customer = Customer.create({
       id: crypto.randomUUID(),
       firstName: dto.firstName,
@@ -52,7 +55,7 @@ export class CustomersService {
 
     await this.prisma.$transaction(async (tx) => {
       await tx.customer.create({
-        data: p as Prisma.CustomerUncheckedCreateInput,
+        data: { ...p, tenantId } as Prisma.CustomerUncheckedCreateInput,
       });
 
       if (dto.addresses?.length) {
@@ -67,6 +70,7 @@ export class CustomersService {
             municipality: addr.municipality?.trim() || null,
             city: addr.city?.trim() || null,
             state: addr.state ?? null,
+            tenantId,
           })) as Prisma.CustomerAddressCreateManyInput[],
         });
       }
@@ -183,6 +187,7 @@ export class CustomersService {
   // ==================== Addresses ====================
 
   async addAddress(customerId: string, dto: CreateAddressDto) {
+    const tenantId = this.tenantPrisma.getTenantId();
     const customer = await this.customerRepo.findById(customerId);
     if (!customer) throw new EntityNotFoundError('Customer', customerId);
 
@@ -197,6 +202,7 @@ export class CustomersService {
         municipality: dto.municipality?.trim() || null,
         city: dto.city?.trim() || null,
         state: dto.state ?? null,
+        tenantId,
       } as Prisma.CustomerAddressUncheckedCreateInput,
     });
   }
