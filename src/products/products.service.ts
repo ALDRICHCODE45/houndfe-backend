@@ -890,8 +890,8 @@ export class ProductsService {
     await this.tenantPrisma.getClient().$transaction(async (tx) => {
       const variantPrice = await tx.variantPrice.upsert({
         where: {
-          variantId_priceListId: { variantId: variant.id, priceListId },
-        } as unknown as Prisma.VariantPriceWhereUniqueInput,
+          tenantId_variantId_priceListId: { tenantId, variantId: variant.id, priceListId },
+        },
         update: { priceCents: dto.priceCents },
         create: {
           variantId: variant.id,
@@ -919,10 +919,10 @@ export class ProductsService {
       }
     });
 
-    const updated = await this.prisma.variantPrice.findUnique({
+    const updated = await this.tenantPrisma.getClient().variantPrice.findUnique({
       where: {
-        variantId_priceListId: { variantId: variant.id, priceListId },
-      } as unknown as Prisma.VariantPriceWhereUniqueInput,
+        tenantId_variantId_priceListId: { tenantId, variantId: variant.id, priceListId },
+      },
       include: {
         priceList: {
           select: { id: true, globalPriceList: { select: { name: true } } },
@@ -988,11 +988,12 @@ export class ProductsService {
       for (const item of dto.prices) {
         const variantPrice = await tx.variantPrice.upsert({
           where: {
-            variantId_priceListId: {
+            tenantId_variantId_priceListId: {
+              tenantId,
               variantId: variant.id,
               priceListId: item.priceListId,
             },
-          } as unknown as Prisma.VariantPriceWhereUniqueInput,
+          },
           update: { priceCents: item.priceCents },
           create: {
             variantId: variant.id,
@@ -1029,6 +1030,7 @@ export class ProductsService {
     variantId: string,
     priceListId: string,
   ): Promise<void> {
+    const tenantId = this.tenantPrisma.getTenantId();
     const { variant } = await this.ensureProductAndVariant(
       productId,
       variantId,
@@ -1042,10 +1044,10 @@ export class ProductsService {
       );
     }
 
-    const variantPrice = await this.prisma.variantPrice.findUnique({
+    const variantPrice = await this.tenantPrisma.getClient().variantPrice.findUnique({
       where: {
-        variantId_priceListId: { variantId: variant.id, priceListId },
-      } as unknown as Prisma.VariantPriceWhereUniqueInput,
+        tenantId_variantId_priceListId: { tenantId, variantId: variant.id, priceListId },
+      },
       select: { id: true },
     });
 

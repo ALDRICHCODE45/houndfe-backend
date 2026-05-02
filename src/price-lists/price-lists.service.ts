@@ -30,7 +30,7 @@ export class PriceListsService {
     }
 
     const existing = await prisma.globalPriceList.findUnique({
-      where: { name } as unknown as Prisma.GlobalPriceListWhereUniqueInput,
+      where: { tenantId_name: { tenantId, name } },
       select: { id: true },
     });
     if (existing) {
@@ -113,6 +113,7 @@ export class PriceListsService {
 
   async update(id: string, dto: UpdatePriceListDto) {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
     const globalPriceList = await prisma.globalPriceList.findUnique({
       where: { id },
       select: { id: true, isDefault: true },
@@ -135,7 +136,7 @@ export class PriceListsService {
 
     if (name) {
       const duplicate = await prisma.globalPriceList.findUnique({
-        where: { name } as unknown as Prisma.GlobalPriceListWhereUniqueInput,
+        where: { tenantId_name: { tenantId, name } },
         select: { id: true },
       });
 
