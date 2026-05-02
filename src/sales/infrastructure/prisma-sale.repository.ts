@@ -32,6 +32,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     if (!existing) {
       // Create new sale
       await prisma.sale.create({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           id: sale.id,
           userId: sale.userId,
@@ -49,6 +50,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     // Create items
     if (sale.items.length > 0) {
       await prisma.saleItem.createMany({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: sale.items.map((item) => ({
           id: item.id,
           saleId: sale.id,

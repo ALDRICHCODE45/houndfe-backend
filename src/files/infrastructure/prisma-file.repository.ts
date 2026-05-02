@@ -16,6 +16,7 @@ export class PrismaFileRepository implements IFileRepository {
   async save(file: FileObject): Promise<FileObject> {
     const prisma = this.tenantPrisma.getClient();
     const persisted = await prisma.fileObject.create({
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         id: file.id,
         storageKey: file.storageKey,

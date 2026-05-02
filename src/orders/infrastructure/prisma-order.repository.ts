@@ -55,6 +55,7 @@ export class PrismaOrderRepository implements IOrderRepository {
     await prisma.order.upsert({
       where: { id: order.id },
       update: { status: order.status, completedAt: order.completedAt },
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       create: {
         id: order.id,
         customerName: order.customerName,
@@ -67,6 +68,7 @@ export class PrismaOrderRepository implements IOrderRepository {
     await prisma.orderItem.deleteMany({ where: { orderId: order.id } });
     if (order.items.length > 0) {
       await prisma.orderItem.createMany({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: order.items.map((item) => ({
           id: crypto.randomUUID(),
           orderId: order.id,

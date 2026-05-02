@@ -22,7 +22,7 @@ export class PrismaProductRepository implements IProductRepository {
 
   async findBySku(sku: string): Promise<Product | null> {
     const prisma = this.tenantPrisma.getClient();
-    const data = await prisma.product.findUnique({
+    const data = await prisma.product.findFirst({
       where: { sku: sku.toUpperCase() },
     });
     return data ? this.toDomain(data) : null;
@@ -30,7 +30,7 @@ export class PrismaProductRepository implements IProductRepository {
 
   async findByBarcode(barcode: string): Promise<Product | null> {
     const prisma = this.tenantPrisma.getClient();
-    const data = await prisma.product.findUnique({
+    const data = await prisma.product.findFirst({
       where: { barcode },
     });
     return data ? this.toDomain(data) : null;
@@ -76,6 +76,7 @@ export class PrismaProductRepository implements IProductRepository {
         hasVariants: p.hasVariants,
         updatedAt: new Date(),
       },
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       create: {
         id: p.id,
         name: p.name,

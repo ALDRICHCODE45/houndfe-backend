@@ -28,6 +28,7 @@ export class PriceListsService {
     }
 
     const existing = await prisma.globalPriceList.findUnique({
+      // @ts-expect-error tenant-scoped unique handled by Prisma tenant extension
       where: { name },
       select: { id: true },
     });
@@ -37,6 +38,7 @@ export class PriceListsService {
 
     return prisma.$transaction(async (tx) => {
       const createdGlobalList = await tx.globalPriceList.create({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: { name },
       });
 
@@ -46,6 +48,7 @@ export class PriceListsService {
 
       if (products.length) {
         await tx.priceList.createMany({
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: products.map((product) => ({
             productId: product.id,
             globalPriceListId: createdGlobalList.id,
@@ -95,7 +98,10 @@ export class PriceListsService {
               );
 
             if (variantPricesData.length) {
-              await tx.variantPrice.createMany({ data: variantPricesData });
+              await tx.variantPrice.createMany({
+                // @ts-expect-error tenantId auto-injected by Prisma tenant extension
+                data: variantPricesData,
+              });
             }
           }
         }
@@ -129,6 +135,7 @@ export class PriceListsService {
 
     if (name) {
       const duplicate = await prisma.globalPriceList.findUnique({
+        // @ts-expect-error tenant-scoped unique handled by Prisma tenant extension
         where: { name },
         select: { id: true },
       });

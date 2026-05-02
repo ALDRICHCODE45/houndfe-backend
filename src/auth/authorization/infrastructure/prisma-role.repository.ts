@@ -56,7 +56,7 @@ export class PrismaRoleRepository implements IRoleRepository {
   }
 
   async findByName(name: string): Promise<Role | null> {
-    const data = await this.prisma.role.findUnique({
+    const data = await this.prisma.role.findFirst({
       where: { name },
       include: {
         permissions: {
@@ -106,12 +106,12 @@ export class PrismaRoleRepository implements IRoleRepository {
     const data = await this.prisma.role.findMany({
       include: {
         permissions: { include: { permission: true } },
-        _count: { select: { users: true } },
+        _count: { select: { tenantMemberships: true } },
       },
     });
     return data.map((r) => ({
       role: this.toDomain(r),
-      userCount: r._count.users,
+      userCount: r._count.tenantMemberships,
     }));
   }
 

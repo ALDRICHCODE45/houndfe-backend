@@ -87,7 +87,7 @@ export class AdminRoleService {
     const existing = await prisma.role.findUnique({
       where: {
         tenantId_name: {
-          tenantId: targetTenantId,
+          tenantId: targetTenantId as string,
           name: dto.name,
         },
       },

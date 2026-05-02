@@ -54,18 +54,24 @@ export class PermissionSeeder implements OnApplicationBootstrap {
       this.logger.log(`✓ Seeded ${permissions.length} permissions`);
 
       // 2. Upsert Super Admin role
-      const superAdminRole = await this.prisma.role.upsert({
-        where: { name: 'Super Admin' },
-        update: {
-          description: 'Full system access',
-          isSystem: true,
-        },
-        create: {
-          name: 'Super Admin',
-          description: 'Full system access',
-          isSystem: true,
-        },
+      const existingSuperAdminRole = await this.prisma.role.findFirst({
+        where: { name: 'Super Admin', tenantId: null },
       });
+      const superAdminRole = existingSuperAdminRole
+        ? await this.prisma.role.update({
+            where: { id: existingSuperAdminRole.id },
+            data: {
+              description: 'Full system access',
+              isSystem: true,
+            },
+          })
+        : await this.prisma.role.create({
+            data: {
+              name: 'Super Admin',
+              description: 'Full system access',
+              isSystem: true,
+            },
+          });
       this.logger.log(`✓ Super Admin role: ${superAdminRole.id}`);
 
       // 3. Find 'manage' on 'all' permission

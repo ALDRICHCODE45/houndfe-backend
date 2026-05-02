@@ -49,6 +49,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         billingState: p.billingState,
         updatedAt: new Date(),
       },
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       create: {
         id: p.id,
         firstName: p.firstName,

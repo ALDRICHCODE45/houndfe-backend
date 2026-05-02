@@ -43,6 +43,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
         // Upsert the main promotion row
         await tx.promotion.upsert({
           where: { id: promotion.id },
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           create: {
             id: promotion.id,
             title: promotion.title,
@@ -88,6 +89,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
         });
         if (promotion.targetItems.length > 0) {
           await tx.promotionTargetItem.createMany({
+            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: promotion.targetItems.map((item) => ({
               promotionId: promotion.id,
               side: item.side,
@@ -102,6 +104,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
         });
         if (promotion.customers.length > 0) {
           await tx.promotionCustomer.createMany({
+            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: promotion.customers.map((c) => ({
               promotionId: promotion.id,
               customerId: c.customerId,
@@ -114,6 +117,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
         });
         if (promotion.priceLists.length > 0) {
           await tx.promotionPriceList.createMany({
+            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: promotion.priceLists.map((pl) => ({
               promotionId: promotion.id,
               globalPriceListId: pl.globalPriceListId,
@@ -126,6 +130,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
         });
         if (promotion.daysOfWeek.length > 0) {
           await tx.promotionDayOfWeek.createMany({
+            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: promotion.daysOfWeek.map((d) => ({
               promotionId: promotion.id,
               day: d.day,

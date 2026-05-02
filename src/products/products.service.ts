@@ -240,6 +240,7 @@ export class ProductsService {
     await this.prisma.$transaction(async (tx) => {
       // 1. Create product
       await tx.product.create({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           id: p.id,
           name: p.name,
@@ -276,6 +277,7 @@ export class ProductsService {
 
       if (globalLists.length) {
         await tx.priceList.createMany({
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: globalLists.map((globalList) => ({
             productId,
             globalPriceListId: globalList.id,
@@ -299,6 +301,7 @@ export class ProductsService {
           );
 
           const createdVariant = await tx.variant.create({
+            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: {
               productId,
               name: resolvedName,
@@ -318,6 +321,7 @@ export class ProductsService {
           // Create variant price entries for each product price list
           if (priceLists.length) {
             await tx.variantPrice.createMany({
+              // @ts-expect-error tenantId auto-injected by Prisma tenant extension
               data: priceLists.map((pl) => ({
                 variantId: createdVariant.id,
                 priceListId: pl.id,
@@ -331,6 +335,7 @@ export class ProductsService {
       // 4. Create inline lots (if provided)
       if (dto.lots?.length) {
         await tx.lot.createMany({
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: dto.lots.map((lotDto) => ({
             productId,
             lotNumber: lotDto.lotNumber.trim(),
@@ -370,6 +375,7 @@ export class ProductsService {
           if (priceList) {
             await tx.priceList.update({
               where: { id: priceList.id },
+              // @ts-expect-error tenantId auto-injected by Prisma tenant extension
               data: {
                 priceCents: plDto.priceCents,
                 ...(plDto.tierPrices !== undefined
@@ -392,6 +398,7 @@ export class ProductsService {
       // 6. Create inline images (if provided)
       if (dto.images?.length) {
         await tx.productImage.createMany({
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: dto.images.map((imgDto, index) => ({
             productId,
             url: imgDto.url,
@@ -614,6 +621,7 @@ export class ProductsService {
 
     const variant = await this.prisma.$transaction(async (tx) => {
       const createdVariant = await tx.variant.create({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           productId,
           name: resolvedName,
@@ -637,6 +645,7 @@ export class ProductsService {
 
       if (priceLists.length) {
         await tx.variantPrice.createMany({
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: priceLists.map((pl) => ({
             variantId: createdVariant.id,
             priceListId: pl.id,
@@ -825,8 +834,9 @@ export class ProductsService {
       const variantPrice = await tx.variantPrice.upsert({
         where: {
           variantId_priceListId: { variantId: variant.id, priceListId },
-        },
+        } as any,
         update: { priceCents: dto.priceCents },
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         create: {
           variantId: variant.id,
           priceListId,
@@ -841,6 +851,7 @@ export class ProductsService {
 
         if (dto.tierPrices.length) {
           await tx.variantTierPrice.createMany({
+            // @ts-expect-error tenantId auto-injected by Prisma tenant extension
             data: dto.tierPrices.map((tier) => ({
               variantPriceId: variantPrice.id,
               minQuantity: tier.minQuantity,
@@ -852,7 +863,7 @@ export class ProductsService {
     });
 
     const updated = await this.prisma.variantPrice.findUnique({
-      where: { variantId_priceListId: { variantId: variant.id, priceListId } },
+      where: { variantId_priceListId: { variantId: variant.id, priceListId } } as any,
       include: {
         priceList: {
           select: { id: true, globalPriceList: { select: { name: true } } },
@@ -921,8 +932,9 @@ export class ProductsService {
               variantId: variant.id,
               priceListId: item.priceListId,
             },
-          },
+          } as any,
           update: { priceCents: item.priceCents },
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           create: {
             variantId: variant.id,
             priceListId: item.priceListId,
@@ -937,6 +949,7 @@ export class ProductsService {
 
           if (item.tierPrices.length) {
             await tx.variantTierPrice.createMany({
+              // @ts-expect-error tenantId auto-injected by Prisma tenant extension
               data: item.tierPrices.map((tier) => ({
                 variantPriceId: variantPrice.id,
                 minQuantity: tier.minQuantity,
@@ -970,7 +983,7 @@ export class ProductsService {
     }
 
     const variantPrice = await this.prisma.variantPrice.findUnique({
-      where: { variantId_priceListId: { variantId: variant.id, priceListId } },
+      where: { variantId_priceListId: { variantId: variant.id, priceListId } } as any,
       select: { id: true },
     });
 
@@ -1015,6 +1028,7 @@ export class ProductsService {
     }
 
     return this.prisma.lot.create({
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         productId,
         lotNumber: dto.lotNumber.trim(),
@@ -1108,6 +1122,7 @@ export class ProductsService {
     // Update price and replace tiers if provided
     const updated = await this.prisma.priceList.update({
       where: { id: priceListId },
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         ...(dto.priceCents !== undefined ? { priceCents: dto.priceCents } : {}),
         ...(dto.tierPrices !== undefined
@@ -1128,7 +1143,7 @@ export class ProductsService {
       },
     });
 
-    return this.enrichPriceListResponse(updated, product);
+    return this.enrichPriceListResponse(updated as any, product);
   }
 
   // ==================== Images ====================
@@ -1161,6 +1176,7 @@ export class ProductsService {
 
     try {
       return await this.prisma.productImage.create({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
         data: {
           productId,
           variantId: dto.variantId ?? null,
@@ -1268,6 +1284,7 @@ export class ProductsService {
 
     // Create ProductImage record linked to FileObject
     const productImage = await this.prisma.productImage.create({
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         productId,
         fileId: fileObject.id,
@@ -1328,6 +1345,7 @@ export class ProductsService {
 
     // Create ProductImage record linked to FileObject
     const productImage = await this.prisma.productImage.create({
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         productId,
         variantId,

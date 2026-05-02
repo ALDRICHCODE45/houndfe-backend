@@ -67,27 +67,27 @@ export class PrismaUserRepository implements IUserRepository {
     const data = await this.prisma.user.findUnique({
       where: { id },
       include: {
-        roles: { include: { role: { select: { id: true, name: true } } } },
+        tenantMemberships: {
+          include: { role: { select: { id: true, name: true } } },
+        },
       },
     });
     if (!data) return null;
     return {
       user: this.toDomain(data),
-      roles: data.roles.map((ur) => ({ id: ur.role.id, name: ur.role.name })),
+      roles: data.tenantMemberships.map((ur) => ({
+        id: ur.role.id,
+        name: ur.role.name,
+      })),
     };
   }
 
   async assignRoles(userId: string, roleIds: string[]): Promise<void> {
-    await this.prisma.$transaction([
-      this.prisma.userRole.deleteMany({ where: { userId } }),
-      this.prisma.userRole.createMany({
-        data: roleIds.map((roleId) => ({
-          userId,
-          roleId,
-          id: crypto.randomUUID(),
-        })),
-      }),
-    ]);
+    void userId;
+    void roleIds;
+    throw new Error(
+      'assignRoles is deprecated. Use tenant membership assignment flow instead.',
+    );
   }
 
   async update(user: User): Promise<User> {

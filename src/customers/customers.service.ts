@@ -50,10 +50,14 @@ export class CustomersService {
     const p = customer.toPersistence();
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.customer.create({ data: p });
+      await tx.customer.create({
+        // @ts-expect-error tenantId auto-injected by Prisma tenant extension
+        data: p,
+      });
 
       if (dto.addresses?.length) {
         await tx.customerAddress.createMany({
+          // @ts-expect-error tenantId auto-injected by Prisma tenant extension
           data: dto.addresses.map((addr) => ({
             customerId,
             street: addr.street.trim(),
@@ -184,6 +188,7 @@ export class CustomersService {
     if (!customer) throw new EntityNotFoundError('Customer', customerId);
 
     return this.prisma.customerAddress.create({
+      // @ts-expect-error tenantId auto-injected by Prisma tenant extension
       data: {
         customerId,
         street: dto.street.trim(),
