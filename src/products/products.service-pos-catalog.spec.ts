@@ -122,6 +122,26 @@ describe('ProductsService — searchForPOS', () => {
     });
   });
 
+  it('should query POS catalog using tenant prisma client', async () => {
+    prisma.product.findMany.mockResolvedValue([]);
+    prisma.product.count.mockResolvedValue(0);
+
+    const tenantPrisma = {
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      getClient: jest.fn().mockReturnValue(prisma),
+    };
+    const serviceWithTenantSpy = new ProductsService(
+      repo,
+      prisma as any,
+      makeMockFilesService(),
+      tenantPrisma as any,
+    );
+
+    await serviceWithTenantSpy.searchForPOS({ limit: 25, offset: 0 });
+
+    expect(tenantPrisma.getClient).toHaveBeenCalled();
+  });
+
   it('should filter by search query across product name, SKU, barcode', async () => {
     // Arrange
     prisma.product.findMany.mockResolvedValue([]);
@@ -369,6 +389,25 @@ describe('ProductsService — findOneForPOS', () => {
     repo = makeMockRepo();
     prisma = makeMockPrisma();
     service = createService(repo, prisma);
+  });
+
+  it('should read detail through tenant prisma client', async () => {
+    prisma.product.findFirst.mockResolvedValue(null);
+
+    const tenantPrisma = {
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      getClient: jest.fn().mockReturnValue(prisma),
+    };
+    const serviceWithTenantSpy = new ProductsService(
+      repo,
+      prisma as any,
+      makeMockFilesService(),
+      tenantPrisma as any,
+    );
+
+    await serviceWithTenantSpy.findOneForPOS('prod-1');
+
+    expect(tenantPrisma.getClient).toHaveBeenCalled();
   });
 
   it('should return a single product with description, location, and enabledForPos', async () => {

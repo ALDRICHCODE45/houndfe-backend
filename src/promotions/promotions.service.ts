@@ -27,6 +27,7 @@ import {
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
 import { PrismaService } from '../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type {
   CreatePromotionParams,
   CustomerScope,
@@ -45,6 +46,7 @@ export class PromotionsService {
     @Inject(PROMOTION_REPOSITORY)
     private readonly repo: IPromotionRepository,
     private readonly prisma: PrismaService,
+    private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
   // ==================== Create ====================
@@ -466,6 +468,7 @@ export class PromotionsService {
   private async validateTargetIds(
     items: Array<{ targetType: string; targetId: string }>,
   ): Promise<void> {
+    const tenantClient = this.tenantPrisma.getClient();
     const byType: Record<string, string[]> = {};
     for (const item of items) {
       byType[item.targetType] = byType[item.targetType] ?? [];
@@ -490,7 +493,7 @@ export class PromotionsService {
           });
           break;
         case 'PRODUCTS':
-          found = await this.prisma.product.findMany({
+          found = await tenantClient.product.findMany({
             where: { id: { in: uniqueIds } },
             select: { id: true },
           });
@@ -526,8 +529,9 @@ export class PromotionsService {
   ): Promise<Array<{ id: string; customerId: string }>> {
     if (!dto.customerIds?.length) return [];
 
+    const tenantClient = this.tenantPrisma.getClient();
     const uniqueIds = [...new Set(dto.customerIds)];
-    const found = await this.prisma.customer.findMany({
+    const found = await tenantClient.customer.findMany({
       where: { id: { in: uniqueIds } },
       select: { id: true },
     });
@@ -555,8 +559,9 @@ export class PromotionsService {
   ): Promise<Array<{ id: string; globalPriceListId: string }>> {
     if (!dto.priceListIds?.length) return [];
 
+    const tenantClient = this.tenantPrisma.getClient();
     const uniqueIds = [...new Set(dto.priceListIds)];
-    const found = await this.prisma.globalPriceList.findMany({
+    const found = await tenantClient.globalPriceList.findMany({
       where: { id: { in: uniqueIds } },
       select: { id: true },
     });

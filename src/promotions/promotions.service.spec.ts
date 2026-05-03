@@ -8,6 +8,7 @@ import {
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
 import { PrismaService } from '../shared/prisma/prisma.service';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
   Promotion,
   PromotionProps,
@@ -103,7 +104,15 @@ function makeService(
   repo: IPromotionRepository,
   prisma: PrismaLookupMock,
 ): PromotionsService {
-  return new PromotionsService(repo, prisma as unknown as PrismaService);
+  const tenantPrisma: Pick<TenantPrismaService, 'getClient'> = {
+    getClient: jest.fn().mockReturnValue(prisma),
+  };
+
+  return new PromotionsService(
+    repo,
+    prisma as unknown as PrismaService,
+    tenantPrisma as TenantPrismaService,
+  );
 }
 
 type CreatePromotionInput = {
@@ -264,6 +273,34 @@ describe('PromotionsService', () => {
           }),
         ),
       ).rejects.toThrow(InvalidArgumentError);
+
+      expect(prisma.category.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('should validate product target IDs using tenant-scoped prisma client', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        product: {
+          findMany: jest.fn().mockResolvedValue([]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      await expect(
+        service.create(
+          createDto({
+            title: 'Missing Product',
+            type: 'PRODUCT_DISCOUNT',
+            method: 'AUTOMATIC',
+            discountType: 'PERCENTAGE',
+            discountValue: 15,
+            appliesTo: 'PRODUCTS',
+            targetItems: [{ targetType: 'PRODUCTS', targetId: 'prod-missing' }],
+          }),
+        ),
+      ).rejects.toThrow(InvalidArgumentError);
+
+      expect(prisma.product.findMany).toHaveBeenCalledTimes(1);
     });
 
     it('should validate customerIds against DB when customerScope is SPECIFIC', async () => {
@@ -289,6 +326,34 @@ describe('PromotionsService', () => {
           }),
         ),
       ).rejects.toThrow(InvalidArgumentError);
+
+      expect(prisma.customer.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('should validate priceListIds against DB', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        globalPriceList: {
+          findMany: jest.fn().mockResolvedValue([]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      await expect(
+        service.create(
+          createDto({
+            title: 'Specific Price Lists',
+            type: 'PRODUCT_DISCOUNT',
+            method: 'AUTOMATIC',
+            discountType: 'PERCENTAGE',
+            discountValue: 10,
+            appliesTo: 'CATEGORIES',
+            priceListIds: ['pl-missing'],
+          }),
+        ),
+      ).rejects.toThrow(InvalidArgumentError);
+
+      expect(prisma.globalPriceList.findMany).toHaveBeenCalledTimes(1);
     });
 
     it('should attach target items from dto when provided', async () => {

@@ -76,6 +76,32 @@ describe('ProductsService — POS Helpers', () => {
   });
 
   describe('getProductInfoForSale', () => {
+    it('should use tenant prisma client for product info lookup', async () => {
+      prisma.product.findUnique.mockResolvedValue({
+        id: 'prod-tenant',
+        name: 'Aspirina',
+        hasVariants: false,
+        sellInPos: true,
+        useStock: false,
+      });
+      prisma.priceList.findFirst.mockResolvedValue({ priceCents: 1000 });
+
+      const tenantPrisma = {
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+        getClient: jest.fn().mockReturnValue(prisma),
+      };
+      const serviceWithTenantSpy = new ProductsService(
+        repo,
+        prisma,
+        makeMockFilesService(),
+        tenantPrisma as any,
+      );
+
+      await serviceWithTenantSpy.getProductInfoForSale('prod-tenant', null);
+
+      expect(tenantPrisma.getClient).toHaveBeenCalled();
+    });
+
     it('should return price and name for a product without variant', async () => {
       // Setup: product without variants
       const mockProduct = {

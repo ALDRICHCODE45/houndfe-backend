@@ -74,9 +74,28 @@ export class AdminRoleService {
   }
 
   async findOne(id: string): Promise<ReturnType<Role['toResponse']>> {
-    const role = await this.roleRepo.findById(id);
+    const prisma = this.tenantPrisma.getClient();
+    const role = await prisma.role.findUnique({
+      where: { id },
+      include: {
+        permissions: { include: { permission: true } },
+      },
+    });
     if (!role) throw new EntityNotFoundError('Role', id);
-    return role.toResponse();
+
+    return Role.fromPersistence({
+      id: role.id,
+      name: role.name,
+      description: role.description,
+      isSystem: role.isSystem,
+      permissions: role.permissions.map((rp) => ({
+        subject: rp.permission.subject as AppSubjects,
+        action: rp.permission.action as AppActions,
+        description: rp.permission.description ?? '',
+      })),
+      createdAt: role.createdAt,
+      updatedAt: role.updatedAt,
+    }).toResponse();
   }
 
   async create(dto: CreateRoleDto): Promise<ReturnType<Role['toResponse']>> {

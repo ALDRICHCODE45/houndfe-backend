@@ -243,6 +243,31 @@ describe('ProductsService — updateVariant uniqueness', () => {
 });
 
 describe('ProductsService — findAll variant aggregates', () => {
+  it('should resolve reads through tenant prisma client', async () => {
+    const repo = makeMockRepo();
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    } as any;
+    const tenantPrisma = {
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      getClient: jest.fn().mockReturnValue(prisma),
+    } as any;
+
+    const service = new ProductsService(
+      repo,
+      prisma,
+      makeMockFilesService(),
+      tenantPrisma,
+    );
+
+    await service.findAll();
+
+    expect(tenantPrisma.getClient).toHaveBeenCalled();
+    expect(prisma.product.findMany).toHaveBeenCalled();
+  });
+
   it('should return variantStockTotal=30 and variantCount=2 for product with variants', async () => {
     const repo = makeMockRepo();
     const prisma = {

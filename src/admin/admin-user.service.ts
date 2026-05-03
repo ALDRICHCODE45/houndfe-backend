@@ -100,12 +100,38 @@ export class AdminUserService {
     user: ReturnType<User['toResponse']>;
     roles: Array<{ id: string; name: string }>;
   }> {
+    const { tenantId, isSuperAdmin } = this.cls.get();
+    const tenantPrisma = this.tenantPrisma.getClient();
     const result = await this.userRepo.findByIdWithRoles(id);
     if (!result) throw new EntityNotFoundError('User', id);
 
+    if (isSuperAdmin && tenantId === null) {
+      return {
+        user: result.user.toResponse(),
+        roles: result.roles,
+      };
+    }
+
+    const membership = await tenantPrisma.tenantMembership.findFirst({
+      where: { userId: id, tenantId: tenantId ?? undefined },
+      select: { id: true },
+    });
+
+    if (!membership) {
+      throw new EntityNotFoundError('User', id);
+    }
+
+    const memberships = await tenantPrisma.tenantMembership.findMany({
+      where: { userId: id, tenantId: tenantId ?? undefined },
+      include: { role: { select: { id: true, name: true } } },
+    });
+
     return {
       user: result.user.toResponse(),
-      roles: result.roles,
+      roles: memberships.map((tenantMembership) => ({
+        id: tenantMembership.role.id,
+        name: tenantMembership.role.name,
+      })),
     };
   }
 

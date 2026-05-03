@@ -1,6 +1,70 @@
 import { AdminUserService } from './admin-user.service';
 
 describe('AdminUserService', () => {
+  it('findOne should throw when user has no membership in current tenant', async () => {
+    const tenantPrismaClient = {
+      tenantMembership: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn(),
+        count: jest.fn(),
+        create: jest.fn(),
+      },
+    } as any;
+
+    const service = new AdminUserService(
+      {
+        findByIdWithRoles: jest.fn().mockResolvedValue({
+          user: { toResponse: () => ({ id: 'u1' }) },
+          roles: [{ id: 'r-cross-tenant', name: 'Cross Tenant Role' }],
+        }),
+      } as any,
+      {} as any,
+      { user: { findUnique: jest.fn() } } as any,
+      { getClient: jest.fn().mockReturnValue(tenantPrismaClient) } as any,
+      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+    );
+
+    await expect(service.findOne('u1')).rejects.toThrow('User with id "u1" not found');
+  });
+
+  it('findOne should return only roles from current tenant memberships', async () => {
+    const tenantPrismaClient = {
+      tenantMembership: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'tm-1' }),
+        findMany: jest.fn().mockResolvedValue([
+          { role: { id: 'r-tenant', name: 'Tenant Role' } },
+        ]),
+        count: jest.fn(),
+        create: jest.fn(),
+      },
+    } as any;
+
+    const service = new AdminUserService(
+      {
+        findByIdWithRoles: jest.fn().mockResolvedValue({
+          user: { toResponse: () => ({ id: 'u1' }) },
+          roles: [
+            { id: 'r-cross-tenant', name: 'Cross Tenant Role' },
+            { id: 'r-tenant', name: 'Tenant Role' },
+          ],
+        }),
+      } as any,
+      {} as any,
+      { user: { findUnique: jest.fn() } } as any,
+      { getClient: jest.fn().mockReturnValue(tenantPrismaClient) } as any,
+      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+    );
+
+    const result = await service.findOne('u1');
+
+    expect(result.roles).toEqual([{ id: 'r-tenant', name: 'Tenant Role' }]);
+    expect(tenantPrismaClient.tenantMembership.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: 'u1', tenantId: 'tenant-1' },
+      }),
+    );
+  });
+
   it('findAll should list only users from current tenant memberships', async () => {
     const tenantPrismaClient = {
       tenantMembership: {

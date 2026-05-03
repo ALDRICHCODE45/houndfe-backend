@@ -80,7 +80,8 @@ export class CustomersService {
   }
 
   async findAll() {
-    const customers = await this.prisma.customer.findMany({
+    const prisma = this.tenantPrisma.getClient();
+    const customers = await prisma.customer.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
         globalPriceList: { select: { id: true, name: true } },
@@ -208,10 +209,11 @@ export class CustomersService {
   }
 
   async getAddresses(customerId: string) {
+    const prisma = this.tenantPrisma.getClient();
     const customer = await this.customerRepo.findById(customerId);
     if (!customer) throw new EntityNotFoundError('Customer', customerId);
 
-    return this.prisma.customerAddress.findMany({
+    return prisma.customerAddress.findMany({
       where: { customerId },
       orderBy: { createdAt: 'asc' },
     });
@@ -222,7 +224,8 @@ export class CustomersService {
     addressId: string,
     dto: UpdateAddressDto,
   ) {
-    const address = await this.prisma.customerAddress.findFirst({
+    const prisma = this.tenantPrisma.getClient();
+    const address = await prisma.customerAddress.findFirst({
       where: { id: addressId, customerId },
     });
     if (!address) throw new EntityNotFoundError('CustomerAddress', addressId);
@@ -253,7 +256,8 @@ export class CustomersService {
   }
 
   async removeAddress(customerId: string, addressId: string): Promise<void> {
-    const address = await this.prisma.customerAddress.findFirst({
+    const prisma = this.tenantPrisma.getClient();
+    const address = await prisma.customerAddress.findFirst({
       where: { id: addressId, customerId },
     });
     if (!address) throw new EntityNotFoundError('CustomerAddress', addressId);
@@ -263,7 +267,8 @@ export class CustomersService {
   // ==================== Helpers ====================
 
   private async buildFullResponse(customerId: string) {
-    const data = await this.prisma.customer.findUnique({
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.customer.findUnique({
       where: { id: customerId },
       include: {
         globalPriceList: { select: { id: true, name: true } },

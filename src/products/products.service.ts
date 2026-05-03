@@ -468,7 +468,9 @@ export class ProductsService {
   }
 
   async findAll() {
-    const products = await this.prisma.product.findMany({
+    const tenantClient = this.tenantPrisma.getClient();
+
+    const products = await tenantClient.product.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
         category: { select: { id: true, name: true } },
@@ -1734,15 +1736,17 @@ export class ProductsService {
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
+    const tenantClient = this.tenantPrisma.getClient();
+
     const [relations, priceLists, variants, images, lots] = await Promise.all([
-      this.prisma.product.findUnique({
+      tenantClient.product.findUnique({
         where: { id: productId },
         select: {
           category: { select: { id: true, name: true } },
           brand: { select: { id: true, name: true } },
         },
       }),
-      this.prisma.priceList.findMany({
+      tenantClient.priceList.findMany({
         where: { productId },
         include: {
           tierPrices: { orderBy: { minQuantity: 'asc' } },
@@ -1751,7 +1755,7 @@ export class ProductsService {
         orderBy: { globalPriceList: { name: 'asc' } },
       }),
       product.hasVariants
-        ? this.prisma.variant.findMany({
+        ? tenantClient.variant.findMany({
             where: { productId },
             include: {
               images: true,
@@ -1771,12 +1775,12 @@ export class ProductsService {
             orderBy: { createdAt: 'asc' },
           })
         : Promise.resolve([]),
-      this.prisma.productImage.findMany({
+      tenantClient.productImage.findMany({
         where: { productId, variantId: null },
         orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
       }),
       product.useLotsAndExpirations
-        ? this.prisma.lot.findMany({
+        ? tenantClient.lot.findMany({
             where: { productId },
             orderBy: { expirationDate: 'asc' },
           })
@@ -1864,8 +1868,10 @@ export class ProductsService {
     }
 
     // Execute queries in parallel
+    const tenantClient = this.tenantPrisma.getClient();
+
     const [products, total] = await Promise.all([
-      this.prisma.product.findMany({
+      tenantClient.product.findMany({
         where,
         take: limit,
         skip: offset,
@@ -1874,7 +1880,7 @@ export class ProductsService {
         },
         orderBy: { name: 'asc' },
       }),
-      this.prisma.product.count({ where }),
+      tenantClient.product.count({ where }),
     ]);
 
     // Map to POS catalog items
@@ -1893,7 +1899,7 @@ export class ProductsService {
    * Reuses the same Prisma include and mapping as searchForPOS.
    */
   async findOneForPOS(productId: string) {
-    const product = await this.prisma.product.findFirst({
+    const product = await this.tenantPrisma.getClient().product.findFirst({
       where: { id: productId, sellInPos: true },
       include: POS_CATALOG_INCLUDE,
     });
@@ -2014,7 +2020,9 @@ export class ProductsService {
     Array<{ priceListId: string; priceListName: string; priceCents: number }>
   > {
     if (variantId) {
-      const variantPrices = await this.prisma.variantPrice.findMany({
+      const variantPrices = await this.tenantPrisma
+        .getClient()
+        .variantPrice.findMany({
         where: { variantId },
         include: {
           tierPrices: { orderBy: { minQuantity: 'asc' } },
@@ -2035,7 +2043,7 @@ export class ProductsService {
       }));
     }
 
-    const priceLists = await this.prisma.priceList.findMany({
+    const priceLists = await this.tenantPrisma.getClient().priceList.findMany({
       where: { productId },
       include: {
         tierPrices: { orderBy: { minQuantity: 'asc' } },
@@ -2113,7 +2121,9 @@ export class ProductsService {
     unitPriceCents: number;
   }> {
     // Fetch product
-    const product = await this.prisma.product.findUnique({
+    const tenantClient = this.tenantPrisma.getClient();
+
+    const product = await tenantClient.product.findUnique({
       where: { id: productId },
     });
 
@@ -2143,7 +2153,7 @@ export class ProductsService {
 
     // If variant is required, fetch it
     if (variantId) {
-      const variant = await this.prisma.variant.findFirst({
+      const variant = await tenantClient.variant.findFirst({
         where: { id: variantId, productId },
       });
 
@@ -2152,7 +2162,7 @@ export class ProductsService {
       }
 
       // Fetch variant price from default price list
-      const variantPrice = await this.prisma.variantPrice.findFirst({
+      const variantPrice = await tenantClient.variantPrice.findFirst({
         where: {
           variantId,
           priceList: {
@@ -2171,7 +2181,7 @@ export class ProductsService {
     }
 
     // No variant - fetch product price from default price list
-    const priceList = await this.prisma.priceList.findFirst({
+    const priceList = await tenantClient.priceList.findFirst({
       where: {
         productId,
         globalPriceList: { isDefault: true },
@@ -2208,7 +2218,9 @@ export class ProductsService {
     currentStock: number | null;
   }> {
     // Fetch product
-    const product = await this.prisma.product.findUnique({
+    const tenantClient = this.tenantPrisma.getClient();
+
+    const product = await tenantClient.product.findUnique({
       where: { id: productId },
     });
 
@@ -2226,7 +2238,7 @@ export class ProductsService {
 
     // If product has variants, check variant stock
     if (product.hasVariants && variantId) {
-      const variant = await this.prisma.variant.findFirst({
+      const variant = await tenantClient.variant.findFirst({
         where: { id: variantId, productId },
       });
 
