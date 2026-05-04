@@ -378,10 +378,9 @@ async function main() {
     });
 
     await tx.globalPriceList.upsert({
-      where: { tenantId_name: { tenantId: centroTenant.id, name: 'PUBLICO' } },
+      where: { name: 'PUBLICO' },
       update: { isDefault: true },
       create: {
-        tenantId: centroTenant.id,
         name: 'PUBLICO',
         isDefault: true,
       },

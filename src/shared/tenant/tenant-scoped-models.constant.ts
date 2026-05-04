@@ -4,7 +4,6 @@ export const TENANT_SCOPED_MODELS = new Set([
   'Lot',
   'ProductImage',
   'FileObject',
-  'GlobalPriceList',
   'PriceList',
   'TierPrice',
   'VariantPrice',

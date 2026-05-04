@@ -184,7 +184,6 @@ model Tenant {
   lots                 Lot[]
   productImages        ProductImage[]
   fileObjects          FileObject[]
-  globalPriceLists     GlobalPriceList[]
   priceLists           PriceList[]
   tierPrices           TierPrice[]
   variantPrices        VariantPrice[]
@@ -417,19 +416,15 @@ model Lot {
 
 model GlobalPriceList {
   id        String   @id @default(uuid())
-  name      String
+  name      String   @unique
   isDefault Boolean  @default(false)
-  tenantId  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant            Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   priceLists        PriceList[]
   customers         Customer[]
   promotionPriceLists PromotionPriceList[]
 
-  @@unique([tenantId, name])
-  @@index([tenantId])
   @@map("global_price_lists")
 }
 

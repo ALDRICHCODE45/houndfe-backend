@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
   BusinessRuleViolationError,
@@ -12,37 +13,41 @@ import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class PriceListsService {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenantPrisma: TenantPrismaService,
+  ) {}
 
   async findAll() {
-    const prisma = this.tenantPrisma.getClient();
-    return prisma.globalPriceList.findMany({
+    return this.prisma.globalPriceList.findMany({
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
     });
   }
 
   async create(dto: CreatePriceListDto) {
-    const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
     const name = dto.name.trim();
     if (!name) {
       throw new InvalidArgumentError('Price list name cannot be empty');
     }
 
-    const existing = await prisma.globalPriceList.findUnique({
-      where: { tenantId_name: { tenantId, name } },
+    const existing = await this.prisma.globalPriceList.findUnique({
+      where: { name },
       select: { id: true },
     });
     if (existing) {
       throw new EntityAlreadyExistsError('GlobalPriceList', name);
     }
 
-    return prisma.$transaction(async (tx) => {
+    // Use base prisma for the transaction — GlobalPriceList is global,
+    // but PriceList/VariantPrice are tenant-scoped and need explicit tenantId.
+    return this.prisma.$transaction(async (tx) => {
       const createdGlobalList = await tx.globalPriceList.create({
-        data: { name, tenantId } as Prisma.GlobalPriceListUncheckedCreateInput,
+        data: { name },
       });
 
       const products = await tx.product.findMany({
+        where: { tenantId },
         select: { id: true, hasVariants: true },
       });
 
@@ -62,7 +67,7 @@ export class PriceListsService {
 
         if (productsWithVariants.length) {
           const variants = await tx.variant.findMany({
-            where: { productId: { in: productsWithVariants } },
+            where: { productId: { in: productsWithVariants }, tenantId },
             select: { id: true, productId: true },
           });
 
@@ -71,6 +76,7 @@ export class PriceListsService {
               where: {
                 productId: { in: productsWithVariants },
                 globalPriceListId: createdGlobalList.id,
+                tenantId,
               },
               select: { id: true, productId: true },
             });
@@ -112,9 +118,7 @@ export class PriceListsService {
   }
 
   async update(id: string, dto: UpdatePriceListDto) {
-    const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
-    const globalPriceList = await prisma.globalPriceList.findUnique({
+    const globalPriceList = await this.prisma.globalPriceList.findUnique({
       where: { id },
       select: { id: true, isDefault: true },
     });
@@ -135,8 +139,8 @@ export class PriceListsService {
     }
 
     if (name) {
-      const duplicate = await prisma.globalPriceList.findUnique({
-        where: { tenantId_name: { tenantId, name } },
+      const duplicate = await this.prisma.globalPriceList.findUnique({
+        where: { name },
         select: { id: true },
       });
 
@@ -145,7 +149,7 @@ export class PriceListsService {
       }
     }
 
-    return prisma.globalPriceList.update({
+    return this.prisma.globalPriceList.update({
       where: { id },
       data: {
         ...(name ? { name } : {}),
@@ -154,8 +158,7 @@ export class PriceListsService {
   }
 
   async remove(id: string): Promise<void> {
-    const prisma = this.tenantPrisma.getClient();
-    const globalPriceList = await prisma.globalPriceList.findUnique({
+    const globalPriceList = await this.prisma.globalPriceList.findUnique({
       where: { id },
       select: { id: true, isDefault: true },
     });
@@ -170,6 +173,6 @@ export class PriceListsService {
       );
     }
 
-    await prisma.globalPriceList.delete({ where: { id } });
+    await this.prisma.globalPriceList.delete({ where: { id } });
   }
 }

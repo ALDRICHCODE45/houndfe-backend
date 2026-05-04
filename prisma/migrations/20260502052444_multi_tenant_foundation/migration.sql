@@ -207,7 +207,6 @@ CREATE TABLE "global_price_lists" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "isDefault" BOOLEAN NOT NULL DEFAULT false,
-    "tenantId" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -526,10 +525,7 @@ CREATE INDEX "lots_tenantId_idx" ON "lots"("tenantId");
 CREATE UNIQUE INDEX "lots_productId_lotNumber_key" ON "lots"("productId", "lotNumber");
 
 -- CreateIndex
-CREATE INDEX "global_price_lists_tenantId_idx" ON "global_price_lists"("tenantId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "global_price_lists_tenantId_name_key" ON "global_price_lists"("tenantId", "name");
+CREATE UNIQUE INDEX "global_price_lists_name_key" ON "global_price_lists"("name");
 
 -- CreateIndex
 CREATE INDEX "price_lists_tenantId_idx" ON "price_lists"("tenantId");
@@ -683,9 +679,6 @@ ALTER TABLE "lots" ADD CONSTRAINT "lots_tenantId_fkey" FOREIGN KEY ("tenantId") 
 
 -- AddForeignKey
 ALTER TABLE "lots" ADD CONSTRAINT "lots_productId_fkey" FOREIGN KEY ("productId") REFERENCES "products"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "global_price_lists" ADD CONSTRAINT "global_price_lists_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "tenants"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "price_lists" ADD CONSTRAINT "price_lists_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "tenants"("id") ON DELETE CASCADE ON UPDATE CASCADE;

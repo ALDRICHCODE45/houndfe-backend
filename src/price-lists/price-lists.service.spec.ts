@@ -5,15 +5,15 @@ import {
   EntityNotFoundError,
 } from '../shared/domain/domain-error';
 
-function makeService(prisma: any) {
-  return new PriceListsService({
-    getClient: jest.fn().mockReturnValue(prisma),
-    getTenantId: jest.fn().mockReturnValue('tenant-1'),
-  } as any);
+function makeService(prisma: any, tenantPrisma?: any) {
+  return new PriceListsService(
+    prisma,
+    tenantPrisma ?? { getTenantId: jest.fn().mockReturnValue('tenant-1') },
+  );
 }
 
 describe('PriceListsService', () => {
-  it('findAll should return all global price lists', async () => {
+  it('findAll should return all global price lists (no tenant filter)', async () => {
     const prisma = {
       globalPriceList: {
         findMany: jest.fn().mockResolvedValue([
@@ -28,10 +28,12 @@ describe('PriceListsService', () => {
 
     expect(result).toHaveLength(2);
     expect(result[0].name).toBe('PUBLICO');
-    expect(prisma.globalPriceList.findMany).toHaveBeenCalled();
+    expect(prisma.globalPriceList.findMany).toHaveBeenCalledWith({
+      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+    });
   });
 
-  it('create should create global list and initialize product/variant matrix in 0', async () => {
+  it('create should create global list and initialize tenant-scoped product/variant matrix in 0', async () => {
     const tx = {
       globalPriceList: {
         create: jest.fn().mockResolvedValue({
@@ -74,6 +76,13 @@ describe('PriceListsService', () => {
     const created = await service.create({ name: '  Mayorista  ' });
 
     expect(created.name).toBe('Mayorista');
+
+    // GlobalPriceList.create should NOT have tenantId
+    expect(tx.globalPriceList.create).toHaveBeenCalledWith({
+      data: { name: 'Mayorista' },
+    });
+
+    // PriceList (tenant-scoped) should still have tenantId
     expect(tx.priceList.createMany).toHaveBeenCalledWith({
       data: [
         {
@@ -90,6 +99,8 @@ describe('PriceListsService', () => {
         },
       ],
     });
+
+    // VariantPrice (tenant-scoped) should still have tenantId
     expect(tx.variantPrice.createMany).toHaveBeenCalledWith({
       data: [
         {
@@ -105,6 +116,30 @@ describe('PriceListsService', () => {
           tenantId: 'tenant-1',
         },
       ],
+    });
+  });
+
+  it('create should query products scoped to current tenant', async () => {
+    const tx = {
+      globalPriceList: {
+        create: jest.fn().mockResolvedValue({ id: 'gl-1', name: 'VIP', isDefault: false }),
+      },
+      product: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    } as any;
+
+    const prisma = {
+      globalPriceList: { findUnique: jest.fn().mockResolvedValue(null) },
+      $transaction: jest.fn(async (cb: any) => cb(tx)),
+    } as any;
+
+    const service = makeService(prisma);
+    await service.create({ name: 'VIP' });
+
+    expect(tx.product.findMany).toHaveBeenCalledWith({
+      where: { tenantId: 'tenant-1' },
+      select: { id: true, hasVariants: true },
     });
   });
 
