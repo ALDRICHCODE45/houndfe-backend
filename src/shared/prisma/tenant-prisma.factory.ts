@@ -1,4 +1,5 @@
-import type { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import type { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../tenant/tenant-cls-store.interface';
 import { TENANT_SCOPED_MODELS } from '../tenant/tenant-scoped-models.constant';
@@ -12,33 +13,15 @@ const READ_OPERATIONS = new Set([
   'groupBy',
 ]);
 
-const toDelegateName = (model: string) =>
-  `${model.charAt(0).toLowerCase()}${model.slice(1)}`;
-
-type TenantScopedDelegate = {
-  findFirst: (args: unknown) => Prisma.PrismaPromise<unknown>;
-  findFirstOrThrow: (args: unknown) => Prisma.PrismaPromise<unknown>;
-};
-
-const getTenantScopedDelegate = (
-  base: PrismaClient,
-  model: string,
-): TenantScopedDelegate => {
-  const delegate = (base as unknown as Record<string, TenantScopedDelegate>)[
-    toDelegateName(model)
-  ];
-
-  if (!delegate) {
-    throw new Error(`Prisma delegate not found for model: ${model}`);
-  }
-
-  return delegate;
-};
+type TenantScopedRecord = { tenantId?: string | null };
 
 export function createTenantScopedPrisma(
   base: PrismaClient,
   cls: ClsService<TenantClsStore>,
 ) {
+  const isTenantRecord = (value: unknown): value is TenantScopedRecord =>
+    value !== null && typeof value === 'object' && 'tenantId' in value;
+
   return base.$extends({
     query: {
       $allOperations({ model, operation, args, query }) {
@@ -58,15 +41,27 @@ export function createTenantScopedPrisma(
         }
 
         if (operation === 'findUnique') {
-          const delegate = getTenantScopedDelegate(base, model);
-          return delegate.findFirst({ ...(args ?? {}), where: { ...(args?.where ?? {}), tenantId } });
+          return query({
+            ...(args ?? {}),
+            where: { ...(args?.where ?? {}), tenantId },
+          });
         }
 
         if (operation === 'findUniqueOrThrow') {
-          const delegate = getTenantScopedDelegate(base, model);
-          return delegate.findFirstOrThrow({
+          return query({
             ...(args ?? {}),
             where: { ...(args?.where ?? {}), tenantId },
+          }).then((record) => {
+            if (!isTenantRecord(record) || record.tenantId !== tenantId) {
+              throw new Prisma.PrismaClientKnownRequestError(
+                'No record found for findUniqueOrThrow',
+                {
+                  clientVersion: Prisma.prismaVersion.client,
+                  code: 'P2025',
+                },
+              );
+            }
+            return record;
           });
         }
 

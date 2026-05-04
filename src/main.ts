@@ -4,11 +4,13 @@
  * Configures:
  * - ValidationPipe: auto-validates DTOs via class-validator
  * - DomainExceptionFilter: maps domain errors to HTTP responses
+ * - PrismaExceptionFilter: maps Prisma known errors to HTTP responses
  */
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
+import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -24,7 +26,7 @@ async function bootstrap() {
   );
 
   // Global exception filter — maps DomainErrors to HTTP responses
-  app.useGlobalFilters(new DomainExceptionFilter());
+  app.useGlobalFilters(new DomainExceptionFilter(), new PrismaExceptionFilter());
 
   // CORS — permite todas las origenes (solo para desarrollo)
   app.enableCors();

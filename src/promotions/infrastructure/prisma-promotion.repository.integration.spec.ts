@@ -52,6 +52,31 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
     createdIds.length = 0;
   });
 
+  describe('save() - Transaction visibility regression', () => {
+    it('should create a promotion without failing on findUniqueOrThrow inside transaction', async () => {
+      const promotion = Promotion.create({
+        id: crypto.randomUUID(),
+        title: 'Save Regression P2025',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        discountType: 'FIXED',
+        discountValue: 1000,
+      });
+
+      createdIds.push(promotion.id);
+
+      const saved = await repository.save(promotion);
+
+      expect(saved.id).toBe(promotion.id);
+      expect(saved.title).toBe('Save Regression P2025');
+
+      const persisted = await prisma.promotion.findUnique({
+        where: { id: promotion.id },
+      });
+      expect(persisted).not.toBeNull();
+    });
+  });
+
   describe('delete() - Cascade behavior (Scenario 5.14)', () => {
     it('should cascade delete all related join table rows when promotion is deleted', async () => {
       // RED: Create a promotion with related rows in all join tables

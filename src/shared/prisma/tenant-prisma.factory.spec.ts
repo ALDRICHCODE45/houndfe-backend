@@ -106,4 +106,26 @@ describe('createTenantScopedPrisma', () => {
       where: { name: { contains: 'abc' } },
     });
   });
+
+  it('keeps transaction query context for findUniqueOrThrow', async () => {
+    const { allOperations, base } = createHarness({
+      tenantId: 'tenant-a',
+      isSuperAdmin: false,
+    });
+    const txRecord = { id: 'promo-1', tenantId: 'tenant-a' };
+    const query = jest.fn().mockResolvedValue(txRecord);
+
+    const result = await allOperations({
+      model: 'Promotion',
+      operation: 'findUniqueOrThrow',
+      args: { where: { id: 'promo-1' } },
+      query,
+    });
+
+    expect(query).toHaveBeenCalledWith({
+      where: { id: 'promo-1', tenantId: 'tenant-a' },
+    });
+    expect((base as any).product.findFirstOrThrow).not.toHaveBeenCalled();
+    expect(result).toEqual(txRecord);
+  });
 });
