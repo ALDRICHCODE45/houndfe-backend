@@ -34,6 +34,11 @@ export class TenantsController {
     return this.tenantsService.findAll(includeInactive === 'true');
   }
 
+  @Get(':id/roles')
+  findRoles(@Param('id', ParseUUIDPipe) id: string) {
+    return this.tenantsService.findRoles(id);
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.tenantsService.findOne(id);

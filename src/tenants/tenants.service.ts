@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
+import { PrismaService } from '../shared/prisma/prisma.service';
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
 import {
@@ -19,6 +20,7 @@ export class TenantsService {
     @Inject(TENANT_REPOSITORY)
     private readonly tenantRepo: ITenantRepository,
     private readonly cls: ClsService<TenantClsStore>,
+    private readonly prisma: PrismaService,
   ) {}
 
   private assertSuperAdmin(): void {
@@ -57,6 +59,21 @@ export class TenantsService {
     const tenant = await this.tenantRepo.findById(id);
     if (!tenant) throw new NotFoundException('TENANT_NOT_FOUND');
     await this.tenantRepo.update(id, { isActive: false });
+  }
+
+  async findRoles(id: string): Promise<{ data: Array<{ id: string; name: string }> }> {
+    this.assertSuperAdmin();
+
+    const tenant = await this.tenantRepo.findById(id);
+    if (!tenant) throw new NotFoundException('TENANT_NOT_FOUND');
+
+    const roles = await this.prisma.role.findMany({
+      where: { tenantId: id },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    });
+
+    return { data: roles };
   }
 
   async assertTenantActive(id: string): Promise<void> {
