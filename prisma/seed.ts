@@ -377,7 +377,7 @@ async function main() {
       create: { name: 'Sin Marca' },
     });
 
-    await tx.globalPriceList.upsert({
+    const publicoList = await tx.globalPriceList.upsert({
       where: { name: 'PUBLICO' },
       update: { isDefault: true },
       create: {
@@ -386,7 +386,7 @@ async function main() {
       },
     });
 
-    await upsertProductByTenantAndName(tx, {
+    const paracetamol = await upsertProductByTenantAndName(tx, {
       tenantId: centroTenant.id,
       name: 'Paracetamol 500mg',
       categoryId: category.id,
@@ -395,7 +395,7 @@ async function main() {
       barcode: '7501234567890',
     });
 
-    await upsertProductByTenantAndName(tx, {
+    const ibuprofeno = await upsertProductByTenantAndName(tx, {
       tenantId: centroTenant.id,
       name: 'Ibuprofeno 400mg',
       categoryId: category.id,
@@ -403,6 +403,27 @@ async function main() {
       sku: 'CENTRO-IBUPROFENO-400',
       barcode: '7501234567891',
     });
+
+    // Initialize PriceList matrix: each product × each global price list × tenant
+    for (const product of [paracetamol, ibuprofeno]) {
+      const existing = await tx.priceList.findFirst({
+        where: {
+          productId: product.id,
+          globalPriceListId: publicoList.id,
+          tenantId: centroTenant.id,
+        },
+      });
+      if (!existing) {
+        await tx.priceList.create({
+          data: {
+            productId: product.id,
+            globalPriceListId: publicoList.id,
+            priceCents: 0,
+            tenantId: centroTenant.id,
+          },
+        });
+      }
+    }
 
     await upsertCustomerByTenantAndEmail(tx, {
       tenantId: centroTenant.id,
