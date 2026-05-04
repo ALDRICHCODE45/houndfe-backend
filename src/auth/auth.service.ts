@@ -281,11 +281,19 @@ export class AuthService {
     currentUser: AuthenticatedUser,
     dto: SwitchTenantDto,
   ): Promise<AuthTokens> {
-    if (!currentUser.isSuperAdmin) {
-      throw new ForbiddenException('Only super admins can switch tenant context');
+    if (currentUser.isSuperAdmin) {
+      return this.switchTenantAsSuperAdmin(currentUser, dto);
     }
 
+    return this.switchTenantAsMember(currentUser, dto);
+  }
+
+  private async switchTenantAsSuperAdmin(
+    currentUser: AuthenticatedUser,
+    dto: SwitchTenantDto,
+  ): Promise<AuthTokens> {
     let authContext: AuthContext;
+
     if (!dto.tenantId) {
       authContext = {
         tenantId: null,
@@ -297,9 +305,8 @@ export class AuthService {
         where: { id: dto.tenantId },
       });
 
-      if (!tenant || !tenant.isActive) {
-        throw new ForbiddenException('Target tenant is missing or inactive');
-      }
+      if (!tenant) throw new ForbiddenException('TENANT_NOT_FOUND');
+      if (!tenant.isActive) throw new ForbiddenException('TENANT_INACTIVE');
 
       authContext = {
         tenantId: tenant.id,
@@ -307,6 +314,41 @@ export class AuthService {
         isSuperAdmin: true,
       };
     }
+
+    const tokens = await this.generateTokens(
+      currentUser.userId,
+      currentUser.email,
+      authContext,
+    );
+    await this.updateRefreshTokenHash(currentUser.userId, tokens.refreshToken);
+
+    return tokens;
+  }
+
+  private async switchTenantAsMember(
+    currentUser: AuthenticatedUser,
+    dto: SwitchTenantDto,
+  ): Promise<AuthTokens> {
+    if (!dto.tenantId) {
+      throw new ForbiddenException('SUPER_ADMIN_REQUIRED');
+    }
+
+    const membership = await this.prisma.tenantMembership.findFirst({
+      where: {
+        userId: currentUser.userId,
+        tenantId: dto.tenantId,
+      },
+      include: { tenant: true },
+    });
+
+    if (!membership) throw new ForbiddenException('TENANT_ACCESS_DENIED');
+    if (!membership.tenant.isActive) throw new ForbiddenException('TENANT_INACTIVE');
+
+    const authContext: AuthContext = {
+      tenantId: membership.tenant.id,
+      tenantSlug: membership.tenant.slug,
+      isSuperAdmin: false,
+    };
 
     const tokens = await this.generateTokens(
       currentUser.userId,

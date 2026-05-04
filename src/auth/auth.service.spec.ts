@@ -62,6 +62,10 @@ describe('AuthService - login multi-tenant flow', () => {
     const prisma = {
       tenantMembership: {
         findMany: jest.fn(),
+        findFirst: jest.fn(),
+      },
+      tenant: {
+        findUnique: jest.fn(),
       },
       role: {
         findFirst: jest.fn(),
@@ -200,5 +204,191 @@ describe('AuthService - login multi-tenant flow', () => {
     (prisma.role.findFirst as jest.Mock).mockResolvedValue(null);
 
     await expect(service.login(loginDto)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('AuthService - switchTenant', () => {
+  const createMockUser = () =>
+    ({
+      id: 'user-1',
+      email: { value: 'john@example.com' },
+      updateRefreshToken: jest.fn(),
+      toResponse: jest.fn(),
+    }) as any;
+
+  const createService = () => {
+    const userRepo = {
+      findByEmail: jest.fn(),
+      findById: jest.fn(),
+      save: jest.fn(),
+      existsByEmail: jest.fn(),
+      findAll: jest.fn(),
+      findByIdWithRoles: jest.fn(),
+      assignRoles: jest.fn(),
+      update: jest.fn(),
+    } as unknown as jest.Mocked<IUserRepository>;
+
+    const jwtService = {
+      signAsync: jest
+        .fn()
+        .mockResolvedValueOnce('new-access-token')
+        .mockResolvedValueOnce('new-refresh-token'),
+      verifyAsync: jest.fn(),
+    } as unknown as jest.Mocked<JwtService>;
+
+    const configService = {
+      get: jest.fn().mockImplementation((_key: string, fallback?: string) => fallback ?? _key),
+      getOrThrow: jest.fn().mockImplementation((key: string) => key),
+    } as unknown as ConfigService;
+
+    const caslAbilityFactory = {
+      getEffectivePermissions: jest.fn(),
+    } as unknown as CaslAbilityFactory;
+
+    const prisma = {
+      tenantMembership: {
+        findMany: jest.fn(),
+        findFirst: jest.fn(),
+      },
+      tenant: {
+        findUnique: jest.fn(),
+      },
+      role: {
+        findFirst: jest.fn(),
+      },
+    } as unknown as PrismaService;
+
+    const service = new AuthService(
+      userRepo,
+      jwtService,
+      configService,
+      caslAbilityFactory,
+      prisma,
+    );
+
+    return { service, userRepo, jwtService, prisma };
+  };
+
+  it('super-admin switches to a specific tenant', async () => {
+    const { service, userRepo, prisma } = createService();
+    const user = createMockUser();
+    userRepo.findById = jest.fn().mockResolvedValue(user);
+    userRepo.save = jest.fn().mockResolvedValue(user);
+    (prisma.tenant.findUnique as jest.Mock).mockResolvedValue({
+      id: 'tenant-b',
+      slug: 'norte',
+      isActive: true,
+    });
+
+    const result = await service.switchTenant(
+      { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: true },
+      { tenantId: 'tenant-b' },
+    );
+
+    expect(result).toEqual({ accessToken: 'new-access-token', refreshToken: 'new-refresh-token' });
+  });
+
+  it('super-admin switches to global context (null tenant)', async () => {
+    const { service, userRepo } = createService();
+    const user = createMockUser();
+    userRepo.findById = jest.fn().mockResolvedValue(user);
+    userRepo.save = jest.fn().mockResolvedValue(user);
+
+    const result = await service.switchTenant(
+      { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: true },
+      { tenantId: null },
+    );
+
+    expect(result).toEqual({ accessToken: 'new-access-token', refreshToken: 'new-refresh-token' });
+  });
+
+  it('non-super-admin with active membership switches tenant successfully', async () => {
+    const { service, userRepo, prisma } = createService();
+    const user = createMockUser();
+    userRepo.findById = jest.fn().mockResolvedValue(user);
+    userRepo.save = jest.fn().mockResolvedValue(user);
+    (prisma.tenantMembership.findFirst as jest.Mock).mockResolvedValue({
+      userId: 'user-1',
+      tenantId: 'tenant-b',
+      tenant: { id: 'tenant-b', slug: 'norte', isActive: true },
+    });
+
+    const result = await service.switchTenant(
+      { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+      { tenantId: 'tenant-b' },
+    );
+
+    expect(result).toEqual({ accessToken: 'new-access-token', refreshToken: 'new-refresh-token' });
+    expect(prisma.tenantMembership.findFirst).toHaveBeenCalledWith({
+      where: { userId: 'user-1', tenantId: 'tenant-b' },
+      include: { tenant: true },
+    });
+  });
+
+  it('non-super-admin without membership is denied', async () => {
+    const { service, prisma } = createService();
+    (prisma.tenantMembership.findFirst as jest.Mock).mockResolvedValue(null);
+
+    await expect(
+      service.switchTenant(
+        { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+        { tenantId: 'tenant-b' },
+      ),
+    ).rejects.toThrow('TENANT_ACCESS_DENIED');
+  });
+
+  it('non-super-admin cannot switch to inactive tenant', async () => {
+    const { service, prisma } = createService();
+    (prisma.tenantMembership.findFirst as jest.Mock).mockResolvedValue({
+      userId: 'user-1',
+      tenantId: 'tenant-b',
+      tenant: { id: 'tenant-b', slug: 'norte', isActive: false },
+    });
+
+    await expect(
+      service.switchTenant(
+        { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+        { tenantId: 'tenant-b' },
+      ),
+    ).rejects.toThrow('TENANT_INACTIVE');
+  });
+
+  it('non-super-admin cannot switch to null tenantId (global context)', async () => {
+    const { service } = createService();
+
+    await expect(
+      service.switchTenant(
+        { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+        { tenantId: null },
+      ),
+    ).rejects.toThrow('SUPER_ADMIN_REQUIRED');
+  });
+
+  it('super-admin is denied when target tenant does not exist', async () => {
+    const { service, prisma } = createService();
+    (prisma.tenant.findUnique as jest.Mock).mockResolvedValue(null);
+
+    await expect(
+      service.switchTenant(
+        { userId: 'user-1', email: 'john@example.com', tenantId: null, tenantSlug: null, isSuperAdmin: true },
+        { tenantId: 'nonexistent' },
+      ),
+    ).rejects.toThrow('TENANT_NOT_FOUND');
+  });
+
+  it('super-admin is denied when target tenant is inactive', async () => {
+    const { service, prisma } = createService();
+    (prisma.tenant.findUnique as jest.Mock).mockResolvedValue({
+      id: 'tenant-b',
+      slug: 'norte',
+      isActive: false,
+    });
+
+    await expect(
+      service.switchTenant(
+        { userId: 'user-1', email: 'john@example.com', tenantId: null, tenantSlug: null, isSuperAdmin: true },
+        { tenantId: 'tenant-b' },
+      ),
+    ).rejects.toThrow('TENANT_INACTIVE');
   });
 });
