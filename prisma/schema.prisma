@@ -120,6 +120,38 @@ enum TargetSide {
 
 enum SaleStatus {
   DRAFT
+  CONFIRMED
+}
+
+enum SalePaymentMethod {
+  CASH
+  CARD_CREDIT
+  CARD_DEBIT
+  TRANSFER
+  CREDIT
+}
+
+enum SalePaymentStatus {
+  PAID
+  PARTIAL
+  CREDIT
+}
+
+enum SaleChannel {
+  POS
+  ONLINE
+}
+
+enum SaleDeliveryStatus {
+  PENDING
+  DELIVERED
+  NOT_APPLICABLE
+}
+
+enum SaleIdempotencyStatus {
+  IN_FLIGHT
+  SUCCEEDED
+  FAILED
 }
 
 enum SaleItemPriceSource {
@@ -192,6 +224,9 @@ model Tenant {
   orderItems           OrderItem[]
   sales                Sale[]
   saleItems            SaleItem[]
+  salePayments         SalePayment[]
+  saleIdempotencies    SaleIdempotency[]
+  saleFolioCounters    SaleFolioCounter[]
   customers            Customer[]
   customerAddresses    CustomerAddress[]
   promotions           Promotion[]
@@ -524,19 +559,39 @@ model OrderItem {
 model Sale {
   id        String     @id @default(uuid())
   userId    String
+  sellerUserId String?
+  customerId String?
   status    SaleStatus @default(DRAFT)
+  channel   SaleChannel @default(POS)
+  register  String      @default("Principal")
+  deliveryStatus SaleDeliveryStatus @default(DELIVERED)
+  subtotalCents Int     @default(0)
+  discountCents Int     @default(0)
+  totalCents    Int     @default(0)
+  paidCents     Int     @default(0)
+  debtCents     Int     @default(0)
+  changeDueCents Int    @default(0)
+  paymentStatus SalePaymentStatus?
+  confirmedAt DateTime?
+  folio       String?
   tenantId  String
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
   // Relations
   tenant Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  user   User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user   User       @relation("SaleCashier", fields: [userId], references: [id], onDelete: Restrict)
+  seller User?      @relation("SaleSeller", fields: [sellerUserId], references: [id], onDelete: SetNull)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
   items  SaleItem[]
+  payments SalePayment[]
+  idempotencyRecords SaleIdempotency[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
   @@index([userId, status])
+  @@index([sellerUserId])
+  @@index([customerId])
   @@map("sales")
 }
 
@@ -551,6 +606,7 @@ model SaleItem {
   variantId         String?
   productName       String
   variantName       String?
+  imageUrl          String?
   quantity          Int
   unitPriceCents    Int
   unitPriceCurrency String   @default("MXN")
@@ -579,6 +635,59 @@ model SaleItem {
   @@map("sale_items")
 }
 
+model SalePayment {
+  id         String            @id @default(uuid())
+  saleId     String
+  method     SalePaymentMethod
+  amountCents Int
+  metadataJson Json?
+  tenantId   String
+  createdAt  DateTime          @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@index([saleId])
+  @@index([tenantId])
+  @@map("sale_payments")
+}
+
+model SaleIdempotency {
+  id          String                @id @default(uuid())
+  tenantId    String
+  operation   String
+  key         String
+  requestHash String
+  status      SaleIdempotencyStatus
+  responseJson Json?
+  saleId      String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale   Sale?  @relation(fields: [saleId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, operation, key])
+  @@index([tenantId])
+  @@index([saleId])
+  @@map("sale_idempotency")
+}
+
+model SaleFolioCounter {
+  id         String   @id @default(uuid())
+  tenantId   String
+  period     String
+  lastNumber Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, period])
+  @@index([tenantId])
+  @@map("sale_folio_counters")
+}
+
 // ============================================================================
 // USER MODEL
 // ============================================================================
@@ -594,7 +703,8 @@ model User {
   updatedAt           DateTime  @updatedAt
 
   tenantMemberships TenantMembership[]
-  sales             Sale[]
+  sales             Sale[] @relation("SaleCashier")
+  salesAsSeller     Sale[] @relation("SaleSeller")
 
   @@map("users")
 }
@@ -677,6 +787,7 @@ model Customer {
   tenantId              String
 
   tenant                Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sales                 Sale[]
 
   // Price list assignment (optional — auto-apply on sales)
   globalPriceListId     String?

@@ -172,6 +172,66 @@ export class PrismaProductRepository implements IProductRepository {
     return !!variantMatch;
   }
 
+  async decrementStockForCharge(
+    adjustments: Array<{
+      productId: string;
+      variantId?: string | null;
+      quantity: number;
+    }>,
+  ): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+
+    for (const adjustment of adjustments) {
+      if (adjustment.quantity <= 0) continue;
+
+      if (adjustment.variantId) {
+        const result = await prisma.variant.updateMany({
+          where: {
+            id: adjustment.variantId,
+            productId: adjustment.productId,
+            tenantId,
+            quantity: { gte: adjustment.quantity },
+          },
+          data: {
+            quantity: { decrement: adjustment.quantity },
+          },
+        });
+
+        if (result.count !== 1) {
+          throw new Error('STOCK_INSUFFICIENT_AT_CONFIRM');
+        }
+        continue;
+      }
+
+      const result = await prisma.product.updateMany({
+        where: {
+          id: adjustment.productId,
+          tenantId,
+          useStock: true,
+          quantity: { gte: adjustment.quantity },
+        },
+        data: {
+          quantity: { decrement: adjustment.quantity },
+        },
+      });
+
+      if (result.count !== 1) {
+        const nonStockProduct = await prisma.product.findFirst({
+          where: {
+            id: adjustment.productId,
+            tenantId,
+            useStock: false,
+          },
+          select: { id: true },
+        });
+        if (nonStockProduct) continue;
+
+        throw new Error('STOCK_INSUFFICIENT_AT_CONFIRM');
+      }
+    }
+  }
+
   private toDomain(data: PrismaProduct): Product {
     return Product.fromPersistence({
       id: data.id,

@@ -84,6 +84,64 @@ describe('Sale Entity', () => {
       expect(sale.items[0].productId).toBe('prod-001');
       expect(sale.items[0].quantity).toBe(2);
     });
+
+    it('should reconstitute a confirmed sale with confirmation fields', () => {
+      const confirmedAt = new Date('2026-05-06T12:00:00.000Z');
+
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        confirmedAt,
+        folio: 'A-2605-0001',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(sale.status).toBe('CONFIRMED');
+      expect(sale.confirmedAt).toEqual(confirmedAt);
+      expect(sale.folio).toBe('A-2605-0001');
+    });
+  });
+
+  describe('confirm - transition DRAFT to CONFIRMED', () => {
+    it('should transition draft sale to confirmed', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+      const confirmedAt = new Date('2026-05-06T12:00:00.000Z');
+
+      const confirmed = sale.confirm({
+        confirmedAt,
+        folio: 'A-2605-0001',
+      });
+
+      expect(confirmed.status).toBe('CONFIRMED');
+      expect(confirmed.confirmedAt).toEqual(confirmedAt);
+      expect(confirmed.folio).toBe('A-2605-0001');
+    });
+
+    it('should reject confirmation when sale is already confirmed', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        confirmedAt: new Date('2026-05-06T12:00:00.000Z'),
+        folio: 'A-2605-0001',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(() =>
+        sale.confirm({
+          confirmedAt: new Date('2026-05-06T12:01:00.000Z'),
+          folio: 'A-2605-0002',
+        }),
+      ).toThrow(BusinessRuleViolationError);
+    });
   });
 
   describe('addItem - add new item to sale', () => {

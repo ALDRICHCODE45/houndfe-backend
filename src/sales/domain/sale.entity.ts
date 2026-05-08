@@ -9,7 +9,14 @@ import {
   ApplySaleItemDiscountInput,
 } from './sale-item.entity';
 
-export type SaleStatus = 'DRAFT';
+export type SaleStatus = 'DRAFT' | 'CONFIRMED';
+export type SaleChannel = 'POS' | 'ONLINE';
+export type SaleDeliveryStatus = 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+
+export interface ConfirmSaleInput {
+  confirmedAt: Date;
+  folio: string;
+}
 
 export interface CreateSaleProps {
   id: string;
@@ -20,7 +27,14 @@ export interface SaleFromPersistenceProps {
   id: string;
   userId: string;
   status: SaleStatus;
+  channel?: SaleChannel;
+  register?: string;
+  deliveryStatus?: SaleDeliveryStatus;
+  customerId?: string | null;
+  sellerUserId?: string | null;
   items: SaleItemProps[];
+  confirmedAt?: Date | null;
+  folio?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -47,7 +61,14 @@ export class Sale {
     public readonly id: string,
     public readonly userId: string,
     public readonly status: SaleStatus,
+    public readonly channel: SaleChannel,
+    public readonly register: string,
+    public readonly deliveryStatus: SaleDeliveryStatus,
+    public readonly customerId: string | null,
+    public readonly sellerUserId: string | null,
     items: SaleItem[] = [],
+    public readonly confirmedAt?: Date,
+    public readonly folio?: string,
     public readonly createdAt?: Date,
     public readonly updatedAt?: Date,
   ) {
@@ -62,7 +83,16 @@ export class Sale {
       throw new InvalidArgumentError('User ID cannot be empty');
     }
 
-    return new Sale(props.id, props.userId, 'DRAFT');
+    return new Sale(
+      props.id,
+      props.userId,
+      'DRAFT',
+      'POS',
+      'Principal',
+      'DELIVERED',
+      null,
+      null,
+    );
   }
 
   static fromPersistence(props: SaleFromPersistenceProps): Sale {
@@ -74,9 +104,49 @@ export class Sale {
       props.id,
       props.userId,
       props.status,
+      props.channel ?? 'POS',
+      props.register ?? 'Principal',
+      props.deliveryStatus ?? 'DELIVERED',
+      props.customerId ?? null,
+      props.sellerUserId ?? null,
       items,
+      props.confirmedAt ?? undefined,
+      props.folio ?? undefined,
       props.createdAt,
       props.updatedAt,
+    );
+  }
+
+  confirm(input: ConfirmSaleInput): Sale {
+    if (this.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        'SALE_ALREADY_CONFIRMED',
+        'SALE_ALREADY_CONFIRMED',
+      );
+    }
+
+    if (!(input.confirmedAt instanceof Date)) {
+      throw new InvalidArgumentError('confirmedAt must be a valid date');
+    }
+
+    if (!input.folio || input.folio.trim() === '') {
+      throw new InvalidArgumentError('folio cannot be empty');
+    }
+
+    return new Sale(
+      this.id,
+      this.userId,
+      'CONFIRMED',
+      this.channel,
+      this.register,
+      this.deliveryStatus,
+      this.customerId,
+      this.sellerUserId,
+      [...this._items],
+      input.confirmedAt,
+      input.folio,
+      this.createdAt,
+      this.updatedAt,
     );
   }
 
@@ -230,6 +300,13 @@ export class Sale {
       id: this.id,
       userId: this.userId,
       status: this.status,
+      channel: this.channel,
+      register: this.register,
+      deliveryStatus: this.deliveryStatus,
+      customerId: this.customerId,
+      sellerUserId: this.sellerUserId,
+      confirmedAt: this.confirmedAt,
+      folio: this.folio,
       items: this._items.map((item) => item.toResponse()),
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,

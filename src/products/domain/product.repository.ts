@@ -25,6 +25,17 @@ export interface IProductRepository {
     barcode: string,
     exclude?: { productId?: string; variantId?: string },
   ): Promise<boolean>;
+
+  /**
+   * Charge-time stock decrement contract (implemented in PR2).
+   */
+  decrementStockForCharge(
+    adjustments: Array<{
+      productId: string;
+      variantId?: string | null;
+      quantity: number;
+    }>,
+  ): Promise<void>;
 }
 
 /** Injection token — used by NestJS DI to resolve the interface. */

@@ -10,16 +10,32 @@ import { Sale } from '../domain/sale.entity';
 
 function makeMockPrisma() {
   return {
+    $transaction: jest.fn(async (cb: any) => cb()),
     sale: {
       create: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       findMany: jest.fn(),
+      groupBy: jest.fn(),
+      count: jest.fn(),
       delete: jest.fn(),
     },
     saleItem: {
       deleteMany: jest.fn(),
       createMany: jest.fn(),
+    },
+    saleFolioCounter: {
+      upsert: jest.fn(),
+    },
+    salePayment: {
+      create: jest.fn(),
+    },
+    saleIdempotency: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      updateMany: jest.fn(),
     },
   } as any;
 }
@@ -50,6 +66,147 @@ describe('PrismaSaleRepository', () => {
     prisma.sale.findUnique.mockResolvedValue(null);
     await repo.findById('missing-sale');
     expect(tenantPrisma.getClient).toHaveBeenCalled();
+  });
+
+  describe('findManyConfirmed', () => {
+    it('applies confirmed base, pagination, sorting, and q OR search', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 2,
+        limit: 10,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: '00042',
+      } as any);
+
+      expect(prisma.sale.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: 'CONFIRMED',
+            OR: [
+              { folio: { contains: '00042', mode: 'insensitive' } },
+              { customer: { firstName: { contains: '00042', mode: 'insensitive' } } },
+              { customer: { lastName: { contains: '00042', mode: 'insensitive' } } },
+              { user: { name: { contains: '00042', mode: 'insensitive' } } },
+              { seller: { name: { contains: '00042', mode: 'insensitive' } } },
+            ],
+          }),
+          orderBy: { confirmedAt: 'desc' },
+          skip: 10,
+          take: 10,
+        }),
+      );
+    });
+  });
+
+  describe('confirmed counts', () => {
+    it('counts all confirmed with base filters', async () => {
+      prisma.sale.count.mockResolvedValue(5);
+
+      const result = await repo.countConfirmed({ q: 'folio' } as any);
+
+      expect(result).toBe(5);
+      expect(prisma.sale.count).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: 'CONFIRMED' }),
+        }),
+      );
+    });
+
+    it('groups confirmed by paymentStatus and counts not delivered', async () => {
+      prisma.sale.groupBy.mockResolvedValue([
+        { paymentStatus: 'PAID', _count: { _all: 2 } },
+      ]);
+      prisma.sale.count.mockResolvedValue(1);
+
+      const grouped = await repo.groupByPaymentStatusConfirmed({} as any);
+      const notDelivered = await repo.countNotDeliveredConfirmed({} as any);
+
+      expect(grouped).toEqual([{ paymentStatus: 'PAID', _count: { _all: 2 } }]);
+      expect(notDelivered).toBe(1);
+      expect(prisma.sale.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          by: ['paymentStatus'],
+          where: expect.objectContaining({ status: 'CONFIRMED' }),
+        }),
+      );
+      expect(prisma.sale.count).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: 'CONFIRMED',
+            NOT: { deliveryStatus: 'DELIVERED' },
+          }),
+        }),
+      );
+    });
+  });
+
+  describe('findOneWithRelations', () => {
+    it('loads detail relations with tenant-safe confirmed filter', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        id: 'sale-1',
+        folio: 'V-0042',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        subtotalCents: 2000,
+        discountCents: 0,
+        totalCents: 2000,
+        paidCents: 2000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+        customer: { id: 'c1', firstName: 'Ana', lastName: null },
+        user: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [
+          {
+            productName: 'Prod 1',
+            variantName: null,
+            imageUrl: 'https://cdn/img.jpg',
+            unitPriceCents: 1000,
+            quantity: 2,
+            discountAmountCents: null,
+          },
+        ],
+        payments: [
+          {
+            method: 'CASH',
+            amountCents: 2000,
+            createdAt: new Date('2026-05-08T10:15:00.000Z'),
+          },
+        ],
+      });
+
+      const result = await repo.findOneWithRelations('sale-1');
+
+      expect(prisma.sale.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'sale-1', tenantId: 'tenant-1', status: 'CONFIRMED' },
+          include: expect.objectContaining({
+            customer: { select: { id: true, firstName: true, lastName: true } },
+            user: { select: { id: true, name: true } },
+            seller: { select: { id: true, name: true } },
+            items: expect.any(Object),
+            payments: expect.any(Object),
+          }),
+        }),
+      );
+      expect(result?.cashier).toEqual({ id: 'u1', name: 'Caja 1' });
+      expect(result?.items[0].subtotalCents).toBe(2000);
+    });
+
+    it('returns null when no tenant-visible sale exists', async () => {
+      prisma.sale.findFirst.mockResolvedValue(null);
+
+      const result = await repo.findOneWithRelations('missing-sale');
+
+      expect(result).toBeNull();
+    });
   });
 
   describe('save', () => {
@@ -131,6 +288,13 @@ describe('PrismaSaleRepository', () => {
           id: 'sale-1',
           userId: 'user-1',
           status: 'DRAFT',
+          channel: 'POS',
+          register: 'Principal',
+          deliveryStatus: 'DELIVERED',
+          customerId: null,
+          sellerUserId: null,
+          confirmedAt: undefined,
+          folio: undefined,
           tenantId: 'tenant-1',
         },
       });
@@ -143,6 +307,7 @@ describe('PrismaSaleRepository', () => {
             variantId: null,
             productName: 'Product 1',
             variantName: null,
+            imageUrl: null,
             quantity: 2,
             unitPriceCents: 1000,
             unitPriceCurrency: 'MXN',
@@ -228,6 +393,13 @@ describe('PrismaSaleRepository', () => {
         where: { id: 'sale-2' },
         data: {
           status: 'DRAFT',
+          channel: 'POS',
+          register: 'Principal',
+          deliveryStatus: 'DELIVERED',
+          customerId: null,
+          sellerUserId: null,
+          confirmedAt: undefined,
+          folio: undefined,
         },
       });
       expect(prisma.saleItem.createMany).toHaveBeenCalledWith({
@@ -239,6 +411,7 @@ describe('PrismaSaleRepository', () => {
             variantId: null,
             productName: 'Product 2',
             variantName: null,
+            imageUrl: null,
             quantity: 1,
             unitPriceCents: 500,
             unitPriceCurrency: 'MXN',
@@ -479,6 +652,101 @@ describe('PrismaSaleRepository', () => {
 
       expect(deletedSale).toBeNull();
       expect(orphanedItems).toHaveLength(0);
+    });
+  });
+
+  describe('charge tenant hardening and idempotency', () => {
+    it('uses tenant predicate in charge lookup/update SQL paths', async () => {
+      prisma.sale.findFirst.mockResolvedValue(null);
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({ id: 'pay-1' });
+
+      await repo.findByIdForUpdate('sale-tenant-scope');
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-tenant-scope',
+        method: 'cash',
+        amountCents: 100,
+        subtotalCents: 100,
+        discountCents: 0,
+        totalCents: 100,
+        paidCents: 100,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000001',
+      });
+
+      expect(prisma.sale.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ tenantId: 'tenant-1' }),
+        }),
+      );
+      expect(prisma.sale.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 'sale-tenant-scope',
+            tenantId: 'tenant-1',
+          }),
+        }),
+      );
+    });
+
+    it('rejects charge paths when tenant context is empty', async () => {
+      tenantPrisma.getTenantId.mockReturnValue('');
+
+      await expect(repo.findByIdForUpdate('sale-1')).rejects.toThrow(
+        'TENANT_CONTEXT_REQUIRED',
+      );
+      await expect(repo.allocateNextFolio()).rejects.toThrow(
+        'TENANT_CONTEXT_REQUIRED',
+      );
+      await expect(
+        repo.persistChargeConfirmation({
+          saleId: 'sale-1',
+          method: 'cash',
+          amountCents: 100,
+          subtotalCents: 100,
+          discountCents: 0,
+          totalCents: 100,
+          paidCents: 100,
+          debtCents: 0,
+          changeDueCents: 0,
+          paymentStatus: 'PAID',
+          confirmedAt: new Date(),
+          folio: 'A-2605-000001',
+        }),
+      ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
+      await expect(
+        (repo as any).acquireChargeIdempotency('sale-1', 'k', 'h'),
+      ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
+    });
+
+    it('replays idempotency row when hash matches and status is succeeded', async () => {
+      prisma.saleIdempotency.create.mockRejectedValue({ code: 'P2002' });
+      prisma.saleIdempotency.findUnique.mockResolvedValue({
+        id: 'idem-1',
+        requestHash: 'hash-a',
+        status: 'SUCCEEDED',
+        responseJson: { saleId: 'sale-1' },
+      });
+
+      const result = await (repo as any).acquireChargeIdempotency(
+        'sale-1',
+        'key-1',
+        'hash-a',
+      );
+
+      expect(result).toEqual({ kind: 'replay', payload: { saleId: 'sale-1' } });
+      expect(prisma.saleIdempotency.findUnique).toHaveBeenCalledWith({
+        where: {
+          tenantId_operation_key: {
+            tenantId: 'tenant-1',
+            operation: 'sale_charge',
+            key: 'key-1',
+          },
+        },
+      });
     });
   });
 });

@@ -9,9 +9,11 @@ function makeTenantPrismaMock() {
       findMany: jest.fn(),
       delete: jest.fn(),
       findFirst: jest.fn(),
+      updateMany: jest.fn(),
     },
     variant: {
       findFirst: jest.fn(),
+      updateMany: jest.fn(),
     },
   } as any;
 
@@ -66,5 +68,21 @@ describe('PrismaProductRepository tenant scoping', () => {
         create: expect.objectContaining({ tenantId: 'tenant-1' }),
       }),
     );
+  });
+
+  it('decrements stock atomically and fails on insufficient stock', async () => {
+    const tenantPrisma = makeTenantPrismaMock();
+    tenantPrisma.client.product.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+
+    const repo = new PrismaProductRepository(tenantPrisma as any);
+
+    await expect(
+      repo.decrementStockForCharge([
+        { productId: 'prod-1', quantity: 2 },
+        { productId: 'prod-2', quantity: 3 },
+      ]),
+    ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
   });
 });
