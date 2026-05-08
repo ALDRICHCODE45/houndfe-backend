@@ -17,10 +17,11 @@ import { SALE_REPOSITORY } from './domain/sale.repository';
 import { ProductsModule } from '../products/products.module';
 import { AuthModule } from '../auth/auth.module';
 import { SaleEventListener } from './listeners/sale-event.listener';
+import { SalesQueryController } from './sales-query.controller';
 
 @Module({
   imports: [ProductsModule, AuthModule],
-  controllers: [SalesController, SalesCatalogController],
+  controllers: [SalesController, SalesCatalogController, SalesQueryController],
   providers: [
     SalesService,
     {
