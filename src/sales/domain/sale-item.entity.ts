@@ -7,6 +7,7 @@ export interface SaleItemProps {
   variantId: string | null;
   productName: string;
   variantName: string | null;
+  imageUrl?: string | null;
   quantity: number;
   unitPriceCents: number;
   unitPriceCurrency: string;
@@ -54,6 +55,7 @@ export class SaleItem {
     public readonly variantId: string | null,
     public readonly productName: string,
     public readonly variantName: string | null,
+    public readonly imageUrl: string | null,
     private _quantity: number,
     private _unitPriceCents: number,
     public readonly unitPriceCurrency: string,
@@ -95,6 +97,7 @@ export class SaleItem {
       props.variantId,
       props.productName,
       props.variantName,
+      props.imageUrl ?? null,
       props.quantity,
       props.unitPriceCents,
       props.unitPriceCurrency,
@@ -119,6 +122,7 @@ export class SaleItem {
       props.variantId,
       props.productName,
       props.variantName,
+      props.imageUrl ?? null,
       props.quantity,
       props.unitPriceCents,
       props.unitPriceCurrency,
@@ -287,6 +291,7 @@ export class SaleItem {
       variantId: this.variantId,
       productName: this.productName,
       variantName: this.variantName,
+      imageUrl: this.imageUrl,
       quantity: this.quantity,
       unitPriceCents: this.unitPriceCents,
       unitPriceCurrency: this.unitPriceCurrency,

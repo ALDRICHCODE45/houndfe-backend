@@ -39,6 +39,9 @@ function makeMockPrisma(overrides: any = {}) {
     priceList: {
       findFirst: jest.fn(),
     },
+    productImage: {
+      findFirst: jest.fn(),
+    },
     ...overrides,
   };
 }
@@ -130,6 +133,7 @@ describe('ProductsService — POS Helpers', () => {
         variantId: null,
         variantName: null,
         unitPriceCents: 5000,
+        imageUrl: null,
       });
     });
 
@@ -173,7 +177,61 @@ describe('ProductsService — POS Helpers', () => {
         variantId: 'var-1',
         variantName: 'Roja M',
         unitPriceCents: 15000,
+        imageUrl: null,
       });
+    });
+
+    it('should resolve product main image with isMain desc and sortOrder asc', async () => {
+      prisma.product.findUnique.mockResolvedValue({
+        id: 'prod-image',
+        name: 'Taza',
+        hasVariants: false,
+        sellInPos: true,
+      });
+      prisma.priceList.findFirst.mockResolvedValue({ priceCents: 2100 });
+
+      prisma.productImage.findFirst.mockResolvedValue({
+        url: 'https://cdn.example.com/main.jpg',
+      });
+
+      const result = await service.getProductInfoForSale('prod-image', null);
+
+      expect(prisma.productImage.findFirst).toHaveBeenCalledWith({
+        where: { productId: 'prod-image', variantId: null },
+        orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+        select: { url: true },
+      });
+      expect(result.imageUrl).toBe('https://cdn.example.com/main.jpg');
+    });
+
+    it('should resolve variant main image with null fallback', async () => {
+      prisma.product.findUnique.mockResolvedValue({
+        id: 'prod-var-image',
+        name: 'Camisa',
+        hasVariants: true,
+        sellInPos: true,
+      });
+      prisma.variant.findFirst.mockResolvedValue({
+        id: 'var-blue',
+        productId: 'prod-var-image',
+        name: 'Azul',
+      });
+      prisma.variantPrice = {
+        findFirst: jest.fn().mockResolvedValue({ priceCents: 999 }),
+      };
+      prisma.productImage.findFirst.mockResolvedValue(null);
+
+      const result = await service.getProductInfoForSale(
+        'prod-var-image',
+        'var-blue',
+      );
+
+      expect(prisma.productImage.findFirst).toHaveBeenCalledWith({
+        where: { productId: 'prod-var-image', variantId: 'var-blue' },
+        orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+        select: { url: true },
+      });
+      expect(result.imageUrl).toBeNull();
     });
 
     it('should reject when product does not exist', async () => {

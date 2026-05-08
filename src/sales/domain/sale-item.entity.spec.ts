@@ -42,6 +42,15 @@ describe('SaleItem Entity', () => {
       expect(item.variantName).toBe('Red');
     });
 
+    it('should keep imageUrl snapshot when provided', () => {
+      const item = SaleItem.create({
+        ...validItemData,
+        imageUrl: 'https://cdn.example.com/p.png',
+      });
+
+      expect(item.imageUrl).toBe('https://cdn.example.com/p.png');
+    });
+
     it('should throw InvalidArgumentError if quantity is less than 1', () => {
       expect(() =>
         SaleItem.create({
@@ -100,10 +109,12 @@ describe('SaleItem Entity', () => {
         quantity: 2,
         unitPriceCents: 5000,
         unitPriceCurrency: 'MXN',
+        imageUrl: 'https://cdn.example.com/persisted.png',
       });
 
       expect(item.id).toBe('550e8400-e29b-41d4-a716-446655440010');
       expect(item.quantity).toBe(2);
+      expect(item.imageUrl).toBe('https://cdn.example.com/persisted.png');
     });
   });
 
