@@ -4,9 +4,9 @@
  * Orchestrates domain logic and infrastructure for the Sale aggregate.
  * Handles: draft creation, item management, validation, and ownership enforcement.
  */
-import { Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { Sale } from './domain/sale.entity';
 import type { ISaleRepository } from './domain/sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
@@ -31,6 +31,19 @@ import type { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
 import type { OverrideItemPriceDto } from './dto/override-item-price.dto';
 import type { AvailablePricesResponseDto } from './dto/available-prices-response.dto';
 import type { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
+import type { ChargeSaleDto } from './dto/charge-sale.dto';
+import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import type { SaleListResponseDto } from './dto/sale-list-response.dto';
+import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
+import { buildSaleTimeline } from './domain/build-sale-timeline';
+
+type SupportedChargeMethod = 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+
+function isSupportedChargeMethod(
+  method: ChargeSaleDto['method'],
+): method is SupportedChargeMethod {
+  return ['cash', 'card_credit', 'card_debit', 'transfer'].includes(method);
+}
 
 @Injectable()
 export class SalesService {
@@ -118,6 +131,7 @@ export class SalesService {
       variantId: productInfo.variantId,
       productName: productInfo.productName,
       variantName: productInfo.variantName,
+      imageUrl: productInfo.imageUrl,
       quantity: dto.quantity,
       unitPriceCents: productInfo.unitPriceCents,
       unitPriceCurrency: 'MXN',
@@ -301,6 +315,101 @@ export class SalesService {
     brandId?: string;
   }) {
     return this.productsService.searchForPOS(dto);
+  }
+
+  async listSales(query: ListSalesQueryDto): Promise<SaleListResponseDto> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    const baseFilters = {
+      q: query.q,
+      from: query.from,
+      to: query.to,
+      cashierUserId: query.cashierUserId,
+      customerId: query.customerId,
+    };
+
+    const [data, total, groupedPaymentStatus, notDelivered] = await Promise.all([
+      this.saleRepo.findManyConfirmed({
+        page,
+        limit,
+        sortBy: query.sortBy ?? 'confirmedAt',
+        sortOrder: query.sortOrder ?? 'desc',
+        q: query.q,
+        status: query.status,
+        paymentStatus: query.paymentStatus,
+        deliveryStatus: query.deliveryStatus,
+        from: query.from,
+        to: query.to,
+        cashierUserId: query.cashierUserId,
+        customerId: query.customerId,
+      }),
+      this.saleRepo.countConfirmed(baseFilters),
+      this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
+      this.saleRepo.countNotDeliveredConfirmed(baseFilters),
+    ]);
+
+    const paidCount = groupedPaymentStatus
+      .filter((item) => item.paymentStatus === 'PAID')
+      .reduce((acc, item) => acc + item._count._all, 0);
+    const pendingPayments = Math.max(0, total - paidCount);
+    const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+
+    return {
+      data,
+      pagination: { page, limit, total, totalPages },
+      counts: {
+        all: total,
+        pendingPayments,
+        notDelivered,
+      },
+    };
+  }
+
+  async getSaleDetail(saleId: string): Promise<SaleDetailResponseDto> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(saleId)) {
+      throw new BadRequestException('Validation failed (uuid is expected)');
+    }
+
+    const sale = await this.saleRepo.findOneWithRelations(saleId);
+    if (!sale) {
+      throw new NotFoundException('Sale not found');
+    }
+
+    return {
+      id: sale.id,
+      folio: sale.folio,
+      status: sale.status,
+      channel: sale.channel,
+      register: sale.register,
+      confirmedAt: sale.confirmedAt?.toISOString() ?? null,
+      subtotalCents: sale.subtotalCents,
+      discountCents: sale.discountCents,
+      totalCents: sale.totalCents,
+      paidCents: sale.paidCents,
+      debtCents: sale.debtCents,
+      changeDueCents: sale.changeDueCents,
+      paymentStatus: sale.paymentStatus,
+      deliveryStatus: sale.deliveryStatus,
+      customer: sale.customer,
+      cashier: sale.cashier,
+      seller: sale.seller,
+      items: sale.items,
+      payments: sale.payments.map((payment) => ({
+        method: payment.method,
+        amountCents: payment.amountCents,
+        tenderedCents: payment.tenderedCents,
+        changeCents: payment.changeCents,
+        reference: payment.reference,
+        paidAt: payment.paidAt.toISOString(),
+      })),
+      timeline: buildSaleTimeline({
+        createdAt: sale.createdAt,
+        confirmedAt: sale.confirmedAt,
+        deliveryStatus: sale.deliveryStatus,
+        payments: sale.payments.map((payment) => ({ createdAt: payment.createdAt })),
+      }),
+    };
   }
 
   /**
@@ -601,5 +710,170 @@ export class SalesService {
     }
 
     return sale.toResponse();
+  }
+
+  async chargeDraft(
+    saleId: string,
+    actorId: string,
+    dto: ChargeSaleDto,
+    idempotencyKey: string,
+  ) {
+    if (!isSupportedChargeMethod(dto.method)) {
+      throw new BusinessRuleViolationError(
+        'PAYMENT_METHOD_NOT_SUPPORTED',
+        'PAYMENT_METHOD_NOT_SUPPORTED',
+      );
+    }
+    const paymentMethod: SupportedChargeMethod = dto.method;
+
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ saleId, actorId, dto }))
+      .digest('hex');
+
+    const idempotency = await this.saleRepo.acquireChargeIdempotency(
+      saleId,
+      idempotencyKey,
+      requestHash,
+    );
+    if (idempotency.kind === 'replay') {
+      return idempotency.payload as {
+        saleId: string;
+        folio: string;
+        subtotalCents: number;
+        discountCents: number;
+        totalCents: number;
+        paidCents: number;
+        debtCents: number;
+        changeDueCents: number;
+        paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
+        confirmedAt: string;
+      };
+    }
+    if (idempotency.kind === 'conflict') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'IDEMPOTENCY_KEY_CONFLICT',
+      );
+    }
+    if (idempotency.kind === 'in_flight') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+      );
+    }
+
+    return this.saleRepo.runInTransaction(async () => {
+      const sale = await this.saleRepo.findByIdForUpdate(saleId);
+      if (!sale) {
+        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+      }
+      if (sale.userId !== actorId) {
+        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+      }
+      if (sale.status !== 'DRAFT') {
+        throw new BusinessRuleViolationError(
+          'SALE_ALREADY_CONFIRMED',
+          'SALE_ALREADY_CONFIRMED',
+        );
+      }
+
+      for (const item of sale.items) {
+        if (item.priceSource === 'custom') continue;
+
+        const currentCents =
+          item.priceSource === 'price_list' && item.appliedPriceListId
+            ? await this.productsService.resolveListPrice(
+                item.appliedPriceListId,
+                item.productId,
+                item.variantId,
+                item.quantity,
+              )
+            : (
+                await this.productsService.getProductInfoForSale(
+                  item.productId,
+                  item.variantId,
+                )
+              ).unitPriceCents;
+
+        if (currentCents !== item.unitPriceCents) {
+          throw new BusinessRuleViolationError(
+            'PRICE_OUT_OF_DATE',
+            'PRICE_OUT_OF_DATE',
+          );
+        }
+      }
+
+      const subtotalCents = sale.items.reduce(
+        (acc, item) =>
+          acc + (item.originalPriceCents ?? item.unitPriceCents) * item.quantity,
+        0,
+      );
+      const totalCents = sale.items.reduce(
+        (acc, item) => acc + item.unitPriceCents * item.quantity,
+        0,
+      );
+      const discountCents = subtotalCents - totalCents;
+
+      const isCash = dto.method === 'cash';
+      if (dto.amountCents < totalCents) {
+        throw new BusinessRuleViolationError(
+          'PAYMENT_AMOUNT_INSUFFICIENT',
+          'PAYMENT_AMOUNT_INSUFFICIENT',
+        );
+      }
+      if (!isCash && dto.amountCents > totalCents) {
+        throw new BusinessRuleViolationError(
+          'PAYMENT_AMOUNT_INVALID',
+          'PAYMENT_AMOUNT_INVALID',
+        );
+      }
+
+      const changeDueCents = isCash ? dto.amountCents - totalCents : 0;
+
+      const stockAdjustments = sale.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+      }));
+      await this.productsService.decrementStockForCharge(stockAdjustments);
+
+      const confirmedAt = new Date();
+      const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
+      await this.saleRepo.persistChargeConfirmation({
+        saleId,
+        method: paymentMethod,
+        amountCents: dto.amountCents,
+        subtotalCents,
+        discountCents,
+        totalCents,
+        paidCents: totalCents,
+        debtCents: 0,
+        changeDueCents,
+        paymentStatus: 'PAID',
+        confirmedAt,
+        folio,
+      });
+
+      const payload = {
+        saleId,
+        folio,
+        subtotalCents,
+        discountCents,
+        totalCents,
+        paidCents: totalCents,
+        debtCents: 0,
+        changeDueCents,
+        paymentStatus: 'PAID' as const,
+        confirmedAt: confirmedAt.toISOString(),
+      };
+
+      await this.saleRepo.markChargeIdempotencySucceeded(
+        idempotency.token,
+        saleId,
+        payload,
+      );
+
+      return payload;
+    });
   }
 }

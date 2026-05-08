@@ -95,6 +95,16 @@ export class ProductsService {
     private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
+  async decrementStockForCharge(
+    adjustments: Array<{
+      productId: string;
+      variantId?: string | null;
+      quantity: number;
+    }>,
+  ): Promise<void> {
+    await this.productRepo.decrementStockForCharge(adjustments);
+  }
+
   // ==================== Product CRUD ====================
 
   async create(dto: CreateProductDto) {
@@ -2119,6 +2129,7 @@ export class ProductsService {
     variantId: string | null;
     variantName: string | null;
     unitPriceCents: number;
+    imageUrl: string | null;
   }> {
     // Fetch product
     const tenantClient = this.tenantPrisma.getClient();
@@ -2171,12 +2182,19 @@ export class ProductsService {
         },
       });
 
+      const image = await tenantClient.productImage.findFirst({
+        where: { productId, variantId },
+        orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+        select: { url: true },
+      });
+
       return {
         productId,
         productName: product.name,
         variantId,
         variantName: variant.name,
         unitPriceCents: variantPrice?.priceCents ?? 0,
+        imageUrl: image?.url ?? null,
       };
     }
 
@@ -2188,12 +2206,19 @@ export class ProductsService {
       },
     });
 
+    const image = await tenantClient.productImage.findFirst({
+      where: { productId, variantId: null },
+      orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+      select: { url: true },
+    });
+
     return {
       productId,
       productName: product.name,
       variantId: null,
       variantName: null,
       unitPriceCents: priceList?.priceCents ?? 0,
+      imageUrl: image?.url ?? null,
     };
   }
 

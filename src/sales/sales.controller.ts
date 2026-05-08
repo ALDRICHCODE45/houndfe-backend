@@ -5,6 +5,7 @@
  * Handles: draft creation, item management (add, update quantity, clear), draft deletion.
  */
 import {
+  BadRequestException,
   Controller,
   Post,
   Patch,
@@ -16,6 +17,7 @@ import {
   HttpCode,
   HttpStatus,
   UseGuards,
+  Headers,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
@@ -28,6 +30,7 @@ import { AddItemDto } from './dto/add-item.dto';
 import { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
 import { OverrideItemPriceDto } from './dto/override-item-price.dto';
 import { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
+import { ChargeSaleDto } from './dto/charge-sale.dto';
 
 @Controller('sales/drafts')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -175,5 +178,20 @@ export class SalesController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.salesService.removeGlobalDiscount(id, user.userId);
+  }
+
+  @Post(':id/charge')
+  @RequirePermissions(['update', 'Sale'])
+  chargeDraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ChargeSaleDto,
+    @Headers('idempotency-key') idempotencyKey: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    if (!idempotencyKey?.trim()) {
+      throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
+    }
+
+    return this.salesService.chargeDraft(id, user.userId, dto, idempotencyKey);
   }
 }

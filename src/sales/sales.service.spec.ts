@@ -22,6 +22,16 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     findById: jest.fn(),
     findDraftsByUserId: jest.fn(),
     delete: jest.fn(),
+    findByIdForUpdate: jest.fn(),
+    acquireChargeIdempotency: jest.fn(),
+    markChargeIdempotencySucceeded: jest.fn(),
+    runInTransaction: jest.fn(async (cb: any) => cb()),
+    allocateNextFolio: jest.fn(),
+    persistChargeConfirmation: jest.fn(),
+    findManyConfirmed: jest.fn(),
+    countConfirmed: jest.fn(),
+    groupByPaymentStatusConfirmed: jest.fn(),
+    countNotDeliveredConfirmed: jest.fn(),
     ...overrides,
   } as jest.Mocked<ISaleRepository>;
 }
@@ -32,6 +42,7 @@ function makeMockProductsService() {
     checkStockAvailability: jest.fn(),
     getApplicablePrices: jest.fn(),
     resolveListPrice: jest.fn(),
+    decrementStockForCharge: jest.fn(),
   } as any;
 }
 
@@ -62,6 +73,338 @@ describe('SalesService', () => {
     productsService = makeMockProductsService();
     eventEmitter = makeMockEventEmitter();
     service = createService(saleRepo, productsService, eventEmitter);
+    saleRepo.acquireChargeIdempotency.mockResolvedValue({
+      kind: 'acquired',
+      token: 'idem-token',
+    });
+    saleRepo.markChargeIdempotencySucceeded.mockResolvedValue(undefined);
+  });
+
+  describe('chargeDraft', () => {
+    const buildDraftSale = (id: string, userId = 'user-1') => {
+      const sale = Sale.create({ id, userId });
+      sale.addItem({
+        id: `${id}-item-1`,
+        saleId: id,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    };
+
+    it('confirms draft with cash payment and computes change', async () => {
+      const sale = Sale.create({ id: 'sale-charge-1', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-1',
+        saleId: 'sale-charge-1',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.resolveListPrice.mockResolvedValue(1000);
+      saleRepo.allocateNextFolio = jest
+        .fn()
+        .mockResolvedValue('A-2605-000001') as any;
+      saleRepo.persistChargeConfirmation = jest.fn().mockResolvedValue(undefined) as any;
+      saleRepo.runInTransaction = jest
+        .fn()
+        .mockImplementation(async (cb: any) => cb()) as any;
+      (saleRepo as any).decrementStockForCharge = jest.fn().mockResolvedValue(undefined);
+
+      const result = await (service as any).chargeDraft(
+        'sale-charge-1',
+        'user-1',
+        { method: 'cash', amountCents: 2500 },
+        'idem-not-used-pr2',
+      );
+
+      expect(result.totalCents).toBe(2000);
+      expect(result.changeDueCents).toBe(500);
+      expect(result.paymentStatus).toBe('PAID');
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalled();
+    });
+
+    it('rejects price mismatch with PRICE_OUT_OF_DATE', async () => {
+      const sale = Sale.create({ id: 'sale-charge-2', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-1',
+        saleId: 'sale-charge-2',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1200,
+      });
+      productsService.resolveListPrice.mockResolvedValue(1200);
+      saleRepo.runInTransaction = jest
+        .fn()
+        .mockImplementation(async (cb: any) => cb()) as any;
+
+      await expect(
+        (service as any).chargeDraft(
+          'sale-charge-2',
+          'user-1',
+          { method: 'cash', amountCents: 1200 },
+          'idem-not-used-pr2',
+        ),
+      ).rejects.toThrow('PRICE_OUT_OF_DATE');
+    });
+
+    it('rejects credit in phase 1 with PAYMENT_METHOD_NOT_SUPPORTED', async () => {
+      await expect(
+        (service as any).chargeDraft(
+          'sale-charge-3',
+          'user-1',
+          { method: 'credit', amountCents: 1000 },
+          'idem-not-used-pr2',
+        ),
+      ).rejects.toThrow('PAYMENT_METHOD_NOT_SUPPORTED');
+    });
+
+    it('rejects card underpayment with PAYMENT_AMOUNT_INSUFFICIENT', async () => {
+      const sale = buildDraftSale('sale-charge-underpay');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'card_debit', amountCents: 1500 },
+          'idem-underpay',
+        ),
+      ).rejects.toThrow('PAYMENT_AMOUNT_INSUFFICIENT');
+    });
+
+    it('rejects non-cash overpayment with PAYMENT_AMOUNT_INVALID', async () => {
+      const sale = buildDraftSale('sale-charge-overpay');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'transfer', amountCents: 2500 },
+          'idem-overpay',
+        ),
+      ).rejects.toThrow('PAYMENT_AMOUNT_INVALID');
+    });
+
+    it('rejects already confirmed sale with SALE_ALREADY_CONFIRMED', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-confirmed',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-1',
+            saleId: 'sale-charge-confirmed',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 2000 },
+          'idem-confirmed',
+        ),
+      ).rejects.toThrow('SALE_ALREADY_CONFIRMED');
+    });
+
+    it('accepts custom-priced item even when current list price changed', async () => {
+      const sale = Sale.create({ id: 'sale-charge-custom-price', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-custom',
+        saleId: sale.id,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod 1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 500,
+        unitPriceCurrency: 'MXN',
+        originalPriceCents: 600,
+        priceSource: 'custom',
+        customPriceCents: 500,
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000011');
+      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 9999,
+      });
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 500 },
+        'idem-custom-price',
+      );
+
+      expect(result.totalCents).toBe(500);
+      expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
+    });
+
+    it('fails all-or-nothing when stock decrement rejects and avoids persistence', async () => {
+      const sale = buildDraftSale('sale-charge-stock-fail');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockRejectedValue(
+        new BusinessRuleViolationError(
+          'STOCK_INSUFFICIENT_AT_CONFIRM',
+          'STOCK_INSUFFICIENT_AT_CONFIRM',
+        ),
+      );
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 2000 },
+          'idem-stock-fail',
+        ),
+      ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(saleRepo.markChargeIdempotencySucceeded).not.toHaveBeenCalled();
+    });
+
+    it('replays stored response when idempotency key/hash already succeeded', async () => {
+      const sale = buildDraftSale('sale-charge-replay');
+      const replayPayload = {
+        saleId: 'sale-charge-replay',
+        folio: 'A-2605-000009',
+        subtotalCents: 2000,
+        discountCents: 0,
+        totalCents: 2000,
+        paidCents: 2000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date().toISOString(),
+      };
+
+      (saleRepo as any).acquireChargeIdempotency = jest
+        .fn()
+        .mockResolvedValue({
+          kind: 'replay',
+          payload: replayPayload,
+        });
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'card_debit', amountCents: 2000 },
+        'idem-replay',
+      );
+
+      expect(result).toEqual(replayPayload);
+      expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(saleRepo.runInTransaction).not.toHaveBeenCalled();
+    });
+
+    it('fails when idempotency key is reused with a different request hash', async () => {
+      (saleRepo as any).acquireChargeIdempotency = jest
+        .fn()
+        .mockResolvedValue({ kind: 'conflict' });
+
+      await expect(
+        service.chargeDraft(
+          'sale-charge-conflict',
+          'user-1',
+          { method: 'cash', amountCents: 2000 },
+          'idem-conflict',
+        ),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+    });
+
+    it('fails when same idempotency key is already in flight', async () => {
+      (saleRepo as any).acquireChargeIdempotency = jest
+        .fn()
+        .mockResolvedValue({ kind: 'in_flight' });
+
+      await expect(
+        service.chargeDraft(
+          'sale-charge-flight',
+          'user-1',
+          { method: 'cash', amountCents: 2000 },
+          'idem-flight',
+        ),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_IN_FLIGHT' });
+    });
+
+    it('stores idempotent success payload after confirming charge', async () => {
+      const sale = buildDraftSale('sale-charge-success');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000010');
+      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      (saleRepo as any).acquireChargeIdempotency = jest
+        .fn()
+        .mockResolvedValue({ kind: 'acquired', token: 'idem-row-1' });
+      (saleRepo as any).markChargeIdempotencySucceeded = jest
+        .fn()
+        .mockResolvedValue(undefined);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-success',
+      );
+
+      expect((saleRepo as any).markChargeIdempotencySucceeded).toHaveBeenCalledWith(
+        'idem-row-1',
+        sale.id,
+        result,
+      );
+    });
   });
 
   describe('item discount use-cases', () => {
@@ -1015,6 +1358,142 @@ describe('SalesService', () => {
       await expect(service.getProductDetail('missing-id')).rejects.toThrow(
         /Product.*missing-id.*not found/,
       );
+    });
+  });
+
+  describe('listSales', () => {
+    it('returns paginated rows and base counts', async () => {
+      saleRepo.findManyConfirmed.mockResolvedValue([
+        {
+          id: 'sale-1',
+          folio: 'V-0001',
+          status: 'CONFIRMED',
+          paymentStatus: 'PAID',
+          deliveryStatus: 'DELIVERED',
+          totalCents: 1500,
+          confirmedAt: new Date('2026-05-08T10:00:00.000Z'),
+          customer: { id: 'c1', name: 'Ana' },
+          cashier: { id: 'u1', name: 'Cajero 1' },
+          seller: null,
+        },
+      ] as any);
+      saleRepo.countConfirmed.mockResolvedValue(7);
+      saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([
+        { paymentStatus: 'PAID', _count: { _all: 4 } },
+        { paymentStatus: 'PARTIAL', _count: { _all: 2 } },
+        { paymentStatus: 'CREDIT', _count: { _all: 1 } },
+      ] as any);
+      saleRepo.countNotDeliveredConfirmed.mockResolvedValue(3);
+
+      const result = await service.listSales({ page: 2, limit: 1, paymentStatus: 'PAID' } as any);
+
+      expect(result.data).toHaveLength(1);
+      expect(result.pagination).toEqual({ page: 2, limit: 1, total: 7, totalPages: 7 });
+      expect(result.counts).toEqual({ all: 7, pendingPayments: 3, notDelivered: 3 });
+      expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentStatus: 'PAID', page: 2, limit: 1 }),
+      );
+      expect(saleRepo.countConfirmed).toHaveBeenCalledWith(expect.objectContaining({}));
+      expect(saleRepo.groupByPaymentStatusConfirmed).toHaveBeenCalledWith(expect.objectContaining({}));
+      expect(saleRepo.countNotDeliveredConfirmed).toHaveBeenCalledWith(expect.objectContaining({}));
+    });
+
+    it('keeps counts independent from tab filters', async () => {
+      saleRepo.findManyConfirmed.mockResolvedValue([] as any);
+      saleRepo.countConfirmed.mockResolvedValue(3);
+      saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([
+        { paymentStatus: 'PAID', _count: { _all: 1 } },
+        { paymentStatus: 'PARTIAL', _count: { _all: 2 } },
+      ] as any);
+      saleRepo.countNotDeliveredConfirmed.mockResolvedValue(1);
+
+      await service.listSales({ paymentStatus: 'PAID', deliveryStatus: 'DELIVERED' } as any);
+
+      expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentStatus: 'PAID', deliveryStatus: 'DELIVERED' }),
+      );
+      expect(saleRepo.countConfirmed).toHaveBeenCalledWith(
+        expect.not.objectContaining({ paymentStatus: expect.anything(), deliveryStatus: expect.anything() }),
+      );
+      expect(saleRepo.groupByPaymentStatusConfirmed).toHaveBeenCalledWith(
+        expect.not.objectContaining({ paymentStatus: expect.anything(), deliveryStatus: expect.anything() }),
+      );
+      expect(saleRepo.countNotDeliveredConfirmed).toHaveBeenCalledWith(
+        expect.not.objectContaining({ paymentStatus: expect.anything(), deliveryStatus: expect.anything() }),
+      );
+    });
+  });
+
+  describe('getSaleDetail', () => {
+    it('maps repository detail shape with timeline and payments', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'V-0042',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        subtotalCents: 2000,
+        discountCents: 200,
+        totalCents: 1800,
+        paidCents: 1800,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+        customer: { id: 'c1', name: 'Ana' },
+        cashier: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [
+          {
+            productName: 'Prod 1',
+            variantName: null,
+            imageUrl: 'https://cdn/img.jpg',
+            unitPriceCents: 900,
+            quantity: 2,
+            discountCents: 0,
+            subtotalCents: 1800,
+          },
+        ],
+        payments: [
+          {
+            method: 'CASH',
+            amountCents: 1800,
+            tenderedCents: 1800,
+            changeCents: 0,
+            reference: null,
+            paidAt: new Date('2026-05-08T10:30:00.000Z'),
+            createdAt: new Date('2026-05-08T10:30:00.000Z'),
+          },
+        ],
+      } as any);
+
+      const result = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result.id).toBe('b5e2b8fd-bdfd-471f-b687-ec340d578885');
+      expect(result.timeline).toHaveLength(3);
+      expect(result.timeline[1]).toEqual({
+        type: 'PAYMENT_RECEIVED',
+        at: '2026-05-08T10:30:00.000Z',
+      });
+      expect(result.payments[0].paidAt).toBe('2026-05-08T10:30:00.000Z');
+    });
+
+    it('throws 400 for invalid UUID input', async () => {
+      await expect(service.getSaleDetail('invalid-id')).rejects.toThrow(
+        'Validation failed (uuid is expected)',
+      );
+    });
+
+    it('throws 404 for missing or cross-tenant sale', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue(null);
+
+      await expect(
+        service.getSaleDetail('b5e2b8fd-bdfd-471f-b687-ec340d578885'),
+      ).rejects.toThrow('Sale not found');
     });
   });
 

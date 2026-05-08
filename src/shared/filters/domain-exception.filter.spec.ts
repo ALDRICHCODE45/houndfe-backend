@@ -59,6 +59,22 @@ describe('DomainExceptionFilter', () => {
     expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
   });
 
+  it('maps charge/idempotency conflict codes to 409', () => {
+    const filter = new DomainExceptionFilter();
+
+    for (const code of [
+      'SALE_ALREADY_CONFIRMED',
+      'PRICE_OUT_OF_DATE',
+      'STOCK_INSUFFICIENT_AT_CONFIRM',
+      'IDEMPOTENCY_KEY_CONFLICT',
+      'IDEMPOTENCY_KEY_IN_FLIGHT',
+    ]) {
+      const { host, status } = makeHost();
+      filter.catch(new BusinessRuleViolationError(code, code), host);
+      expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+    }
+  });
+
   it('keeps EntityNotFoundError as 404', () => {
     const filter = new DomainExceptionFilter();
     const { host, status } = makeHost();
@@ -79,6 +95,20 @@ describe('DomainExceptionFilter', () => {
       const { host, status } = makeHost();
       filter.catch(new BusinessRuleViolationError(code, code), host);
       expect(status).toHaveBeenCalledWith(HttpStatus.BAD_REQUEST);
+    }
+  });
+
+  it('maps payment validation errors to 422', () => {
+    const filter = new DomainExceptionFilter();
+
+    for (const code of [
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+      'PAYMENT_AMOUNT_INSUFFICIENT',
+      'PAYMENT_AMOUNT_INVALID',
+    ]) {
+      const { host, status } = makeHost();
+      filter.catch(new BusinessRuleViolationError(code, code), host);
+      expect(status).toHaveBeenCalledWith(HttpStatus.UNPROCESSABLE_ENTITY);
     }
   });
 });

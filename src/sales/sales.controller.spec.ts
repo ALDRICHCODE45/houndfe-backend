@@ -26,11 +26,18 @@ function makeMockSalesService() {
     removeItemDiscount: jest.fn(),
     applyGlobalDiscount: jest.fn(),
     removeGlobalDiscount: jest.fn(),
+    chargeDraft: jest.fn(),
   } as any;
 }
 
 function makeMockUser(userId: string): AuthenticatedUser {
-  return { userId, email: `${userId}@test.com` };
+  return {
+    userId,
+    email: `${userId}@test.com`,
+    tenantId: null,
+    tenantSlug: null,
+    isSuperAdmin: false,
+  };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -309,6 +316,58 @@ describe('SalesController', () => {
 
       expect(result).toEqual({ id: 's', items: [] });
       expect(service.removeGlobalDiscount).toHaveBeenCalledWith('s', 'user-1');
+    });
+  });
+
+  describe('POST /sales/drafts/:id/charge', () => {
+    it('should delegate charge to service with idempotency key', async () => {
+      service.chargeDraft.mockResolvedValue({
+        saleId: 'sale-1',
+        folio: 'A-2605-000001',
+        totalCents: 1500,
+        paidCents: 1500,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date().toISOString(),
+      });
+
+      const user = makeMockUser('user-1');
+      const dto = { method: 'cash', amountCents: 1500 };
+      const result = await controller.chargeDraft(
+        'sale-1',
+        dto as any,
+        'idem-1',
+        user,
+      );
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          saleId: 'sale-1',
+          folio: 'A-2605-000001',
+        }),
+      );
+      expect(service.chargeDraft).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        dto,
+        'idem-1',
+      );
+    });
+
+    it('should reject missing idempotency key header', async () => {
+      const user = makeMockUser('user-1');
+
+      expect(() =>
+        controller.chargeDraft(
+          '6f4f4d42-3e8d-44e3-bd05-496ff67a7a6a',
+          { method: 'cash', amountCents: 1500 } as any,
+          undefined as any,
+          user,
+        ),
+      ).toThrow('IDEMPOTENCY_KEY_REQUIRED');
+
+      expect(service.chargeDraft).not.toHaveBeenCalled();
     });
   });
 });
