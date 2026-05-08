@@ -14,7 +14,13 @@ function makeMockFilesService() {
 }
 
 function makeMockUser(userId: string): AuthenticatedUser {
-  return { userId, email: `${userId}@test.com`, organizationId: 'org-123' };
+  return {
+    userId,
+    email: `${userId}@test.com`,
+    tenantId: null,
+    tenantSlug: null,
+    isSuperAdmin: false,
+  };
 }
 
 describe('FilesController', () => {

@@ -83,7 +83,7 @@ describe('ProductsController — Image Upload RBAC', () => {
         switchToHttp: () => ({
           getRequest: () => ({}),
         }),
-      } as ExecutionContext;
+      } as unknown as ExecutionContext;
 
       // Mock the guard to throw like it would in production
       (jwtAuthGuard.canActivate as jest.Mock).mockImplementationOnce(() => {
@@ -108,7 +108,7 @@ describe('ProductsController — Image Upload RBAC', () => {
           }),
         }),
         getHandler: () => controller.uploadProductImage,
-      } as ExecutionContext;
+      } as unknown as ExecutionContext;
 
       // Mock the guard to throw like it would in production
       (permissionsGuard.canActivate as jest.Mock).mockImplementationOnce(() => {

@@ -21,7 +21,7 @@ describe('createTenantScopedPrisma', () => {
     } as unknown as PrismaClient;
 
     let allOperations: any;
-    (base.$extends as jest.Mock).mockImplementation((extension) => {
+    (base.$extends as unknown as jest.Mock).mockImplementation((extension) => {
       allOperations = extension.query.$allOperations;
       return { __extended: true, allOperations };
     });

@@ -61,12 +61,12 @@ function makeService() {
       update: jest.fn(),
       delete: jest.fn(),
     },
-  };
+  } as any;
 
   const tenantPrisma = {
     getClient: jest.fn().mockReturnValue(tenantClient),
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
-  };
+  } as any;
 
   const service = new CustomersService(
     customerRepo,

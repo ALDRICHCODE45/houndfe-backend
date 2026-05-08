@@ -441,6 +441,7 @@ describe('ProductsService — findOneForPOS', () => {
     const result = await service.findOneForPOS('prod-1');
 
     expect(result).not.toBeNull();
+    if (!result) throw new Error('Expected product result');
     expect(result.id).toBe('prod-1');
     expect(result.name).toBe('Alimento para perro');
     expect(result.description).toBe('Alimento premium para perros adultos');
@@ -513,6 +514,7 @@ describe('ProductsService — findOneForPOS', () => {
 
     const result = await service.findOneForPOS('prod-2');
 
+    if (!result) throw new Error('Expected product with variants');
     expect(result.hasVariants).toBe(true);
     expect(result.description).toBeNull();
     expect(result.variants[0].stock).toEqual({
@@ -545,6 +547,7 @@ describe('ProductsService — findOneForPOS', () => {
 
     const result = await service.findOneForPOS('prod-3');
 
+    if (!result) throw new Error('Expected product result');
     expect(result.description).toBeNull();
     expect(result.stock).toBeNull();
     expect(result.enabledForPos).toBe(true);
