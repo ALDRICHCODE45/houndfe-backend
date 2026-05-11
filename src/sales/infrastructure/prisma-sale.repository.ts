@@ -436,6 +436,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       paymentStatus: row.paymentStatus,
       deliveryStatus: row.deliveryStatus,
       totalCents: row.totalCents,
+      debtCents: row.debtCents ?? 0,
       confirmedAt: row.confirmedAt,
       customer: row.customer
         ? {

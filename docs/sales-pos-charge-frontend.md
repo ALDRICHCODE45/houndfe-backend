@@ -171,6 +171,7 @@ Authorization: Bearer <jwt>
       "paymentStatus": "PAID",
       "deliveryStatus": "DELIVERED",
       "totalCents": 127000,
+      "debtCents": 0,
       "confirmedAt": "2026-05-06T14:43:00.000Z",
       "customer": { "id": "uuid", "name": "Empresa F." },
       "cashier": { "id": "uuid", "name": "cesar flores" },
@@ -212,7 +213,7 @@ Esto permite que los tabs siempre muestren totales reales sin importar qué filt
 | Cliente | `customer.name` | Vacío si `null` (Público en General) |
 | Pago | `paymentStatus` | Badge: `Pagada` verde / `Impaga` naranja / `Deuda` rojo |
 | Total | `totalCents` | `$X,XXX.XX` (dividir entre 100) |
-| Deuda | — | Calcular localmente si es necesario |
+| Deuda | `debtCents` | `$X,XXX.XX` o vacío si `0` |
 | Productos | `deliveryStatus` | Badge: `Entregados` verde / `No Entregados` rojo |
 | Cajero | `cashier.name` | Nombre |
 | Vendedor | `seller.name` | Nombre o vacío |

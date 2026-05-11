@@ -5,6 +5,7 @@ export interface SaleListRowDto {
   paymentStatus: string | null;
   deliveryStatus: string;
   totalCents: number;
+  debtCents: number;
   confirmedAt: Date | null;
   customer: { id: string; name: string } | null;
   cashier: { id: string; name: string };

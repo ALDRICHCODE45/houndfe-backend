@@ -1371,6 +1371,7 @@ describe('SalesService', () => {
           paymentStatus: 'PAID',
           deliveryStatus: 'DELIVERED',
           totalCents: 1500,
+          debtCents: 0,
           confirmedAt: new Date('2026-05-08T10:00:00.000Z'),
           customer: { id: 'c1', name: 'Ana' },
           cashier: { id: 'u1', name: 'Cajero 1' },
