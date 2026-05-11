@@ -380,13 +380,35 @@ export class PrismaSaleRepository implements ISaleRepository {
 
     if (input.q?.trim()) {
       const q = input.q.trim();
-      where.OR = [
-        { folio: { contains: q, mode: 'insensitive' } },
+      const orClauses: Prisma.SaleWhereInput[] = [
         { customer: { firstName: { contains: q, mode: 'insensitive' } } },
         { customer: { lastName: { contains: q, mode: 'insensitive' } } },
         { user: { name: { contains: q, mode: 'insensitive' } } },
         { seller: { name: { contains: q, mode: 'insensitive' } } },
       ];
+
+      // Folio search: if q is purely numeric, match against the sequence
+      // suffix (endsWith padded) to avoid false positives from year/month.
+      // Otherwise, use standard contains.
+      if (/^\d+$/.test(q)) {
+        const padded = q.padStart(6, '0');
+        orClauses.push({ folio: { endsWith: padded, mode: 'insensitive' } });
+      } else {
+        orClauses.push({ folio: { contains: q, mode: 'insensitive' } });
+      }
+
+      // "Público en General" virtual match: when q matches common tokens,
+      // include sales with no customer assigned.
+      const normalized = q
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+      const publicTokens = ['publico', 'general', 'publico en general'];
+      if (publicTokens.some((token) => token.includes(normalized) || normalized.includes(token))) {
+        orClauses.push({ customerId: null });
+      }
+
+      where.OR = orClauses;
     }
 
     return where;

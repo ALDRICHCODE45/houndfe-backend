@@ -77,26 +77,90 @@ describe('PrismaSaleRepository', () => {
         limit: 10,
         sortBy: 'confirmedAt',
         sortOrder: 'desc',
-        q: '00042',
+        q: 'ana',
       } as any);
 
       expect(prisma.sale.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             status: 'CONFIRMED',
-            OR: [
-              { folio: { contains: '00042', mode: 'insensitive' } },
-              { customer: { firstName: { contains: '00042', mode: 'insensitive' } } },
-              { customer: { lastName: { contains: '00042', mode: 'insensitive' } } },
-              { user: { name: { contains: '00042', mode: 'insensitive' } } },
-              { seller: { name: { contains: '00042', mode: 'insensitive' } } },
-            ],
+            OR: expect.arrayContaining([
+              { customer: { firstName: { contains: 'ana', mode: 'insensitive' } } },
+              { customer: { lastName: { contains: 'ana', mode: 'insensitive' } } },
+              { user: { name: { contains: 'ana', mode: 'insensitive' } } },
+              { seller: { name: { contains: 'ana', mode: 'insensitive' } } },
+              { folio: { contains: 'ana', mode: 'insensitive' } },
+            ]),
           }),
           orderBy: { confirmedAt: 'desc' },
           skip: 10,
           take: 10,
         }),
       );
+    });
+
+    it('uses endsWith padded sequence when q is numeric', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: '2',
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const folioClause = call.where.OR.find((c: any) => c.folio);
+      expect(folioClause).toEqual({ folio: { endsWith: '000002', mode: 'insensitive' } });
+    });
+
+    it('includes customerId null when q matches público/general tokens', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: 'público',
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
+      expect(nullClause).toEqual({ customerId: null });
+    });
+
+    it('includes customerId null when q is "general" (case insensitive)', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: 'General',
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
+      expect(nullClause).toEqual({ customerId: null });
+    });
+
+    it('does not include customerId null for unrelated queries', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: 'Juan',
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
+      expect(nullClause).toBeUndefined();
     });
   });
 
