@@ -7,20 +7,18 @@ export function buildSaleTimeline(input: {
   payments: Array<{ createdAt: Date }>;
 }): SaleDetailTimelineEventDto[] {
   const saleRegisteredAt = input.createdAt;
-  const paymentReceivedAt =
-    input.payments
-      .map((payment) => payment.createdAt)
-      .sort((a, b) => a.getTime() - b.getTime())[0] ??
-    input.confirmedAt ??
-    input.createdAt;
-  const productsDeliveredAt =
-    input.deliveryStatus === 'DELIVERED'
-      ? input.confirmedAt ?? paymentReceivedAt
-      : paymentReceivedAt;
+  const sortedPaymentEvents: SaleDetailTimelineEventDto[] = input.payments
+    .map((payment) => payment.createdAt)
+    .sort((a, b) => a.getTime() - b.getTime())
+    .map((paymentCreatedAt) => ({
+      type: 'PAYMENT_RECEIVED',
+      at: paymentCreatedAt.toISOString(),
+    }));
+  const productsDeliveredAt = input.confirmedAt ?? input.createdAt;
 
   return [
     { type: 'SALE_REGISTERED', at: saleRegisteredAt.toISOString() },
-    { type: 'PAYMENT_RECEIVED', at: paymentReceivedAt.toISOString() },
+    ...sortedPaymentEvents,
     { type: 'PRODUCTS_DELIVERED', at: productsDeliveredAt.toISOString() },
   ];
 }
