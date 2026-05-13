@@ -5,6 +5,6 @@ export class ChargeSaleDto {
   method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
 
   @IsInt()
-  @Min(1)
+  @Min(0)
   amountCents: number;
 }

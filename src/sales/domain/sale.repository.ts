@@ -55,7 +55,7 @@ export interface ISaleRepository {
 
   persistChargeConfirmation(input: {
     saleId: string;
-    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
     amountCents: number;
     subtotalCents: number;
     discountCents: number;
