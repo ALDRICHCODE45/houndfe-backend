@@ -49,6 +49,23 @@ export interface ISaleRepository {
     payload: unknown,
   ): Promise<void>;
 
+  acquirePaymentIdempotency(
+    saleId: string,
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  >;
+
+  markPaymentIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void>;
+
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
 
   allocateNextFolio(now?: Date): Promise<string>;
@@ -72,6 +89,18 @@ export interface ISaleRepository {
     confirmedAt: Date;
     folio: string;
   }): Promise<void>;
+
+  persistCollectedPayment(input: {
+    saleId: string;
+    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+    amountCents: number;
+    reference?: string | null;
+  }): Promise<{
+    paidCents: number;
+    debtCents: number;
+    paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
+    totalCents: number;
+  }>;
 
   findManyConfirmed(input: {
     page: number;

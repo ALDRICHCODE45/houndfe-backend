@@ -25,9 +25,12 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     findByIdForUpdate: jest.fn(),
     acquireChargeIdempotency: jest.fn(),
     markChargeIdempotencySucceeded: jest.fn(),
+    acquirePaymentIdempotency: jest.fn(),
+    markPaymentIdempotencySucceeded: jest.fn(),
     runInTransaction: jest.fn(async (cb: any) => cb()),
     allocateNextFolio: jest.fn(),
     persistChargeConfirmation: jest.fn(),
+    persistCollectedPayment: jest.fn(),
     findManyConfirmed: jest.fn(),
     countConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
@@ -78,6 +81,148 @@ describe('SalesService', () => {
       token: 'idem-token',
     });
     saleRepo.markChargeIdempotencySucceeded.mockResolvedValue(undefined);
+    saleRepo.acquirePaymentIdempotency.mockResolvedValue({
+      kind: 'acquired',
+      token: 'payment-idem-token',
+    });
+    saleRepo.markPaymentIdempotencySucceeded.mockResolvedValue(undefined);
+    saleRepo.persistCollectedPayment.mockResolvedValue({
+      paidCents: 4000,
+      debtCents: 1000,
+      paymentStatus: 'PARTIAL',
+      totalCents: 5000,
+    });
+  });
+
+  describe('addPayment', () => {
+    const buildConfirmedSale = (
+      id: string,
+      userId = 'user-1',
+      totalCents = 5000,
+    ) =>
+      Sale.fromPersistence({
+        id,
+        userId,
+        status: 'CONFIRMED',
+        customerId: 'customer-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: totalCents,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+    it('collects payment on sale with debt and updates financial fields', async () => {
+      const sale = buildConfirmedSale('sale-payment-happy', 'user-1', 5000);
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      const result = (await service.addPayment(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 2000, reference: 'RCPT-1' },
+        'idem-pay-happy',
+      )) as { paymentStatus: string; paidCents: number; debtCents: number };
+
+      expect(result.paymentStatus).toBe('PARTIAL');
+      expect(result.paidCents).toBe(4000);
+      expect(result.debtCents).toBe(1000);
+    });
+
+    it('rejects overpayment with PAYMENT_EXCEEDS_DEBT', async () => {
+      const sale = buildConfirmedSale('sale-payment-overpay', 'user-1', 5000);
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      saleRepo.persistCollectedPayment.mockRejectedValue(
+        new BusinessRuleViolationError('PAYMENT_EXCEEDS_DEBT', 'PAYMENT_EXCEEDS_DEBT'),
+      );
+
+      await expect(
+        service.addPayment(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 1500 },
+          'idem-pay-overpay',
+        ),
+      ).rejects.toThrow('PAYMENT_EXCEEDS_DEBT');
+    });
+
+    it('rejects payment when sale has no debt', async () => {
+      const sale = buildConfirmedSale('sale-payment-no-debt', 'user-1', 5000);
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      saleRepo.persistCollectedPayment.mockRejectedValue(
+        new BusinessRuleViolationError('NO_OUTSTANDING_DEBT', 'NO_OUTSTANDING_DEBT'),
+      );
+
+      await expect(
+        service.addPayment(
+          sale.id,
+          'user-1',
+          { method: 'card_debit', amountCents: 100 },
+          'idem-pay-no-debt',
+        ),
+      ).rejects.toThrow('NO_OUTSTANDING_DEBT');
+    });
+
+    it('rejects credit method with PAYMENT_METHOD_NOT_SUPPORTED', async () => {
+      const sale = buildConfirmedSale('sale-payment-credit-method', 'user-1', 5000);
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await expect(
+        service.addPayment(
+          sale.id,
+          'user-1',
+          { method: 'credit', amountCents: 1000 },
+          'idem-pay-credit-method',
+        ),
+      ).rejects.toThrow('PAYMENT_METHOD_NOT_SUPPORTED');
+    });
+
+    it('returns not found when actor tenant/user cannot access sale', async () => {
+      const sale = buildConfirmedSale('sale-payment-tenant-404', 'user-1', 5000);
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await expect(
+        service.addPayment(
+          sale.id,
+          'user-2',
+          { method: 'cash', amountCents: 500 },
+          'idem-pay-tenant-404',
+        ),
+      ).rejects.toThrow('SALE_NOT_FOUND');
+    });
+
+    it('replays original response when idempotency key repeats', async () => {
+      const replayPayload = {
+        saleId: 'sale-payment-replay',
+        paidCents: 3000,
+        debtCents: 2000,
+        paymentStatus: 'PARTIAL' as const,
+      };
+
+      (saleRepo.acquirePaymentIdempotency as jest.Mock).mockResolvedValue({
+        kind: 'replay',
+        payload: replayPayload,
+      });
+
+      const result = await service.addPayment(
+        'sale-payment-replay',
+        'user-1',
+        { method: 'cash', amountCents: 1000 },
+        'idem-pay-replay',
+      );
+
+      expect(result).toEqual(replayPayload);
+      expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
+    });
   });
 
   describe('chargeDraft', () => {
