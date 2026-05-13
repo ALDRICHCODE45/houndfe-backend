@@ -52,6 +52,12 @@ function isSupportedChargeMethod(
   );
 }
 
+function chargeValidationError(
+  code: 'INVALID_CREDIT_CHARGE' | 'CUSTOMER_REQUIRED_FOR_CREDIT' | 'PAYMENT_AMOUNT_INVALID' | 'PAYMENT_AMOUNT_INSUFFICIENT',
+): never {
+  throw new BusinessRuleViolationError(code, code);
+}
+
 @Injectable()
 export class SalesService {
   constructor(
@@ -825,52 +831,31 @@ export class SalesService {
       const isCreditMethod = dto.method === 'credit';
 
       if (isCreditMethod && dto.amountCents !== 0) {
-        throw new BusinessRuleViolationError(
-          'INVALID_CREDIT_CHARGE',
-          'INVALID_CREDIT_CHARGE',
-        );
+        chargeValidationError('INVALID_CREDIT_CHARGE');
       }
 
       if (!isCreditMethod && dto.amountCents > totalCents && !isCash) {
-        throw new BusinessRuleViolationError(
-          'PAYMENT_AMOUNT_INVALID',
-          'PAYMENT_AMOUNT_INVALID',
-        );
+        chargeValidationError('PAYMENT_AMOUNT_INVALID');
       }
 
       if (!isCreditMethod && dto.amountCents < 0) {
-        throw new BusinessRuleViolationError(
-          'PAYMENT_AMOUNT_INVALID',
-          'PAYMENT_AMOUNT_INVALID',
-        );
+        chargeValidationError('PAYMENT_AMOUNT_INVALID');
       }
 
       if (!isCreditMethod && dto.amountCents < totalCents && !sale.customerId) {
-        throw new BusinessRuleViolationError(
-          'CUSTOMER_REQUIRED_FOR_CREDIT',
-          'CUSTOMER_REQUIRED_FOR_CREDIT',
-        );
+        chargeValidationError('CUSTOMER_REQUIRED_FOR_CREDIT');
       }
 
       if (isCreditMethod && !sale.customerId) {
-        throw new BusinessRuleViolationError(
-          'CUSTOMER_REQUIRED_FOR_CREDIT',
-          'CUSTOMER_REQUIRED_FOR_CREDIT',
-        );
+        chargeValidationError('CUSTOMER_REQUIRED_FOR_CREDIT');
       }
 
       if (!isCreditMethod && dto.amountCents < totalCents && dto.amountCents <= 0) {
-        throw new BusinessRuleViolationError(
-          'PAYMENT_AMOUNT_INVALID',
-          'PAYMENT_AMOUNT_INVALID',
-        );
+        chargeValidationError('PAYMENT_AMOUNT_INVALID');
       }
 
       if (!isCreditMethod && dto.amountCents < totalCents && !isCash) {
-        throw new BusinessRuleViolationError(
-          'PAYMENT_AMOUNT_INSUFFICIENT',
-          'PAYMENT_AMOUNT_INSUFFICIENT',
-        );
+        chargeValidationError('PAYMENT_AMOUNT_INSUFFICIENT');
       }
 
       const paidCents = isCreditMethod ? 0 : Math.min(dto.amountCents, totalCents);
