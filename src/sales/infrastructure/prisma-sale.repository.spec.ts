@@ -11,6 +11,7 @@ import { Sale } from '../domain/sale.entity';
 function makeMockPrisma() {
   return {
     $transaction: jest.fn(async (cb: any) => cb()),
+    $queryRaw: jest.fn(),
     sale: {
       create: jest.fn(),
       update: jest.fn(),
@@ -31,6 +32,7 @@ function makeMockPrisma() {
     },
     salePayment: {
       create: jest.fn(),
+      aggregate: jest.fn(),
     },
     saleIdempotency: {
       create: jest.fn(),
@@ -522,6 +524,61 @@ describe('PrismaSaleRepository', () => {
         data: [],
       });
       expect(result.items).toHaveLength(0);
+    });
+  });
+
+  describe('payment collection idempotency', () => {
+    it('uses sale_payment operation for payment idempotency acquire', async () => {
+      prisma.saleIdempotency.create.mockResolvedValue({ id: 'idem-1' });
+
+      await repo.acquirePaymentIdempotency('sale-1', 'key-1', 'hash-1');
+
+      expect(prisma.saleIdempotency.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ operation: 'sale_payment' }),
+        }),
+      );
+    });
+  });
+
+  describe('persistCollectedPayment', () => {
+    it('recomputes paid/debt from ledger + new amount in transaction', async () => {
+      prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
+      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 2000 } });
+      prisma.salePayment.create.mockResolvedValue({ id: 'p-1' });
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await repo.persistCollectedPayment({
+        saleId: 'sale-1',
+        method: 'cash',
+        amountCents: 2000,
+      });
+
+      expect(prisma.salePayment.aggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { saleId: 'sale-1', tenantId: 'tenant-1' },
+          _sum: { amountCents: true },
+        }),
+      );
+      expect(result).toEqual({
+        paidCents: 4000,
+        debtCents: 1000,
+        paymentStatus: 'PARTIAL',
+        totalCents: 5000,
+      });
+    });
+
+    it('rejects when recomputed payment exceeds total debt', async () => {
+      prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
+      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 4500 } });
+
+      await expect(
+        repo.persistCollectedPayment({
+          saleId: 'sale-2',
+          method: 'card_debit',
+          amountCents: 1000,
+        }),
+      ).rejects.toThrow('PAYMENT_EXCEEDS_DEBT');
     });
   });
 

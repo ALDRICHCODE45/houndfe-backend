@@ -226,6 +226,12 @@ export class PrismaSaleRepository implements ISaleRepository {
   async findByIdForUpdate(id: string): Promise<Sale | null> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
+    await prisma.$queryRaw`
+      SELECT id
+      FROM sales
+      WHERE id = ${id} AND tenant_id = ${tenantId}
+      FOR UPDATE
+    `;
     const saleData = await prisma.sale.findFirst({
       where: { id, tenantId },
       include: { items: true },
@@ -358,6 +364,86 @@ export class PrismaSaleRepository implements ISaleRepository {
         },
       });
     }
+  }
+
+  async persistCollectedPayment(input: {
+    saleId: string;
+    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+    amountCents: number;
+    reference?: string | null;
+  }): Promise<{
+    paidCents: number;
+    debtCents: number;
+    paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
+    totalCents: number;
+  }> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+
+    const sale = await prisma.sale.findFirst({
+      where: { id: input.saleId, tenantId, status: 'CONFIRMED' },
+      select: { totalCents: true },
+    });
+    if (!sale) {
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+
+    const aggregate = await prisma.salePayment.aggregate({
+      where: { saleId: input.saleId, tenantId },
+      _sum: { amountCents: true },
+    });
+    const paidFromLedger = aggregate._sum.amountCents ?? 0;
+    if (paidFromLedger >= sale.totalCents) {
+      throw new BusinessRuleViolationError(
+        'NO_OUTSTANDING_DEBT',
+        'NO_OUTSTANDING_DEBT',
+      );
+    }
+    const recomputedPaidCents = paidFromLedger + input.amountCents;
+    if (recomputedPaidCents > sale.totalCents) {
+      throw new BusinessRuleViolationError(
+        'PAYMENT_EXCEEDS_DEBT',
+        'PAYMENT_EXCEEDS_DEBT',
+      );
+    }
+
+    const recomputedDebtCents = sale.totalCents - recomputedPaidCents;
+    const paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' =
+      recomputedPaidCents === sale.totalCents
+        ? 'PAID'
+        : recomputedPaidCents === 0
+          ? 'CREDIT'
+          : 'PARTIAL';
+
+    await prisma.salePayment.create({
+      data: {
+        saleId: input.saleId,
+        method: input.method.toUpperCase() as
+          | 'CASH'
+          | 'CARD_CREDIT'
+          | 'CARD_DEBIT'
+          | 'TRANSFER',
+        amountCents: input.amountCents,
+        reference: input.reference ?? null,
+        tenantId,
+      },
+    });
+
+    await prisma.sale.updateMany({
+      where: { id: input.saleId, tenantId },
+      data: {
+        paidCents: recomputedPaidCents,
+        debtCents: recomputedDebtCents,
+        paymentStatus,
+      },
+    });
+
+    return {
+      paidCents: recomputedPaidCents,
+      debtCents: recomputedDebtCents,
+      paymentStatus,
+      totalCents: sale.totalCents,
+    };
   }
 
   private buildConfirmedBaseWhere(input: {
@@ -676,6 +762,110 @@ export class PrismaSaleRepository implements ISaleRepository {
     saleId: string,
     payload: unknown,
   ): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+
+    await prisma.saleIdempotency.updateMany({
+      where: {
+        id: token,
+        tenantId,
+      },
+      data: {
+        status: 'SUCCEEDED',
+        responseJson: payload as Prisma.InputJsonValue,
+        saleId,
+      },
+    });
+  }
+
+  async acquirePaymentIdempotency(
+    saleId: string,
+    key: string,
+    requestHash: string,
+  ) {
+    return this.acquireIdempotency('sale_payment', saleId, key, requestHash);
+  }
+
+  async markPaymentIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void> {
+    return this.markIdempotencySucceeded(token, saleId, payload);
+  }
+
+  private async acquireIdempotency(
+    operation: 'sale_charge' | 'sale_payment',
+    saleId: string,
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  > {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+
+    try {
+      const created = await prisma.saleIdempotency.create({
+        data: {
+          tenantId,
+          operation,
+          key,
+          requestHash,
+          status: 'IN_FLIGHT',
+          saleId,
+        },
+      });
+
+      return { kind: 'acquired', token: created.id };
+    } catch (error) {
+      if (
+        !(error instanceof Prisma.PrismaClientKnownRequestError) &&
+        !(typeof error === 'object' && error !== null && 'code' in error)
+      ) {
+        throw error;
+      }
+
+      const prismaCode =
+        error instanceof Prisma.PrismaClientKnownRequestError
+          ? error.code
+          : String((error as { code?: string }).code ?? '');
+      if (prismaCode !== 'P2002') {
+        throw error;
+      }
+
+      const existing = await prisma.saleIdempotency.findUnique({
+        where: {
+          tenantId_operation_key: {
+            tenantId,
+            operation,
+            key,
+          },
+        },
+      });
+
+      if (!existing) {
+        throw new BusinessRuleViolationError(
+          'IDEMPOTENCY_STATE_NOT_FOUND',
+          'IDEMPOTENCY_STATE_NOT_FOUND',
+        );
+      }
+
+      if (existing.requestHash !== requestHash) return { kind: 'conflict' };
+      if (existing.status === 'SUCCEEDED' && existing.responseJson)
+        return { kind: 'replay', payload: existing.responseJson };
+      return { kind: 'in_flight' };
+    }
+  }
+
+  private async markIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ) {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
 
