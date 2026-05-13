@@ -13,6 +13,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ClsModule } from 'nestjs-cls';
 import * as Joi from 'joi';
 import { DatabaseModule } from './shared/prisma/prisma.module';
@@ -28,6 +29,7 @@ import { PromotionsModule } from './promotions/promotions.module';
 import { SalesModule } from './sales/sales.module';
 import { FilesModule } from './files/files.module';
 import { TenantsModule } from './tenants/tenants.module';
+import { OutboxModule } from './shared/outbox/outbox.module';
 
 @Module({
   imports: [
@@ -56,6 +58,7 @@ import { TenantsModule } from './tenants/tenants.module';
 
     // Infrastructure
     EventEmitterModule.forRoot(),
+    ScheduleModule.forRoot(),
     ClsModule.forRoot({
       global: true,
       middleware: {
@@ -77,6 +80,7 @@ import { TenantsModule } from './tenants/tenants.module';
     SalesModule,
     FilesModule,
     TenantsModule,
+    OutboxModule,
   ],
 })
 export class AppModule {}
