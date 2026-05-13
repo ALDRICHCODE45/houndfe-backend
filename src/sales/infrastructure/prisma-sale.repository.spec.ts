@@ -808,7 +808,7 @@ describe('PrismaSaleRepository', () => {
         paymentStatus: 'PAID',
         confirmedAt: new Date(),
         folio: 'A-2605-000001',
-      });
+      } as never);
 
       expect(prisma.sale.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
