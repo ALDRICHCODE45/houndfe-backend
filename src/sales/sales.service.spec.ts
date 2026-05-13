@@ -1721,7 +1721,7 @@ describe('SalesService', () => {
   });
 
   describe('getSaleDetail', () => {
-    it('maps repository detail shape with timeline and payments', async () => {
+    it('maps repository detail shape with per-payment timeline and references', async () => {
       saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
         id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
         folio: 'V-0042',
@@ -1755,10 +1755,19 @@ describe('SalesService', () => {
         payments: [
           {
             method: 'CASH',
-            amountCents: 1800,
-            tenderedCents: 1800,
+            amountCents: 1000,
+            tenderedCents: 1000,
             changeCents: 0,
-            reference: null,
+            reference: 'CASH-1',
+            paidAt: new Date('2026-05-08T10:20:00.000Z'),
+            createdAt: new Date('2026-05-08T10:20:00.000Z'),
+          },
+          {
+            method: 'TRANSFER',
+            amountCents: 800,
+            tenderedCents: 800,
+            changeCents: 0,
+            reference: 'TRF-2',
             paidAt: new Date('2026-05-08T10:30:00.000Z'),
             createdAt: new Date('2026-05-08T10:30:00.000Z'),
           },
@@ -1770,12 +1779,18 @@ describe('SalesService', () => {
       );
 
       expect(result.id).toBe('b5e2b8fd-bdfd-471f-b687-ec340d578885');
-      expect(result.timeline).toHaveLength(3);
+      expect(result.timeline).toHaveLength(4);
       expect(result.timeline[1]).toEqual({
+        type: 'PAYMENT_RECEIVED',
+        at: '2026-05-08T10:20:00.000Z',
+      });
+      expect(result.timeline[2]).toEqual({
         type: 'PAYMENT_RECEIVED',
         at: '2026-05-08T10:30:00.000Z',
       });
-      expect(result.payments[0].paidAt).toBe('2026-05-08T10:30:00.000Z');
+      expect(result.payments[0].paidAt).toBe('2026-05-08T10:20:00.000Z');
+      expect(result.payments[0].reference).toBe('CASH-1');
+      expect(result.payments[1].reference).toBe('TRF-2');
     });
 
     it('throws 400 for invalid UUID input', async () => {
