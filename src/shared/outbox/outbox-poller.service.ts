@@ -49,9 +49,9 @@ export class OutboxPollerService {
           SELECT id
           FROM outbox_events
           WHERE status = 'PENDING'
-            AND next_attempt_at <= NOW()
-            AND (locked_until IS NULL OR locked_until < NOW())
-          ORDER BY created_at ASC
+            AND "nextAttemptAt" <= NOW()
+            AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
+          ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED
         `,
@@ -68,14 +68,14 @@ export class OutboxPollerService {
       const claimed = await tx.$queryRawUnsafe<DispatchableOutboxEvent[]>(
         `
           UPDATE outbox_events
-          SET lock_token = $1,
-              locked_until = NOW() + ($2 * INTERVAL '1 second')
+          SET "lockToken" = $1,
+              "lockedUntil" = NOW() + ($2 * INTERVAL '1 second')
           WHERE id = ANY($3::uuid[])
-          RETURNING id, tenant_id as "tenantId", aggregate_type as "aggregateType",
-                    aggregate_id as "aggregateId", event_type as "eventType", payload,
-                    status, retry_count as "retryCount", next_attempt_at as "nextAttemptAt",
-                    last_error as "lastError", lock_token as "lockToken", locked_until as "lockedUntil",
-                    created_at as "createdAt", published_at as "publishedAt"
+          RETURNING id, "tenantId" as "tenantId", "aggregateType" as "aggregateType",
+                    "aggregateId" as "aggregateId", "eventType" as "eventType", payload,
+                    status, "retryCount" as "retryCount", "nextAttemptAt" as "nextAttemptAt",
+                    "lastError" as "lastError", "lockToken" as "lockToken", "lockedUntil" as "lockedUntil",
+                    "createdAt" as "createdAt", "publishedAt" as "publishedAt"
         `,
         lockToken,
         lockSeconds,
