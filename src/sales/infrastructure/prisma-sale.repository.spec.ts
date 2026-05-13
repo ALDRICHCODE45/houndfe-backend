@@ -574,6 +574,7 @@ describe('PrismaSaleRepository', () => {
         }),
       );
       expect(result).toEqual({
+        paymentId: 'p-1',
         paidCents: 4000,
         debtCents: 1000,
         paymentStatus: 'PARTIAL',
@@ -592,6 +593,24 @@ describe('PrismaSaleRepository', () => {
           amountCents: 1000,
         }),
       ).rejects.toThrow('PAYMENT_EXCEEDS_DEBT');
+    });
+  });
+
+  describe('runInTransaction', () => {
+    it('delegates transaction boundary to tenant prisma service', async () => {
+      const txResult = { ok: true };
+      const runInTransaction = jest.fn(async (work: () => Promise<unknown>) => work());
+      const repoWithTxDelegate = new PrismaSaleRepository({
+        getClient: jest.fn().mockReturnValue(prisma),
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+        runInTransaction,
+      } as unknown as ConstructorParameters<typeof PrismaSaleRepository>[0]);
+
+      const result = await repoWithTxDelegate.runInTransaction(async () => txResult);
+
+      expect(runInTransaction).toHaveBeenCalledTimes(1);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(result).toEqual(txResult);
     });
   });
 
