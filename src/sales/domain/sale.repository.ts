@@ -1,5 +1,11 @@
 import { Sale } from './sale.entity';
 
+export type PersistedChargePayment = {
+  method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+  amountCents: number;
+  reference?: string;
+};
+
 /**
  * Sale Repository Port - defines persistence operations for Sales
  *
@@ -72,8 +78,7 @@ export interface ISaleRepository {
 
   persistChargeConfirmation(input: {
     saleId: string;
-    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
-    amountCents: number;
+    payments: PersistedChargePayment[];
     subtotalCents: number;
     discountCents: number;
     totalCents: number;

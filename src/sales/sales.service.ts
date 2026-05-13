@@ -36,6 +36,7 @@ import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
+import type { PersistedChargePayment } from './domain/sale.repository';
 
 type SupportedChargeMethod =
   | 'cash'
@@ -55,6 +56,8 @@ type ChargePaymentEntry = {
   amountCents: number;
   reference?: string;
 };
+
+type CanonicalChargePayment = PersistedChargePayment;
 
 function isSupportedChargeMethod(
   method: ChargeSaleDto['method'],
@@ -78,7 +81,7 @@ function chargeValidationError(
   throw new BusinessRuleViolationError(code, code);
 }
 
-function normalizeChargePayments(dto: ChargeSaleDto): ChargePaymentEntry[] {
+function normalizeChargeRequestPayments(dto: ChargeSaleDto): ChargePaymentEntry[] {
   const hasLegacy = dto.method !== undefined || dto.amountCents !== undefined;
   const hasArray = dto.payments !== undefined;
 
@@ -139,6 +142,28 @@ function normalizeChargePayments(dto: ChargeSaleDto): ChargePaymentEntry[] {
       amountCents: dto.amountCents,
     },
   ];
+}
+
+function toCanonicalChargePayments(
+  payments: ChargePaymentEntry[],
+): CanonicalChargePayment[] {
+  return payments
+    .filter(
+      (payment): payment is CanonicalChargePayment => payment.method !== 'credit',
+    )
+    .map((payment) => ({
+      method: payment.method,
+      amountCents: payment.amountCents,
+      reference: payment.reference,
+    }));
+}
+
+function sortPaymentsForHash(payments: ChargePaymentEntry[]): ChargePaymentEntry[] {
+  return [...payments].sort((left, right) =>
+    `${left.method}|${left.amountCents}|${left.reference ?? ''}`.localeCompare(
+      `${right.method}|${right.amountCents}|${right.reference ?? ''}`,
+    ),
+  );
 }
 
 function isSupportedCollectionMethod(
@@ -820,12 +845,8 @@ export class SalesService {
     dto: ChargeSaleDto,
     idempotencyKey: string,
   ) {
-    const normalizedPayments = normalizeChargePayments(dto);
-    const hashPayments = [...normalizedPayments].sort((a, b) =>
-      `${a.method}|${a.amountCents}|${a.reference ?? ''}`.localeCompare(
-        `${b.method}|${b.amountCents}|${b.reference ?? ''}`,
-      ),
-    );
+    const normalizedPayments = normalizeChargeRequestPayments(dto);
+    const hashPayments = sortPaymentsForHash(normalizedPayments);
 
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
@@ -967,10 +988,7 @@ export class SalesService {
             : 'PARTIAL';
       const changeDueCents = hasCash && paymentStatus === 'PAID' ? tenderedCents - totalCents : 0;
 
-      const primaryPayment = normalizedPayments[0] ?? {
-        method: 'credit' as const,
-        amountCents: 0,
-      };
+      const canonicalPayments = toCanonicalChargePayments(normalizedPayments);
 
       const stockAdjustments = sale.items.map((item) => ({
         productId: item.productId,
@@ -983,8 +1001,7 @@ export class SalesService {
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
       await this.saleRepo.persistChargeConfirmation({
         saleId,
-        method: primaryPayment.method,
-        amountCents: tenderedCents,
+        payments: canonicalPayments,
         subtotalCents,
         discountCents,
         totalCents,
