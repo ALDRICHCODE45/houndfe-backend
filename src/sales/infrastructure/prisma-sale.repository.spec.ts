@@ -793,13 +793,12 @@ describe('PrismaSaleRepository', () => {
     it('uses tenant predicate in charge lookup/update SQL paths', async () => {
       prisma.sale.findFirst.mockResolvedValue(null);
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
-      prisma.salePayment.create.mockResolvedValue({ id: 'pay-1' });
+      prisma.salePayment.createMany = jest.fn().mockResolvedValue({ count: 1 });
 
       await repo.findByIdForUpdate('sale-tenant-scope');
       await repo.persistChargeConfirmation({
         saleId: 'sale-tenant-scope',
-        method: 'cash',
-        amountCents: 100,
+        payments: [{ method: 'cash', amountCents: 100 }],
         subtotalCents: 100,
         discountCents: 0,
         totalCents: 100,
@@ -809,7 +808,7 @@ describe('PrismaSaleRepository', () => {
         paymentStatus: 'PAID',
         confirmedAt: new Date(),
         folio: 'A-2605-000001',
-      });
+      } as never);
 
       expect(prisma.sale.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -822,6 +821,65 @@ describe('PrismaSaleRepository', () => {
             id: 'sale-tenant-scope',
             tenantId: 'tenant-1',
           }),
+        }),
+      );
+    });
+
+    it('persists zero payment rows for pure credit confirmation', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.createMany = jest.fn().mockResolvedValue({ count: 0 });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-credit-zero-rows',
+        payments: [],
+        subtotalCents: 2000,
+        discountCents: 0,
+        totalCents: 2000,
+        paidCents: 0,
+        debtCents: 2000,
+        changeDueCents: 0,
+        paymentStatus: 'CREDIT',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000020',
+      } as never);
+
+      expect(prisma.salePayment.createMany).toHaveBeenCalledWith({ data: [] });
+    });
+
+    it('persists N payment rows for multi-method confirmation in one call', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.createMany = jest.fn().mockResolvedValue({ count: 2 });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-multi-rows',
+        payments: [
+          { method: 'cash', amountCents: 600 },
+          { method: 'card_debit', amountCents: 400, reference: 'REF-N' },
+        ],
+        subtotalCents: 1000,
+        discountCents: 0,
+        totalCents: 1000,
+        paidCents: 1000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000021',
+      } as never);
+
+      expect(prisma.salePayment.createMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: [
+            expect.objectContaining({
+              method: 'CASH',
+              amountCents: 600,
+            }),
+            expect.objectContaining({
+              method: 'CARD_DEBIT',
+              amountCents: 400,
+              reference: 'REF-N',
+            }),
+          ],
         }),
       );
     });

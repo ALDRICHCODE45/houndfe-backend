@@ -369,5 +369,35 @@ describe('SalesController', () => {
 
       expect(service.chargeDraft).not.toHaveBeenCalled();
     });
+
+    it('should forward payments[] shape to service', async () => {
+      service.chargeDraft.mockResolvedValue({
+        saleId: 'sale-1',
+        folio: 'A-2605-000002',
+        totalCents: 2000,
+        paidCents: 2000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date().toISOString(),
+      });
+
+      const user = makeMockUser('user-1');
+      const dto = {
+        payments: [
+          { method: 'cash', amountCents: 1000 },
+          { method: 'card_debit', amountCents: 1000, reference: 'REF-1' },
+        ],
+      };
+
+      await controller.chargeDraft('sale-1', dto as never, 'idem-array-1', user);
+
+      expect(service.chargeDraft).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        dto,
+        'idem-array-1',
+      );
+    });
   });
 });

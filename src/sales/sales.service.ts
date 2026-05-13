@@ -50,18 +50,95 @@ type SupportedPaymentCollectionMethod =
   | 'card_debit'
   | 'transfer';
 
+type ChargePaymentEntry = {
+  method: SupportedChargeMethod;
+  amountCents: number;
+  reference?: string;
+};
+
 function isSupportedChargeMethod(
   method: ChargeSaleDto['method'],
 ): method is SupportedChargeMethod {
   return ['cash', 'card_credit', 'card_debit', 'transfer', 'credit'].includes(
-    method,
+    method ?? '',
   );
 }
 
 function chargeValidationError(
-  code: 'INVALID_CREDIT_CHARGE' | 'CUSTOMER_REQUIRED_FOR_CREDIT' | 'PAYMENT_AMOUNT_INVALID' | 'PAYMENT_AMOUNT_INSUFFICIENT',
+  code:
+    | 'INVALID_CREDIT_CHARGE'
+    | 'CUSTOMER_REQUIRED_FOR_CREDIT'
+    | 'PAYMENT_AMOUNT_INVALID'
+    | 'PAYMENT_AMOUNT_INSUFFICIENT'
+    | 'AMBIGUOUS_PAYMENT_SHAPE'
+    | 'CREDIT_METHOD_NOT_VALID_IN_MULTI'
+    | 'REFERENCE_REQUIRED'
+    | 'TOO_MANY_PAYMENTS',
 ): never {
   throw new BusinessRuleViolationError(code, code);
+}
+
+function normalizeChargePayments(dto: ChargeSaleDto): ChargePaymentEntry[] {
+  const hasLegacy = dto.method !== undefined || dto.amountCents !== undefined;
+  const hasArray = dto.payments !== undefined;
+
+  if (hasLegacy && hasArray) {
+    chargeValidationError('AMBIGUOUS_PAYMENT_SHAPE');
+  }
+
+  if (hasArray) {
+    const entries = dto.payments ?? [];
+    if (entries.length > 5) {
+      chargeValidationError('TOO_MANY_PAYMENTS');
+    }
+
+    return entries.map((entry) => {
+      if (!isSupportedChargeMethod(entry.method)) {
+        throw new BusinessRuleViolationError(
+          'PAYMENT_METHOD_NOT_SUPPORTED',
+          'PAYMENT_METHOD_NOT_SUPPORTED',
+        );
+      }
+
+      if (entry.method === 'credit') {
+        chargeValidationError('CREDIT_METHOD_NOT_VALID_IN_MULTI');
+      }
+
+      if (
+        ['card_credit', 'card_debit', 'transfer'].includes(entry.method) &&
+        (!entry.reference || entry.reference.trim().length === 0)
+      ) {
+        chargeValidationError('REFERENCE_REQUIRED');
+      }
+
+      return {
+        method: entry.method,
+        amountCents: entry.amountCents,
+        reference: entry.reference,
+      };
+    });
+  }
+
+  if (!dto.method || dto.amountCents === undefined) {
+    throw new BusinessRuleViolationError(
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+    );
+  }
+
+  if (!isSupportedChargeMethod(dto.method)) {
+    throw new BusinessRuleViolationError(
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+    );
+  }
+
+  return [
+    {
+      method: dto.method,
+      amountCents: dto.amountCents,
+    },
+  ];
 }
 
 function isSupportedCollectionMethod(
@@ -743,16 +820,15 @@ export class SalesService {
     dto: ChargeSaleDto,
     idempotencyKey: string,
   ) {
-    if (!isSupportedChargeMethod(dto.method)) {
-      throw new BusinessRuleViolationError(
-        'PAYMENT_METHOD_NOT_SUPPORTED',
-        'PAYMENT_METHOD_NOT_SUPPORTED',
-      );
-    }
-    const paymentMethod: SupportedChargeMethod = dto.method;
+    const normalizedPayments = normalizeChargePayments(dto);
+    const hashPayments = [...normalizedPayments].sort((a, b) =>
+      `${a.method}|${a.amountCents}|${a.reference ?? ''}`.localeCompare(
+        `${b.method}|${b.amountCents}|${b.reference ?? ''}`,
+      ),
+    );
 
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ saleId, actorId, dto }))
+      .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
       .digest('hex');
 
     const idempotency = await this.saleRepo.acquireChargeIdempotency(
@@ -839,38 +915,49 @@ export class SalesService {
       );
       const discountCents = subtotalCents - totalCents;
 
-      const isCash = dto.method === 'cash';
-      const isCreditMethod = dto.method === 'credit';
+      const tenderedCents = normalizedPayments.reduce(
+        (acc, payment) => acc + payment.amountCents,
+        0,
+      );
+      const hasCash = normalizedPayments.some((payment) => payment.method === 'cash');
+      const hasCreditMethod = normalizedPayments.some(
+        (payment) => payment.method === 'credit',
+      );
 
-      if (isCreditMethod && dto.amountCents !== 0) {
+      if (hasCreditMethod && normalizedPayments.length > 1) {
         chargeValidationError('INVALID_CREDIT_CHARGE');
       }
 
-      if (!isCreditMethod && dto.amountCents > totalCents && !isCash) {
+      if (hasCreditMethod && tenderedCents !== 0) {
+        chargeValidationError('INVALID_CREDIT_CHARGE');
+      }
+
+      if (!hasCash && tenderedCents > totalCents) {
         chargeValidationError('PAYMENT_AMOUNT_INVALID');
       }
 
-      if (!isCreditMethod && dto.amountCents < 0) {
+      if (tenderedCents < 0) {
         chargeValidationError('PAYMENT_AMOUNT_INVALID');
       }
 
-      if (!isCreditMethod && dto.amountCents < totalCents && !sale.customerId) {
+      if (tenderedCents < totalCents && !sale.customerId) {
         chargeValidationError('CUSTOMER_REQUIRED_FOR_CREDIT');
       }
 
-      if (isCreditMethod && !sale.customerId) {
-        chargeValidationError('CUSTOMER_REQUIRED_FOR_CREDIT');
-      }
-
-      if (!isCreditMethod && dto.amountCents < totalCents && dto.amountCents <= 0) {
+      if (
+        !hasCreditMethod &&
+        tenderedCents < totalCents &&
+        tenderedCents <= 0 &&
+        normalizedPayments.length > 0
+      ) {
         chargeValidationError('PAYMENT_AMOUNT_INVALID');
       }
 
-      if (!isCreditMethod && dto.amountCents < totalCents && !isCash) {
+      if (tenderedCents < totalCents && tenderedCents > 0 && !hasCash) {
         chargeValidationError('PAYMENT_AMOUNT_INSUFFICIENT');
       }
 
-      const paidCents = isCreditMethod ? 0 : Math.min(dto.amountCents, totalCents);
+      const paidCents = Math.min(tenderedCents, totalCents);
       const debtCents = totalCents - paidCents;
       const paymentStatus =
         paidCents === totalCents
@@ -878,8 +965,12 @@ export class SalesService {
           : paidCents === 0
             ? 'CREDIT'
             : 'PARTIAL';
-      const changeDueCents =
-        isCash && paymentStatus === 'PAID' ? dto.amountCents - totalCents : 0;
+      const changeDueCents = hasCash && paymentStatus === 'PAID' ? tenderedCents - totalCents : 0;
+
+      const primaryPayment = normalizedPayments[0] ?? {
+        method: 'credit' as const,
+        amountCents: 0,
+      };
 
       const stockAdjustments = sale.items.map((item) => ({
         productId: item.productId,
@@ -892,8 +983,8 @@ export class SalesService {
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
       await this.saleRepo.persistChargeConfirmation({
         saleId,
-        method: paymentMethod,
-        amountCents: dto.amountCents,
+        method: primaryPayment.method,
+        amountCents: tenderedCents,
         subtotalCents,
         discountCents,
         totalCents,
