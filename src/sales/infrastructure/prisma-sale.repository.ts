@@ -10,6 +10,15 @@ import { Sale, type SaleStatus } from '../domain/sale.entity';
 import { Prisma } from '@prisma/client';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 
+function extractLegacyReference(metadataJson: unknown): string | null {
+  if (!metadataJson || typeof metadataJson !== 'object') {
+    return null;
+  }
+
+  const candidate = (metadataJson as { reference?: unknown }).reference;
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
+}
+
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
@@ -633,6 +642,8 @@ export class PrismaSaleRepository implements ISaleRepository {
           select: {
             method: true,
             amountCents: true,
+            reference: true,
+            metadataJson: true,
             createdAt: true,
           },
           orderBy: { createdAt: 'asc' },
@@ -683,7 +694,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         amountCents: payment.amountCents,
         tenderedCents: payment.amountCents,
         changeCents: 0,
-        reference: null,
+        reference: payment.reference ?? extractLegacyReference(payment.metadataJson),
         paidAt: payment.createdAt,
         createdAt: payment.createdAt,
       })),
