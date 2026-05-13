@@ -13,6 +13,8 @@ import {
 } from '../shared/domain/domain-error';
 import type { ProductsService } from '../products/products.service';
 import type { EventEmitter2 } from '@nestjs/event-emitter';
+import type { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
+import type { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -52,15 +54,29 @@ function makeMockProductsService() {
 function makeMockEventEmitter() {
   return {
     emit: jest.fn(),
-  } as any;
+  } as unknown as EventEmitter2;
+}
+
+function makeMockOutboxWriter() {
+  return {
+    publish: jest.fn(),
+  } as jest.Mocked<Pick<OutboxWriterService, 'publish'>>;
 }
 
 function createService(
   saleRepo: ISaleRepository,
   productsService: ProductsService,
   eventEmitter: EventEmitter2,
+  outboxWriter: Pick<OutboxWriterService, 'publish'>,
+  tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>,
 ) {
-  return new SalesService(saleRepo, productsService, eventEmitter);
+  return new SalesService(
+    saleRepo,
+    productsService,
+    eventEmitter,
+    outboxWriter,
+    tenantPrisma as TenantPrismaService,
+  );
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -69,13 +85,26 @@ describe('SalesService', () => {
   let saleRepo: ReturnType<typeof makeMockSaleRepo>;
   let productsService: ReturnType<typeof makeMockProductsService>;
   let eventEmitter: ReturnType<typeof makeMockEventEmitter>;
+  let outboxWriter: ReturnType<typeof makeMockOutboxWriter>;
+  let tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>;
   let service: SalesService;
 
   beforeEach(() => {
     saleRepo = makeMockSaleRepo();
     productsService = makeMockProductsService();
     eventEmitter = makeMockEventEmitter();
-    service = createService(saleRepo, productsService, eventEmitter);
+    outboxWriter = makeMockOutboxWriter();
+    tenantPrisma = {
+      getTenantId: jest.fn(() => 'tenant-1'),
+      getClient: jest.fn(() => ({}) as never),
+    };
+    service = createService(
+      saleRepo,
+      productsService,
+      eventEmitter,
+      outboxWriter,
+      tenantPrisma,
+    );
     saleRepo.acquireChargeIdempotency.mockResolvedValue({
       kind: 'acquired',
       token: 'idem-token',
@@ -93,6 +122,7 @@ describe('SalesService', () => {
       paymentStatus: 'PARTIAL',
       totalCents: 5000,
     });
+    outboxWriter.publish.mockResolvedValue(undefined);
   });
 
   describe('addPayment', () => {
@@ -137,6 +167,70 @@ describe('SalesService', () => {
       expect(result.paymentStatus).toBe('PARTIAL');
       expect(result.paidCents).toBe(4000);
       expect(result.debtCents).toBe(1000);
+    });
+
+    it('emits only sale.payment.received outbox event for partial addPayment', async () => {
+      const sale = buildConfirmedSale('sale-payment-outbox-partial', 'user-1', 5000);
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await service.addPayment(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 2000, reference: 'RCPT-1' },
+        'idem-pay-outbox-partial',
+      );
+
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        'Sale',
+        sale.id,
+        'sale.payment.received',
+        expect.objectContaining({
+          saleId: sale.id,
+          tenantId: 'tenant-1',
+          actorId: 'user-1',
+          paymentId: 'payment-1',
+          method: 'cash',
+          amountCents: 2000,
+          reference: 'RCPT-1',
+          resultingPaidCents: 4000,
+          resultingDebtCents: 1000,
+          resultingPaymentStatus: 'PARTIAL',
+          occurredAt: expect.any(String),
+        }),
+      );
+    });
+
+    it('emits sale.payment.received and sale.fully.paid outbox events when addPayment settles debt', async () => {
+      const sale = buildConfirmedSale('sale-payment-outbox-full', 'user-1', 5000);
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      saleRepo.persistCollectedPayment.mockResolvedValue({
+        paymentId: 'payment-final',
+        paidCents: 5000,
+        debtCents: 0,
+        paymentStatus: 'PAID',
+        totalCents: 5000,
+      });
+
+      await service.addPayment(
+        sale.id,
+        'user-1',
+        { method: 'transfer', amountCents: 1000, reference: 'TRX-1' },
+        'idem-pay-outbox-full',
+      );
+
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(2);
+      expect(outboxWriter.publish).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        expect.any(String),
+        'Sale',
+        sale.id,
+        'sale.fully.paid',
+        expect.objectContaining({ saleId: sale.id, totalCents: 5000 }),
+      );
     });
 
     it('rejects overpayment with PAYMENT_EXCEEDS_DEBT', async () => {
@@ -261,7 +355,7 @@ describe('SalesService', () => {
       });
       productsService.decrementStockForCharge.mockResolvedValue(undefined);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
-      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
     };
 
     it('accepts new payments[] shape and computes totals', async () => {
@@ -283,6 +377,108 @@ describe('SalesService', () => {
       expect(result.paymentStatus).toBe('PAID');
       expect(result.paidCents).toBe(2000);
       expect(result.debtCents).toBe(0);
+    });
+
+    it('emits sale.confirmed + payment.received + fully.paid outbox events for fully-paid chargeDraft', async () => {
+      const sale = buildDraftSale('sale-charge-outbox-full', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([
+        {
+          paymentId: 'pmt-1',
+          method: 'cash',
+          amountCents: 1000,
+          reference: null,
+        },
+        {
+          paymentId: 'pmt-2',
+          method: 'card_debit',
+          amountCents: 1000,
+          reference: 'REF-1',
+        },
+      ]);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { payments: [{ method: 'cash', amountCents: 1000 }, { method: 'card_debit', amountCents: 1000, reference: 'REF-1' }] } as never,
+        'idem-charge-outbox-full',
+      );
+
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(4);
+      expect(outboxWriter.publish).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        expect.any(String),
+        'Sale',
+        sale.id,
+        'sale.confirmed',
+        {
+          saleId: sale.id,
+          folio: 'A-2605-000014',
+          tenantId: 'tenant-1',
+          actorId: 'user-1',
+          totalCents: 2000,
+          paidCents: 2000,
+          debtCents: 0,
+          paymentStatus: 'PAID',
+          confirmedAt: expect.any(String),
+        },
+      );
+      expect(outboxWriter.publish).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        expect.any(String),
+        'Sale',
+        sale.id,
+        'sale.payment.received',
+        expect.objectContaining({
+          saleId: sale.id,
+          paymentId: 'pmt-1',
+          tenantId: 'tenant-1',
+          actorId: 'user-1',
+          method: 'cash',
+          amountCents: 1000,
+          reference: undefined,
+          resultingPaidCents: 1000,
+          resultingDebtCents: 1000,
+          resultingPaymentStatus: 'PARTIAL',
+          occurredAt: expect.any(String),
+        }),
+      );
+      expect(outboxWriter.publish).toHaveBeenNthCalledWith(
+        4,
+        expect.anything(),
+        expect.any(String),
+        'Sale',
+        sale.id,
+        'sale.fully.paid',
+        expect.objectContaining({ saleId: sale.id, totalCents: 2000 }),
+      );
+    });
+
+    it('does not emit sale.fully.paid on partial chargeDraft', async () => {
+      const sale = buildDraftSale('sale-charge-outbox-partial', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([
+        {
+          paymentId: 'pmt-1',
+          method: 'cash',
+          amountCents: 1500,
+          reference: null,
+        },
+      ]);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 1500 },
+        'idem-charge-outbox-partial',
+      );
+
+      const eventTypes = outboxWriter.publish.mock.calls.map((args) => args[4]);
+      expect(eventTypes).toContain('sale.confirmed');
+      expect(eventTypes).toContain('sale.payment.received');
+      expect(eventTypes).not.toContain('sale.fully.paid');
     });
 
     it('rejects mixed shape with AMBIGUOUS_PAYMENT_SHAPE', async () => {
@@ -582,7 +778,7 @@ describe('SalesService', () => {
       });
       productsService.decrementStockForCharge.mockResolvedValue(undefined);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000012');
-      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
       const result = await service.chargeDraft(
         sale.id,
@@ -612,7 +808,7 @@ describe('SalesService', () => {
       });
       productsService.decrementStockForCharge.mockResolvedValue(undefined);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000013');
-      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
       const result = await service.chargeDraft(
         sale.id,
@@ -689,7 +885,7 @@ describe('SalesService', () => {
       });
       productsService.decrementStockForCharge.mockResolvedValue(undefined);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
-      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
       const result = await service.chargeDraft(
         sale.id,
@@ -789,7 +985,7 @@ describe('SalesService', () => {
 
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000011');
-      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
       productsService.decrementStockForCharge.mockResolvedValue(undefined);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 9999,
@@ -904,7 +1100,7 @@ describe('SalesService', () => {
       });
       productsService.decrementStockForCharge.mockResolvedValue(undefined);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000010');
-      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
       (saleRepo as any).acquireChargeIdempotency = jest
         .fn()
         .mockResolvedValue({ kind: 'acquired', token: 'idem-row-1' });

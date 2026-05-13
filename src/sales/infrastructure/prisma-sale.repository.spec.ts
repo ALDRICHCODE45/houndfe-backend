@@ -812,9 +812,19 @@ describe('PrismaSaleRepository', () => {
     it('uses tenant predicate in charge lookup/update SQL paths', async () => {
       prisma.sale.findFirst.mockResolvedValue(null);
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
-      prisma.salePayment.createMany = jest.fn().mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-1',
+        method: 'CASH',
+        amountCents: 100,
+        reference: null,
+      });
 
       await repo.findByIdForUpdate('sale-tenant-scope');
+      const lockQueryTemplate = prisma.$queryRaw.mock.calls[0]?.[0] as
+        | TemplateStringsArray
+        | undefined;
+      expect(lockQueryTemplate?.join(' ')).toContain('"tenantId"');
+
       await repo.persistChargeConfirmation({
         saleId: 'sale-tenant-scope',
         payments: [{ method: 'cash', amountCents: 100 }],
@@ -846,7 +856,7 @@ describe('PrismaSaleRepository', () => {
 
     it('persists zero payment rows for pure credit confirmation', async () => {
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
-      prisma.salePayment.createMany = jest.fn().mockResolvedValue({ count: 0 });
+      prisma.salePayment.create.mockReset();
 
       await repo.persistChargeConfirmation({
         saleId: 'sale-credit-zero-rows',
@@ -862,12 +872,24 @@ describe('PrismaSaleRepository', () => {
         folio: 'A-2605-000020',
       } as never);
 
-      expect(prisma.salePayment.createMany).toHaveBeenCalledWith({ data: [] });
+      expect(prisma.salePayment.create).not.toHaveBeenCalled();
     });
 
     it('persists N payment rows for multi-method confirmation in one call', async () => {
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
-      prisma.salePayment.createMany = jest.fn().mockResolvedValue({ count: 2 });
+      prisma.salePayment.create
+        .mockResolvedValueOnce({
+          id: 'pay-1',
+          method: 'CASH',
+          amountCents: 600,
+          reference: null,
+        })
+        .mockResolvedValueOnce({
+          id: 'pay-2',
+          method: 'CARD_DEBIT',
+          amountCents: 400,
+          reference: 'REF-N',
+        });
 
       await repo.persistChargeConfirmation({
         saleId: 'sale-multi-rows',
@@ -886,21 +908,7 @@ describe('PrismaSaleRepository', () => {
         folio: 'A-2605-000021',
       } as never);
 
-      expect(prisma.salePayment.createMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: [
-            expect.objectContaining({
-              method: 'CASH',
-              amountCents: 600,
-            }),
-            expect.objectContaining({
-              method: 'CARD_DEBIT',
-              amountCents: 400,
-              reference: 'REF-N',
-            }),
-          ],
-        }),
-      );
+      expect(prisma.salePayment.create).toHaveBeenCalledTimes(2);
     });
 
     it('rejects charge paths when tenant context is empty', async () => {

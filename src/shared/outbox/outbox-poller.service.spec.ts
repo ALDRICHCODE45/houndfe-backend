@@ -51,6 +51,12 @@ describe('OutboxPollerService', () => {
       expect.stringContaining('FOR UPDATE SKIP LOCKED'),
       expect.anything(),
     );
+    expect(txQueryRawUnsafe.mock.calls[0][0]).toContain('"nextAttemptAt" <= NOW()');
+    expect(txQueryRawUnsafe.mock.calls[0][0]).toContain('"lockedUntil" IS NULL OR "lockedUntil" < NOW()');
+    expect(txQueryRawUnsafe.mock.calls[0][0]).toContain('ORDER BY "createdAt" ASC');
+    expect(txQueryRawUnsafe.mock.calls[1][0]).toContain('SET "lockToken" = $1');
+    expect(txQueryRawUnsafe.mock.calls[1][0]).toContain('"lockedUntil" = NOW() + ($2 * INTERVAL');
+    expect(txQueryRawUnsafe.mock.calls[1][0]).toContain('"tenantId" as "tenantId"');
 
     expect(dispatcher.dispatch).toHaveBeenCalledWith(claimed[0]);
   });
