@@ -44,6 +44,12 @@ type SupportedChargeMethod =
   | 'transfer'
   | 'credit';
 
+type SupportedPaymentCollectionMethod =
+  | 'cash'
+  | 'card_credit'
+  | 'card_debit'
+  | 'transfer';
+
 function isSupportedChargeMethod(
   method: ChargeSaleDto['method'],
 ): method is SupportedChargeMethod {
@@ -56,6 +62,12 @@ function chargeValidationError(
   code: 'INVALID_CREDIT_CHARGE' | 'CUSTOMER_REQUIRED_FOR_CREDIT' | 'PAYMENT_AMOUNT_INVALID' | 'PAYMENT_AMOUNT_INSUFFICIENT',
 ): never {
   throw new BusinessRuleViolationError(code, code);
+}
+
+function isSupportedCollectionMethod(
+  method: string,
+): method is SupportedPaymentCollectionMethod {
+  return ['cash', 'card_credit', 'card_debit', 'transfer'].includes(method);
 }
 
 @Injectable()
@@ -907,6 +919,85 @@ export class SalesService {
       };
 
       await this.saleRepo.markChargeIdempotencySucceeded(
+        idempotency.token,
+        saleId,
+        payload,
+      );
+
+      return payload;
+    });
+  }
+
+  async addPayment(
+    saleId: string,
+    actorId: string,
+    dto: {
+      method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
+      amountCents: number;
+      reference?: string;
+    },
+    idempotencyKey: string,
+  ) {
+    if (!isSupportedCollectionMethod(dto.method)) {
+      throw new BusinessRuleViolationError(
+        'PAYMENT_METHOD_NOT_SUPPORTED',
+        'PAYMENT_METHOD_NOT_SUPPORTED',
+      );
+    }
+    const collectionMethod: SupportedPaymentCollectionMethod = dto.method;
+
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ saleId, actorId, dto }))
+      .digest('hex');
+
+    const idempotency = await this.saleRepo.acquirePaymentIdempotency(
+      saleId,
+      idempotencyKey,
+      requestHash,
+    );
+    if (idempotency.kind === 'replay') {
+      return idempotency.payload;
+    }
+    if (idempotency.kind === 'conflict') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'IDEMPOTENCY_KEY_CONFLICT',
+      );
+    }
+    if (idempotency.kind === 'in_flight') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+      );
+    }
+
+    return this.saleRepo.runInTransaction(async () => {
+      const sale = await this.saleRepo.findByIdForUpdate(saleId);
+      if (!sale || sale.userId !== actorId) {
+        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+      }
+      if (sale.status !== 'CONFIRMED') {
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_CONFIRMABLE_FOR_PAYMENT',
+          'SALE_NOT_CONFIRMABLE_FOR_PAYMENT',
+        );
+      }
+      const updated = await this.saleRepo.persistCollectedPayment({
+        saleId,
+        method: collectionMethod,
+        amountCents: dto.amountCents,
+        reference: dto.reference,
+      });
+
+      const payload = {
+        saleId,
+        paidCents: updated.paidCents,
+        debtCents: updated.debtCents,
+        totalCents: updated.totalCents,
+        paymentStatus: updated.paymentStatus,
+      };
+
+      await this.saleRepo.markPaymentIdempotencySucceeded(
         idempotency.token,
         saleId,
         payload,
