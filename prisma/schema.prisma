@@ -640,6 +640,7 @@ model SalePayment {
   saleId     String
   method     SalePaymentMethod
   amountCents Int
+  reference  String?
   metadataJson Json?
   tenantId   String
   createdAt  DateTime          @default(now())

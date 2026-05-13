@@ -303,7 +303,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async persistChargeConfirmation(input: {
     saleId: string;
-    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
     amountCents: number;
     subtotalCents: number;
     discountCents: number;
@@ -344,18 +344,20 @@ export class PrismaSaleRepository implements ISaleRepository {
       },
     });
 
-    await prisma.salePayment.create({
-      data: {
-        saleId: input.saleId,
-        method: input.method.toUpperCase() as
-          | 'CASH'
-          | 'CARD_CREDIT'
-          | 'CARD_DEBIT'
-          | 'TRANSFER',
-        amountCents: input.amountCents,
-        tenantId,
-      },
-    });
+    if (input.paymentStatus !== 'CREDIT') {
+      await prisma.salePayment.create({
+        data: {
+          saleId: input.saleId,
+          method: input.method.toUpperCase() as
+            | 'CASH'
+            | 'CARD_CREDIT'
+            | 'CARD_DEBIT'
+            | 'TRANSFER',
+          amountCents: input.amountCents,
+          tenantId,
+        },
+      });
+    }
   }
 
   private buildConfirmedBaseWhere(input: {

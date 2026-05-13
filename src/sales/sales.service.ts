@@ -37,12 +37,25 @@ import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
 
-type SupportedChargeMethod = 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+type SupportedChargeMethod =
+  | 'cash'
+  | 'card_credit'
+  | 'card_debit'
+  | 'transfer'
+  | 'credit';
 
 function isSupportedChargeMethod(
   method: ChargeSaleDto['method'],
 ): method is SupportedChargeMethod {
-  return ['cash', 'card_credit', 'card_debit', 'transfer'].includes(method);
+  return ['cash', 'card_credit', 'card_debit', 'transfer', 'credit'].includes(
+    method,
+  );
+}
+
+function chargeValidationError(
+  code: 'INVALID_CREDIT_CHARGE' | 'CUSTOMER_REQUIRED_FOR_CREDIT' | 'PAYMENT_AMOUNT_INVALID' | 'PAYMENT_AMOUNT_INSUFFICIENT',
+): never {
+  throw new BusinessRuleViolationError(code, code);
 }
 
 @Injectable()
@@ -815,20 +828,46 @@ export class SalesService {
       const discountCents = subtotalCents - totalCents;
 
       const isCash = dto.method === 'cash';
-      if (dto.amountCents < totalCents) {
-        throw new BusinessRuleViolationError(
-          'PAYMENT_AMOUNT_INSUFFICIENT',
-          'PAYMENT_AMOUNT_INSUFFICIENT',
-        );
-      }
-      if (!isCash && dto.amountCents > totalCents) {
-        throw new BusinessRuleViolationError(
-          'PAYMENT_AMOUNT_INVALID',
-          'PAYMENT_AMOUNT_INVALID',
-        );
+      const isCreditMethod = dto.method === 'credit';
+
+      if (isCreditMethod && dto.amountCents !== 0) {
+        chargeValidationError('INVALID_CREDIT_CHARGE');
       }
 
-      const changeDueCents = isCash ? dto.amountCents - totalCents : 0;
+      if (!isCreditMethod && dto.amountCents > totalCents && !isCash) {
+        chargeValidationError('PAYMENT_AMOUNT_INVALID');
+      }
+
+      if (!isCreditMethod && dto.amountCents < 0) {
+        chargeValidationError('PAYMENT_AMOUNT_INVALID');
+      }
+
+      if (!isCreditMethod && dto.amountCents < totalCents && !sale.customerId) {
+        chargeValidationError('CUSTOMER_REQUIRED_FOR_CREDIT');
+      }
+
+      if (isCreditMethod && !sale.customerId) {
+        chargeValidationError('CUSTOMER_REQUIRED_FOR_CREDIT');
+      }
+
+      if (!isCreditMethod && dto.amountCents < totalCents && dto.amountCents <= 0) {
+        chargeValidationError('PAYMENT_AMOUNT_INVALID');
+      }
+
+      if (!isCreditMethod && dto.amountCents < totalCents && !isCash) {
+        chargeValidationError('PAYMENT_AMOUNT_INSUFFICIENT');
+      }
+
+      const paidCents = isCreditMethod ? 0 : Math.min(dto.amountCents, totalCents);
+      const debtCents = totalCents - paidCents;
+      const paymentStatus =
+        paidCents === totalCents
+          ? 'PAID'
+          : paidCents === 0
+            ? 'CREDIT'
+            : 'PARTIAL';
+      const changeDueCents =
+        isCash && paymentStatus === 'PAID' ? dto.amountCents - totalCents : 0;
 
       const stockAdjustments = sale.items.map((item) => ({
         productId: item.productId,
@@ -846,10 +885,10 @@ export class SalesService {
         subtotalCents,
         discountCents,
         totalCents,
-        paidCents: totalCents,
-        debtCents: 0,
+        paidCents,
+        debtCents,
         changeDueCents,
-        paymentStatus: 'PAID',
+        paymentStatus,
         confirmedAt,
         folio,
       });
@@ -860,10 +899,10 @@ export class SalesService {
         subtotalCents,
         discountCents,
         totalCents,
-        paidCents: totalCents,
-        debtCents: 0,
+        paidCents,
+        debtCents,
         changeDueCents,
-        paymentStatus: 'PAID' as const,
+        paymentStatus,
         confirmedAt: confirmedAt.toISOString(),
       };
 
