@@ -1,8 +1,15 @@
 import { Injectable } from '@nestjs/common';
+import type { PrismaClient } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../tenant/tenant-cls-store.interface';
 import { createTenantScopedPrisma } from './tenant-prisma.factory';
 import { PrismaService } from './prisma.service';
+
+const TX_CLIENT_KEY = 'prismaTxClient';
+type TenantPrismaClient = ReturnType<typeof createTenantScopedPrisma>;
+type PrismaTransactionClient = Parameters<
+  Parameters<PrismaClient['$transaction']>[0]
+>[0];
 
 @Injectable()
 export class TenantPrismaService {
@@ -11,8 +18,34 @@ export class TenantPrismaService {
     private readonly cls: ClsService<TenantClsStore>,
   ) {}
 
-  getClient() {
+  getClient(): TenantPrismaClient {
+    const txClient = this.cls.get(TX_CLIENT_KEY) as PrismaClient | undefined;
+    if (txClient) {
+      if ('$extends' in txClient && typeof txClient.$extends === 'function') {
+        return createTenantScopedPrisma(txClient, this.cls);
+      }
+
+      return txClient as unknown as TenantPrismaClient;
+    }
+
     return createTenantScopedPrisma(this.prisma, this.cls);
+  }
+
+  async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
+    const previousClient = this.cls.get(TX_CLIENT_KEY) as PrismaTransactionClient | undefined;
+
+    if (previousClient) {
+      return work();
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      this.cls.set(TX_CLIENT_KEY, tx);
+      try {
+        return await work();
+      } finally {
+        this.cls.set(TX_CLIENT_KEY, previousClient);
+      }
+    });
   }
 
   getTenantId(): string {
