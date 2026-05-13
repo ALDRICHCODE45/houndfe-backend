@@ -165,6 +165,12 @@ enum SaleItemDiscountType {
   percentage
 }
 
+enum OutboxEventStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
 // ============================================================================
 // CATEGORY
 // ============================================================================
@@ -227,6 +233,7 @@ model Tenant {
   salePayments         SalePayment[]
   saleIdempotencies    SaleIdempotency[]
   saleFolioCounters    SaleFolioCounter[]
+  outboxEvents         OutboxEvent[]
   customers            Customer[]
   customerAddresses    CustomerAddress[]
   promotions           Promotion[]
@@ -687,6 +694,30 @@ model SaleFolioCounter {
   @@unique([tenantId, period])
   @@index([tenantId])
   @@map("sale_folio_counters")
+}
+
+model OutboxEvent {
+  id            String           @id @default(uuid())
+  tenantId      String
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  status        OutboxEventStatus @default(PENDING)
+  retryCount    Int              @default(0)
+  nextAttemptAt DateTime         @default(now())
+  lastError     String?
+  lockToken     String?
+  lockedUntil   DateTime?
+  createdAt     DateTime         @default(now())
+  publishedAt   DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([tenantId, aggregateType, aggregateId, createdAt])
+  @@index([lockToken])
+  @@map("outbox_events")
 }
 
 // ============================================================================
