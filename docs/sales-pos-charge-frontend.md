@@ -18,7 +18,7 @@ Se habilitaron 3 capacidades nuevas del módulo de ventas POS:
 
 - Pago simple (1 método por request).
 - Canal fijo: `POS`. Caja fija: `Principal`.
-- Entrega fija: `DELIVERED`. Timeline: 3 eventos automáticos.
+- Entrega fija: `DELIVERED`. Timeline: `SALE_REGISTERED` + 0..N eventos `PAYMENT_RECEIVED` + `PRODUCTS_DELIVERED`.
 - `imageUrl` capturado como snapshot al agregar item al draft.
 
 ### Todavía NO implementado
@@ -74,15 +74,15 @@ Idempotency-Key: <uuid-o-string-unico>
 | Campo | Tipo | Requerido | Reglas |
 |---|---|---|---|
 | `method` | `'cash' \| 'card_credit' \| 'card_debit' \| 'transfer' \| 'credit'` | Sí | Pago simple (1 método) |
-| `amountCents` | `number` entero | Sí | `>= 1` |
+| `amountCents` | `number` entero | Sí | `>= 0` |
 
 ### Reglas de validación de pago
 
 | Método | Regla |
 |---|---|
-| `cash` | `amountCents >= totalCents` (si mayor, hay cambio) |
-| `card_credit`, `card_debit`, `transfer` | debe ser exacto (`amountCents == totalCents`) |
-| cualquier método | si `amountCents < totalCents` → error |
+| `credit` | debe ser exactamente `0` (venta a crédito pura) |
+| `cash`, `card_credit`, `card_debit`, `transfer` | permiten parcial (`0 < amountCents < totalCents`) o total (`>= totalCents`) |
+| cualquier método no `credit` con `amountCents = 0` | error |
 
 ### Respuesta `200 OK`
 
@@ -107,7 +107,7 @@ Idempotency-Key: <uuid-o-string-unico>
 | `discountCents` | Diferencia `subtotal - total` |
 | `totalCents` | Monto final a cobrar |
 | `changeDueCents` | Cambio (solo efectivo; 0 en otros métodos) |
-| `paymentStatus` | En esta fase siempre `PAID` |
+| `paymentStatus` | `PAID` \/ `PARTIAL` \/ `CREDIT` según total pagado |
 | `folio` | Formato `A-YYYYMM-NNNNNN` (por tenant) |
 
 ---
@@ -203,6 +203,32 @@ Los contadores se calculan sobre la base `tenant + CONFIRMED` **sin aplicar** lo
 | `notDelivered` | Ventas donde `deliveryStatus != DELIVERED` |
 
 Esto permite que los tabs siempre muestren totales reales sin importar qué filtro esté activo.
+
+---
+
+## 5.1) Endpoint: Registrar pago sobre venta confirmada
+
+```http
+POST /sales/:id/payments
+Authorization: Bearer <jwt>
+Idempotency-Key: <uuid-o-string-unico>
+```
+
+Body:
+
+```json
+{
+  "method": "transfer",
+  "amountCents": 2000,
+  "reference": "TRF-001"
+}
+```
+
+Reglas clave:
+- `method` permitido: `cash | card_credit | card_debit | transfer` (`credit` NO permitido aquí).
+- `amountCents >= 1` y `amountCents <= debtCents`.
+- Si la venta no tiene deuda (`debtCents = 0` o `paymentStatus = PAID`) retorna error.
+- Un mismo `Idempotency-Key` en operación `sale_payment` hace replay sin duplicar pagos.
 
 ### Mapeo para tabla frontend
 
@@ -308,7 +334,7 @@ Authorization: Bearer <jwt>
 | **Actores** | `customer`, `cashier`, `seller` | `null` si no aplica |
 | **Items** | `productName`, `variantName`, `imageUrl`, `unitPriceCents`, `quantity`, `discountCents`, `subtotalCents` | Snapshot inmutable al momento de cobro |
 | **Pagos** | `method`, `amountCents`, `tenderedCents`, `changeCents`, `reference`, `paidAt` | `tenderedCents/changeCents` relevantes solo para cash |
-| **Timeline** | `type`, `at` | Siempre 3 eventos en esta fase |
+| **Timeline** | `type`, `at` | Siempre `SALE_REGISTERED` y `PRODUCTS_DELIVERED`; `PAYMENT_RECEIVED` aparece una vez por cada pago real |
 
 ### Layout recomendado del detalle
 
@@ -359,6 +385,18 @@ Formato estándar:
 | `PAYMENT_METHOD_NOT_SUPPORTED` | 422 | Método no soportado |
 | `PAYMENT_AMOUNT_INSUFFICIENT` | 422 | Monto menor al total |
 | `PAYMENT_AMOUNT_INVALID` | 422 | No-efectivo con monto mayor al total |
+| `INVALID_CREDIT_CHARGE` | 422 | `method=credit` con `amountCents > 0` |
+| `CUSTOMER_REQUIRED_FOR_CREDIT` | 422 | Venta parcial o crédito sin cliente |
+
+### Errores de cobro de deuda (`POST /sales/:id/payments`)
+
+| Código | HTTP | Cuándo pasa |
+|---|---:|---|
+| `IDEMPOTENCY_KEY_REQUIRED` | 400 | Falta header `Idempotency-Key` |
+| `SALE_NOT_FOUND` | 404 | Venta no existe o es de otro tenant |
+| `PAYMENT_METHOD_NOT_SUPPORTED` | 422 | `method=credit` o método inválido |
+| `NO_OUTSTANDING_DEBT` | 409 | Venta sin deuda pendiente |
+| `PAYMENT_EXCEEDS_DEBT` | 409 | `amountCents` mayor a deuda actual |
 
 ### Errores de consulta
 

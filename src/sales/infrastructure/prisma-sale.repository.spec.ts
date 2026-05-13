@@ -243,6 +243,15 @@ describe('PrismaSaleRepository', () => {
           {
             method: 'CASH',
             amountCents: 2000,
+            reference: 'REF-COL',
+            metadataJson: null,
+            createdAt: new Date('2026-05-08T10:10:00.000Z'),
+          },
+          {
+            method: 'TRANSFER',
+            amountCents: 500,
+            reference: null,
+            metadataJson: { reference: 'REF-LEGACY' },
             createdAt: new Date('2026-05-08T10:15:00.000Z'),
           },
         ],
@@ -264,6 +273,10 @@ describe('PrismaSaleRepository', () => {
       );
       expect(result?.cashier).toEqual({ id: 'u1', name: 'Caja 1' });
       expect(result?.items[0].subtotalCents).toBe(2000);
+      expect(result?.payments).toEqual([
+        expect.objectContaining({ reference: 'REF-COL' }),
+        expect.objectContaining({ reference: 'REF-LEGACY' }),
+      ]);
     });
 
     it('returns null when no tenant-visible sale exists', async () => {
