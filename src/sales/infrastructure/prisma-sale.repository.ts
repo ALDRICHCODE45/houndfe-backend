@@ -5,7 +5,7 @@
  */
 import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
-import type { ISaleRepository } from '../domain/sale.repository';
+import type { ISaleRepository, PersistedChargePayment } from '../domain/sale.repository';
 import { Sale, type SaleStatus } from '../domain/sale.entity';
 import { Prisma } from '@prisma/client';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
@@ -318,8 +318,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async persistChargeConfirmation(input: {
     saleId: string;
-    method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
-    amountCents: number;
+    payments: PersistedChargePayment[];
     subtotalCents: number;
     discountCents: number;
     totalCents: number;
@@ -359,20 +358,19 @@ export class PrismaSaleRepository implements ISaleRepository {
       },
     });
 
-    if (input.paymentStatus !== 'CREDIT') {
-      await prisma.salePayment.create({
-        data: {
-          saleId: input.saleId,
-          method: input.method.toUpperCase() as
-            | 'CASH'
-            | 'CARD_CREDIT'
-            | 'CARD_DEBIT'
-            | 'TRANSFER',
-          amountCents: input.amountCents,
-          tenantId,
-        },
-      });
-    }
+    await prisma.salePayment.createMany({
+      data: input.payments.map((payment) => ({
+        saleId: input.saleId,
+        method: payment.method.toUpperCase() as
+          | 'CASH'
+          | 'CARD_CREDIT'
+          | 'CARD_DEBIT'
+          | 'TRANSFER',
+        amountCents: payment.amountCents,
+        reference: payment.reference ?? null,
+        tenantId,
+      })),
+    });
   }
 
   async persistCollectedPayment(input: {

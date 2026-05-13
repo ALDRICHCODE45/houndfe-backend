@@ -896,8 +896,7 @@ describe('PrismaSaleRepository', () => {
       await expect(
         repo.persistChargeConfirmation({
           saleId: 'sale-1',
-          method: 'cash',
-          amountCents: 100,
+          payments: [{ method: 'cash', amountCents: 100 }],
           subtotalCents: 100,
           discountCents: 0,
           totalCents: 100,

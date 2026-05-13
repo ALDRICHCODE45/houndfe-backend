@@ -573,7 +573,7 @@ describe('SalesService', () => {
       ).rejects.toThrow('INVALID_CREDIT_CHARGE');
     });
 
-    it('accepts pure credit (amount 0), marks CREDIT and does not create payment row', async () => {
+    it('accepts pure credit (amount 0), marks CREDIT and persists zero payment rows', async () => {
       const sale = buildDraftSale('sale-charge-credit', 'user-1', 'customer-1');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
@@ -595,8 +595,7 @@ describe('SalesService', () => {
       expect(result.debtCents).toBe(2000);
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
-          method: 'credit',
-          amountCents: 0,
+          payments: [],
           paymentStatus: 'CREDIT',
           paidCents: 0,
           debtCents: 2000,
