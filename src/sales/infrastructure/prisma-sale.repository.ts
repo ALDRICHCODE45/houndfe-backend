@@ -5,7 +5,11 @@
  */
 import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
-import type { ISaleRepository, PersistedChargePayment } from '../domain/sale.repository';
+import type {
+  ISaleRepository,
+  PersistedChargePayment,
+  PersistedSalePaymentRecord,
+} from '../domain/sale.repository';
 import { Sale, type SaleStatus } from '../domain/sale.entity';
 import { Prisma } from '@prisma/client';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
@@ -238,7 +242,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     await prisma.$queryRaw`
       SELECT id
       FROM sales
-      WHERE id = ${id} AND tenant_id = ${tenantId}
+      WHERE id = ${id} AND "tenantId" = ${tenantId}
       FOR UPDATE
     `;
     const saleData = await prisma.sale.findFirst({
@@ -332,7 +336,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     sellerUserId?: string | null;
     confirmedAt: Date;
     folio: string;
-  }): Promise<void> {
+  }): Promise<PersistedSalePaymentRecord[]> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
 
@@ -357,19 +361,35 @@ export class PrismaSaleRepository implements ISaleRepository {
       },
     });
 
-    await prisma.salePayment.createMany({
-      data: input.payments.map((payment) => ({
-        saleId: input.saleId,
-        method: payment.method.toUpperCase() as
-          | 'CASH'
-          | 'CARD_CREDIT'
-          | 'CARD_DEBIT'
-          | 'TRANSFER',
-        amountCents: payment.amountCents,
-        reference: payment.reference ?? null,
-        tenantId,
-      })),
-    });
+    const createdPayments = await Promise.all(
+      input.payments.map((payment) =>
+        prisma.salePayment.create({
+          data: {
+            saleId: input.saleId,
+            method: payment.method.toUpperCase() as
+              | 'CASH'
+              | 'CARD_CREDIT'
+              | 'CARD_DEBIT'
+              | 'TRANSFER',
+            amountCents: payment.amountCents,
+            reference: payment.reference ?? null,
+            tenantId,
+          },
+          select: { id: true, method: true, amountCents: true, reference: true },
+        }),
+      ),
+    );
+
+    return createdPayments.map((payment) => ({
+      paymentId: payment.id,
+      method: payment.method.toLowerCase() as
+        | 'cash'
+        | 'card_credit'
+        | 'card_debit'
+        | 'transfer',
+      amountCents: payment.amountCents,
+      reference: payment.reference,
+    }));
   }
 
   async persistCollectedPayment(input: {
