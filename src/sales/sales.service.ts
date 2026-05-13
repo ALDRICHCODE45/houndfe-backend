@@ -36,7 +36,9 @@ import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
-import type { PersistedChargePayment } from './domain/sale.repository';
+import type { PersistedChargePayment, PersistedSalePaymentRecord } from './domain/sale.repository';
+import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 
 type SupportedChargeMethod =
   | 'cash'
@@ -179,7 +181,105 @@ export class SalesService {
     private readonly saleRepo: ISaleRepository,
     private readonly productsService: ProductsService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly outboxWriter: OutboxWriterService,
+    private readonly tenantPrisma: TenantPrismaService,
   ) {}
+
+  private async publishSaleConfirmedEvent(input: {
+    saleId: string;
+    tenantId: string;
+    actorId: string;
+    folio: string;
+    totalCents: number;
+    paidCents: number;
+    debtCents: number;
+    paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
+    confirmedAt: Date;
+  }): Promise<void> {
+    await this.outboxWriter.publish(
+      this.tenantPrisma.getClient(),
+      input.tenantId,
+      'Sale',
+      input.saleId,
+      'sale.confirmed',
+      {
+        saleId: input.saleId,
+        folio: input.folio,
+        tenantId: input.tenantId,
+        actorId: input.actorId,
+        totalCents: input.totalCents,
+        paidCents: input.paidCents,
+        debtCents: input.debtCents,
+        paymentStatus: input.paymentStatus,
+        confirmedAt: input.confirmedAt.toISOString(),
+      },
+    );
+  }
+
+  private async publishPaymentReceivedEvents(input: {
+    saleId: string;
+    tenantId: string;
+    actorId: string;
+    payments: PersistedSalePaymentRecord[];
+    paidCents: number;
+    debtCents: number;
+    occurredAt: Date;
+    resultingPaymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT';
+  }): Promise<void> {
+    const payments = input.payments ?? [];
+    let cumulativePaidCents = input.paidCents - payments.reduce((sum, p) => sum + p.amountCents, 0);
+    let remainingDebtCents = input.paidCents + input.debtCents - cumulativePaidCents;
+
+    for (const payment of payments) {
+      cumulativePaidCents += payment.amountCents;
+      remainingDebtCents = Math.max(remainingDebtCents - payment.amountCents, 0);
+
+      await this.outboxWriter.publish(
+        this.tenantPrisma.getClient(),
+        input.tenantId,
+        'Sale',
+        input.saleId,
+        'sale.payment.received',
+        {
+          saleId: input.saleId,
+          tenantId: input.tenantId,
+          actorId: input.actorId,
+          paymentId: payment.paymentId,
+          method: payment.method,
+          amountCents: payment.amountCents,
+          reference: payment.reference ?? undefined,
+          occurredAt: input.occurredAt.toISOString(),
+          resultingPaidCents: cumulativePaidCents,
+          resultingDebtCents: remainingDebtCents,
+          resultingPaymentStatus:
+            input.resultingPaymentStatus ?? (remainingDebtCents === 0 ? 'PAID' : 'PARTIAL'),
+        },
+      );
+    }
+  }
+
+  private async publishSaleFullyPaidEvent(input: {
+    saleId: string;
+    tenantId: string;
+    folio: string;
+    totalCents: number;
+    paidAt: Date;
+  }): Promise<void> {
+    await this.outboxWriter.publish(
+      this.tenantPrisma.getClient(),
+      input.tenantId,
+      'Sale',
+      input.saleId,
+      'sale.fully.paid',
+      {
+        saleId: input.saleId,
+        tenantId: input.tenantId,
+        folio: input.folio,
+        totalCents: input.totalCents,
+        paidAt: input.paidAt.toISOString(),
+      },
+    );
+  }
 
   // ==================== Use Cases ====================
 
@@ -885,6 +985,7 @@ export class SalesService {
     }
 
     return this.saleRepo.runInTransaction(async () => {
+      const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
       if (!sale) {
         throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
@@ -999,7 +1100,7 @@ export class SalesService {
 
       const confirmedAt = new Date();
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
-      await this.saleRepo.persistChargeConfirmation({
+      const createdPayments = await this.saleRepo.persistChargeConfirmation({
         saleId,
         payments: canonicalPayments,
         subtotalCents,
@@ -1012,6 +1113,38 @@ export class SalesService {
         confirmedAt,
         folio,
       });
+
+      await this.publishSaleConfirmedEvent({
+        saleId,
+        tenantId,
+        actorId,
+        folio,
+        totalCents,
+        paidCents,
+        debtCents,
+        paymentStatus,
+        confirmedAt,
+      });
+
+      await this.publishPaymentReceivedEvents({
+        saleId,
+        tenantId,
+        actorId,
+        payments: createdPayments,
+        paidCents,
+        debtCents,
+        occurredAt: confirmedAt,
+      });
+
+      if (debtCents === 0) {
+        await this.publishSaleFullyPaidEvent({
+          saleId,
+          tenantId,
+          folio,
+          totalCents,
+          paidAt: confirmedAt,
+        });
+      }
 
       const payload = {
         saleId,
@@ -1080,6 +1213,7 @@ export class SalesService {
     }
 
     return this.saleRepo.runInTransaction(async () => {
+      const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
       if (!sale || sale.userId !== actorId) {
         throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
@@ -1096,6 +1230,34 @@ export class SalesService {
         amountCents: dto.amountCents,
         reference: dto.reference,
       });
+
+      await this.publishPaymentReceivedEvents({
+        saleId,
+        tenantId,
+        actorId,
+        payments: [
+          {
+            paymentId: updated.paymentId,
+            method: collectionMethod,
+            amountCents: dto.amountCents,
+            reference: dto.reference ?? null,
+          },
+        ],
+        paidCents: updated.paidCents,
+        debtCents: updated.debtCents,
+        occurredAt: new Date(),
+        resultingPaymentStatus: updated.paymentStatus,
+      });
+
+      if (updated.debtCents === 0) {
+        await this.publishSaleFullyPaidEvent({
+          saleId,
+          tenantId,
+          folio: sale.folio ?? 'N/A',
+          totalCents: updated.totalCents,
+          paidAt: new Date(),
+        });
+      }
 
       const payload = {
         saleId,

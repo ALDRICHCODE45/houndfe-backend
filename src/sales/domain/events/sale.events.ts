@@ -88,3 +88,43 @@ export class SaleItemRemovedEvent {
     public readonly occurredAt: Date,
   ) {}
 }
+
+export class SaleConfirmedEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly folio: string,
+    public readonly tenantId: string,
+    public readonly actorId: string,
+    public readonly totalCents: number,
+    public readonly paidCents: number,
+    public readonly debtCents: number,
+    public readonly paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT',
+    public readonly confirmedAt: string,
+  ) {}
+}
+
+export class SalePaymentReceivedEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly paymentId: string,
+    public readonly tenantId: string,
+    public readonly actorId: string,
+    public readonly method: 'cash' | 'card_credit' | 'card_debit' | 'transfer',
+    public readonly amountCents: number,
+    public readonly reference: string | undefined,
+    public readonly occurredAt: string,
+    public readonly resultingPaidCents: number,
+    public readonly resultingDebtCents: number,
+    public readonly resultingPaymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT',
+  ) {}
+}
+
+export class SaleFullyPaidEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly folio: string,
+    public readonly totalCents: number,
+    public readonly paidAt: string,
+  ) {}
+}
