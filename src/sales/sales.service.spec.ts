@@ -171,19 +171,155 @@ describe('SalesService', () => {
       ).rejects.toThrow('PRICE_OUT_OF_DATE');
     });
 
-    it('rejects credit in phase 1 with PAYMENT_METHOD_NOT_SUPPORTED', async () => {
+    it('rejects credit with non-zero amount using INVALID_CREDIT_CHARGE', async () => {
+      const sale = buildDraftSale('sale-charge-credit-invalid-simple');
+      sale.customerId = 'customer-1';
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+
       await expect(
-        (service as any).chargeDraft(
-          'sale-charge-3',
+        service.chargeDraft(
+          sale.id,
           'user-1',
           { method: 'credit', amountCents: 1000 },
           'idem-not-used-pr2',
         ),
-      ).rejects.toThrow('PAYMENT_METHOD_NOT_SUPPORTED');
+      ).rejects.toThrow('INVALID_CREDIT_CHARGE');
+    });
+
+    it('accepts pure credit (amount 0), marks CREDIT and does not create payment row', async () => {
+      const sale = buildDraftSale('sale-charge-credit');
+      sale.customerId = 'customer-1';
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000012');
+      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'credit', amountCents: 0 },
+        'idem-credit-ok',
+      );
+
+      expect(result.paymentStatus).toBe('CREDIT');
+      expect(result.paidCents).toBe(0);
+      expect(result.debtCents).toBe(2000);
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'credit',
+          amountCents: 0,
+          paymentStatus: 'CREDIT',
+          paidCents: 0,
+          debtCents: 2000,
+        }),
+      );
+    });
+
+    it('accepts partial non-credit payment and marks PARTIAL', async () => {
+      const sale = buildDraftSale('sale-charge-partial');
+      sale.customerId = 'customer-1';
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000013');
+      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 1500 },
+        'idem-partial-ok',
+      );
+
+      expect(result.paymentStatus).toBe('PARTIAL');
+      expect(result.paidCents).toBe(1500);
+      expect(result.debtCents).toBe(500);
+    });
+
+    it('rejects credit with non-zero amount using INVALID_CREDIT_CHARGE (draft loaded)', async () => {
+      const sale = buildDraftSale('sale-charge-credit-invalid');
+      sale.customerId = 'customer-1';
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'credit', amountCents: 1 },
+          'idem-credit-invalid',
+        ),
+      ).rejects.toThrow('INVALID_CREDIT_CHARGE');
+    });
+
+    it('rejects credit charge without customer using CUSTOMER_REQUIRED_FOR_CREDIT', async () => {
+      const sale = buildDraftSale('sale-charge-credit-no-customer');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'credit', amountCents: 0 },
+          'idem-credit-no-customer',
+        ),
+      ).rejects.toThrow('CUSTOMER_REQUIRED_FOR_CREDIT');
+    });
+
+    it('rejects partial charge without customer using CUSTOMER_REQUIRED_FOR_CREDIT', async () => {
+      const sale = buildDraftSale('sale-charge-partial-no-customer');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 1500 },
+          'idem-partial-no-customer',
+        ),
+      ).rejects.toThrow('CUSTOMER_REQUIRED_FOR_CREDIT');
+    });
+
+    it('allows full payment without customer and keeps PAID', async () => {
+      const sale = buildDraftSale('sale-charge-full-no-customer');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
+      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-full-no-customer',
+      );
+
+      expect(result.paymentStatus).toBe('PAID');
+      expect(result.debtCents).toBe(0);
     });
 
     it('rejects card underpayment with PAYMENT_AMOUNT_INSUFFICIENT', async () => {
       const sale = buildDraftSale('sale-charge-underpay');
+      sale.customerId = 'customer-1';
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
