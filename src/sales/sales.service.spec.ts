@@ -81,21 +81,32 @@ describe('SalesService', () => {
   });
 
   describe('chargeDraft', () => {
-    const buildDraftSale = (id: string, userId = 'user-1') => {
-      const sale = Sale.create({ id, userId });
-      sale.addItem({
-        id: `${id}-item-1`,
-        saleId: id,
-        productId: 'prod-1',
-        variantId: null,
-        productName: 'Prod 1',
-        variantName: null,
-        quantity: 2,
-        unitPriceCents: 1000,
-        unitPriceCurrency: 'MXN',
+    const buildDraftSale = (
+      id: string,
+      userId = 'user-1',
+      customerId: string | null = null,
+    ) =>
+      Sale.fromPersistence({
+        id,
+        userId,
+        customerId,
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
       });
-      return sale;
-    };
 
     it('confirms draft with cash payment and computes change', async () => {
       const sale = Sale.create({ id: 'sale-charge-1', userId: 'user-1' });
@@ -172,8 +183,11 @@ describe('SalesService', () => {
     });
 
     it('rejects credit with non-zero amount using INVALID_CREDIT_CHARGE', async () => {
-      const sale = buildDraftSale('sale-charge-credit-invalid-simple');
-      sale.customerId = 'customer-1';
+      const sale = buildDraftSale(
+        'sale-charge-credit-invalid-simple',
+        'user-1',
+        'customer-1',
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
@@ -190,8 +204,7 @@ describe('SalesService', () => {
     });
 
     it('accepts pure credit (amount 0), marks CREDIT and does not create payment row', async () => {
-      const sale = buildDraftSale('sale-charge-credit');
-      sale.customerId = 'customer-1';
+      const sale = buildDraftSale('sale-charge-credit', 'user-1', 'customer-1');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
@@ -222,8 +235,7 @@ describe('SalesService', () => {
     });
 
     it('accepts partial non-credit payment and marks PARTIAL', async () => {
-      const sale = buildDraftSale('sale-charge-partial');
-      sale.customerId = 'customer-1';
+      const sale = buildDraftSale('sale-charge-partial', 'user-1', 'customer-1');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
@@ -245,8 +257,11 @@ describe('SalesService', () => {
     });
 
     it('rejects credit with non-zero amount using INVALID_CREDIT_CHARGE (draft loaded)', async () => {
-      const sale = buildDraftSale('sale-charge-credit-invalid');
-      sale.customerId = 'customer-1';
+      const sale = buildDraftSale(
+        'sale-charge-credit-invalid',
+        'user-1',
+        'customer-1',
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
@@ -318,8 +333,7 @@ describe('SalesService', () => {
     });
 
     it('rejects card underpayment with PAYMENT_AMOUNT_INSUFFICIENT', async () => {
-      const sale = buildDraftSale('sale-charge-underpay');
-      sale.customerId = 'customer-1';
+      const sale = buildDraftSale('sale-charge-underpay', 'user-1', 'customer-1');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
