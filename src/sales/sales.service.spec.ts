@@ -87,6 +87,7 @@ describe('SalesService', () => {
     });
     saleRepo.markPaymentIdempotencySucceeded.mockResolvedValue(undefined);
     saleRepo.persistCollectedPayment.mockResolvedValue({
+      paymentId: 'payment-1',
       paidCents: 4000,
       debtCents: 1000,
       paymentStatus: 'PARTIAL',

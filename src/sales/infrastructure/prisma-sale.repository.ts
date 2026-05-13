@@ -296,8 +296,7 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
-    const prisma = this.tenantPrisma.getClient();
-    return prisma.$transaction(async () => work());
+    return this.tenantPrisma.runInTransaction(work);
   }
 
   async allocateNextFolio(now = new Date()): Promise<string> {
@@ -379,6 +378,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     amountCents: number;
     reference?: string | null;
   }): Promise<{
+    paymentId: string;
     paidCents: number;
     debtCents: number;
     paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
@@ -422,7 +422,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           ? 'CREDIT'
           : 'PARTIAL';
 
-    await prisma.salePayment.create({
+    const payment = await prisma.salePayment.create({
       data: {
         saleId: input.saleId,
         method: input.method.toUpperCase() as
@@ -446,6 +446,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     });
 
     return {
+      paymentId: payment.id,
       paidCents: recomputedPaidCents,
       debtCents: recomputedDebtCents,
       paymentStatus,

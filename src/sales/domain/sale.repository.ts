@@ -101,6 +101,7 @@ export interface ISaleRepository {
     amountCents: number;
     reference?: string | null;
   }): Promise<{
+    paymentId: string;
     paidCents: number;
     debtCents: number;
     paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
