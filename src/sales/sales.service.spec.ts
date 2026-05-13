@@ -253,6 +253,231 @@ describe('SalesService', () => {
         ],
       });
 
+    const setupHappyPathDraft = (sale: Sale) => {
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
+      saleRepo.persistChargeConfirmation.mockResolvedValue(undefined);
+    };
+
+    it('accepts new payments[] shape and computes totals', async () => {
+      const sale = buildDraftSale('sale-charge-array-ok', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          payments: [
+            { method: 'cash', amountCents: 1000 },
+            { method: 'card_debit', amountCents: 1000, reference: 'REF-1' },
+          ],
+        } as never,
+        'idem-array-ok',
+      );
+
+      expect(result.paymentStatus).toBe('PAID');
+      expect(result.paidCents).toBe(2000);
+      expect(result.debtCents).toBe(0);
+    });
+
+    it('rejects mixed shape with AMBIGUOUS_PAYMENT_SHAPE', async () => {
+      const sale = buildDraftSale('sale-charge-mixed-shape', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            method: 'cash',
+            amountCents: 2000,
+            payments: [{ method: 'cash', amountCents: 2000 }],
+          } as never,
+          'idem-mixed-shape',
+        ),
+      ).rejects.toThrow('AMBIGUOUS_PAYMENT_SHAPE');
+    });
+
+    it('rejects credit method inside payments[] with CREDIT_METHOD_NOT_VALID_IN_MULTI', async () => {
+      const sale = buildDraftSale('sale-charge-array-credit', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [{ method: 'credit', amountCents: 0 }],
+          } as never,
+          'idem-array-credit',
+        ),
+      ).rejects.toThrow('CREDIT_METHOD_NOT_VALID_IN_MULTI');
+    });
+
+    it('rejects missing reference for card/transfer with REFERENCE_REQUIRED', async () => {
+      const sale = buildDraftSale('sale-charge-array-reference', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [{ method: 'card_debit', amountCents: 2000 }],
+          } as never,
+          'idem-array-reference',
+        ),
+      ).rejects.toThrow('REFERENCE_REQUIRED');
+    });
+
+    it('rejects more than five payment entries with TOO_MANY_PAYMENTS', async () => {
+      const sale = buildDraftSale('sale-charge-array-too-many', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [
+              { method: 'cash', amountCents: 1 },
+              { method: 'cash', amountCents: 1 },
+              { method: 'cash', amountCents: 1 },
+              { method: 'cash', amountCents: 1 },
+              { method: 'cash', amountCents: 1 },
+              { method: 'cash', amountCents: 1 },
+            ],
+          } as never,
+          'idem-array-too-many',
+        ),
+      ).rejects.toThrow('TOO_MANY_PAYMENTS');
+    });
+
+    it('rejects empty payments[] without customer with CUSTOMER_REQUIRED_FOR_CREDIT', async () => {
+      const sale = buildDraftSale('sale-charge-array-empty-no-customer');
+      setupHappyPathDraft(sale);
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { payments: [] } as never,
+          'idem-array-empty-no-customer',
+        ),
+      ).rejects.toThrow('CUSTOMER_REQUIRED_FOR_CREDIT');
+    });
+
+    it('accepts empty payments[] with customer and marks CREDIT', async () => {
+      const sale = buildDraftSale('sale-charge-array-empty-credit', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { payments: [] } as never,
+        'idem-array-empty-credit',
+      );
+
+      expect(result.paymentStatus).toBe('CREDIT');
+      expect(result.paidCents).toBe(0);
+      expect(result.debtCents).toBe(2000);
+    });
+
+    it('rejects card-only overpay with PAYMENT_AMOUNT_INVALID', async () => {
+      const sale = buildDraftSale('sale-charge-array-card-overpay', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [{ method: 'card_debit', amountCents: 2500, reference: 'REF-1' }],
+          } as never,
+          'idem-array-card-overpay',
+        ),
+      ).rejects.toThrow('PAYMENT_AMOUNT_INVALID');
+    });
+
+    it('computes changeDueCents from aggregated payments', async () => {
+      const sale = buildDraftSale('sale-charge-array-change', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          payments: [
+            { method: 'cash', amountCents: 1500 },
+            { method: 'card_debit', amountCents: 1000, reference: 'REF-2' },
+          ],
+        } as never,
+        'idem-array-change',
+      );
+
+      expect(result.paymentStatus).toBe('PAID');
+      expect(result.changeDueCents).toBe(500);
+    });
+
+    it('uses stable idempotency hash for reordered payments[]', async () => {
+      const sale = buildDraftSale('sale-charge-array-idempotency', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      const replayPayload = {
+        saleId: sale.id,
+        folio: 'A-2605-000014',
+        subtotalCents: 2000,
+        discountCents: 0,
+        totalCents: 2000,
+        paidCents: 2000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID' as const,
+        confirmedAt: new Date().toISOString(),
+      };
+
+      const hashes = new Map<string, unknown>();
+      saleRepo.acquireChargeIdempotency.mockImplementation(
+        async (_saleId: string, _key: string, requestHash: string) => {
+          if (hashes.has(requestHash)) {
+            return { kind: 'replay', payload: replayPayload };
+          }
+          hashes.set(requestHash, true);
+          return { kind: 'acquired', token: 'idem-row-stable' };
+        },
+      );
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          payments: [
+            { method: 'cash', amountCents: 1000 },
+            { method: 'card_debit', amountCents: 1000, reference: 'REF-A' },
+          ],
+        } as never,
+        'idem-array-stable',
+      );
+
+      const replay = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          payments: [
+            { method: 'card_debit', amountCents: 1000, reference: 'REF-A' },
+            { method: 'cash', amountCents: 1000 },
+          ],
+        } as never,
+        'idem-array-stable',
+      );
+
+      expect(replay).toEqual(replayPayload);
+    });
+
     it('confirms draft with cash payment and computes change', async () => {
       const sale = Sale.create({ id: 'sale-charge-1', userId: 'user-1' });
       sale.addItem({
