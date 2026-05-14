@@ -61,7 +61,6 @@ describe('OutboxDispatcherService', () => {
     const service = new OutboxDispatcherService(
       prisma as never,
       eventEmitter as unknown as EventEmitter2,
-      5,
     );
 
     await service.dispatch(buildEvent(2));
@@ -86,7 +85,6 @@ describe('OutboxDispatcherService', () => {
     const service = new OutboxDispatcherService(
       prisma as never,
       eventEmitter as unknown as EventEmitter2,
-      5,
     );
 
     await service.dispatch(buildEvent(4));

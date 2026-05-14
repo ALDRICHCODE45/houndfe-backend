@@ -70,7 +70,7 @@ export class OutboxPollerService {
           UPDATE outbox_events
           SET "lockToken" = $1,
               "lockedUntil" = NOW() + ($2 * INTERVAL '1 second')
-          WHERE id = ANY($3::uuid[])
+          WHERE id = ANY($3::text[])
           RETURNING id, "tenantId" as "tenantId", "aggregateType" as "aggregateType",
                     "aggregateId" as "aggregateId", "eventType" as "eventType", payload,
                     status, "retryCount" as "retryCount", "nextAttemptAt" as "nextAttemptAt",

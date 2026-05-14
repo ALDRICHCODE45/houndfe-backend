@@ -3,6 +3,9 @@ import { OnEvent } from '@nestjs/event-emitter';
 import {
   SaleItemDiscountAppliedEvent,
   SaleItemDiscountRemovedEvent,
+  SaleConfirmedEvent,
+  SaleFullyPaidEvent,
+  SalePaymentReceivedEvent,
   SaleItemPriceOverriddenEvent,
   SaleItemRemovedEvent,
 } from '../domain/events/sale.events';
@@ -61,6 +64,37 @@ export class SaleEventListener {
       itemId: event.itemId,
       actorId: event.actorId,
       occurredAt: event.occurredAt,
+    });
+  }
+
+  @OnEvent('sale.confirmed')
+  onSaleConfirmed(event: SaleConfirmedEvent) {
+    this.logger.log({
+      eventType: 'sale.confirmed',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      folio: event.folio,
+    });
+  }
+
+  @OnEvent('sale.payment.received')
+  onSalePaymentReceived(event: SalePaymentReceivedEvent) {
+    this.logger.log({
+      eventType: 'sale.payment.received',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      paymentId: event.paymentId,
+      amountCents: event.amountCents,
+    });
+  }
+
+  @OnEvent('sale.fully.paid')
+  onSaleFullyPaid(event: SaleFullyPaidEvent) {
+    this.logger.log({
+      eventType: 'sale.fully.paid',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      folio: event.folio,
     });
   }
 }

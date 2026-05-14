@@ -7,11 +7,11 @@ import type { DispatchableOutboxEvent } from './outbox.types';
 @Injectable()
 export class OutboxDispatcherService {
   private readonly logger = new Logger(OutboxDispatcherService.name);
+  private readonly maxRetries = 5;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
-    private readonly maxRetries = 5,
   ) {}
 
   async dispatch(event: DispatchableOutboxEvent): Promise<void> {
