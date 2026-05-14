@@ -561,6 +561,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         customer: { select: { id: true, firstName: true, lastName: true } },
         user: { select: { id: true, name: true } },
         seller: { select: { id: true, name: true } },
+        payments: { select: { method: true }, orderBy: { createdAt: 'asc' } },
       },
       orderBy: { [input.sortBy]: input.sortOrder },
       skip: (input.page - 1) * input.limit,
@@ -586,6 +587,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         : null,
       cashier: row.user,
       seller: row.seller,
+      paymentMethods: [...new Set(row.payments.map((p) => p.method))],
     }));
   }
 

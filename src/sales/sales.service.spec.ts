@@ -2092,6 +2092,7 @@ describe('SalesService', () => {
           customer: { id: 'c1', name: 'Ana' },
           cashier: { id: 'u1', name: 'Cajero 1' },
           seller: null,
+          paymentMethods: ['CASH', 'CARD_DEBIT'],
         },
       ] as any);
       saleRepo.countConfirmed.mockResolvedValue(7);

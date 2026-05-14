@@ -10,6 +10,7 @@ export interface SaleListRowDto {
   customer: { id: string; name: string } | null;
   cashier: { id: string; name: string };
   seller: { id: string; name: string } | null;
+  paymentMethods: string[];
 }
 
 export interface SaleListResponseDto {

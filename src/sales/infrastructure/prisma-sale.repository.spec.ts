@@ -71,6 +71,73 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('findManyConfirmed', () => {
+    it('includes payments and maps unique paymentMethods', async () => {
+      prisma.sale.findMany.mockResolvedValue([
+        {
+          id: 's1',
+          folio: 'V-001',
+          status: 'CONFIRMED',
+          paymentStatus: 'PAID',
+          deliveryStatus: 'DELIVERED',
+          totalCents: 5000,
+          debtCents: 0,
+          confirmedAt: new Date(),
+          customer: null,
+          user: { id: 'u1', name: 'Cajero' },
+          seller: null,
+          payments: [
+            { method: 'CASH' },
+            { method: 'CARD_DEBIT' },
+            { method: 'CASH' },
+          ],
+        },
+      ] as any);
+
+      const result = await repo.findManyConfirmed({
+        page: 1,
+        limit: 10,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+      } as any);
+
+      expect(result[0].paymentMethods).toEqual(['CASH', 'CARD_DEBIT']);
+      expect(prisma.sale.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: expect.objectContaining({
+            payments: { select: { method: true }, orderBy: { createdAt: 'asc' } },
+          }),
+        }),
+      );
+    });
+
+    it('returns empty paymentMethods for pure credit sale with no payments', async () => {
+      prisma.sale.findMany.mockResolvedValue([
+        {
+          id: 's2',
+          folio: 'V-002',
+          status: 'CONFIRMED',
+          paymentStatus: 'CREDIT',
+          deliveryStatus: 'DELIVERED',
+          totalCents: 5000,
+          debtCents: 5000,
+          confirmedAt: new Date(),
+          customer: { id: 'c1', firstName: 'Ana', lastName: null },
+          user: { id: 'u1', name: 'Cajero' },
+          seller: null,
+          payments: [],
+        },
+      ] as any);
+
+      const result = await repo.findManyConfirmed({
+        page: 1,
+        limit: 10,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+      } as any);
+
+      expect(result[0].paymentMethods).toEqual([]);
+    });
+
     it('applies confirmed base, pagination, sorting, and q OR search', async () => {
       prisma.sale.findMany.mockResolvedValue([]);
 

@@ -6,6 +6,13 @@ export type PersistedChargePayment = {
   reference?: string;
 };
 
+export type PersistedSalePaymentRecord = {
+  paymentId: string;
+  method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+  amountCents: number;
+  reference: string | null;
+};
+
 /**
  * Sale Repository Port - defines persistence operations for Sales
  *
@@ -93,7 +100,7 @@ export interface ISaleRepository {
     sellerUserId?: string | null;
     confirmedAt: Date;
     folio: string;
-  }): Promise<void>;
+  }): Promise<PersistedSalePaymentRecord[]>;
 
   persistCollectedPayment(input: {
     saleId: string;
@@ -134,6 +141,7 @@ export interface ISaleRepository {
       customer: { id: string; name: string } | null;
       cashier: { id: string; name: string };
       seller: { id: string; name: string } | null;
+      paymentMethods: string[];
     }>
   >;
 
