@@ -568,6 +568,7 @@ model Sale {
   userId    String
   sellerUserId String?
   customerId String?
+  shippingAddressId String?
   status    SaleStatus @default(DRAFT)
   channel   SaleChannel @default(POS)
   register  String      @default("Principal")
@@ -590,6 +591,7 @@ model Sale {
   user   User       @relation("SaleCashier", fields: [userId], references: [id], onDelete: Restrict)
   seller User?      @relation("SaleSeller", fields: [sellerUserId], references: [id], onDelete: SetNull)
   customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  shippingAddress CustomerAddress? @relation(fields: [shippingAddressId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   items  SaleItem[]
   payments SalePayment[]
   idempotencyRecords SaleIdempotency[]
@@ -599,6 +601,7 @@ model Sale {
   @@index([userId, status])
   @@index([sellerUserId])
   @@index([customerId])
+  @@index([shippingAddressId])
   @@map("sales")
 }
 
@@ -855,6 +858,7 @@ model CustomerAddress {
   tenantId         String
   tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer         Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  sales            Sale[]
   street           String
   exteriorNumber   String?
   interiorNumber   String?
