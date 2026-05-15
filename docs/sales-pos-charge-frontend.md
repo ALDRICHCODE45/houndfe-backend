@@ -6,6 +6,13 @@
 
 ---
 
+## Índice
+
+- [2) Permisos RBAC](#2-permisos-rbac)
+- [2.5) Asignar cliente y dirección al draft](#25-asignar-cliente-y-dirección-al-draft)
+- [3) Endpoint: Cobrar draft](#3-endpoint-cobrar-draft)
+- [5) Idempotencia (MUY importante)](#5-idempotencia-muy-importante)
+
 ## 0) Qué se implementó (resumen ejecutivo)
 
 Se habilitaron 4 capacidades del módulo de ventas POS:
@@ -55,11 +62,116 @@ Se habilitaron 4 capacidades del módulo de ventas POS:
 | Endpoint | Permiso requerido |
 |---|---|
 | `POST /sales/drafts/:id/charge` | `update:Sale` |
+| `PUT /sales/drafts/:id/customer` | `update:Sale` |
+| `DELETE /sales/drafts/:id/customer` | `update:Sale` |
+| `PUT /sales/drafts/:id/shipping-address` | `update:Sale` |
+| `DELETE /sales/drafts/:id/shipping-address` | `update:Sale` |
 | `POST /sales/:id/payments` | `update:Sale` |
 | `GET /sales` | `read:Sale` |
 | `GET /sales/:id` | `read:Sale` |
 
 Todos requieren JWT válido + tenant activo.
+
+---
+
+## 2.5) Asignar cliente y dirección al draft
+
+Los drafts ahora permiten manejar cliente y dirección de envío con 4 endpoints:
+
+1. `PUT /sales/drafts/:id/customer`
+2. `DELETE /sales/drafts/:id/customer`
+3. `PUT /sales/drafts/:id/shipping-address`
+4. `DELETE /sales/drafts/:id/shipping-address`
+
+### 3.1) Reglas funcionales clave
+
+- Solo opera sobre ventas en estado `DRAFT`; si no, retorna `409 SALE_NOT_DRAFT`.
+- Validación tenant-scoped: cliente/dirección de otro tenant responden como `404`.
+- **Cuando cambia el cliente, la dirección de envío previa se borra automáticamente.**
+- Endpoints `DELETE` y clears son idempotentes: si ya está en `null`, responden `204` y **no emiten evento**.
+- Para cobro a crédito/parcial (`/charge`), el draft debe tener cliente asignado vía estos endpoints.
+
+### 3.2) `PUT /sales/drafts/:id/customer`
+
+Body:
+
+```json
+{
+  "customerId": "f9d2f368-10be-4f4b-a3cc-0e67735f7f26",
+  "shippingAddressId": "8f311d31-131f-449a-8a15-6a3257b0d865"
+}
+```
+
+- `customerId`: UUID requerido.
+- `shippingAddressId`: UUID opcional; puede enviarse explícitamente en `null`.
+
+Respuesta `200` (shape):
+
+```json
+{
+  "id": "sale-id",
+  "status": "DRAFT",
+  "customer": { "id": "...", "firstName": "Ada", "lastName": "Lovelace" },
+  "shippingAddress": {
+    "id": "...",
+    "street": "Main",
+    "exteriorNumber": "1",
+    "interiorNumber": null,
+    "zipCode": "64000",
+    "neighborhood": "Centro",
+    "municipality": "Monterrey",
+    "city": "Monterrey",
+    "state": "Nuevo León"
+  }
+}
+```
+
+Errores esperables: `404 CUSTOMER_NOT_FOUND`, `404 SHIPPING_ADDRESS_NOT_FOUND`, `422 SHIPPING_ADDRESS_NOT_FOR_CUSTOMER`, `409 SALE_NOT_DRAFT`, `403 SALE_UPDATE_FORBIDDEN`.
+
+### 3.3) `DELETE /sales/drafts/:id/customer`
+
+Sin body. Respuesta `204 No Content`.
+
+- Si tenía cliente: limpia cliente + dirección.
+- Si ya estaba en `null`: idem, `204` sin side effects.
+
+### 3.4) `PUT /sales/drafts/:id/shipping-address`
+
+Body:
+
+```json
+{
+  "shippingAddressId": "8f311d31-131f-449a-8a15-6a3257b0d865"
+}
+```
+
+También acepta `{"shippingAddressId": null}` para limpiar.
+
+Errores esperables: `422 SHIPPING_ADDRESS_REQUIRES_CUSTOMER`, `404 SHIPPING_ADDRESS_NOT_FOUND`, `422 SHIPPING_ADDRESS_NOT_FOR_CUSTOMER`, `409 SALE_NOT_DRAFT`, `403 SALE_UPDATE_FORBIDDEN`.
+
+### 3.5) `DELETE /sales/drafts/:id/shipping-address`
+
+Sin body. Respuesta `204 No Content`.
+
+- Limpia solo dirección (mantiene cliente).
+- Idempotente: si ya era `null`, no emite evento.
+
+### 3.6) Ejemplos curl
+
+```bash
+curl -X PUT "$API_URL/sales/drafts/$SALE_ID/customer" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"customerId":"f9d2f368-10be-4f4b-a3cc-0e67735f7f26"}'
+
+curl -X PUT "$API_URL/sales/drafts/$SALE_ID/shipping-address" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"shippingAddressId":"8f311d31-131f-449a-8a15-6a3257b0d865"}'
+
+curl -X DELETE "$API_URL/sales/drafts/$SALE_ID/customer" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ---
 
