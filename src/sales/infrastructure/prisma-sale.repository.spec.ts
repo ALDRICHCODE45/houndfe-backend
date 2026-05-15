@@ -356,6 +356,56 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('save', () => {
+    it('persists shippingAddressId when creating and updating sale', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-with-shipping',
+        userId: 'user-1',
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      prisma.sale.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'sale-with-shipping',
+          userId: 'user-1',
+          status: 'DRAFT',
+          customerId: 'cust-1',
+          shippingAddressId: 'addr-1',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [],
+        })
+        .mockResolvedValueOnce({
+          id: 'sale-with-shipping',
+          userId: 'user-1',
+          status: 'DRAFT',
+          customerId: 'cust-1',
+          shippingAddressId: 'addr-1',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [],
+        });
+
+      await repo.save(sale);
+      expect(prisma.sale.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ shippingAddressId: 'addr-1' }),
+        }),
+      );
+
+      await repo.save(sale);
+      expect(prisma.sale.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ shippingAddressId: 'addr-1' }),
+        }),
+      );
+    });
+
     it('creates sale without requiring tenantId in payload', async () => {
       const sale = Sale.create({ id: 'sale-tenantless', userId: 'user-1' });
 
@@ -438,6 +488,7 @@ describe('PrismaSaleRepository', () => {
           register: 'Principal',
           deliveryStatus: 'DELIVERED',
           customerId: null,
+          shippingAddressId: null,
           sellerUserId: null,
           confirmedAt: undefined,
           folio: undefined,
@@ -543,6 +594,7 @@ describe('PrismaSaleRepository', () => {
           register: 'Principal',
           deliveryStatus: 'DELIVERED',
           customerId: null,
+          shippingAddressId: null,
           sellerUserId: null,
           confirmedAt: undefined,
           folio: undefined,
@@ -759,6 +811,23 @@ describe('PrismaSaleRepository', () => {
       expect(result?.items[0].discountType).toBe('percentage');
       expect(result?.items[0].discountTitle).toBe('Promo');
     });
+
+    it('maps shippingAddressId from persistence into aggregate', async () => {
+      prisma.sale.findUnique.mockResolvedValue({
+        id: 'sale-with-shipping',
+        userId: 'user-1',
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+
+      const result = await repo.findById('sale-with-shipping');
+
+      expect(result?.shippingAddressId).toBe('addr-1');
+    });
   });
 
   describe('findDraftsByUserId', () => {
@@ -797,6 +866,20 @@ describe('PrismaSaleRepository', () => {
       const result = await repo.findDraftsByUserId('user-3');
 
       expect(result).toHaveLength(0);
+    });
+
+    it('includes shippingAddress relation on draft list read path', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findDraftsByUserId('user-3');
+
+      expect(prisma.sale.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: expect.objectContaining({
+            shippingAddress: { select: { id: true } },
+          }),
+        }),
+      );
     });
   });
 

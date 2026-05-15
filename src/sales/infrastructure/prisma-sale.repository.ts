@@ -58,6 +58,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       register: sale.register,
       deliveryStatus: sale.deliveryStatus,
       customerId: sale.customerId,
+      shippingAddressId: sale.shippingAddressId,
       sellerUserId: sale.sellerUserId,
       confirmedAt: sale.confirmedAt,
       folio: sale.folio,
@@ -126,7 +127,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     const prisma = this.tenantPrisma.getClient();
     const saleData = await prisma.sale.findUnique({
       where: { id },
-      include: { items: true },
+      include: { items: true, shippingAddress: { select: { id: true } } },
     });
 
     if (!saleData) return null;
@@ -144,6 +145,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         | 'DELIVERED'
         | 'NOT_APPLICABLE',
       customerId: persistedSale.customerId,
+      shippingAddressId: persistedSale.shippingAddressId,
       sellerUserId: persistedSale.sellerUserId,
       confirmedAt: persistedSale.confirmedAt,
       folio: persistedSale.folio,
@@ -185,7 +187,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         userId,
         status: 'DRAFT',
       },
-      include: { items: true },
+      include: { items: true, shippingAddress: { select: { id: true } } },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -201,6 +203,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           | 'DELIVERED'
           | 'NOT_APPLICABLE',
         customerId: (saleData as any).customerId,
+        shippingAddressId: (saleData as any).shippingAddressId,
         sellerUserId: (saleData as any).sellerUserId,
         items: (saleData as any).items.map((item) => ({
           id: item.id,
@@ -247,7 +250,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     `;
     const saleData = await prisma.sale.findFirst({
       where: { id, tenantId },
-      include: { items: true },
+      include: { items: true, shippingAddress: { select: { id: true } } },
     });
 
     if (!saleData) return null;
@@ -265,6 +268,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         | 'DELIVERED'
         | 'NOT_APPLICABLE',
       customerId: persistedSale.customerId,
+      shippingAddressId: persistedSale.shippingAddressId,
       sellerUserId: persistedSale.sellerUserId,
       confirmedAt: persistedSale.confirmedAt,
       folio: persistedSale.folio,
