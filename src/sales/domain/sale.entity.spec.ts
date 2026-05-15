@@ -144,6 +144,168 @@ describe('Sale Entity', () => {
     });
   });
 
+  describe('assignCustomer', () => {
+    it('assigns customer to a DRAFT sale', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      sale.assignCustomer('cust-1');
+
+      expect(sale.customerId).toBe('cust-1');
+      expect(sale.shippingAddressId).toBeNull();
+    });
+
+    it('clears previous shipping address when assigning a different customer without address', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.assignCustomer('cust-2');
+
+      expect(sale.customerId).toBe('cust-2');
+      expect(sale.shippingAddressId).toBeNull();
+    });
+
+    it('throws when assigning customer on non-DRAFT sale', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(() => sale.assignCustomer('cust-1')).toThrow(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+    });
+  });
+
+  describe('clearCustomer', () => {
+    it('clears both customer and shipping address on DRAFT sale', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.clearCustomer();
+
+      expect(sale.customerId).toBeNull();
+      expect(sale.shippingAddressId).toBeNull();
+    });
+
+    it('is idempotent when customer is already null', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      sale.clearCustomer();
+      sale.clearCustomer();
+
+      expect(sale.customerId).toBeNull();
+      expect(sale.shippingAddressId).toBeNull();
+    });
+
+    it('throws when clearing customer on non-DRAFT sale', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(() => sale.clearCustomer()).toThrow(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+    });
+  });
+
+  describe('setShippingAddress', () => {
+    it('sets shipping address when sale has customer and is DRAFT', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.setShippingAddress('addr-1');
+
+      expect(sale.shippingAddressId).toBe('addr-1');
+    });
+
+    it('throws when setting non-null shipping address without customer', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      expect(() => sale.setShippingAddress('addr-1')).toThrow(
+        new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_REQUIRES_CUSTOMER',
+          'SHIPPING_ADDRESS_REQUIRES_CUSTOMER',
+        ),
+      );
+    });
+
+    it('throws when setting shipping address on non-DRAFT sale', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        customerId: 'cust-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(() => sale.setShippingAddress('addr-1')).toThrow(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+    });
+
+    it('clears shipping address when setting null', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.setShippingAddress(null);
+
+      expect(sale.shippingAddressId).toBeNull();
+    });
+  });
+
   describe('addItem - add new item to sale', () => {
     it('should add new item when product not yet in sale', () => {
       const sale = Sale.create({

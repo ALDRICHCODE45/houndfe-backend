@@ -31,6 +31,7 @@ export interface SaleFromPersistenceProps {
   register?: string;
   deliveryStatus?: SaleDeliveryStatus;
   customerId?: string | null;
+  shippingAddressId?: string | null;
   sellerUserId?: string | null;
   items: SaleItemProps[];
   confirmedAt?: Date | null;
@@ -56,6 +57,8 @@ export interface DiscountApplicationResult {
  */
 export class Sale {
   private _items: SaleItem[] = [];
+  private _customerId: string | null;
+  private _shippingAddressId: string | null;
 
   private constructor(
     public readonly id: string,
@@ -64,7 +67,8 @@ export class Sale {
     public readonly channel: SaleChannel,
     public readonly register: string,
     public readonly deliveryStatus: SaleDeliveryStatus,
-    public readonly customerId: string | null,
+    customerId: string | null,
+    shippingAddressId: string | null,
     public readonly sellerUserId: string | null,
     items: SaleItem[] = [],
     public readonly confirmedAt?: Date,
@@ -73,6 +77,8 @@ export class Sale {
     public readonly updatedAt?: Date,
   ) {
     this._items = items;
+    this._customerId = customerId;
+    this._shippingAddressId = shippingAddressId;
   }
 
   static create(props: CreateSaleProps): Sale {
@@ -92,6 +98,7 @@ export class Sale {
       'DELIVERED',
       null,
       null,
+      null,
     );
   }
 
@@ -108,6 +115,7 @@ export class Sale {
       props.register ?? 'Principal',
       props.deliveryStatus ?? 'DELIVERED',
       props.customerId ?? null,
+      props.shippingAddressId ?? null,
       props.sellerUserId ?? null,
       items,
       props.confirmedAt ?? undefined,
@@ -141,6 +149,7 @@ export class Sale {
       this.register,
       this.deliveryStatus,
       this.customerId,
+      this.shippingAddressId,
       this.sellerUserId,
       [...this._items],
       input.confirmedAt,
@@ -152,6 +161,50 @@ export class Sale {
 
   get items(): ReadonlyArray<SaleItem> {
     return this._items;
+  }
+
+  get customerId(): string | null {
+    return this._customerId;
+  }
+
+  get shippingAddressId(): string | null {
+    return this._shippingAddressId;
+  }
+
+  assignCustomer(customerId: string, shippingAddressId?: string | null): void {
+    this.ensureDraft();
+
+    if (customerId !== this._customerId) {
+      this._shippingAddressId = null;
+    }
+
+    this._customerId = customerId;
+    this._shippingAddressId = shippingAddressId ?? null;
+  }
+
+  clearCustomer(): void {
+    this.ensureDraft();
+    this._customerId = null;
+    this._shippingAddressId = null;
+  }
+
+  setShippingAddress(addressId: string | null): void {
+    this.ensureDraft();
+
+    if (addressId !== null && this._customerId === null) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_REQUIRES_CUSTOMER',
+        'SHIPPING_ADDRESS_REQUIRES_CUSTOMER',
+      );
+    }
+
+    this._shippingAddressId = addressId;
+  }
+
+  private ensureDraft(): void {
+    if (this.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    }
   }
 
   /**
@@ -304,6 +357,7 @@ export class Sale {
       register: this.register,
       deliveryStatus: this.deliveryStatus,
       customerId: this.customerId,
+      shippingAddressId: this.shippingAddressId,
       sellerUserId: this.sellerUserId,
       confirmedAt: this.confirmedAt,
       folio: this.folio,
