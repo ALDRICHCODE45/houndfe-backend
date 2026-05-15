@@ -15,6 +15,12 @@ import type { ProductsService } from '../products/products.service';
 import type { EventEmitter2 } from '@nestjs/event-emitter';
 import type { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import type { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import {
+  SaleCustomerAssignedEvent,
+  SaleCustomerClearedEvent,
+  SaleShippingAddressClearedEvent,
+  SaleShippingAddressSetEvent,
+} from './domain/events/sale.events';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -37,6 +43,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     countConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
     countNotDeliveredConfirmed: jest.fn(),
+    findDraftResponseById: jest.fn(),
     ...overrides,
   } as jest.Mocked<ISaleRepository>;
 }
@@ -317,6 +324,159 @@ describe('SalesService', () => {
 
       expect(result).toEqual(replayPayload);
       expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('draft customer and shipping address mutations', () => {
+    const makeDraftSale = (overrides?: { customerId?: string | null; shippingAddressId?: string | null }) =>
+      Sale.fromPersistence({
+        id: '68f2f172-bfe8-48de-8d58-5e564f94c574',
+        userId: 'bf464f5b-267b-43c5-87c8-2b655bf7ffbc',
+        status: 'DRAFT',
+        customerId: overrides?.customerId ?? null,
+        shippingAddressId: overrides?.shippingAddressId ?? null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+
+    const draftResponse = {
+      id: '68f2f172-bfe8-48de-8d58-5e564f94c574',
+      userId: 'bf464f5b-267b-43c5-87c8-2b655bf7ffbc',
+      status: 'DRAFT',
+      customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26',
+      shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865',
+      customer: {
+        id: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+      },
+      shippingAddress: {
+        id: '8f311d31-131f-449a-8a15-6a3257b0d865',
+        street: 'Main',
+        exteriorNumber: '1',
+        interiorNumber: null,
+        zipCode: '64000',
+        neighborhood: 'Centro',
+        municipality: 'Monterrey',
+        city: 'Monterrey',
+        state: 'Nuevo León',
+      },
+      items: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    it('assigns customer and returns joined draft response', async () => {
+      const sale = makeDraftSale();
+      saleRepo.findById.mockResolvedValue(sale);
+      const prismaClient = {
+        customer: { findUnique: jest.fn().mockResolvedValue({ id: draftResponse.customer.id }) },
+        customerAddress: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: draftResponse.shippingAddress.id,
+            customerId: draftResponse.customer.id,
+          }),
+        },
+      };
+      tenantPrisma.getClient = jest.fn(() => prismaClient as never);
+      saleRepo.findDraftResponseById.mockResolvedValue(draftResponse as never);
+
+      const result = await service.assignCustomer(
+        sale.id,
+        sale.userId,
+        {
+          customerId: draftResponse.customer.id,
+          shippingAddressId: draftResponse.shippingAddress.id,
+        },
+      );
+
+      expect(result).toEqual(draftResponse);
+      expect(saleRepo.save).toHaveBeenCalledWith(sale);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.customer.assigned',
+        expect.any(SaleCustomerAssignedEvent),
+      );
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.shipping-address.set',
+        expect.any(SaleShippingAddressSetEvent),
+      );
+    });
+
+    it('rejects assignCustomer when customer does not exist in tenant', async () => {
+      const sale = makeDraftSale();
+      saleRepo.findById.mockResolvedValue(sale);
+      const prismaClient = {
+        customer: { findUnique: jest.fn().mockResolvedValue(null) },
+      };
+      tenantPrisma.getClient = jest.fn(() => prismaClient as never);
+
+      await expect(
+        service.assignCustomer(sale.id, sale.userId, {
+          customerId: '2bd9bf5e-5d8f-40fc-b2d7-e99e8cf1ba2f',
+        }),
+      ).rejects.toThrow('CUSTOMER_NOT_FOUND');
+    });
+
+    it('clears customer and emits cleared events only on change', async () => {
+      const sale = makeDraftSale({
+        customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26',
+        shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await service.clearCustomer(sale.id, sale.userId);
+
+      expect(saleRepo.save).toHaveBeenCalledWith(sale);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.customer.cleared',
+        expect.any(SaleCustomerClearedEvent),
+      );
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.shipping-address.cleared',
+        expect.any(SaleShippingAddressClearedEvent),
+      );
+    });
+
+    it('does not emit clear events when customer already null', async () => {
+      const sale = makeDraftSale();
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await service.clearCustomer(sale.id, sale.userId);
+
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        'sale.customer.cleared',
+        expect.anything(),
+      );
+    });
+
+    it('requires customer before setting shipping address', async () => {
+      const sale = makeDraftSale({ customerId: null });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.setShippingAddress(sale.id, sale.userId, {
+          shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865',
+        }),
+      ).rejects.toThrow('SHIPPING_ADDRESS_REQUIRES_CUSTOMER');
+    });
+
+    it('clears shipping address via null body', async () => {
+      const sale = makeDraftSale({
+        customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26',
+        shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await service.setShippingAddress(sale.id, sale.userId, {
+        shippingAddressId: null,
+      });
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.shipping-address.cleared',
+        expect.any(SaleShippingAddressClearedEvent),
+      );
     });
   });
 

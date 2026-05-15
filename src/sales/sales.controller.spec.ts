@@ -27,6 +27,10 @@ function makeMockSalesService() {
     applyGlobalDiscount: jest.fn(),
     removeGlobalDiscount: jest.fn(),
     chargeDraft: jest.fn(),
+    assignCustomer: jest.fn(),
+    clearCustomer: jest.fn(),
+    setShippingAddress: jest.fn(),
+    clearShippingAddress: jest.fn(),
   } as any;
 }
 
@@ -397,6 +401,85 @@ describe('SalesController', () => {
         'user-1',
         dto,
         'idem-array-1',
+      );
+    });
+  });
+
+  describe('draft customer and shipping address endpoints', () => {
+    it('assignCustomer delegates and returns response', async () => {
+      const user = makeMockUser('user-1');
+      const dto = {
+        customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26',
+        shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865',
+      };
+      service.assignCustomer.mockResolvedValue({ id: 'sale-1', customer: { id: dto.customerId } });
+
+      const result = await controller.assignCustomer('sale-1', dto, user);
+      expect(result).toEqual({ id: 'sale-1', customer: { id: dto.customerId } });
+      expect(service.assignCustomer).toHaveBeenCalledWith('sale-1', 'user-1', dto);
+    });
+
+    it('assignCustomer forwards service errors', async () => {
+      const user = makeMockUser('user-1');
+      const dto = { customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26' };
+      service.assignCustomer.mockRejectedValue(new Error('CUSTOMER_NOT_FOUND'));
+
+      await expect(controller.assignCustomer('sale-1', dto, user)).rejects.toThrow(
+        'CUSTOMER_NOT_FOUND',
+      );
+    });
+
+    it('clearCustomer delegates to service', async () => {
+      const user = makeMockUser('user-1');
+      service.clearCustomer.mockResolvedValue(undefined);
+
+      const result = await controller.clearCustomer('sale-1', user);
+      expect(result).toBeUndefined();
+      expect(service.clearCustomer).toHaveBeenCalledWith('sale-1', 'user-1');
+    });
+
+    it('clearCustomer forwards service errors', async () => {
+      const user = makeMockUser('user-1');
+      service.clearCustomer.mockRejectedValue(new Error('SALE_NOT_DRAFT'));
+
+      await expect(controller.clearCustomer('sale-1', user)).rejects.toThrow('SALE_NOT_DRAFT');
+    });
+
+    it('setShippingAddress delegates and returns response', async () => {
+      const user = makeMockUser('user-1');
+      const dto = { shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865' };
+      service.setShippingAddress.mockResolvedValue({ id: 'sale-1', shippingAddress: { id: dto.shippingAddressId } });
+
+      const result = await controller.setShippingAddress('sale-1', dto, user);
+      expect(result).toEqual({ id: 'sale-1', shippingAddress: { id: dto.shippingAddressId } });
+      expect(service.setShippingAddress).toHaveBeenCalledWith('sale-1', 'user-1', dto);
+    });
+
+    it('setShippingAddress forwards service errors', async () => {
+      const user = makeMockUser('user-1');
+      const dto = { shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865' };
+      service.setShippingAddress.mockRejectedValue(new Error('SHIPPING_ADDRESS_NOT_FOR_CUSTOMER'));
+
+      await expect(controller.setShippingAddress('sale-1', dto, user)).rejects.toThrow(
+        'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+      );
+    });
+
+    it('clearShippingAddress delegates to service', async () => {
+      const user = makeMockUser('user-1');
+      service.clearShippingAddress.mockResolvedValue(undefined);
+
+      const result = await controller.clearShippingAddress('sale-1', user);
+      expect(result).toBeUndefined();
+      expect(service.clearShippingAddress).toHaveBeenCalledWith('sale-1', 'user-1');
+    });
+
+    it('clearShippingAddress forwards service errors', async () => {
+      const user = makeMockUser('user-1');
+      service.clearShippingAddress.mockRejectedValue(new Error('SALE_NOT_DRAFT'));
+
+      await expect(controller.clearShippingAddress('sale-1', user)).rejects.toThrow(
+        'SALE_NOT_DRAFT',
       );
     });
   });
