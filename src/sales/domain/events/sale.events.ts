@@ -89,6 +89,46 @@ export class SaleItemRemovedEvent {
   ) {}
 }
 
+export class SaleCustomerAssignedEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly userId: string,
+    public readonly previousCustomerId: string | null,
+    public readonly customerId: string,
+    public readonly shippingAddressId: string | null,
+  ) {}
+}
+
+export class SaleCustomerClearedEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly userId: string,
+    public readonly previousCustomerId: string,
+    public readonly previousShippingAddressId: string | null,
+  ) {}
+}
+
+export class SaleShippingAddressSetEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly userId: string,
+    public readonly previousShippingAddressId: string | null,
+    public readonly shippingAddressId: string,
+  ) {}
+}
+
+export class SaleShippingAddressClearedEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly userId: string,
+    public readonly previousShippingAddressId: string,
+  ) {}
+}
+
 export class SaleConfirmedEvent {
   constructor(
     public readonly saleId: string,
