@@ -9,6 +9,7 @@ import {
   Controller,
   Post,
   Patch,
+  Put,
   Delete,
   Get,
   Body,
@@ -31,6 +32,8 @@ import { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
 import { OverrideItemPriceDto } from './dto/override-item-price.dto';
 import { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 import { ChargeSaleDto } from './dto/charge-sale.dto';
+import { AssignCustomerDto } from './dto/assign-customer.dto';
+import { SetShippingAddressDto } from './dto/set-shipping-address.dto';
 
 @Controller('sales/drafts')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -117,6 +120,48 @@ export class SalesController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.salesService.deleteDraft(id, user.userId);
+  }
+
+  @Put(':id/customer')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Sale'])
+  assignCustomer(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AssignCustomerDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.assignCustomer(id, user.userId, dto);
+  }
+
+  @Delete(':id/customer')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['update', 'Sale'])
+  clearCustomer(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.clearCustomer(id, user.userId);
+  }
+
+  @Put(':id/shipping-address')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Sale'])
+  setShippingAddress(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetShippingAddressDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.setShippingAddress(id, user.userId, dto);
+  }
+
+  @Delete(':id/shipping-address')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['update', 'Sale'])
+  clearShippingAddress(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.clearShippingAddress(id, user.userId);
   }
 
   @Get(':id/items/:itemId/available-prices')

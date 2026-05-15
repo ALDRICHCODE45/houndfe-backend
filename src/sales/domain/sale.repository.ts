@@ -13,6 +13,29 @@ export type PersistedSalePaymentRecord = {
   reference: string | null;
 };
 
+export type DraftCustomerSummary = {
+  id: string;
+  firstName: string;
+  lastName: string | null;
+};
+
+export type DraftShippingAddressSummary = {
+  id: string;
+  street: string | null;
+  exteriorNumber: string | null;
+  interiorNumber: string | null;
+  zipCode: string | null;
+  neighborhood: string | null;
+  municipality: string | null;
+  city: string | null;
+  state: string | null;
+};
+
+export type DraftSaleResponse = ReturnType<Sale['toResponse']> & {
+  customer: DraftCustomerSummary | null;
+  shippingAddress: DraftShippingAddressSummary | null;
+};
+
 /**
  * Sale Repository Port - defines persistence operations for Sales
  *
@@ -29,6 +52,8 @@ export interface ISaleRepository {
    * Find sale by ID
    */
   findById(id: string): Promise<Sale | null>;
+
+  findDraftResponseById(id: string): Promise<DraftSaleResponse | null>;
 
   /**
    * Find all DRAFT sales owned by a user

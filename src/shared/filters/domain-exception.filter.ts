@@ -67,6 +67,9 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'SALE_UPDATE_FORBIDDEN') return HttpStatus.FORBIDDEN;
     if (exception.code === 'SALE_NOT_FOUND') return HttpStatus.NOT_FOUND;
     if (exception.code === 'SALE_ITEM_NOT_FOUND') return HttpStatus.NOT_FOUND;
+    if (exception.code === 'CUSTOMER_NOT_FOUND') return HttpStatus.NOT_FOUND;
+    if (exception.code === 'SHIPPING_ADDRESS_NOT_FOUND')
+      return HttpStatus.NOT_FOUND;
     if (exception.code === 'SALE_NOT_DRAFT') return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_ALREADY_CONFIRMED')
       return HttpStatus.CONFLICT;
@@ -82,6 +85,10 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'PAYMENT_AMOUNT_INSUFFICIENT')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'PAYMENT_AMOUNT_INVALID')
+      return HttpStatus.UNPROCESSABLE_ENTITY;
+    if (exception.code === 'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER')
+      return HttpStatus.UNPROCESSABLE_ENTITY;
+    if (exception.code === 'SHIPPING_ADDRESS_REQUIRES_CUSTOMER')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'INVALID_PRICE_OVERRIDE_INPUT')
       return HttpStatus.BAD_REQUEST;

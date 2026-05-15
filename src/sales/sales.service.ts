@@ -25,6 +25,10 @@ import {
   SaleItemDiscountAppliedEvent,
   SaleItemDiscountRemovedEvent,
   SaleItemRemovedEvent,
+  SaleCustomerAssignedEvent,
+  SaleCustomerClearedEvent,
+  SaleShippingAddressSetEvent,
+  SaleShippingAddressClearedEvent,
 } from './domain/events/sale.events';
 import type { AddItemDto } from './dto/add-item.dto';
 import type { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
@@ -35,6 +39,8 @@ import type { ChargeSaleDto } from './dto/charge-sale.dto';
 import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
+import type { AssignCustomerDto } from './dto/assign-customer.dto';
+import type { SetShippingAddressDto } from './dto/set-shipping-address.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
 import type { PersistedChargePayment, PersistedSalePaymentRecord } from './domain/sale.repository';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
@@ -937,6 +943,200 @@ export class SalesService {
     }
 
     return sale.toResponse();
+  }
+
+  async assignCustomer(saleId: string, userId: string, dto: AssignCustomerDto) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== userId) {
+      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+    }
+
+    const prisma = this.tenantPrisma.getClient();
+    const customer = await prisma.customer.findUnique({ where: { id: dto.customerId } });
+    if (!customer) {
+      throw new BusinessRuleViolationError('CUSTOMER_NOT_FOUND', 'CUSTOMER_NOT_FOUND');
+    }
+
+    if (dto.shippingAddressId !== undefined && dto.shippingAddressId !== null) {
+      const address = await prisma.customerAddress.findUnique({ where: { id: dto.shippingAddressId } });
+      if (!address) {
+        throw new BusinessRuleViolationError('SHIPPING_ADDRESS_NOT_FOUND', 'SHIPPING_ADDRESS_NOT_FOUND');
+      }
+      if (address.customerId !== dto.customerId) {
+        throw new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+          'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+        );
+      }
+    }
+
+    const previousCustomerId = sale.customerId;
+    const previousShippingAddressId = sale.shippingAddressId;
+    sale.assignCustomer(dto.customerId, dto.shippingAddressId ?? null);
+    await this.saleRepo.save(sale);
+
+    this.eventEmitter.emit(
+      'sale.customer.assigned',
+      new SaleCustomerAssignedEvent(
+        sale.id,
+        this.tenantPrisma.getTenantId() ?? '',
+        userId,
+        previousCustomerId,
+        sale.customerId!,
+        sale.shippingAddressId,
+      ),
+    );
+
+    if (previousShippingAddressId !== sale.shippingAddressId) {
+      if (sale.shippingAddressId) {
+        this.eventEmitter.emit(
+          'sale.shipping-address.set',
+          new SaleShippingAddressSetEvent(
+            sale.id,
+            this.tenantPrisma.getTenantId() ?? '',
+            userId,
+            previousShippingAddressId,
+            sale.shippingAddressId,
+          ),
+        );
+      } else if (previousShippingAddressId) {
+        this.eventEmitter.emit(
+          'sale.shipping-address.cleared',
+          new SaleShippingAddressClearedEvent(
+            sale.id,
+            this.tenantPrisma.getTenantId() ?? '',
+            userId,
+            previousShippingAddressId,
+          ),
+        );
+      }
+    }
+
+    return this.saleRepo.findDraftResponseById(sale.id);
+  }
+
+  async clearCustomer(saleId: string, userId: string): Promise<void> {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== userId) {
+      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+    }
+
+    if (!sale.customerId) {
+      return;
+    }
+
+    const previousCustomerId = sale.customerId;
+    const previousShippingAddressId = sale.shippingAddressId;
+    sale.clearCustomer();
+    await this.saleRepo.save(sale);
+
+    this.eventEmitter.emit(
+      'sale.customer.cleared',
+      new SaleCustomerClearedEvent(
+        sale.id,
+        this.tenantPrisma.getTenantId() ?? '',
+        userId,
+        previousCustomerId,
+        previousShippingAddressId,
+      ),
+    );
+
+    if (previousShippingAddressId) {
+      this.eventEmitter.emit(
+        'sale.shipping-address.cleared',
+        new SaleShippingAddressClearedEvent(
+          sale.id,
+          this.tenantPrisma.getTenantId() ?? '',
+          userId,
+          previousShippingAddressId,
+        ),
+      );
+    }
+  }
+
+  async setShippingAddress(
+    saleId: string,
+    userId: string,
+    dto: SetShippingAddressDto,
+  ) {
+    if (dto.shippingAddressId === null) {
+      await this.clearShippingAddress(saleId, userId);
+      return this.saleRepo.findDraftResponseById(saleId);
+    }
+
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== userId) {
+      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+    }
+    if (!sale.customerId) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_REQUIRES_CUSTOMER',
+        'SHIPPING_ADDRESS_REQUIRES_CUSTOMER',
+      );
+    }
+
+    const prisma = this.tenantPrisma.getClient();
+    const address = await prisma.customerAddress.findUnique({ where: { id: dto.shippingAddressId } });
+    if (!address) {
+      throw new BusinessRuleViolationError('SHIPPING_ADDRESS_NOT_FOUND', 'SHIPPING_ADDRESS_NOT_FOUND');
+    }
+    if (address.customerId !== sale.customerId) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+        'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+      );
+    }
+
+    const previousShippingAddressId = sale.shippingAddressId;
+    sale.setShippingAddress(dto.shippingAddressId);
+    await this.saleRepo.save(sale);
+
+    if (previousShippingAddressId !== sale.shippingAddressId && sale.shippingAddressId) {
+      this.eventEmitter.emit(
+        'sale.shipping-address.set',
+        new SaleShippingAddressSetEvent(
+          sale.id,
+          this.tenantPrisma.getTenantId() ?? '',
+          userId,
+          previousShippingAddressId,
+          sale.shippingAddressId,
+        ),
+      );
+    }
+
+    return this.saleRepo.findDraftResponseById(sale.id);
+  }
+
+  async clearShippingAddress(saleId: string, userId: string): Promise<void> {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (sale.userId !== userId) {
+      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+    }
+
+    if (!sale.shippingAddressId) {
+      return;
+    }
+
+    const previousShippingAddressId = sale.shippingAddressId;
+    sale.setShippingAddress(null);
+    await this.saleRepo.save(sale);
+    this.eventEmitter.emit(
+      'sale.shipping-address.cleared',
+      new SaleShippingAddressClearedEvent(
+        sale.id,
+        this.tenantPrisma.getTenantId() ?? '',
+        userId,
+        previousShippingAddressId,
+      ),
+    );
   }
 
   async chargeDraft(

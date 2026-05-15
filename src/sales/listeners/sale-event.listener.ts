@@ -8,6 +8,10 @@ import {
   SalePaymentReceivedEvent,
   SaleItemPriceOverriddenEvent,
   SaleItemRemovedEvent,
+  SaleCustomerAssignedEvent,
+  SaleCustomerClearedEvent,
+  SaleShippingAddressSetEvent,
+  SaleShippingAddressClearedEvent,
 } from '../domain/events/sale.events';
 
 @Injectable()
@@ -95,6 +99,52 @@ export class SaleEventListener {
       saleId: event.saleId,
       tenantId: event.tenantId,
       folio: event.folio,
+    });
+  }
+
+  @OnEvent('sale.customer.assigned')
+  onSaleCustomerAssigned(event: SaleCustomerAssignedEvent) {
+    this.logger.log({
+      eventType: 'sale.customer.assigned',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      userId: event.userId,
+      customerId: event.customerId,
+      previousCustomerId: event.previousCustomerId,
+    });
+  }
+
+  @OnEvent('sale.customer.cleared')
+  onSaleCustomerCleared(event: SaleCustomerClearedEvent) {
+    this.logger.log({
+      eventType: 'sale.customer.cleared',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      userId: event.userId,
+      previousCustomerId: event.previousCustomerId,
+    });
+  }
+
+  @OnEvent('sale.shipping-address.set')
+  onSaleShippingAddressSet(event: SaleShippingAddressSetEvent) {
+    this.logger.log({
+      eventType: 'sale.shipping-address.set',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      userId: event.userId,
+      shippingAddressId: event.shippingAddressId,
+      previousShippingAddressId: event.previousShippingAddressId,
+    });
+  }
+
+  @OnEvent('sale.shipping-address.cleared')
+  onSaleShippingAddressCleared(event: SaleShippingAddressClearedEvent) {
+    this.logger.log({
+      eventType: 'sale.shipping-address.cleared',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      userId: event.userId,
+      previousShippingAddressId: event.previousShippingAddressId,
     });
   }
 }

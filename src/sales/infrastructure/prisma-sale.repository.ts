@@ -6,6 +6,7 @@
 import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type {
+  DraftSaleResponse,
   ISaleRepository,
   PersistedChargePayment,
   PersistedSalePaymentRecord,
@@ -178,6 +179,107 @@ export class PrismaSaleRepository implements ISaleRepository {
       createdAt: persistedSale.createdAt,
       updatedAt: persistedSale.updatedAt,
     });
+  }
+
+  async findDraftResponseById(id: string): Promise<DraftSaleResponse | null> {
+    const prisma = this.tenantPrisma.getClient();
+    const saleData = await prisma.sale.findUnique({
+      where: { id },
+      include: {
+        items: true,
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        shippingAddress: {
+          select: {
+            id: true,
+            street: true,
+            exteriorNumber: true,
+            interiorNumber: true,
+            zipCode: true,
+            neighborhood: true,
+            municipality: true,
+            city: true,
+            state: true,
+          },
+        },
+      },
+    });
+
+    if (!saleData) return null;
+
+    const sale = Sale.fromPersistence({
+      id: saleData.id,
+      userId: saleData.userId,
+      status: saleData.status as SaleStatus,
+      channel: saleData.channel as 'POS' | 'ONLINE',
+      register: saleData.register,
+      deliveryStatus: saleData.deliveryStatus as
+        | 'PENDING'
+        | 'DELIVERED'
+        | 'NOT_APPLICABLE',
+      customerId: saleData.customerId,
+      shippingAddressId: saleData.shippingAddressId,
+      sellerUserId: saleData.sellerUserId,
+      confirmedAt: saleData.confirmedAt,
+      folio: saleData.folio,
+      items: saleData.items.map((item) => ({
+        id: item.id,
+        saleId: item.saleId,
+        productId: item.productId,
+        variantId: item.variantId,
+        productName: item.productName,
+        variantName: item.variantName,
+        imageUrl: item.imageUrl,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+        unitPriceCurrency: item.unitPriceCurrency,
+        originalPriceCents: item.originalPriceCents,
+        priceSource: item.priceSource?.toLowerCase() as
+          | 'default'
+          | 'price_list'
+          | 'custom'
+          | undefined,
+        appliedPriceListId: item.appliedPriceListId,
+        customPriceCents: item.customPriceCents,
+        discountType: item.discountType as 'amount' | 'percentage' | null,
+        discountValue: item.discountValue,
+        discountAmountCents: item.discountAmountCents,
+        prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+        discountTitle: item.discountTitle,
+        discountedAt: item.discountedAt,
+      })),
+      createdAt: saleData.createdAt,
+      updatedAt: saleData.updatedAt,
+    });
+
+    return {
+      ...sale.toResponse(),
+      customer: saleData.customer
+        ? {
+            id: saleData.customer.id,
+            firstName: saleData.customer.firstName,
+            lastName: saleData.customer.lastName,
+          }
+        : null,
+      shippingAddress: saleData.shippingAddress
+        ? {
+            id: saleData.shippingAddress.id,
+            street: saleData.shippingAddress.street,
+            exteriorNumber: saleData.shippingAddress.exteriorNumber,
+            interiorNumber: saleData.shippingAddress.interiorNumber,
+            zipCode: saleData.shippingAddress.zipCode,
+            neighborhood: saleData.shippingAddress.neighborhood,
+            municipality: saleData.shippingAddress.municipality,
+            city: saleData.shippingAddress.city,
+            state: saleData.shippingAddress.state,
+          }
+        : null,
+    };
   }
 
   async findDraftsByUserId(userId: string): Promise<Sale[]> {
