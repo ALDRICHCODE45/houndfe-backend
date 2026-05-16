@@ -4,6 +4,7 @@ import {
   InvalidArgumentError,
   BusinessRuleViolationError,
 } from '../../shared/domain/domain-error';
+import { InvalidDueDateError } from './sale.errors';
 
 const BASE_SALE_ID = '550e8400-e29b-41d4-a716-446655440000';
 const USER_ID = '550e8400-e29b-41d4-a716-446655440001';
@@ -141,6 +142,59 @@ describe('Sale Entity', () => {
           folio: 'A-2605-0002',
         }),
       ).toThrow(BusinessRuleViolationError);
+    });
+  });
+
+  describe('setDueDate', () => {
+    it('sets due date when it is equal or after confirmedAt', () => {
+      const confirmedAt = new Date('2026-05-15T18:00:00.000Z');
+      const dueDate = new Date('2026-06-01T00:00:00.000Z');
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        confirmedAt,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.setDueDate(dueDate);
+
+      expect(sale.dueDate).toEqual(dueDate);
+    });
+
+    it('throws InvalidDueDateError when dueDate is before confirmedAt', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(() => sale.setDueDate(new Date('2026-04-01T00:00:00.000Z'))).toThrow(
+        InvalidDueDateError,
+      );
+    });
+
+    it('accepts null and clears dueDate', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        dueDate: new Date('2026-06-10T00:00:00.000Z'),
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.setDueDate(null);
+
+      expect(sale.dueDate).toBeNull();
     });
   });
 
