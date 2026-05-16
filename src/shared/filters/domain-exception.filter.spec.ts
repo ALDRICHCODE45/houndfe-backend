@@ -121,6 +121,7 @@ describe('DomainExceptionFilter', () => {
       'CUSTOMER_NOT_FOUND',
       'SELLER_NOT_FOUND',
       'SHIPPING_ADDRESS_NOT_FOUND',
+      'COMMENT_NOT_FOUND',
     ]) {
       const { host, status } = makeHost();
       filter.catch(new BusinessRuleViolationError(code, code), host);
@@ -139,5 +140,20 @@ describe('DomainExceptionFilter', () => {
       filter.catch(new BusinessRuleViolationError(code, code), host);
       expect(status).toHaveBeenCalledWith(HttpStatus.UNPROCESSABLE_ENTITY);
     }
+  });
+
+  it('maps comment author forbidden to 403', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError(
+        'COMMENT_AUTHOR_FORBIDDEN',
+        'COMMENT_AUTHOR_FORBIDDEN',
+      ),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.FORBIDDEN);
   });
 });

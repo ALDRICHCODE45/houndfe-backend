@@ -65,10 +65,13 @@ export class DomainExceptionFilter implements ExceptionFilter {
    */
   private getHttpStatus(exception: DomainError): number {
     if (exception.code === 'SALE_UPDATE_FORBIDDEN') return HttpStatus.FORBIDDEN;
+    if (exception.code === 'COMMENT_AUTHOR_FORBIDDEN')
+      return HttpStatus.FORBIDDEN;
     if (exception.code === 'SALE_NOT_FOUND') return HttpStatus.NOT_FOUND;
     if (exception.code === 'SALE_ITEM_NOT_FOUND') return HttpStatus.NOT_FOUND;
     if (exception.code === 'CUSTOMER_NOT_FOUND') return HttpStatus.NOT_FOUND;
     if (exception.code === 'SELLER_NOT_FOUND') return HttpStatus.NOT_FOUND;
+    if (exception.code === 'COMMENT_NOT_FOUND') return HttpStatus.NOT_FOUND;
     if (exception.code === 'SHIPPING_ADDRESS_NOT_FOUND')
       return HttpStatus.NOT_FOUND;
     if (exception.code === 'SALE_NOT_DRAFT') return HttpStatus.CONFLICT;
