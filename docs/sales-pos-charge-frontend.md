@@ -8,13 +8,39 @@
 
 ## Índice
 
+- [0) Qué se implementó (resumen ejecutivo)](#0-qué-se-implementó-resumen-ejecutivo)
+- [1) Por qué se hizo así](#1-por-qué-se-hizo-así)
 - [2) Permisos RBAC](#2-permisos-rbac)
 - [2.5) Asignar cliente y dirección al draft](#25-asignar-cliente-y-dirección-al-draft)
 - [2.6) Asignar o limpiar vendedor de una venta](#26-asignar-o-limpiar-vendedor-de-una-venta)
 - [2.7) Comentarios de venta](#27-comentarios-de-venta)
 - [3) Endpoint: Cobrar draft](#3-endpoint-cobrar-draft)
-- [3.7) Due date (nuevo)](#37-due-date-nuevo)
-- [5) Idempotencia (MUY importante)](#5-idempotencia-muy-importante)
+- [4) Idempotencia (MUY importante)](#4-idempotencia-muy-importante)
+- [5) Endpoint: Registrar pago sobre venta confirmada](#5-endpoint-registrar-pago-sobre-venta-confirmada)
+- [6) Endpoint: Listar ventas confirmadas](#6-endpoint-listar-ventas-confirmadas)
+- [7) Endpoint: Detalle de venta](#7-endpoint-detalle-de-venta)
+- [8) Due date (vencimiento de deuda)](#8-due-date-vencimiento-de-deuda)
+- [9) Errores esperables (referencia consolidada)](#9-errores-esperables-referencia-consolidada)
+- [10) Eventos de dominio (Transactional Outbox)](#10-eventos-de-dominio-transactional-outbox)
+- [11) Guía de integración frontend](#11-guía-de-integración-frontend)
+- [12) Ejemplos completos](#12-ejemplos-completos)
+- [13) Valores por defecto fijos (fase actual)](#13-valores-por-defecto-fijos-fase-actual)
+- [14) Checklist para frontend](#14-checklist-para-frontend)
+- [15) Tabla resumen: case de `method` por contexto](#15-tabla-resumen-case-de-method-por-contexto)
+- [Changelog vs Fase 1](#changelog-vs-fase-1)
+
+---
+
+> ⚠️ **Importante — Shape de `customer` (dos representaciones)**
+>
+> El campo `customer` viene con **dos shapes distintos** según el endpoint:
+>
+> - **Respuestas de mutación de drafts** (`PUT /sales/drafts/:id/customer`, `PUT /sales/drafts/:id/shipping-address`, etc.) devuelven `customer: { id, firstName, lastName }`.
+> - **Respuestas de consulta de ventas** (`GET /sales`, `GET /sales/:id`) devuelven `customer: { id, name }`, donde `name` ya viene concatenado como `${firstName} ${lastName ?? ''}`.
+>
+> Tipá ambos casos en el frontend (union type o dos interfaces separadas). Si en `GET /sales` o `GET /sales/:id` el campo es `null`, representa una venta a "Público en General".
+
+---
 
 ## 0) Qué se implementó (resumen ejecutivo)
 
@@ -75,6 +101,7 @@ Se habilitaron 4 capacidades del módulo de ventas POS:
 | `PATCH /sales/:id/comments/:commentId` | `update:SaleComment` |
 | `DELETE /sales/:id/comments/:commentId` | `delete:SaleComment` |
 | `POST /sales/:id/payments` | `update:Sale` |
+| `PATCH /sales/:id/due-date` | `update:Sale` |
 | `GET /sales` | `read:Sale` |
 | `GET /sales/:id` | `read:Sale` |
 
@@ -93,7 +120,7 @@ Los drafts ahora permiten manejar cliente y dirección de envío con 4 endpoints
 3. `PUT /sales/drafts/:id/shipping-address`
 4. `DELETE /sales/drafts/:id/shipping-address`
 
-### 3.1) Reglas funcionales clave
+### 2.5.1) Reglas funcionales clave
 
 - Solo opera sobre ventas en estado `DRAFT`; si no, retorna `409 SALE_NOT_DRAFT`.
 - Validación tenant-scoped: cliente/dirección de otro tenant responden como `404`.
@@ -101,7 +128,7 @@ Los drafts ahora permiten manejar cliente y dirección de envío con 4 endpoints
 - Endpoints `DELETE` y clears son idempotentes: si ya está en `null`, responden `204` y **no emiten evento**.
 - Para cobro a crédito/parcial (`/charge`), el draft debe tener cliente asignado vía estos endpoints.
 
-### 3.2) `PUT /sales/drafts/:id/customer`
+### 2.5.2) `PUT /sales/drafts/:id/customer`
 
 Body:
 
@@ -138,14 +165,14 @@ Respuesta `200` (shape):
 
 Errores esperables: `404 CUSTOMER_NOT_FOUND`, `404 SHIPPING_ADDRESS_NOT_FOUND`, `422 SHIPPING_ADDRESS_NOT_FOR_CUSTOMER`, `409 SALE_NOT_DRAFT`, `403 SALE_UPDATE_FORBIDDEN`.
 
-### 3.3) `DELETE /sales/drafts/:id/customer`
+### 2.5.3) `DELETE /sales/drafts/:id/customer`
 
 Sin body. Respuesta `204 No Content`.
 
 - Si tenía cliente: limpia cliente + dirección.
 - Si ya estaba en `null`: idem, `204` sin side effects.
 
-### 3.4) `PUT /sales/drafts/:id/shipping-address`
+### 2.5.4) `PUT /sales/drafts/:id/shipping-address`
 
 Body:
 
@@ -159,14 +186,14 @@ También acepta `{"shippingAddressId": null}` para limpiar.
 
 Errores esperables: `422 SHIPPING_ADDRESS_REQUIRES_CUSTOMER`, `404 SHIPPING_ADDRESS_NOT_FOUND`, `422 SHIPPING_ADDRESS_NOT_FOR_CUSTOMER`, `409 SALE_NOT_DRAFT`, `403 SALE_UPDATE_FORBIDDEN`.
 
-### 3.5) `DELETE /sales/drafts/:id/shipping-address`
+### 2.5.5) `DELETE /sales/drafts/:id/shipping-address`
 
 Sin body. Respuesta `204 No Content`.
 
 - Limpia solo dirección (mantiene cliente).
 - Idempotente: si ya era `null`, no emite evento.
 
-### 3.6) Ejemplos curl
+### 2.5.6) Ejemplos curl
 
 ```bash
 curl -X PUT "$API_URL/sales/drafts/$SALE_ID/customer" \
@@ -359,6 +386,18 @@ Idempotency-Key: <uuid-o-string-unico>
 
 > **IMPORTANTE**: No mezclar ambos formatos en el mismo request. Enviar `method` + `amountCents` junto con `payments[]` causa → `422 AMBIGUOUS_PAYMENT_SHAPE`.
 
+#### Campo opcional compartido por ambos formatos: `dueDate`
+
+Ambos formatos aceptan opcionalmente `dueDate` (ISO-8601) en el body. Aplica solo si la venta queda con deuda (`paymentStatus !== PAID`). Reglas detalladas en §8.
+
+```json
+{
+  "method": "credit",
+  "amountCents": 0,
+  "dueDate": "2026-07-01T00:00:00.000Z"
+}
+```
+
 ### 3.3) Reglas de validación de pago (en orden de evaluación)
 
 | Regla | Error | HTTP |
@@ -372,6 +411,7 @@ Idempotency-Key: <uuid-o-string-unico>
 | Crédito legacy con `amountCents > 0` | `INVALID_CREDIT_CHARGE` | 422 |
 | Tarjeta/transferencia con monto mayor al total | `PAYMENT_AMOUNT_INVALID` | 422 |
 | `amountCents < 0` | `PAYMENT_AMOUNT_INVALID` | 422 |
+| Pagos no-cash que NO cubren el total Y no hay ningún `cash` en el array | `PAYMENT_AMOUNT_INSUFFICIENT` | 422 |
 | Suma de pagos < total Y venta sin cliente asignado | `CUSTOMER_REQUIRED_FOR_CREDIT` | 422 |
 | Venta no encontrada o de otro tenant | `SALE_NOT_FOUND` | 404 |
 | Venta ya no es DRAFT | `SALE_ALREADY_CONFIRMED` | 409 |
@@ -610,6 +650,7 @@ El parámetro `q` busca en:
       "totalCents": 127000,
       "debtCents": 27000,
       "confirmedAt": "2026-05-06T14:43:00.000Z",
+      "dueDate": "2026-05-21T14:43:00.000Z",
       "customer": { "id": "uuid", "name": "María López" },
       "cashier": { "id": "uuid", "name": "César Flores" },
       "seller": null,
@@ -642,6 +683,7 @@ El parámetro `q` busca en:
 | `totalCents` | `number` | No | En centavos |
 | `debtCents` | `number` | No | `totalCents - paidCents` |
 | `confirmedAt` | `string` (ISO) | Sí (`null` para DRAFT) | |
+| `dueDate` | `string` (ISO) | Sí | Fecha de vencimiento de la deuda. `null` si la venta está `PAID` o no se asignó. Ver §8. |
 | `customer` | `{ id, name }` | Sí | `null` = "Público en General" |
 | `cashier` | `{ id, name }` | No | |
 | `seller` | `{ id, name }` | Sí | `null` = sin vendedor asignado |
@@ -706,6 +748,7 @@ Venta no encontrada o de otro tenant → `404`.
   "channel": "POS",
   "register": "Principal",
   "confirmedAt": "2026-05-06T14:43:00.000Z",
+  "dueDate": "2026-05-21T14:43:00.000Z",
   "subtotalCents": 127000,
   "discountCents": 0,
   "totalCents": 127000,
@@ -807,6 +850,7 @@ Venta no encontrada o de otro tenant → `404`.
 | | `channel` | `string` | No | `'POS'` (fijo por ahora) |
 | | `register` | `string` | No | `'Principal'` (fijo por ahora) |
 | | `confirmedAt` | `string` (ISO) | Sí | |
+| | `dueDate` | `string` (ISO) | Sí | Fecha de vencimiento de deuda. `null` si está `PAID` o sin asignar. Ver §8. |
 | **Montos** | `subtotalCents` | `number` | No | |
 | | `discountCents` | `number` | No | |
 | | `totalCents` | `number` | No | |
@@ -900,7 +944,72 @@ type TimelineEvent =
 
 ---
 
-## 8) Errores esperables (referencia consolidada)
+## 8) Due date (vencimiento de deuda)
+
+Lugar canónico para las reglas de `dueDate`. Si necesitás documentación de un endpoint específico, mirá su sección — esta sección concentra la regla de negocio compartida.
+
+### 8.1) Concepto
+
+`dueDate` es la fecha de vencimiento de la deuda asociada a una venta `CONFIRMED` que no quedó completamente pagada (`paymentStatus` en `PARTIAL` o `CREDIT`). Se expone en:
+
+- Body del cobro (`POST /sales/drafts/:id/charge`) — opcional al confirmar.
+- `GET /sales` y `GET /sales/:id` — siempre presente como `dueDate: string | null`.
+- `PATCH /sales/:id/due-date` — endpoint dedicado para actualizar/limpiar.
+
+### 8.2) Reglas de asignación
+
+- Si frontend envía `dueDate` (ISO-8601) en el body del `/charge` y la venta queda no-`PAID`, se persiste tal cual.
+- Si frontend **no** envía `dueDate` y la venta queda no-`PAID`, backend asigna default `confirmedAt + 15 días`.
+- Si la venta queda `PAID` al confirmar, `dueDate` se ignora y persiste como `null`.
+- Si `dueDate < confirmedAt` → `422 INVALID_DUE_DATE`.
+
+### 8.3) Endpoint: actualizar/limpiar due date
+
+```http
+PATCH /sales/:id/due-date
+Authorization: Bearer <jwt>
+```
+
+Permiso: `update:Sale`.
+
+Body:
+
+```json
+{
+  "dueDate": "2026-07-01T00:00:00.000Z"
+}
+```
+
+También acepta clear explícito:
+
+```json
+{
+  "dueDate": null
+}
+```
+
+Reglas:
+
+- Solo opera sobre ventas `CONFIRMED` con `paymentStatus !== PAID`.
+- Si la venta está `PAID`: `409 SALE_FULLY_PAID`.
+- Si `dueDate < confirmedAt`: `422 INVALID_DUE_DATE`.
+- Si la venta no existe o es de otro tenant: `404 SALE_NOT_FOUND`.
+- Idempotente por overwrite (last-write-wins): reintentos con el mismo valor son inocuos.
+
+Respuesta `200 OK`: detalle actualizado de la venta (mismo shape de `GET /sales/:id`).
+
+### 8.4) Ejemplo curl
+
+```bash
+curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"dueDate":"2026-07-01T00:00:00.000Z"}'
+```
+
+---
+
+## 9) Errores esperables (referencia consolidada)
 
 ### Formato estándar de error
 
@@ -913,7 +1022,7 @@ type TimelineEvent =
 }
 ```
 
-### 8.1) Errores de cobro (`POST /sales/drafts/:id/charge`)
+### 9.1) Errores de cobro (`POST /sales/drafts/:id/charge`)
 
 | Código | HTTP | Cuándo pasa | Acción sugerida |
 |---|---:|---|---|
@@ -925,6 +1034,7 @@ type TimelineEvent =
 | `PAYMENT_METHOD_NOT_SUPPORTED` | 422 | Método no reconocido | Bug del frontend |
 | `INVALID_CREDIT_CHARGE` | 422 | Crédito con `amountCents > 0` | Bug del frontend |
 | `PAYMENT_AMOUNT_INVALID` | 422 | No-cash sobre-paga, o negativo | Validar en frontend antes de enviar |
+| `PAYMENT_AMOUNT_INSUFFICIENT` | 422 | Pagos no-cash no cubren el total y no hay cash en el array | Pedir agregar `cash` o ajustar montos |
 | `CUSTOMER_REQUIRED_FOR_CREDIT` | 422 | Pago parcial/crédito sin cliente | Pedir asignar cliente antes de cobrar |
 | `SALE_NOT_FOUND` | 404 | Venta no existe o de otro tenant | Refrescar listado |
 | `SALE_ALREADY_CONFIRMED` | 409 | Venta ya cobrada | Refrescar — probablemente otro cajero cobró |
@@ -933,7 +1043,7 @@ type TimelineEvent =
 | `IDEMPOTENCY_KEY_CONFLICT` | 409 | Reintento con payload distinto | Generar nuevo key |
 | `IDEMPOTENCY_KEY_IN_FLIGHT` | 409 | Cobro en proceso | Esperar y reintentar |
 
-### 8.2) Errores de cobro de deuda (`POST /sales/:id/payments`)
+### 9.2) Errores de cobro de deuda (`POST /sales/:id/payments`)
 
 | Código | HTTP | Cuándo pasa | Acción sugerida |
 |---|---:|---|---|
@@ -946,7 +1056,7 @@ type TimelineEvent =
 | `IDEMPOTENCY_KEY_CONFLICT` | 409 | Reintento con payload distinto | Generar nuevo key |
 | `IDEMPOTENCY_KEY_IN_FLIGHT` | 409 | Pago en proceso | Esperar y reintentar |
 
-### 8.3) Errores de consulta
+### 9.3) Errores de consulta
 
 | Código | HTTP | Cuándo pasa |
 |---|---:|---|
@@ -954,9 +1064,17 @@ type TimelineEvent =
 | UUID inválido | 400 | `:id` no es UUID válido |
 | No encontrado | 404 | Venta no existe o de otro tenant |
 
+### 9.4) Errores de due date (`POST /sales/drafts/:id/charge` y `PATCH /sales/:id/due-date`)
+
+| Código | HTTP | Cuándo pasa | Acción sugerida |
+|---|---:|---|---|
+| `INVALID_DUE_DATE` | 422 | `dueDate < confirmedAt` | Validar fecha en frontend (>= hoy) |
+| `SALE_FULLY_PAID` | 409 | `PATCH /sales/:id/due-date` sobre venta ya `PAID` | Refrescar — la deuda ya se saldó |
+| `SALE_NOT_FOUND` | 404 | Venta no existe o de otro tenant | Refrescar listado |
+
 ---
 
-## 9) Eventos de dominio (Transactional Outbox)
+## 10) Eventos de dominio (Transactional Outbox)
 
 El backend ahora emite eventos durables por cada operación de dinero. Estos eventos están diseñados para integración futura con:
 - 🖨️ Impresión de tickets (vía WebSocket bridge → Web Serial API)
@@ -966,7 +1084,7 @@ El backend ahora emite eventos durables por cada operación de dinero. Estos eve
 
 **Estado actual**: los eventos se persisten y despachan internamente. El WebSocket bridge para que el frontend los reciba en tiempo real **todavía no está implementado**. Esta sección documenta los payloads para cuando se implemente.
 
-### 9.1) `sale.confirmed`
+### 10.1) `sale.confirmed`
 
 Se emite UNA vez cuando una venta se cobra exitosamente.
 
@@ -984,7 +1102,7 @@ Se emite UNA vez cuando una venta se cobra exitosamente.
 }
 ```
 
-### 9.2) `sale.payment.received`
+### 10.2) `sale.payment.received`
 
 Se emite UNA vez por cada pago registrado. Tanto al cobrar (uno por cada entry del array) como al cobrar deuda.
 
@@ -1008,7 +1126,7 @@ Se emite UNA vez por cada pago registrado. Tanto al cobrar (uno por cada entry d
 
 Los campos `resultingPaidCents`, `resultingDebtCents` y `resultingPaymentStatus` son **acumulativos**: muestran el estado DESPUÉS de aplicar este pago. En un cobro multi-método, cada evento refleja el avance progresivo.
 
-### 9.3) `sale.fully.paid`
+### 10.3) `sale.fully.paid`
 
 Se emite cuando `debtCents` llega a `0` (ya sea al cobrar o al cobrar deuda).
 
@@ -1022,7 +1140,7 @@ Se emite cuando `debtCents` llega a `0` (ya sea al cobrar o al cobrar deuda).
 }
 ```
 
-### 9.4) Cuándo se usa cada evento (guía para el futuro)
+### 10.4) Cuándo se usa cada evento (guía para el futuro)
 
 | Evento | Caso de uso futuro |
 |---|---|
@@ -1032,9 +1150,9 @@ Se emite cuando `debtCents` llega a `0` (ya sea al cobrar o al cobrar deuda).
 
 ---
 
-## 10) Guía de integración frontend
+## 11) Guía de integración frontend
 
-### 10.1) Flujo de cobro
+### 11.1) Flujo de cobro
 
 ```
 ┌─ Cajero arma draft ──────────────────────────────────────┐
@@ -1063,7 +1181,7 @@ Se emite cuando `debtCents` llega a `0` (ya sea al cobrar o al cobrar deuda).
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 10.2) Flujo de cobro de deuda
+### 11.2) Flujo de cobro de deuda
 
 ```
 ┌─ Detalle de venta con deuda (paymentStatus ≠ PAID) ─────┐
@@ -1079,7 +1197,7 @@ Se emite cuando `debtCents` llega a `0` (ya sea al cobrar o al cobrar deuda).
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 10.3) Flujo de listado
+### 11.3) Flujo de listado
 
 1. Al entrar al módulo Ventas → `GET /sales` (default: `page=1&limit=20&sortBy=confirmedAt&sortOrder=desc`).
 2. Renderizar tabla con `data[]` y tabs con `counts`.
@@ -1087,7 +1205,7 @@ Se emite cuando `debtCents` llega a `0` (ya sea al cobrar o al cobrar deuda).
 4. Al buscar → enviar `q=<texto>`.
 5. Al paginar → cambiar `page`.
 
-### 10.4) Flujo de detalle
+### 11.4) Flujo de detalle
 
 1. Click en folio de tabla → `GET /sales/:id`.
 2. Renderizar panel izquierdo (items + totales + timeline) y sidebar (metadata).
@@ -1097,9 +1215,9 @@ Se emite cuando `debtCents` llega a `0` (ya sea al cobrar o al cobrar deuda).
 
 ---
 
-## 11) Ejemplos completos
+## 12) Ejemplos completos
 
-### 11.1) Cobro efectivo exacto (formato legacy)
+### 12.1) Cobro efectivo exacto (formato legacy)
 
 ```json
 // Request
@@ -1123,7 +1241,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
-### 11.2) Cobro efectivo con cambio
+### 12.2) Cobro efectivo con cambio
 
 ```json
 // Request
@@ -1138,7 +1256,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
-### 11.3) Crédito puro (sin pago)
+### 12.3) Crédito puro (sin pago)
 
 ```json
 // Venta DEBE tener cliente asignado
@@ -1154,7 +1272,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
-### 11.4) Multi-método: efectivo + tarjeta (pago completo)
+### 12.4) Multi-método: efectivo + tarjeta (pago completo)
 
 ```json
 // Request
@@ -1174,7 +1292,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
-### 11.5) Multi-método parcial (crea deuda)
+### 12.5) Multi-método parcial (crea deuda)
 
 ```json
 // Venta DEBE tener cliente asignado
@@ -1195,7 +1313,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
-### 11.6) Multi-método con cash de sobra (cambio)
+### 12.6) Multi-método con cash de sobra (cambio)
 
 ```json
 // Request
@@ -1215,7 +1333,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
-### 11.7) Cobro de deuda
+### 12.7) Cobro de deuda
 
 ```json
 // Venta con debtCents = 25000
@@ -1235,7 +1353,7 @@ Idempotency-Key: 660e8400-e29b-41d4-a716-446655440099
 }
 ```
 
-### 11.8) Cobro de deuda parcial
+### 12.8) Cobro de deuda parcial
 
 ```json
 // Venta con debtCents = 25000
@@ -1252,7 +1370,7 @@ Idempotency-Key: 660e8400-e29b-41d4-a716-446655440099
 }
 ```
 
-### 11.9) Error: sobre-pago de deuda
+### 12.9) Error: sobre-pago de deuda
 
 ```json
 // Venta con debtCents = 15000
@@ -1268,14 +1386,14 @@ Idempotency-Key: 660e8400-e29b-41d4-a716-446655440099
 }
 ```
 
-### 11.10) Listado con búsqueda por folio
+### 12.10) Listado con búsqueda por folio
 
 ```
 GET /sales?q=12&page=1&limit=20
 // Encuentra A-202605-000012
 ```
 
-### 11.11) Listado tab "Pagos Pendientes"
+### 12.11) Listado tab "Pagos Pendientes"
 
 ```
 GET /sales?paymentStatus=PARTIAL&page=1&limit=20
@@ -1284,7 +1402,7 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 
 ---
 
-## 12) Valores por defecto fijos (fase actual)
+## 13) Valores por defecto fijos (fase actual)
 
 | Campo | Valor fijo | Cuándo cambia |
 |---|---|---|
@@ -1296,7 +1414,7 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 
 ---
 
-## 13) Checklist para frontend
+## 14) Checklist para frontend
 
 ### Cobro
 - [ ] Enviar siempre `Idempotency-Key` (UUID).
@@ -1342,7 +1460,7 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 
 ---
 
-## 14) Tabla resumen: case de `method` por contexto
+## 15) Tabla resumen: case de `method` por contexto
 
 | Contexto | Case | Ejemplo |
 |---|---|---|
@@ -1368,51 +1486,4 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 | `SalePayment.reference` | En `metadataJson` | Campo directo en DB y response |
 | Nuevos errores | — | `AMBIGUOUS_PAYMENT_SHAPE`, `TOO_MANY_PAYMENTS`, `CREDIT_METHOD_NOT_VALID_IN_MULTI`, `REFERENCE_REQUIRED`, `SALE_NOT_CONFIRMABLE_FOR_PAYMENT` |
 | Eventos de dominio | No existían | `sale.confirmed`, `sale.payment.received`, `sale.fully.paid` (outbox) |
-### 3.7) Due date (nuevo)
-
-- `POST /sales/drafts/:id/charge` ahora acepta `dueDate` opcional (ISO-8601) en el body.
-- Si la venta confirmada queda con `paymentStatus !== PAID` y frontend NO envía `dueDate`, backend asigna default `confirmedAt + 15 días`.
-- Si `paymentStatus === PAID`, `dueDate` queda en `null`.
-- Si frontend envía `dueDate` y es menor a `confirmedAt`, retorna `422 INVALID_DUE_DATE`.
-
-Nuevo endpoint:
-
-```http
-PATCH /sales/:id/due-date
-Authorization: Bearer <jwt>
-```
-
-Body:
-
-```json
-{
-  "dueDate": "2026-07-01T00:00:00.000Z"
-}
-```
-
-También acepta clear explícito:
-
-```json
-{
-  "dueDate": null
-}
-```
-
-Reglas:
-
-- Permiso: `update:Sale`.
-- Solo ventas `CONFIRMED` con `paymentStatus !== PAID`.
-- Si está `PAID`: `409 SALE_FULLY_PAID`.
-- Si `dueDate < confirmedAt`: `422 INVALID_DUE_DATE`.
-- Idempotente por overwrite (last-write-wins).
-
-Respuestas `GET /sales/:id` y `GET /sales` incluyen ahora `dueDate: string | null`.
-
-Ejemplo curl:
-
-```bash
-curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"dueDate":"2026-07-01T00:00:00.000Z"}'
-```
+| `dueDate` | No existía | Campo nuevo en `Sale`, expuesto en `GET /sales`, `GET /sales/:id`, y mutable vía `PATCH /sales/:id/due-date`. Ver §8. |
