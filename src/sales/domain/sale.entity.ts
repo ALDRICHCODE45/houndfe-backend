@@ -61,6 +61,7 @@ export class Sale {
   private _items: SaleItem[] = [];
   private _customerId: string | null;
   private _shippingAddressId: string | null;
+  private _sellerUserId: string | null;
   private _dueDate: Date | null;
 
   private constructor(
@@ -72,7 +73,7 @@ export class Sale {
     public readonly deliveryStatus: SaleDeliveryStatus,
     customerId: string | null,
     shippingAddressId: string | null,
-    public readonly sellerUserId: string | null,
+    sellerUserId: string | null,
     dueDate: Date | null,
     items: SaleItem[] = [],
     public readonly confirmedAt?: Date,
@@ -83,6 +84,7 @@ export class Sale {
     this._items = items;
     this._customerId = customerId;
     this._shippingAddressId = shippingAddressId;
+    this._sellerUserId = sellerUserId;
     this._dueDate = dueDate;
   }
 
@@ -183,6 +185,10 @@ export class Sale {
     return this._dueDate;
   }
 
+  get sellerUserId(): string | null {
+    return this._sellerUserId;
+  }
+
   setDueDate(date: Date | null): void {
     if (
       date !== null &&
@@ -193,6 +199,14 @@ export class Sale {
     }
 
     this._dueDate = date;
+  }
+
+  assignSeller(userId: string): void {
+    this._sellerUserId = userId;
+  }
+
+  clearSeller(): void {
+    this._sellerUserId = null;
   }
 
   assignCustomer(customerId: string, shippingAddressId?: string | null): void {

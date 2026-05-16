@@ -198,6 +198,82 @@ describe('Sale Entity', () => {
     });
   });
 
+  describe('assignSeller', () => {
+    it('assigns seller on DRAFT sale', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      sale.assignSeller('550e8400-e29b-41d4-a716-446655440099');
+
+      expect(sale.sellerUserId).toBe('550e8400-e29b-41d4-a716-446655440099');
+    });
+
+    it('assigns seller on CONFIRMED sale', () => {
+      const confirmedAt = new Date('2026-05-15T18:00:00.000Z');
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        confirmedAt,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.assignSeller('550e8400-e29b-41d4-a716-446655440088');
+
+      expect(sale.sellerUserId).toBe('550e8400-e29b-41d4-a716-446655440088');
+    });
+
+    it('is idempotent when assigning the same seller id', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        sellerUserId: '550e8400-e29b-41d4-a716-446655440077',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.assignSeller('550e8400-e29b-41d4-a716-446655440077');
+
+      expect(sale.sellerUserId).toBe('550e8400-e29b-41d4-a716-446655440077');
+    });
+  });
+
+  describe('clearSeller', () => {
+    it('clears existing seller assignment', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        sellerUserId: '550e8400-e29b-41d4-a716-446655440066',
+        items: [],
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      sale.clearSeller();
+
+      expect(sale.sellerUserId).toBeNull();
+    });
+
+    it('is idempotent when seller is already null', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      sale.clearSeller();
+
+      expect(sale.sellerUserId).toBeNull();
+    });
+  });
+
   describe('assignCustomer', () => {
     it('assigns customer to a DRAFT sale', () => {
       const sale = Sale.create({
