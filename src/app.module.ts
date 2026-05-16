@@ -30,6 +30,7 @@ import { SalesModule } from './sales/sales.module';
 import { FilesModule } from './files/files.module';
 import { TenantsModule } from './tenants/tenants.module';
 import { OutboxModule } from './shared/outbox/outbox.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -80,6 +81,7 @@ import { OutboxModule } from './shared/outbox/outbox.module';
     SalesModule,
     FilesModule,
     TenantsModule,
+    UsersModule,
     OutboxModule,
   ],
 })
