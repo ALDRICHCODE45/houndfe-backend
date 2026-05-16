@@ -243,7 +243,7 @@ Se agregaron 3 endpoints para comentarios (sin endpoint de listado standalone):
 - Autoría obligatoria para editar y borrar (v1): solo el autor puede modificar/eliminar.
 - Borrado lógico: se setea `deletedAt`; los comentarios borrados no deben aparecer en listados derivados.
 - No existe `GET /sales/:id/comments` en este slice.
-- En el próximo slice (PR4b), los comentarios se intercalan en `GET /sales/:id` dentro de `timeline`.
+- Los comentarios activos se intercalan en `GET /sales/:id` dentro de `timeline` como eventos `COMMENT`.
 
 ### `POST /sales/:id/comments`
 
@@ -843,11 +843,13 @@ Venta no encontrada o de otro tenant → `404`.
 type TimelineEvent =
   | { type: 'SALE_REGISTERED'; at: string; actor: { id: string; name: string } | null; register: string }
   | { type: 'PAYMENT_RECEIVED'; at: string; method: string; amountCents: number; reference: string | null; actor: { id: string; name: string } | null; register: string }
+  | { type: 'COMMENT'; at: string; commentId: string; body: string; actor: { id: string; name: string }; register: string }
   | { type: 'PRODUCTS_DELIVERED'; at: string; actor: { id: string; name: string } | null; register: string }
 ```
 
 - `SALE_REGISTERED`: `{ at, actor, register }`
 - `PAYMENT_RECEIVED`: `{ at, method, amountCents, reference, actor, register }`
+- `COMMENT`: `{ at, commentId, body, actor, register }`
 - `PRODUCTS_DELIVERED`: `{ at, actor, register }` (**solo** si `deliveryStatus === 'DELIVERED'`)
 
 **Regla actor (fallback):**
@@ -862,6 +864,7 @@ type TimelineEvent =
 - Venta con pago completo al cobrar: 1 `SALE_REGISTERED` + N `PAYMENT_RECEIVED` (uno por método) + 1 `PRODUCTS_DELIVERED`.
 - Venta a crédito puro o pendiente: 1 `SALE_REGISTERED` + 0 `PAYMENT_RECEIVED` (+ `PRODUCTS_DELIVERED` solo cuando aplica).
 - Venta con cobros de deuda posteriores: cada `POST /sales/:id/payments` agrega un nuevo `PAYMENT_RECEIVED` al timeline.
+- Venta con comentarios: cada `POST /sales/:id/comments` agrega un `COMMENT` en orden cronológico; comentarios soft-deleted no se incluyen.
 
 > Compatibilidad: clientes FE que solo leen `type` y `at` siguen funcionando. Los campos nuevos son aditivos.
 
