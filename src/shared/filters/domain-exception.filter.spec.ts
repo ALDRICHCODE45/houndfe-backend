@@ -117,7 +117,11 @@ describe('DomainExceptionFilter', () => {
   it('maps customer/address not-found errors to 404', () => {
     const filter = new DomainExceptionFilter();
 
-    for (const code of ['CUSTOMER_NOT_FOUND', 'SHIPPING_ADDRESS_NOT_FOUND']) {
+    for (const code of [
+      'CUSTOMER_NOT_FOUND',
+      'SELLER_NOT_FOUND',
+      'SHIPPING_ADDRESS_NOT_FOUND',
+    ]) {
       const { host, status } = makeHost();
       filter.catch(new BusinessRuleViolationError(code, code), host);
       expect(status).toHaveBeenCalledWith(HttpStatus.NOT_FOUND);

@@ -11,3 +11,9 @@ export class SaleFullyPaidError extends BusinessRuleViolationError {
     super('SALE_FULLY_PAID', 'SALE_FULLY_PAID');
   }
 }
+
+export class SellerNotFoundError extends BusinessRuleViolationError {
+  constructor() {
+    super('SELLER_NOT_FOUND', 'SELLER_NOT_FOUND');
+  }
+}
