@@ -11,6 +11,7 @@
 - [2) Permisos RBAC](#2-permisos-rbac)
 - [2.5) Asignar cliente y dirección al draft](#25-asignar-cliente-y-dirección-al-draft)
 - [3) Endpoint: Cobrar draft](#3-endpoint-cobrar-draft)
+- [3.7) Due date (nuevo)](#37-due-date-nuevo)
 - [5) Idempotencia (MUY importante)](#5-idempotencia-muy-importante)
 
 ## 0) Qué se implementó (resumen ejecutivo)
@@ -1197,3 +1198,51 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 | `SalePayment.reference` | En `metadataJson` | Campo directo en DB y response |
 | Nuevos errores | — | `AMBIGUOUS_PAYMENT_SHAPE`, `TOO_MANY_PAYMENTS`, `CREDIT_METHOD_NOT_VALID_IN_MULTI`, `REFERENCE_REQUIRED`, `SALE_NOT_CONFIRMABLE_FOR_PAYMENT` |
 | Eventos de dominio | No existían | `sale.confirmed`, `sale.payment.received`, `sale.fully.paid` (outbox) |
+### 3.7) Due date (nuevo)
+
+- `POST /sales/drafts/:id/charge` ahora acepta `dueDate` opcional (ISO-8601) en el body.
+- Si la venta confirmada queda con `paymentStatus !== PAID` y frontend NO envía `dueDate`, backend asigna default `confirmedAt + 15 días`.
+- Si `paymentStatus === PAID`, `dueDate` queda en `null`.
+- Si frontend envía `dueDate` y es menor a `confirmedAt`, retorna `422 INVALID_DUE_DATE`.
+
+Nuevo endpoint:
+
+```http
+PATCH /sales/:id/due-date
+Authorization: Bearer <jwt>
+```
+
+Body:
+
+```json
+{
+  "dueDate": "2026-07-01T00:00:00.000Z"
+}
+```
+
+También acepta clear explícito:
+
+```json
+{
+  "dueDate": null
+}
+```
+
+Reglas:
+
+- Permiso: `update:Sale`.
+- Solo ventas `CONFIRMED` con `paymentStatus !== PAID`.
+- Si está `PAID`: `409 SALE_FULLY_PAID`.
+- Si `dueDate < confirmedAt`: `422 INVALID_DUE_DATE`.
+- Idempotente por overwrite (last-write-wins).
+
+Respuestas `GET /sales/:id` y `GET /sales` incluyen ahora `dueDate: string | null`.
+
+Ejemplo curl:
+
+```bash
+curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"dueDate":"2026-07-01T00:00:00.000Z"}'
+```
