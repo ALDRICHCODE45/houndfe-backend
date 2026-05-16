@@ -48,6 +48,10 @@ import type { PersistedChargePayment, PersistedSalePaymentRecord } from './domai
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { SaleFullyPaidError, SellerNotFoundError } from './domain/sale.errors';
+import {
+  ISaleCommentRepository,
+  SALE_COMMENT_REPOSITORY,
+} from './comments/domain/sale-comment.repository';
 
 type SupportedChargeMethod =
   | 'cash'
@@ -210,6 +214,10 @@ export class SalesService {
     private readonly eventEmitter: EventEmitter2,
     private readonly outboxWriter: OutboxWriterService,
     private readonly tenantPrisma: TenantPrismaService,
+    @Inject(SALE_COMMENT_REPOSITORY)
+    private readonly saleCommentsRepo: Pick<ISaleCommentRepository, 'findActiveBySale'> = {
+      findActiveBySale: async () => [],
+    },
   ) {}
 
   private async publishSaleConfirmedEvent(input: {
@@ -630,6 +638,8 @@ export class SalesService {
       throw new NotFoundException('Sale not found');
     }
 
+    const comments = await this.saleCommentsRepo.findActiveBySale(saleId);
+
     return {
       id: sale.id,
       folio: sale.folio,
@@ -671,6 +681,12 @@ export class SalesService {
           createdAt: payment.createdAt,
           userId: payment.userId,
           user: payment.user,
+        })),
+        comments: comments.map((comment) => ({
+          id: comment.id,
+          createdAt: comment.createdAt,
+          body: comment.body,
+          author: comment.author,
         })),
       }),
     };

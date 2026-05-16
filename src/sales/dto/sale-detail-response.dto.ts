@@ -1,7 +1,8 @@
 export type SaleTimelineEventType =
   | 'SALE_REGISTERED'
   | 'PAYMENT_RECEIVED'
-  | 'PRODUCTS_DELIVERED';
+  | 'PRODUCTS_DELIVERED'
+  | 'COMMENT';
 
 type TimelineActor = { id: string; name: string } | null;
 
@@ -26,6 +27,13 @@ export type SaleDetailTimelineEventDto =
       at: string;
       actor: TimelineActor;
       register: string;
+    }
+  | {
+      type: 'COMMENT';
+      at: string;
+      actor: { id: string; name: string };
+      body: string;
+      commentId: string;
     };
 
 export interface SaleDetailItemDto {

@@ -153,4 +153,92 @@ describe('buildSaleTimeline', () => {
       'PRODUCTS_DELIVERED',
     ]);
   });
+
+  it('emits COMMENT event with actor, body and commentId', () => {
+    const input = {
+      createdAt: new Date('2026-05-08T10:00:00.000Z'),
+      confirmedAt: new Date('2026-05-08T10:08:00.000Z'),
+      deliveryStatus: 'DELIVERED' as const,
+      register: 'Caja secundaria',
+      cashier,
+      payments: [],
+      comments: [
+        {
+          id: 'comment-1',
+          createdAt: new Date('2026-05-08T10:02:00.000Z'),
+          body: 'Cliente pasa mañana',
+          author: { id: 'seller-1', name: 'Lucía' },
+        },
+      ],
+    };
+
+    const result = buildSaleTimeline(input as Parameters<typeof buildSaleTimeline>[0]);
+
+    expect(result).toContainEqual({
+      type: 'COMMENT',
+      at: '2026-05-08T10:02:00.000Z',
+      actor: { id: 'seller-1', name: 'Lucía' },
+      body: 'Cliente pasa mañana',
+      commentId: 'comment-1',
+    });
+  });
+
+  it('interleaves COMMENT chronologically and skips comment with missing author join', () => {
+    const input = {
+      createdAt: new Date('2026-05-08T10:00:00.000Z'),
+      confirmedAt: new Date('2026-05-08T10:08:00.000Z'),
+      deliveryStatus: 'DELIVERED' as const,
+      register: 'Caja secundaria',
+      cashier,
+      payments: [
+        {
+          method: 'CASH',
+          amountCents: 3000,
+          reference: null,
+          createdAt: new Date('2026-05-08T10:01:00.000Z'),
+          userId: null,
+          user: null,
+        },
+      ],
+      comments: [
+        {
+          id: 'comment-1',
+          createdAt: new Date('2026-05-08T10:02:00.000Z'),
+          body: 'Comentario válido',
+          author: { id: 'seller-1', name: 'Lucía' },
+        },
+        {
+          id: 'comment-2',
+          createdAt: new Date('2026-05-08T10:03:00.000Z'),
+          body: 'No debe romper',
+          author: null,
+        },
+      ],
+    };
+
+    const result = buildSaleTimeline(input as Parameters<typeof buildSaleTimeline>[0]);
+
+    expect(result.map((event) => event.type)).toEqual([
+      'SALE_REGISTERED',
+      'PAYMENT_RECEIVED',
+      'COMMENT',
+      'PRODUCTS_DELIVERED',
+    ]);
+  });
+
+  it('returns no COMMENT events when comments are empty', () => {
+    const input = {
+      createdAt: new Date('2026-05-08T10:00:00.000Z'),
+      confirmedAt: new Date('2026-05-08T10:08:00.000Z'),
+      deliveryStatus: 'DELIVERED' as const,
+      register: 'Caja secundaria',
+      cashier,
+      payments: [],
+      comments: [],
+    };
+
+    const result = buildSaleTimeline(input as Parameters<typeof buildSaleTimeline>[0]);
+
+    expect(result.some((event) => event.type === 'COMMENT')).toBe(false);
+  });
 });

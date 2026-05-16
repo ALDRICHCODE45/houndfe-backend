@@ -14,6 +14,12 @@ export function buildSaleTimeline(input: {
     userId: string | null;
     user: { id: string; name: string } | null;
   }>;
+  comments?: Array<{
+    id: string;
+    createdAt: Date;
+    body: string;
+    author: { id: string; name: string } | null;
+  }>;
 }): SaleDetailTimelineEventDto[] {
   const sortedPaymentEvents: SaleDetailTimelineEventDto[] = input.payments
     .slice()
@@ -35,6 +41,24 @@ export function buildSaleTimeline(input: {
       register: input.register,
     },
     ...sortedPaymentEvents,
+    ...(input.comments ?? [])
+      .filter(
+        (
+          comment,
+        ): comment is {
+          id: string;
+          createdAt: Date;
+          body: string;
+          author: { id: string; name: string };
+        } => comment.author !== null,
+      )
+      .map((comment) => ({
+        type: 'COMMENT' as const,
+        at: comment.createdAt.toISOString(),
+        actor: comment.author,
+        body: comment.body,
+        commentId: comment.id,
+      })),
   ];
 
   if (input.deliveryStatus === 'DELIVERED') {
