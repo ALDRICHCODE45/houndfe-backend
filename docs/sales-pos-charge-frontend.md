@@ -11,6 +11,7 @@
 - [2) Permisos RBAC](#2-permisos-rbac)
 - [2.5) Asignar cliente y dirección al draft](#25-asignar-cliente-y-dirección-al-draft)
 - [2.6) Asignar o limpiar vendedor de una venta](#26-asignar-o-limpiar-vendedor-de-una-venta)
+- [2.7) Comentarios de venta](#27-comentarios-de-venta)
 - [3) Endpoint: Cobrar draft](#3-endpoint-cobrar-draft)
 - [3.7) Due date (nuevo)](#37-due-date-nuevo)
 - [5) Idempotencia (MUY importante)](#5-idempotencia-muy-importante)
@@ -70,6 +71,9 @@ Se habilitaron 4 capacidades del módulo de ventas POS:
 | `DELETE /sales/drafts/:id/shipping-address` | `update:Sale` |
 | `PUT /sales/:id/seller` | `update:Sale` |
 | `DELETE /sales/:id/seller` | `update:Sale` |
+| `POST /sales/:id/comments` | `create:SaleComment` |
+| `PATCH /sales/:id/comments/:commentId` | `update:SaleComment` |
+| `DELETE /sales/:id/comments/:commentId` | `delete:SaleComment` |
 | `POST /sales/:id/payments` | `update:Sale` |
 | `GET /sales` | `read:Sale` |
 | `GET /sales/:id` | `read:Sale` |
@@ -220,6 +224,85 @@ curl -X PUT "$API_URL/sales/$SALE_ID/seller" \
   -d '{"sellerUserId":"8fb23d4c-93ca-4528-8cc1-fdc2443ad621"}'
 
 curl -X DELETE "$API_URL/sales/$SALE_ID/seller" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+## 2.7) Comentarios de venta
+
+Se agregaron 3 endpoints para comentarios (sin endpoint de listado standalone):
+
+- `POST /sales/:id/comments`
+- `PATCH /sales/:id/comments/:commentId`
+- `DELETE /sales/:id/comments/:commentId`
+
+### Reglas funcionales
+
+- Validación de body: string trimmed, mínimo 1 y máximo 2000 caracteres.
+- Autoría obligatoria para editar y borrar (v1): solo el autor puede modificar/eliminar.
+- Borrado lógico: se setea `deletedAt`; los comentarios borrados no deben aparecer en listados derivados.
+- No existe `GET /sales/:id/comments` en este slice.
+- En el próximo slice (PR4b), los comentarios se intercalan en `GET /sales/:id` dentro de `timeline`.
+
+### `POST /sales/:id/comments`
+
+Body:
+
+```json
+{ "body": "El cliente pasa mañana a pagar" }
+```
+
+Respuesta `201`:
+
+```json
+{
+  "id": "c2aa79bb-b644-46d1-ab90-f8a8e0fd76b9",
+  "saleId": "eee55555-0000-0000-0000-000000000002",
+  "tenantId": "tenant-1",
+  "authorUserId": "user-001",
+  "body": "El cliente pasa mañana a pagar",
+  "createdAt": "2026-05-16T01:00:00.000Z",
+  "updatedAt": "2026-05-16T01:00:00.000Z",
+  "deletedAt": null
+}
+```
+
+### `PATCH /sales/:id/comments/:commentId`
+
+Body:
+
+```json
+{ "body": "Actualización: paga el viernes" }
+```
+
+Respuesta `200` con el comentario actualizado.
+
+### `DELETE /sales/:id/comments/:commentId`
+
+Sin body. Respuesta `204 No Content`.
+
+### Errores esperables
+
+- `404 SALE_NOT_FOUND`
+- `404 COMMENT_NOT_FOUND`
+- `403 COMMENT_AUTHOR_FORBIDDEN`
+- `403` por RBAC
+
+### Curl
+
+```bash
+curl -X POST "$API_URL/sales/$SALE_ID/comments" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"body":"El cliente pasa mañana a pagar"}'
+
+curl -X PATCH "$API_URL/sales/$SALE_ID/comments/$COMMENT_ID" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"body":"Actualización: paga el viernes"}'
+
+curl -X DELETE "$API_URL/sales/$SALE_ID/comments/$COMMENT_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
