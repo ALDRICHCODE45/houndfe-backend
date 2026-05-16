@@ -781,8 +781,15 @@ Venta no encontrada o de otro tenant → `404`.
       "register": "Caja secundaria"
     },
     {
+      "type": "COMMENT",
+      "at": "2026-05-06T14:44:00.000Z",
+      "commentId": "c1a2b3d4-e5f6-7890-abcd-ef1234567890",
+      "body": "Cliente pidió entrega coordinada para mañana",
+      "actor": { "id": "cashier-1", "name": "César" }
+    },
+    {
       "type": "PRODUCTS_DELIVERED",
-      "at": "2026-05-06T14:43:00.000Z",
+      "at": "2026-05-06T14:45:00.000Z",
       "actor": { "id": "cashier-1", "name": "César" },
       "register": "Caja secundaria"
     }
@@ -843,13 +850,13 @@ Venta no encontrada o de otro tenant → `404`.
 type TimelineEvent =
   | { type: 'SALE_REGISTERED'; at: string; actor: { id: string; name: string } | null; register: string }
   | { type: 'PAYMENT_RECEIVED'; at: string; method: string; amountCents: number; reference: string | null; actor: { id: string; name: string } | null; register: string }
-  | { type: 'COMMENT'; at: string; commentId: string; body: string; actor: { id: string; name: string }; register: string }
+  | { type: 'COMMENT'; at: string; commentId: string; body: string; actor: { id: string; name: string } }
   | { type: 'PRODUCTS_DELIVERED'; at: string; actor: { id: string; name: string } | null; register: string }
 ```
 
 - `SALE_REGISTERED`: `{ at, actor, register }`
 - `PAYMENT_RECEIVED`: `{ at, method, amountCents, reference, actor, register }`
-- `COMMENT`: `{ at, commentId, body, actor, register }`
+- `COMMENT`: `{ at, commentId, body, actor }` — **sin `register`** (los comentarios son notas del usuario, no ligadas a una caja)
 - `PRODUCTS_DELIVERED`: `{ at, actor, register }` (**solo** si `deliveryStatus === 'DELIVERED'`)
 
 **Regla actor (fallback):**
