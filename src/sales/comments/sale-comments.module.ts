@@ -1,10 +1,12 @@
 import { Module } from '@nestjs/common';
+import { AuthModule } from '../../auth/auth.module';
 import { SaleCommentsController } from './sale-comments.controller';
 import { SaleCommentsService } from './sale-comments.service';
 import { SALE_COMMENT_REPOSITORY } from './domain/sale-comment.repository';
 import { PrismaSaleCommentRepository } from './infrastructure/prisma-sale-comment.repository';
 
 @Module({
+  imports: [AuthModule], // Provides JwtAuthGuard, PermissionsGuard, CaslAbilityFactory
   controllers: [SaleCommentsController],
   providers: [
     SaleCommentsService,
