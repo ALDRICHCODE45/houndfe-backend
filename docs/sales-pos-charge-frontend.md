@@ -675,19 +675,33 @@ Venta no encontrada o de otro tenant → `404`.
   "timeline": [
     {
       "type": "SALE_REGISTERED",
-      "at": "2026-05-06T14:40:00.000Z"
+      "at": "2026-05-06T14:40:00.000Z",
+      "actor": { "id": "cashier-1", "name": "César" },
+      "register": "Caja secundaria"
     },
     {
       "type": "PAYMENT_RECEIVED",
-      "at": "2026-05-06T14:43:00.000Z"
+      "at": "2026-05-06T14:43:00.000Z",
+      "method": "CASH",
+      "amountCents": 60000,
+      "reference": null,
+      "actor": { "id": "cashier-1", "name": "César" },
+      "register": "Caja secundaria"
     },
     {
       "type": "PAYMENT_RECEIVED",
-      "at": "2026-05-06T14:43:00.000Z"
+      "at": "2026-05-06T14:43:00.000Z",
+      "method": "CARD_DEBIT",
+      "amountCents": 40000,
+      "reference": "VOUCHER-42",
+      "actor": { "id": "cashier-1", "name": "César" },
+      "register": "Caja secundaria"
     },
     {
       "type": "PRODUCTS_DELIVERED",
-      "at": "2026-05-06T14:43:00.000Z"
+      "at": "2026-05-06T14:43:00.000Z",
+      "actor": { "id": "cashier-1", "name": "César" },
+      "register": "Caja secundaria"
     }
   ]
 }
@@ -742,17 +756,31 @@ Venta no encontrada o de otro tenant → `404`.
 
 ### 7.5) Timeline
 
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `type` | `string` | `'SALE_REGISTERED'` / `'PAYMENT_RECEIVED'` / `'PRODUCTS_DELIVERED'` |
-| `at` | `string` (ISO) | Timestamp del evento |
+```ts
+type TimelineEvent =
+  | { type: 'SALE_REGISTERED'; at: string; actor: { id: string; name: string } | null; register: string }
+  | { type: 'PAYMENT_RECEIVED'; at: string; method: string; amountCents: number; reference: string | null; actor: { id: string; name: string } | null; register: string }
+  | { type: 'PRODUCTS_DELIVERED'; at: string; actor: { id: string; name: string } | null; register: string }
+```
 
-**Orden**: `SALE_REGISTERED` (creación del draft) → N × `PAYMENT_RECEIVED` (uno por cada pago, ordenados por fecha asc) → `PRODUCTS_DELIVERED`.
+- `SALE_REGISTERED`: `{ at, actor, register }`
+- `PAYMENT_RECEIVED`: `{ at, method, amountCents, reference, actor, register }`
+- `PRODUCTS_DELIVERED`: `{ at, actor, register }` (**solo** si `deliveryStatus === 'DELIVERED'`)
+
+**Regla actor (fallback):**
+- Si el pago tiene `SalePayment.userId`, `actor` sale de ese usuario (quien registró ese pago).
+- Si `SalePayment.userId` es `null` (pagos históricos), `actor` cae al cajero de la venta (`Sale.user`).
+
+`register` es la etiqueta libre guardada en la venta (`Sale.register`).
+
+**Orden**: siempre ascendente por `at`.
 
 **Comportamiento clave:**
 - Venta con pago completo al cobrar: 1 `SALE_REGISTERED` + N `PAYMENT_RECEIVED` (uno por método) + 1 `PRODUCTS_DELIVERED`.
-- Venta a crédito puro: 1 `SALE_REGISTERED` + 0 `PAYMENT_RECEIVED` + 1 `PRODUCTS_DELIVERED`.
+- Venta a crédito puro o pendiente: 1 `SALE_REGISTERED` + 0 `PAYMENT_RECEIVED` (+ `PRODUCTS_DELIVERED` solo cuando aplica).
 - Venta con cobros de deuda posteriores: cada `POST /sales/:id/payments` agrega un nuevo `PAYMENT_RECEIVED` al timeline.
+
+> Compatibilidad: clientes FE que solo leen `type` y `at` siguen funcionando. Los campos nuevos son aditivos.
 
 ### 7.6) Layout recomendado del detalle
 
