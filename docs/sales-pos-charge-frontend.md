@@ -128,6 +128,8 @@ Los drafts ahora permiten manejar cliente y dirección de envío con 4 endpoints
 - Endpoints `DELETE` y clears son idempotentes: si ya está en `null`, responden `204` y **no emiten evento**.
 - Para cobro a crédito/parcial (`/charge`), el draft debe tener cliente asignado vía estos endpoints.
 
+> **Nota sobre los eventos emitidos por estos endpoints** (`sale.customer.assigned`, `sale.customer.cleared`, `sale.shipping-address.set`, `sale.shipping-address.cleared`): son **internos al backend** (EventEmitter2 in-process) y se usan para logs y side effects locales. **No se dispatchan al frontend** ni a consumidores externos. Para eventos consumibles vía WebSocket/outbox, ver §10.
+
 ### 2.5.2) `PUT /sales/drafts/:id/customer`
 
 Body:
@@ -253,6 +255,19 @@ curl -X PUT "$API_URL/sales/$SALE_ID/seller" \
 curl -X DELETE "$API_URL/sales/$SALE_ID/seller" \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+### Selección del vendedor
+
+**Qué users pueden ser asignados como vendedor**: cualquier usuario activo del tenant. El backend solo valida que el `sellerUserId` exista en el tenant (404 `SELLER_NOT_FOUND` si no). No hay filtro por rol ni estado.
+
+**Endpoint sugerido para el picker**: por ahora no existe un endpoint público `GET /users` ligero. El frontend puede:
+
+- Usar `/admin/users` si el operador tiene permiso de admin.
+- Esperar a un endpoint `GET /users` simple que se agregará en un slice futuro (devolvería `[{ id, name }]` filtrado por tenant).
+
+**Si necesitan el endpoint YA, avisar al backend** y se prioriza un mini-slice.
+
+> **Nota sobre los eventos emitidos por estos endpoints** (`sale.seller.assigned`, `sale.seller.cleared`): son **internos al backend** (EventEmitter2 in-process) y se usan para logs y side effects locales. **No se dispatchan al frontend** ni a consumidores externos. Para eventos consumibles vía WebSocket/outbox, ver §10.
 
 ---
 
@@ -898,6 +913,10 @@ type TimelineEvent =
   | { type: 'PRODUCTS_DELIVERED'; at: string; actor: { id: string; name: string } | null; register: string }
 ```
 
+> **Sobre el campo `actor` (asimetría)**: en las variantes `SALE_REGISTERED`, `PAYMENT_RECEIVED` y `PRODUCTS_DELIVERED`, `actor` puede ser `null` para ventas/pagos históricos previos a la introducción de `SalePayment.userId` (sin actor registrado). La variante `COMMENT` siempre tiene `actor` non-null (el autor del comentario es obligatorio a nivel de base de datos: `sale_comments.authorUserId` es `NOT NULL`).
+>
+> El frontend debe tipar esta asimetría: usar `actor: { id, name } | null` para las 3 primeras y `actor: { id, name }` para `COMMENT`.
+
 - `SALE_REGISTERED`: `{ at, actor, register }`
 - `PAYMENT_RECEIVED`: `{ at, method, amountCents, reference, actor, register }`
 - `COMMENT`: `{ at, commentId, body, actor }` — **sin `register`** (los comentarios son notas del usuario, no ligadas a una caja)
@@ -1075,6 +1094,8 @@ curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
 ---
 
 ## 10) Eventos de dominio (Transactional Outbox)
+
+> **Alcance de esta sección**: lista los **eventos durables (outbox)** que se dispatchan a consumidores externos. Existen también eventos in-process via EventEmitter2 (mencionados en §2.5.1 y §2.6 — `sale.customer.assigned`, `sale.customer.cleared`, `sale.shipping-address.set`, `sale.shipping-address.cleared`, `sale.seller.assigned`, `sale.seller.cleared`) que son internos al backend y **NO se exponen al frontend**.
 
 El backend ahora emite eventos durables por cada operación de dinero. Estos eventos están diseñados para integración futura con:
 - 🖨️ Impresión de tickets (vía WebSocket bridge → Web Serial API)
@@ -1472,6 +1493,15 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 ---
 
 ## Changelog vs Fase 1
+
+### Cambios recientes (con fecha)
+
+- **2026-05-15** — Agregado campo `dueDate: string | null` a las responses de `GET /sales` (listado, ver §6) y `GET /sales/:id` (detalle, ver §7). Aplica solo a ventas con `paymentStatus !== 'PAID'`.
+- **2026-05-15** — Clarificación de scope de eventos: los eventos `sale.customer.*`, `sale.shipping-address.*` y `sale.seller.*` son **in-process (EventEmitter2)** y NO se exponen al frontend. Solo los outbox events (`sale.confirmed`, `sale.payment.received`, `sale.fully.paid`) son consumibles externamente. Ver §2.5.1, §2.6 y §10.
+- **2026-05-15** — Aclarada la selección del vendedor en §2.6: cualquier usuario del tenant puede ser asignado, sin filtro por rol. Documentado workaround temporal (`/admin/users`) y plan de endpoint `GET /users` futuro.
+- **2026-05-15** — Documentada la asimetría del campo `actor` en `timeline` (§7.5): `null` permitido para `SALE_REGISTERED` / `PAYMENT_RECEIVED` / `PRODUCTS_DELIVERED` (pagos históricos); siempre non-null en `COMMENT`.
+
+### Resumen histórico
 
 | Cambio | Fase 1 | Fase 2-4 (actual) |
 |---|---|---|
