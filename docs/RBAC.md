@@ -738,6 +738,11 @@ Array<{
 | 24  | `Sale`    | `update` | Modificar items de venta        |
 | 25  | `Sale`    | `delete` | Eliminar ventas/borradores      |
 | 26  | `Sale`    | `manage` | Gestion total de ventas         |
+| 27  | `SaleComment` | `create` | Crear comentarios de venta |
+| 28  | `SaleComment` | `read`   | Ver comentarios de venta |
+| 29  | `SaleComment` | `update` | Editar comentarios de venta |
+| 30  | `SaleComment` | `delete` | Eliminar comentarios de venta |
+| 31  | `SaleComment` | `manage` | Gestion total de comentarios |
 
 > **Nota sobre catalogo POS**: El endpoint `GET /sales/pos-catalog` requiere permiso `read:Sale` (no `read:Product`). Esto es intencional — el catalogo POS es una herramienta de ventas, no de administracion de productos. Ver seccion "POS Catalog RBAC Rationale" mas abajo para detalles.
 
@@ -787,6 +792,9 @@ Referencia rapida de que permiso necesita cada endpoint:
 | `DELETE /admin/roles/:id`            | DELETE | `delete:Role`     |
 | `GET /admin/permissions`             | GET    | `read:Role`       |
 | `GET /sales/pos-catalog`             | GET    | `read:Sale`       |
+| `POST /sales/:id/comments`           | POST   | `create:SaleComment` |
+| `PATCH /sales/:id/comments/:commentId` | PATCH | `update:SaleComment` |
+| `DELETE /sales/:id/comments/:commentId` | DELETE | `delete:SaleComment` |
 
 ---
 
@@ -828,7 +836,18 @@ interface UserPermissionsResponse {
 }
 
 type AppActions = 'create' | 'read' | 'update' | 'delete' | 'manage';
-type AppSubjects = 'Product' | 'Order' | 'User' | 'Role' | 'all';
+type AppSubjects =
+  | 'Product'
+  | 'Order'
+  | 'Sale'
+  | 'SaleComment'
+  | 'User'
+  | 'Role'
+  | 'Tenant'
+  | 'Promotion'
+  | 'Customer'
+  | 'File'
+  | 'all';
 
 // ============================================
 // Admin Types

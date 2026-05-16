@@ -25,6 +25,7 @@ export type AppSubjects =
   | 'Tenant'
   | 'Promotion'
   | 'Customer'
+  | 'SaleComment'
   | 'File'
   | 'all';
 
@@ -140,6 +141,29 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'Sale', action: 'update', description: 'Update sales' },
   { subject: 'Sale', action: 'delete', description: 'Delete sales' },
   { subject: 'Sale', action: 'manage', description: 'Full sale management' },
+
+  // SaleComment permissions
+  {
+    subject: 'SaleComment',
+    action: 'create',
+    description: 'Create sale comments',
+  },
+  { subject: 'SaleComment', action: 'read', description: 'View sale comments' },
+  {
+    subject: 'SaleComment',
+    action: 'update',
+    description: 'Update own sale comments',
+  },
+  {
+    subject: 'SaleComment',
+    action: 'delete',
+    description: 'Delete own sale comments',
+  },
+  {
+    subject: 'SaleComment',
+    action: 'manage',
+    description: 'Full sale comment management',
+  },
 
   // File permissions
   { subject: 'File', action: 'create', description: 'Upload files' },
