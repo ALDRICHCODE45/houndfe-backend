@@ -147,4 +147,38 @@ export class SaleEventListener {
       previousShippingAddressId: event.previousShippingAddressId,
     });
   }
+
+  @OnEvent('sale.seller.assigned')
+  onSaleSellerAssigned(event: {
+    saleId: string;
+    tenantId: string;
+    userId: string;
+    previousSellerUserId: string | null;
+    sellerUserId: string;
+  }) {
+    this.logger.log({
+      eventType: 'sale.seller.assigned',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      userId: event.userId,
+      previousSellerUserId: event.previousSellerUserId,
+      sellerUserId: event.sellerUserId,
+    });
+  }
+
+  @OnEvent('sale.seller.cleared')
+  onSaleSellerCleared(event: {
+    saleId: string;
+    tenantId: string;
+    userId: string;
+    previousSellerUserId: string;
+  }) {
+    this.logger.log({
+      eventType: 'sale.seller.cleared',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      userId: event.userId,
+      previousSellerUserId: event.previousSellerUserId,
+    });
+  }
 }

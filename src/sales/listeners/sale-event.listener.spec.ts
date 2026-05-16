@@ -34,4 +34,32 @@ describe('SaleEventListener', () => {
       expect.objectContaining({ eventType: 'sale.shipping-address.cleared', saleId: 'sale-1' }),
     );
   });
+
+  it('logs seller assigned and cleared events', () => {
+    const listener = new SaleEventListener();
+    const loggerSpy = jest
+      .spyOn((listener as unknown as { logger: { log: (...args: unknown[]) => void } }).logger, 'log')
+      .mockImplementation(() => undefined);
+
+    listener.onSaleSellerAssigned({
+      saleId: 'sale-2',
+      tenantId: 'tenant-1',
+      userId: 'actor-1',
+      previousSellerUserId: null,
+      sellerUserId: 'seller-1',
+    });
+    listener.onSaleSellerCleared({
+      saleId: 'sale-2',
+      tenantId: 'tenant-1',
+      userId: 'actor-1',
+      previousSellerUserId: 'seller-1',
+    });
+
+    expect(loggerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'sale.seller.assigned', sellerUserId: 'seller-1' }),
+    );
+    expect(loggerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'sale.seller.cleared', previousSellerUserId: 'seller-1' }),
+    );
+  });
 });
