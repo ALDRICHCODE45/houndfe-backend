@@ -2543,7 +2543,7 @@ describe('SalesService', () => {
       ]);
     });
 
-    it('does not include soft-deleted comments in timeline', async () => {
+    it('only includes comments returned by findActiveBySale (which excludes soft-deleted at repo layer)', async () => {
       saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
         id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
         folio: 'V-0042',
