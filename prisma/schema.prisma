@@ -649,6 +649,7 @@ model SaleItem {
 model SalePayment {
   id         String            @id @default(uuid())
   saleId     String
+  userId     String?
   method     SalePaymentMethod
   amountCents Int
   reference  String?
@@ -658,9 +659,11 @@ model SalePayment {
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([saleId])
   @@index([tenantId])
+  @@index([userId])
   @@map("sale_payments")
 }
 
@@ -741,6 +744,7 @@ model User {
   tenantMemberships TenantMembership[]
   sales             Sale[] @relation("SaleCashier")
   salesAsSeller     Sale[] @relation("SaleSeller")
+  salePayments      SalePayment[]
 
   @@map("users")
 }
