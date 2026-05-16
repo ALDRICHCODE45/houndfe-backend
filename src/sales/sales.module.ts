@@ -20,9 +20,10 @@ import { SaleEventListener } from './listeners/sale-event.listener';
 import { SalesQueryController } from './sales-query.controller';
 import { SalesPaymentsController } from './sales-payments.controller';
 import { OutboxModule } from '../shared/outbox/outbox.module';
+import { SaleCommentsModule } from './comments/sale-comments.module';
 
 @Module({
-  imports: [ProductsModule, AuthModule, OutboxModule],
+  imports: [ProductsModule, AuthModule, OutboxModule, SaleCommentsModule],
   controllers: [
     SalesController,
     SalesCatalogController,
