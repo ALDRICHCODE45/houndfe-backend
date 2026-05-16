@@ -15,6 +15,7 @@ import type { ProductsService } from '../products/products.service';
 import type { EventEmitter2 } from '@nestjs/event-emitter';
 import type { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import type { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import type { ISaleCommentRepository } from './comments/domain/sale-comment.repository';
 import {
   SaleCustomerAssignedEvent,
   SaleCustomerClearedEvent,
@@ -71,12 +72,19 @@ function makeMockOutboxWriter() {
   } as jest.Mocked<Pick<OutboxWriterService, 'publish'>>;
 }
 
+function makeMockSaleCommentRepo() {
+  return {
+    findActiveBySale: jest.fn(),
+  } as jest.Mocked<Pick<ISaleCommentRepository, 'findActiveBySale'>>;
+}
+
 function createService(
   saleRepo: ISaleRepository,
   productsService: ProductsService,
   eventEmitter: EventEmitter2,
   outboxWriter: Pick<OutboxWriterService, 'publish'>,
   tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>,
+  saleCommentRepo: Pick<ISaleCommentRepository, 'findActiveBySale'>,
 ) {
   return new SalesService(
     saleRepo,
@@ -84,6 +92,7 @@ function createService(
     eventEmitter,
     outboxWriter,
     tenantPrisma as TenantPrismaService,
+    saleCommentRepo,
   );
 }
 
@@ -94,6 +103,7 @@ describe('SalesService', () => {
   let productsService: ReturnType<typeof makeMockProductsService>;
   let eventEmitter: ReturnType<typeof makeMockEventEmitter>;
   let outboxWriter: ReturnType<typeof makeMockOutboxWriter>;
+  let saleCommentRepo: ReturnType<typeof makeMockSaleCommentRepo>;
   let tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>;
   let service: SalesService;
 
@@ -102,6 +112,7 @@ describe('SalesService', () => {
     productsService = makeMockProductsService();
     eventEmitter = makeMockEventEmitter();
     outboxWriter = makeMockOutboxWriter();
+    saleCommentRepo = makeMockSaleCommentRepo();
     tenantPrisma = {
       getTenantId: jest.fn(() => 'tenant-1'),
       getClient: jest.fn(() => ({}) as never),
@@ -112,6 +123,7 @@ describe('SalesService', () => {
       eventEmitter,
       outboxWriter,
       tenantPrisma,
+      saleCommentRepo,
     );
     saleRepo.acquireChargeIdempotency.mockResolvedValue({
       kind: 'acquired',
@@ -123,6 +135,7 @@ describe('SalesService', () => {
       token: 'payment-idem-token',
     });
     saleRepo.markPaymentIdempotencySucceeded.mockResolvedValue(undefined);
+    saleCommentRepo.findActiveBySale.mockResolvedValue([]);
     saleRepo.persistCollectedPayment.mockResolvedValue({
       paymentId: 'payment-1',
       paidCents: 4000,
@@ -2473,6 +2486,103 @@ describe('SalesService', () => {
   });
 
   describe('getSaleDetail', () => {
+    it('interleaves COMMENT events in timeline order [REGISTERED, PAYMENT, COMMENT, DELIVERED]', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'V-0042',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        subtotalCents: 2000,
+        discountCents: 200,
+        totalCents: 1800,
+        paidCents: 1800,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+        customer: { id: 'c1', name: 'Ana' },
+        cashier: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [
+          {
+            method: 'CASH',
+            amountCents: 1000,
+            tenderedCents: 1000,
+            changeCents: 0,
+            reference: 'CASH-1',
+            paidAt: new Date('2026-05-08T10:20:00.000Z'),
+            createdAt: new Date('2026-05-08T10:20:00.000Z'),
+            userId: null,
+            user: null,
+          },
+        ],
+      } as any);
+      saleCommentRepo.findActiveBySale.mockResolvedValue([
+        {
+          id: 'comment-1',
+          saleId: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+          body: 'Cliente pidió entrega en puerta lateral',
+          createdAt: new Date('2026-05-08T10:40:00.000Z'),
+          author: { id: 'u2', name: 'Supervisor 1' },
+        },
+      ]);
+
+      const result = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result.timeline.map((event) => event.type)).toEqual([
+        'SALE_REGISTERED',
+        'PAYMENT_RECEIVED',
+        'COMMENT',
+        'PRODUCTS_DELIVERED',
+      ]);
+    });
+
+    it('does not include soft-deleted comments in timeline', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'V-0042',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        subtotalCents: 2000,
+        discountCents: 200,
+        totalCents: 1800,
+        paidCents: 1800,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+        customer: { id: 'c1', name: 'Ana' },
+        cashier: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [],
+      } as any);
+      saleCommentRepo.findActiveBySale.mockResolvedValue([
+        {
+          id: 'comment-2',
+          saleId: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+          body: 'Entregado completo',
+          createdAt: new Date('2026-05-08T10:50:00.000Z'),
+          author: { id: 'u3', name: 'Caja 2' },
+        },
+      ]);
+
+      const result = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result.timeline.some((event) => event.type === 'COMMENT')).toBe(true);
+    });
+
     it('maps repository detail shape with per-payment timeline and references', async () => {
       saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
         id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
