@@ -22,6 +22,7 @@ import {
   SaleShippingAddressClearedEvent,
   SaleShippingAddressSetEvent,
 } from './domain/events/sale.events';
+import { InvalidDueDateError } from './domain/sale.errors';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -351,6 +352,15 @@ describe('SalesService', () => {
   });
 
   describe('setDueDate', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-06-10T16:30:00.000Z'));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     it('updates dueDate on confirmed non-paid sale', async () => {
       const sale = Sale.fromPersistence({
         id: 'sale-due-date-1',
@@ -368,6 +378,84 @@ describe('SalesService', () => {
       await service.setDueDate(sale.id, { dueDate: '2026-07-01T00:00:00.000Z' });
 
       expect(saleRepo.save).toHaveBeenCalled();
+    });
+
+    it('throws InvalidDueDateError when dueDate is before start of today (UTC)', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-due-date-yesterday',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
+      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+
+      await expect(
+        service.setDueDate(sale.id, { dueDate: '2026-06-09T23:59:59.999Z' }),
+      ).rejects.toBeInstanceOf(InvalidDueDateError);
+    });
+
+    it('allows dueDate on current UTC day regardless of time', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-due-date-today',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
+      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+
+      await expect(
+        service.setDueDate(sale.id, { dueDate: '2026-06-10T03:25:00.000Z' }),
+      ).resolves.toEqual({ id: sale.id });
+    });
+
+    it('allows dueDate on tomorrow (UTC)', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-due-date-tomorrow',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
+      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+
+      await expect(
+        service.setDueDate(sale.id, { dueDate: '2026-06-11T00:00:00.000Z' }),
+      ).resolves.toEqual({ id: sale.id });
+    });
+
+    it('allows null dueDate to clear value', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-due-date-clear',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        dueDate: new Date('2026-06-20T00:00:00.000Z'),
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
+      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+
+      await expect(service.setDueDate(sale.id, { dueDate: null })).resolves.toEqual({
+        id: sale.id,
+      });
+      expect(sale.dueDate).toBeNull();
     });
 
     it('throws SALE_NOT_FOUND when sale does not exist', async () => {
@@ -1163,6 +1251,25 @@ describe('SalesService', () => {
       expect(result.paymentStatus).toBe('PARTIAL');
       expect(result.paidCents).toBe(1500);
       expect(result.debtCents).toBe(500);
+    });
+
+    it('keeps chargeDraft default dueDate rule as confirmedAt + 15 days when dueDate is omitted', async () => {
+      const sale = buildDraftSale('sale-charge-default-due-date', 'user-1', 'customer-1');
+      setupHappyPathDraft(sale);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 1500 },
+        'idem-default-due-date',
+      );
+
+      const persistedInput = saleRepo.persistChargeConfirmation.mock.calls[0][0];
+      const confirmedAt = persistedInput.confirmedAt as Date;
+      const expectedDueDate = new Date(confirmedAt);
+      expectedDueDate.setDate(expectedDueDate.getDate() + 15);
+
+      expect(persistedInput.dueDate).toEqual(expectedDueDate);
     });
 
     it('rejects credit with non-zero amount using INVALID_CREDIT_CHARGE (draft loaded)', async () => {

@@ -47,7 +47,11 @@ import { buildSaleTimeline } from './domain/build-sale-timeline';
 import type { PersistedChargePayment, PersistedSalePaymentRecord } from './domain/sale.repository';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
-import { SaleFullyPaidError, SellerNotFoundError } from './domain/sale.errors';
+import {
+  InvalidDueDateError,
+  SaleFullyPaidError,
+  SellerNotFoundError,
+} from './domain/sale.errors';
 import {
   ISaleCommentRepository,
   SALE_COMMENT_REPOSITORY,
@@ -1435,6 +1439,19 @@ export class SalesService {
 
     if (detail.paymentStatus === 'PAID') {
       throw new SaleFullyPaidError();
+    }
+
+    if (dto.dueDate !== null && dto.dueDate !== undefined) {
+      const requestedDate = new Date(dto.dueDate);
+      const todayStartOfDayUtc = new Date();
+      todayStartOfDayUtc.setUTCHours(0, 0, 0, 0);
+
+      const requestedStartOfDayUtc = new Date(requestedDate);
+      requestedStartOfDayUtc.setUTCHours(0, 0, 0, 0);
+
+      if (requestedStartOfDayUtc < todayStartOfDayUtc) {
+        throw new InvalidDueDateError();
+      }
     }
 
     sale.setDueDate(dto.dueDate ? new Date(dto.dueDate) : null);
