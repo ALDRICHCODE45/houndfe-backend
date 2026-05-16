@@ -40,13 +40,14 @@ import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import type { AssignCustomerDto } from './dto/assign-customer.dto';
+import type { AssignSellerDto } from './dto/assign-seller.dto';
 import type { SetShippingAddressDto } from './dto/set-shipping-address.dto';
 import type { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
 import type { PersistedChargePayment, PersistedSalePaymentRecord } from './domain/sale.repository';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
-import { SaleFullyPaidError } from './domain/sale.errors';
+import { SaleFullyPaidError, SellerNotFoundError } from './domain/sale.errors';
 
 type SupportedChargeMethod =
   | 'cash'
@@ -1414,6 +1415,71 @@ export class SalesService {
     await this.saleRepo.save(sale);
 
     return this.getSaleDetail(saleId);
+  }
+
+  async assignSeller(
+    saleId: string,
+    actorUserId: string,
+    dto: AssignSellerDto,
+  ) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+
+    const seller = await this.tenantPrisma
+      .getClient()
+      .user.findUnique({ where: { id: dto.sellerUserId } });
+
+    if (!seller) {
+      throw new SellerNotFoundError();
+    }
+
+    const previousSellerUserId = sale.sellerUserId;
+    sale.assignSeller(dto.sellerUserId);
+    await this.saleRepo.save(sale);
+
+    if (previousSellerUserId !== dto.sellerUserId) {
+      this.eventEmitter.emit('sale.seller.assigned', {
+        saleId: sale.id,
+        tenantId: this.tenantPrisma.getTenantId() ?? '',
+        userId: actorUserId,
+        previousSellerUserId,
+        sellerUserId: dto.sellerUserId,
+      });
+    }
+
+    if (sale.status === 'DRAFT') {
+      return this.saleRepo.findDraftResponseById(sale.id);
+    }
+
+    return this.getSaleDetail(sale.id);
+  }
+
+  async clearSeller(saleId: string, actorUserId: string) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+
+    const previousSellerUserId = sale.sellerUserId;
+    sale.clearSeller();
+    await this.saleRepo.save(sale);
+
+    if (previousSellerUserId !== null) {
+      this.eventEmitter.emit('sale.seller.cleared', {
+        saleId: sale.id,
+        tenantId: this.tenantPrisma.getTenantId() ?? '',
+        userId: actorUserId,
+        previousSellerUserId,
+      });
+    }
+
+    if (sale.status === 'DRAFT') {
+      return this.saleRepo.findDraftResponseById(sale.id);
+    }
+
+    return this.getSaleDetail(sale.id);
   }
 
   async addPayment(

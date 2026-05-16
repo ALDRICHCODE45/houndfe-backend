@@ -364,6 +364,129 @@ describe('SalesService', () => {
     });
   });
 
+  describe('assignSeller', () => {
+    it('assigns seller and emits sale.seller.assigned when seller changes', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-seller-1',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        sellerUserId: null,
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        user: { findUnique: jest.fn().mockResolvedValue({ id: 'seller-1' }) },
+      });
+      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+
+      await service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-1' });
+
+      expect(saleRepo.save).toHaveBeenCalledWith(sale);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.seller.assigned',
+        expect.objectContaining({
+          saleId: sale.id,
+          sellerUserId: 'seller-1',
+          previousSellerUserId: null,
+          userId: 'actor-1',
+        }),
+      );
+    });
+
+    it('does not emit event when assigning the same seller id', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-seller-2',
+        userId: 'user-1',
+        status: 'DRAFT',
+        sellerUserId: 'seller-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        user: { findUnique: jest.fn().mockResolvedValue({ id: 'seller-1' }) },
+      });
+      saleRepo.findDraftResponseById.mockResolvedValue({ id: sale.id } as never);
+
+      await service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-1' });
+
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith('sale.seller.assigned', expect.anything());
+    });
+
+    it('throws SELLER_NOT_FOUND when seller user does not exist in tenant', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-seller-3',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+      });
+
+      await expect(
+        service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-missing' }),
+      ).rejects.toThrow('SELLER_NOT_FOUND');
+    });
+  });
+
+  describe('clearSeller', () => {
+    it('clears seller and emits sale.seller.cleared when seller existed', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-seller-4',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        sellerUserId: 'seller-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+
+      await service.clearSeller(sale.id, 'actor-1');
+
+      expect(saleRepo.save).toHaveBeenCalledWith(sale);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'sale.seller.cleared',
+        expect.objectContaining({
+          saleId: sale.id,
+          previousSellerUserId: 'seller-1',
+          userId: 'actor-1',
+        }),
+      );
+    });
+
+    it('does not emit event when seller is already null', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-seller-5',
+        userId: 'user-1',
+        status: 'DRAFT',
+        sellerUserId: null,
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.findDraftResponseById.mockResolvedValue({ id: sale.id } as never);
+
+      await service.clearSeller(sale.id, 'actor-1');
+
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith('sale.seller.cleared', expect.anything());
+    });
+  });
+
   describe('draft customer and shipping address mutations', () => {
     const makeDraftSale = (overrides?: { customerId?: string | null; shippingAddressId?: string | null }) =>
       Sale.fromPersistence({
