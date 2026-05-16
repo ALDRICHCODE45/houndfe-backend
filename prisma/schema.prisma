@@ -231,6 +231,7 @@ model Tenant {
   sales                Sale[]
   saleItems            SaleItem[]
   salePayments         SalePayment[]
+  saleComments         SaleComment[]
   saleIdempotencies    SaleIdempotency[]
   saleFolioCounters    SaleFolioCounter[]
   outboxEvents         OutboxEvent[]
@@ -595,6 +596,7 @@ model Sale {
   shippingAddress CustomerAddress? @relation(fields: [shippingAddressId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   items  SaleItem[]
   payments SalePayment[]
+  comments SaleComment[]
   idempotencyRecords SaleIdempotency[]
 
   @@index([tenantId])
@@ -665,6 +667,25 @@ model SalePayment {
   @@index([tenantId])
   @@index([userId])
   @@map("sale_payments")
+}
+
+model SaleComment {
+  id           String   @id @default(uuid())
+  saleId       String
+  tenantId     String
+  authorUserId String
+  body         String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  author User   @relation("SaleCommentAuthor", fields: [authorUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([saleId, createdAt])
+  @@index([tenantId])
+  @@map("sale_comments")
 }
 
 model SaleIdempotency {
@@ -745,6 +766,7 @@ model User {
   sales             Sale[] @relation("SaleCashier")
   salesAsSeller     Sale[] @relation("SaleSeller")
   salePayments      SalePayment[]
+  saleComments      SaleComment[] @relation("SaleCommentAuthor")
 
   @@map("users")
 }
