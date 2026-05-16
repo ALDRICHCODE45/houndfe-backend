@@ -68,6 +68,7 @@ describe('DomainExceptionFilter', () => {
       'STOCK_INSUFFICIENT_AT_CONFIRM',
       'IDEMPOTENCY_KEY_CONFLICT',
       'IDEMPOTENCY_KEY_IN_FLIGHT',
+      'SALE_FULLY_PAID',
     ]) {
       const { host, status } = makeHost();
       filter.catch(new BusinessRuleViolationError(code, code), host);
@@ -105,6 +106,7 @@ describe('DomainExceptionFilter', () => {
       'PAYMENT_METHOD_NOT_SUPPORTED',
       'PAYMENT_AMOUNT_INSUFFICIENT',
       'PAYMENT_AMOUNT_INVALID',
+      'INVALID_DUE_DATE',
     ]) {
       const { host, status } = makeHost();
       filter.catch(new BusinessRuleViolationError(code, code), host);

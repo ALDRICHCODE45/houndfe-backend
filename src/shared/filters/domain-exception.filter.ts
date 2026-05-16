@@ -80,6 +80,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.CONFLICT;
     if (exception.code === 'IDEMPOTENCY_KEY_IN_FLIGHT')
       return HttpStatus.CONFLICT;
+    if (exception.code === 'SALE_FULLY_PAID')
+      return HttpStatus.CONFLICT;
     if (exception.code === 'PAYMENT_METHOD_NOT_SUPPORTED')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'PAYMENT_AMOUNT_INSUFFICIENT')
@@ -89,6 +91,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'SHIPPING_ADDRESS_REQUIRES_CUSTOMER')
+      return HttpStatus.UNPROCESSABLE_ENTITY;
+    if (exception.code === 'INVALID_DUE_DATE')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'INVALID_PRICE_OVERRIDE_INPUT')
       return HttpStatus.BAD_REQUEST;

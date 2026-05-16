@@ -6,6 +6,7 @@ function makeMockSalesService() {
   return {
     listSales: jest.fn(),
     getSaleDetail: jest.fn(),
+    setDueDate: jest.fn(),
   } as any;
 }
 
@@ -55,5 +56,17 @@ describe('SalesQueryController', () => {
   it('rejects invalid UUID format for GET /sales/:id param', async () => {
     const pipe = new ParseUUIDPipe();
     await expect(pipe.transform('not-a-uuid', { type: 'param', metatype: String, data: 'id' })).rejects.toThrow();
+  });
+
+  it('delegates PATCH /sales/:id/due-date to service', async () => {
+    const id = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+    const dto = { dueDate: '2026-07-01T00:00:00.000Z' };
+    const response = { id, dueDate: dto.dueDate };
+    service.setDueDate.mockResolvedValue(response);
+
+    const result = await controller.setDueDate(id, dto);
+
+    expect(result).toEqual(response);
+    expect(service.setDueDate).toHaveBeenCalledWith(id, dto);
   });
 });

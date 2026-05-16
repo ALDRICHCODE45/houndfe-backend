@@ -41,10 +41,12 @@ import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import type { AssignCustomerDto } from './dto/assign-customer.dto';
 import type { SetShippingAddressDto } from './dto/set-shipping-address.dto';
+import type { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
 import type { PersistedChargePayment, PersistedSalePaymentRecord } from './domain/sale.repository';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import { SaleFullyPaidError } from './domain/sale.errors';
 
 type SupportedChargeMethod =
   | 'cash'
@@ -172,6 +174,24 @@ function sortPaymentsForHash(payments: ChargePaymentEntry[]): ChargePaymentEntry
       `${right.method}|${right.amountCents}|${right.reference ?? ''}`,
     ),
   );
+}
+
+function resolveDueDate(
+  dueDateIso: string | undefined,
+  confirmedAt: Date,
+  paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT',
+): Date | null {
+  if (paymentStatus === 'PAID') {
+    return null;
+  }
+
+  if (dueDateIso) {
+    return new Date(dueDateIso);
+  }
+
+  const defaultDueDate = new Date(confirmedAt);
+  defaultDueDate.setDate(defaultDueDate.getDate() + 15);
+  return defaultDueDate;
 }
 
 function isSupportedCollectionMethod(
@@ -616,6 +636,7 @@ export class SalesService {
       channel: sale.channel,
       register: sale.register,
       confirmedAt: sale.confirmedAt?.toISOString() ?? null,
+      dueDate: sale.dueDate ? sale.dueDate.toISOString() : null,
       subtotalCents: sale.subtotalCents,
       discountCents: sale.discountCents,
       totalCents: sale.totalCents,
@@ -1149,7 +1170,7 @@ export class SalesService {
     const hashPayments = sortPaymentsForHash(normalizedPayments);
 
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
+      .update(JSON.stringify({ saleId, actorId, payments: hashPayments, dueDate: dto.dueDate ?? null }))
       .digest('hex');
 
     const idempotency = await this.saleRepo.acquireChargeIdempotency(
@@ -1300,6 +1321,10 @@ export class SalesService {
 
       const confirmedAt = new Date();
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
+      const dueDate = resolveDueDate(dto.dueDate, confirmedAt, paymentStatus);
+      if (dueDate !== null) {
+        sale.setDueDate(dueDate);
+      }
       const createdPayments = await this.saleRepo.persistChargeConfirmation({
         saleId,
         payments: canonicalPayments,
@@ -1310,6 +1335,7 @@ export class SalesService {
         debtCents,
         changeDueCents,
         paymentStatus,
+        dueDate: sale.dueDate,
         confirmedAt,
         folio,
       });
@@ -1367,6 +1393,27 @@ export class SalesService {
 
       return payload;
     });
+  }
+
+  async setDueDate(saleId: string, dto: UpdateSaleDueDateDto): Promise<SaleDetailResponseDto> {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale || sale.status !== 'CONFIRMED') {
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+
+    const detail = await this.saleRepo.findOneWithRelations(saleId);
+    if (!detail) {
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+
+    if (detail.paymentStatus === 'PAID') {
+      throw new SaleFullyPaidError();
+    }
+
+    sale.setDueDate(dto.dueDate ? new Date(dto.dueDate) : null);
+    await this.saleRepo.save(sale);
+
+    return this.getSaleDetail(saleId);
   }
 
   async addPayment(

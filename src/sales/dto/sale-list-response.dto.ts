@@ -7,6 +7,7 @@ export interface SaleListRowDto {
   totalCents: number;
   debtCents: number;
   confirmedAt: Date | null;
+  dueDate: string | null;
   customer: { id: string; name: string } | null;
   cashier: { id: string; name: string };
   seller: { id: string; name: string } | null;

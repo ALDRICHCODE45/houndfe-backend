@@ -123,6 +123,7 @@ export interface ISaleRepository {
     deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
     customerId?: string | null;
     sellerUserId?: string | null;
+    dueDate?: Date | null;
     confirmedAt: Date;
     folio: string;
   }): Promise<PersistedSalePaymentRecord[]>;
@@ -163,6 +164,7 @@ export interface ISaleRepository {
       totalCents: number;
       debtCents: number;
       confirmedAt: Date | null;
+      dueDate: string | null;
       customer: { id: string; name: string } | null;
       cashier: { id: string; name: string };
       seller: { id: string; name: string } | null;
@@ -201,6 +203,7 @@ export interface ISaleRepository {
     channel: 'POS' | 'ONLINE';
     register: string;
     confirmedAt: Date | null;
+    dueDate: Date | null;
     createdAt: Date;
     subtotalCents: number;
     discountCents: number;

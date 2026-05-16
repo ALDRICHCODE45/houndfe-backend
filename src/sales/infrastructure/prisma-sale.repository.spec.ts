@@ -82,6 +82,7 @@ describe('PrismaSaleRepository', () => {
           totalCents: 5000,
           debtCents: 0,
           confirmedAt: new Date(),
+          dueDate: new Date('2026-05-30T18:00:00.000Z'),
           customer: null,
           user: { id: 'u1', name: 'Cajero' },
           seller: null,
@@ -101,6 +102,7 @@ describe('PrismaSaleRepository', () => {
       } as any);
 
       expect(result[0].paymentMethods).toEqual(['CASH', 'CARD_DEBIT']);
+      expect(result[0].dueDate).toBe('2026-05-30T18:00:00.000Z');
       expect(prisma.sale.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           include: expect.objectContaining({
@@ -284,6 +286,7 @@ describe('PrismaSaleRepository', () => {
         channel: 'POS',
         register: 'Principal',
         confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        dueDate: new Date('2026-05-30T18:00:00.000Z'),
         createdAt: new Date('2026-05-08T10:00:00.000Z'),
         subtotalCents: 2000,
         discountCents: 0,
@@ -339,6 +342,7 @@ describe('PrismaSaleRepository', () => {
         }),
       );
       expect(result?.cashier).toEqual({ id: 'u1', name: 'Caja 1' });
+      expect(result?.dueDate?.toISOString()).toBe('2026-05-30T18:00:00.000Z');
       expect(result?.items[0].subtotalCents).toBe(2000);
       expect(result?.payments).toEqual([
         expect.objectContaining({ reference: 'REF-COL' }),
@@ -490,6 +494,7 @@ describe('PrismaSaleRepository', () => {
           customerId: null,
           shippingAddressId: null,
           sellerUserId: null,
+          dueDate: null,
           confirmedAt: undefined,
           folio: undefined,
           tenantId: 'tenant-1',
@@ -596,6 +601,7 @@ describe('PrismaSaleRepository', () => {
           customerId: null,
           shippingAddressId: null,
           sellerUserId: null,
+          dueDate: null,
           confirmedAt: undefined,
           folio: undefined,
         },

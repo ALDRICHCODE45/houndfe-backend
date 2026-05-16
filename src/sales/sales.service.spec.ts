@@ -44,6 +44,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     groupByPaymentStatusConfirmed: jest.fn(),
     countNotDeliveredConfirmed: jest.fn(),
     findDraftResponseById: jest.fn(),
+    findOneWithRelations: jest.fn(),
     ...overrides,
   } as jest.Mocked<ISaleRepository>;
 }
@@ -324,6 +325,42 @@ describe('SalesService', () => {
 
       expect(result).toEqual(replayPayload);
       expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setDueDate', () => {
+    it('updates dueDate on confirmed non-paid sale', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-due-date-1',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
+      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+
+      await service.setDueDate(sale.id, { dueDate: '2026-07-01T00:00:00.000Z' });
+
+      expect(saleRepo.save).toHaveBeenCalled();
+    });
+
+    it('throws SALE_NOT_FOUND when sale does not exist', async () => {
+      saleRepo.findById.mockResolvedValue(null);
+      await expect(service.setDueDate('missing-sale', { dueDate: null })).rejects.toThrow('SALE_NOT_FOUND');
+    });
+
+    it('throws SALE_FULLY_PAID when paymentStatus is PAID', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-paid', userId: 'user-1', status: 'CONFIRMED', items: [], createdAt: new Date(), updatedAt: new Date(),
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PAID' });
+
+      await expect(service.setDueDate('sale-paid', { dueDate: '2026-08-01T00:00:00.000Z' })).rejects.toThrow('SALE_FULLY_PAID');
     });
   });
 

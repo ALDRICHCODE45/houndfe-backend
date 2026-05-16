@@ -581,6 +581,7 @@ model Sale {
   changeDueCents Int    @default(0)
   paymentStatus SalePaymentStatus?
   confirmedAt DateTime?
+  dueDate     DateTime?
   folio       String?
   tenantId  String
   createdAt DateTime   @default(now())

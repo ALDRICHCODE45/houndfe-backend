@@ -34,6 +34,7 @@ export interface SaleDetailResponseDto {
   channel: 'POS' | 'ONLINE';
   register: string;
   confirmedAt: string | null;
+  dueDate: string | null;
   subtotalCents: number;
   discountCents: number;
   totalCents: number;

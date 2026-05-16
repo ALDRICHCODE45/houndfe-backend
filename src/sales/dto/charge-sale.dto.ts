@@ -4,6 +4,7 @@ import {
   IsArray,
   IsIn,
   IsInt,
+  IsISO8601,
   IsOptional,
   IsString,
   Min,
@@ -39,4 +40,8 @@ export class ChargeSaleDto {
   @ValidateNested({ each: true })
   @Type(() => ChargePaymentEntryDto)
   payments?: ChargePaymentEntryDto[];
+
+  @IsOptional()
+  @IsISO8601()
+  dueDate?: string;
 }

@@ -61,6 +61,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       customerId: sale.customerId,
       shippingAddressId: sale.shippingAddressId,
       sellerUserId: sale.sellerUserId,
+      dueDate: sale.dueDate,
       confirmedAt: sale.confirmedAt,
       folio: sale.folio,
     };
@@ -148,6 +149,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       customerId: persistedSale.customerId,
       shippingAddressId: persistedSale.shippingAddressId,
       sellerUserId: persistedSale.sellerUserId,
+      dueDate: persistedSale.dueDate,
       confirmedAt: persistedSale.confirmedAt,
       folio: persistedSale.folio,
       items: persistedSale.items.map((item) => ({
@@ -225,6 +227,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       customerId: saleData.customerId,
       shippingAddressId: saleData.shippingAddressId,
       sellerUserId: saleData.sellerUserId,
+      dueDate: saleData.dueDate,
       confirmedAt: saleData.confirmedAt,
       folio: saleData.folio,
       items: saleData.items.map((item) => ({
@@ -307,6 +310,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         customerId: (saleData as any).customerId,
         shippingAddressId: (saleData as any).shippingAddressId,
         sellerUserId: (saleData as any).sellerUserId,
+        dueDate: (saleData as any).dueDate,
         items: (saleData as any).items.map((item) => ({
           id: item.id,
           saleId: item.saleId,
@@ -440,6 +444,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
     customerId?: string | null;
     sellerUserId?: string | null;
+    dueDate?: Date | null;
     confirmedAt: Date;
     folio: string;
   }): Promise<PersistedSalePaymentRecord[]> {
@@ -462,6 +467,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         deliveryStatus: input.deliveryStatus ?? 'DELIVERED',
         customerId: input.customerId ?? null,
         sellerUserId: input.sellerUserId ?? null,
+        dueDate: input.dueDate ?? null,
         confirmedAt: input.confirmedAt,
         folio: input.folio,
       },
@@ -683,6 +689,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       totalCents: row.totalCents,
       debtCents: row.debtCents ?? 0,
       confirmedAt: row.confirmedAt,
+      dueDate: row.dueDate ? row.dueDate.toISOString() : null,
       customer: row.customer
         ? {
             id: row.customer.id,
@@ -787,6 +794,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       channel: sale.channel,
       register: sale.register,
       confirmedAt: sale.confirmedAt,
+      dueDate: sale.dueDate,
       createdAt: sale.createdAt,
       subtotalCents: sale.subtotalCents,
       discountCents: sale.discountCents,
