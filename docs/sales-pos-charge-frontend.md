@@ -980,7 +980,8 @@ Lugar canónico para las reglas de `dueDate`. Si necesitás documentación de un
 - Si frontend envía `dueDate` (ISO-8601) en el body del `/charge` y la venta queda no-`PAID`, se persiste tal cual.
 - Si frontend **no** envía `dueDate` y la venta queda no-`PAID`, backend asigna default `confirmedAt + 15 días`.
 - Si la venta queda `PAID` al confirmar, `dueDate` se ignora y persiste como `null`.
-- Si `dueDate < confirmedAt` → `422 INVALID_DUE_DATE`.
+- Invariante de dominio (histórica, aplica en todos los paths): si `dueDate < confirmedAt` → `422 INVALID_DUE_DATE`.
+- Regla específica de `PATCH /sales/:id/due-date`: además valida `dueDate >= startOfDay(today)` en UTC (comparación por día, truncando ambos lados a `00:00:00.000Z`).
 
 ### 8.3) Endpoint: actualizar/limpiar due date
 
@@ -1011,7 +1012,8 @@ Reglas:
 
 - Solo opera sobre ventas `CONFIRMED` con `paymentStatus !== PAID`.
 - Si la venta está `PAID`: `409 SALE_FULLY_PAID`.
-- Si `dueDate < confirmedAt`: `422 INVALID_DUE_DATE`.
+- Si `dueDate` es anterior a hoy (granularidad de día UTC): `422 INVALID_DUE_DATE`.
+- También aplica invariante de dominio: si `dueDate < confirmedAt` → `422 INVALID_DUE_DATE`.
 - Si la venta no existe o es de otro tenant: `404 SALE_NOT_FOUND`.
 - Idempotente por overwrite (last-write-wins): reintentos con el mismo valor son inocuos.
 
@@ -1087,7 +1089,7 @@ curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
 
 | Código | HTTP | Cuándo pasa | Acción sugerida |
 |---|---:|---|---|
-| `INVALID_DUE_DATE` | 422 | `dueDate < confirmedAt` | Validar fecha en frontend (>= hoy) |
+| `INVALID_DUE_DATE` | 422 | `PATCH`: `dueDate` anterior a hoy (UTC start-of-day) **o** cualquier path donde `dueDate < confirmedAt` | Mostrar mensaje: "La fecha de vencimiento no puede ser anterior a hoy" y refrescar reglas de negocio del formulario |
 | `SALE_FULLY_PAID` | 409 | `PATCH /sales/:id/due-date` sobre venta ya `PAID` | Refrescar — la deuda ya se saldó |
 | `SALE_NOT_FOUND` | 404 | Venta no existe o de otro tenant | Refrescar listado |
 
