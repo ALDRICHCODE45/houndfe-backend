@@ -13,6 +13,6 @@ import { PrismaSaleCommentRepository } from './infrastructure/prisma-sale-commen
       useClass: PrismaSaleCommentRepository,
     },
   ],
-  exports: [SaleCommentsService],
+  exports: [SaleCommentsService, SALE_COMMENT_REPOSITORY],
 })
 export class SaleCommentsModule {}

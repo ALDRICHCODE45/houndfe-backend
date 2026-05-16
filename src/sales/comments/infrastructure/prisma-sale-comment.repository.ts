@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../../shared/prisma/tenant-prisma.service';
 import {
+  ActiveSaleCommentWithAuthor,
   ISaleCommentRepository,
 } from '../domain/sale-comment.repository';
 import { SaleComment } from '../domain/sale-comment.entity';
@@ -30,14 +31,21 @@ export class PrismaSaleCommentRepository implements ISaleCommentRepository {
     });
   }
 
-  async findActiveBySale(saleId: string): Promise<SaleComment[]> {
+  async findActiveBySale(saleId: string): Promise<ActiveSaleCommentWithAuthor[]> {
     const rows = await this.tenantPrisma.getClient().saleComment.findMany({
       where: { saleId, deletedAt: null },
       orderBy: { createdAt: 'asc' },
+      include: {
+        author: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
     });
 
-    return rows.map((comment) =>
-      SaleComment.fromPersistence({
+    return rows.map((comment) => ({
         id: comment.id,
         saleId: comment.saleId,
         tenantId: comment.tenantId,
@@ -46,8 +54,8 @@ export class PrismaSaleCommentRepository implements ISaleCommentRepository {
         createdAt: comment.createdAt,
         updatedAt: comment.updatedAt,
         deletedAt: comment.deletedAt,
-      }),
-    );
+        author: comment.author,
+      }));
   }
 
   async save(comment: SaleComment): Promise<SaleComment> {
