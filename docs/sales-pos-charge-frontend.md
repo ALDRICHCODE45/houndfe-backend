@@ -10,6 +10,7 @@
 
 - [2) Permisos RBAC](#2-permisos-rbac)
 - [2.5) Asignar cliente y dirección al draft](#25-asignar-cliente-y-dirección-al-draft)
+- [2.6) Asignar o limpiar vendedor de una venta](#26-asignar-o-limpiar-vendedor-de-una-venta)
 - [3) Endpoint: Cobrar draft](#3-endpoint-cobrar-draft)
 - [3.7) Due date (nuevo)](#37-due-date-nuevo)
 - [5) Idempotencia (MUY importante)](#5-idempotencia-muy-importante)
@@ -67,6 +68,8 @@ Se habilitaron 4 capacidades del módulo de ventas POS:
 | `DELETE /sales/drafts/:id/customer` | `update:Sale` |
 | `PUT /sales/drafts/:id/shipping-address` | `update:Sale` |
 | `DELETE /sales/drafts/:id/shipping-address` | `update:Sale` |
+| `PUT /sales/:id/seller` | `update:Sale` |
+| `DELETE /sales/:id/seller` | `update:Sale` |
 | `POST /sales/:id/payments` | `update:Sale` |
 | `GET /sales` | `read:Sale` |
 | `GET /sales/:id` | `read:Sale` |
@@ -78,6 +81,8 @@ Todos requieren JWT válido + tenant activo.
 ## 2.5) Asignar cliente y dirección al draft
 
 Los drafts ahora permiten manejar cliente y dirección de envío con 4 endpoints:
+
+> Para asignar vendedor en ventas DRAFT o CONFIRMED, ver §2.6.
 
 1. `PUT /sales/drafts/:id/customer`
 2. `DELETE /sales/drafts/:id/customer`
@@ -171,6 +176,50 @@ curl -X PUT "$API_URL/sales/drafts/$SALE_ID/shipping-address" \
   -d '{"shippingAddressId":"8f311d31-131f-449a-8a15-6a3257b0d865"}'
 
 curl -X DELETE "$API_URL/sales/drafts/$SALE_ID/customer" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+## 2.6) Asignar o limpiar vendedor de una venta
+
+Estos endpoints aplican a ventas `DRAFT` y `CONFIRMED` (a diferencia de cliente, que es draft-only en §2.5):
+
+- `PUT /sales/:id/seller`
+- `DELETE /sales/:id/seller`
+
+### `PUT /sales/:id/seller`
+
+Body:
+
+```json
+{
+  "sellerUserId": "8fb23d4c-93ca-4528-8cc1-fdc2443ad621"
+}
+```
+
+Respuesta: `200` con el detalle actualizado de la venta.
+
+Errores esperables:
+- `404 SELLER_NOT_FOUND` (sellerUserId no existe en el tenant)
+- `404 SALE_NOT_FOUND`
+- `403` por RBAC (`update:Sale`)
+
+### `DELETE /sales/:id/seller`
+
+Sin body. Respuesta `204 No Content`.
+
+- Idempotente: si ya no tiene vendedor, mantiene `204`.
+
+Ejemplo curl:
+
+```bash
+curl -X PUT "$API_URL/sales/$SALE_ID/seller" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sellerUserId":"8fb23d4c-93ca-4528-8cc1-fdc2443ad621"}'
+
+curl -X DELETE "$API_URL/sales/$SALE_ID/seller" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
