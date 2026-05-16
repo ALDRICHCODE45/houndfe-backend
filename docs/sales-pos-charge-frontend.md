@@ -258,14 +258,28 @@ curl -X DELETE "$API_URL/sales/$SALE_ID/seller" \
 
 ### Selección del vendedor
 
-**Qué users pueden ser asignados como vendedor**: cualquier usuario activo del tenant. El backend solo valida que el `sellerUserId` exista en el tenant (404 `SELLER_NOT_FOUND` si no). No hay filtro por rol ni estado.
+**Qué users pueden ser asignados como vendedor**: cualquier usuario activo del tenant. El backend solo valida que el `sellerUserId` exista en el tenant (404 `SELLER_NOT_FOUND` si no). No hay filtro por rol.
 
-**Endpoint sugerido para el picker**: por ahora no existe un endpoint público `GET /users` ligero. El frontend puede:
+**Endpoint para el picker de vendedor**:
 
-- Usar `/admin/users` si el operador tiene permiso de admin.
-- Esperar a un endpoint `GET /users` simple que se agregará en un slice futuro (devolvería `[{ id, name }]` filtrado por tenant).
+`GET /users/assignable`
 
-**Si necesitan el endpoint YA, avisar al backend** y se prioriza un mini-slice.
+- **Auth**: `Authorization: Bearer <jwt>` + permiso `read:Sale`
+- **Response 200**:
+  ```json
+  [
+    { "id": "uuid", "name": "César Flores" },
+    { "id": "uuid", "name": "Ana Pérez" }
+  ]
+  ```
+- **Comportamiento**: devuelve todos los users activos (`isActive: true`) que pertenecen al tenant actual, ordenados por `name`. Sin paginación.
+- **Curl**:
+  ```bash
+  curl -H "Authorization: Bearer $TOKEN" \
+    "$API_URL/users/assignable"
+  ```
+
+Usá este endpoint para alimentar el dropdown del picker. Cada item es asignable como vendedor vía `PUT /sales/:id/seller { sellerUserId: <id> }`.
 
 > **Nota sobre los eventos emitidos por estos endpoints** (`sale.seller.assigned`, `sale.seller.cleared`): son **internos al backend** (EventEmitter2 in-process) y se usan para logs y side effects locales. **No se dispatchan al frontend** ni a consumidores externos. Para eventos consumibles vía WebSocket/outbox, ver §10.
 
@@ -1498,6 +1512,7 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 
 ### Cambios recientes (con fecha)
 
+- **2026-05-16** — Nuevo endpoint público `GET /users/assignable` para alimentar el picker de vendedor en §2.6. Permiso `read:Sale`.
 - **2026-05-15** — Agregado campo `dueDate: string | null` a las responses de `GET /sales` (listado, ver §6) y `GET /sales/:id` (detalle, ver §7). Aplica solo a ventas con `paymentStatus !== 'PAID'`.
 - **2026-05-15** — Clarificación de scope de eventos: los eventos `sale.customer.*`, `sale.shipping-address.*` y `sale.seller.*` son **in-process (EventEmitter2)** y NO se exponen al frontend. Solo los outbox events (`sale.confirmed`, `sale.payment.received`, `sale.fully.paid`) son consumibles externamente. Ver §2.5.1, §2.6 y §10.
 - **2026-05-15** — Aclarada la selección del vendedor en §2.6: cualquier usuario del tenant puede ser asignado, sin filtro por rol. Documentado workaround temporal (`/admin/users`) y plan de endpoint `GET /users` futuro.
