@@ -1,13 +1,26 @@
 import { SalesQueryController } from './sales-query.controller';
 import type { SalesService } from './sales.service';
 import { ParseUUIDPipe } from '@nestjs/common';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 
 function makeMockSalesService() {
   return {
     listSales: jest.fn(),
     getSaleDetail: jest.fn(),
     setDueDate: jest.fn(),
+    assignSeller: jest.fn(),
+    clearSeller: jest.fn(),
   } as any;
+}
+
+function makeMockUser(userId: string): AuthenticatedUser {
+  return {
+    userId,
+    email: `${userId}@test.com`,
+    tenantId: null,
+    tenantSlug: null,
+    isSuperAdmin: false,
+  };
 }
 
 describe('SalesQueryController', () => {
@@ -68,5 +81,38 @@ describe('SalesQueryController', () => {
 
     expect(result).toEqual(response);
     expect(service.setDueDate).toHaveBeenCalledWith(id, dto);
+  });
+
+  it('delegates PUT /sales/:id/seller to service', async () => {
+    const id = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+    const dto = { sellerUserId: '8fb23d4c-93ca-4528-8cc1-fdc2443ad621' };
+    const response = { id, seller: { id: dto.sellerUserId, name: 'Seller' } };
+    service.assignSeller.mockResolvedValue(response);
+    const user = makeMockUser('actor-1');
+
+    const result = await controller.assignSeller(id, dto, user);
+
+    expect(result).toEqual(response);
+    expect(service.assignSeller).toHaveBeenCalledWith(id, 'actor-1', dto);
+  });
+
+  it('delegates DELETE /sales/:id/seller to service and returns 204 contract', async () => {
+    const id = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+    service.clearSeller.mockResolvedValue(undefined);
+    const user = makeMockUser('actor-1');
+
+    const result = await controller.clearSeller(id, user);
+
+    expect(result).toBeUndefined();
+    expect(service.clearSeller).toHaveBeenCalledWith(id, 'actor-1');
+  });
+
+  it('forwards seller-assignment service errors', async () => {
+    const id = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+    const dto = { sellerUserId: '8fb23d4c-93ca-4528-8cc1-fdc2443ad621' };
+    const user = makeMockUser('actor-1');
+    service.assignSeller.mockRejectedValue(new Error('SELLER_NOT_FOUND'));
+
+    await expect(controller.assignSeller(id, dto, user)).rejects.toThrow('SELLER_NOT_FOUND');
   });
 });
