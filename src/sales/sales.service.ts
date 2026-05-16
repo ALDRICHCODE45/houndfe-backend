@@ -662,7 +662,16 @@ export class SalesService {
         createdAt: sale.createdAt,
         confirmedAt: sale.confirmedAt,
         deliveryStatus: sale.deliveryStatus,
-        payments: sale.payments.map((payment) => ({ createdAt: payment.createdAt })),
+        register: sale.register,
+        cashier: sale.cashier,
+        payments: sale.payments.map((payment) => ({
+          method: payment.method,
+          amountCents: payment.amountCents,
+          reference: payment.reference,
+          createdAt: payment.createdAt,
+          userId: payment.userId,
+          user: payment.user,
+        })),
       }),
     };
   }
@@ -1328,6 +1337,7 @@ export class SalesService {
       }
       const createdPayments = await this.saleRepo.persistChargeConfirmation({
         saleId,
+        userId: actorId,
         payments: canonicalPayments,
         subtotalCents,
         discountCents,
@@ -1542,6 +1552,7 @@ export class SalesService {
         method: collectionMethod,
         amountCents: dto.amountCents,
         reference: dto.reference,
+        userId: actorId,
       });
 
       await this.publishPaymentReceivedEvents({

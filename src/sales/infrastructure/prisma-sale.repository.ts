@@ -431,6 +431,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async persistChargeConfirmation(input: {
     saleId: string;
+    userId: string;
     payments: PersistedChargePayment[];
     subtotalCents: number;
     discountCents: number;
@@ -485,6 +486,7 @@ export class PrismaSaleRepository implements ISaleRepository {
               | 'TRANSFER',
             amountCents: payment.amountCents,
             reference: payment.reference ?? null,
+            userId: input.userId,
             tenantId,
           },
           select: { id: true, method: true, amountCents: true, reference: true },
@@ -509,6 +511,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
     amountCents: number;
     reference?: string | null;
+    userId: string;
   }): Promise<{
     paymentId: string;
     paidCents: number;
@@ -564,6 +567,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           | 'TRANSFER',
         amountCents: input.amountCents,
         reference: input.reference ?? null,
+        userId: input.userId,
         tenantId,
       },
     });
@@ -779,6 +783,8 @@ export class PrismaSaleRepository implements ISaleRepository {
             reference: true,
             metadataJson: true,
             createdAt: true,
+            userId: true,
+            user: { select: { id: true, name: true } },
           },
           orderBy: { createdAt: 'asc' },
         },
@@ -832,6 +838,8 @@ export class PrismaSaleRepository implements ISaleRepository {
         reference: payment.reference ?? extractLegacyReference(payment.metadataJson),
         paidAt: payment.createdAt,
         createdAt: payment.createdAt,
+        userId: payment.userId,
+        user: payment.user,
       })),
     };
   }

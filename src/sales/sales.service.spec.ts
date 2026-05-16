@@ -175,6 +175,15 @@ describe('SalesService', () => {
       expect(result.paymentStatus).toBe('PARTIAL');
       expect(result.paidCents).toBe(4000);
       expect(result.debtCents).toBe(1000);
+      expect(saleRepo.persistCollectedPayment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId: sale.id,
+          method: 'cash',
+          amountCents: 2000,
+          reference: 'RCPT-1',
+          userId: 'user-1',
+        }),
+      );
     });
 
     it('emits only sale.payment.received outbox event for partial addPayment', async () => {
@@ -1116,6 +1125,7 @@ describe('SalesService', () => {
           paymentStatus: 'CREDIT',
           paidCents: 0,
           debtCents: 2000,
+          userId: 'user-1',
         }),
       );
     });
@@ -2503,6 +2513,8 @@ describe('SalesService', () => {
             reference: 'CASH-1',
             paidAt: new Date('2026-05-08T10:20:00.000Z'),
             createdAt: new Date('2026-05-08T10:20:00.000Z'),
+            userId: null,
+            user: null,
           },
           {
             method: 'TRANSFER',
@@ -2512,6 +2524,8 @@ describe('SalesService', () => {
             reference: 'TRF-2',
             paidAt: new Date('2026-05-08T10:30:00.000Z'),
             createdAt: new Date('2026-05-08T10:30:00.000Z'),
+            userId: null,
+            user: null,
           },
         ],
       } as any);
@@ -2522,14 +2536,28 @@ describe('SalesService', () => {
 
       expect(result.id).toBe('b5e2b8fd-bdfd-471f-b687-ec340d578885');
       expect(result.timeline).toHaveLength(4);
-      expect(result.timeline[1]).toEqual({
-        type: 'PAYMENT_RECEIVED',
-        at: '2026-05-08T10:20:00.000Z',
-      });
-      expect(result.timeline[2]).toEqual({
-        type: 'PAYMENT_RECEIVED',
-        at: '2026-05-08T10:30:00.000Z',
-      });
+      expect(result.timeline[1]).toEqual(
+        expect.objectContaining({
+          type: 'PAYMENT_RECEIVED',
+          at: '2026-05-08T10:20:00.000Z',
+          method: 'CASH',
+          amountCents: 1000,
+          reference: 'CASH-1',
+          actor: { id: 'u1', name: 'Caja 1' },
+          register: 'Principal',
+        }),
+      );
+      expect(result.timeline[2]).toEqual(
+        expect.objectContaining({
+          type: 'PAYMENT_RECEIVED',
+          at: '2026-05-08T10:30:00.000Z',
+          method: 'TRANSFER',
+          amountCents: 800,
+          reference: 'TRF-2',
+          actor: { id: 'u1', name: 'Caja 1' },
+          register: 'Principal',
+        }),
+      );
       expect(result.payments[0].paidAt).toBe('2026-05-08T10:20:00.000Z');
       expect(result.payments[0].reference).toBe('CASH-1');
       expect(result.payments[1].reference).toBe('TRF-2');

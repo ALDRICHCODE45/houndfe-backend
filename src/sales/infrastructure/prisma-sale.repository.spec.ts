@@ -341,6 +341,17 @@ describe('PrismaSaleRepository', () => {
           }),
         }),
       );
+      expect(prisma.sale.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: expect.objectContaining({
+            payments: expect.objectContaining({
+              select: expect.objectContaining({
+                user: { select: { id: true, name: true } },
+              }),
+            }),
+          }),
+        }),
+      );
       expect(result?.cashier).toEqual({ id: 'u1', name: 'Caja 1' });
       expect(result?.dueDate?.toISOString()).toBe('2026-05-30T18:00:00.000Z');
       expect(result?.items[0].subtotalCents).toBe(2000);
@@ -690,6 +701,7 @@ describe('PrismaSaleRepository', () => {
         saleId: 'sale-1',
         method: 'cash',
         amountCents: 2000,
+        userId: 'cashier-1',
       });
 
       expect(prisma.salePayment.aggregate).toHaveBeenCalledWith(
@@ -705,6 +717,13 @@ describe('PrismaSaleRepository', () => {
         paymentStatus: 'PARTIAL',
         totalCents: 5000,
       });
+      expect(prisma.salePayment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId: 'cashier-1',
+          }),
+        }),
+      );
     });
 
     it('rejects when recomputed payment exceeds total debt', async () => {
@@ -1049,6 +1068,7 @@ describe('PrismaSaleRepository', () => {
 
       await repo.persistChargeConfirmation({
         saleId: 'sale-multi-rows',
+        userId: 'cashier-77',
         payments: [
           { method: 'cash', amountCents: 600 },
           { method: 'card_debit', amountCents: 400, reference: 'REF-N' },
@@ -1065,6 +1085,11 @@ describe('PrismaSaleRepository', () => {
       } as never);
 
       expect(prisma.salePayment.create).toHaveBeenCalledTimes(2);
+      expect(prisma.salePayment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ userId: 'cashier-77' }),
+        }),
+      );
     });
 
     it('rejects charge paths when tenant context is empty', async () => {

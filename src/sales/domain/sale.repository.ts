@@ -110,6 +110,7 @@ export interface ISaleRepository {
 
   persistChargeConfirmation(input: {
     saleId: string;
+    userId: string;
     payments: PersistedChargePayment[];
     subtotalCents: number;
     discountCents: number;
@@ -133,6 +134,7 @@ export interface ISaleRepository {
     method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
     amountCents: number;
     reference?: string | null;
+    userId: string;
   }): Promise<{
     paymentId: string;
     paidCents: number;
@@ -233,6 +235,8 @@ export interface ISaleRepository {
       reference: string | null;
       paidAt: Date;
       createdAt: Date;
+      userId: string | null;
+      user: { id: string; name: string } | null;
     }>;
   } | null>;
 }

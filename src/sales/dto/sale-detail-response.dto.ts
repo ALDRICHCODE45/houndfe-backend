@@ -3,10 +3,30 @@ export type SaleTimelineEventType =
   | 'PAYMENT_RECEIVED'
   | 'PRODUCTS_DELIVERED';
 
-export interface SaleDetailTimelineEventDto {
-  type: SaleTimelineEventType;
-  at: string;
-}
+type TimelineActor = { id: string; name: string } | null;
+
+export type SaleDetailTimelineEventDto =
+  | {
+      type: 'SALE_REGISTERED';
+      at: string;
+      actor: TimelineActor;
+      register: string;
+    }
+  | {
+      type: 'PAYMENT_RECEIVED';
+      at: string;
+      method: string;
+      amountCents: number;
+      reference: string | null;
+      actor: TimelineActor;
+      register: string;
+    }
+  | {
+      type: 'PRODUCTS_DELIVERED';
+      at: string;
+      actor: TimelineActor;
+      register: string;
+    };
 
 export interface SaleDetailItemDto {
   productName: string;
