@@ -8,6 +8,7 @@ import {
   OverrideSaleItemPriceInput,
   ApplySaleItemDiscountInput,
 } from './sale-item.entity';
+import { InvalidDueDateError } from './sale.errors';
 
 export type SaleStatus = 'DRAFT' | 'CONFIRMED';
 export type SaleChannel = 'POS' | 'ONLINE';
@@ -33,6 +34,7 @@ export interface SaleFromPersistenceProps {
   customerId?: string | null;
   shippingAddressId?: string | null;
   sellerUserId?: string | null;
+  dueDate?: Date | null;
   items: SaleItemProps[];
   confirmedAt?: Date | null;
   folio?: string | null;
@@ -59,6 +61,7 @@ export class Sale {
   private _items: SaleItem[] = [];
   private _customerId: string | null;
   private _shippingAddressId: string | null;
+  private _dueDate: Date | null;
 
   private constructor(
     public readonly id: string,
@@ -70,6 +73,7 @@ export class Sale {
     customerId: string | null,
     shippingAddressId: string | null,
     public readonly sellerUserId: string | null,
+    dueDate: Date | null,
     items: SaleItem[] = [],
     public readonly confirmedAt?: Date,
     public readonly folio?: string,
@@ -79,6 +83,7 @@ export class Sale {
     this._items = items;
     this._customerId = customerId;
     this._shippingAddressId = shippingAddressId;
+    this._dueDate = dueDate;
   }
 
   static create(props: CreateSaleProps): Sale {
@@ -96,6 +101,7 @@ export class Sale {
       'POS',
       'Principal',
       'DELIVERED',
+      null,
       null,
       null,
       null,
@@ -117,6 +123,7 @@ export class Sale {
       props.customerId ?? null,
       props.shippingAddressId ?? null,
       props.sellerUserId ?? null,
+      props.dueDate ?? null,
       items,
       props.confirmedAt ?? undefined,
       props.folio ?? undefined,
@@ -151,6 +158,7 @@ export class Sale {
       this.customerId,
       this.shippingAddressId,
       this.sellerUserId,
+      this._dueDate,
       [...this._items],
       input.confirmedAt,
       input.folio,
@@ -169,6 +177,22 @@ export class Sale {
 
   get shippingAddressId(): string | null {
     return this._shippingAddressId;
+  }
+
+  get dueDate(): Date | null {
+    return this._dueDate;
+  }
+
+  setDueDate(date: Date | null): void {
+    if (
+      date !== null &&
+      this.confirmedAt !== undefined &&
+      date.getTime() < this.confirmedAt.getTime()
+    ) {
+      throw new InvalidDueDateError();
+    }
+
+    this._dueDate = date;
   }
 
   assignCustomer(customerId: string, shippingAddressId?: string | null): void {
@@ -359,6 +383,7 @@ export class Sale {
       customerId: this.customerId,
       shippingAddressId: this.shippingAddressId,
       sellerUserId: this.sellerUserId,
+      dueDate: this.dueDate ? this.dueDate.toISOString() : null,
       confirmedAt: this.confirmedAt,
       folio: this.folio,
       items: this._items.map((item) => item.toResponse()),
