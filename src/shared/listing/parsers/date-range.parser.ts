@@ -1,4 +1,4 @@
-import { DateRange } from '../listing-types';
+import { ParsedDateRange } from '../listing-types';
 import { assertNotInvertedRange } from './range-guarantees';
 
 type ParseDateRangeInput = {
@@ -26,7 +26,7 @@ const parseDateValue = (
   return date;
 };
 
-export function parseDateRange(input: ParseDateRangeInput): DateRange {
+export function parseDateRange(input: ParseDateRangeInput): ParsedDateRange {
   const from = parseDateValue(input.from, input.fromField);
   const to = parseDateValue(input.to, input.toField);
 

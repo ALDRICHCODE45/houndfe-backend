@@ -1,11 +1,11 @@
 export type MultiValue<T> = T[];
 
-export type NumericRange = {
+export type ParsedNumericRange = {
   min?: number;
   max?: number;
 };
 
-export type DateRange = {
+export type ParsedDateRange = {
   from?: Date;
   to?: Date;
 };

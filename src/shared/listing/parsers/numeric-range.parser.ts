@@ -1,4 +1,4 @@
-import { NumericRange } from '../listing-types';
+import { ParsedNumericRange } from '../listing-types';
 import { assertNotInvertedRange } from './range-guarantees';
 
 type ParseNumericRangeInput = {
@@ -19,7 +19,7 @@ const assertFinite = (value: number | undefined, field: string) => {
   }
 };
 
-export function parseNumericRange(input: ParseNumericRangeInput): NumericRange {
+export function parseNumericRange(input: ParseNumericRangeInput): ParsedNumericRange {
   assertFinite(input.min, input.minField);
   assertFinite(input.max, input.maxField);
 
