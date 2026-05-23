@@ -639,22 +639,83 @@ GET /sales
 Authorization: Bearer <jwt>
 ```
 
-### 6.1) Query params
+### 6.1) Query params (contrato vigente)
 
-| Param | Tipo | Default | Notas |
-|---|---|---|---|
-| `page` | `number` | `1` | `>= 1` |
-| `limit` | `number` | `20` | `1..100` |
-| `sortBy` | `'confirmedAt' \| 'totalCents' \| 'createdAt'` | `confirmedAt` | |
-| `sortOrder` | `'asc' \| 'desc'` | `desc` | |
-| `q` | `string` | — | Búsqueda libre (ver abajo) |
-| `status` | `'DRAFT' \| 'CONFIRMED' \| 'CANCELED'` | — | Filtro opcional |
-| `paymentStatus` | `'PAID' \| 'PARTIAL' \| 'CREDIT'` | — | Filtro por tab |
-| `deliveryStatus` | `'PENDING' \| 'DELIVERED' \| 'NOT_APPLICABLE'` | — | Filtro por tab |
-| `from` | ISO date | — | Rango inicio |
-| `to` | ISO date | — | Rango fin |
-| `cashierUserId` | UUID | — | Filtrar por cajero |
-| `customerId` | UUID | — | Filtrar por cliente |
+> Convenciones compartidas (CSV, rangos, flags null, límites y semántica): `src/shared/listing/README.md`.
+
+| Param | Tipo | Required | Default | Allowed / formato | Límite |
+|---|---|---|---|---|---|
+| `page` | `number` | No | `1` | entero `>= 1` | — |
+| `limit` | `number` | No | `20` | entero `1..100` | — |
+| `sortBy` | `enum` | No | `confirmedAt` | `confirmedAt` \| `totalCents` \| `createdAt` | — |
+| `sortOrder` | `enum` | No | `desc` | `asc` \| `desc` | — |
+| `q` | `string` | No | — | búsqueda libre | — |
+| `status` | `csv enum[]` | No | — | `DRAFT` \| `CONFIRMED` \| `CANCELED` | max 50 |
+| `paymentStatus` | `csv enum[]` | No | — | `PAID` \| `PARTIAL` \| `CREDIT` | max 50 |
+| `deliveryStatus` | `csv enum[]` | No | — | `PENDING` \| `DELIVERED` \| `NOT_APPLICABLE` | max 50 |
+| `paymentMethod` | `csv enum[]` | No | — | `CASH` \| `CARD_CREDIT` \| `CARD_DEBIT` \| `TRANSFER` | max 50 |
+| `folio` | `csv string[]` | No | — | valores string trim/dedupe | max 200 |
+| `cashierUserId` | `csv uuid[]` | No | — | UUID | max 200 |
+| `customerId` | `csv uuid[]` | No | — | UUID | max 200 |
+| `customerIncludeNull` | `boolean` | No | `false` | `true` \| `false` | — |
+| `paymentMethodIncludeNull` | `boolean` | No | `false` | `true` \| `false` | — |
+| `dueDateIncludeNull` | `boolean` | No | `false` | `true` \| `false` | — |
+| `totalMin` / `totalMax` | `number` | No | — | rango inclusivo | — |
+| `debtMin` / `debtMax` | `number` | No | — | rango inclusivo | — |
+| `confirmedFrom` / `confirmedTo` | ISO date | No | — | rango inclusivo UTC | — |
+| `dueDateFrom` / `dueDateTo` | ISO date | No | — | rango inclusivo UTC | — |
+| `from` / `to` | ISO date | No | — | **DEPRECATED alias** de `confirmedFrom` / `confirmedTo` | — |
+
+**Regla de cardinalidad (hard limit):** si un CSV supera su cap, backend retorna `LISTING_TOO_MANY_VALUES`.
+
+### 6.1.1) Ejemplos CSV multi-value
+
+```http
+GET /sales?paymentStatus=PAID,CREDIT&paymentMethod=CASH,TRANSFER
+GET /sales?cashierUserId=uuid-a,uuid-b&customerId=uuid-1,uuid-2
+GET /sales?folio=A-202605-000012,A-202605-000019
+```
+
+Semántica: OR dentro del mismo campo (`IN`) y AND entre campos distintos.
+
+### 6.1.2) Ejemplos de rangos (incluyentes)
+
+```http
+# Ambas cotas
+GET /sales?totalMin=10000&totalMax=80000&confirmedFrom=2026-05-01T00:00:00.000Z&confirmedTo=2026-05-31T23:59:59.999Z
+
+# Solo cota inferior
+GET /sales?debtMin=1&dueDateFrom=2026-06-01T00:00:00.000Z
+
+# Solo cota superior
+GET /sales?totalMax=25000&dueDateTo=2026-06-30T23:59:59.999Z
+```
+
+### 6.1.3) Ejemplos de flags null
+
+```http
+# Cliente "Público en General" (customer = null)
+GET /sales?customerIncludeNull=true
+
+# Filtrar por métodos de pago + incluir ventas CRÉDITO puro (sin rows en payments)
+GET /sales?paymentMethod=CARD_CREDIT,TRANSFER&paymentMethodIncludeNull=true
+
+# Incluir ventas sin fecha de vencimiento
+GET /sales?dueDateFrom=2026-06-01T00:00:00.000Z&dueDateIncludeNull=true
+```
+
+Semántica de negocio:
+- `customerIncludeNull=true`: incluye ventas sin cliente asignado (“Público en General”).
+- `paymentMethodIncludeNull=true`: incluye ventas sin registros en `payments` (ej. crédito puro).
+- `dueDateIncludeNull=true`: incluye ventas sin `dueDate`.
+
+### 6.1.4) Alias deprecado `from`/`to`
+
+- `from`/`to` siguen aceptados temporalmente, pero frontend debe migrar a `confirmedFrom`/`confirmedTo`.
+- Si se envían alias y canonical al mismo tiempo, **gana canonical** (`confirmedFrom`/`confirmedTo`).
+- Cuando se usa alias legacy, backend emite log deprecado en servidor:
+  - `"[DEPRECATION] sales-list query used legacy from/to alias"`
+- Los alias serán removidos en una release futura.
 
 ### 6.2) Búsqueda (`q`)
 
@@ -730,6 +791,8 @@ Los contadores se calculan sobre la base `tenant + CONFIRMED + q + from/to + cas
 
 Esto permite que los tabs siempre muestren totales reales sin importar qué filtro esté activo.
 
+> **Nota KPI (locked):** `counts.all`, `counts.pendingPayments` y `counts.notDelivered` responden SOLO al filtro base (`q`, `confirmedFrom/confirmedTo`, `cashierUserId`, `customerId` + `customerIncludeNull`). Filtros extendidos (`paymentStatus`, `paymentMethod`, `deliveryStatus`, `folio`, rangos de total/deuda/dueDate, etc.) **NO** cambian estos KPI.
+
 ### 6.6) Mapeo para tabla frontend
 
 | Columna | Campo | Formato |
@@ -754,6 +817,92 @@ Esto permite que los tabs siempre muestren totales reales sin importar qué filt
 | **Todas** | Sin filtro adicional | `counts.all` |
 | **Pagos Pendientes** | `paymentStatus=PARTIAL` o `paymentStatus=CREDIT` | `counts.pendingPayments` |
 | **No Entregadas** | `deliveryStatus=PENDING` | `counts.notDelivered` |
+
+### 6.8) Errores de validación listing (`LISTING_*`)
+
+Para validaciones de filtros del listado, el backend usa este envelope:
+
+```json
+{
+  "statusCode": 400,
+  "code": "LISTING_INVALID_ENUM_VALUE",
+  "message": "paymentStatus is invalid",
+  "field": "paymentStatus",
+  "details": {
+    "allowed": ["PAID", "PARTIAL", "CREDIT"]
+  }
+}
+```
+
+Ejemplos concretos por código:
+
+```json
+{
+  "statusCode": 400,
+  "code": "LISTING_TOO_MANY_VALUES",
+  "message": "cashierUserId exceeds cardinality cap",
+  "field": "cashierUserId",
+  "details": { "cap": 200 }
+}
+```
+
+```json
+{
+  "statusCode": 400,
+  "code": "LISTING_INVALID_UUID",
+  "message": "customerId contains an invalid UUID",
+  "field": "customerId"
+}
+```
+
+```json
+{
+  "statusCode": 400,
+  "code": "LISTING_INVALID_NUMBER",
+  "message": "totalMin must be a finite number",
+  "field": "totalMin"
+}
+```
+
+```json
+{
+  "statusCode": 400,
+  "code": "LISTING_INVALID_DATE",
+  "message": "confirmedFrom must be a valid ISO date",
+  "field": "confirmedFrom"
+}
+```
+
+```json
+{
+  "statusCode": 400,
+  "code": "LISTING_INVERTED_RANGE",
+  "message": "confirmedFrom must be <= confirmedTo",
+  "field": "confirmedAt",
+  "details": {
+    "min": "2026-06-01T00:00:00.000Z",
+    "max": "2026-05-01T00:00:00.000Z"
+  }
+}
+```
+
+```json
+{
+  "statusCode": 400,
+  "code": "LISTING_INVALID_ENUM_VALUE",
+  "message": "paymentMethod has unsupported values",
+  "field": "paymentMethod",
+  "details": {
+    "allowed": ["CASH", "CARD_CREDIT", "CARD_DEBIT", "TRANSFER"]
+  }
+}
+```
+
+### 6.9) Nota frontend (validación previa)
+
+Los caps de cardinalidad en backend son límites duros. El frontend debe validar antes de enviar:
+- max 50 en filtros CSV enum
+- max 200 en CSV UUID y string
 
 ---
 
