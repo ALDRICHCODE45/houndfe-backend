@@ -11,6 +11,7 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
+import { createListingValidationExceptionFactory } from './shared/listing/listing-validation-exception.factory';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -22,6 +23,7 @@ async function bootstrap() {
       whitelist: true, // strip unknown properties
       forbidNonWhitelisted: true, // throw on unknown properties
       transform: true, // auto-transform payloads to DTO instances
+      exceptionFactory: createListingValidationExceptionFactory(),
     }),
   );
 
