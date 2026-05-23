@@ -620,7 +620,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
     if (input.q?.trim()) {
       const q = input.q.trim();
-      const orClauses: Prisma.SaleWhereInput[] = [
+      const qOrClauses: Prisma.SaleWhereInput[] = [
         { customer: { firstName: { contains: q, mode: 'insensitive' } } },
         { customer: { lastName: { contains: q, mode: 'insensitive' } } },
         { user: { name: { contains: q, mode: 'insensitive' } } },
@@ -632,9 +632,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       // Otherwise, use standard contains.
       if (/^\d+$/.test(q)) {
         const padded = q.padStart(6, '0');
-        orClauses.push({ folio: { endsWith: padded, mode: 'insensitive' } });
+        qOrClauses.push({ folio: { endsWith: padded, mode: 'insensitive' } });
       } else {
-        orClauses.push({ folio: { contains: q, mode: 'insensitive' } });
+        qOrClauses.push({ folio: { contains: q, mode: 'insensitive' } });
       }
 
       // "Público en General" virtual match: when q matches common tokens,
@@ -645,10 +645,26 @@ export class PrismaSaleRepository implements ISaleRepository {
         .replace(/[\u0300-\u036f]/g, '');
       const publicTokens = ['publico', 'general', 'publico en general'];
       if (publicTokens.some((token) => token.includes(normalized) || normalized.includes(token))) {
-        orClauses.push({ customerId: null });
+        qOrClauses.push({ customerId: null });
       }
 
-      where.OR = where.OR ? [...(where.OR as Prisma.SaleWhereInput[]), ...orClauses] : orClauses;
+      const qClause: Prisma.SaleWhereInput = { OR: qOrClauses };
+      const existingCustomerOr = Array.isArray(where.OR) ? [...where.OR] : undefined;
+
+      if (existingCustomerOr) {
+        delete where.OR;
+        const existingAnd = where.AND
+          ? Array.isArray(where.AND)
+            ? where.AND
+            : [where.AND]
+          : [];
+        where.AND = [...existingAnd, { OR: existingCustomerOr }, qClause];
+      } else {
+        if (where.customerId === null && qOrClauses.some((clause) => clause.customerId === null)) {
+          delete where.customerId;
+        }
+        where.OR = qOrClauses;
+      }
     }
 
     return where;

@@ -85,6 +85,22 @@ describe('PrismaSaleRepository', () => {
     };
 
     const baseClause = (where: any) => (where.AND ? where.AND[0] : where);
+    const collectCustomerIdNullClauses = (node: any): any[] => {
+      if (!node || typeof node !== 'object') return [];
+
+      const own =
+        'customerId' in node &&
+        (node as Record<string, unknown>).customerId === null &&
+        !Array.isArray(node)
+          ? [node]
+          : [];
+
+      const nested = Array.isArray(node)
+        ? node.flatMap((item) => collectCustomerIdNullClauses(item))
+        : Object.values(node).flatMap((value) => collectCustomerIdNullClauses(value));
+
+      return [...own, ...nested];
+    };
 
     it('includes payments and maps unique paymentMethods', async () => {
       prisma.sale.findMany.mockResolvedValue([
@@ -247,6 +263,104 @@ describe('PrismaSaleRepository', () => {
       const call = prisma.sale.findMany.mock.calls[0][0] as any;
       const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
       expect(nullClause).toBeUndefined();
+    });
+
+    it('keeps a single customerId null OR clause when q="público" and customerIncludeNull=true', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: 'público',
+        customerIncludeNull: true,
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const nullClauses =
+        call.where.OR?.filter(
+          (c: any) => c && typeof c === 'object' && 'customerId' in c && c.customerId === null,
+        ) ?? [];
+
+      expect(nullClauses).toHaveLength(1);
+      expect(call.where.customerId).toBeUndefined();
+    });
+
+    it('keeps a single customerId null clause from q OR when q="público" only', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: 'público',
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const nullClauses = collectCustomerIdNullClauses(call.where);
+
+      expect(nullClauses).toHaveLength(1);
+      expect(call.where.OR).toEqual(
+        expect.arrayContaining([
+          { customer: { firstName: { contains: 'público', mode: 'insensitive' } } },
+          { customerId: null },
+        ]),
+      );
+    });
+
+    it('keeps include-null in customer dimension when q has no public token', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        q: 'cualquiercosa',
+        customerIncludeNull: true,
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+
+      expect(call.where.customerId).toBeNull();
+      expect(call.where.OR).toEqual(
+        expect.arrayContaining([
+          { customer: { firstName: { contains: 'cualquiercosa', mode: 'insensitive' } } },
+        ]),
+      );
+      expect(call.where.OR).not.toEqual(expect.arrayContaining([{ customerId: null }]));
+    });
+
+    it('separates customer include-null OR from q OR when customerId[] + includeNull + q="público"', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        customerId: ['c1'],
+        customerIncludeNull: true,
+        q: 'público',
+      } as any);
+
+      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+
+      expect(call.where.OR).toBeUndefined();
+      expect(call.where.AND).toEqual(
+        expect.arrayContaining([
+          { OR: [{ customerId: { in: ['c1'] } }, { customerId: null }] },
+          {
+            OR: expect.arrayContaining([
+              { customer: { firstName: { contains: 'público', mode: 'insensitive' } } },
+              { customerId: null },
+            ]),
+          },
+        ]),
+      );
+      expect(collectCustomerIdNullClauses(call.where)).toHaveLength(2);
     });
 
     it('translates status multi-value as in clause', async () => {
