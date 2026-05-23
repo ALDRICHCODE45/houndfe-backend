@@ -591,8 +591,8 @@ export class SalesService {
       q: query.q,
       from: query.from,
       to: query.to,
-      cashierUserId: query.cashierUserId,
-      customerId: query.customerId,
+      cashierUserId: query.cashierUserId as unknown as string | undefined,
+      customerId: query.customerId as unknown as string | undefined,
     };
 
     const [data, total, groupedPaymentStatus, notDelivered] = await Promise.all([
@@ -602,13 +602,17 @@ export class SalesService {
         sortBy: query.sortBy ?? 'confirmedAt',
         sortOrder: query.sortOrder ?? 'desc',
         q: query.q,
-        status: query.status,
-        paymentStatus: query.paymentStatus,
-        deliveryStatus: query.deliveryStatus,
+        status: query.status as unknown as 'DRAFT' | 'CONFIRMED' | 'CANCELED' | undefined,
+        paymentStatus: query.paymentStatus as unknown as 'PAID' | 'PARTIAL' | 'CREDIT' | undefined,
+        deliveryStatus: query.deliveryStatus as unknown as
+          | 'PENDING'
+          | 'DELIVERED'
+          | 'NOT_APPLICABLE'
+          | undefined,
         from: query.from,
         to: query.to,
-        cashierUserId: query.cashierUserId,
-        customerId: query.customerId,
+        cashierUserId: query.cashierUserId as unknown as string | undefined,
+        customerId: query.customerId as unknown as string | undefined,
       }),
       this.saleRepo.countConfirmed(baseFilters),
       this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),

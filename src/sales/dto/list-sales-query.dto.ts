@@ -110,15 +110,15 @@ export class ListSalesQueryDto {
 
   @IsOptional()
   @CsvEnum(ListSalesStatus, { max: 50, field: 'status' })
-  status?: any;
+  status?: MultiValue<ListSalesStatus>;
 
   @IsOptional()
   @CsvEnum(ListSalesPaymentStatus, { max: 50, field: 'paymentStatus' })
-  paymentStatus?: any;
+  paymentStatus?: MultiValue<ListSalesPaymentStatus>;
 
   @IsOptional()
   @CsvEnum(ListSalesDeliveryStatus, { max: 50, field: 'deliveryStatus' })
-  deliveryStatus?: any;
+  deliveryStatus?: MultiValue<ListSalesDeliveryStatus>;
 
   @IsOptional()
   @CsvEnum(ListSalesPaymentMethod, { max: 50, field: 'paymentMethod' })
@@ -130,11 +130,11 @@ export class ListSalesQueryDto {
 
   @IsOptional()
   @CsvUuid({ max: 200, field: 'cashierUserId' })
-  cashierUserId?: any;
+  cashierUserId?: MultiValue<string>;
 
   @IsOptional()
   @CsvUuid({ max: 200, field: 'customerId' })
-  customerId?: any;
+  customerId?: MultiValue<string>;
 
   @IsOptional()
   @Transform(({ value }) => toBoolean(value))

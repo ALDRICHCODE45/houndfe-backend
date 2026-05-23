@@ -594,15 +594,24 @@ export class PrismaSaleRepository implements ISaleRepository {
     q?: string;
     from?: Date;
     to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
+    cashierUserId?: string | string[];
+    customerId?: string | string[];
   }): Prisma.SaleWhereInput {
     const where: Prisma.SaleWhereInput = {
       status: 'CONFIRMED',
     };
 
-    if (input.cashierUserId) where.userId = input.cashierUserId;
-    if (input.customerId) where.customerId = input.customerId;
+    const cashierUserId = Array.isArray(input.cashierUserId)
+      ? input.cashierUserId[0]
+      : input.cashierUserId;
+    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
+    if (cashierUserId) where.userId = cashierUserId;
+
+    const customerId = Array.isArray(input.customerId)
+      ? input.customerId[0]
+      : input.customerId;
+    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
+    if (customerId) where.customerId = customerId;
     if (input.from || input.to) {
       where.confirmedAt = {
         ...(input.from ? { gte: input.from } : {}),
@@ -652,23 +661,35 @@ export class PrismaSaleRepository implements ISaleRepository {
     sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
     sortOrder: 'asc' | 'desc';
     q?: string;
-    status?: 'DRAFT' | 'CONFIRMED' | 'CANCELED';
-    paymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT';
-    deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+    status?: 'DRAFT' | 'CONFIRMED' | 'CANCELED' | Array<'DRAFT' | 'CONFIRMED' | 'CANCELED'>;
+    paymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT' | Array<'PAID' | 'PARTIAL' | 'CREDIT'>;
+    deliveryStatus?:
+      | 'PENDING'
+      | 'DELIVERED'
+      | 'NOT_APPLICABLE'
+      | Array<'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE'>;
     from?: Date;
     to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
+    cashierUserId?: string | string[];
+    customerId?: string | string[];
   }) {
     const prisma = this.tenantPrisma.getClient();
     const baseWhere = this.buildConfirmedBaseWhere(input);
+    const paymentStatus = Array.isArray(input.paymentStatus)
+      ? input.paymentStatus[0]
+      : input.paymentStatus;
+    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
+    const deliveryStatus = Array.isArray(input.deliveryStatus)
+      ? input.deliveryStatus[0]
+      : input.deliveryStatus;
+    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
+    const status = Array.isArray(input.status) ? input.status[0] : input.status;
+    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
     const where: Prisma.SaleWhereInput = {
       ...baseWhere,
-      ...(input.paymentStatus ? { paymentStatus: input.paymentStatus } : {}),
-      ...(input.deliveryStatus ? { deliveryStatus: input.deliveryStatus } : {}),
-      ...(input.status && input.status !== 'CANCELED'
-        ? { status: input.status }
-        : {}),
+      ...(paymentStatus ? { paymentStatus } : {}),
+      ...(deliveryStatus ? { deliveryStatus } : {}),
+      ...(status && status !== 'CANCELED' ? { status } : {}),
     };
 
     const rows = await prisma.sale.findMany({
@@ -712,8 +733,8 @@ export class PrismaSaleRepository implements ISaleRepository {
     q?: string;
     from?: Date;
     to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
+    cashierUserId?: string | string[];
+    customerId?: string | string[];
   }): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.sale.count({ where: this.buildConfirmedBaseWhere(input) });
@@ -723,8 +744,8 @@ export class PrismaSaleRepository implements ISaleRepository {
     q?: string;
     from?: Date;
     to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
+    cashierUserId?: string | string[];
+    customerId?: string | string[];
   }): Promise<
     Array<{ paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null; _count: { _all: number } }>
   > {
@@ -745,8 +766,8 @@ export class PrismaSaleRepository implements ISaleRepository {
     q?: string;
     from?: Date;
     to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
+    cashierUserId?: string | string[];
+    customerId?: string | string[];
   }): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.sale.count({
