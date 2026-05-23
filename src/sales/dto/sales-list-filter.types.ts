@@ -1,4 +1,7 @@
-import { DateRange, NumericRange } from '../../shared/listing';
+import type {
+  ParsedDateRange,
+  ParsedNumericRange,
+} from '../../shared/listing/listing-types';
 import {
   ListSalesDeliveryStatus,
   ListSalesPaymentMethod,
@@ -11,7 +14,7 @@ export interface SalesListBaseFilter {
   cashierUserId?: string[];
   customerId?: string[];
   customerIncludeNull?: boolean;
-  confirmedAt?: DateRange;
+  confirmedAt?: ParsedDateRange;
 }
 
 export interface SalesListExtendedFilter extends SalesListBaseFilter {
@@ -21,8 +24,8 @@ export interface SalesListExtendedFilter extends SalesListBaseFilter {
   deliveryStatus?: ListSalesDeliveryStatus[];
   paymentMethod?: ListSalesPaymentMethod[];
   paymentMethodIncludeNull?: boolean;
-  total?: NumericRange;
-  debt?: NumericRange;
-  dueDate?: DateRange;
+  total?: ParsedNumericRange;
+  debt?: ParsedNumericRange;
+  dueDate?: ParsedDateRange;
   dueDateIncludeNull?: boolean;
 }

@@ -57,7 +57,7 @@ export enum ListSalesPaymentMethod {
 const deprecationLogger = new Logger('ListSalesQueryDto');
 const LEGACY_ALIAS_WARN =
   '[DEPRECATION] sales-list query used legacy from/to alias';
-const LEGACY_WARNED_SYMBOL = Symbol('sales-list-legacy-from-to-warned');
+const LEGACY_WARNED_KEY = '__salesListLegacyFromToWarned';
 
 const toBoolean = (value: unknown): unknown => {
   if (value === true || value === 'true') return true;
@@ -66,11 +66,11 @@ const toBoolean = (value: unknown): unknown => {
 };
 
 const maybeWarnLegacyDateAlias = (obj: Record<string, unknown>): void => {
-  if (obj[LEGACY_WARNED_SYMBOL]) return;
+  if (obj[LEGACY_WARNED_KEY]) return;
 
   if (obj.from !== undefined || obj.to !== undefined) {
     deprecationLogger.warn(LEGACY_ALIAS_WARN);
-    obj[LEGACY_WARNED_SYMBOL] = true;
+    obj[LEGACY_WARNED_KEY] = true;
   }
 };
 
@@ -80,8 +80,8 @@ const coerceOptionalDate = (value: unknown): unknown => {
 };
 
 export class ListSalesQueryDto {
-  private _from?: string;
-  private _to?: string;
+  private _from?: Date;
+  private _to?: Date;
 
   @IsOptional()
   @Type(() => Number)
@@ -110,15 +110,15 @@ export class ListSalesQueryDto {
 
   @IsOptional()
   @CsvEnum(ListSalesStatus, { max: 50, field: 'status' })
-  status?: MultiValue<ListSalesStatus>;
+  status?: any;
 
   @IsOptional()
   @CsvEnum(ListSalesPaymentStatus, { max: 50, field: 'paymentStatus' })
-  paymentStatus?: MultiValue<ListSalesPaymentStatus>;
+  paymentStatus?: any;
 
   @IsOptional()
   @CsvEnum(ListSalesDeliveryStatus, { max: 50, field: 'deliveryStatus' })
-  deliveryStatus?: MultiValue<ListSalesDeliveryStatus>;
+  deliveryStatus?: any;
 
   @IsOptional()
   @CsvEnum(ListSalesPaymentMethod, { max: 50, field: 'paymentMethod' })
@@ -130,11 +130,11 @@ export class ListSalesQueryDto {
 
   @IsOptional()
   @CsvUuid({ max: 200, field: 'cashierUserId' })
-  cashierUserId?: MultiValue<string>;
+  cashierUserId?: any;
 
   @IsOptional()
   @CsvUuid({ max: 200, field: 'customerId' })
-  customerId?: MultiValue<string>;
+  customerId?: any;
 
   @IsOptional()
   @Transform(({ value }) => toBoolean(value))
@@ -187,29 +187,29 @@ export class ListSalesQueryDto {
 
   /** @deprecated Use confirmedFrom */
   @IsOptional()
-  set from(value: string | undefined) {
-    this._from = value;
+  set from(value: string | Date | undefined) {
+    this._from = coerceOptionalDate(value) as Date | undefined;
     maybeWarnLegacyDateAlias(this as unknown as Record<string, unknown>);
     if (this.confirmedFrom === undefined) {
-      this.confirmedFrom = coerceOptionalDate(value) as Date | undefined;
+      this.confirmedFrom = this._from;
     }
   }
 
-  get from(): string | undefined {
+  get from(): Date | undefined {
     return this._from;
   }
 
   /** @deprecated Use confirmedTo */
   @IsOptional()
-  set to(value: string | undefined) {
-    this._to = value;
+  set to(value: string | Date | undefined) {
+    this._to = coerceOptionalDate(value) as Date | undefined;
     maybeWarnLegacyDateAlias(this as unknown as Record<string, unknown>);
     if (this.confirmedTo === undefined) {
-      this.confirmedTo = coerceOptionalDate(value) as Date | undefined;
+      this.confirmedTo = this._to;
     }
   }
 
-  get to(): string | undefined {
+  get to(): Date | undefined {
     return this._to;
   }
 }
