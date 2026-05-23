@@ -12,6 +12,17 @@ type ListingContext = {
   details?: ListingErrorInput['details'];
 };
 
+const extractListingContext = (
+  contexts: ValidationError['contexts'],
+): ListingContext | undefined => {
+  if (!contexts) return undefined;
+
+  return Object.values(contexts).find(
+    (context): context is ListingContext =>
+      Boolean(context) && typeof (context as ListingContext).code === 'string',
+  );
+};
+
 const firstConstraintMessage = (error: ValidationError): string => {
   const first = error.constraints ? Object.values(error.constraints)[0] : undefined;
   return first ?? `${error.property} is invalid`;
@@ -20,7 +31,7 @@ const firstConstraintMessage = (error: ValidationError): string => {
 export const createListingValidationExceptionFactory = () => {
   return (errors: ValidationError[]) => {
     for (const error of errors) {
-      const ctx = error.contexts?.listingError as ListingContext | undefined;
+      const ctx = extractListingContext(error.contexts);
       if (ctx?.code) {
         return new ListingHttpException({
           code: ctx.code,
