@@ -31,6 +31,7 @@ export class SalesQueryController {
   @Get()
   @RequirePermissions(['read', 'Sale'])
   list(@Query() query: ListSalesQueryDto) {
+    query.resolveLegacyAlias();
     return this.salesService.listSales(query);
   }
 
