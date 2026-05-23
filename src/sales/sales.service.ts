@@ -37,6 +37,10 @@ import type { AvailablePricesResponseDto } from './dto/available-prices-response
 import type { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 import type { ChargeSaleDto } from './dto/charge-sale.dto';
 import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import type {
+  SalesListBaseFilter,
+  SalesListExtendedFilter,
+} from './dto/sales-list-filter.types';
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import type { AssignCustomerDto } from './dto/assign-customer.dto';
@@ -587,12 +591,14 @@ export class SalesService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 
-    const baseFilters = {
-      q: query.q,
-      from: query.from,
-      to: query.to,
-      cashierUserId: query.cashierUserId as unknown as string | undefined,
-      customerId: query.customerId as unknown as string | undefined,
+    const extendedFilters = this.toSalesListExtendedFilter(query);
+    const baseFilters: SalesListBaseFilter = {
+      q: extendedFilters.q,
+      cashierUserId: extendedFilters.cashierUserId,
+      customerId: extendedFilters.customerId,
+      customerIncludeNull: extendedFilters.customerIncludeNull,
+      confirmedFrom: extendedFilters.confirmedFrom,
+      confirmedTo: extendedFilters.confirmedTo,
     };
 
     const [data, total, groupedPaymentStatus, notDelivered] = await Promise.all([
@@ -601,18 +607,7 @@ export class SalesService {
         limit,
         sortBy: query.sortBy ?? 'confirmedAt',
         sortOrder: query.sortOrder ?? 'desc',
-        q: query.q,
-        status: query.status as unknown as 'DRAFT' | 'CONFIRMED' | 'CANCELED' | undefined,
-        paymentStatus: query.paymentStatus as unknown as 'PAID' | 'PARTIAL' | 'CREDIT' | undefined,
-        deliveryStatus: query.deliveryStatus as unknown as
-          | 'PENDING'
-          | 'DELIVERED'
-          | 'NOT_APPLICABLE'
-          | undefined,
-        from: query.from,
-        to: query.to,
-        cashierUserId: query.cashierUserId as unknown as string | undefined,
-        customerId: query.customerId as unknown as string | undefined,
+        ...extendedFilters,
       }),
       this.saleRepo.countConfirmed(baseFilters),
       this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
@@ -633,6 +628,30 @@ export class SalesService {
         pendingPayments,
         notDelivered,
       },
+    };
+  }
+
+  private toSalesListExtendedFilter(query: ListSalesQueryDto): SalesListExtendedFilter {
+    return {
+      q: query.q,
+      folio: query.folio,
+      status: query.status,
+      paymentStatus: query.paymentStatus,
+      deliveryStatus: query.deliveryStatus,
+      paymentMethod: query.paymentMethod,
+      paymentMethodIncludeNull: query.paymentMethodIncludeNull,
+      totalMin: query.totalMin,
+      totalMax: query.totalMax,
+      debtMin: query.debtMin,
+      debtMax: query.debtMax,
+      dueDateFrom: query.dueDateFrom,
+      dueDateTo: query.dueDateTo,
+      dueDateIncludeNull: query.dueDateIncludeNull,
+      cashierUserId: query.cashierUserId,
+      customerId: query.customerId,
+      customerIncludeNull: query.customerIncludeNull,
+      confirmedFrom: query.confirmedFrom,
+      confirmedTo: query.confirmedTo,
     };
   }
 

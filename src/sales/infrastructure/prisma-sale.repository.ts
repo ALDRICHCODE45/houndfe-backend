@@ -721,146 +721,14 @@ export class PrismaSaleRepository implements ISaleRepository {
     return andClauses.length === 1 ? andClauses[0] : { AND: andClauses };
   }
 
-  private normalizeBaseFilter(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    confirmedFrom?: Date;
-    confirmedTo?: Date;
-    cashierUserId?: string | string[];
-    customerId?: string | string[];
-    customerIncludeNull?: boolean;
-  }): SalesListBaseFilter {
-    return {
-      q: input.q,
-      confirmedFrom: input.confirmedFrom ?? input.from,
-      confirmedTo: input.confirmedTo ?? input.to,
-      cashierUserId: Array.isArray(input.cashierUserId)
-        ? input.cashierUserId
-        : input.cashierUserId
-          ? [input.cashierUserId]
-          : undefined,
-      customerId: Array.isArray(input.customerId)
-        ? input.customerId
-        : input.customerId
-          ? [input.customerId]
-          : undefined,
-      customerIncludeNull: input.customerIncludeNull,
-    };
-  }
-
-  private normalizeExtendedFilter(input: {
+  async findManyConfirmed(input: SalesListExtendedFilter & {
     page: number;
     limit: number;
     sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
     sortOrder: 'asc' | 'desc';
-    q?: string;
-    status?: 'DRAFT' | 'CONFIRMED' | 'CANCELED' | Array<'DRAFT' | 'CONFIRMED' | 'CANCELED'>;
-    paymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT' | Array<'PAID' | 'PARTIAL' | 'CREDIT'>;
-    deliveryStatus?:
-      | 'PENDING'
-      | 'DELIVERED'
-      | 'NOT_APPLICABLE'
-      | Array<'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE'>;
-    paymentMethod?:
-      | 'CASH'
-      | 'CARD_CREDIT'
-      | 'CARD_DEBIT'
-      | 'TRANSFER'
-      | Array<'CASH' | 'CARD_CREDIT' | 'CARD_DEBIT' | 'TRANSFER'>;
-    paymentMethodIncludeNull?: boolean;
-    from?: Date;
-    to?: Date;
-    confirmedFrom?: Date;
-    confirmedTo?: Date;
-    dueDateFrom?: Date;
-    dueDateTo?: Date;
-    dueDateIncludeNull?: boolean;
-    totalMin?: number;
-    totalMax?: number;
-    debtMin?: number;
-    debtMax?: number;
-    folio?: string | string[];
-    cashierUserId?: string | string[];
-    customerId?: string | string[];
-    customerIncludeNull?: boolean;
-  }): SalesListExtendedFilter {
-    const normalizedBase = this.normalizeBaseFilter(input);
-    const status = (Array.isArray(input.status) ? input.status : input.status ? [input.status] : undefined) as
-      | SalesListExtendedFilter['status']
-      | undefined;
-    const paymentStatus = (Array.isArray(input.paymentStatus)
-      ? input.paymentStatus
-      : input.paymentStatus
-        ? [input.paymentStatus]
-        : undefined) as SalesListExtendedFilter['paymentStatus'] | undefined;
-    const deliveryStatus = (Array.isArray(input.deliveryStatus)
-      ? input.deliveryStatus
-      : input.deliveryStatus
-        ? [input.deliveryStatus]
-        : undefined) as SalesListExtendedFilter['deliveryStatus'] | undefined;
-    const paymentMethod = (Array.isArray(input.paymentMethod)
-      ? input.paymentMethod
-      : input.paymentMethod
-        ? [input.paymentMethod]
-        : undefined) as SalesListExtendedFilter['paymentMethod'] | undefined;
-
-    return {
-      ...normalizedBase,
-      status,
-      paymentStatus,
-      deliveryStatus,
-      paymentMethod,
-      paymentMethodIncludeNull: input.paymentMethodIncludeNull,
-      dueDateFrom: input.dueDateFrom,
-      dueDateTo: input.dueDateTo,
-      dueDateIncludeNull: input.dueDateIncludeNull,
-      totalMin: input.totalMin,
-      totalMax: input.totalMax,
-      debtMin: input.debtMin,
-      debtMax: input.debtMax,
-      folio: Array.isArray(input.folio) ? input.folio : input.folio ? [input.folio] : undefined,
-    };
-  }
-
-  async findManyConfirmed(input: {
-    page: number;
-    limit: number;
-    sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
-    sortOrder: 'asc' | 'desc';
-    q?: string;
-    status?: 'DRAFT' | 'CONFIRMED' | 'CANCELED' | Array<'DRAFT' | 'CONFIRMED' | 'CANCELED'>;
-    paymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT' | Array<'PAID' | 'PARTIAL' | 'CREDIT'>;
-    deliveryStatus?:
-      | 'PENDING'
-      | 'DELIVERED'
-      | 'NOT_APPLICABLE'
-      | Array<'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE'>;
-    paymentMethod?:
-      | 'CASH'
-      | 'CARD_CREDIT'
-      | 'CARD_DEBIT'
-      | 'TRANSFER'
-      | Array<'CASH' | 'CARD_CREDIT' | 'CARD_DEBIT' | 'TRANSFER'>;
-    paymentMethodIncludeNull?: boolean;
-    from?: Date;
-    to?: Date;
-    confirmedFrom?: Date;
-    confirmedTo?: Date;
-    dueDateFrom?: Date;
-    dueDateTo?: Date;
-    dueDateIncludeNull?: boolean;
-    totalMin?: number;
-    totalMax?: number;
-    debtMin?: number;
-    debtMax?: number;
-    folio?: string | string[];
-    cashierUserId?: string | string[];
-    customerId?: string | string[];
-    customerIncludeNull?: boolean;
   }) {
     const prisma = this.tenantPrisma.getClient();
-    const where = this.buildExtendedWhere(this.normalizeExtendedFilter(input));
+    const where = this.buildExtendedWhere(input);
 
     const rows = await prisma.sale.findMany({
       where,
@@ -899,36 +767,18 @@ export class PrismaSaleRepository implements ISaleRepository {
     }));
   }
 
-  async countConfirmed(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    confirmedFrom?: Date;
-    confirmedTo?: Date;
-    cashierUserId?: string | string[];
-    customerId?: string | string[];
-    customerIncludeNull?: boolean;
-  }): Promise<number> {
+  async countConfirmed(input: SalesListBaseFilter): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
-    return prisma.sale.count({ where: this.buildBaseWhere(this.normalizeBaseFilter(input)) });
+    return prisma.sale.count({ where: this.buildBaseWhere(input) });
   }
 
-  async groupByPaymentStatusConfirmed(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    confirmedFrom?: Date;
-    confirmedTo?: Date;
-    cashierUserId?: string | string[];
-    customerId?: string | string[];
-    customerIncludeNull?: boolean;
-  }): Promise<
+  async groupByPaymentStatusConfirmed(input: SalesListBaseFilter): Promise<
     Array<{ paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null; _count: { _all: number } }>
   > {
     const prisma = this.tenantPrisma.getClient();
     const grouped = await prisma.sale.groupBy({
       by: ['paymentStatus'],
-      where: this.buildBaseWhere(this.normalizeBaseFilter(input)),
+      where: this.buildBaseWhere(input),
       _count: { _all: true },
     });
 
@@ -938,20 +788,11 @@ export class PrismaSaleRepository implements ISaleRepository {
     }>;
   }
 
-  async countNotDeliveredConfirmed(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    confirmedFrom?: Date;
-    confirmedTo?: Date;
-    cashierUserId?: string | string[];
-    customerId?: string | string[];
-    customerIncludeNull?: boolean;
-  }): Promise<number> {
+  async countNotDeliveredConfirmed(input: SalesListBaseFilter): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.sale.count({
       where: {
-        ...this.buildBaseWhere(this.normalizeBaseFilter(input)),
+        ...this.buildBaseWhere(input),
         NOT: { deliveryStatus: 'DELIVERED' },
       },
     });

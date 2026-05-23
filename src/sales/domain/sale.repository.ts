@@ -1,4 +1,8 @@
 import { Sale } from './sale.entity';
+import type {
+  SalesListBaseFilter,
+  SalesListExtendedFilter,
+} from '../dto/sales-list-filter.types';
 
 export type PersistedChargePayment = {
   method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
@@ -143,19 +147,11 @@ export interface ISaleRepository {
     totalCents: number;
   }>;
 
-  findManyConfirmed(input: {
+  findManyConfirmed(input: SalesListExtendedFilter & {
     page: number;
     limit: number;
     sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
     sortOrder: 'asc' | 'desc';
-    q?: string;
-    status?: 'DRAFT' | 'CONFIRMED' | 'CANCELED';
-    paymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT';
-    deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
-    from?: Date;
-    to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
   }): Promise<
     Array<{
       id: string;
@@ -174,29 +170,13 @@ export interface ISaleRepository {
     }>
   >;
 
-  countConfirmed(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
-  }): Promise<number>;
+  countConfirmed(input: SalesListBaseFilter): Promise<number>;
 
-  groupByPaymentStatusConfirmed(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
-  }): Promise<Array<{ paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null; _count: { _all: number } }>>;
+  groupByPaymentStatusConfirmed(
+    input: SalesListBaseFilter,
+  ): Promise<Array<{ paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null; _count: { _all: number } }>>;
 
-  countNotDeliveredConfirmed(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    cashierUserId?: string;
-    customerId?: string;
-  }): Promise<number>;
+  countNotDeliveredConfirmed(input: SalesListBaseFilter): Promise<number>;
 
   findOneWithRelations(id: string): Promise<{
     id: string;
