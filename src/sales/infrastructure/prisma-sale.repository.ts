@@ -14,6 +14,10 @@ import type {
 import { Sale, type SaleStatus } from '../domain/sale.entity';
 import { Prisma } from '@prisma/client';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import type {
+  SalesListBaseFilter,
+  SalesListExtendedFilter,
+} from '../dto/sales-list-filter.types';
 
 function extractLegacyReference(metadataJson: unknown): string | null {
   if (!metadataJson || typeof metadataJson !== 'object') {
@@ -590,32 +594,27 @@ export class PrismaSaleRepository implements ISaleRepository {
     };
   }
 
-  private buildConfirmedBaseWhere(input: {
-    q?: string;
-    from?: Date;
-    to?: Date;
-    cashierUserId?: string | string[];
-    customerId?: string | string[];
-  }): Prisma.SaleWhereInput {
+  private buildBaseWhere(input: SalesListBaseFilter): Prisma.SaleWhereInput {
     const where: Prisma.SaleWhereInput = {
       status: 'CONFIRMED',
     };
 
-    const cashierUserId = Array.isArray(input.cashierUserId)
-      ? input.cashierUserId[0]
-      : input.cashierUserId;
-    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
-    if (cashierUserId) where.userId = cashierUserId;
+    if (input.cashierUserId?.length) {
+      where.userId = { in: input.cashierUserId };
+    }
 
-    const customerId = Array.isArray(input.customerId)
-      ? input.customerId[0]
-      : input.customerId;
-    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
-    if (customerId) where.customerId = customerId;
-    if (input.from || input.to) {
+    if (input.customerId?.length && input.customerIncludeNull) {
+      where.OR = [{ customerId: { in: input.customerId } }, { customerId: null }];
+    } else if (input.customerId?.length) {
+      where.customerId = { in: input.customerId };
+    } else if (input.customerIncludeNull) {
+      where.customerId = null;
+    }
+
+    if (input.confirmedFrom || input.confirmedTo) {
       where.confirmedAt = {
-        ...(input.from ? { gte: input.from } : {}),
-        ...(input.to ? { lte: input.to } : {}),
+        ...(input.confirmedFrom ? { gte: input.confirmedFrom } : {}),
+        ...(input.confirmedTo ? { lte: input.confirmedTo } : {}),
       };
     }
 
@@ -649,10 +648,179 @@ export class PrismaSaleRepository implements ISaleRepository {
         orClauses.push({ customerId: null });
       }
 
-      where.OR = orClauses;
+      where.OR = where.OR ? [...(where.OR as Prisma.SaleWhereInput[]), ...orClauses] : orClauses;
     }
 
     return where;
+  }
+
+  private buildExtendedWhere(input: SalesListExtendedFilter): Prisma.SaleWhereInput {
+    const andClauses: Prisma.SaleWhereInput[] = [this.buildBaseWhere(input)];
+
+    if (input.status?.length) {
+      andClauses.push({ status: { in: input.status.filter((status) => status !== 'CANCELED') } });
+    }
+
+    if (input.paymentStatus?.length) {
+      andClauses.push({ paymentStatus: { in: input.paymentStatus } });
+    }
+
+    if (input.deliveryStatus?.length) {
+      andClauses.push({ deliveryStatus: { in: input.deliveryStatus } });
+    }
+
+    if (input.folio?.length) {
+      andClauses.push({ folio: { in: input.folio } });
+    }
+
+    if (input.totalMin !== undefined || input.totalMax !== undefined) {
+      andClauses.push({
+        totalCents: {
+          ...(input.totalMin !== undefined ? { gte: input.totalMin } : {}),
+          ...(input.totalMax !== undefined ? { lte: input.totalMax } : {}),
+        },
+      });
+    }
+
+    if (input.debtMin !== undefined || input.debtMax !== undefined) {
+      andClauses.push({
+        debtCents: {
+          ...(input.debtMin !== undefined ? { gte: input.debtMin } : {}),
+          ...(input.debtMax !== undefined ? { lte: input.debtMax } : {}),
+        },
+      });
+    }
+
+    if (input.dueDateFrom || input.dueDateTo) {
+      const dueDateRange = {
+        ...(input.dueDateFrom ? { gte: input.dueDateFrom } : {}),
+        ...(input.dueDateTo ? { lte: input.dueDateTo } : {}),
+      };
+      andClauses.push(
+        input.dueDateIncludeNull
+          ? { OR: [{ dueDate: dueDateRange }, { dueDate: null }] }
+          : { dueDate: dueDateRange },
+      );
+    } else if (input.dueDateIncludeNull) {
+      andClauses.push({ dueDate: null });
+    }
+
+    if (input.paymentMethod?.length) {
+      const somePaymentMethod = {
+        payments: { some: { method: { in: input.paymentMethod } } },
+      };
+      andClauses.push(
+        input.paymentMethodIncludeNull
+          ? { OR: [somePaymentMethod, { payments: { none: {} } }] }
+          : somePaymentMethod,
+      );
+    } else if (input.paymentMethodIncludeNull) {
+      andClauses.push({ payments: { none: {} } });
+    }
+
+    return andClauses.length === 1 ? andClauses[0] : { AND: andClauses };
+  }
+
+  private normalizeBaseFilter(input: {
+    q?: string;
+    from?: Date;
+    to?: Date;
+    confirmedFrom?: Date;
+    confirmedTo?: Date;
+    cashierUserId?: string | string[];
+    customerId?: string | string[];
+    customerIncludeNull?: boolean;
+  }): SalesListBaseFilter {
+    return {
+      q: input.q,
+      confirmedFrom: input.confirmedFrom ?? input.from,
+      confirmedTo: input.confirmedTo ?? input.to,
+      cashierUserId: Array.isArray(input.cashierUserId)
+        ? input.cashierUserId
+        : input.cashierUserId
+          ? [input.cashierUserId]
+          : undefined,
+      customerId: Array.isArray(input.customerId)
+        ? input.customerId
+        : input.customerId
+          ? [input.customerId]
+          : undefined,
+      customerIncludeNull: input.customerIncludeNull,
+    };
+  }
+
+  private normalizeExtendedFilter(input: {
+    page: number;
+    limit: number;
+    sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
+    sortOrder: 'asc' | 'desc';
+    q?: string;
+    status?: 'DRAFT' | 'CONFIRMED' | 'CANCELED' | Array<'DRAFT' | 'CONFIRMED' | 'CANCELED'>;
+    paymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT' | Array<'PAID' | 'PARTIAL' | 'CREDIT'>;
+    deliveryStatus?:
+      | 'PENDING'
+      | 'DELIVERED'
+      | 'NOT_APPLICABLE'
+      | Array<'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE'>;
+    paymentMethod?:
+      | 'CASH'
+      | 'CARD_CREDIT'
+      | 'CARD_DEBIT'
+      | 'TRANSFER'
+      | Array<'CASH' | 'CARD_CREDIT' | 'CARD_DEBIT' | 'TRANSFER'>;
+    paymentMethodIncludeNull?: boolean;
+    from?: Date;
+    to?: Date;
+    confirmedFrom?: Date;
+    confirmedTo?: Date;
+    dueDateFrom?: Date;
+    dueDateTo?: Date;
+    dueDateIncludeNull?: boolean;
+    totalMin?: number;
+    totalMax?: number;
+    debtMin?: number;
+    debtMax?: number;
+    folio?: string | string[];
+    cashierUserId?: string | string[];
+    customerId?: string | string[];
+    customerIncludeNull?: boolean;
+  }): SalesListExtendedFilter {
+    const normalizedBase = this.normalizeBaseFilter(input);
+    const status = (Array.isArray(input.status) ? input.status : input.status ? [input.status] : undefined) as
+      | SalesListExtendedFilter['status']
+      | undefined;
+    const paymentStatus = (Array.isArray(input.paymentStatus)
+      ? input.paymentStatus
+      : input.paymentStatus
+        ? [input.paymentStatus]
+        : undefined) as SalesListExtendedFilter['paymentStatus'] | undefined;
+    const deliveryStatus = (Array.isArray(input.deliveryStatus)
+      ? input.deliveryStatus
+      : input.deliveryStatus
+        ? [input.deliveryStatus]
+        : undefined) as SalesListExtendedFilter['deliveryStatus'] | undefined;
+    const paymentMethod = (Array.isArray(input.paymentMethod)
+      ? input.paymentMethod
+      : input.paymentMethod
+        ? [input.paymentMethod]
+        : undefined) as SalesListExtendedFilter['paymentMethod'] | undefined;
+
+    return {
+      ...normalizedBase,
+      status,
+      paymentStatus,
+      deliveryStatus,
+      paymentMethod,
+      paymentMethodIncludeNull: input.paymentMethodIncludeNull,
+      dueDateFrom: input.dueDateFrom,
+      dueDateTo: input.dueDateTo,
+      dueDateIncludeNull: input.dueDateIncludeNull,
+      totalMin: input.totalMin,
+      totalMax: input.totalMax,
+      debtMin: input.debtMin,
+      debtMax: input.debtMax,
+      folio: Array.isArray(input.folio) ? input.folio : input.folio ? [input.folio] : undefined,
+    };
   }
 
   async findManyConfirmed(input: {
@@ -668,29 +836,31 @@ export class PrismaSaleRepository implements ISaleRepository {
       | 'DELIVERED'
       | 'NOT_APPLICABLE'
       | Array<'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE'>;
+    paymentMethod?:
+      | 'CASH'
+      | 'CARD_CREDIT'
+      | 'CARD_DEBIT'
+      | 'TRANSFER'
+      | Array<'CASH' | 'CARD_CREDIT' | 'CARD_DEBIT' | 'TRANSFER'>;
+    paymentMethodIncludeNull?: boolean;
     from?: Date;
     to?: Date;
+    confirmedFrom?: Date;
+    confirmedTo?: Date;
+    dueDateFrom?: Date;
+    dueDateTo?: Date;
+    dueDateIncludeNull?: boolean;
+    totalMin?: number;
+    totalMax?: number;
+    debtMin?: number;
+    debtMax?: number;
+    folio?: string | string[];
     cashierUserId?: string | string[];
     customerId?: string | string[];
+    customerIncludeNull?: boolean;
   }) {
     const prisma = this.tenantPrisma.getClient();
-    const baseWhere = this.buildConfirmedBaseWhere(input);
-    const paymentStatus = Array.isArray(input.paymentStatus)
-      ? input.paymentStatus[0]
-      : input.paymentStatus;
-    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
-    const deliveryStatus = Array.isArray(input.deliveryStatus)
-      ? input.deliveryStatus[0]
-      : input.deliveryStatus;
-    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
-    const status = Array.isArray(input.status) ? input.status[0] : input.status;
-    // TODO(slice-3b): translate multi-value to Prisma { in: [...] }
-    const where: Prisma.SaleWhereInput = {
-      ...baseWhere,
-      ...(paymentStatus ? { paymentStatus } : {}),
-      ...(deliveryStatus ? { deliveryStatus } : {}),
-      ...(status && status !== 'CANCELED' ? { status } : {}),
-    };
+    const where = this.buildExtendedWhere(this.normalizeExtendedFilter(input));
 
     const rows = await prisma.sale.findMany({
       where,
@@ -733,26 +903,32 @@ export class PrismaSaleRepository implements ISaleRepository {
     q?: string;
     from?: Date;
     to?: Date;
+    confirmedFrom?: Date;
+    confirmedTo?: Date;
     cashierUserId?: string | string[];
     customerId?: string | string[];
+    customerIncludeNull?: boolean;
   }): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
-    return prisma.sale.count({ where: this.buildConfirmedBaseWhere(input) });
+    return prisma.sale.count({ where: this.buildBaseWhere(this.normalizeBaseFilter(input)) });
   }
 
   async groupByPaymentStatusConfirmed(input: {
     q?: string;
     from?: Date;
     to?: Date;
+    confirmedFrom?: Date;
+    confirmedTo?: Date;
     cashierUserId?: string | string[];
     customerId?: string | string[];
+    customerIncludeNull?: boolean;
   }): Promise<
     Array<{ paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null; _count: { _all: number } }>
   > {
     const prisma = this.tenantPrisma.getClient();
     const grouped = await prisma.sale.groupBy({
       by: ['paymentStatus'],
-      where: this.buildConfirmedBaseWhere(input),
+      where: this.buildBaseWhere(this.normalizeBaseFilter(input)),
       _count: { _all: true },
     });
 
@@ -766,13 +942,16 @@ export class PrismaSaleRepository implements ISaleRepository {
     q?: string;
     from?: Date;
     to?: Date;
+    confirmedFrom?: Date;
+    confirmedTo?: Date;
     cashierUserId?: string | string[];
     customerId?: string | string[];
+    customerIncludeNull?: boolean;
   }): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.sale.count({
       where: {
-        ...this.buildConfirmedBaseWhere(input),
+        ...this.buildBaseWhere(this.normalizeBaseFilter(input)),
         NOT: { deliveryStatus: 'DELIVERED' },
       },
     });

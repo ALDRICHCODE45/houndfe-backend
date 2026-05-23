@@ -71,6 +71,21 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('findManyConfirmed', () => {
+    const findManyWhere = async (input: Record<string, unknown>) => {
+      prisma.sale.findMany.mockResolvedValue([]);
+      await repo.findManyConfirmed({
+        page: 1,
+        limit: 20,
+        sortBy: 'confirmedAt',
+        sortOrder: 'desc',
+        ...input,
+      } as any);
+
+      return prisma.sale.findMany.mock.calls.at(-1)?.[0]?.where as any;
+    };
+
+    const baseClause = (where: any) => (where.AND ? where.AND[0] : where);
+
     it('includes payments and maps unique paymentMethods', async () => {
       prisma.sale.findMany.mockResolvedValue([
         {
@@ -233,6 +248,195 @@ describe('PrismaSaleRepository', () => {
       const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
       expect(nullClause).toBeUndefined();
     });
+
+    it('translates status multi-value as in clause', async () => {
+      const where = await findManyWhere({ status: ['CONFIRMED', 'CANCELED'] });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([expect.objectContaining({ status: { in: ['CONFIRMED'] } })]),
+      );
+    });
+
+    it('translates paymentStatus multi-value as in clause', async () => {
+      const where = await findManyWhere({ paymentStatus: ['PAID', 'CREDIT'] });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ paymentStatus: { in: ['PAID', 'CREDIT'] } }),
+        ]),
+      );
+    });
+
+    it('translates deliveryStatus multi-value as in clause', async () => {
+      const where = await findManyWhere({ deliveryStatus: ['DELIVERED', 'PENDING'] });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ deliveryStatus: { in: ['DELIVERED', 'PENDING'] } }),
+        ]),
+      );
+    });
+
+    it('translates cashierUserId multi-value as in clause', async () => {
+      const where = await findManyWhere({ cashierUserId: ['u1', 'u2'] });
+      expect(baseClause(where)).toEqual(expect.objectContaining({ userId: { in: ['u1', 'u2'] } }));
+    });
+
+    it('translates folio multi-value as in clause', async () => {
+      const where = await findManyWhere({ folio: ['F-1', 'F-2'] });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([expect.objectContaining({ folio: { in: ['F-1', 'F-2'] } })]),
+      );
+    });
+
+    it('sets customerId null when includeNull is true and no ids', async () => {
+      const where = await findManyWhere({ customerIncludeNull: true });
+      expect(where.customerId).toBeNull();
+    });
+
+    it('omits customer filter when ids empty and includeNull false', async () => {
+      const where = await findManyWhere({ customerId: [], customerIncludeNull: false });
+      expect(where.customerId).toBeUndefined();
+      expect(where.OR).toBeUndefined();
+    });
+
+    it('sets customerId in when ids present and includeNull false', async () => {
+      const where = await findManyWhere({ customerId: ['c1', 'c2'], customerIncludeNull: false });
+      expect(baseClause(where)).toEqual(expect.objectContaining({ customerId: { in: ['c1', 'c2'] } }));
+    });
+
+    it('sets customer OR in/null when ids present and includeNull true', async () => {
+      const where = await findManyWhere({ customerId: ['c1', 'c2'], customerIncludeNull: true });
+      expect(baseClause(where).OR).toEqual([
+        { customerId: { in: ['c1', 'c2'] } },
+        { customerId: null },
+      ]);
+    });
+
+    it('sets paymentMethod none when includeNull true and no methods', async () => {
+      const where = await findManyWhere({ paymentMethodIncludeNull: true });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([expect.objectContaining({ payments: { none: {} } })]),
+      );
+    });
+
+    it('sets paymentMethod some/in when methods present and includeNull false', async () => {
+      const where = await findManyWhere({ paymentMethod: ['CASH', 'TRANSFER'] });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          {
+            payments: {
+              some: {
+                method: {
+                  in: ['CASH', 'TRANSFER'],
+                },
+              },
+            },
+          },
+        ]),
+      );
+    });
+
+    it('sets paymentMethod OR some/in with none when includeNull true', async () => {
+      const where = await findManyWhere({
+        paymentMethod: ['CASH'],
+        paymentMethodIncludeNull: true,
+      });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          {
+            OR: [
+              { payments: { some: { method: { in: ['CASH'] } } } },
+              { payments: { none: {} } },
+            ],
+          },
+        ]),
+      );
+    });
+
+    it('uses payments none for credit-only sales no payment rows', async () => {
+      const where = await findManyWhere({ paymentMethodIncludeNull: true });
+      expect(JSON.stringify(where)).toContain('"none":{}');
+      expect(JSON.stringify(where)).not.toContain('method":null');
+    });
+
+    it('sets dueDate null when includeNull true and no range', async () => {
+      const where = await findManyWhere({ dueDateIncludeNull: true });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([expect.objectContaining({ dueDate: null })]),
+      );
+    });
+
+    it('omits dueDate when range empty and includeNull false', async () => {
+      const where = await findManyWhere({ dueDateIncludeNull: false });
+      const dueDateClause = where.AND?.find((clause: any) => 'dueDate' in clause || 'OR' in clause);
+      expect(dueDateClause).toBeUndefined();
+    });
+
+    it('sets dueDate range when range exists and includeNull false', async () => {
+      const from = new Date('2026-06-01T00:00:00.000Z');
+      const to = new Date('2026-06-30T23:59:59.000Z');
+      const where = await findManyWhere({ dueDateFrom: from, dueDateTo: to });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ dueDate: { gte: from, lte: to } }),
+        ]),
+      );
+    });
+
+    it('sets dueDate OR range/null when range exists and includeNull true', async () => {
+      const from = new Date('2026-06-01T00:00:00.000Z');
+      const to = new Date('2026-06-30T23:59:59.000Z');
+      const where = await findManyWhere({ dueDateFrom: from, dueDateTo: to, dueDateIncludeNull: true });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          {
+            OR: [{ dueDate: { gte: from, lte: to } }, { dueDate: null }],
+          },
+        ]),
+      );
+    });
+
+    it('sets totalCents range with min only', async () => {
+      const where = await findManyWhere({ totalMin: 1000 });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([expect.objectContaining({ totalCents: { gte: 1000 } })]),
+      );
+    });
+
+    it('sets totalCents range with max only', async () => {
+      const where = await findManyWhere({ totalMax: 9000 });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([expect.objectContaining({ totalCents: { lte: 9000 } })]),
+      );
+    });
+
+    it('sets totalCents range with both bounds', async () => {
+      const where = await findManyWhere({ totalMin: 1000, totalMax: 9000 });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ totalCents: { gte: 1000, lte: 9000 } }),
+        ]),
+      );
+    });
+
+    it('sets debtCents range with both bounds', async () => {
+      const where = await findManyWhere({ debtMin: 300, debtMax: 700 });
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ debtCents: { gte: 300, lte: 700 } }),
+        ]),
+      );
+    });
+
+    it('maps confirmedFrom to confirmedAt gte', async () => {
+      const from = new Date('2026-06-01T00:00:00.000Z');
+      const where = await findManyWhere({ confirmedFrom: from });
+      expect(baseClause(where)).toEqual(expect.objectContaining({ confirmedAt: { gte: from } }));
+    });
+
+    it('maps confirmedTo to confirmedAt lte', async () => {
+      const to = new Date('2026-06-30T23:59:59.000Z');
+      const where = await findManyWhere({ confirmedTo: to });
+      expect(baseClause(where)).toEqual(expect.objectContaining({ confirmedAt: { lte: to } }));
+    });
   });
 
   describe('confirmed counts', () => {
@@ -274,6 +478,23 @@ describe('PrismaSaleRepository', () => {
           }),
         }),
       );
+    });
+
+    it('ignores extended filters for KPI count methods', async () => {
+      prisma.sale.count.mockResolvedValue(7);
+
+      const baseInput = { q: 'ana' } as any;
+      const extendedInput = { q: 'ana', paymentStatus: ['PAID'], totalMin: 5000 } as any;
+
+      await repo.countConfirmed(baseInput);
+      await repo.countConfirmed(extendedInput);
+
+      const firstWhere = prisma.sale.count.mock.calls[0][0].where;
+      const secondWhere = prisma.sale.count.mock.calls[1][0].where;
+
+      expect(secondWhere).toEqual(firstWhere);
+      expect(secondWhere.paymentStatus).toBeUndefined();
+      expect(secondWhere.totalCents).toBeUndefined();
     });
   });
 
