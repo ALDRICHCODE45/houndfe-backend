@@ -588,6 +588,13 @@ export class SalesService {
   }
 
   async listSales(query: ListSalesQueryDto): Promise<SaleListResponseDto> {
+    // Translate deprecated from/to aliases into canonical confirmedFrom/confirmedTo
+    // before any downstream consumer (filter projection, repo) sees them.
+    // Guard for tests that pass a plain object instead of a DTO instance.
+    if (typeof query.resolveLegacyAlias === 'function') {
+      query.resolveLegacyAlias();
+    }
+
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 

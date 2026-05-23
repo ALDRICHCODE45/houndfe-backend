@@ -99,6 +99,7 @@ describe('ListSalesQueryDto', () => {
     });
 
     const errors = await validate(dto);
+    dto.resolveLegacyAlias();
 
     expect(errors).toHaveLength(0);
     expect(dto.confirmedFrom).toBeInstanceOf(Date);
@@ -490,6 +491,7 @@ describe('ListSalesQueryDto', () => {
     it('maps legacy from alias to confirmedFrom and warns once', async () => {
       const dto = makeDto({ from: '2026-01-01T00:00:00.000Z' });
       const errors = await validate(dto);
+      dto.resolveLegacyAlias();
 
       expect(errors).toHaveLength(0);
       expect(dto.confirmedFrom?.toISOString()).toBe('2026-01-01T00:00:00.000Z');
@@ -502,6 +504,7 @@ describe('ListSalesQueryDto', () => {
         from: '2026-01-01T00:00:00.000Z',
       });
       const errors = await validate(dto);
+      dto.resolveLegacyAlias();
 
       expect(errors).toHaveLength(0);
       expect(dto.confirmedFrom?.toISOString()).toBe('2026-02-01T00:00:00.000Z');
@@ -511,6 +514,7 @@ describe('ListSalesQueryDto', () => {
     it('does not warn when only confirmedFrom is used', async () => {
       const dto = makeDto({ confirmedFrom: '2026-02-01T00:00:00.000Z' });
       const errors = await validate(dto);
+      dto.resolveLegacyAlias();
 
       expect(errors).toHaveLength(0);
       expect(warnSpy).not.toHaveBeenCalled();

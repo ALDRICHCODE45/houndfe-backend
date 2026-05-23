@@ -57,21 +57,11 @@ export enum ListSalesPaymentMethod {
 const deprecationLogger = new Logger('ListSalesQueryDto');
 const LEGACY_ALIAS_WARN =
   '[DEPRECATION] sales-list query used legacy from/to alias';
-const LEGACY_WARNED_KEY = '__salesListLegacyFromToWarned';
 
 const toBoolean = (value: unknown): unknown => {
   if (value === true || value === 'true') return true;
   if (value === false || value === 'false') return false;
   return value;
-};
-
-const maybeWarnLegacyDateAlias = (obj: Record<string, unknown>): void => {
-  if (obj[LEGACY_WARNED_KEY]) return;
-
-  if (obj.from !== undefined || obj.to !== undefined) {
-    deprecationLogger.warn(LEGACY_ALIAS_WARN);
-    obj[LEGACY_WARNED_KEY] = true;
-  }
 };
 
 const coerceOptionalDate = (value: unknown): unknown => {
@@ -80,9 +70,6 @@ const coerceOptionalDate = (value: unknown): unknown => {
 };
 
 export class ListSalesQueryDto {
-  private _from?: Date;
-  private _to?: Date;
-
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -185,31 +172,33 @@ export class ListSalesQueryDto {
   @DateRange({ peer: 'dueDateFrom', role: 'to', field: 'dueDate' })
   dueDateTo?: Date;
 
-  /** @deprecated Use confirmedFrom */
+  /** @deprecated Use confirmedFrom instead. Will be removed in a future release. */
   @IsOptional()
-  set from(value: string | Date | undefined) {
-    this._from = coerceOptionalDate(value) as Date | undefined;
-    maybeWarnLegacyDateAlias(this as unknown as Record<string, unknown>);
-    if (this.confirmedFrom === undefined) {
-      this.confirmedFrom = this._from;
-    }
-  }
+  @Transform(({ value }) => coerceOptionalDate(value))
+  from?: Date;
 
-  get from(): Date | undefined {
-    return this._from;
-  }
-
-  /** @deprecated Use confirmedTo */
+  /** @deprecated Use confirmedTo instead. Will be removed in a future release. */
   @IsOptional()
-  set to(value: string | Date | undefined) {
-    this._to = coerceOptionalDate(value) as Date | undefined;
-    maybeWarnLegacyDateAlias(this as unknown as Record<string, unknown>);
-    if (this.confirmedTo === undefined) {
-      this.confirmedTo = this._to;
-    }
-  }
+  @Transform(({ value }) => coerceOptionalDate(value))
+  to?: Date;
 
-  get to(): Date | undefined {
-    return this._to;
+  /**
+   * Resolve legacy `from`/`to` aliases into the canonical `confirmedFrom`/`confirmedTo`
+   * fields. Emits a single deprecation warning per request if legacy fields were used.
+   *
+   * Must be called AFTER class-validator validation succeeds (typically from the service
+   * layer at the start of `listSales(query)`).
+   */
+  resolveLegacyAlias(): void {
+    const legacyUsed = this.from !== undefined || this.to !== undefined;
+    if (legacyUsed) {
+      deprecationLogger.warn(LEGACY_ALIAS_WARN);
+    }
+    if (this.confirmedFrom === undefined && this.from !== undefined) {
+      this.confirmedFrom = this.from;
+    }
+    if (this.confirmedTo === undefined && this.to !== undefined) {
+      this.confirmedTo = this.to;
+    }
   }
 }
