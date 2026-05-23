@@ -601,6 +601,7 @@ model Sale {
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
+  @@index([tenantId, status, confirmedAt(sort: Desc)], map: "idx_sales_tenant_status_confirmedAt_desc")
   @@index([userId, status])
   @@index([sellerUserId])
   @@index([customerId])
@@ -665,6 +666,7 @@ model SalePayment {
 
   @@index([saleId])
   @@index([tenantId])
+  @@index([tenantId, method], map: "idx_sale_payments_tenant_method")
   @@index([userId])
   @@map("sale_payments")
 }
