@@ -319,9 +319,27 @@ describe('SalesQueryController HTTP integration', () => {
 
     const calledQuery = service.listSales.mock.calls[0][0];
     expect(calledQuery.confirmedFrom).toEqual(new Date('2026-01-01'));
+    expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy).toHaveBeenCalledWith(
       '[DEPRECATION] sales-list query used legacy from/to alias',
     );
+  });
+
+  it('emits deprecation warning exactly once per request when using legacy from', async () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    service.listSales.mockResolvedValue({
+      data: [],
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 },
+      counts: { all: 0, pendingPayments: 0, notDelivered: 0 },
+    });
+
+    await request(app.getHttpServer())
+      .get('/sales')
+      .set('Authorization', 'Bearer tenant-a-read-sale')
+      .query({ from: '2026-01-01' })
+      .expect(200);
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
   it('prefers confirmedFrom over legacy from and still logs deprecation', async () => {

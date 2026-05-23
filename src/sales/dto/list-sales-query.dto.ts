@@ -47,6 +47,15 @@ export enum ListSalesDeliveryStatus {
   NOT_APPLICABLE = 'NOT_APPLICABLE',
 }
 
+/**
+ * Payment method values valid for the GET /sales paymentMethod filter.
+ *
+ * NOTE: `CREDIT` is intentionally NOT a member here. CREDIT-only sales have
+ * ZERO rows in `sale_payments` — they cannot be matched by a method-equals
+ * predicate. To match credit-only sales, use the explicit
+ * `paymentMethodIncludeNull=true` flag (which translates to
+ * `payments: { none: {} }` in Prisma).
+ */
 export enum ListSalesPaymentMethod {
   CASH = 'CASH',
   CARD_CREDIT = 'CARD_CREDIT',
@@ -186,8 +195,7 @@ export class ListSalesQueryDto {
    * Resolve legacy `from`/`to` aliases into the canonical `confirmedFrom`/`confirmedTo`
    * fields. Emits a single deprecation warning per request if legacy fields were used.
    *
-   * Must be called AFTER class-validator validation succeeds (typically from the service
-   * layer at the start of `listSales(query)`).
+   * Must be called AFTER class-validator validation succeeds.
    */
   resolveLegacyAlias(): void {
     const legacyUsed = this.from !== undefined || this.to !== undefined;
@@ -200,5 +208,9 @@ export class ListSalesQueryDto {
     if (this.confirmedTo === undefined && this.to !== undefined) {
       this.confirmedTo = this.to;
     }
+
+    // Make alias resolution idempotent for defensive reuse in tests/callers.
+    this.from = undefined;
+    this.to = undefined;
   }
 }

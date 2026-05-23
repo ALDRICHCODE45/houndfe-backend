@@ -519,5 +519,18 @@ describe('ListSalesQueryDto', () => {
       expect(errors).toHaveLength(0);
       expect(warnSpy).not.toHaveBeenCalled();
     });
+
+    it('is idempotent when resolveLegacyAlias is called twice', async () => {
+      const dto = makeDto({ from: '2026-01-01T00:00:00.000Z' });
+      const errors = await validate(dto);
+
+      dto.resolveLegacyAlias();
+      dto.resolveLegacyAlias();
+
+      expect(errors).toHaveLength(0);
+      expect(dto.confirmedFrom?.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+      expect(dto.from).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    });
   });
 });
