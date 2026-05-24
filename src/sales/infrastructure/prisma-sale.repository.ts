@@ -456,26 +456,39 @@ export class PrismaSaleRepository implements ISaleRepository {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
 
+    // Build the update payload from the always-set fields plus any optional
+    // fields that the caller EXPLICITLY provided (including explicit null,
+    // which means "clear the column"). Fields absent from the input are NOT
+    // included in the payload — that way they keep whatever value the row
+    // already has (e.g. customerId / sellerUserId inherited from the draft).
+    //
+    // The previous defensive `?? null` pattern was destructive: when the
+    // service forgot to pass customerId, the repo overwrote the draft's
+    // customerId with null, which caused confirmed sales to lose their
+    // customer in the listing.
+    const data: Prisma.SaleUncheckedUpdateManyInput = {
+      status: 'CONFIRMED',
+      subtotalCents: input.subtotalCents,
+      discountCents: input.discountCents,
+      totalCents: input.totalCents,
+      paidCents: input.paidCents,
+      debtCents: input.debtCents,
+      changeDueCents: input.changeDueCents,
+      paymentStatus: input.paymentStatus,
+      confirmedAt: input.confirmedAt,
+      folio: input.folio,
+    };
+    if (input.channel !== undefined) data.channel = input.channel;
+    if (input.register !== undefined) data.register = input.register;
+    if (input.deliveryStatus !== undefined)
+      data.deliveryStatus = input.deliveryStatus;
+    if ('customerId' in input) data.customerId = input.customerId ?? null;
+    if ('sellerUserId' in input) data.sellerUserId = input.sellerUserId ?? null;
+    if ('dueDate' in input) data.dueDate = input.dueDate ?? null;
+
     await prisma.sale.updateMany({
       where: { id: input.saleId, tenantId },
-      data: {
-        status: 'CONFIRMED',
-        subtotalCents: input.subtotalCents,
-        discountCents: input.discountCents,
-        totalCents: input.totalCents,
-        paidCents: input.paidCents,
-        debtCents: input.debtCents,
-        changeDueCents: input.changeDueCents,
-        paymentStatus: input.paymentStatus,
-        channel: input.channel ?? 'POS',
-        register: input.register ?? 'Principal',
-        deliveryStatus: input.deliveryStatus ?? 'DELIVERED',
-        customerId: input.customerId ?? null,
-        sellerUserId: input.sellerUserId ?? null,
-        dueDate: input.dueDate ?? null,
-        confirmedAt: input.confirmedAt,
-        folio: input.folio,
-      },
+      data,
     });
 
     const createdPayments = await Promise.all(

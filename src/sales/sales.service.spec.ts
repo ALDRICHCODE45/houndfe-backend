@@ -1571,6 +1571,51 @@ describe('SalesService', () => {
         result,
       );
     });
+
+    it('propagates customerId and sellerUserId from the draft to persistChargeConfirmation', async () => {
+      // Reproduction of the bug reported by the frontend:
+      // A draft with an assigned customer (and optionally a seller) was losing
+      // those references after chargeDraft because the service never forwarded
+      // them to the repo, and the repo defensively overwrote them with null.
+      const sale = buildDraftSale(
+        'sale-charge-customer-propagation',
+        'user-1',
+        'customer-from-draft',
+      );
+      sale.assignSeller('seller-from-draft', 'user-1');
+      setupHappyPathDraft(sale);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-customer-propagation',
+      );
+
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          customerId: 'customer-from-draft',
+          sellerUserId: 'seller-from-draft',
+        }),
+      );
+    });
+
+    it('passes customerId: null when the draft has no customer (público en general)', async () => {
+      const sale = buildDraftSale('sale-charge-no-customer', 'user-1', null);
+      setupHappyPathDraft(sale);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-no-customer',
+      );
+
+      const call = saleRepo.persistChargeConfirmation.mock.calls[0]?.[0] as {
+        customerId?: string | null;
+      };
+      expect(call.customerId).toBeNull();
+    });
   });
 
   describe('item discount use-cases', () => {

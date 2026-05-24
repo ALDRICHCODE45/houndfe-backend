@@ -1389,6 +1389,11 @@ export class SalesService {
         debtCents,
         changeDueCents,
         paymentStatus,
+        // Forward draft-level associations explicitly so the confirmation
+        // preserves them. Passing `null` for "Público en General" is the
+        // intentional empty-customer case, not the destructive default.
+        customerId: sale.customerId,
+        sellerUserId: sale.sellerUserId,
         dueDate: sale.dueDate,
         confirmedAt,
         folio,

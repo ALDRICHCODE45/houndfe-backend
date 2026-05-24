@@ -1456,6 +1456,108 @@ describe('PrismaSaleRepository', () => {
       ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
     });
 
+    it('preserves existing customerId and sellerUserId when input omits them (no destructive null overwrite)', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-bug',
+        method: 'CASH',
+        amountCents: 100,
+        reference: null,
+      });
+
+      // Call persistChargeConfirmation WITHOUT customerId / sellerUserId in the input.
+      // The repo must NOT include those columns in the data: payload, otherwise
+      // it would overwrite the values that the draft persisted earlier with null.
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-customer-preserve',
+        userId: 'cashier-1',
+        payments: [{ method: 'cash', amountCents: 100 }],
+        subtotalCents: 100,
+        discountCents: 0,
+        totalCents: 100,
+        paidCents: 100,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000099',
+      } as never);
+
+      const updateCall = prisma.sale.updateMany.mock.calls[0]?.[0] as {
+        data: Record<string, unknown>;
+      };
+      // The bug: customerId and sellerUserId were being set to null defensively.
+      // The fix: they must be absent from the data payload entirely when input omits them.
+      expect(updateCall.data).not.toHaveProperty('customerId');
+      expect(updateCall.data).not.toHaveProperty('sellerUserId');
+    });
+
+    it('writes customerId and sellerUserId only when explicitly provided in input', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-explicit',
+        method: 'CASH',
+        amountCents: 100,
+        reference: null,
+      });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-with-customer',
+        userId: 'cashier-1',
+        payments: [{ method: 'cash', amountCents: 100 }],
+        subtotalCents: 100,
+        discountCents: 0,
+        totalCents: 100,
+        paidCents: 100,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        customerId: 'cust-42',
+        sellerUserId: 'seller-7',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000100',
+      } as never);
+
+      const updateCall = prisma.sale.updateMany.mock.calls[0]?.[0] as {
+        data: Record<string, unknown>;
+      };
+      expect(updateCall.data.customerId).toBe('cust-42');
+      expect(updateCall.data.sellerUserId).toBe('seller-7');
+    });
+
+    it('explicit null in input clears the column (allows intentional unassign)', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-clear',
+        method: 'CASH',
+        amountCents: 100,
+        reference: null,
+      });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-clear-customer',
+        userId: 'cashier-1',
+        payments: [{ method: 'cash', amountCents: 100 }],
+        subtotalCents: 100,
+        discountCents: 0,
+        totalCents: 100,
+        paidCents: 100,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        customerId: null,
+        sellerUserId: null,
+        confirmedAt: new Date(),
+        folio: 'A-2605-000101',
+      } as never);
+
+      const updateCall = prisma.sale.updateMany.mock.calls[0]?.[0] as {
+        data: Record<string, unknown>;
+      };
+      expect(updateCall.data.customerId).toBeNull();
+      expect(updateCall.data.sellerUserId).toBeNull();
+    });
+
     it('replays idempotency row when hash matches and status is succeeded', async () => {
       prisma.saleIdempotency.create.mockRejectedValue({ code: 'P2002' });
       prisma.saleIdempotency.findUnique.mockResolvedValue({
