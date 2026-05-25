@@ -349,6 +349,85 @@ describe('SalesService', () => {
       expect(result).toEqual(replayPayload);
       expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
     });
+
+    it('rejects mixed shape for addPayment with AMBIGUOUS_PAYMENT_SHAPE', async () => {
+      await expect(
+        service.addPayment(
+          'sale-payment-mixed-shape',
+          'user-1',
+          {
+            method: 'cash',
+            amountCents: 1000,
+            payments: [{ method: 'cash', amountCents: 1000 }],
+          } as never,
+          'idem-pay-mixed-shape',
+        ),
+      ).rejects.toThrow('AMBIGUOUS_PAYMENT_SHAPE');
+    });
+
+    it('rejects empty payments array for addPayment with EMPTY_PAYMENTS', async () => {
+      await expect(
+        service.addPayment(
+          'sale-payment-empty-array',
+          'user-1',
+          { payments: [] } as never,
+          'idem-pay-empty-array',
+        ),
+      ).rejects.toThrow('EMPTY_PAYMENTS');
+    });
+
+    it('uses stable addPayment idempotency hash for reordered payments[]', async () => {
+      const replayPayload = {
+        saleId: 'sale-payment-reorder-replay',
+        paidCents: 3000,
+        debtCents: 2000,
+        totalCents: 5000,
+        paymentStatus: 'PARTIAL' as const,
+        paymentIds: ['payment-1', 'payment-2'],
+      };
+
+      const hashes = new Map<string, unknown>();
+      saleRepo.acquirePaymentIdempotency.mockImplementation(
+        async (_saleId: string, _key: string, requestHash: string) => {
+          if (hashes.has(requestHash)) {
+            return { kind: 'replay', payload: replayPayload };
+          }
+
+          hashes.set(requestHash, true);
+          return { kind: 'acquired', token: 'payment-idem-token' };
+        },
+      );
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(
+        buildConfirmedSale('sale-payment-reorder-replay', 'user-1', 5000),
+      );
+
+      await service.addPayment(
+        'sale-payment-reorder-replay',
+        'user-1',
+        {
+          payments: [
+            { method: 'transfer', amountCents: 1000, reference: 'TRX-2' },
+            { method: 'cash', amountCents: 2000 },
+          ],
+        } as never,
+        'idem-pay-reorder',
+      );
+
+      const replay = await service.addPayment(
+        'sale-payment-reorder-replay',
+        'user-1',
+        {
+          payments: [
+            { method: 'cash', amountCents: 2000 },
+            { method: 'transfer', amountCents: 1000, reference: 'TRX-2' },
+          ],
+        } as never,
+        'idem-pay-reorder',
+      );
+
+      expect(replay).toEqual(replayPayload);
+    });
   });
 
   describe('setDueDate', () => {
