@@ -1643,7 +1643,6 @@ export class SalesService {
         reference: payment.reference,
       })),
     );
-    const firstPayment = normalizedPayments[0];
 
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
@@ -1682,26 +1681,24 @@ export class SalesService {
           'SALE_NOT_CONFIRMABLE_FOR_PAYMENT',
         );
       }
-      const updated = await this.saleRepo.persistCollectedPayment({
+      const updated = await this.saleRepo.persistCollectedPayments({
         saleId,
-        method: firstPayment.method,
-        amountCents: firstPayment.amountCents,
-        reference: firstPayment.reference,
         userId: actorId,
+        payments: normalizedPayments,
       });
+
+      const eventPayments = normalizedPayments.map((payment, index) => ({
+        paymentId: updated.paymentIds[index],
+        method: payment.method,
+        amountCents: payment.amountCents,
+        reference: payment.reference ?? null,
+      }));
 
       await this.publishPaymentReceivedEvents({
         saleId,
         tenantId,
         actorId,
-        payments: [
-          {
-            paymentId: updated.paymentId,
-            method: firstPayment.method,
-            amountCents: firstPayment.amountCents,
-            reference: firstPayment.reference ?? null,
-          },
-        ],
+        payments: eventPayments,
         paidCents: updated.paidCents,
         debtCents: updated.debtCents,
         occurredAt: new Date(),
@@ -1724,6 +1721,7 @@ export class SalesService {
         debtCents: updated.debtCents,
         totalCents: updated.totalCents,
         paymentStatus: updated.paymentStatus,
+        paymentIds: updated.paymentIds,
       };
 
       await this.saleRepo.markPaymentIdempotencySucceeded(
