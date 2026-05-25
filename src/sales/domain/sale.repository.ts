@@ -147,6 +147,22 @@ export interface ISaleRepository {
     totalCents: number;
   }>;
 
+  persistCollectedPayments(input: {
+    saleId: string;
+    userId: string;
+    payments: Array<{
+      method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+      amountCents: number;
+      reference?: string | null;
+    }>;
+  }): Promise<{
+    paymentIds: string[];
+    paidCents: number;
+    debtCents: number;
+    paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
+    totalCents: number;
+  }>;
+
   findManyConfirmed(input: SalesListExtendedFilter & {
     page: number;
     limit: number;

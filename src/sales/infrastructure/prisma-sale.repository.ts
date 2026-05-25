@@ -13,6 +13,7 @@ import type {
 } from '../domain/sale.repository';
 import { Sale, type SaleStatus } from '../domain/sale.entity';
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type {
   SalesListBaseFilter,
@@ -536,6 +537,42 @@ export class PrismaSaleRepository implements ISaleRepository {
     paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
     totalCents: number;
   }> {
+    const result = await this.persistCollectedPayments({
+      saleId: input.saleId,
+      userId: input.userId,
+      payments: [
+        {
+          method: input.method,
+          amountCents: input.amountCents,
+          reference: input.reference,
+        },
+      ],
+    });
+
+    return {
+      paymentId: result.paymentIds[0],
+      paidCents: result.paidCents,
+      debtCents: result.debtCents,
+      paymentStatus: result.paymentStatus,
+      totalCents: result.totalCents,
+    };
+  }
+
+  async persistCollectedPayments(input: {
+    saleId: string;
+    userId: string;
+    payments: Array<{
+      method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+      amountCents: number;
+      reference?: string | null;
+    }>;
+  }): Promise<{
+    paymentIds: string[];
+    paidCents: number;
+    debtCents: number;
+    paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
+    totalCents: number;
+  }> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
 
@@ -558,7 +595,8 @@ export class PrismaSaleRepository implements ISaleRepository {
         'NO_OUTSTANDING_DEBT',
       );
     }
-    const recomputedPaidCents = paidFromLedger + input.amountCents;
+    const batchTotal = input.payments.reduce((sum, payment) => sum + payment.amountCents, 0);
+    const recomputedPaidCents = paidFromLedger + batchTotal;
     if (recomputedPaidCents > sale.totalCents) {
       throw new BusinessRuleViolationError(
         'PAYMENT_EXCEEDS_DEBT',
@@ -574,19 +612,22 @@ export class PrismaSaleRepository implements ISaleRepository {
           ? 'CREDIT'
           : 'PARTIAL';
 
-    const payment = await prisma.salePayment.create({
-      data: {
+    const paymentIds = input.payments.map(() => randomUUID());
+
+    await prisma.salePayment.createMany({
+      data: input.payments.map((payment, index) => ({
+        id: paymentIds[index],
         saleId: input.saleId,
-        method: input.method.toUpperCase() as
+        method: payment.method.toUpperCase() as
           | 'CASH'
           | 'CARD_CREDIT'
           | 'CARD_DEBIT'
           | 'TRANSFER',
-        amountCents: input.amountCents,
-        reference: input.reference ?? null,
+        amountCents: payment.amountCents,
+        reference: payment.reference ?? null,
         userId: input.userId,
         tenantId,
-      },
+      })),
     });
 
     await prisma.sale.updateMany({
@@ -599,7 +640,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     });
 
     return {
-      paymentId: payment.id,
+      paymentIds,
       paidCents: recomputedPaidCents,
       debtCents: recomputedDebtCents,
       paymentStatus,
