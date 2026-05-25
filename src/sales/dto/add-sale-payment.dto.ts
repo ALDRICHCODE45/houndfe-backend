@@ -9,6 +9,7 @@ import {
   Min,
   Validate,
   ValidateNested,
+  ValidationArguments,
   ValidatorConstraint,
   ValidatorConstraintInterface,
 } from 'class-validator';
@@ -17,8 +18,10 @@ type CollectionPaymentMethod = 'cash' | 'card_credit' | 'card_debit' | 'transfer
 
 @ValidatorConstraint({ name: 'collectionPaymentShape', async: false })
 class CollectionPaymentShapeConstraint implements ValidatorConstraintInterface {
-  validate(value: unknown, args: { object: AddSalePaymentDto }): boolean {
-    const dto = args.object;
+  validate(value: unknown, args?: ValidationArguments): boolean {
+    const dto = args?.object as AddSalePaymentDto | undefined;
+    if (!dto) return false;
+
     const hasLegacy = dto.method !== undefined || dto.amountCents !== undefined;
     const hasArray = dto.payments !== undefined;
 
@@ -38,9 +41,9 @@ class CollectionPaymentShapeConstraint implements ValidatorConstraintInterface {
 class CollectionReferenceRequirementConstraint
   implements ValidatorConstraintInterface
 {
-  validate(value: unknown, args: { object: AddSalePaymentDto }): boolean {
-    const dto = args.object;
-    if (!dto.payments?.length) {
+  validate(value: unknown, args?: ValidationArguments): boolean {
+    const dto = args?.object as AddSalePaymentDto | undefined;
+    if (!dto?.payments?.length) {
       return true;
     }
 
