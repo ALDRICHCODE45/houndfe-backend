@@ -30,10 +30,12 @@ export class SalesPaymentsController {
     @Headers('idempotency-key') idempotencyKey: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    if (!idempotencyKey?.trim()) {
+    const normalizedIdempotencyKey = idempotencyKey?.trim();
+
+    if (!normalizedIdempotencyKey) {
       throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
     }
 
-    return this.salesService.addPayment(id, user.userId, dto, idempotencyKey);
+    return this.salesService.addPayment(id, user.userId, dto, normalizedIdempotencyKey);
   }
 }

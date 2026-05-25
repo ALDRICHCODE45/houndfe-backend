@@ -74,6 +74,12 @@ type SupportedPaymentCollectionMethod =
   | 'card_debit'
   | 'transfer';
 
+type CollectionPaymentEntry = {
+  method: SupportedPaymentCollectionMethod;
+  amountCents: number;
+  reference?: string;
+};
+
 type ChargePaymentEntry = {
   method: SupportedChargeMethod;
   amountCents: number;
@@ -211,6 +217,67 @@ function isSupportedCollectionMethod(
   method: string,
 ): method is SupportedPaymentCollectionMethod {
   return ['cash', 'card_credit', 'card_debit', 'transfer'].includes(method);
+}
+
+function normalizeCollectionRequestPayments(dto: {
+  method?: string;
+  amountCents?: number;
+  reference?: string;
+  payments?: Array<{ method: string; amountCents: number; reference?: string }>;
+}): CollectionPaymentEntry[] {
+  const hasLegacy = dto.method !== undefined || dto.amountCents !== undefined;
+  const hasArray = dto.payments !== undefined;
+
+  if (hasLegacy && hasArray) {
+    throw new BusinessRuleViolationError(
+      'AMBIGUOUS_PAYMENT_SHAPE',
+      'AMBIGUOUS_PAYMENT_SHAPE',
+    );
+  }
+
+  if (hasArray) {
+    const entries = dto.payments ?? [];
+    if (entries.length === 0) {
+      throw new BusinessRuleViolationError('EMPTY_PAYMENTS', 'EMPTY_PAYMENTS');
+    }
+
+    return entries.map((entry) => {
+      if (!isSupportedCollectionMethod(entry.method)) {
+        throw new BusinessRuleViolationError(
+          'PAYMENT_METHOD_NOT_SUPPORTED',
+          'PAYMENT_METHOD_NOT_SUPPORTED',
+        );
+      }
+
+      return {
+        method: entry.method,
+        amountCents: entry.amountCents,
+        reference: entry.reference,
+      };
+    });
+  }
+
+  if (!dto.method || dto.amountCents === undefined) {
+    throw new BusinessRuleViolationError(
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+    );
+  }
+
+  if (!isSupportedCollectionMethod(dto.method)) {
+    throw new BusinessRuleViolationError(
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+      'PAYMENT_METHOD_NOT_SUPPORTED',
+    );
+  }
+
+  return [
+    {
+      method: dto.method,
+      amountCents: dto.amountCents,
+      reference: dto.reference,
+    },
+  ];
 }
 
 @Injectable()
@@ -1557,22 +1624,28 @@ export class SalesService {
     saleId: string,
     actorId: string,
     dto: {
-      method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
-      amountCents: number;
+      method?: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
+      amountCents?: number;
       reference?: string;
+      payments?: Array<{
+        method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
+        amountCents: number;
+        reference?: string;
+      }>;
     },
     idempotencyKey: string,
   ) {
-    if (!isSupportedCollectionMethod(dto.method)) {
-      throw new BusinessRuleViolationError(
-        'PAYMENT_METHOD_NOT_SUPPORTED',
-        'PAYMENT_METHOD_NOT_SUPPORTED',
-      );
-    }
-    const collectionMethod: SupportedPaymentCollectionMethod = dto.method;
+    const normalizedPayments = normalizeCollectionRequestPayments(dto);
+    const hashPayments = sortPaymentsForHash(
+      normalizedPayments.map((payment) => ({
+        method: payment.method,
+        amountCents: payment.amountCents,
+        reference: payment.reference,
+      })),
+    );
 
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ saleId, actorId, dto }))
+      .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
       .digest('hex');
 
     const idempotency = await this.saleRepo.acquirePaymentIdempotency(
@@ -1608,26 +1681,24 @@ export class SalesService {
           'SALE_NOT_CONFIRMABLE_FOR_PAYMENT',
         );
       }
-      const updated = await this.saleRepo.persistCollectedPayment({
+      const updated = await this.saleRepo.persistCollectedPayments({
         saleId,
-        method: collectionMethod,
-        amountCents: dto.amountCents,
-        reference: dto.reference,
         userId: actorId,
+        payments: normalizedPayments,
       });
+
+      const eventPayments = normalizedPayments.map((payment, index) => ({
+        paymentId: updated.paymentIds[index],
+        method: payment.method,
+        amountCents: payment.amountCents,
+        reference: payment.reference ?? null,
+      }));
 
       await this.publishPaymentReceivedEvents({
         saleId,
         tenantId,
         actorId,
-        payments: [
-          {
-            paymentId: updated.paymentId,
-            method: collectionMethod,
-            amountCents: dto.amountCents,
-            reference: dto.reference ?? null,
-          },
-        ],
+        payments: eventPayments,
         paidCents: updated.paidCents,
         debtCents: updated.debtCents,
         occurredAt: new Date(),
@@ -1650,6 +1721,7 @@ export class SalesService {
         debtCents: updated.debtCents,
         totalCents: updated.totalCents,
         paymentStatus: updated.paymentStatus,
+        paymentIds: updated.paymentIds,
       };
 
       await this.saleRepo.markPaymentIdempotencySucceeded(

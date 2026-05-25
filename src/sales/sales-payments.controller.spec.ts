@@ -55,4 +55,34 @@ describe('SalesPaymentsController', () => {
       'idem-key-1',
     );
   });
+
+  it('forwards array-shaped payload and trims idempotency key', async () => {
+    const service = makeMockService();
+    const controller = new SalesPaymentsController(service as unknown as SalesService);
+    service.addPayment.mockResolvedValue({ saleId: 'sale-1', paymentIds: ['p-1', 'p-2'] });
+
+    await controller.addPayment(
+      '66f64f29-cde5-41ac-baf2-30ce8e503f1a',
+      {
+        payments: [
+          { method: 'cash', amountCents: 500 },
+          { method: 'transfer', amountCents: 300, reference: 'TRX-1' },
+        ],
+      } as never,
+      '  idem-key-2  ',
+      makeUser('user-1'),
+    );
+
+    expect(service.addPayment).toHaveBeenCalledWith(
+      '66f64f29-cde5-41ac-baf2-30ce8e503f1a',
+      'user-1',
+      {
+        payments: [
+          { method: 'cash', amountCents: 500 },
+          { method: 'transfer', amountCents: 300, reference: 'TRX-1' },
+        ],
+      },
+      'idem-key-2',
+    );
+  });
 });

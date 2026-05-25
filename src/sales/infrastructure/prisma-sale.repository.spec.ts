@@ -32,6 +32,7 @@ function makeMockPrisma() {
     },
     salePayment: {
       create: jest.fn(),
+      createMany: jest.fn(),
       aggregate: jest.fn(),
     },
     saleIdempotency: {
@@ -1029,7 +1030,7 @@ describe('PrismaSaleRepository', () => {
     it('recomputes paid/debt from ledger + new amount in transaction', async () => {
       prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
       prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 2000 } });
-      prisma.salePayment.create.mockResolvedValue({ id: 'p-1' });
+      prisma.salePayment.createMany.mockResolvedValue({ count: 1 });
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
 
       const result = await repo.persistCollectedPayment({
@@ -1045,18 +1046,18 @@ describe('PrismaSaleRepository', () => {
           _sum: { amountCents: true },
         }),
       );
-      expect(result).toEqual({
-        paymentId: 'p-1',
-        paidCents: 4000,
-        debtCents: 1000,
-        paymentStatus: 'PARTIAL',
-        totalCents: 5000,
-      });
-      expect(prisma.salePayment.create).toHaveBeenCalledWith(
+      expect(result.paidCents).toBe(4000);
+      expect(result.debtCents).toBe(1000);
+      expect(result.paymentStatus).toBe('PARTIAL');
+      expect(result.totalCents).toBe(5000);
+      expect(result.paymentId).toEqual(expect.any(String));
+      expect(prisma.salePayment.createMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({
-            userId: 'cashier-1',
-          }),
+          data: [
+            expect.objectContaining({
+              userId: 'cashier-1',
+            }),
+          ],
         }),
       );
     });
@@ -1072,6 +1073,73 @@ describe('PrismaSaleRepository', () => {
           amountCents: 1000,
         }),
       ).rejects.toThrow('PAYMENT_EXCEEDS_DEBT');
+    });
+  });
+
+  describe('persistCollectedPayments', () => {
+    it('persists N payment rows and updates sale once', async () => {
+      prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
+      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 1000 } });
+      prisma.salePayment.createMany.mockResolvedValue({ count: 2 });
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await repo.persistCollectedPayments({
+        saleId: 'sale-collection-1',
+        userId: 'cashier-1',
+        payments: [
+          { method: 'cash', amountCents: 1000 },
+          { method: 'transfer', amountCents: 1500, reference: 'TRX-1' },
+        ],
+      });
+
+      expect(prisma.salePayment.createMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: [
+            expect.objectContaining({ method: 'CASH', amountCents: 1000 }),
+            expect.objectContaining({ method: 'TRANSFER', amountCents: 1500, reference: 'TRX-1' }),
+          ],
+        }),
+      );
+      expect(prisma.sale.updateMany).toHaveBeenCalledTimes(1);
+      expect(result.paymentIds).toHaveLength(2);
+      expect(result.paidCents).toBe(3500);
+      expect(result.debtCents).toBe(1500);
+      expect(result.paymentStatus).toBe('PARTIAL');
+    });
+
+    it('rejects overpay in aggregate and does not insert rows', async () => {
+      prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
+      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 4500 } });
+
+      await expect(
+        repo.persistCollectedPayments({
+          saleId: 'sale-collection-overpay',
+          userId: 'cashier-1',
+          payments: [{ method: 'cash', amountCents: 700 }],
+        }),
+      ).rejects.toThrow('PAYMENT_EXCEEDS_DEBT');
+
+      expect(prisma.salePayment.createMany).not.toHaveBeenCalled();
+    });
+
+    it('keeps deterministic paymentIds order based on input sequence', async () => {
+      prisma.sale.findFirst.mockResolvedValue({ totalCents: 10000 });
+      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 0 } });
+      prisma.salePayment.createMany.mockResolvedValue({ count: 3 });
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await repo.persistCollectedPayments({
+        saleId: 'sale-collection-order',
+        userId: 'cashier-1',
+        payments: [
+          { method: 'transfer', amountCents: 1000, reference: 'A' },
+          { method: 'cash', amountCents: 1000 },
+          { method: 'card_debit', amountCents: 1000, reference: 'B' },
+        ],
+      });
+
+      expect(result.paymentIds).toHaveLength(3);
+      expect(new Set(result.paymentIds).size).toBe(3);
     });
   });
 

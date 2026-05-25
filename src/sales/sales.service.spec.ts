@@ -41,6 +41,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     allocateNextFolio: jest.fn(),
     persistChargeConfirmation: jest.fn(),
     persistCollectedPayment: jest.fn(),
+    persistCollectedPayments: jest.fn(),
     findManyConfirmed: jest.fn(),
     countConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
@@ -144,6 +145,13 @@ describe('SalesService', () => {
       paymentStatus: 'PARTIAL',
       totalCents: 5000,
     });
+    saleRepo.persistCollectedPayments.mockResolvedValue({
+      paymentIds: ['payment-1'],
+      paidCents: 4000,
+      debtCents: 1000,
+      paymentStatus: 'PARTIAL',
+      totalCents: 5000,
+    });
     outboxWriter.publish.mockResolvedValue(undefined);
   });
 
@@ -184,18 +192,28 @@ describe('SalesService', () => {
         'user-1',
         { method: 'cash', amountCents: 2000, reference: 'RCPT-1' },
         'idem-pay-happy',
-      )) as { paymentStatus: string; paidCents: number; debtCents: number };
+      )) as {
+        paymentStatus: string;
+        paidCents: number;
+        debtCents: number;
+        paymentIds: string[];
+      };
 
       expect(result.paymentStatus).toBe('PARTIAL');
       expect(result.paidCents).toBe(4000);
       expect(result.debtCents).toBe(1000);
-      expect(saleRepo.persistCollectedPayment).toHaveBeenCalledWith(
+      expect(result.paymentIds).toEqual(['payment-1']);
+      expect(saleRepo.persistCollectedPayments).toHaveBeenCalledWith(
         expect.objectContaining({
           saleId: sale.id,
-          method: 'cash',
-          amountCents: 2000,
-          reference: 'RCPT-1',
           userId: 'user-1',
+          payments: [
+            expect.objectContaining({
+              method: 'cash',
+              amountCents: 2000,
+              reference: 'RCPT-1',
+            }),
+          ],
         }),
       );
     });
@@ -237,8 +255,8 @@ describe('SalesService', () => {
     it('emits sale.payment.received and sale.fully.paid outbox events when addPayment settles debt', async () => {
       const sale = buildConfirmedSale('sale-payment-outbox-full', 'user-1', 5000);
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
-      saleRepo.persistCollectedPayment.mockResolvedValue({
-        paymentId: 'payment-final',
+      saleRepo.persistCollectedPayments.mockResolvedValue({
+        paymentIds: ['payment-final'],
         paidCents: 5000,
         debtCents: 0,
         paymentStatus: 'PAID',
@@ -267,7 +285,7 @@ describe('SalesService', () => {
     it('rejects overpayment with PAYMENT_EXCEEDS_DEBT', async () => {
       const sale = buildConfirmedSale('sale-payment-overpay', 'user-1', 5000);
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
-      saleRepo.persistCollectedPayment.mockRejectedValue(
+      saleRepo.persistCollectedPayments.mockRejectedValue(
         new BusinessRuleViolationError('PAYMENT_EXCEEDS_DEBT', 'PAYMENT_EXCEEDS_DEBT'),
       );
 
@@ -284,7 +302,7 @@ describe('SalesService', () => {
     it('rejects payment when sale has no debt', async () => {
       const sale = buildConfirmedSale('sale-payment-no-debt', 'user-1', 5000);
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
-      saleRepo.persistCollectedPayment.mockRejectedValue(
+      saleRepo.persistCollectedPayments.mockRejectedValue(
         new BusinessRuleViolationError('NO_OUTSTANDING_DEBT', 'NO_OUTSTANDING_DEBT'),
       );
 
@@ -348,6 +366,120 @@ describe('SalesService', () => {
 
       expect(result).toEqual(replayPayload);
       expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
+    });
+
+    it('rejects mixed shape for addPayment with AMBIGUOUS_PAYMENT_SHAPE', async () => {
+      await expect(
+        service.addPayment(
+          'sale-payment-mixed-shape',
+          'user-1',
+          {
+            method: 'cash',
+            amountCents: 1000,
+            payments: [{ method: 'cash', amountCents: 1000 }],
+          } as never,
+          'idem-pay-mixed-shape',
+        ),
+      ).rejects.toThrow('AMBIGUOUS_PAYMENT_SHAPE');
+    });
+
+    it('rejects empty payments array for addPayment with EMPTY_PAYMENTS', async () => {
+      await expect(
+        service.addPayment(
+          'sale-payment-empty-array',
+          'user-1',
+          { payments: [] } as never,
+          'idem-pay-empty-array',
+        ),
+      ).rejects.toThrow('EMPTY_PAYMENTS');
+    });
+
+    it('uses stable addPayment idempotency hash for reordered payments[]', async () => {
+      const replayPayload = {
+        saleId: 'sale-payment-reorder-replay',
+        paidCents: 3000,
+        debtCents: 2000,
+        totalCents: 5000,
+        paymentStatus: 'PARTIAL' as const,
+        paymentIds: ['payment-1', 'payment-2'],
+      };
+
+      const hashes = new Map<string, unknown>();
+      saleRepo.acquirePaymentIdempotency.mockImplementation(
+        async (_saleId: string, _key: string, requestHash: string) => {
+          if (hashes.has(requestHash)) {
+            return { kind: 'replay', payload: replayPayload };
+          }
+
+          hashes.set(requestHash, true);
+          return { kind: 'acquired', token: 'payment-idem-token' };
+        },
+      );
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(
+        buildConfirmedSale('sale-payment-reorder-replay', 'user-1', 5000),
+      );
+
+      await service.addPayment(
+        'sale-payment-reorder-replay',
+        'user-1',
+        {
+          payments: [
+            { method: 'transfer', amountCents: 1000, reference: 'TRX-2' },
+            { method: 'cash', amountCents: 2000 },
+          ],
+        } as never,
+        'idem-pay-reorder',
+      );
+
+      const replay = await service.addPayment(
+        'sale-payment-reorder-replay',
+        'user-1',
+        {
+          payments: [
+            { method: 'cash', amountCents: 2000 },
+            { method: 'transfer', amountCents: 1000, reference: 'TRX-2' },
+          ],
+        } as never,
+        'idem-pay-reorder',
+      );
+
+      expect(replay).toEqual(replayPayload);
+    });
+
+    it('publishes one payment.received event per entry and one fully.paid when debt reaches zero', async () => {
+      saleRepo.findByIdForUpdate.mockResolvedValue(
+        buildConfirmedSale('sale-payment-multi-events', 'user-1', 5000),
+      );
+      saleRepo.persistCollectedPayments.mockResolvedValue({
+        paymentIds: ['p-1', 'p-2'],
+        paidCents: 5000,
+        debtCents: 0,
+        paymentStatus: 'PAID',
+        totalCents: 5000,
+      });
+
+      await service.addPayment(
+        'sale-payment-multi-events',
+        'user-1',
+        {
+          payments: [
+            { method: 'cash', amountCents: 1000 },
+            { method: 'transfer', amountCents: 2000, reference: 'TRX-1' },
+          ],
+        } as never,
+        'idem-pay-multi-events',
+      );
+
+      const paymentEvents = outboxWriter.publish.mock.calls.filter(
+        (args) => args[4] === 'sale.payment.received',
+      );
+      const fullyPaidEvents = outboxWriter.publish.mock.calls.filter(
+        (args) => args[4] === 'sale.fully.paid',
+      );
+
+      expect(paymentEvents).toHaveLength(2);
+      expect(fullyPaidEvents).toHaveLength(1);
     });
   });
 
