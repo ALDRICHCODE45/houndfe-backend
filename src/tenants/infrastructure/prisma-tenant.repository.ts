@@ -50,7 +50,9 @@ export class PrismaTenantRepository implements ITenantRepository {
 
   async update(
     id: string,
-    data: Partial<Pick<Tenant, 'name' | 'slug' | 'address' | 'phone' | 'isActive'>>,
+    data: Partial<
+      Pick<Tenant, 'name' | 'slug' | 'address' | 'phone' | 'isActive'>
+    >,
   ): Promise<Tenant> {
     try {
       return await this.prisma.tenant.update({
@@ -70,7 +72,10 @@ export class PrismaTenantRepository implements ITenantRepository {
   }
 
   async deactivate(id: string): Promise<void> {
-    await this.prisma.tenant.update({ where: { id }, data: { isActive: false } });
+    await this.prisma.tenant.update({
+      where: { id },
+      data: { isActive: false },
+    });
   }
 
   private handleConflict(error: unknown): never | void {

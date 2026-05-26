@@ -36,6 +36,11 @@ export class SalesPaymentsController {
       throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
     }
 
-    return this.salesService.addPayment(id, user.userId, dto, normalizedIdempotencyKey);
+    return this.salesService.addPayment(
+      id,
+      user.userId,
+      dto,
+      normalizedIdempotencyKey,
+    );
   }
 }

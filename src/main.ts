@@ -28,7 +28,10 @@ async function bootstrap() {
   );
 
   // Global exception filter — maps DomainErrors to HTTP responses
-  app.useGlobalFilters(new DomainExceptionFilter(), new PrismaExceptionFilter());
+  app.useGlobalFilters(
+    new DomainExceptionFilter(),
+    new PrismaExceptionFilter(),
+  );
 
   // CORS — permite todas las origenes (solo para desarrollo)
   app.enableCors();

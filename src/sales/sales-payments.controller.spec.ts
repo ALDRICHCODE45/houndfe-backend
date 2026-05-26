@@ -24,7 +24,9 @@ function makeUser(userId: string): AuthenticatedUser {
 describe('SalesPaymentsController', () => {
   it('rejects request when idempotency header is missing', async () => {
     const service = makeMockService();
-    const controller = new SalesPaymentsController(service as unknown as SalesService);
+    const controller = new SalesPaymentsController(
+      service as unknown as SalesService,
+    );
 
     expect(() =>
       controller.addPayment(
@@ -38,7 +40,9 @@ describe('SalesPaymentsController', () => {
 
   it('forwards endpoint payload to service', async () => {
     const service = makeMockService();
-    const controller = new SalesPaymentsController(service as unknown as SalesService);
+    const controller = new SalesPaymentsController(
+      service as unknown as SalesService,
+    );
     service.addPayment.mockResolvedValue({ saleId: 'sale-1' });
 
     await controller.addPayment(
@@ -58,8 +62,13 @@ describe('SalesPaymentsController', () => {
 
   it('forwards array-shaped payload and trims idempotency key', async () => {
     const service = makeMockService();
-    const controller = new SalesPaymentsController(service as unknown as SalesService);
-    service.addPayment.mockResolvedValue({ saleId: 'sale-1', paymentIds: ['p-1', 'p-2'] });
+    const controller = new SalesPaymentsController(
+      service as unknown as SalesService,
+    );
+    service.addPayment.mockResolvedValue({
+      saleId: 'sale-1',
+      paymentIds: ['p-1', 'p-2'],
+    });
 
     await controller.addPayment(
       '66f64f29-cde5-41ac-baf2-30ce8e503f1a',

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ClsModule } from 'nestjs-cls';
+import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { TENANT_REPOSITORY } from './domain/tenant.repository';
 import { TENANT_MEMBERSHIP_REPOSITORY } from './domain/tenant-membership.repository';
@@ -11,7 +12,7 @@ import { TenantsService } from './tenants.service';
 import { TenantsMembershipService } from './tenants-membership.service';
 
 @Module({
-  imports: [DatabaseModule, ClsModule],
+  imports: [DatabaseModule, ClsModule, AuthModule], // AuthModule provides JwtAuthGuard, PermissionsGuard, CaslAbilityFactory
   controllers: [TenantsController, TenantsMembersController],
   providers: [
     TenantsService,

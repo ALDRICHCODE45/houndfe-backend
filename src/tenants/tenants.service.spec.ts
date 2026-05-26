@@ -19,7 +19,9 @@ describe('TenantsService', () => {
 
   it('duplicate slug throws ConflictException', async () => {
     const repo = {
-      create: jest.fn().mockRejectedValue(new ConflictException('TENANT_ALREADY_EXISTS')),
+      create: jest
+        .fn()
+        .mockRejectedValue(new ConflictException('TENANT_ALREADY_EXISTS')),
     } as any;
     const service = new TenantsService(
       repo,
@@ -27,9 +29,9 @@ describe('TenantsService', () => {
       { role: { findMany: jest.fn() } } as any,
     );
 
-    await expect(service.create({ name: 'HQ', slug: 'hq' })).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(
+      service.create({ name: 'HQ', slug: 'hq' }),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 
   it('deactivated tenant on selection throws ForbiddenException', async () => {
@@ -60,9 +62,9 @@ describe('TenantsService', () => {
       { role: { findMany: jest.fn() } } as any,
     );
 
-    await expect(service.create({ name: 'HQ', slug: 'hq' })).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
+    await expect(
+      service.create({ name: 'HQ', slug: 'hq' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('super-admin lists roles for target tenant', async () => {

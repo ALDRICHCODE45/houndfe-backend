@@ -23,6 +23,10 @@ export type AppSubjects =
   | 'User'
   | 'Role'
   | 'Tenant'
+  | 'Brand'
+  | 'Category'
+  | 'GlobalPriceList'
+  | 'TenantMembership'
   | 'Promotion'
   | 'Customer'
   | 'SaleComment'
@@ -163,6 +167,94 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'SaleComment',
     action: 'manage',
     description: 'Full sale comment management',
+  },
+
+  // Brand permissions
+  { subject: 'Brand', action: 'create', description: 'Create new brands' },
+  { subject: 'Brand', action: 'read', description: 'View brands' },
+  { subject: 'Brand', action: 'update', description: 'Update brands' },
+  { subject: 'Brand', action: 'delete', description: 'Delete brands' },
+  {
+    subject: 'Brand',
+    action: 'manage',
+    description: 'Full brand management',
+  },
+
+  // Category permissions
+  {
+    subject: 'Category',
+    action: 'create',
+    description: 'Create new categories',
+  },
+  { subject: 'Category', action: 'read', description: 'View categories' },
+  {
+    subject: 'Category',
+    action: 'update',
+    description: 'Update categories',
+  },
+  {
+    subject: 'Category',
+    action: 'delete',
+    description: 'Delete categories',
+  },
+  {
+    subject: 'Category',
+    action: 'manage',
+    description: 'Full category management',
+  },
+
+  // GlobalPriceList permissions
+  {
+    subject: 'GlobalPriceList',
+    action: 'create',
+    description: 'Create new global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'read',
+    description: 'View global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'update',
+    description: 'Update global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'delete',
+    description: 'Delete global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'manage',
+    description: 'Full global price list management',
+  },
+
+  // TenantMembership permissions
+  {
+    subject: 'TenantMembership',
+    action: 'create',
+    description: 'Create new tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'read',
+    description: 'View tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'update',
+    description: 'Update tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'delete',
+    description: 'Delete tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'manage',
+    description: 'Full tenant membership management',
   },
 
   // File permissions

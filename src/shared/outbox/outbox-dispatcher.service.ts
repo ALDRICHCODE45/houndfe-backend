@@ -30,7 +30,10 @@ export class OutboxDispatcherService {
         },
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown outbox dispatch error';
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown outbox dispatch error';
       const nextRetryCount = event.retryCount + 1;
       const isExhausted = nextRetryCount >= this.maxRetries;
 
@@ -38,7 +41,9 @@ export class OutboxDispatcherService {
         where: { id: event.id },
         data: {
           retryCount: nextRetryCount,
-          status: isExhausted ? OutboxEventStatus.FAILED : OutboxEventStatus.PENDING,
+          status: isExhausted
+            ? OutboxEventStatus.FAILED
+            : OutboxEventStatus.PENDING,
           nextAttemptAt: new Date(),
           lastError: message,
           lockToken: null,
@@ -51,7 +56,9 @@ export class OutboxDispatcherService {
         eventType: event.eventType,
         tenantId: event.tenantId,
         retryCount: nextRetryCount,
-        status: isExhausted ? OutboxEventStatus.FAILED : OutboxEventStatus.PENDING,
+        status: isExhausted
+          ? OutboxEventStatus.FAILED
+          : OutboxEventStatus.PENDING,
         error: message,
       });
     }

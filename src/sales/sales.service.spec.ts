@@ -219,7 +219,11 @@ describe('SalesService', () => {
     });
 
     it('emits only sale.payment.received outbox event for partial addPayment', async () => {
-      const sale = buildConfirmedSale('sale-payment-outbox-partial', 'user-1', 5000);
+      const sale = buildConfirmedSale(
+        'sale-payment-outbox-partial',
+        'user-1',
+        5000,
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
 
       await service.addPayment(
@@ -253,7 +257,11 @@ describe('SalesService', () => {
     });
 
     it('emits sale.payment.received and sale.fully.paid outbox events when addPayment settles debt', async () => {
-      const sale = buildConfirmedSale('sale-payment-outbox-full', 'user-1', 5000);
+      const sale = buildConfirmedSale(
+        'sale-payment-outbox-full',
+        'user-1',
+        5000,
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       saleRepo.persistCollectedPayments.mockResolvedValue({
         paymentIds: ['payment-final'],
@@ -286,7 +294,10 @@ describe('SalesService', () => {
       const sale = buildConfirmedSale('sale-payment-overpay', 'user-1', 5000);
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       saleRepo.persistCollectedPayments.mockRejectedValue(
-        new BusinessRuleViolationError('PAYMENT_EXCEEDS_DEBT', 'PAYMENT_EXCEEDS_DEBT'),
+        new BusinessRuleViolationError(
+          'PAYMENT_EXCEEDS_DEBT',
+          'PAYMENT_EXCEEDS_DEBT',
+        ),
       );
 
       await expect(
@@ -303,7 +314,10 @@ describe('SalesService', () => {
       const sale = buildConfirmedSale('sale-payment-no-debt', 'user-1', 5000);
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       saleRepo.persistCollectedPayments.mockRejectedValue(
-        new BusinessRuleViolationError('NO_OUTSTANDING_DEBT', 'NO_OUTSTANDING_DEBT'),
+        new BusinessRuleViolationError(
+          'NO_OUTSTANDING_DEBT',
+          'NO_OUTSTANDING_DEBT',
+        ),
       );
 
       await expect(
@@ -317,7 +331,11 @@ describe('SalesService', () => {
     });
 
     it('rejects credit method with PAYMENT_METHOD_NOT_SUPPORTED', async () => {
-      const sale = buildConfirmedSale('sale-payment-credit-method', 'user-1', 5000);
+      const sale = buildConfirmedSale(
+        'sale-payment-credit-method',
+        'user-1',
+        5000,
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
 
       await expect(
@@ -331,7 +349,11 @@ describe('SalesService', () => {
     });
 
     it('returns not found when actor tenant/user cannot access sale', async () => {
-      const sale = buildConfirmedSale('sale-payment-tenant-404', 'user-1', 5000);
+      const sale = buildConfirmedSale(
+        'sale-payment-tenant-404',
+        'user-1',
+        5000,
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
 
       await expect(
@@ -504,10 +526,16 @@ describe('SalesService', () => {
         updatedAt: new Date(),
       });
       saleRepo.findById.mockResolvedValue(sale);
-      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
-      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        paymentStatus: 'PARTIAL',
+      });
+      jest
+        .spyOn(service, 'getSaleDetail')
+        .mockResolvedValue({ id: sale.id } as never);
 
-      await service.setDueDate(sale.id, { dueDate: '2026-07-01T00:00:00.000Z' });
+      await service.setDueDate(sale.id, {
+        dueDate: '2026-07-01T00:00:00.000Z',
+      });
 
       expect(saleRepo.save).toHaveBeenCalled();
     });
@@ -523,8 +551,12 @@ describe('SalesService', () => {
         updatedAt: new Date(),
       });
       saleRepo.findById.mockResolvedValue(sale);
-      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
-      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        paymentStatus: 'PARTIAL',
+      });
+      jest
+        .spyOn(service, 'getSaleDetail')
+        .mockResolvedValue({ id: sale.id } as never);
 
       await expect(
         service.setDueDate(sale.id, { dueDate: '2026-06-09T23:59:59.999Z' }),
@@ -542,8 +574,12 @@ describe('SalesService', () => {
         updatedAt: new Date(),
       });
       saleRepo.findById.mockResolvedValue(sale);
-      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
-      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        paymentStatus: 'PARTIAL',
+      });
+      jest
+        .spyOn(service, 'getSaleDetail')
+        .mockResolvedValue({ id: sale.id } as never);
 
       await expect(
         service.setDueDate(sale.id, { dueDate: '2026-06-10T03:25:00.000Z' }),
@@ -561,8 +597,12 @@ describe('SalesService', () => {
         updatedAt: new Date(),
       });
       saleRepo.findById.mockResolvedValue(sale);
-      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
-      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        paymentStatus: 'PARTIAL',
+      });
+      jest
+        .spyOn(service, 'getSaleDetail')
+        .mockResolvedValue({ id: sale.id } as never);
 
       await expect(
         service.setDueDate(sale.id, { dueDate: '2026-06-11T00:00:00.000Z' }),
@@ -581,10 +621,16 @@ describe('SalesService', () => {
         updatedAt: new Date(),
       });
       saleRepo.findById.mockResolvedValue(sale);
-      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PARTIAL' });
-      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        paymentStatus: 'PARTIAL',
+      });
+      jest
+        .spyOn(service, 'getSaleDetail')
+        .mockResolvedValue({ id: sale.id } as never);
 
-      await expect(service.setDueDate(sale.id, { dueDate: null })).resolves.toEqual({
+      await expect(
+        service.setDueDate(sale.id, { dueDate: null }),
+      ).resolves.toEqual({
         id: sale.id,
       });
       expect(sale.dueDate).toBeNull();
@@ -592,17 +638,30 @@ describe('SalesService', () => {
 
     it('throws SALE_NOT_FOUND when sale does not exist', async () => {
       saleRepo.findById.mockResolvedValue(null);
-      await expect(service.setDueDate('missing-sale', { dueDate: null })).rejects.toThrow('SALE_NOT_FOUND');
+      await expect(
+        service.setDueDate('missing-sale', { dueDate: null }),
+      ).rejects.toThrow('SALE_NOT_FOUND');
     });
 
     it('throws SALE_FULLY_PAID when paymentStatus is PAID', async () => {
       const sale = Sale.fromPersistence({
-        id: 'sale-paid', userId: 'user-1', status: 'CONFIRMED', items: [], createdAt: new Date(), updatedAt: new Date(),
+        id: 'sale-paid',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
       saleRepo.findById.mockResolvedValue(sale);
-      saleRepo.findOneWithRelations.mockResolvedValue({ paymentStatus: 'PAID' });
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        paymentStatus: 'PAID',
+      });
 
-      await expect(service.setDueDate('sale-paid', { dueDate: '2026-08-01T00:00:00.000Z' })).rejects.toThrow('SALE_FULLY_PAID');
+      await expect(
+        service.setDueDate('sale-paid', {
+          dueDate: '2026-08-01T00:00:00.000Z',
+        }),
+      ).rejects.toThrow('SALE_FULLY_PAID');
     });
   });
 
@@ -622,9 +681,13 @@ describe('SalesService', () => {
       (tenantPrisma.getClient as jest.Mock).mockReturnValue({
         user: { findUnique: jest.fn().mockResolvedValue({ id: 'seller-1' }) },
       });
-      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+      jest
+        .spyOn(service, 'getSaleDetail')
+        .mockResolvedValue({ id: sale.id } as never);
 
-      await service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-1' });
+      await service.assignSeller(sale.id, 'actor-1', {
+        sellerUserId: 'seller-1',
+      });
 
       expect(saleRepo.save).toHaveBeenCalledWith(sale);
       expect(eventEmitter.emit).toHaveBeenCalledWith(
@@ -653,11 +716,18 @@ describe('SalesService', () => {
       (tenantPrisma.getClient as jest.Mock).mockReturnValue({
         user: { findUnique: jest.fn().mockResolvedValue({ id: 'seller-1' }) },
       });
-      saleRepo.findDraftResponseById.mockResolvedValue({ id: sale.id } as never);
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: sale.id,
+      } as never);
 
-      await service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-1' });
+      await service.assignSeller(sale.id, 'actor-1', {
+        sellerUserId: 'seller-1',
+      });
 
-      expect(eventEmitter.emit).not.toHaveBeenCalledWith('sale.seller.assigned', expect.anything());
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        'sale.seller.assigned',
+        expect.anything(),
+      );
     });
 
     it('throws SELLER_NOT_FOUND when seller user does not exist in tenant', async () => {
@@ -676,7 +746,9 @@ describe('SalesService', () => {
       });
 
       await expect(
-        service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-missing' }),
+        service.assignSeller(sale.id, 'actor-1', {
+          sellerUserId: 'seller-missing',
+        }),
       ).rejects.toThrow('SELLER_NOT_FOUND');
     });
   });
@@ -694,7 +766,9 @@ describe('SalesService', () => {
       });
 
       saleRepo.findById.mockResolvedValue(sale);
-      jest.spyOn(service, 'getSaleDetail').mockResolvedValue({ id: sale.id } as never);
+      jest
+        .spyOn(service, 'getSaleDetail')
+        .mockResolvedValue({ id: sale.id } as never);
 
       await service.clearSeller(sale.id, 'actor-1');
 
@@ -721,16 +795,24 @@ describe('SalesService', () => {
       });
 
       saleRepo.findById.mockResolvedValue(sale);
-      saleRepo.findDraftResponseById.mockResolvedValue({ id: sale.id } as never);
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: sale.id,
+      } as never);
 
       await service.clearSeller(sale.id, 'actor-1');
 
-      expect(eventEmitter.emit).not.toHaveBeenCalledWith('sale.seller.cleared', expect.anything());
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        'sale.seller.cleared',
+        expect.anything(),
+      );
     });
   });
 
   describe('draft customer and shipping address mutations', () => {
-    const makeDraftSale = (overrides?: { customerId?: string | null; shippingAddressId?: string | null }) =>
+    const makeDraftSale = (overrides?: {
+      customerId?: string | null;
+      shippingAddressId?: string | null;
+    }) =>
       Sale.fromPersistence({
         id: '68f2f172-bfe8-48de-8d58-5e564f94c574',
         userId: 'bf464f5b-267b-43c5-87c8-2b655bf7ffbc',
@@ -773,7 +855,11 @@ describe('SalesService', () => {
       const sale = makeDraftSale();
       saleRepo.findById.mockResolvedValue(sale);
       const prismaClient = {
-        customer: { findUnique: jest.fn().mockResolvedValue({ id: draftResponse.customer.id }) },
+        customer: {
+          findUnique: jest
+            .fn()
+            .mockResolvedValue({ id: draftResponse.customer.id }),
+        },
         customerAddress: {
           findUnique: jest.fn().mockResolvedValue({
             id: draftResponse.shippingAddress.id,
@@ -784,14 +870,10 @@ describe('SalesService', () => {
       tenantPrisma.getClient = jest.fn(() => prismaClient as never);
       saleRepo.findDraftResponseById.mockResolvedValue(draftResponse as never);
 
-      const result = await service.assignCustomer(
-        sale.id,
-        sale.userId,
-        {
-          customerId: draftResponse.customer.id,
-          shippingAddressId: draftResponse.shippingAddress.id,
-        },
-      );
+      const result = await service.assignCustomer(sale.id, sale.userId, {
+        customerId: draftResponse.customer.id,
+        shippingAddressId: draftResponse.shippingAddress.id,
+      });
 
       expect(result).toEqual(draftResponse);
       expect(saleRepo.save).toHaveBeenCalledWith(sale);
@@ -921,7 +1003,11 @@ describe('SalesService', () => {
     };
 
     it('accepts new payments[] shape and computes totals', async () => {
-      const sale = buildDraftSale('sale-charge-array-ok', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-ok',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       const result = await service.chargeDraft(
@@ -942,7 +1028,11 @@ describe('SalesService', () => {
     });
 
     it('emits sale.confirmed + payment.received + fully.paid outbox events for fully-paid chargeDraft', async () => {
-      const sale = buildDraftSale('sale-charge-outbox-full', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-outbox-full',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
       saleRepo.persistChargeConfirmation.mockResolvedValue([
         {
@@ -962,7 +1052,12 @@ describe('SalesService', () => {
       await service.chargeDraft(
         sale.id,
         'user-1',
-        { payments: [{ method: 'cash', amountCents: 1000 }, { method: 'card_debit', amountCents: 1000, reference: 'REF-1' }] } as never,
+        {
+          payments: [
+            { method: 'cash', amountCents: 1000 },
+            { method: 'card_debit', amountCents: 1000, reference: 'REF-1' },
+          ],
+        } as never,
         'idem-charge-outbox-full',
       );
 
@@ -1019,7 +1114,11 @@ describe('SalesService', () => {
     });
 
     it('does not emit sale.fully.paid on partial chargeDraft', async () => {
-      const sale = buildDraftSale('sale-charge-outbox-partial', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-outbox-partial',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
       saleRepo.persistChargeConfirmation.mockResolvedValue([
         {
@@ -1044,7 +1143,11 @@ describe('SalesService', () => {
     });
 
     it('rejects mixed shape with AMBIGUOUS_PAYMENT_SHAPE', async () => {
-      const sale = buildDraftSale('sale-charge-mixed-shape', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-mixed-shape',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       await expect(
@@ -1062,7 +1165,11 @@ describe('SalesService', () => {
     });
 
     it('rejects credit method inside payments[] with CREDIT_METHOD_NOT_VALID_IN_MULTI', async () => {
-      const sale = buildDraftSale('sale-charge-array-credit', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-credit',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       await expect(
@@ -1078,7 +1185,11 @@ describe('SalesService', () => {
     });
 
     it('rejects missing reference for card/transfer with REFERENCE_REQUIRED', async () => {
-      const sale = buildDraftSale('sale-charge-array-reference', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-reference',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       await expect(
@@ -1094,7 +1205,11 @@ describe('SalesService', () => {
     });
 
     it('rejects more than five payment entries with TOO_MANY_PAYMENTS', async () => {
-      const sale = buildDraftSale('sale-charge-array-too-many', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-too-many',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       await expect(
@@ -1131,7 +1246,11 @@ describe('SalesService', () => {
     });
 
     it('accepts empty payments[] with customer and marks CREDIT', async () => {
-      const sale = buildDraftSale('sale-charge-array-empty-credit', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-empty-credit',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       const result = await service.chargeDraft(
@@ -1147,7 +1266,11 @@ describe('SalesService', () => {
     });
 
     it('rejects card-only overpay with PAYMENT_AMOUNT_INVALID', async () => {
-      const sale = buildDraftSale('sale-charge-array-card-overpay', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-card-overpay',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       await expect(
@@ -1155,7 +1278,9 @@ describe('SalesService', () => {
           sale.id,
           'user-1',
           {
-            payments: [{ method: 'card_debit', amountCents: 2500, reference: 'REF-1' }],
+            payments: [
+              { method: 'card_debit', amountCents: 2500, reference: 'REF-1' },
+            ],
           } as never,
           'idem-array-card-overpay',
         ),
@@ -1163,7 +1288,11 @@ describe('SalesService', () => {
     });
 
     it('computes changeDueCents from aggregated payments', async () => {
-      const sale = buildDraftSale('sale-charge-array-change', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-change',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       const result = await service.chargeDraft(
@@ -1183,7 +1312,11 @@ describe('SalesService', () => {
     });
 
     it('uses stable idempotency hash for reordered payments[]', async () => {
-      const sale = buildDraftSale('sale-charge-array-idempotency', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-array-idempotency',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       const replayPayload = {
@@ -1259,11 +1392,15 @@ describe('SalesService', () => {
       saleRepo.allocateNextFolio = jest
         .fn()
         .mockResolvedValue('A-2605-000001') as any;
-      saleRepo.persistChargeConfirmation = jest.fn().mockResolvedValue(undefined) as any;
+      saleRepo.persistChargeConfirmation = jest
+        .fn()
+        .mockResolvedValue(undefined) as any;
       saleRepo.runInTransaction = jest
         .fn()
         .mockImplementation(async (cb: any) => cb()) as any;
-      (saleRepo as any).decrementStockForCharge = jest.fn().mockResolvedValue(undefined);
+      (saleRepo as any).decrementStockForCharge = jest
+        .fn()
+        .mockResolvedValue(undefined);
 
       const result = await (service as any).chargeDraft(
         'sale-charge-1',
@@ -1364,7 +1501,11 @@ describe('SalesService', () => {
     });
 
     it('accepts partial non-credit payment and marks PARTIAL', async () => {
-      const sale = buildDraftSale('sale-charge-partial', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-partial',
+        'user-1',
+        'customer-1',
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
@@ -1386,7 +1527,11 @@ describe('SalesService', () => {
     });
 
     it('keeps chargeDraft default dueDate rule as confirmedAt + 15 days when dueDate is omitted', async () => {
-      const sale = buildDraftSale('sale-charge-default-due-date', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-default-due-date',
+        'user-1',
+        'customer-1',
+      );
       setupHappyPathDraft(sale);
 
       await service.chargeDraft(
@@ -1396,8 +1541,9 @@ describe('SalesService', () => {
         'idem-default-due-date',
       );
 
-      const persistedInput = saleRepo.persistChargeConfirmation.mock.calls[0][0];
-      const confirmedAt = persistedInput.confirmedAt as Date;
+      const persistedInput =
+        saleRepo.persistChargeConfirmation.mock.calls[0][0];
+      const confirmedAt = persistedInput.confirmedAt;
       const expectedDueDate = new Date(confirmedAt);
       expectedDueDate.setDate(expectedDueDate.getDate() + 15);
 
@@ -1481,7 +1627,11 @@ describe('SalesService', () => {
     });
 
     it('rejects card underpayment with PAYMENT_AMOUNT_INSUFFICIENT', async () => {
-      const sale = buildDraftSale('sale-charge-underpay', 'user-1', 'customer-1');
+      const sale = buildDraftSale(
+        'sale-charge-underpay',
+        'user-1',
+        'customer-1',
+      );
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
@@ -1549,7 +1699,10 @@ describe('SalesService', () => {
     });
 
     it('accepts custom-priced item even when current list price changed', async () => {
-      const sale = Sale.create({ id: 'sale-charge-custom-price', userId: 'user-1' });
+      const sale = Sale.create({
+        id: 'sale-charge-custom-price',
+        userId: 'user-1',
+      });
       sale.addItem({
         id: 'item-custom',
         saleId: sale.id,
@@ -1624,12 +1777,10 @@ describe('SalesService', () => {
         confirmedAt: new Date().toISOString(),
       };
 
-      (saleRepo as any).acquireChargeIdempotency = jest
-        .fn()
-        .mockResolvedValue({
-          kind: 'replay',
-          payload: replayPayload,
-        });
+      (saleRepo as any).acquireChargeIdempotency = jest.fn().mockResolvedValue({
+        kind: 'replay',
+        payload: replayPayload,
+      });
 
       const result = await service.chargeDraft(
         sale.id,
@@ -1697,11 +1848,9 @@ describe('SalesService', () => {
         'idem-success',
       );
 
-      expect((saleRepo as any).markChargeIdempotencySucceeded).toHaveBeenCalledWith(
-        'idem-row-1',
-        sale.id,
-        result,
-      );
+      expect(
+        (saleRepo as any).markChargeIdempotencySucceeded,
+      ).toHaveBeenCalledWith('idem-row-1', sale.id, result);
     });
 
     it('propagates customerId and sellerUserId from the draft to persistChargeConfirmation', async () => {
@@ -1754,16 +1903,28 @@ describe('SalesService', () => {
     it('applies item discount and emits event', async () => {
       const sale = Sale.create({ id: 'sale-discount', userId: 'user-1' });
       sale.addItem({
-        id: 'item-1', saleId: 'sale-discount', productId: 'prod-1', variantId: null,
-        productName: 'Prod', variantName: null, quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+        id: 'item-1',
+        saleId: 'sale-discount',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
       });
       saleRepo.findById.mockResolvedValue(sale);
 
-      const result = await service.applyItemDiscount('sale-discount', 'item-1', {
-        type: 'percentage',
-        percent: 15,
-        discountTitle: 'promo',
-      }, 'user-1');
+      const result = await service.applyItemDiscount(
+        'sale-discount',
+        'item-1',
+        {
+          type: 'percentage',
+          percent: 15,
+          discountTitle: 'promo',
+        },
+        'user-1',
+      );
 
       expect(result.items[0].discountType).toBe('percentage');
       expect(result.items[0].discountTitle).toBe('promo');
@@ -1776,17 +1937,31 @@ describe('SalesService', () => {
     it('removes item discount and emits event', async () => {
       const sale = Sale.create({ id: 'sale-discount-2', userId: 'user-1' });
       sale.addItem({
-        id: 'item-1', saleId: 'sale-discount-2', productId: 'prod-1', variantId: null,
-        productName: 'Prod', variantName: null, quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+        id: 'item-1',
+        saleId: 'sale-discount-2',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Prod',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
       });
       sale.applyItemDiscount('item-1', { type: 'amount', amountCents: 100 });
       saleRepo.findById.mockResolvedValue(sale);
 
-      const result = await service.removeItemDiscount('sale-discount-2', 'item-1', 'user-1');
+      const result = await service.removeItemDiscount(
+        'sale-discount-2',
+        'item-1',
+        'user-1',
+      );
       expect(result.items[0].discountType).toBeNull();
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.item.discount.removed',
-        expect.objectContaining({ saleId: 'sale-discount-2', itemId: 'item-1' }),
+        expect.objectContaining({
+          saleId: 'sale-discount-2',
+          itemId: 'item-1',
+        }),
       );
     });
   });
@@ -1830,7 +2005,10 @@ describe('SalesService', () => {
       expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.item.discount.applied',
-        expect.objectContaining({ saleId: 'sale-global', itemId: 'item-eligible' }),
+        expect.objectContaining({
+          saleId: 'sale-global',
+          itemId: 'item-eligible',
+        }),
       );
     });
 
@@ -1905,7 +2083,10 @@ describe('SalesService', () => {
         unitPriceCurrency: 'MXN',
       });
       // Apply individual discount to first item
-      sale.applyItemDiscount('item-has-discount', { type: 'percentage', percent: 10 });
+      sale.applyItemDiscount('item-has-discount', {
+        type: 'percentage',
+        percent: 10,
+      });
       saleRepo.findById.mockResolvedValue(sale);
 
       const result = await service.applyGlobalDiscount(
@@ -1931,7 +2112,10 @@ describe('SalesService', () => {
       expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.item.discount.applied',
-        expect.objectContaining({ saleId: 'sale-skip-strat', itemId: 'item-no-discount' }),
+        expect.objectContaining({
+          saleId: 'sale-skip-strat',
+          itemId: 'item-no-discount',
+        }),
       );
     });
 
@@ -1959,10 +2143,16 @@ describe('SalesService', () => {
         unitPriceCents: 800,
         unitPriceCurrency: 'MXN',
       });
-      sale.applyItemDiscount('item-discounted', { type: 'amount', amountCents: 100 });
+      sale.applyItemDiscount('item-discounted', {
+        type: 'amount',
+        amountCents: 100,
+      });
       saleRepo.findById.mockResolvedValue(sale);
 
-      const result = await service.removeGlobalDiscount('sale-remove-global', 'user-1');
+      const result = await service.removeGlobalDiscount(
+        'sale-remove-global',
+        'user-1',
+      );
 
       expect(result.items[0].discountType).toBeNull();
       expect(result.items[1].discountType).toBeNull();
@@ -1977,7 +2167,10 @@ describe('SalesService', () => {
     });
 
     it('removeGlobalDiscount is idempotent when no discounts exist', async () => {
-      const sale = Sale.create({ id: 'sale-remove-idempotent', userId: 'user-1' });
+      const sale = Sale.create({
+        id: 'sale-remove-idempotent',
+        userId: 'user-1',
+      });
       sale.addItem({
         id: 'item-plain',
         saleId: 'sale-remove-idempotent',
@@ -2504,7 +2697,10 @@ describe('SalesService', () => {
     });
 
     it('should throw SALE_UPDATE_FORBIDDEN when actor is not owner', async () => {
-      const sale = Sale.create({ id: 'sale-remove-forbidden', userId: 'owner-1' });
+      const sale = Sale.create({
+        id: 'sale-remove-forbidden',
+        userId: 'owner-1',
+      });
       saleRepo.findById.mockResolvedValue(sale);
 
       await expect(
@@ -2730,17 +2926,36 @@ describe('SalesService', () => {
       ] as any);
       saleRepo.countNotDeliveredConfirmed.mockResolvedValue(3);
 
-      const result = await service.listSales({ page: 2, limit: 1, paymentStatus: 'PAID' } as any);
+      const result = await service.listSales({
+        page: 2,
+        limit: 1,
+        paymentStatus: 'PAID',
+      } as any);
 
       expect(result.data).toHaveLength(1);
-      expect(result.pagination).toEqual({ page: 2, limit: 1, total: 7, totalPages: 7 });
-      expect(result.counts).toEqual({ all: 7, pendingPayments: 3, notDelivered: 3 });
+      expect(result.pagination).toEqual({
+        page: 2,
+        limit: 1,
+        total: 7,
+        totalPages: 7,
+      });
+      expect(result.counts).toEqual({
+        all: 7,
+        pendingPayments: 3,
+        notDelivered: 3,
+      });
       expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
         expect.objectContaining({ paymentStatus: 'PAID', page: 2, limit: 1 }),
       );
-      expect(saleRepo.countConfirmed).toHaveBeenCalledWith(expect.objectContaining({}));
-      expect(saleRepo.groupByPaymentStatusConfirmed).toHaveBeenCalledWith(expect.objectContaining({}));
-      expect(saleRepo.countNotDeliveredConfirmed).toHaveBeenCalledWith(expect.objectContaining({}));
+      expect(saleRepo.countConfirmed).toHaveBeenCalledWith(
+        expect.objectContaining({}),
+      );
+      expect(saleRepo.groupByPaymentStatusConfirmed).toHaveBeenCalledWith(
+        expect.objectContaining({}),
+      );
+      expect(saleRepo.countNotDeliveredConfirmed).toHaveBeenCalledWith(
+        expect.objectContaining({}),
+      );
     });
 
     it('keeps counts independent from tab filters', async () => {
@@ -2752,19 +2967,34 @@ describe('SalesService', () => {
       ] as any);
       saleRepo.countNotDeliveredConfirmed.mockResolvedValue(1);
 
-      await service.listSales({ paymentStatus: 'PAID', deliveryStatus: 'DELIVERED' } as any);
+      await service.listSales({
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+      } as any);
 
       expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
-        expect.objectContaining({ paymentStatus: 'PAID', deliveryStatus: 'DELIVERED' }),
+        expect.objectContaining({
+          paymentStatus: 'PAID',
+          deliveryStatus: 'DELIVERED',
+        }),
       );
       expect(saleRepo.countConfirmed).toHaveBeenCalledWith(
-        expect.not.objectContaining({ paymentStatus: expect.anything(), deliveryStatus: expect.anything() }),
+        expect.not.objectContaining({
+          paymentStatus: expect.anything(),
+          deliveryStatus: expect.anything(),
+        }),
       );
       expect(saleRepo.groupByPaymentStatusConfirmed).toHaveBeenCalledWith(
-        expect.not.objectContaining({ paymentStatus: expect.anything(), deliveryStatus: expect.anything() }),
+        expect.not.objectContaining({
+          paymentStatus: expect.anything(),
+          deliveryStatus: expect.anything(),
+        }),
       );
       expect(saleRepo.countNotDeliveredConfirmed).toHaveBeenCalledWith(
-        expect.not.objectContaining({ paymentStatus: expect.anything(), deliveryStatus: expect.anything() }),
+        expect.not.objectContaining({
+          paymentStatus: expect.anything(),
+          deliveryStatus: expect.anything(),
+        }),
       );
     });
   });
@@ -2864,7 +3094,9 @@ describe('SalesService', () => {
         'b5e2b8fd-bdfd-471f-b687-ec340d578885',
       );
 
-      expect(result.timeline.some((event) => event.type === 'COMMENT')).toBe(true);
+      expect(result.timeline.some((event) => event.type === 'COMMENT')).toBe(
+        true,
+      );
     });
 
     it('maps repository detail shape with per-payment timeline and references', async () => {

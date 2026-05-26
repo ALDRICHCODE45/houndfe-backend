@@ -21,19 +21,27 @@ describe('AdminUserService', () => {
       {} as any,
       { user: { findUnique: jest.fn() } } as any,
       { getClient: jest.fn().mockReturnValue(tenantPrismaClient) } as any,
-      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+      {
+        get: jest
+          .fn()
+          .mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }),
+      } as any,
     );
 
-    await expect(service.findOne('u1')).rejects.toThrow('User with id "u1" not found');
+    await expect(service.findOne('u1')).rejects.toThrow(
+      'User with id "u1" not found',
+    );
   });
 
   it('findOne should return only roles from current tenant memberships', async () => {
     const tenantPrismaClient = {
       tenantMembership: {
         findFirst: jest.fn().mockResolvedValue({ id: 'tm-1' }),
-        findMany: jest.fn().mockResolvedValue([
-          { role: { id: 'r-tenant', name: 'Tenant Role' } },
-        ]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { role: { id: 'r-tenant', name: 'Tenant Role' } },
+          ]),
         count: jest.fn(),
         create: jest.fn(),
       },
@@ -52,7 +60,11 @@ describe('AdminUserService', () => {
       {} as any,
       { user: { findUnique: jest.fn() } } as any,
       { getClient: jest.fn().mockReturnValue(tenantPrismaClient) } as any,
-      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+      {
+        get: jest
+          .fn()
+          .mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }),
+      } as any,
     );
 
     const result = await service.findOne('u1');
@@ -93,7 +105,11 @@ describe('AdminUserService', () => {
       {} as any,
       { user: { findUnique: jest.fn() } } as any,
       { getClient: jest.fn().mockReturnValue(tenantPrismaClient) } as any,
-      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+      {
+        get: jest
+          .fn()
+          .mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }),
+      } as any,
     );
 
     const result = await service.findAll(1, 20);
@@ -117,7 +133,9 @@ describe('AdminUserService', () => {
     const service = new AdminUserService(
       {
         save: jest.fn(),
-        findById: jest.fn().mockResolvedValue({ toResponse: () => ({ id: 'u1' }) }),
+        findById: jest
+          .fn()
+          .mockResolvedValue({ toResponse: () => ({ id: 'u1' }) }),
       } as any,
       { findById: jest.fn().mockResolvedValue({ id: 'r1' }) } as any,
       {
@@ -126,7 +144,11 @@ describe('AdminUserService', () => {
         },
       } as any,
       { getClient: jest.fn().mockReturnValue(tenantPrismaClient) } as any,
-      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+      {
+        get: jest
+          .fn()
+          .mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }),
+      } as any,
     );
 
     await service.create({

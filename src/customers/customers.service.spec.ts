@@ -68,11 +68,7 @@ function makeService() {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
   } as any;
 
-  const service = new CustomersService(
-    customerRepo,
-    prisma,
-    tenantPrisma,
-  );
+  const service = new CustomersService(customerRepo, prisma, tenantPrisma);
 
   return { service, customerRepo, prisma, tenantPrisma, tenantClient };
 }

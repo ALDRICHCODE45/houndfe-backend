@@ -22,7 +22,11 @@ describe('AdminRoleService', () => {
       { findById: jest.fn() } as any,
       {} as any,
       { getClient: jest.fn().mockReturnValue(prisma) } as any,
-      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+      {
+        get: jest
+          .fn()
+          .mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }),
+      } as any,
     );
 
     await service.findOne('role-1');
@@ -45,7 +49,11 @@ describe('AdminRoleService', () => {
       {} as any,
       {} as any,
       { getClient: jest.fn().mockReturnValue(prisma) } as any,
-      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+      {
+        get: jest
+          .fn()
+          .mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }),
+      } as any,
     );
 
     await service.findAll();
@@ -76,7 +84,11 @@ describe('AdminRoleService', () => {
       {} as any,
       {} as any,
       { getClient: jest.fn().mockReturnValue(prisma) } as any,
-      { get: jest.fn().mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }) } as any,
+      {
+        get: jest
+          .fn()
+          .mockReturnValue({ tenantId: 'tenant-1', isSuperAdmin: false }),
+      } as any,
     );
 
     await service.create({ name: 'Manager' });

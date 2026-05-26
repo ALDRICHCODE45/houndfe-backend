@@ -21,11 +21,15 @@ describe('TenantPrismaService', () => {
     const txClient = { tx: true };
     const baseClient = {
       $extends: jest.fn().mockReturnThis(),
-      $transaction: jest.fn(async (work: (tx: unknown) => Promise<unknown>) => work(txClient)),
+      $transaction: jest.fn(async (work: (tx: unknown) => Promise<unknown>) =>
+        work(txClient),
+      ),
     } as unknown as TransactionCapableClient;
     const cls = makeCls();
     const service = new TenantPrismaService(
-      baseClient as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
+      baseClient as unknown as ConstructorParameters<
+        typeof TenantPrismaService
+      >[0],
       cls,
     );
 
@@ -43,12 +47,16 @@ describe('TenantPrismaService', () => {
 
     const baseClient = {
       $extends: jest.fn().mockReturnThis(),
-      $transaction: jest.fn(async (work: (tx: unknown) => Promise<unknown>) => work(outerTxClient)),
+      $transaction: jest.fn(async (work: (tx: unknown) => Promise<unknown>) =>
+        work(outerTxClient),
+      ),
     } as unknown as TransactionCapableClient;
 
     const cls = makeCls();
     const service = new TenantPrismaService(
-      baseClient as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
+      baseClient as unknown as ConstructorParameters<
+        typeof TenantPrismaService
+      >[0],
       cls,
     );
 

@@ -62,7 +62,9 @@ export function DateRange(
       validator: {
         validate(value: Date | undefined, args: ValidationArguments) {
           if (value === undefined || Number.isNaN(value.getTime())) return true;
-          const peer = (args.object as Record<string, Date | undefined>)[options.peer];
+          const peer = (args.object as Record<string, Date | undefined>)[
+            options.peer
+          ];
           if (!peer || Number.isNaN(peer.getTime())) return true;
           return options.role === 'from' ? value <= peer : peer <= value;
         },

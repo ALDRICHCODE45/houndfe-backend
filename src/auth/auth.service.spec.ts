@@ -44,14 +44,19 @@ describe('AuthService - login multi-tenant flow', () => {
     } as unknown as jest.Mocked<IUserRepository>;
 
     const jwtService = {
-      signAsync: jest.fn().mockResolvedValueOnce('access-token').mockResolvedValueOnce('refresh-token'),
+      signAsync: jest
+        .fn()
+        .mockResolvedValueOnce('access-token')
+        .mockResolvedValueOnce('refresh-token'),
       verifyAsync: jest.fn(),
     } as unknown as jest.Mocked<JwtService>;
 
     const configService = {
       get: jest
         .fn()
-        .mockImplementation((key: string, fallback?: string) => fallback ?? key),
+        .mockImplementation(
+          (key: string, fallback?: string) => fallback ?? key,
+        ),
       getOrThrow: jest.fn().mockImplementation((key: string) => key),
     } as unknown as ConfigService;
 
@@ -98,7 +103,12 @@ describe('AuthService - login multi-tenant flow', () => {
     (prisma.tenantMembership.findMany as jest.Mock).mockResolvedValue([
       {
         tenantId: 'tenant-1',
-        tenant: { id: 'tenant-1', name: 'Centro', slug: 'centro', isActive: true },
+        tenant: {
+          id: 'tenant-1',
+          name: 'Centro',
+          slug: 'centro',
+          isActive: true,
+        },
       },
     ]);
     (prisma.role.findFirst as jest.Mock).mockResolvedValue(null);
@@ -135,11 +145,21 @@ describe('AuthService - login multi-tenant flow', () => {
     (prisma.tenantMembership.findMany as jest.Mock).mockResolvedValue([
       {
         tenantId: 'tenant-1',
-        tenant: { id: 'tenant-1', name: 'Centro', slug: 'centro', isActive: true },
+        tenant: {
+          id: 'tenant-1',
+          name: 'Centro',
+          slug: 'centro',
+          isActive: true,
+        },
       },
       {
         tenantId: 'tenant-2',
-        tenant: { id: 'tenant-2', name: 'Norte', slug: 'norte', isActive: true },
+        tenant: {
+          id: 'tenant-2',
+          name: 'Norte',
+          slug: 'norte',
+          isActive: true,
+        },
       },
     ]);
     (prisma.role.findFirst as jest.Mock).mockResolvedValue(null);
@@ -203,7 +223,9 @@ describe('AuthService - login multi-tenant flow', () => {
     (prisma.tenantMembership.findMany as jest.Mock).mockResolvedValue([]);
     (prisma.role.findFirst as jest.Mock).mockResolvedValue(null);
 
-    await expect(service.login(loginDto)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.login(loginDto)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 });
 
@@ -237,7 +259,11 @@ describe('AuthService - switchTenant', () => {
     } as unknown as jest.Mocked<JwtService>;
 
     const configService = {
-      get: jest.fn().mockImplementation((_key: string, fallback?: string) => fallback ?? _key),
+      get: jest
+        .fn()
+        .mockImplementation(
+          (_key: string, fallback?: string) => fallback ?? _key,
+        ),
       getOrThrow: jest.fn().mockImplementation((key: string) => key),
     } as unknown as ConfigService;
 
@@ -281,11 +307,20 @@ describe('AuthService - switchTenant', () => {
     });
 
     const result = await service.switchTenant(
-      { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: true },
+      {
+        userId: 'user-1',
+        email: 'john@example.com',
+        tenantId: 'tenant-a',
+        tenantSlug: 'centro',
+        isSuperAdmin: true,
+      },
       { tenantId: 'tenant-b' },
     );
 
-    expect(result).toEqual({ accessToken: 'new-access-token', refreshToken: 'new-refresh-token' });
+    expect(result).toEqual({
+      accessToken: 'new-access-token',
+      refreshToken: 'new-refresh-token',
+    });
   });
 
   it('super-admin switches to global context (null tenant)', async () => {
@@ -295,11 +330,20 @@ describe('AuthService - switchTenant', () => {
     userRepo.save = jest.fn().mockResolvedValue(user);
 
     const result = await service.switchTenant(
-      { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: true },
+      {
+        userId: 'user-1',
+        email: 'john@example.com',
+        tenantId: 'tenant-a',
+        tenantSlug: 'centro',
+        isSuperAdmin: true,
+      },
       { tenantId: null },
     );
 
-    expect(result).toEqual({ accessToken: 'new-access-token', refreshToken: 'new-refresh-token' });
+    expect(result).toEqual({
+      accessToken: 'new-access-token',
+      refreshToken: 'new-refresh-token',
+    });
   });
 
   it('non-super-admin with active membership switches tenant successfully', async () => {
@@ -314,11 +358,20 @@ describe('AuthService - switchTenant', () => {
     });
 
     const result = await service.switchTenant(
-      { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+      {
+        userId: 'user-1',
+        email: 'john@example.com',
+        tenantId: 'tenant-a',
+        tenantSlug: 'centro',
+        isSuperAdmin: false,
+      },
       { tenantId: 'tenant-b' },
     );
 
-    expect(result).toEqual({ accessToken: 'new-access-token', refreshToken: 'new-refresh-token' });
+    expect(result).toEqual({
+      accessToken: 'new-access-token',
+      refreshToken: 'new-refresh-token',
+    });
     expect(prisma.tenantMembership.findFirst).toHaveBeenCalledWith({
       where: { userId: 'user-1', tenantId: 'tenant-b' },
       include: { tenant: true },
@@ -331,7 +384,13 @@ describe('AuthService - switchTenant', () => {
 
     await expect(
       service.switchTenant(
-        { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+        {
+          userId: 'user-1',
+          email: 'john@example.com',
+          tenantId: 'tenant-a',
+          tenantSlug: 'centro',
+          isSuperAdmin: false,
+        },
         { tenantId: 'tenant-b' },
       ),
     ).rejects.toThrow('TENANT_ACCESS_DENIED');
@@ -347,7 +406,13 @@ describe('AuthService - switchTenant', () => {
 
     await expect(
       service.switchTenant(
-        { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+        {
+          userId: 'user-1',
+          email: 'john@example.com',
+          tenantId: 'tenant-a',
+          tenantSlug: 'centro',
+          isSuperAdmin: false,
+        },
         { tenantId: 'tenant-b' },
       ),
     ).rejects.toThrow('TENANT_INACTIVE');
@@ -358,7 +423,13 @@ describe('AuthService - switchTenant', () => {
 
     await expect(
       service.switchTenant(
-        { userId: 'user-1', email: 'john@example.com', tenantId: 'tenant-a', tenantSlug: 'centro', isSuperAdmin: false },
+        {
+          userId: 'user-1',
+          email: 'john@example.com',
+          tenantId: 'tenant-a',
+          tenantSlug: 'centro',
+          isSuperAdmin: false,
+        },
         { tenantId: null },
       ),
     ).rejects.toThrow('SUPER_ADMIN_REQUIRED');
@@ -370,7 +441,13 @@ describe('AuthService - switchTenant', () => {
 
     await expect(
       service.switchTenant(
-        { userId: 'user-1', email: 'john@example.com', tenantId: null, tenantSlug: null, isSuperAdmin: true },
+        {
+          userId: 'user-1',
+          email: 'john@example.com',
+          tenantId: null,
+          tenantSlug: null,
+          isSuperAdmin: true,
+        },
         { tenantId: 'nonexistent' },
       ),
     ).rejects.toThrow('TENANT_NOT_FOUND');
@@ -386,7 +463,13 @@ describe('AuthService - switchTenant', () => {
 
     await expect(
       service.switchTenant(
-        { userId: 'user-1', email: 'john@example.com', tenantId: null, tenantSlug: null, isSuperAdmin: true },
+        {
+          userId: 'user-1',
+          email: 'john@example.com',
+          tenantId: null,
+          tenantSlug: null,
+          isSuperAdmin: true,
+        },
         { tenantId: 'tenant-b' },
       ),
     ).rejects.toThrow('TENANT_INACTIVE');

@@ -31,7 +31,9 @@ export class PrismaSaleCommentRepository implements ISaleCommentRepository {
     });
   }
 
-  async findActiveBySale(saleId: string): Promise<ActiveSaleCommentWithAuthor[]> {
+  async findActiveBySale(
+    saleId: string,
+  ): Promise<ActiveSaleCommentWithAuthor[]> {
     const rows = await this.tenantPrisma.getClient().saleComment.findMany({
       where: { saleId, deletedAt: null },
       orderBy: { createdAt: 'asc' },
@@ -46,16 +48,16 @@ export class PrismaSaleCommentRepository implements ISaleCommentRepository {
     });
 
     return rows.map((comment) => ({
-        id: comment.id,
-        saleId: comment.saleId,
-        tenantId: comment.tenantId,
-        authorUserId: comment.authorUserId,
-        body: comment.body,
-        createdAt: comment.createdAt,
-        updatedAt: comment.updatedAt,
-        deletedAt: comment.deletedAt,
-        author: comment.author,
-      }));
+      id: comment.id,
+      saleId: comment.saleId,
+      tenantId: comment.tenantId,
+      authorUserId: comment.authorUserId,
+      body: comment.body,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      deletedAt: comment.deletedAt,
+      author: comment.author,
+    }));
   }
 
   async save(comment: SaleComment): Promise<SaleComment> {

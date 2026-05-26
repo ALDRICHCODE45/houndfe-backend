@@ -16,4 +16,6 @@ export interface ITenantMembershipRepository {
   delete(id: string): Promise<void>;
 }
 
-export const TENANT_MEMBERSHIP_REPOSITORY = Symbol('TENANT_MEMBERSHIP_REPOSITORY');
+export const TENANT_MEMBERSHIP_REPOSITORY = Symbol(
+  'TENANT_MEMBERSHIP_REPOSITORY',
+);

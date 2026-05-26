@@ -3,9 +3,9 @@ import { UsersController } from './users.controller';
 describe('UsersController', () => {
   it('delegates assignable listing to service', async () => {
     const usersService = {
-      findAssignable: jest.fn().mockResolvedValue([
-        { id: 'u-1', name: 'Ana Pérez' },
-      ]),
+      findAssignable: jest
+        .fn()
+        .mockResolvedValue([{ id: 'u-1', name: 'Ana Pérez' }]),
     };
     const controller = new UsersController(usersService as never);
 

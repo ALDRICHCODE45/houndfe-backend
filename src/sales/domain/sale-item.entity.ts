@@ -237,14 +237,18 @@ export class SaleItem {
     }
 
     const baseline = this._prePriceCentsBeforeDiscount ?? this._unitPriceCents;
-    const discountAmountCents = this.computeDiscountAmountCents(input, baseline);
+    const discountAmountCents = this.computeDiscountAmountCents(
+      input,
+      baseline,
+    );
     if (baseline - discountAmountCents < 1) {
       throw new InvalidArgumentError('DISCOUNT_AMOUNT_INVALID');
     }
 
     this._prePriceCentsBeforeDiscount = baseline;
     this._discountType = input.type;
-    this._discountValue = input.type === 'amount' ? input.amountCents! : input.percent!;
+    this._discountValue =
+      input.type === 'amount' ? input.amountCents! : input.percent!;
     this._discountAmountCents = discountAmountCents;
     this._discountTitle = input.discountTitle ?? null;
     this._discountedAt = new Date();
@@ -269,7 +273,11 @@ export class SaleItem {
       return input.amountCents!;
     }
 
-    if (!Number.isInteger(input.percent) || input.percent! < 1 || input.percent! > 99) {
+    if (
+      !Number.isInteger(input.percent) ||
+      input.percent! < 1 ||
+      input.percent! > 99
+    ) {
       throw new InvalidArgumentError('DISCOUNT_PERCENT_INVALID');
     }
     return Math.round((baseline * input.percent!) / 100);

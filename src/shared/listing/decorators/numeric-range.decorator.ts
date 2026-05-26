@@ -63,7 +63,9 @@ export function NumericRange(
       validator: {
         validate(value: number | undefined, args: ValidationArguments) {
           if (value === undefined || !Number.isFinite(value)) return true;
-          const peer = (args.object as Record<string, number | undefined>)[options.peer];
+          const peer = (args.object as Record<string, number | undefined>)[
+            options.peer
+          ];
           if (peer === undefined || !Number.isFinite(peer)) return true;
           return options.role === 'min' ? value <= peer : peer <= value;
         },

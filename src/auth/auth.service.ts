@@ -191,7 +191,11 @@ export class AuthService {
         tenantSlug: null,
         isSuperAdmin: true,
       };
-      const tokens = await this.generateTokens(user.id, user.email.value, authContext);
+      const tokens = await this.generateTokens(
+        user.id,
+        user.email.value,
+        authContext,
+      );
       await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
 
       return {
@@ -209,7 +213,11 @@ export class AuthService {
         tenantSlug: selected.tenant.slug,
         isSuperAdmin: false,
       };
-      const tokens = await this.generateTokens(user.id, user.email.value, authContext);
+      const tokens = await this.generateTokens(
+        user.id,
+        user.email.value,
+        authContext,
+      );
       await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
 
       return {
@@ -252,7 +260,9 @@ export class AuthService {
     });
 
     if (!membership) {
-      throw new ForbiddenException('User does not belong to the selected tenant');
+      throw new ForbiddenException(
+        'User does not belong to the selected tenant',
+      );
     }
 
     if (!membership.tenant.isActive) {
@@ -268,7 +278,11 @@ export class AuthService {
       isSuperAdmin: false,
     };
 
-    const tokens = await this.generateTokens(user.id, user.email.value, authContext);
+    const tokens = await this.generateTokens(
+      user.id,
+      user.email.value,
+      authContext,
+    );
     await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
 
     return {
@@ -342,7 +356,8 @@ export class AuthService {
     });
 
     if (!membership) throw new ForbiddenException('TENANT_ACCESS_DENIED');
-    if (!membership.tenant.isActive) throw new ForbiddenException('TENANT_INACTIVE');
+    if (!membership.tenant.isActive)
+      throw new ForbiddenException('TENANT_INACTIVE');
 
     const authContext: AuthContext = {
       tenantId: membership.tenant.id,
@@ -387,7 +402,11 @@ export class AuthService {
       isSuperAdmin: payload.isSuperAdmin,
     };
 
-    const tokens = await this.generateTokens(user.id, user.email.value, authContext);
+    const tokens = await this.generateTokens(
+      user.id,
+      user.email.value,
+      authContext,
+    );
     await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
 
     return tokens;
@@ -401,7 +420,10 @@ export class AuthService {
     await this.userRepo.save(user);
   }
 
-  async getProfile(userId: string, tenantId?: string | null): Promise<{
+  async getProfile(
+    userId: string,
+    tenantId?: string | null,
+  ): Promise<{
     id: string;
     email: string;
     name: string;
@@ -429,7 +451,8 @@ export class AuthService {
     const currentTenant =
       tenantId == null
         ? null
-        : activeMemberships.find((membership) => membership.id === tenantId) ?? null;
+        : (activeMemberships.find((membership) => membership.id === tenantId) ??
+          null);
 
     return {
       ...user.toResponse(),
@@ -438,12 +461,16 @@ export class AuthService {
     };
   }
 
-  async getUserPermissions(user: AuthenticatedUser): Promise<UserPermissionsResponse> {
-    const permissions =
-      await this.caslAbilityFactory.getEffectivePermissions(user.userId, {
+  async getUserPermissions(
+    user: AuthenticatedUser,
+  ): Promise<UserPermissionsResponse> {
+    const permissions = await this.caslAbilityFactory.getEffectivePermissions(
+      user.userId,
+      {
         tenantId: user.tenantId,
         isSuperAdmin: user.isSuperAdmin,
-      });
+      },
+    );
 
     if (!permissions) throw new EntityNotFoundError('User', user.userId);
 
@@ -508,12 +535,13 @@ export class AuthService {
     tempToken: string,
   ): Promise<TenantSelectionTokenPayload> {
     try {
-      const payload = await this.jwtService.verifyAsync<TenantSelectionTokenPayload>(
-        tempToken,
-        {
-          secret: this.configService.getOrThrow<string>('JWT_SECRET'),
-        },
-      );
+      const payload =
+        await this.jwtService.verifyAsync<TenantSelectionTokenPayload>(
+          tempToken,
+          {
+            secret: this.configService.getOrThrow<string>('JWT_SECRET'),
+          },
+        );
 
       if (payload.purpose !== 'tenant-selection') {
         throw new UnauthorizedException('Invalid token purpose');

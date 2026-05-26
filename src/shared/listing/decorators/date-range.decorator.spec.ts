@@ -29,7 +29,9 @@ describe('@DateRange', () => {
     });
     const errors = await validate(dto);
 
-    expect(errors[0].contexts?.listingInvalidDate?.code).toBe('LISTING_INVALID_DATE');
+    expect(errors[0].contexts?.listingInvalidDate?.code).toBe(
+      'LISTING_INVALID_DATE',
+    );
   });
 
   it('rejects inverted ranges', async () => {
@@ -39,6 +41,8 @@ describe('@DateRange', () => {
     });
     const errors = await validate(dto);
 
-    expect(errors[0].contexts?.listingInvertedRange?.code).toBe('LISTING_INVERTED_RANGE');
+    expect(errors[0].contexts?.listingInvertedRange?.code).toBe(
+      'LISTING_INVERTED_RANGE',
+    );
   });
 });

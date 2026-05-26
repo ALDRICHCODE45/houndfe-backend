@@ -85,6 +85,7 @@ export class ProductsController {
 
   @Post(':id/variants')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['update', 'Product'])
   addVariant(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateVariantDto,
@@ -93,11 +94,13 @@ export class ProductsController {
   }
 
   @Get(':id/variants')
+  @RequirePermissions(['read', 'Product'])
   getVariants(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.getVariants(id);
   }
 
   @Patch(':id/variants/:variantId')
+  @RequirePermissions(['update', 'Product'])
   updateVariant(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
@@ -108,6 +111,7 @@ export class ProductsController {
 
   @Delete(':id/variants/:variantId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['delete', 'Product'])
   removeVariant(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
@@ -116,6 +120,7 @@ export class ProductsController {
   }
 
   @Get(':productId/variants/:variantId/prices')
+  @RequirePermissions(['read', 'Product'])
   getVariantPrices(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
@@ -124,6 +129,7 @@ export class ProductsController {
   }
 
   @Put(':productId/variants/:variantId/prices/:priceListId')
+  @RequirePermissions(['update', 'Product'])
   upsertVariantPrice(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
@@ -140,6 +146,7 @@ export class ProductsController {
 
   @Delete(':productId/variants/:variantId/prices/:priceListId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['update', 'Product'])
   removeVariantPrice(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
@@ -153,6 +160,7 @@ export class ProductsController {
   }
 
   @Put(':productId/variants/:variantId/prices')
+  @RequirePermissions(['update', 'Product'])
   bulkUpsertVariantPrices(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
@@ -169,16 +177,19 @@ export class ProductsController {
 
   @Post(':id/lots')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['update', 'Product'])
   addLot(@Param('id', ParseUUIDPipe) id: string, @Body() dto: CreateLotDto) {
     return this.productsService.addLot(id, dto);
   }
 
   @Get(':id/lots')
+  @RequirePermissions(['read', 'Product'])
   getLots(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.getLots(id);
   }
 
   @Patch(':id/lots/:lotId')
+  @RequirePermissions(['update', 'Product'])
   updateLot(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('lotId', ParseUUIDPipe) lotId: string,
@@ -189,6 +200,7 @@ export class ProductsController {
 
   @Delete(':id/lots/:lotId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['update', 'Product'])
   removeLot(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('lotId', ParseUUIDPipe) lotId: string,
@@ -199,11 +211,13 @@ export class ProductsController {
   // ==================== Price Lists ====================
 
   @Get(':id/price-lists')
+  @RequirePermissions(['read', 'Product'])
   getPriceLists(@Param('id', ParseUUIDPipe) id: string) {
     return this.productsService.getPriceLists(id);
   }
 
   @Patch(':id/price-lists/:priceListId')
+  @RequirePermissions(['update', 'Product'])
   updatePriceList(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('priceListId', ParseUUIDPipe) priceListId: string,

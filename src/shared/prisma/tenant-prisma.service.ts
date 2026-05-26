@@ -32,7 +32,9 @@ export class TenantPrismaService {
   }
 
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
-    const previousClient = this.cls.get(TX_CLIENT_KEY) as PrismaTransactionClient | undefined;
+    const previousClient = this.cls.get(TX_CLIENT_KEY) as
+      | PrismaTransactionClient
+      | undefined;
 
     if (previousClient) {
       return work();

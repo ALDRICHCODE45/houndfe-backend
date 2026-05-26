@@ -13,7 +13,10 @@ class NumericRangeDto {
 
 describe('@NumericRange', () => {
   it('accepts valid min/max values', async () => {
-    const dto = plainToInstance(NumericRangeDto, { totalMin: '100', totalMax: '200' });
+    const dto = plainToInstance(NumericRangeDto, {
+      totalMin: '100',
+      totalMax: '200',
+    });
     const errors = await validate(dto);
 
     expect(errors).toHaveLength(0);
@@ -25,13 +28,20 @@ describe('@NumericRange', () => {
     const dto = plainToInstance(NumericRangeDto, { totalMin: 'not-a-number' });
     const errors = await validate(dto);
 
-    expect(errors[0].contexts?.listingInvalidNumber?.code).toBe('LISTING_INVALID_NUMBER');
+    expect(errors[0].contexts?.listingInvalidNumber?.code).toBe(
+      'LISTING_INVALID_NUMBER',
+    );
   });
 
   it('rejects inverted ranges', async () => {
-    const dto = plainToInstance(NumericRangeDto, { totalMin: '300', totalMax: '200' });
+    const dto = plainToInstance(NumericRangeDto, {
+      totalMin: '300',
+      totalMax: '200',
+    });
     const errors = await validate(dto);
 
-    expect(errors[0].contexts?.listingInvertedRange?.code).toBe('LISTING_INVERTED_RANGE');
+    expect(errors[0].contexts?.listingInvertedRange?.code).toBe(
+      'LISTING_INVERTED_RANGE',
+    );
   });
 });

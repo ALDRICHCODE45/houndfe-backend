@@ -19,7 +19,9 @@ const assertFinite = (value: number | undefined, field: string) => {
   }
 };
 
-export function parseNumericRange(input: ParseNumericRangeInput): ParsedNumericRange {
+export function parseNumericRange(
+  input: ParseNumericRangeInput,
+): ParsedNumericRange {
   assertFinite(input.min, input.minField);
   assertFinite(input.max, input.maxField);
 

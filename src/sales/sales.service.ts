@@ -4,7 +4,12 @@
  * Orchestrates domain logic and infrastructure for the Sale aggregate.
  * Handles: draft creation, item management, validation, and ownership enforcement.
  */
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
 import { Sale } from './domain/sale.entity';
@@ -48,7 +53,10 @@ import type { AssignSellerDto } from './dto/assign-seller.dto';
 import type { SetShippingAddressDto } from './dto/set-shipping-address.dto';
 import type { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
-import type { PersistedChargePayment, PersistedSalePaymentRecord } from './domain/sale.repository';
+import type {
+  PersistedChargePayment,
+  PersistedSalePaymentRecord,
+} from './domain/sale.repository';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
@@ -110,7 +118,9 @@ function chargeValidationError(
   throw new BusinessRuleViolationError(code, code);
 }
 
-function normalizeChargeRequestPayments(dto: ChargeSaleDto): ChargePaymentEntry[] {
+function normalizeChargeRequestPayments(
+  dto: ChargeSaleDto,
+): ChargePaymentEntry[] {
   const hasLegacy = dto.method !== undefined || dto.amountCents !== undefined;
   const hasArray = dto.payments !== undefined;
 
@@ -178,7 +188,8 @@ function toCanonicalChargePayments(
 ): CanonicalChargePayment[] {
   return payments
     .filter(
-      (payment): payment is CanonicalChargePayment => payment.method !== 'credit',
+      (payment): payment is CanonicalChargePayment =>
+        payment.method !== 'credit',
     )
     .map((payment) => ({
       method: payment.method,
@@ -187,7 +198,9 @@ function toCanonicalChargePayments(
     }));
 }
 
-function sortPaymentsForHash(payments: ChargePaymentEntry[]): ChargePaymentEntry[] {
+function sortPaymentsForHash(
+  payments: ChargePaymentEntry[],
+): ChargePaymentEntry[] {
   return [...payments].sort((left, right) =>
     `${left.method}|${left.amountCents}|${left.reference ?? ''}`.localeCompare(
       `${right.method}|${right.amountCents}|${right.reference ?? ''}`,
@@ -290,7 +303,10 @@ export class SalesService {
     private readonly outboxWriter: OutboxWriterService,
     private readonly tenantPrisma: TenantPrismaService,
     @Inject(SALE_COMMENT_REPOSITORY)
-    private readonly saleCommentsRepo: Pick<ISaleCommentRepository, 'findActiveBySale'> = {
+    private readonly saleCommentsRepo: Pick<
+      ISaleCommentRepository,
+      'findActiveBySale'
+    > = {
       findActiveBySale: async () => [],
     },
   ) {}
@@ -337,12 +353,17 @@ export class SalesService {
     resultingPaymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT';
   }): Promise<void> {
     const payments = input.payments ?? [];
-    let cumulativePaidCents = input.paidCents - payments.reduce((sum, p) => sum + p.amountCents, 0);
-    let remainingDebtCents = input.paidCents + input.debtCents - cumulativePaidCents;
+    let cumulativePaidCents =
+      input.paidCents - payments.reduce((sum, p) => sum + p.amountCents, 0);
+    let remainingDebtCents =
+      input.paidCents + input.debtCents - cumulativePaidCents;
 
     for (const payment of payments) {
       cumulativePaidCents += payment.amountCents;
-      remainingDebtCents = Math.max(remainingDebtCents - payment.amountCents, 0);
+      remainingDebtCents = Math.max(
+        remainingDebtCents - payment.amountCents,
+        0,
+      );
 
       await this.outboxWriter.publish(
         this.tenantPrisma.getClient(),
@@ -362,7 +383,8 @@ export class SalesService {
           resultingPaidCents: cumulativePaidCents,
           resultingDebtCents: remainingDebtCents,
           resultingPaymentStatus:
-            input.resultingPaymentStatus ?? (remainingDebtCents === 0 ? 'PAID' : 'PARTIAL'),
+            input.resultingPaymentStatus ??
+            (remainingDebtCents === 0 ? 'PAID' : 'PARTIAL'),
         },
       );
     }
@@ -668,18 +690,20 @@ export class SalesService {
       confirmedTo: extendedFilters.confirmedTo,
     };
 
-    const [data, total, groupedPaymentStatus, notDelivered] = await Promise.all([
-      this.saleRepo.findManyConfirmed({
-        page,
-        limit,
-        sortBy: query.sortBy ?? 'confirmedAt',
-        sortOrder: query.sortOrder ?? 'desc',
-        ...extendedFilters,
-      }),
-      this.saleRepo.countConfirmed(baseFilters),
-      this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
-      this.saleRepo.countNotDeliveredConfirmed(baseFilters),
-    ]);
+    const [data, total, groupedPaymentStatus, notDelivered] = await Promise.all(
+      [
+        this.saleRepo.findManyConfirmed({
+          page,
+          limit,
+          sortBy: query.sortBy ?? 'confirmedAt',
+          sortOrder: query.sortOrder ?? 'desc',
+          ...extendedFilters,
+        }),
+        this.saleRepo.countConfirmed(baseFilters),
+        this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
+        this.saleRepo.countNotDeliveredConfirmed(baseFilters),
+      ],
+    );
 
     const paidCount = groupedPaymentStatus
       .filter((item) => item.paymentStatus === 'PAID')
@@ -698,7 +722,9 @@ export class SalesService {
     };
   }
 
-  private toSalesListExtendedFilter(query: ListSalesQueryDto): SalesListExtendedFilter {
+  private toSalesListExtendedFilter(
+    query: ListSalesQueryDto,
+  ): SalesListExtendedFilter {
     return {
       q: query.q,
       folio: query.folio,
@@ -723,7 +749,11 @@ export class SalesService {
   }
 
   async getSaleDetail(saleId: string): Promise<SaleDetailResponseDto> {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(saleId)) {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        saleId,
+      )
+    ) {
       throw new BadRequestException('Validation failed (uuid is expected)');
     }
 
@@ -1031,7 +1061,11 @@ export class SalesService {
 
     const skippedIds = new Set(result.skippedItems.map((item) => item.itemId));
     for (const item of sale.items) {
-      if (skippedIds.has(item.id) || !item.discountType || !item.discountValue) {
+      if (
+        skippedIds.has(item.id) ||
+        !item.discountType ||
+        !item.discountValue
+      ) {
         continue;
       }
 
@@ -1088,22 +1122,37 @@ export class SalesService {
 
   async assignCustomer(saleId: string, userId: string, dto: AssignCustomerDto) {
     const sale = await this.saleRepo.findById(saleId);
-    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
-    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     if (sale.userId !== userId) {
-      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
     }
 
     const prisma = this.tenantPrisma.getClient();
-    const customer = await prisma.customer.findUnique({ where: { id: dto.customerId } });
+    const customer = await prisma.customer.findUnique({
+      where: { id: dto.customerId },
+    });
     if (!customer) {
-      throw new BusinessRuleViolationError('CUSTOMER_NOT_FOUND', 'CUSTOMER_NOT_FOUND');
+      throw new BusinessRuleViolationError(
+        'CUSTOMER_NOT_FOUND',
+        'CUSTOMER_NOT_FOUND',
+      );
     }
 
     if (dto.shippingAddressId !== undefined && dto.shippingAddressId !== null) {
-      const address = await prisma.customerAddress.findUnique({ where: { id: dto.shippingAddressId } });
+      const address = await prisma.customerAddress.findUnique({
+        where: { id: dto.shippingAddressId },
+      });
       if (!address) {
-        throw new BusinessRuleViolationError('SHIPPING_ADDRESS_NOT_FOUND', 'SHIPPING_ADDRESS_NOT_FOUND');
+        throw new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_NOT_FOUND',
+          'SHIPPING_ADDRESS_NOT_FOUND',
+        );
       }
       if (address.customerId !== dto.customerId) {
         throw new BusinessRuleViolationError(
@@ -1160,10 +1209,15 @@ export class SalesService {
 
   async clearCustomer(saleId: string, userId: string): Promise<void> {
     const sale = await this.saleRepo.findById(saleId);
-    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
-    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     if (sale.userId !== userId) {
-      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
     }
 
     if (!sale.customerId) {
@@ -1210,10 +1264,15 @@ export class SalesService {
     }
 
     const sale = await this.saleRepo.findById(saleId);
-    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
-    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     if (sale.userId !== userId) {
-      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
     }
     if (!sale.customerId) {
       throw new BusinessRuleViolationError(
@@ -1223,9 +1282,14 @@ export class SalesService {
     }
 
     const prisma = this.tenantPrisma.getClient();
-    const address = await prisma.customerAddress.findUnique({ where: { id: dto.shippingAddressId } });
+    const address = await prisma.customerAddress.findUnique({
+      where: { id: dto.shippingAddressId },
+    });
     if (!address) {
-      throw new BusinessRuleViolationError('SHIPPING_ADDRESS_NOT_FOUND', 'SHIPPING_ADDRESS_NOT_FOUND');
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_NOT_FOUND',
+        'SHIPPING_ADDRESS_NOT_FOUND',
+      );
     }
     if (address.customerId !== sale.customerId) {
       throw new BusinessRuleViolationError(
@@ -1238,7 +1302,10 @@ export class SalesService {
     sale.setShippingAddress(dto.shippingAddressId);
     await this.saleRepo.save(sale);
 
-    if (previousShippingAddressId !== sale.shippingAddressId && sale.shippingAddressId) {
+    if (
+      previousShippingAddressId !== sale.shippingAddressId &&
+      sale.shippingAddressId
+    ) {
       this.eventEmitter.emit(
         'sale.shipping-address.set',
         new SaleShippingAddressSetEvent(
@@ -1256,10 +1323,15 @@ export class SalesService {
 
   async clearShippingAddress(saleId: string, userId: string): Promise<void> {
     const sale = await this.saleRepo.findById(saleId);
-    if (!sale) throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
-    if (sale.status !== 'DRAFT') throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    if (!sale)
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    if (sale.status !== 'DRAFT')
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     if (sale.userId !== userId) {
-      throw new BusinessRuleViolationError('SALE_UPDATE_FORBIDDEN', 'SALE_UPDATE_FORBIDDEN');
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
     }
 
     if (!sale.shippingAddressId) {
@@ -1290,7 +1362,14 @@ export class SalesService {
     const hashPayments = sortPaymentsForHash(normalizedPayments);
 
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ saleId, actorId, payments: hashPayments, dueDate: dto.dueDate ?? null }))
+      .update(
+        JSON.stringify({
+          saleId,
+          actorId,
+          payments: hashPayments,
+          dueDate: dto.dueDate ?? null,
+        }),
+      )
       .digest('hex');
 
     const idempotency = await this.saleRepo.acquireChargeIdempotency(
@@ -1329,10 +1408,16 @@ export class SalesService {
       const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
       if (!sale) {
-        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_FOUND',
+          'SALE_NOT_FOUND',
+        );
       }
       if (sale.userId !== actorId) {
-        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_FOUND',
+          'SALE_NOT_FOUND',
+        );
       }
       if (sale.status !== 'DRAFT') {
         throw new BusinessRuleViolationError(
@@ -1369,7 +1454,8 @@ export class SalesService {
 
       const subtotalCents = sale.items.reduce(
         (acc, item) =>
-          acc + (item.originalPriceCents ?? item.unitPriceCents) * item.quantity,
+          acc +
+          (item.originalPriceCents ?? item.unitPriceCents) * item.quantity,
         0,
       );
       const totalCents = sale.items.reduce(
@@ -1382,7 +1468,9 @@ export class SalesService {
         (acc, payment) => acc + payment.amountCents,
         0,
       );
-      const hasCash = normalizedPayments.some((payment) => payment.method === 'cash');
+      const hasCash = normalizedPayments.some(
+        (payment) => payment.method === 'cash',
+      );
       const hasCreditMethod = normalizedPayments.some(
         (payment) => payment.method === 'credit',
       );
@@ -1428,7 +1516,8 @@ export class SalesService {
           : paidCents === 0
             ? 'CREDIT'
             : 'PARTIAL';
-      const changeDueCents = hasCash && paymentStatus === 'PAID' ? tenderedCents - totalCents : 0;
+      const changeDueCents =
+        hasCash && paymentStatus === 'PAID' ? tenderedCents - totalCents : 0;
 
       const canonicalPayments = toCanonicalChargePayments(normalizedPayments);
 
@@ -1521,7 +1610,10 @@ export class SalesService {
     });
   }
 
-  async setDueDate(saleId: string, dto: UpdateSaleDueDateDto): Promise<SaleDetailResponseDto> {
+  async setDueDate(
+    saleId: string,
+    dto: UpdateSaleDueDateDto,
+  ): Promise<SaleDetailResponseDto> {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale || sale.status !== 'CONFIRMED') {
       throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
@@ -1673,7 +1765,10 @@ export class SalesService {
       const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
       if (!sale || sale.userId !== actorId) {
-        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_FOUND',
+          'SALE_NOT_FOUND',
+        );
       }
       if (sale.status !== 'CONFIRMED') {
         throw new BusinessRuleViolationError(
