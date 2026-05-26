@@ -82,14 +82,6 @@ export class PrismaUserRepository implements IUserRepository {
     };
   }
 
-  async assignRoles(userId: string, roleIds: string[]): Promise<void> {
-    void userId;
-    void roleIds;
-    throw new Error(
-      'assignRoles is deprecated. Use tenant membership assignment flow instead.',
-    );
-  }
-
   async update(user: User): Promise<User> {
     return this.save(user);
   }

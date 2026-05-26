@@ -39,7 +39,6 @@ describe('AuthService - login multi-tenant flow', () => {
       existsByEmail: jest.fn(),
       findAll: jest.fn(),
       findByIdWithRoles: jest.fn(),
-      assignRoles: jest.fn(),
       update: jest.fn(),
     } as unknown as jest.Mocked<IUserRepository>;
 
@@ -246,7 +245,6 @@ describe('AuthService - switchTenant', () => {
       existsByEmail: jest.fn(),
       findAll: jest.fn(),
       findByIdWithRoles: jest.fn(),
-      assignRoles: jest.fn(),
       update: jest.fn(),
     } as unknown as jest.Mocked<IUserRepository>;
 
