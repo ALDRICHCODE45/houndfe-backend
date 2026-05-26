@@ -260,6 +260,14 @@ async function main() {
       permissionKey('Order', 'update'),
       permissionKey('Order', 'delete'),
       permissionKey('Role', 'read'),
+      permissionKey('Brand', 'create'),
+      permissionKey('Brand', 'read'),
+      permissionKey('Brand', 'update'),
+      permissionKey('Brand', 'delete'),
+      permissionKey('Category', 'create'),
+      permissionKey('Category', 'read'),
+      permissionKey('Category', 'update'),
+      permissionKey('Category', 'delete'),
     ];
 
     const cashierPermissionKeys: SeedPermissionKey[] = [
@@ -267,6 +275,8 @@ async function main() {
       permissionKey('Sale', 'read'),
       permissionKey('Product', 'read'),
       permissionKey('Customer', 'read'),
+      permissionKey('Brand', 'read'),
+      permissionKey('Category', 'read'),
     ];
 
     for (const managerRole of managerRoleByTenant.values()) {
