@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ClsService } from 'nestjs-cls';
 import { CaslAbilityFactory } from '../auth/authorization/casl-ability.factory';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type {
   AppActions,
   AppSubjects,
@@ -16,6 +17,7 @@ import {
   type ITenantMembershipRepository,
 } from './domain/tenant-membership.repository';
 import { CreateMembershipDto } from './dto/create-membership.dto';
+import { TenantMembershipDetailedDto } from './dto/tenant-membership-detailed.dto';
 import { UpdateMembershipDto } from './dto/update-membership.dto';
 
 @Injectable()
@@ -25,6 +27,7 @@ export class TenantsMembershipService {
     private readonly membershipRepo: ITenantMembershipRepository,
     private readonly cls: ClsService<TenantClsStore>,
     private readonly caslAbilityFactory: CaslAbilityFactory,
+    private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
   private async assertCanManageTenant(
@@ -63,6 +66,20 @@ export class TenantsMembershipService {
   async findByTenant(tenantId: string) {
     await this.assertCanManageTenant(tenantId, 'read', 'TenantMembership');
     return this.membershipRepo.findByTenant(tenantId);
+  }
+
+  async findByTenantDetailed(
+    tenantId: string,
+  ): Promise<TenantMembershipDetailedDto[]> {
+    await this.assertCanManageTenant(tenantId, 'read', 'TenantMembership');
+    return this.tenantPrisma.getClient().tenantMembership.findMany({
+      where: { tenantId },
+      include: {
+        user: { select: { id: true, email: true, name: true, isActive: true } },
+        role: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async update(

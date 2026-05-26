@@ -1,4 +1,5 @@
 import { ForbiddenException } from '@nestjs/common';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { TenantsMembershipService } from './tenants-membership.service';
 
 describe('TenantsMembershipService', () => {
@@ -35,13 +36,30 @@ describe('TenantsMembershipService', () => {
       createForUser: jest.fn().mockResolvedValue(ability),
     } as any;
 
+    const findMany = jest.fn().mockResolvedValue([]);
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue({
+        tenantMembership: {
+          findMany,
+        },
+      }),
+    } as unknown as TenantPrismaService;
+
     const service = new TenantsMembershipService(
       membershipRepo,
       cls,
       caslAbilityFactory,
+      tenantPrisma,
     );
 
-    return { service, membershipRepo, caslAbilityFactory, ability };
+    return {
+      service,
+      membershipRepo,
+      caslAbilityFactory,
+      ability,
+      tenantPrisma,
+      findMany,
+    };
   };
 
   it('bypasses CASL checks for super-admin across all public methods', async () => {
@@ -117,5 +135,32 @@ describe('TenantsMembershipService', () => {
     const { service, ability } = createService({ can: true });
     await service.remove(tenantId, 'membership-1');
     expect(ability.can).toHaveBeenCalledWith('delete', 'TenantMembership');
+  });
+
+  it("findByTenantDetailed() calls assert gate with ('read', 'TenantMembership')", async () => {
+    const { service, ability } = createService({ can: true });
+
+    await service.findByTenantDetailed(tenantId);
+
+    expect(ability.can).toHaveBeenCalledWith('read', 'TenantMembership');
+  });
+
+  it('findByTenantDetailed() uses include(user, role) and orderBy createdAt desc', async () => {
+    const { service, findMany } = createService({ can: true });
+
+    await service.findByTenantDetailed(tenantId);
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { tenantId },
+      include: {
+        user: {
+          select: { id: true, email: true, name: true, isActive: true },
+        },
+        role: {
+          select: { id: true, name: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   });
 });

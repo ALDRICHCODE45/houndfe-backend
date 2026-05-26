@@ -3,4 +3,5 @@ export interface TenantMembership {
   userId: string;
   tenantId: string;
   roleId: string;
+  createdAt: Date;
 }

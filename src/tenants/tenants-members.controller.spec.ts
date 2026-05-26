@@ -24,6 +24,22 @@ function makeMockService() {
       .fn()
       .mockResolvedValue({ id: MEMBERSHIP_ID, tenantId: TENANT_ID }),
     findByTenant: jest.fn().mockResolvedValue([{ id: MEMBERSHIP_ID }]),
+    findByTenantDetailed: jest.fn().mockResolvedValue([
+      {
+        id: MEMBERSHIP_ID,
+        userId: 'u-1',
+        tenantId: TENANT_ID,
+        roleId: 'r-1',
+        createdAt: new Date('2026-05-01T10:00:00.000Z'),
+        user: {
+          id: 'u-1',
+          email: 'user1@example.com',
+          name: 'User One',
+          isActive: true,
+        },
+        role: { id: 'r-1', name: 'Manager' },
+      },
+    ]),
     update: jest.fn().mockResolvedValue({ id: MEMBERSHIP_ID }),
     remove: jest.fn().mockResolvedValue(undefined),
   } as any;
@@ -230,6 +246,32 @@ describe('TenantsMembersController auth integration', () => {
       .get(`/admin/tenants/${TENANT_ID}/members`)
       .set('Authorization', 'Bearer membership-read-only')
       .expect(200);
+  });
+
+  it('GET /admin/tenants/:tenantId/members returns { data: [...] } enriched shape', async () => {
+    const response = await request(app.getHttpServer())
+      .get(`/admin/tenants/${TENANT_ID}/members`)
+      .set('Authorization', 'Bearer membership-read-only')
+      .expect(200);
+
+    expect(response.body).toEqual({
+      data: [
+        {
+          id: MEMBERSHIP_ID,
+          userId: 'u-1',
+          tenantId: TENANT_ID,
+          roleId: 'r-1',
+          createdAt: '2026-05-01T10:00:00.000Z',
+          user: {
+            id: 'u-1',
+            email: 'user1@example.com',
+            name: 'User One',
+            isActive: true,
+          },
+          role: { id: 'r-1', name: 'Manager' },
+        },
+      ],
+    });
   });
 
   it('POST returns 201 with TenantMembership:create', async () => {
