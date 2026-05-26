@@ -17,13 +17,19 @@ import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
 import { CreateTenantDto } from './dto/create-tenant.dto';
+import { EligibleUsersListDto } from './dto/eligible-users-list.dto';
+import { ListEligibleUsersQueryDto } from './dto/list-eligible-users-query.dto';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
+import { TenantsMembershipService } from './tenants-membership.service';
 import { TenantsService } from './tenants.service';
 
 @Controller('admin/tenants')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class TenantsController {
-  constructor(private readonly tenantsService: TenantsService) {}
+  constructor(
+    private readonly tenantsService: TenantsService,
+    private readonly tenantsMembershipService: TenantsMembershipService,
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
@@ -42,6 +48,15 @@ export class TenantsController {
   @RequirePermissions(['read', 'Tenant'])
   findRoles(@Param('id', ParseUUIDPipe) id: string) {
     return this.tenantsService.findRoles(id);
+  }
+
+  @Get(':tenantId/eligible-users')
+  @RequirePermissions(['create', 'TenantMembership'])
+  findEligibleUsers(
+    @Param('tenantId', ParseUUIDPipe) tenantId: string,
+    @Query() query: ListEligibleUsersQueryDto,
+  ): Promise<EligibleUsersListDto> {
+    return this.tenantsMembershipService.findEligibleUsers(tenantId, query);
   }
 
   @Get(':id')

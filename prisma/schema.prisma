@@ -826,6 +826,7 @@ model TenantMembership {
   userId   String
   tenantId String
   roleId   String
+  createdAt DateTime @default(now())
 
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)

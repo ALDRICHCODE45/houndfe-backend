@@ -10,6 +10,7 @@ import {
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { TenantsController } from './tenants.controller';
+import { TenantsMembershipService } from './tenants-membership.service';
 import { TenantsService } from './tenants.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
@@ -27,6 +28,22 @@ function makeMockTenantsService() {
       .fn()
       .mockResolvedValue({ id: 'tenant-1', name: 'Centro Updated' }),
     deactivate: jest.fn().mockResolvedValue(undefined),
+  } as any;
+}
+
+function makeMockTenantsMembershipService() {
+  return {
+    findEligibleUsers: jest.fn().mockResolvedValue({
+      data: [
+        {
+          id: 'user-eligible-1',
+          email: 'eligible@example.com',
+          name: 'Eligible User',
+          isActive: true,
+        },
+      ],
+      meta: { total: 1, page: 1, limit: 20, totalPages: 1 },
+    }),
   } as any;
 }
 
@@ -72,6 +89,17 @@ class TestJwtAuthGuard implements CanActivate {
         tenantSlug: 'centro',
         isSuperAdmin: false,
         permissions: ['read:Tenant'],
+      };
+      return true;
+    }
+
+    if (token === 'membership-create-only') {
+      req.user = {
+        userId: 'user-membership-creator',
+        tenantId: 'tenant-1',
+        tenantSlug: 'centro',
+        isSuperAdmin: false,
+        permissions: ['create:TenantMembership'],
       };
       return true;
     }
@@ -129,13 +157,18 @@ class TestPermissionsGuard implements CanActivate {
 describe('TenantsController auth integration', () => {
   let app: INestApplication;
   let service: ReturnType<typeof makeMockTenantsService>;
+  let membershipsService: ReturnType<typeof makeMockTenantsMembershipService>;
 
   beforeEach(async () => {
     service = makeMockTenantsService();
+    membershipsService = makeMockTenantsMembershipService();
 
     const moduleRef = await Test.createTestingModule({
       controllers: [TenantsController],
-      providers: [{ provide: TenantsService, useValue: service }],
+      providers: [
+        { provide: TenantsService, useValue: service },
+        { provide: TenantsMembershipService, useValue: membershipsService },
+      ],
     })
       .overrideGuard(JwtAuthGuard)
       .useClass(TestJwtAuthGuard as Type<CanActivate>)
@@ -219,6 +252,13 @@ describe('TenantsController auth integration', () => {
       .expect(403);
   });
 
+  it('GET /admin/tenants/:tenantId/eligible-users returns 403 without TenantMembership:create', async () => {
+    await request(app.getHttpServer())
+      .get('/admin/tenants/b5e2b8fd-bdfd-471f-b687-ec340d578885/eligible-users')
+      .set('Authorization', 'Bearer tenant-read-only')
+      .expect(403);
+  });
+
   // ---------- 403: Read-only trying writes ----------
 
   it('POST /admin/tenants returns 403 for read-only user', async () => {
@@ -273,6 +313,36 @@ describe('TenantsController auth integration', () => {
       .set('Authorization', 'Bearer tenant-full-crud')
       .send({ name: 'New Tenant', slug: 'new-tenant' })
       .expect(201);
+  });
+
+  it('GET /admin/tenants/:tenantId/eligible-users dispatches query dto and returns {data,meta}', async () => {
+    const response = await request(app.getHttpServer())
+      .get(
+        '/admin/tenants/b5e2b8fd-bdfd-471f-b687-ec340d578885/eligible-users?page=2&limit=10&search=ju&includeInactive=true',
+      )
+      .set('Authorization', 'Bearer membership-create-only')
+      .expect(200);
+
+    expect(membershipsService.findEligibleUsers).toHaveBeenCalledWith(
+      'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      {
+        search: 'ju',
+        page: 2,
+        limit: 10,
+        includeInactive: true,
+      },
+    );
+    expect(response.body).toEqual({
+      data: [
+        {
+          id: 'user-eligible-1',
+          email: 'eligible@example.com',
+          name: 'Eligible User',
+          isActive: true,
+        },
+      ],
+      meta: { total: 1, page: 1, limit: 20, totalPages: 1 },
+    });
   });
 
   // ---------- Super admin ----------

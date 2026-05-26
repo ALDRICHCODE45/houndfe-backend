@@ -1,11 +1,14 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { CaslAbilityFactory } from '../auth/authorization/casl-ability.factory';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type {
   AppActions,
   AppSubjects,
@@ -16,6 +19,9 @@ import {
   type ITenantMembershipRepository,
 } from './domain/tenant-membership.repository';
 import { CreateMembershipDto } from './dto/create-membership.dto';
+import { EligibleUsersListDto } from './dto/eligible-users-list.dto';
+import { ListEligibleUsersQueryDto } from './dto/list-eligible-users-query.dto';
+import { TenantMembershipDetailedDto } from './dto/tenant-membership-detailed.dto';
 import { UpdateMembershipDto } from './dto/update-membership.dto';
 
 @Injectable()
@@ -25,6 +31,7 @@ export class TenantsMembershipService {
     private readonly membershipRepo: ITenantMembershipRepository,
     private readonly cls: ClsService<TenantClsStore>,
     private readonly caslAbilityFactory: CaslAbilityFactory,
+    private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
   private async assertCanManageTenant(
@@ -63,6 +70,69 @@ export class TenantsMembershipService {
   async findByTenant(tenantId: string) {
     await this.assertCanManageTenant(tenantId, 'read', 'TenantMembership');
     return this.membershipRepo.findByTenant(tenantId);
+  }
+
+  async findByTenantDetailed(
+    tenantId: string,
+  ): Promise<TenantMembershipDetailedDto[]> {
+    await this.assertCanManageTenant(tenantId, 'read', 'TenantMembership');
+    return this.tenantPrisma.getClient().tenantMembership.findMany({
+      where: { tenantId },
+      include: {
+        user: { select: { id: true, email: true, name: true, isActive: true } },
+        role: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async findEligibleUsers(
+    tenantId: string,
+    query: ListEligibleUsersQueryDto,
+  ): Promise<EligibleUsersListDto> {
+    await this.assertCanManageTenant(tenantId, 'create', 'TenantMembership');
+
+    const { search, page = 1, limit = 20, includeInactive = false } = query;
+
+    if (search !== undefined && search.length === 1) {
+      throw new BadRequestException('SEARCH_QUERY_TOO_SHORT');
+    }
+
+    const where: Prisma.UserWhereInput = {
+      ...(includeInactive ? {} : { isActive: true }),
+      tenantMemberships: { none: { tenantId } },
+      ...(search && search.length >= 2
+        ? {
+            OR: [
+              { email: { contains: search, mode: 'insensitive' } },
+              { name: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await Promise.all([
+      this.tenantPrisma.getClient().user.findMany({
+        where,
+        select: { id: true, email: true, name: true, isActive: true },
+        skip,
+        take: limit,
+        orderBy: { name: 'asc' },
+      }),
+      this.tenantPrisma.getClient().user.count({ where }),
+    ]);
+
+    return {
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
   }
 
   async update(
