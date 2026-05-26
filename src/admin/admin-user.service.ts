@@ -26,7 +26,6 @@ import {
 } from '../shared/domain/domain-error';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
-import { AssignRolesDto } from './dto/assign-roles.dto';
 
 @Injectable()
 export class AdminUserService {
@@ -205,21 +204,6 @@ export class AdminUserService {
 
     const updated = await this.userRepo.update(user);
     return updated.toResponse();
-  }
-
-  async assignRoles(userId: string, dto: AssignRolesDto): Promise<void> {
-    // Validate user exists
-    const user = await this.userRepo.findById(userId);
-    if (!user) throw new EntityNotFoundError('User', userId);
-
-    // Validate all roles exist
-    for (const roleId of dto.roleIds) {
-      const role = await this.roleRepo.findById(roleId);
-      if (!role) throw new EntityNotFoundError('Role', roleId);
-    }
-
-    // REPLACE strategy (atomic)
-    await this.userRepo.assignRoles(userId, dto.roleIds);
   }
 
   async deactivate(id: string): Promise<void> {

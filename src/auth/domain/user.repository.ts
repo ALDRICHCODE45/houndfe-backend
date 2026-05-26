@@ -26,7 +26,6 @@ export interface IUserRepository {
     limit: number,
   ): Promise<{ users: User[]; total: number }>;
   findByIdWithRoles(id: string): Promise<UserWithRoles | null>;
-  assignRoles(userId: string, roleIds: string[]): Promise<void>;
   update(user: User): Promise<User>;
 }
 

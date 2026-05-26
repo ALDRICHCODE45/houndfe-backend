@@ -25,7 +25,6 @@ import { RequirePermissions } from '../auth/authorization/decorators/require-per
 import { AdminUserService } from './admin-user.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
-import { AssignRolesDto } from './dto/assign-roles.dto';
 import { PaginationQueryDto } from './dto/pagination-query.dto';
 
 @Controller('admin/users')
@@ -56,15 +55,6 @@ export class AdminUserController {
   @RequirePermissions(['update', 'User'])
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateUserDto) {
     return this.adminUserService.update(id, dto);
-  }
-
-  @Patch(':id/roles')
-  @RequirePermissions(['update', 'User'])
-  assignRoles(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: AssignRolesDto,
-  ) {
-    return this.adminUserService.assignRoles(id, dto);
   }
 
   @Delete(':id')
