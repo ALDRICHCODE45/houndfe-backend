@@ -31,8 +31,16 @@ describe('Tenant Prisma isolation (integration)', () => {
   beforeEach(async () => {
     await prisma.tenant.createMany({
       data: [
-        { id: tenantAId, name: 'Tenant A', slug: `tenant-a-${tenantAId.slice(0, 8)}` },
-        { id: tenantBId, name: 'Tenant B', slug: `tenant-b-${tenantBId.slice(0, 8)}` },
+        {
+          id: tenantAId,
+          name: 'Tenant A',
+          slug: `tenant-a-${tenantAId.slice(0, 8)}`,
+        },
+        {
+          id: tenantBId,
+          name: 'Tenant B',
+          slug: `tenant-b-${tenantBId.slice(0, 8)}`,
+        },
       ],
       skipDuplicates: true,
     });
@@ -40,7 +48,9 @@ describe('Tenant Prisma isolation (integration)', () => {
 
   afterEach(async () => {
     if (createdProductIds.length) {
-      await prisma.product.deleteMany({ where: { id: { in: createdProductIds } } });
+      await prisma.product.deleteMany({
+        where: { id: { in: createdProductIds } },
+      });
       createdProductIds.length = 0;
     }
 
@@ -54,7 +64,9 @@ describe('Tenant Prisma isolation (integration)', () => {
       createdUserIds.length = 0;
     }
 
-    await prisma.tenant.deleteMany({ where: { id: { in: [tenantAId, tenantBId] } } });
+    await prisma.tenant.deleteMany({
+      where: { id: { in: [tenantAId, tenantBId] } },
+    });
   });
 
   afterAll(async () => {
@@ -73,7 +85,9 @@ describe('Tenant Prisma isolation (integration)', () => {
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
-    const foundInB = await tenantBClient.product.findMany({ where: { id: created.id } });
+    const foundInB = await tenantBClient.product.findMany({
+      where: { id: created.id },
+    });
 
     expect(foundInB).toHaveLength(0);
   });
@@ -81,12 +95,16 @@ describe('Tenant Prisma isolation (integration)', () => {
   it('findUnique by id from another tenant returns null', async () => {
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
-    const created = await tenantAClient.product.create({ data: { name: 'Aspirina' } as any });
+    const created = await tenantAClient.product.create({
+      data: { name: 'Aspirina' } as any,
+    });
     createdProductIds.push(created.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
-    const found = await tenantBClient.product.findUnique({ where: { id: created.id } });
+    const found = await tenantBClient.product.findUnique({
+      where: { id: created.id },
+    });
 
     expect(found).toBeNull();
   });
@@ -94,12 +112,16 @@ describe('Tenant Prisma isolation (integration)', () => {
   it('super-admin global context can read records from both tenants', async () => {
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
-    const productA = await tenantAClient.product.create({ data: { name: 'Producto A' } as any });
+    const productA = await tenantAClient.product.create({
+      data: { name: 'Producto A' } as any,
+    });
     createdProductIds.push(productA.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
-    const productB = await tenantBClient.product.create({ data: { name: 'Producto B' } as any });
+    const productB = await tenantBClient.product.create({
+      data: { name: 'Producto B' } as any,
+    });
     createdProductIds.push(productB.id);
 
     ctx.tenantId = null;
@@ -128,7 +150,9 @@ describe('Tenant Prisma isolation (integration)', () => {
   it('update from Tenant B on Tenant A product is not found', async () => {
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
-    const created = await tenantAClient.product.create({ data: { name: 'Omeprazol' } as any });
+    const created = await tenantAClient.product.create({
+      data: { name: 'Omeprazol' } as any,
+    });
     createdProductIds.push(created.id);
 
     ctx.tenantId = tenantBId;
@@ -163,7 +187,9 @@ describe('Tenant Prisma isolation (integration)', () => {
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
-    const found = await tenantBClient.sale.findUnique({ where: { id: created.id } });
+    const found = await tenantBClient.sale.findUnique({
+      where: { id: created.id },
+    });
 
     expect(found).toBeNull();
   });
@@ -171,7 +197,9 @@ describe('Tenant Prisma isolation (integration)', () => {
   it('cross-tenant product update has zero effect on original tenant data', async () => {
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
-    const created = await tenantAClient.product.create({ data: { name: 'Paracetamol' } as any });
+    const created = await tenantAClient.product.create({
+      data: { name: 'Paracetamol' } as any,
+    });
     createdProductIds.push(created.id);
 
     ctx.tenantId = tenantBId;

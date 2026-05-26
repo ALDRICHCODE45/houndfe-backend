@@ -21,7 +21,8 @@ export class OutboxPollerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly dispatcher: OutboxDispatcherService,
-    @Inject(OUTBOX_POLL_INTERVAL_MS) private readonly pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+    @Inject(OUTBOX_POLL_INTERVAL_MS)
+    private readonly pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     @Inject(OUTBOX_BATCH_SIZE) private readonly batchSize = DEFAULT_BATCH_SIZE,
     @Inject(OUTBOX_LOCK_MS) private readonly lockMs = DEFAULT_LOCK_MS,
   ) {}

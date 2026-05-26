@@ -373,7 +373,11 @@ describe('SaleItem Entity', () => {
         unitPriceCurrency: 'MXN',
       });
 
-      item.applyDiscount({ type: 'percentage', percent: 20, discountTitle: 'Promo' });
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 20,
+        discountTitle: 'Promo',
+      });
       item.overridePrice({
         priceCents: 900,
         priceSource: 'custom',
@@ -393,11 +397,22 @@ describe('SaleItem Entity', () => {
   describe('discount behavior', () => {
     it('applies percentage discount and stores metadata', () => {
       const item = SaleItem.create({
-        id: 'i1', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
-        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+        id: 'i1',
+        saleId: 's1',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
       });
 
-      item.applyDiscount({ type: 'percentage', percent: 15, discountTitle: '15 off' });
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 15,
+        discountTitle: '15 off',
+      });
 
       expect(item.unitPriceCents).toBe(850);
       expect(item.discountType).toBe('percentage');
@@ -410,8 +425,15 @@ describe('SaleItem Entity', () => {
 
     it('replaces discount from original baseline (no stacking)', () => {
       const item = SaleItem.create({
-        id: 'i2', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
-        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+        id: 'i2',
+        saleId: 's1',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
       });
 
       item.applyDiscount({ type: 'percentage', percent: 10 });
@@ -424,30 +446,51 @@ describe('SaleItem Entity', () => {
 
     it('rejects 100% discount', () => {
       const item = SaleItem.create({
-        id: 'i3', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
-        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+        id: 'i3',
+        saleId: 's1',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
       });
 
-      expect(() => item.applyDiscount({ type: 'percentage', percent: 100 })).toThrow(
-        /DISCOUNT_PERCENT_INVALID/,
-      );
+      expect(() =>
+        item.applyDiscount({ type: 'percentage', percent: 100 }),
+      ).toThrow(/DISCOUNT_PERCENT_INVALID/);
     });
 
     it('rejects amount that leaves price below 1', () => {
       const item = SaleItem.create({
-        id: 'i4', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
-        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+        id: 'i4',
+        saleId: 's1',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
       });
 
-      expect(() => item.applyDiscount({ type: 'amount', amountCents: 1000 })).toThrow(
-        /DISCOUNT_AMOUNT_INVALID/,
-      );
+      expect(() =>
+        item.applyDiscount({ type: 'amount', amountCents: 1000 }),
+      ).toThrow(/DISCOUNT_AMOUNT_INVALID/);
     });
 
     it('removeDiscount restores price and is idempotent', () => {
       const item = SaleItem.create({
-        id: 'i5', saleId: 's1', productId: 'p1', variantId: null, productName: 'P', variantName: null,
-        quantity: 1, unitPriceCents: 1000, unitPriceCurrency: 'MXN',
+        id: 'i5',
+        saleId: 's1',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
       });
 
       item.applyDiscount({ type: 'amount', amountCents: 200 });

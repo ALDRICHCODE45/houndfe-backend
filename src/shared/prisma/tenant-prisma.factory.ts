@@ -81,7 +81,10 @@ export function createTenantScopedPrisma(
 
         if (operation === 'createMany') {
           const data = Array.isArray(args?.data)
-            ? args.data.map((item: Record<string, unknown>) => ({ ...item, tenantId }))
+            ? args.data.map((item: Record<string, unknown>) => ({
+                ...item,
+                tenantId,
+              }))
             : { ...(args?.data ?? {}), tenantId };
 
           return query({ ...(args ?? {}), data });

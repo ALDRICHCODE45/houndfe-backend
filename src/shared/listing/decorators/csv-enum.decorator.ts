@@ -1,6 +1,9 @@
 import { ValidationOptions } from 'class-validator';
 import { ListingErrorCode } from '../listing.exceptions';
-import { applyCsvTransform, registerCsvConstraint } from './csv-decorator.utils';
+import {
+  applyCsvTransform,
+  registerCsvConstraint,
+} from './csv-decorator.utils';
 
 type CsvEnumOptions = { field: string; max: number };
 

@@ -13,7 +13,9 @@ export class TenantContextGuard implements CanActivate {
   constructor(private readonly cls: ClsService<TenantClsStore>) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<{ user?: AuthenticatedUser }>();
+    const request = context
+      .switchToHttp()
+      .getRequest<{ user?: AuthenticatedUser }>();
     const user = request.user;
 
     if (!user) {

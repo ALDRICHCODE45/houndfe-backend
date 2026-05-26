@@ -12,7 +12,9 @@ export interface ITenantRepository {
   findAll(includeInactive?: boolean): Promise<Tenant[]>;
   update(
     id: string,
-    data: Partial<Pick<Tenant, 'name' | 'slug' | 'address' | 'phone' | 'isActive'>>,
+    data: Partial<
+      Pick<Tenant, 'name' | 'slug' | 'address' | 'phone' | 'isActive'>
+    >,
   ): Promise<Tenant>;
   deactivate(id: string): Promise<void>;
 }

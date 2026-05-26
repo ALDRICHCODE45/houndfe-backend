@@ -27,7 +27,9 @@ describe('@CsvUuid', () => {
     const errors = await validate(dto);
 
     expect(errors[0].property).toBe('customerId');
-    expect(errors[0].contexts?.listingInvalidUuid?.code).toBe('LISTING_INVALID_UUID');
+    expect(errors[0].contexts?.listingInvalidUuid?.code).toBe(
+      'LISTING_INVALID_UUID',
+    );
   });
 
   it('rejects values over cap', async () => {

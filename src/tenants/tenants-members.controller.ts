@@ -22,7 +22,9 @@ import { TenantsMembershipService } from './tenants-membership.service';
 @Controller('admin/tenants/:tenantId/members')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class TenantsMembersController {
-  constructor(private readonly tenantsMembershipService: TenantsMembershipService) {}
+  constructor(
+    private readonly tenantsMembershipService: TenantsMembershipService,
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)

@@ -1,6 +1,4 @@
-import {
-  CommentAuthorForbiddenError,
-} from './sale-comment.errors';
+import { CommentAuthorForbiddenError } from './sale-comment.errors';
 import { SaleComment } from './sale-comment.entity';
 import { BusinessRuleViolationError } from '../../../shared/domain/domain-error';
 

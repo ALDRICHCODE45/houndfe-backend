@@ -122,7 +122,9 @@ describe('PriceListsService', () => {
   it('create should query products scoped to current tenant', async () => {
     const tx = {
       globalPriceList: {
-        create: jest.fn().mockResolvedValue({ id: 'gl-1', name: 'VIP', isDefault: false }),
+        create: jest
+          .fn()
+          .mockResolvedValue({ id: 'gl-1', name: 'VIP', isDefault: false }),
       },
       product: {
         findMany: jest.fn().mockResolvedValue([]),

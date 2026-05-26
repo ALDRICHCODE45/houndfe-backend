@@ -14,7 +14,11 @@ import {
   ValidatorConstraintInterface,
 } from 'class-validator';
 
-type CollectionPaymentMethod = 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+type CollectionPaymentMethod =
+  | 'cash'
+  | 'card_credit'
+  | 'card_debit'
+  | 'transfer';
 
 @ValidatorConstraint({ name: 'collectionPaymentShape', async: false })
 class CollectionPaymentShapeConstraint implements ValidatorConstraintInterface {
@@ -38,9 +42,7 @@ class CollectionPaymentShapeConstraint implements ValidatorConstraintInterface {
 }
 
 @ValidatorConstraint({ name: 'collectionReferenceRequirement', async: false })
-class CollectionReferenceRequirementConstraint
-  implements ValidatorConstraintInterface
-{
+class CollectionReferenceRequirementConstraint implements ValidatorConstraintInterface {
   validate(value: unknown, args?: ValidationArguments): boolean {
     const dto = args?.object as AddSalePaymentDto | undefined;
     if (!dto?.payments?.length) {

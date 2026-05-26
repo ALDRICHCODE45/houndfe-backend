@@ -173,7 +173,10 @@ export class AdminUserService {
       });
 
       if (membershipExists) {
-        throw new EntityAlreadyExistsError('TenantMembership', `${userId}:${tenantId}:${dto.roleId}`);
+        throw new EntityAlreadyExistsError(
+          'TenantMembership',
+          `${userId}:${tenantId}:${dto.roleId}`,
+        );
       }
 
       await tenantPrisma.tenantMembership.create({

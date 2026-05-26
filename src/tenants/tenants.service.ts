@@ -61,7 +61,9 @@ export class TenantsService {
     await this.tenantRepo.update(id, { isActive: false });
   }
 
-  async findRoles(id: string): Promise<{ data: Array<{ id: string; name: string }> }> {
+  async findRoles(
+    id: string,
+  ): Promise<{ data: Array<{ id: string; name: string }> }> {
     this.assertSuperAdmin();
 
     const tenant = await this.tenantRepo.findById(id);

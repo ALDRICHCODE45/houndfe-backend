@@ -5,7 +5,9 @@ import type { JwtTokenPayload } from '../../interfaces/jwt-payload.interface';
 describe('JwtStrategy', () => {
   const createStrategy = () => {
     const configService = {
-      getOrThrow: jest.fn().mockReturnValue('test-jwt-secret-32-characters-long'),
+      getOrThrow: jest
+        .fn()
+        .mockReturnValue('test-jwt-secret-32-characters-long'),
     } as unknown as ConfigService;
 
     return new JwtStrategy(configService);

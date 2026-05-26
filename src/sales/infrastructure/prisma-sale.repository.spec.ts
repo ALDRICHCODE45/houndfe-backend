@@ -82,7 +82,7 @@ describe('PrismaSaleRepository', () => {
         ...input,
       } as any);
 
-      return prisma.sale.findMany.mock.calls.at(-1)?.[0]?.where as any;
+      return prisma.sale.findMany.mock.calls.at(-1)?.[0]?.where;
     };
 
     const baseClause = (where: any) => (where.AND ? where.AND[0] : where);
@@ -98,7 +98,9 @@ describe('PrismaSaleRepository', () => {
 
       const nested = Array.isArray(node)
         ? node.flatMap((item) => collectCustomerIdNullClauses(item))
-        : Object.values(node).flatMap((value) => collectCustomerIdNullClauses(value));
+        : Object.values(node).flatMap((value) =>
+            collectCustomerIdNullClauses(value),
+          );
 
       return [...own, ...nested];
     };
@@ -138,7 +140,10 @@ describe('PrismaSaleRepository', () => {
       expect(prisma.sale.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           include: expect.objectContaining({
-            payments: { select: { method: true }, orderBy: { createdAt: 'asc' } },
+            payments: {
+              select: { method: true },
+              orderBy: { createdAt: 'asc' },
+            },
           }),
         }),
       );
@@ -188,8 +193,16 @@ describe('PrismaSaleRepository', () => {
           where: expect.objectContaining({
             status: 'CONFIRMED',
             OR: expect.arrayContaining([
-              { customer: { firstName: { contains: 'ana', mode: 'insensitive' } } },
-              { customer: { lastName: { contains: 'ana', mode: 'insensitive' } } },
+              {
+                customer: {
+                  firstName: { contains: 'ana', mode: 'insensitive' },
+                },
+              },
+              {
+                customer: {
+                  lastName: { contains: 'ana', mode: 'insensitive' },
+                },
+              },
               { user: { name: { contains: 'ana', mode: 'insensitive' } } },
               { seller: { name: { contains: 'ana', mode: 'insensitive' } } },
               { folio: { contains: 'ana', mode: 'insensitive' } },
@@ -213,9 +226,11 @@ describe('PrismaSaleRepository', () => {
         q: '2',
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
       const folioClause = call.where.OR.find((c: any) => c.folio);
-      expect(folioClause).toEqual({ folio: { endsWith: '000002', mode: 'insensitive' } });
+      expect(folioClause).toEqual({
+        folio: { endsWith: '000002', mode: 'insensitive' },
+      });
     });
 
     it('includes customerId null when q matches público/general tokens', async () => {
@@ -229,7 +244,7 @@ describe('PrismaSaleRepository', () => {
         q: 'público',
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
       const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
       expect(nullClause).toEqual({ customerId: null });
     });
@@ -245,7 +260,7 @@ describe('PrismaSaleRepository', () => {
         q: 'General',
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
       const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
       expect(nullClause).toEqual({ customerId: null });
     });
@@ -261,7 +276,7 @@ describe('PrismaSaleRepository', () => {
         q: 'Juan',
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
       const nullClause = call.where.OR.find((c: any) => 'customerId' in c);
       expect(nullClause).toBeUndefined();
     });
@@ -278,10 +293,14 @@ describe('PrismaSaleRepository', () => {
         customerIncludeNull: true,
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
       const nullClauses =
         call.where.OR?.filter(
-          (c: any) => c && typeof c === 'object' && 'customerId' in c && c.customerId === null,
+          (c: any) =>
+            c &&
+            typeof c === 'object' &&
+            'customerId' in c &&
+            c.customerId === null,
         ) ?? [];
 
       expect(nullClauses).toHaveLength(1);
@@ -299,13 +318,17 @@ describe('PrismaSaleRepository', () => {
         q: 'público',
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
       const nullClauses = collectCustomerIdNullClauses(call.where);
 
       expect(nullClauses).toHaveLength(1);
       expect(call.where.OR).toEqual(
         expect.arrayContaining([
-          { customer: { firstName: { contains: 'público', mode: 'insensitive' } } },
+          {
+            customer: {
+              firstName: { contains: 'público', mode: 'insensitive' },
+            },
+          },
           { customerId: null },
         ]),
       );
@@ -323,15 +346,21 @@ describe('PrismaSaleRepository', () => {
         customerIncludeNull: true,
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
 
       expect(call.where.customerId).toBeNull();
       expect(call.where.OR).toEqual(
         expect.arrayContaining([
-          { customer: { firstName: { contains: 'cualquiercosa', mode: 'insensitive' } } },
+          {
+            customer: {
+              firstName: { contains: 'cualquiercosa', mode: 'insensitive' },
+            },
+          },
         ]),
       );
-      expect(call.where.OR).not.toEqual(expect.arrayContaining([{ customerId: null }]));
+      expect(call.where.OR).not.toEqual(
+        expect.arrayContaining([{ customerId: null }]),
+      );
     });
 
     it('separates customer include-null OR from q OR when customerId[] + includeNull + q="público"', async () => {
@@ -347,7 +376,7 @@ describe('PrismaSaleRepository', () => {
         q: 'público',
       } as any);
 
-      const call = prisma.sale.findMany.mock.calls[0][0] as any;
+      const call = prisma.sale.findMany.mock.calls[0][0];
 
       expect(call.where.OR).toBeUndefined();
       expect(call.where.AND).toEqual(
@@ -355,7 +384,11 @@ describe('PrismaSaleRepository', () => {
           { OR: [{ customerId: { in: ['c1'] } }, { customerId: null }] },
           {
             OR: expect.arrayContaining([
-              { customer: { firstName: { contains: 'público', mode: 'insensitive' } } },
+              {
+                customer: {
+                  firstName: { contains: 'público', mode: 'insensitive' },
+                },
+              },
               { customerId: null },
             ]),
           },
@@ -367,7 +400,9 @@ describe('PrismaSaleRepository', () => {
     it('translates status multi-value as in clause', async () => {
       const where = await findManyWhere({ status: ['CONFIRMED', 'CANCELED'] });
       expect(where.AND).toEqual(
-        expect.arrayContaining([expect.objectContaining({ status: { in: ['CONFIRMED'] } })]),
+        expect.arrayContaining([
+          expect.objectContaining({ status: { in: ['CONFIRMED'] } }),
+        ]),
       );
     });
 
@@ -375,29 +410,39 @@ describe('PrismaSaleRepository', () => {
       const where = await findManyWhere({ paymentStatus: ['PAID', 'CREDIT'] });
       expect(where.AND).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ paymentStatus: { in: ['PAID', 'CREDIT'] } }),
+          expect.objectContaining({
+            paymentStatus: { in: ['PAID', 'CREDIT'] },
+          }),
         ]),
       );
     });
 
     it('translates deliveryStatus multi-value as in clause', async () => {
-      const where = await findManyWhere({ deliveryStatus: ['DELIVERED', 'PENDING'] });
+      const where = await findManyWhere({
+        deliveryStatus: ['DELIVERED', 'PENDING'],
+      });
       expect(where.AND).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ deliveryStatus: { in: ['DELIVERED', 'PENDING'] } }),
+          expect.objectContaining({
+            deliveryStatus: { in: ['DELIVERED', 'PENDING'] },
+          }),
         ]),
       );
     });
 
     it('translates cashierUserId multi-value as in clause', async () => {
       const where = await findManyWhere({ cashierUserId: ['u1', 'u2'] });
-      expect(baseClause(where)).toEqual(expect.objectContaining({ userId: { in: ['u1', 'u2'] } }));
+      expect(baseClause(where)).toEqual(
+        expect.objectContaining({ userId: { in: ['u1', 'u2'] } }),
+      );
     });
 
     it('translates folio multi-value as in clause', async () => {
       const where = await findManyWhere({ folio: ['F-1', 'F-2'] });
       expect(where.AND).toEqual(
-        expect.arrayContaining([expect.objectContaining({ folio: { in: ['F-1', 'F-2'] } })]),
+        expect.arrayContaining([
+          expect.objectContaining({ folio: { in: ['F-1', 'F-2'] } }),
+        ]),
       );
     });
 
@@ -407,18 +452,29 @@ describe('PrismaSaleRepository', () => {
     });
 
     it('omits customer filter when ids empty and includeNull false', async () => {
-      const where = await findManyWhere({ customerId: [], customerIncludeNull: false });
+      const where = await findManyWhere({
+        customerId: [],
+        customerIncludeNull: false,
+      });
       expect(where.customerId).toBeUndefined();
       expect(where.OR).toBeUndefined();
     });
 
     it('sets customerId in when ids present and includeNull false', async () => {
-      const where = await findManyWhere({ customerId: ['c1', 'c2'], customerIncludeNull: false });
-      expect(baseClause(where)).toEqual(expect.objectContaining({ customerId: { in: ['c1', 'c2'] } }));
+      const where = await findManyWhere({
+        customerId: ['c1', 'c2'],
+        customerIncludeNull: false,
+      });
+      expect(baseClause(where)).toEqual(
+        expect.objectContaining({ customerId: { in: ['c1', 'c2'] } }),
+      );
     });
 
     it('sets customer OR in/null when ids present and includeNull true', async () => {
-      const where = await findManyWhere({ customerId: ['c1', 'c2'], customerIncludeNull: true });
+      const where = await findManyWhere({
+        customerId: ['c1', 'c2'],
+        customerIncludeNull: true,
+      });
       expect(baseClause(where).OR).toEqual([
         { customerId: { in: ['c1', 'c2'] } },
         { customerId: null },
@@ -428,12 +484,16 @@ describe('PrismaSaleRepository', () => {
     it('sets paymentMethod none when includeNull true and no methods', async () => {
       const where = await findManyWhere({ paymentMethodIncludeNull: true });
       expect(where.AND).toEqual(
-        expect.arrayContaining([expect.objectContaining({ payments: { none: {} } })]),
+        expect.arrayContaining([
+          expect.objectContaining({ payments: { none: {} } }),
+        ]),
       );
     });
 
     it('sets paymentMethod some/in when methods present and includeNull false', async () => {
-      const where = await findManyWhere({ paymentMethod: ['CASH', 'TRANSFER'] });
+      const where = await findManyWhere({
+        paymentMethod: ['CASH', 'TRANSFER'],
+      });
       expect(where.AND).toEqual(
         expect.arrayContaining([
           {
@@ -481,7 +541,9 @@ describe('PrismaSaleRepository', () => {
 
     it('omits dueDate when range empty and includeNull false', async () => {
       const where = await findManyWhere({ dueDateIncludeNull: false });
-      const dueDateClause = where.AND?.find((clause: any) => 'dueDate' in clause || 'OR' in clause);
+      const dueDateClause = where.AND?.find(
+        (clause: any) => 'dueDate' in clause || 'OR' in clause,
+      );
       expect(dueDateClause).toBeUndefined();
     });
 
@@ -499,7 +561,11 @@ describe('PrismaSaleRepository', () => {
     it('sets dueDate OR range/null when range exists and includeNull true', async () => {
       const from = new Date('2026-06-01T00:00:00.000Z');
       const to = new Date('2026-06-30T23:59:59.000Z');
-      const where = await findManyWhere({ dueDateFrom: from, dueDateTo: to, dueDateIncludeNull: true });
+      const where = await findManyWhere({
+        dueDateFrom: from,
+        dueDateTo: to,
+        dueDateIncludeNull: true,
+      });
       expect(where.AND).toEqual(
         expect.arrayContaining([
           {
@@ -512,14 +578,18 @@ describe('PrismaSaleRepository', () => {
     it('sets totalCents range with min only', async () => {
       const where = await findManyWhere({ totalMin: 1000 });
       expect(where.AND).toEqual(
-        expect.arrayContaining([expect.objectContaining({ totalCents: { gte: 1000 } })]),
+        expect.arrayContaining([
+          expect.objectContaining({ totalCents: { gte: 1000 } }),
+        ]),
       );
     });
 
     it('sets totalCents range with max only', async () => {
       const where = await findManyWhere({ totalMax: 9000 });
       expect(where.AND).toEqual(
-        expect.arrayContaining([expect.objectContaining({ totalCents: { lte: 9000 } })]),
+        expect.arrayContaining([
+          expect.objectContaining({ totalCents: { lte: 9000 } }),
+        ]),
       );
     });
 
@@ -544,13 +614,17 @@ describe('PrismaSaleRepository', () => {
     it('maps confirmedFrom to confirmedAt gte', async () => {
       const from = new Date('2026-06-01T00:00:00.000Z');
       const where = await findManyWhere({ confirmedFrom: from });
-      expect(baseClause(where)).toEqual(expect.objectContaining({ confirmedAt: { gte: from } }));
+      expect(baseClause(where)).toEqual(
+        expect.objectContaining({ confirmedAt: { gte: from } }),
+      );
     });
 
     it('maps confirmedTo to confirmedAt lte', async () => {
       const to = new Date('2026-06-30T23:59:59.000Z');
       const where = await findManyWhere({ confirmedTo: to });
-      expect(baseClause(where)).toEqual(expect.objectContaining({ confirmedAt: { lte: to } }));
+      expect(baseClause(where)).toEqual(
+        expect.objectContaining({ confirmedAt: { lte: to } }),
+      );
     });
   });
 
@@ -599,7 +673,11 @@ describe('PrismaSaleRepository', () => {
       prisma.sale.count.mockResolvedValue(7);
 
       const baseInput = { q: 'ana' } as any;
-      const extendedInput = { q: 'ana', paymentStatus: ['PAID'], totalMin: 5000 } as any;
+      const extendedInput = {
+        q: 'ana',
+        paymentStatus: ['PAID'],
+        totalMin: 5000,
+      } as any;
 
       await repo.countConfirmed(baseInput);
       await repo.countConfirmed(extendedInput);
@@ -760,16 +838,14 @@ describe('PrismaSaleRepository', () => {
     it('creates sale without requiring tenantId in payload', async () => {
       const sale = Sale.create({ id: 'sale-tenantless', userId: 'user-1' });
 
-      prisma.sale.findUnique
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          id: 'sale-tenantless',
-          userId: 'user-1',
-          status: 'DRAFT',
-          createdAt: new Date(),
-          updatedAt: new Date(),
-          items: [],
-        });
+      prisma.sale.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+        id: 'sale-tenantless',
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
       prisma.sale.create.mockResolvedValue({ id: 'sale-tenantless' });
 
       await repo.save(sale);
@@ -1029,7 +1105,9 @@ describe('PrismaSaleRepository', () => {
   describe('persistCollectedPayment', () => {
     it('recomputes paid/debt from ledger + new amount in transaction', async () => {
       prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
-      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 2000 } });
+      prisma.salePayment.aggregate.mockResolvedValue({
+        _sum: { amountCents: 2000 },
+      });
       prisma.salePayment.createMany.mockResolvedValue({ count: 1 });
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
 
@@ -1064,7 +1142,9 @@ describe('PrismaSaleRepository', () => {
 
     it('rejects when recomputed payment exceeds total debt', async () => {
       prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
-      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 4500 } });
+      prisma.salePayment.aggregate.mockResolvedValue({
+        _sum: { amountCents: 4500 },
+      });
 
       await expect(
         repo.persistCollectedPayment({
@@ -1079,7 +1159,9 @@ describe('PrismaSaleRepository', () => {
   describe('persistCollectedPayments', () => {
     it('persists N payment rows and updates sale once', async () => {
       prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
-      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 1000 } });
+      prisma.salePayment.aggregate.mockResolvedValue({
+        _sum: { amountCents: 1000 },
+      });
       prisma.salePayment.createMany.mockResolvedValue({ count: 2 });
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
 
@@ -1096,7 +1178,11 @@ describe('PrismaSaleRepository', () => {
         expect.objectContaining({
           data: [
             expect.objectContaining({ method: 'CASH', amountCents: 1000 }),
-            expect.objectContaining({ method: 'TRANSFER', amountCents: 1500, reference: 'TRX-1' }),
+            expect.objectContaining({
+              method: 'TRANSFER',
+              amountCents: 1500,
+              reference: 'TRX-1',
+            }),
           ],
         }),
       );
@@ -1109,7 +1195,9 @@ describe('PrismaSaleRepository', () => {
 
     it('rejects overpay in aggregate and does not insert rows', async () => {
       prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });
-      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 4500 } });
+      prisma.salePayment.aggregate.mockResolvedValue({
+        _sum: { amountCents: 4500 },
+      });
 
       await expect(
         repo.persistCollectedPayments({
@@ -1124,7 +1212,9 @@ describe('PrismaSaleRepository', () => {
 
     it('keeps deterministic paymentIds order based on input sequence', async () => {
       prisma.sale.findFirst.mockResolvedValue({ totalCents: 10000 });
-      prisma.salePayment.aggregate.mockResolvedValue({ _sum: { amountCents: 0 } });
+      prisma.salePayment.aggregate.mockResolvedValue({
+        _sum: { amountCents: 0 },
+      });
       prisma.salePayment.createMany.mockResolvedValue({ count: 3 });
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });
 
@@ -1146,14 +1236,18 @@ describe('PrismaSaleRepository', () => {
   describe('runInTransaction', () => {
     it('delegates transaction boundary to tenant prisma service', async () => {
       const txResult = { ok: true };
-      const runInTransaction = jest.fn(async (work: () => Promise<unknown>) => work());
+      const runInTransaction = jest.fn(async (work: () => Promise<unknown>) =>
+        work(),
+      );
       const repoWithTxDelegate = new PrismaSaleRepository({
         getClient: jest.fn().mockReturnValue(prisma),
         getTenantId: jest.fn().mockReturnValue('tenant-1'),
         runInTransaction,
       } as unknown as ConstructorParameters<typeof PrismaSaleRepository>[0]);
 
-      const result = await repoWithTxDelegate.runInTransaction(async () => txResult);
+      const result = await repoWithTxDelegate.runInTransaction(
+        async () => txResult,
+      );
 
       expect(runInTransaction).toHaveBeenCalledTimes(1);
       expect(prisma.$transaction).not.toHaveBeenCalled();

@@ -172,7 +172,9 @@ describe('buildSaleTimeline', () => {
       ],
     };
 
-    const result = buildSaleTimeline(input as Parameters<typeof buildSaleTimeline>[0]);
+    const result = buildSaleTimeline(
+      input as Parameters<typeof buildSaleTimeline>[0],
+    );
 
     expect(result).toContainEqual({
       type: 'COMMENT',
@@ -216,7 +218,9 @@ describe('buildSaleTimeline', () => {
       ],
     };
 
-    const result = buildSaleTimeline(input as Parameters<typeof buildSaleTimeline>[0]);
+    const result = buildSaleTimeline(
+      input as Parameters<typeof buildSaleTimeline>[0],
+    );
 
     expect(result.map((event) => event.type)).toEqual([
       'SALE_REGISTERED',
@@ -237,7 +241,9 @@ describe('buildSaleTimeline', () => {
       comments: [],
     };
 
-    const result = buildSaleTimeline(input as Parameters<typeof buildSaleTimeline>[0]);
+    const result = buildSaleTimeline(
+      input as Parameters<typeof buildSaleTimeline>[0],
+    );
 
     expect(result.some((event) => event.type === 'COMMENT')).toBe(false);
   });

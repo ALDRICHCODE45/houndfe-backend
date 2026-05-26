@@ -84,7 +84,9 @@ describe('ListSalesQueryDto', () => {
   });
 
   it('rejects invalid payment status enum', async () => {
-    const dto = plainToInstance(ListSalesQueryDto, { paymentStatus: 'INVALID' });
+    const dto = plainToInstance(ListSalesQueryDto, {
+      paymentStatus: 'INVALID',
+    });
 
     const errors = await validate(dto);
 
@@ -201,7 +203,9 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('folio');
-      expect(errors[0].contexts?.listingTooManyValues?.code).toBe('LISTING_TOO_MANY_VALUES');
+      expect(errors[0].contexts?.listingTooManyValues?.code).toBe(
+        'LISTING_TOO_MANY_VALUES',
+      );
     });
 
     it('accepts status single value csv', async () => {
@@ -228,7 +232,9 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors).toHaveLength(0);
-      expect(dto.deliveryStatus).toEqual([ListSalesDeliveryStatus.NOT_APPLICABLE]);
+      expect(dto.deliveryStatus).toEqual([
+        ListSalesDeliveryStatus.NOT_APPLICABLE,
+      ]);
     });
 
     it('accepts customerId csv with two uuids', async () => {
@@ -248,13 +254,16 @@ describe('ListSalesQueryDto', () => {
     it('rejects customerId when cardinality cap is exceeded', async () => {
       const uuids = Array.from(
         { length: 201 },
-        (_, i) => `550e8400-e29b-41d4-a716-${(446655440000 + i).toString().padStart(12, '0')}`,
+        (_, i) =>
+          `550e8400-e29b-41d4-a716-${(446655440000 + i).toString().padStart(12, '0')}`,
       );
       const dto = makeDto({ customerId: uuids.join(',') });
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('customerId');
-      expect(errors[0].contexts?.listingTooManyValues?.code).toBe('LISTING_TOO_MANY_VALUES');
+      expect(errors[0].contexts?.listingTooManyValues?.code).toBe(
+        'LISTING_TOO_MANY_VALUES',
+      );
     });
 
     it('accepts cashierUserId csv with two uuids', async () => {
@@ -274,13 +283,16 @@ describe('ListSalesQueryDto', () => {
     it('rejects cashierUserId when cardinality cap is exceeded', async () => {
       const uuids = Array.from(
         { length: 201 },
-        (_, i) => `550e8400-e29b-41d4-a716-${(446655440000 + i).toString().padStart(12, '0')}`,
+        (_, i) =>
+          `550e8400-e29b-41d4-a716-${(446655440000 + i).toString().padStart(12, '0')}`,
       );
       const dto = makeDto({ cashierUserId: uuids.join(',') });
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('cashierUserId');
-      expect(errors[0].contexts?.listingTooManyValues?.code).toBe('LISTING_TOO_MANY_VALUES');
+      expect(errors[0].contexts?.listingTooManyValues?.code).toBe(
+        'LISTING_TOO_MANY_VALUES',
+      );
     });
 
     it('accepts folio csv values', async () => {
@@ -334,7 +346,9 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('debtMin');
-      expect(errors[0].contexts?.listingInvertedRange?.code).toBe('LISTING_INVERTED_RANGE');
+      expect(errors[0].contexts?.listingInvertedRange?.code).toBe(
+        'LISTING_INVERTED_RANGE',
+      );
     });
 
     it('accepts zero boundaries for debt range', async () => {
@@ -374,7 +388,9 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('confirmedFrom');
-      expect(errors[0].contexts?.listingInvertedRange?.code).toBe('LISTING_INVERTED_RANGE');
+      expect(errors[0].contexts?.listingInvertedRange?.code).toBe(
+        'LISTING_INVERTED_RANGE',
+      );
     });
 
     it('rejects malformed confirmedFrom date', async () => {
@@ -382,7 +398,9 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('confirmedFrom');
-      expect(errors[0].contexts?.listingInvalidDate?.code).toBe('LISTING_INVALID_DATE');
+      expect(errors[0].contexts?.listingInvalidDate?.code).toBe(
+        'LISTING_INVALID_DATE',
+      );
     });
 
     it('accepts dueDateFrom without dueDateTo', async () => {
@@ -411,7 +429,9 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('dueDateFrom');
-      expect(errors[0].contexts?.listingInvertedRange?.code).toBe('LISTING_INVERTED_RANGE');
+      expect(errors[0].contexts?.listingInvertedRange?.code).toBe(
+        'LISTING_INVERTED_RANGE',
+      );
     });
 
     it('rejects malformed dueDateFrom date', async () => {
@@ -419,7 +439,9 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors[0].property).toBe('dueDateFrom');
-      expect(errors[0].contexts?.listingInvalidDate?.code).toBe('LISTING_INVALID_DATE');
+      expect(errors[0].contexts?.listingInvalidDate?.code).toBe(
+        'LISTING_INVALID_DATE',
+      );
     });
   });
 

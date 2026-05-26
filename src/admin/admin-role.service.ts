@@ -25,7 +25,10 @@ import {
 import { CreateRoleDto } from './dto/create-role.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 import { AssignPermissionsDto } from './dto/assign-permissions.dto';
-import type { AppActions, AppSubjects } from '../auth/authorization/domain/permission';
+import type {
+  AppActions,
+  AppSubjects,
+} from '../auth/authorization/domain/permission';
 
 @Injectable()
 export class AdminRoleService {

@@ -45,7 +45,11 @@ export class TenantsMembershipService {
     return this.membershipRepo.findByTenant(tenantId);
   }
 
-  async update(tenantId: string, membershipId: string, dto: UpdateMembershipDto) {
+  async update(
+    tenantId: string,
+    membershipId: string,
+    dto: UpdateMembershipDto,
+  ) {
     await this.assertCanManageTenant(tenantId);
     const tenantMemberships = await this.membershipRepo.findByTenant(tenantId);
     const exists = tenantMemberships.some((m) => m.id === membershipId);

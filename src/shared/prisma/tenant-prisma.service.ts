@@ -19,7 +19,7 @@ export class TenantPrismaService {
   ) {}
 
   getClient(): TenantPrismaClient {
-    const txClient = this.cls.get(TX_CLIENT_KEY) as PrismaClient | undefined;
+    const txClient = this.cls.get(TX_CLIENT_KEY);
     if (txClient) {
       if ('$extends' in txClient && typeof txClient.$extends === 'function') {
         return createTenantScopedPrisma(txClient, this.cls);
@@ -32,7 +32,7 @@ export class TenantPrismaService {
   }
 
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
-    const previousClient = this.cls.get(TX_CLIENT_KEY) as PrismaTransactionClient | undefined;
+    const previousClient = this.cls.get(TX_CLIENT_KEY);
 
     if (previousClient) {
       return work();

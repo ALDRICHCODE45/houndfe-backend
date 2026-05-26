@@ -16,15 +16,11 @@ import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard
 
 function makeMockCategoriesService() {
   return {
-    create: jest
-      .fn()
-      .mockResolvedValue({ id: 'cat-1', name: 'Electronics' }),
+    create: jest.fn().mockResolvedValue({ id: 'cat-1', name: 'Electronics' }),
     findAll: jest
       .fn()
       .mockResolvedValue([{ id: 'cat-1', name: 'Electronics' }]),
-    findOne: jest
-      .fn()
-      .mockResolvedValue({ id: 'cat-1', name: 'Electronics' }),
+    findOne: jest.fn().mockResolvedValue({ id: 'cat-1', name: 'Electronics' }),
     update: jest.fn().mockResolvedValue({ id: 'cat-1', name: 'Clothing' }),
     remove: jest.fn().mockResolvedValue(undefined),
   } as any;

@@ -26,7 +26,9 @@ function extractLegacyReference(metadataJson: unknown): string | null {
   }
 
   const candidate = (metadataJson as { reference?: unknown }).reference;
-  return typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
+  return typeof candidate === 'string' && candidate.length > 0
+    ? candidate
+    : null;
 }
 
 @Injectable()
@@ -507,7 +509,12 @@ export class PrismaSaleRepository implements ISaleRepository {
             userId: input.userId,
             tenantId,
           },
-          select: { id: true, method: true, amountCents: true, reference: true },
+          select: {
+            id: true,
+            method: true,
+            amountCents: true,
+            reference: true,
+          },
         }),
       ),
     );
@@ -595,7 +602,10 @@ export class PrismaSaleRepository implements ISaleRepository {
         'NO_OUTSTANDING_DEBT',
       );
     }
-    const batchTotal = input.payments.reduce((sum, payment) => sum + payment.amountCents, 0);
+    const batchTotal = input.payments.reduce(
+      (sum, payment) => sum + payment.amountCents,
+      0,
+    );
     const recomputedPaidCents = paidFromLedger + batchTotal;
     if (recomputedPaidCents > sale.totalCents) {
       throw new BusinessRuleViolationError(
@@ -658,7 +668,10 @@ export class PrismaSaleRepository implements ISaleRepository {
     }
 
     if (input.customerId?.length && input.customerIncludeNull) {
-      where.OR = [{ customerId: { in: input.customerId } }, { customerId: null }];
+      where.OR = [
+        { customerId: { in: input.customerId } },
+        { customerId: null },
+      ];
     } else if (input.customerId?.length) {
       where.customerId = { in: input.customerId };
     } else if (input.customerIncludeNull) {
@@ -698,12 +711,18 @@ export class PrismaSaleRepository implements ISaleRepository {
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '');
       const publicTokens = ['publico', 'general', 'publico en general'];
-      if (publicTokens.some((token) => token.includes(normalized) || normalized.includes(token))) {
+      if (
+        publicTokens.some(
+          (token) => token.includes(normalized) || normalized.includes(token),
+        )
+      ) {
         qOrClauses.push({ customerId: null });
       }
 
       const qClause: Prisma.SaleWhereInput = { OR: qOrClauses };
-      const existingCustomerOr = Array.isArray(where.OR) ? [...where.OR] : undefined;
+      const existingCustomerOr = Array.isArray(where.OR)
+        ? [...where.OR]
+        : undefined;
 
       if (existingCustomerOr) {
         delete where.OR;
@@ -714,7 +733,10 @@ export class PrismaSaleRepository implements ISaleRepository {
           : [];
         where.AND = [...existingAnd, { OR: existingCustomerOr }, qClause];
       } else {
-        if (where.customerId === null && qOrClauses.some((clause) => clause.customerId === null)) {
+        if (
+          where.customerId === null &&
+          qOrClauses.some((clause) => clause.customerId === null)
+        ) {
           delete where.customerId;
         }
         where.OR = qOrClauses;
@@ -724,11 +746,15 @@ export class PrismaSaleRepository implements ISaleRepository {
     return where;
   }
 
-  private buildExtendedWhere(input: SalesListExtendedFilter): Prisma.SaleWhereInput {
+  private buildExtendedWhere(
+    input: SalesListExtendedFilter,
+  ): Prisma.SaleWhereInput {
     const andClauses: Prisma.SaleWhereInput[] = [this.buildBaseWhere(input)];
 
     if (input.status?.length) {
-      andClauses.push({ status: { in: input.status.filter((status) => status !== 'CANCELED') } });
+      andClauses.push({
+        status: { in: input.status.filter((status) => status !== 'CANCELED') },
+      });
     }
 
     if (input.paymentStatus?.length) {
@@ -791,12 +817,14 @@ export class PrismaSaleRepository implements ISaleRepository {
     return andClauses.length === 1 ? andClauses[0] : { AND: andClauses };
   }
 
-  async findManyConfirmed(input: SalesListExtendedFilter & {
-    page: number;
-    limit: number;
-    sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
-    sortOrder: 'asc' | 'desc';
-  }) {
+  async findManyConfirmed(
+    input: SalesListExtendedFilter & {
+      page: number;
+      limit: number;
+      sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
+      sortOrder: 'asc' | 'desc';
+    },
+  ) {
     const prisma = this.tenantPrisma.getClient();
     const where = this.buildExtendedWhere(input);
 
@@ -843,7 +871,10 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async groupByPaymentStatusConfirmed(input: SalesListBaseFilter): Promise<
-    Array<{ paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null; _count: { _all: number } }>
+    Array<{
+      paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null;
+      _count: { _all: number };
+    }>
   > {
     const prisma = this.tenantPrisma.getClient();
     const grouped = await prisma.sale.groupBy({
@@ -858,7 +889,9 @@ export class PrismaSaleRepository implements ISaleRepository {
     }>;
   }
 
-  async countNotDeliveredConfirmed(input: SalesListBaseFilter): Promise<number> {
+  async countNotDeliveredConfirmed(
+    input: SalesListBaseFilter,
+  ): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.sale.count({
       where: {
@@ -946,7 +979,8 @@ export class PrismaSaleRepository implements ISaleRepository {
         amountCents: payment.amountCents,
         tenderedCents: payment.amountCents,
         changeCents: 0,
-        reference: payment.reference ?? extractLegacyReference(payment.metadataJson),
+        reference:
+          payment.reference ?? extractLegacyReference(payment.metadataJson),
         paidAt: payment.createdAt,
         createdAt: payment.createdAt,
         userId: payment.userId,

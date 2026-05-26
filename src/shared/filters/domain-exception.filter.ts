@@ -75,8 +75,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'SHIPPING_ADDRESS_NOT_FOUND')
       return HttpStatus.NOT_FOUND;
     if (exception.code === 'SALE_NOT_DRAFT') return HttpStatus.CONFLICT;
-    if (exception.code === 'SALE_ALREADY_CONFIRMED')
-      return HttpStatus.CONFLICT;
+    if (exception.code === 'SALE_ALREADY_CONFIRMED') return HttpStatus.CONFLICT;
     if (exception.code === 'PRICE_OUT_OF_DATE') return HttpStatus.CONFLICT;
     if (exception.code === 'STOCK_INSUFFICIENT_AT_CONFIRM')
       return HttpStatus.CONFLICT;
@@ -84,8 +83,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.CONFLICT;
     if (exception.code === 'IDEMPOTENCY_KEY_IN_FLIGHT')
       return HttpStatus.CONFLICT;
-    if (exception.code === 'SALE_FULLY_PAID')
-      return HttpStatus.CONFLICT;
+    if (exception.code === 'SALE_FULLY_PAID') return HttpStatus.CONFLICT;
     if (exception.code === 'PAYMENT_METHOD_NOT_SUPPORTED')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'PAYMENT_AMOUNT_INSUFFICIENT')

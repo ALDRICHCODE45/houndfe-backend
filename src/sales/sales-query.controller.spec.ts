@@ -55,7 +55,12 @@ describe('SalesQueryController', () => {
       counts: { all: 1, pendingPayments: 0, notDelivered: 0 },
     };
     service.listSales.mockResolvedValue(response);
-    const query = { page: 1, limit: 20, q: '0001', resolveLegacyAlias: jest.fn() };
+    const query = {
+      page: 1,
+      limit: 20,
+      q: '0001',
+      resolveLegacyAlias: jest.fn(),
+    };
 
     const result = await controller.list(query as any);
 
@@ -85,7 +90,13 @@ describe('SalesQueryController', () => {
 
   it('rejects invalid UUID format for GET /sales/:id param', async () => {
     const pipe = new ParseUUIDPipe();
-    await expect(pipe.transform('not-a-uuid', { type: 'param', metatype: String, data: 'id' })).rejects.toThrow();
+    await expect(
+      pipe.transform('not-a-uuid', {
+        type: 'param',
+        metatype: String,
+        data: 'id',
+      }),
+    ).rejects.toThrow();
   });
 
   it('delegates PATCH /sales/:id/due-date to service', async () => {
@@ -130,7 +141,9 @@ describe('SalesQueryController', () => {
     const user = makeMockUser('actor-1');
     service.assignSeller.mockRejectedValue(new Error('SELLER_NOT_FOUND'));
 
-    await expect(controller.assignSeller(id, dto, user)).rejects.toThrow('SELLER_NOT_FOUND');
+    await expect(controller.assignSeller(id, dto, user)).rejects.toThrow(
+      'SELLER_NOT_FOUND',
+    );
   });
 });
 
@@ -272,7 +285,11 @@ describe('SalesQueryController HTTP integration', () => {
 
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0].customer.name).toContain('Juan');
-    expect(res.body.counts).toEqual({ all: 3, pendingPayments: 1, notDelivered: 1 });
+    expect(res.body.counts).toEqual({
+      all: 3,
+      pendingPayments: 1,
+      notDelivered: 1,
+    });
   });
 
   it('returns 401 when JWT is missing', async () => {
@@ -395,8 +412,10 @@ describe('SalesQueryController HTTP integration', () => {
   });
 
   it('returns LISTING_TOO_MANY_VALUES when customerId cardinality exceeds cap', async () => {
-    const ids = Array.from({ length: 201 }, (_, index) =>
-      `${(index + 1).toString().padStart(8, '0')}-1234-4234-9234-1234567890ab`,
+    const ids = Array.from(
+      { length: 201 },
+      (_, index) =>
+        `${(index + 1).toString().padStart(8, '0')}-1234-4234-9234-1234567890ab`,
     );
 
     const res = await request(app.getHttpServer())

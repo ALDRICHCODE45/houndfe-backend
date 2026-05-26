@@ -17,11 +17,15 @@ import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard
 
 function makeMockTenantsService() {
   return {
-    create: jest.fn().mockResolvedValue({ id: 'tenant-1', name: 'Centro', slug: 'centro' }),
+    create: jest
+      .fn()
+      .mockResolvedValue({ id: 'tenant-1', name: 'Centro', slug: 'centro' }),
     findAll: jest.fn().mockResolvedValue([{ id: 'tenant-1', name: 'Centro' }]),
     findOne: jest.fn().mockResolvedValue({ id: 'tenant-1', name: 'Centro' }),
     findRoles: jest.fn().mockResolvedValue([{ id: 'role-1', name: 'Manager' }]),
-    update: jest.fn().mockResolvedValue({ id: 'tenant-1', name: 'Centro Updated' }),
+    update: jest
+      .fn()
+      .mockResolvedValue({ id: 'tenant-1', name: 'Centro Updated' }),
     deactivate: jest.fn().mockResolvedValue(undefined),
   } as any;
 }

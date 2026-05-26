@@ -163,12 +163,14 @@ export interface ISaleRepository {
     totalCents: number;
   }>;
 
-  findManyConfirmed(input: SalesListExtendedFilter & {
-    page: number;
-    limit: number;
-    sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
-    sortOrder: 'asc' | 'desc';
-  }): Promise<
+  findManyConfirmed(
+    input: SalesListExtendedFilter & {
+      page: number;
+      limit: number;
+      sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
+      sortOrder: 'asc' | 'desc';
+    },
+  ): Promise<
     Array<{
       id: string;
       folio: string | null;
@@ -188,9 +190,12 @@ export interface ISaleRepository {
 
   countConfirmed(input: SalesListBaseFilter): Promise<number>;
 
-  groupByPaymentStatusConfirmed(
-    input: SalesListBaseFilter,
-  ): Promise<Array<{ paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null; _count: { _all: number } }>>;
+  groupByPaymentStatusConfirmed(input: SalesListBaseFilter): Promise<
+    Array<{
+      paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null;
+      _count: { _all: number };
+    }>
+  >;
 
   countNotDeliveredConfirmed(input: SalesListBaseFilter): Promise<number>;
 

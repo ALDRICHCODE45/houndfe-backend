@@ -36,7 +36,9 @@ describe('OutboxDispatcherService', () => {
 
     await service.dispatch(buildEvent());
 
-    expect(eventEmitter.emit).toHaveBeenCalledWith('sale.confirmed', { saleId: 'sale-1' });
+    expect(eventEmitter.emit).toHaveBeenCalledWith('sale.confirmed', {
+      saleId: 'sale-1',
+    });
     expect(prisma.outboxEvent.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'evt-1' },

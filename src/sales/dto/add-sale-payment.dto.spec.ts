@@ -82,7 +82,9 @@ describe('AddSalePaymentDto', () => {
   });
 
   it('rejects non-cash payment without reference', async () => {
-    const dto = toDto({ payments: [{ method: 'card_debit', amountCents: 1000 }] });
+    const dto = toDto({
+      payments: [{ method: 'card_debit', amountCents: 1000 }],
+    });
 
     const errors = await validate(dto);
 

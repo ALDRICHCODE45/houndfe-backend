@@ -180,7 +180,11 @@ describe('SalesController', () => {
       service.removeItem.mockResolvedValue(mockSale);
 
       const user = makeMockUser('user-1');
-      const result = await controller.removeItem('sale-4b', 'item-removed', user);
+      const result = await controller.removeItem(
+        'sale-4b',
+        'item-removed',
+        user,
+      );
 
       expect(result).toEqual(mockSale);
       expect(service.removeItem).toHaveBeenCalledWith(
@@ -274,7 +278,12 @@ describe('SalesController', () => {
       service.applyItemDiscount.mockResolvedValue({ id: 's', items: [] });
       const user = makeMockUser('user-1');
       const dto = { type: 'amount', amountCents: 100, discountTitle: 'promo' };
-      const result = await controller.applyItemDiscount('s', 'i', dto as any, user);
+      const result = await controller.applyItemDiscount(
+        's',
+        'i',
+        dto as any,
+        user,
+      );
       expect(result).toEqual({ id: 's', items: [] });
       expect(service.applyItemDiscount).toHaveBeenCalledWith(
         's',
@@ -291,7 +300,11 @@ describe('SalesController', () => {
       const user = makeMockUser('user-1');
       const result = await controller.removeItemDiscount('s', 'i', user);
       expect(result).toEqual({ id: 's', items: [] });
-      expect(service.removeItemDiscount).toHaveBeenCalledWith('s', 'i', 'user-1');
+      expect(service.removeItemDiscount).toHaveBeenCalledWith(
+        's',
+        'i',
+        'user-1',
+      );
     });
   });
 
@@ -304,10 +317,21 @@ describe('SalesController', () => {
 
       const user = makeMockUser('user-1');
       const dto = { type: 'percentage', percent: 10 };
-      const result = await controller.applyGlobalDiscount('s', dto as any, user);
+      const result = await controller.applyGlobalDiscount(
+        's',
+        dto as any,
+        user,
+      );
 
-      expect(result).toEqual({ sale: { id: 's', items: [] }, skippedItems: [] });
-      expect(service.applyGlobalDiscount).toHaveBeenCalledWith('s', dto, 'user-1');
+      expect(result).toEqual({
+        sale: { id: 's', items: [] },
+        skippedItems: [],
+      });
+      expect(service.applyGlobalDiscount).toHaveBeenCalledWith(
+        's',
+        dto,
+        'user-1',
+      );
     });
   });
 
@@ -394,7 +418,12 @@ describe('SalesController', () => {
         ],
       };
 
-      await controller.chargeDraft('sale-1', dto as never, 'idem-array-1', user);
+      await controller.chargeDraft(
+        'sale-1',
+        dto as never,
+        'idem-array-1',
+        user,
+      );
 
       expect(service.chargeDraft).toHaveBeenCalledWith(
         'sale-1',
@@ -412,11 +441,21 @@ describe('SalesController', () => {
         customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26',
         shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865',
       };
-      service.assignCustomer.mockResolvedValue({ id: 'sale-1', customer: { id: dto.customerId } });
+      service.assignCustomer.mockResolvedValue({
+        id: 'sale-1',
+        customer: { id: dto.customerId },
+      });
 
       const result = await controller.assignCustomer('sale-1', dto, user);
-      expect(result).toEqual({ id: 'sale-1', customer: { id: dto.customerId } });
-      expect(service.assignCustomer).toHaveBeenCalledWith('sale-1', 'user-1', dto);
+      expect(result).toEqual({
+        id: 'sale-1',
+        customer: { id: dto.customerId },
+      });
+      expect(service.assignCustomer).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        dto,
+      );
     });
 
     it('assignCustomer forwards service errors', async () => {
@@ -424,9 +463,9 @@ describe('SalesController', () => {
       const dto = { customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26' };
       service.assignCustomer.mockRejectedValue(new Error('CUSTOMER_NOT_FOUND'));
 
-      await expect(controller.assignCustomer('sale-1', dto, user)).rejects.toThrow(
-        'CUSTOMER_NOT_FOUND',
-      );
+      await expect(
+        controller.assignCustomer('sale-1', dto, user),
+      ).rejects.toThrow('CUSTOMER_NOT_FOUND');
     });
 
     it('clearCustomer delegates to service', async () => {
@@ -442,27 +481,41 @@ describe('SalesController', () => {
       const user = makeMockUser('user-1');
       service.clearCustomer.mockRejectedValue(new Error('SALE_NOT_DRAFT'));
 
-      await expect(controller.clearCustomer('sale-1', user)).rejects.toThrow('SALE_NOT_DRAFT');
+      await expect(controller.clearCustomer('sale-1', user)).rejects.toThrow(
+        'SALE_NOT_DRAFT',
+      );
     });
 
     it('setShippingAddress delegates and returns response', async () => {
       const user = makeMockUser('user-1');
       const dto = { shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865' };
-      service.setShippingAddress.mockResolvedValue({ id: 'sale-1', shippingAddress: { id: dto.shippingAddressId } });
+      service.setShippingAddress.mockResolvedValue({
+        id: 'sale-1',
+        shippingAddress: { id: dto.shippingAddressId },
+      });
 
       const result = await controller.setShippingAddress('sale-1', dto, user);
-      expect(result).toEqual({ id: 'sale-1', shippingAddress: { id: dto.shippingAddressId } });
-      expect(service.setShippingAddress).toHaveBeenCalledWith('sale-1', 'user-1', dto);
+      expect(result).toEqual({
+        id: 'sale-1',
+        shippingAddress: { id: dto.shippingAddressId },
+      });
+      expect(service.setShippingAddress).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        dto,
+      );
     });
 
     it('setShippingAddress forwards service errors', async () => {
       const user = makeMockUser('user-1');
       const dto = { shippingAddressId: '8f311d31-131f-449a-8a15-6a3257b0d865' };
-      service.setShippingAddress.mockRejectedValue(new Error('SHIPPING_ADDRESS_NOT_FOR_CUSTOMER'));
-
-      await expect(controller.setShippingAddress('sale-1', dto, user)).rejects.toThrow(
-        'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+      service.setShippingAddress.mockRejectedValue(
+        new Error('SHIPPING_ADDRESS_NOT_FOR_CUSTOMER'),
       );
+
+      await expect(
+        controller.setShippingAddress('sale-1', dto, user),
+      ).rejects.toThrow('SHIPPING_ADDRESS_NOT_FOR_CUSTOMER');
     });
 
     it('clearShippingAddress delegates to service', async () => {
@@ -471,16 +524,21 @@ describe('SalesController', () => {
 
       const result = await controller.clearShippingAddress('sale-1', user);
       expect(result).toBeUndefined();
-      expect(service.clearShippingAddress).toHaveBeenCalledWith('sale-1', 'user-1');
+      expect(service.clearShippingAddress).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+      );
     });
 
     it('clearShippingAddress forwards service errors', async () => {
       const user = makeMockUser('user-1');
-      service.clearShippingAddress.mockRejectedValue(new Error('SALE_NOT_DRAFT'));
-
-      await expect(controller.clearShippingAddress('sale-1', user)).rejects.toThrow(
-        'SALE_NOT_DRAFT',
+      service.clearShippingAddress.mockRejectedValue(
+        new Error('SALE_NOT_DRAFT'),
       );
+
+      await expect(
+        controller.clearShippingAddress('sale-1', user),
+      ).rejects.toThrow('SALE_NOT_DRAFT');
     });
   });
 });

@@ -175,9 +175,9 @@ describe('Sale Entity', () => {
         updatedAt: new Date(),
       });
 
-      expect(() => sale.setDueDate(new Date('2026-04-01T00:00:00.000Z'))).toThrow(
-        InvalidDueDateError,
-      );
+      expect(() =>
+        sale.setDueDate(new Date('2026-04-01T00:00:00.000Z')),
+      ).toThrow(InvalidDueDateError);
     });
 
     it('accepts null and clears dueDate', () => {
@@ -651,16 +651,24 @@ describe('Sale Entity', () => {
       sale.updateItemQuantity(itemId, 5);
 
       expect(sale.items[0].quantity).toBe(5);
-      expect(sale.items[0].discountType).toBe(discountBeforeUpdate.discountType);
-      expect(sale.items[0].discountValue).toBe(discountBeforeUpdate.discountValue);
+      expect(sale.items[0].discountType).toBe(
+        discountBeforeUpdate.discountType,
+      );
+      expect(sale.items[0].discountValue).toBe(
+        discountBeforeUpdate.discountValue,
+      );
       expect(sale.items[0].discountAmountCents).toBe(
         discountBeforeUpdate.discountAmountCents,
       );
       expect(sale.items[0].prePriceCentsBeforeDiscount).toBe(
         discountBeforeUpdate.prePriceCentsBeforeDiscount,
       );
-      expect(sale.items[0].discountTitle).toBe(discountBeforeUpdate.discountTitle);
-      expect(sale.items[0].discountedAt).toBe(discountBeforeUpdate.discountedAt);
+      expect(sale.items[0].discountTitle).toBe(
+        discountBeforeUpdate.discountTitle,
+      );
+      expect(sale.items[0].discountedAt).toBe(
+        discountBeforeUpdate.discountedAt,
+      );
     });
   });
 
@@ -774,8 +782,13 @@ describe('Sale Entity', () => {
         unitPriceCurrency: 'MXN',
       });
 
-      expect(() => sale.removeItem('550e8400-e29b-41d4-a716-446655449999')).toThrow(
-        new BusinessRuleViolationError('SALE_ITEM_NOT_FOUND', 'SALE_ITEM_NOT_FOUND'),
+      expect(() =>
+        sale.removeItem('550e8400-e29b-41d4-a716-446655449999'),
+      ).toThrow(
+        new BusinessRuleViolationError(
+          'SALE_ITEM_NOT_FOUND',
+          'SALE_ITEM_NOT_FOUND',
+        ),
       );
     });
   });
@@ -881,7 +894,10 @@ describe('Sale Entity', () => {
         unitPriceCurrency: 'MXN',
       });
 
-      sale.applyItemDiscount('item-discount', { type: 'amount', amountCents: 100 });
+      sale.applyItemDiscount('item-discount', {
+        type: 'amount',
+        amountCents: 100,
+      });
       expect(sale.items[0].discountType).toBe('amount');
       expect(sale.items[0].unitPriceCents).toBe(900);
     });
@@ -920,7 +936,10 @@ describe('Sale Entity', () => {
         unitPriceCurrency: 'MXN',
       });
 
-      const result = sale.applyGlobalDiscount({ type: 'percentage', percent: 10 });
+      const result = sale.applyGlobalDiscount({
+        type: 'percentage',
+        percent: 10,
+      });
 
       expect(result.sale).toBe(sale);
       expect(result.skippedItems).toEqual([]);
@@ -953,7 +972,10 @@ describe('Sale Entity', () => {
         unitPriceCurrency: 'MXN',
       });
 
-      const result = sale.applyGlobalDiscount({ type: 'amount', amountCents: 500 });
+      const result = sale.applyGlobalDiscount({
+        type: 'amount',
+        amountCents: 500,
+      });
 
       expect(result.skippedItems).toEqual([
         { itemId: 'item-global-skip', reason: 'DISCOUNT_AMOUNT_INVALID' },
@@ -982,7 +1004,10 @@ describe('Sale Entity', () => {
         percent: 10,
       });
 
-      const result = sale.applyGlobalDiscount({ type: 'percentage', percent: 20 });
+      const result = sale.applyGlobalDiscount({
+        type: 'percentage',
+        percent: 20,
+      });
 
       expect(result.skippedItems).toEqual([]);
       expect(result.sale.items[0].prePriceCentsBeforeDiscount).toBe(1000);
@@ -1143,7 +1168,10 @@ describe('Sale Entity', () => {
     it('succeeds on empty sales with no skipped items', () => {
       const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
 
-      const result = sale.applyGlobalDiscount({ type: 'percentage', percent: 10 });
+      const result = sale.applyGlobalDiscount({
+        type: 'percentage',
+        percent: 10,
+      });
 
       expect(result.sale).toBe(sale);
       expect(result.skippedItems).toEqual([]);

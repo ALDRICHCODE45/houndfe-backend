@@ -343,12 +343,12 @@ export class ProductsService {
       if (globalLists.length) {
         await tx.priceList.createMany({
           data: globalLists.map((globalList) => ({
-              productId,
-              globalPriceListId: globalList.id,
-              priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
-              tenantId,
-            })) as Prisma.PriceListCreateManyInput[],
-          });
+            productId,
+            globalPriceListId: globalList.id,
+            priceCents: globalList.isDefault ? (dto.priceCents ?? 0) : 0,
+            tenantId,
+          })) as Prisma.PriceListCreateManyInput[],
+        });
       }
 
       // 3. Create inline variants (if provided)
@@ -687,55 +687,57 @@ export class ProductsService {
       dto.value,
     );
 
-    const variant = await this.tenantPrisma.getClient().$transaction(async (tx) => {
-      const createdVariant = await tx.variant.create({
-        data: {
-          productId,
-          name: resolvedName,
-          option: dto.option?.trim() || null,
-          value: dto.value?.trim() || null,
-          sku: dto.sku?.trim().toUpperCase() || null,
-          barcode: dto.barcode?.trim() || null,
-          quantity: dto.quantity ?? 0,
-          minQuantity: this.normalizeVariantMinQuantity(
-            product.useStock,
-            dto.minQuantity,
-          ),
-          purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
-          tenantId,
-        } as Prisma.VariantUncheckedCreateInput,
-      });
-
-      const priceLists = await tx.priceList.findMany({
-        where: { productId },
-        select: { id: true },
-      });
-
-      if (priceLists.length) {
-        await tx.variantPrice.createMany({
-          data: priceLists.map((pl) => ({
-            variantId: createdVariant.id,
-            priceListId: pl.id,
-            priceCents: 0,
-            tenantId,
-          })) as Prisma.VariantPriceCreateManyInput[],
-        });
-      }
-
-      if (!product.hasVariants) {
-        await tx.product.update({
-          where: { id: productId },
+    const variant = await this.tenantPrisma
+      .getClient()
+      .$transaction(async (tx) => {
+        const createdVariant = await tx.variant.create({
           data: {
-            hasVariants: true,
-            useLotsAndExpirations: false,
-            quantity: 0,
-            minQuantity: 0,
-          },
+            productId,
+            name: resolvedName,
+            option: dto.option?.trim() || null,
+            value: dto.value?.trim() || null,
+            sku: dto.sku?.trim().toUpperCase() || null,
+            barcode: dto.barcode?.trim() || null,
+            quantity: dto.quantity ?? 0,
+            minQuantity: this.normalizeVariantMinQuantity(
+              product.useStock,
+              dto.minQuantity,
+            ),
+            purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
+            tenantId,
+          } as Prisma.VariantUncheckedCreateInput,
         });
-      }
 
-      return createdVariant;
-    });
+        const priceLists = await tx.priceList.findMany({
+          where: { productId },
+          select: { id: true },
+        });
+
+        if (priceLists.length) {
+          await tx.variantPrice.createMany({
+            data: priceLists.map((pl) => ({
+              variantId: createdVariant.id,
+              priceListId: pl.id,
+              priceCents: 0,
+              tenantId,
+            })) as Prisma.VariantPriceCreateManyInput[],
+          });
+        }
+
+        if (!product.hasVariants) {
+          await tx.product.update({
+            where: { id: productId },
+            data: {
+              hasVariants: true,
+              useLotsAndExpirations: false,
+              quantity: 0,
+              minQuantity: 0,
+            },
+          });
+        }
+
+        return createdVariant;
+      });
 
     return this.enrichVariantCostResponse(variant);
   }
@@ -902,7 +904,11 @@ export class ProductsService {
     await this.tenantPrisma.getClient().$transaction(async (tx) => {
       const variantPrice = await tx.variantPrice.upsert({
         where: {
-          tenantId_variantId_priceListId: { tenantId, variantId: variant.id, priceListId },
+          tenantId_variantId_priceListId: {
+            tenantId,
+            variantId: variant.id,
+            priceListId,
+          },
         },
         update: { priceCents: dto.priceCents },
         create: {
@@ -931,17 +937,23 @@ export class ProductsService {
       }
     });
 
-    const updated = await this.tenantPrisma.getClient().variantPrice.findUnique({
-      where: {
-        tenantId_variantId_priceListId: { tenantId, variantId: variant.id, priceListId },
-      },
-      include: {
-        priceList: {
-          select: { id: true, globalPriceList: { select: { name: true } } },
+    const updated = await this.tenantPrisma
+      .getClient()
+      .variantPrice.findUnique({
+        where: {
+          tenantId_variantId_priceListId: {
+            tenantId,
+            variantId: variant.id,
+            priceListId,
+          },
         },
-        tierPrices: { orderBy: { minQuantity: 'asc' } },
-      },
-    });
+        include: {
+          priceList: {
+            select: { id: true, globalPriceList: { select: { name: true } } },
+          },
+          tierPrices: { orderBy: { minQuantity: 'asc' } },
+        },
+      });
 
     if (!updated) {
       throw new EntityNotFoundError(
@@ -1056,12 +1068,18 @@ export class ProductsService {
       );
     }
 
-    const variantPrice = await this.tenantPrisma.getClient().variantPrice.findUnique({
-      where: {
-        tenantId_variantId_priceListId: { tenantId, variantId: variant.id, priceListId },
-      },
-      select: { id: true },
-    });
+    const variantPrice = await this.tenantPrisma
+      .getClient()
+      .variantPrice.findUnique({
+        where: {
+          tenantId_variantId_priceListId: {
+            tenantId,
+            variantId: variant.id,
+            priceListId,
+          },
+        },
+        select: { id: true },
+      });
 
     if (!variantPrice) {
       throw new EntityNotFoundError(
@@ -2033,14 +2051,14 @@ export class ProductsService {
       const variantPrices = await this.tenantPrisma
         .getClient()
         .variantPrice.findMany({
-        where: { variantId },
-        include: {
-          tierPrices: { orderBy: { minQuantity: 'asc' } },
-          priceList: {
-            include: { globalPriceList: { select: { name: true } } },
+          where: { variantId },
+          include: {
+            tierPrices: { orderBy: { minQuantity: 'asc' } },
+            priceList: {
+              include: { globalPriceList: { select: { name: true } } },
+            },
           },
-        },
-      });
+        });
 
       return variantPrices.map((vp) => ({
         priceListId: vp.priceListId,

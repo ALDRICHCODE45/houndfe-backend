@@ -40,7 +40,10 @@ export class CaslAbilityFactory {
    * @param userId - The user's ID
    * @returns AppAbility instance with all user permissions
    */
-  async createForUser(userId: string, context: AbilityContext): Promise<AppAbility> {
+  async createForUser(
+    userId: string,
+    context: AbilityContext,
+  ): Promise<AppAbility> {
     const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
 
     if (context.isSuperAdmin && context.tenantId === null) {
@@ -48,7 +51,10 @@ export class CaslAbilityFactory {
       return build();
     }
 
-    const permissions = await this.queryUserPermissions(userId, context.tenantId);
+    const permissions = await this.queryUserPermissions(
+      userId,
+      context.tenantId,
+    );
 
     if (!permissions) {
       // User not found → return empty ability (no permissions)
@@ -134,8 +140,8 @@ export class CaslAbilityFactory {
     if (!membership) return [];
 
     return membership.role.permissions.map((rolePermission) => ({
-        action: rolePermission.permission.action as AppActions,
-        subject: rolePermission.permission.subject as AppSubjects,
-      }));
+      action: rolePermission.permission.action as AppActions,
+      subject: rolePermission.permission.subject as AppSubjects,
+    }));
   }
 }

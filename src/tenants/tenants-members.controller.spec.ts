@@ -20,7 +20,9 @@ const MEMBERSHIP_ID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
 
 function makeMockService() {
   return {
-    create: jest.fn().mockResolvedValue({ id: MEMBERSHIP_ID, tenantId: TENANT_ID }),
+    create: jest
+      .fn()
+      .mockResolvedValue({ id: MEMBERSHIP_ID, tenantId: TENANT_ID }),
     findByTenant: jest.fn().mockResolvedValue([{ id: MEMBERSHIP_ID }]),
     update: jest.fn().mockResolvedValue({ id: MEMBERSHIP_ID }),
     remove: jest.fn().mockResolvedValue(undefined),
@@ -234,7 +236,10 @@ describe('TenantsMembersController auth integration', () => {
     await request(app.getHttpServer())
       .post(`/admin/tenants/${TENANT_ID}/members`)
       .set('Authorization', 'Bearer membership-full-crud')
-      .send({ userId: 'c1d2e3f4-a5b6-7890-abcd-ef1234567890', roleId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' })
+      .send({
+        userId: 'c1d2e3f4-a5b6-7890-abcd-ef1234567890',
+        roleId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+      })
       .expect(201);
   });
 

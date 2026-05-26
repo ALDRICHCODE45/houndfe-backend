@@ -24,7 +24,9 @@ const extractListingContext = (
 };
 
 const firstConstraintMessage = (error: ValidationError): string => {
-  const first = error.constraints ? Object.values(error.constraints)[0] : undefined;
+  const first = error.constraints
+    ? Object.values(error.constraints)[0]
+    : undefined;
   return first ?? `${error.property} is invalid`;
 };
 

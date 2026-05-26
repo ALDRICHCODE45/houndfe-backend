@@ -1320,10 +1320,15 @@ describe('ProductsService - Image deletion with file storage', () => {
       },
     } as any;
 
-    const service = new ProductsService(repo, prisma, mockFilesService as any, {
-      getTenantId: jest.fn().mockReturnValue('tenant-1'),
-      getClient: jest.fn().mockReturnValue(prisma),
-    } as any);
+    const service = new ProductsService(
+      repo,
+      prisma,
+      mockFilesService as any,
+      {
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+        getClient: jest.fn().mockReturnValue(prisma),
+      } as any,
+    );
 
     // Act
     await service.removeImage(PRODUCT_ID, 'img-1');
@@ -1357,10 +1362,15 @@ describe('ProductsService - Image deletion with file storage', () => {
       },
     } as any;
 
-    const service = new ProductsService(repo, prisma, mockFilesService as any, {
-      getTenantId: jest.fn().mockReturnValue('tenant-1'),
-      getClient: jest.fn().mockReturnValue(prisma),
-    } as any);
+    const service = new ProductsService(
+      repo,
+      prisma,
+      mockFilesService as any,
+      {
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+        getClient: jest.fn().mockReturnValue(prisma),
+      } as any,
+    );
 
     // Act
     await service.removeImage(PRODUCT_ID, 'img-2');
@@ -1401,7 +1411,10 @@ describe('ProductsService - tenant-scoped create contract', () => {
           brand: null,
         }),
       },
-      priceList: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn() },
+      priceList: {
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn(),
+      },
       variant: {
         findFirst: jest.fn(),
         findMany: jest.fn().mockResolvedValue([]),

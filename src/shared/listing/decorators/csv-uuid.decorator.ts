@@ -1,6 +1,9 @@
 import { ValidationOptions, isUUID } from 'class-validator';
 import { ListingErrorCode } from '../listing.exceptions';
-import { applyCsvTransform, registerCsvConstraint } from './csv-decorator.utils';
+import {
+  applyCsvTransform,
+  registerCsvConstraint,
+} from './csv-decorator.utils';
 
 type CsvUuidOptions = { field: string; max: number };
 

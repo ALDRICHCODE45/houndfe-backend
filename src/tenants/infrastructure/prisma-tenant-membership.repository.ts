@@ -8,9 +8,7 @@ import type { ITenantMembershipRepository } from '../domain/tenant-membership.re
 import type { TenantMembership } from '../domain/tenant-membership.entity';
 
 @Injectable()
-export class PrismaTenantMembershipRepository
-  implements ITenantMembershipRepository
-{
+export class PrismaTenantMembershipRepository implements ITenantMembershipRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(data: {
@@ -50,14 +48,19 @@ export class PrismaTenantMembershipRepository
     userId: string,
     tenantId: string,
   ): Promise<TenantMembership[]> {
-    return this.prisma.tenantMembership.findMany({ where: { userId, tenantId } });
+    return this.prisma.tenantMembership.findMany({
+      where: { userId, tenantId },
+    });
   }
 
   async findByUserId(userId: string): Promise<TenantMembership[]> {
     return this.prisma.tenantMembership.findMany({ where: { userId } });
   }
 
-  async update(id: string, data: { roleId: string }): Promise<TenantMembership> {
+  async update(
+    id: string,
+    data: { roleId: string },
+  ): Promise<TenantMembership> {
     const current = await this.prisma.tenantMembership.findUnique({
       where: { id },
       select: { tenantId: true },
