@@ -13,17 +13,20 @@ import {
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
+import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
+import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
 import { CreateMembershipDto } from './dto/create-membership.dto';
 import { UpdateMembershipDto } from './dto/update-membership.dto';
 import { TenantsMembershipService } from './tenants-membership.service';
 
 @Controller('admin/tenants/:tenantId/members')
-@UseGuards(JwtAuthGuard, TenantContextGuard)
+@UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class TenantsMembersController {
   constructor(private readonly tenantsMembershipService: TenantsMembershipService) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['create', 'TenantMembership'])
   create(
     @Param('tenantId', ParseUUIDPipe) tenantId: string,
     @Body() dto: CreateMembershipDto,
@@ -32,11 +35,13 @@ export class TenantsMembersController {
   }
 
   @Get()
+  @RequirePermissions(['read', 'TenantMembership'])
   findByTenant(@Param('tenantId', ParseUUIDPipe) tenantId: string) {
     return this.tenantsMembershipService.findByTenant(tenantId);
   }
 
   @Patch(':membershipId')
+  @RequirePermissions(['update', 'TenantMembership'])
   update(
     @Param('tenantId', ParseUUIDPipe) tenantId: string,
     @Param('membershipId', ParseUUIDPipe) membershipId: string,
@@ -47,6 +52,7 @@ export class TenantsMembersController {
 
   @Delete(':membershipId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['delete', 'TenantMembership'])
   remove(
     @Param('tenantId', ParseUUIDPipe) tenantId: string,
     @Param('membershipId', ParseUUIDPipe) membershipId: string,

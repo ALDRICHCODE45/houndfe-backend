@@ -203,6 +203,60 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     description: 'Full category management',
   },
 
+  // GlobalPriceList permissions
+  {
+    subject: 'GlobalPriceList',
+    action: 'create',
+    description: 'Create new global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'read',
+    description: 'View global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'update',
+    description: 'Update global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'delete',
+    description: 'Delete global price lists',
+  },
+  {
+    subject: 'GlobalPriceList',
+    action: 'manage',
+    description: 'Full global price list management',
+  },
+
+  // TenantMembership permissions
+  {
+    subject: 'TenantMembership',
+    action: 'create',
+    description: 'Create new tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'read',
+    description: 'View tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'update',
+    description: 'Update tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'delete',
+    description: 'Delete tenant memberships',
+  },
+  {
+    subject: 'TenantMembership',
+    action: 'manage',
+    description: 'Full tenant membership management',
+  },
+
   // File permissions
   { subject: 'File', action: 'create', description: 'Upload files' },
   { subject: 'File', action: 'read', description: 'View files' },
