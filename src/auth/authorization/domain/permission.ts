@@ -36,6 +36,7 @@ export type AppSubjects =
   | 'EmployeeSalary'
   | 'EmployeeTimeOff'
   | 'EmployeeTimeOffMedical'
+  | 'EmployeeEmergencyContact'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -362,5 +363,32 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'EmployeeTimeOffMedical',
     action: 'read',
     description: 'View SICK time-off reason (medical sensitivity)',
+  },
+
+  // EmployeeEmergencyContact permissions
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'create',
+    description: 'Add emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'read',
+    description: 'View emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'update',
+    description: 'Update emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'delete',
+    description: 'Delete emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'manage',
+    description: 'Full emergency contact management',
   },
 ];
