@@ -20,4 +20,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   'PromotionPriceList',
   'PromotionDayOfWeek',
   'Role',
+  'Employee',
+  'EmployeeSalaryHistory',
+  'EmployeePositionHistory',
+  'EmployeeDocument',
+  'EmployeeTimeOff',
+  'EmployeeEmergencyContact',
 ]);

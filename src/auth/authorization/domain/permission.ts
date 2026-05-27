@@ -31,6 +31,12 @@ export type AppSubjects =
   | 'Customer'
   | 'SaleComment'
   | 'File'
+  | 'Employee'
+  | 'EmployeeDocument'
+  | 'EmployeeSalary'
+  | 'EmployeeTimeOff'
+  | 'EmployeeTimeOffMedical'
+  | 'EmployeeEmergencyContact'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -262,4 +268,127 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'File', action: 'read', description: 'View files' },
   { subject: 'File', action: 'delete', description: 'Delete files' },
   { subject: 'File', action: 'manage', description: 'Full file management' },
+
+  // Employee permissions
+  {
+    subject: 'Employee',
+    action: 'create',
+    description: 'Create employees',
+  },
+  { subject: 'Employee', action: 'read', description: 'View employee profiles' },
+  {
+    subject: 'Employee',
+    action: 'update',
+    description: 'Update employee data',
+  },
+  {
+    subject: 'Employee',
+    action: 'delete',
+    description: 'Delete employees',
+  },
+  {
+    subject: 'Employee',
+    action: 'manage',
+    description: 'Full employee management',
+  },
+
+  // EmployeeSalary permissions (sensitive — Tier 2 financial)
+  {
+    subject: 'EmployeeSalary',
+    action: 'create',
+    description: 'Add salary changes',
+  },
+  {
+    subject: 'EmployeeSalary',
+    action: 'read',
+    description: 'View salary data and history',
+  },
+  {
+    subject: 'EmployeeSalary',
+    action: 'manage',
+    description: 'Full salary management',
+  },
+
+  // EmployeeDocument permissions
+  {
+    subject: 'EmployeeDocument',
+    action: 'create',
+    description: 'Upload employee documents',
+  },
+  {
+    subject: 'EmployeeDocument',
+    action: 'read',
+    description: 'View employee documents',
+  },
+  {
+    subject: 'EmployeeDocument',
+    action: 'delete',
+    description: 'Delete employee documents',
+  },
+  {
+    subject: 'EmployeeDocument',
+    action: 'manage',
+    description: 'Full employee document management',
+  },
+
+  // EmployeeTimeOff permissions
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'create',
+    description: 'Request time off',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'read',
+    description: 'View time-off requests',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'update',
+    description: 'Approve/reject time-off requests',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'delete',
+    description: 'Delete time-off requests',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'manage',
+    description: 'Full time-off management',
+  },
+
+  // EmployeeTimeOffMedical permissions (sensitive — Tier 3 medical)
+  {
+    subject: 'EmployeeTimeOffMedical',
+    action: 'read',
+    description: 'View SICK time-off reason (medical sensitivity)',
+  },
+
+  // EmployeeEmergencyContact permissions
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'create',
+    description: 'Add emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'read',
+    description: 'View emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'update',
+    description: 'Update emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'delete',
+    description: 'Delete emergency contacts',
+  },
+  {
+    subject: 'EmployeeEmergencyContact',
+    action: 'manage',
+    description: 'Full emergency contact management',
+  },
 ];

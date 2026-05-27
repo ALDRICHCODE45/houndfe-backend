@@ -155,6 +155,107 @@ describe('FilesService', () => {
       );
       expect(mockStoragePort.upload).not.toHaveBeenCalled();
     });
+
+    // --- Per-call MIME override (allowedMimeTypes) ---
+
+    it('should accept non-image MIME when allowedMimeTypes includes it', async () => {
+      // Arrange
+      const buffer = Buffer.from('pdf content');
+      const input = {
+        buffer,
+        mimeType: 'application/pdf',
+        originalName: 'contract.pdf',
+        allowedMimeTypes: ['application/pdf'],
+      };
+
+      mockStoragePort.upload.mockResolvedValueOnce({
+        key: 'orphan/uuid-pdf.pdf',
+        url: 'https://cdn.example.com/orphan/uuid-pdf.pdf',
+      });
+
+      const savedFile = FileObject.create({
+        id: 'file-pdf-1',
+        storageKey: 'orphan/uuid-pdf.pdf',
+        url: 'https://cdn.example.com/orphan/uuid-pdf.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: buffer.length,
+        createdAt: new Date(),
+      });
+      mockFileRepository.save.mockResolvedValueOnce(savedFile);
+
+      // Act
+      const result = await service.uploadAndRegister(input);
+
+      // Assert
+      expect(result.id).toBe('file-pdf-1');
+      expect(mockStoragePort.upload).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reject MIME not in the provided allowedMimeTypes', async () => {
+      // Arrange
+      const buffer = Buffer.from('exe content');
+      const input = {
+        buffer,
+        mimeType: 'application/x-msdownload',
+        originalName: 'virus.exe',
+        allowedMimeTypes: ['application/pdf', 'image/jpeg'],
+      };
+
+      // Act & Assert
+      await expect(service.uploadAndRegister(input)).rejects.toThrow(
+        UnsupportedMediaTypeError,
+      );
+      expect(mockStoragePort.upload).not.toHaveBeenCalled();
+    });
+
+    it('should reject everything when allowedMimeTypes is empty', async () => {
+      // Arrange
+      const buffer = Buffer.from('test content');
+      const input = {
+        buffer,
+        mimeType: 'image/jpeg',
+        originalName: 'photo.jpg',
+        allowedMimeTypes: [],
+      };
+
+      // Act & Assert
+      await expect(service.uploadAndRegister(input)).rejects.toThrow(
+        UnsupportedMediaTypeError,
+      );
+      expect(mockStoragePort.upload).not.toHaveBeenCalled();
+    });
+
+    it('should use default image allowlist when allowedMimeTypes is not provided (backward compat)', async () => {
+      // Arrange — image/jpeg is in the default allowlist
+      const buffer = Buffer.from('image content');
+      const input = {
+        buffer,
+        mimeType: 'image/jpeg',
+        originalName: 'photo.jpg',
+        // No allowedMimeTypes → defaults to ALLOWED_IMAGE_MIME_TYPES
+      };
+
+      mockStoragePort.upload.mockResolvedValueOnce({
+        key: 'orphan/uuid-img.jpg',
+        url: 'https://cdn.example.com/orphan/uuid-img.jpg',
+      });
+
+      const savedFile = FileObject.create({
+        id: 'file-img-1',
+        storageKey: 'orphan/uuid-img.jpg',
+        url: 'https://cdn.example.com/orphan/uuid-img.jpg',
+        mimeType: 'image/jpeg',
+        sizeBytes: buffer.length,
+        createdAt: new Date(),
+      });
+      mockFileRepository.save.mockResolvedValueOnce(savedFile);
+
+      // Act
+      const result = await service.uploadAndRegister(input);
+
+      // Assert
+      expect(result.id).toBe('file-img-1');
+    });
   });
 
   describe('findById', () => {

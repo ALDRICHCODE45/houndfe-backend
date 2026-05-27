@@ -242,6 +242,12 @@ model Tenant {
   promotionCustomers   PromotionCustomer[]
   promotionPriceLists  PromotionPriceList[]
   promotionDaysOfWeek  PromotionDayOfWeek[]
+  employees            Employee[]
+  employeeSalaryHistory   EmployeeSalaryHistory[]
+  employeePositionHistory EmployeePositionHistory[]
+  employeeDocuments       EmployeeDocument[]
+  employeeTimeOff         EmployeeTimeOff[]
+  employeeEmergencyContacts EmployeeEmergencyContact[]
 
   @@map("tenants")
 }
@@ -1015,4 +1021,257 @@ model PromotionDayOfWeek {
   @@unique([promotionId, day])
   @@index([tenantId])
   @@map("promotion_days_of_week")
+}
+
+// ============================================================================
+// EMPLOYEE ENUMS
+// ============================================================================
+
+enum EmployeeStatus {
+  ACTIVE
+  ON_LEAVE
+  TERMINATED
+}
+
+enum ContractType {
+  PERMANENT
+  TEMPORARY
+  FREELANCE
+  INTERNSHIP
+}
+
+enum WorkModality {
+  ONSITE
+  REMOTE
+  HYBRID
+}
+
+enum IdentityDocumentType {
+  INE
+  PASSPORT
+  DRIVER_LICENSE
+  MILITARY_ID
+  OTHER
+}
+
+// ============================================================================
+// EMPLOYEE
+// ============================================================================
+
+model Employee {
+  id                      String              @id @default(uuid())
+  employeeNumber          String
+  firstName               String
+  lastName                String
+  email                   String?
+  phone                   String?
+  dateOfBirth             DateTime?           @db.Date
+  nationalId              String?
+  nationalIdType          IdentityDocumentType?
+  photoFileId             String?
+  cvFileId                String?
+
+  // Address (flat fields — matches Customer pattern)
+  street                  String?
+  exteriorNumber          String?
+  interiorNumber          String?
+  zipCode                 String?
+  neighborhood            String?
+  municipality            String?
+  city                    String?
+  state                   String?
+
+  // Lifecycle
+  hireDate                DateTime            @db.Date
+  terminationDate         DateTime?           @db.Date
+  terminationReason       String?
+  status                  EmployeeStatus      @default(ACTIVE)
+
+  // Current snapshot (denormalized — source of truth is history tables)
+  currentPosition         String?
+  currentDepartment       String?
+  currentSalaryCents      Int?
+  currentSalaryCurrency   String?             @default("MXN")
+  currentResponsibilities String?
+  currentSchedule         String?
+
+  // Contract
+  contractType            ContractType        @default(PERMANENT)
+  workModality            WorkModality        @default(ONSITE)
+
+  // Time-off
+  annualVacationDays      Int                 @default(0)
+
+  // Org chart
+  managerId               String?
+  manager                 Employee?           @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
+  subordinates            Employee[]          @relation("EmployeeManager")
+
+  // Relations
+  salaryHistory           EmployeeSalaryHistory[]
+  positionHistory         EmployeePositionHistory[]
+  documents               EmployeeDocument[]
+  timeOff                 EmployeeTimeOff[]
+  emergencyContacts       EmployeeEmergencyContact[]
+
+  // Tenant
+  tenantId                String
+  tenant                  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+
+  @@unique([tenantId, employeeNumber])
+  @@index([tenantId, terminationDate])
+  @@index([tenantId, managerId])
+  @@index([tenantId, status])
+  @@map("employees")
+}
+
+// ============================================================================
+// EMPLOYEE SALARY HISTORY (append-only)
+// ============================================================================
+
+model EmployeeSalaryHistory {
+  id                String   @id @default(uuid())
+  employeeId        String
+  employee          Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  amountCents       Int
+  currency          String   @default("MXN")
+  effectiveFrom     DateTime @db.Date
+  reason            String
+  recordedByUserId  String?
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+
+  @@index([employeeId, effectiveFrom(sort: Desc)])
+  @@index([tenantId, employeeId])
+  @@map("employee_salary_history")
+}
+
+// ============================================================================
+// EMPLOYEE POSITION HISTORY (append-only)
+// ============================================================================
+
+model EmployeePositionHistory {
+  id                String   @id @default(uuid())
+  employeeId        String
+  employee          Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  position          String
+  department        String?
+  effectiveFrom     DateTime @db.Date
+  reason            String
+  recordedByUserId  String?
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+
+  @@index([employeeId, effectiveFrom(sort: Desc)])
+  @@index([tenantId, employeeId])
+  @@map("employee_position_history")
+}
+
+// ============================================================================
+// EMPLOYEE DOCUMENT CATEGORY
+// ============================================================================
+
+enum EmployeeDocumentCategory {
+  CONTRACT
+  NDA
+  EVALUATION
+  CERTIFICATE
+  WARNING
+  ID_DOCUMENT
+  CV
+  MEDICAL
+  OTHER
+}
+
+// ============================================================================
+// EMPLOYEE DOCUMENT
+// ============================================================================
+
+model EmployeeDocument {
+  id               String                   @id @default(uuid())
+  employeeId       String
+  employee         Employee                 @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  fileId           String
+  // No FK to FileObject — FilesService manages its own table, we store the id only.
+  // Orphan cleanup is best-effort at delete-time, full job is v2.
+  category         EmployeeDocumentCategory
+  expiresAt        DateTime?                @db.Date
+  notes            String?
+  uploadedByUserId String?
+  tenantId         String
+  tenant           Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt        DateTime                 @default(now())
+
+  @@index([employeeId, category])
+  @@index([employeeId, expiresAt])
+  @@index([tenantId, expiresAt])
+  @@map("employee_documents")
+}
+
+// ============================================================================
+// EMPLOYEE TIME OFF
+// ============================================================================
+
+enum TimeOffType {
+  VACATION
+  SICK
+  PERSONAL
+  UNPAID
+}
+
+enum TimeOffStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model EmployeeTimeOff {
+  id                String        @id @default(uuid())
+  employeeId        String
+  employee          Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  type              TimeOffType
+  startDate         DateTime      @db.Date
+  endDate           DateTime      @db.Date
+  reason            String?
+  status            TimeOffStatus @default(PENDING)
+  reviewerUserId    String?
+  reviewedAt        DateTime?
+  reviewerNotes     String?
+  requestedByUserId String?
+  tenantId          String
+  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([employeeId, status, startDate])
+  @@index([tenantId, status, startDate])
+  @@index([employeeId, startDate])
+  @@map("employee_time_off")
+}
+
+// ============================================================================
+// EMPLOYEE EMERGENCY CONTACT
+// ============================================================================
+
+model EmployeeEmergencyContact {
+  id              String   @id @default(uuid())
+  employeeId      String
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  name            String
+  relationship    String
+  phone           String
+  email           String?
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([employeeId])
+  @@map("employee_emergency_contacts")
 }
