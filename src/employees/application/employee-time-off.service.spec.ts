@@ -53,6 +53,33 @@ function makeService() {
   };
 }
 
+function makeServiceWithCls(opts: {
+  abilityCanResult: boolean;
+  userId?: string | null;
+}) {
+  const base = makeService();
+  const ability = { can: jest.fn().mockReturnValue(opts.abilityCanResult) };
+  const cls = {
+    get: jest
+      .fn()
+      .mockReturnValue(
+        opts.userId === null
+          ? { isSuperAdmin: false }
+          : { userId: opts.userId ?? 'user-1', tenantId: 'tenant-1', isSuperAdmin: false },
+      ),
+  } as any;
+  const caslAbilityFactory = {
+    createForUser: jest.fn().mockResolvedValue(ability),
+  } as any;
+  const service = new EmployeeTimeOffService(
+    base.employeeRepo,
+    base.tenantPrisma,
+    cls,
+    caslAbilityFactory,
+  );
+  return { ...base, service, ability, cls, caslAbilityFactory };
+}
+
 const mockEmployee = {
   id: 'emp-1',
   tenantId: 'tenant-1',
@@ -406,6 +433,82 @@ describe('EmployeeTimeOffService', () => {
         orderBy: { startDate: 'asc' },
       });
       expect(result).toHaveLength(2);
+    });
+  });
+
+  describe('runtime ability resolution (CLS-driven)', () => {
+    it('listForEmployee uses CLS-built ability to strip SICK reason when permission missing', async () => {
+      const { service, employeeRepo, prismaClient, ability, caslAbilityFactory } =
+        makeServiceWithCls({ abilityCanResult: false });
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      prismaClient.employeeTimeOff.findMany.mockResolvedValue([
+        {
+          id: 't1',
+          employeeId: 'emp-1',
+          type: 'SICK',
+          status: 'APPROVED',
+          startDate: new Date('2026-03-01'),
+          endDate: new Date('2026-03-03'),
+          reason: 'Gripe fuerte',
+        },
+      ]);
+      prismaClient.employeeTimeOff.count.mockResolvedValue(1);
+
+      const result = await service.listForEmployee('emp-1', {} as any);
+
+      expect(caslAbilityFactory.createForUser).toHaveBeenCalledWith('user-1', {
+        tenantId: 'tenant-1',
+        isSuperAdmin: false,
+      });
+      expect(ability.can).toHaveBeenCalledWith('read', 'EmployeeTimeOffMedical');
+      expect(result.data[0].reason).toBeNull();
+    });
+
+    it('listForEmployee keeps SICK reason when CLS-built ability grants medical permission', async () => {
+      const { service, employeeRepo, prismaClient, ability } = makeServiceWithCls({
+        abilityCanResult: true,
+      });
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      prismaClient.employeeTimeOff.findMany.mockResolvedValue([
+        {
+          id: 't1',
+          employeeId: 'emp-1',
+          type: 'SICK',
+          status: 'APPROVED',
+          startDate: new Date('2026-03-01'),
+          endDate: new Date('2026-03-03'),
+          reason: 'Gripe fuerte',
+        },
+      ]);
+      prismaClient.employeeTimeOff.count.mockResolvedValue(1);
+
+      const result = await service.listForEmployee('emp-1', {} as any);
+
+      expect(ability.can).toHaveBeenCalledWith('read', 'EmployeeTimeOffMedical');
+      expect(result.data[0].reason).toBe('Gripe fuerte');
+    });
+
+    it('listPendingApprovalsForManager builds CLS ability and strips SICK reason when missing permission', async () => {
+      const { service, prismaClient, ability } = makeServiceWithCls({
+        abilityCanResult: false,
+      });
+      prismaClient.employee.findMany.mockResolvedValue([{ id: 'emp-2' }]);
+      prismaClient.employeeTimeOff.findMany.mockResolvedValue([
+        {
+          id: 't9',
+          employeeId: 'emp-2',
+          type: 'SICK',
+          status: 'PENDING',
+          startDate: new Date('2026-04-01'),
+          endDate: new Date('2026-04-02'),
+          reason: 'Confidencial',
+        },
+      ]);
+
+      const result = await service.listPendingApprovalsForManager('mgr-1');
+
+      expect(ability.can).toHaveBeenCalledWith('read', 'EmployeeTimeOffMedical');
+      expect(result[0].reason).toBeNull();
     });
   });
 });

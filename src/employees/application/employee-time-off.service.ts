@@ -1,7 +1,9 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ClsService } from 'nestjs-cls';
 import type { IEmployeeRepository } from '../domain/employee.repository';
 import { EMPLOYEE_REPOSITORY } from '../domain/employee.repository';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { CaslAbilityFactory } from '../../auth/authorization/casl-ability.factory';
 import { CreateTimeOffDto } from '../dto/create-time-off.dto';
 import { ReviewTimeOffDto } from '../dto/review-time-off.dto';
 import { ListTimeOffQueryDto } from '../dto/list-time-off.query.dto';
@@ -10,6 +12,7 @@ import { TimeOffNotFoundError } from '../domain/errors/time-off-not-found.error'
 import { TimeOffInvalidTransitionError } from '../domain/errors/time-off-invalid-transition.error';
 import { TimeOffInvalidDateRangeError } from '../domain/errors/time-off-invalid-date-range.error';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
+import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 
 @Injectable()
 export class EmployeeTimeOffService {
@@ -17,7 +20,24 @@ export class EmployeeTimeOffService {
     @Inject(EMPLOYEE_REPOSITORY)
     private readonly employeeRepo: IEmployeeRepository,
     private readonly tenantPrisma: TenantPrismaService,
+    @Optional() private readonly cls?: ClsService<TenantClsStore>,
+    @Optional() private readonly caslAbilityFactory?: CaslAbilityFactory,
   ) {}
+
+  /**
+   * Build the CASL ability for the current request from CLS context.
+   * Returns undefined if dependencies are not wired (e.g. unit tests with
+   * direct instantiation).
+   */
+  private async getCurrentAbility(): Promise<AppAbility | undefined> {
+    if (!this.cls || !this.caslAbilityFactory) return undefined;
+    const store = this.cls.get();
+    if (!store?.userId) return undefined;
+    return this.caslAbilityFactory.createForUser(store.userId, {
+      tenantId: store.tenantId ?? null,
+      isSuperAdmin: store.isSuperAdmin ?? false,
+    });
+  }
 
   async request(
     employeeId: string,
@@ -136,8 +156,12 @@ export class EmployeeTimeOffService {
       prisma.employeeTimeOff.count({ where }),
     ]);
 
+    const effectiveAbility = ability ?? (await this.getCurrentAbility());
+
     return {
-      data: data.map((row: any) => this.stripMedicalReason(row, ability)),
+      data: data.map((row: any) =>
+        this.stripMedicalReason(row, effectiveAbility),
+      ),
       total,
       page,
       limit,
@@ -214,7 +238,11 @@ export class EmployeeTimeOffService {
       orderBy: { startDate: 'asc' },
     });
 
-    return rows.map((row: any) => this.stripMedicalReason(row, ability));
+    const effectiveAbility = ability ?? (await this.getCurrentAbility());
+
+    return rows.map((row: any) =>
+      this.stripMedicalReason(row, effectiveAbility),
+    );
   }
 
   // ==================== Helpers ====================

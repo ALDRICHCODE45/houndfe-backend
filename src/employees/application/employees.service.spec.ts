@@ -6,7 +6,10 @@ import { ManagerSelfReferenceError } from '../domain/errors/manager-self-referen
 import { ManagerCycleError } from '../domain/errors/manager-cycle.error';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 
-function makeService() {
+function makeService(opts?: {
+  withRuntimeAbility?: { can: jest.Mock };
+  clsStore?: { userId?: string; tenantId?: string | null; isSuperAdmin?: boolean };
+}) {
   const employeeRepo = {
     create: jest.fn(),
     findById: jest.fn(),
@@ -21,9 +24,26 @@ function makeService() {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
   } as any;
 
-  const service = new EmployeesService(employeeRepo, tenantPrisma);
+  const cls = opts?.clsStore
+    ? ({
+        get: jest.fn().mockReturnValue(opts.clsStore),
+      } as any)
+    : undefined;
 
-  return { service, employeeRepo, tenantPrisma };
+  const caslAbilityFactory = opts?.withRuntimeAbility
+    ? ({
+        createForUser: jest.fn().mockResolvedValue(opts.withRuntimeAbility),
+      } as any)
+    : undefined;
+
+  const service = new EmployeesService(
+    employeeRepo,
+    tenantPrisma,
+    cls,
+    caslAbilityFactory,
+  );
+
+  return { service, employeeRepo, tenantPrisma, cls, caslAbilityFactory };
 }
 
 const now = new Date('2026-01-15T00:00:00Z');
@@ -470,6 +490,79 @@ describe('EmployeesService', () => {
       await expect(service.findManagerChain('missing')).rejects.toThrow(
         EmployeeNotFoundError,
       );
+    });
+  });
+
+  describe('runtime ability resolution', () => {
+    it('should build ability from CLS + factory when no override passed and strip salary if permission missing', async () => {
+      const denyingAbility = { can: jest.fn().mockReturnValue(false) };
+      const { service, employeeRepo, caslAbilityFactory } = makeService({
+        withRuntimeAbility: denyingAbility,
+        clsStore: { userId: 'user-1', tenantId: 'tenant-1', isSuperAdmin: false },
+      });
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ currentSalaryCents: 5000000 }),
+      );
+
+      const result = await service.findOne('emp-1');
+
+      expect(caslAbilityFactory!.createForUser).toHaveBeenCalledWith('user-1', {
+        tenantId: 'tenant-1',
+        isSuperAdmin: false,
+      });
+      expect(denyingAbility.can).toHaveBeenCalledWith('read', 'EmployeeSalary');
+      expect(result.currentSalaryCents).toBeUndefined();
+    });
+
+    it('should keep salary fields when CLS-built ability grants read:EmployeeSalary', async () => {
+      const allowingAbility = { can: jest.fn().mockReturnValue(true) };
+      const { service, employeeRepo } = makeService({
+        withRuntimeAbility: allowingAbility,
+        clsStore: { userId: 'user-1', tenantId: 'tenant-1', isSuperAdmin: false },
+      });
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({
+          currentSalaryCents: 5000000,
+          currentSalaryCurrency: 'MXN',
+        }),
+      );
+
+      const result = await service.findOne('emp-1');
+
+      expect(allowingAbility.can).toHaveBeenCalledWith('read', 'EmployeeSalary');
+      expect(result.currentSalaryCents).toBe(5000000);
+      expect(result.currentSalaryCurrency).toBe('MXN');
+    });
+
+    it('should default to most-restrictive when CLS context lacks userId', async () => {
+      const { service, employeeRepo } = makeService({
+        clsStore: { isSuperAdmin: false }, // no userId
+      });
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ currentSalaryCents: 5000000 }),
+      );
+
+      const result = await service.findOne('emp-1');
+
+      expect(result.currentSalaryCents).toBeUndefined();
+    });
+
+    it('should prefer explicit ability override over CLS-built one', async () => {
+      const clsAbility = { can: jest.fn().mockReturnValue(false) };
+      const overrideAbility = { can: jest.fn().mockReturnValue(true) };
+      const { service, employeeRepo } = makeService({
+        withRuntimeAbility: clsAbility,
+        clsStore: { userId: 'user-1', tenantId: 't', isSuperAdmin: false },
+      });
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ currentSalaryCents: 5000000 }),
+      );
+
+      const result = await service.findOne('emp-1', overrideAbility as any);
+
+      expect(overrideAbility.can).toHaveBeenCalledWith('read', 'EmployeeSalary');
+      expect(clsAbility.can).not.toHaveBeenCalled();
+      expect(result.currentSalaryCents).toBe(5000000);
     });
   });
 });

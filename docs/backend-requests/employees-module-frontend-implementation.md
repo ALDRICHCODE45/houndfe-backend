@@ -994,7 +994,7 @@ Llamado en: `listForEmployee`, `listPendingApprovalsForManager`.
 
 **Para el frontend**: En filas con `type: "SICK"`, el campo `reason` viene como `null` si el caller no tiene `read:EmployeeTimeOffMedical`. La key `reason` SÍ existe — solo el valor es null.
 
-Nota: los controllers actuales NO pasan la `ability` al service (ver `employee-time-off.controller.ts:53` y `:100`). Esto significa que **actualmente el stripping SIEMPRE se aplica** para SICK reasons, independientemente del permiso del caller. Si esto cambia en el futuro, el frontend debería chequear `can('read', 'EmployeeTimeOffMedical')` para decidir si mostrar una columna de "Motivo médico".
+**Cómo se resuelve la ability en runtime**: el service llama a `getCurrentAbility()` (helper privado) que arma la `AppAbility` usando `ClsService` (de `nestjs-cls`, que tiene el `userId` y `tenantId` del JWT validado) más `CaslAbilityFactory.createForUser(userId, { tenantId, isSuperAdmin })`. Esto pasa para **todas las lecturas** de empleados (`findOne`, `findAll`, `findSubordinates`, `findManagerChain`) y de time-off (`listForEmployee`, `listPendingApprovalsForManager`). El frontend no necesita hacer nada — solo asegurarse de que el rol del usuario tenga los permisos correctos (`read:EmployeeSalary` y/o `read:EmployeeTimeOffMedical`) en su `Role.permissions` para ver los campos sensibles.
 
 ---
 

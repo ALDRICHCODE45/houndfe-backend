@@ -1,10 +1,12 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { ClsService } from 'nestjs-cls';
 import type {
   IEmployeeRepository,
   EmployeeListOptions,
 } from '../domain/employee.repository';
 import { EMPLOYEE_REPOSITORY } from '../domain/employee.repository';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { CaslAbilityFactory } from '../../auth/authorization/casl-ability.factory';
 import { CreateEmployeeDto } from '../dto/create-employee.dto';
 import { UpdateEmployeeDto } from '../dto/update-employee.dto';
 import { TerminateEmployeeDto } from '../dto/terminate-employee.dto';
@@ -14,6 +16,7 @@ import { ManagerSelfReferenceError } from '../domain/errors/manager-self-referen
 import { ManagerCycleError } from '../domain/errors/manager-cycle.error';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
+import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 
 @Injectable()
 export class EmployeesService {
@@ -23,7 +26,25 @@ export class EmployeesService {
     @Inject(EMPLOYEE_REPOSITORY)
     private readonly employeeRepo: IEmployeeRepository,
     private readonly tenantPrisma: TenantPrismaService,
+    @Optional() private readonly cls?: ClsService<TenantClsStore>,
+    @Optional() private readonly caslAbilityFactory?: CaslAbilityFactory,
   ) {}
+
+  /**
+   * Build the CASL ability for the current request, using CLS context.
+   * Returns undefined if dependencies are not wired (e.g. in unit tests with
+   * direct service instantiation), allowing callers to pass an explicit
+   * ability via the override parameter.
+   */
+  private async getCurrentAbility(): Promise<AppAbility | undefined> {
+    if (!this.cls || !this.caslAbilityFactory) return undefined;
+    const store = this.cls.get();
+    if (!store?.userId) return undefined;
+    return this.caslAbilityFactory.createForUser(store.userId, {
+      tenantId: store.tenantId ?? null,
+      isSuperAdmin: store.isSuperAdmin ?? false,
+    });
+  }
 
   async create(dto: CreateEmployeeDto) {
     const tenantId = this.tenantPrisma.getTenantId();
@@ -81,10 +102,11 @@ export class EmployeesService {
     };
 
     const result = await this.employeeRepo.findAll(options);
+    const effectiveAbility = ability ?? (await this.getCurrentAbility());
 
     return {
       data: result.data.map((emp) =>
-        this.stripSensitiveFields(this.toResponse(emp), ability),
+        this.stripSensitiveFields(this.toResponse(emp), effectiveAbility),
       ),
       total: result.total,
       page: result.page,
@@ -96,7 +118,8 @@ export class EmployeesService {
   async findOne(id: string, ability?: AppAbility) {
     const employee = await this.employeeRepo.findById(id);
     if (!employee) throw new EmployeeNotFoundError(id);
-    return this.stripSensitiveFields(this.toResponse(employee), ability);
+    const effectiveAbility = ability ?? (await this.getCurrentAbility());
+    return this.stripSensitiveFields(this.toResponse(employee), effectiveAbility);
   }
 
   async update(id: string, dto: UpdateEmployeeDto) {
@@ -200,12 +223,16 @@ export class EmployeesService {
     const employee = await this.employeeRepo.findById(id);
     if (!employee) throw new EmployeeNotFoundError(id);
     const subs = await this.employeeRepo.findSubordinates(id);
-    return subs.map((s) => this.stripSensitiveFields(this.toResponse(s), ability));
+    const effectiveAbility = ability ?? (await this.getCurrentAbility());
+    return subs.map((s) =>
+      this.stripSensitiveFields(this.toResponse(s), effectiveAbility),
+    );
   }
 
   async findManagerChain(id: string, ability?: AppAbility) {
     const employee = await this.employeeRepo.findById(id);
     if (!employee) throw new EmployeeNotFoundError(id);
+    const effectiveAbility = ability ?? (await this.getCurrentAbility());
     const chain: any[] = [];
     let currentManagerId: string | null = employee.managerId;
     const visited = new Set<string>();
@@ -215,7 +242,9 @@ export class EmployeesService {
       visited.add(currentManagerId);
       const manager = await this.employeeRepo.findById(currentManagerId);
       if (!manager) break;
-      chain.push(this.stripSensitiveFields(this.toResponse(manager), ability));
+      chain.push(
+        this.stripSensitiveFields(this.toResponse(manager), effectiveAbility),
+      );
       currentManagerId = manager.managerId;
     }
     return chain;
