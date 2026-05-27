@@ -34,6 +34,8 @@ export type AppSubjects =
   | 'Employee'
   | 'EmployeeDocument'
   | 'EmployeeSalary'
+  | 'EmployeeTimeOff'
+  | 'EmployeeTimeOffMedical'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -326,5 +328,39 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'EmployeeDocument',
     action: 'manage',
     description: 'Full employee document management',
+  },
+
+  // EmployeeTimeOff permissions
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'create',
+    description: 'Request time off',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'read',
+    description: 'View time-off requests',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'update',
+    description: 'Approve/reject time-off requests',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'delete',
+    description: 'Delete time-off requests',
+  },
+  {
+    subject: 'EmployeeTimeOff',
+    action: 'manage',
+    description: 'Full time-off management',
+  },
+
+  // EmployeeTimeOffMedical permissions (sensitive — Tier 3 medical)
+  {
+    subject: 'EmployeeTimeOffMedical',
+    action: 'read',
+    description: 'View SICK time-off reason (medical sensitivity)',
   },
 ];

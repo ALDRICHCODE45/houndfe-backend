@@ -7,6 +7,7 @@ import { EmployeesService } from './application/employees.service';
 import { EmployeeSalaryService } from './application/employee-salary.service';
 import { EmployeePositionService } from './application/employee-position.service';
 import { EmployeeDocumentsService } from './application/employee-documents.service';
+import { EmployeeTimeOffService } from './application/employee-time-off.service';
 import { EmployeesController } from './employees.controller';
 import { EmployeeSalaryController } from './employee-salary.controller';
 import { EmployeePositionController } from './employee-position.controller';
@@ -25,6 +26,7 @@ import { EmployeeDocumentsController } from './employee-documents.controller';
     EmployeeSalaryService,
     EmployeePositionService,
     EmployeeDocumentsService,
+    EmployeeTimeOffService,
     {
       provide: EMPLOYEE_REPOSITORY,
       useClass: PrismaEmployeeRepository,
