@@ -1,4 +1,4 @@
-import { IsOptional, IsEnum, IsInt, Min } from 'class-validator';
+import { IsOptional, IsEnum, IsInt, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
 import { TimeOffStatus } from '@prisma/client';
 
@@ -11,6 +11,7 @@ export class ListTimeOffQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(2000)
+  @Max(2100)
   year?: number;
 
   @IsOptional()
@@ -23,5 +24,6 @@ export class ListTimeOffQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(100)
   pageSize?: number;
 }

@@ -12,6 +12,7 @@ import { EmployeesController } from './employees.controller';
 import { EmployeeSalaryController } from './employee-salary.controller';
 import { EmployeePositionController } from './employee-position.controller';
 import { EmployeeDocumentsController } from './employee-documents.controller';
+import { EmployeeTimeOffController } from './employee-time-off.controller';
 
 @Module({
   imports: [AuthModule, FilesModule],
@@ -20,6 +21,7 @@ import { EmployeeDocumentsController } from './employee-documents.controller';
     EmployeeSalaryController,
     EmployeePositionController,
     EmployeeDocumentsController,
+    EmployeeTimeOffController,
   ],
   providers: [
     EmployeesService,
