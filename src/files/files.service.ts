@@ -25,6 +25,8 @@ export interface UploadAndRegisterInput {
   ownerType?: string;
   ownerId?: string;
   uploadedBy?: string;
+  /** Per-call MIME allowlist override. Defaults to ALLOWED_IMAGE_MIME_TYPES. */
+  allowedMimeTypes?: string[];
 }
 
 // Allowed MIME types for file uploads
@@ -61,8 +63,10 @@ export class FilesService {
       throw new FileTooLargeError(this.maxUploadSizeMB);
     }
 
-    // Validate MIME type
-    if (!ALLOWED_IMAGE_MIME_TYPES.includes(input.mimeType)) {
+    // Validate MIME type (per-call override or default image-only allowlist)
+    const effectiveAllowlist =
+      input.allowedMimeTypes ?? ALLOWED_IMAGE_MIME_TYPES;
+    if (!effectiveAllowlist.includes(input.mimeType)) {
       throw new UnsupportedMediaTypeError(input.mimeType);
     }
 

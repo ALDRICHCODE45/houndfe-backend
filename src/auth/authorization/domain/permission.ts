@@ -32,6 +32,7 @@ export type AppSubjects =
   | 'SaleComment'
   | 'File'
   | 'Employee'
+  | 'EmployeeDocument'
   | 'EmployeeSalary'
   | 'all';
 
@@ -303,5 +304,27 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'EmployeeSalary',
     action: 'manage',
     description: 'Full salary management',
+  },
+
+  // EmployeeDocument permissions
+  {
+    subject: 'EmployeeDocument',
+    action: 'create',
+    description: 'Upload employee documents',
+  },
+  {
+    subject: 'EmployeeDocument',
+    action: 'read',
+    description: 'View employee documents',
+  },
+  {
+    subject: 'EmployeeDocument',
+    action: 'delete',
+    description: 'Delete employee documents',
+  },
+  {
+    subject: 'EmployeeDocument',
+    action: 'manage',
+    description: 'Full employee document management',
   },
 ];

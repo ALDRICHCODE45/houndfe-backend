@@ -23,4 +23,5 @@ export const TENANT_SCOPED_MODELS = new Set([
   'Employee',
   'EmployeeSalaryHistory',
   'EmployeePositionHistory',
+  'EmployeeDocument',
 ]);
