@@ -86,4 +86,21 @@ export class PrismaEmployeeRepository implements IEmployeeRepository {
       throw err;
     }
   }
+
+  async findSubordinates(managerId: string): Promise<any[]> {
+    const prisma = this.tenantPrisma.getClient();
+    return prisma.employee.findMany({
+      where: { managerId },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+    });
+  }
+
+  async findManagerIdOf(employeeId: string): Promise<string | null> {
+    const prisma = this.tenantPrisma.getClient();
+    const result = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { managerId: true },
+    });
+    return result?.managerId ?? null;
+  }
 }

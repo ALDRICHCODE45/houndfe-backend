@@ -18,6 +18,8 @@ export interface IEmployeeRepository {
   findById(id: string): Promise<any | null>;
   findAll(options: EmployeeListOptions): Promise<EmployeeListResult>;
   update(id: string, data: any): Promise<any>;
+  findSubordinates(managerId: string): Promise<any[]>;
+  findManagerIdOf(employeeId: string): Promise<string | null>;
 }
 
 export const EMPLOYEE_REPOSITORY = Symbol('EMPLOYEE_REPOSITORY');

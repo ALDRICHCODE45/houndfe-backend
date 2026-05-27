@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type {
   IEmployeeRepository,
   EmployeeListOptions,
@@ -11,11 +11,14 @@ import { TerminateEmployeeDto } from '../dto/terminate-employee.dto';
 import { ListEmployeesQueryDto } from '../dto/list-employees.query.dto';
 import { EmployeeNotFoundError } from '../domain/errors/employee-not-found.error';
 import { ManagerSelfReferenceError } from '../domain/errors/manager-self-reference.error';
+import { ManagerCycleError } from '../domain/errors/manager-cycle.error';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 
 @Injectable()
 export class EmployeesService {
+  private readonly logger = new Logger(EmployeesService.name);
+
   constructor(
     @Inject(EMPLOYEE_REPOSITORY)
     private readonly employeeRepo: IEmployeeRepository,
@@ -25,8 +28,13 @@ export class EmployeesService {
   async create(dto: CreateEmployeeDto) {
     const tenantId = this.tenantPrisma.getTenantId();
 
-    // Note: managerId self-reference is impossible on create (employee has no id yet).
-    // Full cycle prevention against existing manager chains is handled in Slice 3.
+    // Validate that proposed manager exists in same tenant
+    if (dto.managerId) {
+      const managerExists = await this.employeeRepo.findById(dto.managerId);
+      if (!managerExists) {
+        throw new EmployeeNotFoundError(dto.managerId);
+      }
+    }
 
     const data = {
       employeeNumber: dto.employeeNumber.trim(),
@@ -95,9 +103,9 @@ export class EmployeesService {
     const employee = await this.employeeRepo.findById(id);
     if (!employee) throw new EmployeeNotFoundError(id);
 
-    // Self-reference check for managerId
-    if (dto.managerId !== undefined && dto.managerId === id) {
-      throw new ManagerSelfReferenceError(id);
+    // Full ancestry cycle prevention (covers self-reference + indirect cycles)
+    if (dto.managerId !== undefined && dto.managerId !== null) {
+      await this.assertNoManagerCycle(id, dto.managerId);
     }
 
     const data: any = {};
@@ -188,7 +196,58 @@ export class EmployeesService {
     return this.toResponse(updated);
   }
 
+  async findSubordinates(id: string, ability?: AppAbility) {
+    const employee = await this.employeeRepo.findById(id);
+    if (!employee) throw new EmployeeNotFoundError(id);
+    const subs = await this.employeeRepo.findSubordinates(id);
+    return subs.map((s) => this.stripSensitiveFields(this.toResponse(s), ability));
+  }
+
+  async findManagerChain(id: string, ability?: AppAbility) {
+    const employee = await this.employeeRepo.findById(id);
+    if (!employee) throw new EmployeeNotFoundError(id);
+    const chain: any[] = [];
+    let currentManagerId: string | null = employee.managerId;
+    const visited = new Set<string>();
+    for (let i = 0; i < 50; i++) {
+      if (currentManagerId === null) break;
+      if (visited.has(currentManagerId)) break;
+      visited.add(currentManagerId);
+      const manager = await this.employeeRepo.findById(currentManagerId);
+      if (!manager) break;
+      chain.push(this.stripSensitiveFields(this.toResponse(manager), ability));
+      currentManagerId = manager.managerId;
+    }
+    return chain;
+  }
+
   // ==================== Helpers ====================
+
+  private async assertNoManagerCycle(
+    employeeId: string,
+    proposedManagerId: string,
+  ): Promise<void> {
+    // Step 1: direct self-reference
+    if (proposedManagerId === employeeId) {
+      throw new ManagerSelfReferenceError(employeeId);
+    }
+    // Step 2: walk ancestry from proposedManagerId upward
+    let currentId: string | null = proposedManagerId;
+    const visited = new Set<string>();
+    for (let i = 0; i < 50; i++) {
+      if (currentId === null) return;
+      if (visited.has(currentId)) return;
+      visited.add(currentId);
+      if (currentId === employeeId) {
+        throw new ManagerCycleError(employeeId, proposedManagerId);
+      }
+      currentId = await this.employeeRepo.findManagerIdOf(currentId);
+    }
+    // Defensive cap reached — log warning but allow write
+    this.logger.warn(
+      `Manager chain depth exceeded 50 for employee ${employeeId} -> proposed manager ${proposedManagerId}. Possible data corruption.`,
+    );
+  }
 
   private toResponse(employee: any) {
     return {

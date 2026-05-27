@@ -68,4 +68,16 @@ export class EmployeesController {
   reactivate(@Param('id', ParseUUIDPipe) id: string) {
     return this.employeesService.reactivate(id);
   }
+
+  @Get(':id/subordinates')
+  @RequirePermissions(['read', 'Employee'])
+  findSubordinates(@Param('id', ParseUUIDPipe) id: string) {
+    return this.employeesService.findSubordinates(id);
+  }
+
+  @Get(':id/manager-chain')
+  @RequirePermissions(['read', 'Employee'])
+  findManagerChain(@Param('id', ParseUUIDPipe) id: string) {
+    return this.employeesService.findManagerChain(id);
+  }
 }

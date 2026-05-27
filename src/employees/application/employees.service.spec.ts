@@ -3,6 +3,7 @@ import { EMPLOYEE_REPOSITORY } from '../domain/employee.repository';
 import { EmployeeNotFoundError } from '../domain/errors/employee-not-found.error';
 import { EmployeeNumberConflictError } from '../domain/errors/employee-number-conflict.error';
 import { ManagerSelfReferenceError } from '../domain/errors/manager-self-reference.error';
+import { ManagerCycleError } from '../domain/errors/manager-cycle.error';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 
 function makeService() {
@@ -11,6 +12,8 @@ function makeService() {
     findById: jest.fn(),
     findAll: jest.fn(),
     update: jest.fn(),
+    findSubordinates: jest.fn(),
+    findManagerIdOf: jest.fn(),
   };
 
   const tenantPrisma = {
@@ -285,6 +288,188 @@ describe('EmployeesService', () => {
       );
       expect(result.total).toBe(1);
       expect(result.data[0].currentSalaryCents).toBeUndefined();
+    });
+  });
+
+  describe('manager cycle prevention', () => {
+    it('should reject direct self-reference (managerId === id)', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(makeEmployeeRecord());
+
+      await expect(
+        service.update('emp-1', { managerId: 'emp-1' }),
+      ).rejects.toThrow(ManagerSelfReferenceError);
+      expect(employeeRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('should reject 2-hop cycle: A.manager=B, set B.manager=A', async () => {
+      const { service, employeeRepo } = makeService();
+      // B exists and A is B's proposed manager target
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ id: 'B', managerId: null }),
+      );
+      // Walk from A upward: A's manager is B
+      employeeRepo.findManagerIdOf
+        .mockResolvedValueOnce('B') // A's manager is B
+        .mockResolvedValueOnce(null); // B's manager is null (won't reach this)
+
+      // Trying to set B's manager to A. employeeId=B, proposedManagerId=A
+      // Walk: start at A -> findManagerIdOf(A) returns B -> B === employeeId(B) -> CYCLE
+      await expect(
+        service.update('B', { managerId: 'A' }),
+      ).rejects.toThrow(ManagerCycleError);
+      expect(employeeRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('should reject 3-hop cycle: A->B->C, set C.manager=A', async () => {
+      const { service, employeeRepo } = makeService();
+      // C exists
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ id: 'C', managerId: 'B' }),
+      );
+      // Walk from A upward: A's manager is B, B's manager is C
+      employeeRepo.findManagerIdOf
+        .mockResolvedValueOnce('B')  // A's manager is B
+        .mockResolvedValueOnce('C'); // B's manager is C -> C === employeeId -> CYCLE
+
+      await expect(
+        service.update('C', { managerId: 'A' }),
+      ).rejects.toThrow(ManagerCycleError);
+      expect(employeeRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('should allow valid manager assignment when no cycle exists', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(makeEmployeeRecord({ id: 'A' }));
+      employeeRepo.findManagerIdOf.mockResolvedValue(null); // B has no manager
+      employeeRepo.update.mockResolvedValue(
+        makeEmployeeRecord({ id: 'A', managerId: 'B' }),
+      );
+
+      const result = await service.update('A', { managerId: 'B' });
+
+      expect(result.managerId).toBe('B');
+      expect(employeeRepo.update).toHaveBeenCalled();
+    });
+
+    it('should tolerate defensive iteration cap without infinite loop', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ id: 'emp-1' }),
+      );
+      // Simulate a very long chain that never hits employeeId
+      let counter = 0;
+      employeeRepo.findManagerIdOf.mockImplementation(async () => {
+        counter++;
+        return `manager-${counter}`;
+      });
+      employeeRepo.update.mockResolvedValue(
+        makeEmployeeRecord({ id: 'emp-1', managerId: 'deep-manager' }),
+      );
+
+      // Should NOT throw — cap is hit but it allows the write
+      const result = await service.update('emp-1', {
+        managerId: 'deep-manager',
+      });
+
+      expect(result).toBeDefined();
+      // findManagerIdOf should have been called exactly 50 times (cap)
+      expect(employeeRepo.findManagerIdOf).toHaveBeenCalledTimes(50);
+    });
+
+    it('should reject create when managerId points to non-existent employee', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(null); // manager does not exist
+
+      await expect(
+        service.create({
+          employeeNumber: 'EMP-002',
+          firstName: 'Carlos',
+          lastName: 'Lopez',
+          hireDate: '2026-01-15',
+          managerId: 'nonexistent',
+        }),
+      ).rejects.toThrow(EmployeeNotFoundError);
+      expect(employeeRepo.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findSubordinates()', () => {
+    it('should return direct subordinates stripped of salary fields', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ id: 'manager-1' }),
+      );
+      employeeRepo.findSubordinates.mockResolvedValue([
+        makeEmployeeRecord({
+          id: 'sub-1',
+          managerId: 'manager-1',
+          currentSalaryCents: 3000000,
+        }),
+        makeEmployeeRecord({
+          id: 'sub-2',
+          managerId: 'manager-1',
+          currentSalaryCents: 4000000,
+        }),
+      ]);
+
+      const result = await service.findSubordinates('manager-1');
+
+      expect(result).toHaveLength(2);
+      expect(result[0].id).toBe('sub-1');
+      expect(result[1].id).toBe('sub-2');
+      // Salary stripped by default (no ability passed)
+      expect(result[0].currentSalaryCents).toBeUndefined();
+      expect(result[1].currentSalaryCents).toBeUndefined();
+    });
+
+    it('should throw EmployeeNotFoundError when employee does not exist', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(null);
+
+      await expect(service.findSubordinates('missing')).rejects.toThrow(
+        EmployeeNotFoundError,
+      );
+    });
+  });
+
+  describe('findManagerChain()', () => {
+    it('should return ancestors in order from direct manager up to top', async () => {
+      const { service, employeeRepo } = makeService();
+      const empC = makeEmployeeRecord({ id: 'C', managerId: 'B' });
+      const empB = makeEmployeeRecord({ id: 'B', managerId: 'A' });
+      const empA = makeEmployeeRecord({ id: 'A', managerId: null });
+
+      employeeRepo.findById
+        .mockResolvedValueOnce(empC)  // initial lookup of C
+        .mockResolvedValueOnce(empB)  // lookup B (C's manager)
+        .mockResolvedValueOnce(empA); // lookup A (B's manager)
+
+      const result = await service.findManagerChain('C');
+
+      expect(result).toHaveLength(2);
+      expect(result[0].id).toBe('B');
+      expect(result[1].id).toBe('A');
+    });
+
+    it('should return empty array when employee has no manager', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(
+        makeEmployeeRecord({ id: 'top', managerId: null }),
+      );
+
+      const result = await service.findManagerChain('top');
+
+      expect(result).toEqual([]);
+    });
+
+    it('should throw EmployeeNotFoundError when employee does not exist', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(null);
+
+      await expect(service.findManagerChain('missing')).rejects.toThrow(
+        EmployeeNotFoundError,
+      );
     });
   });
 });
