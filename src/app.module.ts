@@ -31,6 +31,7 @@ import { FilesModule } from './files/files.module';
 import { TenantsModule } from './tenants/tenants.module';
 import { OutboxModule } from './shared/outbox/outbox.module';
 import { UsersModule } from './users/users.module';
+import { EmployeesModule } from './employees/employees.module';
 
 @Module({
   imports: [
@@ -82,6 +83,7 @@ import { UsersModule } from './users/users.module';
     FilesModule,
     TenantsModule,
     UsersModule,
+    EmployeesModule,
     OutboxModule,
   ],
 })
