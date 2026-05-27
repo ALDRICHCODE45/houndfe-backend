@@ -20,4 +20,5 @@ export const TENANT_SCOPED_MODELS = new Set([
   'PromotionPriceList',
   'PromotionDayOfWeek',
   'Role',
+  'Employee',
 ]);

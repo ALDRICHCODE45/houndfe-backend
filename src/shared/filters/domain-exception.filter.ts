@@ -96,6 +96,14 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'INVALID_DUE_DATE')
       return HttpStatus.UNPROCESSABLE_ENTITY;
+    if (exception.code === 'DUPLICATE_EMPLOYEE_NUMBER')
+      return HttpStatus.CONFLICT;
+    if (exception.code === 'EMPLOYEE_ALREADY_TERMINATED')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'EMPLOYEE_NOT_TERMINATED')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'MANAGER_SELF_REFERENCE')
+      return HttpStatus.BAD_REQUEST;
     if (exception.code === 'INVALID_PRICE_OVERRIDE_INPUT')
       return HttpStatus.BAD_REQUEST;
     if (exception.code === 'INVALID_PRICE_LIST_FOR_ITEM')

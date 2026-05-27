@@ -31,6 +31,8 @@ export type AppSubjects =
   | 'Customer'
   | 'SaleComment'
   | 'File'
+  | 'Employee'
+  | 'EmployeeSalary'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -262,4 +264,39 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'File', action: 'read', description: 'View files' },
   { subject: 'File', action: 'delete', description: 'Delete files' },
   { subject: 'File', action: 'manage', description: 'Full file management' },
+
+  // Employee permissions
+  {
+    subject: 'Employee',
+    action: 'create',
+    description: 'Create employees',
+  },
+  { subject: 'Employee', action: 'read', description: 'View employee profiles' },
+  {
+    subject: 'Employee',
+    action: 'update',
+    description: 'Update employee data',
+  },
+  {
+    subject: 'Employee',
+    action: 'delete',
+    description: 'Delete employees',
+  },
+  {
+    subject: 'Employee',
+    action: 'manage',
+    description: 'Full employee management',
+  },
+
+  // EmployeeSalary permissions (sensitive — Tier 2 financial)
+  {
+    subject: 'EmployeeSalary',
+    action: 'read',
+    description: 'View salary data and history',
+  },
+  {
+    subject: 'EmployeeSalary',
+    action: 'manage',
+    description: 'Full salary management',
+  },
 ];

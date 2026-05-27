@@ -242,6 +242,7 @@ model Tenant {
   promotionCustomers   PromotionCustomer[]
   promotionPriceLists  PromotionPriceList[]
   promotionDaysOfWeek  PromotionDayOfWeek[]
+  employees            Employee[]
 
   @@map("tenants")
 }
@@ -1015,4 +1016,102 @@ model PromotionDayOfWeek {
   @@unique([promotionId, day])
   @@index([tenantId])
   @@map("promotion_days_of_week")
+}
+
+// ============================================================================
+// EMPLOYEE ENUMS
+// ============================================================================
+
+enum EmployeeStatus {
+  ACTIVE
+  ON_LEAVE
+  TERMINATED
+}
+
+enum ContractType {
+  PERMANENT
+  TEMPORARY
+  FREELANCE
+  INTERNSHIP
+}
+
+enum WorkModality {
+  ONSITE
+  REMOTE
+  HYBRID
+}
+
+enum IdentityDocumentType {
+  INE
+  PASSPORT
+  DRIVER_LICENSE
+  MILITARY_ID
+  OTHER
+}
+
+// ============================================================================
+// EMPLOYEE
+// ============================================================================
+
+model Employee {
+  id                      String              @id @default(uuid())
+  employeeNumber          String
+  firstName               String
+  lastName                String
+  email                   String?
+  phone                   String?
+  dateOfBirth             DateTime?           @db.Date
+  nationalId              String?
+  nationalIdType          IdentityDocumentType?
+  photoFileId             String?
+  cvFileId                String?
+
+  // Address (flat fields — matches Customer pattern)
+  street                  String?
+  exteriorNumber          String?
+  interiorNumber          String?
+  zipCode                 String?
+  neighborhood            String?
+  municipality            String?
+  city                    String?
+  state                   String?
+
+  // Lifecycle
+  hireDate                DateTime            @db.Date
+  terminationDate         DateTime?           @db.Date
+  terminationReason       String?
+  status                  EmployeeStatus      @default(ACTIVE)
+
+  // Current snapshot (denormalized — source of truth is history tables)
+  currentPosition         String?
+  currentDepartment       String?
+  currentSalaryCents      Int?
+  currentSalaryCurrency   String?             @default("MXN")
+  currentResponsibilities String?
+  currentSchedule         String?
+
+  // Contract
+  contractType            ContractType        @default(PERMANENT)
+  workModality            WorkModality        @default(ONSITE)
+
+  // Time-off
+  annualVacationDays      Int                 @default(0)
+
+  // Org chart
+  managerId               String?
+  manager                 Employee?           @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
+  subordinates            Employee[]          @relation("EmployeeManager")
+
+  // Tenant
+  tenantId                String
+  tenant                  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+
+  @@unique([tenantId, employeeNumber])
+  @@index([tenantId, terminationDate])
+  @@index([tenantId, managerId])
+  @@index([tenantId, status])
+  @@map("employees")
 }
