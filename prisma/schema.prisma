@@ -243,6 +243,8 @@ model Tenant {
   promotionPriceLists  PromotionPriceList[]
   promotionDaysOfWeek  PromotionDayOfWeek[]
   employees            Employee[]
+  employeeSalaryHistory   EmployeeSalaryHistory[]
+  employeePositionHistory EmployeePositionHistory[]
 
   @@map("tenants")
 }
@@ -1102,6 +1104,10 @@ model Employee {
   manager                 Employee?           @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
   subordinates            Employee[]          @relation("EmployeeManager")
 
+  // Relations
+  salaryHistory           EmployeeSalaryHistory[]
+  positionHistory         EmployeePositionHistory[]
+
   // Tenant
   tenantId                String
   tenant                  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -1114,4 +1120,48 @@ model Employee {
   @@index([tenantId, managerId])
   @@index([tenantId, status])
   @@map("employees")
+}
+
+// ============================================================================
+// EMPLOYEE SALARY HISTORY (append-only)
+// ============================================================================
+
+model EmployeeSalaryHistory {
+  id                String   @id @default(uuid())
+  employeeId        String
+  employee          Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  amountCents       Int
+  currency          String   @default("MXN")
+  effectiveFrom     DateTime @db.Date
+  reason            String
+  recordedByUserId  String?
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+
+  @@index([employeeId, effectiveFrom(sort: Desc)])
+  @@index([tenantId, employeeId])
+  @@map("employee_salary_history")
+}
+
+// ============================================================================
+// EMPLOYEE POSITION HISTORY (append-only)
+// ============================================================================
+
+model EmployeePositionHistory {
+  id                String   @id @default(uuid())
+  employeeId        String
+  employee          Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  position          String
+  department        String?
+  effectiveFrom     DateTime @db.Date
+  reason            String
+  recordedByUserId  String?
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+
+  @@index([employeeId, effectiveFrom(sort: Desc)])
+  @@index([tenantId, employeeId])
+  @@map("employee_position_history")
 }

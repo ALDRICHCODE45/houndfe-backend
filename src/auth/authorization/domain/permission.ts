@@ -291,6 +291,11 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   // EmployeeSalary permissions (sensitive — Tier 2 financial)
   {
     subject: 'EmployeeSalary',
+    action: 'create',
+    description: 'Add salary changes',
+  },
+  {
+    subject: 'EmployeeSalary',
     action: 'read',
     description: 'View salary data and history',
   },
