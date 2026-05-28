@@ -18,6 +18,7 @@ function makeService() {
   const timeOffCount = jest.fn();
   const timeOffUpdate = jest.fn();
   const employeeFindMany = jest.fn();
+  const employeeFindFirst = jest.fn();
 
   const prismaClient = {
     employeeTimeOff: {
@@ -29,6 +30,7 @@ function makeService() {
     },
     employee: {
       findMany: employeeFindMany,
+      findFirst: employeeFindFirst,
     },
   };
 
@@ -50,6 +52,7 @@ function makeService() {
     timeOffCount,
     timeOffUpdate,
     employeeFindMany,
+    employeeFindFirst,
   };
 }
 
@@ -433,6 +436,59 @@ describe('EmployeeTimeOffService', () => {
         orderBy: { startDate: 'asc' },
       });
       expect(result).toHaveLength(2);
+    });
+  });
+
+  // ============================================================
+  // listPendingApprovalsForCurrentUser()
+  // ============================================================
+  describe('listPendingApprovalsForCurrentUser()', () => {
+    it('should return empty array when current user is not linked to an employee', async () => {
+      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
+        makeService();
+      employeeFindFirst.mockResolvedValue(null);
+
+      const result = await service.listPendingApprovalsForCurrentUser('user-1');
+
+      expect(employeeFindFirst).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+        select: { id: true },
+      });
+      expect(employeeFindMany).not.toHaveBeenCalled();
+      expect(timeOffFindMany).not.toHaveBeenCalled();
+      expect(result).toEqual([]);
+    });
+
+    it('should resolve the linked employee and return pending subordinate requests', async () => {
+      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
+        makeService();
+      employeeFindFirst.mockResolvedValue({ id: 'mgr-1' });
+      employeeFindMany.mockResolvedValue([{ id: 'emp-2' }]);
+      timeOffFindMany.mockResolvedValue([
+        {
+          id: 'to-1',
+          employeeId: 'emp-2',
+          type: 'VACATION',
+          status: 'PENDING',
+          reason: 'Family trip',
+          startDate: new Date('2026-07-01'),
+        },
+      ]);
+
+      const result = await service.listPendingApprovalsForCurrentUser('user-1');
+
+      expect(employeeFindMany).toHaveBeenCalledWith({
+        where: { managerId: 'mgr-1' },
+        select: { id: true },
+      });
+      expect(timeOffFindMany).toHaveBeenCalledWith({
+        where: {
+          employeeId: { in: ['emp-2'] },
+          status: 'PENDING',
+        },
+        orderBy: { startDate: 'asc' },
+      });
+      expect(result).toHaveLength(1);
     });
   });
 

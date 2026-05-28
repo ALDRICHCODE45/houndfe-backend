@@ -9,10 +9,11 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
-  Req,
   UseGuards,
 } from '@nestjs/common';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
@@ -33,12 +34,12 @@ export class EmployeeTimeOffController {
   request(
     @Param('employeeId', ParseUUIDPipe) employeeId: string,
     @Body() dto: CreateTimeOffDto,
-    @Req() req: any,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.timeOffService.request(
       employeeId,
       dto,
-      req.user?.id ?? req.user?.userId,
+      user.userId,
     );
   }
 
@@ -70,14 +71,13 @@ export class EmployeeTimeOffController {
     @Param('employeeId', ParseUUIDPipe) employeeId: string,
     @Param('timeOffId', ParseUUIDPipe) timeOffId: string,
     @Body() dto: ReviewTimeOffDto,
-    @Req() req: any,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    const reviewerUserId = req.user?.id ?? req.user?.userId;
     return this.timeOffService.review(
       employeeId,
       timeOffId,
       dto,
-      reviewerUserId,
+      user.userId,
     );
   }
 
@@ -92,11 +92,21 @@ export class EmployeeTimeOffController {
     return this.timeOffService.cancel(employeeId, timeOffId);
   }
 
-  /** GET /admin/employees-time-off/pending-approvals?managerId=:uuid — manager view */
+  /** GET /admin/employees-time-off/pending-approvals — current manager view */
   @Get('admin/employees-time-off/pending-approvals')
   @RequirePermissions(['read', 'EmployeeTimeOff'])
-  pendingApprovals(@Query('managerId', ParseUUIDPipe) managerId: string) {
-    // ability not passed — service defaults to most-restrictive (strips SICK reasons)
+  pendingApprovals(@CurrentUser() user: AuthenticatedUser) {
+    // Current manager view: backend resolves User -> Employee inside the tenant.
+    return this.timeOffService.listPendingApprovalsForCurrentUser(user.userId);
+  }
+
+  /** GET /admin/employees-time-off/pending-approvals/by-manager/:managerId — HR/admin view */
+  @Get('admin/employees-time-off/pending-approvals/by-manager/:managerId')
+  @RequirePermissions(['read', 'EmployeeTimeOff'])
+  pendingApprovalsByManager(
+    @Param('managerId', ParseUUIDPipe) managerId: string,
+  ) {
+    // HR/admin compatibility view for an explicit Employee manager id.
     return this.timeOffService.listPendingApprovalsForManager(managerId);
   }
 }

@@ -245,6 +245,22 @@ export class EmployeeTimeOffService {
     );
   }
 
+  async listPendingApprovalsForCurrentUser(
+    userId: string,
+    ability?: AppAbility,
+  ) {
+    const prisma = this.tenantPrisma.getClient();
+
+    const manager = await prisma.employee.findFirst({
+      where: { userId },
+      select: { id: true },
+    });
+
+    if (!manager) return [];
+
+    return this.listPendingApprovalsForManager(manager.id, ability);
+  }
+
   // ==================== Helpers ====================
 
   private stripMedicalReason(row: any, ability?: AppAbility): any {
