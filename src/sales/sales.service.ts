@@ -1444,7 +1444,9 @@ export class SalesService {
                 )
               ).unitPriceCents;
 
-        if (currentCents !== item.unitPriceCents) {
+        const expectedBaseCents =
+          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;
+        if (currentCents !== expectedBaseCents) {
           throw new BusinessRuleViolationError(
             'PRICE_OUT_OF_DATE',
             'PRICE_OUT_OF_DATE',

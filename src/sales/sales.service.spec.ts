@@ -1448,6 +1448,94 @@ describe('SalesService', () => {
       ).rejects.toThrow('PRICE_OUT_OF_DATE');
     });
 
+    it('succeeds when item has per-line discount and list price is unchanged', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-discount-ok',
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-discount-ok',
+            saleId: 'sale-charge-discount-ok',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 63000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountAmountCents: 7000,
+            prePriceCentsBeforeDiscount: 70000,
+          },
+        ],
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 70000,
+      });
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 63000 },
+        'idem-discount-ok',
+      );
+
+      expect(result.totalCents).toBe(63000);
+      expect(result.paymentStatus).toBe('PAID');
+    });
+
+    it('rejects when item has per-line discount and underlying price changed', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-discount-stale',
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-discount-stale',
+            saleId: 'sale-charge-discount-stale',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 63000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountAmountCents: 7000,
+            prePriceCentsBeforeDiscount: 70000,
+          },
+        ],
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 80000,
+      });
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 63000 },
+          'idem-discount-stale',
+        ),
+      ).rejects.toMatchObject({ code: 'PRICE_OUT_OF_DATE' });
+    });
+
     it('rejects credit with non-zero amount using INVALID_CREDIT_CHARGE', async () => {
       const sale = buildDraftSale(
         'sale-charge-credit-invalid-simple',
