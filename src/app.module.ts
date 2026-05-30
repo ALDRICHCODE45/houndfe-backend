@@ -32,6 +32,7 @@ import { TenantsModule } from './tenants/tenants.module';
 import { OutboxModule } from './shared/outbox/outbox.module';
 import { UsersModule } from './users/users.module';
 import { EmployeesModule } from './employees/employees.module';
+import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 
 @Module({
   imports: [
@@ -84,6 +85,7 @@ import { EmployeesModule } from './employees/employees.module';
     TenantsModule,
     UsersModule,
     EmployeesModule,
+    PublicCatalogModule,
     OutboxModule,
   ],
 })
