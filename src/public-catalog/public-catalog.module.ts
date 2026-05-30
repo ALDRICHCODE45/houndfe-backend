@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { PublicCatalogController } from './http/public-catalog.controller';
 import { PublicTenantGuard } from './http/guards/public-tenant.guard';
 import { ListPublicBranchesUseCase } from './application/use-cases/list-public-branches.use-case';
@@ -19,10 +18,6 @@ import { PUBLIC_CATALOG_REPOSITORY } from './application/ports/public-catalog.re
   ],
   controllers: [PublicCatalogController],
   providers: [
-    {
-      provide: APP_GUARD,
-      useClass: ThrottlerGuard,
-    },
     PublicTenantGuard,
     ListPublicBranchesUseCase,
     ListPublicProductsUseCase,

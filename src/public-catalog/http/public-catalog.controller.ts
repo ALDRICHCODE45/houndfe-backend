@@ -9,7 +9,7 @@ import {
   UseInterceptors,
   ParseUUIDPipe,
 } from '@nestjs/common';
-import { Throttle } from '@nestjs/throttler';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { PublicTenantGuard } from './guards/public-tenant.guard';
 import {
   PublicTenant,
@@ -27,7 +27,7 @@ import { ListProductsQueryDto } from './request-dto/list-products-query.dto';
 import { ValidateCartBodyDto } from './request-dto/validate-cart-body.dto';
 
 @Controller('public/catalog')
-@UseGuards(PublicTenantGuard)
+@UseGuards(PublicTenantGuard, ThrottlerGuard)
 @UseInterceptors(CacheControlInterceptor)
 export class PublicCatalogController {
   constructor(
