@@ -16,6 +16,7 @@ import {
 } from './decorators/public-tenant.decorator';
 import { ListPublicBranchesUseCase } from '../application/use-cases/list-public-branches.use-case';
 import { ListPublicProductsUseCase } from '../application/use-cases/list-public-products.use-case';
+import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
 import { ListProductsQueryDto } from './request-dto/list-products-query.dto';
 
 @Controller('public/catalog')
@@ -24,6 +25,7 @@ export class PublicCatalogController {
   constructor(
     private readonly listBranches: ListPublicBranchesUseCase,
     private readonly listProducts: ListPublicProductsUseCase,
+    private readonly getProductDetail: GetPublicProductDetailUseCase,
   ) {}
 
   @Get('branches')
@@ -40,5 +42,13 @@ export class PublicCatalogController {
       page: query.page ?? 1,
       limit: query.limit ?? 20,
     });
+  }
+
+  @Get(':tenantSlug/products/:productId')
+  async getProduct(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @PublicTenant() tenant: PublicTenantInfo,
+  ) {
+    return this.getProductDetail.execute(productId, tenant);
   }
 }
