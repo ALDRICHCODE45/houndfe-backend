@@ -299,6 +299,9 @@ model Product {
   quantity                 Int             @default(0)
   minQuantity              Int             @default(0)
 
+  // Price hidden in public catalog
+  hidePriceInOnlineCatalog Boolean         @default(false)
+
   // Has variants flag
   hasVariants              Boolean         @default(false)
 
@@ -315,6 +318,8 @@ model Product {
   priceLists    PriceList[]
 
   @@index([tenantId])
+  @@index([tenantId, includeInOnlineCatalog, categoryId])
+  @@index([tenantId, includeInOnlineCatalog, createdAt(sort: Desc)])
   @@map("products")
 }
 
