@@ -185,7 +185,10 @@ export class ValidatePublicCartUseCase {
     let totalCents: number | null = null;
     if (!hasHiddenPrice) {
       totalCents = validatedItems.reduce(
-        (sum, item) => sum + (item.lineTotalCents ?? 0),
+        (sum, item) =>
+          item.availability === 'out_of_stock' || item.unitPriceCents == null
+            ? sum
+            : sum + (item.lineTotalCents ?? 0),
         0,
       );
     }

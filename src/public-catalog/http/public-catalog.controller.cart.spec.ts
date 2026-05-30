@@ -159,6 +159,70 @@ describe('ValidatePublicCartUseCase', () => {
     expect(result.totalCents).toBeNull();
   });
 
+  it('should exclude out_of_stock items from totalCents (CRITICAL-03 regression)', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      // Item 1: available with visible price — contributes to total
+      makeDbProduct({ id: 'prod-1', quantity: 50, priceLists: [{ priceCents: 100000 }] }),
+      // Item 2: out_of_stock with visible price — must NOT contribute to total
+      makeDbProduct({ id: 'prod-2', name: 'Out of stock item', quantity: 0, priceLists: [{ priceCents: 50000 }] }),
+      // Item 3: price hidden — must NOT contribute to total
+      makeDbProduct({ id: 'prod-3', name: 'Rx item', hidePriceInOnlineCatalog: true, priceLists: [{ priceCents: 75000 }] }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [
+        { productId: 'prod-1', quantity: 2 },
+        { productId: 'prod-2', quantity: 1 },
+        { productId: 'prod-3', quantity: 1 },
+      ],
+    });
+
+    // totalCents should be null because at least one item has hidden price
+    // but the key assertion is: out_of_stock item does NOT contribute
+    expect(result.totalCents).toBeNull();
+    // The out_of_stock item should still have lineTotalCents (it has a visible price)
+    // but it should not contribute to the total sum
+    expect(result.items[1].availability).toBe('out_of_stock');
+    expect(result.items[2].priceHidden).toBe(true);
+  });
+
+  it('should exclude out_of_stock from totalCents when no hidden prices exist', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      // Item 1: available — contributes 200000
+      makeDbProduct({ id: 'prod-1', quantity: 50, priceLists: [{ priceCents: 100000 }] }),
+      // Item 2: out_of_stock — must NOT contribute (even though price is visible)
+      makeDbProduct({ id: 'prod-2', name: 'OOS', quantity: 0, priceLists: [{ priceCents: 50000 }] }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [
+        { productId: 'prod-1', quantity: 2 },
+        { productId: 'prod-2', quantity: 1 },
+      ],
+    });
+
+    // Only prod-1 contributes: 100000 * 2 = 200000
+    // prod-2 is out_of_stock — does NOT contribute even though price is visible
+    expect(result.totalCents).toBe(200000);
+  });
+
+  it('should include low_stock items in totalCents', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({ id: 'prod-1', quantity: 50, priceLists: [{ priceCents: 100000 }] }),
+      makeDbProduct({ id: 'prod-2', quantity: 3, minQuantity: 5, priceLists: [{ priceCents: 50000 }] }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [
+        { productId: 'prod-1', quantity: 1 },
+        { productId: 'prod-2', quantity: 1 },
+      ],
+    });
+
+    // low_stock items DO contribute: 100000 + 50000 = 150000
+    expect(result.totalCents).toBe(150000);
+  });
+
   it('should produce NO persistence side effects', async () => {
     mockClient.product.findMany.mockResolvedValue([makeDbProduct()]);
 
