@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { PublicCatalogController } from './http/public-catalog.controller';
 import { PublicTenantGuard } from './http/guards/public-tenant.guard';
 import { ListPublicBranchesUseCase } from './application/use-cases/list-public-branches.use-case';
+import { ListPublicProductsUseCase } from './application/use-cases/list-public-products.use-case';
 import { PrismaPublicCatalogRepository } from './infrastructure/prisma-public-catalog.repository';
 import { PUBLIC_CATALOG_REPOSITORY } from './application/ports/public-catalog.repository';
 
@@ -22,6 +23,7 @@ import { PUBLIC_CATALOG_REPOSITORY } from './application/ports/public-catalog.re
     },
     PublicTenantGuard,
     ListPublicBranchesUseCase,
+    ListPublicProductsUseCase,
     {
       provide: PUBLIC_CATALOG_REPOSITORY,
       useClass: PrismaPublicCatalogRepository,
