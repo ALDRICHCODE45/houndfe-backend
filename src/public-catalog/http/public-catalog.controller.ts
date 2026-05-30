@@ -7,8 +7,8 @@ import {
   Body,
   UseGuards,
   ParseUUIDPipe,
-  NotFoundException,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { PublicTenantGuard } from './guards/public-tenant.guard';
 import {
   PublicTenant,
@@ -17,7 +17,9 @@ import {
 import { ListPublicBranchesUseCase } from '../application/use-cases/list-public-branches.use-case';
 import { ListPublicProductsUseCase } from '../application/use-cases/list-public-products.use-case';
 import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
+import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
 import { ListProductsQueryDto } from './request-dto/list-products-query.dto';
+import { ValidateCartBodyDto } from './request-dto/validate-cart-body.dto';
 
 @Controller('public/catalog')
 @UseGuards(PublicTenantGuard)
@@ -26,6 +28,7 @@ export class PublicCatalogController {
     private readonly listBranches: ListPublicBranchesUseCase,
     private readonly listProducts: ListPublicProductsUseCase,
     private readonly getProductDetail: GetPublicProductDetailUseCase,
+    private readonly validateCart: ValidatePublicCartUseCase,
   ) {}
 
   @Get('branches')
@@ -50,5 +53,11 @@ export class PublicCatalogController {
     @PublicTenant() tenant: PublicTenantInfo,
   ) {
     return this.getProductDetail.execute(productId, tenant);
+  }
+
+  @Post(':tenantSlug/cart/validate')
+  @Throttle({ 'public-validate': { ttl: 60_000, limit: 20 } })
+  async validateCartEndpoint(@Body() body: ValidateCartBodyDto) {
+    return this.validateCart.execute(body);
   }
 }
