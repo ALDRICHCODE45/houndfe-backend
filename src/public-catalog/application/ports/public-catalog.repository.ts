@@ -5,7 +5,7 @@ import type { ProductWithIncludes, ProductDetailWithIncludes } from '../mappers/
 export interface ListProductsParams {
   q?: string;
   categoryId?: string;
-  sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest';
+  sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
   page: number;
   limit: number;
 }

@@ -128,4 +128,51 @@ describe('ListPublicProductsUseCase', () => {
     const result = await useCase.execute({ ...defaultInput, limit: 10 });
     expect(result.meta.totalPages).toBe(3);
   });
+
+  it('should accept rating_desc sort and fall back to relevance behavior', async () => {
+    repo.findProducts.mockResolvedValue({
+      items: [makeProduct('p1')],
+      total: 1,
+    });
+    repo.findCategoryFacets.mockResolvedValue([]);
+
+    // rating_desc is accepted (no 400) and falls back to relevance sort
+    const result = await useCase.execute({
+      ...defaultInput,
+      sort: 'rating_desc',
+    });
+
+    expect(result.items).toHaveLength(1);
+    // repo should receive 'rating_desc' — the repo maps it to relevance orderBy internally
+    expect(repo.findProducts).toHaveBeenCalledWith(
+      expect.objectContaining({ sort: 'rating_desc' }),
+    );
+  });
+});
+
+describe('ListProductsQueryDto validation (CRITICAL-02 regression)', () => {
+  // Test at DTO validation layer — rating_desc must be accepted, not 400
+  it('should accept rating_desc as a valid sort value', async () => {
+    const { validate } = require('class-validator');
+    const { plainToInstance } = require('class-transformer');
+    const { ListProductsQueryDto } = require('./request-dto/list-products-query.dto');
+
+    const dto = plainToInstance(ListProductsQueryDto, { sort: 'rating_desc' });
+    const errors = await validate(dto);
+    const sortErrors = errors.filter((e: any) => e.property === 'sort');
+
+    expect(sortErrors).toHaveLength(0);
+  });
+
+  it('should still reject invalid sort values', async () => {
+    const { validate } = require('class-validator');
+    const { plainToInstance } = require('class-transformer');
+    const { ListProductsQueryDto } = require('./request-dto/list-products-query.dto');
+
+    const dto = plainToInstance(ListProductsQueryDto, { sort: 'invalid_sort' });
+    const errors = await validate(dto);
+    const sortErrors = errors.filter((e: any) => e.property === 'sort');
+
+    expect(sortErrors).toHaveLength(1);
+  });
 });

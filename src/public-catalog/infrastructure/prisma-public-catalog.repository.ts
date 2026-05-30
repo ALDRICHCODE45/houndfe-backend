@@ -211,6 +211,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         return [{ priceLists: { _count: 'asc' } }, { name: 'asc' }];
       case 'price_desc':
         return [{ priceLists: { _count: 'desc' } }, { name: 'asc' }];
+      case 'rating_desc':
       case 'relevance':
       case 'newest':
       default:

@@ -10,7 +10,7 @@ import type { PublicCatalogCategoryFacet } from '../dto/public-category-facet.dt
 export interface ListProductsInput {
   q?: string;
   categoryId?: string;
-  sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest';
+  sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
   page: number;
   limit: number;
 }

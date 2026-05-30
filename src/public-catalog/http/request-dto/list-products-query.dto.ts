@@ -23,7 +23,7 @@ export class ListProductsQueryDto {
   branchId?: string;
 
   @IsOptional()
-  @IsIn(['relevance', 'price_asc', 'price_desc', 'newest'])
+  @IsIn(['relevance', 'price_asc', 'price_desc', 'newest', 'rating_desc'])
   sort?: string = 'newest';
 
   @IsOptional()
