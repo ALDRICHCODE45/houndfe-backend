@@ -1825,6 +1825,186 @@ describe('SalesService', () => {
       expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
     });
 
+    it('computes subtotal/discount from prePriceCentsBeforeDiscount for discounted default-priced item', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-discounted-default',
+        userId: 'user-1',
+        status: 'DRAFT',
+        customerId: 'customer-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-discounted-default',
+            saleId: 'sale-charge-discounted-default',
+            productId: 'prod-discounted',
+            variantId: null,
+            productName: 'Prod discounted',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 63000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountAmountCents: 7000,
+            prePriceCentsBeforeDiscount: 70000,
+          },
+        ],
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 70000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000015');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 126000 },
+        'idem-charge-discounted-default',
+      );
+
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 140000,
+          discountCents: 14000,
+          totalCents: 126000,
+        }),
+      );
+    });
+
+    it('computes override subtotal with zero discount for custom-priced item', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-custom-override',
+        userId: 'user-1',
+        status: 'DRAFT',
+        customerId: 'customer-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-custom-override',
+            saleId: 'sale-charge-custom-override',
+            productId: 'prod-custom',
+            variantId: null,
+            productName: 'Prod custom',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 90000,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: 80000,
+            priceSource: 'custom',
+            prePriceCentsBeforeDiscount: null,
+          },
+        ],
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000016');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 180000 },
+        'idem-charge-custom-override',
+      );
+
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 180000,
+          discountCents: 0,
+          totalCents: 180000,
+        }),
+      );
+    });
+
+    it('computes totals for mixed plain, discounted, and override items', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-mixed-items',
+        userId: 'user-1',
+        status: 'DRAFT',
+        customerId: 'customer-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-plain',
+            saleId: 'sale-charge-mixed-items',
+            productId: 'prod-plain',
+            variantId: null,
+            productName: 'Prod plain',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 20000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default',
+          },
+          {
+            id: 'item-discount',
+            saleId: 'sale-charge-mixed-items',
+            productId: 'prod-discount',
+            variantId: null,
+            productName: 'Prod discount',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 63000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountAmountCents: 7000,
+            prePriceCentsBeforeDiscount: 70000,
+          },
+          {
+            id: 'item-override',
+            saleId: 'sale-charge-mixed-items',
+            productId: 'prod-override',
+            variantId: null,
+            productName: 'Prod override',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 90000,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: 80000,
+            priceSource: 'custom',
+            prePriceCentsBeforeDiscount: null,
+          },
+        ],
+      });
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockImplementation(
+        async (productId: string) => {
+          if (productId === 'prod-plain') return { unitPriceCents: 20000 };
+          return { unitPriceCents: 70000 };
+        },
+      );
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000017');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 326000 },
+        'idem-charge-mixed-items',
+      );
+
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 340000,
+          totalCents: 326000,
+          discountCents: 14000,
+        }),
+      );
+    });
+
     it('fails all-or-nothing when stock decrement rejects and avoids persistence', async () => {
       const sale = buildDraftSale('sale-charge-stock-fail');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);

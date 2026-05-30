@@ -917,7 +917,14 @@ export class PrismaSaleRepository implements ISaleRepository {
             imageUrl: true,
             unitPriceCents: true,
             quantity: true,
+            originalPriceCents: true,
+            priceSource: true,
+            appliedPriceListId: true,
+            discountType: true,
+            discountValue: true,
             discountAmountCents: true,
+            discountTitle: true,
+            prePriceCentsBeforeDiscount: true,
           },
         },
         payments: {
@@ -971,8 +978,19 @@ export class PrismaSaleRepository implements ISaleRepository {
         unitPriceCents: item.unitPriceCents,
         quantity: item.quantity,
         discountCents: item.discountAmountCents ?? 0,
-        subtotalCents:
-          item.unitPriceCents * item.quantity + (item.discountAmountCents ?? 0),
+        subtotalCents: item.unitPriceCents * item.quantity,
+        originalPriceCents: item.originalPriceCents,
+        priceSource: item.priceSource?.toLowerCase() as
+          | 'default'
+          | 'price_list'
+          | 'custom'
+          | null,
+        appliedPriceListId: item.appliedPriceListId,
+        discountType: item.discountType as 'amount' | 'percentage' | null,
+        discountValue: item.discountValue,
+        discountAmountCents: item.discountAmountCents,
+        discountTitle: item.discountTitle,
+        prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
       })),
       payments: sale.payments.map((payment) => ({
         method: payment.method,

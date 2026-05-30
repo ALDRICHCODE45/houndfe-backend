@@ -1457,7 +1457,8 @@ export class SalesService {
       const subtotalCents = sale.items.reduce(
         (acc, item) =>
           acc +
-          (item.originalPriceCents ?? item.unitPriceCents) * item.quantity,
+          (item.prePriceCentsBeforeDiscount ?? item.unitPriceCents) *
+            item.quantity,
         0,
       );
       const totalCents = sale.items.reduce(

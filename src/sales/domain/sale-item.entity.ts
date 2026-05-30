@@ -147,6 +147,10 @@ export class SaleItem {
     return this._unitPriceCents;
   }
 
+  get subtotalCents(): number {
+    return this._unitPriceCents * this._quantity;
+  }
+
   get originalPriceCents(): number | null {
     return this._originalPriceCents;
   }

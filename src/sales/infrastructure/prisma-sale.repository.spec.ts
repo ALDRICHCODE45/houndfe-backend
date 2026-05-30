@@ -720,7 +720,14 @@ describe('PrismaSaleRepository', () => {
             imageUrl: 'https://cdn/img.jpg',
             unitPriceCents: 1000,
             quantity: 2,
-            discountAmountCents: null,
+            originalPriceCents: 1200,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            discountType: 'PERCENTAGE',
+            discountValue: 10,
+            discountAmountCents: 200,
+            discountTitle: 'Promo 10%',
+            prePriceCentsBeforeDiscount: 1200,
           },
         ],
         payments: [
@@ -758,6 +765,18 @@ describe('PrismaSaleRepository', () => {
       expect(prisma.sale.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
           include: expect.objectContaining({
+            items: expect.objectContaining({
+              select: expect.objectContaining({
+                originalPriceCents: true,
+                priceSource: true,
+                appliedPriceListId: true,
+                discountType: true,
+                discountValue: true,
+                discountAmountCents: true,
+                discountTitle: true,
+                prePriceCentsBeforeDiscount: true,
+              }),
+            }),
             payments: expect.objectContaining({
               select: expect.objectContaining({
                 user: { select: { id: true, name: true } },
@@ -769,10 +788,71 @@ describe('PrismaSaleRepository', () => {
       expect(result?.cashier).toEqual({ id: 'u1', name: 'Caja 1' });
       expect(result?.dueDate?.toISOString()).toBe('2026-05-30T18:00:00.000Z');
       expect(result?.items[0].subtotalCents).toBe(2000);
+      expect(result?.items[0]).toEqual(
+        expect.objectContaining({
+          originalPriceCents: 1200,
+          priceSource: 'default',
+          appliedPriceListId: null,
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+          discountAmountCents: 200,
+          discountTitle: 'Promo 10%',
+          prePriceCentsBeforeDiscount: 1200,
+        }),
+      );
       expect(result?.payments).toEqual([
         expect.objectContaining({ reference: 'REF-COL' }),
         expect.objectContaining({ reference: 'REF-LEGACY' }),
       ]);
+    });
+
+    it('maps per-line subtotal as unitPriceCents times quantity without adding discount', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        id: 'sale-subtotal-only-unit-times-qty',
+        folio: 'V-0043',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        dueDate: null,
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        subtotalCents: 126000,
+        discountCents: 14000,
+        totalCents: 126000,
+        paidCents: 126000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+        customer: null,
+        user: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [
+          {
+            productName: 'Prod 1',
+            variantName: null,
+            imageUrl: 'https://cdn/img.jpg',
+            unitPriceCents: 63000,
+            quantity: 2,
+            originalPriceCents: 70000,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            discountType: 'PERCENTAGE',
+            discountValue: 10,
+            discountAmountCents: 7000,
+            discountTitle: 'Promo',
+            prePriceCentsBeforeDiscount: 70000,
+          },
+        ],
+        payments: [],
+      });
+
+      const result = await repo.findOneWithRelations(
+        'sale-subtotal-only-unit-times-qty',
+      );
+
+      expect(result?.items[0].discountCents).toBe(7000);
+      expect(result?.items[0].subtotalCents).toBe(126000);
     });
 
     it('returns null when no tenant-visible sale exists', async () => {

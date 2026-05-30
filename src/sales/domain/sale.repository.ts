@@ -227,6 +227,14 @@ export interface ISaleRepository {
       quantity: number;
       discountCents: number;
       subtotalCents: number;
+      originalPriceCents: number | null;
+      priceSource: 'default' | 'price_list' | 'custom' | null;
+      appliedPriceListId: string | null;
+      discountType: 'amount' | 'percentage' | null;
+      discountValue: number | null;
+      discountAmountCents: number | null;
+      discountTitle: string | null;
+      prePriceCentsBeforeDiscount: number | null;
     }>;
     payments: Array<{
       method: string;
