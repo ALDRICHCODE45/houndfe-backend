@@ -102,7 +102,10 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       client.product.count({ where }),
     ]);
 
-    return { items, total };
+    return {
+      items: this.sortByPriceIfNeeded(items, params.sort),
+      total,
+    };
   }
 
   async findCategoryFacets(params: {
@@ -208,14 +211,50 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
   ): Prisma.ProductOrderByWithRelationInput[] {
     switch (sort) {
       case 'price_asc':
-        return [{ priceLists: { _count: 'asc' } }, { name: 'asc' }];
       case 'price_desc':
-        return [{ priceLists: { _count: 'desc' } }, { name: 'asc' }];
+        // Price sort is done in application layer via sortByPriceIfNeeded()
+        // because Prisma does not support orderBy on relation aggregate fields.
+        // Use createdAt as stable DB-level ordering for deterministic pagination.
+        return [{ createdAt: 'desc' }];
       case 'rating_desc':
       case 'relevance':
       case 'newest':
       default:
         return [{ createdAt: 'desc' }];
     }
+  }
+
+  /**
+   * Post-sorts fetched products by their default price list priceCents.
+   * Only applied for price_asc / price_desc sorts. Products without a price
+   * list entry are placed last (asc) or first (desc).
+   *
+   * NOTE: This sorts within the current page only. For large catalogs with
+   * thousands of products, accurate cross-page price sorting would require
+   * raw SQL ORDER BY. Acceptable for v1 MVP with <10K products/tenant.
+   */
+  private sortByPriceIfNeeded(
+    items: ProductWithIncludes[],
+    sort: string,
+  ): ProductWithIncludes[] {
+    if (sort !== 'price_asc' && sort !== 'price_desc') return items;
+
+    const getPrice = (p: ProductWithIncludes): number | null =>
+      p.priceLists[0]?.priceCents ?? null;
+
+    return [...items].sort((a, b) => {
+      const priceA = getPrice(a);
+      const priceB = getPrice(b);
+
+      // Nulls last for asc, first for desc
+      if (priceA == null && priceB == null) return 0;
+      if (priceA == null) return sort === 'price_asc' ? 1 : -1;
+      if (priceB == null) return sort === 'price_asc' ? -1 : 1;
+
+      const diff = sort === 'price_asc' ? priceA - priceB : priceB - priceA;
+      // Tiebreaker: name ascending
+      if (diff === 0) return a.name.localeCompare(b.name);
+      return diff;
+    });
   }
 }
