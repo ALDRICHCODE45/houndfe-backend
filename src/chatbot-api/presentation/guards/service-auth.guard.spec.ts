@@ -188,6 +188,26 @@ describe('ServiceAuthGuard', () => {
     });
   });
 
+  it('rejects credentials whose persisted hash does not match the computed token hash', async () => {
+    repository.findByHashedKey.mockResolvedValue(
+      makeCredential({
+        hashedKey: createHash('sha256').update('svc_other-key').digest('hex'),
+      }),
+    );
+
+    await expect(
+      guard.canActivate(
+        mockContext({
+          authorization: 'Bearer svc_valid-key',
+          branchId: 'tenant-1',
+        }),
+      ),
+    ).rejects.toThrow(UnauthorizedException);
+
+    expect(repository.touchLastUsedAt.mock.calls).toHaveLength(0);
+    expect(cls.set).not.toHaveBeenCalled();
+  });
+
   it('is provided by ChatbotApiModule with CLS support', async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [ClsModule.forRoot({}), ChatbotApiModule],

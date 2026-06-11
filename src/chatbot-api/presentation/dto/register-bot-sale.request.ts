@@ -1,4 +1,5 @@
 import {
+  ArrayMinSize,
   IsArray,
   IsInt,
   IsNotEmpty,
@@ -48,6 +49,7 @@ export class RegisterBotSaleRequestDto {
   shippingAddressId?: string | null;
 
   @IsArray()
+  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => BotSaleItemDto)
   items!: BotSaleItemDto[];

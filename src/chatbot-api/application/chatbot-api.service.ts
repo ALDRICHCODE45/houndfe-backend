@@ -1,4 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { Customer } from '../../customers/domain/customer.entity';
 import {
@@ -16,6 +17,7 @@ import {
   type CartItemForEvaluation,
   type IEvaluateCartPromotionsUseCase,
 } from '../../promotions/application/ports/evaluate-cart-promotions.port';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type {
   ProductDetailWithIncludes,
   ProductWithIncludes,
@@ -77,6 +79,14 @@ type CatalogSearchInput = {
   q: string;
   limit?: number;
 };
+
+type OrderHistorySaleRecord = Prisma.SaleGetPayload<{
+  include: {
+    items: true;
+    payments: true;
+    shippingAddress: true;
+  };
+}>;
 
 @Injectable()
 export class ChatbotApiService {
@@ -360,6 +370,28 @@ export class ChatbotApiService {
   async setDeliveryMetadata(input: SetDeliveryMetadataInput): Promise<void> {
     const prisma = this.tenantPrisma.getClient();
 
+    const sale = await prisma.sale.findUnique({
+      where: { id: input.saleId },
+      include: {
+        items: true,
+        payments: true,
+        shippingAddress: true,
+      },
+    });
+
+    if (
+      !sale ||
+      sale.status !== 'CONFIRMED' ||
+      sale.paymentStatus !== 'PAID' ||
+      sale.channel !== 'ONLINE' ||
+      sale.deliveryStatus === 'DELIVERED'
+    ) {
+      throw new BusinessRuleViolationError(
+        'Delivery metadata can only be set on paid confirmed ONLINE sales before delivery',
+        'SALE_DELIVERY_NOT_READY',
+      );
+    }
+
     await prisma.sale.update({
       where: { id: input.saleId },
       data: {
@@ -592,12 +624,9 @@ function toStockCheckResponse(
   };
 }
 
-/* eslint-disable
-   @typescript-eslint/no-unsafe-assignment,
-   @typescript-eslint/no-unsafe-member-access,
-   @typescript-eslint/no-unsafe-call
-*/
-function toOrderHistoryResponse(sale: any): OrderHistoryResponse {
+function toOrderHistoryResponse(
+  sale: OrderHistorySaleRecord,
+): OrderHistoryResponse {
   return {
     saleId: sale.id,
     folio: sale.folio ?? null,
@@ -644,11 +673,6 @@ function toOrderHistoryResponse(sale: any): OrderHistoryResponse {
       : null,
   };
 }
-/* eslint-enable
-   @typescript-eslint/no-unsafe-assignment,
-   @typescript-eslint/no-unsafe-member-access,
-   @typescript-eslint/no-unsafe-call
-*/
 
 function resolveFromPriceCents(product: ProductWithIncludes): number | null {
   const productPrice = product.priceLists[0]?.priceCents ?? null;

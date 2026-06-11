@@ -73,6 +73,7 @@ type MockTenantClient = {
   };
   sale: {
     create: jest.Mock<Promise<MockSaleRecord>, [unknown?]>;
+    findUnique: jest.Mock<Promise<MockSaleRecord | null>, [unknown?]>;
     update: jest.Mock<Promise<MockSaleRecord>, [unknown?]>;
     findMany: jest.Mock<Promise<MockSaleRecord[]>, [unknown?]>;
   };
@@ -218,6 +219,7 @@ describe('ChatbotApiService', () => {
       },
       sale: {
         create: jest.fn<Promise<MockSaleRecord>, [unknown?]>(),
+        findUnique: jest.fn<Promise<MockSaleRecord | null>, [unknown?]>(),
         update: jest.fn<Promise<MockSaleRecord>, [unknown?]>(),
         findMany: jest.fn<Promise<MockSaleRecord[]>, [unknown?]>(),
       },
@@ -848,8 +850,59 @@ describe('ChatbotApiService', () => {
   });
 
   describe('setDeliveryMetadata', () => {
+    it('rejects pending-payment sales before writing delivery metadata', async () => {
+      const client = tenantPrisma.getClient();
+      client.sale.findUnique.mockResolvedValue({
+        id: 'sale-bot-1',
+        folio: 'BOT-0001',
+        status: 'CONFIRMED',
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'PENDING',
+        channel: 'ONLINE',
+        totalCents: 519800,
+        paidCents: 0,
+        debtCents: 519800,
+        confirmedAt: new Date(),
+        customerId: 'cust-1',
+        items: [],
+        payments: [],
+        shippingAddress: null,
+      });
+
+      await expect(
+        service.setDeliveryMetadata({
+          saleId: 'sale-bot-1',
+          carrierName: 'DHL',
+          trackingRef: 'DHL-1234567890',
+          estimatedDeliveryAt: new Date('2026-06-20T00:00:00.000Z'),
+        }),
+      ).rejects.toMatchObject({
+        code: 'SALE_DELIVERY_NOT_READY',
+        message:
+          'Delivery metadata can only be set on paid confirmed ONLINE sales before delivery',
+      });
+
+      expect(client.sale.update).not.toHaveBeenCalled();
+    });
+
     it('updates sale with carrier name, tracking ref, and estimated delivery date', async () => {
       const client = tenantPrisma.getClient();
+      client.sale.findUnique.mockResolvedValue({
+        id: 'sale-bot-1',
+        folio: 'BOT-0001',
+        status: 'CONFIRMED',
+        paymentStatus: 'PAID',
+        deliveryStatus: 'PENDING',
+        channel: 'ONLINE',
+        totalCents: 519800,
+        paidCents: 519800,
+        debtCents: 0,
+        confirmedAt: new Date(),
+        customerId: 'cust-1',
+        items: [],
+        payments: [],
+        shippingAddress: null,
+      });
       client.sale.update.mockResolvedValue({
         id: 'sale-bot-1',
         folio: 'BOT-0001',
@@ -875,6 +928,7 @@ describe('ChatbotApiService', () => {
       });
 
       expect(client.sale.update).toHaveBeenCalledTimes(1);
+      expect(client.sale.findUnique).toHaveBeenCalledTimes(1);
       expect(client.sale.update.mock.calls[0]?.[0]).toMatchObject({
         where: { id: 'sale-bot-1' },
         data: { carrierName: 'DHL', trackingRef: 'DHL-1234567890' },

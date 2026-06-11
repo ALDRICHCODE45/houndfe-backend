@@ -9,7 +9,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../../../shared/tenant/tenant-cls-store.interface';
 import {
@@ -59,7 +59,12 @@ export class ServiceAuthGuard implements CanActivate {
     const hashedKey = createHash('sha256').update(rawToken).digest('hex');
     const credential = await this.credentials.findByHashedKey(hashedKey);
 
-    if (!credential || !credential.isActive || credential.revokedAt) {
+    if (
+      !credential ||
+      !this.hashesMatch(credential.hashedKey, hashedKey) ||
+      !credential.isActive ||
+      credential.revokedAt
+    ) {
       throw new UnauthorizedException('Invalid service credential');
     }
 
@@ -123,5 +128,16 @@ export class ServiceAuthGuard implements CanActivate {
         'Credential is out of scope for this branch',
       );
     }
+  }
+
+  private hashesMatch(storedHash: string, computedHash: string): boolean {
+    const stored = Buffer.from(storedHash, 'utf8');
+    const computed = Buffer.from(computedHash, 'utf8');
+
+    if (stored.length !== computed.length) {
+      return false;
+    }
+
+    return timingSafeEqual(stored, computed);
   }
 }

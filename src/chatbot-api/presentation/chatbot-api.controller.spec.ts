@@ -14,12 +14,12 @@ import { ServiceAuthGuard } from './guards/service-auth.guard';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
 import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
 
-function makeCredential(scopes: string[]) {
+function makeCredential(scopes: string[], rawToken = 'svc_valid-key') {
   return ServiceCredential.fromPersistence({
     id: 'cred-1',
     tenantId: 'tenant-1',
     name: 'Chatbot Bot',
-    hashedKey: createHash('sha256').update('svc_valid-key').digest('hex'),
+    hashedKey: createHash('sha256').update(rawToken).digest('hex'),
     scopes,
     isActive: true,
     lastUsedAt: null,
@@ -192,36 +192,35 @@ describe('ChatbotApiController', () => {
           .digest('hex');
 
         if (hashedKey === validKey) {
-          return makeCredential(['catalog:read']);
+          return makeCredential(['catalog:read'], 'svc_valid-key');
         }
 
         if (hashedKey === limitedKey) {
-          return makeCredential(['customers:read']);
+          return makeCredential(['customers:read'], 'svc_limited-key');
         }
 
         if (
           hashedKey ===
           createHash('sha256').update('svc_write-key').digest('hex')
         ) {
-          return makeCredential(['customers:write']);
+          return makeCredential(['customers:write'], 'svc_write-key');
         }
 
         if (
           hashedKey ===
           createHash('sha256').update('svc_pricing-key').digest('hex')
         ) {
-          return makeCredential(['pricing:evaluate']);
+          return makeCredential(['pricing:evaluate'], 'svc_pricing-key');
         }
 
         if (
           hashedKey ===
           createHash('sha256').update('svc_sales-key').digest('hex')
         ) {
-          return makeCredential([
-            'sales:create',
-            'sales:write',
-            'customers:read',
-          ]);
+          return makeCredential(
+            ['sales:create', 'sales:write', 'customers:read'],
+            'svc_sales-key',
+          );
         }
 
         return null;
@@ -575,6 +574,20 @@ describe('ChatbotApiController', () => {
       .set('Authorization', 'Bearer svc_sales-key')
       .set('X-Idempotency-Key', 'bot-order-abc-123')
       .send({ cashierUserId: 'not-a-uuid', customerId: '', items: [] })
+      .expect(400);
+  });
+
+  it('POST /chatbot-api/sales returns 400 when items is an empty array', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', 'bot-order-abc-124')
+      .send({
+        cashierUserId: '7d880665-5aa5-4cbc-b273-3fe1a2df2b54',
+        customerId: 'c0a97789-c50c-4e30-9915-65c44837a50e',
+        shippingAddressId: 'cf070bfb-ee86-460b-ab8a-7893d324e346',
+        items: [],
+      })
       .expect(400);
   });
 
