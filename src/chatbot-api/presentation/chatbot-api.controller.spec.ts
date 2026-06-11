@@ -504,6 +504,7 @@ describe('ChatbotApiController', () => {
 
   // ── Bot Sale Routes (Slice 6) ────────────────────────────────────────────────
 
+  const saleId = 'a8fdbf81-31ee-4f43-8739-0c70c9388d72';
   const cashierUserId = 'b1fdbf81-31ee-4f43-8739-0c70c9388d72';
   const customerId = 'c2fdbf81-31ee-4f43-8739-0c70c9388d72';
 
@@ -567,5 +568,67 @@ describe('ChatbotApiController', () => {
       .set('X-Idempotency-Key', 'bot-order-abc-123')
       .send({ cashierUserId: 'not-a-uuid', customerId: '', items: [] })
       .expect(400);
+  });
+
+  it('POST /chatbot-api/sales/:saleId/receipts attaches a receipt and returns PENDING status', async () => {
+    await request(httpServer())
+      .post(`/chatbot-api/sales/${saleId}/receipts`)
+      .set('Authorization', 'Bearer svc_sales-key')
+      .send({
+        mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
+        declaredAmountCents: 519800,
+        declaredReference: 'TRF-99887',
+      })
+      .expect(201)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.attachReceipt).toHaveBeenCalledWith(
+          expect.objectContaining({
+            saleId,
+            mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
+            declaredAmountCents: 519800,
+          }),
+        );
+        expect(body).toEqual({ receiptId: 'receipt-1', status: 'PENDING' });
+      });
+  });
+
+  it('PATCH /chatbot-api/sales/:saleId/delivery updates delivery metadata', async () => {
+    await request(httpServer())
+      .patch(`/chatbot-api/sales/${saleId}/delivery`)
+      .set('Authorization', 'Bearer svc_sales-key')
+      .send({
+        carrierName: 'DHL',
+        trackingRef: 'DHL-1234567890',
+        estimatedDeliveryAt: '2026-06-20T00:00:00.000Z',
+      })
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.setDeliveryMetadata).toHaveBeenCalledWith(
+          expect.objectContaining({
+            saleId,
+            carrierName: 'DHL',
+            trackingRef: 'DHL-1234567890',
+          }),
+        );
+        expect(body).toEqual({});
+      });
+  });
+
+  it('GET /chatbot-api/customers/by-phone/:phone/orders returns order history', async () => {
+    await request(httpServer())
+      .get('/chatbot-api/customers/by-phone/5512345678/orders')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .query({ phoneCountryCode: '52' })
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.getOrderHistoryByPhone).toHaveBeenCalledWith(
+          expect.objectContaining({
+            phone: '5512345678',
+            phoneCountryCode: '52',
+          }),
+        );
+        expect(Array.isArray(body)).toBe(true);
+        expect((body as unknown[]).length).toBeGreaterThan(0);
+      });
   });
 });

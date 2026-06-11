@@ -32,6 +32,8 @@ import type {
 import type { CustomerUpsertRequestDto } from '../presentation/dto/customer-upsert.request';
 import type { StockCheckResponse } from '../presentation/dto/stock-check.response';
 import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
+import type { AttachReceiptResponse } from '../presentation/dto/attach-receipt.request';
+import type { OrderHistoryResponse } from '../presentation/dto/order-history.response';
 
 // ── Bot Sale Input Types ────────────────────────────────────────────────────
 
@@ -48,6 +50,27 @@ export type RegisterBotSaleInput = {
     unitPriceCents: number;
   }>;
   idempotencyKey: string;
+};
+
+export type AttachReceiptInput = {
+  saleId: string;
+  mediaUrl: string;
+  declaredAmountCents: number;
+  declaredDate?: Date | null;
+  declaredReference?: string | null;
+};
+
+export type SetDeliveryMetadataInput = {
+  saleId: string;
+  carrierName: string | null;
+  trackingRef: string | null;
+  estimatedDeliveryAt: Date | null;
+};
+
+export type GetOrderHistoryInput = {
+  phoneCountryCode: string;
+  phone: string;
+  limit?: number;
 };
 
 type CatalogSearchInput = {
@@ -304,6 +327,89 @@ export class ChatbotApiService {
     return response;
   }
 
+  /**
+   * Attach transfer receipt evidence to a pending sale.
+   * The receipt stays PENDING until a human confirms or rejects it.
+   */
+  async attachReceipt(
+    input: AttachReceiptInput,
+  ): Promise<AttachReceiptResponse> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+
+    const receipt = await prisma.receiptEvidence.create({
+      data: {
+        id: randomUUID(),
+        saleId: input.saleId,
+        tenantId,
+        mediaUrl: input.mediaUrl,
+        declaredAmountCents: input.declaredAmountCents,
+        declaredDate: input.declaredDate ?? null,
+        declaredReference: input.declaredReference ?? null,
+        status: 'PENDING',
+      },
+    });
+
+    return { receiptId: receipt.id, status: 'PENDING' };
+  }
+
+  /**
+   * Record delivery carrier metadata on a sale.
+   * Also marks the delivery status as SHIPPED.
+   */
+  async setDeliveryMetadata(input: SetDeliveryMetadataInput): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+
+    await prisma.sale.update({
+      where: { id: input.saleId },
+      data: {
+        carrierName: input.carrierName,
+        trackingRef: input.trackingRef,
+        estimatedDeliveryAt: input.estimatedDeliveryAt,
+        deliveryStatus: 'SHIPPED',
+      },
+    });
+  }
+
+  /**
+   * Return recent confirmed sales for a customer looked up by WhatsApp phone.
+   * Used by the bot for "same as last time" reorder flows.
+   */
+  async getOrderHistoryByPhone(
+    input: GetOrderHistoryInput,
+  ): Promise<OrderHistoryResponse[]> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+    const phoneCountryCode = normalizePhonePart(input.phoneCountryCode);
+    const phone = normalizePhonePart(input.phone);
+
+    const customer = await this.customerRepository.findByPhone(
+      tenantId,
+      phoneCountryCode,
+      phone,
+    );
+    if (!customer) {
+      return [];
+    }
+
+    const sales = await prisma.sale.findMany({
+      where: {
+        tenantId,
+        customerId: customer.id,
+        status: 'CONFIRMED',
+      },
+      include: {
+        items: true,
+        payments: true,
+        shippingAddress: true,
+      },
+      orderBy: { confirmedAt: 'desc' },
+      take: input.limit ?? 5,
+    });
+
+    return sales.map(toOrderHistoryResponse);
+  }
+
   private async upsertCustomerAddress(
     customerId: string,
     input: CustomerUpsertRequestDto,
@@ -485,6 +591,64 @@ function toStockCheckResponse(
     })),
   };
 }
+
+/* eslint-disable
+   @typescript-eslint/no-unsafe-assignment,
+   @typescript-eslint/no-unsafe-member-access,
+   @typescript-eslint/no-unsafe-call
+*/
+function toOrderHistoryResponse(sale: any): OrderHistoryResponse {
+  return {
+    saleId: sale.id,
+    folio: sale.folio ?? null,
+    confirmedAt: sale.confirmedAt?.toISOString() ?? null,
+    channel: sale.channel,
+    deliveryStatus: sale.deliveryStatus,
+    paymentStatus: sale.paymentStatus ?? null,
+    totalCents: sale.totalCents,
+    paidCents: sale.paidCents,
+    debtCents: sale.debtCents,
+    items: (sale.items ?? []).map(
+      (item: {
+        productId: string;
+        variantId: string | null;
+        productName: string;
+        variantName: string | null;
+        quantity: number;
+        unitPriceCents: number;
+      }) => ({
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        productName: item.productName,
+        variantName: item.variantName ?? null,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+      }),
+    ),
+    payments: (sale.payments ?? []).map(
+      (payment: {
+        method: string;
+        amountCents: number;
+        reference: string | null;
+      }) => ({
+        method: payment.method,
+        amountCents: payment.amountCents,
+        reference: payment.reference ?? null,
+      }),
+    ),
+    shippingAddress: sale.shippingAddress
+      ? {
+          street: sale.shippingAddress.street ?? null,
+          zipCode: sale.shippingAddress.zipCode ?? null,
+        }
+      : null,
+  };
+}
+/* eslint-enable
+   @typescript-eslint/no-unsafe-assignment,
+   @typescript-eslint/no-unsafe-member-access,
+   @typescript-eslint/no-unsafe-call
+*/
 
 function resolveFromPriceCents(product: ProductWithIncludes): number | null {
   const productPrice = product.priceLists[0]?.priceCents ?? null;

@@ -5,9 +5,11 @@ import {
   Param,
   ParseUUIDPipe,
   Put,
+  Patch,
   Body,
   Query,
   UseGuards,
+  HttpCode,
   Headers,
 } from '@nestjs/common';
 import { ChatbotApiService } from '../application/chatbot-api.service';
@@ -20,6 +22,8 @@ import {
 } from './dto/customer-upsert.request';
 import { ServiceAuthGuard } from './guards/service-auth.guard';
 import { RegisterBotSaleRequestDto } from './dto/register-bot-sale.request';
+import { AttachReceiptRequestDto } from './dto/attach-receipt.request';
+import { DeliveryMetadataRequestDto } from './dto/delivery-metadata.request';
 
 @Controller('chatbot-api')
 @UseGuards(ServiceAuthGuard)
@@ -89,6 +93,51 @@ export class ChatbotApiController {
         unitPriceCents: item.unitPriceCents,
       })),
       idempotencyKey: idempotencyKey ?? '',
+    });
+  }
+
+  @Post('sales/:saleId/receipts')
+  @RequiredScopes('sales:write')
+  attachReceipt(
+    @Param('saleId', ParseUUIDPipe) saleId: string,
+    @Body() body: AttachReceiptRequestDto,
+  ) {
+    return this.chatbotApiService.attachReceipt({
+      saleId,
+      mediaUrl: body.mediaUrl,
+      declaredAmountCents: body.declaredAmountCents,
+      declaredDate: body.declaredDate ? new Date(body.declaredDate) : null,
+      declaredReference: body.declaredReference ?? null,
+    });
+  }
+
+  @Patch('sales/:saleId/delivery')
+  @HttpCode(200)
+  @RequiredScopes('sales:write')
+  async setDeliveryMetadata(
+    @Param('saleId', ParseUUIDPipe) saleId: string,
+    @Body() body: DeliveryMetadataRequestDto,
+  ) {
+    await this.chatbotApiService.setDeliveryMetadata({
+      saleId,
+      carrierName: body.carrierName ?? null,
+      trackingRef: body.trackingRef ?? null,
+      estimatedDeliveryAt: body.estimatedDeliveryAt
+        ? new Date(body.estimatedDeliveryAt)
+        : null,
+    });
+    return {};
+  }
+
+  @Get('customers/by-phone/:phone/orders')
+  @RequiredScopes('customers:read')
+  getOrderHistoryByPhone(
+    @Param('phone') phone: string,
+    @Query('phoneCountryCode') phoneCountryCode: string,
+  ) {
+    return this.chatbotApiService.getOrderHistoryByPhone({
+      phoneCountryCode: phoneCountryCode ?? '',
+      phone,
     });
   }
 }

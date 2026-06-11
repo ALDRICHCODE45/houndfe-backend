@@ -9,7 +9,6 @@ import type {
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { IEvaluateCartPromotionsUseCase } from '../../promotions/application/ports/evaluate-cart-promotions.port';
 import { ChatbotApiService } from './chatbot-api.service';
-import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
 
 type MockCustomerAddress = {
   id: string;
@@ -770,25 +769,21 @@ describe('ChatbotApiService', () => {
         shippingAddress: null,
       });
 
-      const result: BotSaleResponse =
-        await service.registerBotSale(botSaleInput);
+      const result = await service.registerBotSale(botSaleInput);
 
       expect(client.sale.create).toHaveBeenCalledTimes(1);
-
-      const createData = (
-        client.sale.create.mock.calls[0][0] as Record<
-          string,
-          Record<string, unknown>
-        >
-      )['data'];
-      expect(createData['channel']).toBe('ONLINE');
-      expect(createData['status']).toBe('CONFIRMED');
-      expect(createData['paymentStatus']).toBe('CREDIT');
-      expect(createData['deliveryStatus']).toBe('PENDING');
-      expect(createData['paidCents']).toBe(0);
-      expect(createData['totalCents']).toBe(519800);
-      expect(createData['debtCents']).toBe(519800);
-      expect(createData['customerId']).toBe('cust-1');
+      expect(client.sale.create.mock.calls[0]?.[0]).toMatchObject({
+        data: {
+          channel: 'ONLINE',
+          status: 'CONFIRMED',
+          paymentStatus: 'CREDIT',
+          deliveryStatus: 'PENDING',
+          paidCents: 0,
+          totalCents: 519800,
+          debtCents: 519800,
+          customerId: 'cust-1',
+        },
+      });
       expect(result.saleId).toBe('sale-bot-1');
       expect(result.paymentStatus).toBe('CREDIT');
       expect(result.channel).toBe('ONLINE');
@@ -817,6 +812,161 @@ describe('ChatbotApiService', () => {
 
       expect(client.sale.create).not.toHaveBeenCalled();
       expect(result.saleId).toBe('sale-bot-existing');
+    });
+  });
+
+  describe('attachReceipt', () => {
+    it('creates ReceiptEvidence with PENDING status and does not auto-mark the sale as paid', async () => {
+      const client = tenantPrisma.getClient();
+      client.receiptEvidence.create.mockResolvedValue({
+        id: 'receipt-1',
+        status: 'PENDING',
+      });
+
+      const result = await service.attachReceipt({
+        saleId: 'sale-bot-1',
+        mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
+        declaredAmountCents: 519800,
+        declaredDate: new Date('2026-06-11T10:00:00.000Z'),
+        declaredReference: 'TRF-99887',
+      });
+
+      expect(client.receiptEvidence.create).toHaveBeenCalledTimes(1);
+      expect(client.receiptEvidence.create.mock.calls[0]?.[0]).toMatchObject({
+        data: {
+          saleId: 'sale-bot-1',
+          mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
+          declaredAmountCents: 519800,
+          status: 'PENDING',
+        },
+      });
+      // Sale must NOT be updated (no auto-mark-paid)
+      expect(client.sale.update).not.toHaveBeenCalled();
+      expect(result.receiptId).toBe('receipt-1');
+      expect(result.status).toBe('PENDING');
+    });
+  });
+
+  describe('setDeliveryMetadata', () => {
+    it('updates sale with carrier name, tracking ref, and estimated delivery date', async () => {
+      const client = tenantPrisma.getClient();
+      client.sale.update.mockResolvedValue({
+        id: 'sale-bot-1',
+        folio: 'BOT-0001',
+        status: 'CONFIRMED',
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'SHIPPED',
+        channel: 'ONLINE',
+        totalCents: 519800,
+        paidCents: 0,
+        debtCents: 519800,
+        confirmedAt: new Date(),
+        customerId: 'cust-1',
+        items: [],
+        payments: [],
+        shippingAddress: null,
+      });
+
+      await service.setDeliveryMetadata({
+        saleId: 'sale-bot-1',
+        carrierName: 'DHL',
+        trackingRef: 'DHL-1234567890',
+        estimatedDeliveryAt: new Date('2026-06-20T00:00:00.000Z'),
+      });
+
+      expect(client.sale.update).toHaveBeenCalledTimes(1);
+      expect(client.sale.update.mock.calls[0]?.[0]).toMatchObject({
+        where: { id: 'sale-bot-1' },
+        data: { carrierName: 'DHL', trackingRef: 'DHL-1234567890' },
+      });
+    });
+  });
+
+  describe('getOrderHistoryByPhone', () => {
+    it('returns recent confirmed ONLINE sales for a customer found by phone', async () => {
+      const client = tenantPrisma.getClient();
+      const existingCustomer = Customer.fromPersistence({
+        id: 'cust-1',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        phoneCountryCode: '52',
+        phone: '5512345678',
+        email: null,
+        preferredPaymentMethod: 'transfer',
+        comments: null,
+        businessName: null,
+        fiscalZipCode: null,
+        rfc: null,
+        fiscalRegime: null,
+        billingStreet: null,
+        billingExteriorNumber: null,
+        billingInteriorNumber: null,
+        billingZipCode: null,
+        billingNeighborhood: null,
+        billingMunicipality: null,
+        billingCity: null,
+        billingState: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      customerRepository.findByPhone.mockResolvedValue(existingCustomer);
+      client.sale.findMany.mockResolvedValue([
+        {
+          id: 'sale-bot-1',
+          folio: 'BOT-0001',
+          status: 'CONFIRMED',
+          paymentStatus: 'CREDIT',
+          deliveryStatus: 'PENDING',
+          channel: 'ONLINE',
+          totalCents: 519800,
+          paidCents: 0,
+          debtCents: 519800,
+          confirmedAt: new Date('2026-06-11T00:00:00.000Z'),
+          customerId: 'cust-1',
+          items: [
+            {
+              productId: 'prod-1',
+              variantId: 'var-1',
+              productName: 'Royal Canin Mini',
+              variantName: '3 kg',
+              quantity: 2,
+              unitPriceCents: 259900,
+            },
+          ],
+          payments: [],
+          shippingAddress: null,
+        },
+      ]);
+
+      const result = await service.getOrderHistoryByPhone({
+        phoneCountryCode: '52',
+        phone: '5512345678',
+      });
+
+      expect(customerRepository.findByPhone.mock.calls[0]).toEqual([
+        'tenant-1',
+        '52',
+        '5512345678',
+      ]);
+      expect(result).toHaveLength(1);
+      expect(result[0].saleId).toBe('sale-bot-1');
+      expect(result[0].totalCents).toBe(519800);
+      expect(result[0].items).toHaveLength(1);
+      expect(result[0].items[0].productName).toBe('Royal Canin Mini');
+    });
+
+    it('returns empty array when customer has no prior orders', async () => {
+      const client = tenantPrisma.getClient();
+      customerRepository.findByPhone.mockResolvedValue(null);
+      client.sale.findMany.mockResolvedValue([]);
+
+      const result = await service.getOrderHistoryByPhone({
+        phoneCountryCode: '52',
+        phone: '5599999999',
+      });
+
+      expect(client.sale.findMany).not.toHaveBeenCalled();
+      expect(result).toEqual([]);
     });
   });
 });
