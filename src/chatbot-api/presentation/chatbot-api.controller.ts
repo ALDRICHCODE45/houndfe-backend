@@ -1,4 +1,5 @@
 import {
+  Post,
   Controller,
   Get,
   Param,
@@ -11,6 +12,7 @@ import {
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
 import { CatalogSearchQueryDto } from './dto/catalog-search.query';
+import { EvaluateCartRequestDto } from './dto/evaluate-cart.request';
 import {
   CustomerPhoneLookupQueryDto,
   CustomerUpsertRequestDto,
@@ -34,6 +36,19 @@ export class ChatbotApiController {
   @Get('catalog/:productId/stock')
   checkStock(@Param('productId', ParseUUIDPipe) productId: string) {
     return this.chatbotApiService.checkStock(productId);
+  }
+
+  @Post('pricing/evaluate-cart')
+  @RequiredScopes('pricing:evaluate')
+  evaluateCart(@Body() body: EvaluateCartRequestDto) {
+    return this.chatbotApiService.evaluateCart({
+      items: body.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+      })),
+    });
   }
 
   @Get('customers/by-phone')

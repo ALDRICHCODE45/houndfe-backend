@@ -34,6 +34,7 @@ describe('ChatbotApiController', () => {
     checkStock: jest.Mock;
     findCustomerByPhone: jest.Mock;
     upsertCustomerProfile: jest.Mock;
+    evaluateCart: jest.Mock;
   };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
@@ -114,6 +115,21 @@ describe('ChatbotApiController', () => {
           },
         },
       }),
+      evaluateCart: jest.fn().mockResolvedValue({
+        items: [
+          {
+            productId: 'prod-1',
+            variantId: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+            originalPriceCents: 2000,
+            finalPriceCents: 1800,
+            appliedPromotionTitle: '10% off Royal Canin',
+            discountAmountCents: 200,
+          },
+        ],
+        promotionEvaluationStatus: 'fully_evaluated',
+      }),
     };
     cls = { set: jest.fn() };
 
@@ -139,6 +155,13 @@ describe('ChatbotApiController', () => {
           createHash('sha256').update('svc_write-key').digest('hex')
         ) {
           return makeCredential(['customers:write']);
+        }
+
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_pricing-key').digest('hex')
+        ) {
+          return makeCredential(['pricing:evaluate']);
         }
 
         return null;
@@ -346,5 +369,80 @@ describe('ChatbotApiController', () => {
         expect(response.status).toBe('created');
         expect(response.customer.customerId).toBe('cust-2');
       });
+  });
+
+  it('POST /chatbot-api/pricing/evaluate-cart requires pricing:evaluate scope', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/pricing/evaluate-cart')
+      .set('Authorization', 'Bearer svc_valid-key')
+      .send({
+        items: [
+          {
+            productId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+            quantity: 2,
+            unitPriceCents: 1000,
+          },
+        ],
+      })
+      .expect(403);
+  });
+
+  it('POST /chatbot-api/pricing/evaluate-cart validates the payload and returns pricing status', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/pricing/evaluate-cart')
+      .set('Authorization', 'Bearer svc_pricing-key')
+      .send({
+        items: [
+          {
+            productId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+            quantity: 2,
+            unitPriceCents: 1000,
+          },
+        ],
+      })
+      .expect(201)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.evaluateCart).toHaveBeenCalledWith({
+          items: [
+            {
+              productId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+              variantId: null,
+              quantity: 2,
+              unitPriceCents: 1000,
+            },
+          ],
+        });
+        expect(body).toEqual({
+          items: [
+            {
+              productId: 'prod-1',
+              variantId: null,
+              quantity: 2,
+              unitPriceCents: 1000,
+              originalPriceCents: 2000,
+              finalPriceCents: 1800,
+              appliedPromotionTitle: '10% off Royal Canin',
+              discountAmountCents: 200,
+            },
+          ],
+          promotionEvaluationStatus: 'fully_evaluated',
+        });
+      });
+  });
+
+  it('POST /chatbot-api/pricing/evaluate-cart returns 400 for invalid item payloads', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/pricing/evaluate-cart')
+      .set('Authorization', 'Bearer svc_pricing-key')
+      .send({
+        items: [
+          {
+            productId: 'not-a-uuid',
+            quantity: 0,
+            unitPriceCents: -1,
+          },
+        ],
+      })
+      .expect(400);
   });
 });

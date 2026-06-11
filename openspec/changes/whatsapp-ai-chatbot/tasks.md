@@ -104,12 +104,12 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Promotion-Aware Pricing.
 **Depends on**: Slice 3.
 
-- [ ] 5.1 Create `src/promotions/application/evaluate-cart-promotions.use-case.ts`: loads `AUTOMATIC` + `ACTIVE` promotions; evaluates `PRODUCT_DISCOUNT` (percentage / fixed); returns `CartEvaluationResult` with `promotionEvaluationStatus: 'fully_evaluated' | 'needs_human_review'`.
-- [ ] 5.2 Define ports `CartItemForEvaluation`, `EvaluatedCartItem`, `CartEvaluationResult` in the promotions module (per design interface).
-- [ ] 5.3 Add `chatbot-api.service.ts` method `evaluateCart()` delegating to the use case; add controller route `POST /chatbot-api/pricing/evaluate-cart` with `@RequiredScopes('pricing:evaluate')`.
-- [ ] 5.4 Write `evaluate-cart-promotions.use-case.spec.ts`: active percentage promo applies, active fixed promo applies, unsupported promo type → `needs_human_review`, no active promos → `fully_evaluated` with zero discount.
-- [ ] 5.5 Extend `chatbot-api.service.spec.ts` for pricing endpoint contract (status surfaces correctly).
-- [ ] 5.6 **Verify**: `pnpm test src/promotions src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add promotion-aware pricing evaluation`.
+- [x] 5.1 Create `src/promotions/application/evaluate-cart-promotions.use-case.ts`: loads `AUTOMATIC` + `ACTIVE` promotions; evaluates `PRODUCT_DISCOUNT` (percentage / fixed); returns `CartEvaluationResult` with `promotionEvaluationStatus: 'fully_evaluated' | 'needs_human_review'`.
+- [x] 5.2 Define ports `CartItemForEvaluation`, `EvaluatedCartItem`, `CartEvaluationResult` in the promotions module (per design interface).
+- [x] 5.3 Add `chatbot-api.service.ts` method `evaluateCart()` delegating to the use case; add controller route `POST /chatbot-api/pricing/evaluate-cart` with `@RequiredScopes('pricing:evaluate')`.
+- [x] 5.4 Write `evaluate-cart-promotions.use-case.spec.ts`: active percentage promo applies, active fixed promo applies, unsupported promo type → `needs_human_review`, no active promos → `fully_evaluated` with zero discount.
+- [x] 5.5 Extend `chatbot-api.service.spec.ts` for pricing endpoint contract (status surfaces correctly).
+- [x] 5.6 **Verify**: `pnpm test src/promotions src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add promotion-aware pricing evaluation`.
 
 ---
 

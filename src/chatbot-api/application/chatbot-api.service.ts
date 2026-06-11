@@ -9,6 +9,12 @@ import {
   type IPublicCatalogRepository,
 } from '../../public-catalog/application/ports/public-catalog.repository';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import {
+  EVALUATE_CART_PROMOTIONS_USE_CASE,
+  type CartEvaluationResult,
+  type CartItemForEvaluation,
+  type IEvaluateCartPromotionsUseCase,
+} from '../../promotions/application/ports/evaluate-cart-promotions.port';
 import type {
   ProductDetailWithIncludes,
   ProductWithIncludes,
@@ -37,6 +43,8 @@ export class ChatbotApiService {
     private readonly publicCatalogRepository: IPublicCatalogRepository,
     @Inject(CUSTOMER_REPOSITORY)
     private readonly customerRepository: ICustomerRepository,
+    @Inject(EVALUATE_CART_PROMOTIONS_USE_CASE)
+    private readonly evaluateCartPromotionsUseCase: IEvaluateCartPromotionsUseCase,
     private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
@@ -62,6 +70,12 @@ export class ChatbotApiService {
     }
 
     return toStockCheckResponse(product);
+  }
+
+  async evaluateCart(input: {
+    items: CartItemForEvaluation[];
+  }): Promise<CartEvaluationResult> {
+    return this.evaluateCartPromotionsUseCase.execute(input);
   }
 
   async findCustomerByPhone(input: {

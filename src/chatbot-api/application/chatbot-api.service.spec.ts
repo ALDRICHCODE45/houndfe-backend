@@ -7,6 +7,7 @@ import type {
   ProductWithIncludes,
 } from '../../public-catalog/application/mappers/public-product.mapper';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import type { IEvaluateCartPromotionsUseCase } from '../../promotions/application/ports/evaluate-cart-promotions.port';
 import { ChatbotApiService } from './chatbot-api.service';
 
 type MockCustomerAddress = {
@@ -132,6 +133,7 @@ function makeDetailProduct(
 describe('ChatbotApiService', () => {
   let repository: jest.Mocked<IPublicCatalogRepository>;
   let customerRepository: jest.Mocked<ICustomerRepository>;
+  let evaluateCartPromotionsUseCase: jest.Mocked<IEvaluateCartPromotionsUseCase>;
   let tenantPrisma: MockTenantPrisma;
   let service: ChatbotApiService;
 
@@ -149,6 +151,9 @@ describe('ChatbotApiService', () => {
       save: jest.fn(),
       delete: jest.fn(),
     };
+    evaluateCartPromotionsUseCase = {
+      execute: jest.fn(),
+    };
     const tenantClient: MockTenantClient = {
       customerAddress: {
         findFirst: jest.fn<Promise<MockCustomerAddress | null>, [unknown?]>(),
@@ -163,6 +168,7 @@ describe('ChatbotApiService', () => {
     service = new ChatbotApiService(
       repository,
       customerRepository,
+      evaluateCartPromotionsUseCase,
       tenantPrisma as unknown as TenantPrismaService,
     );
   });
@@ -299,6 +305,108 @@ describe('ChatbotApiService', () => {
     await expect(service.checkStock('missing-product')).rejects.toThrow(
       NotFoundException,
     );
+  });
+
+  it('delegates cart pricing evaluation and preserves fully_evaluated status', async () => {
+    evaluateCartPromotionsUseCase.execute.mockResolvedValue({
+      items: [
+        {
+          productId: 'prod-1',
+          variantId: null,
+          quantity: 2,
+          unitPriceCents: 1000,
+          originalPriceCents: 2000,
+          finalPriceCents: 1800,
+          appliedPromotionTitle: '10% off Royal Canin',
+          discountAmountCents: 200,
+        },
+      ],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+
+    await expect(
+      service.evaluateCart({
+        items: [
+          {
+            productId: 'prod-1',
+            variantId: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+          },
+        ],
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          productId: 'prod-1',
+          variantId: null,
+          quantity: 2,
+          unitPriceCents: 1000,
+          originalPriceCents: 2000,
+          finalPriceCents: 1800,
+          appliedPromotionTitle: '10% off Royal Canin',
+          discountAmountCents: 200,
+        },
+      ],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+    expect(evaluateCartPromotionsUseCase.execute.mock.calls[0]).toEqual([
+      {
+        items: [
+          {
+            productId: 'prod-1',
+            variantId: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('delegates cart pricing evaluation and surfaces needs_human_review status', async () => {
+    evaluateCartPromotionsUseCase.execute.mockResolvedValue({
+      items: [
+        {
+          productId: 'prod-2',
+          variantId: null,
+          quantity: 1,
+          unitPriceCents: 2500,
+          originalPriceCents: 2500,
+          finalPriceCents: 2500,
+          appliedPromotionTitle: null,
+          discountAmountCents: 0,
+        },
+      ],
+      promotionEvaluationStatus: 'needs_human_review',
+    });
+
+    await expect(
+      service.evaluateCart({
+        items: [
+          {
+            productId: 'prod-2',
+            variantId: null,
+            quantity: 1,
+            unitPriceCents: 2500,
+          },
+        ],
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          productId: 'prod-2',
+          variantId: null,
+          quantity: 1,
+          unitPriceCents: 2500,
+          originalPriceCents: 2500,
+          finalPriceCents: 2500,
+          appliedPromotionTitle: null,
+          discountAmountCents: 0,
+        },
+      ],
+      promotionEvaluationStatus: 'needs_human_review',
+    });
   });
 
   it('returns a returning customer profile by normalized WhatsApp phone', async () => {
