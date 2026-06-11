@@ -29,7 +29,7 @@ export class PrismaBotAuditLogRepository implements IBotAuditLogRepository {
         action: entry.action,
         resourceType: entry.resourceType,
         resourceId: entry.resourceId ?? null,
-        metadata: entry.metadata ?? null,
+        metadata: entry.metadata ?? undefined,
       },
     });
   }

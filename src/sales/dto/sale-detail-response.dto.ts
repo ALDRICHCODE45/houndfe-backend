@@ -78,7 +78,7 @@ export interface SaleDetailResponseDto {
   debtCents: number;
   changeDueCents: number;
   paymentStatus: string | null;
-  deliveryStatus: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+  deliveryStatus: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
   customer: { id: string; name: string } | null;
   cashier: { id: string; name: string };
   seller: { id: string; name: string } | null;

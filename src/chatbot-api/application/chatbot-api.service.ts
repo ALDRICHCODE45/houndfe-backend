@@ -245,7 +245,7 @@ export class ChatbotApiService {
       },
     });
     if (existing?.status === 'SUCCEEDED' && existing.responseJson) {
-      return existing.responseJson as BotSaleResponse;
+      return existing.responseJson as unknown as BotSaleResponse;
     }
 
     // Reserve the idempotency slot

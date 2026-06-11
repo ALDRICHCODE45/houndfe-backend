@@ -125,7 +125,7 @@ export interface ISaleRepository {
     paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
     channel?: 'POS' | 'ONLINE';
     register?: string;
-    deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+    deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
     customerId?: string | null;
     sellerUserId?: string | null;
     dueDate?: Date | null;
@@ -215,7 +215,7 @@ export interface ISaleRepository {
     debtCents: number;
     changeDueCents: number;
     paymentStatus: string | null;
-    deliveryStatus: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+    deliveryStatus: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
     customer: { id: string; name: string } | null;
     cashier: { id: string; name: string };
     seller: { id: string; name: string } | null;

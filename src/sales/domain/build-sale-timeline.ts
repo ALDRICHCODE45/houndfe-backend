@@ -3,7 +3,7 @@ import type { SaleDetailTimelineEventDto } from '../dto/sale-detail-response.dto
 export function buildSaleTimeline(input: {
   createdAt: Date;
   confirmedAt: Date | null;
-  deliveryStatus: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+  deliveryStatus: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
   register: string;
   cashier: { id: string; name: string } | null;
   payments: Array<{
