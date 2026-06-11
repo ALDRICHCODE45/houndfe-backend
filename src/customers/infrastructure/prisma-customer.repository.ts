@@ -14,6 +14,24 @@ export class PrismaCustomerRepository implements ICustomerRepository {
     return data ? this.toDomain(data) : null;
   }
 
+  async findByPhone(
+    tenantId: string,
+    countryCode: string,
+    phone: string,
+  ): Promise<Customer | null> {
+    const prisma = this.tenantPrisma.getClient();
+    const data = await prisma.customer.findFirst({
+      where: {
+        tenantId,
+        phoneCountryCode: countryCode,
+        phone,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return data ? this.toDomain(data) : null;
+  }
+
   async findAll(): Promise<Customer[]> {
     const prisma = this.tenantPrisma.getClient();
     const data = await prisma.customer.findMany({
@@ -36,6 +54,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         email: p.email,
         globalPriceListId: p.globalPriceListId,
         comments: p.comments,
+        preferredPaymentMethod: p.preferredPaymentMethod,
         businessName: p.businessName,
         fiscalZipCode: p.fiscalZipCode,
         rfc: p.rfc,
@@ -59,6 +78,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         email: p.email,
         globalPriceListId: p.globalPriceListId,
         comments: p.comments,
+        preferredPaymentMethod: p.preferredPaymentMethod,
         businessName: p.businessName,
         fiscalZipCode: p.fiscalZipCode,
         rfc: p.rfc,
@@ -92,6 +112,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
       email: data.email,
       globalPriceListId: data.globalPriceListId,
       comments: data.comments,
+      preferredPaymentMethod: data.preferredPaymentMethod,
       businessName: data.businessName,
       fiscalZipCode: data.fiscalZipCode,
       rfc: data.rfc,

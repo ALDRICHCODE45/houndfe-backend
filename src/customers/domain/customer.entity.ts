@@ -23,6 +23,7 @@ export interface CustomerProps {
   email: string | null;
   globalPriceListId: string | null;
   comments: string | null;
+  preferredPaymentMethod: string | null;
 
   // Billing
   businessName: string | null;
@@ -51,6 +52,7 @@ export class Customer {
   public email: string | null;
   public globalPriceListId: string | null;
   public comments: string | null;
+  public preferredPaymentMethod: string | null;
 
   public businessName: string | null;
   public fiscalZipCode: string | null;
@@ -77,6 +79,7 @@ export class Customer {
     this.email = props.email;
     this.globalPriceListId = props.globalPriceListId;
     this.comments = props.comments;
+    this.preferredPaymentMethod = props.preferredPaymentMethod;
     this.businessName = props.businessName;
     this.fiscalZipCode = props.fiscalZipCode;
     this.rfc = props.rfc;
@@ -102,6 +105,7 @@ export class Customer {
     email?: string | null;
     globalPriceListId?: string | null;
     comments?: string | null;
+    preferredPaymentMethod?: string | null;
     businessName?: string | null;
     fiscalZipCode?: string | null;
     rfc?: string | null;
@@ -130,6 +134,7 @@ export class Customer {
       email: params.email?.trim().toLowerCase() || null,
       globalPriceListId: params.globalPriceListId ?? null,
       comments: params.comments?.trim() || null,
+      preferredPaymentMethod: params.preferredPaymentMethod?.trim() || null,
       businessName: params.businessName?.trim() || null,
       fiscalZipCode: params.fiscalZipCode?.trim() || null,
       rfc: params.rfc?.trim().toUpperCase() || null,
@@ -165,6 +170,7 @@ export class Customer {
       email: this.email,
       globalPriceListId: this.globalPriceListId,
       comments: this.comments,
+      preferredPaymentMethod: this.preferredPaymentMethod,
       businessName: this.businessName,
       fiscalZipCode: this.fiscalZipCode,
       rfc: this.rfc,
@@ -190,6 +196,7 @@ export class Customer {
       email: this.email,
       globalPriceListId: this.globalPriceListId,
       comments: this.comments,
+      preferredPaymentMethod: this.preferredPaymentMethod,
       businessName: this.businessName,
       fiscalZipCode: this.fiscalZipCode,
       rfc: this.rfc,

@@ -22,8 +22,12 @@ phases:
     artifact: tasks.md
     completed_at: "2026-06-10"
   apply:
-    status: pending
+    status: done
+    completed_at: "2026-06-11"
   verify:
-    status: pending
+    status: done
+    verdict: PASS_WITH_WARNINGS
+    artifact: verify-report.md
+    completed_at: "2026-06-11"
   archive:
     status: pending

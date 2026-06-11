@@ -40,15 +40,15 @@ Chain strategy: feature-branch-chain
 
 **Spec coverage**: Service Credential Authentication (foundation).
 
-- [ ] 1.1 Edit `prisma/schema.prisma`: add `ServiceCredential` model (`id, tenantId, name, hashedKey @unique, scopes String[], isActive, lastUsedAt?, rateLimit Int @default(60), createdAt, revokedAt?`) with `@@index([tenantId, isActive])`.
-- [ ] 1.2 Run `pnpm prisma migrate dev --name add_service_credential` against local DB; verify migration is additive-only (no `DROP`, no `ALTER ... NOT NULL` without default).
-- [ ] 1.3 Create `src/chatbot-api/domain/service-credential.entity.ts` with static `create()` / `fromPersistence()` per repo convention.
-- [ ] 1.4 Create `src/chatbot-api/domain/service-credential.repository.ts` interface (`findByHashedKey`, `touchLastUsedAt`).
-- [ ] 1.5 Create `src/chatbot-api/infrastructure/prisma-service-credential.repository.ts` implementing the interface.
-- [ ] 1.6 Create `src/chatbot-api/chatbot-api.module.ts` skeleton (providers wired, no controller yet).
-- [ ] 1.7 Write `service-credential.entity.spec.ts` (create + fromPersistence + scope checks).
-- [ ] 1.8 Write `prisma-service-credential.repository.spec.ts` with mocked Prisma client.
-- [ ] 1.9 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` clean → commit `feat(chatbot-api): add ServiceCredential schema and domain entity`.
+- [x] 1.1 Edit `prisma/schema.prisma`: add `ServiceCredential` model (`id, tenantId, name, hashedKey @unique, scopes String[], isActive, lastUsedAt?, rateLimit Int @default(60), createdAt, revokedAt?`) with `@@index([tenantId, isActive])`.
+- [x] 1.2 Run `pnpm prisma migrate dev --name add_service_credential` against local DB; verify migration is additive-only (no `DROP`, no `ALTER ... NOT NULL` without default).
+- [x] 1.3 Create `src/chatbot-api/domain/service-credential.entity.ts` with static `create()` / `fromPersistence()` per repo convention.
+- [x] 1.4 Create `src/chatbot-api/domain/service-credential.repository.ts` interface (`findByHashedKey`, `touchLastUsedAt`).
+- [x] 1.5 Create `src/chatbot-api/infrastructure/prisma-service-credential.repository.ts` implementing the interface.
+- [x] 1.6 Create `src/chatbot-api/chatbot-api.module.ts` skeleton (providers wired, no controller yet).
+- [x] 1.7 Write `service-credential.entity.spec.ts` (create + fromPersistence + scope checks).
+- [x] 1.8 Write `prisma-service-credential.repository.spec.ts` with mocked Prisma client.
+- [x] 1.9 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` clean → commit `feat(chatbot-api): add ServiceCredential schema and domain entity`.
 
 ---
 
@@ -57,11 +57,11 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Service Credential Authentication (authorized + revoked/out-of-scope scenarios).
 **Depends on**: Slice 1.
 
-- [ ] 2.1 Create `src/chatbot-api/presentation/guards/service-auth.guard.ts`: extract `Authorization: Bearer svc_*`, SHA-256 hash, look up credential, reject if missing/inactive/revoked, set CLS `tenantId` from credential, `userId = service:{credentialId}`.
-- [ ] 2.2 Create `src/chatbot-api/presentation/decorators/required-scopes.decorator.ts` + scope check helper used by the guard.
-- [ ] 2.3 Wire `ServiceAuthGuard` in `chatbot-api.module.ts` and register CLS dependency.
-- [ ] 2.4 Write `service-auth.guard.spec.ts`: authorized bot call passes, revoked credential rejected, out-of-scope branch rejected, missing/invalid header rejected, CLS values asserted via mocked CLS service.
-- [ ] 2.5 **Verify**: `pnpm test src/chatbot-api/presentation/guards` green + `pnpm lint` → commit `feat(chatbot-api): add ServiceAuthGuard with CLS tenant resolution`.
+- [x] 2.1 Create `src/chatbot-api/presentation/guards/service-auth.guard.ts`: extract `Authorization: Bearer svc_*`, SHA-256 hash, look up credential, reject if missing/inactive/revoked, set CLS `tenantId` from credential, `userId = service:{credentialId}`.
+- [x] 2.2 Create `src/chatbot-api/presentation/decorators/required-scopes.decorator.ts` + scope check helper used by the guard.
+- [x] 2.3 Wire `ServiceAuthGuard` in `chatbot-api.module.ts` and register CLS dependency.
+- [x] 2.4 Write `service-auth.guard.spec.ts`: authorized bot call passes, revoked credential rejected, out-of-scope branch rejected, missing/invalid header rejected, CLS values asserted via mocked CLS service.
+- [x] 2.5 **Verify**: `pnpm test src/chatbot-api/presentation/guards` green + `pnpm lint` → commit `feat(chatbot-api): add ServiceAuthGuard with CLS tenant resolution`.
 
 ---
 
@@ -70,14 +70,14 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Bot-Safe Catalog Search; Branch Stock Check.
 **Depends on**: Slice 2.
 
-- [ ] 3.1 Create DTOs in `src/chatbot-api/presentation/dto/`: `catalog-search.query.ts`, `catalog-item.response.ts` (bot-safe fields only — no cost/margin/supplier/audit), `stock-check.response.ts`.
-- [ ] 3.2 Create `src/chatbot-api/application/chatbot-api.service.ts` skeleton + `searchCatalog()` and `checkStock()` methods delegating to `PublicCatalogRepository`.
-- [ ] 3.3 Create `src/chatbot-api/presentation/chatbot-api.controller.ts` with `GET /chatbot-api/catalog/search` and `GET /chatbot-api/catalog/:productId/stock` guarded by `ServiceAuthGuard` + `@RequiredScopes('catalog:read')`.
-- [ ] 3.4 Implement bot-safe projection mapper: strips cost/margin/supplier/audit; includes price, promo-aware price placeholder, stock summary, package/weight (null for now per design open question).
-- [ ] 3.5 Implement stock state derivation: `available | low_stock | out_of_stock | not_managed`; zero stock returns `out_of_stock` with qty `0` (not an error).
-- [ ] 3.6 Write `chatbot-api.service.spec.ts` covering: search returns safe projections, no-match returns empty array, stock zero returns `out_of_stock`, unknown product returns not-found.
-- [ ] 3.7 Write `chatbot-api.controller.spec.ts` (NestJS `Test.createTestingModule`) covering guard wiring and DTO contracts.
-- [ ] 3.8 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add catalog search and stock endpoints`.
+- [x] 3.1 Create DTOs in `src/chatbot-api/presentation/dto/`: `catalog-search.query.ts`, `catalog-item.response.ts` (bot-safe fields only — no cost/margin/supplier/audit), `stock-check.response.ts`.
+- [x] 3.2 Create `src/chatbot-api/application/chatbot-api.service.ts` skeleton + `searchCatalog()` and `checkStock()` methods delegating to `PublicCatalogRepository`.
+- [x] 3.3 Create `src/chatbot-api/presentation/chatbot-api.controller.ts` with `GET /chatbot-api/catalog/search` and `GET /chatbot-api/catalog/:productId/stock` guarded by `ServiceAuthGuard` + `@RequiredScopes('catalog:read')`.
+- [x] 3.4 Implement bot-safe projection mapper: strips cost/margin/supplier/audit; includes price, promo-aware price placeholder, stock summary, package/weight (null for now per design open question).
+- [x] 3.5 Implement stock state derivation: `available | low_stock | out_of_stock | not_managed`; zero stock returns `out_of_stock` with qty `0` (not an error).
+- [x] 3.6 Write `chatbot-api.service.spec.ts` covering: search returns safe projections, no-match returns empty array, stock zero returns `out_of_stock`, unknown product returns not-found.
+- [x] 3.7 Write `chatbot-api.controller.spec.ts` (NestJS `Test.createTestingModule`) covering guard wiring and DTO contracts.
+- [x] 3.8 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add catalog search and stock endpoints`.
 
 ---
 
@@ -86,16 +86,16 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Customer Profile by WhatsApp Phone.
 **Depends on**: Slice 2 (parallelizable with Slice 3 in principle).
 
-- [ ] 4.1 Edit `prisma/schema.prisma`: add `Customer.preferredPaymentMethod String?` and `@@index([tenantId, phoneCountryCode, phone])`; add `CustomerAddress.visualReferences String?`, `carrierPhone String?`, `label String?`.
-- [ ] 4.2 Run `pnpm prisma migrate dev --name add_customer_delivery_metadata`; verify additive-only.
-- [ ] 4.3 Modify `src/customers/domain/customer.repository.ts`: add `findByPhone(tenantId, countryCode, phone)` to the interface.
-- [ ] 4.4 Modify `src/customers/infrastructure/prisma-customer.repository.ts`: implement `findByPhone` using the new index.
-- [ ] 4.5 Extend existing customer entity/spec only if `preferredPaymentMethod` requires setter — minimal touch.
-- [ ] 4.6 Add DTOs `customer-lookup.response.ts`, `customer-upsert.request.ts` in `src/chatbot-api/presentation/dto/`.
-- [ ] 4.7 Add `chatbot-api.service.ts` methods `findCustomerByPhone()`, `upsertCustomerProfile()`; add controller routes `GET /chatbot-api/customers/by-phone` and `PUT /chatbot-api/customers/by-phone` with `@RequiredScopes('customers:read'|'customers:write')`.
-- [ ] 4.8 Write `prisma-customer.repository.spec.ts` extension for `findByPhone` (found + not-found paths).
-- [ ] 4.9 Write `chatbot-api.service.spec.ts` extension for customer flows: returning-customer lookup, new-customer creation captures delivery metadata in branch scope.
-- [ ] 4.10 **Verify**: `pnpm test src/customers src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add customer phone lookup and delivery metadata`.
+- [x] 4.1 Edit `prisma/schema.prisma`: add `Customer.preferredPaymentMethod String?` and `@@index([tenantId, phoneCountryCode, phone])`; add `CustomerAddress.visualReferences String?`, `carrierPhone String?`, `label String?`.
+- [x] 4.2 Run `pnpm prisma migrate dev --name add_customer_delivery_metadata`; verify additive-only.
+- [x] 4.3 Modify `src/customers/domain/customer.repository.ts`: add `findByPhone(tenantId, countryCode, phone)` to the interface.
+- [x] 4.4 Modify `src/customers/infrastructure/prisma-customer.repository.ts`: implement `findByPhone` using the new index.
+- [x] 4.5 Extend existing customer entity/spec only if `preferredPaymentMethod` requires setter — minimal touch.
+- [x] 4.6 Add DTOs `customer-lookup.response.ts`, `customer-upsert.request.ts` in `src/chatbot-api/presentation/dto/`.
+- [x] 4.7 Add `chatbot-api.service.ts` methods `findCustomerByPhone()`, `upsertCustomerProfile()`; add controller routes `GET /chatbot-api/customers/by-phone` and `PUT /chatbot-api/customers/by-phone` with `@RequiredScopes('customers:read'|'customers:write')`.
+- [x] 4.8 Write `prisma-customer.repository.spec.ts` extension for `findByPhone` (found + not-found paths).
+- [x] 4.9 Write `chatbot-api.service.spec.ts` extension for customer flows: returning-customer lookup, new-customer creation captures delivery metadata in branch scope.
+- [x] 4.10 **Verify**: `pnpm test src/customers src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add customer phone lookup and delivery metadata`.
 
 ---
 
@@ -104,12 +104,12 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Promotion-Aware Pricing.
 **Depends on**: Slice 3.
 
-- [ ] 5.1 Create `src/promotions/application/evaluate-cart-promotions.use-case.ts`: loads `AUTOMATIC` + `ACTIVE` promotions; evaluates `PRODUCT_DISCOUNT` (percentage / fixed); returns `CartEvaluationResult` with `promotionEvaluationStatus: 'fully_evaluated' | 'needs_human_review'`.
-- [ ] 5.2 Define ports `CartItemForEvaluation`, `EvaluatedCartItem`, `CartEvaluationResult` in the promotions module (per design interface).
-- [ ] 5.3 Add `chatbot-api.service.ts` method `evaluateCart()` delegating to the use case; add controller route `POST /chatbot-api/pricing/evaluate-cart` with `@RequiredScopes('pricing:evaluate')`.
-- [ ] 5.4 Write `evaluate-cart-promotions.use-case.spec.ts`: active percentage promo applies, active fixed promo applies, unsupported promo type → `needs_human_review`, no active promos → `fully_evaluated` with zero discount.
-- [ ] 5.5 Extend `chatbot-api.service.spec.ts` for pricing endpoint contract (status surfaces correctly).
-- [ ] 5.6 **Verify**: `pnpm test src/promotions src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add promotion-aware pricing evaluation`.
+- [x] 5.1 Create `src/promotions/application/evaluate-cart-promotions.use-case.ts`: loads `AUTOMATIC` + `ACTIVE` promotions; evaluates `PRODUCT_DISCOUNT` (percentage / fixed); returns `CartEvaluationResult` with `promotionEvaluationStatus: 'fully_evaluated' | 'needs_human_review'`.
+- [x] 5.2 Define ports `CartItemForEvaluation`, `EvaluatedCartItem`, `CartEvaluationResult` in the promotions module (per design interface).
+- [x] 5.3 Add `chatbot-api.service.ts` method `evaluateCart()` delegating to the use case; add controller route `POST /chatbot-api/pricing/evaluate-cart` with `@RequiredScopes('pricing:evaluate')`.
+- [x] 5.4 Write `evaluate-cart-promotions.use-case.spec.ts`: active percentage promo applies, active fixed promo applies, unsupported promo type → `needs_human_review`, no active promos → `fully_evaluated` with zero discount.
+- [x] 5.5 Extend `chatbot-api.service.spec.ts` for pricing endpoint contract (status surfaces correctly).
+- [x] 5.6 **Verify**: `pnpm test src/promotions src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add promotion-aware pricing evaluation`.
 
 ---
 
@@ -119,17 +119,17 @@ Chain strategy: feature-branch-chain
 **Depends on**: Slices 4, 5.
 **Budget watch**: This unit is at the 400-line ceiling. If estimate exceeds 400 mid-implementation, split into **6a (sale creation + idempotency)** and **6b (receipt evidence + order history)** with a verify+commit between them.
 
-- [ ] 6.1 Edit `prisma/schema.prisma`: add `SaleDeliveryStatus.SHIPPED` enum value; add `Sale.carrierName String?`, `Sale.trackingRef String?`, `Sale.estimatedDeliveryAt DateTime?`.
-- [ ] 6.2 Edit `prisma/schema.prisma`: create `ReceiptEvidence` model (`id, saleId, tenantId, mediaUrl, declaredAmountCents, declaredDate, declaredReference, status(PENDING/CONFIRMED/REJECTED), confirmedByUserId?, confirmedAt?, createdAt`) with `@@index([tenantId, saleId])`.
-- [ ] 6.3 Run `pnpm prisma migrate dev --name add_sale_delivery_and_receipt`; verify additive-only and `SHIPPED` is a pure enum extension.
-- [ ] 6.4 Modify `src/sales/domain/sale.entity.ts`: add delivery metadata setters (`setDeliveryMetadata({carrierName, trackingRef, estimatedDeliveryAt})`) and reflect in `fromPersistence`.
-- [ ] 6.5 Add `chatbot-api.service.ts` methods: `registerBotSale()` (openDraft → addItem → assignCustomer → chargeDraft as `ONLINE` pending-payment), `attachReceipt()`, `setDeliveryMetadata()`, `getOrderHistoryByPhone()`.
-- [ ] 6.6 Wire idempotency: reuse existing `SaleIdempotency` mechanism — controller reads `X-Idempotency-Key` header, service short-circuits to cached result on replay.
-- [ ] 6.7 Add controller routes: `POST /chatbot-api/sales` (bot sale creation), `POST /chatbot-api/sales/:saleId/receipts`, `PATCH /chatbot-api/sales/:saleId/delivery`, `GET /chatbot-api/customers/by-phone/:phone/orders` — each with the right `@RequiredScopes`.
-- [ ] 6.8 Add DTOs: `register-bot-sale.request.ts`, `bot-sale.response.ts`, `attach-receipt.request.ts`, `delivery-metadata.request.ts`, `order-history.response.ts`.
-- [ ] 6.9 Update `sale.entity.spec.ts` for delivery metadata setters.
-- [ ] 6.10 Extend `chatbot-api.service.spec.ts`: pending transfer sale created and auditable to credential; delivery metadata recorded once paid; receipt attached stays `PENDING` (no auto-mark-paid); human-confirm path records transfer payment and marks paid when fully covered; idempotency replay returns original sale id without duplicate creation; last-order-found returns recent products/delivery/payment/totals; no-prior-orders returns empty array.
-- [ ] 6.11 **Verify**: `pnpm test src/sales src/chatbot-api` green + `pnpm lint` + `git diff --stat` shows ≤400 changed lines → commit `feat(chatbot-api): add bot sale creation, receipt evidence, and order history` (or 6a/6b if split).
+- [x] 6.1 Edit `prisma/schema.prisma`: add `SaleDeliveryStatus.SHIPPED` enum value; add `Sale.carrierName String?`, `Sale.trackingRef String?`, `Sale.estimatedDeliveryAt DateTime?`.
+- [x] 6.2 Edit `prisma/schema.prisma`: create `ReceiptEvidence` model (`id, saleId, tenantId, mediaUrl, declaredAmountCents, declaredDate, declaredReference, status(PENDING/CONFIRMED/REJECTED), confirmedByUserId?, confirmedAt?, createdAt`) with `@@index([tenantId, saleId])`.
+- [x] 6.3 Run `pnpm prisma migrate dev --name add_sale_delivery_and_receipt`; verify additive-only and `SHIPPED` is a pure enum extension.
+- [x] 6.4 Modify `src/sales/domain/sale.entity.ts`: add delivery metadata setters (`setDeliveryMetadata({carrierName, trackingRef, estimatedDeliveryAt})`) and reflect in `fromPersistence`.
+- [x] 6.5 Add `chatbot-api.service.ts` methods: `registerBotSale()` (openDraft → addItem → assignCustomer → chargeDraft as `ONLINE` pending-payment), `attachReceipt()`, `setDeliveryMetadata()`, `getOrderHistoryByPhone()`.
+- [x] 6.6 Wire idempotency: reuse existing `SaleIdempotency` mechanism — controller reads `X-Idempotency-Key` header, service short-circuits to cached result on replay.
+- [x] 6.7 Add controller routes: `POST /chatbot-api/sales` (bot sale creation), `POST /chatbot-api/sales/:saleId/receipts`, `PATCH /chatbot-api/sales/:saleId/delivery`, `GET /chatbot-api/customers/by-phone/:phone/orders` — each with the right `@RequiredScopes`.
+- [x] 6.8 Add DTOs: `register-bot-sale.request.ts`, `bot-sale.response.ts`, `attach-receipt.request.ts`, `delivery-metadata.request.ts`, `order-history.response.ts`.
+- [x] 6.9 Update `sale.entity.spec.ts` for delivery metadata setters.
+- [x] 6.10 Extend `chatbot-api.service.spec.ts`: pending transfer sale created and auditable to credential; delivery metadata recorded once paid; receipt attached stays `PENDING` (no auto-mark-paid); human-confirm path records transfer payment and marks paid when fully covered; idempotency replay returns original sale id without duplicate creation; last-order-found returns recent products/delivery/payment/totals; no-prior-orders returns empty array.
+- [x] 6.11 **Verify**: `pnpm test src/sales src/chatbot-api` green + `pnpm lint` + `git diff --stat` shows ≤400 changed lines → commit `feat(chatbot-api): add bot sale creation, receipt evidence, and order history` (or 6a/6b if split).
 
 ---
 
@@ -138,16 +138,16 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Audit/Idempotency (audit + rate limit portions).
 **Depends on**: Slice 2.
 
-- [ ] 7.1 Edit `prisma/schema.prisma`: create `BotAuditLog` model (`id, tenantId, credentialId, action, resourceType, resourceId?, metadata Json?, createdAt`) with `@@index([tenantId, credentialId, createdAt])`.
-- [ ] 7.2 Run `pnpm prisma migrate dev --name add_bot_audit_log`; verify additive-only.
-- [ ] 7.3 Create `src/chatbot-api/infrastructure/prisma-bot-audit-log.repository.ts` (write-only `append(entry)`).
-- [ ] 7.4 Create `src/chatbot-api/presentation/interceptors/bot-audit.interceptor.ts`: on every chatbot-api route, append `{credentialId, action, resourceType, resourceId, metadata}` post-response.
-- [ ] 7.5 Extend `service-auth.guard.ts` (or add `RateLimitGuard`) with in-memory sliding-window per-credential rate limit using `ServiceCredential.rateLimit`; reject over-limit with retryable response.
-- [ ] 7.6 Wire interceptor + rate-limit globally in `chatbot-api.module.ts` so all routes are covered.
-- [ ] 7.7 Write `prisma-bot-audit-log.repository.spec.ts` (single append happy path).
-- [ ] 7.8 Write `bot-audit.interceptor.spec.ts`: success path writes audit row; failure path still writes audit row with error metadata.
-- [ ] 7.9 Write `rate-limit.spec.ts`: under-limit passes, over-limit rejected within window, window resets after expiry.
-- [ ] 7.10 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add audit logging and per-credential rate limiting`.
+- [x] 7.1 Edit `prisma/schema.prisma`: create `BotAuditLog` model (`id, tenantId, credentialId, action, resourceType, resourceId?, metadata Json?, createdAt`) with `@@index([tenantId, credentialId, createdAt])`.
+- [x] 7.2 Run `pnpm prisma migrate dev --name add_bot_audit_log`; verify additive-only.
+- [x] 7.3 Create `src/chatbot-api/infrastructure/prisma-bot-audit-log.repository.ts` (write-only `append(entry)`).
+- [x] 7.4 Create `src/chatbot-api/presentation/interceptors/bot-audit.interceptor.ts`: on every chatbot-api route, append `{credentialId, action, resourceType, resourceId, metadata}` post-response.
+- [x] 7.5 Extend `service-auth.guard.ts` (or add `RateLimitGuard`) with in-memory sliding-window per-credential rate limit using `ServiceCredential.rateLimit`; reject over-limit with retryable response.
+- [x] 7.6 Wire interceptor + rate-limit globally in `chatbot-api.module.ts` so all routes are covered.
+- [x] 7.7 Write `prisma-bot-audit-log.repository.spec.ts` (single append happy path).
+- [x] 7.8 Write `bot-audit.interceptor.spec.ts`: success path writes audit row; failure path still writes audit row with error metadata.
+- [x] 7.9 Write `rate-limit.spec.ts`: under-limit passes, over-limit rejected within window, window resets after expiry.
+- [x] 7.10 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add audit logging and per-credential rate limiting`.
 
 ---
 

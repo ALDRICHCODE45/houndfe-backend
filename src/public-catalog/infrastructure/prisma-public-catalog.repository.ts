@@ -58,6 +58,32 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
                   },
                 },
               },
+              {
+                variants: {
+                  some: {
+                    OR: [
+                      {
+                        name: {
+                          contains: params.q,
+                          mode: 'insensitive' as const,
+                        },
+                      },
+                      {
+                        option: {
+                          contains: params.q,
+                          mode: 'insensitive' as const,
+                        },
+                      },
+                      {
+                        value: {
+                          contains: params.q,
+                          mode: 'insensitive' as const,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
             ],
           }
         : {}),
@@ -65,45 +91,54 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
     const orderBy = this.resolveOrderBy(params.sort);
 
-    const [items, total] = await Promise.all([
-      client.product.findMany({
-        where,
-        orderBy,
-        skip: (params.page - 1) * params.limit,
-        take: params.limit,
-        include: {
-          category: { select: { id: true, name: true } },
-          brand: { select: { name: true } },
-          images: {
-            where: { isMain: true, variantId: null },
-            take: 1,
-            select: { url: true },
-          },
-          priceLists: {
-            where: { globalPriceList: { isDefault: true } },
-            select: { priceCents: true },
-            take: 1,
-          },
-          variants: {
-            select: {
-              quantity: true,
-              minQuantity: true,
-              variantPrices: {
-                where: {
-                  priceList: { globalPriceList: { isDefault: true } },
-                },
-                select: { priceCents: true },
-                take: 1,
+    const productQuery = client.product.findMany({
+      where,
+      orderBy,
+      skip: (params.page - 1) * params.limit,
+      take: params.limit,
+      include: {
+        category: { select: { id: true, name: true } },
+        brand: { select: { name: true } },
+        images: {
+          where: { isMain: true, variantId: null },
+          take: 1,
+          select: { url: true },
+        },
+        priceLists: {
+          where: { globalPriceList: { isDefault: true } },
+          select: { priceCents: true },
+          take: 1,
+        },
+        variants: {
+          select: {
+            id: true,
+            name: true,
+            option: true,
+            value: true,
+            quantity: true,
+            minQuantity: true,
+            variantPrices: {
+              where: {
+                priceList: { globalPriceList: { isDefault: true } },
               },
+              select: { priceCents: true },
+              take: 1,
             },
           },
         },
-      }) as unknown as ProductWithIncludes[],
+      },
+    });
+
+    const [items, total] = await Promise.all([
+      productQuery,
       client.product.count({ where }),
     ]);
 
     return {
-      items: this.sortByPriceIfNeeded(items, params.sort),
+      items: this.sortByPriceIfNeeded(
+        items as unknown as ProductWithIncludes[],
+        params.sort,
+      ),
       total,
     };
   }

@@ -8,6 +8,8 @@ import { PrismaService } from '../../shared/prisma/prisma.service';
 import { PrismaPromotionRepository } from './prisma-promotion.repository';
 import { Promotion } from '../domain/promotion.entity';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import type { ClsService } from 'nestjs-cls';
 
 describe('PrismaPromotionRepository (Integration - Real DB)', () => {
   let prisma: PrismaService;
@@ -25,15 +27,18 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
     if (!tenant) throw new Error('No tenant found for integration test');
     tenantId = tenant.id;
 
-    const cls = {
+    const cls: Pick<ClsService<TenantClsStore>, 'get'> = {
       get: (key: string) => {
         if (key === 'tenantId') return tenantId;
         if (key === 'isSuperAdmin') return false;
         return undefined;
       },
-    } as any;
+    };
 
-    const tenantPrisma = new TenantPrismaService(prisma, cls);
+    const tenantPrisma = new TenantPrismaService(
+      prisma,
+      cls as ClsService<TenantClsStore>,
+    );
     repository = new PrismaPromotionRepository(tenantPrisma);
   });
 

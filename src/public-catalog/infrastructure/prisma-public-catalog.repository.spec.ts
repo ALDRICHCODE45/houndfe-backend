@@ -111,4 +111,44 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
     expect(items[0].priceLists[0]?.priceCents).toBe(50000);
     expect(items[1].priceLists).toHaveLength(0);
   });
+
+  it('should search by variant name and value when q is provided', async () => {
+    let lastFindManyArgs: { where: { OR: unknown[] } } | undefined;
+
+    mockFindMany.mockResolvedValue([]);
+    mockFindMany.mockImplementation((args: { where: { OR: unknown[] } }) => {
+      lastFindManyArgs = args;
+      return Promise.resolve([]);
+    });
+    mockCount.mockResolvedValue(0);
+
+    await repo.findProducts({
+      q: '8 kg',
+      sort: 'relevance',
+      page: 1,
+      limit: 20,
+    });
+
+    expect(lastFindManyArgs?.where.OR).toEqual(
+      expect.arrayContaining([
+        { name: { contains: '8 kg', mode: 'insensitive' } },
+        {
+          brand: {
+            name: { contains: '8 kg', mode: 'insensitive' },
+          },
+        },
+        {
+          variants: {
+            some: {
+              OR: [
+                { name: { contains: '8 kg', mode: 'insensitive' } },
+                { option: { contains: '8 kg', mode: 'insensitive' } },
+                { value: { contains: '8 kg', mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+      ]),
+    );
+  });
 });

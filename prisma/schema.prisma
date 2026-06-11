@@ -146,6 +146,13 @@ enum SaleDeliveryStatus {
   PENDING
   DELIVERED
   NOT_APPLICABLE
+  SHIPPED
+}
+
+enum ReceiptEvidenceStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
 }
 
 enum SaleIdempotencyStatus {
@@ -237,6 +244,9 @@ model Tenant {
   outboxEvents         OutboxEvent[]
   customers            Customer[]
   customerAddresses    CustomerAddress[]
+  serviceCredentials   ServiceCredential[]
+  botAuditLogs         BotAuditLog[]
+  receiptEvidences     ReceiptEvidence[]
   promotions           Promotion[]
   promotionTargetItems PromotionTargetItem[]
   promotionCustomers   PromotionCustomer[]
@@ -250,6 +260,42 @@ model Tenant {
   employeeEmergencyContacts EmployeeEmergencyContact[]
 
   @@map("tenants")
+}
+
+model ServiceCredential {
+  id         String   @id @default(uuid())
+  tenantId   String
+  name       String
+  hashedKey  String   @unique
+  scopes     String[]
+  isActive   Boolean  @default(true)
+  lastUsedAt DateTime?
+  rateLimit  Int      @default(60)
+  createdAt  DateTime @default(now())
+  revokedAt  DateTime?
+
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botAuditLogs BotAuditLog[]
+
+  @@index([tenantId, isActive])
+  @@map("service_credentials")
+}
+
+model BotAuditLog {
+  id           String   @id @default(uuid())
+  tenantId     String
+  credentialId String
+  action       String
+  resourceType String
+  resourceId   String?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  credential   ServiceCredential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, credentialId, createdAt])
+  @@map("bot_audit_logs")
 }
 
 // ============================================================================
@@ -595,6 +641,10 @@ model Sale {
   confirmedAt DateTime?
   dueDate     DateTime?
   folio       String?
+  // Delivery metadata — set for bot-created ONLINE sales when dispatched
+  carrierName          String?
+  trackingRef          String?
+  estimatedDeliveryAt  DateTime?
   tenantId  String
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -609,6 +659,7 @@ model Sale {
   payments SalePayment[]
   comments SaleComment[]
   idempotencyRecords SaleIdempotency[]
+  receiptEvidences   ReceiptEvidence[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
@@ -737,6 +788,30 @@ model SaleFolioCounter {
   @@map("sale_folio_counters")
 }
 
+// ============================================================================
+// RECEIPT EVIDENCE — pending payment proof for bot-created transfer sales
+// ============================================================================
+
+model ReceiptEvidence {
+  id                  String                @id @default(uuid())
+  saleId              String
+  tenantId            String
+  mediaUrl            String
+  declaredAmountCents Int
+  declaredDate        DateTime?
+  declaredReference   String?
+  status              ReceiptEvidenceStatus @default(PENDING)
+  confirmedByUserId   String?
+  confirmedAt         DateTime?
+  createdAt           DateTime              @default(now())
+
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, saleId])
+  @@map("receipt_evidences")
+}
+
 model OutboxEvent {
   id            String           @id @default(uuid())
   tenantId      String
@@ -861,6 +936,7 @@ model Customer {
   phone                 String?
   email                 String?
   comments              String?
+  preferredPaymentMethod String?
   tenantId              String
 
   tenant                Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -891,6 +967,7 @@ model Customer {
   updatedAt             DateTime @updatedAt
 
   @@index([tenantId])
+  @@index([tenantId, phoneCountryCode, phone])
   @@map("customers")
 }
 
@@ -909,6 +986,9 @@ model CustomerAddress {
   municipality     String?
   city             String?
   state            String?
+  visualReferences String?
+  carrierPhone     String?
+  label            String?
 
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
