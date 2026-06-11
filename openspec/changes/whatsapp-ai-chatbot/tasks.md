@@ -86,16 +86,16 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Customer Profile by WhatsApp Phone.
 **Depends on**: Slice 2 (parallelizable with Slice 3 in principle).
 
-- [ ] 4.1 Edit `prisma/schema.prisma`: add `Customer.preferredPaymentMethod String?` and `@@index([tenantId, phoneCountryCode, phone])`; add `CustomerAddress.visualReferences String?`, `carrierPhone String?`, `label String?`.
-- [ ] 4.2 Run `pnpm prisma migrate dev --name add_customer_delivery_metadata`; verify additive-only.
-- [ ] 4.3 Modify `src/customers/domain/customer.repository.ts`: add `findByPhone(tenantId, countryCode, phone)` to the interface.
-- [ ] 4.4 Modify `src/customers/infrastructure/prisma-customer.repository.ts`: implement `findByPhone` using the new index.
-- [ ] 4.5 Extend existing customer entity/spec only if `preferredPaymentMethod` requires setter — minimal touch.
-- [ ] 4.6 Add DTOs `customer-lookup.response.ts`, `customer-upsert.request.ts` in `src/chatbot-api/presentation/dto/`.
-- [ ] 4.7 Add `chatbot-api.service.ts` methods `findCustomerByPhone()`, `upsertCustomerProfile()`; add controller routes `GET /chatbot-api/customers/by-phone` and `PUT /chatbot-api/customers/by-phone` with `@RequiredScopes('customers:read'|'customers:write')`.
-- [ ] 4.8 Write `prisma-customer.repository.spec.ts` extension for `findByPhone` (found + not-found paths).
-- [ ] 4.9 Write `chatbot-api.service.spec.ts` extension for customer flows: returning-customer lookup, new-customer creation captures delivery metadata in branch scope.
-- [ ] 4.10 **Verify**: `pnpm test src/customers src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add customer phone lookup and delivery metadata`.
+- [x] 4.1 Edit `prisma/schema.prisma`: add `Customer.preferredPaymentMethod String?` and `@@index([tenantId, phoneCountryCode, phone])`; add `CustomerAddress.visualReferences String?`, `carrierPhone String?`, `label String?`.
+- [x] 4.2 Run `pnpm prisma migrate dev --name add_customer_delivery_metadata`; verify additive-only.
+- [x] 4.3 Modify `src/customers/domain/customer.repository.ts`: add `findByPhone(tenantId, countryCode, phone)` to the interface.
+- [x] 4.4 Modify `src/customers/infrastructure/prisma-customer.repository.ts`: implement `findByPhone` using the new index.
+- [x] 4.5 Extend existing customer entity/spec only if `preferredPaymentMethod` requires setter — minimal touch.
+- [x] 4.6 Add DTOs `customer-lookup.response.ts`, `customer-upsert.request.ts` in `src/chatbot-api/presentation/dto/`.
+- [x] 4.7 Add `chatbot-api.service.ts` methods `findCustomerByPhone()`, `upsertCustomerProfile()`; add controller routes `GET /chatbot-api/customers/by-phone` and `PUT /chatbot-api/customers/by-phone` with `@RequiredScopes('customers:read'|'customers:write')`.
+- [x] 4.8 Write `prisma-customer.repository.spec.ts` extension for `findByPhone` (found + not-found paths).
+- [x] 4.9 Write `chatbot-api.service.spec.ts` extension for customer flows: returning-customer lookup, new-customer creation captures delivery metadata in branch scope.
+- [x] 4.10 **Verify**: `pnpm test src/customers src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add customer phone lookup and delivery metadata`.
 
 ---
 

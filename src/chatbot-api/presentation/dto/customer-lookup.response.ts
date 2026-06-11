@@ -1,0 +1,34 @@
+export interface CustomerDeliveryAddressResponse {
+  id: string;
+  label: string | null;
+  street: string;
+  exteriorNumber: string | null;
+  interiorNumber: string | null;
+  zipCode: string | null;
+  neighborhood: string | null;
+  municipality: string | null;
+  city: string | null;
+  state: string | null;
+  visualReferences: string | null;
+  carrierPhone: string | null;
+}
+
+export interface CustomerProfileResponse {
+  customerId: string;
+  firstName: string;
+  lastName: string | null;
+  phoneCountryCode: string | null;
+  phone: string | null;
+  preferredPaymentMethod: string | null;
+  address: CustomerDeliveryAddressResponse | null;
+}
+
+export interface CustomerLookupResponse {
+  found: boolean;
+  customer: CustomerProfileResponse | null;
+}
+
+export interface CustomerUpsertResponse {
+  status: 'created' | 'updated';
+  customer: CustomerProfileResponse;
+}

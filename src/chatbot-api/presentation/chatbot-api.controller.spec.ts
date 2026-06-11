@@ -32,6 +32,8 @@ describe('ChatbotApiController', () => {
   let service: {
     searchCatalog: jest.Mock;
     checkStock: jest.Mock;
+    findCustomerByPhone: jest.Mock;
+    upsertCustomerProfile: jest.Mock;
   };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
@@ -62,6 +64,56 @@ describe('ChatbotApiController', () => {
         stock: { status: 'out_of_stock', quantity: 0 },
         variants: [],
       }),
+      findCustomerByPhone: jest.fn().mockResolvedValue({
+        found: true,
+        customer: {
+          customerId: 'cust-1',
+          firstName: 'Ada',
+          lastName: 'Lovelace',
+          phoneCountryCode: '52',
+          phone: '5512345678',
+          preferredPaymentMethod: 'transfer',
+          address: {
+            id: 'addr-1',
+            label: 'Home',
+            street: 'Evergreen 742',
+            exteriorNumber: '742',
+            interiorNumber: null,
+            zipCode: '01234',
+            neighborhood: 'Centro',
+            municipality: 'Benito Juarez',
+            city: 'CDMX',
+            state: 'Ciudad de México',
+            visualReferences: 'Blue gate',
+            carrierPhone: '5511223344',
+          },
+        },
+      }),
+      upsertCustomerProfile: jest.fn().mockResolvedValue({
+        status: 'created',
+        customer: {
+          customerId: 'cust-2',
+          firstName: 'Ada',
+          lastName: 'Lovelace',
+          phoneCountryCode: '52',
+          phone: '5512345678',
+          preferredPaymentMethod: 'transfer',
+          address: {
+            id: 'addr-2',
+            label: 'Home',
+            street: 'Evergreen 742',
+            exteriorNumber: '742',
+            interiorNumber: null,
+            zipCode: '01234',
+            neighborhood: 'Centro',
+            municipality: 'Benito Juarez',
+            city: 'CDMX',
+            state: 'Ciudad de México',
+            visualReferences: 'Blue gate',
+            carrierPhone: '5511223344',
+          },
+        },
+      }),
     };
     cls = { set: jest.fn() };
 
@@ -80,6 +132,13 @@ describe('ChatbotApiController', () => {
 
         if (hashedKey === limitedKey) {
           return makeCredential(['customers:read']);
+        }
+
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_write-key').digest('hex')
+        ) {
+          return makeCredential(['customers:write']);
         }
 
         return null;
@@ -193,5 +252,99 @@ describe('ChatbotApiController', () => {
       .get('/chatbot-api/catalog/not-a-uuid/stock')
       .set('Authorization', 'Bearer svc_valid-key')
       .expect(400);
+  });
+
+  it('GET /chatbot-api/customers/by-phone validates query params and returns the customer payload', async () => {
+    await request(httpServer())
+      .get('/chatbot-api/customers/by-phone')
+      .set('Authorization', 'Bearer svc_limited-key')
+      .query({ phoneCountryCode: '+52', phone: '55 1234 5678' })
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        const response = body as {
+          found: boolean;
+          customer: { customerId: string };
+        };
+        expect(service.findCustomerByPhone).toHaveBeenCalledWith({
+          phoneCountryCode: '+52',
+          phone: '55 1234 5678',
+        });
+        expect(response.found).toBe(true);
+        expect(response.customer.customerId).toBe('cust-1');
+      });
+  });
+
+  it('GET /chatbot-api/customers/by-phone returns 400 when the phone query is missing', async () => {
+    await request(httpServer())
+      .get('/chatbot-api/customers/by-phone')
+      .set('Authorization', 'Bearer svc_limited-key')
+      .query({ phoneCountryCode: '+52' })
+      .expect(400);
+  });
+
+  it('PUT /chatbot-api/customers/by-phone requires customers:write scope', async () => {
+    await request(httpServer())
+      .put('/chatbot-api/customers/by-phone')
+      .set('Authorization', 'Bearer svc_limited-key')
+      .send({
+        firstName: 'Ada',
+        phoneCountryCode: '+52',
+        phone: '55 1234 5678',
+        address: { street: 'Evergreen 742' },
+      })
+      .expect(403);
+  });
+
+  it('PUT /chatbot-api/customers/by-phone validates the body and returns the upsert payload', async () => {
+    await request(httpServer())
+      .put('/chatbot-api/customers/by-phone')
+      .set('Authorization', 'Bearer svc_write-key')
+      .send({
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        phoneCountryCode: '+52',
+        phone: '55 1234 5678',
+        preferredPaymentMethod: 'transfer',
+        address: {
+          label: 'Home',
+          street: 'Evergreen 742',
+          exteriorNumber: '742',
+          zipCode: '01234',
+          neighborhood: 'Centro',
+          municipality: 'Benito Juarez',
+          city: 'CDMX',
+          state: 'Ciudad de México',
+          visualReferences: 'Blue gate',
+          carrierPhone: '55 11 22 33 44',
+        },
+      })
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        const response = body as {
+          status: string;
+          customer: { customerId: string };
+        };
+        expect(service.upsertCustomerProfile).toHaveBeenCalledWith({
+          firstName: 'Ada',
+          lastName: 'Lovelace',
+          phoneCountryCode: '+52',
+          phone: '55 1234 5678',
+          preferredPaymentMethod: 'transfer',
+          address: {
+            label: 'Home',
+            street: 'Evergreen 742',
+            exteriorNumber: '742',
+            zipCode: '01234',
+            neighborhood: 'Centro',
+            municipality: 'Benito Juarez',
+            city: 'CDMX',
+            state: 'Ciudad de México',
+            visualReferences: 'Blue gate',
+            carrierPhone: '55 11 22 33 44',
+          },
+        });
+        expect(response.status).toBe('created');
+        expect(response.customer.customerId).toBe('cust-2');
+      });
   });
 });
