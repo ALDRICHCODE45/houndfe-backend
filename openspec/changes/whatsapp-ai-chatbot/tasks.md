@@ -48,7 +48,7 @@ Chain strategy: feature-branch-chain
 - [x] 1.6 Create `src/chatbot-api/chatbot-api.module.ts` skeleton (providers wired, no controller yet).
 - [x] 1.7 Write `service-credential.entity.spec.ts` (create + fromPersistence + scope checks).
 - [x] 1.8 Write `prisma-service-credential.repository.spec.ts` with mocked Prisma client.
-- [ ] 1.9 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` clean → commit `feat(chatbot-api): add ServiceCredential schema and domain entity`.
+- [x] 1.9 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` clean → commit `feat(chatbot-api): add ServiceCredential schema and domain entity`.
 
 ---
 
@@ -57,11 +57,11 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Service Credential Authentication (authorized + revoked/out-of-scope scenarios).
 **Depends on**: Slice 1.
 
-- [ ] 2.1 Create `src/chatbot-api/presentation/guards/service-auth.guard.ts`: extract `Authorization: Bearer svc_*`, SHA-256 hash, look up credential, reject if missing/inactive/revoked, set CLS `tenantId` from credential, `userId = service:{credentialId}`.
-- [ ] 2.2 Create `src/chatbot-api/presentation/decorators/required-scopes.decorator.ts` + scope check helper used by the guard.
-- [ ] 2.3 Wire `ServiceAuthGuard` in `chatbot-api.module.ts` and register CLS dependency.
-- [ ] 2.4 Write `service-auth.guard.spec.ts`: authorized bot call passes, revoked credential rejected, out-of-scope branch rejected, missing/invalid header rejected, CLS values asserted via mocked CLS service.
-- [ ] 2.5 **Verify**: `pnpm test src/chatbot-api/presentation/guards` green + `pnpm lint` → commit `feat(chatbot-api): add ServiceAuthGuard with CLS tenant resolution`.
+- [x] 2.1 Create `src/chatbot-api/presentation/guards/service-auth.guard.ts`: extract `Authorization: Bearer svc_*`, SHA-256 hash, look up credential, reject if missing/inactive/revoked, set CLS `tenantId` from credential, `userId = service:{credentialId}`.
+- [x] 2.2 Create `src/chatbot-api/presentation/decorators/required-scopes.decorator.ts` + scope check helper used by the guard.
+- [x] 2.3 Wire `ServiceAuthGuard` in `chatbot-api.module.ts` and register CLS dependency.
+- [x] 2.4 Write `service-auth.guard.spec.ts`: authorized bot call passes, revoked credential rejected, out-of-scope branch rejected, missing/invalid header rejected, CLS values asserted via mocked CLS service.
+- [x] 2.5 **Verify**: `pnpm test src/chatbot-api/presentation/guards` green + `pnpm lint` → commit `feat(chatbot-api): add ServiceAuthGuard with CLS tenant resolution`.
 
 ---
 
