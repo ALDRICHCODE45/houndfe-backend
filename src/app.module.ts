@@ -32,6 +32,7 @@ import { TenantsModule } from './tenants/tenants.module';
 import { OutboxModule } from './shared/outbox/outbox.module';
 import { UsersModule } from './users/users.module';
 import { EmployeesModule } from './employees/employees.module';
+import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 
 @Module({
@@ -85,6 +86,7 @@ import { PublicCatalogModule } from './public-catalog/public-catalog.module';
     TenantsModule,
     UsersModule,
     EmployeesModule,
+    ChatbotApiModule,
     PublicCatalogModule,
     OutboxModule,
   ],

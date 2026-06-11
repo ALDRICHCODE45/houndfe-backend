@@ -7,6 +7,7 @@ import { Test } from '@nestjs/testing';
 import { ClsModule, ClsService } from 'nestjs-cls';
 import { Reflector } from '@nestjs/core';
 import { createHash } from 'node:crypto';
+import { PUBLIC_CATALOG_REPOSITORY } from '../../../public-catalog/application/ports/public-catalog.repository';
 import type { TenantClsStore } from '../../../shared/tenant/tenant-cls-store.interface';
 import { ChatbotApiModule } from '../../chatbot-api.module';
 import { ServiceCredential } from '../../domain/service-credential.entity';
@@ -169,6 +170,13 @@ describe('ServiceAuthGuard', () => {
     })
       .overrideProvider(SERVICE_CREDENTIAL_REPOSITORY)
       .useValue(repository)
+      .overrideProvider(PUBLIC_CATALOG_REPOSITORY)
+      .useValue({
+        findActiveBranches: jest.fn(),
+        findProducts: jest.fn(),
+        findCategoryFacets: jest.fn(),
+        findProductById: jest.fn(),
+      })
       .compile();
 
     expect(moduleRef.get(ServiceAuthGuard)).toBeInstanceOf(ServiceAuthGuard);

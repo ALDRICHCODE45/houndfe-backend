@@ -70,14 +70,14 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Bot-Safe Catalog Search; Branch Stock Check.
 **Depends on**: Slice 2.
 
-- [ ] 3.1 Create DTOs in `src/chatbot-api/presentation/dto/`: `catalog-search.query.ts`, `catalog-item.response.ts` (bot-safe fields only — no cost/margin/supplier/audit), `stock-check.response.ts`.
-- [ ] 3.2 Create `src/chatbot-api/application/chatbot-api.service.ts` skeleton + `searchCatalog()` and `checkStock()` methods delegating to `PublicCatalogRepository`.
-- [ ] 3.3 Create `src/chatbot-api/presentation/chatbot-api.controller.ts` with `GET /chatbot-api/catalog/search` and `GET /chatbot-api/catalog/:productId/stock` guarded by `ServiceAuthGuard` + `@RequiredScopes('catalog:read')`.
-- [ ] 3.4 Implement bot-safe projection mapper: strips cost/margin/supplier/audit; includes price, promo-aware price placeholder, stock summary, package/weight (null for now per design open question).
-- [ ] 3.5 Implement stock state derivation: `available | low_stock | out_of_stock | not_managed`; zero stock returns `out_of_stock` with qty `0` (not an error).
-- [ ] 3.6 Write `chatbot-api.service.spec.ts` covering: search returns safe projections, no-match returns empty array, stock zero returns `out_of_stock`, unknown product returns not-found.
-- [ ] 3.7 Write `chatbot-api.controller.spec.ts` (NestJS `Test.createTestingModule`) covering guard wiring and DTO contracts.
-- [ ] 3.8 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add catalog search and stock endpoints`.
+- [x] 3.1 Create DTOs in `src/chatbot-api/presentation/dto/`: `catalog-search.query.ts`, `catalog-item.response.ts` (bot-safe fields only — no cost/margin/supplier/audit), `stock-check.response.ts`.
+- [x] 3.2 Create `src/chatbot-api/application/chatbot-api.service.ts` skeleton + `searchCatalog()` and `checkStock()` methods delegating to `PublicCatalogRepository`.
+- [x] 3.3 Create `src/chatbot-api/presentation/chatbot-api.controller.ts` with `GET /chatbot-api/catalog/search` and `GET /chatbot-api/catalog/:productId/stock` guarded by `ServiceAuthGuard` + `@RequiredScopes('catalog:read')`.
+- [x] 3.4 Implement bot-safe projection mapper: strips cost/margin/supplier/audit; includes price, promo-aware price placeholder, stock summary, package/weight (null for now per design open question).
+- [x] 3.5 Implement stock state derivation: `available | low_stock | out_of_stock | not_managed`; zero stock returns `out_of_stock` with qty `0` (not an error).
+- [x] 3.6 Write `chatbot-api.service.spec.ts` covering: search returns safe projections, no-match returns empty array, stock zero returns `out_of_stock`, unknown product returns not-found.
+- [x] 3.7 Write `chatbot-api.controller.spec.ts` (NestJS `Test.createTestingModule`) covering guard wiring and DTO contracts.
+- [x] 3.8 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add catalog search and stock endpoints`.
 
 ---
 
