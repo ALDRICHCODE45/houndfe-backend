@@ -25,6 +25,10 @@ export interface ProductWithIncludes {
   images: Array<{ url: string }>;
   priceLists: Array<{ priceCents: number }>;
   variants: Array<{
+    id: string;
+    name: string;
+    option: string | null;
+    value: string | null;
     quantity: number;
     minQuantity: number;
     variantPrices: Array<{ priceCents: number }>;
