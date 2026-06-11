@@ -1,0 +1,30 @@
+schema: spec-driven
+
+context: |
+  Tech stack: NestJS 11 + TypeScript 5.7 + Prisma 6 + PostgreSQL
+  Architecture: Hexagonal / DDD bounded contexts, multi-tenant via CLS + TenantPrismaService
+  Testing: Jest (unit specs co-located, no E2E infra yet)
+  Style: Domain entities with static create/fromPersistence, repository interfaces, outbox events
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns
+    tdd: false
+    test_command: "pnpm test"
+  verify:
+    test_command: "pnpm test"
+    build_command: "pnpm build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas

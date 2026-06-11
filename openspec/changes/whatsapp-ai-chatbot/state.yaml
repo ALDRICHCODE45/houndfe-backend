@@ -1,0 +1,23 @@
+change: whatsapp-ai-chatbot
+status: proposed
+phases:
+  explore:
+    status: done
+    artifact: exploration.md
+    completed_at: "2026-06-10"
+  propose:
+    status: done
+    artifact: proposal.md
+    completed_at: "2026-06-10"
+  spec:
+    status: pending
+  design:
+    status: pending
+  tasks:
+    status: pending
+  apply:
+    status: pending
+  verify:
+    status: pending
+  archive:
+    status: pending
