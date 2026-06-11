@@ -237,6 +237,7 @@ model Tenant {
   outboxEvents         OutboxEvent[]
   customers            Customer[]
   customerAddresses    CustomerAddress[]
+  serviceCredentials   ServiceCredential[]
   promotions           Promotion[]
   promotionTargetItems PromotionTargetItem[]
   promotionCustomers   PromotionCustomer[]
@@ -250,6 +251,24 @@ model Tenant {
   employeeEmergencyContacts EmployeeEmergencyContact[]
 
   @@map("tenants")
+}
+
+model ServiceCredential {
+  id         String   @id @default(uuid())
+  tenantId   String
+  name       String
+  hashedKey  String   @unique
+  scopes     String[]
+  isActive   Boolean  @default(true)
+  lastUsedAt DateTime?
+  rateLimit  Int      @default(60)
+  createdAt  DateTime @default(now())
+  revokedAt  DateTime?
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, isActive])
+  @@map("service_credentials")
 }
 
 // ============================================================================

@@ -40,14 +40,14 @@ Chain strategy: feature-branch-chain
 
 **Spec coverage**: Service Credential Authentication (foundation).
 
-- [ ] 1.1 Edit `prisma/schema.prisma`: add `ServiceCredential` model (`id, tenantId, name, hashedKey @unique, scopes String[], isActive, lastUsedAt?, rateLimit Int @default(60), createdAt, revokedAt?`) with `@@index([tenantId, isActive])`.
-- [ ] 1.2 Run `pnpm prisma migrate dev --name add_service_credential` against local DB; verify migration is additive-only (no `DROP`, no `ALTER ... NOT NULL` without default).
-- [ ] 1.3 Create `src/chatbot-api/domain/service-credential.entity.ts` with static `create()` / `fromPersistence()` per repo convention.
-- [ ] 1.4 Create `src/chatbot-api/domain/service-credential.repository.ts` interface (`findByHashedKey`, `touchLastUsedAt`).
-- [ ] 1.5 Create `src/chatbot-api/infrastructure/prisma-service-credential.repository.ts` implementing the interface.
-- [ ] 1.6 Create `src/chatbot-api/chatbot-api.module.ts` skeleton (providers wired, no controller yet).
-- [ ] 1.7 Write `service-credential.entity.spec.ts` (create + fromPersistence + scope checks).
-- [ ] 1.8 Write `prisma-service-credential.repository.spec.ts` with mocked Prisma client.
+- [x] 1.1 Edit `prisma/schema.prisma`: add `ServiceCredential` model (`id, tenantId, name, hashedKey @unique, scopes String[], isActive, lastUsedAt?, rateLimit Int @default(60), createdAt, revokedAt?`) with `@@index([tenantId, isActive])`.
+- [x] 1.2 Run `pnpm prisma migrate dev --name add_service_credential` against local DB; verify migration is additive-only (no `DROP`, no `ALTER ... NOT NULL` without default).
+- [x] 1.3 Create `src/chatbot-api/domain/service-credential.entity.ts` with static `create()` / `fromPersistence()` per repo convention.
+- [x] 1.4 Create `src/chatbot-api/domain/service-credential.repository.ts` interface (`findByHashedKey`, `touchLastUsedAt`).
+- [x] 1.5 Create `src/chatbot-api/infrastructure/prisma-service-credential.repository.ts` implementing the interface.
+- [x] 1.6 Create `src/chatbot-api/chatbot-api.module.ts` skeleton (providers wired, no controller yet).
+- [x] 1.7 Write `service-credential.entity.spec.ts` (create + fromPersistence + scope checks).
+- [x] 1.8 Write `prisma-service-credential.repository.spec.ts` with mocked Prisma client.
 - [ ] 1.9 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` clean → commit `feat(chatbot-api): add ServiceCredential schema and domain entity`.
 
 ---

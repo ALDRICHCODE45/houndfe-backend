@@ -22,7 +22,7 @@ phases:
     artifact: tasks.md
     completed_at: "2026-06-10"
   apply:
-    status: pending
+    status: in-progress
   verify:
     status: pending
   archive:
