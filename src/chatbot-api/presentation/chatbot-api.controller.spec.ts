@@ -11,6 +11,8 @@ import {
 } from '../domain/service-credential.repository';
 import { ServiceCredential } from '../domain/service-credential.entity';
 import { ServiceAuthGuard } from './guards/service-auth.guard';
+import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
+import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
 
 function makeCredential(scopes: string[]) {
   return ServiceCredential.fromPersistence({
@@ -42,6 +44,7 @@ describe('ChatbotApiController', () => {
   };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
+  let auditLogs: { append: jest.Mock };
 
   beforeEach(async () => {
     service = {
@@ -177,6 +180,7 @@ describe('ChatbotApiController', () => {
       ]),
     };
     cls = { set: jest.fn() };
+    auditLogs = { append: jest.fn().mockResolvedValue(undefined) };
 
     repository = {
       findByHashedKey: jest.fn((hashedKey: string) => {
@@ -229,9 +233,11 @@ describe('ChatbotApiController', () => {
       controllers: [ChatbotApiController],
       providers: [
         ServiceAuthGuard,
+        BotAuditInterceptor,
         { provide: ClsService, useValue: cls },
         { provide: ChatbotApiService, useValue: service },
         { provide: SERVICE_CREDENTIAL_REPOSITORY, useValue: repository },
+        { provide: BOT_AUDIT_LOG_REPOSITORY, useValue: auditLogs },
       ],
     }).compile();
 
@@ -247,7 +253,9 @@ describe('ChatbotApiController', () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    if (app) {
+      await app.close();
+    }
   });
 
   function httpServer(): Parameters<typeof request>[0] {

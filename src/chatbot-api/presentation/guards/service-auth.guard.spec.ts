@@ -1,6 +1,7 @@
 import {
   ExecutionContext,
   ForbiddenException,
+  HttpStatus,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -80,6 +81,7 @@ describe('ServiceAuthGuard', () => {
     branchId?: string;
     handler?: () => void;
   }): ExecutionContext {
+    const setHeader = jest.fn();
     const request = {
       headers: {
         authorization: input?.authorization,
@@ -89,7 +91,10 @@ describe('ServiceAuthGuard', () => {
     };
 
     return {
-      switchToHttp: () => ({ getRequest: () => request }),
+      switchToHttp: () => ({
+        getRequest: () => request,
+        getResponse: () => ({ setHeader }),
+      }),
       getHandler: () => input?.handler ?? handler,
       getClass: () => ScopedController,
     } as unknown as ExecutionContext;
@@ -162,6 +167,25 @@ describe('ServiceAuthGuard', () => {
         }),
       ),
     ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('rejects requests after the credential exceeds its configured rate limit window', async () => {
+    repository.findByHashedKey.mockResolvedValue(
+      makeCredential({ rateLimit: 1 }),
+    );
+    repository.touchLastUsedAt.mockResolvedValue();
+
+    const firstContext = mockContext({
+      authorization: 'Bearer svc_valid-key',
+    });
+    const secondContext = mockContext({
+      authorization: 'Bearer svc_valid-key',
+    });
+
+    await expect(guard.canActivate(firstContext)).resolves.toBe(true);
+    await expect(guard.canActivate(secondContext)).rejects.toMatchObject({
+      status: HttpStatus.TOO_MANY_REQUESTS,
+    });
   });
 
   it('is provided by ChatbotApiModule with CLS support', async () => {

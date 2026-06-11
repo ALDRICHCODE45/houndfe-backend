@@ -2,6 +2,8 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   UnauthorizedException,
@@ -18,14 +20,26 @@ import {
   credentialHasRequiredScopes,
   REQUIRED_SCOPES_KEY,
 } from '../decorators/required-scopes.decorator';
+import { CredentialRateLimiter } from './credential-rate-limiter';
 
 type ServiceRequest = {
   headers?: Record<string, string | string[] | undefined>;
   serviceCredential?: unknown;
 };
 
+type ServiceResponse = {
+  setHeader(name: string, value: string): void;
+};
+
 @Injectable()
 export class ServiceAuthGuard implements CanActivate {
+  /**
+   * Single-node deployment assumption from the Slice 7 design.
+   * If the chatbot API ever scales horizontally, swap this in-memory limiter
+   * for a shared store such as Redis.
+   */
+  private readonly rateLimiter = new CredentialRateLimiter();
+
   constructor(
     @Inject(SERVICE_CREDENTIAL_REPOSITORY)
     private readonly credentials: IServiceCredentialRepository,
@@ -35,6 +49,7 @@ export class ServiceAuthGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<ServiceRequest>();
+    const response = context.switchToHttp().getResponse<ServiceResponse>();
     const rawToken = this.extractBearerToken(request.headers?.authorization);
 
     if (!rawToken.startsWith('svc_')) {
@@ -58,6 +73,22 @@ export class ServiceAuthGuard implements CanActivate {
 
     if (!credentialHasRequiredScopes(credential, requiredScopes)) {
       throw new ForbiddenException('Insufficient service scope');
+    }
+
+    const decision = this.rateLimiter.check({
+      credentialId: credential.id,
+      limit: credential.rateLimit,
+    });
+
+    if (!decision.allowed) {
+      response.setHeader(
+        'Retry-After',
+        Math.max(1, Math.ceil(decision.retryAfterMs / 1000)).toString(),
+      );
+      throw new HttpException(
+        'Service credential rate limit exceeded',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     this.cls.set('tenantId', credential.tenantId);

@@ -245,6 +245,7 @@ model Tenant {
   customers            Customer[]
   customerAddresses    CustomerAddress[]
   serviceCredentials   ServiceCredential[]
+  botAuditLogs         BotAuditLog[]
   receiptEvidences     ReceiptEvidence[]
   promotions           Promotion[]
   promotionTargetItems PromotionTargetItem[]
@@ -273,10 +274,28 @@ model ServiceCredential {
   createdAt  DateTime @default(now())
   revokedAt  DateTime?
 
-  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botAuditLogs BotAuditLog[]
 
   @@index([tenantId, isActive])
   @@map("service_credentials")
+}
+
+model BotAuditLog {
+  id           String   @id @default(uuid())
+  tenantId     String
+  credentialId String
+  action       String
+  resourceType String
+  resourceId   String?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  credential   ServiceCredential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, credentialId, createdAt])
+  @@map("bot_audit_logs")
 }
 
 // ============================================================================

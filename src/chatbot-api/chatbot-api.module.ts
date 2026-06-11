@@ -13,7 +13,12 @@ import { ChatbotApiService } from './application/chatbot-api.service';
 import { ServiceAuthGuard } from './presentation/guards/service-auth.guard';
 import { ChatbotApiController } from './presentation/chatbot-api.controller';
 import { SERVICE_CREDENTIAL_REPOSITORY } from './domain/service-credential.repository';
+import {
+  BOT_AUDIT_LOG_REPOSITORY,
+  PrismaBotAuditLogRepository,
+} from './infrastructure/prisma-bot-audit-log.repository';
 import { PrismaServiceCredentialRepository } from './infrastructure/prisma-service-credential.repository';
+import { BotAuditInterceptor } from './presentation/interceptors/bot-audit.interceptor';
 
 @Module({
   imports: [ClsModule, DatabaseModule],
@@ -21,10 +26,15 @@ import { PrismaServiceCredentialRepository } from './infrastructure/prisma-servi
   providers: [
     ChatbotApiService,
     ServiceAuthGuard,
+    BotAuditInterceptor,
     EvaluateCartPromotionsUseCase,
     {
       provide: SERVICE_CREDENTIAL_REPOSITORY,
       useClass: PrismaServiceCredentialRepository,
+    },
+    {
+      provide: BOT_AUDIT_LOG_REPOSITORY,
+      useClass: PrismaBotAuditLogRepository,
     },
     {
       provide: PUBLIC_CATALOG_REPOSITORY,

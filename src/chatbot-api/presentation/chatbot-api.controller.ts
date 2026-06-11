@@ -11,6 +11,7 @@ import {
   UseGuards,
   HttpCode,
   Headers,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
@@ -24,9 +25,11 @@ import { ServiceAuthGuard } from './guards/service-auth.guard';
 import { RegisterBotSaleRequestDto } from './dto/register-bot-sale.request';
 import { AttachReceiptRequestDto } from './dto/attach-receipt.request';
 import { DeliveryMetadataRequestDto } from './dto/delivery-metadata.request';
+import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
 
 @Controller('chatbot-api')
 @UseGuards(ServiceAuthGuard)
+@UseInterceptors(BotAuditInterceptor)
 @RequiredScopes('catalog:read')
 export class ChatbotApiController {
   constructor(private readonly chatbotApiService: ChatbotApiService) {}

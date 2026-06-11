@@ -138,16 +138,16 @@ Chain strategy: feature-branch-chain
 **Spec coverage**: Audit/Idempotency (audit + rate limit portions).
 **Depends on**: Slice 2.
 
-- [ ] 7.1 Edit `prisma/schema.prisma`: create `BotAuditLog` model (`id, tenantId, credentialId, action, resourceType, resourceId?, metadata Json?, createdAt`) with `@@index([tenantId, credentialId, createdAt])`.
-- [ ] 7.2 Run `pnpm prisma migrate dev --name add_bot_audit_log`; verify additive-only.
-- [ ] 7.3 Create `src/chatbot-api/infrastructure/prisma-bot-audit-log.repository.ts` (write-only `append(entry)`).
-- [ ] 7.4 Create `src/chatbot-api/presentation/interceptors/bot-audit.interceptor.ts`: on every chatbot-api route, append `{credentialId, action, resourceType, resourceId, metadata}` post-response.
-- [ ] 7.5 Extend `service-auth.guard.ts` (or add `RateLimitGuard`) with in-memory sliding-window per-credential rate limit using `ServiceCredential.rateLimit`; reject over-limit with retryable response.
-- [ ] 7.6 Wire interceptor + rate-limit globally in `chatbot-api.module.ts` so all routes are covered.
-- [ ] 7.7 Write `prisma-bot-audit-log.repository.spec.ts` (single append happy path).
-- [ ] 7.8 Write `bot-audit.interceptor.spec.ts`: success path writes audit row; failure path still writes audit row with error metadata.
-- [ ] 7.9 Write `rate-limit.spec.ts`: under-limit passes, over-limit rejected within window, window resets after expiry.
-- [ ] 7.10 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add audit logging and per-credential rate limiting`.
+- [x] 7.1 Edit `prisma/schema.prisma`: create `BotAuditLog` model (`id, tenantId, credentialId, action, resourceType, resourceId?, metadata Json?, createdAt`) with `@@index([tenantId, credentialId, createdAt])`.
+- [x] 7.2 Run `pnpm prisma migrate dev --name add_bot_audit_log`; verify additive-only.
+- [x] 7.3 Create `src/chatbot-api/infrastructure/prisma-bot-audit-log.repository.ts` (write-only `append(entry)`).
+- [x] 7.4 Create `src/chatbot-api/presentation/interceptors/bot-audit.interceptor.ts`: on every chatbot-api route, append `{credentialId, action, resourceType, resourceId, metadata}` post-response.
+- [x] 7.5 Extend `service-auth.guard.ts` (or add `RateLimitGuard`) with in-memory sliding-window per-credential rate limit using `ServiceCredential.rateLimit`; reject over-limit with retryable response.
+- [x] 7.6 Wire interceptor + rate-limit globally in `chatbot-api.module.ts` so all routes are covered.
+- [x] 7.7 Write `prisma-bot-audit-log.repository.spec.ts` (single append happy path).
+- [x] 7.8 Write `bot-audit.interceptor.spec.ts`: success path writes audit row; failure path still writes audit row with error metadata.
+- [x] 7.9 Write `rate-limit.spec.ts`: under-limit passes, over-limit rejected within window, window resets after expiry.
+- [x] 7.10 **Verify**: `pnpm test src/chatbot-api` green + `pnpm lint` → commit `feat(chatbot-api): add audit logging and per-credential rate limiting`.
 
 ---
 
