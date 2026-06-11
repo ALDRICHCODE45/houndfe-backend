@@ -9,6 +9,7 @@ import type {
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { IEvaluateCartPromotionsUseCase } from '../../promotions/application/ports/evaluate-cart-promotions.port';
 import { ChatbotApiService } from './chatbot-api.service';
+import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
 
 type MockCustomerAddress = {
   id: string;
@@ -25,11 +26,59 @@ type MockCustomerAddress = {
   carrierPhone?: string | null;
 };
 
+type MockSaleRecord = {
+  id: string;
+  folio: string | null;
+  status: string;
+  paymentStatus: string | null;
+  deliveryStatus: string;
+  channel: string;
+  totalCents: number;
+  paidCents: number;
+  debtCents: number;
+  confirmedAt: Date | null;
+  customerId: string | null;
+  items: Array<{
+    productId: string;
+    variantId: string | null;
+    productName: string;
+    variantName: string | null;
+    quantity: number;
+    unitPriceCents: number;
+  }>;
+  payments: Array<{
+    method: string;
+    amountCents: number;
+    reference: string | null;
+  }>;
+  shippingAddress: { street: string; zipCode: string | null } | null;
+};
+
+type MockIdempotencyRecord = {
+  id: string;
+  status: string;
+  responseJson: unknown;
+  saleId: string | null;
+};
+
 type MockTenantClient = {
   customerAddress: {
     findFirst: jest.Mock<Promise<MockCustomerAddress | null>, [unknown?]>;
     create: jest.Mock<Promise<{ id: string }>, [unknown?]>;
     update: jest.Mock<Promise<{ id: string }>, [unknown?]>;
+  };
+  saleIdempotency: {
+    findUnique: jest.Mock<Promise<MockIdempotencyRecord | null>, [unknown?]>;
+    upsert: jest.Mock<Promise<MockIdempotencyRecord>, [unknown?]>;
+    update: jest.Mock<Promise<MockIdempotencyRecord>, [unknown?]>;
+  };
+  sale: {
+    create: jest.Mock<Promise<MockSaleRecord>, [unknown?]>;
+    update: jest.Mock<Promise<MockSaleRecord>, [unknown?]>;
+    findMany: jest.Mock<Promise<MockSaleRecord[]>, [unknown?]>;
+  };
+  receiptEvidence: {
+    create: jest.Mock<Promise<{ id: string; status: string }>, [unknown?]>;
   };
 };
 
@@ -159,6 +208,22 @@ describe('ChatbotApiService', () => {
         findFirst: jest.fn<Promise<MockCustomerAddress | null>, [unknown?]>(),
         create: jest.fn<Promise<{ id: string }>, [unknown?]>(),
         update: jest.fn<Promise<{ id: string }>, [unknown?]>(),
+      },
+      saleIdempotency: {
+        findUnique: jest.fn<
+          Promise<MockIdempotencyRecord | null>,
+          [unknown?]
+        >(),
+        upsert: jest.fn<Promise<MockIdempotencyRecord>, [unknown?]>(),
+        update: jest.fn<Promise<MockIdempotencyRecord>, [unknown?]>(),
+      },
+      sale: {
+        create: jest.fn<Promise<MockSaleRecord>, [unknown?]>(),
+        update: jest.fn<Promise<MockSaleRecord>, [unknown?]>(),
+        findMany: jest.fn<Promise<MockSaleRecord[]>, [unknown?]>(),
+      },
+      receiptEvidence: {
+        create: jest.fn<Promise<{ id: string; status: string }>, [unknown?]>(),
       },
     };
     tenantPrisma = {
@@ -650,5 +715,108 @@ describe('ChatbotApiService', () => {
     expect(updateCall.data.label).toBe('Office');
     expect(updateCall.data.visualReferences).toBe('Ring twice');
     expect(result.status).toBe('updated');
+  });
+
+  // ── Bot Sale Operations (Slice 6) ───────────────────────────────────────────
+
+  describe('registerBotSale', () => {
+    const botSaleInput = {
+      cashierUserId: 'user-cashier-1',
+      customerId: 'cust-1',
+      shippingAddressId: 'addr-1',
+      items: [
+        {
+          productId: 'prod-1',
+          variantId: 'var-1',
+          productName: 'Royal Canin Mini',
+          variantName: '3 kg',
+          quantity: 2,
+          unitPriceCents: 259900,
+        },
+      ],
+      idempotencyKey: 'bot-order-abc-123',
+    };
+
+    it('creates an ONLINE CREDIT sale and returns the bot sale response', async () => {
+      const client = tenantPrisma.getClient();
+
+      client.saleIdempotency.findUnique.mockResolvedValue(null);
+      client.saleIdempotency.upsert.mockResolvedValue({
+        id: 'idem-1',
+        status: 'IN_FLIGHT',
+        responseJson: null,
+        saleId: null,
+      });
+      client.saleIdempotency.update.mockResolvedValue({
+        id: 'idem-1',
+        status: 'SUCCEEDED',
+        responseJson: {},
+        saleId: 'sale-bot-1',
+      });
+      client.sale.create.mockResolvedValue({
+        id: 'sale-bot-1',
+        folio: 'BOT-0001',
+        status: 'CONFIRMED',
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'PENDING',
+        channel: 'ONLINE',
+        totalCents: 519800,
+        paidCents: 0,
+        debtCents: 519800,
+        confirmedAt: new Date('2026-06-11T00:00:00.000Z'),
+        customerId: 'cust-1',
+        items: [],
+        payments: [],
+        shippingAddress: null,
+      });
+
+      const result: BotSaleResponse =
+        await service.registerBotSale(botSaleInput);
+
+      expect(client.sale.create).toHaveBeenCalledTimes(1);
+
+      const createData = (
+        client.sale.create.mock.calls[0][0] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['data'];
+      expect(createData['channel']).toBe('ONLINE');
+      expect(createData['status']).toBe('CONFIRMED');
+      expect(createData['paymentStatus']).toBe('CREDIT');
+      expect(createData['deliveryStatus']).toBe('PENDING');
+      expect(createData['paidCents']).toBe(0);
+      expect(createData['totalCents']).toBe(519800);
+      expect(createData['debtCents']).toBe(519800);
+      expect(createData['customerId']).toBe('cust-1');
+      expect(result.saleId).toBe('sale-bot-1');
+      expect(result.paymentStatus).toBe('CREDIT');
+      expect(result.channel).toBe('ONLINE');
+    });
+
+    it('returns cached response without creating a duplicate sale on idempotency replay', async () => {
+      const client = tenantPrisma.getClient();
+      const cached = {
+        saleId: 'sale-bot-existing',
+        folio: 'BOT-0001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        totalCents: 519800,
+        paidCents: 0,
+        debtCents: 519800,
+        deliveryStatus: 'PENDING',
+      };
+      client.saleIdempotency.findUnique.mockResolvedValue({
+        id: 'idem-1',
+        status: 'SUCCEEDED',
+        responseJson: cached,
+        saleId: 'sale-bot-existing',
+      });
+
+      const result = await service.registerBotSale(botSaleInput);
+
+      expect(client.sale.create).not.toHaveBeenCalled();
+      expect(result.saleId).toBe('sale-bot-existing');
+    });
   });
 });

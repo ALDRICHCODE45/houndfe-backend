@@ -1,4 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { Customer } from '../../customers/domain/customer.entity';
 import {
   CUSTOMER_REPOSITORY,
@@ -30,6 +31,24 @@ import type {
 } from '../presentation/dto/customer-lookup.response';
 import type { CustomerUpsertRequestDto } from '../presentation/dto/customer-upsert.request';
 import type { StockCheckResponse } from '../presentation/dto/stock-check.response';
+import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
+
+// ── Bot Sale Input Types ────────────────────────────────────────────────────
+
+export type RegisterBotSaleInput = {
+  cashierUserId: string;
+  customerId: string;
+  shippingAddressId?: string | null;
+  items: Array<{
+    productId: string;
+    variantId?: string | null;
+    productName: string;
+    variantName?: string | null;
+    quantity: number;
+    unitPriceCents: number;
+  }>;
+  idempotencyKey: string;
+};
 
 type CatalogSearchInput = {
   q: string;
@@ -166,6 +185,123 @@ export class ChatbotApiService {
           }
         : null,
     };
+  }
+
+  // ── Bot Sale Operations ─────────────────────────────────────────────────────
+
+  /**
+   * Register a bot-created ONLINE sale.
+   * Creates a CONFIRMED CREDIT (pending-payment) sale directly via Prisma.
+   * Idempotent: replays the original response for the same idempotency key.
+   *
+   * NOTE: `cashierUserId` must be a valid User.id (FK constraint on Sale.userId).
+   * The bot credential identity is recorded in BotAuditLog (Slice 7).
+   */
+  async registerBotSale(input: RegisterBotSaleInput): Promise<BotSaleResponse> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+
+    // Idempotency check: return cached response if key was already processed
+    const existing = await prisma.saleIdempotency.findUnique({
+      where: {
+        tenantId_operation_key: {
+          tenantId,
+          operation: 'bot_sale_register',
+          key: input.idempotencyKey,
+        },
+      },
+    });
+    if (existing?.status === 'SUCCEEDED' && existing.responseJson) {
+      return existing.responseJson as BotSaleResponse;
+    }
+
+    // Reserve the idempotency slot
+    await prisma.saleIdempotency.upsert({
+      where: {
+        tenantId_operation_key: {
+          tenantId,
+          operation: 'bot_sale_register',
+          key: input.idempotencyKey,
+        },
+      },
+      create: {
+        id: randomUUID(),
+        tenantId,
+        operation: 'bot_sale_register',
+        key: input.idempotencyKey,
+        requestHash: input.idempotencyKey,
+        status: 'IN_FLIGHT',
+      },
+      update: {},
+    });
+
+    const totalCents = input.items.reduce(
+      (sum, item) => sum + item.unitPriceCents * item.quantity,
+      0,
+    );
+
+    const sale = await prisma.sale.create({
+      data: {
+        id: randomUUID(),
+        tenantId,
+        userId: input.cashierUserId,
+        customerId: input.customerId,
+        shippingAddressId: input.shippingAddressId ?? null,
+        status: 'CONFIRMED',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        paymentStatus: 'CREDIT',
+        subtotalCents: totalCents,
+        discountCents: 0,
+        totalCents,
+        paidCents: 0,
+        debtCents: totalCents,
+        changeDueCents: 0,
+        confirmedAt: new Date(),
+        items: {
+          create: input.items.map((item) => ({
+            id: randomUUID(),
+            tenantId,
+            productId: item.productId,
+            variantId: item.variantId ?? null,
+            productName: item.productName,
+            variantName: item.variantName ?? null,
+            quantity: item.quantity,
+            unitPriceCents: item.unitPriceCents,
+          })),
+        },
+      },
+    });
+
+    const response: BotSaleResponse = {
+      saleId: sale.id,
+      folio: sale.folio ?? null,
+      paymentStatus: 'CREDIT',
+      channel: 'ONLINE',
+      deliveryStatus: 'PENDING',
+      totalCents: sale.totalCents,
+      paidCents: 0,
+      debtCents: sale.totalCents,
+      confirmedAt: sale.confirmedAt?.toISOString() ?? null,
+    };
+
+    // Mark idempotency as succeeded with the cached response
+    await prisma.saleIdempotency.update({
+      where: {
+        tenantId_operation_key: {
+          tenantId,
+          operation: 'bot_sale_register',
+          key: input.idempotencyKey,
+        },
+      },
+      data: {
+        status: 'SUCCEEDED',
+        responseJson: response,
+        saleId: sale.id,
+      },
+    });
+
+    return response;
   }
 
   private async upsertCustomerAddress(

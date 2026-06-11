@@ -35,6 +35,10 @@ describe('ChatbotApiController', () => {
     findCustomerByPhone: jest.Mock;
     upsertCustomerProfile: jest.Mock;
     evaluateCart: jest.Mock;
+    registerBotSale: jest.Mock;
+    attachReceipt: jest.Mock;
+    setDeliveryMetadata: jest.Mock;
+    getOrderHistoryByPhone: jest.Mock;
   };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
@@ -130,6 +134,47 @@ describe('ChatbotApiController', () => {
         ],
         promotionEvaluationStatus: 'fully_evaluated',
       }),
+      registerBotSale: jest.fn().mockResolvedValue({
+        saleId: 'sale-bot-1',
+        folio: 'BOT-0001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents: 519800,
+        paidCents: 0,
+        debtCents: 519800,
+        confirmedAt: '2026-06-11T00:00:00.000Z',
+      }),
+      attachReceipt: jest.fn().mockResolvedValue({
+        receiptId: 'receipt-1',
+        status: 'PENDING',
+      }),
+      setDeliveryMetadata: jest.fn().mockResolvedValue(undefined),
+      getOrderHistoryByPhone: jest.fn().mockResolvedValue([
+        {
+          saleId: 'sale-bot-1',
+          folio: 'BOT-0001',
+          confirmedAt: '2026-06-11T00:00:00.000Z',
+          channel: 'ONLINE',
+          deliveryStatus: 'PENDING',
+          paymentStatus: 'CREDIT',
+          totalCents: 519800,
+          paidCents: 0,
+          debtCents: 519800,
+          items: [
+            {
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'Royal Canin Mini',
+              variantName: null,
+              quantity: 2,
+              unitPriceCents: 259900,
+            },
+          ],
+          payments: [],
+          shippingAddress: null,
+        },
+      ]),
     };
     cls = { set: jest.fn() };
 
@@ -162,6 +207,17 @@ describe('ChatbotApiController', () => {
           createHash('sha256').update('svc_pricing-key').digest('hex')
         ) {
           return makeCredential(['pricing:evaluate']);
+        }
+
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_sales-key').digest('hex')
+        ) {
+          return makeCredential([
+            'sales:create',
+            'sales:write',
+            'customers:read',
+          ]);
         }
 
         return null;
@@ -443,6 +499,73 @@ describe('ChatbotApiController', () => {
           },
         ],
       })
+      .expect(400);
+  });
+
+  // ── Bot Sale Routes (Slice 6) ────────────────────────────────────────────────
+
+  const cashierUserId = 'b1fdbf81-31ee-4f43-8739-0c70c9388d72';
+  const customerId = 'c2fdbf81-31ee-4f43-8739-0c70c9388d72';
+
+  const validBotSalePayload = {
+    cashierUserId,
+    customerId,
+    items: [
+      {
+        productId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+        productName: 'Royal Canin Mini',
+        quantity: 2,
+        unitPriceCents: 259900,
+      },
+    ],
+  };
+
+  it('POST /chatbot-api/sales returns 401 without credentials', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .send(validBotSalePayload)
+      .expect(401);
+  });
+
+  it('POST /chatbot-api/sales returns 403 for credentials missing sales:create scope', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_valid-key')
+      .send(validBotSalePayload)
+      .expect(403);
+  });
+
+  it('POST /chatbot-api/sales creates a bot sale and returns the response', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', 'bot-order-abc-123')
+      .send(validBotSalePayload)
+      .expect(201)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.registerBotSale).toHaveBeenCalledWith(
+          expect.objectContaining({
+            cashierUserId,
+            customerId,
+            idempotencyKey: 'bot-order-abc-123',
+          }),
+        );
+        expect(body).toEqual(
+          expect.objectContaining({
+            saleId: 'sale-bot-1',
+            paymentStatus: 'CREDIT',
+            channel: 'ONLINE',
+          }),
+        );
+      });
+  });
+
+  it('POST /chatbot-api/sales returns 400 for invalid payload', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', 'bot-order-abc-123')
+      .send({ cashierUserId: 'not-a-uuid', customerId: '', items: [] })
       .expect(400);
   });
 });

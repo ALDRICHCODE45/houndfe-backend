@@ -8,6 +8,7 @@ import {
   Body,
   Query,
   UseGuards,
+  Headers,
 } from '@nestjs/common';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
@@ -18,6 +19,7 @@ import {
   CustomerUpsertRequestDto,
 } from './dto/customer-upsert.request';
 import { ServiceAuthGuard } from './guards/service-auth.guard';
+import { RegisterBotSaleRequestDto } from './dto/register-bot-sale.request';
 
 @Controller('chatbot-api')
 @UseGuards(ServiceAuthGuard)
@@ -64,5 +66,29 @@ export class ChatbotApiController {
   @RequiredScopes('customers:write')
   upsertCustomerProfile(@Body() body: CustomerUpsertRequestDto) {
     return this.chatbotApiService.upsertCustomerProfile(body);
+  }
+
+  // ── Bot Sale Routes ─────────────────────────────────────────────────────────
+
+  @Post('sales')
+  @RequiredScopes('sales:create')
+  registerBotSale(
+    @Body() body: RegisterBotSaleRequestDto,
+    @Headers('x-idempotency-key') idempotencyKey: string,
+  ) {
+    return this.chatbotApiService.registerBotSale({
+      cashierUserId: body.cashierUserId,
+      customerId: body.customerId,
+      shippingAddressId: body.shippingAddressId ?? null,
+      items: body.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        productName: item.productName,
+        variantName: item.variantName ?? null,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+      })),
+      idempotencyKey: idempotencyKey ?? '',
+    });
   }
 }

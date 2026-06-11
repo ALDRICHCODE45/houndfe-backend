@@ -40,6 +40,10 @@ export interface SaleFromPersistenceProps {
   folio?: string | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Delivery metadata — added for bot-created ONLINE sales (Slice 6) */
+  carrierName?: string | null;
+  trackingRef?: string | null;
+  estimatedDeliveryAt?: Date | null;
 }
 
 export interface DiscountApplicationResult {
@@ -63,6 +67,9 @@ export class Sale {
   private _shippingAddressId: string | null;
   private _sellerUserId: string | null;
   private _dueDate: Date | null;
+  private _carrierName: string | null;
+  private _trackingRef: string | null;
+  private _estimatedDeliveryAt: Date | null;
 
   private constructor(
     public readonly id: string,
@@ -80,12 +87,18 @@ export class Sale {
     public readonly folio?: string,
     public readonly createdAt?: Date,
     public readonly updatedAt?: Date,
+    carrierName: string | null = null,
+    trackingRef: string | null = null,
+    estimatedDeliveryAt: Date | null = null,
   ) {
     this._items = items;
     this._customerId = customerId;
     this._shippingAddressId = shippingAddressId;
     this._sellerUserId = sellerUserId;
     this._dueDate = dueDate;
+    this._carrierName = carrierName;
+    this._trackingRef = trackingRef;
+    this._estimatedDeliveryAt = estimatedDeliveryAt;
   }
 
   static create(props: CreateSaleProps): Sale {
@@ -131,6 +144,9 @@ export class Sale {
       props.folio ?? undefined,
       props.createdAt,
       props.updatedAt,
+      props.carrierName ?? null,
+      props.trackingRef ?? null,
+      props.estimatedDeliveryAt ?? null,
     );
   }
 
@@ -187,6 +203,32 @@ export class Sale {
 
   get sellerUserId(): string | null {
     return this._sellerUserId;
+  }
+
+  get carrierName(): string | null {
+    return this._carrierName;
+  }
+
+  get trackingRef(): string | null {
+    return this._trackingRef;
+  }
+
+  get estimatedDeliveryAt(): Date | null {
+    return this._estimatedDeliveryAt;
+  }
+
+  /**
+   * Set delivery carrier metadata for ONLINE/bot-created sales.
+   * Called when a sale is dispatched or delivery is scheduled.
+   */
+  setDeliveryMetadata(input: {
+    carrierName: string | null;
+    trackingRef: string | null;
+    estimatedDeliveryAt: Date | null;
+  }): void {
+    this._carrierName = input.carrierName;
+    this._trackingRef = input.trackingRef;
+    this._estimatedDeliveryAt = input.estimatedDeliveryAt;
   }
 
   setDueDate(date: Date | null): void {

@@ -1,5 +1,4 @@
 import { Sale } from './sale.entity';
-import { SaleItem } from './sale-item.entity';
 import {
   InvalidArgumentError,
   BusinessRuleViolationError,
@@ -1212,6 +1211,92 @@ describe('Sale Entity', () => {
       expect(result.items[1].unitPriceCents).toBe(800);
 
       expect(() => sale.removeGlobalDiscount()).not.toThrow();
+    });
+  });
+
+  // ── Delivery Metadata (Slice 6: bot sales) ──────────────────────────────────
+
+  describe('setDeliveryMetadata - update carrier/tracking/ETA', () => {
+    it('sets carrier name, tracking ref, and estimated delivery date', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const eta = new Date('2026-06-20T00:00:00.000Z');
+      sale.setDeliveryMetadata({
+        carrierName: 'DHL',
+        trackingRef: 'DHL-1234567890',
+        estimatedDeliveryAt: eta,
+      });
+
+      expect(sale.carrierName).toBe('DHL');
+      expect(sale.trackingRef).toBe('DHL-1234567890');
+      expect(sale.estimatedDeliveryAt).toBe(eta);
+    });
+
+    it('allows clearing delivery metadata by setting null values', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        carrierName: 'DHL',
+        trackingRef: 'DHL-1234567890',
+        estimatedDeliveryAt: new Date('2026-06-20T00:00:00.000Z'),
+      });
+
+      sale.setDeliveryMetadata({
+        carrierName: null,
+        trackingRef: null,
+        estimatedDeliveryAt: null,
+      });
+
+      expect(sale.carrierName).toBeNull();
+      expect(sale.trackingRef).toBeNull();
+      expect(sale.estimatedDeliveryAt).toBeNull();
+    });
+  });
+
+  describe('fromPersistence - delivery metadata reconstitution', () => {
+    it('reconstitutes delivery metadata fields from persistence', () => {
+      const eta = new Date('2026-06-20T00:00:00.000Z');
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        carrierName: 'Estafeta',
+        trackingRef: 'EST-9876',
+        estimatedDeliveryAt: eta,
+      });
+
+      expect(sale.carrierName).toBe('Estafeta');
+      expect(sale.trackingRef).toBe('EST-9876');
+      expect(sale.estimatedDeliveryAt).toBe(eta);
+    });
+
+    it('defaults delivery metadata to null when not provided', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(sale.carrierName).toBeNull();
+      expect(sale.trackingRef).toBeNull();
+      expect(sale.estimatedDeliveryAt).toBeNull();
     });
   });
 });

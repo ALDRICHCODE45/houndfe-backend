@@ -146,6 +146,13 @@ enum SaleDeliveryStatus {
   PENDING
   DELIVERED
   NOT_APPLICABLE
+  SHIPPED
+}
+
+enum ReceiptEvidenceStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
 }
 
 enum SaleIdempotencyStatus {
@@ -238,6 +245,7 @@ model Tenant {
   customers            Customer[]
   customerAddresses    CustomerAddress[]
   serviceCredentials   ServiceCredential[]
+  receiptEvidences     ReceiptEvidence[]
   promotions           Promotion[]
   promotionTargetItems PromotionTargetItem[]
   promotionCustomers   PromotionCustomer[]
@@ -614,6 +622,10 @@ model Sale {
   confirmedAt DateTime?
   dueDate     DateTime?
   folio       String?
+  // Delivery metadata — set for bot-created ONLINE sales when dispatched
+  carrierName          String?
+  trackingRef          String?
+  estimatedDeliveryAt  DateTime?
   tenantId  String
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -628,6 +640,7 @@ model Sale {
   payments SalePayment[]
   comments SaleComment[]
   idempotencyRecords SaleIdempotency[]
+  receiptEvidences   ReceiptEvidence[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
@@ -754,6 +767,30 @@ model SaleFolioCounter {
   @@unique([tenantId, period])
   @@index([tenantId])
   @@map("sale_folio_counters")
+}
+
+// ============================================================================
+// RECEIPT EVIDENCE — pending payment proof for bot-created transfer sales
+// ============================================================================
+
+model ReceiptEvidence {
+  id                  String                @id @default(uuid())
+  saleId              String
+  tenantId            String
+  mediaUrl            String
+  declaredAmountCents Int
+  declaredDate        DateTime?
+  declaredReference   String?
+  status              ReceiptEvidenceStatus @default(PENDING)
+  confirmedByUserId   String?
+  confirmedAt         DateTime?
+  createdAt           DateTime              @default(now())
+
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, saleId])
+  @@map("receipt_evidences")
 }
 
 model OutboxEvent {
