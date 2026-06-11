@@ -1,4 +1,5 @@
 import { PrismaPromotionRepository } from './prisma-promotion.repository';
+import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 
 type PrismaRepoMock = {
   promotion: {
@@ -37,17 +38,23 @@ function makePrisma(): PrismaRepoMock {
 describe('PrismaPromotionRepository', () => {
   function makeTenantPrismaMock() {
     const client = makePrisma();
-    return {
+    const tenantPrisma: Pick<TenantPrismaService, 'getClient'> & {
+      client: PrismaRepoMock;
+    } = {
       getClient: jest.fn().mockReturnValue(client),
       client,
     };
+
+    return tenantPrisma;
   }
 
   describe('findAll()', () => {
     it('should include customerScope in where clause when provided', async () => {
       const tenantPrisma = makeTenantPrismaMock();
       const prisma = tenantPrisma.client;
-      const repo = new PrismaPromotionRepository(tenantPrisma as any);
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
 
       await repo.findAll({ page: 1, limit: 20, customerScope: 'SPECIFIC' });
 
@@ -64,7 +71,9 @@ describe('PrismaPromotionRepository', () => {
     it('should compose combined filters (type/status/method/search/customerScope) into query', async () => {
       const tenantPrisma = makeTenantPrismaMock();
       const prisma = tenantPrisma.client;
-      const repo = new PrismaPromotionRepository(tenantPrisma as any);
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
 
       await repo.findAll({
         page: 2,
@@ -105,7 +114,9 @@ describe('PrismaPromotionRepository', () => {
     it('should rely on DB cascade by deleting parent promotion row', async () => {
       const tenantPrisma = makeTenantPrismaMock();
       const prisma = tenantPrisma.client;
-      const repo = new PrismaPromotionRepository(tenantPrisma as any);
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
 
       await repo.delete('promo-1');
 

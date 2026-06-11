@@ -15,17 +15,24 @@ import { PromotionsController } from './promotions.controller';
 import { PromotionsService } from './promotions.service';
 import { PrismaPromotionRepository } from './infrastructure/prisma-promotion.repository';
 import { PROMOTION_REPOSITORY } from './domain/promotion.repository';
+import { EvaluateCartPromotionsUseCase } from './application/evaluate-cart-promotions.use-case';
+import { EVALUATE_CART_PROMOTIONS_USE_CASE } from './application/ports/evaluate-cart-promotions.port';
 
 @Module({
   imports: [AuthModule], // Provides JwtAuthGuard, PermissionsGuard, CaslAbilityFactory
   controllers: [PromotionsController],
   providers: [
     PromotionsService,
+    EvaluateCartPromotionsUseCase,
     {
       provide: PROMOTION_REPOSITORY,
       useClass: PrismaPromotionRepository,
     },
+    {
+      provide: EVALUATE_CART_PROMOTIONS_USE_CASE,
+      useExisting: EvaluateCartPromotionsUseCase,
+    },
   ],
-  exports: [PromotionsService],
+  exports: [PromotionsService, EVALUATE_CART_PROMOTIONS_USE_CASE],
 })
 export class PromotionsModule {}
