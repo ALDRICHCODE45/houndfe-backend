@@ -119,17 +119,17 @@ Chain strategy: feature-branch-chain
 **Depends on**: Slices 4, 5.
 **Budget watch**: This unit is at the 400-line ceiling. If estimate exceeds 400 mid-implementation, split into **6a (sale creation + idempotency)** and **6b (receipt evidence + order history)** with a verify+commit between them.
 
-- [ ] 6.1 Edit `prisma/schema.prisma`: add `SaleDeliveryStatus.SHIPPED` enum value; add `Sale.carrierName String?`, `Sale.trackingRef String?`, `Sale.estimatedDeliveryAt DateTime?`.
-- [ ] 6.2 Edit `prisma/schema.prisma`: create `ReceiptEvidence` model (`id, saleId, tenantId, mediaUrl, declaredAmountCents, declaredDate, declaredReference, status(PENDING/CONFIRMED/REJECTED), confirmedByUserId?, confirmedAt?, createdAt`) with `@@index([tenantId, saleId])`.
-- [ ] 6.3 Run `pnpm prisma migrate dev --name add_sale_delivery_and_receipt`; verify additive-only and `SHIPPED` is a pure enum extension.
-- [ ] 6.4 Modify `src/sales/domain/sale.entity.ts`: add delivery metadata setters (`setDeliveryMetadata({carrierName, trackingRef, estimatedDeliveryAt})`) and reflect in `fromPersistence`.
-- [ ] 6.5 Add `chatbot-api.service.ts` methods: `registerBotSale()` (openDraft → addItem → assignCustomer → chargeDraft as `ONLINE` pending-payment), `attachReceipt()`, `setDeliveryMetadata()`, `getOrderHistoryByPhone()`.
-- [ ] 6.6 Wire idempotency: reuse existing `SaleIdempotency` mechanism — controller reads `X-Idempotency-Key` header, service short-circuits to cached result on replay.
-- [ ] 6.7 Add controller routes: `POST /chatbot-api/sales` (bot sale creation), `POST /chatbot-api/sales/:saleId/receipts`, `PATCH /chatbot-api/sales/:saleId/delivery`, `GET /chatbot-api/customers/by-phone/:phone/orders` — each with the right `@RequiredScopes`.
-- [ ] 6.8 Add DTOs: `register-bot-sale.request.ts`, `bot-sale.response.ts`, `attach-receipt.request.ts`, `delivery-metadata.request.ts`, `order-history.response.ts`.
-- [ ] 6.9 Update `sale.entity.spec.ts` for delivery metadata setters.
-- [ ] 6.10 Extend `chatbot-api.service.spec.ts`: pending transfer sale created and auditable to credential; delivery metadata recorded once paid; receipt attached stays `PENDING` (no auto-mark-paid); human-confirm path records transfer payment and marks paid when fully covered; idempotency replay returns original sale id without duplicate creation; last-order-found returns recent products/delivery/payment/totals; no-prior-orders returns empty array.
-- [ ] 6.11 **Verify**: `pnpm test src/sales src/chatbot-api` green + `pnpm lint` + `git diff --stat` shows ≤400 changed lines → commit `feat(chatbot-api): add bot sale creation, receipt evidence, and order history` (or 6a/6b if split).
+- [x] 6.1 Edit `prisma/schema.prisma`: add `SaleDeliveryStatus.SHIPPED` enum value; add `Sale.carrierName String?`, `Sale.trackingRef String?`, `Sale.estimatedDeliveryAt DateTime?`.
+- [x] 6.2 Edit `prisma/schema.prisma`: create `ReceiptEvidence` model (`id, saleId, tenantId, mediaUrl, declaredAmountCents, declaredDate, declaredReference, status(PENDING/CONFIRMED/REJECTED), confirmedByUserId?, confirmedAt?, createdAt`) with `@@index([tenantId, saleId])`.
+- [x] 6.3 Run `pnpm prisma migrate dev --name add_sale_delivery_and_receipt`; verify additive-only and `SHIPPED` is a pure enum extension.
+- [x] 6.4 Modify `src/sales/domain/sale.entity.ts`: add delivery metadata setters (`setDeliveryMetadata({carrierName, trackingRef, estimatedDeliveryAt})`) and reflect in `fromPersistence`.
+- [x] 6.5 Add `chatbot-api.service.ts` methods: `registerBotSale()` (openDraft → addItem → assignCustomer → chargeDraft as `ONLINE` pending-payment), `attachReceipt()`, `setDeliveryMetadata()`, `getOrderHistoryByPhone()`.
+- [x] 6.6 Wire idempotency: reuse existing `SaleIdempotency` mechanism — controller reads `X-Idempotency-Key` header, service short-circuits to cached result on replay.
+- [x] 6.7 Add controller routes: `POST /chatbot-api/sales` (bot sale creation), `POST /chatbot-api/sales/:saleId/receipts`, `PATCH /chatbot-api/sales/:saleId/delivery`, `GET /chatbot-api/customers/by-phone/:phone/orders` — each with the right `@RequiredScopes`.
+- [x] 6.8 Add DTOs: `register-bot-sale.request.ts`, `bot-sale.response.ts`, `attach-receipt.request.ts`, `delivery-metadata.request.ts`, `order-history.response.ts`.
+- [x] 6.9 Update `sale.entity.spec.ts` for delivery metadata setters.
+- [x] 6.10 Extend `chatbot-api.service.spec.ts`: pending transfer sale created and auditable to credential; delivery metadata recorded once paid; receipt attached stays `PENDING` (no auto-mark-paid); human-confirm path records transfer payment and marks paid when fully covered; idempotency replay returns original sale id without duplicate creation; last-order-found returns recent products/delivery/payment/totals; no-prior-orders returns empty array.
+- [x] 6.11 **Verify**: `pnpm test src/sales src/chatbot-api` green + `pnpm lint` + `git diff --stat` shows ≤400 changed lines → commit `feat(chatbot-api): add bot sale creation, receipt evidence, and order history` (or 6a/6b if split).
 
 ---
 
