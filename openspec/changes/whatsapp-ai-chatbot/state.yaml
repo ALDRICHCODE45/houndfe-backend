@@ -10,11 +10,17 @@ phases:
     artifact: proposal.md
     completed_at: "2026-06-10"
   spec:
-    status: pending
+    status: done
+    artifact: specs/chatbot-api-foundation/spec.md
+    completed_at: "2026-06-10"
   design:
-    status: pending
+    status: done
+    artifact: design.md
+    completed_at: "2026-06-10"
   tasks:
-    status: pending
+    status: done
+    artifact: tasks.md
+    completed_at: "2026-06-10"
   apply:
     status: pending
   verify:
