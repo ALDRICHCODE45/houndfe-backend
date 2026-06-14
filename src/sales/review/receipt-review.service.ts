@@ -61,6 +61,12 @@ export class ReceiptReviewService {
     private readonly outboxWriter: OutboxWriterService,
   ) {}
 
+  /**
+   * Lists actionable receipt evidence for one sale in the active tenant.
+   * The controller enforces `ReceiptEvidence:read`; this method keeps the
+   * tenant filter inside the repository boundary and returns only `PENDING`
+   * receipt rows mapped for the review queue.
+   */
   async listPending(saleId: string): Promise<ReceiptReviewQueueResponseDto> {
     const tenantId = this.tenantPrisma.getTenantId();
     const receipts = await this.receiptReviewRepository.findPendingForSale(
@@ -71,6 +77,13 @@ export class ReceiptReviewService {
     return receipts.map(mapQueueItem);
   }
 
+  /**
+   * Confirms a pending receipt and applies its real transfer amount.
+   * The controller enforces `ReceiptEvidence:update` and supplies the reviewer
+   * id plus idempotency key. The method guards receipt and sale state before a
+   * transaction that records the shared sale payment, marks the receipt as
+   * confirmed, and emits the receipt confirmation outbox event.
+   */
   async confirm(
     saleId: string,
     receiptId: string,
@@ -118,6 +131,12 @@ export class ReceiptReviewService {
     });
   }
 
+  /**
+   * Rejects a pending receipt with the reviewer-provided reason.
+   * The controller enforces `ReceiptEvidence:update`; this method guards the
+   * receipt state before a short transaction that stores the rejection reason
+   * and emits the receipt rejection outbox event without touching sale payment.
+   */
   async reject(
     saleId: string,
     receiptId: string,
