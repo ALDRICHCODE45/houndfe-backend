@@ -8,6 +8,7 @@ import type {
 } from '../../public-catalog/application/mappers/public-product.mapper';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { IEvaluateCartPromotionsUseCase } from '../../promotions/application/ports/evaluate-cart-promotions.port';
+import type { SalesService } from '../../sales/sales.service';
 import { ChatbotApiService } from './chatbot-api.service';
 
 type MockCustomerAddress = {
@@ -183,6 +184,7 @@ describe('ChatbotApiService', () => {
   let repository: jest.Mocked<IPublicCatalogRepository>;
   let customerRepository: jest.Mocked<ICustomerRepository>;
   let evaluateCartPromotionsUseCase: jest.Mocked<IEvaluateCartPromotionsUseCase>;
+  let salesService: jest.Mocked<Pick<SalesService, 'confirmBotSale'>>;
   let tenantPrisma: MockTenantPrisma;
   let service: ChatbotApiService;
 
@@ -202,6 +204,9 @@ describe('ChatbotApiService', () => {
     };
     evaluateCartPromotionsUseCase = {
       execute: jest.fn(),
+    };
+    salesService = {
+      confirmBotSale: jest.fn(),
     };
     const tenantClient: MockTenantClient = {
       customerAddress: {
@@ -235,6 +240,7 @@ describe('ChatbotApiService', () => {
       repository,
       customerRepository,
       evaluateCartPromotionsUseCase,
+      salesService as unknown as SalesService,
       tenantPrisma as unknown as TenantPrismaService,
     );
   });
@@ -738,7 +744,7 @@ describe('ChatbotApiService', () => {
       idempotencyKey: 'bot-order-abc-123',
     };
 
-    it('creates an ONLINE CREDIT sale and returns the bot sale response', async () => {
+    it('delegates bot sale confirmation to SalesService and returns the mapped response', async () => {
       const client = tenantPrisma.getClient();
 
       client.saleIdempotency.findUnique.mockResolvedValue(null);
@@ -754,39 +760,38 @@ describe('ChatbotApiService', () => {
         responseJson: {},
         saleId: 'sale-bot-1',
       });
-      client.sale.create.mockResolvedValue({
-        id: 'sale-bot-1',
-        folio: 'BOT-0001',
-        status: 'CONFIRMED',
+      salesService.confirmBotSale.mockResolvedValue({
+        saleId: 'sale-bot-1',
+        folio: 'A-2606-000001',
         paymentStatus: 'CREDIT',
-        deliveryStatus: 'PENDING',
         channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
         totalCents: 519800,
         paidCents: 0,
         debtCents: 519800,
-        confirmedAt: new Date('2026-06-11T00:00:00.000Z'),
-        customerId: 'cust-1',
-        items: [],
-        payments: [],
-        shippingAddress: null,
+        confirmedAt: '2026-06-11T00:00:00.000Z',
       });
 
       const result = await service.registerBotSale(botSaleInput);
 
-      expect(client.sale.create).toHaveBeenCalledTimes(1);
-      expect(client.sale.create.mock.calls[0]?.[0]).toMatchObject({
-        data: {
-          channel: 'ONLINE',
-          status: 'CONFIRMED',
-          paymentStatus: 'CREDIT',
-          deliveryStatus: 'PENDING',
-          paidCents: 0,
-          totalCents: 519800,
-          debtCents: 519800,
-          customerId: 'cust-1',
-        },
+      expect(salesService.confirmBotSale).toHaveBeenCalledTimes(1);
+      expect(salesService.confirmBotSale).toHaveBeenCalledWith({
+        cashierUserId: 'user-cashier-1',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [
+          {
+            productId: 'prod-1',
+            variantId: 'var-1',
+            productName: 'Royal Canin Mini',
+            variantName: '3 kg',
+            quantity: 2,
+            unitPriceCents: 259900,
+          },
+        ],
       });
       expect(result.saleId).toBe('sale-bot-1');
+      expect(result.folio).toBe('A-2606-000001');
       expect(result.paymentStatus).toBe('CREDIT');
       expect(result.channel).toBe('ONLINE');
     });
@@ -812,7 +817,7 @@ describe('ChatbotApiService', () => {
 
       const result = await service.registerBotSale(botSaleInput);
 
-      expect(client.sale.create).not.toHaveBeenCalled();
+      expect(salesService.confirmBotSale).not.toHaveBeenCalled();
       expect(result.saleId).toBe('sale-bot-existing');
     });
   });

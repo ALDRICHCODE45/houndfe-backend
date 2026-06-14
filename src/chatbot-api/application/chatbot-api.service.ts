@@ -36,6 +36,7 @@ import type { StockCheckResponse } from '../presentation/dto/stock-check.respons
 import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
 import type { AttachReceiptResponse } from '../presentation/dto/attach-receipt.request';
 import type { OrderHistoryResponse } from '../presentation/dto/order-history.response';
+import { SalesService } from '../../sales/sales.service';
 
 // ── Bot Sale Input Types ────────────────────────────────────────────────────
 
@@ -97,6 +98,7 @@ export class ChatbotApiService {
     private readonly customerRepository: ICustomerRepository,
     @Inject(EVALUATE_CART_PROMOTIONS_USE_CASE)
     private readonly evaluateCartPromotionsUseCase: IEvaluateCartPromotionsUseCase,
+    private readonly salesService: SalesService,
     private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
@@ -268,54 +270,23 @@ export class ChatbotApiService {
       update: {},
     });
 
-    const totalCents = input.items.reduce(
-      (sum, item) => sum + item.unitPriceCents * item.quantity,
-      0,
-    );
-
-    const sale = await prisma.sale.create({
-      data: {
-        id: randomUUID(),
-        tenantId,
-        userId: input.cashierUserId,
-        customerId: input.customerId,
-        shippingAddressId: input.shippingAddressId ?? null,
-        status: 'CONFIRMED',
-        channel: 'ONLINE',
-        deliveryStatus: 'PENDING',
-        paymentStatus: 'CREDIT',
-        subtotalCents: totalCents,
-        discountCents: 0,
-        totalCents,
-        paidCents: 0,
-        debtCents: totalCents,
-        changeDueCents: 0,
-        confirmedAt: new Date(),
-        items: {
-          create: input.items.map((item) => ({
-            id: randomUUID(),
-            tenantId,
-            productId: item.productId,
-            variantId: item.variantId ?? null,
-            productName: item.productName,
-            variantName: item.variantName ?? null,
-            quantity: item.quantity,
-            unitPriceCents: item.unitPriceCents,
-          })),
-        },
-      },
+    const confirmedSale = await this.salesService.confirmBotSale({
+      cashierUserId: input.cashierUserId,
+      customerId: input.customerId,
+      shippingAddressId: input.shippingAddressId ?? null,
+      items: input.items,
     });
 
     const response: BotSaleResponse = {
-      saleId: sale.id,
-      folio: sale.folio ?? null,
-      paymentStatus: 'CREDIT',
-      channel: 'ONLINE',
-      deliveryStatus: 'PENDING',
-      totalCents: sale.totalCents,
-      paidCents: 0,
-      debtCents: sale.totalCents,
-      confirmedAt: sale.confirmedAt?.toISOString() ?? null,
+      saleId: confirmedSale.saleId,
+      folio: confirmedSale.folio,
+      paymentStatus: confirmedSale.paymentStatus,
+      channel: confirmedSale.channel,
+      deliveryStatus: confirmedSale.deliveryStatus,
+      totalCents: confirmedSale.totalCents,
+      paidCents: confirmedSale.paidCents,
+      debtCents: confirmedSale.debtCents,
+      confirmedAt: confirmedSale.confirmedAt,
     };
 
     // Mark idempotency as succeeded with the cached response
@@ -330,7 +301,7 @@ export class ChatbotApiService {
       data: {
         status: 'SUCCEEDED',
         responseJson: response,
-        saleId: sale.id,
+        saleId: confirmedSale.saleId,
       },
     });
 
