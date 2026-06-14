@@ -105,28 +105,28 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
 
 ## Phase 4: Review Service & Business Logic
 
-- [ ] 4.1 **TEST**: Write failing test for `ConfirmReceiptDto` validation
+- [x] 4.1 **TEST**: Write failing test for `ConfirmReceiptDto` validation
   - Files: `src/sales/review/dto/confirm-receipt.dto.spec.ts`
   - Test: `amountCents` is integer, min 1, required
   - Gate: `pnpm test src/sales/review/dto/confirm-receipt.dto.spec.ts` (fails)
 
-- [ ] 4.2 **CODE**: Create `ConfirmReceiptDto`
+- [x] 4.2 **CODE**: Create `ConfirmReceiptDto`
   - Files: `src/sales/review/dto/confirm-receipt.dto.ts`
   - Fields: `amountCents` with `@IsInt()`, `@Min(1)` decorators
   - Gate: `pnpm test src/sales/review/dto/confirm-receipt.dto.spec.ts` (passes)
 
-- [ ] 4.3 **TEST**: Write failing test for `RejectReceiptDto` validation
+- [x] 4.3 **TEST**: Write failing test for `RejectReceiptDto` validation
   - Files: `src/sales/review/dto/reject-receipt.dto.spec.ts`
   - Test: `reason` is string, non-empty, required
   - Gate: `pnpm test src/sales/review/dto/reject-receipt.dto.spec.ts` (fails)
 
-- [ ] 4.4 **CODE**: Create `RejectReceiptDto`
+- [x] 4.4 **CODE**: Create `RejectReceiptDto`
   - Files: `src/sales/review/dto/reject-receipt.dto.ts`
   - Fields: `reason` with `@IsString()`, `@IsNotEmpty()` decorators
   - Gate: `pnpm test src/sales/review/dto/reject-receipt.dto.spec.ts` (passes)
   - Commit: "feat(sales): add receipt review DTOs with validation"
 
-- [ ] 4.5 **TEST**: Write failing tests for `ReceiptReviewService.confirm()`
+- [x] 4.5 **TEST**: Write failing tests for `ReceiptReviewService.confirm()`
   - Files: `src/sales/review/receipt-review.service.spec.ts`
   - Test: Confirm full amount → sale `PAID`, partial → `PARTIAL`, real ≠ declared uses real
   - Test: Non-PENDING receipt → `ReceiptNotActionableError`, no payment/event
@@ -135,30 +135,30 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
   - Mock: `ReceiptReviewRepository`, `SalesService.addPayment`
   - Gate: `pnpm test src/sales/review/receipt-review.service.spec.ts` (fails)
 
-- [ ] 4.6 **CODE**: Implement `ReceiptReviewService.confirm()`
+- [x] 4.6 **CODE**: Implement `ReceiptReviewService.confirm()`
   - Files: `src/sales/review/receipt-review.service.ts`
   - Logic: Load receipt (PENDING guard), load sale (CONFIRMED guard), runInTransaction { addPayment(authMode:'reviewer'), markConfirmed, emit receipt.confirmed }
   - Inject: `ReceiptReviewRepository`, `SalesService`, transaction helper, outbox writer
   - Gate: `pnpm test src/sales/review/receipt-review.service.spec.ts` (confirm tests pass)
 
-- [ ] 4.7 **TEST**: Write failing tests for `ReceiptReviewService.reject()`
+- [x] 4.7 **TEST**: Write failing tests for `ReceiptReviewService.reject()`
   - Files: Same `src/sales/review/receipt-review.service.spec.ts`
   - Test: Reject sets REJECTED + reason, sale untouched
   - Test: Reject on non-PENDING → `ReceiptNotActionableError`
   - Gate: `pnpm test src/sales/review/receipt-review.service.spec.ts` (reject tests fail)
 
-- [ ] 4.8 **CODE**: Implement `ReceiptReviewService.reject()`
+- [x] 4.8 **CODE**: Implement `ReceiptReviewService.reject()`
   - Files: `src/sales/review/receipt-review.service.ts`
   - Logic: PENDING guard, runInTransaction { markRejected(reason), emit receipt.rejected }
   - Gate: `pnpm test src/sales/review/receipt-review.service.spec.ts` (all tests pass), `pnpm lint src/sales/review`
   - Commit: "feat(sales): add ReceiptReviewService with confirm/reject orchestration"
 
-- [ ] 4.9 **TEST**: Write failing test for `ReceiptReviewService.listPending()`
+- [x] 4.9 **TEST**: Write failing test for `ReceiptReviewService.listPending()`
   - Files: Same `src/sales/review/receipt-review.service.spec.ts`
   - Test: Returns only PENDING receipts for given sale, includes mediaUrl
   - Gate: `pnpm test src/sales/review/receipt-review.service.spec.ts` (listPending test fails)
 
-- [ ] 4.10 **CODE**: Implement `ReceiptReviewService.listPending()`
+- [x] 4.10 **CODE**: Implement `ReceiptReviewService.listPending()`
   - Files: `src/sales/review/receipt-review.service.ts`
   - Logic: Call `repository.findPendingForSale(saleId, tenantId)`
   - Gate: `pnpm test src/sales/review/receipt-review.service.spec.ts` (all tests pass)
