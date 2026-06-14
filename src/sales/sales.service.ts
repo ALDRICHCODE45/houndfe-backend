@@ -348,7 +348,7 @@ export class SalesService {
   private async publishPaymentReceivedEvents(input: {
     saleId: string;
     tenantId: string;
-    actorId: string;
+    actorId: string | null;
     payments: PersistedSalePaymentRecord[];
     paidCents: number;
     debtCents: number;
@@ -1810,7 +1810,7 @@ export class SalesService {
       await this.publishPaymentReceivedEvents({
         saleId,
         tenantId,
-        actorId,
+        actorId: authMode === 'reviewer' ? null : actorId,
         payments: eventPayments,
         paidCents: updated.paidCents,
         debtCents: updated.debtCents,

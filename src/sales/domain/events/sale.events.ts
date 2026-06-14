@@ -148,7 +148,7 @@ export class SalePaymentReceivedEvent {
     public readonly saleId: string,
     public readonly paymentId: string,
     public readonly tenantId: string,
-    public readonly actorId: string,
+    public readonly actorId: string | null,
     public readonly method: 'cash' | 'card_credit' | 'card_debit' | 'transfer',
     public readonly amountCents: number,
     public readonly reference: string | undefined,

@@ -429,6 +429,65 @@ describe('SalesService', () => {
       );
     });
 
+    it('emits sale.payment.received with null actorId on the reviewer path (D7: reviewer is not the payer)', async () => {
+      const sale = buildConfirmedSale(
+        'sale-payment-reviewer-event',
+        'cashier-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await service.addPayment(
+        sale.id,
+        'reviewer-1',
+        { method: 'cash', amountCents: 500, reference: 'BANK-1' },
+        'idem-pay-reviewer-event',
+        'reviewer',
+      );
+
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        'Sale',
+        sale.id,
+        'sale.payment.received',
+        expect.objectContaining({
+          actorId: null,
+          method: 'transfer',
+          amountCents: 500,
+        }),
+      );
+    });
+
+    it('emits sale.payment.received with the cashier actorId on the owner path (regression guard)', async () => {
+      const sale = buildConfirmedSale(
+        'sale-payment-owner-event-guard',
+        'cashier-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await service.addPayment(
+        sale.id,
+        'cashier-1',
+        { method: 'cash', amountCents: 500 },
+        'idem-pay-owner-event-guard',
+      );
+
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        'Sale',
+        sale.id,
+        'sale.payment.received',
+        expect.objectContaining({
+          actorId: 'cashier-1',
+          method: 'cash',
+          amountCents: 500,
+        }),
+      );
+    });
+
     it('replays original response when idempotency key repeats', async () => {
       const replayPayload = {
         saleId: 'sale-payment-replay',
