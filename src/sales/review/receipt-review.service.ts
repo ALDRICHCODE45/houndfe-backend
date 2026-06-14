@@ -20,6 +20,11 @@ import type {
   ReceiptReviewQueueItemDto,
   ReceiptReviewQueueResponseDto,
 } from './dto/receipt-review-queue.dto';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
+import {
+  ReceiptConfirmedEvent,
+  ReceiptRejectedEvent,
+} from '../domain/events/sale.events';
 
 type ConfirmReceiptResult = {
   saleId: string;
@@ -53,6 +58,7 @@ export class ReceiptReviewService {
     @Inject(SALE_REPOSITORY)
     private readonly saleRepository: ISaleRepository,
     private readonly tenantPrisma: TenantPrismaService,
+    private readonly outboxWriter: OutboxWriterService,
   ) {}
 
   async listPending(saleId: string): Promise<ReceiptReviewQueueResponseDto> {
@@ -100,7 +106,7 @@ export class ReceiptReviewService {
         reviewerUserId,
         confirmedAt,
       );
-      this.publishReceiptConfirmedEventSeam({
+      await this.publishReceiptConfirmedEventSeam({
         receipt,
         reviewerUserId,
         amountCents: dto.amountCents,
@@ -131,7 +137,7 @@ export class ReceiptReviewService {
         tenantId,
         dto.reason,
       );
-      this.publishReceiptRejectedEventSeam({
+      await this.publishReceiptRejectedEventSeam({
         receipt,
         reviewerUserId,
         reason: dto.reason,
@@ -166,18 +172,52 @@ export class ReceiptReviewService {
     }
   }
 
-  private publishReceiptConfirmedEventSeam(
+  private async publishReceiptConfirmedEventSeam(
     input: ReceiptConfirmedEventSeamInput,
-  ): void {
-    void input;
-    // TODO(receipt-payment-confirmation Phase 6): publish receipt.confirmed via outbox.
+  ): Promise<void> {
+    const occurredAt = input.confirmedAt.toISOString();
+
+    await this.outboxWriter.publish(
+      this.tenantPrisma.getClient(),
+      input.receipt.tenantId,
+      'ReceiptEvidence',
+      input.receipt.id,
+      'receipt.confirmed',
+      new ReceiptConfirmedEvent(
+        input.receipt.id,
+        input.receipt.saleId,
+        input.receipt.tenantId,
+        input.amountCents,
+        'TRANSFER',
+        { kind: 'bot', channel: input.receipt.sale.channel },
+        input.reviewerUserId,
+        input.confirmedAt.toISOString(),
+        input.paymentResult.paymentStatus,
+        occurredAt,
+      ),
+    );
   }
 
-  private publishReceiptRejectedEventSeam(
+  private async publishReceiptRejectedEventSeam(
     input: ReceiptRejectedEventSeamInput,
-  ): void {
-    void input;
-    // TODO(receipt-payment-confirmation Phase 6): publish receipt.rejected via outbox.
+  ): Promise<void> {
+    const occurredAt = new Date().toISOString();
+
+    await this.outboxWriter.publish(
+      this.tenantPrisma.getClient(),
+      input.receipt.tenantId,
+      'ReceiptEvidence',
+      input.receipt.id,
+      'receipt.rejected',
+      new ReceiptRejectedEvent(
+        input.receipt.id,
+        input.receipt.saleId,
+        input.receipt.tenantId,
+        input.reviewerUserId,
+        input.reason,
+        occurredAt,
+      ),
+    );
   }
 }
 

@@ -194,25 +194,25 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
 
 ## Phase 6: Event Emission
 
-- [ ] 6.1 **TEST**: Write failing tests for `ReceiptConfirmedEvent` and `ReceiptRejectedEvent` types
+- [x] 6.1 **TEST**: Write failing tests for `ReceiptConfirmedEvent` and `ReceiptRejectedEvent` types
   - Files: `src/sales/domain/events/sale.events.spec.ts` (add new test cases)
   - Test: `ReceiptConfirmedEvent` includes receiptId, saleId, tenantId, amountCents, paymentMethod, origin, validatedByUserId, validatedAt, resultingPaymentStatus, occurredAt
   - Test: `ReceiptRejectedEvent` includes receiptId, saleId, tenantId, validatedByUserId, reason, occurredAt
   - Gate: `pnpm test src/sales/domain/events/sale.events.spec.ts` (fails)
 
-- [ ] 6.2 **CODE**: Add event type definitions to domain events
+- [x] 6.2 **CODE**: Add event type definitions to domain events
   - Files: `src/sales/domain/events/sale.events.ts`
   - Add: `ReceiptConfirmedEvent` and `ReceiptRejectedEvent` interfaces matching outbox event contract
   - Gate: `pnpm test src/sales/domain/events/sale.events.spec.ts` (passes)
 
-- [ ] 6.3 **TEST**: Write failing test for outbox event emission
+- [x] 6.3 **TEST**: Write failing test for outbox event emission
   - Files: Same `src/sales/review/receipt-review.service.spec.ts` (extend existing tests)
   - Test: Confirm emits `receipt.confirmed` via `outboxWriter.publish` with all 3 audit facts (TRANSFER, bot-origin, validatedByUserId)
   - Test: Reject emits `receipt.rejected` with reason
   - Spy: `outboxWriter.publish` call args
   - Gate: `pnpm test src/sales/review/receipt-review.service.spec.ts` (new event assertions fail)
 
-- [ ] 6.4 **CODE**: Wire outbox event emission in service
+- [x] 6.4 **CODE**: Wire outbox event emission in service
   - Files: `src/sales/review/receipt-review.service.ts`
   - Logic: After `markConfirmed`, call `outboxWriter.publish('receipt.confirmed', aggregateType: 'ReceiptEvidence', payload)`
   - Logic: After `markRejected`, call `outboxWriter.publish('receipt.rejected', payload with reason)`

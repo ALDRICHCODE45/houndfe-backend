@@ -168,3 +168,29 @@ export class SaleFullyPaidEvent {
     public readonly paidAt: string,
   ) {}
 }
+
+export class ReceiptConfirmedEvent {
+  constructor(
+    public readonly receiptId: string,
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly amountCents: number,
+    public readonly paymentMethod: 'TRANSFER',
+    public readonly origin: { kind: 'bot'; channel: 'ONLINE' | 'POS' },
+    public readonly validatedByUserId: string,
+    public readonly validatedAt: string,
+    public readonly resultingPaymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT',
+    public readonly occurredAt: string,
+  ) {}
+}
+
+export class ReceiptRejectedEvent {
+  constructor(
+    public readonly receiptId: string,
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly validatedByUserId: string,
+    public readonly reason: string,
+    public readonly occurredAt: string,
+  ) {}
+}

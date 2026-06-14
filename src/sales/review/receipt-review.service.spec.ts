@@ -6,6 +6,7 @@ import type {
 import type { SalesService } from '../sales.service';
 import type { ISaleRepository } from '../domain/sale.repository';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import type { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import {
   ReceiptNotActionableError,
   SaleNotReviewableError,
@@ -61,12 +62,21 @@ function makeSaleRepository() {
   } as jest.Mocked<Pick<ISaleRepository, 'runInTransaction'>>;
 }
 
+function makeOutboxWriter() {
+  return {
+    publish: jest.fn().mockResolvedValue(undefined),
+  } as jest.Mocked<Pick<OutboxWriterService, 'publish'>>;
+}
+
 function makeService() {
   const repository = makeRepository();
   const salesService = makeSalesService();
   const saleRepository = makeSaleRepository();
+  const outboxWriter = makeOutboxWriter();
+  const txClient = { outboxEvent: { create: jest.fn() } };
   const tenantPrisma = {
     getTenantId: jest.fn(() => 'tenant-1'),
+    getClient: jest.fn(() => txClient),
   } as unknown as jest.Mocked<Pick<TenantPrismaService, 'getTenantId'>>;
 
   const service = new ReceiptReviewService(
@@ -74,9 +84,18 @@ function makeService() {
     salesService as unknown as SalesService,
     saleRepository as unknown as ISaleRepository,
     tenantPrisma as unknown as TenantPrismaService,
+    outboxWriter as unknown as OutboxWriterService,
   );
 
-  return { service, repository, salesService, saleRepository, tenantPrisma };
+  return {
+    service,
+    repository,
+    salesService,
+    saleRepository,
+    tenantPrisma,
+    outboxWriter,
+    txClient,
+  };
 }
 
 describe('ReceiptReviewService', () => {
@@ -248,6 +267,48 @@ describe('ReceiptReviewService', () => {
 
       expect(salesService.addPayment.mock.calls).toHaveLength(0);
     });
+
+    it('publishes receipt.confirmed with transfer, bot-origin, and reviewer audit facts inside the transaction', async () => {
+      const { service, repository, salesService, outboxWriter, txClient } =
+        makeService();
+      repository.findById.mockResolvedValue(makeReceipt());
+      salesService.addPayment.mockResolvedValue({
+        saleId: 'sale-1',
+        paidCents: 2000,
+        debtCents: 0,
+        totalCents: 2000,
+        paymentStatus: 'PAID',
+        paymentIds: ['payment-1'],
+      });
+
+      await service.confirm(
+        'sale-1',
+        'receipt-1',
+        'reviewer-1',
+        { amountCents: 2000 },
+        'idem-events-1',
+      );
+
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        txClient,
+        'tenant-1',
+        'ReceiptEvidence',
+        'receipt-1',
+        'receipt.confirmed',
+        {
+          receiptId: 'receipt-1',
+          saleId: 'sale-1',
+          tenantId: 'tenant-1',
+          amountCents: 2000,
+          paymentMethod: 'TRANSFER',
+          origin: { kind: 'bot', channel: 'ONLINE' },
+          validatedByUserId: 'reviewer-1',
+          validatedAt: '2026-06-13T12:00:00.000Z',
+          resultingPaymentStatus: 'PAID',
+          occurredAt: '2026-06-13T12:00:00.000Z',
+        },
+      );
+    });
   });
 
   describe('reject', () => {
@@ -284,6 +345,31 @@ describe('ReceiptReviewService', () => {
 
       expect(saleRepository.runInTransaction.mock.calls).toHaveLength(0);
       expect(salesService.addPayment.mock.calls).toHaveLength(0);
+    });
+
+    it('publishes receipt.rejected with the reviewer audit fact and rejection reason inside the transaction', async () => {
+      const { service, repository, outboxWriter, txClient } = makeService();
+      repository.findById.mockResolvedValue(makeReceipt());
+
+      await service.reject('sale-1', 'receipt-1', 'reviewer-1', {
+        reason: 'Unreadable receipt',
+      });
+
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        txClient,
+        'tenant-1',
+        'ReceiptEvidence',
+        'receipt-1',
+        'receipt.rejected',
+        {
+          receiptId: 'receipt-1',
+          saleId: 'sale-1',
+          tenantId: 'tenant-1',
+          validatedByUserId: 'reviewer-1',
+          reason: 'Unreadable receipt',
+          occurredAt: '2026-06-13T12:00:00.000Z',
+        },
+      );
     });
   });
 
