@@ -536,7 +536,8 @@ export class PrismaSaleRepository implements ISaleRepository {
     method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
     amountCents: number;
     reference?: string | null;
-    userId: string;
+    userId: string | null;
+    metadataJson?: unknown;
   }): Promise<{
     paymentId: string;
     paidCents: number;
@@ -552,6 +553,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           method: input.method,
           amountCents: input.amountCents,
           reference: input.reference,
+          metadataJson: input.metadataJson,
         },
       ],
     });
@@ -567,11 +569,12 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async persistCollectedPayments(input: {
     saleId: string;
-    userId: string;
+    userId: string | null;
     payments: Array<{
       method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
       amountCents: number;
       reference?: string | null;
+      metadataJson?: unknown;
     }>;
   }): Promise<{
     paymentIds: string[];
@@ -635,6 +638,10 @@ export class PrismaSaleRepository implements ISaleRepository {
           | 'TRANSFER',
         amountCents: payment.amountCents,
         reference: payment.reference ?? null,
+        metadataJson:
+          payment.metadataJson === undefined
+            ? Prisma.JsonNull
+            : (payment.metadataJson as Prisma.InputJsonValue),
         userId: input.userId,
         tenantId,
       })),

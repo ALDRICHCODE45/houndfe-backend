@@ -65,13 +65,13 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
   - Gate: `pnpm test src/auth/authorization/domain/permission.spec.ts` (passes), `pnpm lint src/auth`
   - Commit: "feat(auth): add ReceiptEvidence CASL permissions"
 
-- [ ] 2.3 **TEST**: Write failing tests for `addPayment` authMode parameter
+- [x] 2.3 **TEST**: Write failing tests for `addPayment` authMode parameter
   - Files: `src/sales/sales.service.spec.ts` (add new test cases)
   - Test: `authMode: 'owner'` rejects non-owner (existing behavior), `authMode: 'reviewer'` bypasses ownership check
   - Test: Default `authMode` is `'owner'` (zero regression for existing controller calls)
   - Gate: `pnpm test src/sales/sales.service.spec.ts` (fails on new tests)
 
-- [ ] 2.4 **CODE**: Add `authMode: 'owner' | 'reviewer'` parameter to `addPayment` in `SalesService`
+- [x] 2.4 **CODE**: Add `authMode: 'owner' | 'reviewer'` parameter to `addPayment` in `SalesService`
   - Files: `src/sales/sales.service.ts` (~1770)
   - Modify: Replace `sale.userId !== actorId` ownership guard with conditional check based on `authMode`
   - Default: `authMode = 'owner'` to preserve existing cashier behavior

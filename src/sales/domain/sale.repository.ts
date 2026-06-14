@@ -138,7 +138,8 @@ export interface ISaleRepository {
     method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
     amountCents: number;
     reference?: string | null;
-    userId: string;
+    userId: string | null;
+    metadataJson?: unknown;
   }): Promise<{
     paymentId: string;
     paidCents: number;
@@ -149,11 +150,12 @@ export interface ISaleRepository {
 
   persistCollectedPayments(input: {
     saleId: string;
-    userId: string;
+    userId: string | null;
     payments: Array<{
       method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
       amountCents: number;
       reference?: string | null;
+      metadataJson?: unknown;
     }>;
   }): Promise<{
     paymentIds: string[];

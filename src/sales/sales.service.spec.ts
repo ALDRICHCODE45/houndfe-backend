@@ -366,6 +366,69 @@ describe('SalesService', () => {
       ).rejects.toThrow('SALE_NOT_FOUND');
     });
 
+    it('keeps owner authorization as the default addPayment mode', async () => {
+      const sale = buildConfirmedSale(
+        'sale-payment-default-owner-mode',
+        'owner-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await service.addPayment(
+        sale.id,
+        'owner-1',
+        { method: 'cash', amountCents: 500 },
+        'idem-pay-default-owner-mode',
+      );
+
+      expect(saleRepo.persistCollectedPayments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId: sale.id,
+          userId: 'owner-1',
+          payments: [
+            expect.objectContaining({
+              method: 'cash',
+              amountCents: 500,
+            }),
+          ],
+        }),
+      );
+    });
+
+    it('allows reviewer mode to collect payment for a non-owner sale as bot-originated transfer', async () => {
+      const sale = buildConfirmedSale(
+        'sale-payment-reviewer-mode',
+        'cashier-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await service.addPayment(
+        sale.id,
+        'reviewer-1',
+        { method: 'cash', amountCents: 500, reference: 'BANK-1' },
+        'idem-pay-reviewer-mode',
+        'reviewer',
+      );
+
+      expect(saleRepo.persistCollectedPayments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId: sale.id,
+          userId: null,
+          payments: [
+            expect.objectContaining({
+              method: 'transfer',
+              amountCents: 500,
+              reference: 'BANK-1',
+              metadataJson: {
+                origin: { kind: 'bot', channel: 'POS' },
+              },
+            }),
+          ],
+        }),
+      );
+    });
+
     it('replays original response when idempotency key repeats', async () => {
       const replayPayload = {
         saleId: 'sale-payment-replay',
