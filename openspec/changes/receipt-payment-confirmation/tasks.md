@@ -221,20 +221,20 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
 
 ## Phase 7: Integration & Verification
 
-- [ ] 7.1 **TEST**: Write failing integration test for full confirm flow
+- [x] 7.1 **TEST**: Write failing integration test for full confirm flow
   - Files: `src/sales/review/receipt-review.integration.spec.ts`
   - Test: End-to-end confirm with real DB (test DB), real transaction, verify receipt CONFIRMED + sale PAID/PARTIAL + events emitted
   - Gate: `pnpm test src/sales/review/receipt-review.integration.spec.ts` (fails)
 
-- [ ] 7.2 **CODE**: Fix integration test (if needed, adjust service/controller)
+- [x] 7.2 **CODE**: Fix integration test (if needed, adjust service/controller)
   - Gate: `pnpm test src/sales/review/receipt-review.integration.spec.ts` (passes)
 
-- [ ] 7.3 **TEST**: Write failing integration test for reject flow
+- [x] 7.3 **TEST**: Write failing integration test for reject flow
   - Files: Same `src/sales/review/receipt-review.integration.spec.ts`
   - Test: End-to-end reject with reason, verify receipt REJECTED + sale untouched + event emitted
   - Gate: `pnpm test src/sales/review/receipt-review.integration.spec.ts` (reject test fails)
 
-- [ ] 7.4 **CODE**: Fix integration test (if needed, adjust service)
+- [x] 7.4 **CODE**: Fix integration test (if needed, adjust service)
   - Gate: `pnpm test src/sales/review/receipt-review.integration.spec.ts` (all tests pass)
   - Commit: "test(sales): add receipt review integration tests"
 
