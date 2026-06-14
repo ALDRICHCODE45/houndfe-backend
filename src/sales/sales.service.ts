@@ -86,7 +86,10 @@ type CollectionPaymentEntry = {
   method: SupportedPaymentCollectionMethod;
   amountCents: number;
   reference?: string;
+  metadataJson?: unknown;
 };
+
+type AddPaymentAuthMode = 'owner' | 'reviewer';
 
 type ChargePaymentEntry = {
   method: SupportedChargeMethod;
@@ -345,7 +348,7 @@ export class SalesService {
   private async publishPaymentReceivedEvents(input: {
     saleId: string;
     tenantId: string;
-    actorId: string;
+    actorId: string | null;
     payments: PersistedSalePaymentRecord[];
     paidCents: number;
     debtCents: number;
@@ -1729,6 +1732,7 @@ export class SalesService {
       }>;
     },
     idempotencyKey: string,
+    authMode: AddPaymentAuthMode = 'owner',
   ) {
     const normalizedPayments = normalizeCollectionRequestPayments(dto);
     const hashPayments = sortPaymentsForHash(
@@ -1767,7 +1771,7 @@ export class SalesService {
     return this.saleRepo.runInTransaction(async () => {
       const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
-      if (!sale || sale.userId !== actorId) {
+      if (!sale || (authMode === 'owner' && sale.userId !== actorId)) {
         throw new BusinessRuleViolationError(
           'SALE_NOT_FOUND',
           'SALE_NOT_FOUND',
@@ -1779,13 +1783,24 @@ export class SalesService {
           'SALE_NOT_CONFIRMABLE_FOR_PAYMENT',
         );
       }
+      const paymentsToPersist =
+        authMode === 'reviewer'
+          ? normalizedPayments.map((payment) => ({
+              ...payment,
+              method: 'transfer' as const,
+              metadataJson: {
+                origin: { kind: 'bot', channel: sale.channel },
+              },
+            }))
+          : normalizedPayments;
+
       const updated = await this.saleRepo.persistCollectedPayments({
         saleId,
-        userId: actorId,
-        payments: normalizedPayments,
+        userId: authMode === 'reviewer' ? null : actorId,
+        payments: paymentsToPersist,
       });
 
-      const eventPayments = normalizedPayments.map((payment, index) => ({
+      const eventPayments = paymentsToPersist.map((payment, index) => ({
         paymentId: updated.paymentIds[index],
         method: payment.method,
         amountCents: payment.amountCents,
@@ -1795,7 +1810,7 @@ export class SalesService {
       await this.publishPaymentReceivedEvents({
         saleId,
         tenantId,
-        actorId,
+        actorId: authMode === 'reviewer' ? null : actorId,
         payments: eventPayments,
         paidCents: updated.paidCents,
         debtCents: updated.debtCents,

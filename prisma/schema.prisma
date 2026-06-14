@@ -803,12 +803,15 @@ model ReceiptEvidence {
   status              ReceiptEvidenceStatus @default(PENDING)
   confirmedByUserId   String?
   confirmedAt         DateTime?
+  rejectionReason     String?
   createdAt           DateTime              @default(now())
 
-  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale        Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  confirmedBy User?  @relation("ReceiptReviewer", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, saleId])
+  @@index([tenantId, status])
   @@map("receipt_evidences")
 }
 
@@ -855,6 +858,7 @@ model User {
   salesAsSeller     Sale[] @relation("SaleSeller")
   salePayments      SalePayment[]
   saleComments      SaleComment[] @relation("SaleCommentAuthor")
+  reviewedReceipts  ReceiptEvidence[] @relation("ReceiptReviewer")
   employees         Employee[]
 
   @@map("users")
@@ -937,6 +941,7 @@ model Customer {
   email                 String?
   comments              String?
   preferredPaymentMethod String?
+  isTrusted             Boolean  @default(false)
   tenantId              String
 
   tenant                Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)

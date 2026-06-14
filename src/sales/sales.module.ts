@@ -21,6 +21,10 @@ import { SalesQueryController } from './sales-query.controller';
 import { SalesPaymentsController } from './sales-payments.controller';
 import { OutboxModule } from '../shared/outbox/outbox.module';
 import { SaleCommentsModule } from './comments/sale-comments.module';
+import { ReceiptReviewController } from './review/receipt-review.controller';
+import { ReceiptReviewService } from './review/receipt-review.service';
+import { RECEIPT_REVIEW_REPOSITORY } from './review/domain/receipt-review.repository';
+import { PrismaReceiptReviewRepository } from './review/infrastructure/prisma-receipt-review.repository';
 
 @Module({
   imports: [ProductsModule, AuthModule, OutboxModule, SaleCommentsModule],
@@ -29,12 +33,18 @@ import { SaleCommentsModule } from './comments/sale-comments.module';
     SalesCatalogController,
     SalesQueryController,
     SalesPaymentsController,
+    ReceiptReviewController,
   ],
   providers: [
     SalesService,
     {
       provide: SALE_REPOSITORY,
       useClass: PrismaSaleRepository,
+    },
+    ReceiptReviewService,
+    {
+      provide: RECEIPT_REVIEW_REPOSITORY,
+      useClass: PrismaReceiptReviewRepository,
     },
     SaleEventListener,
   ],
