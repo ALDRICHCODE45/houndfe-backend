@@ -81,22 +81,22 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
 
 ## Phase 3: Review Repository & Data Access
 
-- [ ] 3.1 **TEST**: Write failing tests for `ReceiptReviewRepository` port interface
+- [x] 3.1 **TEST**: Write failing tests for `ReceiptReviewRepository` port interface
   - Files: `src/sales/review/domain/receipt-review.repository.spec.ts`
   - Test: Interface defines `findPendingForSale`, `findById`, `markConfirmed`, `markRejected`
   - Gate: `pnpm test src/sales/review/domain/receipt-review.repository.spec.ts` (fails)
 
-- [ ] 3.2 **CODE**: Create `ReceiptReviewRepository` port interface
+- [x] 3.2 **CODE**: Create `ReceiptReviewRepository` port interface
   - Files: `src/sales/review/domain/receipt-review.repository.ts`
   - Methods: `findPendingForSale(saleId, tenantId)`, `findById(receiptId, tenantId)`, `markConfirmed(receiptId, userId, timestamp)`, `markRejected(receiptId, reason)`
   - Gate: `pnpm test src/sales/review/domain/receipt-review.repository.spec.ts` (passes)
 
-- [ ] 3.3 **TEST**: Write failing tests for Prisma repository adapter
+- [x] 3.3 **TEST**: Write failing tests for Prisma repository adapter
   - Files: `src/sales/review/infrastructure/prisma-receipt-review.repository.spec.ts`
   - Test: Adapter implements port, uses `TenantPrismaService`, filters by `tenantId` + `status === 'PENDING'`, FK writes for `confirmedByUserId`
   - Gate: `pnpm test src/sales/review/infrastructure/prisma-receipt-review.repository.spec.ts` (fails)
 
-- [ ] 3.4 **CODE**: Create Prisma repository adapter
+- [x] 3.4 **CODE**: Create Prisma repository adapter
   - Files: `src/sales/review/infrastructure/prisma-receipt-review.repository.ts`
   - Implements: `ReceiptReviewRepository` via `TenantPrismaService`
   - Query: `@@index([tenantId, status])` for queue listing, FK relation for `confirmedBy`
