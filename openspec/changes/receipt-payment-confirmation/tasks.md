@@ -53,12 +53,12 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
 
 ## Phase 2: Authorization & Domain Routing
 
-- [ ] 2.1 **TEST**: Write failing test for `ReceiptEvidence` CASL subject registration
+- [x] 2.1 **TEST**: Write failing test for `ReceiptEvidence` CASL subject registration
   - Files: `src/auth/authorization/domain/permission.spec.ts` (add new test cases)
   - Test: `ReceiptEvidence` in `AppSubjects`, 3 permissions (`read`, `update`, `manage`) in `PERMISSION_REGISTRY`
   - Gate: `pnpm test src/auth/authorization/domain/permission.spec.ts` (fails)
 
-- [ ] 2.2 **CODE**: Add `ReceiptEvidence` CASL subject and permissions
+- [x] 2.2 **CODE**: Add `ReceiptEvidence` CASL subject and permissions
   - Files: `src/auth/authorization/domain/permission.ts`
   - Add: `'ReceiptEvidence'` to `AppSubjects` union type
   - Add: 3 `PERMISSION_REGISTRY` entries (`read:ReceiptEvidence`, `update:ReceiptEvidence`, `manage:ReceiptEvidence`)

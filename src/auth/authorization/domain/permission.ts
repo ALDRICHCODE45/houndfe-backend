@@ -20,6 +20,7 @@ export type AppSubjects =
   | 'Product'
   | 'Order'
   | 'Sale'
+  | 'ReceiptEvidence'
   | 'User'
   | 'Role'
   | 'Tenant'
@@ -152,6 +153,23 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'Sale', action: 'delete', description: 'Delete sales' },
   { subject: 'Sale', action: 'manage', description: 'Full sale management' },
 
+  // ReceiptEvidence permissions
+  {
+    subject: 'ReceiptEvidence',
+    action: 'read',
+    description: 'View receipt evidence for review',
+  },
+  {
+    subject: 'ReceiptEvidence',
+    action: 'update',
+    description: 'Confirm or reject receipt evidence',
+  },
+  {
+    subject: 'ReceiptEvidence',
+    action: 'manage',
+    description: 'Full receipt evidence review management',
+  },
+
   // SaleComment permissions
   {
     subject: 'SaleComment',
@@ -275,7 +293,11 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     action: 'create',
     description: 'Create employees',
   },
-  { subject: 'Employee', action: 'read', description: 'View employee profiles' },
+  {
+    subject: 'Employee',
+    action: 'read',
+    description: 'View employee profiles',
+  },
   {
     subject: 'Employee',
     action: 'update',
