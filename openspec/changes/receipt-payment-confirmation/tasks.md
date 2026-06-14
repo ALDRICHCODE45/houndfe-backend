@@ -165,7 +165,7 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
 
 ## Phase 5: Controller & HTTP API
 
-- [ ] 5.1 **TEST**: Write failing tests for `ReceiptReviewController` endpoints
+- [x] 5.1 **TEST**: Write failing tests for `ReceiptReviewController` endpoints
   - Files: `src/sales/review/receipt-review.controller.spec.ts`
   - Test: `GET /sales/:id/receipts` returns pending queue
   - Test: `POST /sales/:id/receipts/:rid/confirm` requires `ReceiptEvidence:update`, calls service, returns 200/400 on validation
@@ -173,7 +173,7 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
   - Use: `Test.createTestingModule`, apply global `ValidationPipe`
   - Gate: `pnpm test src/sales/review/receipt-review.controller.spec.ts` (fails)
 
-- [ ] 5.2 **CODE**: Create `ReceiptReviewController`
+- [x] 5.2 **CODE**: Create `ReceiptReviewController`
   - Files: `src/sales/review/receipt-review.controller.ts`
   - Routes: `GET /sales/:id/receipts`, `POST /sales/:id/receipts/:rid/confirm`, `POST /sales/:id/receipts/:rid/reject`
   - Guards: `@CheckPolicies()` with `ReceiptEvidence:update` for confirm/reject
@@ -181,12 +181,12 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
   - Gate: `pnpm test src/sales/review/receipt-review.controller.spec.ts` (passes), `pnpm lint src/sales/review`
   - Commit: "feat(sales): add receipt review HTTP controller with CASL guards"
 
-- [ ] 5.3 **TEST**: Write failing test for module registration
+- [x] 5.3 **TEST**: Write failing test for module registration
   - Files: `src/sales/sales.module.spec.ts` (add new test case)
   - Test: `ReceiptReviewService`, `ReceiptReviewController`, repository port + adapter are registered
   - Gate: `pnpm test src/sales/sales.module.spec.ts` (fails)
 
-- [ ] 5.4 **CODE**: Register review components in `SalesModule`
+- [x] 5.4 **CODE**: Register review components in `SalesModule`
   - Files: `src/sales/sales.module.ts`
   - Add: `ReceiptReviewController` to `controllers`, `ReceiptReviewService` to `providers`, repository port + Prisma adapter to `providers`
   - Gate: `pnpm test src/sales/sales.module.spec.ts` (passes), `pnpm lint src/sales`
