@@ -35,17 +35,17 @@ This change is above the 400-line budget (~600-700 lines), but the developer is 
 
 ## Phase 1: Schema & Foundation
 
-- [ ] 1.1 **TEST**: Write migration file with additive schema changes (`ReceiptEvidence.rejectionReason String?`, FK `confirmedBy User?` relation, `@@index([tenantId, status])`, `Customer.isTrusted Boolean @default(false)`)
+- [x] 1.1 **TEST**: Write migration file with additive schema changes (`ReceiptEvidence.rejectionReason String?`, FK `confirmedBy User?` relation, `@@index([tenantId, status])`, `Customer.isTrusted Boolean @default(false)`)
   - Files: `prisma/migrations/<timestamp>_receipt_review/migration.sql`
   - Gate: `pnpm prisma migrate dev --name receipt_review --create-only`, inspect generated SQL
   - Commit: "feat(sales): add receipt review schema migration"
 
-- [ ] 1.2 **TEST**: Write failing test for `ReceiptNotActionableError` and `SaleNotReviewableError`
+- [x] 1.2 **TEST**: Write failing test for `ReceiptNotActionableError` and `SaleNotReviewableError`
   - Files: `src/sales/review/domain/receipt-review.errors.spec.ts`
   - Test: Errors extend `BusinessRuleViolationError`, correct code/message
   - Gate: `pnpm test src/sales/review/domain/receipt-review.errors.spec.ts` (fails)
 
-- [ ] 1.3 **CODE**: Create error types matching `src/sales/domain/sale.errors.ts` pattern
+- [x] 1.3 **CODE**: Create error types matching `src/sales/domain/sale.errors.ts` pattern
   - Files: `src/sales/review/domain/receipt-review.errors.ts`
   - Exports: `ReceiptNotActionableError`, `SaleNotReviewableError`
   - Gate: `pnpm test src/sales/review/domain/receipt-review.errors.spec.ts` (passes)
