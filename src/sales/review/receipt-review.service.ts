@@ -183,18 +183,20 @@ export class ReceiptReviewService {
       'ReceiptEvidence',
       input.receipt.id,
       'receipt.confirmed',
-      new ReceiptConfirmedEvent(
-        input.receipt.id,
-        input.receipt.saleId,
-        input.receipt.tenantId,
-        input.amountCents,
-        'TRANSFER',
-        { kind: 'bot', channel: input.receipt.sale.channel },
-        input.reviewerUserId,
-        input.confirmedAt.toISOString(),
-        input.paymentResult.paymentStatus,
-        occurredAt,
-      ),
+      {
+        ...new ReceiptConfirmedEvent(
+          input.receipt.id,
+          input.receipt.saleId,
+          input.receipt.tenantId,
+          input.amountCents,
+          'TRANSFER',
+          { kind: 'bot', channel: input.receipt.sale.channel },
+          input.reviewerUserId,
+          input.confirmedAt.toISOString(),
+          input.paymentResult.paymentStatus,
+          occurredAt,
+        ),
+      },
     );
   }
 
@@ -209,14 +211,16 @@ export class ReceiptReviewService {
       'ReceiptEvidence',
       input.receipt.id,
       'receipt.rejected',
-      new ReceiptRejectedEvent(
-        input.receipt.id,
-        input.receipt.saleId,
-        input.receipt.tenantId,
-        input.reviewerUserId,
-        input.reason,
-        occurredAt,
-      ),
+      {
+        ...new ReceiptRejectedEvent(
+          input.receipt.id,
+          input.receipt.saleId,
+          input.receipt.tenantId,
+          input.reviewerUserId,
+          input.reason,
+          occurredAt,
+        ),
+      },
     );
   }
 }
