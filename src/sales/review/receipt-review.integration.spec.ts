@@ -468,7 +468,10 @@ describe('Receipt review integration flow', () => {
     ]);
     expect(outboxWriter.events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ eventType: 'sale.payment.received' }),
+        expect.objectContaining({
+          eventType: 'sale.payment.received',
+          payload: expect.objectContaining({ actorId: null }),
+        }),
         expect.objectContaining({ eventType: 'sale.fully.paid' }),
         expect.objectContaining({
           eventType: 'receipt.confirmed',
@@ -621,6 +624,138 @@ describe('Receipt review integration flow', () => {
     expect(receipt.status).toBe('PENDING');
     expect(saleRepository.payments).toEqual([]);
     expect(outboxWriter.events).toEqual([]);
+  });
+
+  it('accumulates payments across multiple receipt confirmations and enforces idempotency on re-confirm', async () => {
+    const sale = makeSale({
+      totalCents: 3000,
+      paidCents: 0,
+      debtCents: 3000,
+      paymentStatus: 'PARTIAL',
+    });
+    const receiptA = makeReceipt(sale, {
+      id: 'aaaa1111-1111-4111-8111-111111111111',
+      declaredAmountCents: 1000,
+      declaredReference: 'TRX-A',
+    });
+    const receiptB = makeReceipt(sale, {
+      id: 'bbbb2222-2222-4222-8222-222222222222',
+      declaredAmountCents: 2000,
+      declaredReference: 'TRX-B',
+    });
+    const receipts = new Map<string, ReceiptReviewRecord>([
+      [receiptA.id, receiptA],
+      [receiptB.id, receiptB],
+    ]);
+    const saleRepository = new InMemorySaleRepository(sale);
+    const receiptRepository = new InMemoryReceiptReviewRepository(receipts);
+    const outboxWriter = new CapturingOutboxWriter();
+    const tenantPrisma = {
+      getTenantId: () => sale.tenantId,
+      getClient: () => ({ outboxEvent: { create: jest.fn() } }),
+    } as unknown as TenantPrismaService;
+    const salesService = new SalesService(
+      saleRepository as unknown as ISaleRepository,
+      {} as never,
+      new EventEmitter2(),
+      outboxWriter as unknown as OutboxWriterService,
+      tenantPrisma,
+    );
+    const receiptReviewService = new ReceiptReviewService(
+      receiptRepository,
+      salesService,
+      saleRepository as unknown as ISaleRepository,
+      tenantPrisma,
+      outboxWriter as unknown as OutboxWriterService,
+    );
+
+    // Confirm receipt A (partial: 1000 of 3000)
+    const resultA = await receiptReviewService.confirm(
+      sale.id,
+      receiptA.id,
+      'reviewer-user-id',
+      { amountCents: 1000 },
+      'idem-multi-a',
+    );
+
+    expect(resultA.paymentStatus).toBe('PARTIAL');
+    expect(resultA.paidCents).toBe(1000);
+    expect(resultA.debtCents).toBe(2000);
+    expect(receiptA.status).toBe('CONFIRMED');
+    expect(sale.paidCents).toBe(1000);
+    expect(sale.debtCents).toBe(2000);
+
+    // Confirm receipt B (settles remaining 2000 → PAID)
+    const resultB = await receiptReviewService.confirm(
+      sale.id,
+      receiptB.id,
+      'reviewer-user-id',
+      { amountCents: 2000 },
+      'idem-multi-b',
+    );
+
+    expect(resultB.paymentStatus).toBe('PAID');
+    expect(resultB.paidCents).toBe(3000);
+    expect(resultB.debtCents).toBe(0);
+    expect(receiptB.status).toBe('CONFIRMED');
+    expect(sale.paidCents).toBe(3000);
+    expect(sale.debtCents).toBe(0);
+    expect(sale.paymentStatus).toBe('PAID');
+
+    // Verify two distinct payments were recorded
+    expect(saleRepository.payments).toHaveLength(2);
+    expect(saleRepository.payments[0]).toEqual(
+      expect.objectContaining({
+        userId: null,
+        method: 'transfer',
+        amountCents: 1000,
+      }),
+    );
+    expect(saleRepository.payments[1]).toEqual(
+      expect.objectContaining({
+        userId: null,
+        method: 'transfer',
+        amountCents: 2000,
+      }),
+    );
+
+    // Verify events: two sale.payment.received, one sale.fully.paid, two receipt.confirmed
+    const paymentReceivedEvents = outboxWriter.events.filter(
+      (e) => e.eventType === 'sale.payment.received',
+    );
+    const fullyPaidEvents = outboxWriter.events.filter(
+      (e) => e.eventType === 'sale.fully.paid',
+    );
+    const receiptConfirmedEvents = outboxWriter.events.filter(
+      (e) => e.eventType === 'receipt.confirmed',
+    );
+
+    expect(paymentReceivedEvents).toHaveLength(2);
+    expect(fullyPaidEvents).toHaveLength(1);
+    expect(receiptConfirmedEvents).toHaveLength(2);
+    expect(
+      (receiptConfirmedEvents[0].payload as Record<string, unknown>)
+        .resultingPaymentStatus,
+    ).toBe('PARTIAL');
+    expect(
+      (receiptConfirmedEvents[1].payload as Record<string, unknown>)
+        .resultingPaymentStatus,
+    ).toBe('PAID');
+
+    // Idempotency: re-confirming an already-confirmed receipt is blocked
+    await expect(
+      receiptReviewService.confirm(
+        sale.id,
+        receiptA.id,
+        'reviewer-user-id',
+        { amountCents: 1000 },
+        'idem-multi-a',
+      ),
+    ).rejects.toBeInstanceOf(ReceiptNotActionableError);
+
+    // No extra payments or events created by the re-confirm attempt
+    expect(saleRepository.payments).toHaveLength(2);
+    expect(outboxWriter.events.filter((e) => e.eventType === 'receipt.confirmed')).toHaveLength(2);
   });
 });
 
