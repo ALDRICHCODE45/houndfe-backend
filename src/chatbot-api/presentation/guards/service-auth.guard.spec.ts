@@ -4,6 +4,8 @@ import {
   HttpStatus,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { Test } from '@nestjs/testing';
 import { ClsModule, ClsService } from 'nestjs-cls';
 import { Reflector } from '@nestjs/core';
@@ -210,7 +212,26 @@ describe('ServiceAuthGuard', () => {
 
   it('is provided by ChatbotApiModule with CLS support', async () => {
     const moduleRef = await Test.createTestingModule({
-      imports: [ClsModule.forRoot({}), ChatbotApiModule],
+      imports: [
+        ConfigModule.forRoot({
+          isGlobal: true,
+          ignoreEnvFile: true,
+          load: [
+            () => ({
+              JWT_SECRET: 'test-secret',
+              SPACES_ACCESS_KEY_ID: 'test-access-key',
+              SPACES_BUCKET: 'test-bucket',
+              SPACES_ENDPOINT: 'https://spaces.example.test',
+              SPACES_PUBLIC_BASE_URL: 'https://cdn.example.test',
+              SPACES_REGION: 'test-region',
+              SPACES_SECRET_ACCESS_KEY: 'test-secret-key',
+            }),
+          ],
+        }),
+        ClsModule.forRoot({ global: true }),
+        EventEmitterModule.forRoot(),
+        ChatbotApiModule,
+      ],
     })
       .overrideProvider(SERVICE_CREDENTIAL_REPOSITORY)
       .useValue(repository)

@@ -2289,6 +2289,213 @@ describe('SalesService', () => {
     });
   });
 
+  describe('confirmBotSale', () => {
+    const botSaleInput = {
+      cashierUserId: 'user-bot-cashier',
+      customerId: 'customer-1',
+      shippingAddressId: 'shipping-1',
+      items: [
+        {
+          productId: 'prod-1',
+          variantId: 'var-1',
+          productName: 'Prod 1',
+          variantName: '3 kg',
+          quantity: 2,
+          unitPriceCents: 1000,
+        },
+      ],
+    };
+
+    const setupConfirmBotSaleHappyPath = () => {
+      productsService.getApplicablePrices.mockResolvedValue([
+        {
+          priceListId: 'price-list-1',
+          priceListName: 'PUBLICO',
+          priceCents: 1000,
+        },
+      ]);
+      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      saleRepo.save.mockImplementation(async (sale) => sale);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2606-000001');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+    };
+
+    it('confirms bot sale in one transaction with stock, folio, seller attribution, and default credit due date', async () => {
+      setupConfirmBotSaleHappyPath();
+
+      const result = await service.confirmBotSale(botSaleInput);
+
+      expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
+      expect(productsService.getApplicablePrices).toHaveBeenCalledWith(
+        'prod-1',
+        'var-1',
+        2,
+      );
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+      expect(productsService.decrementStockForCharge).toHaveBeenCalledWith([
+        {
+          productId: 'prod-1',
+          variantId: 'var-1',
+          quantity: 2,
+        },
+      ]);
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-bot-cashier',
+          customerId: 'customer-1',
+          sellerUserId: 'user-bot-cashier',
+          channel: 'ONLINE',
+          deliveryStatus: 'PENDING',
+          paymentStatus: 'CREDIT',
+          paidCents: 0,
+          debtCents: 2000,
+          totalCents: 2000,
+          payments: [],
+          folio: 'A-2606-000001',
+        }),
+      );
+
+      const persistedInput = saleRepo.persistChargeConfirmation.mock
+        .calls[0]?.[0] as {
+        confirmedAt: Date;
+        dueDate: Date | null;
+      };
+      const expectedDueDate = new Date(persistedInput.confirmedAt);
+      expectedDueDate.setDate(expectedDueDate.getDate() + 15);
+      expect(persistedInput.dueDate).toEqual(expectedDueDate);
+
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        expect.anything(),
+        'tenant-1',
+        'Sale',
+        result.saleId,
+        'sale.confirmed',
+        {
+          saleId: result.saleId,
+          folio: 'A-2606-000001',
+          tenantId: 'tenant-1',
+          actorId: 'user-bot-cashier',
+          totalCents: 2000,
+          paidCents: 0,
+          debtCents: 2000,
+          paymentStatus: 'CREDIT',
+          confirmedAt: expect.any(String),
+        },
+      );
+
+      const transactionCallOrder = saleRepo.runInTransaction.mock
+        .invocationCallOrder[0];
+      expect(
+        productsService.getApplicablePrices.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(transactionCallOrder);
+      expect(saleRepo.save.mock.invocationCallOrder[0]).toBeGreaterThan(
+        transactionCallOrder,
+      );
+      expect(
+        productsService.decrementStockForCharge.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(transactionCallOrder);
+      expect(
+        saleRepo.persistChargeConfirmation.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(transactionCallOrder);
+      expect(outboxWriter.publish.mock.invocationCallOrder[0]).toBeGreaterThan(
+        transactionCallOrder,
+      );
+
+      expect(result).toEqual({
+        saleId: expect.any(String),
+        folio: 'A-2606-000001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents: 2000,
+        paidCents: 0,
+        debtCents: 2000,
+        confirmedAt: expect.any(String),
+      });
+    });
+
+    it('rejects stale bot prices before stock, folio, persistence, or outbox side effects', async () => {
+      let priceValidationRanInsideTransaction = false;
+
+      saleRepo.runInTransaction.mockImplementation(async (callback: any) => {
+        priceValidationRanInsideTransaction = true;
+        try {
+          return await callback();
+        } finally {
+          priceValidationRanInsideTransaction = false;
+        }
+      });
+      productsService.getApplicablePrices.mockImplementation(async () => {
+        expect(priceValidationRanInsideTransaction).toBe(true);
+
+        return [
+          {
+            priceListId: 'price-list-1',
+            priceListName: 'PUBLICO',
+            priceCents: 1250,
+          },
+        ];
+      });
+
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
+        code: 'PRICE_OUT_OF_DATE',
+      });
+
+      expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
+      expect(productsService.getApplicablePrices).toHaveBeenCalledTimes(1);
+      expect(
+        productsService.getApplicablePrices.mock.results[0]?.type,
+      ).toBe('return');
+      expect(
+        productsService.getApplicablePrices.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        saleRepo.runInTransaction.mock.invocationCallOrder[0],
+      );
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+      expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('publishes a plain-object sale.confirmed payload with the required fields', async () => {
+      setupConfirmBotSaleHappyPath();
+
+      const result = await service.confirmBotSale(botSaleInput);
+      const payload = outboxWriter.publish.mock.calls[0]?.[5] as Record<
+        string,
+        unknown
+      >;
+
+      expect(Object.getPrototypeOf(payload)).toBe(Object.prototype);
+      expect(payload).toEqual({
+        saleId: result.saleId,
+        folio: 'A-2606-000001',
+        tenantId: 'tenant-1',
+        actorId: 'user-bot-cashier',
+        totalCents: 2000,
+        paidCents: 0,
+        debtCents: 2000,
+        paymentStatus: 'CREDIT',
+        confirmedAt: expect.any(String),
+      });
+    });
+
+    it('emits only sale.confirmed for zero-payment credit bot sales', async () => {
+      setupConfirmBotSaleHappyPath();
+
+      await service.confirmBotSale(botSaleInput);
+
+      const publishedEventTypes = outboxWriter.publish.mock.calls.map(
+        (args) => args[4],
+      );
+      expect(publishedEventTypes).toEqual(['sale.confirmed']);
+      expect(publishedEventTypes).not.toContain('sale.payment.received');
+      expect(publishedEventTypes).not.toContain('sale.fully.paid');
+    });
+  });
+
   describe('item discount use-cases', () => {
     it('applies item discount and emits event', async () => {
       const sale = Sale.create({ id: 'sale-discount', userId: 'user-1' });

@@ -99,6 +99,32 @@ type ChargePaymentEntry = {
 
 type CanonicalChargePayment = PersistedChargePayment;
 
+type ConfirmBotSaleInput = {
+  cashierUserId: string;
+  customerId: string;
+  shippingAddressId?: string | null;
+  items: Array<{
+    productId: string;
+    variantId?: string | null;
+    productName: string;
+    variantName?: string | null;
+    quantity: number;
+    unitPriceCents: number;
+  }>;
+};
+
+type ConfirmBotSaleResult = {
+  saleId: string;
+  folio: string;
+  paymentStatus: 'CREDIT';
+  channel: 'ONLINE';
+  deliveryStatus: 'PENDING';
+  totalCents: number;
+  paidCents: 0;
+  debtCents: number;
+  confirmedAt: string;
+};
+
 function isSupportedChargeMethod(
   method: ChargeSaleDto['method'],
 ): method is SupportedChargeMethod {
@@ -1613,6 +1639,120 @@ export class SalesService {
       );
 
       return payload;
+    });
+  }
+
+  async confirmBotSale(
+    input: ConfirmBotSaleInput,
+  ): Promise<ConfirmBotSaleResult> {
+    return this.saleRepo.runInTransaction(async () => {
+      for (const item of input.items) {
+        const applicablePrices = await this.productsService.getApplicablePrices(
+          item.productId,
+          item.variantId ?? null,
+          item.quantity,
+        );
+
+        const hasMatchingLivePrice = applicablePrices.some(
+          (candidate) => candidate.priceCents === item.unitPriceCents,
+        );
+
+        if (!hasMatchingLivePrice) {
+          throw new BusinessRuleViolationError(
+            'PRICE_OUT_OF_DATE',
+            'PRICE_OUT_OF_DATE',
+          );
+        }
+      }
+
+      const tenantId = this.tenantPrisma.getTenantId();
+      const saleId = randomUUID();
+      const sale = Sale.create({
+        id: saleId,
+        userId: input.cashierUserId,
+      });
+
+      sale.assignCustomer(input.customerId, input.shippingAddressId ?? null);
+      sale.assignSeller(input.cashierUserId);
+
+      for (const item of input.items) {
+        sale.addItem({
+          id: randomUUID(),
+          saleId,
+          productId: item.productId,
+          variantId: item.variantId ?? null,
+          productName: item.productName,
+          variantName: item.variantName ?? null,
+          quantity: item.quantity,
+          unitPriceCents: item.unitPriceCents,
+          unitPriceCurrency: 'MXN',
+        });
+      }
+
+      await this.saleRepo.save(sale);
+
+      const totalCents = input.items.reduce(
+        (sum, item) => sum + item.unitPriceCents * item.quantity,
+        0,
+      );
+      const paidCents = 0 as const;
+      const debtCents = totalCents;
+
+      await this.productsService.decrementStockForCharge(
+        input.items.map((item) => ({
+          productId: item.productId,
+          variantId: item.variantId ?? null,
+          quantity: item.quantity,
+        })),
+      );
+
+      const confirmedAt = new Date();
+      const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
+      const dueDate = resolveDueDate(undefined, confirmedAt, 'CREDIT');
+
+      await this.saleRepo.persistChargeConfirmation({
+        saleId,
+        userId: input.cashierUserId,
+        payments: [],
+        subtotalCents: totalCents,
+        discountCents: 0,
+        totalCents,
+        paidCents,
+        debtCents,
+        changeDueCents: 0,
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        customerId: input.customerId,
+        sellerUserId: input.cashierUserId,
+        dueDate,
+        confirmedAt,
+        folio,
+      });
+
+      await this.publishSaleConfirmedEvent({
+        saleId,
+        tenantId,
+        actorId: input.cashierUserId,
+        folio,
+        totalCents,
+        paidCents,
+        debtCents,
+        paymentStatus: 'CREDIT',
+        confirmedAt,
+      });
+
+      return {
+        saleId,
+        folio,
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents,
+        paidCents,
+        debtCents,
+        confirmedAt: confirmedAt.toISOString(),
+      };
     });
   }
 

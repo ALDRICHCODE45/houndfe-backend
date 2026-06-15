@@ -19,9 +19,10 @@ import {
 } from './infrastructure/prisma-bot-audit-log.repository';
 import { PrismaServiceCredentialRepository } from './infrastructure/prisma-service-credential.repository';
 import { BotAuditInterceptor } from './presentation/interceptors/bot-audit.interceptor';
+import { SalesModule } from '../sales/sales.module';
 
 @Module({
-  imports: [ClsModule, DatabaseModule],
+  imports: [ClsModule, DatabaseModule, SalesModule],
   controllers: [ChatbotApiController],
   providers: [
     ChatbotApiService,
