@@ -1645,26 +1645,26 @@ export class SalesService {
   async confirmBotSale(
     input: ConfirmBotSaleInput,
   ): Promise<ConfirmBotSaleResult> {
-    for (const item of input.items) {
-      const applicablePrices = await this.productsService.getApplicablePrices(
-        item.productId,
-        item.variantId ?? null,
-        item.quantity,
-      );
-
-      const hasMatchingLivePrice = applicablePrices.some(
-        (candidate) => candidate.priceCents === item.unitPriceCents,
-      );
-
-      if (!hasMatchingLivePrice) {
-        throw new BusinessRuleViolationError(
-          'PRICE_OUT_OF_DATE',
-          'PRICE_OUT_OF_DATE',
-        );
-      }
-    }
-
     return this.saleRepo.runInTransaction(async () => {
+      for (const item of input.items) {
+        const applicablePrices = await this.productsService.getApplicablePrices(
+          item.productId,
+          item.variantId ?? null,
+          item.quantity,
+        );
+
+        const hasMatchingLivePrice = applicablePrices.some(
+          (candidate) => candidate.priceCents === item.unitPriceCents,
+        );
+
+        if (!hasMatchingLivePrice) {
+          throw new BusinessRuleViolationError(
+            'PRICE_OUT_OF_DATE',
+            'PRICE_OUT_OF_DATE',
+          );
+        }
+      }
+
       const tenantId = this.tenantPrisma.getTenantId();
       const saleId = randomUUID();
       const sale = Sale.create({

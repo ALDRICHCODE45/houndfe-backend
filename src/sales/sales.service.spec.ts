@@ -2386,6 +2386,9 @@ describe('SalesService', () => {
 
       const transactionCallOrder = saleRepo.runInTransaction.mock
         .invocationCallOrder[0];
+      expect(
+        productsService.getApplicablePrices.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(transactionCallOrder);
       expect(saleRepo.save.mock.invocationCallOrder[0]).toBeGreaterThan(
         transactionCallOrder,
       );
@@ -2413,18 +2416,42 @@ describe('SalesService', () => {
     });
 
     it('rejects stale bot prices before stock, folio, persistence, or outbox side effects', async () => {
-      productsService.getApplicablePrices.mockResolvedValue([
-        {
-          priceListId: 'price-list-1',
-          priceListName: 'PUBLICO',
-          priceCents: 1250,
-        },
-      ]);
+      let priceValidationRanInsideTransaction = false;
+
+      saleRepo.runInTransaction.mockImplementation(async (callback: any) => {
+        priceValidationRanInsideTransaction = true;
+        try {
+          return await callback();
+        } finally {
+          priceValidationRanInsideTransaction = false;
+        }
+      });
+      productsService.getApplicablePrices.mockImplementation(async () => {
+        expect(priceValidationRanInsideTransaction).toBe(true);
+
+        return [
+          {
+            priceListId: 'price-list-1',
+            priceListName: 'PUBLICO',
+            priceCents: 1250,
+          },
+        ];
+      });
 
       await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
         code: 'PRICE_OUT_OF_DATE',
       });
 
+      expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
+      expect(productsService.getApplicablePrices).toHaveBeenCalledTimes(1);
+      expect(
+        productsService.getApplicablePrices.mock.results[0]?.type,
+      ).toBe('return');
+      expect(
+        productsService.getApplicablePrices.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        saleRepo.runInTransaction.mock.invocationCallOrder[0],
+      );
       expect(saleRepo.save).not.toHaveBeenCalled();
       expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
       expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
