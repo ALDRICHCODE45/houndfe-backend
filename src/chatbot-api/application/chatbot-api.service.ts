@@ -35,7 +35,11 @@ import type { CustomerUpsertRequestDto } from '../presentation/dto/customer-upse
 import type { StockCheckResponse } from '../presentation/dto/stock-check.response';
 import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
 import type { AttachReceiptResponse } from '../presentation/dto/attach-receipt.request';
-import type { OrderHistoryResponse } from '../presentation/dto/order-history.response';
+import type {
+  OrderHistoryItem,
+  OrderHistoryPayment,
+  OrderHistoryResponse,
+} from '../presentation/dto/order-history.response';
 import { SalesService } from '../../sales/sales.service';
 
 // ── Bot Sale Input Types ────────────────────────────────────────────────────
@@ -88,6 +92,9 @@ type OrderHistorySaleRecord = Prisma.SaleGetPayload<{
     shippingAddress: true;
   };
 }>;
+
+type OrderHistorySaleItemRecord = OrderHistorySaleRecord['items'][number];
+type OrderHistorySalePaymentRecord = OrderHistorySaleRecord['payments'][number];
 
 @Injectable()
 export class ChatbotApiService {
@@ -608,15 +615,8 @@ function toOrderHistoryResponse(
     totalCents: sale.totalCents,
     paidCents: sale.paidCents,
     debtCents: sale.debtCents,
-    items: (sale.items ?? []).map(
-      (item: {
-        productId: string;
-        variantId: string | null;
-        productName: string;
-        variantName: string | null;
-        quantity: number;
-        unitPriceCents: number;
-      }) => ({
+    items: sale.items.map(
+      (item: OrderHistorySaleItemRecord): OrderHistoryItem => ({
         productId: item.productId,
         variantId: item.variantId ?? null,
         productName: item.productName,
@@ -625,12 +625,8 @@ function toOrderHistoryResponse(
         unitPriceCents: item.unitPriceCents,
       }),
     ),
-    payments: (sale.payments ?? []).map(
-      (payment: {
-        method: string;
-        amountCents: number;
-        reference: string | null;
-      }) => ({
+    payments: sale.payments.map(
+      (payment: OrderHistorySalePaymentRecord): OrderHistoryPayment => ({
         method: payment.method,
         amountCents: payment.amountCents,
         reference: payment.reference ?? null,
