@@ -70,6 +70,9 @@ export class ServiceAuthGuard implements CanActivate {
 
     this.assertBranchScope(request, credential.tenantId);
 
+    // Method-level @RequiredScopes intentionally replace the controller-level
+    // default when present. We use getAllAndOverride here on purpose instead of
+    // merging scopes so specific routes can narrow or change access rules.
     const requiredScopes =
       this.reflector.getAllAndOverride<string[]>(REQUIRED_SCOPES_KEY, [
         context.getHandler(),
@@ -131,13 +134,21 @@ export class ServiceAuthGuard implements CanActivate {
   }
 
   private hashesMatch(storedHash: string, computedHash: string): boolean {
-    const stored = Buffer.from(storedHash, 'utf8');
-    const computed = Buffer.from(computedHash, 'utf8');
+    const stored = this.decodeSha256Hex(storedHash);
+    const computed = this.decodeSha256Hex(computedHash);
 
-    if (stored.length !== computed.length) {
+    if (!stored || !computed || stored.length !== computed.length) {
       return false;
     }
 
     return timingSafeEqual(stored, computed);
+  }
+
+  private decodeSha256Hex(value: string): Buffer | null {
+    if (value.length !== 64 || !/^[0-9a-f]+$/i.test(value)) {
+      return null;
+    }
+
+    return Buffer.from(value, 'hex');
   }
 }

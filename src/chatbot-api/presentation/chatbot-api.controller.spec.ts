@@ -588,7 +588,12 @@ describe('ChatbotApiController', () => {
         shippingAddressId: 'cf070bfb-ee86-460b-ab8a-7893d324e346',
         items: [],
       })
-      .expect(400);
+      .expect(400)
+      .expect(({ body }: { body: { message?: string[] } }) => {
+        expect(body.message).toEqual(
+          expect.arrayContaining(['items must contain at least 1 elements']),
+        );
+      });
   });
 
   it('POST /chatbot-api/sales/:saleId/receipts attaches a receipt and returns PENDING status', async () => {

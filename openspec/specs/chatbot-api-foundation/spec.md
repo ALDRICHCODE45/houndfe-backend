@@ -112,7 +112,7 @@ The system MUST let the bot create an `ONLINE` sale through existing sale aggreg
 - AND the sale remains auditable to the bot credential
 
 #### Scenario: Delivery metadata recorded
-- GIVEN a paid bot-created sale exists
+- GIVEN a bot-created sale exists and a human has already confirmed payment so the sale payment status is `PAID`
 - WHEN delivery is scheduled or shipped
 - THEN the API records carrier, tracking reference, ETA, and delivery status
 
