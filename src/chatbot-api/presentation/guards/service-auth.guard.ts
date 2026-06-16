@@ -70,6 +70,9 @@ export class ServiceAuthGuard implements CanActivate {
 
     this.assertBranchScope(request, credential.tenantId);
 
+    // Method-level @RequiredScopes intentionally replace the controller-level
+    // default when present. We use getAllAndOverride here on purpose instead of
+    // merging scopes so specific routes can narrow or change access rules.
     const requiredScopes =
       this.reflector.getAllAndOverride<string[]>(REQUIRED_SCOPES_KEY, [
         context.getHandler(),
