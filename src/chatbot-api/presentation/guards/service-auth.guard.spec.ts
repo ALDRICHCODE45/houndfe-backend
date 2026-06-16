@@ -210,6 +210,38 @@ describe('ServiceAuthGuard', () => {
     expect(cls.set).not.toHaveBeenCalled();
   });
 
+  it('rejects a wrong service key with the same raw length as the valid credential', async () => {
+    repository.findByHashedKey.mockResolvedValue(makeCredential());
+
+    await expect(
+      guard.canActivate(
+        mockContext({
+          authorization: 'Bearer svc_other-key',
+          branchId: 'tenant-1',
+        }),
+      ),
+    ).rejects.toThrow(UnauthorizedException);
+
+    expect(repository.touchLastUsedAt.mock.calls).toHaveLength(0);
+    expect(cls.set).not.toHaveBeenCalled();
+  });
+
+  it('rejects a wrong-length service key without throwing from timing-safe comparison', async () => {
+    repository.findByHashedKey.mockResolvedValue(makeCredential());
+
+    await expect(
+      guard.canActivate(
+        mockContext({
+          authorization: 'Bearer svc_short',
+          branchId: 'tenant-1',
+        }),
+      ),
+    ).rejects.toThrow(UnauthorizedException);
+
+    expect(repository.touchLastUsedAt.mock.calls).toHaveLength(0);
+    expect(cls.set).not.toHaveBeenCalled();
+  });
+
   it('is provided by ChatbotApiModule with CLS support', async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [

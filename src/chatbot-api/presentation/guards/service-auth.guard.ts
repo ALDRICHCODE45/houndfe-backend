@@ -131,13 +131,21 @@ export class ServiceAuthGuard implements CanActivate {
   }
 
   private hashesMatch(storedHash: string, computedHash: string): boolean {
-    const stored = Buffer.from(storedHash, 'utf8');
-    const computed = Buffer.from(computedHash, 'utf8');
+    const stored = this.decodeSha256Hex(storedHash);
+    const computed = this.decodeSha256Hex(computedHash);
 
-    if (stored.length !== computed.length) {
+    if (!stored || !computed || stored.length !== computed.length) {
       return false;
     }
 
     return timingSafeEqual(stored, computed);
+  }
+
+  private decodeSha256Hex(value: string): Buffer | null {
+    if (value.length !== 64 || !/^[0-9a-f]+$/i.test(value)) {
+      return null;
+    }
+
+    return Buffer.from(value, 'hex');
   }
 }
