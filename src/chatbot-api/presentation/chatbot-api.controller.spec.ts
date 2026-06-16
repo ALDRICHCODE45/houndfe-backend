@@ -591,9 +591,7 @@ describe('ChatbotApiController', () => {
       .expect(400)
       .expect(({ body }: { body: { message?: string[] } }) => {
         expect(body.message).toEqual(
-          expect.arrayContaining([
-            'items must contain at least 1 elements',
-          ]),
+          expect.arrayContaining(['items must contain at least 1 elements']),
         );
       });
   });
