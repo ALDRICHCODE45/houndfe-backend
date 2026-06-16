@@ -615,7 +615,7 @@ function toOrderHistoryResponse(
     totalCents: sale.totalCents,
     paidCents: sale.paidCents,
     debtCents: sale.debtCents,
-    items: sale.items.map(
+    items: (sale.items ?? []).map(
       (item: OrderHistorySaleItemRecord): OrderHistoryItem => ({
         productId: item.productId,
         variantId: item.variantId ?? null,
@@ -625,7 +625,7 @@ function toOrderHistoryResponse(
         unitPriceCents: item.unitPriceCents,
       }),
     ),
-    payments: sale.payments.map(
+    payments: (sale.payments ?? []).map(
       (payment: OrderHistorySalePaymentRecord): OrderHistoryPayment => ({
         method: payment.method,
         amountCents: payment.amountCents,
