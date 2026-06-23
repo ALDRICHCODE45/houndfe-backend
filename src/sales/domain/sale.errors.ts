@@ -17,3 +17,18 @@ export class SellerNotFoundError extends BusinessRuleViolationError {
     super('SELLER_NOT_FOUND', 'SELLER_NOT_FOUND');
   }
 }
+
+export class SaleNotCancellableError extends BusinessRuleViolationError {
+  constructor() {
+    super('SALE_NOT_CANCELLABLE', 'SALE_NOT_CANCELLABLE');
+  }
+}
+
+export class SaleDeliveredCannotCancelError extends BusinessRuleViolationError {
+  constructor() {
+    super(
+      'SALE_DELIVERED_CANNOT_CANCEL',
+      'SALE_DELIVERED_CANNOT_CANCEL',
+    );
+  }
+}
