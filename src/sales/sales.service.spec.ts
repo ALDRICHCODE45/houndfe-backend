@@ -2593,6 +2593,41 @@ describe('SalesService', () => {
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
       expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
+
+    it('cancels when actor differs from sale creator — tenant scope is sufficient (CRITICAL-2)', async () => {
+      // sale.userId = 'user-1' (original cashier), actorId = 'admin-actor'
+      // Tenant isolation is enforced by the tenant-scoped findByIdForUpdate;
+      // RBAC (delete:Sale / sales:write) is enforced at the controller layer.
+      // The ownership check (sale.userId !== actorId) must NOT block this path.
+      // Uses CREDIT so refundedCents=0 — findOneWithRelations is skipped.
+      const sale = buildConfirmedSaleForCancel('sale-cancel-admin', 'CREDIT');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      const result = await service.cancelSale(sale.id, 'admin-actor', {
+        reason: 'ORDER_ERROR',
+      });
+
+      expect(result).toMatchObject({ saleId: sale.id, status: 'CANCELED' });
+      expect(productsService.incrementStockForRestock).toHaveBeenCalledWith([
+        { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+      ]);
+      expect(saleRepo.persistCancellation).toHaveBeenCalled();
+    });
+
+    it('rejects when sale is not found in actor tenant — cross-tenant isolation stays intact (CRITICAL-2)', async () => {
+      // findByIdForUpdate returns null when the sale belongs to a different
+      // tenant (tenant-scoped client filters it out). This must still reject.
+      saleRepo.findByIdForUpdate.mockResolvedValue(null);
+
+      await expect(
+        service.cancelSale('sale-other-tenant', 'admin-actor', {
+          reason: 'ORDER_ERROR',
+        }),
+      ).rejects.toThrow('SALE_NOT_FOUND');
+
+      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
+      expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+    });
   });
 
   describe('confirmBotSale', () => {

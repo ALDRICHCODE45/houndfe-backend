@@ -409,6 +409,25 @@ describe('PrismaSaleRepository', () => {
       );
     });
 
+    it('filters by CANCELED-only status: no contradicting CONFIRMED clause in where (CRITICAL-1)', async () => {
+      // Regression guard: when the caller supplies status:['CANCELED'], the
+      // generated WHERE must NOT contain a root-level status:'CONFIRMED' clause.
+      // Without the fix, buildBaseWhere injects status:'CONFIRMED' AND
+      // buildExtendedWhere appends status:{in:['CANCELED']} — the AND of both
+      // is a logical contradiction that returns 0 rows every time.
+      const where = await findManyWhere({ status: ['CANCELED'] });
+
+      // Full serialized where must not contain the contradicting CONFIRMED value.
+      expect(JSON.stringify(where)).not.toMatch(/"status"\s*:\s*"CONFIRMED"/);
+
+      // Must still include the explicit CANCELED filter.
+      expect(where.AND).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ status: { in: ['CANCELED'] } }),
+        ]),
+      );
+    });
+
     it('translates paymentStatus multi-value as in clause', async () => {
       const where = await findManyWhere({ paymentStatus: ['PAID', 'CREDIT'] });
       expect(where.AND).toEqual(

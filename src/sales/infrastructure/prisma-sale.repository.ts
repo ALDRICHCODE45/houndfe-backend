@@ -806,9 +806,17 @@ export class PrismaSaleRepository implements ISaleRepository {
   private buildExtendedWhere(
     input: SalesListExtendedFilter,
   ): Prisma.SaleWhereInput {
-    const andClauses: Prisma.SaleWhereInput[] = [this.buildBaseWhere(input)];
+    const base = this.buildBaseWhere(input);
+    const andClauses: Prisma.SaleWhereInput[] = [base];
 
     if (input.status?.length) {
+      // When an explicit status filter is supplied, remove the default
+      // status:'CONFIRMED' that buildBaseWhere adds. Without this, the generated
+      // WHERE becomes status='CONFIRMED' AND status IN (...) — a logical
+      // contradiction when filtering for e.g. CANCELED (always returns 0 rows).
+      // The CONFIRMED default is only meaningful when no explicit status is given;
+      // KPI/countConfirmed paths call buildBaseWhere directly and are unaffected.
+      delete (base as { status?: unknown }).status;
       andClauses.push({
         status: { in: input.status },
       });

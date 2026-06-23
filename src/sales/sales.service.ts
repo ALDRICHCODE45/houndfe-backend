@@ -1759,7 +1759,13 @@ export class SalesService {
       const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
 
-      if (!sale || sale.userId !== actorId) {
+      // Tenant isolation: findByIdForUpdate queries within the tenant-scoped
+      // client — a null result means the sale does not belong to this tenant.
+      // Authorization: RBAC (delete:Sale / sales:write) is enforced at the
+      // controller layer. Creator-ownership is NOT an eligibility gate; any
+      // authorized actor in the same tenant may cancel. actorId is still
+      // recorded as canceledByUserId for audit purposes.
+      if (!sale) {
         throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
       }
 
