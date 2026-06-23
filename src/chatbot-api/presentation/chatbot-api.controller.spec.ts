@@ -41,6 +41,7 @@ describe('ChatbotApiController', () => {
     attachReceipt: jest.Mock;
     setDeliveryMetadata: jest.Mock;
     getOrderHistoryByPhone: jest.Mock;
+    cancelBotSale: jest.Mock;
   };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
@@ -153,6 +154,15 @@ describe('ChatbotApiController', () => {
         status: 'PENDING',
       }),
       setDeliveryMetadata: jest.fn().mockResolvedValue(undefined),
+      cancelBotSale: jest.fn().mockResolvedValue({
+        saleId: 'sale-bot-1',
+        status: 'CANCELED',
+        refundedCents: 0,
+        restockedItems: [
+          { productId: 'prod-1', variantId: null, quantity: 2 },
+        ],
+        canceledAt: '2026-06-23T00:00:00.000Z',
+      }),
       getOrderHistoryByPhone: jest.fn().mockResolvedValue([
         {
           saleId: 'sale-bot-1',
@@ -656,5 +666,59 @@ describe('ChatbotApiController', () => {
         expect(Array.isArray(body)).toBe(true);
         expect((body as unknown[]).length).toBeGreaterThan(0);
       });
+  });
+
+  // ── D.2.1 Bot cancel route ────────────────────────────────────────────────
+
+  it('POST /chatbot-api/sales/:saleId/cancel returns 401 without credentials', async () => {
+    await request(httpServer())
+      .post(`/chatbot-api/sales/${saleId}/cancel`)
+      .send({ reason: 'CUSTOMER_REQUEST', cashierUserId: cashierUserId })
+      .expect(401);
+  });
+
+  it('POST /chatbot-api/sales/:saleId/cancel returns 403 for credentials missing sales:write scope', async () => {
+    await request(httpServer())
+      .post(`/chatbot-api/sales/${saleId}/cancel`)
+      .set('Authorization', 'Bearer svc_valid-key')
+      .send({ reason: 'CUSTOMER_REQUEST', cashierUserId: cashierUserId })
+      .expect(403);
+  });
+
+  it('POST /chatbot-api/sales/:saleId/cancel cancels the sale and returns the result', async () => {
+    await request(httpServer())
+      .post(`/chatbot-api/sales/${saleId}/cancel`)
+      .set('Authorization', 'Bearer svc_sales-key')
+      .send({ reason: 'CUSTOMER_REQUEST', cashierUserId: cashierUserId })
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.cancelBotSale).toHaveBeenCalledWith({
+          saleId,
+          reason: 'CUSTOMER_REQUEST',
+          cashierUserId,
+        });
+        expect(body).toEqual(
+          expect.objectContaining({
+            saleId: 'sale-bot-1',
+            status: 'CANCELED',
+          }),
+        );
+      });
+  });
+
+  it('POST /chatbot-api/sales/:saleId/cancel returns 400 for invalid reason', async () => {
+    await request(httpServer())
+      .post(`/chatbot-api/sales/${saleId}/cancel`)
+      .set('Authorization', 'Bearer svc_sales-key')
+      .send({ reason: 'INVALID_REASON', cashierUserId: cashierUserId })
+      .expect(400);
+  });
+
+  it('POST /chatbot-api/sales/:saleId/cancel returns 400 for missing cashierUserId', async () => {
+    await request(httpServer())
+      .post(`/chatbot-api/sales/${saleId}/cancel`)
+      .set('Authorization', 'Bearer svc_sales-key')
+      .send({ reason: 'CUSTOMER_REQUEST' })
+      .expect(400);
   });
 });

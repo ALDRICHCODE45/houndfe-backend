@@ -74,6 +74,12 @@ export type SetDeliveryMetadataInput = {
   estimatedDeliveryAt: Date | null;
 };
 
+export type CancelBotSaleInput = {
+  saleId: string;
+  reason: import('../../sales/domain/sale.entity').SaleCancelReason;
+  cashierUserId: string;
+};
+
 export type GetOrderHistoryInput = {
   phoneCountryCode: string;
   phone: string;
@@ -378,6 +384,16 @@ export class ChatbotApiService {
         estimatedDeliveryAt: input.estimatedDeliveryAt,
         deliveryStatus: 'SHIPPED',
       },
+    });
+  }
+
+  /**
+   * Cancel a bot-created sale. Delegates to SalesService.cancelSale.
+   * The cashierUserId must match the sale's original creator (userId FK).
+   */
+  async cancelBotSale(input: CancelBotSaleInput) {
+    return this.salesService.cancelSale(input.saleId, input.cashierUserId, {
+      reason: input.reason,
     });
   }
 

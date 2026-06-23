@@ -379,6 +379,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       register: persistedSale.register,
       deliveryStatus: persistedSale.deliveryStatus as
         | 'PENDING'
+        | 'SHIPPED'
         | 'DELIVERED'
         | 'NOT_APPLICABLE',
       customerId: persistedSale.customerId,

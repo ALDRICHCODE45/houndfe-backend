@@ -80,16 +80,16 @@ Single developer workflow: work on dedicated branch, clean work-unit commits (Aâ
 ## Slice D: HTTP Surfaces
 
 ### Phase D.1: DTO + Admin Route (TDD)
-- [ ] D.1.1 Create `cancel-sale.dto.ts` with `reason: SaleCancelReason` (@IsEnum, required) (`src/sales/dto/`)
-- [ ] D.1.2 RED: Write spec for admin route RBAC: `delete:Sale` required (`sales.controller.spec.ts`)
-- [ ] D.1.3 GREEN: Add `POST /sales/:id/cancel` route with `@RequirePermissions(['delete','Sale'])` (`sales.controller.ts`)
-- [ ] D.1.4 RED: Write spec for 409 mapping (invalid state) + 404 (not found) + DTO validation
-- [ ] D.1.5 GREEN: Wire route to `cancelSale` use case; map exceptions to HTTP status codes
+- [x] D.1.1 Create `cancel-sale.dto.ts` with `reason: SaleCancelReason` (@IsEnum, required) (`src/sales/dto/`)
+- [x] D.1.2 RED: Write spec for admin route RBAC: `delete:Sale` required (`sales.controller.spec.ts`)
+- [x] D.1.3 GREEN: Add `POST /sales/:id/cancel` route with `@RequirePermissions(['delete','Sale'])` (`sales.controller.ts`)
+- [x] D.1.4 RED: Write spec for 409 mapping (invalid state) + 404 (not found) + DTO validation
+- [x] D.1.5 GREEN: Wire route to `cancelSale` use case; map exceptions to HTTP status codes
 
 ### Phase D.2: Chatbot Route (TDD)
-- [ ] D.2.1 RED: Write spec for chatbot route scope: `sales:write` required (`chatbot-api.controller.spec.ts`)
-- [ ] D.2.2 GREEN: Add `POST /chatbot-api/sales/:saleId/cancel` with `@RequiredScopes('sales:write')` (`chatbot-api.controller.ts`)
-- [ ] D.2.3 GREEN: Delegate to `SalesService.cancelSale` from `chatbot-api.service.ts`
+- [x] D.2.1 RED: Write spec for chatbot route scope: `sales:write` required (`chatbot-api.controller.spec.ts`)
+- [x] D.2.2 GREEN: Add `POST /chatbot-api/sales/:saleId/cancel` with `@RequiredScopes('sales:write')` (`chatbot-api.controller.ts`)
+- [x] D.2.3 GREEN: Delegate to `SalesService.cancelSale` from `chatbot-api.service.ts`
 
 **Work-unit commit D**: `feat(api): add sale cancellation endpoints for admin and chatbot`
 

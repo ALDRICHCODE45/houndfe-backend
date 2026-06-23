@@ -84,6 +84,9 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'IDEMPOTENCY_KEY_IN_FLIGHT')
       return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_FULLY_PAID') return HttpStatus.CONFLICT;
+    if (exception.code === 'SALE_NOT_CANCELLABLE') return HttpStatus.CONFLICT;
+    if (exception.code === 'SALE_DELIVERED_CANNOT_CANCEL')
+      return HttpStatus.CONFLICT;
     if (exception.code === 'PAYMENT_METHOD_NOT_SUPPORTED')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'PAYMENT_AMOUNT_INSUFFICIENT')
