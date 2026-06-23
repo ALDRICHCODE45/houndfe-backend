@@ -59,21 +59,21 @@ Single developer workflow: work on dedicated branch, clean work-unit commits (A�
 ## Slice C: cancelSale Use Case + Persistence
 
 ### Phase C.1: Repository Method (TDD)
-- [ ] C.1.1 RED: Write spec for `persistCancellation` flipping status, writing refunds (`prisma-sale.repository.spec.ts`)
-- [ ] C.1.2 GREEN: Add port `ISaleRepository.persistCancellation(sale, refunds)` (`sale.repository.ts`)
-- [ ] C.1.3 GREEN: Implement in adapter: update Sale with cancel metadata, insert SaleRefund rows, clear debtCents for CREDIT (`prisma-sale.repository.ts`)
-- [ ] C.1.4 RED: Write spec for listing with CANCELED → update `:401-404` expectation deliberately
-- [ ] C.1.5 GREEN: Remove `!== 'CANCELED'` strip at line 763 so listing returns CANCELED when filtered
+- [x] C.1.1 RED: Write spec for `persistCancellation` flipping status, writing refunds (`prisma-sale.repository.spec.ts`)
+- [x] C.1.2 GREEN: Add port `ISaleRepository.persistCancellation(sale, refunds)` (`sale.repository.ts`)
+- [x] C.1.3 GREEN: Implement in adapter: update Sale with cancel metadata, insert SaleRefund rows, clear debtCents for CREDIT (`prisma-sale.repository.ts`)
+- [x] C.1.4 RED: Write spec for listing with CANCELED → update `:401-404` expectation deliberately
+- [x] C.1.5 GREEN: Remove `!== 'CANCELED'` strip at line 763 so listing returns CANCELED when filtered
 
 ### Phase C.2: Use Case (TDD)
-- [ ] C.2.1 RED: Write spec for `cancelSale` happy path: CONFIRMED non-delivered → status CANCELED, restock, refund, outbox (`sales.service.spec.ts`)
-- [ ] C.2.2 GREEN: Implement `SalesService.cancelSale(saleId, actor, dto)`: idempotency → runInTransaction → findByIdForUpdate → sale.cancel → incrementStockForRestock → persistCancellation → outbox.publish (`sales.service.ts`)
-- [ ] C.2.3 RED: Write spec for idempotent retry (same operation key → no double restock/refund)
-- [ ] C.2.4 GREEN: Add `acquire*Idempotency` with `sale:cancel:{saleId}` key + `mark*IdempotencySucceeded`
-- [ ] C.2.5 RED: Write spec for CREDIT sale: refund = 0, debt cleared
-- [ ] C.2.6 GREEN: Verify refund computation branches on `paymentStatus === 'CREDIT'` or `paidCents === 0`
-- [ ] C.2.7 RED: Write spec for SHIPPED/DELIVERED → 409 Conflict
-- [ ] C.2.8 GREEN: Map `SALE_DELIVERED_CANNOT_CANCEL` exception to 409
+- [x] C.2.1 RED: Write spec for `cancelSale` happy path: CONFIRMED non-delivered → status CANCELED, restock, refund, outbox (`sales.service.spec.ts`)
+- [x] C.2.2 GREEN: Implement `SalesService.cancelSale(saleId, actor, dto)`: idempotency → runInTransaction → findByIdForUpdate → sale.cancel → incrementStockForRestock → persistCancellation → outbox.publish (`sales.service.ts`)
+- [x] C.2.3 RED: Write spec for idempotent retry (same operation key → no double restock/refund)
+- [x] C.2.4 GREEN: Add `acquire*Idempotency` with `sale:cancel:{saleId}` key + `mark*IdempotencySucceeded`
+- [x] C.2.5 RED: Write spec for CREDIT sale: refund = 0, debt cleared
+- [x] C.2.6 GREEN: Verify refund computation branches on `paymentStatus === 'CREDIT'` or `paidCents === 0`
+- [x] C.2.7 RED: Write spec for SHIPPED/DELIVERED → 409 Conflict
+- [x] C.2.8 GREEN: Map `SALE_DELIVERED_CANNOT_CANCEL` exception to 409
 
 **Work-unit commit C**: `feat(sales): add cancelSale use case with restock, refund, and outbox`
 

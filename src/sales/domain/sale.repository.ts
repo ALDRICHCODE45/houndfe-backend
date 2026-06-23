@@ -17,6 +17,13 @@ export type PersistedSalePaymentRecord = {
   reference: string | null;
 };
 
+export type PersistedSaleRefundRecord = {
+  salePaymentId: string | null;
+  method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
+  amountCents: number;
+  reason: NonNullable<ReturnType<Sale['toResponse']>['cancelReason']>;
+};
+
 export type DraftCustomerSummary = {
   id: string;
   firstName: string;
@@ -108,6 +115,23 @@ export interface ISaleRepository {
     payload: unknown,
   ): Promise<void>;
 
+  acquireCancellationIdempotency(
+    saleId: string,
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  >;
+
+  markCancellationIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void>;
+
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
 
   allocateNextFolio(now?: Date): Promise<string>;
@@ -132,6 +156,11 @@ export interface ISaleRepository {
     confirmedAt: Date;
     folio: string;
   }): Promise<PersistedSalePaymentRecord[]>;
+
+  persistCancellation(
+    sale: Sale,
+    refunds: PersistedSaleRefundRecord[],
+  ): Promise<void>;
 
   persistCollectedPayment(input: {
     saleId: string;
@@ -239,6 +268,7 @@ export interface ISaleRepository {
       prePriceCentsBeforeDiscount: number | null;
     }>;
     payments: Array<{
+      paymentId: string;
       method: string;
       amountCents: number;
       tenderedCents: number;

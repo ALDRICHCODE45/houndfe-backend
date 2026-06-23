@@ -35,6 +35,9 @@ function makeMockPrisma() {
       createMany: jest.fn(),
       aggregate: jest.fn(),
     },
+    saleRefund: {
+      createMany: jest.fn(),
+    },
     saleIdempotency: {
       create: jest.fn(),
       findUnique: jest.fn(),
@@ -401,7 +404,7 @@ describe('PrismaSaleRepository', () => {
       const where = await findManyWhere({ status: ['CONFIRMED', 'CANCELED'] });
       expect(where.AND).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ status: { in: ['CONFIRMED'] } }),
+          expect.objectContaining({ status: { in: ['CONFIRMED', 'CANCELED'] } }),
         ]),
       );
     });
@@ -1561,6 +1564,151 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('charge tenant hardening and idempotency', () => {
+    it('hydrates charge-time financial fields on findByIdForUpdate for cancellation workflows', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        id: 'sale-hydrated-for-cancel',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus: 'PENDING',
+        customerId: 'customer-1',
+        shippingAddressId: null,
+        sellerUserId: 'seller-1',
+        dueDate: new Date('2026-06-30T00:00:00.000Z'),
+        confirmedAt: new Date('2026-06-23T12:00:00.000Z'),
+        folio: 'A-202606-000123',
+        totalCents: 5000,
+        paidCents: 4500,
+        debtCents: 500,
+        changeDueCents: 300,
+        paymentStatus: 'PARTIAL',
+        canceledAt: null,
+        cancelReason: null,
+        canceledByUserId: null,
+        createdAt: new Date('2026-06-23T11:55:00.000Z'),
+        updatedAt: new Date('2026-06-23T12:05:00.000Z'),
+        items: [],
+      });
+
+      const result = await repo.findByIdForUpdate('sale-hydrated-for-cancel');
+
+      expect(result?.paidCents).toBe(4500);
+      expect(result?.debtCents).toBe(500);
+      expect(result?.changeDueCents).toBe(300);
+      expect(result?.paymentStatus).toBe('PARTIAL');
+      expect(result?.dueDate?.toISOString()).toBe('2026-06-30T00:00:00.000Z');
+    });
+
+    it('persists cancellation metadata and refund audit rows for paid sales', async () => {
+      const canceledSale = Sale.fromPersistence({
+        id: 'sale-cancel-paid',
+        userId: 'user-1',
+        status: 'CANCELED',
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus: 'PENDING',
+        items: [],
+        confirmedAt: new Date('2026-06-23T10:00:00.000Z'),
+        folio: 'A-202606-000124',
+        totalCents: 5000,
+        paidCents: 4500,
+        debtCents: 500,
+        changeDueCents: 300,
+        paymentStatus: 'PARTIAL',
+        canceledAt: new Date('2026-06-23T12:00:00.000Z'),
+        cancelReason: 'ORDER_ERROR',
+        canceledByUserId: 'cashier-1',
+        createdAt: new Date('2026-06-23T09:55:00.000Z'),
+        updatedAt: new Date('2026-06-23T12:00:00.000Z'),
+      });
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.saleRefund.createMany.mockResolvedValue({ count: 2 });
+
+      await repo.persistCancellation(canceledSale, [
+        {
+          salePaymentId: 'payment-1',
+          method: 'cash',
+          amountCents: 4000,
+          reason: 'ORDER_ERROR',
+        },
+        {
+          salePaymentId: 'payment-2',
+          method: 'transfer',
+          amountCents: 500,
+          reason: 'ORDER_ERROR',
+        },
+      ]);
+
+      expect(prisma.sale.updateMany).toHaveBeenCalledWith({
+        where: { id: 'sale-cancel-paid', tenantId: 'tenant-1' },
+        data: expect.objectContaining({
+          status: 'CANCELED',
+          canceledAt: canceledSale.canceledAt,
+          cancelReason: 'ORDER_ERROR',
+          canceledByUserId: 'cashier-1',
+          debtCents: 500,
+        }),
+      });
+      expect(prisma.saleRefund.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            tenantId: 'tenant-1',
+            saleId: 'sale-cancel-paid',
+            salePaymentId: 'payment-1',
+            method: 'CASH',
+            amountCents: 4000,
+            reason: 'ORDER_ERROR',
+          },
+          {
+            tenantId: 'tenant-1',
+            saleId: 'sale-cancel-paid',
+            salePaymentId: 'payment-2',
+            method: 'TRANSFER',
+            amountCents: 500,
+            reason: 'ORDER_ERROR',
+          },
+        ],
+      });
+    });
+
+    it('clears debt and skips refund rows for canceled credit sales', async () => {
+      const canceledSale = Sale.fromPersistence({
+        id: 'sale-cancel-credit',
+        userId: 'user-1',
+        status: 'CANCELED',
+        channel: 'ONLINE',
+        register: 'Principal',
+        deliveryStatus: 'PENDING',
+        items: [],
+        confirmedAt: new Date('2026-06-23T10:00:00.000Z'),
+        folio: 'A-202606-000125',
+        totalCents: 5000,
+        paidCents: 0,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'CREDIT',
+        canceledAt: new Date('2026-06-23T12:00:00.000Z'),
+        cancelReason: 'CUSTOMER_REQUEST',
+        canceledByUserId: 'cashier-1',
+        createdAt: new Date('2026-06-23T09:55:00.000Z'),
+        updatedAt: new Date('2026-06-23T12:00:00.000Z'),
+      });
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.saleRefund.createMany.mockResolvedValue({ count: 0 });
+
+      await repo.persistCancellation(canceledSale, []);
+
+      expect(prisma.sale.updateMany).toHaveBeenCalledWith({
+        where: { id: 'sale-cancel-credit', tenantId: 'tenant-1' },
+        data: expect.objectContaining({
+          status: 'CANCELED',
+          debtCents: 0,
+        }),
+      });
+      expect(prisma.saleRefund.createMany).not.toHaveBeenCalled();
+    });
+
     it('uses tenant predicate in charge lookup/update SQL paths', async () => {
       prisma.sale.findFirst.mockResolvedValue(null);
       prisma.sale.updateMany.mockResolvedValue({ count: 1 });

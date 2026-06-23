@@ -37,9 +37,12 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     markChargeIdempotencySucceeded: jest.fn(),
     acquirePaymentIdempotency: jest.fn(),
     markPaymentIdempotencySucceeded: jest.fn(),
+    acquireCancellationIdempotency: jest.fn(),
+    markCancellationIdempotencySucceeded: jest.fn(),
     runInTransaction: jest.fn(async (cb: any) => cb()),
     allocateNextFolio: jest.fn(),
     persistChargeConfirmation: jest.fn(),
+    persistCancellation: jest.fn(),
     persistCollectedPayment: jest.fn(),
     persistCollectedPayments: jest.fn(),
     findManyConfirmed: jest.fn(),
@@ -59,6 +62,7 @@ function makeMockProductsService() {
     getApplicablePrices: jest.fn(),
     resolveListPrice: jest.fn(),
     decrementStockForCharge: jest.fn(),
+    incrementStockForRestock: jest.fn(),
   } as any;
 }
 
@@ -137,7 +141,13 @@ describe('SalesService', () => {
       token: 'payment-idem-token',
     });
     saleRepo.markPaymentIdempotencySucceeded.mockResolvedValue(undefined);
+    saleRepo.acquireCancellationIdempotency.mockResolvedValue({
+      kind: 'acquired',
+      token: 'cancel-idem-token',
+    });
+    saleRepo.markCancellationIdempotencySucceeded.mockResolvedValue(undefined);
     saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+    saleRepo.persistCancellation.mockResolvedValue(undefined);
     saleRepo.persistCollectedPayment.mockResolvedValue({
       paymentId: 'payment-1',
       paidCents: 4000,
@@ -152,6 +162,7 @@ describe('SalesService', () => {
       paymentStatus: 'PARTIAL',
       totalCents: 5000,
     });
+    productsService.incrementStockForRestock.mockResolvedValue(undefined);
     outboxWriter.publish.mockResolvedValue(undefined);
   });
 
@@ -2286,6 +2297,301 @@ describe('SalesService', () => {
         customerId?: string | null;
       };
       expect(call.customerId).toBeNull();
+    });
+  });
+
+  describe('cancelSale', () => {
+    const buildConfirmedSaleForCancel = (
+      saleId = 'sale-cancel-happy',
+      paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' = 'PARTIAL',
+      deliveryStatus: 'PENDING' | 'SHIPPED' | 'DELIVERED' = 'PENDING',
+      status: 'CONFIRMED' | 'CANCELED' = 'CONFIRMED',
+    ) =>
+      Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status,
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus,
+        customerId: 'customer-1',
+        items: [
+          {
+            id: `${saleId}-item-1`,
+            saleId,
+            productId: 'prod-1',
+            variantId: 'var-1',
+            productName: 'Prod 1',
+            variantName: 'Var 1',
+            quantity: 2,
+            unitPriceCents: 2500,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+        confirmedAt: new Date('2026-06-23T10:00:00.000Z'),
+        folio: 'A-202606-000126',
+        totalCents: 5000,
+        paidCents: paymentStatus === 'CREDIT' ? 0 : 4500,
+        debtCents: paymentStatus === 'CREDIT' ? 5000 : 500,
+        changeDueCents: 300,
+        paymentStatus,
+        canceledAt:
+          status === 'CANCELED'
+            ? new Date('2026-06-23T12:00:00.000Z')
+            : undefined,
+        cancelReason: status === 'CANCELED' ? 'ORDER_ERROR' : undefined,
+        canceledByUserId: status === 'CANCELED' ? 'user-1' : undefined,
+        createdAt: new Date('2026-06-23T09:55:00.000Z'),
+        updatedAt: new Date('2026-06-23T10:00:00.000Z'),
+      });
+
+    it('cancels a confirmed non-delivered sale with restock, refund audit, and outbox', async () => {
+      const sale = buildConfirmedSaleForCancel();
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        id: sale.id,
+        folio: sale.folio ?? null,
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: sale.confirmedAt ?? null,
+        dueDate: null,
+        createdAt: new Date('2026-06-23T09:55:00.000Z'),
+        subtotalCents: 5000,
+        discountCents: 0,
+        totalCents: 5000,
+        paidCents: 4500,
+        debtCents: 500,
+        changeDueCents: 300,
+        paymentStatus: 'PARTIAL',
+        deliveryStatus: 'PENDING',
+        customer: { id: 'customer-1', name: 'Ana' },
+        cashier: { id: 'user-1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [
+          {
+            paymentId: 'payment-1',
+            method: 'cash',
+            amountCents: 4000,
+            tenderedCents: 4000,
+            changeCents: 0,
+            reference: null,
+            paidAt: new Date('2026-06-23T10:00:00.000Z'),
+            createdAt: new Date('2026-06-23T10:00:00.000Z'),
+            userId: 'user-1',
+            user: { id: 'user-1', name: 'Caja 1' },
+          },
+          {
+            paymentId: 'payment-2',
+            method: 'transfer',
+            amountCents: 800,
+            tenderedCents: 800,
+            changeCents: 300,
+            reference: 'TRX-1',
+            paidAt: new Date('2026-06-23T10:01:00.000Z'),
+            createdAt: new Date('2026-06-23T10:01:00.000Z'),
+            userId: 'user-1',
+            user: { id: 'user-1', name: 'Caja 1' },
+          },
+        ],
+      });
+
+      const result = await service.cancelSale(sale.id, 'user-1', {
+        reason: 'ORDER_ERROR',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          saleId: sale.id,
+          status: 'CANCELED',
+          refundedCents: 4500,
+          restockedItems: [
+            { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+          ],
+          canceledAt: expect.any(String),
+        }),
+      );
+      expect(productsService.incrementStockForRestock).toHaveBeenCalledWith([
+        { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+      ]);
+      expect(saleRepo.persistCancellation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: sale.id,
+          status: 'CANCELED',
+          cancelReason: 'ORDER_ERROR',
+        }),
+        [
+          {
+            salePaymentId: 'payment-1',
+            method: 'cash',
+            amountCents: 4000,
+            reason: 'ORDER_ERROR',
+          },
+          {
+            salePaymentId: 'payment-2',
+            method: 'transfer',
+            amountCents: 500,
+            reason: 'ORDER_ERROR',
+          },
+        ],
+      );
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        expect.anything(),
+        'tenant-1',
+        'Sale',
+        sale.id,
+        'sale.canceled',
+        expect.objectContaining({
+          saleId: sale.id,
+          tenantId: 'tenant-1',
+          actorId: 'user-1',
+          folio: 'A-202606-000126',
+          reason: 'ORDER_ERROR',
+          refundedCents: 4500,
+          restockedItems: [
+            { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+          ],
+          canceledAt: expect.any(String),
+        }),
+      );
+    });
+
+    it('replays the stored cancellation result without duplicate side effects', async () => {
+      saleRepo.acquireCancellationIdempotency.mockResolvedValueOnce({
+        kind: 'replay',
+        payload: {
+          saleId: 'sale-cancel-replay',
+          status: 'CANCELED',
+          refundedCents: 4500,
+          restockedItems: [
+            { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+          ],
+          canceledAt: '2026-06-23T12:00:00.000Z',
+        },
+      });
+
+      const result = await service.cancelSale('sale-cancel-replay', 'user-1', {
+        reason: 'ORDER_ERROR',
+      });
+
+      expect(result).toEqual({
+        saleId: 'sale-cancel-replay',
+        status: 'CANCELED',
+        refundedCents: 4500,
+        restockedItems: [
+          { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+        ],
+        canceledAt: '2026-06-23T12:00:00.000Z',
+      });
+      expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
+      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
+      expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('returns the existing canceled outcome without double restock or refund when the row is already canceled', async () => {
+      const sale = buildConfirmedSaleForCancel(
+        'sale-cancel-already-canceled',
+        'PARTIAL',
+        'PENDING',
+        'CANCELED',
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      const result = await service.cancelSale(sale.id, 'user-1', {
+        reason: 'ORDER_ERROR',
+      });
+
+      expect(result).toEqual({
+        saleId: sale.id,
+        status: 'CANCELED',
+        refundedCents: 4500,
+        restockedItems: [
+          { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+        ],
+        canceledAt: '2026-06-23T12:00:00.000Z',
+      });
+      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
+      expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+      expect(saleRepo.markCancellationIdempotencySucceeded).toHaveBeenCalledWith(
+        'cancel-idem-token',
+        sale.id,
+        result,
+      );
+    });
+
+    it('cancels credit sales with zero refund rows and no payment detail lookup', async () => {
+      const sale = buildConfirmedSaleForCancel('sale-cancel-credit', 'CREDIT');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      const result = await service.cancelSale(sale.id, 'user-1', {
+        reason: 'CUSTOMER_REQUEST',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          saleId: sale.id,
+          status: 'CANCELED',
+          refundedCents: 0,
+        }),
+      );
+      expect(saleRepo.findOneWithRelations).not.toHaveBeenCalled();
+      expect(saleRepo.persistCancellation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: sale.id,
+          status: 'CANCELED',
+          paymentStatus: 'CREDIT',
+          debtCents: 0,
+        }),
+        [],
+      );
+      expect(outboxWriter.publish).toHaveBeenCalledWith(
+        expect.anything(),
+        'tenant-1',
+        'Sale',
+        sale.id,
+        'sale.canceled',
+        expect.objectContaining({
+          refundedCents: 0,
+          reason: 'CUSTOMER_REQUEST',
+        }),
+      );
+    });
+
+    it('propagates the shipped cancellation guard without side effects', async () => {
+      const sale = buildConfirmedSaleForCancel(
+        'sale-cancel-shipped',
+        'PARTIAL',
+        'SHIPPED',
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await expect(
+        service.cancelSale(sale.id, 'user-1', { reason: 'ORDER_ERROR' }),
+      ).rejects.toThrow('SALE_DELIVERED_CANNOT_CANCEL');
+
+      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
+      expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('propagates the delivered cancellation guard without side effects', async () => {
+      const sale = buildConfirmedSaleForCancel(
+        'sale-cancel-delivered',
+        'PARTIAL',
+        'DELIVERED',
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await expect(
+        service.cancelSale(sale.id, 'user-1', { reason: 'ORDER_ERROR' }),
+      ).rejects.toThrow('SALE_DELIVERED_CANNOT_CANCEL');
+
+      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
+      expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
   });
 

@@ -9,6 +9,7 @@ import type {
   DraftSaleResponse,
   ISaleRepository,
   PersistedChargePayment,
+  PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from '../domain/sale.repository';
 import { Sale, type SaleStatus } from '../domain/sale.entity';
@@ -383,8 +384,17 @@ export class PrismaSaleRepository implements ISaleRepository {
       customerId: persistedSale.customerId,
       shippingAddressId: persistedSale.shippingAddressId,
       sellerUserId: persistedSale.sellerUserId,
+      dueDate: persistedSale.dueDate,
       confirmedAt: persistedSale.confirmedAt,
       folio: persistedSale.folio,
+      totalCents: persistedSale.totalCents,
+      paidCents: persistedSale.paidCents,
+      debtCents: persistedSale.debtCents,
+      changeDueCents: persistedSale.changeDueCents,
+      paymentStatus: persistedSale.paymentStatus,
+      canceledAt: persistedSale.canceledAt,
+      cancelReason: persistedSale.cancelReason,
+      canceledByUserId: persistedSale.canceledByUserId,
       items: persistedSale.items.map((item) => ({
         id: item.id,
         saleId: item.saleId,
@@ -413,6 +423,45 @@ export class PrismaSaleRepository implements ISaleRepository {
       })),
       createdAt: persistedSale.createdAt,
       updatedAt: persistedSale.updatedAt,
+    });
+  }
+
+  async persistCancellation(
+    sale: Sale,
+    refunds: PersistedSaleRefundRecord[],
+  ): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+
+    await prisma.sale.updateMany({
+      where: { id: sale.id, tenantId },
+      data: {
+        status: 'CANCELED',
+        canceledAt: sale.canceledAt,
+        cancelReason: sale.cancelReason,
+        canceledByUserId: sale.canceledByUserId,
+        debtCents: sale.paymentStatus === 'CREDIT' ? 0 : sale.debtCents,
+      },
+    });
+
+    if (refunds.length === 0) {
+      return;
+    }
+
+    await prisma.saleRefund.createMany({
+      data: refunds.map((refund) => ({
+        tenantId,
+        saleId: sale.id,
+        salePaymentId: refund.salePaymentId,
+        method: refund.method.toUpperCase() as
+          | 'CASH'
+          | 'CARD_CREDIT'
+          | 'CARD_DEBIT'
+          | 'TRANSFER'
+          | 'CREDIT',
+        amountCents: refund.amountCents,
+        reason: refund.reason,
+      })),
     });
   }
 
@@ -760,7 +809,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
     if (input.status?.length) {
       andClauses.push({
-        status: { in: input.status.filter((status) => status !== 'CANCELED') },
+        status: { in: input.status },
       });
     }
 
@@ -936,6 +985,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         },
         payments: {
           select: {
+            id: true,
             method: true,
             amountCents: true,
             reference: true,
@@ -1000,6 +1050,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
       })),
       payments: sale.payments.map((payment) => ({
+        paymentId: payment.id,
         method: payment.method,
         amountCents: payment.amountCents,
         tenderedCents: payment.amountCents,
@@ -1118,8 +1169,24 @@ export class PrismaSaleRepository implements ISaleRepository {
     return this.markIdempotencySucceeded(token, saleId, payload);
   }
 
+  async acquireCancellationIdempotency(
+    saleId: string,
+    key: string,
+    requestHash: string,
+  ) {
+    return this.acquireIdempotency('sale_cancel', saleId, key, requestHash);
+  }
+
+  async markCancellationIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void> {
+    return this.markIdempotencySucceeded(token, saleId, payload);
+  }
+
   private async acquireIdempotency(
-    operation: 'sale_charge' | 'sale_payment',
+    operation: 'sale_charge' | 'sale_payment' | 'sale_cancel',
     saleId: string,
     key: string,
     requestHash: string,
