@@ -232,6 +232,46 @@ export class PrismaProductRepository implements IProductRepository {
     }
   }
 
+  async incrementStockForRestock(
+    adjustments: Array<{
+      productId: string;
+      variantId?: string | null;
+      quantity: number;
+    }>,
+  ): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+
+    for (const adjustment of adjustments) {
+      if (adjustment.quantity <= 0) continue;
+
+      if (adjustment.variantId) {
+        await prisma.variant.updateMany({
+          where: {
+            id: adjustment.variantId,
+            productId: adjustment.productId,
+            tenantId,
+          },
+          data: {
+            quantity: { increment: adjustment.quantity },
+          },
+        });
+        continue;
+      }
+
+      await prisma.product.updateMany({
+        where: {
+          id: adjustment.productId,
+          tenantId,
+          useStock: true,
+        },
+        data: {
+          quantity: { increment: adjustment.quantity },
+        },
+      });
+    }
+  }
+
   private toDomain(data: PrismaProduct): Product {
     return Product.fromPersistence({
       id: data.id,

@@ -26,6 +26,8 @@ function makeMockRepo(overrides: Partial<IProductRepository> = {}) {
     findAll: jest.fn(),
     save: jest.fn(),
     delete: jest.fn(),
+    decrementStockForCharge: jest.fn(),
+    incrementStockForRestock: jest.fn(),
     isSkuTaken: jest.fn<Promise<boolean>, any>().mockResolvedValue(false),
     isBarcodeTaken: jest.fn<Promise<boolean>, any>().mockResolvedValue(false),
     ...overrides,
@@ -239,6 +241,20 @@ describe('ProductsService — updateVariant uniqueness', () => {
       await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { name: 'Rojo' });
       expect(repo.isBarcodeTaken).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('ProductsService — stock adjustments', () => {
+  it('delegates restock increments to the product repository', async () => {
+    const repo = makeMockRepo();
+    repo.incrementStockForRestock.mockResolvedValue(undefined);
+
+    const service = createService(repo, makeMockPrisma());
+    const adjustments = [{ productId: 'prod-1', variantId: 'var-1', quantity: 2 }];
+
+    await service.incrementStockForRestock(adjustments);
+
+    expect(repo.incrementStockForRestock).toHaveBeenCalledWith(adjustments);
   });
 });
 

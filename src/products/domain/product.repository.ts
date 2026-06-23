@@ -36,6 +36,14 @@ export interface IProductRepository {
       quantity: number;
     }>,
   ): Promise<void>;
+
+  incrementStockForRestock(
+    adjustments: Array<{
+      productId: string;
+      variantId?: string | null;
+      quantity: number;
+    }>,
+  ): Promise<void>;
 }
 
 /** Injection token — used by NestJS DI to resolve the interface. */

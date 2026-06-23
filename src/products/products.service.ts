@@ -105,6 +105,16 @@ export class ProductsService {
     await this.productRepo.decrementStockForCharge(adjustments);
   }
 
+  async incrementStockForRestock(
+    adjustments: Array<{
+      productId: string;
+      variantId?: string | null;
+      quantity: number;
+    }>,
+  ): Promise<void> {
+    await this.productRepo.incrementStockForRestock(adjustments);
+  }
+
   // ==================== Product CRUD ====================
 
   async create(dto: CreateProductDto) {

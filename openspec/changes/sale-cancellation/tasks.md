@@ -43,16 +43,16 @@ Single developer workflow: work on dedicated branch, clean work-unit commits (A�
 ## Slice B: Restock Primitive in Products
 
 ### Phase B.1: Repository Port + Adapter (TDD)
-- [ ] B.1.1 RED: Write spec for `incrementStockForRestock` with variant line (`prisma-product.repository.spec.ts`)
-- [ ] B.1.2 GREEN: Add port `IProductRepository.incrementStockForRestock(adjustments)` (`product.repository.ts`)
-- [ ] B.1.3 GREEN: Implement variant increment in adapter: `variant.updateMany({ quantity: { increment } })` (`prisma-product.repository.ts`)
-- [ ] B.1.4 RED: Write spec for product line with `useStock: true`
-- [ ] B.1.5 GREEN: Implement product increment: `product.updateMany({ where: { useStock: true }, data: { quantity: { increment } } })`
-- [ ] B.1.6 RED: Write spec for `useStock: false` → no-op (no error)
-- [ ] B.1.7 GREEN: Verify skip logic (already implicit via `where: { useStock: true }`)
+- [x] B.1.1 RED: Write spec for `incrementStockForRestock` with variant line (`prisma-product.repository.spec.ts`)
+- [x] B.1.2 GREEN: Add port `IProductRepository.incrementStockForRestock(adjustments)` (`product.repository.ts`)
+- [x] B.1.3 GREEN: Implement variant increment in adapter: `variant.updateMany({ quantity: { increment } })` (`prisma-product.repository.ts`)
+- [x] B.1.4 RED: Write spec for product line with `useStock: true`
+- [x] B.1.5 GREEN: Implement product increment: `product.updateMany({ where: { useStock: true }, data: { quantity: { increment } } })`
+- [x] B.1.6 RED: Write spec for `useStock: false` → no-op (no error)
+- [x] B.1.7 GREEN: Verify skip logic (already implicit via `where: { useStock: true }`)
 
 ### Phase B.2: Service Exposure
-- [ ] B.2.1 Expose `ProductsService.incrementStockForRestock(adjustments)` wrapping repo method (`products.service.ts`)
+- [x] B.2.1 Expose `ProductsService.incrementStockForRestock(adjustments)` wrapping repo method (`products.service.ts`)
 
 **Work-unit commit B**: `feat(products): add incrementStockForRestock for sale cancellation restock`
 

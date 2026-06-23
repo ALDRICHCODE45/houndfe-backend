@@ -85,4 +85,68 @@ describe('PrismaProductRepository tenant scoping', () => {
       ]),
     ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
   });
+
+  it('increments variant stock for restock adjustments', async () => {
+    const tenantPrisma = makeTenantPrismaMock();
+    tenantPrisma.client.variant.updateMany.mockResolvedValue({ count: 1 });
+
+    const repo = new PrismaProductRepository(tenantPrisma as any);
+
+    await repo.incrementStockForRestock([
+      { productId: 'prod-1', variantId: 'var-1', quantity: 4 },
+    ]);
+
+    expect(tenantPrisma.client.variant.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'var-1',
+        productId: 'prod-1',
+        tenantId: 'tenant-1',
+      },
+      data: {
+        quantity: { increment: 4 },
+      },
+    });
+  });
+
+  it('increments product stock for restock adjustments when useStock is enabled', async () => {
+    const tenantPrisma = makeTenantPrismaMock();
+    tenantPrisma.client.product.updateMany.mockResolvedValue({ count: 1 });
+
+    const repo = new PrismaProductRepository(tenantPrisma as any);
+
+    await repo.incrementStockForRestock([{ productId: 'prod-2', quantity: 3 }]);
+
+    expect(tenantPrisma.client.product.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'prod-2',
+        tenantId: 'tenant-1',
+        useStock: true,
+      },
+      data: {
+        quantity: { increment: 3 },
+      },
+    });
+  });
+
+  it('skips non-stock products during restock without raising an error', async () => {
+    const tenantPrisma = makeTenantPrismaMock();
+    tenantPrisma.client.product.updateMany.mockResolvedValue({ count: 0 });
+
+    const repo = new PrismaProductRepository(tenantPrisma as any);
+
+    await expect(
+      repo.incrementStockForRestock([{ productId: 'prod-3', quantity: 2 }]),
+    ).resolves.toBeUndefined();
+
+    expect(tenantPrisma.client.product.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'prod-3',
+        tenantId: 'tenant-1',
+        useStock: true,
+      },
+      data: {
+        quantity: { increment: 2 },
+      },
+    });
+  });
 });
