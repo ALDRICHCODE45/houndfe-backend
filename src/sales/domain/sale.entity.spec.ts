@@ -3,7 +3,11 @@ import {
   InvalidArgumentError,
   BusinessRuleViolationError,
 } from '../../shared/domain/domain-error';
-import { InvalidDueDateError } from './sale.errors';
+import {
+  InvalidDueDateError,
+  SaleDeliveredCannotCancelError,
+  SaleNotCancellableError,
+} from './sale.errors';
 
 const BASE_SALE_ID = '550e8400-e29b-41d4-a716-446655440000';
 const USER_ID = '550e8400-e29b-41d4-a716-446655440001';
@@ -141,6 +145,172 @@ describe('Sale Entity', () => {
           folio: 'A-2605-0002',
         }),
       ).toThrow(BusinessRuleViolationError);
+    });
+  });
+
+  describe('cancel - guard requires CONFIRMED status', () => {
+    it('rejects canceling a DRAFT sale', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      try {
+        sale.cancel('CUSTOMER_REQUEST', { actorId: USER_ID });
+        throw new Error('Expected SaleNotCancellableError');
+      } catch (error) {
+        expect(error).toBeInstanceOf(SaleNotCancellableError);
+        expect((error as SaleNotCancellableError).code).toBe(
+          'SALE_NOT_CANCELLABLE',
+        );
+      }
+    });
+
+    it('rejects canceling an already CANCELED sale', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CANCELED',
+        items: [],
+        confirmedAt: new Date('2026-05-06T12:00:00.000Z'),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      try {
+        sale.cancel('ORDER_ERROR', { actorId: USER_ID });
+        throw new Error('Expected SaleNotCancellableError');
+      } catch (error) {
+        expect(error).toBeInstanceOf(SaleNotCancellableError);
+        expect((error as SaleNotCancellableError).code).toBe(
+          'SALE_NOT_CANCELLABLE',
+        );
+      }
+    });
+  });
+
+  describe('cancel - delivery guard', () => {
+    it('rejects canceling a SHIPPED sale', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        deliveryStatus: 'SHIPPED',
+        items: [],
+        confirmedAt: new Date('2026-05-06T12:00:00.000Z'),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      try {
+        sale.cancel('CUSTOMER_REQUEST', { actorId: USER_ID });
+        throw new Error('Expected SaleDeliveredCannotCancelError');
+      } catch (error) {
+        expect(error).toBeInstanceOf(SaleDeliveredCannotCancelError);
+        expect((error as SaleDeliveredCannotCancelError).code).toBe(
+          'SALE_DELIVERED_CANNOT_CANCEL',
+        );
+      }
+    });
+
+    it('rejects canceling a DELIVERED sale', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        deliveryStatus: 'DELIVERED',
+        items: [],
+        confirmedAt: new Date('2026-05-06T12:00:00.000Z'),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      try {
+        sale.cancel('ORDER_ERROR', { actorId: USER_ID });
+        throw new Error('Expected SaleDeliveredCannotCancelError');
+      } catch (error) {
+        expect(error).toBeInstanceOf(SaleDeliveredCannotCancelError);
+        expect((error as SaleDeliveredCannotCancelError).code).toBe(
+          'SALE_DELIVERED_CANNOT_CANCEL',
+        );
+      }
+    });
+  });
+
+  describe('cancel - refund computation', () => {
+    it('cancels a CREDIT sale with zero refund and cleared debt', () => {
+      const canceledAt = new Date('2026-06-23T12:00:00.000Z');
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        deliveryStatus: 'PENDING',
+        items: [],
+        confirmedAt: new Date('2026-05-06T12:00:00.000Z'),
+        folio: 'A-2605-0001',
+        paidCents: 0,
+        debtCents: 3500,
+        paymentStatus: 'CREDIT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = sale.cancel('CUSTOMER_REQUEST', {
+        actorId: USER_ID,
+        canceledAt,
+      });
+
+      expect(result.refundedCents).toBe(0);
+      expect(result.sale.status).toBe('CANCELED');
+      expect(result.sale.debtCents).toBe(0);
+      expect(result.sale.cancelReason).toBe('CUSTOMER_REQUEST');
+      expect(result.sale.canceledByUserId).toBe(USER_ID);
+      expect(result.sale.canceledAt).toEqual(canceledAt);
+    });
+
+    it('refunds the recorded paid cents for non-CREDIT sales', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        deliveryStatus: 'PENDING',
+        items: [],
+        confirmedAt: new Date('2026-05-06T12:00:00.000Z'),
+        folio: 'A-2605-0002',
+        paidCents: 2700,
+        debtCents: 800,
+        paymentStatus: 'PARTIAL',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = sale.cancel('ORDER_ERROR', { actorId: USER_ID });
+
+      expect(result.refundedCents).toBe(2700);
+      expect(result.sale.debtCents).toBe(800);
+      expect(result.sale.cancelReason).toBe('ORDER_ERROR');
+    });
+
+    it('clears debt when no money was paid even if payment status is not CREDIT', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        deliveryStatus: 'PENDING',
+        items: [],
+        confirmedAt: new Date('2026-05-06T12:00:00.000Z'),
+        folio: 'A-2605-0003',
+        paidCents: 0,
+        debtCents: 1800,
+        paymentStatus: 'PARTIAL',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = sale.cancel('OTHER', { actorId: USER_ID });
+
+      expect(result.refundedCents).toBe(0);
+      expect(result.sale.debtCents).toBe(0);
     });
   });
 

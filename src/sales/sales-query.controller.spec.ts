@@ -1,7 +1,9 @@
 import {
+  ConflictException,
   ForbiddenException,
   INestApplication,
   Logger,
+  NotFoundException,
   ParseUUIDPipe,
   UnauthorizedException,
   ValidationPipe,
@@ -26,6 +28,7 @@ function makeMockSalesService() {
     setDueDate: jest.fn(),
     assignSeller: jest.fn(),
     clearSeller: jest.fn(),
+    cancelSale: jest.fn(),
   } as any;
 }
 
@@ -145,6 +148,49 @@ describe('SalesQueryController', () => {
       'SELLER_NOT_FOUND',
     );
   });
+
+  // ── D.1.2 / D.1.4 cancel unit tests ──────────────────────────────────────
+
+  it('POST /sales/:id/cancel — delegates to cancelSale and returns result', async () => {
+    const id = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+    const user = makeMockUser('user-1');
+    const dto = { reason: 'CUSTOMER_REQUEST' as const };
+    const expected = {
+      saleId: id,
+      status: 'CANCELED',
+      refundedCents: 1000,
+      restockedItems: [],
+      canceledAt: '2026-06-23T00:00:00.000Z',
+    };
+    service.cancelSale.mockResolvedValue(expected);
+
+    const result = await controller.cancelSale(id, dto as any, user);
+
+    expect(result).toEqual(expected);
+    expect(service.cancelSale).toHaveBeenCalledWith(id, 'user-1', dto);
+  });
+
+  it('POST /sales/:id/cancel — forwards service errors without masking', async () => {
+    const id = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+    const user = makeMockUser('user-1');
+    service.cancelSale.mockRejectedValue(new Error('SALE_NOT_CANCELLABLE'));
+
+    await expect(
+      controller.cancelSale(id, { reason: 'OTHER' } as any, user),
+    ).rejects.toThrow('SALE_NOT_CANCELLABLE');
+  });
+
+  it('POST /sales/:id/cancel — forwards SALE_DELIVERED_CANNOT_CANCEL error', async () => {
+    const id = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+    const user = makeMockUser('user-1');
+    service.cancelSale.mockRejectedValue(
+      new Error('SALE_DELIVERED_CANNOT_CANCEL'),
+    );
+
+    await expect(
+      controller.cancelSale(id, { reason: 'OTHER' } as any, user),
+    ).rejects.toThrow('SALE_DELIVERED_CANNOT_CANCEL');
+  });
 });
 
 describe('SalesQueryController HTTP integration', () => {
@@ -182,6 +228,17 @@ describe('SalesQueryController HTTP integration', () => {
         return true;
       }
 
+      if (token === 'tenant-a-delete-sale') {
+        req.user = {
+          userId: 'user-a',
+          tenantId: 'tenant-a',
+          tenantSlug: 'tenant-a',
+          isSuperAdmin: false,
+          permissions: ['read:Sale', 'delete:Sale'],
+        };
+        return true;
+      }
+
       throw new UnauthorizedException('Unauthorized');
     }
   }
@@ -200,6 +257,16 @@ describe('SalesQueryController HTTP integration', () => {
     canActivate(context: ExecutionContext): boolean {
       const req = context.switchToHttp().getRequest();
       const permissions = (req.user?.permissions ?? []) as string[];
+      const path = req.path as string;
+
+      // cancel route requires delete:Sale
+      if (path.endsWith('/cancel')) {
+        if (!permissions.includes('delete:Sale')) {
+          throw new ForbiddenException('Insufficient permissions');
+        }
+        return true;
+      }
+
       if (!permissions.includes('read:Sale')) {
         throw new ForbiddenException('Insufficient permissions');
       }
@@ -426,5 +493,73 @@ describe('SalesQueryController HTTP integration', () => {
 
     expect(res.body.code).toBe('LISTING_TOO_MANY_VALUES');
     expect(res.body.details?.cap).toBe(200);
+  });
+
+  // ── D.1.2 / D.1.4 cancel HTTP integration tests ───────────────────────────
+
+  const cancelSaleId = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+  const cancelBody = { reason: 'CUSTOMER_REQUEST' };
+  const cancelResult = {
+    saleId: cancelSaleId,
+    status: 'CANCELED',
+    refundedCents: 1000,
+    restockedItems: [],
+    canceledAt: '2026-06-23T00:00:00.000Z',
+  };
+
+  it('POST /sales/:id/cancel returns 403 when delete:Sale permission is missing', async () => {
+    await request(app.getHttpServer())
+      .post(`/sales/${cancelSaleId}/cancel`)
+      .set('Authorization', 'Bearer tenant-a-read-sale')
+      .send(cancelBody)
+      .expect(403);
+  });
+
+  it('POST /sales/:id/cancel returns 200 and cancel result for authorized user', async () => {
+    service.cancelSale.mockResolvedValue(cancelResult);
+
+    await request(app.getHttpServer())
+      .post(`/sales/${cancelSaleId}/cancel`)
+      .set('Authorization', 'Bearer tenant-a-delete-sale')
+      .send(cancelBody)
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.cancelSale).toHaveBeenCalledWith(
+          cancelSaleId,
+          'user-a',
+          cancelBody,
+        );
+        expect(body).toEqual(cancelResult);
+      });
+  });
+
+  it('POST /sales/:id/cancel returns 400 for invalid reason enum value', async () => {
+    await request(app.getHttpServer())
+      .post(`/sales/${cancelSaleId}/cancel`)
+      .set('Authorization', 'Bearer tenant-a-delete-sale')
+      .send({ reason: 'INVALID_REASON' })
+      .expect(400);
+  });
+
+  it('POST /sales/:id/cancel propagates ConflictException (invalid state)', async () => {
+    service.cancelSale.mockRejectedValue(
+      new ConflictException('SALE_NOT_CANCELLABLE'),
+    );
+
+    await request(app.getHttpServer())
+      .post(`/sales/${cancelSaleId}/cancel`)
+      .set('Authorization', 'Bearer tenant-a-delete-sale')
+      .send(cancelBody)
+      .expect(409);
+  });
+
+  it('POST /sales/:id/cancel propagates NotFoundException (not found)', async () => {
+    service.cancelSale.mockRejectedValue(new NotFoundException('Sale not found'));
+
+    await request(app.getHttpServer())
+      .post(`/sales/${cancelSaleId}/cancel`)
+      .set('Authorization', 'Bearer tenant-a-delete-sale')
+      .send(cancelBody)
+      .expect(404);
   });
 });

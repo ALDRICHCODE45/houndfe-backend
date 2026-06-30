@@ -169,6 +169,28 @@ export class SaleFullyPaidEvent {
   ) {}
 }
 
+export class SaleCanceledEvent {
+  constructor(
+    public readonly saleId: string,
+    public readonly tenantId: string,
+    public readonly actorId: string,
+    public readonly folio: string,
+    public readonly reason:
+      | 'CUSTOMER_REQUEST'
+      | 'ORDER_ERROR'
+      | 'OUT_OF_STOCK'
+      | 'DUPLICATE_SALE'
+      | 'OTHER',
+    public readonly refundedCents: number,
+    public readonly restockedItems: Array<{
+      productId: string;
+      variantId: string | null;
+      quantity: number;
+    }>,
+    public readonly canceledAt: string,
+  ) {}
+}
+
 export class ReceiptConfirmedEvent {
   constructor(
     public readonly receiptId: string,

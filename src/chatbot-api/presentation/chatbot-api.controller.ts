@@ -12,6 +12,7 @@ import {
   HttpCode,
   Headers,
   UseInterceptors,
+  HttpStatus,
 } from '@nestjs/common';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
@@ -25,6 +26,7 @@ import { ServiceAuthGuard } from './guards/service-auth.guard';
 import { RegisterBotSaleRequestDto } from './dto/register-bot-sale.request';
 import { AttachReceiptRequestDto } from './dto/attach-receipt.request';
 import { DeliveryMetadataRequestDto } from './dto/delivery-metadata.request';
+import { CancelBotSaleRequestDto } from './dto/cancel-bot-sale.request';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
 
 @Controller('chatbot-api')
@@ -141,6 +143,24 @@ export class ChatbotApiController {
     return this.chatbotApiService.getOrderHistoryByPhone({
       phoneCountryCode: phoneCountryCode ?? '',
       phone,
+    });
+  }
+
+  /**
+   * POST /chatbot-api/sales/:saleId/cancel — Cancel a bot sale.
+   * Requires `sales:write` scope. Delegates to SalesService.cancelSale via ChatbotApiService.
+   */
+  @Post('sales/:saleId/cancel')
+  @HttpCode(HttpStatus.OK)
+  @RequiredScopes('sales:write')
+  cancelBotSale(
+    @Param('saleId', ParseUUIDPipe) saleId: string,
+    @Body() body: CancelBotSaleRequestDto,
+  ) {
+    return this.chatbotApiService.cancelBotSale({
+      saleId,
+      reason: body.reason,
+      cashierUserId: body.cashierUserId,
     });
   }
 }

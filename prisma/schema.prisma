@@ -121,6 +121,15 @@ enum TargetSide {
 enum SaleStatus {
   DRAFT
   CONFIRMED
+  CANCELED
+}
+
+enum SaleCancelReason {
+  CUSTOMER_REQUEST
+  ORDER_ERROR
+  OUT_OF_STOCK
+  DUPLICATE_SALE
+  OTHER
 }
 
 enum SalePaymentMethod {
@@ -238,6 +247,7 @@ model Tenant {
   sales                Sale[]
   saleItems            SaleItem[]
   salePayments         SalePayment[]
+  saleRefunds          SaleRefund[]
   saleComments         SaleComment[]
   saleIdempotencies    SaleIdempotency[]
   saleFolioCounters    SaleFolioCounter[]
@@ -641,6 +651,9 @@ model Sale {
   confirmedAt DateTime?
   dueDate     DateTime?
   folio       String?
+  canceledAt DateTime?
+  cancelReason SaleCancelReason?
+  canceledByUserId String?
   // Delivery metadata — set for bot-created ONLINE sales when dispatched
   carrierName          String?
   trackingRef          String?
@@ -657,6 +670,7 @@ model Sale {
   shippingAddress CustomerAddress? @relation(fields: [shippingAddressId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   items  SaleItem[]
   payments SalePayment[]
+  refunds SaleRefund[]
   comments SaleComment[]
   idempotencyRecords SaleIdempotency[]
   receiptEvidences   ReceiptEvidence[]
@@ -725,12 +739,32 @@ model SalePayment {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
   user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  refunds SaleRefund[]
 
   @@index([saleId])
   @@index([tenantId])
   @@index([tenantId, method], map: "idx_sale_payments_tenant_method")
   @@index([userId])
   @@map("sale_payments")
+}
+
+model SaleRefund {
+  id            String           @id @default(cuid())
+  tenantId      String
+  saleId        String
+  salePaymentId String?
+  method        SalePaymentMethod
+  amountCents   Int
+  reason        SaleCancelReason
+  createdAt     DateTime         @default(now())
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale        Sale         @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  salePayment SalePayment? @relation(fields: [salePaymentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, saleId])
+  @@index([tenantId, createdAt])
+  @@map("sale_refunds")
 }
 
 model SaleComment {

@@ -8,11 +8,36 @@ import {
   OverrideSaleItemPriceInput,
   ApplySaleItemDiscountInput,
 } from './sale-item.entity';
-import { InvalidDueDateError } from './sale.errors';
+import {
+  InvalidDueDateError,
+  SaleNotCancellableError,
+  SaleDeliveredCannotCancelError,
+} from './sale.errors';
 
-export type SaleStatus = 'DRAFT' | 'CONFIRMED';
+export type SaleStatus = 'DRAFT' | 'CONFIRMED' | 'CANCELED';
 export type SaleChannel = 'POS' | 'ONLINE';
-export type SaleDeliveryStatus = 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+export type SaleDeliveryStatus =
+  | 'PENDING'
+  | 'DELIVERED'
+  | 'NOT_APPLICABLE'
+  | 'SHIPPED';
+export type SalePaymentStatus = 'PAID' | 'PARTIAL' | 'CREDIT';
+export type SaleCancelReason =
+  | 'CUSTOMER_REQUEST'
+  | 'ORDER_ERROR'
+  | 'OUT_OF_STOCK'
+  | 'DUPLICATE_SALE'
+  | 'OTHER';
+
+export interface CancelSaleActor {
+  actorId: string;
+  canceledAt?: Date;
+}
+
+export interface CancelSaleResult {
+  sale: Sale;
+  refundedCents: number;
+}
 
 export interface ConfirmSaleInput {
   confirmedAt: Date;
@@ -38,6 +63,14 @@ export interface SaleFromPersistenceProps {
   items: SaleItemProps[];
   confirmedAt?: Date | null;
   folio?: string | null;
+  totalCents?: number;
+  paidCents?: number;
+  debtCents?: number;
+  changeDueCents?: number;
+  paymentStatus?: SalePaymentStatus | null;
+  canceledAt?: Date | null;
+  cancelReason?: SaleCancelReason | null;
+  canceledByUserId?: string | null;
   createdAt: Date;
   updatedAt: Date;
   /** Delivery metadata — added for bot-created ONLINE sales (Slice 6) */
@@ -85,6 +118,14 @@ export class Sale {
     items: SaleItem[] = [],
     public readonly confirmedAt?: Date,
     public readonly folio?: string,
+    public readonly totalCents: number = 0,
+    public readonly paidCents: number = 0,
+    public readonly debtCents: number = 0,
+    public readonly changeDueCents: number = 0,
+    public readonly paymentStatus: SalePaymentStatus | null = null,
+    public readonly canceledAt: Date | null = null,
+    public readonly cancelReason: SaleCancelReason | null = null,
+    public readonly canceledByUserId: string | null = null,
     public readonly createdAt?: Date,
     public readonly updatedAt?: Date,
     carrierName: string | null = null,
@@ -142,6 +183,14 @@ export class Sale {
       items,
       props.confirmedAt ?? undefined,
       props.folio ?? undefined,
+      props.totalCents ?? 0,
+      props.paidCents ?? 0,
+      props.debtCents ?? 0,
+      props.changeDueCents ?? 0,
+      props.paymentStatus ?? null,
+      props.canceledAt ?? null,
+      props.cancelReason ?? null,
+      props.canceledByUserId ?? null,
       props.createdAt,
       props.updatedAt,
       props.carrierName ?? null,
@@ -180,9 +229,72 @@ export class Sale {
       [...this._items],
       input.confirmedAt,
       input.folio,
+      this.totalCents,
+      this.paidCents,
+      this.debtCents,
+      this.changeDueCents,
+      this.paymentStatus,
+      this.canceledAt,
+      this.cancelReason,
+      this.canceledByUserId,
       this.createdAt,
       this.updatedAt,
     );
+  }
+
+  cancel(reason: SaleCancelReason, actor: CancelSaleActor): CancelSaleResult {
+    if (this.status !== 'CONFIRMED') {
+      throw new SaleNotCancellableError();
+    }
+
+    if (
+      this.deliveryStatus === 'SHIPPED' ||
+      this.deliveryStatus === 'DELIVERED'
+    ) {
+      throw new SaleDeliveredCannotCancelError();
+    }
+
+    const canceledAt = actor.canceledAt ?? new Date();
+    const refundedCents =
+      this.paymentStatus === 'CREDIT' || this.paidCents === 0
+        ? 0
+        : this.paidCents;
+    const resultingDebtCents =
+      this.paymentStatus === 'CREDIT' || this.paidCents === 0
+        ? 0
+        : this.debtCents;
+
+    return {
+      sale: new Sale(
+        this.id,
+        this.userId,
+        'CANCELED',
+        this.channel,
+        this.register,
+        this.deliveryStatus,
+        this.customerId,
+        this.shippingAddressId,
+        this.sellerUserId,
+        this._dueDate,
+        [...this._items],
+        this.confirmedAt,
+        this.folio,
+        this.totalCents,
+        this.paidCents,
+        resultingDebtCents,
+        this.changeDueCents,
+        this.paymentStatus,
+        canceledAt,
+        reason,
+        actor.actorId,
+        this.createdAt,
+        this.updatedAt,
+        this.carrierName,
+        this.trackingRef,
+        this.estimatedDeliveryAt,
+      ),
+      refundedCents,
+    };
   }
 
   get items(): ReadonlyArray<SaleItem> {
@@ -442,6 +554,14 @@ export class Sale {
       dueDate: this.dueDate ? this.dueDate.toISOString() : null,
       confirmedAt: this.confirmedAt,
       folio: this.folio,
+      totalCents: this.totalCents,
+      paidCents: this.paidCents,
+      debtCents: this.debtCents,
+      changeDueCents: this.changeDueCents,
+      paymentStatus: this.paymentStatus,
+      canceledAt: this.canceledAt,
+      cancelReason: this.cancelReason,
+      canceledByUserId: this.canceledByUserId,
       items: this._items.map((item) => item.toResponse()),
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,

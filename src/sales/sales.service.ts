@@ -12,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
-import { Sale } from './domain/sale.entity';
+import { Sale, type SaleCancelReason } from './domain/sale.entity';
 import type { ISaleRepository } from './domain/sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
 import { ProductsService } from '../products/products.service';
@@ -55,6 +55,7 @@ import type { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
 import type {
   PersistedChargePayment,
+  PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from './domain/sale.repository';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
@@ -124,6 +125,87 @@ type ConfirmBotSaleResult = {
   debtCents: number;
   confirmedAt: string;
 };
+
+type CancelSaleDto = {
+  reason: SaleCancelReason;
+};
+
+type CancelSaleResult = {
+  saleId: string;
+  status: 'CANCELED';
+  refundedCents: number;
+  restockedItems: Array<{
+    productId: string;
+    variantId: string | null;
+    quantity: number;
+  }>;
+  canceledAt: string;
+};
+
+type CancelSaleRefundSource = {
+  paymentId: string;
+  method: string;
+  amountCents: number;
+};
+
+function normalizeRefundMethod(
+  method: string,
+): PersistedSaleRefundRecord['method'] {
+  switch (method.toUpperCase()) {
+    case 'CASH':
+      return 'cash';
+    case 'CARD_CREDIT':
+      return 'card_credit';
+    case 'CARD_DEBIT':
+      return 'card_debit';
+    case 'TRANSFER':
+      return 'transfer';
+    case 'CREDIT':
+      return 'credit';
+    default:
+      throw new BusinessRuleViolationError(
+        'SALE_REFUND_METHOD_NOT_SUPPORTED',
+        'SALE_REFUND_METHOD_NOT_SUPPORTED',
+      );
+  }
+}
+
+function buildCancellationRefunds(
+  payments: CancelSaleRefundSource[],
+  refundedCents: number,
+  reason: SaleCancelReason,
+): PersistedSaleRefundRecord[] {
+  let remaining = refundedCents;
+  const refunds: PersistedSaleRefundRecord[] = [];
+
+  for (const payment of payments) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const amountCents = Math.min(payment.amountCents, remaining);
+    if (amountCents <= 0) {
+      continue;
+    }
+
+    refunds.push({
+      salePaymentId: payment.paymentId,
+      method: normalizeRefundMethod(payment.method),
+      amountCents,
+      reason,
+    });
+    remaining -= amountCents;
+  }
+
+  if (remaining !== 0) {
+    throw new BusinessRuleViolationError(
+      'SALE_REFUND_AUDIT_MISMATCH',
+      'SALE_REFUND_AUDIT_MISMATCH',
+    );
+  }
+
+  return refunds;
+}
 
 function isSupportedChargeMethod(
   method: ChargeSaleDto['method'],
@@ -1633,6 +1715,141 @@ export class SalesService {
       };
 
       await this.saleRepo.markChargeIdempotencySucceeded(
+        idempotency.token,
+        saleId,
+        payload,
+      );
+
+      return payload;
+    });
+  }
+
+  async cancelSale(
+    saleId: string,
+    actorId: string,
+    dto: CancelSaleDto,
+  ): Promise<CancelSaleResult> {
+    const idempotencyKey = `sale:cancel:${saleId}`;
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ saleId, actorId, reason: dto.reason }))
+      .digest('hex');
+
+    const idempotency = await this.saleRepo.acquireCancellationIdempotency(
+      saleId,
+      idempotencyKey,
+      requestHash,
+    );
+    if (idempotency.kind === 'replay') {
+      return idempotency.payload as CancelSaleResult;
+    }
+    if (idempotency.kind === 'conflict') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'IDEMPOTENCY_KEY_CONFLICT',
+      );
+    }
+    if (idempotency.kind === 'in_flight') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+      );
+    }
+
+    return this.saleRepo.runInTransaction(async () => {
+      const tenantId = this.tenantPrisma.getTenantId();
+      const sale = await this.saleRepo.findByIdForUpdate(saleId);
+
+      // Tenant isolation: findByIdForUpdate queries within the tenant-scoped
+      // client — a null result means the sale does not belong to this tenant.
+      // Authorization: RBAC (delete:Sale / sales:write) is enforced at the
+      // controller layer. Creator-ownership is NOT an eligibility gate; any
+      // authorized actor in the same tenant may cancel. actorId is still
+      // recorded as canceledByUserId for audit purposes.
+      if (!sale) {
+        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+      }
+
+      const restockedItems = sale.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+      }));
+
+      const buildResult = (
+        canceledSale: Sale,
+        refundedCents: number,
+      ): CancelSaleResult => ({
+        saleId: canceledSale.id,
+        status: 'CANCELED',
+        refundedCents,
+        restockedItems,
+        canceledAt:
+          canceledSale.canceledAt?.toISOString() ?? new Date().toISOString(),
+      });
+
+      if (sale.status === 'CANCELED') {
+        const replayPayload = buildResult(
+          sale,
+          sale.paymentStatus === 'CREDIT' || sale.paidCents === 0
+            ? 0
+            : sale.paidCents,
+        );
+
+        await this.saleRepo.markCancellationIdempotencySucceeded(
+          idempotency.token,
+          saleId,
+          replayPayload,
+        );
+
+        return replayPayload;
+      }
+
+      const { sale: canceledSale, refundedCents } = sale.cancel(dto.reason, {
+        actorId,
+      });
+
+      await this.productsService.incrementStockForRestock(restockedItems);
+
+      const detail =
+        refundedCents === 0
+          ? null
+          : await this.saleRepo.findOneWithRelations(saleId);
+      const refunds =
+        refundedCents === 0
+          ? []
+          : buildCancellationRefunds(
+              (detail?.payments ?? []).map((payment) => ({
+                paymentId: payment.paymentId,
+                method: payment.method,
+                amountCents: payment.amountCents,
+              })),
+              refundedCents,
+              dto.reason,
+            );
+
+      await this.saleRepo.persistCancellation(canceledSale, refunds);
+
+      const payload = buildResult(canceledSale, refundedCents);
+
+      await this.outboxWriter.publish(
+        this.tenantPrisma.getClient(),
+        tenantId,
+        'Sale',
+        saleId,
+        'sale.canceled',
+        {
+          saleId,
+          tenantId,
+          actorId,
+          folio: canceledSale.folio ?? 'N/A',
+          reason: dto.reason,
+          refundedCents,
+          restockedItems,
+          canceledAt: payload.canceledAt,
+        },
+      );
+
+      await this.saleRepo.markCancellationIdempotencySucceeded(
         idempotency.token,
         saleId,
         payload,
