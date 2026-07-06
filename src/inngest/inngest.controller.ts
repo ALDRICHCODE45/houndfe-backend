@@ -10,14 +10,24 @@
  *     `/api/inngest` is JWT-EXCLUDED.
  *   - The ONLY authentication gate on this endpoint is Inngest's own
  *     signature verification, which `serve({ signingKey })` performs
- *     internally. Unsigned requests to a configured signing key are
- *     rejected by the SDK with 401.
+ *     internally — but ONLY while the SDK client is in CLOUD mode.
+ *     Unsigned requests are rejected with 401 by the SDK in cloud
+ *     mode; in DEV mode they are accepted (which is the bypass we
+ *     must close).
+ *   - **Cloud vs dev mode is set by `INNGEST_DEV`** (the env var) or
+ *     `isDev` (the client option). The SDK's mode-resolution chain is
+ *     `options.isDev` → `INNGEST_DEV` env var → explicit URL →
+ *     default cloud. DEV mode silently disables signature verification
+ *     on `serve()`, regardless of whether `signingKey` is passed.
  *   - Joi D.4 enforces that `INNGEST_SIGNING_KEY` is set in
- *     staging/production — so by the time this controller is
- *     constructed in prod, the key is present, and `serve()` runs in
- *     signed mode.
- *   - In dev (no signing key), `serve()` runs unsigned — fine because
- *     the Inngest Dev Server is local and trusted.
+ *     staging/production. Joi D-hardening enforces that `INNGEST_DEV`
+ *     is falsy in staging/production. AND `InngestService` pins
+ *     `isDev: false` at construction in deployed envs as belt-and-braces.
+ *     By the time this controller is constructed in prod, all three
+ *     gates are closed and `serve()` runs in signed mode.
+ *   - In dev (no signing key, INNGEST_DEV allowed), `serve()` runs
+ *     unsigned — fine because the Inngest Dev Server is local and
+ *     trusted.
  *
  * **Why `@All()` and `@Req()` / `@Res()`.** Inngest's SDK uses one of
  * three HTTP verbs (GET for introspection, PUT for sync, POST for

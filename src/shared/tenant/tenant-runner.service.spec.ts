@@ -188,6 +188,61 @@ describe('TenantRunnerService.runWithTenant (D.1)', () => {
     expect(innerSeenDuringOuter).toBe('tenant-B');
   });
 
+  describe('runWithTenant tenantId guard (D-hardening)', () => {
+    it('throws when tenantId is empty string (no CLS scope opened, fn never invoked)', async () => {
+      const { cls } = makeCls();
+      const runner = new TenantRunnerService(cls);
+
+      const fn = jest.fn().mockResolvedValue('should-not-run');
+
+      await expect(runner.runWithTenant('', fn)).rejects.toThrow(
+        /tenantId is required/,
+      );
+      expect(fn).not.toHaveBeenCalled();
+      expect(cls.run).not.toHaveBeenCalled();
+      expect(cls.set).not.toHaveBeenCalled();
+    });
+
+    it('throws when tenantId is whitespace-only (treated as missing)', async () => {
+      const { cls } = makeCls();
+      const runner = new TenantRunnerService(cls);
+
+      const fn = jest.fn().mockResolvedValue('should-not-run');
+
+      await expect(runner.runWithTenant('   ', fn)).rejects.toThrow(
+        /tenantId is required/,
+      );
+      expect(fn).not.toHaveBeenCalled();
+      expect(cls.run).not.toHaveBeenCalled();
+    });
+
+    it('throws when tenantId is undefined (defensive — primitive param may be untyped)', async () => {
+      const { cls } = makeCls();
+      const runner = new TenantRunnerService(cls);
+
+      const fn = jest.fn().mockResolvedValue('should-not-run');
+
+      await expect(
+        runner.runWithTenant(undefined as unknown as string, fn),
+      ).rejects.toThrow(/tenantId is required/);
+      expect(fn).not.toHaveBeenCalled();
+      expect(cls.run).not.toHaveBeenCalled();
+    });
+
+    it('accepts a non-empty tenantId that contains internal whitespace (only leading/trailing must be trimmed)', async () => {
+      const { cls, activeStore } = makeCls();
+      const runner = new TenantRunnerService(cls);
+
+      let observed: unknown = undefined;
+      await runner.runWithTenant('  tenant-A  ', async () => {
+        observed = activeStore().tenantId;
+      });
+
+      // We trim before assigning so the seeded value is canonical.
+      expect(observed).toBe('tenant-A');
+    });
+  });
+
   it('does NOT leak a parent CLS tenantId into the child scope (defensive clear)', async () => {
     // Simulate a parent request having seeded tenantId='tenant-parent'.
     // The runner opens its OWN `cls.run()` scope and OVERWRITES with the

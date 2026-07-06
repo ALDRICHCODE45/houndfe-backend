@@ -47,10 +47,24 @@ export class TenantRunnerService {
   /**
    * Run `fn` inside a fresh CLS scope seeded with the supplied `tenantId`
    * and the SYSTEM_ACTOR_ID posture. Returns whatever `fn` resolves to.
+   *
+   * Throws synchronously (before opening any CLS scope) when `tenantId` is
+   * missing or whitespace-only. This guard is load-bearing: a blank
+   * `tenantId` would otherwise seed CLS with `''`/`undefined` and silently
+   * bypass every tenant-scoped repository's CLS lookup. Background flows
+   * (Inngest step bodies, outbox dispatchers, scheduled jobs) have no
+   * request context to fall back on, so the guard is the only line of
+   * defense against a missing `tenantId` in an event payload.
    */
   async runWithTenant<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+    const trimmed = tenantId?.trim();
+    if (!trimmed) {
+      throw new Error(
+        'runWithTenant: tenantId is required for a system-scoped run',
+      );
+    }
     return this.cls.run(async () => {
-      this.cls.set('tenantId', tenantId);
+      this.cls.set('tenantId', trimmed);
       this.cls.set('userId', SYSTEM_ACTOR_ID);
       this.cls.set('isSuperAdmin', false);
       this.cls.set('tenantSlug', null);

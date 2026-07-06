@@ -15,12 +15,25 @@
  *
  *   - `INNGEST_SIGNING_KEY` and `INNGEST_EVENT_KEY` are REQUIRED when
  *     `NODE_ENV` is `staging` or `production`. The signing key secures
- *     the `/api/inngest` endpoint (Inngest signature verification); the
- *     event key authorizes outbound events to Inngest Cloud.
+ *     the `/api/inngest` endpoint (Inngest signature verification — only
+ *     enforced while the SDK is in CLOUD mode); the event key authorizes
+ *     outbound events to Inngest Cloud.
  *
  *   - `RESEND_API_KEY` is REQUIRED when `NODE_ENV` is `production` —
  *     finding #4: no dev-logger fallback in prod. Staging may use the
  *     redacted dev-logger fallback, so it stays optional there.
+ *
+ *   - `INNGEST_DEV` (D-hardening) is FAIL-CLOSED when `NODE_ENV` is
+ *     `staging` or `production`: it must be absent or explicitly
+ *     `false`/`0`. The Inngest SDK derives its `mode` (cloud vs dev)
+ *     from a priority chain — `options.isDev` → `INNGEST_DEV` env var →
+ *     explicit URL → default cloud — and DEV mode silently disables
+ *     signature verification on `serve()`. Since `/api/inngest` has no
+ *     JWT guard (see `inngest.controller.ts`), a truthy `INNGEST_DEV`
+ *     in a deployed environment would expose the endpoint to
+ *     unauthenticated function execution. The Joi schema rejects it at
+ *     boot. In dev/test the value is permissive so the Inngest Dev
+ *     Server flow works.
  *
  *   - In dev / test, the optional keys are relaxed so the app boots
  *     against the Inngest Dev Server and the dev-mailer fallback without
@@ -65,7 +78,10 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
       // makes an unset env fail Joi at boot — fail-closed.
       .required(),
 
-    // Signs /api/inngest — the Inngest SDK refuses unsigned prod requests.
+    // Signs /api/inngest. The Inngest SDK only enforces signature
+    // verification while the client is in CLOUD mode (see `INNGEST_DEV`
+    // and `isDev` below). The schema enforces presence; the SDK enforces
+    // the actual verification.
     INNGEST_SIGNING_KEY: Joi.string().when('NODE_ENV', {
       is: Joi.valid('staging', 'production'),
       then: Joi.required(),
@@ -78,6 +94,37 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
       then: Joi.required(),
       otherwise: Joi.optional(),
     }),
+
+    // D-hardening — INNGEST_DEV fail-closed posture.
+    //
+    // The SDK's mode-resolution chain is:
+    //   1. options.isDev (we pin this in `inngest.service.ts`)
+    //   2. INNGEST_DEV env var (`true`/`1` → dev, anything else → cloud)
+    //   3. INNGEST_DEV as a URL → dev with that URL
+    //   4. default → cloud
+    //
+    // In deployed envs (staging/production) we reject any truthy
+    // INNGEST_DEV at boot so a misconfigured env cannot demote the
+    // client to dev mode (which would silently disable signature
+    // verification on /api/inngest — fatal since the endpoint is
+    // JWT-excluded). `.truthy('1', 1)` / `.falsy('0', 0)` extend the
+    // default Joi.boolean() coercion to match the SDK's parseAsBoolean
+    // (which accepts both `true`/`1` and `false`/`0`). These keywords
+    // exist for dev/test parse parity — so `INNGEST_DEV=1` in a local
+    // env is understood as a boolean rather than crashing boot on a
+    // plain Joi.boolean(). In staging/production every truthy value is
+    // rejected (boot aborts — the fail-closed outcome) with or without
+    // these keywords; URL form or any other non-boolean string is also
+    // rejected outright. In dev/test the value is permissive — needed
+    // for the Inngest Dev Server.
+    INNGEST_DEV: Joi.boolean()
+      .truthy('1', 1)
+      .falsy('0', 0)
+      .when('NODE_ENV', {
+        is: Joi.valid('staging', 'production'),
+        then: Joi.valid(false).default(false),
+        otherwise: Joi.optional(),
+      }),
 
     // Resend API key — required only in production (finding #4: no
     // dev-logger fallback in prod). Staging may use the redacted dev

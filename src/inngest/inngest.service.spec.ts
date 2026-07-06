@@ -36,12 +36,14 @@ jest.mock('inngest', () => {
   class Inngest {
     readonly id: string;
     readonly eventKey: string | undefined;
+    readonly isDev: boolean | undefined;
     readonly send = sendMock;
     readonly createFunction = createFunctionMock;
 
-    constructor(opts: { id: string; eventKey?: string }) {
+    constructor(opts: { id: string; eventKey?: string; isDev?: boolean }) {
       this.id = opts.id;
       this.eventKey = opts.eventKey;
+      this.isDev = opts.isDev;
     }
   }
 
@@ -55,9 +57,10 @@ jest.mock('inngest', () => {
 import { InngestService } from './inngest.service';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const inngestMock = require('inngest') as {
-  Inngest: new (opts: { id: string; eventKey?: string }) => {
+  Inngest: new (opts: { id: string; eventKey?: string; isDev?: boolean }) => {
     id: string;
     eventKey: string | undefined;
+    isDev: boolean | undefined;
     send: jest.Mock;
     createFunction: jest.Mock;
   };
@@ -78,9 +81,39 @@ function makeConfigService(values: Record<string, string | undefined>): ConfigSe
 }
 
 describe('InngestService (D.2)', () => {
+  // Track constructor calls so we can assert the options handed to the
+  // SDK — fail-closed tests below pin isDev:false regardless of INNGEST_DEV.
+  type CapturedOpts = {
+    id: string;
+    eventKey?: string;
+    isDev?: boolean;
+  };
+  const capturedConstructors: CapturedOpts[] = [];
+  let OriginalInngest: typeof inngestMock.Inngest;
+
+  beforeAll(() => {
+    OriginalInngest = inngestMock.Inngest;
+  });
+
   beforeEach(() => {
     inngestMock.__mocks.sendMock.mockReset();
     inngestMock.__mocks.createFunctionMock.mockReset();
+    capturedConstructors.length = 0;
+    // Wrap the mocked constructor so we can capture every call's options.
+    const Wrapped = jest.fn((opts: CapturedOpts) => {
+      capturedConstructors.push({ ...opts });
+      return new OriginalInngest(opts);
+    });
+    Object.setPrototypeOf(Wrapped, OriginalInngest);
+    (inngestMock as unknown as { Inngest: unknown }).Inngest =
+      Wrapped as unknown as typeof OriginalInngest;
+  });
+
+  afterEach(() => {
+    // Restore the original mocked constructor so other specs that share
+    // the module-level mock don't see our wrapper.
+    (inngestMock as unknown as { Inngest: unknown }).Inngest =
+      OriginalInngest;
   });
 
   describe('client construction', () => {
@@ -195,6 +228,94 @@ describe('InngestService (D.2)', () => {
 
       const second = svc.getFunctions();
       expect(second).toEqual([]);
+    });
+  });
+
+  // ─── D-hardening — fail-closed posture on INNGEST_DEV / NODE_ENV ─────
+  // The Inngest SDK derives its `mode` (cloud vs dev) from
+  // `options.isDev` first, then `INNGEST_DEV`, then explicit URL. Dev mode
+  // makes `serve()` accept UNSIGNED requests — a fatal bypass on
+  // /api/inngest. We force `isDev: false` whenever NODE_ENV is
+  // `staging` or `production`, regardless of INNGEST_DEV. In dev/test we
+  // keep the SDK's default (relaxed) so the Inngest Dev Server works.
+  describe('fail-closed mode forcing (D-hardening)', () => {
+    it('passes isDev:false to the SDK when NODE_ENV=production (cloud mode enforced)', () => {
+      const config = makeConfigService({
+        INNGEST_EVENT_KEY: 'evt_prod',
+        NODE_ENV: 'production',
+      });
+
+      const svc = new InngestService(config);
+      void svc;
+
+      expect(capturedConstructors).toHaveLength(1);
+      const opts = capturedConstructors[0] as CapturedOpts;
+      expect(opts.isDev).toBe(false);
+      // Confirm the keys are still forwarded — fail-closed posture does
+      // not break the existing eventKey wiring.
+      expect(opts.eventKey).toBe('evt_prod');
+    });
+
+    it('passes isDev:false to the SDK when NODE_ENV=staging (cloud mode enforced)', () => {
+      const config = makeConfigService({
+        INNGEST_EVENT_KEY: 'evt_staging',
+        NODE_ENV: 'staging',
+      });
+
+      const svc = new InngestService(config);
+      void svc;
+
+      expect(capturedConstructors).toHaveLength(1);
+      expect((capturedConstructors[0] as CapturedOpts).isDev).toBe(false);
+    });
+
+    it('does NOT set isDev in dev mode (lets the Inngest Dev Server flow through unchanged)', () => {
+      const config = makeConfigService({
+        INNGEST_EVENT_KEY: undefined,
+        NODE_ENV: 'development',
+      });
+
+      const svc = new InngestService(config);
+      void svc;
+
+      expect(capturedConstructors).toHaveLength(1);
+      // `isDev` is undefined — the SDK falls back to its default (read
+      // INNGEST_DEV from env). We deliberately do not flip dev mode.
+      expect((capturedConstructors[0] as CapturedOpts).isDev).toBeUndefined();
+    });
+
+    it('does NOT set isDev in test mode (parity with dev)', () => {
+      const config = makeConfigService({
+        INNGEST_EVENT_KEY: undefined,
+        NODE_ENV: 'test',
+      });
+
+      const svc = new InngestService(config);
+      void svc;
+
+      expect(capturedConstructors).toHaveLength(1);
+      expect((capturedConstructors[0] as CapturedOpts).isDev).toBeUndefined();
+    });
+
+    it('forces isDev:false in production even when INNGEST_DEV is truthy in the env object (the bypass the gate is closing)', () => {
+      // This is the precise regression: today the SDK reads INNGEST_DEV
+      // and silently flips to dev (unsigned) mode. The fix pins isDev at
+      // construction time so an INNGEST_DEV=1 env cannot demote the
+      // client. Joi D-hardening catches the same value at boot in prod;
+      // this is the belt-and-braces in case the boot guard is ever
+      // bypassed.
+      const config = makeConfigService({
+        INNGEST_EVENT_KEY: 'evt_prod',
+        NODE_ENV: 'production',
+        INNGEST_DEV: '1',
+      });
+
+      const svc = new InngestService(config);
+      void svc;
+
+      expect(capturedConstructors).toHaveLength(1);
+      const opts = capturedConstructors[0] as CapturedOpts;
+      expect(opts.isDev).toBe(false);
     });
   });
 });

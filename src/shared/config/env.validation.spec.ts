@@ -263,4 +263,145 @@ describe('buildEnvValidationSchema (D.4)', () => {
       expect(value.RESEND_API_KEY).toBeUndefined();
     });
   });
+
+  // ─── D-hardening — INNGEST_DEV fail-closed posture ─────────────────
+  // The Inngest SDK derives its mode (cloud vs dev) from `options.isDev`
+  // → `INNGEST_DEV` → URL → default cloud. Dev mode makes `serve()`
+  // accept UNSIGNED requests — fatal on /api/inngest (no JWT guard). We
+  // therefore reject a truthy INNGEST_DEV when NODE_ENV is staging/
+  // production. In dev/test it is permissive (boots against the Dev
+  // Server).
+  describe('INNGEST_DEV (D-hardening — fail-closed in deployed envs)', () => {
+    it('rejects INNGEST_DEV=true in production (the bypass the gate is closing)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        INNGEST_DEV: 'true',
+      });
+      expect(error).toBeDefined();
+      expect(error!.details.some((d) => d.path.includes('INNGEST_DEV'))).toBe(
+        true,
+      );
+    });
+
+    it('rejects INNGEST_DEV=1 in production', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        INNGEST_DEV: '1',
+      });
+      expect(error).toBeDefined();
+      expect(error!.details.some((d) => d.path.includes('INNGEST_DEV'))).toBe(
+        true,
+      );
+    });
+
+    it('rejects INNGEST_DEV=true in staging', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'staging',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        INNGEST_DEV: 'true',
+      });
+      expect(error).toBeDefined();
+      expect(error!.details.some((d) => d.path.includes('INNGEST_DEV'))).toBe(
+        true,
+      );
+    });
+
+    it('accepts INNGEST_DEV=false in production (explicit cloud mode is fine)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        INNGEST_DEV: 'false',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('accepts INNGEST_DEV=0 in production (explicit cloud mode is fine)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        INNGEST_DEV: '0',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('accepts INNGEST_DEV unset in production (default posture is fail-closed)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('rejects non-boolean INNGEST_DEV values in production (URL form / unknown strings are fail-closed)', () => {
+      // The SDK's mode-resolution falls back to "dev" when INNGEST_DEV is
+      // a URL. Joi.boolean() rejects any non-boolean string outright, so
+      // a misconfigured URL form also aborts boot — exactly what we want.
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        INNGEST_DEV: 'https://dev.example.com',
+      });
+      expect(error).toBeDefined();
+      expect(error!.details.some((d) => d.path.includes('INNGEST_DEV'))).toBe(
+        true,
+      );
+    });
+
+    it('accepts INNGEST_DEV=true in development (Dev Server flow)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        INNGEST_DEV: 'true',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('accepts INNGEST_DEV=1 in development', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        INNGEST_DEV: '1',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('accepts INNGEST_DEV unset in development (default)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('accepts INNGEST_DEV=1 in test (parity with development)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'test',
+        INNGEST_DEV: '1',
+      });
+      expect(error).toBeUndefined();
+    });
+  });
 });

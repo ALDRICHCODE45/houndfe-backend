@@ -10,6 +10,20 @@
  *      dev/test the key is optional because the Inngest Dev Server
  *      accepts unsigned events.
  *
+ *      **Fail-closed posture on `INNGEST_DEV` (D-hardening).** The
+ *      Inngest SDK derives its `mode` (cloud vs dev) from a priority
+ *      chain: `options.isDev` → `INNGEST_DEV` env var → explicit URL →
+ *      default cloud. Dev mode makes `serve()` accept UNSIGNED requests,
+ *      which is a fatal bypass on `/api/inngest` — the endpoint has no
+ *      JWT guard and relies entirely on the SDK's signature check.
+ *      Joi (D.4 + D-hardening) already rejects a truthy `INNGEST_DEV`
+ *      when `NODE_ENV` is staging/production. We additionally pin
+ *      `isDev: false` at construction time in those environments so an
+ *      `INNGEST_DEV=1` that somehow slips past the schema cannot flip
+ *      the client to dev mode. In dev/test we leave `isDev` unset so the
+ *      SDK falls back to its default behavior (reads INNGEST_DEV from
+ *      env — needed for the local Dev Server flow).
+ *
  *   2. **`send(name, data, idempotencyKey)` — the domain port.** The
  *      dedicated low-stock outbox dispatcher (Slice F) calls this to
  *      enqueue a crossing into Inngest. The idempotency key is passed as
@@ -33,6 +47,7 @@ import { ConfigService } from '@nestjs/config';
 import { Inngest } from 'inngest';
 
 const INNGEST_APP_ID = 'houndfe-backend';
+const DEPLOYED_NODE_ENVS = new Set(['staging', 'production']);
 
 @Injectable()
 export class InngestService {
@@ -53,11 +68,20 @@ export class InngestService {
     // it required in staging/production, so the app never boots with a
     // missing key in those environments.
     const key = configService.get<string>('INNGEST_EVENT_KEY');
+    const nodeEnv = configService.get<string>('NODE_ENV');
 
     this.eventKey = key;
+
+    // Pin cloud mode in deployed envs — see file header. isDev:false
+    // takes priority over INNGEST_DEV in the SDK's mode-resolution chain,
+    // so a misconfigured env var cannot demote the client to dev (which
+    // would silently disable signature verification on /api/inngest).
+    const isDev = DEPLOYED_NODE_ENVS.has(nodeEnv ?? '') ? false : undefined;
+
     this.client = new Inngest({
       id: INNGEST_APP_ID,
       ...(key ? { eventKey: key } : {}),
+      ...(isDev === undefined ? {} : { isDev }),
     });
   }
 
