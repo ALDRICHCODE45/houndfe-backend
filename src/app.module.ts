@@ -2,7 +2,8 @@
  * AppModule - Root module of the application.
  *
  * Imports:
- * - ConfigModule: Global configuration with Joi validation
+ * - ConfigModule: Global configuration with Joi validation (extended in
+ *                 D.4 with fail-closed NODE_ENV + Inngest + Resend keys)
  * - EventEmitterModule: NestJS event bus for domain events
  * - DatabaseModule: Global Prisma connection
  * - ProductsModule: Products bounded context
@@ -15,7 +16,7 @@ import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ClsModule } from 'nestjs-cls';
-import * as Joi from 'joi';
+import { buildEnvValidationSchema } from './shared/config/env.validation';
 import { DatabaseModule } from './shared/prisma/prisma.module';
 import { ProductsModule } from './products/products.module';
 import { CategoriesModule } from './categories/categories.module';
@@ -36,30 +37,17 @@ import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
 import { NotificationConfigModule } from './notification-config/notification-config.module';
+import { InngestModule } from './inngest/inngest.module';
 
 @Module({
   imports: [
     // Configuration (MUST be first for global availability)
     ConfigModule.forRoot({
       isGlobal: true,
-      validationSchema: Joi.object({
-        DATABASE_URL: Joi.string().required(),
-        JWT_SECRET: Joi.string().required().min(32),
-        JWT_REFRESH_SECRET: Joi.string().required().min(32),
-        JWT_ACCESS_EXPIRATION: Joi.string().default('15m'),
-        JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
-        SPACES_ENDPOINT: Joi.string().uri().required(),
-        SPACES_REGION: Joi.string().required(),
-        SPACES_BUCKET: Joi.string().required(),
-        SPACES_ACCESS_KEY_ID: Joi.string().required(),
-        SPACES_SECRET_ACCESS_KEY: Joi.string().required(),
-        SPACES_PUBLIC_BASE_URL: Joi.string().uri().required(),
-        SPACES_UPLOAD_MAX_MB: Joi.number()
-          .integer()
-          .min(1)
-          .max(100)
-          .default(10),
-      }),
+      // D.4 — extracted to shared/config/env.validation.ts so the schema
+      // can be unit-tested in isolation (abortEarly:false surfaces every
+      // missing key in a single shot — fail-closed composition).
+      validationSchema: buildEnvValidationSchema(),
     }),
 
     // Infrastructure
@@ -93,6 +81,9 @@ import { NotificationConfigModule } from './notification-config/notification-con
     SatCatalogModule,
     NotificationConfigModule,
     OutboxModule,
+    // D — Inngest infra (controller + service). JWT-excluded serve handler.
+    // Functions are registered in Slice F (low-stock.functions.ts).
+    InngestModule,
   ],
 })
 export class AppModule {}

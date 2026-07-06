@@ -15,10 +15,10 @@
 - [x] C.3 GREEN `notification-config.module.ts` wires port+adapter+service+controller.
 
 ## Slice D — Inngest
-- [ ] D.1 RED `tenant-runner.service.spec.ts` — CLS seeded (`tenantId`/`SYSTEM`/`isSuperAdmin=false`) + fn runs. GREEN `src/shared/tenant/tenant-runner.service.ts`.
-- [ ] D.2 RED `inngest.service.spec.ts` — client ctor + `send(name,data,idempotencyKey)` + `getFunctions()`. GREEN `src/inngest/inngest.service.ts`.
-- [ ] D.3 RED `inngest.controller.spec.ts` — JWT-excluded + delegates to `serve()` + unsigned reject. GREEN `src/inngest/inngest.controller.ts`.
-- [ ] D.4 RED `app-bootstrap-env.spec.ts` — Joi fails missing `NODE_ENV`/keys. GREEN extend `src/app.module.ts` Joi w/ `NODE_ENV.valid(...).required()` + key conditionals.
+- [x] D.1 RED `tenant-runner.service.spec.ts` — CLS seeded (`tenantId`/`SYSTEM`/`isSuperAdmin=false`) + fn runs. GREEN `src/shared/tenant/tenant-runner.service.ts`.
+- [x] D.2 RED `inngest.service.spec.ts` — client ctor + `send(name,data,idempotencyKey)` + `getFunctions()`. GREEN `src/inngest/inngest.service.ts`.
+- [x] D.3 RED `inngest.controller.spec.ts` — JWT-excluded + delegates to `serve()` + unsigned reject. GREEN `src/inngest/inngest.controller.ts`.
+- [x] D.4 RED `app-bootstrap-env.spec.ts` — Joi fails missing `NODE_ENV`/keys. GREEN extend `src/app.module.ts` Joi w/ `NODE_ENV.valid(...).required()` + key conditionals.
 
 ## Slice E — Stock Crossing
 - [ ] E.1 RED `prisma-stock-alert-state.repository.spec.ts` — flip `count===1` / `count===0` re-flip. GREEN `prisma-stock-alert-state.repository.ts` w/ `INSERT ... ON CONFLICT DO NOTHING` + guarded `UPDATE ... RETURNING "alertEpoch"`.
