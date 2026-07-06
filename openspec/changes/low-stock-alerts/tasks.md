@@ -6,8 +6,8 @@
 - [x] A.3 RED `low-stock-migration-drift.spec.ts` — excludes `employee_emergency_contacts` + 5 new objects only. GREEN add 4 models + enum + back-relations + restore `updatedAt @updatedAt` on `EmployeeEmergencyContact`; `prisma migrate dev --create-only --name low_stock_alerts`; verify diff.
 
 ## Slice B — notification-config Domain + Prisma
-- [ ] B.1 RED `notification-config.repository.spec.ts` — `find`+`replace`. GREEN `domain/notification-config.repository.ts` + token + `dto/update-notification-config.dto.ts`.
-- [ ] B.2 RED `prisma-notification-config.repository.spec.ts` — empty defaults / populated / full overwrite / unknown key throws. GREEN `infrastructure/prisma-notification-config.repository.ts`.
+- [x] B.1 RED `notification-config.repository.spec.ts` — `find`+`replace`. GREEN `domain/notification-config.repository.ts` + token + `dto/update-notification-config.dto.ts`.
+- [x] B.2 RED `prisma-notification-config.repository.spec.ts` — empty defaults / populated / full overwrite / unknown key throws. GREEN `infrastructure/prisma-notification-config.repository.ts`.
 
 ## Slice C — Service + Controller + Module
 - [ ] C.1 RED `notification-config.service.spec.ts` — read delegates / `UNKNOWN_ACTION_KEY` throws / empty defaults. GREEN `notification-config.service.ts`.
