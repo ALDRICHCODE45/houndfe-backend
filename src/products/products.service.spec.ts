@@ -11,6 +11,7 @@ import {
   BusinessRuleViolationError,
 } from '../shared/domain/domain-error';
 import { Product } from './domain/product.entity';
+import { BadRequestException } from '@nestjs/common';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -72,6 +73,7 @@ function createService(
   repo: IProductRepository,
   prisma: ReturnType<typeof makeMockPrisma>,
   filesService?: ReturnType<typeof makeMockFilesService>,
+  satCatalog?: any,
 ) {
   const tenantPrisma = {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
@@ -82,7 +84,16 @@ function createService(
     prisma,
     filesService ?? makeMockFilesService(),
     tenantPrisma,
+    satCatalog ?? makeNoopSatCatalog(),
   );
+}
+
+function makeNoopSatCatalog() {
+  return {
+    assertExists: jest.fn().mockResolvedValue(undefined),
+    search: jest.fn(),
+    findByKey: jest.fn(),
+  } as any;
 }
 
 function makeProduct(id = PRODUCT_ID) {
@@ -112,6 +123,7 @@ function makePersistenceProduct(
     unit: 'UNIDAD',
     satKey: null,
     categoryId: null,
+    brandId: null,
     sellInPos: true,
     includeInOnlineCatalog: true,
     requiresPrescription: false,
@@ -276,6 +288,7 @@ describe('ProductsService — findAll variant aggregates', () => {
       prisma,
       makeMockFilesService(),
       tenantPrisma,
+      makeNoopSatCatalog(),
     );
 
     await service.findAll();
@@ -1344,6 +1357,7 @@ describe('ProductsService - Image deletion with file storage', () => {
         getTenantId: jest.fn().mockReturnValue('tenant-1'),
         getClient: jest.fn().mockReturnValue(prisma),
       } as any,
+      makeNoopSatCatalog(),
     );
 
     // Act
@@ -1386,6 +1400,7 @@ describe('ProductsService - Image deletion with file storage', () => {
         getTenantId: jest.fn().mockReturnValue('tenant-1'),
         getClient: jest.fn().mockReturnValue(prisma),
       } as any,
+      makeNoopSatCatalog(),
     );
 
     // Act
@@ -1458,5 +1473,199 @@ describe('ProductsService - tenant-scoped create contract', () => {
 
     expect(prisma.$transaction).toHaveBeenCalled();
     expect(repo.save).not.toHaveBeenCalled();
+  });
+});
+
+// ── Slice D — SAT catalog validation (create + update change-detection) ──
+
+describe('ProductsService — SAT catalog validation (Slice D)', () => {
+  function makeSpySatCatalog(opts: { exists?: boolean } = {}) {
+    const exists = opts.exists ?? true;
+    return {
+      assertExists: jest.fn(async (key: string) => {
+        if (!exists) {
+          throw new BadRequestException({
+            error: 'SAT_KEY_NOT_FOUND',
+            message: `SAT key "${key}" is not in the catalog. Use GET /sat-keys?search=... to find a valid key.`,
+          });
+        }
+      }),
+      search: jest.fn(),
+      findByKey: jest.fn(),
+    } as any;
+  }
+
+  function makeProductWithSatKey(satKey: string | null) {
+    return Product.fromPersistence({
+      ...makePersistenceProduct({ id: PRODUCT_ID }),
+      satKey,
+    });
+  }
+
+  // ── CREATE path ──
+
+  describe('create() — satKey validation (D.2)', () => {
+    function setupCreateMocks() {
+      const tx = {
+        product: {
+          create: jest.fn().mockResolvedValue({ id: PRODUCT_ID }),
+        },
+        variant: { create: jest.fn() },
+        lot: { create: jest.fn() },
+        globalPriceList: { findMany: jest.fn().mockResolvedValue([]) },
+        priceList: { createMany: jest.fn(), create: jest.fn() },
+        variantPrice: { createMany: jest.fn(), create: jest.fn() },
+        productImage: { createMany: jest.fn(), create: jest.fn() },
+      };
+      const prisma = {
+        $transaction: jest.fn(async (cb: any) => cb(tx)),
+      } as any;
+      const repo = makeMockRepo();
+      return { repo, prisma };
+    }
+
+    it('accepts a satKey that exists in the catalog (D.2.1)', async () => {
+      const { repo, prisma } = setupCreateMocks();
+      const satCatalog = makeSpySatCatalog({ exists: true });
+      const service = createService(repo, prisma, undefined, satCatalog);
+      jest
+        .spyOn(service as any, 'buildFullResponse')
+        .mockResolvedValue({ id: PRODUCT_ID });
+
+      await service.create({ name: 'P1', satKey: '01010101' } as any);
+
+      expect(satCatalog.assertExists).toHaveBeenCalledWith('01010101');
+      expect(prisma.$transaction).toHaveBeenCalled();
+    });
+
+    it('rejects with 400 SAT_KEY_NOT_FOUND when satKey is not in the catalog (D.2.1)', async () => {
+      const { repo, prisma } = setupCreateMocks();
+      const satCatalog = makeSpySatCatalog({ exists: false });
+      const service = createService(repo, prisma, undefined, satCatalog);
+
+      await expect(
+        service.create({ name: 'P1', satKey: '99999999' } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      // Re-do to capture the response shape (the rejection was consumed above)
+      await expect(
+        service.create({ name: 'P1', satKey: '99999999' } as any),
+      ).rejects.toMatchObject({
+        response: { error: 'SAT_KEY_NOT_FOUND' },
+      });
+
+      expect(satCatalog.assertExists).toHaveBeenCalledWith('99999999');
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('succeeds with satKey=null and skips catalog lookup when the field is omitted (D.2.1)', async () => {
+      const { repo, prisma } = setupCreateMocks();
+      const satCatalog = makeSpySatCatalog({ exists: false });
+      const service = createService(repo, prisma, undefined, satCatalog);
+      jest
+        .spyOn(service as any, 'buildFullResponse')
+        .mockResolvedValue({ id: PRODUCT_ID });
+
+      await service.create({ name: 'P1' } as any);
+
+      expect(satCatalog.assertExists).not.toHaveBeenCalled();
+      expect(prisma.$transaction).toHaveBeenCalled();
+    });
+  });
+
+  // ── UPDATE path — change-detection (validate-only-on-change) ──
+
+  describe('update() — satKey change-detection (D.3)', () => {
+    function setupUpdateMocks(opts: { product?: Product } = {}) {
+      const product = opts.product ?? makeProduct();
+      const repo = makeMockRepo({
+        findById: jest.fn().mockResolvedValue(product),
+        save: jest.fn(async (p: any) => p),
+      });
+      const prisma = makeMockPrisma();
+      return { repo, prisma, product };
+    }
+
+    it('does NOT call assertExists when satKey === current value (legacy key unchanged, D.3.1)', async () => {
+      const legacyProduct = makeProductWithSatKey('LEGACY_NOT_IN_CATALOG');
+      const { repo, prisma } = setupUpdateMocks({ product: legacyProduct });
+      const satCatalog = makeSpySatCatalog({ exists: false });
+      const service = createService(repo, prisma, undefined, satCatalog);
+      jest
+        .spyOn(service as any, 'buildFullResponse')
+        .mockResolvedValue({ id: PRODUCT_ID });
+
+      await service.update(PRODUCT_ID, { satKey: 'LEGACY_NOT_IN_CATALOG' });
+
+      expect(satCatalog.assertExists).not.toHaveBeenCalled();
+      expect(repo.save).toHaveBeenCalled();
+      const savedEntity = repo.save.mock.calls[0][0];
+      expect(savedEntity.satKey).toBe('LEGACY_NOT_IN_CATALOG');
+    });
+
+    it('does NOT call assertExists when satKey is not in dto (other-field edits, D.3.2)', async () => {
+      const legacyProduct = makeProductWithSatKey('LEGACY_NOT_IN_CATALOG');
+      const { repo, prisma } = setupUpdateMocks({ product: legacyProduct });
+      const satCatalog = makeSpySatCatalog({ exists: false });
+      const service = createService(repo, prisma, undefined, satCatalog);
+      jest
+        .spyOn(service as any, 'buildFullResponse')
+        .mockResolvedValue({ id: PRODUCT_ID });
+
+      await service.update(PRODUCT_ID, { name: 'Nuevo' });
+
+      expect(satCatalog.assertExists).not.toHaveBeenCalled();
+      expect(repo.save).toHaveBeenCalled();
+      const savedEntity = repo.save.mock.calls[0][0];
+      expect(savedEntity.satKey).toBe('LEGACY_NOT_IN_CATALOG');
+    });
+
+    it('rejects with 400 SAT_KEY_NOT_FOUND when satKey changes to an unknown key (D.3.3)', async () => {
+      const existingProduct = makeProductWithSatKey('01010101');
+      const { repo, prisma } = setupUpdateMocks({ product: existingProduct });
+      const satCatalog = makeSpySatCatalog({ exists: false });
+      const service = createService(repo, prisma, undefined, satCatalog);
+
+      await expect(
+        service.update(PRODUCT_ID, { satKey: '99999999' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(satCatalog.assertExists).toHaveBeenCalledWith('99999999');
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('accepts and persists a satKey change to a valid known key (D.3.3)', async () => {
+      const existingProduct = makeProductWithSatKey('01010101');
+      const { repo, prisma } = setupUpdateMocks({ product: existingProduct });
+      const satCatalog = makeSpySatCatalog({ exists: true });
+      const service = createService(repo, prisma, undefined, satCatalog);
+      jest
+        .spyOn(service as any, 'buildFullResponse')
+        .mockResolvedValue({ id: PRODUCT_ID });
+
+      await service.update(PRODUCT_ID, { satKey: '01010102' });
+
+      expect(satCatalog.assertExists).toHaveBeenCalledWith('01010102');
+      expect(repo.save).toHaveBeenCalled();
+      const savedEntity = repo.save.mock.calls[0][0];
+      expect(savedEntity.satKey).toBe('01010102');
+    });
+
+    it('accepts clearing satKey to null without calling assertExists (next === null)', async () => {
+      const existingProduct = makeProductWithSatKey('01010101');
+      const { repo, prisma } = setupUpdateMocks({ product: existingProduct });
+      const satCatalog = makeSpySatCatalog({ exists: false });
+      const service = createService(repo, prisma, undefined, satCatalog);
+      jest
+        .spyOn(service as any, 'buildFullResponse')
+        .mockResolvedValue({ id: PRODUCT_ID });
+
+      await service.update(PRODUCT_ID, { satKey: null } as any);
+
+      expect(satCatalog.assertExists).not.toHaveBeenCalled();
+      expect(repo.save).toHaveBeenCalled();
+      const savedEntity = repo.save.mock.calls[0][0];
+      expect(savedEntity.satKey).toBeNull();
+    });
   });
 });

@@ -48,6 +48,10 @@ function createService(
   return new ProductsService(repo, prisma as any, makeMockFilesService(), {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
     getClient: jest.fn().mockReturnValue(prisma),
+  } as any, {
+    assertExists: jest.fn().mockResolvedValue(undefined),
+    search: jest.fn(),
+    findByKey: jest.fn(),
   } as any);
 }
 
@@ -130,6 +134,11 @@ describe('ProductsService — searchForPOS', () => {
       prisma as any,
       makeMockFilesService(),
       tenantPrisma as any,
+      {
+        assertExists: jest.fn().mockResolvedValue(undefined),
+        search: jest.fn(),
+        findByKey: jest.fn(),
+      } as any,
     );
 
     await serviceWithTenantSpy.searchForPOS({ limit: 25, offset: 0 });
@@ -398,6 +407,11 @@ describe('ProductsService — findOneForPOS', () => {
       prisma as any,
       makeMockFilesService(),
       tenantPrisma as any,
+      {
+        assertExists: jest.fn().mockResolvedValue(undefined),
+        search: jest.fn(),
+        findByKey: jest.fn(),
+      } as any,
     );
 
     await serviceWithTenantSpy.findOneForPOS('prod-1');

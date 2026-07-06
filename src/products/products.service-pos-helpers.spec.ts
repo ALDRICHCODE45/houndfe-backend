@@ -62,6 +62,10 @@ function createService(
   return new ProductsService(repo, prisma, makeMockFilesService(), {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
     getClient: jest.fn().mockReturnValue(prisma),
+  } as any, {
+    assertExists: jest.fn().mockResolvedValue(undefined),
+    search: jest.fn(),
+    findByKey: jest.fn(),
   } as any);
 }
 
@@ -98,6 +102,11 @@ describe('ProductsService — POS Helpers', () => {
         prisma,
         makeMockFilesService(),
         tenantPrisma as any,
+        {
+          assertExists: jest.fn().mockResolvedValue(undefined),
+          search: jest.fn(),
+          findByKey: jest.fn(),
+        } as any,
       );
 
       await serviceWithTenantSpy.getProductInfoForSale('prod-tenant', null);
