@@ -1348,6 +1348,7 @@ async function main() {
       permissionKey('EmployeeEmergencyContact', 'update'),
       permissionKey('EmployeeEmergencyContact', 'delete'),
       permissionKey('GlobalPriceList', 'read'),
+      permissionKey('SatKey', 'read'),
     ];
 
     const cashierPermissionKeys: SeedPermissionKey[] = [

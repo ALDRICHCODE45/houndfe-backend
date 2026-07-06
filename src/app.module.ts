@@ -34,6 +34,7 @@ import { UsersModule } from './users/users.module';
 import { EmployeesModule } from './employees/employees.module';
 import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 import { PublicCatalogModule } from './public-catalog/public-catalog.module';
+import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
 
 @Module({
   imports: [
@@ -88,6 +89,7 @@ import { PublicCatalogModule } from './public-catalog/public-catalog.module';
     EmployeesModule,
     ChatbotApiModule,
     PublicCatalogModule,
+    SatCatalogModule,
     OutboxModule,
   ],
 })
