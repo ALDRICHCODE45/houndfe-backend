@@ -11,13 +11,17 @@
  * the runtime ILIKE compare byte-for-byte. Keeping the import here keeps
  * ingest and query from drifting.
  */
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { PrismaService } from '../../shared/prisma/prisma.service';
 import { SatKey, type SatInclusion } from '../domain/sat-key.entity';
 import type {
   ISatKeyRepository,
   SatKeySearchOptions,
 } from '../domain/sat-key.repository';
 import { normalize } from '../ingest/normalize';
+
+/** Injection token for the "now" clock override (deterministic tests / clock skew). */
+export const SAT_KEY_NOW = Symbol('SAT_KEY_NOW');
 
 type SatKeyRow = {
   key: string;
@@ -39,11 +43,19 @@ type SatKeyDelegate = {
 export class PrismaSatKeyRepository implements ISatKeyRepository {
   /**
    * @param prisma  Base `PrismaService` (exposes `.satProductServiceKey`).
+   *                Injected by class token so the Nest DI container can build
+   *                this adapter at runtime — NOT a bare type literal (which
+   *                erases to `Object` and breaks resolution). Tests still pass
+   *                a structural mock via `new PrismaSatKeyRepository(mock, ...)`.
    * @param now     Override for the "now" used by `activeClause`. Defaults to
-   *                `new Date()`. Injectable for deterministic tests / clock skew.
+   *                `new Date()`. Optional so DI does not try to resolve it;
+   *                deterministic tests pass a fixed clock directly.
    */
   constructor(
+    @Inject(PrismaService)
     private readonly prisma: { satProductServiceKey: SatKeyDelegate },
+    @Optional()
+    @Inject(SAT_KEY_NOW)
     private readonly now: () => Date = () => new Date(),
   ) {}
 
