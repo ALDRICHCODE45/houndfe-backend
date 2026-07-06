@@ -39,6 +39,7 @@ export type AppSubjects =
   | 'EmployeeTimeOff'
   | 'EmployeeTimeOffMedical'
   | 'EmployeeEmergencyContact'
+  | 'NotificationConfig'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -416,5 +417,18 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'EmployeeEmergencyContact',
     action: 'manage',
     description: 'Full emergency contact management',
+  },
+
+  // NotificationConfig permissions (low-stock-alerts) — per-tenant config:
+  // read (GET /notification-config) + update (PUT).
+  {
+    subject: 'NotificationConfig',
+    action: 'read',
+    description: 'View per-tenant notification configuration',
+  },
+  {
+    subject: 'NotificationConfig',
+    action: 'update',
+    description: 'Update per-tenant notification configuration',
   },
 ];

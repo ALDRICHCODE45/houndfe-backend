@@ -1,9 +1,9 @@
 # Tasks: Low-Stock Email Alerts
 
 ## Slice A — Schema
-- [ ] A.1 RED `tenant-scoped-models.spec.ts` — 4 new models. GREEN add to `src/shared/tenant/tenant-scoped-models.constant.ts`.
-- [ ] A.2 RED `permission-registry.spec.ts` + `permission.seeder.spec.ts` — `(NotificationConfig,read|update)` + idempotent. GREEN add to `AppSubjects` + `PERMISSION_REGISTRY` in `src/auth/authorization/domain/permission.ts`.
-- [ ] A.3 RED `low-stock-migration-drift.spec.ts` — excludes `employee_emergency_contacts` + 5 new objects only. GREEN add 4 models + enum + back-relations + restore `updatedAt @updatedAt` on `EmployeeEmergencyContact`; `prisma migrate dev --create-only --name low_stock_alerts`; verify diff.
+- [x] A.1 RED `tenant-scoped-models.spec.ts` — 4 new models. GREEN add to `src/shared/tenant/tenant-scoped-models.constant.ts`.
+- [x] A.2 RED `permission-registry.spec.ts` + `permission.seeder.spec.ts` — `(NotificationConfig,read|update)` + idempotent. GREEN add to `AppSubjects` + `PERMISSION_REGISTRY` in `src/auth/authorization/domain/permission.ts`.
+- [x] A.3 RED `low-stock-migration-drift.spec.ts` — excludes `employee_emergency_contacts` + 5 new objects only. GREEN add 4 models + enum + back-relations + restore `updatedAt @updatedAt` on `EmployeeEmergencyContact`; `prisma migrate dev --create-only --name low_stock_alerts`; verify diff.
 
 ## Slice B — notification-config Domain + Prisma
 - [ ] B.1 RED `notification-config.repository.spec.ts` — `find`+`replace`. GREEN `domain/notification-config.repository.ts` + token + `dto/update-notification-config.dto.ts`.
