@@ -1,0 +1,11 @@
+c_ClaveProdServ,Descripción,Incluir IVA trasladado,Incluir IEPS trasladado,Fecha de inicio de vigencia,Fecha de fin de vigencia
+01010101,Aspirina 500 mg caja con 20 tabletas,Sí,No,2018-01-01,
+01010102,Paracetamol 500 mg caja con 10 tabletas,Sí,No,2018-01-01,
+01010103,Medicación para el dolor muscular,Sí,Opcional,2019-06-15,
+01010104,Pañales para niño etapa 3,Opcional,No,2017-03-01,
+01010105,Ibuprofeno 400 mg caja con 15 cápsulas,Sí,No,2018-01-01,2020-12-31
+01010106,Vitamina C efervescente 1 g,No,No,2020-05-10,
+01010107,Solución salina nasal 30 ml,Sí,No,2019-09-01,
+01010108,Piña en almíbar lata 800 g,Sí,No,2021-02-20,
+01010109,Servicio de consultoría médica,Opcional,No,2022-04-01,
+01010110,Equipo de diagnóstico portátil,Sí,Opcional,2020-11-15,
