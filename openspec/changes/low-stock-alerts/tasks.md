@@ -10,9 +10,9 @@
 - [x] B.2 RED `prisma-notification-config.repository.spec.ts` — empty defaults / populated / full overwrite / unknown key throws. GREEN `infrastructure/prisma-notification-config.repository.ts`.
 
 ## Slice C — Service + Controller + Module
-- [ ] C.1 RED `notification-config.service.spec.ts` — read delegates / `UNKNOWN_ACTION_KEY` throws / empty defaults. GREEN `notification-config.service.ts`.
-- [ ] C.2 RED `notification-config.controller.spec.ts` — GET 200/403 / PUT 200/403/400 / tenant isolation. GREEN `notification-config.controller.ts` + DTOs + guards + `@RequirePermissions`.
-- [ ] C.3 GREEN `notification-config.module.ts` wires port+adapter+service+controller.
+- [x] C.1 RED `notification-config.service.spec.ts` — read delegates / `UNKNOWN_ACTION_KEY` throws / empty defaults. GREEN `notification-config.service.ts`.
+- [x] C.2 RED `notification-config.controller.spec.ts` — GET 200/403 / PUT 200/403/400 / tenant isolation. GREEN `notification-config.controller.ts` + DTOs + guards + `@RequirePermissions`.
+- [x] C.3 GREEN `notification-config.module.ts` wires port+adapter+service+controller.
 
 ## Slice D — Inngest
 - [ ] D.1 RED `tenant-runner.service.spec.ts` — CLS seeded (`tenantId`/`SYSTEM`/`isSuperAdmin=false`) + fn runs. GREEN `src/shared/tenant/tenant-runner.service.ts`.

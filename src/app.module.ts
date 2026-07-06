@@ -35,6 +35,7 @@ import { EmployeesModule } from './employees/employees.module';
 import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
+import { NotificationConfigModule } from './notification-config/notification-config.module';
 
 @Module({
   imports: [
@@ -90,6 +91,7 @@ import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
     ChatbotApiModule,
     PublicCatalogModule,
     SatCatalogModule,
+    NotificationConfigModule,
     OutboxModule,
   ],
 })
