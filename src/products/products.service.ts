@@ -9,6 +9,7 @@ import { Product } from './domain/product.entity';
 import type { IProductRepository } from './domain/product.repository';
 import { PRODUCT_REPOSITORY } from './domain/product.repository';
 import { FilesService } from '../files/files.service';
+import { SatCatalogService } from '../sat-catalog/sat-catalog.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateVariantDto, UpdateVariantDto } from './dto/variant.dto';
@@ -93,6 +94,7 @@ export class ProductsService {
     private readonly prisma: PrismaService,
     private readonly filesService: FilesService,
     private readonly tenantPrisma: TenantPrismaService,
+    private readonly satCatalog: SatCatalogService,
   ) {}
 
   async decrementStockForCharge(
@@ -277,6 +279,11 @@ export class ProductsService {
     }
 
     // ── Build domain entity ──
+
+    // ── SAT catalog validation (Slice D): create has no prior value, so any
+    //    non-empty satKey must exist in the SAT catalog. Empty/absent is
+    //    accepted (stores null) — see spec "Strict SAT Key Validation".
+    if (dto.satKey) await this.satCatalog.assertExists(dto.satKey);
 
     const product = Product.create({
       id: crypto.randomUUID(),
@@ -596,7 +603,17 @@ export class ProductsService {
       product.description = dto.description?.trim() || null;
     if (dto.type !== undefined) product.type = dto.type as ProductType;
     if (dto.unit !== undefined) product.unit = dto.unit as UnitOfMeasure;
-    if (dto.satKey !== undefined) product.satKey = dto.satKey || null;
+    if (dto.satKey !== undefined) {
+      const next = dto.satKey || null;
+      // Change-detection: validate against the SAT catalog ONLY when the
+      // inbound value differs from the persisted one. Legacy keys that
+      // pre-date the catalog are preserved on no-op edits, and other-field
+      // updates never block — see spec "Validate-Only-On-Change".
+      if (next !== null && next !== product.satKey) {
+        await this.satCatalog.assertExists(next);
+      }
+      product.satKey = next;
+    }
     if (dto.categoryId !== undefined)
       product.categoryId = dto.categoryId || null;
     if (dto.brandId !== undefined) product.brandId = dto.brandId || null;

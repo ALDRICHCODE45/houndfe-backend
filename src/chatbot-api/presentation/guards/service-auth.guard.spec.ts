@@ -11,6 +11,7 @@ import { ClsModule, ClsService } from 'nestjs-cls';
 import { Reflector } from '@nestjs/core';
 import { createHash } from 'node:crypto';
 import { PUBLIC_CATALOG_REPOSITORY } from '../../../public-catalog/application/ports/public-catalog.repository';
+import { SAT_KEY_REPOSITORY } from '../../../sat-catalog/domain/sat-key.repository';
 import type { TenantClsStore } from '../../../shared/tenant/tenant-cls-store.interface';
 import { ChatbotApiModule } from '../../chatbot-api.module';
 import { ServiceCredential } from '../../domain/service-credential.entity';
@@ -273,6 +274,12 @@ describe('ServiceAuthGuard', () => {
         findProducts: jest.fn(),
         findCategoryFacets: jest.fn(),
         findProductById: jest.fn(),
+      })
+      .overrideProvider(SAT_KEY_REPOSITORY)
+      .useValue({
+        search: jest.fn(),
+        findByKey: jest.fn(),
+        exists: jest.fn(),
       })
       .compile();
 

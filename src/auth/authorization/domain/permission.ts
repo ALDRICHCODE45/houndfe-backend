@@ -20,6 +20,7 @@ export type AppSubjects =
   | 'Product'
   | 'Order'
   | 'Sale'
+  | 'SatKey'
   | 'ReceiptEvidence'
   | 'User'
   | 'Role'
@@ -152,6 +153,9 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   { subject: 'Sale', action: 'update', description: 'Update sales' },
   { subject: 'Sale', action: 'delete', description: 'Delete sales' },
   { subject: 'Sale', action: 'manage', description: 'Full sale management' },
+
+  // SAT catalog permissions (Slice C — national reference data, read-only for editors)
+  { subject: 'SatKey', action: 'read', description: 'View SAT catalog keys' },
 
   // ReceiptEvidence permissions
   {

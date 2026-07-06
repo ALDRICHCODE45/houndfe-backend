@@ -18,9 +18,10 @@ import { ProductsService } from './products.service';
 import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
 import { PRODUCT_REPOSITORY } from './domain/product.repository';
 import { FilesModule } from '../files/files.module';
+import { SatCatalogModule } from '../sat-catalog/sat-catalog.module';
 
 @Module({
-  imports: [AuthModule, FilesModule],
+  imports: [AuthModule, FilesModule, SatCatalogModule],
   controllers: [ProductsController],
   providers: [
     ProductsService,

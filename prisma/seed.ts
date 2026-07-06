@@ -13,6 +13,7 @@ import {
 import bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import { PERMISSION_REGISTRY } from '../src/auth/authorization/domain/permission';
+import { ingestSatCatalog } from './seed-sat';
 
 const prisma = new PrismaClient();
 
@@ -1347,6 +1348,7 @@ async function main() {
       permissionKey('EmployeeEmergencyContact', 'update'),
       permissionKey('EmployeeEmergencyContact', 'delete'),
       permissionKey('GlobalPriceList', 'read'),
+      permissionKey('SatKey', 'read'),
     ];
 
     const cashierPermissionKeys: SeedPermissionKey[] = [
@@ -1526,6 +1528,14 @@ async function main() {
 
     await seedCentroEmployees(tx, centroTenant, managerUser.id);
   });
+
+  // National reference data — runs OUTSIDE the tenant transaction because
+  // the SAT catalog is non-tenant (base Prisma client) and must survive
+  // tenant-specific rollback. Idempotent via createMany skipDuplicates.
+  const satResult = await ingestSatCatalog(prisma);
+  console.log(
+    `\nSAT catalog ingest: ${satResult.totalWritten} rows from ${satResult.source} (${satResult.batches} batches)`,
+  );
 
   console.log('\n--- Multi-tenant seed completed ---');
   console.log(`Super Admin: ${USERS.superAdmin.email} / ${USERS.superAdmin.password}`);
