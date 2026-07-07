@@ -1,14 +1,18 @@
 /**
  * StockAlertsModule — NestJS module for the stock-alerts bounded context.
  *
- * Slice E.2 wiring: registers the `StockAlertState` atomic-flip port
- * (`STOCK_ALERT_STATE_REPOSITORY`) and binds the Prisma adapter. The
- * module is consumed by `ProductsModule` (the product repository
- * depends on the flip machine for in-tx edge-trigger detection).
+ * **Slice F wiring (incremental TDD — F.1–F.5 land in sequence):**
  *
- * Slice F (NOT implemented here) will register `LowStockOutboxPoller`,
- * `LowStockOutboxDispatcher`, and Inngest function builders — they
- * ride on top of the durable outbox rows this slice writes in-tx.
+ *   - F.2 (`buildLowStockFunctions` + `LowStockInngestRegistrar`)
+ *     registers the low-stock Inngest function with `InngestService`
+ *     at module init. The registrar lives in `app.module.ts`
+ *     directly to keep the dep graph bounded.
+ *   - F.4 (dedicated poller) and F.5 (dedicated dispatcher) providers
+ *     are added in their own RED → GREEN slices. Until then the
+ *     module stays slim (only the `STOCK_ALERT_STATE_REPOSITORY` and
+ *     `USER_EMAIL_LOOKUP` ports) so transitive chains that pull in
+ *     StockAlertsModule (SalesModule, ProductsModule, …
+ *     ChatbotApiModule's spec) don't break during F.1 + F.2 wiring.
  *
  * Mirrors `src/sat-catalog/sat-catalog.module.ts` and
  * `src/notification-config/notification-config.module.ts`.
@@ -18,25 +22,27 @@ import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { PrismaStockAlertStateRepository } from './infrastructure/prisma-stock-alert-state.repository';
 import {
   STOCK_ALERT_STATE_REPOSITORY,
-  type IStockAlertStateRepository,
 } from './domain/stock-alert-state.repository';
+import {
+  USER_EMAIL_LOOKUP,
+} from './domain/user-email-lookup.repository';
+import { PrismaUserEmailLookupRepository } from './infrastructure/prisma-user-email-lookup.repository';
 
 @Module({
   imports: [DatabaseModule],
+  controllers: [],
   providers: [
     {
       provide: STOCK_ALERT_STATE_REPOSITORY,
       useClass: PrismaStockAlertStateRepository,
     },
+    {
+      provide: USER_EMAIL_LOOKUP,
+      useClass: PrismaUserEmailLookupRepository,
+    },
   ],
-  exports: [STOCK_ALERT_STATE_REPOSITORY],
+  exports: [STOCK_ALERT_STATE_REPOSITORY, USER_EMAIL_LOOKUP],
 })
 export class StockAlertsModule {
-  // Re-export the interface type for consumers that want the union
-  // without importing from the adapter file.
   static readonly repository: symbol = STOCK_ALERT_STATE_REPOSITORY;
 }
-
-// Re-export so callers can `import { StockAlertsModule }` without
-// pulling in the symbol token accidentally.
-export type { IStockAlertStateRepository };

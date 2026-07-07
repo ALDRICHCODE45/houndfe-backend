@@ -76,6 +76,8 @@ describe('buildEnvValidationSchema (D.4)', () => {
         }
         if (env === 'production') {
           extras.RESEND_API_KEY = 're';
+          extras.MAIL_FROM = 'Alerts <alerts@example.com>';
+          extras.APP_WEB_URL = 'https://app.example.com';
         }
         const { error } = validate({ ...baseValidEnv, ...extras, NODE_ENV: env });
         expect(error).toBeUndefined();
@@ -128,6 +130,8 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_SIGNING_KEY: 'signkey-prod-xxx',
         INNGEST_EVENT_KEY: 'evt-prod-xxx',
         RESEND_API_KEY: 're-prod-xxx',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
       });
       expect(error).toBeUndefined();
     });
@@ -197,6 +201,48 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_SIGNING_KEY: 'signkey',
         INNGEST_EVENT_KEY: 'evt',
         RESEND_API_KEY: 're-prod',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('rejects a missing MAIL_FROM in production (verified sender is fail-closed)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'signkey',
+        INNGEST_EVENT_KEY: 'evt',
+        RESEND_API_KEY: 're-prod',
+        APP_WEB_URL: 'https://app.example.com',
+        // MAIL_FROM omitted on purpose
+      });
+      expect(error).toBeDefined();
+      expect(error!.details.some((d) => d.path.includes('MAIL_FROM'))).toBe(
+        true,
+      );
+    });
+
+    it('rejects a missing APP_WEB_URL in production (deep-link base is fail-closed)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'signkey',
+        INNGEST_EVENT_KEY: 'evt',
+        RESEND_API_KEY: 're-prod',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        // APP_WEB_URL omitted on purpose
+      });
+      expect(error).toBeDefined();
+      expect(error!.details.some((d) => d.path.includes('APP_WEB_URL'))).toBe(
+        true,
+      );
+    });
+
+    it('accepts MAIL_FROM + APP_WEB_URL as OPTIONAL in development (dev-mailer fallback covers the absence)', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
       });
       expect(error).toBeUndefined();
     });
@@ -223,7 +269,7 @@ describe('buildEnvValidationSchema (D.4)', () => {
   });
 
   describe('fail-closed composition (D.4 — Triangulation)', () => {
-    it('a prod env missing ALL three keys surfaces ALL three in one shot (abortEarly:false)', () => {
+    it('a prod env missing ALL production-only keys surfaces ALL of them in one shot (abortEarly:false)', () => {
       const { error } = validate({
         ...baseValidEnv,
         NODE_ENV: 'production',
@@ -233,6 +279,10 @@ describe('buildEnvValidationSchema (D.4)', () => {
       expect(paths).toContain('INNGEST_SIGNING_KEY');
       expect(paths).toContain('INNGEST_EVENT_KEY');
       expect(paths).toContain('RESEND_API_KEY');
+      // Slice F.1 — MAIL_FROM required in prod (verified sender).
+      expect(paths).toContain('MAIL_FROM');
+      // Slice F.2 — APP_WEB_URL required in prod (deep-link base).
+      expect(paths).toContain('APP_WEB_URL');
     });
 
     it('a complete production env validates cleanly', () => {
@@ -242,6 +292,8 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_SIGNING_KEY: 'signkey-prod',
         INNGEST_EVENT_KEY: 'evt-prod',
         RESEND_API_KEY: 're-prod',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
       });
       expect(error).toBeUndefined();
       expect(value.NODE_ENV).toBe('production');
@@ -323,6 +375,8 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_SIGNING_KEY: 'sk',
         INNGEST_EVENT_KEY: 'ek',
         RESEND_API_KEY: 're',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
         INNGEST_DEV: 'false',
       });
       expect(error).toBeUndefined();
@@ -335,6 +389,8 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_SIGNING_KEY: 'sk',
         INNGEST_EVENT_KEY: 'ek',
         RESEND_API_KEY: 're',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
         INNGEST_DEV: '0',
       });
       expect(error).toBeUndefined();
@@ -347,6 +403,8 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_SIGNING_KEY: 'sk',
         INNGEST_EVENT_KEY: 'ek',
         RESEND_API_KEY: 're',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
       });
       expect(error).toBeUndefined();
     });

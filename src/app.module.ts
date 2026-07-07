@@ -38,6 +38,10 @@ import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
 import { NotificationConfigModule } from './notification-config/notification-config.module';
 import { InngestModule } from './inngest/inngest.module';
+import { MailerModule } from './notifications/email/mailer.module';
+import { TenantModule } from './shared/tenant/tenant.module';
+import { StockAlertsModule } from './stock-alerts/stock-alerts.module';
+import { LowStockInngestRegistrar } from './stock-alerts/inngest/low-stock-inngest-registrar';
 
 @Module({
   imports: [
@@ -84,6 +88,18 @@ import { InngestModule } from './inngest/inngest.module';
     // D — Inngest infra (controller + service). JWT-excluded serve handler.
     // Functions are registered in Slice F (low-stock.functions.ts).
     InngestModule,
+    // F.1 — Mailer adapter (Resend + dev-logger fallback).
+    MailerModule,
+    // F.2 — TenantRunner for Inngest handler scope seeding.
+    TenantModule,
+    // F — StockAlerts (notification function + dedicated outbox poller/dispatcher).
+    StockAlertsModule,
   ],
+  // Slice F.2 — the Inngest function registrar. Declared as a top-level
+  // provider (not a module) so its dep graph (InngestService + MAILER +
+  // NotificationConfigRepo + UserEmailLookup + TenantRunner) resolves
+  // through AppModule's imports WITHOUT forcing those deps into every
+  // transitive chain (e.g. ChatbotApiModule's tests).
+  providers: [LowStockInngestRegistrar],
 })
 export class AppModule {}

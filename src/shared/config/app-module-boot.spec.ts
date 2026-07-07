@@ -79,6 +79,8 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
     delete process.env.INNGEST_SIGNING_KEY;
     delete process.env.INNGEST_EVENT_KEY;
     delete process.env.RESEND_API_KEY;
+    delete process.env.MAIL_FROM;
+    delete process.env.APP_WEB_URL;
 
     await expect(
       Test.createTestingModule({
@@ -87,11 +89,13 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
     ).rejects.toThrow();
   });
 
-  it('surfaces ALL THREE missing keys (INNGEST_SIGNING_KEY, INNGEST_EVENT_KEY, RESEND_API_KEY) in one shot under production (abortEarly:false)', async () => {
+  it('surfaces ALL missing keys (Inngest + Resend + MAIL_FROM + APP_WEB_URL) in one shot under production (abortEarly:false)', async () => {
     process.env.NODE_ENV = 'production';
     delete process.env.INNGEST_SIGNING_KEY;
     delete process.env.INNGEST_EVENT_KEY;
     delete process.env.RESEND_API_KEY;
+    delete process.env.MAIL_FROM;
+    delete process.env.APP_WEB_URL;
 
     let captured: Error | undefined;
     try {
@@ -104,12 +108,14 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
 
     expect(captured).toBeDefined();
     const message = captured!.message;
-    // All three must surface — abortEarly:false composition is the
+    // All keys must surface — abortEarly:false composition is the
     // single-shot guarantee that a prod deploy without keys reports
     // every missing key at once, not one-at-a-time across N restarts.
     expect(message).toMatch(/INNGEST_SIGNING_KEY/);
     expect(message).toMatch(/INNGEST_EVENT_KEY/);
     expect(message).toMatch(/RESEND_API_KEY/);
+    expect(message).toMatch(/MAIL_FROM/);
+    expect(message).toMatch(/APP_WEB_URL/);
   });
 
   it('boot REJECTS when NODE_ENV is unset entirely (no silent default — fail-closed)', async () => {
@@ -117,6 +123,8 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
     delete process.env.INNGEST_SIGNING_KEY;
     delete process.env.INNGEST_EVENT_KEY;
     delete process.env.RESEND_API_KEY;
+    delete process.env.MAIL_FROM;
+    delete process.env.APP_WEB_URL;
 
     let captured: Error | undefined;
     try {
@@ -136,6 +144,8 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
     process.env.INNGEST_SIGNING_KEY = 'signkey';
     process.env.INNGEST_EVENT_KEY = 'evt';
     process.env.RESEND_API_KEY = 're';
+    process.env.MAIL_FROM = 'Alerts <alerts@example.com>';
+    process.env.APP_WEB_URL = 'https://app.example.com';
     process.env.INNGEST_DEV = 'true';
 
     let captured: Error | undefined;
@@ -156,6 +166,8 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
     delete process.env.INNGEST_SIGNING_KEY;
     delete process.env.INNGEST_EVENT_KEY;
     delete process.env.RESEND_API_KEY;
+    delete process.env.MAIL_FROM;
+    delete process.env.APP_WEB_URL;
 
     const moduleRef = await Test.createTestingModule({
       imports: [ConfigModule.forRoot(APP_MODULE_CONFIG_OPTIONS)],
@@ -176,6 +188,8 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
     process.env.INNGEST_SIGNING_KEY = 'signkey-prod';
     process.env.INNGEST_EVENT_KEY = 'evt-prod';
     process.env.RESEND_API_KEY = 're-prod';
+    process.env.MAIL_FROM = 'Alerts <alerts@example.com>';
+    process.env.APP_WEB_URL = 'https://app.example.com';
 
     const moduleRef = await Test.createTestingModule({
       imports: [ConfigModule.forRoot(APP_MODULE_CONFIG_OPTIONS)],
@@ -191,11 +205,13 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
     await moduleRef.close();
   });
 
-  it('boot SUCCEEDS in staging with INNGEST keys but no RESEND_API_KEY (dev-logger fallback is allowed in staging)', async () => {
+  it('boot SUCCEEDS in staging with INNGEST keys but no RESEND_API_KEY / MAIL_FROM / APP_WEB_URL (dev-logger fallback is allowed in staging)', async () => {
     process.env.NODE_ENV = 'staging';
     process.env.INNGEST_SIGNING_KEY = 'signkey-staging';
     process.env.INNGEST_EVENT_KEY = 'evt-staging';
     delete process.env.RESEND_API_KEY;
+    delete process.env.MAIL_FROM;
+    delete process.env.APP_WEB_URL;
 
     const moduleRef = await Test.createTestingModule({
       imports: [ConfigModule.forRoot(APP_MODULE_CONFIG_OPTIONS)],

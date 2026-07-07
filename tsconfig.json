@@ -19,7 +19,12 @@
     "forceConsistentCasingInFileNames": true,
     "noImplicitAny": false,
     "strictBindCallApply": false,
-    "noFallthroughCasesInSwitch": false
+    "noFallthroughCasesInSwitch": false,
+    // Slice F.1 — React Email templates (.tsx). jsx:"react-jsx"
+    // matches @react-email/components + react 18 default; we pin
+    // the JSX runtime so the template's `render(<Email .../>)`
+    // path uses the modern React 18 transform (no `import React`).
+    "jsx": "react-jsx"
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

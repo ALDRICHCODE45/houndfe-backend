@@ -107,19 +107,54 @@ export class InngestService {
   /**
    * The list of `InngestFunction` registrations to hand to `serve()`.
    * Returns a defensive copy so callers cannot mutate the internal
-   * registry. Empty in D; E/F add `createFunction` closures via
-   * follow-up slices (mirrors how the design wires
-   * `NotificationConfigRepository`, `MailerPort`, `TenantRunnerService`).
+   * registry. Empty in D; E/F populate by calling `registerFunctions`
+   * (see below) at `OnModuleInit` time. The InngestController hands
+   * the array straight through to `serve({ functions })`.
    *
    * The return type is `unknown[]` because the SDK's `InngestFunction`
    * is a generic whose concrete shape depends on the function's trigger
    * and handler — the SDK's `serve({ functions })` accepts any
-   * `InngestFunction.Like[]`, and the InngestController hands the
-   * array straight through. E/F will populate this list with real
-   * `createFunction(...)` calls; the cast happens at the call site.
+   * `InngestFunction.Like[]`. Slice F's `buildLowStockFunctions` returns
+   * an `unknown[]` it built from the same SDK; the cast happens at the
+   * call site (the controller).
    */
   getFunctions(): unknown[] {
     return [...this.functions];
+  }
+
+  /**
+   * Register one or more `InngestFunction` closures built via the
+   * client's `createFunction(...)`. Called by feature modules (e.g.
+   * `StockAlertsModule` via its `OnModuleInit` hook) at boot time.
+   * Throws if any entry duplicates an already-registered `id` —
+   * duplicate registration would silently overwrite the handler and
+   * create two functions racing for the same trigger.
+   *
+   * The defnsive-copy rule on `getFunctions()` only protects the
+   * REGISTRY from external mutation; this method is the SOLE
+   * owner of registration and is the only place that mutates
+   * `this.functions`. Module-load happens once; runtime calls
+   * are not expected after the InngestController handler is wired.
+   *
+   * Spec: design.md "Inngest + Resend Wiring" — `InngestService`
+   * paragraph + Module placement.
+   */
+  registerFunctions(defs: unknown[]): void {
+    const registeredIds = new Set(
+      (this.functions as Array<{ id?: unknown } | undefined | null>)
+        .map((f) => extractInngestId(f))
+        .filter((id): id is string => Boolean(id)),
+    );
+    for (const def of defs) {
+      const id = extractInngestId(def);
+      if (id && registeredIds.has(id)) {
+        throw new Error(
+          `InngestService.registerFunctions: duplicate function id "${id}".`,
+        );
+      }
+      registeredIds.add(id ?? `anonymous-${registeredIds.size}`);
+      this.functions.push(def);
+    }
   }
 
   /**
@@ -139,4 +174,27 @@ export class InngestService {
   getEventKey(): string | undefined {
     return this.eventKey;
   }
+}
+
+/**
+ * Best-effort extraction of the `id` field from an `InngestFunction`
+ * closure. The SDK stores it as a property on the registered object;
+ * we tolerate both shapes (top-level `id` and a wrapped `config.id`)
+ * because different SDK versions expose different surfaces. A `null`
+ * return disables duplicate-id checking for that entry — fine for
+ * tests and ad-hoc fakes; production functions MUST supply an id.
+ */
+function extractInngestId(def: unknown): string | null {
+  if (!def || typeof def !== 'object') return null;
+  const d = def as Record<string, unknown>;
+  if (typeof d.id === 'string') return d.id;
+  const cfg = d.config;
+  if (
+    cfg &&
+    typeof cfg === 'object' &&
+    typeof (cfg as Record<string, unknown>).id === 'string'
+  ) {
+    return (cfg as Record<string, unknown>).id as string;
+  }
+  return null;
 }

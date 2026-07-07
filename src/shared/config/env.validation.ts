@@ -134,5 +134,31 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
       then: Joi.required(),
       otherwise: Joi.optional(),
     }),
+
+    // Slice F.1 — verified sender for outbound low-stock alerts.
+    // Required in production so the ResendMailer can't be silently
+    // constructed without a working `from:` address (which Resend
+    // rejects at send time anyway — surface the misconfig at boot
+    // instead). Dev / staging may use the redacted dev-logger
+    // fallback without a real sender domain.
+    MAIL_FROM: Joi.string().when('NODE_ENV', {
+      is: Joi.valid('production'),
+      then: Joi.required(),
+      otherwise: Joi.optional(),
+    }),
+
+    // Slice F.2 — per-tenant web app base URL used to construct
+    // the `deepLink` in the low-stock email + the footer link in
+    // the email body. Optional in dev/staging (the email template
+    // still renders without it, just no footer link) — required in
+    // production so a misconfigured deploy can't silently ship a
+    // batch of emails with a missing deep-link / footer.
+    APP_WEB_URL: Joi.string()
+      .uri()
+      .when('NODE_ENV', {
+        is: Joi.valid('production'),
+        then: Joi.required(),
+        otherwise: Joi.optional(),
+      }),
   });
 }

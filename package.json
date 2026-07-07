@@ -92,15 +92,16 @@
     "moduleFileExtensions": [
       "js",
       "json",
-      "ts"
+      "ts",
+      "tsx"
     ],
     "roots": [
       "src",
       "prisma"
     ],
-    "testRegex": ".*\\.spec\\.ts$",
+    "testRegex": ".*\\.spec\\.(t|j)sx?$",
     "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
+      "^.+\\.(t|j)sx?$": "ts-jest"
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"
