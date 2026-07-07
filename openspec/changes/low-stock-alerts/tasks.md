@@ -27,12 +27,12 @@
 - [x] E.4 RED integration spec (real DB) — 2 concurrent txs: one `count===1`, other `count===0` under READ COMMITTED.
 
 ## Slice F — Email + Dispatch
-- [ ] F.1 RED `mailer.port.spec.ts` + `resend-mailer.spec.ts` — `MAILER.send({to[],subject,html})`; dev redacts recipients; prod w/o key throws. GREEN `mailer.port.ts` + `resend.mailer.ts` + `templates/low-stock.email.tsx`.
-- [ ] F.2 RED `low-stock.functions.spec.ts` — coalesce / short-circuits / dedupe / replay idempotent / fields. GREEN `low-stock.functions.ts` w/ `batchEvents:{maxSize:50,timeout:'60s',key:'event.data.tenantId'}`, `idempotency:event.id`, `step.run`s in `runWithTenant`.
-- [ ] F.3 RED extend `outbox-poller.service.spec.ts` — SELECT contains `AND "eventType" <> 'stock.low.detected'`; non-alert still claimed. GREEN add predicate to `src/shared/outbox/outbox-poller.service.ts:48-60`.
-- [ ] F.4 RED `low-stock-outbox.poller.spec.ts` — claims ONLY `status='PENDING' AND "eventType"='stock.low.detected' AND "nextAttemptAt" <= NOW()` + lockedUntil; SKIP LOCKED + lockToken. GREEN `src/stock-alerts/outbox/low-stock-outbox.poller.ts` `@Interval`.
-- [ ] F.5 RED `low-stock-outbox.dispatcher.spec.ts` — AWAIT `send`; resolve→`PUBLISHED`; reject→`PENDING`+`retryCount++`+bumped`nextAttemptAt`+`lastError`; maxRetries→`FAILED`; replay→mailer once. GREEN `src/stock-alerts/outbox/low-stock-outbox.dispatcher.ts`.
-- [ ] F.6 Tests + `prisma migrate status` + `tsc --noEmit` green.
+- [x] F.1 RED `mailer.port.spec.ts` + `resend-mailer.spec.ts` — `MAILER.send({to[],subject,html})`; dev redacts recipients; prod w/o key throws. GREEN `mailer.port.ts` + `resend.mailer.ts` + `templates/low-stock.email.tsx`.
+- [x] F.2 RED `low-stock.functions.spec.ts` — coalesce / short-circuits / dedupe / replay idempotent / fields. GREEN `low-stock.functions.ts` w/ `batchEvents:{maxSize:50,timeout:'60s',key:'event.data.tenantId'}`, `idempotency:event.id`, `step.run`s in `runWithTenant`.
+- [x] F.3 RED extend `outbox-poller.service.spec.ts` — SELECT contains `AND "eventType" <> 'stock.low.detected'`; non-alert still claimed. GREEN add predicate to `src/shared/outbox/outbox-poller.service.ts:48-60`.
+- [x] F.4 RED `low-stock-outbox.poller.spec.ts` — claims ONLY `status='PENDING' AND "eventType"='stock.low.detected' AND "nextAttemptAt" <= NOW()` + lockedUntil; SKIP LOCKED + lockToken. GREEN `src/stock-alerts/outbox/low-stock-outbox.poller.ts` `@Interval`.
+- [x] F.5 RED `low-stock-outbox.dispatcher.spec.ts` — AWAIT `send`; resolve→`PUBLISHED`; reject→`PENDING`+`retryCount++`+bumped`nextAttemptAt`+`lastError`; maxRetries→`FAILED`; replay→mailer once. GREEN `src/stock-alerts/outbox/low-stock-outbox.dispatcher.ts`.
+- [x] F.6 Tests + `prisma migrate status` + `tsc --noEmit` green.
 
 ## Review Workload Forecast
 
