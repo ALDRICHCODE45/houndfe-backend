@@ -21,10 +21,10 @@
 - [x] D.4 RED `app-bootstrap-env.spec.ts` — Joi fails missing `NODE_ENV`/keys. GREEN extend `src/app.module.ts` Joi w/ `NODE_ENV.valid(...).required()` + key conditionals.
 
 ## Slice E — Stock Crossing
-- [ ] E.1 RED `prisma-stock-alert-state.repository.spec.ts` — flip `count===1` / `count===0` re-flip. GREEN `prisma-stock-alert-state.repository.ts` w/ `INSERT ... ON CONFLICT DO NOTHING` + guarded `UPDATE ... RETURNING "alertEpoch"`.
-- [ ] E.2 RED extend `prisma-product.repository.spec.ts` + `products.service.spec.ts:30` — `StockCrossing[]`; PRE-gate; variant; lots excluded; cross-tenant throws; in-tx outbox; strict `>` re-arm. GREEN rewrite w/ raw `$queryRaw` UPDATE…RETURNING + flip + outbox; update `src/products/products.service.ts:100-108`.
-- [ ] E.3 RED extend `sales.service.spec.ts` — crossings in-tx / dispatched AFTER `runInTransaction` / rollback→no send / payload enriched / `mockResolvedValue(undefined)`→`mockResolvedValue([])`. GREEN `sales.service.ts:1643` + `:1918` capture + post-commit dispatch; inject `InngestService`.
-- [ ] E.4 RED integration spec (real DB) — 2 concurrent txs: one `count===1`, other `count===0` under READ COMMITTED.
+- [x] E.1 RED `prisma-stock-alert-state.repository.spec.ts` — flip `count===1` / `count===0` re-flip. GREEN `prisma-stock-alert-state.repository.ts` w/ `INSERT ... ON CONFLICT DO NOTHING` + guarded `UPDATE ... RETURNING "alertEpoch"`.
+- [x] E.2 RED extend `prisma-product.repository.spec.ts` + `products.service.spec.ts:30` — `StockCrossing[]`; PRE-gate; variant; lots excluded; cross-tenant throws; in-tx outbox; strict `>` re-arm. GREEN rewrite w/ raw `$queryRaw` UPDATE…RETURNING + flip + outbox; update `src/products/products.service.ts:100-108`.
+- [x] E.3 RED extend `sales.service.spec.ts` — crossings in-tx / dispatched AFTER `runInTransaction` / rollback→no send / payload enriched / `mockResolvedValue(undefined)`→`mockResolvedValue([])`. GREEN `sales.service.ts:1643` + `:1918` capture + post-commit dispatch; inject `InngestService`.
+- [x] E.4 RED integration spec (real DB) — 2 concurrent txs: one `count===1`, other `count===0` under READ COMMITTED.
 
 ## Slice F — Email + Dispatch
 - [ ] F.1 RED `mailer.port.spec.ts` + `resend-mailer.spec.ts` — `MAILER.send({to[],subject,html})`; dev redacts recipients; prod w/o key throws. GREEN `mailer.port.ts` + `resend.mailer.ts` + `templates/low-stock.email.tsx`.
