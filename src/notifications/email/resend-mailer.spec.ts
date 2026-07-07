@@ -42,7 +42,8 @@ jest.mock('resend', () => {
   const sendMock = jest.fn();
   class Resend {
     public readonly emails = {
-      send: (...args: unknown[]) => sendMock(...args),
+      send: (...args: unknown[]) =>
+        sendMock(...args) as unknown as Promise<unknown>,
     };
     public readonly capturedApiKey: string | undefined;
     constructor(apiKey?: string) {
@@ -52,7 +53,7 @@ jest.mock('resend', () => {
   return { Resend, __mocks: { sendMock } };
 });
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const resendMock = require('resend') as {
   Resend: new (apiKey?: string) => {
     emails: { send: jest.Mock };
@@ -200,7 +201,8 @@ describe('ResendMailer (F.1)', () => {
       });
 
       expect(sendMock).toHaveBeenCalledTimes(1);
-      const call = sendMock.mock.calls[0][0] as {
+      const sendCalls = sendMock.mock.calls as unknown[][];
+      const call = sendCalls[0]?.[0] as {
         from: string;
         to: string[];
         subject: string;

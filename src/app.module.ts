@@ -41,6 +41,7 @@ import { InngestModule } from './inngest/inngest.module';
 import { MailerModule } from './notifications/email/mailer.module';
 import { TenantModule } from './shared/tenant/tenant.module';
 import { StockAlertsModule } from './stock-alerts/stock-alerts.module';
+import { LowStockOutboxModule } from './stock-alerts/outbox/low-stock-outbox.module';
 import { LowStockInngestRegistrar } from './stock-alerts/inngest/low-stock-inngest-registrar';
 
 @Module({
@@ -94,6 +95,10 @@ import { LowStockInngestRegistrar } from './stock-alerts/inngest/low-stock-innge
     TenantModule,
     // F — StockAlerts (notification function + dedicated outbox poller/dispatcher).
     StockAlertsModule,
+    // F.4 + F.5 — dedicated outbox poller + dispatcher in their own
+    // module so the dep graph (InngestService + Mailer + TenantRunner)
+    // doesn't pollute transitive module chains.
+    LowStockOutboxModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +

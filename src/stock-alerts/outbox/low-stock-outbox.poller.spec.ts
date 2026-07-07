@@ -35,12 +35,10 @@ describe('LowStockOutboxPoller (F.4)', () => {
     const prisma = {
       $transaction: (work: (tx: unknown) => Promise<unknown>) => {
         const tx = {
-          $queryRawUnsafe: jest
-            .fn()
-            .mockImplementation((sql: string) => {
-              capturedCalls.push(sql);
-              return Promise.resolve([]);
-            }),
+          $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+            capturedCalls.push(sql);
+            return Promise.resolve([]);
+          }),
         };
         return work(tx);
       },
@@ -55,16 +53,21 @@ describe('LowStockOutboxPoller (F.4)', () => {
       { dispatch: jest.fn() } as never,
     );
 
-    await (service as unknown as { claimBatch: () => Promise<unknown> }).claimBatch();
+    await (
+      service as unknown as { claimBatch: () => Promise<unknown> }
+    ).claimBatch();
 
     const claimSql =
-      capturedCalls.find((c) => /SELECT\s+id\s+FROM\s+outbox_events/i.test(c)) ??
-      '';
+      capturedCalls.find((c) =>
+        /SELECT\s+id\s+FROM\s+outbox_events/i.test(c),
+      ) ?? '';
     expect(claimSql).toContain(`status = 'PENDING'`);
     expect(claimSql).toContain(`"eventType" = 'stock.low.detected'`);
     expect(claimSql).toContain(`"nextAttemptAt" <= NOW()`);
     // lock-decay: lockedUntil null OR expired
-    expect(claimSql).toContain(`"lockedUntil" IS NULL OR "lockedUntil" < NOW()`);
+    expect(claimSql).toContain(
+      `"lockedUntil" IS NULL OR "lockedUntil" < NOW()`,
+    );
     expect(claimSql).toMatch(/FOR\s+UPDATE\s+SKIP\s+LOCKED/i);
     // The dedicated poller MUST NOT have the NEGATIVE predicate
     // (that's the generic poller's job — see F.3).
@@ -76,41 +79,39 @@ describe('LowStockOutboxPoller (F.4)', () => {
     const prisma = {
       $transaction: (work: (tx: unknown) => Promise<unknown>) => {
         const tx = {
-          $queryRawUnsafe: jest
-            .fn()
-            .mockImplementation((sql: string) => {
-              capturedCalls.push(sql);
-              // First call: claim SELECT — return one matching id.
-              if (/SELECT\s+id\s+FROM\s+outbox_events/i.test(sql)) {
-                return Promise.resolve([{ id: 'evt-1' }]);
-              }
-              // Second call: lock UPDATE — return one claimed row.
-              if (/UPDATE\s+outbox_events/i.test(sql)) {
-                return Promise.resolve([
-                  {
-                    id: 'evt-1',
+          $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+            capturedCalls.push(sql);
+            // First call: claim SELECT — return one matching id.
+            if (/SELECT\s+id\s+FROM\s+outbox_events/i.test(sql)) {
+              return Promise.resolve([{ id: 'evt-1' }]);
+            }
+            // Second call: lock UPDATE — return one claimed row.
+            if (/UPDATE\s+outbox_events/i.test(sql)) {
+              return Promise.resolve([
+                {
+                  id: 'evt-1',
+                  tenantId: 'tenant-1',
+                  aggregateType: 'StockAlert',
+                  aggregateId: 'product-1:__PRODUCT__',
+                  eventType: 'stock.low.detected',
+                  payload: {
                     tenantId: 'tenant-1',
-                    aggregateType: 'StockAlert',
-                    aggregateId: 'product-1:__PRODUCT__',
-                    eventType: 'stock.low.detected',
-                    payload: {
-                      tenantId: 'tenant-1',
-                      productId: 'product-1',
-                      alertEpoch: 1,
-                    },
-                    status: OutboxEventStatus.PENDING,
-                    retryCount: 0,
-                    nextAttemptAt: new Date(),
-                    lastError: null,
-                    lockToken: 'lock-1',
-                    lockedUntil: new Date(),
-                    createdAt: new Date(),
-                    publishedAt: null,
+                    productId: 'product-1',
+                    alertEpoch: 1,
                   },
-                ]);
-              }
-              return Promise.resolve([]);
-            }),
+                  status: OutboxEventStatus.PENDING,
+                  retryCount: 0,
+                  nextAttemptAt: new Date(),
+                  lastError: null,
+                  lockToken: 'lock-1',
+                  lockedUntil: new Date(),
+                  createdAt: new Date(),
+                  publishedAt: null,
+                },
+              ]);
+            }
+            return Promise.resolve([]);
+          }),
         };
         return work(tx);
       },
@@ -126,7 +127,9 @@ describe('LowStockOutboxPoller (F.4)', () => {
       dispatcher as never,
     );
 
-    await (service as unknown as { claimBatch: () => Promise<unknown> }).claimBatch();
+    await (
+      service as unknown as { claimBatch: () => Promise<unknown> }
+    ).claimBatch();
 
     const updateSql =
       capturedCalls.find((c) => /UPDATE\s+outbox_events/i.test(c)) ?? '';
@@ -175,17 +178,15 @@ describe('LowStockOutboxPoller (F.4)', () => {
     const prisma = {
       $transaction: (work: (tx: unknown) => Promise<unknown>) => {
         const tx = {
-          $queryRawUnsafe: jest
-            .fn()
-            .mockImplementation((sql: string) => {
-              if (/SELECT\s+id\s+FROM\s+outbox_events/i.test(sql)) {
-                return Promise.resolve(claimed.map((c) => ({ id: c.id })));
-              }
-              if (/UPDATE\s+outbox_events/i.test(sql)) {
-                return Promise.resolve(claimed);
-              }
-              return Promise.resolve([]);
-            }),
+          $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+            if (/SELECT\s+id\s+FROM\s+outbox_events/i.test(sql)) {
+              return Promise.resolve(claimed.map((c) => ({ id: c.id })));
+            }
+            if (/UPDATE\s+outbox_events/i.test(sql)) {
+              return Promise.resolve(claimed);
+            }
+            return Promise.resolve([]);
+          }),
         };
         return work(tx);
       },

@@ -134,8 +134,8 @@ export function LowStockEmail({
               margin: '0 0 24px',
             }}
           >
-            Los siguientes productos han cruzado su inventario mínimo.
-            Repón o ajusta el límite antes de que el stock llegue a cero.
+            Los siguientes productos han cruzado su inventario mínimo. Repón o
+            ajusta el límite antes de que el stock llegue a cero.
           </Text>
 
           {items.map((item, index) => (

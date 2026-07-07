@@ -91,12 +91,10 @@ describe('OutboxPollerService', () => {
       const prisma = {
         $transaction: (work: (tx: unknown) => Promise<unknown>) => {
           const tx = {
-            $queryRawUnsafe: jest
-              .fn()
-              .mockImplementation((sql: string) => {
-                capturedCalls.push(sql);
-                return Promise.resolve([]);
-              }),
+            $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+              capturedCalls.push(sql);
+              return Promise.resolve([]);
+            }),
           };
           return work(tx);
         },
@@ -118,8 +116,9 @@ describe('OutboxPollerService', () => {
       // claim SELECT (FOR UPDATE SKIP LOCKED). It's the only call that
       // touches the WHERE clause predicates we care about.
       const claimSql =
-        capturedCalls.find((c) => /SELECT\s+id\s+FROM\s+outbox_events/i.test(c)) ??
-        '';
+        capturedCalls.find((c) =>
+          /SELECT\s+id\s+FROM\s+outbox_events/i.test(c),
+        ) ?? '';
       expect(claimSql).toContain(`"eventType" <> 'stock.low.detected'`);
     });
 

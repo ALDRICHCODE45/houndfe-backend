@@ -25,12 +25,7 @@
  *   - "DEV redacts recipients" → enforced at the
  *     `ResendMailer` adapter (F.1) — the port just defines the shape.
  */
-import {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  MAILER,
-  type IMailer,
-  type SendMailInput,
-} from './mailer.port';
+import { MAILER, type IMailer, type SendMailInput } from './mailer.port';
 
 describe('MAILER port (F.1)', () => {
   it('exports the injection token as a Symbol with a stable description', () => {
@@ -42,7 +37,8 @@ describe('MAILER port (F.1)', () => {
     // Type-level smoke: a value typed as IMailer MUST accept the
     // documented input shape. If this compiles, the contract holds.
     const mailer: IMailer = {
-      send: async (_input: SendMailInput) => undefined,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      send: (_input: SendMailInput) => Promise.resolve(),
     };
     expect(typeof mailer.send).toBe('function');
   });
