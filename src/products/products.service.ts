@@ -103,8 +103,15 @@ export class ProductsService {
       variantId?: string | null;
       quantity: number;
     }>,
-  ): Promise<void> {
-    await this.productRepo.decrementStockForCharge(adjustments);
+  ): Promise<
+    Array<{
+      productId: string;
+      variantId: string | null;
+      newQuantity: number;
+      minQuantity: number;
+    }>
+  > {
+    return this.productRepo.decrementStockForCharge(adjustments);
   }
 
   async incrementStockForRestock(
