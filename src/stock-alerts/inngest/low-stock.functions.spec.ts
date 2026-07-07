@@ -68,9 +68,7 @@ function makeFakeInngest() {
     }
   }
   return {
-    Inngest: FakeInngest as unknown as new (opts: {
-      id: string;
-    }) => unknown,
+    Inngest: FakeInngest as unknown as new (opts: { id: string }) => unknown,
     captured,
   };
 }
@@ -87,9 +85,9 @@ function makeFakeStep() {
       stepCalls.push(name);
       return fn();
     }),
-    sleep: jest.fn(async () => undefined),
-    sendEvent: jest.fn(async () => undefined),
-    waitForEvent: jest.fn(async () => undefined),
+    sleep: jest.fn(() => Promise.resolve(undefined)),
+    sendEvent: jest.fn(() => Promise.resolve(undefined)),
+    waitForEvent: jest.fn(() => Promise.resolve(undefined)),
   };
   return {
     step: step as unknown as Record<string, unknown>,
@@ -142,7 +140,9 @@ describe('low-stock Inngest function (F.2)', () => {
     };
     const mailer = { send: jest.fn() };
     const userEmailLookup = { resolveEmailsByUserIds: jest.fn() };
-    const tenantRunner = { runWithTenant: (_id: string, fn: () => unknown) => fn() };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
 
     buildLowStockFunctions({
       inngestClient: new fake.Inngest({ id: 'test' }) as never,
@@ -162,16 +162,12 @@ describe('low-stock Inngest function (F.2)', () => {
       retries: 3,
       concurrency: { limit: 5 },
     });
-    expect(
-      (options as { batchEvents?: unknown }).batchEvents,
-    ).toEqual({
+    expect((options as { batchEvents?: unknown }).batchEvents).toEqual({
       maxSize: 50,
       timeout: '60s',
       key: 'event.data.tenantId',
     });
-    expect((options as { idempotency?: unknown }).idempotency).toBe(
-      'event.id',
-    );
+    expect((options as { idempotency?: unknown }).idempotency).toBe('event.id');
 
     // triggers lives INSIDE options in Inngest v4.
     expect(
@@ -190,12 +186,12 @@ describe('low-stock Inngest function (F.2)', () => {
       }),
     };
     const userEmailLookup = {
-      resolveEmailsByUserIds: jest
-        .fn()
-        .mockResolvedValue(['u1@example.com']),
+      resolveEmailsByUserIds: jest.fn().mockResolvedValue(['u1@example.com']),
     };
     const mailer = { send: jest.fn().mockResolvedValue(undefined) };
-    const tenantRunner = { runWithTenant: (_id: string, fn: () => unknown) => fn() };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
 
     buildLowStockFunctions({
       inngestClient: new fake.Inngest({ id: 'test' }) as never,
@@ -241,7 +237,9 @@ describe('low-stock Inngest function (F.2)', () => {
     };
     const userEmailLookup = { resolveEmailsByUserIds: jest.fn() };
     const mailer = { send: jest.fn() };
-    const tenantRunner = { runWithTenant: (_id: string, fn: () => unknown) => fn() };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
 
     buildLowStockFunctions({
       inngestClient: new fake.Inngest({ id: 'test' }) as never,
@@ -255,9 +253,7 @@ describe('low-stock Inngest function (F.2)', () => {
     const { step } = makeFakeStep();
 
     await handler({
-      events: [
-        { id: 'k', name: 'stock/low.detected', data: basePayload() },
-      ],
+      events: [{ id: 'k', name: 'stock/low.detected', data: basePayload() }],
       step,
     });
 
@@ -277,7 +273,9 @@ describe('low-stock Inngest function (F.2)', () => {
     };
     const userEmailLookup = { resolveEmailsByUserIds: jest.fn() };
     const mailer = { send: jest.fn() };
-    const tenantRunner = { runWithTenant: (_id: string, fn: () => unknown) => fn() };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
 
     buildLowStockFunctions({
       inngestClient: new fake.Inngest({ id: 'test' }) as never,
@@ -291,9 +289,7 @@ describe('low-stock Inngest function (F.2)', () => {
     const { step } = makeFakeStep();
 
     await handler({
-      events: [
-        { id: 'k', name: 'stock/low.detected', data: basePayload() },
-      ],
+      events: [{ id: 'k', name: 'stock/low.detected', data: basePayload() }],
       step,
     });
 
@@ -314,7 +310,9 @@ describe('low-stock Inngest function (F.2)', () => {
       resolveEmailsByUserIds: jest.fn().mockResolvedValue([]),
     };
     const mailer = { send: jest.fn() };
-    const tenantRunner = { runWithTenant: (_id: string, fn: () => unknown) => fn() };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
 
     buildLowStockFunctions({
       inngestClient: new fake.Inngest({ id: 'test' }) as never,
@@ -328,9 +326,7 @@ describe('low-stock Inngest function (F.2)', () => {
     const { step } = makeFakeStep();
 
     await handler({
-      events: [
-        { id: 'k', name: 'stock/low.detected', data: basePayload() },
-      ],
+      events: [{ id: 'k', name: 'stock/low.detected', data: basePayload() }],
       step,
     });
 
@@ -348,14 +344,18 @@ describe('low-stock Inngest function (F.2)', () => {
       }),
     };
     const userEmailLookup = {
-      resolveEmailsByUserIds: jest.fn().mockResolvedValue([
-        'u1@example.com',
-        'u1@example.com',
-        'u2@example.com',
-      ]),
+      resolveEmailsByUserIds: jest
+        .fn()
+        .mockResolvedValue([
+          'u1@example.com',
+          'u1@example.com',
+          'u2@example.com',
+        ]),
     };
     const mailer = { send: jest.fn().mockResolvedValue(undefined) };
-    const tenantRunner = { runWithTenant: (_id: string, fn: () => unknown) => fn() };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
 
     buildLowStockFunctions({
       inngestClient: new fake.Inngest({ id: 'test' }) as never,
@@ -369,14 +369,13 @@ describe('low-stock Inngest function (F.2)', () => {
     const { step } = makeFakeStep();
 
     await handler({
-      events: [
-        { id: 'k', name: 'stock/low.detected', data: basePayload() },
-      ],
+      events: [{ id: 'k', name: 'stock/low.detected', data: basePayload() }],
       step,
     });
 
     expect(mailer.send).toHaveBeenCalledTimes(1);
-    const arg = (mailer.send as jest.Mock).mock.calls[0][0] as {
+    const sendCalls = mailer.send.mock.calls as unknown[][];
+    const arg = sendCalls[0]?.[0] as {
       to: string[];
     };
     expect(new Set(arg.to)).toEqual(
@@ -396,12 +395,12 @@ describe('low-stock Inngest function (F.2)', () => {
       }),
     };
     const userEmailLookup = {
-      resolveEmailsByUserIds: jest
-        .fn()
-        .mockResolvedValue(['user@example.com']),
+      resolveEmailsByUserIds: jest.fn().mockResolvedValue(['user@example.com']),
     };
     const mailer = { send: jest.fn().mockResolvedValue(undefined) };
-    const tenantRunner = { runWithTenant: (_id: string, fn: () => unknown) => fn() };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
 
     buildLowStockFunctions({
       inngestClient: new fake.Inngest({ id: 'test' }) as never,
@@ -431,7 +430,8 @@ describe('low-stock Inngest function (F.2)', () => {
     });
 
     expect(mailer.send).toHaveBeenCalledTimes(1);
-    const mailInput = (mailer.send as jest.Mock).mock.calls[0][0] as {
+    const sendCalls = mailer.send.mock.calls as unknown[][];
+    const mailInput = sendCalls[0]?.[0] as {
       subject: string;
       html: string;
     };
@@ -457,13 +457,13 @@ describe('low-stock Inngest function (F.2)', () => {
       }),
     };
     const userEmailLookup = {
-      resolveEmailsByUserIds: jest
-        .fn()
-        .mockResolvedValue(['user@example.com']),
+      resolveEmailsByUserIds: jest.fn().mockResolvedValue(['user@example.com']),
     };
     const mailer = { send: jest.fn().mockResolvedValue(undefined) };
     const tenantRunner = {
-      runWithTenant: jest.fn(async (_id: string, fn: () => unknown) => fn()),
+      runWithTenant: jest.fn((_id: string, fn: () => unknown) =>
+        Promise.resolve(fn()),
+      ),
     };
 
     buildLowStockFunctions({
@@ -478,18 +478,17 @@ describe('low-stock Inngest function (F.2)', () => {
     const { step } = makeFakeStep();
 
     await handler({
-      events: [
-        { id: 'k', name: 'stock/low.detected', data: basePayload() },
-      ],
+      events: [{ id: 'k', name: 'stock/low.detected', data: basePayload() }],
       step,
     });
 
     // runWithTenant called for at least the `load-config` and
     // `resolve-recipients` steps. The handler short-circuits when
     // tenantId is missing; we expect ≥ 2 normal calls.
-    expect((tenantRunner.runWithTenant as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(1);
-    const firstTenantId = (tenantRunner.runWithTenant as jest.Mock).mock
-      .calls[0][0];
+    const runnerCalls = (tenantRunner.runWithTenant as jest.Mock).mock
+      .calls as unknown[][];
+    expect(runnerCalls.length).toBeGreaterThanOrEqual(1);
+    const firstTenantId = runnerCalls[0]?.[0];
     expect(firstTenantId).toBe('tenant-1');
   });
 

@@ -128,7 +128,7 @@ export class LowStockOutboxPoller {
       const ids = pendingRows.map((row) => row.id);
       const lockSeconds = this.lockMs / 1000;
 
-      const claimed = (await tx.$queryRawUnsafe<DispatchableOutboxEvent[]>(
+      const claimed = await tx.$queryRawUnsafe<DispatchableOutboxEvent[]>(
         `
           UPDATE outbox_events
           SET "lockToken" = $1,
@@ -150,7 +150,7 @@ export class LowStockOutboxPoller {
         lockToken,
         lockSeconds,
         ids,
-      )) as DispatchableOutboxEvent[];
+      );
 
       this.logger.debug(
         `[LowStockOutboxPoller] claimed ${claimed.length} stock.low.detected events`,

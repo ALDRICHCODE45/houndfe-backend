@@ -48,9 +48,7 @@ import {
   type LowStockEmailItem,
 } from '../../notifications/email/templates/low-stock.email';
 import type { TenantRunnerService } from '../../shared/tenant/tenant-runner.service';
-import type {
-  INotificationConfigRepository,
-} from '../../notification-config/domain/notification-config.repository';
+import type { INotificationConfigRepository } from '../../notification-config/domain/notification-config.repository';
 import type { LowStockEventPayload } from '../domain/stock-crossing';
 
 /**
@@ -65,9 +63,7 @@ export interface IUserEmailLookup {
    * Inactive users are filtered out (spec: `isActive` predicate).
    * Returns an empty array when no ids resolve; never returns `null`.
    */
-  resolveEmailsByUserIds(
-    userIds: string[],
-  ): Promise<string[]>;
+  resolveEmailsByUserIds(userIds: string[]): Promise<string[]>;
 }
 
 /**
@@ -100,10 +96,7 @@ type InngestBatchContext = {
 export interface BuildLowStockFunctionsInput {
   inngestClient: Inngest;
   tenantRunner: Pick<TenantRunnerService, 'runWithTenant'>;
-  notificationConfigRepository: Pick<
-    INotificationConfigRepository,
-    'find'
-  >;
+  notificationConfigRepository: Pick<INotificationConfigRepository, 'find'>;
   userEmailLookup: IUserEmailLookup;
   mailer: IMailer;
   /** Per-tenant web app base URL — used as the footer link origin. */
@@ -147,9 +140,7 @@ export function buildLowStockFunctions(
       // unambiguous; we still defensively re-check the const invariant
       // so a misconfigured downstream caller cannot poison the CLS.
       const tenantId = events[0].data.tenantId;
-      const sharedTenantId = events.every(
-        (e) => e.data.tenantId === tenantId,
-      )
+      const sharedTenantId = events.every((e) => e.data.tenantId === tenantId)
         ? tenantId
         : events[0].data.tenantId;
       if (!sharedTenantId) {
@@ -163,7 +154,11 @@ export function buildLowStockFunctions(
           ctx.step.run('load-config', () =>
             input.notificationConfigRepository.find(),
           ),
-      )) as { enabled: boolean; recipients: string[]; enabledActions: string[] };
+      )) as {
+        enabled: boolean;
+        recipients: string[];
+        enabledActions: string[];
+      };
 
       if (!config.enabled) {
         return { skipped: 'master-disabled' };
@@ -203,7 +198,7 @@ export function buildLowStockFunctions(
         'compose-items',
         () => composeItems(events) as unknown as Promise<LowStockEmailItem[]>,
       );
-      const items = composeResult as unknown as LowStockEmailItem[];
+      const items = composeResult as LowStockEmailItem[];
 
       // (4) send-email — render the template, then dispatch via MAILER.
       const subject = composeSubject(items.length);
@@ -248,9 +243,7 @@ function composeSubject(count: number): string {
  * protects against a misconfigured caller fanning the same crossing
  * in twice.
  */
-function composeItems(
-  events: InngestBatchEvent[],
-): LowStockEmailItem[] {
+function composeItems(events: InngestBatchEvent[]): LowStockEmailItem[] {
   const seen = new Set<string>();
   const items: LowStockEmailItem[] = [];
   for (const event of events) {

@@ -23,10 +23,7 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { InngestService } from '../../inngest/inngest.service';
-import {
-  MAILER,
-  type IMailer,
-} from '../../notifications/email/mailer.port';
+import { MAILER, type IMailer } from '../../notifications/email/mailer.port';
 import {
   NOTIFICATION_CONFIG_REPOSITORY,
   type INotificationConfigRepository,
