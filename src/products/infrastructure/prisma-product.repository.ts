@@ -247,7 +247,8 @@ export class PrismaProductRepository implements IProductRepository {
       if (adjustment.variantId) {
         // Variant path: no useStock / useLotsAndExpirations columns on
         // the variants table (design Decision 5, finding #9).
-        const variantRows = await prisma.$queryRaw`
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+        const variantRows = (await prisma.$queryRaw`
           UPDATE "variants"
              SET "quantity" = "quantity" - ${adjustment.quantity},
                  "updatedAt" = NOW()
@@ -255,9 +256,9 @@ export class PrismaProductRepository implements IProductRepository {
              AND "productId" = ${adjustment.productId}
              AND "tenantId" = ${tenantId}
              AND "quantity" >= ${adjustment.quantity}
-          RETURNING "quantity"::int AS "newQuantity",
-                    "minQuantity"::int AS "minQuantity"
-        `;
+           RETURNING "quantity"::int AS "newQuantity",
+                     "minQuantity"::int AS "minQuantity"
+        `) as Array<{ newQuantity: number; minQuantity: number }>;
 
         if (variantRows.length !== 1) {
           throw new Error('STOCK_INSUFFICIENT_AT_CONFIRM');
@@ -289,7 +290,8 @@ export class PrismaProductRepository implements IProductRepository {
       }
 
       // Product path: tenant + useStock guard + quantity guard.
-      const productRows = await prisma.$queryRaw`
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+      const productRows = (await prisma.$queryRaw`
         UPDATE "products"
            SET "quantity" = "quantity" - ${adjustment.quantity},
                "updatedAt" = NOW()
@@ -297,20 +299,25 @@ export class PrismaProductRepository implements IProductRepository {
            AND "tenantId" = ${tenantId}
            AND "useStock" = true
            AND "quantity" >= ${adjustment.quantity}
-        RETURNING "quantity"::int AS "newQuantity",
-                  "minQuantity"::int AS "minQuantity",
-                  "useLotsAndExpirations" AS "useLotsAndExpirations"
-      `;
+         RETURNING "quantity"::int AS "newQuantity",
+                   "minQuantity"::int AS "minQuantity",
+                   "useLotsAndExpirations" AS "useLotsAndExpirations"
+      `) as Array<{
+        newQuantity: number;
+        minQuantity: number;
+        useLotsAndExpirations: boolean;
+      }>;
 
       if (productRows.length !== 1) {
         // Non-stock fallback: skip silently if `useStock=false`.
-        const nonStock = await prisma.$queryRaw`
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+        const nonStock = (await prisma.$queryRaw`
           SELECT "id"::text AS "id"
             FROM "products"
            WHERE "id" = ${adjustment.productId}
              AND "tenantId" = ${tenantId}
              AND "useStock" = false
-        `;
+        `) as Array<{ id: string }>;
 
         if (nonStock.length > 0) {
           continue;
@@ -442,16 +449,17 @@ export class PrismaProductRepository implements IProductRepository {
       if (adjustment.quantity <= 0) continue;
 
       if (adjustment.variantId) {
-        const variantRows = await prisma.$queryRaw`
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+        const variantRows = (await prisma.$queryRaw`
           UPDATE "variants"
              SET "quantity" = "quantity" + ${adjustment.quantity},
                  "updatedAt" = NOW()
            WHERE "id" = ${adjustment.variantId}
              AND "productId" = ${adjustment.productId}
              AND "tenantId" = ${tenantId}
-          RETURNING "quantity"::int AS "newQuantity",
-                    "minQuantity"::int AS "minQuantity"
-        `;
+           RETURNING "quantity"::int AS "newQuantity",
+                     "minQuantity"::int AS "minQuantity"
+        `) as Array<{ newQuantity: number; minQuantity: number }>;
 
         if (variantRows.length !== 1) continue;
 
@@ -467,16 +475,17 @@ export class PrismaProductRepository implements IProductRepository {
         continue;
       }
 
-      const productRows = await prisma.$queryRaw`
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+      const productRows = (await prisma.$queryRaw`
         UPDATE "products"
            SET "quantity" = "quantity" + ${adjustment.quantity},
                "updatedAt" = NOW()
          WHERE "id" = ${adjustment.productId}
            AND "tenantId" = ${tenantId}
            AND "useStock" = true
-        RETURNING "quantity"::int AS "newQuantity",
-                  "minQuantity"::int AS "minQuantity"
-      `;
+         RETURNING "quantity"::int AS "newQuantity",
+                   "minQuantity"::int AS "minQuantity"
+      `) as Array<{ newQuantity: number; minQuantity: number }>;
 
       if (productRows.length !== 1) continue;
 
