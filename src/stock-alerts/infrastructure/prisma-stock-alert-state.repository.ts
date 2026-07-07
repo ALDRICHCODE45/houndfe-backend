@@ -51,11 +51,24 @@ export class PrismaStockAlertStateRepository
 
     // 1. Ensure an armed row exists. Idempotent via ON CONFLICT
     //    (unique key: [tenantId, productId, variantKey]).
+    //
+    //    Both `"createdAt"` and `"updatedAt"` MUST be supplied:
+    //      - `createdAt` has a DB default of `CURRENT_TIMESTAMP`, so omitting
+    //        it is fine — but supplying it makes the SQL self-describing and
+    //        matches the explicit values declared in the migration.
+    //      - `updatedAt` has NO DB default and is `NOT NULL`. On the FIRST
+    //        crossing for any (tenantId, productId, variantKey) the row does
+    //        NOT exist, the INSERT actually executes, and omitting the
+    //        column aborts the whole sale transaction with `23502`. The
+    //        `@updatedAt` directive on the Prisma model is Client-applied,
+    //        but `$queryRaw` bypasses Prisma Client — we have to set the
+    //        value explicitly via SQL `NOW()`. See
+    //        `prisma-stock-alert-state.repository.integration.spec.ts`.
     await tx.$queryRaw`
       INSERT INTO "stock_alert_states"
-        ("id", "tenantId", "productId", "variantId", "variantKey", "alerted", "alertEpoch")
+        ("id", "tenantId", "productId", "variantId", "variantKey", "alerted", "alertEpoch", "createdAt", "updatedAt")
       VALUES
-        (${newId}, ${input.tenantId}, ${input.productId}, ${input.variantId}, ${variantKey}, false, 0)
+        (${newId}, ${input.tenantId}, ${input.productId}, ${input.variantId}, ${variantKey}, false, 0, NOW(), NOW())
       ON CONFLICT ("tenantId", "productId", "variantKey") DO NOTHING
     `;
 
