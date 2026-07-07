@@ -1640,11 +1640,14 @@ export class SalesService {
         variantId: item.variantId,
         quantity: item.quantity,
       }));
-      // Slice E.3 — capture crossings. The product repository already
-      // wrote the durable outbox rows (stock.low.detected) IN THE SAME
-      // transaction; the capture here keeps the value visible for any
-      // post-commit work (Slice F dispatcher uses the OutboxEvent table,
-      // but the returned array lets us assert behavior in spec scenarios).
+      // Slice E.3 — crossings return value is currently UNUSED at this
+      // call site. `decrementStockForCharge` writes the durable
+      // `stock.low.detected` outbox rows IN THE SAME transaction
+      // (inserted via `OutboxWriterService.publish` inside
+      // `PrismaProductRepository`). Slice F consumes those rows from
+      // `OutboxEvent`. The returned `StockCrossing[]` is intentionally
+      // discarded here — there is no post-commit work in this method
+      // that consumes it.
       await this.productsService.decrementStockForCharge(stockAdjustments);
 
       const confirmedAt = new Date();
@@ -1920,9 +1923,13 @@ export class SalesService {
       const paidCents = 0 as const;
       const debtCents = totalCents;
 
-      // Slice E.3 — capture crossings. The product repository already
-      // wrote the durable outbox rows (stock.low.detected) IN THE SAME
-      // transaction; the capture here is observable for spec assertions.
+      // Slice E.3 — crossings return value is currently UNUSED at this
+      // call site. The product repository writes the durable
+      // `stock.low.detected` outbox rows IN THE SAME transaction
+      // (inserted via `OutboxWriterService.publish` inside
+      // `PrismaProductRepository`). Slice F consumes those rows from
+      // `OutboxEvent`. The returned `StockCrossing[]` is intentionally
+      // discarded here — this method does not consume it.
       await this.productsService.decrementStockForCharge(
         input.items.map((item) => ({
           productId: item.productId,
