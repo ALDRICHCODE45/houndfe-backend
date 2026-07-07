@@ -26,7 +26,10 @@ import type { StockCrossing } from '../../stock-alerts/domain/stock-crossing';
 
 type RawCall = { sql: string };
 type TxClient = {
-  $queryRaw: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>;
+  $queryRaw: (
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ) => Promise<unknown>;
   // OutboxWriterService.publish expects Prisma.TransactionClient; the
   // tenant-scoped client (and the tx client it surfaces inside
   // `runInTransaction`) is structurally compatible but not nominally,
@@ -221,6 +224,19 @@ export class PrismaProductRepository implements IProductRepository {
       quantity: number;
     }>,
   ): Promise<StockCrossing[]> {
+    // Slice E — ambient-tx guard. The decrement + flip + outbox.write MUST
+    // be atomic with the surrounding sale. `tenantPrisma.getClient()`
+    // SILENTLY falls back to a non-transactional (tenant-scoped) client
+    // when no CLS tx is active — that would auto-commit each raw UPDATE
+    // and the outbox row independently, producing either an orphaned
+    // `stock.low.detected` row or a committed decrement for a failed sale.
+    // Throw fast instead of letting that happen.
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error(
+        'decrementStockForCharge must be called inside TenantPrismaService.runInTransaction',
+      );
+    }
+
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
     const crossings: StockCrossing[] = [];
@@ -231,7 +247,7 @@ export class PrismaProductRepository implements IProductRepository {
       if (adjustment.variantId) {
         // Variant path: no useStock / useLotsAndExpirations columns on
         // the variants table (design Decision 5, finding #9).
-        const variantRows = (await prisma.$queryRaw`
+        const variantRows = await prisma.$queryRaw`
           UPDATE "variants"
              SET "quantity" = "quantity" - ${adjustment.quantity},
                  "updatedAt" = NOW()
@@ -241,7 +257,7 @@ export class PrismaProductRepository implements IProductRepository {
              AND "quantity" >= ${adjustment.quantity}
           RETURNING "quantity"::int AS "newQuantity",
                     "minQuantity"::int AS "minQuantity"
-        `) as Array<{ newQuantity: number; minQuantity: number }>;
+        `;
 
         if (variantRows.length !== 1) {
           throw new Error('STOCK_INSUFFICIENT_AT_CONFIRM');
@@ -273,7 +289,7 @@ export class PrismaProductRepository implements IProductRepository {
       }
 
       // Product path: tenant + useStock guard + quantity guard.
-      const productRows = (await prisma.$queryRaw`
+      const productRows = await prisma.$queryRaw`
         UPDATE "products"
            SET "quantity" = "quantity" - ${adjustment.quantity},
                "updatedAt" = NOW()
@@ -284,21 +300,17 @@ export class PrismaProductRepository implements IProductRepository {
         RETURNING "quantity"::int AS "newQuantity",
                   "minQuantity"::int AS "minQuantity",
                   "useLotsAndExpirations" AS "useLotsAndExpirations"
-      `) as Array<{
-        newQuantity: number;
-        minQuantity: number;
-        useLotsAndExpirations: boolean;
-      }>;
+      `;
 
       if (productRows.length !== 1) {
         // Non-stock fallback: skip silently if `useStock=false`.
-        const nonStock = (await prisma.$queryRaw`
+        const nonStock = await prisma.$queryRaw`
           SELECT "id"::text AS "id"
             FROM "products"
            WHERE "id" = ${adjustment.productId}
              AND "tenantId" = ${tenantId}
              AND "useStock" = false
-        `) as Array<{ id: string }>;
+        `;
 
         if (nonStock.length > 0) {
           continue;
@@ -306,7 +318,8 @@ export class PrismaProductRepository implements IProductRepository {
         throw new Error('STOCK_INSUFFICIENT_AT_CONFIRM');
       }
 
-      const { newQuantity, minQuantity, useLotsAndExpirations } = productRows[0];
+      const { newQuantity, minQuantity, useLotsAndExpirations } =
+        productRows[0];
       const pre = newQuantity + adjustment.quantity;
 
       // PRE-gate: pre > minQty && newQty <= minQty && !useLotsAndExpirations.
@@ -412,6 +425,16 @@ export class PrismaProductRepository implements IProductRepository {
       quantity: number;
     }>,
   ): Promise<void> {
+    // Slice E — ambient-tx guard (mirror of decrementStockForCharge).
+    // Restock + rearm happen in the same tx as the underlying stock update;
+    // running outside a tx would leave the product decremented without
+    // the alerted=false rearm, blocking the next alert forever.
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error(
+        'incrementStockForRestock must be called inside TenantPrismaService.runInTransaction',
+      );
+    }
+
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
 
@@ -419,7 +442,7 @@ export class PrismaProductRepository implements IProductRepository {
       if (adjustment.quantity <= 0) continue;
 
       if (adjustment.variantId) {
-        const variantRows = (await prisma.$queryRaw`
+        const variantRows = await prisma.$queryRaw`
           UPDATE "variants"
              SET "quantity" = "quantity" + ${adjustment.quantity},
                  "updatedAt" = NOW()
@@ -428,7 +451,7 @@ export class PrismaProductRepository implements IProductRepository {
              AND "tenantId" = ${tenantId}
           RETURNING "quantity"::int AS "newQuantity",
                     "minQuantity"::int AS "minQuantity"
-        `) as Array<{ newQuantity: number; minQuantity: number }>;
+        `;
 
         if (variantRows.length !== 1) continue;
 
@@ -444,7 +467,7 @@ export class PrismaProductRepository implements IProductRepository {
         continue;
       }
 
-      const productRows = (await prisma.$queryRaw`
+      const productRows = await prisma.$queryRaw`
         UPDATE "products"
            SET "quantity" = "quantity" + ${adjustment.quantity},
                "updatedAt" = NOW()
@@ -453,7 +476,7 @@ export class PrismaProductRepository implements IProductRepository {
            AND "useStock" = true
         RETURNING "quantity"::int AS "newQuantity",
                   "minQuantity"::int AS "minQuantity"
-      `) as Array<{ newQuantity: number; minQuantity: number }>;
+      `;
 
       if (productRows.length !== 1) continue;
 

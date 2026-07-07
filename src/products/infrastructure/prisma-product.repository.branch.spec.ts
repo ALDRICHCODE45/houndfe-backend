@@ -75,6 +75,7 @@ describe('PrismaProductRepository.decrementStockForCharge — flip-loser branch 
     const tenantPrisma = {
       getClient: jest.fn().mockReturnValue(tx),
       getTenantId: jest.fn().mockReturnValue(TENANT),
+      isInTransaction: jest.fn().mockReturnValue(true),
     };
     const outbox: jest.Mocked<OutboxWriterService> = {
       publish: jest.fn().mockResolvedValue(undefined),
@@ -111,6 +112,7 @@ describe('PrismaProductRepository.decrementStockForCharge — flip-loser branch 
     const tenantPrisma = {
       getClient: jest.fn().mockReturnValue(tx),
       getTenantId: jest.fn().mockReturnValue(TENANT),
+      isInTransaction: jest.fn().mockReturnValue(true),
     };
     const outbox: jest.Mocked<OutboxWriterService> = {
       publish: jest.fn().mockResolvedValue(undefined),

@@ -79,6 +79,12 @@ function makeTenantPrismaForTx(tx: ReturnType<typeof makeTxMock>) {
   return {
     getClient: jest.fn().mockReturnValue(tx),
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
+    // Ambient-tx guard (Slice E — WARNING 1 fix): the repo throws unless
+    // it sees an active tx. Inside `runInTransaction`, CLS has the tx
+    // client set, so this mock returns `true` for tests that drive the
+    // repo as if they were inside the tx. The "outside-tx throws" test
+    // below flips this to `false`.
+    isInTransaction: jest.fn().mockReturnValue(true),
   };
 }
 
@@ -347,7 +353,12 @@ describe('PrismaProductRepository.decrementStockForCharge — crossings (E.2)', 
     ]);
 
     expect(result).toEqual([
-      { productId: 'prod-1', variantId: 'var-1', newQuantity: 3, minQuantity: 3 },
+      {
+        productId: 'prod-1',
+        variantId: 'var-1',
+        newQuantity: 3,
+        minQuantity: 3,
+      },
     ]);
 
     // UPDATE variants — no useStock, no useLotsAndExpirations
@@ -522,9 +533,7 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
       alertState,
     );
 
-    await repo.incrementStockForRestock([
-      { productId: 'prod-1', quantity: 1 },
-    ]);
+    await repo.incrementStockForRestock([{ productId: 'prod-1', quantity: 1 }]);
 
     expect(alertState.rearm).not.toHaveBeenCalled();
     expect(tx.calls).toHaveLength(1); // only the restock UPDATE; no flip
@@ -544,9 +553,7 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
       alertState,
     );
 
-    await repo.incrementStockForRestock([
-      { productId: 'prod-1', quantity: 3 },
-    ]);
+    await repo.incrementStockForRestock([{ productId: 'prod-1', quantity: 3 }]);
 
     expect(alertState.rearm).toHaveBeenCalledWith({
       tx: tx as any,
@@ -554,5 +561,72 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
       productId: 'prod-1',
       variantId: null,
     });
+  });
+});
+
+// ── WARNING 1 — Ambient-transaction guard (Slice E reliability) ────────
+
+describe('PrismaProductRepository — ambient-tx guard (R1 fix)', () => {
+  it('decrementStockForCharge THROWS when called outside an ambient transaction (silent-fallback foot-gun)', async () => {
+    // tenantPrisma.isInTransaction() === false → repo MUST throw BEFORE
+    // touching the underlying client (no auto-commit, no outbox write,
+    // no decrement). Without this guard, getClient() would silently
+    // return a non-tx client and each statement would commit
+    // independently, leaving the outbox inconsistent with the
+    // products row.
+    const tx = makeTxMock();
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(tx),
+      getTenantId: jest.fn().mockReturnValue(TENANT),
+      isInTransaction: jest.fn().mockReturnValue(false),
+    };
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await expect(
+      repo.decrementStockForCharge([{ productId: 'prod-1', quantity: 5 }]),
+    ).rejects.toThrow(
+      /must be called inside TenantPrismaService\.runInTransaction/,
+    );
+
+    // NO statements ran against the client — guard fires before
+    // getClient() is even consumed.
+    expect(tx.calls).toHaveLength(0);
+    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
+    expect(outbox.publish).not.toHaveBeenCalled();
+  });
+
+  it('incrementStockForRestock THROWS when called outside an ambient transaction', async () => {
+    // Mirror guard for the restock path — leaving the rearm dangling
+    // would block the next alert forever.
+    const tx = makeTxMock();
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(tx),
+      getTenantId: jest.fn().mockReturnValue(TENANT),
+      isInTransaction: jest.fn().mockReturnValue(false),
+    };
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await expect(
+      repo.incrementStockForRestock([{ productId: 'prod-1', quantity: 3 }]),
+    ).rejects.toThrow(
+      /must be called inside TenantPrismaService\.runInTransaction/,
+    );
+
+    expect(tx.calls).toHaveLength(0);
+    expect(alertState.rearm).not.toHaveBeenCalled();
   });
 });

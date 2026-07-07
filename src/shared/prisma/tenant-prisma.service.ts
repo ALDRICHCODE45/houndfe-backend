@@ -19,7 +19,7 @@ export class TenantPrismaService {
   ) {}
 
   getClient(): TenantPrismaClient {
-    const txClient = this.cls.get(TX_CLIENT_KEY) as PrismaClient | undefined;
+    const txClient = this.cls.get(TX_CLIENT_KEY);
     if (txClient) {
       if ('$extends' in txClient && typeof txClient.$extends === 'function') {
         return createTenantScopedPrisma(txClient, this.cls);
@@ -31,10 +31,27 @@ export class TenantPrismaService {
     return createTenantScopedPrisma(this.prisma, this.cls);
   }
 
+  /**
+   * Slice E — ambient-tx guard.
+   *
+   * Returns `true` when the caller is currently inside
+   * `runInTransaction(...)` (i.e. the CLS slot has a tx client set).
+   * Repository methods that MUST run inside an ambient transaction
+   * (decrement + flip + outbox write — all-or-nothing) call this to
+   * avoid the silent-fallback foot-gun in `getClient()`: when no tx is
+   * active, `getClient()` returns a tenant-scoped (NOT transactional)
+   * client, which would auto-commit each statement independently and
+   * leave the system with an orphaned `outbox` row or a committed
+   * decrement for a failed sale.
+   *
+   * See design §Reliability finding R1.
+   */
+  isInTransaction(): boolean {
+    return Boolean(this.cls.get(TX_CLIENT_KEY));
+  }
+
   async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
-    const previousClient = this.cls.get(TX_CLIENT_KEY) as
-      | PrismaTransactionClient
-      | undefined;
+    const previousClient = this.cls.get(TX_CLIENT_KEY);
 
     if (previousClient) {
       return work();
