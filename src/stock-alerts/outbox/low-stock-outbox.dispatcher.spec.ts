@@ -202,6 +202,14 @@ describe('LowStockOutboxDispatcher (F.5)', () => {
       5,
     );
 
+    // WARNING (Reliability) — capture the wall-clock baseline BEFORE
+    // the dispatcher runs. The previous assertion
+    // (`> new Date().getTime() - 1000`) was a TAUTOLOGY — it passed
+    // even if `nextAttemptAt` was `now` or slightly in the past.
+    // Anchoring to a pre-dispatch `before` lets us assert the actual
+    // backoff DELAY the dispatcher scheduled.
+    const before = Date.now();
+
     await dispatcher.dispatch(buildClaimed({ retryCount: 1 }));
 
     expect(updateMock).toHaveBeenCalledTimes(1);
@@ -221,13 +229,59 @@ describe('LowStockOutboxDispatcher (F.5)', () => {
     expect(arg.data.retryCount).toBe(2);
     expect(arg.data.lastError).toMatch(/Inngest down/);
     expect(arg.data.nextAttemptAt).toBeInstanceOf(Date);
-    // The bumped nextAttemptAt must be ≥ slightly in the future
-    // (backoff ≥ a couple of seconds, with jitter).
-    expect(arg.data.nextAttemptAt.getTime()).toBeGreaterThan(
-      new Date().getTime() - 1000,
-    );
+    // Load-bearing backoff assertion. retryCount=1 (nextRetryCount=2)
+    // → BACKOFF_TABLE_MS[1] = 5_000 with ±10% jitter ⇒ 4_500–5_500ms.
+    // Floor at BACKOFF_BASE_MS (2_000) — the structural minimum the
+    // dispatcher enforces via Math.max — so a regression that sets
+    // nextAttemptAt = now is caught. Ceiling at 6_000 so a future
+    // refactor that uses a wrong-tier index (e.g. 60s) is caught.
+    const nextDelayMs = arg.data.nextAttemptAt.getTime() - before;
+    expect(nextDelayMs).toBeGreaterThanOrEqual(2_000);
+    expect(nextDelayMs).toBeLessThanOrEqual(6_000);
     expect(arg.data.lockToken).toBeNull();
     expect(arg.data.lockedUntil).toBeNull();
+  });
+
+  // WARNING (Reliability) — backoff progression across retry levels.
+  // The backoff table is exponential (2s → 5s → 15s → 60s → 5m); a
+  // regression that flattens it to a constant delay (or uses the
+  // wrong index) would still pass the per-row test above but
+  // starve the queue on a flapping downstream. This test drives
+  // the dispatcher at retryCount=1 and retryCount=2 and asserts
+  // the gap between the two `nextAttemptAt` deltas reflects the
+  // larger delay at the higher retry level (5_000ms vs 15_000ms
+  // tier ⇒ retryCount=2 must be ≥ 9s LATER than retryCount=1's
+  // baseline after stripping the common `before` anchor).
+  it('backoff progression: retryCount=2 schedules a STRICTLY LATER nextAttemptAt than retryCount=1 (5s tier vs 15s tier)', async () => {
+    async function dispatchAt(retryCount: number): Promise<number> {
+      const inngestService = {
+        send: jest.fn().mockRejectedValue(new Error('down')),
+      };
+      const updateMock = jest.fn().mockResolvedValue({ id: 'evt-1' });
+      const prisma = { outboxEvent: { update: updateMock } };
+      const dispatcher = new LowStockOutboxDispatcher(
+        inngestService as never,
+        prisma as never,
+        buildTenantPrisma() as never,
+        buildTenantRunner() as never,
+        buildConfig() as never,
+        5,
+      );
+      const t0 = Date.now();
+      await dispatcher.dispatch(buildClaimed({ retryCount }));
+      const arg = updateMock.mock.calls[0]?.[0] as {
+        data: { nextAttemptAt: Date };
+      };
+      return arg.data.nextAttemptAt.getTime() - t0;
+    }
+
+    // Run each path once. The 5s tier is 4_500–5_500ms; the 15s
+    // tier is 13_500–16_500ms. The lower bound of the gap is
+    // 13_500 − 5_500 = 8_000ms. We assert ≥ 7_000 to leave a small
+    // jitter margin.
+    const delayAt1 = await dispatchAt(1);
+    const delayAt2 = await dispatchAt(2);
+    expect(delayAt2 - delayAt1).toBeGreaterThanOrEqual(7_000);
   });
 
   it('marks FAILED when retryCount reaches maxRetries', async () => {
