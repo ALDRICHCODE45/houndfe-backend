@@ -292,6 +292,119 @@ describe('LowStockOutboxDispatcher (F.5)', () => {
     await expect(dispatcher.dispatch(buildClaimed())).resolves.toBeUndefined();
   });
 
+  // ─── Fix 1a (Resilience, R4) ─────────────────────────────────────
+  // Regression: a failure inside `enrich()` (tenant-scoped Prisma
+  // read) MUST flow through `markRetry` so the row gets a bumped
+  // retryCount + lastError + backed-off nextAttemptAt — NOT escape
+  // dispatch() and abort the poller's per-row loop. Before the fix,
+  // `enrich()` was called OUTSIDE the durability try/catch so a
+  // single bad row would reject out of dispatch() → the poller loop
+  // died mid-batch → up to 24 other claimed rows sat locked for
+  // lockMs without a retry bump (an invisible poison pill that
+  // re-failed every poll cycle).
+  it('R4 — when enrich() throws (product.findFirst rejects), the row goes to markRetry (retryCount++ + lastError + backoff) instead of escaping dispatch()', async () => {
+    const enrichError = new Error('prisma: tenant scope lost');
+    const tenantPrisma = {
+      getClient: () => ({
+        product: {
+          findFirst: jest.fn().mockRejectedValue(enrichError),
+        },
+        variant: {
+          findFirst: jest.fn().mockResolvedValue(null),
+        },
+      }),
+    };
+    const inngestService = {
+      send: jest.fn().mockResolvedValue({ ids: ['evt-id-1'] }),
+    };
+    const updateMock = jest.fn().mockResolvedValue({ id: 'evt-1' });
+    const prisma = {
+      outboxEvent: { update: updateMock },
+    };
+
+    const dispatcher = new LowStockOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      tenantPrisma as never,
+      buildTenantRunner() as never,
+      buildConfig() as never,
+      5,
+    );
+
+    // Must NOT throw — the dispatcher manages the error itself.
+    await expect(
+      dispatcher.dispatch(buildClaimed({ retryCount: 1 })),
+    ).resolves.toBeUndefined();
+
+    // Inngest send must NOT have been called — enrich blew up first.
+    expect(inngestService.send).not.toHaveBeenCalled();
+
+    // Exactly one update — the markRetry path. retryCount bumped to 2,
+    // lastError carries the enrich failure, status PENDING (not yet
+    // exhausted at maxRetries=5).
+    expect(updateMock).toHaveBeenCalledTimes(1);
+    const callArgs = updateMock.mock.calls as unknown[][];
+    const arg = callArgs[0]?.[0] as {
+      where: { id: string };
+      data: {
+        status: OutboxEventStatus;
+        retryCount: number;
+        lastError: string;
+        nextAttemptAt: Date;
+        lockToken: null;
+        lockedUntil: null;
+      };
+    };
+    expect(arg.where.id).toBe('evt-1');
+    expect(arg.data.status).toBe(OutboxEventStatus.PENDING);
+    expect(arg.data.retryCount).toBe(2);
+    expect(arg.data.lastError).toMatch(/tenant scope lost/);
+    expect(arg.data.nextAttemptAt).toBeInstanceOf(Date);
+    expect(arg.data.lockToken).toBeNull();
+    expect(arg.data.lockedUntil).toBeNull();
+  });
+
+  it('R4 — when enrich() throws at retryCount=maxRetries-1, the row reaches FAILED (no infinite loop on poison rows)', async () => {
+    const tenantPrisma = {
+      getClient: () => ({
+        product: {
+          findFirst: jest.fn().mockRejectedValue(new Error('db-blip')),
+        },
+        variant: {
+          findFirst: jest.fn().mockResolvedValue(null),
+        },
+      }),
+    };
+    const inngestService = {
+      send: jest.fn(),
+    };
+    const updateMock = jest.fn().mockResolvedValue({ id: 'evt-1' });
+    const prisma = {
+      outboxEvent: { update: updateMock },
+    };
+
+    const dispatcher = new LowStockOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      tenantPrisma as never,
+      buildTenantRunner() as never,
+      buildConfig() as never,
+      // maxRetries=5 ⇒ retryCount 4 + 1 = 5 ⇒ exhausted.
+      5,
+    );
+
+    await dispatcher.dispatch(buildClaimed({ retryCount: 4 }));
+
+    expect(updateMock).toHaveBeenCalledTimes(1);
+    const callArgs = updateMock.mock.calls as unknown[][];
+    const arg = callArgs[0]?.[0] as {
+      data: { status: OutboxEventStatus; retryCount: number };
+    };
+    expect(arg.data.status).toBe(OutboxEventStatus.FAILED);
+    expect(arg.data.retryCount).toBe(5);
+    expect(inngestService.send).not.toHaveBeenCalled();
+  });
+
   it('replay idempotency: re-dispatching the same outbox row calls inngestService.send with the SAME idempotencyKey', async () => {
     const inngestService = {
       send: jest.fn().mockResolvedValue({ ids: ['evt-1'] }),

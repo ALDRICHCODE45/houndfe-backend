@@ -114,19 +114,41 @@ export class LowStockOutboxDispatcher {
         '[LowStockOutboxDispatcher] missing tenantId on claim — leaving row PENDING for retry',
         { eventId: event.id, eventType: event.eventType },
       );
-      await this.markRetry(event, 0, 'missing tenantId on claim');
+      // Fix 5 (Resilience, R4): bump retryCount + honor exhaustion just
+      // like the send-failure path. Passing nextRetryCount=0 made the
+      // row loop forever — an "infinite poison" with no FAILED exit.
+      const nextRetryCount = event.retryCount + 1;
+      const isExhausted = nextRetryCount >= this.maxRetries;
+      await this.markRetry(
+        event,
+        nextRetryCount,
+        'missing tenantId on claim',
+        isExhausted ? OutboxEventStatus.FAILED : OutboxEventStatus.PENDING,
+      );
       return;
     }
 
-    const idemKey = computeIdempotencyKey(event);
-    const enriched = await this.enrich(event);
-
+    // Fix 1a (Resilience, R4): `enrich()` does a tenant-scoped Prisma
+    // read (product.findFirst → variant.findFirst + deepLink compose).
+    // ANY throw — DB blip, CLS eviction, Prisma validation — used to
+    // escape dispatch() and abort the poller's per-row loop (no
+    // per-row try/catch around `await dispatcher.dispatch(event)`).
+    // The throwing row never got a retryCount bump, no lastError, no
+    // FAILED transition → invisible poison pill re-failing every poll
+    // cycle AND up to 24 other claimed rows sat locked for `lockMs`.
+    // Move enrich() + the idempotency key inside the durability try so
+    // a bad row flows through markRetry (backoff + lastError + FAILED).
     try {
+      const idemKey = computeIdempotencyKey(event);
+      const enriched = await this.enrich(event);
+
       await this.inngestService.send('stock/low.detected', enriched, idemKey);
       await this.markPublished(event);
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'unknown Inngest send error';
+        error instanceof Error
+          ? error.message
+          : 'unknown Inngest send / enrichment error';
       const nextRetryCount = event.retryCount + 1;
       const isExhausted = nextRetryCount >= this.maxRetries;
       await this.markRetry(
@@ -152,7 +174,7 @@ export class LowStockOutboxDispatcher {
         );
       } else {
         this.logger.warn(
-          '[LowStockOutboxDispatcher] send rejected — scheduled retry',
+          '[LowStockOutboxDispatcher] send or enrichment rejected — scheduled retry',
           {
             eventId: event.id,
             tenantId,
