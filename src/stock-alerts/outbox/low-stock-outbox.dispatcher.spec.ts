@@ -347,6 +347,159 @@ describe('LowStockOutboxDispatcher (F.5)', () => {
     await expect(dispatcher.dispatch(buildClaimed())).resolves.toBeUndefined();
   });
 
+  // ─── Fix 5 (Resilience, R4 re-review) ─────────────────────────────
+  // Regression: the missing-tenantId branch (dispatcher line ~112)
+  // was missing a regression test. Prior R4 review flagged it as
+  // "CORRECT production fix but NO test" — a regression that reverts
+  // the line to `markRetry(event, 0, '...')` would (a) keep retryCount
+  // pinned at 0 forever, (b) never reach FAILED, (c) silently loop
+  // the row back to PENDING on every claim — the very "infinite
+  // poison" shape Fix 5 closed. Two cases pin both legs of the fix:
+  //   - Under maxRetries: row → PENDING with retryCount++ so the
+  //     next poll re-evaluates backed-off nextAttemptAt.
+  //   - At maxRetries-1: row → FAILED with retryCount===maxRetries,
+  //     proving the exhaustion exit (not the infinite loop).
+  it('R4 re-review — when claimed row has a falsy tenantId, dispatch() bumps retryCount via markRetry and InngestService.send is NOT called', async () => {
+    // Construct a claimed row with a falsy tenantId. The
+    // `DispatchableOutboxEvent.tenantId` field is typed `string`, so
+    // we cast through `never` to force the production branch to
+    // see the falsy value (matches the runtime shape that escapes
+    // the DB schema's NOT NULL during a future migration).
+    const claimed = buildClaimed({
+      id: 'evt-no-tenant',
+      tenantId: null as never,
+      retryCount: 1,
+    });
+
+    const inngestService = {
+      send: jest.fn().mockResolvedValue({ ids: ['should-not-fire'] }),
+    };
+    const updateMock = jest.fn().mockResolvedValue({ id: 'evt-no-tenant' });
+    const prisma = {
+      outboxEvent: { update: updateMock },
+    };
+
+    const dispatcher = new LowStockOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      buildTenantPrisma() as never,
+      buildTenantRunner() as never,
+      buildConfig() as never,
+      5,
+    );
+
+    const before = Date.now();
+
+    // Must NOT throw — the missing-tenantId branch returns early.
+    // (A future regression that re-threw unhandled would surface here.)
+    await expect(dispatcher.dispatch(claimed)).resolves.toBeUndefined();
+
+    // Critical — Inngest must NOT be called when there is no tenant
+    // to scope the alert under. A regression that falls through to
+    // the `await inngestService.send(...)` line would publish a
+    // tenant-less event (a cross-tenant data leak and an Inngest
+    // payload missing `tenantId`).
+    expect(inngestService.send).not.toHaveBeenCalled();
+
+    // Exactly one update: the markRetry path. retryCount bumped
+    // from 1 → 2, status PENDING (not yet exhausted), lastError
+    // carries the marker so the support runbook can grep for it,
+    // nextAttemptAt bumped to backoff tier 2 (5_000ms ± jitter),
+    // lockToken/lockedUntil cleared so the next poll re-evaluates.
+    //
+    // Load-bearing retryCount=2: a regression reverting to
+    // `markRetry(event, 0, ...)` would keep retryCount at 0 (the
+    // explicit nextRetryCount arg) and the assertion below would
+    // fail — that's the whole point of this test.
+    expect(updateMock).toHaveBeenCalledTimes(1);
+    const callArgs = updateMock.mock.calls as unknown[][];
+    const arg = callArgs[0]?.[0] as {
+      where: { id: string };
+      data: {
+        status: OutboxEventStatus;
+        retryCount: number;
+        lastError: string;
+        nextAttemptAt: Date;
+        lockToken: null;
+        lockedUntil: null;
+      };
+    };
+    expect(arg.where.id).toBe('evt-no-tenant');
+    expect(arg.data.status).toBe(OutboxEventStatus.PENDING);
+    expect(arg.data.retryCount).toBe(2);
+    expect(arg.data.lastError).toMatch(/missing tenantId/i);
+    expect(arg.data.lockToken).toBeNull();
+    expect(arg.data.lockedUntil).toBeNull();
+    expect(arg.data.nextAttemptAt).toBeInstanceOf(Date);
+
+    // Backoff anchored to the pre-dispatch baseline. retryCount=1
+    // → BACKOFF_TABLE_MS[1] = 5_000ms ± 10% jitter, floor 2_000ms.
+    // Same tier window as the existing send-reject assertion
+    // (2_000–6_000ms) so the tier is pinned regardless of which
+    // failure path scheduled the retry.
+    const nextDelayMs = arg.data.nextAttemptAt.getTime() - before;
+    expect(nextDelayMs).toBeGreaterThanOrEqual(2_000);
+    expect(nextDelayMs).toBeLessThanOrEqual(6_000);
+  });
+
+  it('R4 re-review — when a falsy tenantId meets retryCount=maxRetries-1, the row reaches FAILED (the exhaustion exit, not an infinite loop)', async () => {
+    // Companion to the test above. Without this, a regression to
+    // `markRetry(event, 0, ...)` would still pass the under-max
+    // test (status default = PENDING, retryCount = 0) and stay
+    // green forever — the bug would ship. This test pins the
+    // FAILED transition by driving the dispatcher at the
+    // exhaustion boundary.
+    const claimed = buildClaimed({
+      id: 'evt-no-tenant-exhausted',
+      tenantId: null as never,
+      retryCount: 4, // next=5 === maxRetries ⇒ exhausted
+    });
+
+    const inngestService = {
+      send: jest.fn().mockResolvedValue({ ids: ['should-not-fire'] }),
+    };
+    const updateMock = jest.fn().mockResolvedValue({
+      id: 'evt-no-tenant-exhausted',
+    });
+    const prisma = {
+      outboxEvent: { update: updateMock },
+    };
+
+    const dispatcher = new LowStockOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      buildTenantPrisma() as never,
+      buildTenantRunner() as never,
+      buildConfig() as never,
+      // maxRetries=5 ⇒ retryCount 4 + 1 = 5 ⇒ FAILED.
+      5,
+    );
+
+    await expect(dispatcher.dispatch(claimed)).resolves.toBeUndefined();
+
+    expect(inngestService.send).not.toHaveBeenCalled();
+    expect(updateMock).toHaveBeenCalledTimes(1);
+    const callArgs = updateMock.mock.calls as unknown[][];
+    const arg = callArgs[0]?.[0] as {
+      where: { id: string };
+      data: {
+        status: OutboxEventStatus;
+        retryCount: number;
+        lastError: string;
+      };
+    };
+    expect(arg.where.id).toBe('evt-no-tenant-exhausted');
+
+    // Load-bearing FAILED transition + retryCount=5. A regression
+    // reverting the fix to `markRetry(event, 0, ...)` (or to the
+    // default-PENDING path) would emit status=PENDING + retryCount=0
+    // and the assertions below would fail — the row would loop
+    // forever instead of exiting to FAILED.
+    expect(arg.data.status).toBe(OutboxEventStatus.FAILED);
+    expect(arg.data.retryCount).toBe(5);
+    expect(arg.data.lastError).toMatch(/missing tenantId/i);
+  });
+
   // ─── Fix 1a (Resilience, R4) ─────────────────────────────────────
   // Regression: a failure inside `enrich()` (tenant-scoped Prisma
   // read) MUST flow through `markRetry` so the row gets a bumped
