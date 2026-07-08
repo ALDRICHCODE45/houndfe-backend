@@ -269,7 +269,8 @@ describe('LowStockOutboxDispatcher (F.5)', () => {
       );
       const t0 = Date.now();
       await dispatcher.dispatch(buildClaimed({ retryCount }));
-      const arg = updateMock.mock.calls[0]?.[0] as {
+      const calls = updateMock.mock.calls as unknown[][];
+      const arg = calls[0]?.[0] as {
         data: { nextAttemptAt: Date };
       };
       return arg.data.nextAttemptAt.getTime() - t0;
@@ -457,6 +458,161 @@ describe('LowStockOutboxDispatcher (F.5)', () => {
     expect(arg.data.status).toBe(OutboxEventStatus.FAILED);
     expect(arg.data.retryCount).toBe(5);
     expect(inngestService.send).not.toHaveBeenCalled();
+  });
+
+  // WARNING (Reliability) — enrich() field-mapping was untested.
+  // Every prior dispatcher test stubbed product/variant findFirst
+  // → null, so only the FALLBACK branch of enrich() ran; the
+  // actual field mapping (product.name, product.sku,
+  // product.category.name, variant.option:value, and the
+  // deepLink built from APP_WEB_URL) had zero coverage. A
+  // regression that drops the product.read (e.g. a refactor
+  // that reads from the outbox payload's stale `productName`)
+  // would still pass every other test in this file.
+  //
+  // This test stubs the product + variant reads with realistic
+  // data and asserts the enriched payload (the second arg to
+  // inngestService.send) reflects the read values, not the
+  // fallback to base.productName/etc.
+  it('enrich() field mapping: with a non-null product/variant, the sent payload reflects product.name + sku + category.name + variant.option:value + APP_WEB_URL deepLink', async () => {
+    const tenantPrisma = {
+      getClient: () => ({
+        product: {
+          findFirst: jest.fn().mockResolvedValue({
+            name: 'Aspirina Original',
+            sku: 'ASP-500',
+            category: { name: 'Analgésicos' },
+          }),
+        },
+        variant: {
+          findFirst: jest.fn().mockResolvedValue({
+            option: 'Concentración',
+            value: '500mg',
+          }),
+        },
+      }),
+    };
+    const config = {
+      get: jest.fn((key: string) =>
+        key === 'APP_WEB_URL' ? 'https://app.example.com/' : undefined,
+      ),
+    };
+    const inngestService = {
+      send: jest.fn().mockResolvedValue({ ids: ['evt-id-1'] }),
+    };
+    const prisma = {
+      outboxEvent: { update: jest.fn().mockResolvedValue({ id: 'evt-1' }) },
+    };
+    const dispatcher = new LowStockOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      tenantPrisma as never,
+      buildTenantRunner() as never,
+      config as never,
+      5,
+    );
+
+    await dispatcher.dispatch(
+      buildClaimed({
+        id: 'evt-enrich',
+        // The dispatcher reads `base.variantId` from the payload
+        // (see `enrich()` line 269). The top-level `DispatchableOutboxEvent`
+        // has no `variantId` — it lives inside `payload`.
+        payload: {
+          tenantId: 'tenant-1',
+          productId: 'product-1',
+          variantKey: 'var-1',
+          variantId: 'var-1',
+          alertEpoch: 1,
+          newQuantity: 3,
+          minQuantity: 3,
+          productName: 'STALE-NAME-FROM-PAYLOAD', // must be overridden by product.name read
+          variantDescription: 'STALE-VARIANT', // must be overridden by variant read
+          sku: 'STALE-SKU',
+          category: 'STALE-CATEGORY',
+          deepLink: 'https://stale.example.com/products/product-1', // must be overridden by APP_WEB_URL build
+          occurredAt: '2026-07-06T12:00:00.000Z',
+        },
+      }),
+    );
+
+    expect(inngestService.send).toHaveBeenCalledTimes(1);
+    const sendCall = inngestService.send.mock.calls[0] as unknown[];
+    // InngestService.send(name, data, idempotencyKey) — the
+    // enriched payload is the second argument.
+    const enriched = sendCall[1] as {
+      productName: string;
+      sku: string | null;
+      category: string | null;
+      variantDescription: string | null;
+      deepLink: string;
+    };
+
+    // The product read must win over the payload's
+    // pre-existing (possibly stale) productName from the
+    // in-tx path. The dispatcher defers the fresh read.
+    expect(enriched.productName).toBe('Aspirina Original');
+    expect(enriched.sku).toBe('ASP-500');
+    expect(enriched.category).toBe('Analgésicos');
+
+    // Variant option + value joined with ': ' — proves the
+    // dispatcher composes variantDescription from the read,
+    // not from the payload's pre-existing (often null) value.
+    expect(enriched.variantDescription).toBe('Concentración: 500mg');
+
+    // DeepLink is built from APP_WEB_URL (with trailing slash
+    // stripped) + /products/<productId> — proves the dispatcher
+    // constructs the link, not just echoes the payload's link.
+    expect(enriched.deepLink).toBe(
+      'https://app.example.com/products/product-1',
+    );
+  });
+
+  it('enrich() deepLink fallback: when APP_WEB_URL is unset, the deepLink falls back to base.deepLink (no fabricated URL)', async () => {
+    // Companion to the field-mapping test above. When APP_WEB_URL
+    // is empty (e.g. an unconfigured tenant or a misconfigured
+    // env), the dispatcher must NOT invent a deep link from
+    // scratch — it falls back to the in-tx base.deepLink. A
+    // regression that hard-codes `appBaseUrl = 'http://localhost'`
+    // would send emails pointing at the wrong origin.
+    const tenantPrisma = {
+      getClient: () => ({
+        product: { findFirst: jest.fn().mockResolvedValue(null) },
+        variant: { findFirst: jest.fn().mockResolvedValue(null) },
+      }),
+    };
+    const config = {
+      get: jest.fn().mockReturnValue(undefined), // APP_WEB_URL unset
+    };
+    const inngestService = {
+      send: jest.fn().mockResolvedValue({ ids: ['evt-id-1'] }),
+    };
+    const prisma = {
+      outboxEvent: { update: jest.fn().mockResolvedValue({ id: 'evt-1' }) },
+    };
+    const dispatcher = new LowStockOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      tenantPrisma as never,
+      buildTenantRunner() as never,
+      config as never,
+      5,
+    );
+
+    await dispatcher.dispatch(
+      buildClaimed({
+        id: 'evt-enrich-fallback',
+        // buildClaimed sets deepLink: 'https://app.example.com/products/product-1'
+      }),
+    );
+
+    const sendCall = inngestService.send.mock.calls[0] as unknown[];
+    const enriched = sendCall[1] as { deepLink: string };
+    // The dispatcher's fallback is the payload's deepLink, not
+    // an empty string (which would render as a broken link).
+    expect(enriched.deepLink).toBe(
+      'https://app.example.com/products/product-1',
+    );
   });
 
   it('replay idempotency: re-dispatching the same outbox row calls inngestService.send with the SAME idempotencyKey', async () => {

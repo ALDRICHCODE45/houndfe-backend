@@ -136,24 +136,25 @@ export function buildLowStockFunctions(
       }
 
       // All events in a coalesced batch share the same tenantId by
-      // design (batchEvents key). Reading it from the first event is
-      // unambiguous; we still defensively re-check the const invariant
-      // so a misconfigured downstream caller cannot poison the CLS.
+      // design (`batchEvents.key: 'event.data.tenantId'` partitions
+      // by tenant). We trust the FIRST event's tenantId as the
+      // authoritative key for this batch — the dead ternary that
+      // used to live here evaluated both branches to the same
+      // value and provided no protection. The actual defense-in-
+      // depth guard is in `composeItems`, which filters out any
+      // event whose `data.tenantId` does not match the trusted id
+      // (a foreign event that slipped past the SDK partition would
+      // otherwise leak into the email body).
       const tenantId = events[0].data.tenantId;
-      const sharedTenantId = events.every((e) => e.data.tenantId === tenantId)
-        ? tenantId
-        : events[0].data.tenantId;
-      if (!sharedTenantId) {
+      if (!tenantId) {
         return { skipped: 'missing-tenant' };
       }
 
       // (1) load-config — runs in the tenant's CLS scope.
-      const config = (await input.tenantRunner.runWithTenant(
-        sharedTenantId,
-        () =>
-          ctx.step.run('load-config', () =>
-            input.notificationConfigRepository.find(),
-          ),
+      const config = (await input.tenantRunner.runWithTenant(tenantId, () =>
+        ctx.step.run('load-config', () =>
+          input.notificationConfigRepository.find(),
+        ),
       )) as {
         enabled: boolean;
         recipients: string[];
@@ -174,12 +175,10 @@ export function buildLowStockFunctions(
         return { skipped: 'no-recipients' };
       }
 
-      const recipients = (await input.tenantRunner.runWithTenant(
-        sharedTenantId,
-        () =>
-          ctx.step.run('resolve-recipients', async () =>
-            input.userEmailLookup.resolveEmailsByUserIds(recipientUserIds),
-          ),
+      const recipients = (await input.tenantRunner.runWithTenant(tenantId, () =>
+        ctx.step.run('resolve-recipients', async () =>
+          input.userEmailLookup.resolveEmailsByUserIds(recipientUserIds),
+        ),
       )) as string[];
       // Defensive: dedupe again at the email level in case the port
       // didn't (e.g. multi-tenant user collisions).
@@ -196,7 +195,10 @@ export function buildLowStockFunctions(
       // SDK's `step.run` over-erasure of the inner return type.
       const composeResult = await ctx.step.run(
         'compose-items',
-        () => composeItems(events) as unknown as Promise<LowStockEmailItem[]>,
+        () =>
+          composeItems(tenantId, events) as unknown as Promise<
+            LowStockEmailItem[]
+          >,
       );
       const items = composeResult as LowStockEmailItem[];
 
@@ -242,11 +244,36 @@ function composeSubject(count: number): string {
  * inherently contains DISTINCT items. A defensive dedupe-by-itemKey
  * protects against a misconfigured caller fanning the same crossing
  * in twice.
+ *
+ * **Cross-tenant guard (defense-in-depth).** Even though Inngest's
+ * `batchEvents.key: 'event.data.tenantId'` should partition by
+ * tenant — so a mixed-tenant batch never reaches the handler — a
+ * misconfigured downstream caller, a future SDK bug, or a future
+ * refactor of the key could let a foreign-tenant event slip in.
+ * The `trustedTenantId` arg is the FIRST event's tenantId
+ * (authoritative for this batch); any subsequent event with a
+ * different `data.tenantId` is dropped. The `low-stock.functions
+ * .spec.ts` mixed-tenant test pins this contract: a batch with
+ * `tenant-1` + `tenant-other` events renders only the
+ * `tenant-1` item in the email body.
  */
-function composeItems(events: InngestBatchEvent[]): LowStockEmailItem[] {
+function composeItems(
+  trustedTenantId: string,
+  events: InngestBatchEvent[],
+): LowStockEmailItem[] {
   const seen = new Set<string>();
   const items: LowStockEmailItem[] = [];
   for (const event of events) {
+    // Defense-in-depth: drop foreign-tenant events. The
+    // `batchEvents.key` partition should make this a no-op in
+    // production, but we don't trust the SDK with the email
+    // body — a future bug or refactor that drops the key would
+    // otherwise leak the foreign tenant's product name into
+    // the email.
+    if (event.data.tenantId !== trustedTenantId) {
+      continue;
+    }
+
     const payload = event.data;
     const itemKey =
       `${payload.tenantId}:` +

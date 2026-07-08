@@ -81,7 +81,8 @@ describe('PrismaUserEmailLookupRepository — isActive + tenant-scoped dedupe (C
     await repo.resolveEmailsByUserIds(['user-1']);
 
     expect(findManyMock).toHaveBeenCalledTimes(1);
-    const arg = findManyMock.mock.calls[0]?.[0] as {
+    const calls = findManyMock.mock.calls as unknown[][];
+    const arg = calls[0]?.[0] as {
       where: {
         userId: { in: string[] };
         tenantId: string;
@@ -115,7 +116,8 @@ describe('PrismaUserEmailLookupRepository — isActive + tenant-scoped dedupe (C
 
     // And the WHERE must include the CLS tenantId — the gate that
     // makes the empty result structurally load-bearing.
-    const arg = findManyMock.mock.calls[0]?.[0] as {
+    const calls = findManyMock.mock.calls as unknown[][];
+    const arg = calls[0]?.[0] as {
       where: { tenantId: string };
     };
     expect(arg.where.tenantId).toBe('tenant-1');
@@ -129,7 +131,8 @@ describe('PrismaUserEmailLookupRepository — isActive + tenant-scoped dedupe (C
 
     await repo.resolveEmailsByUserIds(['u1', 'u2']);
 
-    const arg = findManyMock.mock.calls[0]?.[0] as {
+    const calls = findManyMock.mock.calls as unknown[][];
+    const arg = calls[0]?.[0] as {
       where: { tenantId: string };
     };
     expect(arg.where.tenantId).toBe('tenant-OTHER');
@@ -160,7 +163,8 @@ describe('PrismaUserEmailLookupRepository — isActive + tenant-scoped dedupe (C
 
     await repo.resolveEmailsByUserIds(['u1']);
 
-    const arg = findManyMock.mock.calls[0]?.[0] as {
+    const calls = findManyMock.mock.calls as unknown[][];
+    const arg = calls[0]?.[0] as {
       select: { user: { select: { email: boolean } } };
     };
     // Pin the narrow projection — the alert path must NOT pull

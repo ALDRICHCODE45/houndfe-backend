@@ -629,4 +629,104 @@ describe('low-stock Inngest function (F.2)', () => {
     expect(typeof LowStockEmail).toBe('function');
     expect(Array.isArray(props.items)).toBe(true);
   });
+
+  // WARNING (Reliability) — defense-in-depth for cross-tenant CLS
+  // poisoning. The Inngest `batchEvents.key: 'event.data.tenantId'`
+  // should partition by tenant so a mixed-tenant batch never reaches
+  // the handler. But that is the SDK's promise, not ours — a
+  // misconfigured downstream caller, an SDK bug, or a future
+  // refactor of the key could let a foreign-tenant event slip in.
+  // `composeItems` MUST filter those out so the rendered email
+  // contains only the trusted tenant's items.
+  //
+  // The pre-existing dead ternary
+  //   `events.every((e) => e.data.tenantId === tenantId)
+  //      ? tenantId
+  //      : events[0].data.tenantId`
+  // did nothing — both branches evaluated to the same value — and
+  // `composeItems` itself had no tenant guard. This test pins the
+  // contract: a mixed-tenant batch does NOT leak the foreign-tenant
+  // item into the email body, and the subject reflects only the
+  // trusted-tenant count.
+  it('defense-in-depth: a mixed-tenant batch (foreign event slipped in) does NOT leak the foreign item into the email', async () => {
+    const fake = makeFakeInngest();
+    const { buildLowStockFunctions } = await import('./low-stock.functions');
+    const notificationConfigRepo = {
+      find: jest.fn().mockResolvedValue({
+        enabled: true,
+        recipients: ['user@example.com'],
+        enabledActions: ['LOW_STOCK'],
+      }),
+    };
+    const userEmailLookup = {
+      resolveEmailsByUserIds: jest.fn().mockResolvedValue(['user@example.com']),
+    };
+    const mailer = { send: jest.fn().mockResolvedValue(undefined) };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
+
+    buildLowStockFunctions({
+      inngestClient: new fake.Inngest({ id: 'test' }) as never,
+      tenantRunner: tenantRunner as never,
+      notificationConfigRepository: notificationConfigRepo as never,
+      userEmailLookup: userEmailLookup as never,
+      mailer: mailer as never,
+      appBaseUrl: 'https://app.example.com',
+    });
+
+    const { handler } = fake.captured[0];
+    const { step } = makeFakeStep();
+
+    await handler({
+      events: [
+        {
+          id: 'tenant-1:p1:n:1',
+          name: 'stock/low.detected',
+          // Trusted tenant — Aspirina.
+          data: basePayload({
+            tenantId: 'tenant-1',
+            productId: 'product-1',
+            productName: 'Aspirina',
+            sku: 'ASP-500',
+          }),
+        },
+        {
+          id: 'tenant-other:p2:n:1',
+          name: 'stock/low.detected',
+          // Foreign tenant — should NOT appear in the email body.
+          data: basePayload({
+            tenantId: 'tenant-other',
+            productId: 'product-2',
+            productName: 'ForeignProduct',
+            sku: 'FGN-999',
+          }),
+        },
+      ],
+      step,
+    });
+
+    expect(mailer.send).toHaveBeenCalledTimes(1);
+    const sendCalls = mailer.send.mock.calls as unknown[][];
+    const mailInput = sendCalls[0]?.[0] as {
+      to: string[];
+      subject: string;
+      html: string;
+    };
+
+    // The trusted tenant's product name MUST be in the body.
+    expect(mailInput.html).toContain('Aspirina');
+
+    // The foreign tenant's product name MUST NOT be in the body
+    // (no cross-tenant PII / alert leak).
+    expect(mailInput.html).not.toContain('ForeignProduct');
+    expect(mailInput.html).not.toContain('FGN-999');
+
+    // Subject reflects only the trusted tenant's count (1 item),
+    // not the 2-item batch the un-guarded composeItems would have
+    // produced. This proves the filter actually drops the event
+    // — if it just kept both, the subject would be the plural
+    // form.
+    expect(mailInput.subject).toBe('1 producto con bajo inventario');
+  });
 });
