@@ -1130,7 +1130,7 @@ describe('SalesService', () => {
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
       });
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
     };
@@ -1614,7 +1614,7 @@ describe('SalesService', () => {
       });
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
 
       const result = await service.chargeDraft(
         sale.id,
@@ -1696,7 +1696,7 @@ describe('SalesService', () => {
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
       });
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000012');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
@@ -1731,7 +1731,7 @@ describe('SalesService', () => {
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
       });
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000013');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
@@ -1832,7 +1832,7 @@ describe('SalesService', () => {
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
       });
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
@@ -1942,7 +1942,7 @@ describe('SalesService', () => {
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000011');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 9999,
       });
@@ -1990,7 +1990,7 @@ describe('SalesService', () => {
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 70000,
       });
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000015');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
@@ -2037,7 +2037,7 @@ describe('SalesService', () => {
       });
 
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000016');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
@@ -2118,7 +2118,7 @@ describe('SalesService', () => {
           return { unitPriceCents: 70000 };
         },
       );
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000017');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
 
@@ -2232,7 +2232,7 @@ describe('SalesService', () => {
       productsService.getProductInfoForSale.mockResolvedValue({
         unitPriceCents: 1000,
       });
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000010');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
       (saleRepo as any).acquireChargeIdempotency = jest
@@ -2297,6 +2297,146 @@ describe('SalesService', () => {
         customerId?: string | null;
       };
       expect(call.customerId).toBeNull();
+    });
+  });
+
+  // ── Slice E.3 — sales orchestrator captures crossings ───────────────
+
+  describe('Slice E.3 — chargeDraft stock-crossing capture', () => {
+    const buildDraftSaleWithMultipleItems = (id: string) =>
+      Sale.fromPersistence({
+        id,
+        userId: 'user-1',
+        customerId: 'customer-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+          {
+            id: `${id}-item-2`,
+            saleId: id,
+            productId: 'prod-2',
+            variantId: 'var-1',
+            productName: 'Prod 2',
+            variantName: 'Red',
+            quantity: 1,
+            unitPriceCents: 2500,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+    it('calls decrementStockForCharge with the per-item stockAdjustments array (E.3 wiring)', async () => {
+      const sale = buildDraftSaleWithMultipleItems('sale-e3-multi');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockImplementation(
+        async (productId: string) => {
+          if (productId === 'prod-2') {
+            return { unitPriceCents: 2500 };
+          }
+          return { unitPriceCents: 1000 };
+        },
+      );
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000050');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 4500 },
+        'idem-e3-multi',
+      );
+
+      // One call, with one entry per sale item.
+      expect(productsService.decrementStockForCharge).toHaveBeenCalledTimes(1);
+      const [adjustments] =
+        productsService.decrementStockForCharge.mock.calls[0];
+      expect(adjustments).toEqual([
+        { productId: 'prod-1', variantId: null, quantity: 2 },
+        { productId: 'prod-2', variantId: 'var-1', quantity: 1 },
+      ]);
+    });
+
+    it('runs decrementStockForCharge INSIDE runInTransaction (no in-tx network call escapes the tx boundary)', async () => {
+      const sale = buildDraftSaleWithMultipleItems('sale-e3-in-tx');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockImplementation(
+        async (productId: string) => {
+          if (productId === 'prod-2') {
+            return { unitPriceCents: 2500 };
+          }
+          return { unitPriceCents: 1000 };
+        },
+      );
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000051');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 4500 },
+        'idem-e3-in-tx',
+      );
+
+      // The tx was opened exactly once.
+      expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
+      // decrementStockForCharge was invoked during the tx body (its
+      // call count is 1, observed AFTER runInTransaction resolves).
+      expect(productsService.decrementStockForCharge).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT call decrementStockForCharge when runInTransaction rejects (rollback → no crossings emitted)', async () => {
+      const sale = buildDraftSaleWithMultipleItems('sale-e3-rollback');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockImplementation(
+        async (productId: string) => {
+          if (productId === 'prod-2') {
+            return { unitPriceCents: 2500 };
+          }
+          return { unitPriceCents: 1000 };
+        },
+      );
+      // Simulate the decrement throwing STOCK_INSUFFICIENT_AT_CONFIRM
+      // mid-tx. The outer runInTransaction rejects; nothing leaks out.
+      productsService.decrementStockForCharge.mockRejectedValue(
+        new Error('STOCK_INSUFFICIENT_AT_CONFIRM'),
+      );
+      // Override runInTransaction to actually throw (the default mock
+      // resolves, so the .rejects expectation below wouldn't fire).
+      saleRepo.runInTransaction.mockImplementation(async (cb: any) => {
+        return cb();
+      });
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 4500 },
+          'idem-e3-rollback',
+        ),
+      ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
+
+      // Mark idempotency as NOT succeeded on reject.
+      expect(saleRepo.markChargeIdempotencySucceeded).not.toHaveBeenCalled();
+      // No outbox writes occurred (no sale.confirmed, no payment events).
+      const eventTypes = outboxWriter.publish.mock.calls.map(
+        (args) => args[4],
+      );
+      expect(eventTypes).not.toContain('sale.confirmed');
+      expect(eventTypes).not.toContain('sale.payment.received');
     });
   });
 
@@ -2655,7 +2795,7 @@ describe('SalesService', () => {
           priceCents: 1000,
         },
       ]);
-      productsService.decrementStockForCharge.mockResolvedValue(undefined);
+      productsService.decrementStockForCharge.mockResolvedValue([]);
       saleRepo.save.mockImplementation(async (sale) => sale);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2606-000001');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);

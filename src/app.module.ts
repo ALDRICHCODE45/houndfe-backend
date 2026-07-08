@@ -2,7 +2,8 @@
  * AppModule - Root module of the application.
  *
  * Imports:
- * - ConfigModule: Global configuration with Joi validation
+ * - ConfigModule: Global configuration with Joi validation (extended in
+ *                 D.4 with fail-closed NODE_ENV + Inngest + Resend keys)
  * - EventEmitterModule: NestJS event bus for domain events
  * - DatabaseModule: Global Prisma connection
  * - ProductsModule: Products bounded context
@@ -15,7 +16,7 @@ import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ClsModule } from 'nestjs-cls';
-import * as Joi from 'joi';
+import { buildEnvValidationSchema } from './shared/config/env.validation';
 import { DatabaseModule } from './shared/prisma/prisma.module';
 import { ProductsModule } from './products/products.module';
 import { CategoriesModule } from './categories/categories.module';
@@ -35,30 +36,23 @@ import { EmployeesModule } from './employees/employees.module';
 import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
+import { NotificationConfigModule } from './notification-config/notification-config.module';
+import { InngestModule } from './inngest/inngest.module';
+import { MailerModule } from './notifications/email/mailer.module';
+import { TenantModule } from './shared/tenant/tenant.module';
+import { StockAlertsModule } from './stock-alerts/stock-alerts.module';
+import { LowStockOutboxModule } from './stock-alerts/outbox/low-stock-outbox.module';
+import { LowStockInngestRegistrar } from './stock-alerts/inngest/low-stock-inngest-registrar';
 
 @Module({
   imports: [
     // Configuration (MUST be first for global availability)
     ConfigModule.forRoot({
       isGlobal: true,
-      validationSchema: Joi.object({
-        DATABASE_URL: Joi.string().required(),
-        JWT_SECRET: Joi.string().required().min(32),
-        JWT_REFRESH_SECRET: Joi.string().required().min(32),
-        JWT_ACCESS_EXPIRATION: Joi.string().default('15m'),
-        JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
-        SPACES_ENDPOINT: Joi.string().uri().required(),
-        SPACES_REGION: Joi.string().required(),
-        SPACES_BUCKET: Joi.string().required(),
-        SPACES_ACCESS_KEY_ID: Joi.string().required(),
-        SPACES_SECRET_ACCESS_KEY: Joi.string().required(),
-        SPACES_PUBLIC_BASE_URL: Joi.string().uri().required(),
-        SPACES_UPLOAD_MAX_MB: Joi.number()
-          .integer()
-          .min(1)
-          .max(100)
-          .default(10),
-      }),
+      // D.4 — extracted to shared/config/env.validation.ts so the schema
+      // can be unit-tested in isolation (abortEarly:false surfaces every
+      // missing key in a single shot — fail-closed composition).
+      validationSchema: buildEnvValidationSchema(),
     }),
 
     // Infrastructure
@@ -90,7 +84,27 @@ import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
     ChatbotApiModule,
     PublicCatalogModule,
     SatCatalogModule,
+    NotificationConfigModule,
     OutboxModule,
+    // D — Inngest infra (controller + service). JWT-excluded serve handler.
+    // Functions are registered in Slice F (low-stock.functions.ts).
+    InngestModule,
+    // F.1 — Mailer adapter (Resend + dev-logger fallback).
+    MailerModule,
+    // F.2 — TenantRunner for Inngest handler scope seeding.
+    TenantModule,
+    // F — StockAlerts (notification function + dedicated outbox poller/dispatcher).
+    StockAlertsModule,
+    // F.4 + F.5 — dedicated outbox poller + dispatcher in their own
+    // module so the dep graph (InngestService + Mailer + TenantRunner)
+    // doesn't pollute transitive module chains.
+    LowStockOutboxModule,
   ],
+  // Slice F.2 — the Inngest function registrar. Declared as a top-level
+  // provider (not a module) so its dep graph (InngestService + MAILER +
+  // NotificationConfigRepo + UserEmailLookup + TenantRunner) resolves
+  // through AppModule's imports WITHOUT forcing those deps into every
+  // transitive chain (e.g. ChatbotApiModule's tests).
+  providers: [LowStockInngestRegistrar],
 })
 export class AppModule {}

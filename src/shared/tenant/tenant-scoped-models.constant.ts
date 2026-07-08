@@ -26,4 +26,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   'EmployeeDocument',
   'EmployeeTimeOff',
   'EmployeeEmergencyContact',
+  // Low-stock alerts (A.1) — allowlist-based; omitting ANY of these re-enables
+  // cross-tenant reads via the tenant-id injection extension.
+  'NotificationSettings',
+  'NotificationRecipient',
+  'NotificationAction',
+  'StockAlertState',
 ]);

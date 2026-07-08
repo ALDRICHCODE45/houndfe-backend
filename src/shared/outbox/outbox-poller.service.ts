@@ -45,6 +45,17 @@ export class OutboxPollerService {
     const lockToken = randomUUID();
 
     return this.prisma.$transaction(async (tx) => {
+      // Slice F.3 — claim disjointness (design.md "Risk R-E" +
+      // "Durable dispatch flow"). The generic dispatcher's
+      // fire-and-forget semantics cannot deliver `stock.low.detected`
+      // durably (a post-commit `InngestService.send` rejection would
+      // be swallowed with the row already PUBLISHED). Add the
+      // `eventType` exclusion here so the generic poller NEVER
+      // claims a dedicated-type row; the dedicated poller
+      // (`LowStockOutboxPoller`, Slice F.4) owns those rows
+      // exclusively. Scope is ONE predicate — the generic
+      // dispatcher's behavior for every OTHER event type is
+      // unchanged.
       const pendingRows = (await tx.$queryRawUnsafe<{ id: string }[]>(
         `
           SELECT id
@@ -52,6 +63,7 @@ export class OutboxPollerService {
           WHERE status = 'PENDING'
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
+            AND "eventType" <> 'stock.low.detected'
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED
