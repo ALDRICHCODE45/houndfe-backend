@@ -175,7 +175,19 @@ describe('low-stock Inngest function (F.2)', () => {
     ).toEqual([{ event: 'stock/low.detected' }]);
   });
 
-  it('invokes the handler with `events[]` (coalesced batch payload)', async () => {
+  it('invokes the handler with `events[]` (coalesced batch payload) — mailer called ONCE with the body containing BOTH distinct items', async () => {
+    // CRITICAL 2 (Reliability) — the prior assertion (`send` called
+    // once) was a MOCK TAUTOLOGY: both events reused
+    // `productName: 'Aspirina'`, so the body assertion could not
+    // tell whether the renderer actually folded both events in
+    // (vs. dropping the second) or whether the subject was
+    // coerced to `'1 producto…'`. Here the two events carry
+    // DISTINCT product names ('Aspirina' + 'Ibuprofeno') so the
+    // body assertion is load-bearing — the only way for both
+    // names to appear in the rendered HTML is for `composeItems`
+    // to have produced two items, and for `mailer.send` to have
+    // been called with the multi-item body (not a single-item
+    // body for just one of them).
     const fake = makeFakeInngest();
     const { buildLowStockFunctions } = await import('./low-stock.functions');
     const notificationConfigRepo = {
@@ -210,19 +222,123 @@ describe('low-stock Inngest function (F.2)', () => {
         {
           id: 'tenant-1:p1:n:1',
           name: 'stock/low.detected',
-          data: basePayload(),
+          data: basePayload({
+            productId: 'product-1',
+            productName: 'Aspirina',
+            sku: 'ASP-500',
+            deepLink: 'https://app.example.com/products/product-1',
+          }),
         },
         {
           id: 'tenant-1:p2:n:1',
           name: 'stock/low.detected',
-          data: basePayload({ productId: 'product-2', alertEpoch: 2 }),
+          data: basePayload({
+            productId: 'product-2',
+            productName: 'Ibuprofeno',
+            sku: 'IBU-200',
+            deepLink: 'https://app.example.com/products/product-2',
+            alertEpoch: 2,
+            newQuantity: 1,
+            minQuantity: 5,
+          }),
         },
       ],
       step,
     });
 
-    // mailer invoked exactly once with both items in the body.
+    // mailer invoked exactly once (coalescing).
     expect(mailer.send).toHaveBeenCalledTimes(1);
+
+    const sendCalls = mailer.send.mock.calls as unknown[][];
+    const mailInput = sendCalls[0]?.[0] as {
+      to: string[];
+      subject: string;
+      html: string;
+    };
+
+    // Both distinct product names MUST appear in the rendered body.
+    // (Item sections are emitted by the template; this proves the
+    // renderer folded both events in.)
+    expect(mailInput.html).toContain('Aspirina');
+    expect(mailInput.html).toContain('Ibuprofeno');
+
+    // Both distinct SKUs MUST appear — distinguishes the items in
+    // the body even if the template ever changed how productName
+    // is rendered.
+    expect(mailInput.html).toContain('ASP-500');
+    expect(mailInput.html).toContain('IBU-200');
+
+    // Subject is the plural form for > 1 item (the design
+    // Risk R-E contract: "N productos con bajo inventario" for
+    // count > 1, "1 producto con bajo inventario" for count = 1).
+    expect(mailInput.subject).toMatch(/2 productos con bajo inventario/);
+    expect(mailInput.subject).not.toMatch(/^1 producto/);
+  });
+
+  it('single-crossing batch produces the "1 producto con bajo inventario" subject and exactly one item section', async () => {
+    // CRITICAL 2 (Reliability) — counterpart to the multi-item
+    // test above. With ONE event, the subject is the singular form
+    // AND the body must contain that event's product name (not
+    // coerce to plural or wrap a second phantom item). The
+    // `basePayload()` default has `productName: 'Aspirina'` — the
+    // assertion below pins the subject + that the name is the
+    // only product reference in the body.
+    const fake = makeFakeInngest();
+    const { buildLowStockFunctions } = await import('./low-stock.functions');
+    const notificationConfigRepo = {
+      find: jest.fn().mockResolvedValue({
+        enabled: true,
+        recipients: ['user-1'],
+        enabledActions: ['LOW_STOCK'],
+      }),
+    };
+    const userEmailLookup = {
+      resolveEmailsByUserIds: jest.fn().mockResolvedValue(['u1@example.com']),
+    };
+    const mailer = { send: jest.fn().mockResolvedValue(undefined) };
+    const tenantRunner = {
+      runWithTenant: (_id: string, fn: () => unknown) => fn(),
+    };
+
+    buildLowStockFunctions({
+      inngestClient: new fake.Inngest({ id: 'test' }) as never,
+      tenantRunner: tenantRunner as never,
+      notificationConfigRepository: notificationConfigRepo as never,
+      userEmailLookup: userEmailLookup as never,
+      mailer: mailer as never,
+      appBaseUrl: 'https://app.example.com',
+    });
+
+    const { handler } = fake.captured[0];
+    const { step } = makeFakeStep();
+
+    await handler({
+      events: [
+        {
+          id: 'tenant-1:p1:n:1',
+          name: 'stock/low.detected',
+          data: basePayload({ productName: 'Aspirina' }),
+        },
+      ],
+      step,
+    });
+
+    expect(mailer.send).toHaveBeenCalledTimes(1);
+
+    const sendCalls = mailer.send.mock.calls as unknown[][];
+    const mailInput = sendCalls[0]?.[0] as {
+      subject: string;
+      html: string;
+    };
+
+    // Singular subject — the spec's "1 producto" form (design Risk
+    // R-E). A multi-item subject would mean `composeSubject`
+    // ignores the item count.
+    expect(mailInput.subject).toBe('1 producto con bajo inventario');
+    expect(mailInput.subject).not.toMatch(/2 productos/);
+
+    // The product name is in the body.
+    expect(mailInput.html).toContain('Aspirina');
   });
 
   it('short-circuits when notification config is disabled (master OFF)', async () => {
