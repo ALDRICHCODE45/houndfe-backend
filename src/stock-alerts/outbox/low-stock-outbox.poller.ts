@@ -78,6 +78,20 @@ export class LowStockOutboxPoller {
    * Scheduled poll entry. Runs every `DECORATOR_TICK_MS` (1s) and
    * short-circuits until `intervalMs` elapsed since the last real
    * claim — so the knob is honest without spamming Prisma.
+   *
+   * Per-row try/catch around `dispatcher.dispatch(event)`. Without
+   * this guard, a single throwing row would:
+   *   1) abort the rest of the claimed batch (up to 24 other rows
+   *      stay locked for lockMs=60s without a retry bump),
+   *   2) reject out of poll() → unhandled rejection inside the
+   *      @Interval tick (Nest swallows silently after one log, but
+   *      the lock sits until the next tick releases it).
+   *
+   * With the guard, one bad row logs at error and the rest of the
+   * batch proceeds. The dispatcher's own try/catch (F.5) handles
+   * the common failure modes (Inngest reject, enrich throw); this
+   * outer guard is the belt-and-suspenders for anything that
+   * escapes — finding R4 (Resilience review).
    */
   @Interval(DECORATOR_TICK_MS)
   async poll(): Promise<void> {
@@ -89,7 +103,22 @@ export class LowStockOutboxPoller {
 
     const events = await this.claimBatch();
     for (const event of events) {
-      await this.dispatcher.dispatch(event);
+      try {
+        await this.dispatcher.dispatch(event);
+      } catch (error) {
+        // Log + continue. The dispatcher's own try/catch should have
+        // absorbed retries/failures; this is the OUTER fence for any
+        // throw that escaped (e.g. a defect in a future refactor).
+        this.logger.error(
+          `[LowStockOutboxPoller] dispatch threw — skipping row to protect the rest of the batch`,
+          {
+            eventId: event.id,
+            tenantId: event.tenantId,
+            eventType: event.eventType,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
     }
   }
 

@@ -214,4 +214,114 @@ describe('LowStockOutboxPoller (F.4)', () => {
     expect(typeof LOW_STOCK_OUTBOX_POLLER_BATCH_SIZE).toBe('symbol');
     expect(typeof LOW_STOCK_OUTBOX_POLLER_LOCK_MS).toBe('symbol');
   });
+
+  // ─── Fix 1b (Resilience, R4) ─────────────────────────────────────
+  // Regression: the per-row dispatch loop had NO try/catch. A single
+  // throwing dispatcher (poison row, downstream outage that escaped
+  // dispatch's own try/catch, etc.) aborted the rest of the batch AND
+  // rejected out of poll() → unhandled rejection inside @Interval,
+  // leaving up to 24 claimed rows locked for lockMs=60s. Wrap each
+  // dispatch in its own try/catch so one bad row cannot poison the
+  // batch or reject the interval tick.
+  it('R4 — when dispatcher.dispatch() rejects for one row, the remaining rows still dispatch and poll() resolves (no rejected interval tick)', async () => {
+    const claimed = [
+      {
+        id: 'evt-A',
+        tenantId: 'tenant-1',
+        aggregateType: 'StockAlert',
+        aggregateId: 'product-A:__PRODUCT__',
+        eventType: 'stock.low.detected',
+        payload: { tenantId: 'tenant-1', productId: 'product-A' },
+        status: OutboxEventStatus.PENDING,
+        retryCount: 0,
+        nextAttemptAt: new Date(),
+        lastError: null,
+        lockToken: 'lock-A',
+        lockedUntil: new Date(),
+        createdAt: new Date(),
+        publishedAt: null,
+      },
+      {
+        id: 'evt-B',
+        tenantId: 'tenant-1',
+        aggregateType: 'StockAlert',
+        aggregateId: 'product-B:__PRODUCT__',
+        eventType: 'stock.low.detected',
+        payload: { tenantId: 'tenant-1', productId: 'product-B' },
+        status: OutboxEventStatus.PENDING,
+        retryCount: 0,
+        nextAttemptAt: new Date(),
+        lastError: null,
+        lockToken: 'lock-B',
+        lockedUntil: new Date(),
+        createdAt: new Date(),
+        publishedAt: null,
+      },
+      {
+        id: 'evt-C',
+        tenantId: 'tenant-1',
+        aggregateType: 'StockAlert',
+        aggregateId: 'product-C:__PRODUCT__',
+        eventType: 'stock.low.detected',
+        payload: { tenantId: 'tenant-1', productId: 'product-C' },
+        status: OutboxEventStatus.PENDING,
+        retryCount: 0,
+        nextAttemptAt: new Date(),
+        lastError: null,
+        lockToken: 'lock-C',
+        lockedUntil: new Date(),
+        createdAt: new Date(),
+        publishedAt: null,
+      },
+    ];
+
+    const prisma = {
+      $transaction: (work: (tx: unknown) => Promise<unknown>) => {
+        const tx = {
+          $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+            if (/SELECT\s+id\s+FROM\s+outbox_events/i.test(sql)) {
+              return Promise.resolve(claimed.map((c) => ({ id: c.id })));
+            }
+            if (/UPDATE\s+outbox_events/i.test(sql)) {
+              return Promise.resolve(claimed);
+            }
+            return Promise.resolve([]);
+          }),
+        };
+        return work(tx);
+      },
+    };
+
+    // The MIDDLE row rejects — the others MUST still get dispatched,
+    // and poll() MUST resolve cleanly (no unhandled rejection).
+    const dispatcher = {
+      dispatch: jest
+        .fn()
+        .mockImplementationOnce(async () => undefined)
+        .mockImplementationOnce(async () => {
+          throw new Error('dispatcher-BOOM — must NOT abort batch');
+        })
+        .mockImplementationOnce(async () => undefined),
+    };
+
+    const service = new LowStockOutboxPoller(
+      prisma as never,
+      1000,
+      50,
+      30000,
+      dispatcher as never,
+    );
+
+    // Must resolve — NOT reject — even though dispatch rejected on row B.
+    await expect(
+      (service as unknown as { poll: () => Promise<void> }).poll(),
+    ).resolves.toBeUndefined();
+
+    // ALL three rows were attempted in order. The rejection on evt-B
+    // is contained; the others (A and C) still flowed through.
+    expect(dispatcher.dispatch).toHaveBeenCalledTimes(3);
+    expect(dispatcher.dispatch).toHaveBeenNthCalledWith(1, claimed[0]);
+    expect(dispatcher.dispatch).toHaveBeenNthCalledWith(2, claimed[1]);
+    expect(dispatcher.dispatch).toHaveBeenNthCalledWith(3, claimed[2]);
+  });
 });
