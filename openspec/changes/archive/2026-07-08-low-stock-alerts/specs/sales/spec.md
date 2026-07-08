@@ -46,33 +46,55 @@ cross downward MUST NOT appear in the returned array.
 - AND the transaction is rolled back
 - AND no entries are returned (the returned value is observable only on commit)
 
-### Requirement: Sales Orchestrator Dispatches Low-Stock Alerts Only After Commit
+### Requirement: Sales Orchestrator Dispatches Low-Stock Alerts Via Durable Outbox
 
-The sales orchestrator MUST buffer crossings during the `runInTransaction`
-body and MUST emit `stock/low.detected` events strictly AFTER `runInTransaction`
-resolves. The dispatch MUST NOT happen before commit; the dispatch MUST NOT
-happen inside the open transaction. Each event payload MUST include
-`tenantId`, `productId`, `variantId | null`, `productName`, `variantDescription | null`,
-`newQuantity`, `minQuantity`, `sku`, `category`, `deepLink`, and `occurredAt`.
+The sales decrement path MUST persist `stock.low.detected` events as
+PENDING rows in the EXISTING `OutboxEvent` table via `OutboxWriterService.publish`
+INSIDE the same transaction as the decrement and the `StockAlertState` atomic
+flip (the durable in-tx boundary). The shared generic `OutboxDispatcherService`
+MUST NOT claim these rows — it is fire-and-forget and marks rows `PUBLISHED`
+unconditionally, so it CANNOT deliver this event durably. A dedicated
+`LowStockOutboxPoller` claims ONLY `eventType='stock.low.detected'` PENDING
+rows (disjoint from the generic poller's claim set via a single exclusion
+predicate `AND "eventType" <> 'stock.low.detected'` on the generic poller),
+and a dedicated `LowStockOutboxDispatcher` AWAITs `InngestService.send` and
+marks the row `PUBLISHED` only on resolve (on reject it stays `PENDING`,
+bumps `retryCount`, stamps `nextAttemptAt` for backoff, and records
+`lastError` — the dedicated poller retries; the alert is never lost).
+On transaction rollback, the outbox row is discarded with the tx and
+zero events ever exist. On transaction commit, the event becomes durable
+and is delivered by the dedicated dispatch path. Each event payload MUST
+include `tenantId`, `productId`, `variantId | null`, `productName`,
+`variantDescription | null`, `newQuantity`, `minQuantity`, `sku`, `category`,
+`deepLink`, and `occurredAt`.
 
-#### Scenario: Successful commit dispatches one event per crossing
-- GIVEN a sale that decrements P and V1, both crossing `<= minQuantity`
+#### Scenario: Successful commit dispatches one event per crossing through the dedicated outbox path
+- GIVEN a sale that decrements P and V1, both crossing `<= minQuantity` and both winning the `StockAlertState` flip
 - WHEN `runInTransaction` resolves successfully
-- THEN the orchestrator emits exactly two `stock/low.detected` events
-- AND each event payload contains `tenantId`, `productId`/`variantId`, `newQuantity`, `minQuantity`, `sku`, `category`, `deepLink`, and `occurredAt`
-- AND the events are delivered to `InngestService.send` AFTER the commit (no in-tx network call)
+- THEN two PENDING `OutboxEvent` rows of `eventType='stock.low.detected'` exist for this sale
+- AND the generic `OutboxPollerService` does NOT claim those rows (disjoint claim set)
+- AND the dedicated `LowStockOutboxPoller` claims them and `LowStockOutboxDispatcher` calls `InngestService.send` exactly twice (one per crossing), AWAITING each call
+- AND on resolve the dispatcher marks each row `PUBLISHED` exactly once
+- AND no Inngest `send` call happens while the transaction is open
 
-#### Scenario: Rollback produces zero dispatches
+#### Scenario: Rollback produces zero dispatches and zero outbox rows
 - GIVEN a sale tx that crosses P and V1, then a downstream step throws
 - WHEN `runInTransaction` rejects
-- THEN the orchestrator's catch path does NOT call `InngestService.send`
-- AND zero `stock/low.detected` events exist for this sale
+- THEN no `OutboxEvent` rows of `eventType='stock.low.detected'` survive (the in-tx write is rolled back with the tx)
+- AND `LowStockOutboxDispatcher` is never invoked
+- AND `InngestService.send` is never called
 
-#### Scenario: No crossings → no dispatch
+#### Scenario: No crossings → no outbox rows, no dispatch
 - GIVEN a sale that decrements only items staying above their `minQuantity`
 - WHEN `runInTransaction` resolves successfully
-- THEN the orchestrator emits zero `stock/low.detected` events
-- AND no Inngest invocation is enqueued
+- THEN zero `OutboxEvent` rows of `eventType='stock.low.detected'` are written
+- AND `LowStockOutboxDispatcher` is never invoked and no Inngest invocation is enqueued
+
+#### Scenario: Post-commit send failure keeps the row retryable, not lost
+- GIVEN a committed sale with a PENDING `stock.low.detected` outbox row claimed by the dedicated poller
+- WHEN `InngestService.send` REJECTS during dispatch
+- THEN the dispatcher leaves the row `PENDING`, increments `retryCount`, stamps `nextAttemptAt` for backoff, and records `lastError`
+- AND the dedicated poller re-claims the row on the next tick (no lost alert, no silent success)
 
 #### Scenario: Tenant id always in payload
 - GIVEN any crossing dispatched by the sales orchestrator
