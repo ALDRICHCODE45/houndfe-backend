@@ -501,6 +501,106 @@ export class PrismaProductRepository implements IProductRepository {
     }
   }
 
+  /**
+   * Edit-path re-arm. Mirrors the ambient-tx guard + STRICT `>` gate of
+   * `incrementStockForRestock`, but does NOT touch the stock columns
+   * itself — the edit write lives in the service layer. This method only
+   * re-reads the RESULTING `(quantity, minQuantity)` inside the same
+   * transaction (read-your-own-writes under READ COMMITTED) and, when
+   * the boundary is crossed strictly upward, calls `alertState.rearm`
+   * with the correct simple-vs-variant key.
+   *
+   * Two-branch SELECT:
+   *   - product path: gates on `useStock = true` (parent column); a row
+   *     missing that predicate returns 0 rows → early return (no rearm,
+   *     no error — spec scenario: useStock = false).
+   *   - variant path: SELECT must JOIN the parent `products` row to gate
+   *     on the parent's `useStock` (Variant has no such column of its
+   *     own). Non-stock parents are excluded by the JOIN, returning
+   *     0 rows. The tenant-scoped join key preserves isolation.
+   *
+   * Spec coverage: stock-alerts/spec.md — "One-Shot Edge Trigger At Or
+   * Below Min Quantity" (MODIFIED — edit-path re-arm scenarios).
+   */
+  async rearmAlertAfterEdit(item: {
+    productId: string;
+    variantId?: string | null;
+  }): Promise<void> {
+    // Mirror the restock ambient-tx guard. A partial commit (write
+    // auto-committed, rearm never issued) would block the next alert
+    // forever. Throw before touching the client.
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error(
+        'rearmAlertAfterEdit must be called inside TenantPrismaService.runInTransaction',
+      );
+    }
+
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+    const { productId, variantId } = item;
+
+    if (variantId) {
+      // Variant path: JOIN products p to gate on the parent's
+      // `useStock` (Variant has no such column). The tenant-scoped
+      // join key (`p.tenantId = v.tenantId`) preserves isolation.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+      const rows = (await prisma.$queryRaw`
+        SELECT v."quantity"::int AS "q",
+               v."minQuantity"::int AS "m"
+          FROM "variants" v
+          JOIN "products" p ON p."id" = v."productId"
+                           AND p."tenantId" = v."tenantId"
+         WHERE v."id" = ${variantId}
+           AND v."productId" = ${productId}
+           AND v."tenantId" = ${tenantId}
+           AND p."useStock" = true
+      `) as Array<{ q: number; m: number }>;
+
+      if (rows.length !== 1) {
+        // non-stock parent (JOIN excluded) OR row missing — no-op.
+        return;
+      }
+
+      const { q, m } = rows[0];
+      if (q > m) {
+        await this.alertState.rearm({
+          tx: prisma,
+          tenantId,
+          productId,
+          variantId,
+        });
+      }
+      return;
+    }
+
+    // Product path: tenant + useStock gate on the parent column. A
+    // non-stock row returns 0 rows and the method short-circuits
+    // without throwing (spec: useStock = false → no alert logic).
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+    const rows = (await prisma.$queryRaw`
+      SELECT "quantity"::int AS "q",
+             "minQuantity"::int AS "m"
+        FROM "products"
+       WHERE "id" = ${productId}
+         AND "tenantId" = ${tenantId}
+         AND "useStock" = true
+    `) as Array<{ q: number; m: number }>;
+
+    if (rows.length !== 1) {
+      return;
+    }
+
+    const { q, m } = rows[0];
+    if (q > m) {
+      await this.alertState.rearm({
+        tx: prisma,
+        tenantId,
+        productId,
+        variantId: null,
+      });
+    }
+  }
+
   private toDomain(data: PrismaProduct): Product {
     return Product.fromPersistence({
       id: data.id,

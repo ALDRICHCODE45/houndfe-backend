@@ -630,3 +630,200 @@ describe('PrismaProductRepository — ambient-tx guard (R1 fix)', () => {
     expect(alertState.rearm).not.toHaveBeenCalled();
   });
 });
+
+// ── Edit-path re-arm — rearmAlertAfterEdit (low-stock-rearm-on-edit) ────
+
+describe('PrismaProductRepository.rearmAlertAfterEdit — ambient-tx guard', () => {
+  it('throws when called outside an ambient transaction (mirror of restock guard) — Sc.7', async () => {
+    // Without an ambient tx, getClient() would silently fall back to a
+    // non-tx client and auto-commit the rearm UPDATE — that blocks the
+    // next alert forever. The guard throws BEFORE touching the client.
+    const tx = makeTxMock();
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(tx),
+      getTenantId: jest.fn().mockReturnValue(TENANT),
+      isInTransaction: jest.fn().mockReturnValue(false),
+    };
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await expect(
+      repo.rearmAlertAfterEdit({ productId: 'prod-1' }),
+    ).rejects.toThrow(
+      /must be called inside TenantPrismaService\.runInTransaction/,
+    );
+
+    // Guard fires before any statement; getClient is never consumed.
+    expect(tx.calls).toHaveLength(0);
+    expect(alertState.rearm).not.toHaveBeenCalled();
+  });
+});
+
+describe('PrismaProductRepository.rearmAlertAfterEdit — product path', () => {
+  it('product path STRICT `>`: rearm when resulting q > m on a useStock=true product — Sc.1', async () => {
+    // SELECT products.quantity,minQuantity WHERE useStock=true → 1 row
+    // {q:10, m:3} → 10 > 3 → rearm({variantId:null}).
+    const tx = makeTxMock();
+    tx.setResponses([[{ q: 10, m: 3 }]]);
+
+    const tenantPrisma = makeTenantPrismaForTx(tx);
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await repo.rearmAlertAfterEdit({ productId: 'prod-1' });
+
+    // SELECT was issued; product SELECT carries the useStock=true predicate.
+    expect(tx.calls).toHaveLength(1);
+    const select = tx.calls[0];
+    expect(select.sql).toMatch(/SELECT/);
+    expect(select.sql).toMatch(/"products"/);
+    expect(select.sql).toMatch(/"useStock"\s*=\s*true/);
+    expect(select.sql).toMatch(/"tenantId"\s*=\s*\$/);
+    expect(select.sql).toMatch(/"id"\s*=\s*\$/);
+    expect(select.values).toContain('prod-1');
+    expect(select.values).toContain(TENANT);
+
+    // rearm was called with the simple-product key (variantId: null).
+    expect(alertState.rearm).toHaveBeenCalledWith({
+      tx: tx as any,
+      tenantId: TENANT,
+      productId: 'prod-1',
+      variantId: null,
+    });
+  });
+
+  it('product path STRICT `==`: does NOT rearm when q == m (equality excluded) — Sc.4', async () => {
+    // The repository MUST guard the boundary: 3 == 3 is not a re-arm
+    // condition. seedAndFlip is also never called on this path.
+    const tx = makeTxMock();
+    tx.setResponses([[{ q: 3, m: 3 }]]);
+
+    const tenantPrisma = makeTenantPrismaForTx(tx);
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await repo.rearmAlertAfterEdit({ productId: 'prod-1' });
+
+    expect(alertState.rearm).not.toHaveBeenCalled();
+    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
+  });
+
+  it('product path 0 rows: no throw, no rearm (useStock=false OR row missing) — Sc.6, Sc.8', async () => {
+    // 0 rows means the row is either absent or useStock=false; either
+    // way the edit MUST be a harmless no-op (no throw, no rearm, no
+    // seedAndFlip). Scenario 6: no pre-existing alert-state row → the
+    // rearm UPDATE would match 0 rows anyway, but here we never even
+    // reach it.
+    const tx = makeTxMock();
+    tx.setResponses([[]]);
+
+    const tenantPrisma = makeTenantPrismaForTx(tx);
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await expect(
+      repo.rearmAlertAfterEdit({ productId: 'prod-1' }),
+    ).resolves.toBeUndefined();
+
+    expect(alertState.rearm).not.toHaveBeenCalled();
+    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
+  });
+});
+
+describe('PrismaProductRepository.rearmAlertAfterEdit — variant path', () => {
+  it('variant path STRICT `>`: SELECT JOINs products.useStock=true, rearm with variantId — Sc.2', async () => {
+    // Variant SELECT MUST JOIN products p ON p.useStock=true AND
+    // p.tenantId=v.tenantId, gating on the parent. With the join
+    // satisfied, q>m ⇒ rearm({variantId:'var-1'}).
+    const tx = makeTxMock();
+    tx.setResponses([[{ q: 10, m: 3 }]]);
+
+    const tenantPrisma = makeTenantPrismaForTx(tx);
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await repo.rearmAlertAfterEdit({
+      productId: 'prod-1',
+      variantId: 'var-1',
+    });
+
+    expect(tx.calls).toHaveLength(1);
+    const select = tx.calls[0];
+    expect(select.sql).toMatch(/SELECT/);
+    expect(select.sql).toMatch(/"variants"/);
+    // JOIN to products is mandatory — Variant has no useStock column.
+    expect(select.sql).toMatch(/JOIN\s+"products"/);
+    expect(select.sql).toMatch(/p\."useStock"\s*=\s*true/);
+    expect(select.sql).toMatch(/"tenantId"\s*=\s*\$/);
+    expect(select.sql).toMatch(/"id"\s*=\s*\$/);
+    expect(select.sql).toMatch(/"productId"\s*=\s*\$/);
+    expect(select.values).toContain('var-1');
+    expect(select.values).toContain('prod-1');
+    expect(select.values).toContain(TENANT);
+
+    expect(alertState.rearm).toHaveBeenCalledWith({
+      tx: tx as any,
+      tenantId: TENANT,
+      productId: 'prod-1',
+      variantId: 'var-1',
+    });
+  });
+
+  it('variant path parent useStock=false: JOIN gates it out → 0 rows → no rearm — Sc.8', async () => {
+    // The useStock predicate sits on the JOIN to products. When the
+    // parent's useStock is false, the JOIN excludes the row ⇒ 0 rows
+    // returned ⇒ early return ⇒ no rearm. (Design CRITICAL-2 trap.)
+    const tx = makeTxMock();
+    tx.setResponses([[]]);
+
+    const tenantPrisma = makeTenantPrismaForTx(tx);
+    const outbox = makeOutboxWriter();
+    const alertState = makeStockAlertRepo();
+
+    const repo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox,
+      alertState,
+    );
+
+    await expect(
+      repo.rearmAlertAfterEdit({
+        productId: 'prod-1',
+        variantId: 'var-1',
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(alertState.rearm).not.toHaveBeenCalled();
+    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
+  });
+});
