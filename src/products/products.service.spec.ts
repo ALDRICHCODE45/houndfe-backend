@@ -12,6 +12,8 @@ import {
 } from '../shared/domain/domain-error';
 import { Product } from './domain/product.entity';
 import { BadRequestException } from '@nestjs/common';
+import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
+import type { IStockAlertStateRepository } from '../stock-alerts/domain/stock-alert-state.repository';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -1734,15 +1736,135 @@ describe('ProductsService — update() edit-path re-arm', () => {
     };
   }
 
+  /**
+   * W-1 helper: construct a service backed by a REAL
+   * `PrismaProductRepository` with a mocked `IStockAlertStateRepository`
+   * seam. The previous W-1 assertion `(repo as any).seedAndFlip).toBeUndefined()`
+   * was tautological because `IProductRepository` never exposes
+   * `seedAndFlip` — that method lives on `IStockAlertStateRepository`,
+   * which is consumed by the adapter. Only by wiring the real adapter
+   * do we expose the `alertStateMock.seedAndFlip` method to the
+   * production code path. If the edit path ever routed through
+   * `alertState.seedAndFlip`, the mock would record the call and the
+   * load-bearing assertion would FAIL.
+   *
+   * The mocked `$queryRaw` returns `[{q:10, m:3}]` so the adapter's
+   * STRICT `>` gate fires (q > m) and `rearmAlertAfterEdit` actually
+   * calls `alertState.rearm`. The W-1 assertion is `seedAndFlip not
+   * called`; the rearm call count is a sanity check that the wiring
+   * is real.
+   */
+  function setupServiceWithRealAdapter(opts: {
+    product?: ReturnType<typeof makePersistenceProductWithStock>;
+  } = {}) {
+    const product = Product.fromPersistence(
+      opts.product ?? makePersistenceProductWithStock(),
+    );
+
+    const alertStateMock: jest.Mocked<IStockAlertStateRepository> = {
+      seedAndFlip: jest.fn().mockResolvedValue(undefined),
+      rearm: jest.fn().mockResolvedValue(undefined),
+    } as any;
+
+    // Tx client. $queryRaw returns q>m so the adapter's STRICT >
+    // gate fires (q=10 > m=3) → rearm is exercised when
+    // rearmAlertAfterEdit is called. product.upsert is stubbed for
+    // the service's save call (the real adapter's save goes through
+    // prisma.product.upsert).
+    const txMock: any = {
+      product: {
+        findUnique: jest.fn().mockImplementation(({ where }: any) =>
+          Promise.resolve({
+            id: where?.id ?? PRODUCT_ID,
+            tenantId: 'tenant-1',
+            useStock: true,
+          }),
+        ),
+        upsert: jest.fn().mockImplementation(({ create, update }: any) =>
+          Promise.resolve({
+            id: update?.id ?? create?.id ?? PRODUCT_ID,
+            ...create,
+            ...update,
+          }),
+        ),
+      },
+      $queryRaw: jest.fn().mockResolvedValue([{ q: 10, m: 3 }]),
+    };
+
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(txMock),
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      // Ambient-tx guard: rearmAlertAfterEdit throws unless
+      // isInTransaction() returns true. The real adapter checks this
+      // BEFORE touching the client.
+      isInTransaction: jest.fn().mockReturnValue(true),
+      runInTransaction: jest.fn(
+        async (work: (client: typeof txMock) => Promise<unknown>) =>
+          work(txMock),
+      ),
+    };
+
+    const outbox = { publish: jest.fn().mockResolvedValue(undefined) };
+
+    const realRepo = new PrismaProductRepository(
+      tenantPrisma as any,
+      outbox as any,
+      alertStateMock,
+    );
+
+    const prisma = {
+      globalPriceList: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'gl-publico' }),
+      },
+      priceList: { updateMany: jest.fn() },
+      variant: { updateMany: jest.fn() },
+    } as any;
+
+    const service = createService(realRepo as any, prisma);
+    (service as any).tenantPrisma = tenantPrisma;
+
+    jest
+      .spyOn(service as any, 'buildFullResponse')
+      .mockResolvedValue({ id: PRODUCT_ID });
+
+    return {
+      service,
+      realRepo,
+      tenantPrisma,
+      prisma,
+      product,
+      alertStateMock,
+    };
+  }
+
   function setupService(opts: {
     product?: ReturnType<typeof makePersistenceProductWithStock>;
   } = {}) {
     const product = Product.fromPersistence(
       opts.product ?? makePersistenceProductWithStock(),
     );
+
+    // ── W-2 containment proof ─────────────────────────────────────────
+    // The runInTransaction wrap toggles `insideTx` while the callback
+    // runs; tx-client writes + the repo's `save`/`rearmAlertAfterEdit`
+    // mocks capture the flag at call time so the test can prove every
+    // write happened INSIDE the wrap (not just AFTER it).
+    const txState = { insideTx: false };
+    const txCaptures: Array<{ method: string; insideTx: boolean }> = [];
+    const recordCall = (method: string) => {
+      txCaptures.push({ method, insideTx: txState.insideTx });
+    };
+
     const repo = makeMockRepo({
       findById: jest.fn().mockResolvedValue(product),
-      save: jest.fn(async (p: any) => p),
+      save: jest.fn(async (p: any) => {
+        recordCall('repo.save');
+        return p;
+      }),
+      rearmAlertAfterEdit: jest.fn(async () => {
+        recordCall('repo.rearmAlertAfterEdit');
+        return undefined;
+      }),
     });
 
     // tenantPrisma exposes runInTransaction (the wrap the service must
@@ -1750,16 +1872,32 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // captures the writes routed through it (priceList, variant,
     // save's underlying upsert).
     const txClient = {
-      priceList: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-      variant: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      priceList: {
+        updateMany: jest.fn().mockImplementation(() => {
+          recordCall('txClient.priceList.updateMany');
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      variant: {
+        updateMany: jest.fn().mockImplementation(() => {
+          recordCall('txClient.variant.updateMany');
+          return Promise.resolve({ count: 0 });
+        }),
+      },
     };
     const tenantPrisma = {
       getTenantId: jest.fn().mockReturnValue('tenant-1'),
       getClient: jest.fn().mockReturnValue(txClient),
       isInTransaction: jest.fn().mockReturnValue(false),
       runInTransaction: jest.fn(
-        async (work: (client: typeof txClient) => Promise<unknown>) =>
-          work(txClient),
+        async (work: (client: typeof txClient) => Promise<unknown>) => {
+          txState.insideTx = true;
+          try {
+            return await work(txClient);
+          } finally {
+            txState.insideTx = false;
+          }
+        },
       ),
     };
     const prisma = {
@@ -1779,11 +1917,20 @@ describe('ProductsService — update() edit-path re-arm', () => {
       .spyOn(service as any, 'buildFullResponse')
       .mockResolvedValue({ id: PRODUCT_ID });
 
-    return { service, repo, tenantPrisma, txClient, prisma, product };
+    return {
+      service,
+      repo,
+      tenantPrisma,
+      txClient,
+      prisma,
+      product,
+      txCaptures,
+    };
   }
 
   it('wraps save + rearm in ONE runInTransaction when quantity is provided — Sc.1', async () => {
-    const { service, repo, tenantPrisma, txClient, prisma } = setupService();
+    const { service, repo, tenantPrisma, txClient, prisma, txCaptures } =
+      setupService();
 
     await service.update(PRODUCT_ID, { quantity: 10 });
 
@@ -1800,10 +1947,21 @@ describe('ProductsService — update() edit-path re-arm', () => {
       productId: PRODUCT_ID,
       variantId: null,
     });
+
+    // ── W-2 containment proof: every write happened INSIDE the wrap ──
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('repo.save').length).toBeGreaterThan(0);
+    expect(calls('repo.save').every((c) => c.insideTx)).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').length).toBeGreaterThan(0);
+    expect(
+      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
+    ).toBe(true);
   });
 
   it('routes priceList through the tx client when priceCents is in the DTO', async () => {
-    const { service, tenantPrisma, txClient, prisma } = setupService();
+    const { service, tenantPrisma, txClient, prisma, txCaptures } =
+      setupService();
 
     await service.update(PRODUCT_ID, { priceCents: 50000, quantity: 10 });
 
@@ -1816,10 +1974,27 @@ describe('ProductsService — update() edit-path re-arm', () => {
     });
     // raw prisma.priceList was NOT called.
     expect(prisma.priceList.updateMany).not.toHaveBeenCalled();
+
+    // ── W-2 containment proof: priceList write + save + rearm all
+    //    observed with insideTx=true. If any of them moved outside the
+    //    callback (e.g. after `await runInTransaction(...)` resolved),
+    //    the wrap toggle would already be back to false and the
+    //    captures would record insideTx=false — failing this assertion.
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('txClient.priceList.updateMany').length).toBe(1);
+    expect(
+      calls('txClient.priceList.updateMany').every((c) => c.insideTx),
+    ).toBe(true);
+    expect(calls('repo.save').every((c) => c.insideTx)).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx)).toBe(
+      true,
+    );
   });
 
   it('wraps in runInTransaction when ONLY minQuantity is provided (RESULTING pair) — Sc.3', async () => {
-    const { service, repo, tenantPrisma, txClient } = setupService();
+    const { service, repo, tenantPrisma, txClient, txCaptures } =
+      setupService();
 
     await service.update(PRODUCT_ID, { minQuantity: 1 });
 
@@ -1830,10 +2005,18 @@ describe('ProductsService — update() edit-path re-arm', () => {
       productId: PRODUCT_ID,
       variantId: null,
     });
+
+    // ── W-2 containment proof ──
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('repo.save').every((c) => c.insideTx)).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx)).toBe(
+      true,
+    );
   });
 
   it('does NOT call rearmAlertAfterEdit when neither quantity nor minQuantity is in the DTO — Sc.4', async () => {
-    const { service, repo, tenantPrisma } = setupService();
+    const { service, repo, tenantPrisma, txCaptures } = setupService();
 
     await service.update(PRODUCT_ID, { name: 'New name' });
 
@@ -1845,19 +2028,34 @@ describe('ProductsService — update() edit-path re-arm', () => {
     expect(repo.save).toHaveBeenCalled();
     // Wrap still ran exactly once (persistence is atomic).
     expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+
+    // ── W-2 containment proof: save happened inside the wrap; rearm
+    //    was correctly gated out (and therefore not called at all).
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('repo.save').length).toBeGreaterThan(0);
+    expect(calls('repo.save').every((c) => c.insideTx)).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').length).toBe(0);
   });
 
-  it('NEVER calls rearm on downward edits (no seedAndFlip, no event) — Sc.5', async () => {
+  it('edit path NEVER calls seedAndFlip on the alertState seam; rearm fires only on upward crossings — Sc.5', async () => {
     // Spec scenario 5: a manual downward edit lands stock <= min.
     // The edit path MUST NOT seed a new StockAlertState row and
     // MUST NOT call seedAndFlip; it only flips a possibly-existing
     // alerted row back to false (rearm). We assert that rearm is
     // called (the adapter is the q>m gate — the service's job is
     // to call it on qty/min change) and that no other alerting
-    // primitive runs. The repository only exposes rearmAlertAfterEdit
-    // on the edit path; if the service were to call any other
-    // alerting primitive, that would be visible here.
-    const { service, repo } = setupService();
+    // primitive runs. The previous assertion
+    // `(repo as any).seedAndFlip).toBeUndefined()` was tautological:
+    // IProductRepository NEVER exposes seedAndFlip (it lives on
+    // IStockAlertStateRepository). Wiring a real
+    // PrismaProductRepository with a mocked alertState makes the
+    // assertion load-bearing — if the production code ever routed
+    // the edit path through seedAndFlip (e.g. by mistake or
+    // regression), the mock would record the call and the test
+    // would fail.
+    const { service, alertStateMock, realRepo } = setupServiceWithRealAdapter();
+    const rearmSpy = jest.spyOn(realRepo, 'rearmAlertAfterEdit');
 
     // Downward edit (would falsely fire on the old path) — the
     // service still calls the adapter (its job is qty/min
@@ -1869,22 +2067,31 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // Field-only edit.
     await service.update(PRODUCT_ID, { name: 'X' });
 
-    // save is called every time.
-    expect(repo.save).toHaveBeenCalledTimes(3);
-    // rearmAlertAfterEdit only fires on the two edits that carried
-    // quantity/minQuantity — never on the name-only edit.
-    expect(repo.rearmAlertAfterEdit).toHaveBeenCalledTimes(2);
-    // The repo mock has no seedAndFlip method (the edit path's
-    // boundary); the absence of that method is the structural
-    // guarantee that the edit path cannot seed.
-    expect((repo as any).seedAndFlip).toBeUndefined();
+    // rearmAlertAfterEdit fires on the two edits that carried
+    // quantity/minQuantity — never on the name-only edit. We spy on
+    // the real adapter's method (not the mock) so the assertion still
+    // pins the service-level contract.
+    expect(rearmSpy).toHaveBeenCalledTimes(2);
+    // Load-bearing W-1 assertion: the edit path MUST NEVER seed a new
+    // StockAlertState row (seedAndFlip is the charge-time primitive;
+    // rearmAlertAfterEdit is the only edit-path primitive). The
+    // alertStateMock is wired through the real PrismaProductRepository,
+    // so any production code path that called alertState.seedAndFlip
+    // (directly, or by routing the edit through decrementStockForCharge
+    // semantics) would be observed here and FAIL this test.
+    expect(alertStateMock.seedAndFlip).not.toHaveBeenCalled();
+    // Rearm did fire on the qty/min edits — the production adapter's
+    // STRICT `>` gate decides (q=10 > m=3 ⇒ rearm). This is a
+    // sanity check that the wiring is real (the spy + alertState
+    // mock ARE reachable from the production code path).
+    expect(alertStateMock.rearm).toHaveBeenCalled();
   });
 
   it('routes the useStock-false cascade variant.updateMany through the tx client — atomic with save + rearm', async () => {
     // Transition useStock true → false: the variant cascade
     // (minQuantity:0) MUST join the same tx as save and rearm so a
     // rollback does not leave a half-cascaded product behind.
-    const { service, tenantPrisma, txClient, repo } = setupService({
+    const { service, tenantPrisma, txClient, repo, txCaptures } = setupService({
       product: makePersistenceProductWithStock({
         useStock: true,
         previousUseStock: true, // matches persisted value → transition triggers
@@ -1907,6 +2114,18 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // raw prisma.variant was NOT used for the cascade.
     expect((service as any).prisma.variant.updateMany).not.toHaveBeenCalled();
     expect(repo.save).toHaveBeenCalled();
+
+    // ── W-2 containment proof: variant cascade + save happened
+    //    INSIDE the wrap. A regression that moved the cascade outside
+    //    runInTransaction (but still used getClient()) would be caught
+    //    here.
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('txClient.variant.updateMany').length).toBe(1);
+    expect(
+      calls('txClient.variant.updateMany').every((c) => c.insideTx),
+    ).toBe(true);
+    expect(calls('repo.save').every((c) => c.insideTx)).toBe(true);
   });
 });
 
@@ -1930,19 +2149,37 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
       product: { useStock: productRow.useStock },
     };
 
-    const repo = makeMockRepo();
+    // ── W-2 containment proof ─────────────────────────────────────────────
+    // runInTransaction toggles `insideTx` while the callback runs;
+    // txClient writes + repo.rearmAlertAfterEdit capture the flag at
+    // call time so the test can prove the writes happened INSIDE the
+    // wrap (not just AFTER it). Same pattern as the update() suite.
+    const txState = { insideTx: false };
+    const txCaptures: Array<{ method: string; insideTx: boolean }> = [];
+    const recordCall = (method: string) => {
+      txCaptures.push({ method, insideTx: txState.insideTx });
+    };
+
+    const repo = makeMockRepo({
+      rearmAlertAfterEdit: jest.fn(async () => {
+        recordCall('repo.rearmAlertAfterEdit');
+        return undefined;
+      }),
+    });
 
     const txClient = {
       variant: {
-        update: jest.fn().mockImplementation(({ data }: any) =>
-          Promise.resolve({
+        update: jest.fn().mockImplementation((args: any) => {
+          recordCall('txClient.variant.update');
+          return Promise.resolve({
             ...variantRow,
-            quantity: data.quantity ?? variantRow.quantity,
-            minQuantity: data.minQuantity ?? variantRow.minQuantity,
+            quantity: args.data?.quantity ?? variantRow.quantity,
+            minQuantity: args.data?.minQuantity ?? variantRow.minQuantity,
             purchaseNetCostCents:
-              data.purchaseNetCostCents ?? variantRow.purchaseNetCostCents,
-          }),
-        ),
+              args.data?.purchaseNetCostCents ??
+              variantRow.purchaseNetCostCents,
+          });
+        }),
       },
     };
     const tenantPrisma = {
@@ -1950,8 +2187,14 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
       getClient: jest.fn().mockReturnValue(txClient),
       isInTransaction: jest.fn().mockReturnValue(false),
       runInTransaction: jest.fn(
-        async (work: (client: typeof txClient) => Promise<unknown>) =>
-          work(txClient),
+        async (work: (client: typeof txClient) => Promise<unknown>) => {
+          txState.insideTx = true;
+          try {
+            return await work(txClient);
+          } finally {
+            txState.insideTx = false;
+          }
+        },
       ),
     };
     const prisma = {
@@ -1973,11 +2216,12 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     const service = createService(repo, prisma);
     (service as any).tenantPrisma = tenantPrisma;
 
-    return { service, repo, tenantPrisma, txClient, prisma };
+    return { service, repo, tenantPrisma, txClient, prisma, txCaptures };
   }
 
   it('wraps variant.update + rearm in ONE runInTransaction when quantity is provided — Sc.2', async () => {
-    const { service, repo, tenantPrisma, txClient, prisma } = setupService();
+    const { service, repo, tenantPrisma, txClient, prisma, txCaptures } =
+      setupService();
 
     const updated = await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
       quantity: 10,
@@ -2001,20 +2245,46 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     // The .then(enrichVariantCostResponse) chain still produced a
     // response object.
     expect(updated).toBeDefined();
+
+    // ── W-2 containment proof: variant.update + rearm both observed
+    //    with insideTx=true. If either moved outside the wrap (but
+    //    still used getClient()), the toggle would be false and the
+    //    captures would fail.
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('txClient.variant.update').length).toBeGreaterThan(0);
+    expect(calls('txClient.variant.update').every((c) => c.insideTx)).toBe(
+      true,
+    );
+    expect(
+      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
+    ).toBe(true);
   });
 
   it('does NOT call rearmAlertAfterEdit when neither quantity nor minQuantity is in the DTO', async () => {
-    const { service, repo, tenantPrisma, txClient } = setupService();
+    const { service, repo, tenantPrisma, txClient, txCaptures } =
+      setupService();
 
     await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { name: 'New' });
 
     expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
     expect(txClient.variant.update).toHaveBeenCalled();
     expect(repo.rearmAlertAfterEdit).not.toHaveBeenCalled();
+
+    // ── W-2 containment proof: variant.update happened inside the
+    //    wrap; rearm was correctly gated out (and therefore not called).
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('txClient.variant.update').length).toBeGreaterThan(0);
+    expect(calls('txClient.variant.update').every((c) => c.insideTx)).toBe(
+      true,
+    );
+    expect(calls('repo.rearmAlertAfterEdit').length).toBe(0);
   });
 
   it('wraps in runInTransaction when ONLY minQuantity is provided (RESULTING pair)', async () => {
-    const { service, repo, tenantPrisma, txClient } = setupService();
+    const { service, repo, tenantPrisma, txClient, txCaptures } =
+      setupService();
 
     await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { minQuantity: 1 });
 
@@ -2028,6 +2298,16 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
       productId: PRODUCT_ID,
       variantId: VARIANT_A_ID,
     });
+
+    // ── W-2 containment proof ──
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('txClient.variant.update').every((c) => c.insideTx)).toBe(
+      true,
+    );
+    expect(
+      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
+    ).toBe(true);
   });
 
   it('on parent useStock=false, the service still issues the wrap (adapter handles the useStock gate) — Sc.8', async () => {
@@ -2038,7 +2318,7 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     // (see prisma-product.repository.spec.ts Sc.8 — JOIN returns 0
     // rows on a useStock=false parent). Here we only assert the
     // service contract: wrap still runs, adapter is invoked.
-    const { service, repo, tenantPrisma } = setupService({
+    const { service, repo, tenantPrisma, txCaptures } = setupService({
       product: { useStock: false, quantity: 0, minQuantity: 0 },
     });
 
@@ -2049,5 +2329,17 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
       productId: PRODUCT_ID,
       variantId: VARIANT_A_ID,
     });
+
+    // ── W-2 containment proof: variant.update + rearm both observed
+    //    with insideTx=true on the wrap path.
+    const calls = (method: string) =>
+      txCaptures.filter((c) => c.method === method);
+    expect(calls('txClient.variant.update').length).toBeGreaterThan(0);
+    expect(calls('txClient.variant.update').every((c) => c.insideTx)).toBe(
+      true,
+    );
+    expect(
+      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
+    ).toBe(true);
   });
 });
