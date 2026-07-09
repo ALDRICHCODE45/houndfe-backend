@@ -55,3 +55,10 @@ pids
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 .atl/.skill-registry.cache.json
+
+# Brand design assets (logos + brand manual PDF) — kept out of the code
+# repo; the email logo is hosted on Spaces CDN. Design source lives with
+# the client / a dedicated assets store, not in the backend git history.
+docs/hounfeLogos/
+# Local email render used only for design review — regenerated on demand.
+docs/email-preview.html
