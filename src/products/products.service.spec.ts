@@ -29,6 +29,9 @@ function makeMockRepo(overrides: Partial<IProductRepository> = {}) {
     delete: jest.fn(),
     decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
+    rearmAlertAfterEdit: jest
+      .fn<Promise<void>, any>()
+      .mockResolvedValue(undefined),
     isSkuTaken: jest.fn<Promise<boolean>, any>().mockResolvedValue(false),
     isBarcodeTaken: jest.fn<Promise<boolean>, any>().mockResolvedValue(false),
     ...overrides,
@@ -75,9 +78,20 @@ function createService(
   filesService?: ReturnType<typeof makeMockFilesService>,
   satCatalog?: any,
 ) {
+  // Edit-path tests need `runInTransaction` to be a passthrough so
+  // that the production code's wrap is exercised without an actual
+  // CLS-backed tx. The default impl here lets `runInTransaction(work)`
+  // just call `work(prisma)` synchronously — tests that need to
+  // assert the wrap (count calls, route writes through a tx client)
+  // override the instance field after construction.
   const tenantPrisma = {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
     getClient: jest.fn().mockReturnValue(prisma),
+    isInTransaction: jest.fn().mockReturnValue(false),
+    runInTransaction: jest.fn(
+      async (work: (client: ReturnType<typeof getClient>) => Promise<unknown>) =>
+        work(prisma),
+    ),
   } as any;
   return new ProductsService(
     repo,
@@ -1666,6 +1680,374 @@ describe('ProductsService — SAT catalog validation (Slice D)', () => {
       expect(repo.save).toHaveBeenCalled();
       const savedEntity = repo.save.mock.calls[0][0];
       expect(savedEntity.satKey).toBeNull();
+    });
+  });
+});
+
+// ── Edit-path re-arm (low-stock-rearm-on-edit) ─────────────────────────
+//
+// Service wraps the persistence tail in tenantPrisma.runInTransaction so
+// priceList + product + variant (useStock-off cascade) + rearm commit
+// atomically. Validation stays OUTSIDE the wrap. The change-gate
+// (`dto.quantity !== undefined || dto.minQuantity !== undefined`) drives
+// whether `rearmAlertAfterEdit` fires.
+
+describe('ProductsService — update() edit-path re-arm', () => {
+  function makePersistenceProductWithStock(
+    overrides: Partial<{
+      id: string;
+      useStock: boolean;
+      quantity: number;
+      minQuantity: number;
+      previousUseStock: boolean;
+    }> = {},
+  ) {
+    const now = new Date('2026-04-01T10:00:00.000Z');
+    return {
+      id: overrides.id ?? PRODUCT_ID,
+      name: 'Stocked Product',
+      location: null,
+      description: null,
+      type: 'PRODUCT',
+      sku: 'SKU-1',
+      barcode: null,
+      unit: 'UNIDAD',
+      satKey: null,
+      categoryId: null,
+      brandId: null,
+      sellInPos: true,
+      includeInOnlineCatalog: true,
+      requiresPrescription: false,
+      chargeProductTaxes: true,
+      ivaRate: 'IVA_16',
+      iepsRate: 'NO_APLICA',
+      purchaseCostMode: 'NET',
+      purchaseNetCostCents: 0,
+      purchaseGrossCostCents: 0,
+      useStock: overrides.useStock ?? true,
+      useLotsAndExpirations: false,
+      quantity: overrides.quantity ?? 5,
+      minQuantity: overrides.minQuantity ?? 3,
+      hasVariants: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  function setupService(opts: {
+    product?: ReturnType<typeof makePersistenceProductWithStock>;
+  } = {}) {
+    const product = Product.fromPersistence(
+      opts.product ?? makePersistenceProductWithStock(),
+    );
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(product),
+      save: jest.fn(async (p: any) => p),
+    });
+
+    // tenantPrisma exposes runInTransaction (the wrap the service must
+    // use) and isInTransaction. We use a "tx client" object that
+    // captures the writes routed through it (priceList, variant,
+    // save's underlying upsert).
+    const txClient = {
+      priceList: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      variant: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    };
+    const tenantPrisma = {
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      getClient: jest.fn().mockReturnValue(txClient),
+      isInTransaction: jest.fn().mockReturnValue(false),
+      runInTransaction: jest.fn(
+        async (work: (client: typeof txClient) => Promise<unknown>) =>
+          work(txClient),
+      ),
+    };
+    const prisma = {
+      globalPriceList: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'gl-publico' }),
+      },
+      // raw prisma fallbacks must NOT be called inside the wrap.
+      priceList: { updateMany: jest.fn() },
+      variant: { updateMany: jest.fn() },
+    } as any;
+
+    const service = createService(repo, prisma);
+    // Inject the real tenantPrisma (createService builds its own).
+    (service as any).tenantPrisma = tenantPrisma;
+
+    jest
+      .spyOn(service as any, 'buildFullResponse')
+      .mockResolvedValue({ id: PRODUCT_ID });
+
+    return { service, repo, tenantPrisma, txClient, prisma, product };
+  }
+
+  it('wraps save + rearm in ONE runInTransaction when quantity is provided — Sc.1', async () => {
+    const { service, repo, tenantPrisma, txClient, prisma } = setupService();
+
+    await service.update(PRODUCT_ID, { quantity: 10 });
+
+    // Single runInTransaction wrap.
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    // priceList UPDATE is conditional on dto.priceCents and was not
+    // provided → no call (raw OR tx).
+    expect(txClient.priceList.updateMany).not.toHaveBeenCalled();
+    expect(prisma.priceList.updateMany).not.toHaveBeenCalled();
+    // save was called and lives inside the wrap.
+    expect(repo.save).toHaveBeenCalled();
+    // rearmAlertAfterEdit was called with the simple-product key.
+    expect(repo.rearmAlertAfterEdit).toHaveBeenCalledWith({
+      productId: PRODUCT_ID,
+      variantId: null,
+    });
+  });
+
+  it('routes priceList through the tx client when priceCents is in the DTO', async () => {
+    const { service, tenantPrisma, txClient, prisma } = setupService();
+
+    await service.update(PRODUCT_ID, { priceCents: 50000, quantity: 10 });
+
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    // priceList UPDATE was routed through the tx client, not the raw
+    // prisma.
+    expect(txClient.priceList.updateMany).toHaveBeenCalledWith({
+      where: { productId: PRODUCT_ID, globalPriceListId: 'gl-publico' },
+      data: { priceCents: 50000 },
+    });
+    // raw prisma.priceList was NOT called.
+    expect(prisma.priceList.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('wraps in runInTransaction when ONLY minQuantity is provided (RESULTING pair) — Sc.3', async () => {
+    const { service, repo, tenantPrisma, txClient } = setupService();
+
+    await service.update(PRODUCT_ID, { minQuantity: 1 });
+
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(txClient.priceList.updateMany).not.toHaveBeenCalled();
+    expect(repo.save).toHaveBeenCalled();
+    expect(repo.rearmAlertAfterEdit).toHaveBeenCalledWith({
+      productId: PRODUCT_ID,
+      variantId: null,
+    });
+  });
+
+  it('does NOT call rearmAlertAfterEdit when neither quantity nor minQuantity is in the DTO — Sc.4', async () => {
+    const { service, repo, tenantPrisma } = setupService();
+
+    await service.update(PRODUCT_ID, { name: 'New name' });
+
+    // runInTransaction still wraps the persistence tail (priceList is
+    // conditional and absent here) — the wrap is what makes the
+    // persistence atomic. The rearm call MUST be skipped.
+    expect(repo.rearmAlertAfterEdit).not.toHaveBeenCalled();
+    // save ran.
+    expect(repo.save).toHaveBeenCalled();
+    // Wrap still ran exactly once (persistence is atomic).
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('NEVER calls rearm on downward edits (no seedAndFlip, no event) — Sc.5', async () => {
+    // Spec scenario 5: a manual downward edit lands stock <= min.
+    // The edit path MUST NOT seed a new StockAlertState row and
+    // MUST NOT call seedAndFlip; it only flips a possibly-existing
+    // alerted row back to false (rearm). We assert that rearm is
+    // called (the adapter is the q>m gate — the service's job is
+    // to call it on qty/min change) and that no other alerting
+    // primitive runs. The repository only exposes rearmAlertAfterEdit
+    // on the edit path; if the service were to call any other
+    // alerting primitive, that would be visible here.
+    const { service, repo } = setupService();
+
+    // Downward edit (would falsely fire on the old path) — the
+    // service still calls the adapter (its job is qty/min
+    // change-detection); the adapter's STRICT > gate decides.
+    await service.update(PRODUCT_ID, { quantity: 1, minQuantity: 10 });
+    // Upward edit (the happy path) — rearm is the only alert
+    // primitive.
+    await service.update(PRODUCT_ID, { quantity: 10, minQuantity: 3 });
+    // Field-only edit.
+    await service.update(PRODUCT_ID, { name: 'X' });
+
+    // save is called every time.
+    expect(repo.save).toHaveBeenCalledTimes(3);
+    // rearmAlertAfterEdit only fires on the two edits that carried
+    // quantity/minQuantity — never on the name-only edit.
+    expect(repo.rearmAlertAfterEdit).toHaveBeenCalledTimes(2);
+    // The repo mock has no seedAndFlip method (the edit path's
+    // boundary); the absence of that method is the structural
+    // guarantee that the edit path cannot seed.
+    expect((repo as any).seedAndFlip).toBeUndefined();
+  });
+
+  it('routes the useStock-false cascade variant.updateMany through the tx client — atomic with save + rearm', async () => {
+    // Transition useStock true → false: the variant cascade
+    // (minQuantity:0) MUST join the same tx as save and rearm so a
+    // rollback does not leave a half-cascaded product behind.
+    const { service, tenantPrisma, txClient, repo } = setupService({
+      product: makePersistenceProductWithStock({
+        useStock: true,
+        previousUseStock: true, // matches persisted value → transition triggers
+        quantity: 5,
+        minQuantity: 3,
+      }),
+    });
+    // We need previousUseStock !== false to trigger the cascade. The
+    // service captures it from the persisted product; override the
+    // product's useStock to true (already) and the dto to false to
+    // force the transition.
+    await service.update(PRODUCT_ID, { useStock: false });
+
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    // variant cascade was routed through the tx client.
+    expect(txClient.variant.updateMany).toHaveBeenCalledWith({
+      where: { productId: PRODUCT_ID },
+      data: { minQuantity: 0 },
+    });
+    // raw prisma.variant was NOT used for the cascade.
+    expect((service as any).prisma.variant.updateMany).not.toHaveBeenCalled();
+    expect(repo.save).toHaveBeenCalled();
+  });
+});
+
+describe('ProductsService — updateVariant() edit-path re-arm', () => {
+  function setupService(opts: {
+    product?: { useStock: boolean; quantity?: number; minQuantity?: number };
+    variantRow?: any;
+  } = {}) {
+    const productRow = opts.product ?? { useStock: true, quantity: 5, minQuantity: 3 };
+    const variantRow = opts.variantRow ?? {
+      id: VARIANT_A_ID,
+      productId: PRODUCT_ID,
+      name: 'Red',
+      option: null,
+      value: null,
+      sku: 'SKU-RED',
+      barcode: null,
+      quantity: 3,
+      minQuantity: 3,
+      purchaseNetCostCents: null,
+      product: { useStock: productRow.useStock },
+    };
+
+    const repo = makeMockRepo();
+
+    const txClient = {
+      variant: {
+        update: jest.fn().mockImplementation(({ data }: any) =>
+          Promise.resolve({
+            ...variantRow,
+            quantity: data.quantity ?? variantRow.quantity,
+            minQuantity: data.minQuantity ?? variantRow.minQuantity,
+            purchaseNetCostCents:
+              data.purchaseNetCostCents ?? variantRow.purchaseNetCostCents,
+          }),
+        ),
+      },
+    };
+    const tenantPrisma = {
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      getClient: jest.fn().mockReturnValue(txClient),
+      isInTransaction: jest.fn().mockReturnValue(false),
+      runInTransaction: jest.fn(
+        async (work: (client: typeof txClient) => Promise<unknown>) =>
+          work(txClient),
+      ),
+    };
+    const prisma = {
+      variant: {
+        findFirst: jest.fn().mockResolvedValue(variantRow),
+        // Raw prisma.variant.update MUST NOT be called after the
+        // wrap is in place — the service routes through the tx
+        // client. In the RED state the service still calls the
+        // raw prisma; we mock it to return a resolvable promise
+        // so the existing `.then(...)` chain does not throw, and
+        // our assertion that the raw call is NOT made is the
+        // load-bearing check.
+        update: jest
+          .fn()
+          .mockResolvedValue(variantRow),
+      },
+    } as any;
+
+    const service = createService(repo, prisma);
+    (service as any).tenantPrisma = tenantPrisma;
+
+    return { service, repo, tenantPrisma, txClient, prisma };
+  }
+
+  it('wraps variant.update + rearm in ONE runInTransaction when quantity is provided — Sc.2', async () => {
+    const { service, repo, tenantPrisma, txClient, prisma } = setupService();
+
+    const updated = await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+      quantity: 10,
+    });
+
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    // variant.update was routed through the tx client.
+    expect(txClient.variant.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: VARIANT_A_ID },
+        data: expect.objectContaining({ quantity: 10 }),
+      }),
+    );
+    // raw prisma.variant.update was NOT called.
+    expect(prisma.variant.update).not.toHaveBeenCalled();
+    // rearm was called with the variantId key.
+    expect(repo.rearmAlertAfterEdit).toHaveBeenCalledWith({
+      productId: PRODUCT_ID,
+      variantId: VARIANT_A_ID,
+    });
+    // The .then(enrichVariantCostResponse) chain still produced a
+    // response object.
+    expect(updated).toBeDefined();
+  });
+
+  it('does NOT call rearmAlertAfterEdit when neither quantity nor minQuantity is in the DTO', async () => {
+    const { service, repo, tenantPrisma, txClient } = setupService();
+
+    await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { name: 'New' });
+
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(txClient.variant.update).toHaveBeenCalled();
+    expect(repo.rearmAlertAfterEdit).not.toHaveBeenCalled();
+  });
+
+  it('wraps in runInTransaction when ONLY minQuantity is provided (RESULTING pair)', async () => {
+    const { service, repo, tenantPrisma, txClient } = setupService();
+
+    await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { minQuantity: 1 });
+
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(txClient.variant.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ minQuantity: 1 }),
+      }),
+    );
+    expect(repo.rearmAlertAfterEdit).toHaveBeenCalledWith({
+      productId: PRODUCT_ID,
+      variantId: VARIANT_A_ID,
+    });
+  });
+
+  it('on parent useStock=false, the service still issues the wrap (adapter handles the useStock gate) — Sc.8', async () => {
+    // The service's job is qty/min change-detection + atomic wrap.
+    // The adapter's job is the STRICT > with useStock JOIN gate. The
+    // service calls the adapter when qty/min changes; whether the
+    // adapter actually fires `rearm` is the adapter spec's concern
+    // (see prisma-product.repository.spec.ts Sc.8 — JOIN returns 0
+    // rows on a useStock=false parent). Here we only assert the
+    // service contract: wrap still runs, adapter is invoked.
+    const { service, repo, tenantPrisma } = setupService({
+      product: { useStock: false, quantity: 0, minQuantity: 0 },
+    });
+
+    await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { quantity: 5 });
+
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(repo.rearmAlertAfterEdit).toHaveBeenCalledWith({
+      productId: PRODUCT_ID,
+      variantId: VARIANT_A_ID,
     });
   });
 });

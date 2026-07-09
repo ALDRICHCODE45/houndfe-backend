@@ -662,33 +662,75 @@ export class ProductsService {
       );
     }
 
-    // Update default price list if priceCents provided
+    // Resolve the default global price-list id OUTSIDE the wrap.
+    // It is a static config lookup, not a write; pulling it inside
+    // the tx would just hold a connection longer than necessary.
+    let defaultGlobalListId: string | null = null;
     if (dto.priceCents !== undefined) {
       const defaultGlobalList = await this.prisma.globalPriceList.findFirst({
         where: { isDefault: true },
         select: { id: true },
       });
-
-      if (defaultGlobalList) {
-        await this.prisma.priceList.updateMany({
-          where: {
-            productId: id,
-            globalPriceListId: defaultGlobalList.id,
-          },
-          data: { priceCents: dto.priceCents },
-        });
-      }
+      defaultGlobalListId = defaultGlobalList?.id ?? null;
     }
+
+    // Edit-path re-arm gate: the rearm is meaningful only when
+    // `quantity` or `minQuantity` is part of this edit. Without this
+    // gate a `name`-only edit would still hit the rearm SELECT and
+    // call `rearm`, which is wasteful (and would rearm on a non-stock
+    // change in some edge cases).
+    const rearmEligible =
+      dto.quantity !== undefined || dto.minQuantity !== undefined;
 
     product.updatedAt = new Date();
-    await this.productRepo.save(product);
 
-    if (dto.useStock === false && previousUseStock !== false) {
-      await this.prisma.variant.updateMany({
-        where: { productId: id },
-        data: { minQuantity: 0 },
-      });
-    }
+    // Persistence tail + rearm MUST commit atomically. The
+    // `runInTransaction` boundary sets the CLS slot that
+    // `tenantPrisma.getClient()` reads; routing the raw
+    // `this.prisma.*` writes through `getClient()` joins them to the
+    // same tx as `productRepo.save` (which already uses `getClient()`)
+    // and the new rearm call. The change-gate (above) is applied
+    // INSIDE the wrap so the rearm method's ambient-tx guard sees an
+    // active tx and the rearm SELECT commits with the writes.
+    await this.tenantPrisma.runInTransaction(async () => {
+      // 1. priceList write — re-routed through the tx client so it
+      //    joins the wrap.
+      if (dto.priceCents !== undefined && defaultGlobalListId) {
+        await this.tenantPrisma
+          .getClient()
+          .priceList.updateMany({
+            where: {
+              productId: id,
+              globalPriceListId: defaultGlobalListId,
+            },
+            data: { priceCents: dto.priceCents },
+          });
+      }
+
+      // 2. Save the product (already uses getClient() internally).
+      await this.productRepo.save(product);
+
+      // 3. useStock true→false cascade: zero out variant minQuantity.
+      //    Also re-routed through getClient() to join the same tx.
+      if (dto.useStock === false && previousUseStock !== false) {
+        await this.tenantPrisma
+          .getClient()
+          .variant.updateMany({
+            where: { productId: id },
+            data: { minQuantity: 0 },
+          });
+      }
+
+      // 4. Edit-path re-arm (gated on qty/min presence). The
+      //    repository re-reads the RESULTING pair inside the tx
+      //    and decides STRICT > with the useStock gate.
+      if (rearmEligible) {
+        await this.productRepo.rearmAlertAfterEdit({
+          productId: id,
+          variantId: null,
+        });
+      }
+    });
 
     return this.buildFullResponse(id);
   }
@@ -831,45 +873,75 @@ export class ProductsService {
 
     const variantUsesStock = variant.product?.useStock ?? true;
 
-    return this.prisma.variant
-      .update({
-        where: { id: variantId },
-        data: {
-          ...(dto.name !== undefined ||
-          dto.option !== undefined ||
-          dto.value !== undefined
-            ? {
-                name: this.resolveVariantName(
-                  dto.name ?? variant.name,
-                  dto.option !== undefined ? dto.option : variant.option,
-                  dto.value !== undefined ? dto.value : variant.value,
-                ),
-              }
-            : {}),
-          ...(dto.option !== undefined
-            ? { option: dto.option?.trim() || null }
-            : {}),
-          ...(dto.value !== undefined
-            ? { value: dto.value?.trim() || null }
-            : {}),
-          ...(dto.sku !== undefined
-            ? { sku: dto.sku?.trim().toUpperCase() || null }
-            : {}),
-          ...(dto.barcode !== undefined
-            ? { barcode: dto.barcode?.trim() || null }
-            : {}),
-          ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
-          ...(variantUsesStock
-            ? dto.minQuantity !== undefined
-              ? { minQuantity: dto.minQuantity }
-              : {}
-            : { minQuantity: 0 }),
-          ...(dto.purchaseNetCostCents !== undefined
-            ? { purchaseNetCostCents: dto.purchaseNetCostCents }
-            : {}),
-        },
+    // Edit-path re-arm gate: a name/sku/barcode/purchaseNetCostCents
+    // edit does not change the resulting `(quantity, minQuantity)`
+    // pair and MUST NOT trigger a rearm call (waste, and would
+    // touch the alert state machine on a non-stock edit).
+    const rearmEligible =
+      dto.quantity !== undefined || dto.minQuantity !== undefined;
+
+    // Persistence + rearm MUST commit atomically. `variant.update`
+    // is re-routed through `getClient()` so it joins the tx that
+    // `runInTransaction` sets in the CLS slot. The conditional
+    // data spread (variantUsesStock vs minQuantity:0) and the
+    // `.then(enrichVariantCostResponse)` chain are preserved
+    // verbatim.
+    return this.tenantPrisma
+      .runInTransaction(async () => {
+        const updatedVariant = await this.tenantPrisma
+          .getClient()
+          .variant.update({
+            where: { id: variantId },
+            data: {
+              ...(dto.name !== undefined ||
+              dto.option !== undefined ||
+              dto.value !== undefined
+                ? {
+                    name: this.resolveVariantName(
+                      dto.name ?? variant.name,
+                      dto.option !== undefined ? dto.option : variant.option,
+                      dto.value !== undefined ? dto.value : variant.value,
+                    ),
+                  }
+                : {}),
+              ...(dto.option !== undefined
+                ? { option: dto.option?.trim() || null }
+                : {}),
+              ...(dto.value !== undefined
+                ? { value: dto.value?.trim() || null }
+                : {}),
+              ...(dto.sku !== undefined
+                ? { sku: dto.sku?.trim().toUpperCase() || null }
+                : {}),
+              ...(dto.barcode !== undefined
+                ? { barcode: dto.barcode?.trim() || null }
+                : {}),
+              ...(dto.quantity !== undefined
+                ? { quantity: dto.quantity }
+                : {}),
+              ...(variantUsesStock
+                ? dto.minQuantity !== undefined
+                  ? { minQuantity: dto.minQuantity }
+                  : {}
+                : { minQuantity: 0 }),
+              ...(dto.purchaseNetCostCents !== undefined
+                ? { purchaseNetCostCents: dto.purchaseNetCostCents }
+                : {}),
+            },
+          });
+
+        if (rearmEligible) {
+          await this.productRepo.rearmAlertAfterEdit({
+            productId,
+            variantId,
+          });
+        }
+
+        return updatedVariant;
       })
-      .then((updatedVariant) => this.enrichVariantCostResponse(updatedVariant));
+      .then((updatedVariant) =>
+        this.enrichVariantCostResponse(updatedVariant),
+      );
   }
 
   async removeVariant(productId: string, variantId: string) {
