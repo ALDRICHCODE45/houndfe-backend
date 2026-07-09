@@ -151,8 +151,19 @@ export function buildLowStockFunctions(
       }
 
       // (1) load-config — runs in the tenant's CLS scope.
-      const config = (await input.tenantRunner.runWithTenant(tenantId, () =>
-        ctx.step.run('load-config', () =>
+      //
+      // CRITICAL ordering: `runWithTenant` (which opens the CLS scope via
+      // `cls.run`) MUST be INSIDE the `step.run` callback, not wrapping it.
+      // Inngest re-executes the function body multiple times per run and
+      // memoizes completed steps; the step callback therefore runs in a
+      // DIFFERENT async context than the outer function body. If the CLS
+      // scope were opened outside `step.run`, AsyncLocalStorage would be
+      // lost by the time the Prisma query inside `find()` reads
+      // `cls.get('tenantId')` → "Tenant context required". Seeding CLS
+      // INSIDE the step callback keeps the scope alive on the same tick as
+      // the query.
+      const config = (await ctx.step.run('load-config', () =>
+        input.tenantRunner.runWithTenant(tenantId, () =>
           input.notificationConfigRepository.find(),
         ),
       )) as {
@@ -175,8 +186,11 @@ export function buildLowStockFunctions(
         return { skipped: 'no-recipients' };
       }
 
-      const recipients = (await input.tenantRunner.runWithTenant(tenantId, () =>
-        ctx.step.run('resolve-recipients', async () =>
+      // Same CLS ordering as load-config: seed the tenant scope INSIDE the
+      // step callback so AsyncLocalStorage is alive when the user-lookup's
+      // Prisma query reads `cls.get('tenantId')`.
+      const recipients = (await ctx.step.run('resolve-recipients', async () =>
+        input.tenantRunner.runWithTenant(tenantId, () =>
           input.userEmailLookup.resolveEmailsByUserIds(recipientUserIds),
         ),
       )) as string[];

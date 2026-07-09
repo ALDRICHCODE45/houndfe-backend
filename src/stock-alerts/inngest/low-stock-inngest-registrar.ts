@@ -21,7 +21,7 @@
  * + Slice F.2 wiring.
  */
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import { InngestService } from '../../inngest/inngest.service';
 import { MAILER, type IMailer } from '../../notifications/email/mailer.port';
 import {

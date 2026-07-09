@@ -34,7 +34,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
-import type { PrismaService } from '../../shared/prisma/prisma.service';
+import { PrismaService } from '../../shared/prisma/prisma.service';
 import type { DispatchableOutboxEvent } from '../../shared/outbox/outbox.types';
 import { LowStockOutboxDispatcher } from './low-stock-outbox.dispatcher';
 

@@ -46,6 +46,7 @@ import {
   All,
   Controller,
   Inject,
+  type OnApplicationBootstrap,
   Req,
   Res,
   type Request,
@@ -58,16 +59,32 @@ import { InngestService } from './inngest.service';
 type ExpressMiddleware = (req: unknown, res: unknown, next?: unknown) => void;
 
 @Controller('api/inngest')
-export class InngestController {
-  private readonly handler: ExpressMiddleware;
+export class InngestController implements OnApplicationBootstrap {
+  private handler: ExpressMiddleware | undefined;
 
   constructor(
     private readonly inngestService: InngestService,
-    @Inject(ConfigService) configService: ConfigService,
-  ) {
-    // Build the handler ONCE — `serve()` returns a middleware that
-    // closes over the configured client, functions, and signing key.
-    const signingKey = configService.get<string>('INNGEST_SIGNING_KEY');
+    @Inject(ConfigService) private readonly configService: ConfigService,
+  ) {}
+
+  /**
+   * Build the `serve()` handler in `OnApplicationBootstrap` — NOT in the
+   * constructor.
+   *
+   * The Inngest SDK's `serve({ functions })` SNAPSHOTS the function list
+   * when the handler is created; it does not re-read the array per
+   * request. Feature modules register their functions in `OnModuleInit`
+   * (e.g. `LowStockInngestRegistrar`), which Nest runs AFTER every
+   * controller/provider constructor. Building `serve()` in the
+   * constructor therefore captured an EMPTY list and the endpoint
+   * reported `function_count: 0` to the Dev Server / Cloud sync forever.
+   *
+   * `OnApplicationBootstrap` fires AFTER all `OnModuleInit` hooks across
+   * every module have completed, so by this point the registry is fully
+   * populated. We snapshot it once here — a single, correct build.
+   */
+  onApplicationBootstrap(): void {
+    const signingKey = this.configService.get<string>('INNGEST_SIGNING_KEY');
 
     this.handler = serve({
       client: this.inngestService.getClient(),
@@ -88,6 +105,18 @@ export class InngestController {
    */
   @All()
   handle(@Req() req: Request, @Res() res: Response): void {
+    if (!this.handler) {
+      // Defensive: onApplicationBootstrap always runs before the HTTP
+      // server accepts requests, so this branch should be unreachable.
+      // Guard rather than crash if the lifecycle order ever changes.
+      // `Response` here is Nest's generic type (no typed .status/.json),
+      // so reach for the underlying express response via a narrow cast.
+      const expressRes = res as unknown as {
+        status: (code: number) => { json: (body: unknown) => void };
+      };
+      expressRes.status(503).json({ error: 'Inngest handler not ready' });
+      return;
+    }
     this.handler(req, res);
   }
 }

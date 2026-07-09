@@ -47,6 +47,17 @@ import { buildEnvValidationSchema } from './env.validation';
 const APP_MODULE_CONFIG_OPTIONS = {
   isGlobal: true,
   validationSchema: buildEnvValidationSchema(),
+  // `ignoreEnvFile: true` makes this suite DETERMINISTIC: it validates
+  // ONLY the `process.env` each test sets, never the developer's local
+  // `.env` on disk. Without it, a value like `INNGEST_DEV=true` in a
+  // dev `.env` (needed for the local Inngest Dev Server) leaks into the
+  // staging/production boot cases and flips their expected outcome —
+  // the suite would pass or fail depending on each machine's `.env`,
+  // which is exactly the non-determinism a fail-closed boot test must
+  // not have. AppModule itself does NOT ignore the env file (it loads
+  // real config); this test deliberately diverges so it can exercise
+  // the Joi schema against controlled inputs.
+  ignoreEnvFile: true,
   // app.module.ts:43-51 omits validationOptions; @nestjs/config then
   // defaults to `{ abortEarly: false, allowUnknown: true }`, which is
   // exactly what we pin here — so this test mirrors the effective
@@ -66,8 +77,38 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
   // — we mutate NODE_ENV and the inngest/resend keys.
   const ORIGINAL_ENV = process.env;
 
+  /**
+   * The non-Inngest/Resend keys the schema ALWAYS requires (DATABASE_URL,
+   * JWT_*, SPACES_*). With `ignoreEnvFile: true` the suite no longer
+   * inherits these from the developer's `.env`, so the "boot SUCCEEDS"
+   * cases must seed them explicitly to reach the Inngest/Resend gates
+   * under test. The rejection cases don't need them — they fail on the
+   * gate before base-key validation matters (abortEarly:false reports
+   * all at once, and the rejection assertions only match the gate keys).
+   */
+  const seedBaseRequiredEnv = (): void => {
+    process.env.DATABASE_URL = 'postgresql://user:pass@localhost:5432/test';
+    process.env.JWT_SECRET = 'x'.repeat(32);
+    process.env.JWT_REFRESH_SECRET = 'y'.repeat(32);
+    process.env.SPACES_ENDPOINT = 'https://sfo3.digitaloceanspaces.com';
+    process.env.SPACES_REGION = 'sfo3';
+    process.env.SPACES_BUCKET = 'test-bucket';
+    process.env.SPACES_ACCESS_KEY_ID = 'test-access-key';
+    process.env.SPACES_SECRET_ACCESS_KEY = 'test-secret-key';
+    process.env.SPACES_PUBLIC_BASE_URL = 'https://cdn.example.com';
+  };
+
   beforeEach(() => {
     process.env = { ...ORIGINAL_ENV };
+    // Clear the Inngest/Resend gate keys so each test starts from a known
+    // baseline and sets ONLY what it needs (defends against ORIGINAL_ENV
+    // carrying a dev `.env`'s INNGEST_DEV=true into staging/prod cases).
+    delete process.env.INNGEST_DEV;
+    delete process.env.INNGEST_SIGNING_KEY;
+    delete process.env.INNGEST_EVENT_KEY;
+    delete process.env.RESEND_API_KEY;
+    delete process.env.MAIL_FROM;
+    delete process.env.APP_WEB_URL;
   });
 
   afterEach(() => {
@@ -162,6 +203,7 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
   });
 
   it('boot SUCCEEDS in development with no keys (Dev Server / dev-mailer fallback)', async () => {
+    seedBaseRequiredEnv();
     process.env.NODE_ENV = 'development';
     delete process.env.INNGEST_SIGNING_KEY;
     delete process.env.INNGEST_EVENT_KEY;
@@ -184,6 +226,7 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
   });
 
   it('boot SUCCEEDS in production with a complete key set (happy path)', async () => {
+    seedBaseRequiredEnv();
     process.env.NODE_ENV = 'production';
     process.env.INNGEST_SIGNING_KEY = 'signkey-prod';
     process.env.INNGEST_EVENT_KEY = 'evt-prod';
@@ -206,6 +249,7 @@ describe('AppModule boot wiring (D-hardening — fail-closed)', () => {
   });
 
   it('boot SUCCEEDS in staging with INNGEST keys but no RESEND_API_KEY / MAIL_FROM / APP_WEB_URL (dev-logger fallback is allowed in staging)', async () => {
+    seedBaseRequiredEnv();
     process.env.NODE_ENV = 'staging';
     process.env.INNGEST_SIGNING_KEY = 'signkey-staging';
     process.env.INNGEST_EVENT_KEY = 'evt-staging';

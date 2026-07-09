@@ -39,7 +39,7 @@ import { ConfigService } from '@nestjs/config';
 import { OutboxEventStatus } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { InngestService } from '../../inngest/inngest.service';
-import type { PrismaService } from '../../shared/prisma/prisma.service';
+import { PrismaService } from '../../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { TenantRunnerService } from '../../shared/tenant/tenant-runner.service';
 import type { DispatchableOutboxEvent } from '../../shared/outbox/outbox.types';

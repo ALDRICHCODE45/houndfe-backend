@@ -32,10 +32,7 @@
  * mirrors the production behavior: 401 on unsigned production requests,
  * 200 on signed ones.
  */
-import {
-  INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import request from 'supertest';
@@ -52,34 +49,34 @@ jest.mock('inngest/express', () => {
   // decides 200 vs 401 based on the presence of an X-Inngest-Signature
   // header — exactly mirroring how the real SDK gates prod requests.
   return {
-    serve: jest.fn((opts: {
-      client: unknown;
-      functions: unknown;
-      signingKey?: string;
-    }) => {
-      serveCalls.push(opts);
-      return (req: any, res: any) => {
-        if (opts.signingKey) {
-          // Signed mode: reject unsigned requests with 401.
-          if (!req.headers['x-inngest-signature']) {
-            res.status(401).json({
-              error: 'unauthorized',
-              message: 'missing signature',
-            });
-            return;
+    serve: jest.fn(
+      (opts: { client: unknown; functions: unknown; signingKey?: string }) => {
+        serveCalls.push(opts);
+        return (req: any, res: any) => {
+          if (opts.signingKey) {
+            // Signed mode: reject unsigned requests with 401.
+            if (!req.headers['x-inngest-signature']) {
+              res.status(401).json({
+                error: 'unauthorized',
+                message: 'missing signature',
+              });
+              return;
+            }
           }
-        }
-        // Signed OR dev (no key): echo 200.
-        res.status(200).json({ ok: true, framework: 'mock' });
-      };
-    }),
+          // Signed OR dev (no key): echo 200.
+          res.status(200).json({ ok: true, framework: 'mock' });
+        };
+      },
+    ),
   };
 });
 
 import { InngestController } from './inngest.controller';
 import { InngestService } from './inngest.service';
 
-function makeConfigService(values: Record<string, string | undefined>): ConfigService {
+function makeConfigService(
+  values: Record<string, string | undefined>,
+): ConfigService {
   return {
     get: jest.fn((key: string) => values[key]),
     getOrThrow: jest.fn((key: string) => {
@@ -99,10 +96,18 @@ function makeConfigService(values: Record<string, string | undefined>): ConfigSe
  */
 function makeInngestService() {
   const client = { id: 'houndfe-backend', __mockClient: true };
+  // Mirrors the real service's internal registry. `getFunctions()`
+  // returns a snapshot of whatever is registered AT CALL TIME — the
+  // controller must call it in onApplicationBootstrap (after
+  // registration), not in the constructor (before). Tests push into
+  // this array to simulate a registrar's OnModuleInit before bootstrap.
+  const registry: unknown[] = [];
   return {
     getClient: jest.fn().mockReturnValue(client),
-    getFunctions: jest.fn().mockReturnValue([]),
+    getFunctions: jest.fn(() => [...registry]),
     getClientId: jest.fn().mockReturnValue('houndfe-backend'),
+    // Test seam: simulate a feature module registering a function.
+    __registry: registry,
     // for type compatibility with the real service surface the controller uses:
     send: jest.fn(),
     getEventKey: jest.fn(),
@@ -144,11 +149,42 @@ describe('InngestController — /api/inngest (D.3)', () => {
     await app.close();
   });
 
-  it('wires serve() at construction with the configured client and signing key (memoized)', () => {
+  it('wires serve() at onApplicationBootstrap with the configured client and signing key (memoized)', () => {
+    // app.init() (in beforeEach) fires onApplicationBootstrap, which is
+    // where the controller builds serve() — exactly once.
     expect(serveCalls).toHaveLength(1);
     expect(serveCalls[0].client).toBe(inngestService.getClient());
     expect(serveCalls[0].signingKey).toBe('signkey_test_abc123');
     expect(serveCalls[0].functions).toEqual([]);
+  });
+
+  it('does NOT build serve() in the constructor — only at onApplicationBootstrap (regression: "no functions registered")', async () => {
+    // The Inngest SDK snapshots the function list when serve() is built.
+    // Feature modules register functions in OnModuleInit, which runs
+    // AFTER controller constructors but BEFORE onApplicationBootstrap.
+    // If the controller built serve() in its constructor it would
+    // capture an empty list — the endpoint would report function_count:0
+    // forever. This test proves serve() is deferred and sees functions
+    // registered in between.
+    serveCalls.length = 0;
+    const svc = makeInngestService();
+    const cfg = makeConfigService({
+      INNGEST_SIGNING_KEY: 'signkey_test_abc123',
+    });
+
+    const controller = new InngestController(svc, cfg);
+    // Constructor must NOT have built serve() yet.
+    expect(serveCalls).toHaveLength(0);
+
+    // Simulate a feature module's OnModuleInit registering a function
+    // (happens after construction, before bootstrap).
+    const fakeFn = { id: 'low-stock-email' };
+    (svc as unknown as { __registry: unknown[] }).__registry.push(fakeFn);
+
+    // Now the app bootstrap phase builds serve() — with the function present.
+    controller.onApplicationBootstrap();
+    expect(serveCalls).toHaveLength(1);
+    expect(serveCalls[0].functions).toContain(fakeFn);
   });
 
   it('returns 401 for an unsigned request when a signing key is configured (signed mode)', async () => {

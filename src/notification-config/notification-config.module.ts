@@ -37,6 +37,10 @@ import { NOTIFICATION_CONFIG_REPOSITORY } from './domain/notification-config.rep
       useClass: PrismaNotificationConfigRepository,
     },
   ],
-  exports: [NotificationConfigService],
+  // Exports NotificationConfigService for HTTP/service consumers, and the
+  // NOTIFICATION_CONFIG_REPOSITORY token so top-level providers wired in
+  // AppModule (LowStockInngestRegistrar — Slice F.2) can inject the repo
+  // directly for the Inngest low-stock function build.
+  exports: [NotificationConfigService, NOTIFICATION_CONFIG_REPOSITORY],
 })
 export class NotificationConfigModule {}
