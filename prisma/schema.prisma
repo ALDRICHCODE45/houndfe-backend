@@ -255,6 +255,8 @@ model Tenant {
   saleComments              SaleComment[]
   saleIdempotencies         SaleIdempotency[]
   saleFolioCounters         SaleFolioCounter[]
+  salePromotionApplied      SalePromotionApplied[]
+  salePromotionVetoes       SalePromotionVeto[]
   outboxEvents              OutboxEvent[]
   customers                 Customer[]
   customerAddresses         CustomerAddress[]
@@ -682,6 +684,8 @@ model Sale {
   comments           SaleComment[]
   idempotencyRecords SaleIdempotency[]
   receiptEvidences   ReceiptEvidence[]
+  appliedPromotion   SalePromotionApplied?
+  promotionVetoes    SalePromotionVeto[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
@@ -718,18 +722,25 @@ model SaleItem {
   prePriceCentsBeforeDiscount Int?
   discountTitle               String?
   discountedAt                DateTime?
+  // Promotion back-reference for audit (per-line). Nullable so existing rows
+  // remain valid; SetNull preserves the sale row if the promotion is deleted.
+  promotionId                 String?
   tenantId                    String
   createdAt                   DateTime              @default(now())
   updatedAt                   DateTime              @updatedAt
 
   // Relations
-  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  product Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
-  variant Variant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale      Sale       @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product   Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variant   Variant?   @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  // Promotion back-reference (audit). SetNull preserves the sale row if the
+  // promotion is later deleted. Nullable so existing rows remain valid.
+  promotion Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
 
   @@index([saleId])
   @@index([tenantId])
+  @@index([promotionId])
   @@map("sale_items")
 }
 
@@ -1087,6 +1098,9 @@ model Promotion {
   customers   PromotionCustomer[]
   priceLists  PromotionPriceList[]
   daysOfWeek  PromotionDayOfWeek[]
+  appliedItems SaleItem[]
+  appliedSales SalePromotionApplied[]
+  saleVetoes   SalePromotionVeto[]
 
   @@index([tenantId])
   @@index([type])
@@ -1154,6 +1168,55 @@ model PromotionDayOfWeek {
   @@unique([promotionId, day])
   @@index([tenantId])
   @@map("promotion_days_of_week")
+}
+
+// ============================================================================
+// SALE <-> PROMOTION JUNCTION TABLES (additive, Work Unit 1)
+// ============================================================================
+
+// ORDER_DISCOUNT audit row. One per sale (enforced by @@unique([saleId])).
+// Snapshot fields preserve the applied discount at recompute time even if
+// the referenced Promotion is later edited or deleted.
+model SalePromotionApplied {
+  id                 String               @id @default(uuid())
+  tenantId           String
+  saleId             String
+  promotionId        String?
+  discountType       SaleItemDiscountType?
+  discountValue      Int?
+  discountAmountCents Int
+  discountTitle      String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale      Sale       @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  // SetNull: if the Promotion is later deleted we keep the audit row but
+  // null the FK. Mirrors SaleItem.promotionId SetNull.
+  promotion Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+
+  @@unique([saleId])
+  @@index([tenantId])
+  @@map("sale_promotion_applied")
+}
+
+// Per-draft veto set: a (sale, promotion) pair the seller has dismissed.
+// promotionId is non-null and Cascade so the unique pair stays well-defined
+// even if the promotion is later deleted. Mirrors PromotionTargetItem etc.
+model SalePromotionVeto {
+  id          String   @id @default(uuid())
+  tenantId    String
+  saleId      String
+  promotionId String
+  createdAt   DateTime @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale      Sale      @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  @@unique([saleId, promotionId])
+  @@index([tenantId])
+  @@map("sale_promotion_vetoes")
 }
 
 // ============================================================================
