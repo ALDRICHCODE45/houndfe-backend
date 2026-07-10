@@ -368,6 +368,13 @@ export class PrismaSaleRepository implements ISaleRepository {
 
     return {
       ...sale.toResponse(),
+      // Work Unit 4 (C2) — surface order-discount-aware totals for draft
+      // preview. `sale.toResponse()` returns `totalCents = this.totalCents`
+      // which is 0 for drafts; spreading `previewTotals()` AFTER replaces
+      // `totalCents` and `discountCents` with the order-discount-adjusted
+      // values and adds `subtotalCents`. Same helper the charge path uses
+      // (Unit 5) — single source of truth, no math duplication.
+      ...sale.previewTotals(),
       customer: saleData.customer
         ? {
             id: saleData.customer.id,

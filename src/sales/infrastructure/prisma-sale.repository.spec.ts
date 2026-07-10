@@ -2233,6 +2233,60 @@ describe('PrismaSaleRepository', () => {
       });
     });
 
+    // -------- 3b. findDraftResponseById — Work Unit 4 (4.5) C2 draft preview totals --------
+    describe('findDraftResponseById — draft preview totals reflect order discount (C2)', () => {
+      // RED test for task 4.5. A draft with an ORDER_DISCOUNT applied MUST show
+      // `totalCents = Σ(unitPrice·qty) − orderDiscountCents` and `discountCents
+      // = orderDiscountCents` in its preview response (not 0).
+      //
+      // Default makeMockSaleData items: [{ unitPriceCents: 1000, quantity: 2 }]
+      // → per-line subtotal = 2000 cents.
+      it('returns totalCents/discountCents adjusted by the applied order discount (C2)', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          makeMockSaleData({
+            customer: null,
+            shippingAddress: null,
+            promotionVetoes: [],
+            appliedPromotion: {
+              promotionId: 'promo-order-1',
+              discountType: 'amount',
+              discountValue: 500,
+              discountAmountCents: 500,
+              discountTitle: '$500 off',
+            },
+          }),
+        );
+
+        const result = await repo.findDraftResponseById('sale-promo');
+
+        expect(result).not.toBeNull();
+        // subtotal = 1000 * 2 = 2000
+        expect(result?.subtotalCents).toBe(2000);
+        // order discount = 500 cents
+        expect(result?.discountCents).toBe(500);
+        // totalCents = 2000 - 500 = 1500 (NOT 0)
+        expect(result?.totalCents).toBe(1500);
+      });
+
+      it('returns totalCents = subtotalCents when no order discount is applied', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          makeMockSaleData({
+            customer: null,
+            shippingAddress: null,
+            promotionVetoes: [],
+            appliedPromotion: null,
+          }),
+        );
+
+        const result = await repo.findDraftResponseById('sale-promo-no-discount');
+
+        expect(result).not.toBeNull();
+        expect(result?.subtotalCents).toBe(2000);
+        expect(result?.discountCents).toBe(0);
+        expect(result?.totalCents).toBe(2000);
+      });
+    });
+
     // -------- 4. findDraftsByUserId --------
     describe('findDraftsByUserId loads veto + applied-order-promo + item promotionId (W2)', () => {
       it('includes vetoes and appliedPromotion in the prisma query', async () => {

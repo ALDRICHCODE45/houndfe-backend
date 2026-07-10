@@ -20,6 +20,11 @@ import {
   EntityNotFoundError,
   BusinessRuleViolationError,
 } from '../shared/domain/domain-error';
+import type {
+  IPosEvaluatePromotionsUseCase,
+  PosEvalInput,
+} from '../promotions/application/ports/pos-evaluate-promotions.port';
+import { POS_EVALUATE_PROMOTIONS_USE_CASE } from '../promotions/application/ports/pos-evaluate-promotions.port';
 import {
   SaleDraftOpenedEvent,
   SaleItemAddedEvent,
@@ -420,7 +425,142 @@ export class SalesService {
     > = {
       findActiveBySale: async () => [],
     },
+    /**
+     * Work Unit 4 — POS promotion engine port (Symbol-injected from
+     * PromotionsModule). Drives `recomputePromotions(sale)` after every
+     * draft mutation. Hexagonal: we depend on the I/O contract only, not
+     * on promotions internals.
+     */
+    @Inject(POS_EVALUATE_PROMOTIONS_USE_CASE)
+    private readonly posEvaluatePromotions: IPosEvaluatePromotionsUseCase,
   ) {}
+
+  /**
+   * Work Unit 4 — recompute POS promotions on the in-memory sale aggregate.
+   *
+   * Called AFTER each draft mutation (`addItem`, `updateItemQuantity`,
+   * `removeItem`, `assignCustomer`) and BEFORE the caller's `saleRepo.save`.
+   * Same method is re-used at charge time by Unit 5 inside the charge tx.
+   *
+   * Steps (per design.md — "Recompute Placement & Transaction Boundaries"):
+   *  1. Collect the DISTINCT non-null `appliedPriceListId`s from the items
+   *     and batch-resolve each to its `globalPriceListId` via
+   *     `ProductsService.resolvePriceListGlobalIds` (C1 fix). Tenant-scoped.
+   *  2. Build `PosEvalInput` from the CURRENT item state:
+   *       `effectiveUnitPriceCents = item.prePriceCentsBeforeDiscount
+   *         ?? item.unitPriceCents`  ← S3, pre-promo base so recompute
+   *         never compounds on re-entry.
+   *       `appliedGlobalPriceListId` from the resolution map (null when no
+   *         override or unresolved).
+   *       `hasManualDiscount = item.discountType !== null
+   *         && item.promotionId === null`  ← auto-promo skips this line.
+   *  3. Call the engine (`posEvaluatePromotions.evaluate(input)`).
+   *  4. For each item that currently has a PROMO-sourced discount
+   *     (`promotionId != null`), clear it before applying new results.
+   *     Manual free-form discount lines are LEFT untouched (manual wins).
+   *  5. Apply each engine `lines[]` result via `item.applyDiscount({...,
+   *     promotionId})`. Engine only emits lines for items that should
+   *     receive an auto promo, so manual-discount lines are not affected.
+   *  6. Set or clear `sale.appliedOrderPromotion` from `result.order`.
+   *
+   * Recompute mutates the in-memory aggregate only — the caller persists
+   * via `saleRepo.save` after this method returns. This keeps the
+   * transactional boundary where the existing `save` lives.
+   *
+   * SAFE NO-OP: when no promotions match, the engine returns empty `lines`
+   * and `null` `order`. Every item with `promotionId != null` is cleared
+   * (recompute drops the auto-promo) and no new discount is applied. So
+   * the ~1600 existing tests that don't involve promotions stay green:
+   * the default mock returns empty and the in-memory sale ends in the
+   * same state it was in (modulo any prior auto-promo being cleared,
+   * which doesn't happen when no engine result is wired).
+   */
+  private async recomputePromotions(sale: Sale): Promise<void> {
+    // (1) Distinct non-null appliedPriceListIds.
+    const distinctPriceListIds = [
+      ...new Set(
+        sale.items
+          .map((item) => item.appliedPriceListId)
+          .filter((id): id is string => id != null && id !== ''),
+      ),
+    ];
+
+    // (2) Batch-resolve to globalPriceListId (C1 fix).
+    const priceListGlobalIdMap =
+      distinctPriceListIds.length > 0
+        ? await this.productsService.resolvePriceListGlobalIds(
+            distinctPriceListIds,
+          )
+        : new Map<string, string>();
+
+    // (3) Build engine input from current item state.
+    const input: PosEvalInput = {
+      now: new Date(),
+      customerId: sale.customerId,
+      lines: sale.items.map((item) => ({
+        itemId: item.id,
+        productId: item.productId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+        effectiveUnitPriceCents:
+          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
+        appliedPriceListId: item.appliedPriceListId,
+        appliedGlobalPriceListId:
+          item.appliedPriceListId != null
+            ? (priceListGlobalIdMap.get(item.appliedPriceListId) ?? null)
+            : null,
+        hasManualDiscount:
+          item.discountType !== null && item.promotionId === null,
+      })),
+      vetoedPromotionIds: sale.vetoedPromotionIds,
+      optedInManualPromotionIds: sale.optedInManualPromotionIds,
+    };
+
+    // (4) Evaluate via the engine port.
+    const result = await this.posEvaluatePromotions.evaluate(input);
+
+    // (5) Clear prior PROMO-sourced discounts before applying the new results.
+    //     Manual free-form discounts are skipped (no `promotionId`).
+    for (const item of sale.items) {
+      if (item.promotionId != null) {
+        item.removeDiscount();
+      }
+    }
+
+    // (6) Apply each per-line result. Engine guarantees `hasManualDiscount
+    //     === false` for lines it returns, so manual-discount lines are
+    //     never re-applied here.
+    for (const lineResult of result.lines) {
+      const item = sale.items.find((i) => i.id === lineResult.itemId);
+      if (!item) continue;
+      item.applyDiscount({
+        type: lineResult.discountType,
+        amountCents:
+          lineResult.discountType === 'amount'
+            ? lineResult.discountValue
+            : undefined,
+        percent:
+          lineResult.discountType === 'percentage'
+            ? lineResult.discountValue
+            : undefined,
+        discountTitle: lineResult.discountTitle,
+        promotionId: lineResult.promotionId,
+      });
+    }
+
+    // (7) Set or clear the sale-level ORDER_DISCOUNT snapshot.
+    if (result.order) {
+      sale.setAppliedOrderPromotion({
+        promotionId: result.order.promotionId,
+        discountType: result.order.discountType,
+        discountValue: result.order.discountValue,
+        discountAmountCents: result.order.discountAmountCents,
+        discountTitle: result.order.discountTitle,
+      });
+    } else {
+      sale.clearAppliedOrderPromotion();
+    }
+  }
 
   private async publishSaleConfirmedEvent(input: {
     saleId: string;
@@ -607,6 +747,11 @@ export class SalesService {
       unitPriceCurrency: 'MXN',
     });
 
+    // Work Unit 4 — recompute POS promotions on the new item state BEFORE
+    // persisting. Same-engine call (so charge totals will agree with the
+    // draft preview once Unit 5 wires charge).
+    await this.recomputePromotions(sale);
+
     await this.saleRepo.save(sale);
 
     this.eventEmitter.emit(
@@ -672,6 +817,9 @@ export class SalesService {
     // Update quantity
     sale.updateItemQuantity(itemId, dto.quantity);
 
+    // Work Unit 4 — recompute (qty change can flip eligibility / re-apply).
+    await this.recomputePromotions(sale);
+
     await this.saleRepo.save(sale);
 
     this.eventEmitter.emit(
@@ -731,6 +879,9 @@ export class SalesService {
     }
 
     sale.removeItem(itemId);
+    // Work Unit 4 — recompute so any ORDER_DISCOUNT no longer references the
+    // removed item, and remaining items re-evaluate against the new state.
+    await this.recomputePromotions(sale);
     await this.saleRepo.save(sale);
     this.eventEmitter.emit(
       'sale.item.removed',
@@ -1276,6 +1427,10 @@ export class SalesService {
     const previousCustomerId = sale.customerId;
     const previousShippingAddressId = sale.shippingAddressId;
     sale.assignCustomer(dto.customerId, dto.shippingAddressId ?? null);
+    // Work Unit 4 — recompute (SPECIFIC / REGISTERED_ONLY promos only become
+    // eligible after the eligible customer is assigned; removing the customer
+    // would re-drop them).
+    await this.recomputePromotions(sale);
     await this.saleRepo.save(sale);
 
     this.eventEmitter.emit(
