@@ -467,6 +467,7 @@ describe('Promotion Entity', () => {
         type: 'PRODUCT_DISCOUNT',
         method: 'MANUAL',
         status: 'ACTIVE',
+        manuallyEnded: false,
         startDate: null,
         endDate: null,
         customerScope: 'ALL',
@@ -494,16 +495,19 @@ describe('Promotion Entity', () => {
       expect(promo.appliesTo).toBe('PRODUCTS');
     });
 
-    it('should preserve ENDED status from persistence (manual override)', () => {
+    it('should preserve manuallyEnded=true from persistence and force ENDED even when dates are valid', () => {
       const now = new Date();
+      const futureStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const futureEnd = new Date(now.getTime() + 24 * 60 * 60 * 1000);
       const promo = Promotion.fromPersistence({
         id: BASE_ID,
-        title: 'Ended Promo',
+        title: 'Manually Ended Promo',
         type: 'ORDER_DISCOUNT',
         method: 'MANUAL',
-        status: 'ENDED',
-        startDate: null,
-        endDate: now,
+        status: 'ACTIVE',
+        manuallyEnded: true,
+        startDate: futureStart,
+        endDate: futureEnd,
         customerScope: 'ALL',
         discountType: 'PERCENTAGE',
         discountValue: 10,
@@ -522,7 +526,347 @@ describe('Promotion Entity', () => {
         daysOfWeek: [],
       });
 
+      expect(promo.getEffectiveStatus(now)).toBe('ENDED');
+    });
+
+    it('should default manuallyEnded to false when not provided in persistence data', () => {
+      const now = new Date();
+      const promo = Promotion.fromPersistence({
+        id: BASE_ID,
+        title: 'Default Flag',
+        type: 'ORDER_DISCOUNT',
+        method: 'MANUAL',
+        status: 'ACTIVE',
+        startDate: null,
+        endDate: null,
+        customerScope: 'ALL',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        minPurchaseAmountCents: null,
+        appliesTo: null,
+        buyQuantity: null,
+        getQuantity: null,
+        getDiscountPercent: null,
+        buyTargetType: null,
+        getTargetType: null,
+        createdAt: now,
+        updatedAt: now,
+        targetItems: [],
+        customers: [],
+        priceLists: [],
+        daysOfWeek: [],
+      });
+
+      expect(promo.manuallyEnded).toBe(false);
+    });
+  });
+
+  // ============================================================
+  // READ-TIME STATUS DERIVATION (the corrupt-row scenario)
+  // ============================================================
+  describe('getEffectiveStatus — read-time date derivation', () => {
+    const validBase = {
+      id: BASE_ID,
+      title: 'Window Promo',
+      type: 'ORDER_DISCOUNT' as const,
+      method: 'AUTOMATIC' as const,
+      discountType: 'PERCENTAGE' as const,
+      discountValue: 10,
+    };
+
+    it('should return ACTIVE when today is inside [startDate, endDate] even if persisted status is ENDED (corrupt-row regression)', () => {
+      const promo = Promotion.fromPersistence({
+        id: BASE_ID,
+        title: 'Window Promo',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        status: 'ENDED', // stale column from a past deriveStatus() snapshot
+        manuallyEnded: false, // never operator-ended
+        startDate: new Date('2026-07-09T00:00:00.000Z'),
+        endDate: new Date('2026-07-11T00:00:00.000Z'),
+        customerScope: 'ALL',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        minPurchaseAmountCents: null,
+        appliesTo: null,
+        buyQuantity: null,
+        getQuantity: null,
+        getDiscountPercent: null,
+        buyTargetType: null,
+        getTargetType: null,
+        createdAt: new Date('2026-07-09T00:00:00.000Z'),
+        updatedAt: new Date('2026-07-09T00:00:00.000Z'),
+        targetItems: [],
+        customers: [],
+        priceLists: [],
+        daysOfWeek: [],
+      });
+
+      const now = new Date('2026-07-10T00:00:00.000Z');
+      expect(promo.getEffectiveStatus(now)).toBe('ACTIVE');
+    });
+
+    it('should return SCHEDULED when startDate is in the future, regardless of persisted status', () => {
+      const futureStart = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const futureEnd = new Date(Date.now() + 48 * 60 * 60 * 1000);
+      const promo = Promotion.fromPersistence({
+        id: BASE_ID,
+        title: 'Future Promo',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        status: 'ENDED',
+        manuallyEnded: false,
+        startDate: futureStart,
+        endDate: futureEnd,
+        customerScope: 'ALL',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        minPurchaseAmountCents: null,
+        appliesTo: null,
+        buyQuantity: null,
+        getQuantity: null,
+        getDiscountPercent: null,
+        buyTargetType: null,
+        getTargetType: null,
+        createdAt: futureStart,
+        updatedAt: futureStart,
+        targetItems: [],
+        customers: [],
+        priceLists: [],
+        daysOfWeek: [],
+      });
+
+      expect(promo.getEffectiveStatus(new Date())).toBe('SCHEDULED');
+    });
+
+    it('should return ENDED when endDate has passed without any DB write (read-time derivation)', () => {
+      const pastStart = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      const pastEnd = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const promo = Promotion.fromPersistence({
+        id: BASE_ID,
+        title: 'Expired Promo',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        status: 'ACTIVE', // stale persisted column
+        manuallyEnded: false,
+        startDate: pastStart,
+        endDate: pastEnd,
+        customerScope: 'ALL',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        minPurchaseAmountCents: null,
+        appliesTo: null,
+        buyQuantity: null,
+        getQuantity: null,
+        getDiscountPercent: null,
+        buyTargetType: null,
+        getTargetType: null,
+        createdAt: pastStart,
+        updatedAt: pastStart,
+        targetItems: [],
+        customers: [],
+        priceLists: [],
+        daysOfWeek: [],
+      });
+
       expect(promo.getEffectiveStatus(new Date())).toBe('ENDED');
+    });
+
+    it('should still be ACTIVE at exactly endDate instant (inclusive bound)', () => {
+      const endDateInstant = new Date('2026-07-11T00:00:00.000Z');
+      const promo = Promotion.fromPersistence({
+        id: BASE_ID,
+        title: 'Inclusive Bound Promo',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        status: 'ACTIVE',
+        manuallyEnded: false,
+        startDate: new Date('2026-07-09T00:00:00.000Z'),
+        endDate: endDateInstant,
+        customerScope: 'ALL',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        minPurchaseAmountCents: null,
+        appliesTo: null,
+        buyQuantity: null,
+        getQuantity: null,
+        getDiscountPercent: null,
+        buyTargetType: null,
+        getTargetType: null,
+        createdAt: new Date('2026-07-09T00:00:00.000Z'),
+        updatedAt: new Date('2026-07-09T00:00:00.000Z'),
+        targetItems: [],
+        customers: [],
+        priceLists: [],
+        daysOfWeek: [],
+      });
+
+      expect(promo.getEffectiveStatus(endDateInstant)).toBe('ACTIVE');
+    });
+
+    it('should return ACTIVE when no dates are set, regardless of persisted status column', () => {
+      const promo = Promotion.fromPersistence({
+        id: BASE_ID,
+        title: 'No Dates Promo',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        status: 'ENDED',
+        manuallyEnded: false,
+        startDate: null,
+        endDate: null,
+        customerScope: 'ALL',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        minPurchaseAmountCents: null,
+        appliesTo: null,
+        buyQuantity: null,
+        getQuantity: null,
+        getDiscountPercent: null,
+        buyTargetType: null,
+        getTargetType: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        targetItems: [],
+        customers: [],
+        priceLists: [],
+        daysOfWeek: [],
+      });
+
+      expect(promo.getEffectiveStatus(new Date())).toBe('ACTIVE');
+    });
+  });
+
+  // ============================================================
+  // manuallyEnded override (operator-initiated ENDED)
+  // ============================================================
+  describe('manuallyEnded override', () => {
+    const validBase = {
+      id: BASE_ID,
+      title: 'Manual Override Promo',
+      type: 'ORDER_DISCOUNT' as const,
+      method: 'AUTOMATIC' as const,
+      discountType: 'PERCENTAGE' as const,
+      discountValue: 10,
+    };
+
+    it('should default manuallyEnded to false on create()', () => {
+      const promo = Promotion.create(validBase);
+      expect(promo.manuallyEnded).toBe(false);
+    });
+
+    it('should set manuallyEnded to true when end() is called', () => {
+      const promo = Promotion.create(validBase);
+      promo.end();
+      expect(promo.manuallyEnded).toBe(true);
+    });
+
+    it('should force ENDED even if dates would say SCHEDULED (future window)', () => {
+      const futureStart = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const futureEnd = new Date(Date.now() + 48 * 60 * 60 * 1000);
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: futureStart,
+        endDate: futureEnd,
+      });
+      promo.end();
+      expect(promo.getEffectiveStatus(new Date())).toBe('ENDED');
+    });
+
+    it('should force ENDED even if dates would say ACTIVE (current window)', () => {
+      const pastStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const futureEnd = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: pastStart,
+        endDate: futureEnd,
+      });
+      promo.end();
+      expect(promo.getEffectiveStatus(new Date())).toBe('ENDED');
+    });
+
+    it('should be idempotent — calling end() twice keeps manuallyEnded=true', () => {
+      const promo = Promotion.create(validBase);
+      promo.end();
+      promo.end();
+      expect(promo.manuallyEnded).toBe(true);
+    });
+
+    it('should keep manuallyEnded=false even when dates naturally expire (date-expired is NOT a manual end)', () => {
+      const pastStart = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      const pastEnd = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: pastStart,
+        endDate: pastEnd,
+      });
+      expect(promo.manuallyEnded).toBe(false);
+    });
+  });
+
+  // ============================================================
+  // recomputeStatus — write-time status sync
+  // ============================================================
+  describe('recomputeStatus()', () => {
+    const validBase = {
+      id: BASE_ID,
+      title: 'Recompute Promo',
+      type: 'ORDER_DISCOUNT' as const,
+      method: 'AUTOMATIC' as const,
+      discountType: 'PERCENTAGE' as const,
+      discountValue: 10,
+    };
+
+    it('should derive ACTIVE from dates when manuallyEnded=false', () => {
+      const pastStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const futureEnd = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: pastStart,
+        endDate: futureEnd,
+      });
+      // Persisted status would have been ACTIVE at create() time.
+      // After recompute with current dates it should still be ACTIVE.
+      promo.recomputeStatus();
+      expect(promo.status).toBe('ACTIVE');
+    });
+
+    it('should derive ENDED from dates when endDate is in the past', () => {
+      const pastStart = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      const pastEnd = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: pastStart,
+        endDate: pastEnd,
+      });
+      promo.recomputeStatus();
+      expect(promo.status).toBe('ENDED');
+    });
+
+    it('should derive SCHEDULED from dates when startDate is in the future', () => {
+      const futureStart = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const futureEnd = new Date(Date.now() + 48 * 60 * 60 * 1000);
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: futureStart,
+        endDate: futureEnd,
+      });
+      promo.recomputeStatus();
+      expect(promo.status).toBe('SCHEDULED');
+    });
+
+    it('should set status=ENDED when manuallyEnded=true even if dates would say ACTIVE', () => {
+      const pastStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const futureEnd = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: pastStart,
+        endDate: futureEnd,
+      });
+      promo.end();
+      // recompute should NOT clear the manuallyEnded flag.
+      promo.recomputeStatus();
+      expect(promo.status).toBe('ENDED');
+      expect(promo.manuallyEnded).toBe(true);
     });
   });
 

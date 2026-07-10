@@ -201,6 +201,12 @@ export class PromotionsService {
       }));
     }
 
+    // Recompute the persisted `status` from the (possibly new) date window.
+    // Honours `manuallyEnded` as a permanent override, so a manually-ended
+    // promotion stays ENDED across title-only edits, and a promotion whose
+    // dates just moved back inside the window flips ACTIVE again.
+    existing.recomputeStatus();
+
     existing.updatedAt = new Date();
     const saved = await this.repo.save(existing);
     return saved.toResponse();

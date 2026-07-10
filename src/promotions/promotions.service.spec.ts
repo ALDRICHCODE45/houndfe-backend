@@ -44,6 +44,7 @@ function makePromotion(overrides: Partial<PromotionProps> = {}): Promotion {
     type: 'PRODUCT_DISCOUNT',
     method: 'AUTOMATIC',
     status: 'ACTIVE',
+    manuallyEnded: false,
     startDate: null,
     endDate: null,
     customerScope: 'ALL',
@@ -747,6 +748,100 @@ describe('PromotionsService', () => {
         appliesTo: 'CATEGORIES',
       });
     });
+
+    // ============================================================
+    // STATUS RECOMPUTE — invariant: update() must re-derive status
+    // from the (possibly new) date window, and must NOT clear a
+    // manuallyEnded override.
+    // ============================================================
+
+    it('should flip status back to ACTIVE when extending endDate past today (date-only expiration regression)', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        // Existing promotion whose window already expired.
+        const existing = makePromotion({
+          status: 'ENDED',
+          startDate: new Date('2026-06-01T00:00:00.000Z'),
+          endDate: new Date('2026-07-05T00:00:00.000Z'),
+        });
+
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((promotion: Promotion) => promotion),
+        });
+        const prisma = makePrisma();
+        const service = makeService(repo, prisma);
+
+        const result = await service.update(
+          'promo-1',
+          updateDto({ endDate: '2026-08-01T00:00:00.000Z' }),
+        );
+
+        expect(result.status).toBe('ACTIVE');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should flip status to SCHEDULED when pushing startDate into the future on update', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        const existing = makePromotion({
+          status: 'ACTIVE',
+          startDate: new Date('2026-07-01T00:00:00.000Z'),
+          endDate: new Date('2026-08-01T00:00:00.000Z'),
+        });
+
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((promotion: Promotion) => promotion),
+        });
+        const prisma = makePrisma();
+        const service = makeService(repo, prisma);
+
+        const result = await service.update(
+          'promo-1',
+          updateDto({ startDate: '2026-07-20T00:00:00.000Z' }),
+        );
+
+        expect(result.status).toBe('SCHEDULED');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should preserve manuallyEnded override on update() when dates are valid in-window', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        // Operator manually ended this promotion before; dates are still valid.
+        const existing = makePromotion({
+          status: 'ENDED',
+          manuallyEnded: true,
+          startDate: new Date('2026-07-01T00:00:00.000Z'),
+          endDate: new Date('2026-08-01T00:00:00.000Z'),
+        });
+
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((promotion: Promotion) => promotion),
+        });
+        const prisma = makePrisma();
+        const service = makeService(repo, prisma);
+
+        // Editing just the title — should NOT silently un-end the promo.
+        const result = await service.update('promo-1', updateDto({ title: 'New Title' }));
+
+        expect(result.status).toBe('ENDED');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   // ── remove ────────────────────────────────────────────────
@@ -813,7 +908,10 @@ describe('PromotionsService', () => {
       });
 
       // second findById call returns updated
-      const endedPromo = makePromotion({ status: 'ENDED' });
+      const endedPromo = makePromotion({
+        status: 'ENDED',
+        manuallyEnded: true,
+      });
       repo.findById
         .mockResolvedValueOnce(existing)
         .mockResolvedValueOnce(endedPromo);
@@ -842,6 +940,7 @@ describe('PromotionsService', () => {
     it('should be idempotent — ending already ENDED promotion succeeds', async () => {
       const alreadyEnded = makePromotion({
         status: 'ENDED',
+        manuallyEnded: true,
         endDate: new Date('2026-01-05'),
       });
       const repo = makeRepo({

@@ -1067,6 +1067,11 @@ model Promotion {
   type          PromotionType
   method        PromotionMethod
   status        PromotionStatus @default(ACTIVE)
+  // Operator-initiated ENDED (via Promotion.end()). Additive, defaulted, and
+  // distinct from the date-derived `status` column — read-time derivation
+  // honours this flag as a permanent override, while a stale `status`
+  // column value alone MUST NOT force ENDED when dates are still valid.
+  manuallyEnded Boolean         @default(false)
   startDate     DateTime?
   endDate       DateTime?
   customerScope CustomerScope   @default(ALL)

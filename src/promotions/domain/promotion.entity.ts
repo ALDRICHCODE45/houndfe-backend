@@ -60,6 +60,17 @@ export interface PromotionProps {
   type: PromotionType;
   method: PromotionMethod;
   status: PromotionStatus;
+  /**
+   * Operator-initiated ENDED (set via `Promotion.end()`). Distinct from the
+   * `status` column: `manuallyEnded` is a permanent override honoured by
+   * `getEffectiveStatus()` at READ time, while the `status` column is a
+   * write-through hint that can become stale when dates change.
+   *
+   * Optional in `PromotionProps` for backward compatibility with existing
+   * fixtures / call sites that pre-date the column. `fromPersistence()`
+   * defaults to `false` so the entity invariant always holds.
+   */
+  manuallyEnded?: boolean;
   startDate: Date | null;
   endDate: Date | null;
   customerScope: CustomerScope;
@@ -89,6 +100,7 @@ export interface CreatePromotionParams {
   title: string;
   type: PromotionType;
   method: PromotionMethod;
+  manuallyEnded?: boolean;
   startDate?: Date | null;
   endDate?: Date | null;
   customerScope?: CustomerScope;
@@ -187,14 +199,18 @@ function validateDateRange(
 }
 
 /**
- * Derive initial status from dates (used in create).
- * Manual ENDED override is applied AFTER this in end().
+ * Derive status from dates alone. Used as a write-through hint for the
+ * `status` column and as a building block for `getEffectiveStatus()`.
+ *
+ * `manuallyEnded` is NOT consulted here — that flag lives outside the
+ * date-window semantics and is honoured only at READ time by
+ * `getEffectiveStatus()`. This keeps the derivation pure and testable.
  */
 function deriveStatus(
   startDate: Date | null,
   endDate: Date | null,
+  now: Date = new Date(),
 ): PromotionStatus {
-  const now = new Date();
   if (endDate && endDate < now) return 'ENDED';
   if (startDate && startDate > now) return 'SCHEDULED';
   return 'ACTIVE';
@@ -209,6 +225,12 @@ export class Promotion {
   public readonly type: PromotionType;
   public readonly method: PromotionMethod;
   public status: PromotionStatus;
+  /**
+   * Operator-initiated ENDED. Permanent until an explicit re-activation.
+   * Honoured by `getEffectiveStatus()` regardless of the (possibly stale)
+   * `status` column or the current date window.
+   */
+  public manuallyEnded: boolean;
   public startDate: Date | null;
   public endDate: Date | null;
   public customerScope: CustomerScope;
@@ -234,6 +256,7 @@ export class Promotion {
     this.type = props.type;
     this.method = props.method;
     this.status = props.status;
+    this.manuallyEnded = props.manuallyEnded ?? false;
     this.startDate = props.startDate;
     this.endDate = props.endDate;
     this.customerScope = props.customerScope;
@@ -274,12 +297,19 @@ export class Promotion {
     validateByType(params);
 
     const now = new Date();
+    const manuallyEnded = params.manuallyEnded ?? false;
     return new Promotion({
       id: params.id,
       title,
       type: params.type,
       method: params.method,
-      status: deriveStatus(startDate, endDate),
+      // Persisted column = the date-derived hint. If the operator has
+      // manually ended, reflect that immediately so list filtering works
+      // even before the row is re-fetched from the DB.
+      status: manuallyEnded
+        ? 'ENDED'
+        : deriveStatus(startDate, endDate, now),
+      manuallyEnded,
       startDate,
       endDate,
       customerScope: params.customerScope ?? 'ALL',
@@ -307,6 +337,9 @@ export class Promotion {
   static fromPersistence(data: PromotionProps): Promotion {
     return new Promotion({
       ...data,
+      // Default the manual flag to false so legacy callers / tests that
+      // construct PromotionProps without the new field keep working.
+      manuallyEnded: data.manuallyEnded ?? false,
       createdAt: new Date(data.createdAt),
       updatedAt: new Date(data.updatedAt),
       startDate: data.startDate ? new Date(data.startDate) : null,
@@ -315,11 +348,18 @@ export class Promotion {
   }
 
   // ============================================================
-  // getEffectiveStatus — lazy evaluation
+  // getEffectiveStatus — READ-TIME single source of truth.
+  //
+  // Decision contract:
+  //   1. manuallyEnded is the ONLY permanent override (operator intent).
+  //   2. Otherwise the status is derived from the current date window,
+  //      ALWAYS — the persisted `status` column is treated as a stale
+  //      write-through hint and is NEVER trusted to force ENDED.
+  //   3. Bounds are inclusive: at exactly endDate the promotion is still
+  //      ACTIVE / eligible (matches the POS engine invariant).
   // ============================================================
   getEffectiveStatus(now: Date): PromotionStatus {
-    // Manual ENDED override is permanent
-    if (this.status === 'ENDED') return 'ENDED';
+    if (this.manuallyEnded) return 'ENDED';
 
     if (this.startDate && this.startDate > now) return 'SCHEDULED';
     if (this.endDate && this.endDate < now) return 'ENDED';
@@ -327,15 +367,29 @@ export class Promotion {
   }
 
   // ============================================================
-  // end() — irreversibly end the promotion
+  // end() — irreversibly end the promotion (operator intent).
+  // Sets both the manual override flag and the persisted status column
+  // so list-filter queries continue to match this row without read-time
+  // recomputation.
   // ============================================================
   end(): void {
-    if (this.status === 'ENDED') return; // idempotent
+    if (this.manuallyEnded) return; // idempotent
+    this.manuallyEnded = true;
     this.status = 'ENDED';
     if (!this.endDate) {
       this.endDate = new Date();
     }
     this.updatedAt = new Date();
+  }
+
+  // ============================================================
+  // recomputeStatus — write-time status sync.
+  // Service calls this on every update() so the persisted `status`
+  // column reflects the current date window. Manually-ended rows stay
+  // ENDED; the manual flag is never silently cleared by this method.
+  // ============================================================
+  recomputeStatus(now: Date = new Date()): void {
+    this.status = this.getEffectiveStatus(now);
   }
 
   // ============================================================

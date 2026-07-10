@@ -50,6 +50,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             type: promotion.type,
             method: promotion.method,
             status: promotion.status,
+            manuallyEnded: promotion.manuallyEnded,
             startDate: promotion.startDate,
             endDate: promotion.endDate,
             customerScope: promotion.customerScope,
@@ -68,6 +69,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             title: promotion.title,
             method: promotion.method,
             status: promotion.status,
+            manuallyEnded: promotion.manuallyEnded,
             startDate: promotion.startDate,
             endDate: promotion.endDate,
             customerScope: promotion.customerScope,
@@ -276,6 +278,12 @@ export class PrismaPromotionRepository implements IPromotionRepository {
       where: { id },
       data: {
         status,
+        // Persist the manual override whenever we are told the promotion
+        // is ENDED via the application layer (i.e. `endPromotion`).
+        // For ACTIVE/SCHEDULED writes we leave the flag untouched to
+        // preserve operator intent across status flips that originated
+        // outside of `Promotion.end()`.
+        ...(status === 'ENDED' ? { manuallyEnded: true } : {}),
         ...(endDate !== undefined ? { endDate } : {}),
         updatedAt: new Date(),
       },
@@ -292,6 +300,10 @@ export class PrismaPromotionRepository implements IPromotionRepository {
       type: data.type,
       method: data.method,
       status: data.status,
+      // `data.manuallyEnded` is a non-null boolean column (default false).
+      // The `?? false` guard keeps the mapper safe even if Prisma's typed
+      // shape ever changes (e.g. selects without the column).
+      manuallyEnded: data.manuallyEnded ?? false,
       startDate: data.startDate,
       endDate: data.endDate,
       customerScope: data.customerScope,
