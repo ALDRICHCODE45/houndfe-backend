@@ -502,4 +502,132 @@ describe('SaleItem Entity', () => {
       expect(item.discountTitle).toBeNull();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 3 — Task 3.1: promotionId on SaleItem
+  //
+  // Distinguishes promo-sourced discounts (applyDiscount called with
+  // `promotionId`) from manual free-form discounts (applyDiscount called
+  // without `promotionId`). The getter and toResponse expose the field so the
+  // engine and the response payload can discriminate at recompute / preview
+  // time.
+  // ---------------------------------------------------------------------------
+  describe('promotionId - promo-sourced vs manual free-form discount', () => {
+    function createItem(): SaleItem {
+      return SaleItem.create({
+        id: 'i-promo',
+        saleId: 's1',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+    }
+
+    it('defaults promotionId to null on a fresh item', () => {
+      const item = createItem();
+      expect(item.promotionId).toBeNull();
+    });
+
+    it('treats a discount applied without promotionId as manual free-form', () => {
+      const item = createItem();
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 10,
+        discountTitle: 'manual override',
+      });
+      expect(item.discountType).toBe('percentage');
+      expect(item.promotionId).toBeNull();
+    });
+
+    it('treats a discount applied with promotionId as promo-sourced', () => {
+      const item = createItem();
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 15,
+        discountTitle: 'Spring Promo',
+        promotionId: 'promo-1',
+      });
+      expect(item.discountType).toBe('percentage');
+      expect(item.promotionId).toBe('promo-1');
+      expect(item.discountTitle).toBe('Spring Promo');
+    });
+
+    it('replaces a manual discount with a promo-sourced one (and updates promotionId)', () => {
+      const item = createItem();
+      item.applyDiscount({
+        type: 'amount',
+        amountCents: 100,
+        discountTitle: 'manual',
+      });
+      expect(item.promotionId).toBeNull();
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 20,
+        discountTitle: 'Promo X',
+        promotionId: 'promo-x',
+      });
+      expect(item.promotionId).toBe('promo-x');
+      expect(item.discountType).toBe('percentage');
+      expect(item.discountTitle).toBe('Promo X');
+      expect(item.discountAmountCents).toBe(200);
+    });
+
+    it('exposes promotionId via toResponse for API consumers', () => {
+      const item = createItem();
+      item.applyDiscount({
+        type: 'amount',
+        amountCents: 250,
+        discountTitle: 'manual',
+      });
+      const manualResponse = item.toResponse();
+      expect(manualResponse.promotionId).toBeNull();
+
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 25,
+        discountTitle: 'Promo Z',
+        promotionId: 'promo-z',
+      });
+      const promoResponse = item.toResponse();
+      expect(promoResponse.promotionId).toBe('promo-z');
+    });
+
+    it('clears promotionId on removeDiscount', () => {
+      const item = createItem();
+      item.applyDiscount({
+        type: 'amount',
+        amountCents: 100,
+        promotionId: 'promo-1',
+      });
+      expect(item.promotionId).toBe('promo-1');
+      item.removeDiscount();
+      expect(item.promotionId).toBeNull();
+    });
+
+    it('preserves the baseline - discount >= 1 invariant when promotionId is set', () => {
+      const item = createItem();
+      expect(() =>
+        item.applyDiscount({
+          type: 'amount',
+          amountCents: 1000,
+          promotionId: 'promo-too-big',
+        }),
+      ).toThrow(/DISCOUNT_AMOUNT_INVALID/);
+    });
+
+    it('clamps the percent range when promotionId is set', () => {
+      const item = createItem();
+      expect(() =>
+        item.applyDiscount({
+          type: 'percentage',
+          percent: 100,
+          promotionId: 'promo-100',
+        }),
+      ).toThrow(/DISCOUNT_PERCENT_INVALID/);
+    });
+  });
 });

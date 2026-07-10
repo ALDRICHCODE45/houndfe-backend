@@ -21,6 +21,12 @@ export interface SaleItemProps {
   prePriceCentsBeforeDiscount?: number | null;
   discountTitle?: string | null;
   discountedAt?: Date | null;
+  /**
+   * Promotion back-reference. Null = manual free-form discount; set =
+   * discount was sourced from an applied Promotion (auto or manual opt-in).
+   * Defaults to null so existing manual-discount call sites remain unchanged.
+   */
+  promotionId?: string | null;
 }
 
 export interface ApplySaleItemDiscountInput {
@@ -29,6 +35,12 @@ export interface ApplySaleItemDiscountInput {
   percent?: number;
   discountTitle?: string;
   strategy?: 'replace' | 'skip';
+  /**
+   * Promotion back-reference (Unit 3+). When set, the discount is tagged as
+   * promo-sourced; when omitted, the discount is treated as a manual
+   * free-form override. Default: null (manual).
+   */
+  promotionId?: string | null;
 }
 
 export interface OverrideSaleItemPriceInput {
@@ -69,6 +81,7 @@ export class SaleItem {
     private _prePriceCentsBeforeDiscount: number | null,
     private _discountTitle: string | null,
     private _discountedAt: Date | null,
+    private _promotionId: string | null,
   ) {}
 
   static create(props: SaleItemProps): SaleItem {
@@ -111,6 +124,7 @@ export class SaleItem {
       props.prePriceCentsBeforeDiscount ?? null,
       props.discountTitle ?? null,
       props.discountedAt ?? null,
+      props.promotionId ?? null,
     );
   }
 
@@ -136,6 +150,7 @@ export class SaleItem {
       props.prePriceCentsBeforeDiscount ?? null,
       props.discountTitle ?? null,
       props.discountedAt ?? null,
+      props.promotionId ?? null,
     );
   }
 
@@ -189,6 +204,10 @@ export class SaleItem {
 
   get discountedAt(): Date | null {
     return this._discountedAt;
+  }
+
+  get promotionId(): string | null {
+    return this._promotionId;
   }
 
   changeQuantity(newQuantity: number): void {
@@ -257,6 +276,9 @@ export class SaleItem {
     this._discountTitle = input.discountTitle ?? null;
     this._discountedAt = new Date();
     this._unitPriceCents = baseline - discountAmountCents;
+    // Tag the discount as promo-sourced when input.promotionId is provided;
+    // null = manual free-form discount (existing call sites unchanged).
+    this._promotionId = input.promotionId ?? null;
   }
 
   removeDiscount(): void {
@@ -294,6 +316,7 @@ export class SaleItem {
     this._prePriceCentsBeforeDiscount = null;
     this._discountTitle = null;
     this._discountedAt = null;
+    this._promotionId = null;
   }
 
   toResponse() {
@@ -317,6 +340,7 @@ export class SaleItem {
       prePriceCentsBeforeDiscount: this.prePriceCentsBeforeDiscount,
       discountTitle: this.discountTitle,
       discountedAt: this.discountedAt,
+      promotionId: this.promotionId,
     };
   }
 }

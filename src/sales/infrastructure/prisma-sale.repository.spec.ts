@@ -43,6 +43,15 @@ function makeMockPrisma() {
       findUnique: jest.fn(),
       updateMany: jest.fn(),
     },
+    // Unit 3 — promotion persistence (sale_promotion_applied + sale_promotion_vetoes)
+    salePromotionApplied: {
+      deleteMany: jest.fn(),
+      upsert: jest.fn(),
+    },
+    salePromotionVeto: {
+      deleteMany: jest.fn(),
+      createMany: jest.fn(),
+    },
   } as any;
 }
 
@@ -1048,6 +1057,7 @@ describe('PrismaSaleRepository', () => {
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,
+            promotionId: null,
             tenantId: 'tenant-1',
           },
         ],
@@ -1154,6 +1164,7 @@ describe('PrismaSaleRepository', () => {
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,
+            promotionId: null,
             tenantId: 'tenant-1',
           },
         ],
@@ -1991,6 +2002,518 @@ describe('PrismaSaleRepository', () => {
             key: 'key-1',
           },
         },
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 3 — Tasks 3.5 / 3.6 / 3.7: Promotion persistence (W2 fix)
+  //
+  // CRITICAL (W2): every read mapper MUST load veto rows, the applied
+  // order-promo row, and item promotionId. If any mapper omits veto loading,
+  // a vetoed auto-promo silently re-applies on the next recompute.
+  //
+  // The four mappers under test:
+  //   1. findById
+  //   2. findByIdForUpdate
+  //   3. findDraftResponseById
+  //   4. findDraftsByUserId
+  // ---------------------------------------------------------------------------
+  describe('promotion persistence (Unit 3 — W2 round-trip)', () => {
+    function makeMockSaleData(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'sale-promo',
+        userId: 'user-1',
+        status: 'DRAFT',
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus: 'DELIVERED',
+        customerId: null,
+        shippingAddressId: null,
+        sellerUserId: null,
+        dueDate: null,
+        confirmedAt: null,
+        folio: null,
+        createdAt: new Date('2026-07-01'),
+        updatedAt: new Date('2026-07-01'),
+        items: [
+          {
+            id: 'item-promo-1',
+            saleId: 'sale-promo',
+            productId: 'p-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            discountType: null,
+            discountValue: null,
+            discountAmountCents: null,
+            prePriceCentsBeforeDiscount: null,
+            discountTitle: null,
+            discountedAt: null,
+            promotionId: 'promo-item-1',
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    function makeMockReloadedAfterSave(overrides: Record<string, unknown> = {}) {
+      // What findById returns after a save reload — includes the new relations.
+      return makeMockSaleData(overrides);
+    }
+
+    // -------- 1. findById --------
+    describe('findById loads veto + applied-order-promo + item promotionId (W2)', () => {
+      it('includes vetoes and appliedPromotion in the prisma query', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          makeMockSaleData({
+            promotionVetoes: [{ promotionId: 'promo-vetoed' }],
+            appliedPromotion: {
+              promotionId: 'promo-order',
+              discountType: 'amount',
+              discountValue: 500,
+              discountAmountCents: 500,
+              discountTitle: '$500 off',
+            },
+          }),
+        );
+
+        await repo.findById('sale-promo');
+
+        const call = prisma.sale.findUnique.mock.calls.at(-1)?.[0] as {
+          include: Record<string, unknown>;
+        };
+        expect(call.include).toHaveProperty('promotionVetoes');
+        expect(call.include).toHaveProperty('appliedPromotion');
+      });
+
+      it('maps vetoes + applied-promo + item promotionId into the aggregate', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          makeMockSaleData({
+            promotionVetoes: [
+              { promotionId: 'promo-vetoed-a' },
+              { promotionId: 'promo-vetoed-b' },
+            ],
+            appliedPromotion: {
+              promotionId: 'promo-order',
+              discountType: 'amount',
+              discountValue: 500,
+              discountAmountCents: 500,
+              discountTitle: '$500 off',
+            },
+          }),
+        );
+
+        const result = await repo.findById('sale-promo');
+
+        expect(result?.vetoedPromotionIds).toEqual([
+          'promo-vetoed-a',
+          'promo-vetoed-b',
+        ]);
+        expect(result?.appliedOrderPromotion).toEqual({
+          promotionId: 'promo-order',
+          discountType: 'amount',
+          discountValue: 500,
+          discountAmountCents: 500,
+          discountTitle: '$500 off',
+        });
+        expect(result?.items[0].promotionId).toBe('promo-item-1');
+      });
+    });
+
+    // -------- 2. findByIdForUpdate --------
+    describe('findByIdForUpdate loads veto + applied-order-promo + item promotionId (W2)', () => {
+      it('includes vetoes and appliedPromotion in the prisma query', async () => {
+        prisma.$queryRaw.mockResolvedValue([]);
+        prisma.sale.findFirst.mockResolvedValue(
+          makeMockSaleData({
+            promotionVetoes: [{ promotionId: 'promo-vetoed' }],
+            appliedPromotion: {
+              promotionId: 'promo-order',
+              discountType: 'amount',
+              discountValue: 200,
+              discountAmountCents: 200,
+              discountTitle: '$200 off',
+            },
+          }),
+        );
+
+        await repo.findByIdForUpdate('sale-promo');
+
+        const call = prisma.sale.findFirst.mock.calls.at(-1)?.[0] as {
+          include: Record<string, unknown>;
+        };
+        expect(call.include).toHaveProperty('promotionVetoes');
+        expect(call.include).toHaveProperty('appliedPromotion');
+      });
+
+      it('maps vetoes + applied-promo + item promotionId into the aggregate', async () => {
+        prisma.$queryRaw.mockResolvedValue([]);
+        prisma.sale.findFirst.mockResolvedValue(
+          makeMockSaleData({
+            promotionVetoes: [{ promotionId: 'promo-vetoed-a' }],
+            appliedPromotion: {
+              promotionId: 'promo-order',
+              discountType: 'amount',
+              discountValue: 200,
+              discountAmountCents: 200,
+              discountTitle: '$200 off',
+            },
+          }),
+        );
+
+        const result = await repo.findByIdForUpdate('sale-promo');
+
+        expect(result?.vetoedPromotionIds).toEqual(['promo-vetoed-a']);
+        expect(result?.appliedOrderPromotion).toEqual({
+          promotionId: 'promo-order',
+          discountType: 'amount',
+          discountValue: 200,
+          discountAmountCents: 200,
+          discountTitle: '$200 off',
+        });
+        expect(result?.items[0].promotionId).toBe('promo-item-1');
+      });
+    });
+
+    // -------- 3. findDraftResponseById --------
+    describe('findDraftResponseById loads veto + applied-order-promo + item promotionId (W2)', () => {
+      it('includes vetoes and appliedPromotion in the prisma query', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          makeMockSaleData({
+            customer: null,
+            shippingAddress: null,
+            promotionVetoes: [{ promotionId: 'promo-vetoed' }],
+            appliedPromotion: {
+              promotionId: 'promo-order',
+              discountType: 'amount',
+              discountValue: 100,
+              discountAmountCents: 100,
+              discountTitle: '$100 off',
+            },
+          }),
+        );
+
+        await repo.findDraftResponseById('sale-promo');
+
+        const call = prisma.sale.findUnique.mock.calls.at(-1)?.[0] as {
+          include: Record<string, unknown>;
+        };
+        expect(call.include).toHaveProperty('promotionVetoes');
+        expect(call.include).toHaveProperty('appliedPromotion');
+      });
+
+      it('maps vetoes + applied-promo + item promotionId into the response', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          makeMockSaleData({
+            customer: null,
+            shippingAddress: null,
+            promotionVetoes: [{ promotionId: 'promo-vetoed-a' }],
+            appliedPromotion: {
+              promotionId: 'promo-order',
+              discountType: 'amount',
+              discountValue: 100,
+              discountAmountCents: 100,
+              discountTitle: '$100 off',
+            },
+          }),
+        );
+
+        const result = await repo.findDraftResponseById('sale-promo');
+
+        expect(result).not.toBeNull();
+        expect(result?.items[0].promotionId).toBe('promo-item-1');
+      });
+    });
+
+    // -------- 4. findDraftsByUserId --------
+    describe('findDraftsByUserId loads veto + applied-order-promo + item promotionId (W2)', () => {
+      it('includes vetoes and appliedPromotion in the prisma query', async () => {
+        prisma.sale.findMany.mockResolvedValue([]);
+
+        await repo.findDraftsByUserId('user-1');
+
+        const call = prisma.sale.findMany.mock.calls.at(-1)?.[0] as {
+          include: Record<string, unknown>;
+        };
+        expect(call.include).toHaveProperty('promotionVetoes');
+        expect(call.include).toHaveProperty('appliedPromotion');
+      });
+
+      it('maps vetoes + applied-promo + item promotionId into each draft', async () => {
+        prisma.sale.findMany.mockResolvedValue([
+          makeMockSaleData({
+            id: 'sale-promo-a',
+            promotionVetoes: [{ promotionId: 'promo-v1' }],
+            appliedPromotion: {
+              promotionId: 'promo-o1',
+              discountType: 'amount',
+              discountValue: 50,
+              discountAmountCents: 50,
+              discountTitle: '$50 off',
+            },
+          }),
+        ]);
+
+        const result = await repo.findDraftsByUserId('user-1');
+
+        expect(result).toHaveLength(1);
+        expect(result[0].vetoedPromotionIds).toEqual(['promo-v1']);
+        expect(result[0].appliedOrderPromotion).toEqual({
+          promotionId: 'promo-o1',
+          discountType: 'amount',
+          discountValue: 50,
+          discountAmountCents: 50,
+          discountTitle: '$50 off',
+        });
+        expect(result[0].items[0].promotionId).toBe('promo-item-1');
+      });
+    });
+
+    // -------- save() persistence (3.6) --------
+    describe('save persists veto + applied-promo + item promotionId', () => {
+      it('writes item.promotionId via saleItem.createMany', async () => {
+        const sale = Sale.fromPersistence({
+          id: 'sale-save-promo',
+          userId: 'user-1',
+          status: 'DRAFT',
+          items: [
+            {
+              id: 'item-save-1',
+              saleId: 'sale-save-promo',
+              productId: 'p-1',
+              variantId: null,
+              productName: 'P',
+              variantName: null,
+              quantity: 1,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+              promotionId: 'promo-saved',
+            },
+          ],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          appliedOrderPromotion: null,
+          vetoedPromotionIds: [],
+          optedInManualPromotionIds: [],
+        });
+        sale.setAppliedOrderPromotion({
+          promotionId: 'promo-order-1',
+          discountType: 'amount',
+          discountValue: 100,
+          discountAmountCents: 100,
+          discountTitle: '$100 off',
+        });
+        sale.addVetoedPromotion('promo-veto-a');
+
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(
+            makeMockSaleData({
+              id: 'sale-save-promo',
+              promotionVetoes: [{ promotionId: 'promo-veto-a' }],
+              appliedPromotion: {
+                promotionId: 'promo-order-1',
+                discountType: 'amount',
+                discountValue: 100,
+                discountAmountCents: 100,
+                discountTitle: '$100 off',
+              },
+            }),
+          );
+        prisma.sale.create.mockResolvedValue({ id: 'sale-save-promo' });
+
+        await repo.save(sale);
+
+        expect(prisma.saleItem.createMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.arrayContaining([
+              expect.objectContaining({ promotionId: 'promo-saved' }),
+            ]),
+          }),
+        );
+      });
+
+      it('upserts the sale_promotion_applied row when an order promotion is set', async () => {
+        const sale = Sale.fromPersistence({
+          id: 'sale-save-order',
+          userId: 'user-1',
+          status: 'DRAFT',
+          items: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          appliedOrderPromotion: null,
+          vetoedPromotionIds: [],
+          optedInManualPromotionIds: [],
+        });
+        sale.setAppliedOrderPromotion({
+          promotionId: 'promo-order-1',
+          discountType: 'amount',
+          discountValue: 100,
+          discountAmountCents: 100,
+          discountTitle: '$100 off',
+        });
+
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(makeMockSaleData({ id: 'sale-save-order' }));
+        prisma.sale.create.mockResolvedValue({ id: 'sale-save-order' });
+
+        await repo.save(sale);
+
+        expect(prisma.salePromotionApplied.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { saleId: 'sale-save-order' },
+            create: expect.objectContaining({
+              saleId: 'sale-save-order',
+              promotionId: 'promo-order-1',
+              discountType: 'amount',
+              discountValue: 100,
+              discountAmountCents: 100,
+              discountTitle: '$100 off',
+              tenantId: 'tenant-1',
+            }),
+          }),
+        );
+      });
+
+      it('removes the sale_promotion_applied row when the order promotion is cleared', async () => {
+        const sale = Sale.fromPersistence({
+          id: 'sale-clear-order',
+          userId: 'user-1',
+          status: 'DRAFT',
+          items: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          appliedOrderPromotion: {
+            promotionId: 'promo-existing',
+            discountType: 'amount',
+            discountValue: 100,
+            discountAmountCents: 100,
+            discountTitle: '$100 off',
+          },
+          vetoedPromotionIds: [],
+          optedInManualPromotionIds: [],
+        });
+        sale.clearAppliedOrderPromotion();
+
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(makeMockSaleData({ id: 'sale-clear-order' }));
+        prisma.sale.create.mockResolvedValue({ id: 'sale-clear-order' });
+
+        await repo.save(sale);
+
+        expect(prisma.salePromotionApplied.deleteMany).toHaveBeenCalledWith({
+          where: { saleId: 'sale-clear-order', tenantId: 'tenant-1' },
+        });
+      });
+
+      it('persists veto rows delete-then-createMany', async () => {
+        const sale = Sale.fromPersistence({
+          id: 'sale-save-veto',
+          userId: 'user-1',
+          status: 'DRAFT',
+          items: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          appliedOrderPromotion: null,
+          vetoedPromotionIds: ['promo-v-old'],
+          optedInManualPromotionIds: [],
+        });
+        // replace veto set
+        (sale as any).removeVetoedPromotion('promo-v-old');
+        sale.addVetoedPromotion('promo-v-new-a');
+        sale.addVetoedPromotion('promo-v-new-b');
+
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(makeMockSaleData({ id: 'sale-save-veto' }));
+        prisma.sale.create.mockResolvedValue({ id: 'sale-save-veto' });
+
+        await repo.save(sale);
+
+        expect(prisma.salePromotionVeto.deleteMany).toHaveBeenCalledWith({
+          where: { saleId: 'sale-save-veto', tenantId: 'tenant-1' },
+        });
+        expect(prisma.salePromotionVeto.createMany).toHaveBeenCalledWith({
+          data: expect.arrayContaining([
+            expect.objectContaining({
+              saleId: 'sale-save-veto',
+              promotionId: 'promo-v-new-a',
+              tenantId: 'tenant-1',
+            }),
+            expect.objectContaining({
+              saleId: 'sale-save-veto',
+              promotionId: 'promo-v-new-b',
+              tenantId: 'tenant-1',
+            }),
+          ]),
+        });
+      });
+    });
+
+    // -------- 3.7 round-trip integration (with mocked prisma) --------
+    describe('veto + applied-promo round-trip (3.7)', () => {
+      it('persisted veto + applied-promo survive a save -> findById reload', async () => {
+        // Phase 1: build a sale with veto + order promo and save it
+        const sale = Sale.create({
+          id: 'sale-roundtrip',
+          userId: 'user-1',
+        });
+        sale.addVetoedPromotion('promo-rt-veto');
+        sale.setAppliedOrderPromotion({
+          promotionId: 'promo-rt-order',
+          discountType: 'amount',
+          discountValue: 200,
+          discountAmountCents: 200,
+          discountTitle: '$200 off',
+        });
+
+        // The first findUnique is the existence check (returns null → create).
+        // The second findUnique is the reload after save; this is what the
+        // test asserts on.
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(
+            makeMockSaleData({
+              id: 'sale-roundtrip',
+              promotionVetoes: [{ promotionId: 'promo-rt-veto' }],
+              appliedPromotion: {
+                promotionId: 'promo-rt-order',
+                discountType: 'amount',
+                discountValue: 200,
+                discountAmountCents: 200,
+                discountTitle: '$200 off',
+              },
+            }),
+          );
+        prisma.sale.create.mockResolvedValue({ id: 'sale-roundtrip' });
+
+        // Phase 2: save -> repo internally calls findById to reload
+        const reloaded = await repo.save(sale);
+
+        expect(reloaded.vetoedPromotionIds).toEqual(['promo-rt-veto']);
+        expect(reloaded.appliedOrderPromotion).toEqual({
+          promotionId: 'promo-rt-order',
+          discountType: 'amount',
+          discountValue: 200,
+          discountAmountCents: 200,
+          discountTitle: '$200 off',
+        });
+        // The reloaded findById must include the new relations (W2)
+        const reloadCall = prisma.sale.findUnique.mock.calls.at(-1)?.[0] as {
+          include: Record<string, unknown>;
+        };
+        expect(reloadCall.include).toHaveProperty('promotionVetoes');
+        expect(reloadCall.include).toHaveProperty('appliedPromotion');
       });
     });
   });
