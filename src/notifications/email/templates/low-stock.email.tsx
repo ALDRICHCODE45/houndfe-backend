@@ -246,21 +246,32 @@ export function LowStockEmail({
                     >
                       {item.productName}
                     </Heading>
-                    <Text
-                      style={{
-                        color: BRAND.textMuted,
-                        fontSize: '12px',
-                        lineHeight: '17px',
-                        margin: 0,
-                      }}
-                    >
-                      {item.variantDescription
-                        ? `${item.variantDescription} · `
-                        : ''}
-                      {item.sku ? <>{item.sku}</> : null}
-                      {item.sku && item.category ? ' · ' : null}
-                      {item.category ? <>{item.category}</> : null}
-                    </Text>
+                    {item.variantDescription ? (
+                      <Text
+                        style={{
+                          color: BRAND.textBody,
+                          fontSize: '12px',
+                          lineHeight: '17px',
+                          margin: '0 0 2px',
+                        }}
+                      >
+                        {item.variantDescription}
+                      </Text>
+                    ) : null}
+                    {item.sku || item.category ? (
+                      <Text
+                        style={{
+                          color: BRAND.textMuted,
+                          fontSize: '11px',
+                          lineHeight: '16px',
+                          margin: 0,
+                        }}
+                      >
+                        {item.sku ? <>SKU {item.sku}</> : null}
+                        {item.sku && item.category ? ' · ' : null}
+                        {item.category ? <>{item.category}</> : null}
+                      </Text>
+                    ) : null}
                   </Column>
                 </Row>
 
