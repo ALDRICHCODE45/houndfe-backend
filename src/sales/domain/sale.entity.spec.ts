@@ -1469,4 +1469,174 @@ describe('Sale Entity', () => {
       expect(sale.estimatedDeliveryAt).toBeNull();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 3 — Task 3.3: Sale-level promotion state + previewTotals (C2)
+  //
+  // `appliedOrderPromotion` (when set) contributes an order-level discount to
+  // the sale total via `previewTotals()`. `vetoedPromotionIds` and
+  // `optedInManualPromotionIds` expose the per-draft promotion state stored in
+  // `sale_promotion_vetoes` and `sale_applied_promotions` (manual opt-in is
+  // captured elsewhere in Unit 6 — Unit 3 only models the in-memory shape).
+  // ---------------------------------------------------------------------------
+  describe('appliedOrderPromotion + previewTotals + veto/opt-in (C2, Unit 3)', () => {
+    function makeSaleWithItem(unitPriceCents: number, quantity: number): Sale {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-prev',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-prev',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity,
+        unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    it('starts with no applied order promotion and empty sets', () => {
+      const sale = makeSaleWithItem(1000, 2);
+      expect(sale.appliedOrderPromotion).toBeNull();
+      expect(sale.vetoedPromotionIds).toEqual([]);
+      expect(sale.optedInManualPromotionIds).toEqual([]);
+    });
+
+    it('previewTotals returns subtotal = Σ(unitPrice*qty) when no order promotion', () => {
+      const sale = makeSaleWithItem(1000, 2);
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(2000);
+      expect(totals.discountCents).toBe(0);
+      expect(totals.totalCents).toBe(2000);
+    });
+
+    it('previewTotals subtracts the order discount from the per-line subtotal (C2)', () => {
+      const sale = makeSaleWithItem(1000, 3);
+      sale.setAppliedOrderPromotion({
+        promotionId: 'promo-order',
+        discountType: 'amount',
+        discountValue: 500,
+        discountAmountCents: 500,
+        discountTitle: '$500 off',
+      });
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(3000);
+      expect(totals.discountCents).toBe(500);
+      expect(totals.totalCents).toBe(2500);
+    });
+
+    it('previewTotals clamps totalCents to 0 (never negative) when order discount exceeds subtotal', () => {
+      const sale = makeSaleWithItem(100, 1);
+      sale.setAppliedOrderPromotion({
+        promotionId: 'promo-overkill',
+        discountType: 'amount',
+        discountValue: 500,
+        discountAmountCents: 500,
+        discountTitle: 'overkill',
+      });
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(100);
+      expect(totals.discountCents).toBe(100);
+      expect(totals.totalCents).toBe(0);
+    });
+
+    it('clearAppliedOrderPromotion restores the no-discount math', () => {
+      const sale = makeSaleWithItem(1000, 2);
+      sale.setAppliedOrderPromotion({
+        promotionId: 'promo-order',
+        discountType: 'amount',
+        discountValue: 200,
+        discountAmountCents: 200,
+        discountTitle: '$200 off',
+      });
+      sale.clearAppliedOrderPromotion();
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(2000);
+      expect(totals.discountCents).toBe(0);
+      expect(totals.totalCents).toBe(2000);
+      expect(sale.appliedOrderPromotion).toBeNull();
+    });
+
+    it('tracks vetoedPromotionIds via addVetoedPromotion / removeVetoedPromotion', () => {
+      const sale = makeSaleWithItem(1000, 1);
+      sale.addVetoedPromotion('promo-a');
+      sale.addVetoedPromotion('promo-b');
+      expect(sale.vetoedPromotionIds).toEqual(['promo-a', 'promo-b']);
+      sale.removeVetoedPromotion('promo-a');
+      expect(sale.vetoedPromotionIds).toEqual(['promo-b']);
+    });
+
+    it('tracks optedInManualPromotionIds via optInManualPromotion / optOutManualPromotion', () => {
+      const sale = makeSaleWithItem(1000, 1);
+      sale.optInManualPromotion('promo-m');
+      sale.optInManualPromotion('promo-n');
+      expect(sale.optedInManualPromotionIds).toEqual(['promo-m', 'promo-n']);
+      sale.optOutManualPromotion('promo-m');
+      expect(sale.optedInManualPromotionIds).toEqual(['promo-n']);
+    });
+
+    it('fromPersistence maps appliedOrderPromotion + vetoedPromotionIds + optedInManualPromotionIds', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-p',
+            saleId: BASE_SALE_ID,
+            productId: 'p',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 1500,
+            unitPriceCurrency: 'MXN',
+            promotionId: 'promo-item',
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        appliedOrderPromotion: {
+          promotionId: 'promo-order',
+          discountType: 'amount',
+          discountValue: 300,
+          discountAmountCents: 300,
+          discountTitle: '$300 off',
+        },
+        vetoedPromotionIds: ['promo-v1', 'promo-v2'],
+        optedInManualPromotionIds: ['promo-m'],
+      });
+
+      expect(sale.appliedOrderPromotion).toEqual({
+        promotionId: 'promo-order',
+        discountType: 'amount',
+        discountValue: 300,
+        discountAmountCents: 300,
+        discountTitle: '$300 off',
+      });
+      expect(sale.vetoedPromotionIds).toEqual(['promo-v1', 'promo-v2']);
+      expect(sale.optedInManualPromotionIds).toEqual(['promo-m']);
+      expect(sale.items[0].promotionId).toBe('promo-item');
+
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(3000);
+      expect(totals.discountCents).toBe(300);
+      expect(totals.totalCents).toBe(2700);
+    });
+
+    it('fromPersistence defaults to null appliedOrderPromotion and empty sets when omitted', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      expect(sale.appliedOrderPromotion).toBeNull();
+      expect(sale.vetoedPromotionIds).toEqual([]);
+      expect(sale.optedInManualPromotionIds).toEqual([]);
+    });
+  });
 });

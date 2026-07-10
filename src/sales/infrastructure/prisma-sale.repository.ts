@@ -12,7 +12,8 @@ import type {
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from '../domain/sale.repository';
-import { Sale, type SaleStatus } from '../domain/sale.entity';
+import { Sale, type SaleStatus, type AppliedOrderPromotionSnapshot } from '../domain/sale.entity';
+import { SaleItem } from '../domain/sale-item.entity';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
@@ -121,12 +122,76 @@ export class PrismaSaleRepository implements ISaleRepository {
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
+          promotionId: item.promotionId,
           tenantId,
         })) as Prisma.SaleItemCreateManyInput[],
       });
     } else {
       // Explicitly handle empty items (for clearItems case)
       await prisma.saleItem.createMany({ data: [] });
+    }
+
+    // ---- Unit 3 — promotion persistence (veto + applied-order-promo) ----
+    // Veto rows: delete-then-recreate for the sale to stay idempotent across
+    // rapid mutations (and to handle both adds and removes in one pass).
+    await prisma.salePromotionVeto.deleteMany({
+      where: { saleId: sale.id, tenantId },
+    });
+    if (sale.vetoedPromotionIds.length > 0) {
+      await prisma.salePromotionVeto.createMany({
+        data: sale.vetoedPromotionIds.map((promotionId) => ({
+          saleId: sale.id,
+          promotionId,
+          tenantId,
+        })),
+      });
+    }
+
+    // ---- Unit 6 close-out — MANUAL opt-in persistence ----
+    // Mirrors the veto block EXACTLY (delete-then-createMany) so the
+    // `optedInManualPromotionIds` set survives a save→findById reload.
+    // Without this, every read mapper returns [] and a subsequent recompute
+    // (e.g. from addItem) drops the manual line discount.
+    await prisma.salePromotionOptIn.deleteMany({
+      where: { saleId: sale.id, tenantId },
+    });
+    if (sale.optedInManualPromotionIds.length > 0) {
+      await prisma.salePromotionOptIn.createMany({
+        data: sale.optedInManualPromotionIds.map((promotionId) => ({
+          saleId: sale.id,
+          promotionId,
+          tenantId,
+        })),
+      });
+    }
+
+    // Applied order promotion: upsert on (saleId) when set, delete when cleared.
+    // The schema's `@@unique([saleId])` enforces one row per sale.
+    if (sale.appliedOrderPromotion) {
+      const snap = sale.appliedOrderPromotion;
+      await prisma.salePromotionApplied.upsert({
+        where: { saleId: sale.id },
+        create: {
+          saleId: sale.id,
+          tenantId,
+          promotionId: snap.promotionId,
+          discountType: snap.discountType,
+          discountValue: snap.discountValue,
+          discountAmountCents: snap.discountAmountCents,
+          discountTitle: snap.discountTitle,
+        },
+        update: {
+          promotionId: snap.promotionId,
+          discountType: snap.discountType,
+          discountValue: snap.discountValue,
+          discountAmountCents: snap.discountAmountCents,
+          discountTitle: snap.discountTitle,
+        },
+      });
+    } else {
+      await prisma.salePromotionApplied.deleteMany({
+        where: { saleId: sale.id, tenantId },
+      });
     }
 
     // Reload and return
@@ -137,7 +202,23 @@ export class PrismaSaleRepository implements ISaleRepository {
     const prisma = this.tenantPrisma.getClient();
     const saleData = await prisma.sale.findUnique({
       where: { id },
-      include: { items: true, shippingAddress: { select: { id: true } } },
+      include: {
+        items: true,
+        shippingAddress: { select: { id: true } },
+        // Unit 3 — W2: load veto set + applied order-promo so the engine can
+        // exclude vetoed promotions and the draft preview can show the order
+        // discount. Item-level promotionId flows through `items: true`.
+        promotionVetoes: {
+          select: { promotionId: true },
+        },
+        // Unit 6 close-out: load MANUAL opt-in set so a reload preserves the
+        // seller's opt-in across draft mutations (addItem, assignCustomer,
+        // etc.). Without this, a recompute drops the manual line discount.
+        promotionOptIns: {
+          select: { promotionId: true },
+        },
+        appliedPromotion: true,
+      },
     });
 
     if (!saleData) return null;
@@ -185,9 +266,30 @@ export class PrismaSaleRepository implements ISaleRepository {
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
+        promotionId: item.promotionId ?? null,
       })),
       createdAt: persistedSale.createdAt,
       updatedAt: persistedSale.updatedAt,
+      appliedOrderPromotion: persistedSale.appliedPromotion
+        ? {
+            promotionId: persistedSale.appliedPromotion.promotionId ?? null,
+            discountType:
+              (persistedSale.appliedPromotion.discountType as
+                | 'amount'
+                | 'percentage'
+                | null) ?? null,
+            discountValue: persistedSale.appliedPromotion.discountValue ?? null,
+            discountAmountCents:
+              persistedSale.appliedPromotion.discountAmountCents,
+            discountTitle: persistedSale.appliedPromotion.discountTitle ?? null,
+          }
+        : null,
+      vetoedPromotionIds: (
+        (persistedSale.promotionVetoes as Array<{ promotionId: string }>) ?? []
+      ).map((v) => v.promotionId),
+      optedInManualPromotionIds: (
+        (persistedSale.promotionOptIns as Array<{ promotionId: string }>) ?? []
+      ).map((o) => o.promotionId),
     });
   }
 
@@ -217,6 +319,16 @@ export class PrismaSaleRepository implements ISaleRepository {
             state: true,
           },
         },
+        // Unit 3 — W2: load veto + applied-promo for draft preview.
+        promotionVetoes: {
+          select: { promotionId: true },
+        },
+        // Unit 6 close-out: load MANUAL opt-in set so draft preview totals
+        // and recompute paths see the seller's opt-in.
+        promotionOptIns: {
+          select: { promotionId: true },
+        },
+        appliedPromotion: true,
       },
     });
 
@@ -263,13 +375,40 @@ export class PrismaSaleRepository implements ISaleRepository {
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
+        promotionId: item.promotionId ?? null,
       })),
       createdAt: saleData.createdAt,
       updatedAt: saleData.updatedAt,
+      appliedOrderPromotion: saleData.appliedPromotion
+        ? {
+            promotionId: saleData.appliedPromotion.promotionId ?? null,
+            discountType:
+              (saleData.appliedPromotion.discountType as
+                | 'amount'
+                | 'percentage'
+                | null) ?? null,
+            discountValue: saleData.appliedPromotion.discountValue ?? null,
+            discountAmountCents: saleData.appliedPromotion.discountAmountCents,
+            discountTitle: saleData.appliedPromotion.discountTitle ?? null,
+          }
+        : null,
+      vetoedPromotionIds: (
+        (saleData.promotionVetoes as Array<{ promotionId: string }>) ?? []
+      ).map((v) => v.promotionId),
+      optedInManualPromotionIds: (
+        (saleData.promotionOptIns as Array<{ promotionId: string }>) ?? []
+      ).map((o) => o.promotionId),
     });
 
     return {
       ...sale.toResponse(),
+      // Work Unit 4 (C2) — surface order-discount-aware totals for draft
+      // preview. `sale.toResponse()` returns `totalCents = this.totalCents`
+      // which is 0 for drafts; spreading `previewTotals()` AFTER replaces
+      // `totalCents` and `discountCents` with the order-discount-adjusted
+      // values and adds `subtotalCents`. Same helper the charge path uses
+      // (Unit 5) — single source of truth, no math duplication.
+      ...sale.previewTotals(),
       customer: saleData.customer
         ? {
             id: saleData.customer.id,
@@ -300,7 +439,16 @@ export class PrismaSaleRepository implements ISaleRepository {
         userId,
         status: 'DRAFT',
       },
-      include: { items: true, shippingAddress: { select: { id: true } } },
+      include: {
+        items: true,
+        shippingAddress: { select: { id: true } },
+        // Unit 3 — W2: load veto + applied-promo on the draft-list path too.
+        promotionVetoes: { select: { promotionId: true } },
+        // Unit 6 close-out: load MANUAL opt-in set on the draft-list path so
+        // every draft the user owns surfaces its opt-in state.
+        promotionOptIns: { select: { promotionId: true } },
+        appliedPromotion: true,
+      },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -344,11 +492,38 @@ export class PrismaSaleRepository implements ISaleRepository {
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
+          promotionId: item.promotionId ?? null,
         })),
         confirmedAt: (saleData as any).confirmedAt,
         folio: (saleData as any).folio,
         createdAt: (saleData as any).createdAt,
         updatedAt: (saleData as any).updatedAt,
+        appliedOrderPromotion: (saleData as any).appliedPromotion
+          ? {
+              promotionId: (saleData as any).appliedPromotion.promotionId ?? null,
+              discountType:
+                ((saleData as any).appliedPromotion.discountType as
+                  | 'amount'
+                  | 'percentage'
+                  | null) ?? null,
+              discountValue:
+                (saleData as any).appliedPromotion.discountValue ?? null,
+              discountAmountCents: (saleData as any).appliedPromotion
+                .discountAmountCents,
+              discountTitle:
+                (saleData as any).appliedPromotion.discountTitle ?? null,
+            }
+          : null,
+        vetoedPromotionIds: (
+          ((saleData as any).promotionVetoes as Array<{
+            promotionId: string;
+          }>) ?? []
+        ).map((v) => v.promotionId),
+        optedInManualPromotionIds: (
+          ((saleData as any).promotionOptIns as Array<{
+            promotionId: string;
+          }>) ?? []
+        ).map((o) => o.promotionId),
       }),
     );
   }
@@ -364,7 +539,18 @@ export class PrismaSaleRepository implements ISaleRepository {
     `;
     const saleData = await prisma.sale.findFirst({
       where: { id, tenantId },
-      include: { items: true, shippingAddress: { select: { id: true } } },
+      include: {
+        items: true,
+        shippingAddress: { select: { id: true } },
+        // Unit 3 — W2: charge path needs veto + applied-promo so the
+        // charge-time recompute excludes vetoed ids and keeps the order
+        // discount consistent with the draft preview.
+        promotionVetoes: { select: { promotionId: true } },
+        // Unit 6 close-out: charge path needs the MANUAL opt-in set so the
+        // charge-time recompute respects the seller's manual picks.
+        promotionOptIns: { select: { promotionId: true } },
+        appliedPromotion: true,
+      },
     });
 
     if (!saleData) return null;
@@ -421,9 +607,31 @@ export class PrismaSaleRepository implements ISaleRepository {
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
+        promotionId: item.promotionId ?? null,
       })),
       createdAt: persistedSale.createdAt,
       updatedAt: persistedSale.updatedAt,
+      appliedOrderPromotion: persistedSale.appliedPromotion
+        ? {
+            promotionId: persistedSale.appliedPromotion.promotionId ?? null,
+            discountType:
+              (persistedSale.appliedPromotion.discountType as
+                | 'amount'
+                | 'percentage'
+                | null) ?? null,
+            discountValue: persistedSale.appliedPromotion.discountValue ?? null,
+            discountAmountCents:
+              persistedSale.appliedPromotion.discountAmountCents,
+            discountTitle: persistedSale.appliedPromotion.discountTitle ?? null,
+          }
+        : null,
+      vetoedPromotionIds: (
+        (persistedSale.promotionVetoes as Array<{ promotionId: string }>) ?? []
+      ).map((v) => v.promotionId),
+      optedInManualPromotionIds: (
+        (persistedSale.promotionOptIns as Array<{ promotionId: string }>) ??
+        []
+      ).map((o) => o.promotionId),
     });
   }
 
@@ -505,6 +713,22 @@ export class PrismaSaleRepository implements ISaleRepository {
     dueDate?: Date | null;
     confirmedAt: Date;
     folio: string;
+    /**
+     * Work Unit 5 — W1 fix. When provided, the SaleItem rows are
+     * deleteMany + createMany-re-written INSIDE the charge tx so the
+     * charge-time recomputed per-line promo state (promotionId /
+     * discountAmountCents / unitPriceCents) is persisted alongside the
+     * charged total. Same pattern as `save` (which already re-writes items
+     * outside the charge path). When omitted, no item re-write happens
+     * (back-compat for non-promo charges — keep the previous behavior).
+     */
+    items?: ReadonlyArray<SaleItem>;
+    /**
+     * Work Unit 5 — C2 audit. When provided (incl. explicit null), the
+     * `sale_promotion_applied` row is upserted (non-null) or deleted
+     * (null). When omitted entirely, the table is left alone (back-compat).
+     */
+    appliedOrderPromotion?: AppliedOrderPromotionSnapshot | null;
   }): Promise<PersistedSalePaymentRecord[]> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
@@ -538,6 +762,85 @@ export class PrismaSaleRepository implements ISaleRepository {
     if ('customerId' in input) data.customerId = input.customerId ?? null;
     if ('sellerUserId' in input) data.sellerUserId = input.sellerUserId ?? null;
     if ('dueDate' in input) data.dueDate = input.dueDate ?? null;
+
+    // Work Unit 5 — W1 in-tx SaleItem re-write. Must run inside the SAME
+    // `runInTransaction` block as the Sale.updateMany + SalePayment.create
+    // calls below — so the audit (promotionId / discountAmountCents /
+    // unitPriceCents) commits or rolls back atomically with the charged
+    // total. `persistChargeConfirmation` already runs inside the charge
+    // tx (chargeDraft calls `saleRepo.runInTransaction` then this method),
+    // and `tenantPrisma.getClient()` resolves to the tx client via CLS.
+    if (input.items !== undefined) {
+      await prisma.saleItem.deleteMany({
+        where: { saleId: input.saleId },
+      });
+      if (input.items.length > 0) {
+        await prisma.saleItem.createMany({
+          data: input.items.map((item) => ({
+            id: item.id,
+            saleId: item.saleId,
+            productId: item.productId,
+            variantId: item.variantId,
+            productName: item.productName,
+            variantName: item.variantName,
+            imageUrl: item.imageUrl,
+            quantity: item.quantity,
+            unitPriceCents: item.unitPriceCents,
+            unitPriceCurrency: item.unitPriceCurrency,
+            originalPriceCents: item.originalPriceCents,
+            priceSource:
+              item.priceSource === 'default'
+                ? 'DEFAULT'
+                : item.priceSource === 'price_list'
+                  ? 'PRICE_LIST'
+                  : 'CUSTOM',
+            appliedPriceListId: item.appliedPriceListId,
+            customPriceCents: item.customPriceCents,
+            discountType: item.discountType,
+            discountValue: item.discountValue,
+            discountAmountCents: item.discountAmountCents,
+            prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+            discountTitle: item.discountTitle,
+            discountedAt: item.discountedAt,
+            promotionId: item.promotionId,
+            tenantId,
+          })) as Prisma.SaleItemCreateManyInput[],
+        });
+      }
+    }
+
+    // Work Unit 5 — C2 audit. The sale-level ORDER_DISCOUNT snapshot may
+    // have been set / cleared at charge time by the recompute. Explicit
+    // null means "no order promo applies this run" — delete any prior row.
+    // Omitted entirely means "back-compat — do not touch the table".
+    if (input.appliedOrderPromotion !== undefined) {
+      if (input.appliedOrderPromotion === null) {
+        await prisma.salePromotionApplied.deleteMany({
+          where: { saleId: input.saleId, tenantId },
+        });
+      } else {
+        const snap = input.appliedOrderPromotion;
+        await prisma.salePromotionApplied.upsert({
+          where: { saleId: input.saleId },
+          create: {
+            saleId: input.saleId,
+            tenantId,
+            promotionId: snap.promotionId,
+            discountType: snap.discountType,
+            discountValue: snap.discountValue,
+            discountAmountCents: snap.discountAmountCents,
+            discountTitle: snap.discountTitle,
+          },
+          update: {
+            promotionId: snap.promotionId,
+            discountType: snap.discountType,
+            discountValue: snap.discountValue,
+            discountAmountCents: snap.discountAmountCents,
+            discountTitle: snap.discountTitle,
+          },
+        });
+      }
+    }
 
     await prisma.sale.updateMany({
       where: { id: input.saleId, tenantId },

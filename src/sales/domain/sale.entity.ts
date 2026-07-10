@@ -77,6 +77,35 @@ export interface SaleFromPersistenceProps {
   carrierName?: string | null;
   trackingRef?: string | null;
   estimatedDeliveryAt?: Date | null;
+  /**
+   * Sale-level ORDER_DISCOUNT promotion snapshot. Null = no order promotion
+   * applied. Persisted to `sale_promotion_applied`. Defaults to null so
+   * existing fromPersistence call sites stay unchanged.
+   */
+  appliedOrderPromotion?: AppliedOrderPromotionSnapshot | null;
+  /**
+   * Promotion ids the seller has dismissed on this draft. Persisted to
+   * `sale_promotion_vetoes` and feeds the engine's exclusion list.
+   */
+  vetoedPromotionIds?: ReadonlyArray<string>;
+  /**
+   * MANUAL promotion ids the seller has opted into on this draft.
+   * Default: empty array.
+   */
+  optedInManualPromotionIds?: ReadonlyArray<string>;
+}
+
+/**
+ * Sale-level ORDER_DISCOUNT snapshot. Mirrors the columns on
+ * `sale_promotion_applied`. `promotionId` may be null when the underlying
+ * Promotion row was deleted (SetNull on the FK).
+ */
+export interface AppliedOrderPromotionSnapshot {
+  promotionId: string | null;
+  discountType: 'amount' | 'percentage' | null;
+  discountValue: number | null;
+  discountAmountCents: number;
+  discountTitle: string | null;
 }
 
 export interface DiscountApplicationResult {
@@ -103,6 +132,9 @@ export class Sale {
   private _carrierName: string | null;
   private _trackingRef: string | null;
   private _estimatedDeliveryAt: Date | null;
+  private _appliedOrderPromotion: AppliedOrderPromotionSnapshot | null;
+  private _vetoedPromotionIds: string[];
+  private _optedInManualPromotionIds: string[];
 
   private constructor(
     public readonly id: string,
@@ -131,6 +163,9 @@ export class Sale {
     carrierName: string | null = null,
     trackingRef: string | null = null,
     estimatedDeliveryAt: Date | null = null,
+    appliedOrderPromotion: AppliedOrderPromotionSnapshot | null = null,
+    vetoedPromotionIds: ReadonlyArray<string> = [],
+    optedInManualPromotionIds: ReadonlyArray<string> = [],
   ) {
     this._items = items;
     this._customerId = customerId;
@@ -140,6 +175,9 @@ export class Sale {
     this._carrierName = carrierName;
     this._trackingRef = trackingRef;
     this._estimatedDeliveryAt = estimatedDeliveryAt;
+    this._appliedOrderPromotion = appliedOrderPromotion;
+    this._vetoedPromotionIds = [...vetoedPromotionIds];
+    this._optedInManualPromotionIds = [...optedInManualPromotionIds];
   }
 
   static create(props: CreateSaleProps): Sale {
@@ -196,6 +234,9 @@ export class Sale {
       props.carrierName ?? null,
       props.trackingRef ?? null,
       props.estimatedDeliveryAt ?? null,
+      props.appliedOrderPromotion ?? null,
+      props.vetoedPromotionIds ?? [],
+      props.optedInManualPromotionIds ?? [],
     );
   }
 
@@ -327,6 +368,143 @@ export class Sale {
 
   get estimatedDeliveryAt(): Date | null {
     return this._estimatedDeliveryAt;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Promotion state (Unit 3 — promotionId/sale row mirrors `sale_promotion_applied`
+  // and `sale_promotion_vetoes`. The engine (Unit 4) mutates these via the
+  // helpers below; persistence mirrors them via the repo's `save`.
+  // ---------------------------------------------------------------------------
+
+  /** Sale-level ORDER_DISCOUNT snapshot (null = none). */
+  get appliedOrderPromotion(): AppliedOrderPromotionSnapshot | null {
+    return this._appliedOrderPromotion;
+  }
+
+  /** Promotion ids the seller has dismissed on this draft. */
+  get vetoedPromotionIds(): ReadonlyArray<string> {
+    return this._vetoedPromotionIds;
+  }
+
+  /** MANUAL promotion ids the seller has opted into on this draft. */
+  get optedInManualPromotionIds(): ReadonlyArray<string> {
+    return this._optedInManualPromotionIds;
+  }
+
+  /** Replace the sale-level ORDER_DISCOUNT snapshot. */
+  setAppliedOrderPromotion(snapshot: AppliedOrderPromotionSnapshot): void {
+    this._appliedOrderPromotion = { ...snapshot };
+  }
+
+  /** Clear any applied ORDER_DISCOUNT (used when recompute drops the promo). */
+  clearAppliedOrderPromotion(): void {
+    this._appliedOrderPromotion = null;
+  }
+
+  /** Add a promotion id to the veto set (idempotent). */
+  addVetoedPromotion(promotionId: string): void {
+    if (!this._vetoedPromotionIds.includes(promotionId)) {
+      this._vetoedPromotionIds.push(promotionId);
+    }
+  }
+
+  /** Remove a promotion id from the veto set (idempotent). */
+  removeVetoedPromotion(promotionId: string): void {
+    this._vetoedPromotionIds = this._vetoedPromotionIds.filter(
+      (id) => id !== promotionId,
+    );
+  }
+
+  /** Opt in a MANUAL promotion (idempotent). */
+  optInManualPromotion(promotionId: string): void {
+    if (!this._optedInManualPromotionIds.includes(promotionId)) {
+      this._optedInManualPromotionIds.push(promotionId);
+    }
+  }
+
+  /** Remove a MANUAL opt-in (idempotent). */
+  optOutManualPromotion(promotionId: string): void {
+    this._optedInManualPromotionIds = this._optedInManualPromotionIds.filter(
+      (id) => id !== promotionId,
+    );
+  }
+
+  /**
+   * C2 + documented-contract: order-discount-aware preview totals. Source of
+   * truth for BOTH draft preview (Unit 4) and charge totals (Unit 5) — never
+   * duplicate the math.
+   *
+   * Documented contract (docs/sales-pos-charge-frontend.md:473-475):
+   *   subtotalCents = "Suma base antes de descuentos"
+   *   discountCents = "Diferencia subtotal - total"
+   *   totalCents    = "Monto final a cobrar"
+   *
+   * Implementation:
+   *   baseCents(item)        = prePriceCentsBeforeDiscount ?? unitPriceCents
+   *                            (the price BEFORE any per-line discount; falls
+   *                            back to the current unitPrice when no per-line
+   *                            discount is present)
+   *   subtotalCents          = Σ baseCents(item) × quantity         (BEFORE discounts)
+   *   postLineSubtotalCents  = Σ unitPriceCents × quantity          (AFTER per-line)
+   *   orderDiscountCents     = appliedOrderPromotion?.discountAmountCents ?? 0
+   *   totalCents             = max(0, postLineSubtotalCents − orderDiscountCents)
+   *                            (what the customer actually pays)
+   *   discountCents          = subtotalCents − totalCents           (ALL savings)
+   *
+   * Invariants:
+   *   - The charged `totalCents` is EXACTLY the customer's charge — it is
+   *     never larger than the post-line sum and is clamped to 0 when an
+   *     order discount exceeds the post-line sum (order-discount ceiling).
+   *   - `subtotalCents >= totalCents` always (the base is the upper bound).
+   *   - `discountCents >= 0` always and equals `subtotalCents − totalCents`,
+   *     which is the sum of per-line savings plus the order discount.
+   *   - `discountCents` therefore carries the FULL savings (per-line + order)
+   *     and is the value the receipt's "Descuentos" line must show, not
+   *     just the order discount. (This is the S-1 fix: the U5 gate caught
+   *     that pre-fix, a per-line PRODUCT_DISCOUNT would persist
+   *     `discountCents=0` and the per-line savings vanished from the
+   *     receipt, violating the documented contract.)
+   */
+  previewTotals(): {
+    subtotalCents: number;
+    discountCents: number;
+    totalCents: number;
+  } {
+    // Subtotal = base BEFORE any discount (per-line + order). For each line
+    // the "base" is `prePriceCentsBeforeDiscount` when the per-line discount
+    // is present, otherwise it equals the current `unitPriceCents` (no
+    // per-line discount to roll back).
+    const subtotalCents = this._items.reduce(
+      (sum, item) =>
+        sum +
+        (item.prePriceCentsBeforeDiscount ?? item.unitPriceCents) *
+          item.quantity,
+      0,
+    );
+    // Post-line sum = Σ(unitPriceCents × quantity). Per-line discounts are
+    // baked into `unitPriceCents`, so this is the sum AFTER per-line.
+    const postLineSubtotalCents = this._items.reduce(
+      (sum, item) => sum + item.subtotalCents,
+      0,
+    );
+    const orderDiscountCents =
+      this._appliedOrderPromotion?.discountAmountCents ?? 0;
+    // Total = what the customer actually pays (post-line − order discount,
+    // clamped to 0 to never go negative when an order discount exceeds the
+    // post-line sum).
+    const totalCents = Math.max(
+      0,
+      postLineSubtotalCents - orderDiscountCents,
+    );
+    // discountCents = full savings (per-line + order combined) = subtotal - total.
+    // Math.min guards against any floating-point round-trip making
+    // `subtotalCents - totalCents` marginally exceed `subtotalCents`; the
+    // invariant `discountCents ≤ subtotalCents` is preserved.
+    const discountCents = Math.min(
+      subtotalCents,
+      subtotalCents - totalCents,
+    );
+    return { subtotalCents, discountCents, totalCents };
   }
 
   /**

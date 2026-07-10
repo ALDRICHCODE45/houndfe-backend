@@ -61,8 +61,25 @@ function makeMockProductsService() {
     checkStockAvailability: jest.fn(),
     getApplicablePrices: jest.fn(),
     resolveListPrice: jest.fn(),
+    resolvePriceListGlobalIds: jest.fn().mockResolvedValue(new Map<string, string>()),
     decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
+  } as any;
+}
+
+/**
+ * Work Unit 4 — POS promotion engine (injected as Symbol token) is the
+ * `SalesService.recomputePromotions(sale)` driving port. Default mock
+ * returns empty `lines` / null `order` so the existing tests stay green
+ * when recompute is wired (a no-op when no promotions match).
+ */
+function makeMockPosEvaluateUseCase() {
+  return {
+    evaluate: jest.fn().mockResolvedValue({
+      lines: [],
+      order: null,
+      availableManualPromotions: [],
+    }),
   } as any;
 }
 
@@ -91,6 +108,7 @@ function createService(
   outboxWriter: Pick<OutboxWriterService, 'publish'>,
   tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>,
   saleCommentRepo: Pick<ISaleCommentRepository, 'findActiveBySale'>,
+  posEvaluateUseCase: { evaluate: jest.Mock } = makeMockPosEvaluateUseCase(),
 ) {
   return new SalesService(
     saleRepo,
@@ -99,6 +117,7 @@ function createService(
     outboxWriter,
     tenantPrisma as TenantPrismaService,
     saleCommentRepo,
+    posEvaluateUseCase as any,
   );
 }
 
@@ -110,6 +129,7 @@ describe('SalesService', () => {
   let eventEmitter: ReturnType<typeof makeMockEventEmitter>;
   let outboxWriter: ReturnType<typeof makeMockOutboxWriter>;
   let saleCommentRepo: ReturnType<typeof makeMockSaleCommentRepo>;
+  let posEvaluateUseCase: ReturnType<typeof makeMockPosEvaluateUseCase>;
   let tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>;
   let service: SalesService;
 
@@ -119,6 +139,7 @@ describe('SalesService', () => {
     eventEmitter = makeMockEventEmitter();
     outboxWriter = makeMockOutboxWriter();
     saleCommentRepo = makeMockSaleCommentRepo();
+    posEvaluateUseCase = makeMockPosEvaluateUseCase();
     tenantPrisma = {
       getTenantId: jest.fn(() => 'tenant-1'),
       getClient: jest.fn(() => ({}) as never),
@@ -130,6 +151,7 @@ describe('SalesService', () => {
       outboxWriter,
       tenantPrisma,
       saleCommentRepo,
+      posEvaluateUseCase,
     );
     saleRepo.acquireChargeIdempotency.mockResolvedValue({
       kind: 'acquired',
@@ -1958,7 +1980,14 @@ describe('SalesService', () => {
       expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
     });
 
-    it('computes subtotal/discount from prePriceCentsBeforeDiscount for discounted default-priced item', async () => {
+    it('computes subtotal/discount from prePriceCentsBeforeDiscount for discounted default-priced item (REGRESSION GUARD — contract: subtotalCents=base, discountCents=subtotal-total)', async () => {
+      // Per-line PRODUCT_DISCOUNT only — case (a) of the documented contract:
+      //   subtotalCents = Σ(prePrice · qty)  = 70000*2 = 140000
+      //   totalCents    = Σ(unitPrice · qty)  = 63000*2 = 126000 (charged)
+      //   discountCents = subtotalCents − totalCents = 14000
+      // The per-line savings MUST surface on the Sale row, not vanish (the
+      // receipt is the source of truth and the frontend lays it out from
+      // `subtotalCents` / `discountCents` / `totalCents`).
       const sale = Sale.fromPersistence({
         id: 'sale-charge-discounted-default',
         userId: 'user-1',
@@ -2003,6 +2032,14 @@ describe('SalesService', () => {
 
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
+          // Documented contract (docs/sales-pos-charge-frontend.md:473-475):
+          //   subtotalCents = "Suma base antes de descuentos"
+          //   discountCents = "Diferencia subtotal - total"
+          //   totalCents    = "Monto final a cobrar"
+          // `previewTotals()` is the SINGLE source of truth for BOTH draft
+          // preview and charge. prePriceCentsBeforeDiscount is the base for
+          // the sale-level subtotal, even though the customer is still
+          // charged against the post-line `unitPriceCents`.
           subtotalCents: 140000,
           discountCents: 14000,
           totalCents: 126000,
@@ -2131,6 +2168,15 @@ describe('SalesService', () => {
 
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
+          // Documented contract (docs/sales-pos-charge-frontend.md:473-475):
+          //   subtotalCents = 20000*1 + 70000*2 + 90000*2 = 340000 (pre-discount base)
+          //   totalCents    = 20000   + 63000*2 + 90000*2 = 326000 (charged)
+          //   discountCents = subtotal − total = 14000 (per-line savings)
+          // The override-priced line has prePriceCentsBeforeDiscount=null so
+          // its base falls back to unitPriceCents (no per-line discount to
+          // roll back). Plain line has no discount either. The 14000 savings
+          // is purely from the per-line 10% PRODUCT_DISCOUNT on the
+          // `item-discount` line (70000 - 63000 = 7000 per unit × 2).
           subtotalCents: 340000,
           totalCents: 326000,
           discountCents: 14000,
@@ -4409,6 +4455,1293 @@ describe('SalesService', () => {
         'sale.item.price.overridden',
         expect.any(Object),
       );
+    });
+  });
+
+  // ============================================================================
+  // Work Unit 4 — Wire recomputePromotions into draft mutations (4.1, 4.2)
+  // ============================================================================
+  describe('Work Unit 4 — recomputePromotions wiring (4.1, 4.2)', () => {
+    /**
+     * Build a fresh draft sale with a single item already added in-memory
+     * (skipping the recompute loop the service runs). Returns the same sale
+     * the service will see from `saleRepo.findById`.
+     */
+    function buildDraftWithItem(
+      id: string,
+      itemId: string,
+      productId = 'prod-1',
+      unitPriceCents = 1000,
+      quantity = 2,
+    ) {
+      const sale = Sale.create({ id, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId: id,
+        productId,
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity,
+        unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    it('addItem calls the engine and applies an AUTOMATIC PRODUCT_DISCOUNT to the matching line (4.1)', async () => {
+      const saleId = 'sale-rec-add';
+      saleRepo.findById.mockResolvedValue(
+        Sale.create({ id: saleId, userId: 'user-1' }),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      // Engine returns the AUTO promo for whatever line is passed in.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  itemId: line.itemId,
+                  promotionId: 'promo-auto-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: '10% off',
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+        });
+      });
+
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 2,
+      });
+
+      // Capture the actual itemId from the saved sale (addItem uses randomUUID).
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const actualItemId = savedSale.items[0].id;
+
+      // The engine WAS called after the in-memory mutation.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+
+      // The recompute input captured the new line with the pre-promo base
+      // (`effectiveUnitPriceCents` = unitPriceCents when no prior discount).
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.lines).toHaveLength(1);
+      expect(input.lines[0]).toMatchObject({
+        itemId: actualItemId,
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 2,
+        effectiveUnitPriceCents: 1000,
+        appliedPriceListId: null,
+        appliedGlobalPriceListId: null,
+        hasManualDiscount: false,
+      });
+
+      // `saleRepo.save` ran AFTER recompute — the saved sale carries the
+      // promo-sourced discount (recompute mutates the in-memory aggregate).
+      expect(savedSale.items[0].promotionId).toBe('promo-auto-1');
+      expect(savedSale.items[0].discountType).toBe('percentage');
+      expect(savedSale.items[0].discountValue).toBe(10);
+      // 10% of 1000 = 100 → unitPriceCents drops from 1000 to 900.
+      expect(savedSale.items[0].unitPriceCents).toBe(900);
+    });
+
+    it('addItem recompute is idempotent: running recompute twice yields the same discount (no compounding) (4.1)', async () => {
+      const saleId = 'sale-rec-idem';
+      saleRepo.findById.mockResolvedValue(
+        Sale.create({ id: saleId, userId: 'user-1' }),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      // Engine returns 10% off for whatever line is passed in.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  itemId: line.itemId,
+                  promotionId: 'promo-auto-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: '10% off',
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+        });
+      });
+
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 1,
+      });
+      const afterFirst = (
+        saleRepo.save.mock.calls.at(-1)?.[0] as Sale
+      ).items[0];
+      const actualItemId = afterFirst.id;
+      expect(afterFirst.unitPriceCents).toBe(900);
+      expect(afterFirst.prePriceCentsBeforeDiscount).toBe(1000);
+
+      // Second mutation (updateItemQuantity, qty 1 -> 2): recompute runs again.
+      // The mock returns the SAME promo again — but the discount must still
+      // compute against the ORIGINAL baseline (1000), not the new 900.
+      saleRepo.findById.mockResolvedValue(
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: actualItemId,
+              saleId,
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'P',
+              variantName: null,
+              quantity: 1,
+              unitPriceCents: 900,
+              unitPriceCurrency: 'MXN',
+              prePriceCentsBeforeDiscount: 1000,
+              discountType: 'percentage',
+              discountValue: 10,
+              discountAmountCents: 100,
+              discountTitle: '10% off',
+              promotionId: 'promo-auto-1',
+            },
+          ],
+        }),
+      );
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      await service.updateItemQuantity(saleId, 'user-1', actualItemId, {
+        quantity: 2,
+      });
+
+      const secondInput = posEvaluateUseCase.evaluate.mock.calls.at(-1)?.[0];
+      // effectiveUnitPriceCents must be the ORIGINAL baseline (1000),
+      // NOT the discounted 900.
+      expect(secondInput.lines[0].effectiveUnitPriceCents).toBe(1000);
+      expect(secondInput.lines[0].quantity).toBe(2);
+
+      const afterSecond = (
+        saleRepo.save.mock.calls.at(-1)?.[0] as Sale
+      ).items[0];
+      // Discount still 10% of 1000 = 100 → unitPriceCents stays at 900.
+      expect(afterSecond.unitPriceCents).toBe(900);
+      expect(afterSecond.discountAmountCents).toBe(100);
+      expect(afterSecond.promotionId).toBe('promo-auto-1');
+    });
+
+    it('updateItemQuantity triggers recompute (engine called, prior auto-promo re-applied) (4.2)', async () => {
+      const saleId = 'sale-rec-qty';
+      const itemId = 'item-rec-qty';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: itemId,
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [
+          {
+            itemId,
+            promotionId: 'promo-auto-1',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountTitle: '10% off',
+          },
+        ],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      await service.updateItemQuantity(saleId, 'user-1', itemId, {
+        quantity: 5,
+      });
+
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const saved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(saved.items[0].quantity).toBe(5);
+      // The promo is re-applied to the new qty.
+      expect(saved.items[0].promotionId).toBe('promo-auto-1');
+      expect(saved.items[0].discountType).toBe('percentage');
+    });
+
+    it('removeItem triggers recompute and clears the auto-promo on the removed item (4.2)', async () => {
+      const saleId = 'sale-rec-rm';
+      const itemAId = 'item-rec-rm-a';
+      const itemBId = 'item-rec-rm-b';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: itemAId,
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'A',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountAmountCents: 100,
+            prePriceCentsBeforeDiscount: 1000,
+            discountTitle: '10% off',
+            promotionId: 'promo-auto-1',
+          },
+          {
+            id: itemBId,
+            saleId,
+            productId: 'prod-2',
+            variantId: null,
+            productName: 'B',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 2000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      // After removal, the engine returns nothing for the surviving item B.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      const result = await service.removeItem(saleId, 'user-1', itemAId);
+
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      // The recompute ran with only item B (the removed item was gone).
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.lines.map((l: { itemId: string }) => l.itemId)).toEqual([
+        itemBId,
+      ]);
+      // Returned response has only item B, untouched.
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].id).toBe(itemBId);
+      expect(result.items[0].promotionId).toBeNull();
+    });
+
+    it('assignCustomer triggers recompute: a SPECIFIC promo auto-applies after the eligible customer is assigned (4.2)', async () => {
+      const saleId = 'sale-rec-cust';
+      const itemId = 'item-rec-cust';
+      const customerId = 'cust-eligible';
+
+      // Sale loaded BEFORE assign: no customer, item at full price.
+      const saleBeforeAssign = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: itemId,
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(saleBeforeAssign);
+
+      // Customer exists in the tenant prisma (assignCustomer preloads it).
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        customer: {
+          findUnique: jest.fn().mockResolvedValue({ id: customerId }),
+        },
+        customerAddress: {
+          findUnique: jest.fn(),
+        },
+      });
+
+      // Engine: customer-scoped promo applies only AFTER assignment.
+      // We simulate that by returning the line result conditionally — for
+      // this test, we return it once because the engine itself would have
+      // been called WITH customerId set after assignment.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [
+          {
+            itemId,
+            promotionId: 'promo-specific-1',
+            discountType: 'percentage',
+            discountValue: 15,
+            discountTitle: 'VIP 15% off',
+          },
+        ],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      // findDraftResponseById reload for the response.
+      saleRepo.findDraftResponseById.mockResolvedValue(
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: itemId,
+              saleId,
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'P',
+              variantName: null,
+              quantity: 1,
+              unitPriceCents: 850,
+              unitPriceCurrency: 'MXN',
+              discountType: 'percentage',
+              discountValue: 15,
+              discountAmountCents: 150,
+              prePriceCentsBeforeDiscount: 1000,
+              discountTitle: 'VIP 15% off',
+              promotionId: 'promo-specific-1',
+            },
+          ],
+        }).toResponse(),
+      );
+
+      await service.assignCustomer(saleId, 'user-1', { customerId });
+
+      // The engine was called once, with the assigned customerId.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.customerId).toBe(customerId);
+      // saleRepo.save was called BEFORE the draft response reload.
+      expect(saleRepo.save).toHaveBeenCalled();
+      // The saved sale carries the SPECIFIC promo applied to the item.
+      const saved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(saved.customerId).toBe(customerId);
+      expect(saved.items[0].promotionId).toBe('promo-specific-1');
+      expect(saved.items[0].discountType).toBe('percentage');
+    });
+
+    it('addItem with no matching promos is a safe no-op (engine returns empty, items unchanged) (4.7 boundary)', async () => {
+      const saleId = 'sale-rec-noop';
+      saleRepo.findById.mockResolvedValue(
+        Sale.create({ id: saleId, userId: 'user-1' }),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      // Engine default mock already returns empty — explicit anyway for clarity.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      const result = await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 1,
+      });
+
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      expect(result.items[0].promotionId).toBeNull();
+      expect(result.items[0].discountType).toBeNull();
+      expect(result.items[0].unitPriceCents).toBe(1000);
+    });
+
+    it('recompute calls ProductsService.resolvePriceListGlobalIds once with the DISTINCT appliedPriceListIds (C1 wiring)', async () => {
+      const saleId = 'sale-rec-c1';
+      const itemAId = 'item-rec-c1-a';
+      const itemBId = 'item-rec-c1-b';
+      // Two items, each with a price-list override — two distinct ids.
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: itemAId,
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'A',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            appliedPriceListId: 'PL-a',
+            priceSource: 'price_list',
+          },
+          {
+            id: itemBId,
+            saleId,
+            productId: 'prod-2',
+            variantId: null,
+            productName: 'B',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 2000,
+            unitPriceCurrency: 'MXN',
+            appliedPriceListId: 'PL-b',
+            priceSource: 'price_list',
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      productsService.resolvePriceListGlobalIds.mockResolvedValue(
+        new Map<string, string>([
+          ['PL-a', 'GPL-retail'],
+          ['PL-b', 'GPL-mayoreo'],
+        ]),
+      );
+
+      await service.updateItemQuantity(saleId, 'user-1', itemAId, {
+        quantity: 3,
+      });
+
+      // Resolver called ONCE (batch), with the DISTINCT ids.
+      expect(
+        productsService.resolvePriceListGlobalIds,
+      ).toHaveBeenCalledTimes(1);
+      const ids = (
+        productsService.resolvePriceListGlobalIds as jest.Mock
+      ).mock.calls[0][0] as string[];
+      expect([...ids].sort()).toEqual(['PL-a', 'PL-b']);
+
+      // Engine input carries the resolved global ids per line (C1).
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      const lineA = input.lines.find(
+        (l: { itemId: string }) => l.itemId === itemAId,
+      );
+      const lineB = input.lines.find(
+        (l: { itemId: string }) => l.itemId === itemBId,
+      );
+      expect(lineA.appliedPriceListId).toBe('PL-a');
+      expect(lineA.appliedGlobalPriceListId).toBe('GPL-retail');
+      expect(lineB.appliedPriceListId).toBe('PL-b');
+      expect(lineB.appliedGlobalPriceListId).toBe('GPL-mayoreo');
+    });
+  });
+
+  // ============================================================================
+  // Work Unit 5 — Charge + Override + Inline Totals (5.1, 5.3, 5.4, 5.7)
+  //
+  // The HIGHEST-RISK slice of the change: any totals-drift between the charge
+  // path and the draft preview re-introduces C2. The tests below lock the
+  // contract:
+  //   5.1 RED — overrideItemPrice re-applies an eligible auto-promo on the new
+  //             price (the override wipes any prior discount; recompute must
+  //             re-apply auto-promos so promo-on-top-of-price-list still wins).
+  //   5.3 RED — chargeDraft triggers a recompute inside its runInTransaction
+  //             block so the charged total is authoritative against the
+  //             current state (a qty change after the last draft recompute
+  //             must be picked up).
+  //   5.4 RED (C2) — a draft with an applied ORDER_DISCOUNT must charge
+  //             `totalCents = Σ(unitPrice·qty) − orderDiscountCents`; this is
+  //             the C2 proof for the charge path (same maths as the draft
+  //             preview, single source of truth).
+  //   5.7 GREEN (C2) — inline totals reuse `sale.previewTotals()` so the
+  //             adapter call receives the order-discount-adjusted numbers;
+  //             covered transitively by the 5.4 test (asserting
+  //             `persistChargeConfirmation` saw the right `totalCents` /
+  //             `discountCents`).
+  // ============================================================================
+  describe('Work Unit 5 — charge + override + inline totals', () => {
+    /**
+     * Build a DRAFT sale usable by charge-time tests.
+     * Items are persisted at unitPriceCents=1000 qty=2 → subtotal=2000.
+     * Caller may overlay an `appliedOrderPromotion` snapshot.
+     */
+    function buildDraftSaleWithTotals(
+      id: string,
+      overrides: {
+        appliedOrderPromotion?: {
+          promotionId: string;
+          discountType: 'amount' | 'percentage';
+          discountValue: number;
+          discountAmountCents: number;
+          discountTitle: string;
+        } | null;
+        unitPriceCents?: number;
+        quantity?: number;
+        discountAmountCents?: number;
+        prePriceCentsBeforeDiscount?: number;
+        discountType?: 'amount' | 'percentage' | null;
+        discountValue?: number;
+      } = {},
+    ) {
+      const unit = overrides.unitPriceCents ?? 1000;
+      const qty = overrides.quantity ?? 2;
+      const props: Parameters<typeof Sale.fromPersistence>[0] = {
+        id,
+        userId: 'user-1',
+        customerId: 'customer-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: qty,
+            unitPriceCents: unit,
+            unitPriceCurrency: 'MXN',
+            ...(overrides.prePriceCentsBeforeDiscount !== undefined
+              ? {
+                  prePriceCentsBeforeDiscount:
+                    overrides.prePriceCentsBeforeDiscount,
+                }
+              : {}),
+            ...(overrides.discountType !== undefined
+              ? { discountType: overrides.discountType }
+              : {}),
+            ...(overrides.discountValue !== undefined
+              ? { discountValue: overrides.discountValue }
+              : {}),
+            ...(overrides.discountAmountCents !== undefined
+              ? { discountAmountCents: overrides.discountAmountCents }
+              : {}),
+          },
+        ],
+        ...(overrides.appliedOrderPromotion !== undefined
+          ? { appliedOrderPromotion: overrides.appliedOrderPromotion }
+          : {}),
+      };
+      return Sale.fromPersistence(props);
+    }
+
+    it('5.1 RED — overrideItemPrice re-runs recompute so an eligible auto-promo applies on the NEW price', async () => {
+      const saleId = 'sale-u5-override-recompute';
+      const itemId = 'item-u5-override-1';
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.save.mockResolvedValue(sale);
+      // resolveListPrice returns 800 for the PRICE_LIST override.
+      productsService.resolveListPrice.mockResolvedValue(800);
+      // Engine returns 10% promo on the line → after recompute unitPrice should
+      // drop from 800 to 720 (NOT stay at 800 — old behavior was 800 with no
+      // recompute).
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  itemId: line.itemId,
+                  promotionId: 'promo-auto-override-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: '10% off',
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+        });
+      });
+
+      await service.overrideItemPrice(
+        saleId,
+        itemId,
+        { priceListId: 'pl-1' },
+        'user-1',
+      );
+
+      // Recompute WAS called during overrideItemPrice (this is the new wiring).
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const recomputeInput =
+        posEvaluateUseCase.evaluate.mock.calls[0][0];
+      // The recompute input carries the NEW unitPriceCents (800) — recompute
+      // runs AFTER overridePrice, on the new baseline.
+      expect(recomputeInput.lines[0].effectiveUnitPriceCents).toBe(800);
+
+      // The saved sale has the auto promo applied on the NEW price:
+      // 10% of 800 = 80 → unitPriceCents = 720.
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const savedItem = savedSale.items.find((i) => i.id === itemId)!;
+      expect(savedItem.promotionId).toBe('promo-auto-override-1');
+      expect(savedItem.discountType).toBe('percentage');
+      expect(savedItem.discountValue).toBe(10);
+      expect(savedItem.prePriceCentsBeforeDiscount).toBe(800);
+      expect(savedItem.unitPriceCents).toBe(720);
+    });
+
+    it('5.3 RED — chargeDraft triggers a recompute inside the runInTransaction block', async () => {
+      const saleId = 'sale-u5-charge-recompute';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        // Subtotal 2000; no per-line discount; no order promo.
+        unitPriceCents: 1000,
+        quantity: 2,
+      });
+      // Freshness loop must succeed against live prices:
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000050');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-u5-charge-recompute',
+      );
+
+      // The engine WAS called inside the charge tx — recompute is authoritative.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const chargeInput =
+        posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(chargeInput.lines).toHaveLength(1);
+      expect(chargeInput.lines[0].itemId).toBe(`${saleId}-item-1`);
+    });
+
+    it('5.4 RED (C2) — chargeDraft totalCents reflects the applied ORDER_DISCOUNT via previewTotals (single source of truth)', async () => {
+      const saleId = 'sale-u5-c2-order-charge';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        unitPriceCents: 1000,
+        quantity: 2,
+        appliedOrderPromotion: {
+          promotionId: 'promo-order-c2',
+          discountType: 'amount',
+          discountValue: 500,
+          discountAmountCents: 500,
+          discountTitle: '$500 off',
+        },
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000060');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      // The charge-time recompute must KEEP the applied order promo so
+      // previewTotals() reduces the total. This models the realistic flow:
+      // the engine returned the same order discount at charge time as it
+      // did at the last draft recompute, so the in-memory state survives.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: {
+          promotionId: 'promo-order-c2',
+          discountType: 'amount',
+          discountValue: 500,
+          discountTitle: '$500 off',
+          discountAmountCents: 500,
+        },
+        availableManualPromotions: [],
+      });
+
+      const result = await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 1500 },
+        'idem-u5-c2-order-charge',
+      );
+
+      // subtotal=2000, orderDiscount=500 → total=1500, discount=500.
+      // This is THE C2 proof: the same previewTotals() helper the draft
+      // preview uses is the SOLE source of truth at charge time.
+      expect(result.subtotalCents).toBe(2000);
+      expect(result.discountCents).toBe(500);
+      expect(result.totalCents).toBe(1500);
+      expect(result.paidCents).toBe(1500);
+      expect(result.paymentStatus).toBe('PAID');
+
+      // The persistChargeConfirmation payload ALSO carried the order-discount-
+      // adjusted numbers — this is what gets persisted as the Sale row.
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId,
+          subtotalCents: 2000,
+          discountCents: 500,
+          totalCents: 1500,
+          paidCents: 1500,
+          debtCents: 0,
+          paymentStatus: 'PAID',
+          // The applied-order-promo snapshot was forwarded to the repo so
+          // it can upsert the sale_promotion_applied row inside the tx.
+          appliedOrderPromotion: expect.objectContaining({
+            promotionId: 'promo-order-c2',
+            discountAmountCents: 500,
+          }),
+        }),
+      );
+    });
+
+    it('5.7 GREEN (C2) — chargeDraft inline totals reuse previewTotals when no order discount is applied (no regression)', async () => {
+      const saleId = 'sale-u5-no-order';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        unitPriceCents: 1000,
+        quantity: 2,
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000061');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      const result = await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-u5-no-order',
+      );
+
+      // subtotal === total === 2000; discount === 0 (no order promo).
+      expect(result.subtotalCents).toBe(2000);
+      expect(result.discountCents).toBe(0);
+      expect(result.totalCents).toBe(2000);
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 2000,
+          discountCents: 0,
+          totalCents: 2000,
+        }),
+      );
+    });
+
+    // ------------------------------------------------------------------------
+    // S-1 EXPLICIT REGRESSION GUARD — restored after the U5 gate failed
+    // (commit b1cd15f). Asserts the DOCUMENTED contract (docs/sales-pos-
+    // charge-frontend.md:473-475) for a charge with a per-line PRODUCT_DISCOUNT:
+    //   subtotalCents = Σ((prePrice ?? unitPrice) · qty)   = base BEFORE discounts
+    //   totalCents    = Σ(unitPrice · qty)                  = what the customer pays
+    //   discountCents = subtotalCents − totalCents          = ALL savings (per-line)
+    // The persisted Sale row receives these values, and the receipt/detail
+    // view (`getSaleDetail` → `findOneWithRelations`) reads them back
+    // verbatim. Before this fix, a 1000¢×2 sale with 10% per-line discount
+    // persisted subtotal=1800/discount=0 — the per-line savings VANISHED
+    // from the receipt, violating the documented contract.
+    // ------------------------------------------------------------------------
+    it('S-1 REGRESSION GUARD — per-line PRODUCT_DISCOUNT persists subtotalCents=pre-discount base and discountCents=full savings (contract)', async () => {
+      const saleId = 'sale-s1-per-line-contract';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        // base 1000 × 2 = 2000, 10% per-line → unitPrice=900, post-line=1800
+        unitPriceCents: 900,
+        quantity: 2,
+        prePriceCentsBeforeDiscount: 1000,
+        discountType: 'percentage',
+        discountValue: 10,
+        discountAmountCents: 100,
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      // Price-freshness check expects current base price = prePrice = 1000
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000099');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      const result = await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 1800 },
+        'idem-s1-per-line-contract',
+      );
+
+      // Case (a) of the contract: per-line 10% only, no order discount.
+      //   subtotalCents = 1000*2 = 2000 (base BEFORE discounts)
+      //   totalCents    = 900*2  = 1800 (customer pays)
+      //   discountCents = 2000 - 1800 = 200 (per-line savings)
+      expect(result.subtotalCents).toBe(2000);
+      expect(result.discountCents).toBe(200);
+      expect(result.totalCents).toBe(1800);
+
+      // The Sale row receives the contract values, not a subtotal=1800
+      // / discount=0 regression that would lose the per-line savings.
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId,
+          subtotalCents: 2000,
+          discountCents: 200,
+          totalCents: 1800,
+        }),
+      );
+    });
+  });
+
+  // ============================================================================
+  // Work Unit 6 — Manual apply/remove endpoints + veto (6.1, 6.2, 6.3, 6.4, 6.5)
+  // ============================================================================
+  describe('Work Unit 6 — manual apply/remove + veto endpoints', () => {
+    /**
+     * Build a fresh draft sale with a single item already added in-memory
+     * (mirrors the U4 helper). Used to seed `findById` for the new endpoints.
+     */
+    function buildDraftSaleWithItem(
+      id: string,
+      itemId: string,
+      productId = 'prod-1',
+      unitPriceCents = 1000,
+      quantity = 2,
+    ) {
+      const sale = Sale.create({ id, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId: id,
+        productId,
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity,
+        unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    // ------------------------------------------------------------------------
+    // 6.1 — listApplicablePromotions
+    // ------------------------------------------------------------------------
+    it('6.1 — listApplicablePromotions returns the engine.availableManualPromotions for the draft', async () => {
+      const saleId = 'sale-u6-list';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-list');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-m-1', title: '10% off', type: 'PRODUCT_DISCOUNT' },
+          { id: 'promo-m-2', title: '20% off', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+
+      const result = await service.listApplicablePromotions(saleId, 'user-1');
+
+      expect(result.saleId).toBe(saleId);
+      expect(result.promotions).toEqual([
+        { id: 'promo-m-1', title: '10% off', type: 'PRODUCT_DISCOUNT' },
+        { id: 'promo-m-2', title: '20% off', type: 'PRODUCT_DISCOUNT' },
+      ]);
+
+      // Engine was called once with the proper PosEvalInput.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.lines).toHaveLength(1);
+      expect(input.lines[0]).toMatchObject({
+        itemId: 'item-u6-list',
+        productId: 'prod-1',
+        effectiveUnitPriceCents: 1000,
+      });
+    });
+
+    it('6.1 — listApplicablePromotions does NOT mutate sale state (no apply, no save)', async () => {
+      const saleId = 'sale-u6-list-nomut';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-list-nomut');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [
+          {
+            itemId: 'item-u6-list-nomut',
+            promotionId: 'promo-auto-1',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountTitle: '10% off',
+          },
+        ],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-m-1', title: 'manual', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+
+      const beforePromotionId = sale.items[0].promotionId;
+      await service.listApplicablePromotions(saleId, 'user-1');
+
+      // No mutation: the engine's `lines` (auto-promo) was NOT applied to
+      // the in-memory sale; the line's promotionId is still null.
+      expect(sale.items[0].promotionId).toBe(beforePromotionId);
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('6.1 — listApplicablePromotions rejects non-DRAFT sales', async () => {
+      const saleId = 'sale-u6-list-confirmed';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.listApplicablePromotions(saleId, 'user-1'),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+    });
+
+    it('6.1 — listApplicablePromotions enforces ownership', async () => {
+      const saleId = 'sale-u6-list-other';
+      const sale = Sale.create({ id: saleId, userId: 'user-other' });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.listApplicablePromotions(saleId, 'user-1'),
+      ).rejects.toMatchObject({ code: 'SALE_UPDATE_FORBIDDEN' });
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.2 — applyManualPromotion (opt in a MANUAL promo)
+    // ------------------------------------------------------------------------
+    it('6.2 — applyManualPromotion adds id to optedInManualPromotionIds, recomputes, and saves', async () => {
+      const saleId = 'sale-u6-apply';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-apply');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // Engine returns the manual promo as a best-wins line result for the item.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const opted = input.optedInManualPromotionIds;
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines:
+            opted.includes('promo-m-1') && line
+              ? [
+                  {
+                    itemId: line.itemId,
+                    promotionId: 'promo-m-1',
+                    discountType: 'percentage',
+                    discountValue: 10,
+                    discountTitle: '10% off',
+                  },
+                ]
+              : [],
+          order: null,
+          availableManualPromotions: [],
+        });
+      });
+
+      const result = await service.applyManualPromotion(
+        saleId,
+        'user-1',
+        'promo-m-1',
+      );
+
+      // Opt-in was added before the engine ran.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.optedInManualPromotionIds).toContain('promo-m-1');
+
+      // Recompute applied the manual promo to the line (10% of 1000 = 100).
+      expect(result.items[0].promotionId).toBe('promo-m-1');
+      expect(result.items[0].unitPriceCents).toBe(900);
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('6.2 — applyManualPromotion also removes the id from the veto set (reactivation)', async () => {
+      const saleId = 'sale-u6-apply-reactivate';
+      // Sale already has 'promo-m-1' in the veto set.
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-apply-reactivate');
+      sale.addVetoedPromotion('promo-m-1');
+      expect(sale.vetoedPromotionIds).toContain('promo-m-1');
+
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockImplementation((input) => ({
+        lines:
+          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1')
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-m-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: 'reactivated',
+                },
+              ]
+            : [],
+        order: null,
+        availableManualPromotions: [],
+      }));
+
+      await service.applyManualPromotion(saleId, 'user-1', 'promo-m-1');
+
+      // After reactivation: still opted-in (from the apply), no longer vetoed.
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.optedInManualPromotionIds).toContain('promo-m-1');
+      expect(savedSale.vetoedPromotionIds).not.toContain('promo-m-1');
+    });
+
+    it('6.2 — applyManualPromotion rejects non-DRAFT sales', async () => {
+      const saleId = 'sale-u6-apply-confirmed';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.applyManualPromotion(saleId, 'user-1', 'promo-m-1'),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('6.2 — applyManualPromotion enforces ownership', async () => {
+      const saleId = 'sale-u6-apply-other';
+      const sale = Sale.create({ id: saleId, userId: 'user-other' });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.applyManualPromotion(saleId, 'user-1', 'promo-m-1'),
+      ).rejects.toMatchObject({ code: 'SALE_UPDATE_FORBIDDEN' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.3 — removeManualPromotion (opt out a MANUAL promo)
+    // ------------------------------------------------------------------------
+    it('6.3 — removeManualPromotion removes id from optedInManualPromotionIds, recomputes, and saves', async () => {
+      const saleId = 'sale-u6-remove-m';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-remove-m');
+      sale.optInManualPromotion('promo-m-1');
+      expect(sale.optedInManualPromotionIds).toContain('promo-m-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // Engine no longer sees the manual promo as opted-in.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-m-1', title: 'back on the shelf', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+
+      const result = await service.removeManualPromotion(
+        saleId,
+        'user-1',
+        'promo-m-1',
+      );
+
+      // After remove: opt-in set no longer contains the id.
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.optedInManualPromotionIds).not.toContain('promo-m-1');
+
+      // Engine was called WITHOUT the id in opt-in (verify it was removed
+      // BEFORE the recompute).
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.optedInManualPromotionIds).not.toContain('promo-m-1');
+      expect(result).toBeDefined();
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('6.3 — removeManualPromotion is a no-op when id is not opted-in', async () => {
+      const saleId = 'sale-u6-remove-m-noop';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-remove-m-noop');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      // Removing a non-opted-in id should NOT throw, just be idempotent.
+      await expect(
+        service.removeManualPromotion(saleId, 'user-1', 'promo-not-opted-in'),
+      ).resolves.toBeDefined();
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.4 — removeAppliedPromotion (veto an AUTO promo)
+    // ------------------------------------------------------------------------
+    it('6.4 — removeAppliedPromotion adds id to vetoedPromotionIds, recomputes, and saves', async () => {
+      const saleId = 'sale-u6-veto';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-veto');
+      expect(sale.vetoedPromotionIds).not.toContain('promo-auto-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // After veto, the engine no longer returns the auto promo.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => ({
+        lines:
+          !input.vetoedPromotionIds.includes('promo-auto-1') && input.lines[0]
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-auto-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: 'auto',
+                },
+              ]
+            : [],
+        order: null,
+        availableManualPromotions: [],
+      }));
+
+      await service.removeAppliedPromotion(saleId, 'user-1', 'promo-auto-1');
+
+      // Veto was added before recompute.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.vetoedPromotionIds).toContain('promo-auto-1');
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.vetoedPromotionIds).toContain('promo-auto-1');
+      // The auto promo is no longer applied to the line.
+      expect(savedSale.items[0].promotionId).not.toBe('promo-auto-1');
+    });
+
+    it('6.4 — removeAppliedPromotion is idempotent when id is already vetoed', async () => {
+      const saleId = 'sale-u6-veto-idem';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-veto-idem');
+      sale.addVetoedPromotion('promo-auto-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      await expect(
+        service.removeAppliedPromotion(saleId, 'user-1', 'promo-auto-1'),
+      ).resolves.toBeDefined();
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      // Only one entry in veto set (no duplicates).
+      const count = savedSale.vetoedPromotionIds.filter(
+        (id) => id === 'promo-auto-1',
+      ).length;
+      expect(count).toBe(1);
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.5 — remove endpoints MUST NOT mutate the Promotion catalog
+    // ------------------------------------------------------------------------
+    //
+    // The unit test asserts the SERVICE-SIDE invariant: the service
+    // methods do NOT touch the Promotion entity / catalog. The catalog
+    // mutation would require a write to Promotion.status / method /
+    // discountValue, but our service only mutates the in-memory Sale
+    // aggregate's opt-in / veto sets and calls saleRepo.save. The
+    // Promotion catalog is read-only from the engine's perspective and
+    // is never written to by SalesService.
+    //
+    // We assert this by confirming the service has no Promotion write
+    // surface: there is no Promotion repository injected, no
+    // prisma.promotion.update call, no Promotion entity write API used.
+    // The simplest test: the service does not import or expose any
+    // "updatePromotion" / "deletePromotion" / "setPromotionStatus" method.
+    it('6.5 — SalesService does not expose any method that mutates the Promotion catalog', () => {
+      const proto = Object.getOwnPropertyNames(SalesService.prototype);
+      const forbidden = [
+        'updatePromotion',
+        'deletePromotion',
+        'setPromotionStatus',
+        'setPromotionMethod',
+        'setPromotionDiscountValue',
+        'mutatePromotionCatalog',
+      ];
+      for (const name of forbidden) {
+        expect(proto).not.toContain(name);
+      }
+      // Sanity: the only write surface on the service for promotions is
+      // the per-draft opt-in / veto mutators (applyManual / removeManual /
+      // removeApplied) which mutate the Sale aggregate, not the catalog.
+      expect(proto).toContain('applyManualPromotion');
+      expect(proto).toContain('removeManualPromotion');
+      expect(proto).toContain('removeAppliedPromotion');
+      expect(proto).toContain('listApplicablePromotions');
     });
   });
 });
