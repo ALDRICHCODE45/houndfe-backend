@@ -147,6 +147,24 @@ export class PrismaSaleRepository implements ISaleRepository {
       });
     }
 
+    // ---- Unit 6 close-out — MANUAL opt-in persistence ----
+    // Mirrors the veto block EXACTLY (delete-then-createMany) so the
+    // `optedInManualPromotionIds` set survives a save→findById reload.
+    // Without this, every read mapper returns [] and a subsequent recompute
+    // (e.g. from addItem) drops the manual line discount.
+    await prisma.salePromotionOptIn.deleteMany({
+      where: { saleId: sale.id, tenantId },
+    });
+    if (sale.optedInManualPromotionIds.length > 0) {
+      await prisma.salePromotionOptIn.createMany({
+        data: sale.optedInManualPromotionIds.map((promotionId) => ({
+          saleId: sale.id,
+          promotionId,
+          tenantId,
+        })),
+      });
+    }
+
     // Applied order promotion: upsert on (saleId) when set, delete when cleared.
     // The schema's `@@unique([saleId])` enforces one row per sale.
     if (sale.appliedOrderPromotion) {
@@ -191,6 +209,12 @@ export class PrismaSaleRepository implements ISaleRepository {
         // exclude vetoed promotions and the draft preview can show the order
         // discount. Item-level promotionId flows through `items: true`.
         promotionVetoes: {
+          select: { promotionId: true },
+        },
+        // Unit 6 close-out: load MANUAL opt-in set so a reload preserves the
+        // seller's opt-in across draft mutations (addItem, assignCustomer,
+        // etc.). Without this, a recompute drops the manual line discount.
+        promotionOptIns: {
           select: { promotionId: true },
         },
         appliedPromotion: true,
@@ -263,7 +287,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       vetoedPromotionIds: (
         (persistedSale.promotionVetoes as Array<{ promotionId: string }>) ?? []
       ).map((v) => v.promotionId),
-      optedInManualPromotionIds: [], // populated by Unit 6 manual endpoints
+      optedInManualPromotionIds: (
+        (persistedSale.promotionOptIns as Array<{ promotionId: string }>) ?? []
+      ).map((o) => o.promotionId),
     });
   }
 
@@ -295,6 +321,11 @@ export class PrismaSaleRepository implements ISaleRepository {
         },
         // Unit 3 — W2: load veto + applied-promo for draft preview.
         promotionVetoes: {
+          select: { promotionId: true },
+        },
+        // Unit 6 close-out: load MANUAL opt-in set so draft preview totals
+        // and recompute paths see the seller's opt-in.
+        promotionOptIns: {
           select: { promotionId: true },
         },
         appliedPromotion: true,
@@ -364,7 +395,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       vetoedPromotionIds: (
         (saleData.promotionVetoes as Array<{ promotionId: string }>) ?? []
       ).map((v) => v.promotionId),
-      optedInManualPromotionIds: [], // populated by Unit 6 manual endpoints
+      optedInManualPromotionIds: (
+        (saleData.promotionOptIns as Array<{ promotionId: string }>) ?? []
+      ).map((o) => o.promotionId),
     });
 
     return {
@@ -411,6 +444,9 @@ export class PrismaSaleRepository implements ISaleRepository {
         shippingAddress: { select: { id: true } },
         // Unit 3 — W2: load veto + applied-promo on the draft-list path too.
         promotionVetoes: { select: { promotionId: true } },
+        // Unit 6 close-out: load MANUAL opt-in set on the draft-list path so
+        // every draft the user owns surfaces its opt-in state.
+        promotionOptIns: { select: { promotionId: true } },
         appliedPromotion: true,
       },
       orderBy: { createdAt: 'desc' },
@@ -483,7 +519,11 @@ export class PrismaSaleRepository implements ISaleRepository {
             promotionId: string;
           }>) ?? []
         ).map((v) => v.promotionId),
-        optedInManualPromotionIds: [], // populated by Unit 6 manual endpoints
+        optedInManualPromotionIds: (
+          ((saleData as any).promotionOptIns as Array<{
+            promotionId: string;
+          }>) ?? []
+        ).map((o) => o.promotionId),
       }),
     );
   }
@@ -506,6 +546,9 @@ export class PrismaSaleRepository implements ISaleRepository {
         // charge-time recompute excludes vetoed ids and keeps the order
         // discount consistent with the draft preview.
         promotionVetoes: { select: { promotionId: true } },
+        // Unit 6 close-out: charge path needs the MANUAL opt-in set so the
+        // charge-time recompute respects the seller's manual picks.
+        promotionOptIns: { select: { promotionId: true } },
         appliedPromotion: true,
       },
     });
@@ -585,7 +628,10 @@ export class PrismaSaleRepository implements ISaleRepository {
       vetoedPromotionIds: (
         (persistedSale.promotionVetoes as Array<{ promotionId: string }>) ?? []
       ).map((v) => v.promotionId),
-      optedInManualPromotionIds: [], // populated by Unit 6 manual endpoints
+      optedInManualPromotionIds: (
+        (persistedSale.promotionOptIns as Array<{ promotionId: string }>) ??
+        []
+      ).map((o) => o.promotionId),
     });
   }
 

@@ -1,4 +1,6 @@
 import { Sale } from './sale.entity';
+import { SaleItem } from './sale-item.entity';
+import type { AppliedOrderPromotionSnapshot } from './sale.entity';
 import type {
   SalesListBaseFilter,
   SalesListExtendedFilter,
@@ -155,6 +157,21 @@ export interface ISaleRepository {
     dueDate?: Date | null;
     confirmedAt: Date;
     folio: string;
+    /**
+     * Work Unit 5 — W1 fix. When provided, the SaleItem rows are
+     * deleteMany + createMany-re-written INSIDE the charge tx so the
+     * charge-time recomputed per-line promo state (promotionId /
+     * discountAmountCents / unitPriceCents) is persisted alongside the
+     * charged total. Same pattern as `save`. When omitted, no item re-write
+     * happens (back-compat for non-promo charges).
+     */
+    items?: ReadonlyArray<SaleItem>;
+    /**
+     * Work Unit 5 — C2 audit. When provided (incl. explicit null), the
+     * `sale_promotion_applied` row is upserted (non-null) or deleted
+     * (null). When omitted entirely, the table is left alone (back-compat).
+     */
+    appliedOrderPromotion?: AppliedOrderPromotionSnapshot | null;
   }): Promise<PersistedSalePaymentRecord[]>;
 
   persistCancellation(

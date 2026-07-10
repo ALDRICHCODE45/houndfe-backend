@@ -257,6 +257,7 @@ model Tenant {
   saleFolioCounters         SaleFolioCounter[]
   salePromotionApplied      SalePromotionApplied[]
   salePromotionVetoes       SalePromotionVeto[]
+  salePromotionOptIns       SalePromotionOptIn[]
   outboxEvents              OutboxEvent[]
   customers                 Customer[]
   customerAddresses         CustomerAddress[]
@@ -686,6 +687,7 @@ model Sale {
   receiptEvidences   ReceiptEvidence[]
   appliedPromotion   SalePromotionApplied?
   promotionVetoes    SalePromotionVeto[]
+  promotionOptIns    SalePromotionOptIn[]
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
@@ -1101,6 +1103,7 @@ model Promotion {
   appliedItems SaleItem[]
   appliedSales SalePromotionApplied[]
   saleVetoes   SalePromotionVeto[]
+  saleOptIns   SalePromotionOptIn[]
 
   @@index([tenantId])
   @@index([type])
@@ -1217,6 +1220,26 @@ model SalePromotionVeto {
   @@unique([saleId, promotionId])
   @@index([tenantId])
   @@map("sale_promotion_vetoes")
+}
+
+// Per-draft MANUAL opt-in set: a (sale, promotion) pair the seller has opted
+// into. Mirrors SalePromotionVeto EXACTLY (same shape, FK semantics, and
+// unique-pair index) so the persistence path stays symmetric: delete-then-
+// createMany on save, include promotionOptIns on every read mapper.
+model SalePromotionOptIn {
+  id          String   @id @default(uuid())
+  tenantId    String
+  saleId      String
+  promotionId String
+  createdAt   DateTime @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale      Sale      @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  @@unique([saleId, promotionId])
+  @@index([tenantId])
+  @@map("sale_promotion_opt_ins")
 }
 
 // ============================================================================
