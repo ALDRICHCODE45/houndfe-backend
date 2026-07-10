@@ -34,6 +34,9 @@ import { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 import { ChargeSaleDto } from './dto/charge-sale.dto';
 import { AssignCustomerDto } from './dto/assign-customer.dto';
 import { SetShippingAddressDto } from './dto/set-shipping-address.dto';
+import { ApplyManualPromotionDto } from './dto/apply-manual-promotion.dto';
+import { RemoveManualPromotionDto } from './dto/remove-manual-promotion.dto';
+import { RemoveAppliedPromotionDto } from './dto/remove-applied-promotion.dto';
 
 @Controller('sales/drafts')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -238,5 +241,86 @@ export class SalesController {
     }
 
     return this.salesService.chargeDraft(id, user.userId, dto, idempotencyKey);
+  }
+
+  // ============================================================================
+  // Work Unit 6 — Manual apply/remove + veto routes (6.1, 6.2, 6.3, 6.4)
+  //
+  // All four routes mirror the existing draft-mutation route conventions:
+  // `@UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)` is on
+  // the controller (line 39), `@ParseUUIDPipe` validates ids, and
+  // `@RequirePermissions(['update', 'Sale'])` enforces the same RBAC action
+  // as addItem / updateItemQuantity / removeItem / assignCustomer. The
+  // service layer additionally enforces ownership + DRAFT status.
+  // ============================================================================
+
+  /**
+   * 6.1 — `GET /sales/drafts/:id/applicable-promotions`
+   *
+   * Returns the MANUAL promotions the seller can opt-in to on the
+   * current draft. Read-only — does NOT mutate the draft state.
+   */
+  @Get(':id/applicable-promotions')
+  @RequirePermissions(['update', 'Sale'])
+  listApplicablePromotions(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.listApplicablePromotions(id, user.userId);
+  }
+
+  /**
+   * 6.2 — `POST /sales/drafts/:id/manual-promotions/:promotionId`
+   *
+   * Opts a MANUAL promotion in. Reactivation path: if the id was
+   * previously vetoed it is removed from the veto set. Body is
+   * intentionally empty (path params carry the inputs).
+   */
+  @Post(':id/manual-promotions/:promotionId')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Sale'])
+  applyManualPromotion(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('promotionId', ParseUUIDPipe) promotionId: string,
+    @Body() _dto: ApplyManualPromotionDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.applyManualPromotion(id, user.userId, promotionId);
+  }
+
+  /**
+   * 6.3 — `DELETE /sales/drafts/:id/manual-promotions/:promotionId`
+   *
+   * Removes a MANUAL opt-in. Idempotent.
+   */
+  @Delete(':id/manual-promotions/:promotionId')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Sale'])
+  removeManualPromotion(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('promotionId', ParseUUIDPipe) promotionId: string,
+    @Body() _dto: RemoveManualPromotionDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.removeManualPromotion(id, user.userId, promotionId);
+  }
+
+  /**
+   * 6.4 — `DELETE /sales/drafts/:id/promotions/:promotionId`
+   *
+   * Veto an AUTO-applied promotion. Adds the id to the per-draft
+   * veto set; subsequent recomputes exclude it. The Promotion catalog
+   * is NEVER mutated by this route (6.5 invariant).
+   */
+  @Delete(':id/promotions/:promotionId')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Sale'])
+  removeAppliedPromotion(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('promotionId', ParseUUIDPipe) promotionId: string,
+    @Body() _dto: RemoveAppliedPromotionDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.removeAppliedPromotion(id, user.userId, promotionId);
   }
 }

@@ -31,6 +31,10 @@ function makeMockSalesService() {
     clearCustomer: jest.fn(),
     setShippingAddress: jest.fn(),
     clearShippingAddress: jest.fn(),
+    listApplicablePromotions: jest.fn(),
+    applyManualPromotion: jest.fn(),
+    removeManualPromotion: jest.fn(),
+    removeAppliedPromotion: jest.fn(),
   } as any;
 }
 
@@ -539,6 +543,120 @@ describe('SalesController', () => {
       await expect(
         controller.clearShippingAddress('sale-1', user),
       ).rejects.toThrow('SALE_NOT_DRAFT');
+    });
+  });
+
+  // ============================================================================
+  // Work Unit 6 — Manual apply/remove + veto routes (6.7)
+  // ============================================================================
+  describe('Work Unit 6 — manual promotion routes', () => {
+    it('GET /sales/drafts/:id/applicable-promotions delegates to listApplicablePromotions', async () => {
+      const user = makeMockUser('user-1');
+      service.listApplicablePromotions.mockResolvedValue({
+        saleId: 'sale-1',
+        promotions: [
+          { id: 'promo-m-1', title: '10% off', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+
+      const result = await controller.listApplicablePromotions('sale-1', user);
+
+      expect(result).toEqual({
+        saleId: 'sale-1',
+        promotions: [
+          { id: 'promo-m-1', title: '10% off', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+      expect(service.listApplicablePromotions).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+      );
+    });
+
+    it('POST /sales/drafts/:id/manual-promotions/:promotionId delegates to applyManualPromotion', async () => {
+      const user = makeMockUser('user-1');
+      service.applyManualPromotion.mockResolvedValue({
+        id: 'sale-1',
+        items: [{ id: 'item-1', promotionId: 'promo-m-1', unitPriceCents: 900 }],
+      });
+
+      const result = await controller.applyManualPromotion(
+        'sale-1',
+        'promo-m-1',
+        {},
+        user,
+      );
+
+      expect(result).toEqual({
+        id: 'sale-1',
+        items: [{ id: 'item-1', promotionId: 'promo-m-1', unitPriceCents: 900 }],
+      });
+      expect(service.applyManualPromotion).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        'promo-m-1',
+      );
+    });
+
+    it('DELETE /sales/drafts/:id/manual-promotions/:promotionId delegates to removeManualPromotion', async () => {
+      const user = makeMockUser('user-1');
+      service.removeManualPromotion.mockResolvedValue({
+        id: 'sale-1',
+        items: [{ id: 'item-1', promotionId: null, unitPriceCents: 1000 }],
+      });
+
+      const result = await controller.removeManualPromotion(
+        'sale-1',
+        'promo-m-1',
+        {},
+        user,
+      );
+
+      expect(result).toEqual({
+        id: 'sale-1',
+        items: [{ id: 'item-1', promotionId: null, unitPriceCents: 1000 }],
+      });
+      expect(service.removeManualPromotion).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        'promo-m-1',
+      );
+    });
+
+    it('DELETE /sales/drafts/:id/promotions/:promotionId delegates to removeAppliedPromotion', async () => {
+      const user = makeMockUser('user-1');
+      service.removeAppliedPromotion.mockResolvedValue({
+        id: 'sale-1',
+        items: [{ id: 'item-1', promotionId: null, unitPriceCents: 1000 }],
+      });
+
+      const result = await controller.removeAppliedPromotion(
+        'sale-1',
+        'promo-auto-1',
+        {},
+        user,
+      );
+
+      expect(result).toEqual({
+        id: 'sale-1',
+        items: [{ id: 'item-1', promotionId: null, unitPriceCents: 1000 }],
+      });
+      expect(service.removeAppliedPromotion).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        'promo-auto-1',
+      );
+    });
+
+    it('routes forward service errors', async () => {
+      const user = makeMockUser('user-1');
+      service.applyManualPromotion.mockRejectedValue(
+        new Error('PROMOTION_NOT_FOUND'),
+      );
+
+      await expect(
+        controller.applyManualPromotion('sale-1', 'promo-m-1', {}, user),
+      ).rejects.toThrow('PROMOTION_NOT_FOUND');
     });
   });
 });

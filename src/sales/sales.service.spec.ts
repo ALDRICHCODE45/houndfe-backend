@@ -5353,4 +5353,395 @@ describe('SalesService', () => {
       );
     });
   });
+
+  // ============================================================================
+  // Work Unit 6 — Manual apply/remove endpoints + veto (6.1, 6.2, 6.3, 6.4, 6.5)
+  // ============================================================================
+  describe('Work Unit 6 — manual apply/remove + veto endpoints', () => {
+    /**
+     * Build a fresh draft sale with a single item already added in-memory
+     * (mirrors the U4 helper). Used to seed `findById` for the new endpoints.
+     */
+    function buildDraftSaleWithItem(
+      id: string,
+      itemId: string,
+      productId = 'prod-1',
+      unitPriceCents = 1000,
+      quantity = 2,
+    ) {
+      const sale = Sale.create({ id, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId: id,
+        productId,
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity,
+        unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    // ------------------------------------------------------------------------
+    // 6.1 — listApplicablePromotions
+    // ------------------------------------------------------------------------
+    it('6.1 — listApplicablePromotions returns the engine.availableManualPromotions for the draft', async () => {
+      const saleId = 'sale-u6-list';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-list');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-m-1', title: '10% off', type: 'PRODUCT_DISCOUNT' },
+          { id: 'promo-m-2', title: '20% off', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+
+      const result = await service.listApplicablePromotions(saleId, 'user-1');
+
+      expect(result.saleId).toBe(saleId);
+      expect(result.promotions).toEqual([
+        { id: 'promo-m-1', title: '10% off', type: 'PRODUCT_DISCOUNT' },
+        { id: 'promo-m-2', title: '20% off', type: 'PRODUCT_DISCOUNT' },
+      ]);
+
+      // Engine was called once with the proper PosEvalInput.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.lines).toHaveLength(1);
+      expect(input.lines[0]).toMatchObject({
+        itemId: 'item-u6-list',
+        productId: 'prod-1',
+        effectiveUnitPriceCents: 1000,
+      });
+    });
+
+    it('6.1 — listApplicablePromotions does NOT mutate sale state (no apply, no save)', async () => {
+      const saleId = 'sale-u6-list-nomut';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-list-nomut');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [
+          {
+            itemId: 'item-u6-list-nomut',
+            promotionId: 'promo-auto-1',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountTitle: '10% off',
+          },
+        ],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-m-1', title: 'manual', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+
+      const beforePromotionId = sale.items[0].promotionId;
+      await service.listApplicablePromotions(saleId, 'user-1');
+
+      // No mutation: the engine's `lines` (auto-promo) was NOT applied to
+      // the in-memory sale; the line's promotionId is still null.
+      expect(sale.items[0].promotionId).toBe(beforePromotionId);
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('6.1 — listApplicablePromotions rejects non-DRAFT sales', async () => {
+      const saleId = 'sale-u6-list-confirmed';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.listApplicablePromotions(saleId, 'user-1'),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+    });
+
+    it('6.1 — listApplicablePromotions enforces ownership', async () => {
+      const saleId = 'sale-u6-list-other';
+      const sale = Sale.create({ id: saleId, userId: 'user-other' });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.listApplicablePromotions(saleId, 'user-1'),
+      ).rejects.toMatchObject({ code: 'SALE_UPDATE_FORBIDDEN' });
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.2 — applyManualPromotion (opt in a MANUAL promo)
+    // ------------------------------------------------------------------------
+    it('6.2 — applyManualPromotion adds id to optedInManualPromotionIds, recomputes, and saves', async () => {
+      const saleId = 'sale-u6-apply';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-apply');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // Engine returns the manual promo as a best-wins line result for the item.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const opted = input.optedInManualPromotionIds;
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines:
+            opted.includes('promo-m-1') && line
+              ? [
+                  {
+                    itemId: line.itemId,
+                    promotionId: 'promo-m-1',
+                    discountType: 'percentage',
+                    discountValue: 10,
+                    discountTitle: '10% off',
+                  },
+                ]
+              : [],
+          order: null,
+          availableManualPromotions: [],
+        });
+      });
+
+      const result = await service.applyManualPromotion(
+        saleId,
+        'user-1',
+        'promo-m-1',
+      );
+
+      // Opt-in was added before the engine ran.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.optedInManualPromotionIds).toContain('promo-m-1');
+
+      // Recompute applied the manual promo to the line (10% of 1000 = 100).
+      expect(result.items[0].promotionId).toBe('promo-m-1');
+      expect(result.items[0].unitPriceCents).toBe(900);
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('6.2 — applyManualPromotion also removes the id from the veto set (reactivation)', async () => {
+      const saleId = 'sale-u6-apply-reactivate';
+      // Sale already has 'promo-m-1' in the veto set.
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-apply-reactivate');
+      sale.addVetoedPromotion('promo-m-1');
+      expect(sale.vetoedPromotionIds).toContain('promo-m-1');
+
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockImplementation((input) => ({
+        lines:
+          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1')
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-m-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: 'reactivated',
+                },
+              ]
+            : [],
+        order: null,
+        availableManualPromotions: [],
+      }));
+
+      await service.applyManualPromotion(saleId, 'user-1', 'promo-m-1');
+
+      // After reactivation: still opted-in (from the apply), no longer vetoed.
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.optedInManualPromotionIds).toContain('promo-m-1');
+      expect(savedSale.vetoedPromotionIds).not.toContain('promo-m-1');
+    });
+
+    it('6.2 — applyManualPromotion rejects non-DRAFT sales', async () => {
+      const saleId = 'sale-u6-apply-confirmed';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.applyManualPromotion(saleId, 'user-1', 'promo-m-1'),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('6.2 — applyManualPromotion enforces ownership', async () => {
+      const saleId = 'sale-u6-apply-other';
+      const sale = Sale.create({ id: saleId, userId: 'user-other' });
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.applyManualPromotion(saleId, 'user-1', 'promo-m-1'),
+      ).rejects.toMatchObject({ code: 'SALE_UPDATE_FORBIDDEN' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.3 — removeManualPromotion (opt out a MANUAL promo)
+    // ------------------------------------------------------------------------
+    it('6.3 — removeManualPromotion removes id from optedInManualPromotionIds, recomputes, and saves', async () => {
+      const saleId = 'sale-u6-remove-m';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-remove-m');
+      sale.optInManualPromotion('promo-m-1');
+      expect(sale.optedInManualPromotionIds).toContain('promo-m-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // Engine no longer sees the manual promo as opted-in.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-m-1', title: 'back on the shelf', type: 'PRODUCT_DISCOUNT' },
+        ],
+      });
+
+      const result = await service.removeManualPromotion(
+        saleId,
+        'user-1',
+        'promo-m-1',
+      );
+
+      // After remove: opt-in set no longer contains the id.
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.optedInManualPromotionIds).not.toContain('promo-m-1');
+
+      // Engine was called WITHOUT the id in opt-in (verify it was removed
+      // BEFORE the recompute).
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.optedInManualPromotionIds).not.toContain('promo-m-1');
+      expect(result).toBeDefined();
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('6.3 — removeManualPromotion is a no-op when id is not opted-in', async () => {
+      const saleId = 'sale-u6-remove-m-noop';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-remove-m-noop');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      // Removing a non-opted-in id should NOT throw, just be idempotent.
+      await expect(
+        service.removeManualPromotion(saleId, 'user-1', 'promo-not-opted-in'),
+      ).resolves.toBeDefined();
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.4 — removeAppliedPromotion (veto an AUTO promo)
+    // ------------------------------------------------------------------------
+    it('6.4 — removeAppliedPromotion adds id to vetoedPromotionIds, recomputes, and saves', async () => {
+      const saleId = 'sale-u6-veto';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-veto');
+      expect(sale.vetoedPromotionIds).not.toContain('promo-auto-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // After veto, the engine no longer returns the auto promo.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => ({
+        lines:
+          !input.vetoedPromotionIds.includes('promo-auto-1') && input.lines[0]
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-auto-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: 'auto',
+                },
+              ]
+            : [],
+        order: null,
+        availableManualPromotions: [],
+      }));
+
+      await service.removeAppliedPromotion(saleId, 'user-1', 'promo-auto-1');
+
+      // Veto was added before recompute.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.vetoedPromotionIds).toContain('promo-auto-1');
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.vetoedPromotionIds).toContain('promo-auto-1');
+      // The auto promo is no longer applied to the line.
+      expect(savedSale.items[0].promotionId).not.toBe('promo-auto-1');
+    });
+
+    it('6.4 — removeAppliedPromotion is idempotent when id is already vetoed', async () => {
+      const saleId = 'sale-u6-veto-idem';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-veto-idem');
+      sale.addVetoedPromotion('promo-auto-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      await expect(
+        service.removeAppliedPromotion(saleId, 'user-1', 'promo-auto-1'),
+      ).resolves.toBeDefined();
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      // Only one entry in veto set (no duplicates).
+      const count = savedSale.vetoedPromotionIds.filter(
+        (id) => id === 'promo-auto-1',
+      ).length;
+      expect(count).toBe(1);
+    });
+
+    // ------------------------------------------------------------------------
+    // 6.5 — remove endpoints MUST NOT mutate the Promotion catalog
+    // ------------------------------------------------------------------------
+    //
+    // The unit test asserts the SERVICE-SIDE invariant: the service
+    // methods do NOT touch the Promotion entity / catalog. The catalog
+    // mutation would require a write to Promotion.status / method /
+    // discountValue, but our service only mutates the in-memory Sale
+    // aggregate's opt-in / veto sets and calls saleRepo.save. The
+    // Promotion catalog is read-only from the engine's perspective and
+    // is never written to by SalesService.
+    //
+    // We assert this by confirming the service has no Promotion write
+    // surface: there is no Promotion repository injected, no
+    // prisma.promotion.update call, no Promotion entity write API used.
+    // The simplest test: the service does not import or expose any
+    // "updatePromotion" / "deletePromotion" / "setPromotionStatus" method.
+    it('6.5 — SalesService does not expose any method that mutates the Promotion catalog', () => {
+      const proto = Object.getOwnPropertyNames(SalesService.prototype);
+      const forbidden = [
+        'updatePromotion',
+        'deletePromotion',
+        'setPromotionStatus',
+        'setPromotionMethod',
+        'setPromotionDiscountValue',
+        'mutatePromotionCatalog',
+      ];
+      for (const name of forbidden) {
+        expect(proto).not.toContain(name);
+      }
+      // Sanity: the only write surface on the service for promotions is
+      // the per-draft opt-in / veto mutators (applyManual / removeManual /
+      // removeApplied) which mutate the Sale aggregate, not the catalog.
+      expect(proto).toContain('applyManualPromotion');
+      expect(proto).toContain('removeManualPromotion');
+      expect(proto).toContain('removeAppliedPromotion');
+      expect(proto).toContain('listApplicablePromotions');
+    });
+  });
 });

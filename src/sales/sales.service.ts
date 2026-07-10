@@ -476,50 +476,10 @@ export class SalesService {
    * which doesn't happen when no engine result is wired).
    */
   private async recomputePromotions(sale: Sale): Promise<void> {
-    // (1) Distinct non-null appliedPriceListIds.
-    const distinctPriceListIds = [
-      ...new Set(
-        sale.items
-          .map((item) => item.appliedPriceListId)
-          .filter((id): id is string => id != null && id !== ''),
-      ),
-    ];
+    // (1) Build input + (2) call engine — see `buildPosEvalInput`.
+    const result = await this.evaluatePromotionsForSale(sale);
 
-    // (2) Batch-resolve to globalPriceListId (C1 fix).
-    const priceListGlobalIdMap =
-      distinctPriceListIds.length > 0
-        ? await this.productsService.resolvePriceListGlobalIds(
-            distinctPriceListIds,
-          )
-        : new Map<string, string>();
-
-    // (3) Build engine input from current item state.
-    const input: PosEvalInput = {
-      now: new Date(),
-      customerId: sale.customerId,
-      lines: sale.items.map((item) => ({
-        itemId: item.id,
-        productId: item.productId,
-        variantId: item.variantId,
-        quantity: item.quantity,
-        effectiveUnitPriceCents:
-          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
-        appliedPriceListId: item.appliedPriceListId,
-        appliedGlobalPriceListId:
-          item.appliedPriceListId != null
-            ? (priceListGlobalIdMap.get(item.appliedPriceListId) ?? null)
-            : null,
-        hasManualDiscount:
-          item.discountType !== null && item.promotionId === null,
-      })),
-      vetoedPromotionIds: sale.vetoedPromotionIds,
-      optedInManualPromotionIds: sale.optedInManualPromotionIds,
-    };
-
-    // (4) Evaluate via the engine port.
-    const result = await this.posEvaluatePromotions.evaluate(input);
-
-    // (5) Clear prior PROMO-sourced discounts before applying the new results.
+    // (3) Clear prior PROMO-sourced discounts before applying the new results.
     //     Manual free-form discounts are skipped (no `promotionId`).
     for (const item of sale.items) {
       if (item.promotionId != null) {
@@ -527,7 +487,7 @@ export class SalesService {
       }
     }
 
-    // (6) Apply each per-line result. Engine guarantees `hasManualDiscount
+    // (4) Apply each per-line result. Engine guarantees `hasManualDiscount
     //     === false` for lines it returns, so manual-discount lines are
     //     never re-applied here.
     for (const lineResult of result.lines) {
@@ -548,7 +508,7 @@ export class SalesService {
       });
     }
 
-    // (7) Set or clear the sale-level ORDER_DISCOUNT snapshot.
+    // (5) Set or clear the sale-level ORDER_DISCOUNT snapshot.
     if (result.order) {
       sale.setAppliedOrderPromotion({
         promotionId: result.order.promotionId,
@@ -560,6 +520,65 @@ export class SalesService {
     } else {
       sale.clearAppliedOrderPromotion();
     }
+  }
+
+  /**
+   * Work Unit 6 — Non-mutating engine call: builds the `PosEvalInput` from
+   * the current draft state and runs the engine WITHOUT applying results
+   * to the sale. Used by `listApplicablePromotions` to expose the
+   * `availableManualPromotions[]` (what the seller could still opt-in to)
+   * without changing the draft. Read-only — the spec scenario for
+   * `GET /sales/drafts/:id/applicable-promotions` is non-mutating.
+   */
+  private async evaluatePromotionsForSale(sale: Sale) {
+    const input = await this.buildPosEvalInput(sale);
+    return this.posEvaluatePromotions.evaluate(input);
+  }
+
+  /**
+   * Work Unit 6 — Build the engine input from the sale's current item
+   * state. Extracted from `recomputePromotions` so the non-mutating
+   * `evaluatePromotionsForSale` can reuse it without duplicating the
+   * batch-resolve + per-line construction logic.
+   */
+  private async buildPosEvalInput(sale: Sale): Promise<PosEvalInput> {
+    // Distinct non-null appliedPriceListIds.
+    const distinctPriceListIds = [
+      ...new Set(
+        sale.items
+          .map((item) => item.appliedPriceListId)
+          .filter((id): id is string => id != null && id !== ''),
+      ),
+    ];
+    // Batch-resolve to globalPriceListId (C1 fix).
+    const priceListGlobalIdMap =
+      distinctPriceListIds.length > 0
+        ? await this.productsService.resolvePriceListGlobalIds(
+            distinctPriceListIds,
+          )
+        : new Map<string, string>();
+
+    return {
+      now: new Date(),
+      customerId: sale.customerId,
+      lines: sale.items.map((item) => ({
+        itemId: item.id,
+        productId: item.productId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+        effectiveUnitPriceCents:
+          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
+        appliedPriceListId: item.appliedPriceListId,
+        appliedGlobalPriceListId:
+          item.appliedPriceListId != null
+            ? (priceListGlobalIdMap.get(item.appliedPriceListId) ?? null)
+            : null,
+        hasManualDiscount:
+          item.discountType !== null && item.promotionId === null,
+      })),
+      vetoedPromotionIds: sale.vetoedPromotionIds,
+      optedInManualPromotionIds: sale.optedInManualPromotionIds,
+    };
   }
 
   private async publishSaleConfirmedEvent(input: {
@@ -1385,6 +1404,186 @@ export class SalesService {
         new SaleItemDiscountRemovedEvent(saleId, itemId, actorId, new Date()),
       );
     }
+
+    return sale.toResponse();
+  }
+
+  // ============================================================================
+  // Work Unit 6 — Manual apply/remove + veto endpoints (6.1, 6.2, 6.3, 6.4, 6.5)
+  // ============================================================================
+
+  /**
+   * 6.1 — `GET /sales/drafts/:id/applicable-promotions`
+   *
+   * Read-only: returns the MANUAL promotions the engine currently marks
+   * as eligible for this draft (excludes opted-in + vetoed + ineligible).
+   * Does NOT mutate the in-memory Sale aggregate — the engine call is
+   * non-mutating and we do NOT call `saleRepo.save`.
+   *
+   * The list is a snapshot of the current draft state (items, customer,
+   * vetoed ids, opted-in ids). Changing any of those via a mutation
+   * endpoint will change the list on the next call.
+   */
+  async listApplicablePromotions(saleId: string, actorId: string) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_FOUND',
+        'SALE_NOT_FOUND',
+      );
+    }
+    if (sale.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_DRAFT',
+        'SALE_NOT_DRAFT',
+      );
+    }
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    // Non-mutating engine call — same input the recompute would use, but
+    // we DO NOT apply the result to the sale and DO NOT save.
+    const result = await this.evaluatePromotionsForSale(sale);
+
+    return {
+      saleId,
+      promotions: result.availableManualPromotions,
+    };
+  }
+
+  /**
+   * 6.2 — `POST /sales/drafts/:id/manual-promotions/:promotionId`
+   *
+   * Opt a MANUAL promotion in. Adds the id to `sale.optedInManualPromotionIds`,
+   * runs the recompute so the engine sees the opt-in (best-wins now
+   * includes the manual candidate), then persists. If the same id was
+   * previously vetoed, it is REMOVED from the veto set (reactivation
+   * path per the design's precedence state machine).
+   */
+  async applyManualPromotion(
+    saleId: string,
+    actorId: string,
+    promotionId: string,
+  ) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_FOUND',
+        'SALE_NOT_FOUND',
+      );
+    }
+    if (sale.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_DRAFT',
+        'SALE_NOT_DRAFT',
+      );
+    }
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    // Mutate BEFORE recompute so the engine sees the opt-in set.
+    sale.optInManualPromotion(promotionId);
+    // Reactivation: a previously-vetoed MANUAL id can be brought back
+    // by re-applying it. Remove from the veto set so subsequent
+    // recomputes treat it as eligible again.
+    sale.removeVetoedPromotion(promotionId);
+
+    await this.recomputePromotions(sale);
+    await this.saleRepo.save(sale);
+
+    return sale.toResponse();
+  }
+
+  /**
+   * 6.3 — `DELETE /sales/drafts/:id/manual-promotions/:promotionId`
+   *
+   * Remove a MANUAL opt-in. Idempotent — removing an id that is NOT
+   * currently opted-in is a safe no-op. The recompute runs so any
+   * per-line discount sourced from the now-removed opt-in is cleared.
+   */
+  async removeManualPromotion(
+    saleId: string,
+    actorId: string,
+    promotionId: string,
+  ) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_FOUND',
+        'SALE_NOT_FOUND',
+      );
+    }
+    if (sale.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_DRAFT',
+        'SALE_NOT_DRAFT',
+      );
+    }
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    // Mutate BEFORE recompute so the engine sees the updated opt-in set.
+    sale.optOutManualPromotion(promotionId);
+
+    await this.recomputePromotions(sale);
+    await this.saleRepo.save(sale);
+
+    return sale.toResponse();
+  }
+
+  /**
+   * 6.4 — `DELETE /sales/drafts/:id/promotions/:promotionId`
+   *
+   * Veto an AUTO-applied promotion. Adds the id to
+   * `sale.vetoedPromotionIds` so the engine excludes it on every
+   * subsequent recompute (Unit 3 persists the veto rows; the persistence
+   * layer mirrors the in-memory set in `saleRepo.save`).
+   *
+   * 6.5 — The Promotion catalog (status / method / discountValue) is
+   * NEVER mutated by this method. We only touch the per-draft veto set.
+   */
+  async removeAppliedPromotion(
+    saleId: string,
+    actorId: string,
+    promotionId: string,
+  ) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_FOUND',
+        'SALE_NOT_FOUND',
+      );
+    }
+    if (sale.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_DRAFT',
+        'SALE_NOT_DRAFT',
+      );
+    }
+    if (sale.userId !== actorId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    // Mutate BEFORE recompute so the engine sees the updated veto set.
+    sale.addVetoedPromotion(promotionId);
+
+    await this.recomputePromotions(sale);
+    await this.saleRepo.save(sale);
 
     return sale.toResponse();
   }
