@@ -2405,4 +2405,40 @@ export class ProductsService {
       currentStock,
     };
   }
+
+  /**
+   * Batch-resolves a set of `PriceList.id` (per-product row keys) to
+   * their underlying `GlobalPriceList.id`.
+   *
+   * Used by the POS promotion engine (Unit 4 wiring) once per
+   * recompute to fix C1: promo price-list restrictions use
+   * `GlobalPriceList.id`, while `SaleItem.appliedPriceListId` is a
+   * `PriceList.id`. Membership against the raw id is always a miss.
+   *
+   * - Distinct ids → ONE tenant-scoped `findMany` call (N+1-safe).
+   * - Empty input → no DB call.
+   * - Missing ids → silently omitted from the result map.
+   * - Tenant-scoped via `tenantPrisma.getClient()` (NOT the global
+   *   prisma client).
+   */
+  async resolvePriceListGlobalIds(
+    priceListIds: ReadonlyArray<string>,
+  ): Promise<Map<string, string>> {
+    const distinct = [...new Set(priceListIds)];
+    const map = new Map<string, string>();
+
+    if (distinct.length === 0) return map;
+
+    const rows = await this.tenantPrisma
+      .getClient()
+      .priceList.findMany({
+        where: { id: { in: distinct } },
+        select: { id: true, globalPriceListId: true },
+      });
+
+    for (const row of rows) {
+      map.set(row.id, row.globalPriceListId);
+    }
+    return map;
+  }
 }
