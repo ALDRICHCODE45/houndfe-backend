@@ -1980,7 +1980,14 @@ describe('SalesService', () => {
       expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
     });
 
-    it('subtotal uses post-line-discount unitPrice (C2 / previewTotals source of truth) for a discounted default-priced item', async () => {
+    it('computes subtotal/discount from prePriceCentsBeforeDiscount for discounted default-priced item (REGRESSION GUARD — contract: subtotalCents=base, discountCents=subtotal-total)', async () => {
+      // Per-line PRODUCT_DISCOUNT only — case (a) of the documented contract:
+      //   subtotalCents = Σ(prePrice · qty)  = 70000*2 = 140000
+      //   totalCents    = Σ(unitPrice · qty)  = 63000*2 = 126000 (charged)
+      //   discountCents = subtotalCents − totalCents = 14000
+      // The per-line savings MUST surface on the Sale row, not vanish (the
+      // receipt is the source of truth and the frontend lays it out from
+      // `subtotalCents` / `discountCents` / `totalCents`).
       const sale = Sale.fromPersistence({
         id: 'sale-charge-discounted-default',
         userId: 'user-1',
@@ -2025,14 +2032,16 @@ describe('SalesService', () => {
 
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
-          // Work Unit 5 (C2) — sale-level view. `sale.previewTotals()` is the
-          // single source of truth for both preview and charge paths.
-          // Per-line discounts are baked into per-line `unitPriceCents`
-          // (62900*2 = 126000 here), so `subtotalCents` = post-line-discount
-          // line totals, and `discountCents` only carries the ORDER_DISCOUNT
-          // term (zero in this test — no order promo).
-          subtotalCents: 126000,
-          discountCents: 0,
+          // Documented contract (docs/sales-pos-charge-frontend.md:473-475):
+          //   subtotalCents = "Suma base antes de descuentos"
+          //   discountCents = "Diferencia subtotal - total"
+          //   totalCents    = "Monto final a cobrar"
+          // `previewTotals()` is the SINGLE source of truth for BOTH draft
+          // preview and charge. prePriceCentsBeforeDiscount is the base for
+          // the sale-level subtotal, even though the customer is still
+          // charged against the post-line `unitPriceCents`.
+          subtotalCents: 140000,
+          discountCents: 14000,
           totalCents: 126000,
         }),
       );
@@ -2159,14 +2168,18 @@ describe('SalesService', () => {
 
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
-          // Work Unit 5 (C2) — `sale.previewTotals()` is the single source
-          // of truth. The item-discount line still has the 10% per-line
-          // discount baked into `unitPriceCents=63000` so the post-line
-          // subtotal is 20000+126000+180000=326000. discountCents only
-          // carries the ORDER_DISCOUNT (zero here — no order promo).
-          subtotalCents: 326000,
+          // Documented contract (docs/sales-pos-charge-frontend.md:473-475):
+          //   subtotalCents = 20000*1 + 70000*2 + 90000*2 = 340000 (pre-discount base)
+          //   totalCents    = 20000   + 63000*2 + 90000*2 = 326000 (charged)
+          //   discountCents = subtotal − total = 14000 (per-line savings)
+          // The override-priced line has prePriceCentsBeforeDiscount=null so
+          // its base falls back to unitPriceCents (no per-line discount to
+          // roll back). Plain line has no discount either. The 14000 savings
+          // is purely from the per-line 10% PRODUCT_DISCOUNT on the
+          // `item-discount` line (70000 - 63000 = 7000 per unit × 2).
+          subtotalCents: 340000,
           totalCents: 326000,
-          discountCents: 0,
+          discountCents: 14000,
         }),
       );
     });
@@ -5276,6 +5289,66 @@ describe('SalesService', () => {
           subtotalCents: 2000,
           discountCents: 0,
           totalCents: 2000,
+        }),
+      );
+    });
+
+    // ------------------------------------------------------------------------
+    // S-1 EXPLICIT REGRESSION GUARD — restored after the U5 gate failed
+    // (commit b1cd15f). Asserts the DOCUMENTED contract (docs/sales-pos-
+    // charge-frontend.md:473-475) for a charge with a per-line PRODUCT_DISCOUNT:
+    //   subtotalCents = Σ((prePrice ?? unitPrice) · qty)   = base BEFORE discounts
+    //   totalCents    = Σ(unitPrice · qty)                  = what the customer pays
+    //   discountCents = subtotalCents − totalCents          = ALL savings (per-line)
+    // The persisted Sale row receives these values, and the receipt/detail
+    // view (`getSaleDetail` → `findOneWithRelations`) reads them back
+    // verbatim. Before this fix, a 1000¢×2 sale with 10% per-line discount
+    // persisted subtotal=1800/discount=0 — the per-line savings VANISHED
+    // from the receipt, violating the documented contract.
+    // ------------------------------------------------------------------------
+    it('S-1 REGRESSION GUARD — per-line PRODUCT_DISCOUNT persists subtotalCents=pre-discount base and discountCents=full savings (contract)', async () => {
+      const saleId = 'sale-s1-per-line-contract';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        // base 1000 × 2 = 2000, 10% per-line → unitPrice=900, post-line=1800
+        unitPriceCents: 900,
+        quantity: 2,
+        prePriceCentsBeforeDiscount: 1000,
+        discountType: 'percentage',
+        discountValue: 10,
+        discountAmountCents: 100,
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      // Price-freshness check expects current base price = prePrice = 1000
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000099');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      const result = await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 1800 },
+        'idem-s1-per-line-contract',
+      );
+
+      // Case (a) of the contract: per-line 10% only, no order discount.
+      //   subtotalCents = 1000*2 = 2000 (base BEFORE discounts)
+      //   totalCents    = 900*2  = 1800 (customer pays)
+      //   discountCents = 2000 - 1800 = 200 (per-line savings)
+      expect(result.subtotalCents).toBe(2000);
+      expect(result.discountCents).toBe(200);
+      expect(result.totalCents).toBe(1800);
+
+      // The Sale row receives the contract values, not a subtotal=1800
+      // / discount=0 regression that would lose the per-line savings.
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId,
+          subtotalCents: 2000,
+          discountCents: 200,
+          totalCents: 1800,
         }),
       );
     });

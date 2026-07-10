@@ -430,27 +430,80 @@ export class Sale {
   }
 
   /**
-   * C2: order-discount-aware preview totals. Source of truth for BOTH draft
-   * preview (Unit 4) and charge totals (Unit 5) — never duplicate the math.
+   * C2 + documented-contract: order-discount-aware preview totals. Source of
+   * truth for BOTH draft preview (Unit 4) and charge totals (Unit 5) — never
+   * duplicate the math.
    *
-   *   subtotalCents = Σ(unitPriceCents × quantity)
-   *   orderDiscountCents = appliedOrderPromotion?.discountAmountCents ?? 0
-   *   discountCents = min(subtotalCents, orderDiscountCents)
-   *   totalCents = max(0, subtotalCents - orderDiscountCents)
+   * Documented contract (docs/sales-pos-charge-frontend.md:473-475):
+   *   subtotalCents = "Suma base antes de descuentos"
+   *   discountCents = "Diferencia subtotal - total"
+   *   totalCents    = "Monto final a cobrar"
+   *
+   * Implementation:
+   *   baseCents(item)        = prePriceCentsBeforeDiscount ?? unitPriceCents
+   *                            (the price BEFORE any per-line discount; falls
+   *                            back to the current unitPrice when no per-line
+   *                            discount is present)
+   *   subtotalCents          = Σ baseCents(item) × quantity         (BEFORE discounts)
+   *   postLineSubtotalCents  = Σ unitPriceCents × quantity          (AFTER per-line)
+   *   orderDiscountCents     = appliedOrderPromotion?.discountAmountCents ?? 0
+   *   totalCents             = max(0, postLineSubtotalCents − orderDiscountCents)
+   *                            (what the customer actually pays)
+   *   discountCents          = subtotalCents − totalCents           (ALL savings)
+   *
+   * Invariants:
+   *   - The charged `totalCents` is EXACTLY the customer's charge — it is
+   *     never larger than the post-line sum and is clamped to 0 when an
+   *     order discount exceeds the post-line sum (order-discount ceiling).
+   *   - `subtotalCents >= totalCents` always (the base is the upper bound).
+   *   - `discountCents >= 0` always and equals `subtotalCents − totalCents`,
+   *     which is the sum of per-line savings plus the order discount.
+   *   - `discountCents` therefore carries the FULL savings (per-line + order)
+   *     and is the value the receipt's "Descuentos" line must show, not
+   *     just the order discount. (This is the S-1 fix: the U5 gate caught
+   *     that pre-fix, a per-line PRODUCT_DISCOUNT would persist
+   *     `discountCents=0` and the per-line savings vanished from the
+   *     receipt, violating the documented contract.)
    */
   previewTotals(): {
     subtotalCents: number;
     discountCents: number;
     totalCents: number;
   } {
+    // Subtotal = base BEFORE any discount (per-line + order). For each line
+    // the "base" is `prePriceCentsBeforeDiscount` when the per-line discount
+    // is present, otherwise it equals the current `unitPriceCents` (no
+    // per-line discount to roll back).
     const subtotalCents = this._items.reduce(
+      (sum, item) =>
+        sum +
+        (item.prePriceCentsBeforeDiscount ?? item.unitPriceCents) *
+          item.quantity,
+      0,
+    );
+    // Post-line sum = Σ(unitPriceCents × quantity). Per-line discounts are
+    // baked into `unitPriceCents`, so this is the sum AFTER per-line.
+    const postLineSubtotalCents = this._items.reduce(
       (sum, item) => sum + item.subtotalCents,
       0,
     );
     const orderDiscountCents =
       this._appliedOrderPromotion?.discountAmountCents ?? 0;
-    const discountCents = Math.min(subtotalCents, orderDiscountCents);
-    const totalCents = Math.max(0, subtotalCents - orderDiscountCents);
+    // Total = what the customer actually pays (post-line − order discount,
+    // clamped to 0 to never go negative when an order discount exceeds the
+    // post-line sum).
+    const totalCents = Math.max(
+      0,
+      postLineSubtotalCents - orderDiscountCents,
+    );
+    // discountCents = full savings (per-line + order combined) = subtotal - total.
+    // Math.min guards against any floating-point round-trip making
+    // `subtotalCents - totalCents` marginally exceed `subtotalCents`; the
+    // invariant `discountCents ≤ subtotalCents` is preserved.
+    const discountCents = Math.min(
+      subtotalCents,
+      subtotalCents - totalCents,
+    );
     return { subtotalCents, discountCents, totalCents };
   }
 
