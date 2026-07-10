@@ -12,7 +12,8 @@ import type {
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from '../domain/sale.repository';
-import { Sale, type SaleStatus } from '../domain/sale.entity';
+import { Sale, type SaleStatus, type AppliedOrderPromotionSnapshot } from '../domain/sale.entity';
+import { SaleItem } from '../domain/sale-item.entity';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
@@ -666,6 +667,22 @@ export class PrismaSaleRepository implements ISaleRepository {
     dueDate?: Date | null;
     confirmedAt: Date;
     folio: string;
+    /**
+     * Work Unit 5 — W1 fix. When provided, the SaleItem rows are
+     * deleteMany + createMany-re-written INSIDE the charge tx so the
+     * charge-time recomputed per-line promo state (promotionId /
+     * discountAmountCents / unitPriceCents) is persisted alongside the
+     * charged total. Same pattern as `save` (which already re-writes items
+     * outside the charge path). When omitted, no item re-write happens
+     * (back-compat for non-promo charges — keep the previous behavior).
+     */
+    items?: ReadonlyArray<SaleItem>;
+    /**
+     * Work Unit 5 — C2 audit. When provided (incl. explicit null), the
+     * `sale_promotion_applied` row is upserted (non-null) or deleted
+     * (null). When omitted entirely, the table is left alone (back-compat).
+     */
+    appliedOrderPromotion?: AppliedOrderPromotionSnapshot | null;
   }): Promise<PersistedSalePaymentRecord[]> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
@@ -699,6 +716,85 @@ export class PrismaSaleRepository implements ISaleRepository {
     if ('customerId' in input) data.customerId = input.customerId ?? null;
     if ('sellerUserId' in input) data.sellerUserId = input.sellerUserId ?? null;
     if ('dueDate' in input) data.dueDate = input.dueDate ?? null;
+
+    // Work Unit 5 — W1 in-tx SaleItem re-write. Must run inside the SAME
+    // `runInTransaction` block as the Sale.updateMany + SalePayment.create
+    // calls below — so the audit (promotionId / discountAmountCents /
+    // unitPriceCents) commits or rolls back atomically with the charged
+    // total. `persistChargeConfirmation` already runs inside the charge
+    // tx (chargeDraft calls `saleRepo.runInTransaction` then this method),
+    // and `tenantPrisma.getClient()` resolves to the tx client via CLS.
+    if (input.items !== undefined) {
+      await prisma.saleItem.deleteMany({
+        where: { saleId: input.saleId },
+      });
+      if (input.items.length > 0) {
+        await prisma.saleItem.createMany({
+          data: input.items.map((item) => ({
+            id: item.id,
+            saleId: item.saleId,
+            productId: item.productId,
+            variantId: item.variantId,
+            productName: item.productName,
+            variantName: item.variantName,
+            imageUrl: item.imageUrl,
+            quantity: item.quantity,
+            unitPriceCents: item.unitPriceCents,
+            unitPriceCurrency: item.unitPriceCurrency,
+            originalPriceCents: item.originalPriceCents,
+            priceSource:
+              item.priceSource === 'default'
+                ? 'DEFAULT'
+                : item.priceSource === 'price_list'
+                  ? 'PRICE_LIST'
+                  : 'CUSTOM',
+            appliedPriceListId: item.appliedPriceListId,
+            customPriceCents: item.customPriceCents,
+            discountType: item.discountType,
+            discountValue: item.discountValue,
+            discountAmountCents: item.discountAmountCents,
+            prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+            discountTitle: item.discountTitle,
+            discountedAt: item.discountedAt,
+            promotionId: item.promotionId,
+            tenantId,
+          })) as Prisma.SaleItemCreateManyInput[],
+        });
+      }
+    }
+
+    // Work Unit 5 — C2 audit. The sale-level ORDER_DISCOUNT snapshot may
+    // have been set / cleared at charge time by the recompute. Explicit
+    // null means "no order promo applies this run" — delete any prior row.
+    // Omitted entirely means "back-compat — do not touch the table".
+    if (input.appliedOrderPromotion !== undefined) {
+      if (input.appliedOrderPromotion === null) {
+        await prisma.salePromotionApplied.deleteMany({
+          where: { saleId: input.saleId, tenantId },
+        });
+      } else {
+        const snap = input.appliedOrderPromotion;
+        await prisma.salePromotionApplied.upsert({
+          where: { saleId: input.saleId },
+          create: {
+            saleId: input.saleId,
+            tenantId,
+            promotionId: snap.promotionId,
+            discountType: snap.discountType,
+            discountValue: snap.discountValue,
+            discountAmountCents: snap.discountAmountCents,
+            discountTitle: snap.discountTitle,
+          },
+          update: {
+            promotionId: snap.promotionId,
+            discountType: snap.discountType,
+            discountValue: snap.discountValue,
+            discountAmountCents: snap.discountAmountCents,
+            discountTitle: snap.discountTitle,
+          },
+        });
+      }
+    }
 
     await prisma.sale.updateMany({
       where: { id: input.saleId, tenantId },

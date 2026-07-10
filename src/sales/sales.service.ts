@@ -1190,6 +1190,13 @@ export class SalesService {
       });
     }
 
+    // Work Unit 5 — recompute after override. `overridePrice` calls
+    // `clearDiscountFields()` (sale-item.entity.ts:226) which wipes any prior
+    // discount / `promotionId` on the line. Without recompute, an eligible
+    // auto-promo would silently disappear on override. Recompute re-applies
+    // it on the NEW baseline (promo-on-top-of-price-list).
+    await this.recomputePromotions(sale);
+
     await this.saleRepo.save(sale);
     const updated = sale.items.find((i) => i.id === itemId)!;
     this.eventEmitter.emit(
@@ -1720,18 +1727,28 @@ export class SalesService {
         }
       }
 
-      const subtotalCents = sale.items.reduce(
-        (acc, item) =>
-          acc +
-          (item.prePriceCentsBeforeDiscount ?? item.unitPriceCents) *
-            item.quantity,
-        0,
-      );
-      const totalCents = sale.items.reduce(
-        (acc, item) => acc + item.unitPriceCents * item.quantity,
-        0,
-      );
-      const discountCents = subtotalCents - totalCents;
+      // Work Unit 5 — re-run the same engine call `addItem/qty/remove/assign`
+      // already use, INSIDE the charge tx. A qty change between the last draft
+      // recompute and the charge attempt can flip eligibility (date rollover,
+      // customer change, etc.); the charge recompute is authoritative so the
+      // charged totalCents / discountCents reflect the current state, not
+      // whatever was last persisted. Reads go through the tenant+tx-scoped
+      // prisma client because we are inside `runInTransaction`.
+      await this.recomputePromotions(sale);
+
+      // Work Unit 5 — inline totals use the SAME helper the draft preview
+      // uses (`sale.previewTotals()`, Unit 3). This is the single source of
+      // truth for `subtotalCents / discountCents / totalCents` on BOTH paths,
+      // so the charged total can NEVER drift from the draft preview (C2).
+      //   subtotalCents = Σ(unitPrice·qty)
+      //   orderDiscountCents = appliedOrderPromotion?.discountAmountCents ?? 0
+      //   totalCents = max(0, subtotalCents − orderDiscountCents)
+      //   discountCents = min(subtotalCents, orderDiscountCents)
+      const {
+        subtotalCents,
+        discountCents,
+        totalCents,
+      } = sale.previewTotals();
 
       const tenderedCents = normalizedPayments.reduce(
         (acc, payment) => acc + payment.amountCents,
@@ -1830,6 +1847,16 @@ export class SalesService {
         dueDate: sale.dueDate,
         confirmedAt,
         folio,
+        // Work Unit 5 — W1 fix: the charge-time recompute may have changed
+        // per-line state (promotionId / discountAmountCents / unitPriceCents)
+        // since the last `save`. Persist the recomputed SaleItem rows in the
+        // same tx so the audit log and the charged total stay consistent.
+        items: sale.items,
+        // Work Unit 5 — C2 audit: the charge-time recompute may also have
+        // set / cleared / kept the applied ORDER_DISCOUNT snapshot. Passing
+        // it explicitly lets the repo upsert or delete the row accordingly
+        // (W1 + C2).
+        appliedOrderPromotion: sale.appliedOrderPromotion,
       });
 
       await this.publishSaleConfirmedEvent({

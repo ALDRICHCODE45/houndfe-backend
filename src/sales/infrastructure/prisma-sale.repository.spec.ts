@@ -2571,4 +2571,199 @@ describe('PrismaSaleRepository', () => {
       });
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 5 — Tasks 5.6, 5.7, 5.8 (W1 + W2 + C2 charge persistence)
+  //
+  // `persistChargeConfirmation` previously wrote ONLY the Sale row + SalePayment
+  // rows. After Unit 5 it MUST also re-write the SaleItem rows (W1) so the
+  // charge-time recomputed per-line promo state (promotionId / discountAmount /
+  // unitPriceCents) reaches the audit log AND persist the applied-order-promo
+  // row (W1 + C2) so the order discount ends up on the Sale's `discountCents`
+  // / `totalCents` together with the engine output.
+  //
+  // The W1 fix is "SaleItem re-write inside the charge tx" — same deleteMany +
+  // createMany pattern `save` already uses. Verifying with the mocked prisma
+  // client is sufficient since the calls happen inside `runInTransaction`,
+  // which the service drives on the upper layer.
+  // ---------------------------------------------------------------------------
+  describe('persistChargeConfirmation — Work Unit 5 (W1 + C2 + items param)', () => {
+    it('5.6/5.8 (W1) RED — re-writes SaleItem rows when items[] is provided', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-w1',
+        method: 'CASH',
+        amountCents: 1500,
+        reference: null,
+      });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-charge-w1-items',
+        userId: 'cashier-1',
+        payments: [{ method: 'cash', amountCents: 1500 }],
+        subtotalCents: 2000,
+        discountCents: 500,
+        totalCents: 1500,
+        paidCents: 1500,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000200',
+        // W1 — items[] carries the charge-time recomputed per-line state
+        // (promotionId + discountAmountCents already set by the engine).
+        items: [
+          {
+            id: 'item-w1-1',
+            saleId: 'sale-charge-w1-items',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 750, // base 1000 - 25% promo
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'default',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            discountType: 'percentage',
+            discountValue: 25,
+            discountAmountCents: 250,
+            prePriceCentsBeforeDiscount: 1000,
+            discountTitle: '25% off',
+            discountedAt: null,
+            promotionId: 'promo-w1-1',
+          },
+        ],
+      } as never);
+
+      // (1) The re-write deletes then re-creates SaleItems INSIDE the charge
+      // write. Same pattern as `save`'s item re-write.
+      expect(prisma.saleItem.deleteMany).toHaveBeenCalledWith({
+        where: { saleId: 'sale-charge-w1-items' },
+      });
+      expect(prisma.saleItem.createMany).toHaveBeenCalledTimes(1);
+      const createManyCall =
+        prisma.saleItem.createMany.mock.calls[0][0] as {
+          data: Array<Record<string, unknown>>;
+        };
+      expect(createManyCall.data).toHaveLength(1);
+      // The persisted row carries the engine's recomputed audit fields
+      // (promotionId / discountAmountCents / unitPriceCents) — not the stale
+      // pre-charge values. This is the W1 fix.
+      expect(createManyCall.data[0].promotionId).toBe('promo-w1-1');
+      expect(createManyCall.data[0].discountAmountCents).toBe(250);
+      expect(createManyCall.data[0].unitPriceCents).toBe(750);
+      expect(createManyCall.data[0].prePriceCentsBeforeDiscount).toBe(1000);
+    });
+
+    it('5.6 (W1) — does NOT re-write items when items[] is omitted (back-compat with non-promo charges)', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-noitems',
+        method: 'CASH',
+        amountCents: 100,
+        reference: null,
+      });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-charge-noitems',
+        userId: 'cashier-1',
+        payments: [{ method: 'cash', amountCents: 100 }],
+        subtotalCents: 100,
+        discountCents: 0,
+        totalCents: 100,
+        paidCents: 100,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000201',
+      } as never);
+
+      // No item re-write when caller doesn't pass items[].
+      expect(prisma.saleItem.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.saleItem.createMany).not.toHaveBeenCalled();
+    });
+
+    it('5.8 (W1 + C2) — upserts the applied-order-promo row when appliedOrderPromotion is provided', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-ap',
+        method: 'CASH',
+        amountCents: 1500,
+        reference: null,
+      });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-charge-order-promo',
+        userId: 'cashier-1',
+        payments: [{ method: 'cash', amountCents: 1500 }],
+        subtotalCents: 2000,
+        discountCents: 500,
+        totalCents: 1500,
+        paidCents: 1500,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000210',
+        items: [],
+        appliedOrderPromotion: {
+          promotionId: 'promo-order-u5',
+          discountType: 'amount',
+          discountValue: 500,
+          discountAmountCents: 500,
+          discountTitle: '$500 off',
+        },
+      } as never);
+
+      expect(prisma.salePromotionApplied.upsert).toHaveBeenCalledWith({
+        where: { saleId: 'sale-charge-order-promo' },
+        create: expect.objectContaining({
+          saleId: 'sale-charge-order-promo',
+          promotionId: 'promo-order-u5',
+          discountAmountCents: 500,
+        }),
+        update: expect.objectContaining({
+          promotionId: 'promo-order-u5',
+          discountAmountCents: 500,
+        }),
+      });
+    });
+
+    it('5.8 (W1 + C2) — clears the applied-order-promo row when appliedOrderPromotion is explicitly null', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-clear',
+        method: 'CASH',
+        amountCents: 2000,
+        reference: null,
+      });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-charge-clear-order',
+        userId: 'cashier-1',
+        payments: [{ method: 'cash', amountCents: 2000 }],
+        subtotalCents: 2000,
+        discountCents: 0,
+        totalCents: 2000,
+        paidCents: 2000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000211',
+        items: [],
+        appliedOrderPromotion: null,
+      } as never);
+
+      // Explicit null means "recompute didn't pick an order promo this run" —
+      // any prior row gets removed.
+      expect(prisma.salePromotionApplied.deleteMany).toHaveBeenCalledWith({
+        where: { saleId: 'sale-charge-clear-order', tenantId: 'tenant-1' },
+      });
+    });
+  });
 });

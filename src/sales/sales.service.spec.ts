@@ -1980,7 +1980,7 @@ describe('SalesService', () => {
       expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
     });
 
-    it('computes subtotal/discount from prePriceCentsBeforeDiscount for discounted default-priced item', async () => {
+    it('subtotal uses post-line-discount unitPrice (C2 / previewTotals source of truth) for a discounted default-priced item', async () => {
       const sale = Sale.fromPersistence({
         id: 'sale-charge-discounted-default',
         userId: 'user-1',
@@ -2025,8 +2025,14 @@ describe('SalesService', () => {
 
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
-          subtotalCents: 140000,
-          discountCents: 14000,
+          // Work Unit 5 (C2) — sale-level view. `sale.previewTotals()` is the
+          // single source of truth for both preview and charge paths.
+          // Per-line discounts are baked into per-line `unitPriceCents`
+          // (62900*2 = 126000 here), so `subtotalCents` = post-line-discount
+          // line totals, and `discountCents` only carries the ORDER_DISCOUNT
+          // term (zero in this test — no order promo).
+          subtotalCents: 126000,
+          discountCents: 0,
           totalCents: 126000,
         }),
       );
@@ -2153,9 +2159,14 @@ describe('SalesService', () => {
 
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
-          subtotalCents: 340000,
+          // Work Unit 5 (C2) — `sale.previewTotals()` is the single source
+          // of truth. The item-discount line still has the 10% per-line
+          // discount baked into `unitPriceCents=63000` so the post-line
+          // subtotal is 20000+126000+180000=326000. discountCents only
+          // carries the ORDER_DISCOUNT (zero here — no order promo).
+          subtotalCents: 326000,
           totalCents: 326000,
-          discountCents: 14000,
+          discountCents: 0,
         }),
       );
     });
@@ -4970,6 +4981,303 @@ describe('SalesService', () => {
       expect(lineA.appliedGlobalPriceListId).toBe('GPL-retail');
       expect(lineB.appliedPriceListId).toBe('PL-b');
       expect(lineB.appliedGlobalPriceListId).toBe('GPL-mayoreo');
+    });
+  });
+
+  // ============================================================================
+  // Work Unit 5 — Charge + Override + Inline Totals (5.1, 5.3, 5.4, 5.7)
+  //
+  // The HIGHEST-RISK slice of the change: any totals-drift between the charge
+  // path and the draft preview re-introduces C2. The tests below lock the
+  // contract:
+  //   5.1 RED — overrideItemPrice re-applies an eligible auto-promo on the new
+  //             price (the override wipes any prior discount; recompute must
+  //             re-apply auto-promos so promo-on-top-of-price-list still wins).
+  //   5.3 RED — chargeDraft triggers a recompute inside its runInTransaction
+  //             block so the charged total is authoritative against the
+  //             current state (a qty change after the last draft recompute
+  //             must be picked up).
+  //   5.4 RED (C2) — a draft with an applied ORDER_DISCOUNT must charge
+  //             `totalCents = Σ(unitPrice·qty) − orderDiscountCents`; this is
+  //             the C2 proof for the charge path (same maths as the draft
+  //             preview, single source of truth).
+  //   5.7 GREEN (C2) — inline totals reuse `sale.previewTotals()` so the
+  //             adapter call receives the order-discount-adjusted numbers;
+  //             covered transitively by the 5.4 test (asserting
+  //             `persistChargeConfirmation` saw the right `totalCents` /
+  //             `discountCents`).
+  // ============================================================================
+  describe('Work Unit 5 — charge + override + inline totals', () => {
+    /**
+     * Build a DRAFT sale usable by charge-time tests.
+     * Items are persisted at unitPriceCents=1000 qty=2 → subtotal=2000.
+     * Caller may overlay an `appliedOrderPromotion` snapshot.
+     */
+    function buildDraftSaleWithTotals(
+      id: string,
+      overrides: {
+        appliedOrderPromotion?: {
+          promotionId: string;
+          discountType: 'amount' | 'percentage';
+          discountValue: number;
+          discountAmountCents: number;
+          discountTitle: string;
+        } | null;
+        unitPriceCents?: number;
+        quantity?: number;
+        discountAmountCents?: number;
+        prePriceCentsBeforeDiscount?: number;
+        discountType?: 'amount' | 'percentage' | null;
+        discountValue?: number;
+      } = {},
+    ) {
+      const unit = overrides.unitPriceCents ?? 1000;
+      const qty = overrides.quantity ?? 2;
+      const props: Parameters<typeof Sale.fromPersistence>[0] = {
+        id,
+        userId: 'user-1',
+        customerId: 'customer-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: qty,
+            unitPriceCents: unit,
+            unitPriceCurrency: 'MXN',
+            ...(overrides.prePriceCentsBeforeDiscount !== undefined
+              ? {
+                  prePriceCentsBeforeDiscount:
+                    overrides.prePriceCentsBeforeDiscount,
+                }
+              : {}),
+            ...(overrides.discountType !== undefined
+              ? { discountType: overrides.discountType }
+              : {}),
+            ...(overrides.discountValue !== undefined
+              ? { discountValue: overrides.discountValue }
+              : {}),
+            ...(overrides.discountAmountCents !== undefined
+              ? { discountAmountCents: overrides.discountAmountCents }
+              : {}),
+          },
+        ],
+        ...(overrides.appliedOrderPromotion !== undefined
+          ? { appliedOrderPromotion: overrides.appliedOrderPromotion }
+          : {}),
+      };
+      return Sale.fromPersistence(props);
+    }
+
+    it('5.1 RED — overrideItemPrice re-runs recompute so an eligible auto-promo applies on the NEW price', async () => {
+      const saleId = 'sale-u5-override-recompute';
+      const itemId = 'item-u5-override-1';
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      saleRepo.save.mockResolvedValue(sale);
+      // resolveListPrice returns 800 for the PRICE_LIST override.
+      productsService.resolveListPrice.mockResolvedValue(800);
+      // Engine returns 10% promo on the line → after recompute unitPrice should
+      // drop from 800 to 720 (NOT stay at 800 — old behavior was 800 with no
+      // recompute).
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  itemId: line.itemId,
+                  promotionId: 'promo-auto-override-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: '10% off',
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+        });
+      });
+
+      await service.overrideItemPrice(
+        saleId,
+        itemId,
+        { priceListId: 'pl-1' },
+        'user-1',
+      );
+
+      // Recompute WAS called during overrideItemPrice (this is the new wiring).
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const recomputeInput =
+        posEvaluateUseCase.evaluate.mock.calls[0][0];
+      // The recompute input carries the NEW unitPriceCents (800) — recompute
+      // runs AFTER overridePrice, on the new baseline.
+      expect(recomputeInput.lines[0].effectiveUnitPriceCents).toBe(800);
+
+      // The saved sale has the auto promo applied on the NEW price:
+      // 10% of 800 = 80 → unitPriceCents = 720.
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const savedItem = savedSale.items.find((i) => i.id === itemId)!;
+      expect(savedItem.promotionId).toBe('promo-auto-override-1');
+      expect(savedItem.discountType).toBe('percentage');
+      expect(savedItem.discountValue).toBe(10);
+      expect(savedItem.prePriceCentsBeforeDiscount).toBe(800);
+      expect(savedItem.unitPriceCents).toBe(720);
+    });
+
+    it('5.3 RED — chargeDraft triggers a recompute inside the runInTransaction block', async () => {
+      const saleId = 'sale-u5-charge-recompute';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        // Subtotal 2000; no per-line discount; no order promo.
+        unitPriceCents: 1000,
+        quantity: 2,
+      });
+      // Freshness loop must succeed against live prices:
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000050');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-u5-charge-recompute',
+      );
+
+      // The engine WAS called inside the charge tx — recompute is authoritative.
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      const chargeInput =
+        posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(chargeInput.lines).toHaveLength(1);
+      expect(chargeInput.lines[0].itemId).toBe(`${saleId}-item-1`);
+    });
+
+    it('5.4 RED (C2) — chargeDraft totalCents reflects the applied ORDER_DISCOUNT via previewTotals (single source of truth)', async () => {
+      const saleId = 'sale-u5-c2-order-charge';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        unitPriceCents: 1000,
+        quantity: 2,
+        appliedOrderPromotion: {
+          promotionId: 'promo-order-c2',
+          discountType: 'amount',
+          discountValue: 500,
+          discountAmountCents: 500,
+          discountTitle: '$500 off',
+        },
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000060');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      // The charge-time recompute must KEEP the applied order promo so
+      // previewTotals() reduces the total. This models the realistic flow:
+      // the engine returned the same order discount at charge time as it
+      // did at the last draft recompute, so the in-memory state survives.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: {
+          promotionId: 'promo-order-c2',
+          discountType: 'amount',
+          discountValue: 500,
+          discountTitle: '$500 off',
+          discountAmountCents: 500,
+        },
+        availableManualPromotions: [],
+      });
+
+      const result = await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 1500 },
+        'idem-u5-c2-order-charge',
+      );
+
+      // subtotal=2000, orderDiscount=500 → total=1500, discount=500.
+      // This is THE C2 proof: the same previewTotals() helper the draft
+      // preview uses is the SOLE source of truth at charge time.
+      expect(result.subtotalCents).toBe(2000);
+      expect(result.discountCents).toBe(500);
+      expect(result.totalCents).toBe(1500);
+      expect(result.paidCents).toBe(1500);
+      expect(result.paymentStatus).toBe('PAID');
+
+      // The persistChargeConfirmation payload ALSO carried the order-discount-
+      // adjusted numbers — this is what gets persisted as the Sale row.
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId,
+          subtotalCents: 2000,
+          discountCents: 500,
+          totalCents: 1500,
+          paidCents: 1500,
+          debtCents: 0,
+          paymentStatus: 'PAID',
+          // The applied-order-promo snapshot was forwarded to the repo so
+          // it can upsert the sale_promotion_applied row inside the tx.
+          appliedOrderPromotion: expect.objectContaining({
+            promotionId: 'promo-order-c2',
+            discountAmountCents: 500,
+          }),
+        }),
+      );
+    });
+
+    it('5.7 GREEN (C2) — chargeDraft inline totals reuse previewTotals when no order discount is applied (no regression)', async () => {
+      const saleId = 'sale-u5-no-order';
+      const sale = buildDraftSaleWithTotals(saleId, {
+        unitPriceCents: 1000,
+        quantity: 2,
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000061');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+
+      const result = await service.chargeDraft(
+        saleId,
+        'user-1',
+        { method: 'cash', amountCents: 2000 },
+        'idem-u5-no-order',
+      );
+
+      // subtotal === total === 2000; discount === 0 (no order promo).
+      expect(result.subtotalCents).toBe(2000);
+      expect(result.discountCents).toBe(0);
+      expect(result.totalCents).toBe(2000);
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 2000,
+          discountCents: 0,
+          totalCents: 2000,
+        }),
+      );
     });
   });
 });
