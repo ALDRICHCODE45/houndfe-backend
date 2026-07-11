@@ -12,6 +12,7 @@ import { FilesService } from '../files/files.service';
 import { SatCatalogService } from '../sat-catalog/sat-catalog.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { CreateVariantDto, UpdateVariantDto } from './dto/variant.dto';
 import { CreateLotDto, UpdateLotDto } from './dto/lot.dto';
 import { UpdatePriceListDto } from './dto/price-list.dto';
@@ -501,10 +502,43 @@ export class ProductsService {
     return this.buildFullResponse(productId);
   }
 
-  async findAll() {
+  async findAll(query: ListProductsQueryDto = {} as ListProductsQueryDto) {
     const tenantClient = this.tenantPrisma.getClient();
 
+    // Search term: trim + ignore empty/whitespace-only.
+    // Case-insensitive matching is enforced at the DB level via Prisma's
+    // `mode: 'insensitive'`, which maps to `ILIKE` on PostgreSQL.
+    const trimmedSearch =
+      typeof query.search === 'string' ? query.search.trim() : '';
+    const hasSearch = trimmedSearch.length > 0;
+
+    const where: Prisma.ProductWhereInput | undefined = hasSearch
+      ? {
+          OR: [
+            { name: { contains: trimmedSearch, mode: 'insensitive' } },
+            { sku: { contains: trimmedSearch, mode: 'insensitive' } },
+            { barcode: { contains: trimmedSearch, mode: 'insensitive' } },
+          ],
+        }
+      : undefined;
+
+    // Pagination is opt-in: applied only when EITHER `page` or `limit` is
+    // supplied. Each field falls back to a sensible default (page=1,
+    // limit=20) so callers can specify just `?limit=5` or just `?page=2`.
+    // Direct callers (`findAll()` from tests or internal code) preserve
+    // the legacy "return everything" behavior because both fields are
+    // undefined → no skip/take sent to Prisma.
+    const DEFAULT_PAGE = 1;
+    const DEFAULT_LIMIT = 20;
+    const hasPagination =
+      typeof query.page === 'number' || typeof query.limit === 'number';
+    const page = query.page ?? DEFAULT_PAGE;
+    const limit = query.limit ?? DEFAULT_LIMIT;
+    const skip = hasPagination ? (page - 1) * limit : undefined;
+    const take = hasPagination ? limit : undefined;
+
     const products = await tenantClient.product.findMany({
+      ...(where !== undefined ? { where } : {}),
       orderBy: { createdAt: 'desc' },
       include: {
         category: { select: { id: true, name: true } },
@@ -517,6 +551,8 @@ export class ProductsService {
           take: 1,
         },
       },
+      ...(skip !== undefined ? { skip } : {}),
+      ...(take !== undefined ? { take } : {}),
     });
 
     return products.map((product) => {

@@ -13,6 +13,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
@@ -30,6 +31,7 @@ import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { CreateVariantDto, UpdateVariantDto } from './dto/variant.dto';
 import { CreateLotDto, UpdateLotDto } from './dto/lot.dto';
 import { UpdatePriceListDto } from './dto/price-list.dto';
@@ -55,8 +57,8 @@ export class ProductsController {
 
   @Get()
   @RequirePermissions(['read', 'Product'])
-  findAll() {
-    return this.productsService.findAll();
+  findAll(@Query() query: ListProductsQueryDto) {
+    return this.productsService.findAll(query);
   }
 
   @Get(':id')
