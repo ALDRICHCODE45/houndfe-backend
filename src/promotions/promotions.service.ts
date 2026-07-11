@@ -5,7 +5,13 @@
  * Handles: Promotion CRUD + manual end operation.
  */
 import { Inject, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Promotion } from './domain/promotion.entity';
+import {
+  normalizePromotionDateRange,
+  startOfBusinessDay,
+  endOfBusinessDay,
+} from './domain/promotion-date-range';
 import type {
   IPromotionRepository,
   PromotionFindAllQuery,
@@ -42,12 +48,29 @@ import type {
 
 @Injectable()
 export class PromotionsService {
+  /**
+   * Business timezone for promotion date-range normalization.
+   *
+   * Configured via the `PROMOTIONS_BUSINESS_TIMEZONE` env var. Default
+   * `America/Mexico_City` matches the production tenant location; the
+   * variable exists so a tenant in a different zone can shift the
+   * window without code changes. The helper validates the zone is a
+   * known IANA name at first use, so a typo fails loudly at boot.
+   */
+  private readonly businessTimezone: string;
+
   constructor(
     @Inject(PROMOTION_REPOSITORY)
     private readonly repo: IPromotionRepository,
     private readonly prisma: PrismaService,
     private readonly tenantPrisma: TenantPrismaService,
-  ) {}
+    configService: ConfigService,
+  ) {
+    this.businessTimezone = configService.get<string>(
+      'PROMOTIONS_BUSINESS_TIMEZONE',
+      'America/Mexico_City',
+    );
+  }
 
   // ==================== Create ====================
 
@@ -63,14 +86,27 @@ export class PromotionsService {
     // ── Validate price lists ──
     const priceLists = await this.resolvePriceLists(dto);
 
+    // ── Normalize date range to business-day boundaries in the
+    //    configured timezone. The frontend serializes date-only picks
+    //    as UTC-midnight; storing that instant verbatim makes the
+    //    effective-status comparison drift by the business-tz offset
+    //    (see `promotion-date-range.ts` for the full contract). ──
+    const normalizedDates = normalizePromotionDateRange(
+      {
+        startDate: dto.startDate ? new Date(dto.startDate) : null,
+        endDate: dto.endDate ? new Date(dto.endDate) : null,
+      },
+      this.businessTimezone,
+    );
+
     // ── Build domain entity (entity validates type-specific rules) ──
     const promotion = Promotion.create({
       id: crypto.randomUUID(),
       title: dto.title,
       type: dto.type as PromotionType,
       method: dto.method as PromotionMethod,
-      startDate: dto.startDate ? new Date(dto.startDate) : null,
-      endDate: dto.endDate ? new Date(dto.endDate) : null,
+      startDate: normalizedDates.startDate,
+      endDate: normalizedDates.endDate,
       customerScope: dto.customerScope as CustomerScope,
       discountType: dto.discountType as DiscountType,
       discountValue: dto.discountValue ?? null,
@@ -324,23 +360,41 @@ export class PromotionsService {
     existing: Promotion,
     dto: UpdatePromotionDto,
   ): CreatePromotionParams {
+    // ── Date normalization ──
+    //
+    // update() can change startDate/endDate, clear them with null, or
+    // leave them untouched (omitted). For each branch we must
+    // produce the exact value the entity will persist:
+    //
+    //   1. dto.startDate is omitted → keep `existing.startDate` as-is
+    //      (it's already a stored business-day boundary — do NOT
+    //      re-normalize it or DST rounding could shift it).
+    //   2. dto.startDate === null → explicit null (clear the bound).
+    //   3. dto.startDate is a string → re-normalize the new pick.
+    //
+    // Same three-way branch for endDate. The timezone comes from the
+    // same business-tz source as create().
+    const tz = this.businessTimezone;
+    const mergedStartDate =
+      dto.startDate === undefined
+        ? existing.startDate
+        : dto.startDate === null
+          ? null
+          : startOfBusinessDay(new Date(dto.startDate), tz);
+    const mergedEndDate =
+      dto.endDate === undefined
+        ? existing.endDate
+        : dto.endDate === null
+          ? null
+          : endOfBusinessDay(new Date(dto.endDate), tz);
+
     return {
       id: existing.id,
       title: dto.title ?? existing.title,
       type: existing.type,
       method: existing.method,
-      startDate:
-        dto.startDate !== undefined
-          ? dto.startDate
-            ? new Date(dto.startDate)
-            : null
-          : existing.startDate,
-      endDate:
-        dto.endDate !== undefined
-          ? dto.endDate
-            ? new Date(dto.endDate)
-            : null
-          : existing.endDate,
+      startDate: mergedStartDate,
+      endDate: mergedEndDate,
       customerScope: (dto.customerScope ??
         existing.customerScope) as CustomerScope,
       discountType: (dto.discountType ?? existing.discountType) as DiscountType,

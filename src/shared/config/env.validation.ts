@@ -156,5 +156,19 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
         then: Joi.required(),
         otherwise: Joi.optional(),
       }),
+
+    // Promotion date-range normalization — business timezone.
+    //
+    // PromotionsService normalizes `startDate`/`endDate` to the local
+    // start-of-day / end-of-day in this IANA timezone before
+    // persisting. The frontend sends date-only picks as UTC-midnight,
+    // and storing that instant verbatim makes the effective-status
+    // comparison drift by the business-tz offset (Mexico City is
+    // UTC-6, so the final local day is silently truncated by ~6h).
+    //
+    // Optional everywhere — the default matches the production
+    // tenant location. The PromotionsService validates the zone is a
+    // known IANA name at first use, so a typo fails loudly at boot.
+    PROMOTIONS_BUSINESS_TIMEZONE: Joi.string().default('America/Mexico_City'),
   });
 }

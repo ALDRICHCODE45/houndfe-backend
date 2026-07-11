@@ -61,7 +61,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
     it('fails when NODE_ENV is missing (fail-closed: an unset env must not degrade to dev)', () => {
       const { error } = validate({ ...baseValidEnv });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('NODE_ENV'))).toBe(true);
+      expect(error!.details.some((d) => d.path.includes('NODE_ENV'))).toBe(
+        true,
+      );
     });
 
     it('accepts development, test, staging, production', () => {
@@ -79,7 +81,11 @@ describe('buildEnvValidationSchema (D.4)', () => {
           extras.MAIL_FROM = 'Alerts <alerts@example.com>';
           extras.APP_WEB_URL = 'https://app.example.com';
         }
-        const { error } = validate({ ...baseValidEnv, ...extras, NODE_ENV: env });
+        const { error } = validate({
+          ...baseValidEnv,
+          ...extras,
+          NODE_ENV: env,
+        });
         expect(error).toBeUndefined();
       }
     });
@@ -87,7 +93,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
     it('rejects an unknown NODE_ENV value', () => {
       const { error } = validate({ ...baseValidEnv, NODE_ENV: 'qa' });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('NODE_ENV'))).toBe(true);
+      expect(error!.details.some((d) => d.path.includes('NODE_ENV'))).toBe(
+        true,
+      );
     });
   });
 
@@ -100,7 +108,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
         RESEND_API_KEY: 're_test',
       });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('INNGEST_SIGNING_KEY'))).toBe(true);
+      expect(
+        error!.details.some((d) => d.path.includes('INNGEST_SIGNING_KEY')),
+      ).toBe(true);
     });
 
     it('is REQUIRED when NODE_ENV=staging (absent key ⇒ boot fails)', () => {
@@ -110,7 +120,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_EVENT_KEY: 'evt_test',
       });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('INNGEST_SIGNING_KEY'))).toBe(true);
+      expect(
+        error!.details.some((d) => d.path.includes('INNGEST_SIGNING_KEY')),
+      ).toBe(true);
     });
 
     it('is OPTIONAL when NODE_ENV=development (Inngest Dev Server does not sign)', () => {
@@ -145,7 +157,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
         RESEND_API_KEY: 're',
       });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('INNGEST_SIGNING_KEY'))).toBe(true);
+      expect(
+        error!.details.some((d) => d.path.includes('INNGEST_SIGNING_KEY')),
+      ).toBe(true);
     });
   });
 
@@ -158,7 +172,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
         RESEND_API_KEY: 're',
       });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('INNGEST_EVENT_KEY'))).toBe(true);
+      expect(
+        error!.details.some((d) => d.path.includes('INNGEST_EVENT_KEY')),
+      ).toBe(true);
     });
 
     it('is OPTIONAL in development', () => {
@@ -176,7 +192,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_EVENT_KEY: 'evt',
       });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('RESEND_API_KEY'))).toBe(true);
+      expect(
+        error!.details.some((d) => d.path.includes('RESEND_API_KEY')),
+      ).toBe(true);
     });
 
     it('is OPTIONAL when NODE_ENV=staging (dev-logger fallback is allowed for non-prod)', () => {
@@ -254,7 +272,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
       void DATABASE_URL;
       const { error } = validate({ ...rest, NODE_ENV: 'development' });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('DATABASE_URL'))).toBe(true);
+      expect(error!.details.some((d) => d.path.includes('DATABASE_URL'))).toBe(
+        true,
+      );
     });
 
     it('still requires JWT_SECRET (min 32 chars)', () => {
@@ -264,7 +284,9 @@ describe('buildEnvValidationSchema (D.4)', () => {
         JWT_SECRET: 'short',
       });
       expect(error).toBeDefined();
-      expect(error!.details.some((d) => d.path.includes('JWT_SECRET'))).toBe(true);
+      expect(error!.details.some((d) => d.path.includes('JWT_SECRET'))).toBe(
+        true,
+      );
     });
   });
 
@@ -460,6 +482,76 @@ describe('buildEnvValidationSchema (D.4)', () => {
         INNGEST_DEV: '1',
       });
       expect(error).toBeUndefined();
+    });
+  });
+
+  // ─── Business timezone for promotion date-range normalization ─
+  // Optional, defaults to America/Mexico_City. Used by PromotionsService
+  // to compute the start-of-day / end-of-day boundaries for the
+  // `startDate` / `endDate` columns. Optional everywhere — a tenant
+  // can stay on the default. The key never changes the fail-closed
+  // posture of any other gate.
+  describe('PROMOTIONS_BUSINESS_TIMEZONE (optional — default America/Mexico_City)', () => {
+    it('accepts an unset value (defaults to America/Mexico_City)', () => {
+      const { error, value } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
+      });
+      expect(error).toBeUndefined();
+      // Joi honors `.default(...)` on optional keys — when the env var
+      // is absent the schema populates the default.
+      expect(value.PROMOTIONS_BUSINESS_TIMEZONE).toBe('America/Mexico_City');
+    });
+
+    it('accepts a custom IANA zone override', () => {
+      const { error, value } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
+        PROMOTIONS_BUSINESS_TIMEZONE: 'America/New_York',
+      });
+      expect(error).toBeUndefined();
+      expect(value.PROMOTIONS_BUSINESS_TIMEZONE).toBe('America/New_York');
+    });
+
+    it('accepts UTC as a valid override', () => {
+      const { error, value } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'production',
+        INNGEST_SIGNING_KEY: 'sk',
+        INNGEST_EVENT_KEY: 'ek',
+        RESEND_API_KEY: 're',
+        MAIL_FROM: 'Alerts <alerts@example.com>',
+        APP_WEB_URL: 'https://app.example.com',
+        PROMOTIONS_BUSINESS_TIMEZONE: 'UTC',
+      });
+      expect(error).toBeUndefined();
+      expect(value.PROMOTIONS_BUSINESS_TIMEZONE).toBe('UTC');
+    });
+
+    it('rejects an empty string (a typo must NOT silently fall back to the default)', () => {
+      // Joi.string() rejects '' by default. Without explicit handling,
+      // an unset/empty config could mask a misconfigured env.
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        PROMOTIONS_BUSINESS_TIMEZONE: '',
+      });
+      expect(error).toBeDefined();
+      expect(
+        error!.details.some((d) =>
+          d.path.includes('PROMOTIONS_BUSINESS_TIMEZONE'),
+        ),
+      ).toBe(true);
     });
   });
 });

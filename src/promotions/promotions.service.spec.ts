@@ -9,6 +9,7 @@ import {
 } from '../shared/domain/domain-error';
 import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import { ConfigService } from '@nestjs/config';
 import {
   Promotion,
   PromotionProps,
@@ -104,6 +105,7 @@ function makePrisma(
 function makeService(
   repo: IPromotionRepository,
   prisma: PrismaLookupMock,
+  configService: ConfigService = makeConfigService(),
 ): PromotionsService {
   const tenantPrisma: Pick<TenantPrismaService, 'getClient'> = {
     getClient: jest.fn().mockReturnValue(prisma),
@@ -113,7 +115,26 @@ function makeService(
     repo,
     prisma as unknown as PrismaService,
     tenantPrisma as TenantPrismaService,
+    configService,
   );
+}
+
+/**
+ * Build a ConfigService mock that resolves PROMOTIONS_BUSINESS_TIMEZONE
+ * to the given timezone (default: America/Mexico_City). Other keys fall
+ * through to the underlying default. This lets every existing test
+ * keep its current shape (default args) while letting the new
+ * normalization tests override the timezone explicitly.
+ */
+function makeConfigService(
+  timezone: string = 'America/Mexico_City',
+): ConfigService {
+  return {
+    get: jest.fn((key: string, defaultValue?: unknown) => {
+      if (key === 'PROMOTIONS_BUSINESS_TIMEZONE') return timezone;
+      return defaultValue;
+    }),
+  } as unknown as ConfigService;
 }
 
 type CreatePromotionInput = {
@@ -438,6 +459,282 @@ describe('PromotionsService', () => {
           }),
         ]),
       );
+    });
+
+    // ============================================================
+    // DATE-RANGE NORMALIZATION (business-timezone bug fix)
+    // The frontend sends UTC-midnight for date-only picks. Without
+    // normalization, the backend stores those UTC-midnight instants
+    // verbatim and the effective-status comparison drifts by the
+    // business-tz offset (at UTC-6 the final local day is silently
+    // truncated by ~6h). The service MUST normalize to business-day
+    // boundaries before persisting.
+    // ============================================================
+
+    it('should normalize startDate to local midnight in business tz (America/Mexico_City, UTC-6)', async () => {
+      let captured: Promotion | null = null;
+      const repo = makeRepo({
+        save: jest.fn().mockImplementation((p: Promotion) => {
+          captured = p;
+          return p;
+        }),
+      });
+      const prisma = makePrisma();
+      const service = makeService(
+        repo,
+        prisma,
+        makeConfigService('America/Mexico_City'),
+      );
+
+      await service.create(
+        createDto({
+          title: 'Normalize start',
+          type: 'ORDER_DISCOUNT',
+          method: 'AUTOMATIC',
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+          // Frontend sends UTC-midnight for the user-picked day "1 July".
+          startDate: '2026-07-01T00:00:00.000Z',
+        }),
+      );
+
+      // Mexico City is UTC-6 → local midnight on 1 July = 06:00:00.000Z.
+      expect(captured!.startDate?.toISOString()).toBe(
+        '2026-07-01T06:00:00.000Z',
+      );
+    });
+
+    it('should normalize endDate to local 23:59:59.999 in business tz (America/Mexico_City, UTC-6)', async () => {
+      let captured: Promotion | null = null;
+      const repo = makeRepo({
+        save: jest.fn().mockImplementation((p: Promotion) => {
+          captured = p;
+          return p;
+        }),
+      });
+      const prisma = makePrisma();
+      const service = makeService(
+        repo,
+        prisma,
+        makeConfigService('America/Mexico_City'),
+      );
+
+      await service.create(
+        createDto({
+          title: 'Normalize end',
+          type: 'ORDER_DISCOUNT',
+          method: 'AUTOMATIC',
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+          endDate: '2026-07-11T00:00:00.000Z',
+        }),
+      );
+
+      // Mexico City end-of-day on 11 July = July 12 05:59:59.999Z.
+      expect(captured!.endDate?.toISOString()).toBe('2026-07-12T05:59:59.999Z');
+    });
+
+    it('should normalize the "Promocion chida" range (1–11 July Mexico) to ACTIVE at July 10 21:46 local time (the bug fix)', async () => {
+      // Reproduces the production bug. Without normalization, a range
+      // 2026-07-01..2026-07-11 (UTC-midnight instants) compares as
+      // ENDED at 2026-07-11T03:46Z (July 10 21:46 local). With
+      // normalization, endDate becomes 2026-07-12T05:59:59.999Z and the
+      // promo is ACTIVE through the entire local day of July 11.
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-11T03:46:00.000Z'));
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.create(
+          createDto({
+            title: 'Promocion chida',
+            type: 'ORDER_DISCOUNT',
+            method: 'AUTOMATIC',
+            discountType: 'PERCENTAGE',
+            discountValue: 10,
+            startDate: '2026-07-01T00:00:00.000Z',
+            endDate: '2026-07-11T00:00:00.000Z',
+          }),
+        );
+
+        // Stored bounds are the inclusive business-day boundaries.
+        expect(captured!.startDate?.toISOString()).toBe(
+          '2026-07-01T06:00:00.000Z',
+        );
+        expect(captured!.endDate?.toISOString()).toBe(
+          '2026-07-12T05:59:59.999Z',
+        );
+
+        // And the effective status at this now is ACTIVE.
+        const now = new Date('2026-07-11T03:46:00.000Z');
+        expect(captured!.getEffectiveStatus(now)).toBe('ACTIVE');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should return ENDED for the same promo one local minute after the end-day midnight', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-12T06:30:00.000Z'));
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.create(
+          createDto({
+            title: 'Promocion chida (past)',
+            type: 'ORDER_DISCOUNT',
+            method: 'AUTOMATIC',
+            discountType: 'PERCENTAGE',
+            discountValue: 10,
+            startDate: '2026-07-01T00:00:00.000Z',
+            endDate: '2026-07-11T00:00:00.000Z',
+          }),
+        );
+
+        const now = new Date('2026-07-12T06:30:00.000Z');
+        expect(captured!.getEffectiveStatus(now)).toBe('ENDED');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('a promo whose start-day is "today in Mexico" should be ACTIVE from local midnight (not 6h shifted)', async () => {
+      // At 2026-07-10T01:00Z (= July 9 19:00 local Mexico), a promo that
+      // starts on July 10 must still be SCHEDULED (it has not yet
+      // reached local midnight in Mexico). With normalization,
+      // startDate = 2026-07-10T06:00:00Z — and the comparison with now
+      // (2026-07-10T01:00Z) is correctly "future".
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T01:00:00.000Z'));
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.create(
+          createDto({
+            title: 'Starts today',
+            type: 'ORDER_DISCOUNT',
+            method: 'AUTOMATIC',
+            discountType: 'PERCENTAGE',
+            discountValue: 10,
+            startDate: '2026-07-10T00:00:00.000Z',
+            endDate: null,
+          }),
+        );
+
+        // Stored start is local midnight on 10 July (UTC-6 → 06:00:00Z).
+        expect(captured!.startDate?.toISOString()).toBe(
+          '2026-07-10T06:00:00.000Z',
+        );
+        // At 01:00Z (5h before local midnight), the promo is still SCHEDULED.
+        expect(
+          captured!.getEffectiveStatus(new Date('2026-07-10T01:00:00.000Z')),
+        ).toBe('SCHEDULED');
+        // And after local midnight (12:00Z), the promo becomes ACTIVE.
+        expect(
+          captured!.getEffectiveStatus(new Date('2026-07-10T12:00:00.000Z')),
+        ).toBe('ACTIVE');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should keep null startDate and null endDate as null (no normalization applied)', async () => {
+      let captured: Promotion | null = null;
+      const repo = makeRepo({
+        save: jest.fn().mockImplementation((p: Promotion) => {
+          captured = p;
+          return p;
+        }),
+      });
+      const prisma = makePrisma();
+      const service = makeService(
+        repo,
+        prisma,
+        makeConfigService('America/Mexico_City'),
+      );
+
+      await service.create(
+        createDto({
+          title: 'No dates',
+          type: 'ORDER_DISCOUNT',
+          method: 'AUTOMATIC',
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+        }),
+      );
+
+      expect(captured!.startDate).toBeNull();
+      expect(captured!.endDate).toBeNull();
+    });
+
+    it('should respect PROMOTIONS_BUSINESS_TIMEZONE env override (UTC produces UTC-midnight / UTC-end-of-day)', async () => {
+      let captured: Promotion | null = null;
+      const repo = makeRepo({
+        save: jest.fn().mockImplementation((p: Promotion) => {
+          captured = p;
+          return p;
+        }),
+      });
+      const prisma = makePrisma();
+      const service = makeService(repo, prisma, makeConfigService('UTC'));
+
+      await service.create(
+        createDto({
+          title: 'UTC tz',
+          type: 'ORDER_DISCOUNT',
+          method: 'AUTOMATIC',
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+          startDate: '2026-07-01T00:00:00.000Z',
+          endDate: '2026-07-11T00:00:00.000Z',
+        }),
+      );
+
+      // In UTC, the local-midnight instant IS the UTC-midnight instant,
+      // and end-of-day is 23:59:59.999Z (no offset shift).
+      expect(captured!.startDate?.toISOString()).toBe(
+        '2026-07-01T00:00:00.000Z',
+      );
+      expect(captured!.endDate?.toISOString()).toBe('2026-07-11T23:59:59.999Z');
     });
   });
 
@@ -769,7 +1066,9 @@ describe('PromotionsService', () => {
 
         const repo = makeRepo({
           findById: jest.fn().mockResolvedValue(existing),
-          save: jest.fn().mockImplementation((promotion: Promotion) => promotion),
+          save: jest
+            .fn()
+            .mockImplementation((promotion: Promotion) => promotion),
         });
         const prisma = makePrisma();
         const service = makeService(repo, prisma);
@@ -798,7 +1097,9 @@ describe('PromotionsService', () => {
 
         const repo = makeRepo({
           findById: jest.fn().mockResolvedValue(existing),
-          save: jest.fn().mockImplementation((promotion: Promotion) => promotion),
+          save: jest
+            .fn()
+            .mockImplementation((promotion: Promotion) => promotion),
         });
         const prisma = makePrisma();
         const service = makeService(repo, prisma);
@@ -829,15 +1130,276 @@ describe('PromotionsService', () => {
 
         const repo = makeRepo({
           findById: jest.fn().mockResolvedValue(existing),
-          save: jest.fn().mockImplementation((promotion: Promotion) => promotion),
+          save: jest
+            .fn()
+            .mockImplementation((promotion: Promotion) => promotion),
         });
         const prisma = makePrisma();
         const service = makeService(repo, prisma);
 
         // Editing just the title — should NOT silently un-end the promo.
-        const result = await service.update('promo-1', updateDto({ title: 'New Title' }));
+        const result = await service.update(
+          'promo-1',
+          updateDto({ title: 'New Title' }),
+        );
 
         expect(result.status).toBe('ENDED');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    // ============================================================
+    // DATE-RANGE NORMALIZATION on update()
+    // update() must re-normalize whenever a date input is supplied
+    // (whether or not the other bound changes). The previous fix
+    // already re-validates the merged payload; this fix adds the
+    // tz-aware boundary computation on top of it.
+    // ============================================================
+
+    it('should re-normalize endDate when it is changed on update() (business tz)', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        // Existing promotion stored with raw UTC-midnight endDate (the
+        // pre-fix shape). The update changes endDate to "2026-07-11"
+        // and we expect the service to normalize it to the business-day
+        // end instant.
+        const existing = makePromotion({
+          status: 'ACTIVE',
+          startDate: new Date('2026-07-01T06:00:00.000Z'),
+          endDate: new Date('2026-07-05T05:59:59.999Z'),
+        });
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.update(
+          'promo-1',
+          updateDto({ endDate: '2026-07-11T00:00:00.000Z' }),
+        );
+
+        expect(captured!.endDate?.toISOString()).toBe(
+          '2026-07-12T05:59:59.999Z',
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should re-normalize startDate when it is changed on update()', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        const existing = makePromotion({
+          status: 'ACTIVE',
+          startDate: new Date('2026-07-01T06:00:00.000Z'),
+          endDate: new Date('2026-07-15T05:59:59.999Z'),
+        });
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.update(
+          'promo-1',
+          updateDto({ startDate: '2026-07-05T00:00:00.000Z' }),
+        );
+
+        // Local midnight on 5 July in Mexico City (UTC-6) → 06:00:00Z.
+        expect(captured!.startDate?.toISOString()).toBe(
+          '2026-07-05T06:00:00.000Z',
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should re-normalize both bounds when the range changes via update() and re-derive status', async () => {
+      jest.useFakeTimers();
+      try {
+        // Same instant as the production bug: July 10 21:46 local.
+        jest.setSystemTime(new Date('2026-07-11T03:46:00.000Z'));
+
+        const existing = makePromotion({
+          status: 'ACTIVE',
+          startDate: new Date('2026-07-01T06:00:00.000Z'),
+          endDate: new Date('2026-07-05T05:59:59.999Z'),
+        });
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.update(
+          'promo-1',
+          updateDto({ endDate: '2026-07-11T00:00:00.000Z' }),
+        );
+
+        // After normalization, endDate is 2026-07-12T05:59:59.999Z — past
+        // the current instant, so the status recomputes to ACTIVE.
+        expect(captured!.endDate?.toISOString()).toBe(
+          '2026-07-12T05:59:59.999Z',
+        );
+        expect(
+          captured!.getEffectiveStatus(new Date('2026-07-11T03:46:00.000Z')),
+        ).toBe('ACTIVE');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should NOT re-normalize the existing endDate when the update does not change dates', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        // Already-normalized values. A title-only update must not
+        // perturb them (no DST rounding, no off-by-one shift).
+        const existing = makePromotion({
+          status: 'ACTIVE',
+          startDate: new Date('2026-07-01T06:00:00.000Z'),
+          endDate: new Date('2026-07-11T05:59:59.999Z'),
+        });
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.update(
+          'promo-1',
+          updateDto({ title: 'Edited title only' }),
+        );
+
+        // Title changed but startDate/endDate preserved bit-for-bit.
+        expect(captured!.startDate?.toISOString()).toBe(
+          '2026-07-01T06:00:00.000Z',
+        );
+        expect(captured!.endDate?.toISOString()).toBe(
+          '2026-07-11T05:59:59.999Z',
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should preserve a null endDate when update() omits endDate (no normalization on null)', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        const existing = makePromotion({
+          status: 'ACTIVE',
+          startDate: new Date('2026-07-01T06:00:00.000Z'),
+          endDate: null,
+        });
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        await service.update(
+          'promo-1',
+          updateDto({ title: 'Edited title only' }),
+        );
+
+        expect(captured!.endDate).toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('should set endDate to null when update() explicitly passes endDate=null', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+
+        const existing = makePromotion({
+          status: 'ACTIVE',
+          startDate: new Date('2026-07-01T06:00:00.000Z'),
+          endDate: new Date('2026-07-11T05:59:59.999Z'),
+        });
+
+        let captured: Promotion | null = null;
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(existing),
+          save: jest.fn().mockImplementation((p: Promotion) => {
+            captured = p;
+            return p;
+          }),
+        });
+        const prisma = makePrisma();
+        const service = makeService(
+          repo,
+          prisma,
+          makeConfigService('America/Mexico_City'),
+        );
+
+        // Pass null — service must propagate null, not normalize.
+        await service.update(
+          'promo-1',
+          updateDto({ endDate: null as unknown as string }),
+        );
+
+        expect(captured!.endDate).toBeNull();
       } finally {
         jest.useRealTimers();
       }
