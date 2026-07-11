@@ -2292,6 +2292,60 @@ describe('PrismaSaleRepository', () => {
         expect(result?.discountCents).toBe(0);
         expect(result?.totalCents).toBe(2000);
       });
+
+      // Regression guard for the toResponse() DRAFT-guard fix:
+      // `findDraftResponseById` already spreads `sale.previewTotals()`
+      // after `sale.toResponse()` (Unit 4 C2). After the fix, `toResponse()`
+      // ALSO spreads `previewTotals()` for DRAFT — the second spread
+      // re-applies identical values, so totals must NOT be double-counted.
+      // Item: per-line 10% off 10000 (unit price 9000, prePrice 10000)
+      // Order: $200 off (200 cents)
+      //   subtotalCents = 10000
+      //   postLineCents = 9000
+      //   orderDiscount = 200
+      //   totalCents    = max(0, 9000 - 200) = 8800
+      //   discountCents = min(10000, 10000 - 8800) = 1200
+      it('does NOT double-count when a draft has BOTH a per-line discount AND an order-level promotion', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          makeMockSaleData({
+            customer: null,
+            shippingAddress: null,
+            promotionVetoes: [],
+            appliedPromotion: {
+              promotionId: 'promo-order-2',
+              discountType: 'amount',
+              discountValue: 200,
+              discountAmountCents: 200,
+              discountTitle: '$200 off',
+            },
+            items: [
+              {
+                id: 'item-mixed',
+                saleId: 'sale-promo-mixed',
+                productId: 'prod-1',
+                variantId: null,
+                productName: 'Mixed',
+                variantName: null,
+                quantity: 1,
+                unitPriceCents: 9000,
+                unitPriceCurrency: 'MXN',
+                priceSource: 'default',
+                discountType: 'percentage',
+                discountValue: 10,
+                discountAmountCents: 1000,
+                prePriceCentsBeforeDiscount: 10000,
+              },
+            ],
+          }),
+        );
+
+        const result = await repo.findDraftResponseById('sale-promo-mixed');
+
+        expect(result).not.toBeNull();
+        expect(result?.subtotalCents).toBe(10000);
+        expect(result?.discountCents).toBe(1200);
+        expect(result?.totalCents).toBe(8800);
+      });
     });
 
     // -------- 4. findDraftsByUserId --------

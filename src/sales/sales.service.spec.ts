@@ -3595,6 +3595,41 @@ describe('SalesService', () => {
         3, // NOT 8 (5 + 3)
       );
     });
+
+    // -----------------------------------------------------------------
+    // Regression guard for the POS $0.00 bug: addItem must return a
+    // response whose subtotalCents/totalCents reflect the live preview
+    // totals (not the persisted totalCents, which is 0 for drafts).
+    // -----------------------------------------------------------------
+    it('returns non-zero subtotalCents/totalCents for the response of a freshly added item (POS draft preview)', async () => {
+      const saleId = 'sale-draft-totals';
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'Aspirina',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 12345,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      const result = await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 1,
+      });
+
+      // POS frontend lays out Subtotal/Total from these keys; if they are
+      // 0 (or undefined) the POS renders $0.00.
+      expect(result.subtotalCents).toBe(12345);
+      expect(result.totalCents).toBe(12345);
+      expect(result.discountCents).toBe(0);
+    });
   });
 
   describe('updateItemQuantity', () => {
@@ -3920,6 +3955,33 @@ describe('SalesService', () => {
       const result = await service.getUserDrafts('user-2');
 
       expect(result).toHaveLength(0);
+    });
+
+    // Regression guard for the POS $0.00 bug: the session-tab list
+    // (getUserDrafts) MUST return drafts whose subtotalCents/totalCents
+    // are populated from previewTotals(), not the persisted 0.
+    it('surfaces preview totals for every draft returned to the POS session-tab list', async () => {
+      const draft = Sale.create({ id: 'sale-tab-1', userId: 'user-1' });
+      draft.addItem({
+        id: 'item-tab-1',
+        saleId: 'sale-tab-1',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Aspirina',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 7500,
+        unitPriceCurrency: 'MXN',
+      });
+
+      saleRepo.findDraftsByUserId.mockResolvedValue([draft]);
+
+      const result = await service.getUserDrafts('user-1');
+
+      expect(result).toHaveLength(1);
+      expect(result[0].subtotalCents).toBe(15000);
+      expect(result[0].totalCents).toBe(15000);
+      expect(result[0].discountCents).toBe(0);
     });
 
     // S15: Create Unlimited Drafts per User

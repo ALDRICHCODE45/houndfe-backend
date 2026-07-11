@@ -402,12 +402,21 @@ export class PrismaSaleRepository implements ISaleRepository {
 
     return {
       ...sale.toResponse(),
-      // Work Unit 4 (C2) — surface order-discount-aware totals for draft
-      // preview. `sale.toResponse()` returns `totalCents = this.totalCents`
-      // which is 0 for drafts; spreading `previewTotals()` AFTER replaces
-      // `totalCents` and `discountCents` with the order-discount-adjusted
-      // values and adds `subtotalCents`. Same helper the charge path uses
-      // (Unit 5) — single source of truth, no math duplication.
+      // Order-discount-aware totals for the draft preview. As of the
+      // `fix(sales): surface preview totals for draft toResponse` change,
+      // `sale.toResponse()` ALREADY spreads `previewTotals()` when the sale
+      // is in DRAFT status, so the explicit `...sale.previewTotals()`
+      // spread below is now redundant for DRAFT — it re-applies identical
+      // values. We keep it explicitly (rather than removing it) because
+      // (a) it is harmless — same numbers, no double-count, and the
+      // regression-guard test in prisma-sale.repository.spec.ts ("does NOT
+      // double-count when a draft has BOTH a per-line discount AND an
+      // order-level promotion") proves this — and (b) it makes the data
+      // flow self-documenting at this call site: a future reader sees that
+      // the preview totals are the source of truth here without having to
+      // chase the DRAFT branch in `Sale.toResponse()`. Same helper the
+      // charge path uses (Unit 5) — single source of truth, no math
+      // duplication.
       ...sale.previewTotals(),
       customer: saleData.customer
         ? {

@@ -990,6 +990,163 @@ describe('Sale Entity', () => {
       expect(response.items[0].productId).toBe('prod-001');
       expect(response.items[0].quantity).toBe(2);
     });
+
+    // -----------------------------------------------------------------
+    // Work Unit: surface preview totals on DRAFT toResponse so the POS
+    // renders Subtotal/Total correctly. The persisted `totalCents` is 0
+    // for drafts (only written at CHARGE time); the response must instead
+    // derive live totals from `previewTotals()` so the POS sees the
+    // order-discount-aware and per-line-discount-aware figures.
+    // -----------------------------------------------------------------
+    it('should surface previewTotals-derived subtotalCents/discountCents/totalCents for a DRAFT with no items (empty draft)', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      const response = sale.toResponse();
+
+      expect(response.status).toBe('DRAFT');
+      expect(response.subtotalCents).toBe(0);
+      expect(response.discountCents).toBe(0);
+      expect(response.totalCents).toBe(0);
+    });
+
+    it('should surface previewTotals-derived totals for a DRAFT with no discounts (single item, qty 1)', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      const response = sale.toResponse();
+
+      expect(response.status).toBe('DRAFT');
+      // base = unitPriceCents (no per-line discount to roll back)
+      expect(response.subtotalCents).toBe(5000);
+      expect(response.discountCents).toBe(0);
+      expect(response.totalCents).toBe(5000);
+    });
+
+    it('should surface previewTotals-derived totals for a DRAFT with a per-line discount (the POS $0.00 bug case: $100 base -> $80 charged)', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 10000,
+        unitPriceCurrency: 'MXN',
+      });
+      // 20% off -> discount = 2000, unit price becomes 8000, prePrice rolled back to 10000
+      sale.applyItemDiscount('550e8400-e29b-41d4-a716-446655440010', {
+        type: 'percentage',
+        percent: 20,
+        discountTitle: '20% off',
+      });
+
+      const response = sale.toResponse();
+
+      expect(response.status).toBe('DRAFT');
+      // subtotalCents uses prePriceCentsBeforeDiscount (10000) as base
+      expect(response.subtotalCents).toBe(10000);
+      // discountCents = full savings (per-line + order)
+      expect(response.discountCents).toBe(2000);
+      // totalCents = what the customer will actually pay (post-line)
+      expect(response.totalCents).toBe(8000);
+    });
+
+    it('should surface previewTotals-derived totals for a DRAFT with an order-level promotion', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 2000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.setAppliedOrderPromotion({
+        promotionId: 'promo-order',
+        discountType: 'amount',
+        discountValue: 500,
+        discountAmountCents: 500,
+        discountTitle: '$500 off',
+      });
+
+      const response = sale.toResponse();
+
+      expect(response.status).toBe('DRAFT');
+      expect(response.subtotalCents).toBe(2000);
+      expect(response.discountCents).toBe(500);
+      expect(response.totalCents).toBe(1500);
+    });
+
+    it('should NOT add previewTotals-derived subtotalCents/discountCents keys for a CONFIRMED sale (byte-for-byte shape preserved)', () => {
+      // The persisted `totalCents` is the source of truth on confirmed sales —
+      // previewTotals() is a draft-time projection and must NOT be surfaced on
+      // a confirmed response (would regress receipts/list mappers that read
+      // the charged totalCents). The DRAFT guard inside toResponse() is what
+      // enforces this.
+      const confirmedAt = new Date('2026-05-06T12:00:00.000Z');
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        items: [
+          {
+            id: '550e8400-e29b-41d4-a716-446655440010',
+            saleId: BASE_SALE_ID,
+            productId: 'prod-001',
+            variantId: null,
+            productName: 'Test Product',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 10000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+        confirmedAt,
+        folio: 'A-2605-000001',
+        totalCents: 10000,
+        paidCents: 10000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const response = sale.toResponse();
+
+      // The persisted total must be surfaced (not previewTotals-derived).
+      expect(response.status).toBe('CONFIRMED');
+      expect(response.totalCents).toBe(10000);
+
+      // The pre-fix shape had no subtotalCents / discountCents keys for
+      // CONFIRMED sales — assert they are STILL absent (byte-for-byte
+      // shape unchanged for confirmed) so receipts/list mappers don't
+      // accidentally start reading preview values.
+      expect(
+        Object.prototype.hasOwnProperty.call(response, 'subtotalCents'),
+      ).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(response, 'discountCents'),
+      ).toBe(false);
+    });
   });
 
   describe('overrideItemPrice', () => {

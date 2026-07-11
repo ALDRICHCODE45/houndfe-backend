@@ -718,8 +718,36 @@ export class Sale {
     return this;
   }
 
-  toResponse() {
-    return {
+  toResponse(): {
+    id: string;
+    userId: string;
+    status: SaleStatus;
+    channel: SaleChannel;
+    register: string;
+    deliveryStatus: SaleDeliveryStatus;
+    customerId: string | null;
+    shippingAddressId: string | null;
+    sellerUserId: string | null;
+    dueDate: string | null;
+    confirmedAt?: Date;
+    folio?: string;
+    totalCents: number;
+    paidCents: number;
+    debtCents: number;
+    changeDueCents: number;
+    paymentStatus: SalePaymentStatus | null;
+    canceledAt: Date | null;
+    cancelReason: SaleCancelReason | null;
+    canceledByUserId: string | null;
+    items: ReturnType<SaleItem['toResponse']>[];
+    createdAt?: Date;
+    updatedAt?: Date;
+    /** Live subtotal (Σ prePrice·qty). Only present for DRAFT sales. */
+    subtotalCents?: number;
+    /** Live discount (subtotalCents − totalCents). Only present for DRAFT sales. */
+    discountCents?: number;
+  } {
+    const base = {
       id: this.id,
       userId: this.userId,
       status: this.status,
@@ -744,5 +772,31 @@ export class Sale {
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };
+    // For DRAFT sales, surface live preview totals on the response. The
+    // persisted `totalCents` is 0 for drafts (subtotalCents / discountCents /
+    // totalCents columns are only written at CHARGE time), so every
+    // POS-facing service path that returned `sale.toResponse()` (addItem,
+    // updateItemQuantity, removeItem, clearItems, getUserDrafts,
+    // overrideItemPrice, applyItemDiscount, removeItemDiscount,
+    // applyGlobalDiscount, removeGlobalDiscount, applyManualPromotion,
+    // removeManualPromotion, removeAppliedPromotion — ~13 call sites) used
+    // to emit `totalCents: 0` and the POS rendered Subtotal/Total as $0.00.
+    //
+    // `previewTotals()` is order-discount-aware and per-line-discount-aware
+    // (single source of truth, shared with the charge path) and is
+    // well-tested for empty drafts, plain items, per-line discounts,
+    // order-level promotions, and the order-discount-exceeds-subtotal
+    // clamping case.
+    //
+    // For CONFIRMED / CANCELED sales we MUST keep the persisted
+    // `totalCents` (the charged amount). `previewTotals()` is a draft-time
+    // projection; using it on a confirmed response would regress receipts
+    // and list mappers that read the charged totalCents and do not expect
+    // subtotalCents / discountCents keys on a confirmed sale. The DRAFT
+    // guard below preserves the confirmed-sale shape byte-for-byte.
+    if (this.status === 'DRAFT') {
+      return { ...base, ...this.previewTotals() };
+    }
+    return base;
   }
 }
