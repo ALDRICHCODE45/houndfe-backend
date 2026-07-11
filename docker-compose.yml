@@ -1,3 +1,18 @@
+# Test-DB isolation: never interfere with the dev DB on 5432.
+#
+# Notes:
+#   - Same user/password as dev (admin/secreto) — keeps the connection
+#     string trivially symmetric with `.env.test` and avoids introducing
+#     a second test-only role for no reason.
+#   - Host port 5433, container port 5432 — chosen so it can NEVER clash
+#     with the dev DB even when both are running side by side.
+#   - Volume: NAMED volume (persistent across `pnpm test:integration`
+#     runs). Faster re-runs because `prisma migrate deploy` only runs on
+#     the first bring-up. Trade-off: stale schema is possible if a
+#     migration is added without a fresh start; in that case run
+#     `pnpm run test:db:down -- -v` to nuke the volume, then `up`.
+#   - Container name is fixed (`nest-practice-test-db`) so test helpers
+#     can reference it without a discovery roundtrip.
 services:
   postgres:
     image: postgres:17
@@ -12,5 +27,27 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
+  # Dedicated test DB — see PR description.
+  # Port 5433 on host (NOT 5432 — that is the dev DB above and must
+  # remain untouched by the test run).
+  postgres-test:
+    image: postgres:17
+    container_name: nest-practice-test-db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secreto
+      POSTGRES_DB: nest-practice-test
+    ports:
+      - '5433:5432'
+    volumes:
+      # Named volume (NOT a bind mount, NOT ephemeral): survives
+      # between `pnpm test:integration` runs so `prisma migrate deploy`
+      # only re-applies on first bring-up. Drop it with
+      # `docker compose down -v postgres-test` when a fresh schema is
+      # needed.
+      - postgres_test_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  postgres_test_data:

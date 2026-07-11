@@ -1,8 +1,50 @@
-import { PrismaService } from './prisma.service';
+/**
+ * Tenant Prisma isolation — integration spec against the dedicated
+ * test DB.
+ *
+ * Proves that `createTenantScopedPrisma` enforces per-tenant
+ * read/write isolation through the `ClsService<TenantClsStore>`
+ * store. This file lives under `src/` without an `.integration`
+ * suffix because the tenant-scoping work landed before the
+ * integration-naming convention was adopted. The unit Jest config
+ * `testPathIgnorePatterns` lists it explicitly so `pnpm test` never
+ * reaches a DB; the integration config picks it up via its
+ * `testMatch` block.
+ *
+ * ## Test-DB isolation
+ *
+ * The two tracked-id arrays (`createdProductIds`, `createdSaleIds`,
+ * `createdUserIds`) were removed in favour of `resetAndSeedBaseline()`
+ * (see `test/integration/reset-db.ts`) which uses
+ * `TRUNCATE TABLE "tenants" CASCADE` + `TRUNCATE TABLE "users" CASCADE`
+ * + a single re-seed of the baseline tenant. That makes a mid-test
+ * failure impossible to leak rows from: the cleanup runs even when
+ * an assertion throws.
+ *
+ * Tenant A/B IDs are pinned (instead of `crypto.randomUUID()` per
+ * module load) so the cleanup can deterministically recreate them in
+ * `beforeEach` and so slugs that derive from the first 8 hex chars
+ * stay stable across runs.
+ *
+ * ## Skip guard
+ *
+ * `SKIP_DB_INTEGRATION=1` or unset `DATABASE_URL` skips the whole
+ * describe — same convention as the e4 and stock specs.
+ */
+import {
+  integrationPrisma,
+  resetAndSeedBaseline,
+  disconnectIntegrationPrisma,
+} from '../../../test/integration/reset-db';
 import { createTenantScopedPrisma } from './tenant-prisma.factory';
 import type { TenantClsStore } from '../tenant/tenant-cls-store.interface';
 
-describe('Tenant Prisma isolation (integration)', () => {
+const SKIP_INTEGRATION =
+  process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL;
+
+const describeIfDb = SKIP_INTEGRATION ? describe.skip : describe;
+
+describeIfDb('Tenant Prisma isolation (integration)', () => {
   const ctx: TenantClsStore = {
     userId: 'test-user',
     tenantId: null,
@@ -14,21 +56,25 @@ describe('Tenant Prisma isolation (integration)', () => {
     get: jest.fn((key: keyof TenantClsStore) => ctx[key]),
   };
 
-  const tenantAId = crypto.randomUUID();
-  const tenantBId = crypto.randomUUID();
-
-  const createdProductIds: string[] = [];
-  const createdSaleIds: string[] = [];
-  const createdUserIds: string[] = [];
-
-  let prisma: PrismaService;
+  // Pinned UUID-shaped IDs. The first 8 hex chars feed the slug so
+  // a fixed prefix (`00000000`) keeps slugs stable across runs —
+  // important because `Tenant.slug` has a UNIQUE constraint.
+  const tenantAId = '00000000-0000-0000-0000-0000000000aa';
+  const tenantBId = '00000000-0000-0000-0000-0000000000bb';
 
   beforeAll(async () => {
-    prisma = new PrismaService();
-    await prisma.$connect();
+    // Force the singleton construction early so a misconfigured
+    // DATABASE_URL throws here (loud), not inside the first test
+    // (cryptic).
+    integrationPrisma();
+    await resetAndSeedBaseline();
   });
 
   beforeEach(async () => {
+    const prisma = integrationPrisma();
+    // The previous `createMany … skipDuplicates` pattern is kept
+    // — the `resetAndSeedBaseline` in afterEach deliberately wipes
+    // these so each test starts from "Tenant A and Tenant B exist".
     await prisma.tenant.createMany({
       data: [
         {
@@ -47,33 +93,19 @@ describe('Tenant Prisma isolation (integration)', () => {
   });
 
   afterEach(async () => {
-    if (createdProductIds.length) {
-      await prisma.product.deleteMany({
-        where: { id: { in: createdProductIds } },
-      });
-      createdProductIds.length = 0;
-    }
-
-    if (createdSaleIds.length) {
-      await prisma.sale.deleteMany({ where: { id: { in: createdSaleIds } } });
-      createdSaleIds.length = 0;
-    }
-
-    if (createdUserIds.length) {
-      await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-      createdUserIds.length = 0;
-    }
-
-    await prisma.tenant.deleteMany({
-      where: { id: { in: [tenantAId, tenantBId] } },
-    });
+    // TRUNCATE … CASCADE: robust against mid-test failure. The
+    // helper re-seeds the baseline tenant after truncation so any
+    // other spec in the same run (or any later test within this
+    // suite) sees a known starting state.
+    await resetAndSeedBaseline();
   });
 
   afterAll(async () => {
-    await prisma.$disconnect();
+    await disconnectIntegrationPrisma();
   });
 
   it('creates in Tenant A and findMany in Tenant B returns empty', async () => {
+    const prisma = integrationPrisma();
     ctx.tenantId = tenantAId;
     ctx.isSuperAdmin = false;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
@@ -81,7 +113,6 @@ describe('Tenant Prisma isolation (integration)', () => {
     const created = await tenantAClient.product.create({
       data: { name: 'Ibuprofeno' } as any,
     });
-    createdProductIds.push(created.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
@@ -93,12 +124,12 @@ describe('Tenant Prisma isolation (integration)', () => {
   });
 
   it('findUnique by id from another tenant returns null', async () => {
+    const prisma = integrationPrisma();
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
     const created = await tenantAClient.product.create({
       data: { name: 'Aspirina' } as any,
     });
-    createdProductIds.push(created.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
@@ -110,19 +141,18 @@ describe('Tenant Prisma isolation (integration)', () => {
   });
 
   it('super-admin global context can read records from both tenants', async () => {
+    const prisma = integrationPrisma();
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
     const productA = await tenantAClient.product.create({
       data: { name: 'Producto A' } as any,
     });
-    createdProductIds.push(productA.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
     const productB = await tenantBClient.product.create({
       data: { name: 'Producto B' } as any,
     });
-    createdProductIds.push(productB.id);
 
     ctx.tenantId = null;
     ctx.isSuperAdmin = true;
@@ -135,6 +165,7 @@ describe('Tenant Prisma isolation (integration)', () => {
   });
 
   it('create enforces current tenantId in persisted record', async () => {
+    const prisma = integrationPrisma();
     ctx.tenantId = tenantAId;
     ctx.isSuperAdmin = false;
     const tenantClient = createTenantScopedPrisma(prisma, cls as any);
@@ -142,18 +173,17 @@ describe('Tenant Prisma isolation (integration)', () => {
     const created = await tenantClient.product.create({
       data: { name: 'Naproxeno', tenantId: tenantBId } as any,
     });
-    createdProductIds.push(created.id);
 
     expect(created.tenantId).toBe(tenantAId);
   });
 
   it('update from Tenant B on Tenant A product is not found', async () => {
+    const prisma = integrationPrisma();
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
     const created = await tenantAClient.product.create({
       data: { name: 'Omeprazol' } as any,
     });
-    createdProductIds.push(created.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
@@ -167,6 +197,7 @@ describe('Tenant Prisma isolation (integration)', () => {
   });
 
   it('findUnique sale by id from another tenant returns null', async () => {
+    const prisma = integrationPrisma();
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
     const userId = crypto.randomUUID();
@@ -178,12 +209,10 @@ describe('Tenant Prisma isolation (integration)', () => {
         name: 'Cashier A',
       },
     });
-    createdUserIds.push(userId);
 
     const created = await tenantAClient.sale.create({
       data: { userId, status: 'DRAFT' } as any,
     });
-    createdSaleIds.push(created.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);
@@ -195,12 +224,12 @@ describe('Tenant Prisma isolation (integration)', () => {
   });
 
   it('cross-tenant product update has zero effect on original tenant data', async () => {
+    const prisma = integrationPrisma();
     ctx.tenantId = tenantAId;
     const tenantAClient = createTenantScopedPrisma(prisma, cls as any);
     const created = await tenantAClient.product.create({
       data: { name: 'Paracetamol' } as any,
     });
-    createdProductIds.push(created.id);
 
     ctx.tenantId = tenantBId;
     const tenantBClient = createTenantScopedPrisma(prisma, cls as any);

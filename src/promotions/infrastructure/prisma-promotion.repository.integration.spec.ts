@@ -1,9 +1,33 @@
 /**
  * Integration test for PrismaPromotionRepository with real database.
  *
- * This test suite proves cascade delete behavior using a real Prisma connection
- * and database transactions, addressing spec scenario 5.14.
+ * This test suite proves cascade delete behavior using a real Prisma
+ * connection and database transactions, addressing spec scenario 5.14.
+ *
+ * ## Test-DB isolation
+ *
+ * Runs against the dedicated `nest-practice-test` database (NOT the
+ * dev DB). Loaded by:
+ *
+ *   - `jest.integration.config.js` → only this file is matched
+ *   - `test/integration/setup/load-env.ts` → sets `DATABASE_URL`
+ *   - `test/integration/setup/global-setup.ts` → applies migrations
+ *     and seeds the baseline tenant
+ *
+ * Defensive guards:
+ *   - `SKIP_DB_INTEGRATION=1` (or unset DATABASE_URL) → describe is
+ *     skipped entirely so the unit config or a CI without a test DB
+ *     does not crash with a connection error.
+ *   - `afterEach` calls `resetAndSeedBaseline()` so a mid-test
+ *     failure cannot leak `promotion` rows from one test into the
+ *     next. The previous tracked-`createdIds` cleanup was fragile —
+ *     a throw inside the tracked code path would skip the cleanup
+ *     block and pollute the test DB.
  */
+import {
+  resetAndSeedBaseline,
+  disconnectIntegrationPrisma,
+} from '../../../test/integration/reset-db';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { PrismaPromotionRepository } from './prisma-promotion.repository';
 import { Promotion } from '../domain/promotion.entity';
@@ -11,20 +35,37 @@ import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import type { ClsService } from 'nestjs-cls';
 
-describe('PrismaPromotionRepository (Integration - Real DB)', () => {
+const SKIP_INTEGRATION =
+  process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL;
+
+// describe.skip when the test DB is unreachable — `pnpm test:unit`
+// boots no DB, and any operator running `pnpm test:integration`
+// without first running `pnpm run test:db:up` gets a clear message
+// from load-env.ts/global-setup.ts rather than a misleading failure.
+const describeIfDb = SKIP_INTEGRATION ? describe.skip : describe;
+
+describeIfDb('PrismaPromotionRepository (Integration - Real DB)', () => {
   let prisma: PrismaService;
   let repository: PrismaPromotionRepository;
   let tenantId: string;
-
-  // Test data cleanup tracker
-  const createdIds: string[] = [];
 
   beforeAll(async () => {
     prisma = new PrismaService();
     await prisma.$connect();
 
+    // Wipe state from any previous run, then re-seed the baseline
+    // tenant (idempotent — globalSetup already did this once at
+    // suite boot, but per-suite the contract is "I own this row
+    // before I touch anything").
+    await resetAndSeedBaseline();
+
     const tenant = await prisma.tenant.findFirst({ select: { id: true } });
-    if (!tenant) throw new Error('No tenant found for integration test');
+    if (!tenant) {
+      throw new Error(
+        'No tenant found for integration test. globalSetup must have seeded one — ' +
+          'verify .env.test and that `pnpm run test:db:up` has the container running.',
+      );
+    }
     tenantId = tenant.id;
 
     const cls: Pick<ClsService<TenantClsStore>, 'get'> = {
@@ -36,25 +77,27 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
     };
 
     const tenantPrisma = new TenantPrismaService(
-      prisma,
+      // The `cls` mock satisfies `ClsService<TenantClsStore>`; the
+      // cast is the same one used elsewhere in the integration
+      // spec surface (see e4-concurrent-stock-alert.spec.ts).
+      prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
       cls as ClsService<TenantClsStore>,
     );
     repository = new PrismaPromotionRepository(tenantPrisma);
   });
 
-  afterAll(async () => {
-    // Cleanup all test data
-    if (createdIds.length > 0) {
-      await prisma.promotion.deleteMany({
-        where: { id: { in: createdIds } },
-      });
-    }
-    await prisma.$disconnect();
+  afterEach(async () => {
+    // Robust cascade reset — wipes the promotion rows this spec
+    // creates plus every related join table. Re-seeds the baseline
+    // tenant so the very next test starts from a clean slate. This
+    // replaces the previous tracked-id cleanup that could leak rows
+    // on a mid-test failure.
+    await resetAndSeedBaseline();
   });
 
-  afterEach(() => {
-    // Clear the tracker after each test
-    createdIds.length = 0;
+  afterAll(async () => {
+    await prisma.$disconnect();
+    await disconnectIntegrationPrisma();
   });
 
   describe('save() - Transaction visibility regression', () => {
@@ -67,8 +110,6 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
         discountType: 'FIXED',
         discountValue: 1000,
       });
-
-      createdIds.push(promotion.id);
 
       const saved = await repository.save(promotion);
 
@@ -111,9 +152,8 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
         { id: crypto.randomUUID(), day: 'FRIDAY' },
       ];
 
-      createdIds.push(promotion.id);
-
-      // GREEN: Seed promotion rows directly in DB for this integration scenario
+      // GREEN: Seed promotion rows directly in DB for this integration
+      // scenario
       await prisma.promotion.create({
         data: {
           id: promotion.id,
@@ -191,14 +231,11 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
         where: { promotionId: promotion.id },
       });
       expect(remainingPriceLists.length).toBe(0);
-
-      // Remove from cleanup tracker since already deleted
-      const idx = createdIds.indexOf(promotion.id);
-      if (idx >= 0) createdIds.splice(idx, 1);
     });
 
     it('should return null when attempting to find a deleted promotion', async () => {
-      // TRIANGULATION: Different path - verify repository findById after delete
+      // TRIANGULATION: Different path - verify repository findById after
+      // delete
       const promotion = Promotion.create({
         id: crypto.randomUUID(),
         title: 'Find After Delete Test',
@@ -207,8 +244,6 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
         discountType: 'FIXED',
         discountValue: 500,
       });
-
-      createdIds.push(promotion.id);
 
       // Seed and verify existence
       await prisma.promotion.create({
@@ -234,10 +269,6 @@ describe('PrismaPromotionRepository (Integration - Real DB)', () => {
       // THEN: Repository findById should return null
       const notFound = await repository.findById(promotion.id);
       expect(notFound).toBeNull();
-
-      // Remove from cleanup tracker
-      const idx = createdIds.indexOf(promotion.id);
-      if (idx >= 0) createdIds.splice(idx, 1);
     });
   });
 });

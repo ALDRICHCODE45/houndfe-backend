@@ -38,9 +38,15 @@ lerna-debug.log*
 # dotenv environment variable files
 .env
 .env.development.local
+.env.test
 .env.test.local
 .env.production.local
 .env.local
+
+# `.env.test` is intentionally gitignored (matches the `.env` /
+# `.env.local` pattern). A safe committed template lives at
+# `.env.test.example` — copy it to `.env.test` before running
+# `pnpm test:integration` (see test/integration/README.md).
 
 # temp directory
 .temp
