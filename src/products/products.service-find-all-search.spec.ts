@@ -266,6 +266,94 @@ describe('ProductsService.findAll — search filter (bug fix)', () => {
     expect(result).toHaveLength(3);
     expect(findMany.mock.calls[0][0].where).toBeUndefined();
   });
+
+  // ─── Legacy `q` alias (frontend POS screen sends ?q= alongside ?search=)
+  // The global ValidationPipe rejects unknown query params, so `q` is now
+  // declared on the DTO and treated as an alias for `search`.
+
+  it('uses `q` as the effective search term when `search` is absent', async () => {
+    const findMany = jest.fn().mockResolvedValue([IBUP]);
+    const service = createService(makeMockPrisma(findMany));
+
+    await service.findAll({ q: 'ibup' } as any);
+
+    const args = findMany.mock.calls[0][0];
+    expect(args.where.OR).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: { contains: 'ibup', mode: 'insensitive' },
+        }),
+      ]),
+    );
+  });
+
+  it('prefers `search` over `q` when BOTH are present (search wins)', async () => {
+    const findMany = jest.fn().mockResolvedValue([PARACETAMOL]);
+    const service = createService(makeMockPrisma(findMany));
+
+    await service.findAll({ search: 'para', q: 'ibup' } as any);
+
+    const args = findMany.mock.calls[0][0];
+    // The WHERE clause must reference `para` (the search term), NOT `ibup`.
+    const nameFilter = args.where.OR.find(
+      (c: any) => c.name?.contains !== undefined,
+    );
+    expect(nameFilter.name.contains).toBe('para');
+    const skuFilter = args.where.OR.find(
+      (c: any) => c.sku?.contains !== undefined,
+    );
+    expect(skuFilter.sku.contains).toBe('para');
+    const barcodeFilter = args.where.OR.find(
+      (c: any) => c.barcode?.contains !== undefined,
+    );
+    expect(barcodeFilter.barcode.contains).toBe('para');
+    // Defense-in-depth: `ibup` must NOT appear in the WHERE clause.
+    expect(JSON.stringify(args.where.OR)).not.toContain('ibup');
+  });
+
+  it('falls back to `q` when `search` is an empty string', async () => {
+    const findMany = jest.fn().mockResolvedValue([IBUP]);
+    const service = createService(makeMockPrisma(findMany));
+
+    await service.findAll({ search: '', q: 'ibup' } as any);
+
+    const args = findMany.mock.calls[0][0];
+    const nameFilter = args.where.OR.find(
+      (c: any) => c.name?.contains !== undefined,
+    );
+    expect(nameFilter.name.contains).toBe('ibup');
+  });
+
+  it('trims `q` the same way `search` is trimmed', async () => {
+    const findMany = jest.fn().mockResolvedValue([IBUP]);
+    const service = createService(makeMockPrisma(findMany));
+
+    await service.findAll({ q: '  ibup  ' } as any);
+
+    const args = findMany.mock.calls[0][0];
+    const nameFilter = args.where.OR.find(
+      (c: any) => c.name?.contains !== undefined,
+    );
+    expect(nameFilter.name.contains).toBe('ibup');
+  });
+
+  it('treats empty `q` as no-search when `search` is also empty', async () => {
+    const findMany = jest.fn().mockResolvedValue([IBUP, PARACETAMOL, ASPIRIN]);
+    const service = createService(makeMockPrisma(findMany));
+
+    await service.findAll({ search: '', q: '' } as any);
+
+    expect(findMany.mock.calls[0][0].where).toBeUndefined();
+  });
+
+  it('treats whitespace-only `q` as no-search when `search` is empty', async () => {
+    const findMany = jest.fn().mockResolvedValue([IBUP, PARACETAMOL, ASPIRIN]);
+    const service = createService(makeMockPrisma(findMany));
+
+    await service.findAll({ search: '', q: '   ' } as any);
+
+    expect(findMany.mock.calls[0][0].where).toBeUndefined();
+  });
 });
 
 describe('ProductsService.findAll — backward compatibility (no query)', () => {

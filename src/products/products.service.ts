@@ -508,8 +508,19 @@ export class ProductsService {
     // Search term: trim + ignore empty/whitespace-only.
     // Case-insensitive matching is enforced at the DB level via Prisma's
     // `mode: 'insensitive'`, which maps to `ILIKE` on PostgreSQL.
-    const trimmedSearch =
-      typeof query.search === 'string' ? query.search.trim() : '';
+    //
+    // Alias resolution: `search` is the canonical term; `q` is a legacy
+    // alias accepted for backward compatibility with the frontend POS
+    // screen (see `ListProductsQueryDto`). `search` wins when both are
+    // present, otherwise `q` is used. Empty / whitespace-only resolves to
+    // no-filter, same as a missing value.
+    const rawSearchTerm =
+      typeof query.search === 'string' && query.search.length > 0
+        ? query.search
+        : typeof query.q === 'string'
+          ? query.q
+          : '';
+    const trimmedSearch = rawSearchTerm.trim();
     const hasSearch = trimmedSearch.length > 0;
 
     const where: Prisma.ProductWhereInput | undefined = hasSearch

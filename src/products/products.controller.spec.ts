@@ -448,4 +448,79 @@ describe('ProductsController sub-resource auth integration', () => {
       .set('Authorization', 'Bearer super-admin')
       .expect(204);
   });
+
+  // ==================== GET /products — query alias regression ====================
+  //
+  // Regression: commit c61bbb8 introduced ListProductsQueryDto on
+  // GET /products. With the global ValidationPipe's
+  // `whitelist + forbidNonWhitelisted` policy (replicated below), any
+  // unknown query param now returns 400. The frontend POS screen sends
+  // `?q=` (legacy alias) in addition to `?search=`, so the product list
+  // was rejected and rendered empty.
+  //
+  // These tests exercise the FULL pipe (whitelist + forbidNonWhitelisted +
+  // transform) so the fix is proven end-to-end, not just at the DTO unit
+  // level.
+  //
+  // Trade-off: the chosen fix (Approach A in the design discussion) adds
+  // `q` as an explicit, documented alias on the DTO. We CANNOT apply a
+  // handler-scoped @UsePipes with forbidNonWhitelisted:false because the
+  // global ValidationPipe runs FIRST in NestJS' pipe chain
+  // (global → controller → method → parameter) and throws before the
+  // handler pipe runs. Relaxing the global pipe itself would weaken
+  // mutation endpoints. Therefore unknown legacy params other than `q`
+  // will still 400 — that is intentional and documented.
+
+  it('GET /products?q=ibup returns 200 (q accepted as legacy alias of search)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/products?q=ibup')
+      .set('Authorization', 'Bearer product-read-only')
+      .expect(200);
+
+    // The service is called with the DTO instance. `q` must be preserved
+    // on the DTO (so the service can resolve the alias).
+    expect(service.findAll).toHaveBeenCalledTimes(1);
+    const passedQuery = service.findAll.mock.calls[0][0];
+    expect(passedQuery.q).toBe('ibup');
+  });
+
+  it('GET /products?search=ibup returns 200 (canonical search still works)', async () => {
+    await request(app.getHttpServer())
+      .get('/products?search=ibup')
+      .set('Authorization', 'Bearer product-read-only')
+      .expect(200);
+
+    const passedQuery = service.findAll.mock.calls[0][0];
+    expect(passedQuery.search).toBe('ibup');
+  });
+
+  it('GET /products?search=para&q=ibup returns 200 (both params present, no 400)', async () => {
+    await request(app.getHttpServer())
+      .get('/products?search=para&q=ibup')
+      .set('Authorization', 'Bearer product-read-only')
+      .expect(200);
+
+    const passedQuery = service.findAll.mock.calls[0][0];
+    expect(passedQuery.search).toBe('para');
+    expect(passedQuery.q).toBe('ibup');
+  });
+
+  it('GET /products with NO params returns 200 (flat array, unchanged)', async () => {
+    await request(app.getHttpServer())
+      .get('/products')
+      .set('Authorization', 'Bearer product-read-only')
+      .expect(200);
+
+    expect(service.findAll).toHaveBeenCalledTimes(1);
+  });
+
+  // Defense-in-depth: the global pipe is still strict on this endpoint.
+  // An unknown param (anything other than the documented DTO fields)
+  // MUST still 400, proving we did NOT weaken the global policy.
+  it('GET /products?someUnknownParam=1 returns 400 (global pipe still rejects unknown query props)', async () => {
+    await request(app.getHttpServer())
+      .get('/products?someUnknownParam=1')
+      .set('Authorization', 'Bearer product-read-only')
+      .expect(400);
+  });
 });

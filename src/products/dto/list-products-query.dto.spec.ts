@@ -3,6 +3,10 @@
  *
  * Validates the query-DTO contract for `GET /products`:
  *  - `search` is an optional, trimmed string.
+ *  - `q` is an optional, trimmed string. Legacy alias accepted for
+ *    backward compatibility with the frontend POS screen, which sends
+ *    `?q=` in addition to `?search=`. The service resolves the
+ *    effective search term as `search ?? q`.
  *  - `page` is an optional integer >= 1.
  *  - `limit` is an optional integer in [1, 100].
  *  - Extra/unknown query params are rejected (forbidNonWhitelisted at the
@@ -39,6 +43,36 @@ describe('ListProductsQueryDto', () => {
       const { dto, errors } = await validateDto({ search: '' });
       expect(errors).toHaveLength(0);
       expect(dto.search).toBe('');
+    });
+  });
+
+  describe('q (legacy alias)', () => {
+    it('accepts an omitted q (undefined)', async () => {
+      const { dto, errors } = await validateDto({});
+      expect(errors).toHaveLength(0);
+      expect(dto.q).toBeUndefined();
+    });
+
+    it('accepts a plain string for q', async () => {
+      const { dto, errors } = await validateDto({ q: 'ibup' });
+      expect(errors).toHaveLength(0);
+      expect(dto.q).toBe('ibup');
+    });
+
+    it('accepts an empty string for q (treated as no-search at the service layer)', async () => {
+      const { dto, errors } = await validateDto({ q: '' });
+      expect(errors).toHaveLength(0);
+      expect(dto.q).toBe('');
+    });
+
+    it('accepts both search and q together without validation error', async () => {
+      const { dto, errors } = await validateDto({
+        search: 'para',
+        q: 'ibup',
+      });
+      expect(errors).toHaveLength(0);
+      expect(dto.search).toBe('para');
+      expect(dto.q).toBe('ibup');
     });
   });
 
