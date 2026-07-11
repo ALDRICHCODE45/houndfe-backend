@@ -25,10 +25,12 @@ type RolePermissionUpsertCall = {
 };
 
 describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
-  function makePrismaStub(overrides: Partial<{
-    existingSuperAdmin: { id: string } | null;
-    rolePermissionUpsertResolved: unknown;
-  }> = {}) {
+  function makePrismaStub(
+    overrides: Partial<{
+      existingSuperAdmin: { id: string } | null;
+      rolePermissionUpsertResolved: unknown;
+    }> = {},
+  ) {
     const permissionUpsertCalls: PermissionUpsertCall[] = [];
 
     const create = {
@@ -56,13 +58,18 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
     };
 
     const rolePermission = {
-      upsert: jest.fn(async (args: RolePermissionUpsertCall) =>
-        overrides.rolePermissionUpsertResolved ?? args,
+      upsert: jest.fn(
+        async (args: RolePermissionUpsertCall) =>
+          overrides.rolePermissionUpsertResolved ?? args,
       ),
     };
 
     return {
-      prisma: { permission: create, role, rolePermission } as unknown as PrismaService,
+      prisma: {
+        permission: create,
+        role,
+        rolePermission,
+      } as unknown as PrismaService,
       permissionUpsertCalls,
     };
   }

@@ -112,10 +112,7 @@ describe('ProductsService.resolvePriceListGlobalIds', () => {
       { id: 'PL-a', globalPriceListId: 'GPL-retail' },
     ]);
 
-    const map = await service.resolvePriceListGlobalIds([
-      'PL-a',
-      'PL-missing',
-    ]);
+    const map = await service.resolvePriceListGlobalIds(['PL-a', 'PL-missing']);
 
     expect(map.size).toBe(1);
     expect(map.get('PL-a')).toBe('GPL-retail');

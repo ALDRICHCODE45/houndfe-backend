@@ -20,12 +20,8 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { PrismaStockAlertStateRepository } from './infrastructure/prisma-stock-alert-state.repository';
-import {
-  STOCK_ALERT_STATE_REPOSITORY,
-} from './domain/stock-alert-state.repository';
-import {
-  USER_EMAIL_LOOKUP,
-} from './domain/user-email-lookup.repository';
+import { STOCK_ALERT_STATE_REPOSITORY } from './domain/stock-alert-state.repository';
+import { USER_EMAIL_LOOKUP } from './domain/user-email-lookup.repository';
 import { PrismaUserEmailLookupRepository } from './infrastructure/prisma-user-email-lookup.repository';
 
 @Module({

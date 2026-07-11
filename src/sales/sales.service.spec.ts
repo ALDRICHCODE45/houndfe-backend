@@ -61,7 +61,9 @@ function makeMockProductsService() {
     checkStockAvailability: jest.fn(),
     getApplicablePrices: jest.fn(),
     resolveListPrice: jest.fn(),
-    resolvePriceListGlobalIds: jest.fn().mockResolvedValue(new Map<string, string>()),
+    resolvePriceListGlobalIds: jest
+      .fn()
+      .mockResolvedValue(new Map<string, string>()),
     decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
   } as any;
@@ -2478,9 +2480,7 @@ describe('SalesService', () => {
       // Mark idempotency as NOT succeeded on reject.
       expect(saleRepo.markChargeIdempotencySucceeded).not.toHaveBeenCalled();
       // No outbox writes occurred (no sale.confirmed, no payment events).
-      const eventTypes = outboxWriter.publish.mock.calls.map(
-        (args) => args[4],
-      );
+      const eventTypes = outboxWriter.publish.mock.calls.map((args) => args[4]);
       expect(eventTypes).not.toContain('sale.confirmed');
       expect(eventTypes).not.toContain('sale.payment.received');
     });
@@ -2701,11 +2701,9 @@ describe('SalesService', () => {
       expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
       expect(outboxWriter.publish).not.toHaveBeenCalled();
-      expect(saleRepo.markCancellationIdempotencySucceeded).toHaveBeenCalledWith(
-        'cancel-idem-token',
-        sale.id,
-        result,
-      );
+      expect(
+        saleRepo.markCancellationIdempotencySucceeded,
+      ).toHaveBeenCalledWith('cancel-idem-token', sale.id, result);
     });
 
     it('cancels credit sales with zero refund rows and no payment detail lookup', async () => {
@@ -2911,8 +2909,8 @@ describe('SalesService', () => {
         },
       );
 
-      const transactionCallOrder = saleRepo.runInTransaction.mock
-        .invocationCallOrder[0];
+      const transactionCallOrder =
+        saleRepo.runInTransaction.mock.invocationCallOrder[0];
       expect(
         productsService.getApplicablePrices.mock.invocationCallOrder[0],
       ).toBeGreaterThan(transactionCallOrder);
@@ -2971,14 +2969,12 @@ describe('SalesService', () => {
 
       expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
       expect(productsService.getApplicablePrices).toHaveBeenCalledTimes(1);
-      expect(
-        productsService.getApplicablePrices.mock.results[0]?.type,
-      ).toBe('return');
+      expect(productsService.getApplicablePrices.mock.results[0]?.type).toBe(
+        'return',
+      );
       expect(
         productsService.getApplicablePrices.mock.invocationCallOrder[0],
-      ).toBeGreaterThan(
-        saleRepo.runInTransaction.mock.invocationCallOrder[0],
-      );
+      ).toBeGreaterThan(saleRepo.runInTransaction.mock.invocationCallOrder[0]);
       expect(saleRepo.save).not.toHaveBeenCalled();
       expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
       expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
@@ -4665,9 +4661,8 @@ describe('SalesService', () => {
         variantId: null,
         quantity: 1,
       });
-      const afterFirst = (
-        saleRepo.save.mock.calls.at(-1)?.[0] as Sale
-      ).items[0];
+      const afterFirst = (saleRepo.save.mock.calls.at(-1)?.[0] as Sale)
+        .items[0];
       const actualItemId = afterFirst.id;
       expect(afterFirst.unitPriceCents).toBe(900);
       expect(afterFirst.prePriceCentsBeforeDiscount).toBe(1000);
@@ -4717,9 +4712,8 @@ describe('SalesService', () => {
       expect(secondInput.lines[0].effectiveUnitPriceCents).toBe(1000);
       expect(secondInput.lines[0].quantity).toBe(2);
 
-      const afterSecond = (
-        saleRepo.save.mock.calls.at(-1)?.[0] as Sale
-      ).items[0];
+      const afterSecond = (saleRepo.save.mock.calls.at(-1)?.[0] as Sale)
+        .items[0];
       // Discount still 10% of 1000 = 100 → unitPriceCents stays at 900.
       expect(afterSecond.unitPriceCents).toBe(900);
       expect(afterSecond.discountAmountCents).toBe(100);
@@ -5036,12 +5030,11 @@ describe('SalesService', () => {
       });
 
       // Resolver called ONCE (batch), with the DISTINCT ids.
-      expect(
-        productsService.resolvePriceListGlobalIds,
-      ).toHaveBeenCalledTimes(1);
-      const ids = (
-        productsService.resolvePriceListGlobalIds as jest.Mock
-      ).mock.calls[0][0] as string[];
+      expect(productsService.resolvePriceListGlobalIds).toHaveBeenCalledTimes(
+        1,
+      );
+      const ids = (productsService.resolvePriceListGlobalIds as jest.Mock).mock
+        .calls[0][0] as string[];
       expect([...ids].sort()).toEqual(['PL-a', 'PL-b']);
 
       // Engine input carries the resolved global ids per line (C1).
@@ -5200,8 +5193,7 @@ describe('SalesService', () => {
 
       // Recompute WAS called during overrideItemPrice (this is the new wiring).
       expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
-      const recomputeInput =
-        posEvaluateUseCase.evaluate.mock.calls[0][0];
+      const recomputeInput = posEvaluateUseCase.evaluate.mock.calls[0][0];
       // The recompute input carries the NEW unitPriceCents (800) — recompute
       // runs AFTER overridePrice, on the new baseline.
       expect(recomputeInput.lines[0].effectiveUnitPriceCents).toBe(800);
@@ -5242,8 +5234,7 @@ describe('SalesService', () => {
 
       // The engine WAS called inside the charge tx — recompute is authoritative.
       expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
-      const chargeInput =
-        posEvaluateUseCase.evaluate.mock.calls[0][0];
+      const chargeInput = posEvaluateUseCase.evaluate.mock.calls[0][0];
       expect(chargeInput.lines).toHaveLength(1);
       expect(chargeInput.lines[0].itemId).toBe(`${saleId}-item-1`);
     });
@@ -5597,7 +5588,8 @@ describe('SalesService', () => {
 
       posEvaluateUseCase.evaluate.mockImplementation((input) => ({
         lines:
-          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1')
+          input.lines[0] &&
+          input.optedInManualPromotionIds.includes('promo-m-1')
             ? [
                 {
                   itemId: input.lines[0].itemId,
@@ -5664,7 +5656,11 @@ describe('SalesService', () => {
         lines: [],
         order: null,
         availableManualPromotions: [
-          { id: 'promo-m-1', title: 'back on the shelf', type: 'PRODUCT_DISCOUNT' },
+          {
+            id: 'promo-m-1',
+            title: 'back on the shelf',
+            type: 'PRODUCT_DISCOUNT',
+          },
         ],
       });
 

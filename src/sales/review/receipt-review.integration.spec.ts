@@ -733,14 +733,12 @@ describe('Receipt review integration flow', () => {
     expect(paymentReceivedEvents).toHaveLength(2);
     expect(fullyPaidEvents).toHaveLength(1);
     expect(receiptConfirmedEvents).toHaveLength(2);
-    expect(
-      (receiptConfirmedEvents[0].payload as Record<string, unknown>)
-        .resultingPaymentStatus,
-    ).toBe('PARTIAL');
-    expect(
-      (receiptConfirmedEvents[1].payload as Record<string, unknown>)
-        .resultingPaymentStatus,
-    ).toBe('PAID');
+    expect(receiptConfirmedEvents[0].payload.resultingPaymentStatus).toBe(
+      'PARTIAL',
+    );
+    expect(receiptConfirmedEvents[1].payload.resultingPaymentStatus).toBe(
+      'PAID',
+    );
 
     // Idempotency: re-confirming an already-confirmed receipt is blocked
     await expect(
@@ -755,7 +753,9 @@ describe('Receipt review integration flow', () => {
 
     // No extra payments or events created by the re-confirm attempt
     expect(saleRepository.payments).toHaveLength(2);
-    expect(outboxWriter.events.filter((e) => e.eventType === 'receipt.confirmed')).toHaveLength(2);
+    expect(
+      outboxWriter.events.filter((e) => e.eventType === 'receipt.confirmed'),
+    ).toHaveLength(2);
   });
 });
 

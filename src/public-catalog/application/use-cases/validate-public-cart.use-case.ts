@@ -30,9 +30,7 @@ export class ValidatePublicCartUseCase {
   async execute(input: CartInput): Promise<CartValidationResponseDto> {
     const client = this.tenantPrisma.getClient();
 
-    const productIds = [
-      ...new Set(input.items.map((i) => i.productId)),
-    ];
+    const productIds = [...new Set(input.items.map((i) => i.productId))];
     const variantIds = input.items
       .map((i) => i.variantId)
       .filter((id): id is string => id != null);
@@ -76,11 +74,15 @@ export class ValidatePublicCartUseCase {
     const globalWarnings = new Set<CartWarningCode>();
 
     for (const item of input.items) {
-      const product = productMap.get(item.productId) as any;
+      const product = productMap.get(item.productId);
 
       if (!product) {
         validatedItems.push(
-          this.notFoundItem(item.productId, item.variantId ?? null, item.quantity),
+          this.notFoundItem(
+            item.productId,
+            item.variantId ?? null,
+            item.quantity,
+          ),
         );
         globalWarnings.add('NOT_FOUND');
         continue;
@@ -107,9 +109,7 @@ export class ValidatePublicCartUseCase {
       // Resolve variant if requested
       let variant: any = null;
       if (item.variantId) {
-        variant = product.variants?.find(
-          (v: any) => v.id === item.variantId,
-        );
+        variant = product.variants?.find((v: any) => v.id === item.variantId);
         if (!variant) {
           validatedItems.push({
             productId: item.productId,

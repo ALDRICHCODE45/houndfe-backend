@@ -554,7 +554,9 @@ describe('SalesQueryController HTTP integration', () => {
   });
 
   it('POST /sales/:id/cancel propagates NotFoundException (not found)', async () => {
-    service.cancelSale.mockRejectedValue(new NotFoundException('Sale not found'));
+    service.cancelSale.mockRejectedValue(
+      new NotFoundException('Sale not found'),
+    );
 
     await request(app.getHttpServer())
       .post(`/sales/${cancelSaleId}/cancel`)

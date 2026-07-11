@@ -1,4 +1,10 @@
-import { IsEnum, IsOptional, IsDateString, IsString, MaxLength } from 'class-validator';
+import {
+  IsEnum,
+  IsOptional,
+  IsDateString,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 import { EmployeeDocumentCategory } from '@prisma/client';
 
 export class UploadEmployeeDocumentDto {

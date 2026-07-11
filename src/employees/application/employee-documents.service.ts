@@ -63,7 +63,10 @@ export class EmployeeDocumentsService {
     });
   }
 
-  async list(employeeId: string, query: Partial<ListEmployeeDocumentsQueryDto> = {}) {
+  async list(
+    employeeId: string,
+    query: Partial<ListEmployeeDocumentsQueryDto> = {},
+  ) {
     const employee = await this.employeeRepo.findById(employeeId);
     if (!employee) throw new EmployeeNotFoundError(employeeId);
 
@@ -98,7 +101,9 @@ export class EmployeeDocumentsService {
 
   async getDownloadInfo(employeeId: string, docId: string) {
     const prisma = this.tenantPrisma.getClient();
-    const doc = await prisma.employeeDocument.findUnique({ where: { id: docId } });
+    const doc = await prisma.employeeDocument.findUnique({
+      where: { id: docId },
+    });
 
     if (!doc || doc.employeeId !== employeeId) {
       throw new EmployeeDocumentNotFoundError(docId);
@@ -110,7 +115,9 @@ export class EmployeeDocumentsService {
 
   async delete(employeeId: string, docId: string) {
     const prisma = this.tenantPrisma.getClient();
-    const doc = await prisma.employeeDocument.findUnique({ where: { id: docId } });
+    const doc = await prisma.employeeDocument.findUnique({
+      where: { id: docId },
+    });
 
     if (!doc || doc.employeeId !== employeeId) {
       throw new EmployeeDocumentNotFoundError(docId);

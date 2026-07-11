@@ -5,7 +5,10 @@ import {
 import type { IPublicCatalogRepository } from '../application/ports/public-catalog.repository';
 import type { ProductWithIncludes } from '../application/mappers/public-product.mapper';
 
-function makeProduct(id: string, overrides: Partial<ProductWithIncludes> = {}): ProductWithIncludes {
+function makeProduct(
+  id: string,
+  overrides: Partial<ProductWithIncludes> = {},
+): ProductWithIncludes {
   return {
     id,
     name: `Product ${id}`,
@@ -155,7 +158,9 @@ describe('ListProductsQueryDto validation (CRITICAL-02 regression)', () => {
   it('should accept rating_desc as a valid sort value', async () => {
     const { validate } = require('class-validator');
     const { plainToInstance } = require('class-transformer');
-    const { ListProductsQueryDto } = require('./request-dto/list-products-query.dto');
+    const {
+      ListProductsQueryDto,
+    } = require('./request-dto/list-products-query.dto');
 
     const dto = plainToInstance(ListProductsQueryDto, { sort: 'rating_desc' });
     const errors = await validate(dto);
@@ -167,7 +172,9 @@ describe('ListProductsQueryDto validation (CRITICAL-02 regression)', () => {
   it('should still reject invalid sort values', async () => {
     const { validate } = require('class-validator');
     const { plainToInstance } = require('class-transformer');
-    const { ListProductsQueryDto } = require('./request-dto/list-products-query.dto');
+    const {
+      ListProductsQueryDto,
+    } = require('./request-dto/list-products-query.dto');
 
     const dto = plainToInstance(ListProductsQueryDto, { sort: 'invalid_sort' });
     const errors = await validate(dto);

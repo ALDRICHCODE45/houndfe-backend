@@ -274,7 +274,10 @@ export class EmployeeTimeOffService {
     return copy;
   }
 
-  private daysInclusive(startDate: Date | string, endDate: Date | string): number {
+  private daysInclusive(
+    startDate: Date | string,
+    endDate: Date | string,
+  ): number {
     const start = new Date(startDate).getTime();
     const end = new Date(endDate).getTime();
     return Math.round((end - start) / 86400000) + 1;

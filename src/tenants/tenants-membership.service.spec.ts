@@ -257,7 +257,10 @@ describe('TenantsMembershipService', () => {
     const { service, userCount } = createService({ can: true });
     userCount.mockResolvedValue(21);
 
-    const result = await service.findEligibleUsers(tenantId, { page: 2, limit: 10 });
+    const result = await service.findEligibleUsers(tenantId, {
+      page: 2,
+      limit: 10,
+    });
 
     expect(result.meta).toEqual({
       total: 21,

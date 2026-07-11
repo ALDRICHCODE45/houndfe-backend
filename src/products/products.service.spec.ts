@@ -91,8 +91,9 @@ function createService(
     getClient: jest.fn().mockReturnValue(prisma),
     isInTransaction: jest.fn().mockReturnValue(false),
     runInTransaction: jest.fn(
-      async (work: (client: ReturnType<typeof getClient>) => Promise<unknown>) =>
-        work(prisma),
+      async (
+        work: (client: ReturnType<typeof getClient>) => Promise<unknown>,
+      ) => work(prisma),
     ),
   } as any;
   return new ProductsService(
@@ -278,7 +279,9 @@ describe('ProductsService — stock adjustments', () => {
     repo.incrementStockForRestock.mockResolvedValue(undefined);
 
     const service = createService(repo, makeMockPrisma());
-    const adjustments = [{ productId: 'prod-1', variantId: 'var-1', quantity: 2 }];
+    const adjustments = [
+      { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+    ];
 
     await service.incrementStockForRestock(adjustments);
 
@@ -1754,9 +1757,11 @@ describe('ProductsService — update() edit-path re-arm', () => {
    * called`; the rearm call count is a sanity check that the wiring
    * is real.
    */
-  function setupServiceWithRealAdapter(opts: {
-    product?: ReturnType<typeof makePersistenceProductWithStock>;
-  } = {}) {
+  function setupServiceWithRealAdapter(
+    opts: {
+      product?: ReturnType<typeof makePersistenceProductWithStock>;
+    } = {},
+  ) {
     const product = Product.fromPersistence(
       opts.product ?? makePersistenceProductWithStock(),
     );
@@ -1837,9 +1842,11 @@ describe('ProductsService — update() edit-path re-arm', () => {
     };
   }
 
-  function setupService(opts: {
-    product?: ReturnType<typeof makePersistenceProductWithStock>;
-  } = {}) {
+  function setupService(
+    opts: {
+      product?: ReturnType<typeof makePersistenceProductWithStock>;
+    } = {},
+  ) {
     const product = Product.fromPersistence(
       opts.product ?? makePersistenceProductWithStock(),
     );
@@ -1954,9 +1961,9 @@ describe('ProductsService — update() edit-path re-arm', () => {
     expect(calls('repo.save').length).toBeGreaterThan(0);
     expect(calls('repo.save').every((c) => c.insideTx)).toBe(true);
     expect(calls('repo.rearmAlertAfterEdit').length).toBeGreaterThan(0);
-    expect(
-      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
-    ).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx)).toBe(
+      true,
+    );
   });
 
   it('routes priceList through the tx client when priceCents is in the DTO', async () => {
@@ -2122,19 +2129,25 @@ describe('ProductsService — update() edit-path re-arm', () => {
     const calls = (method: string) =>
       txCaptures.filter((c) => c.method === method);
     expect(calls('txClient.variant.updateMany').length).toBe(1);
-    expect(
-      calls('txClient.variant.updateMany').every((c) => c.insideTx),
-    ).toBe(true);
+    expect(calls('txClient.variant.updateMany').every((c) => c.insideTx)).toBe(
+      true,
+    );
     expect(calls('repo.save').every((c) => c.insideTx)).toBe(true);
   });
 });
 
 describe('ProductsService — updateVariant() edit-path re-arm', () => {
-  function setupService(opts: {
-    product?: { useStock: boolean; quantity?: number; minQuantity?: number };
-    variantRow?: any;
-  } = {}) {
-    const productRow = opts.product ?? { useStock: true, quantity: 5, minQuantity: 3 };
+  function setupService(
+    opts: {
+      product?: { useStock: boolean; quantity?: number; minQuantity?: number };
+      variantRow?: any;
+    } = {},
+  ) {
+    const productRow = opts.product ?? {
+      useStock: true,
+      quantity: 5,
+      minQuantity: 3,
+    };
     const variantRow = opts.variantRow ?? {
       id: VARIANT_A_ID,
       productId: PRODUCT_ID,
@@ -2207,9 +2220,7 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
         // so the existing `.then(...)` chain does not throw, and
         // our assertion that the raw call is NOT made is the
         // load-bearing check.
-        update: jest
-          .fn()
-          .mockResolvedValue(variantRow),
+        update: jest.fn().mockResolvedValue(variantRow),
       },
     } as any;
 
@@ -2256,9 +2267,9 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     expect(calls('txClient.variant.update').every((c) => c.insideTx)).toBe(
       true,
     );
-    expect(
-      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
-    ).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx)).toBe(
+      true,
+    );
   });
 
   it('does NOT call rearmAlertAfterEdit when neither quantity nor minQuantity is in the DTO', async () => {
@@ -2305,9 +2316,9 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     expect(calls('txClient.variant.update').every((c) => c.insideTx)).toBe(
       true,
     );
-    expect(
-      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
-    ).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx)).toBe(
+      true,
+    );
   });
 
   it('on parent useStock=false, the service still issues the wrap (adapter handles the useStock gate) — Sc.8', async () => {
@@ -2338,8 +2349,8 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     expect(calls('txClient.variant.update').every((c) => c.insideTx)).toBe(
       true,
     );
-    expect(
-      calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx),
-    ).toBe(true);
+    expect(calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx)).toBe(
+      true,
+    );
   });
 });

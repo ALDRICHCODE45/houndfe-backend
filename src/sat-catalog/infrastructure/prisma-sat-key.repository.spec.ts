@@ -17,15 +17,17 @@ import { PrismaSatKeyRepository } from './prisma-sat-key.repository';
 
 const NOW = new Date('2026-07-01T00:00:00.000Z');
 
-function row(overrides: Partial<{
-  key: string;
-  description: string;
-  searchText: string;
-  includeIva: 'REQUIRED' | 'NONE' | 'OPTIONAL';
-  includeIeps: 'REQUIRED' | 'NONE' | 'OPTIONAL';
-  validFrom: Date | null;
-  validTo: Date | null;
-}>) {
+function row(
+  overrides: Partial<{
+    key: string;
+    description: string;
+    searchText: string;
+    includeIva: 'REQUIRED' | 'NONE' | 'OPTIONAL';
+    includeIeps: 'REQUIRED' | 'NONE' | 'OPTIONAL';
+    validFrom: Date | null;
+    validTo: Date | null;
+  }>,
+) {
   return {
     key: '01010101',
     description: 'Aspirina',
@@ -99,7 +101,9 @@ describe('PrismaSatKeyRepository.search (B.2.2 / B.2.3 / B.2.4)', () => {
     const args = findMany.mock.calls[0][0] as {
       where: { AND: Array<Record<string, unknown>> };
     };
-    const activeClause = args.where.AND[0] as { OR: Array<Record<string, unknown>> };
+    const activeClause = args.where.AND[0] as {
+      OR: Array<Record<string, unknown>>;
+    };
 
     expect(activeClause.OR).toEqual([
       { validTo: null },
@@ -138,7 +142,9 @@ describe('PrismaSatKeyRepository.search (B.2.2 / B.2.3 / B.2.4)', () => {
     expect(result.items[0].key).toBe('01010101');
     expect(result.items[0].searchText).toBe('01010101 aspirina');
     expect(count).toHaveBeenCalledTimes(1);
-    expect(count).toHaveBeenCalledWith({ where: findMany.mock.calls[0][0].where });
+    expect(count).toHaveBeenCalledWith({
+      where: findMany.mock.calls[0][0].where,
+    });
   });
 
   it('accent-insensitive match: query "MEDICACIÓN" matches a row with description "Medicación"', async () => {
@@ -242,7 +248,9 @@ describe('PrismaSatKeyRepository.findByKey (B.2.4)', () => {
 describe('PrismaSatKeyRepository.exists (B.2.1)', () => {
   it('returns true when findUnique returns a row (retired or active)', async () => {
     const { prisma, findUnique } = makePrismaMock();
-    findUnique.mockResolvedValue(row({ key: '99999999', validTo: new Date('2020-12-31T00:00:00.000Z') }));
+    findUnique.mockResolvedValue(
+      row({ key: '99999999', validTo: new Date('2020-12-31T00:00:00.000Z') }),
+    );
 
     const repo = makeRepo(prisma);
     await expect(repo.exists('99999999')).resolves.toBe(true);

@@ -56,10 +56,7 @@ if (!process.env.DATABASE_URL) {
 // This is a last-resort guard for the case where an operator hand-edits
 // `.env.test` and somehow pastes the dev URL back in.
 const url = process.env.DATABASE_URL;
-if (
-  url.includes(':5432/') &&
-  !url.includes('nest-practice-test')
-) {
+if (url.includes(':5432/') && !url.includes('nest-practice-test')) {
   throw new Error(
     `[test:integration setupFile] DATABASE_URL=${url} does not look like the test DB. ` +
       `Expected port 5433 and database name 'nest-practice-test'. ` +

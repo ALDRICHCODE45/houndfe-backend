@@ -25,10 +25,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { PROMOTION_REPOSITORY } from '../domain/promotion.repository';
 import type { IPromotionRepository } from '../domain/promotion.repository';
-import {
-  Promotion,
-  type DayOfWeek,
-} from '../domain/promotion.entity';
+import { Promotion, type DayOfWeek } from '../domain/promotion.entity';
 import type {
   IPosEvaluatePromotionsUseCase,
   PosEvalInput,
@@ -85,9 +82,7 @@ interface PerLineCandidate {
 }
 
 @Injectable()
-export class PosEvaluatePromotionsUseCase
-  implements IPosEvaluatePromotionsUseCase
-{
+export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCase {
   constructor(
     @Inject(PROMOTION_REPOSITORY)
     private readonly promotionRepository: IPromotionRepository,
@@ -159,7 +154,10 @@ export class PosEvaluatePromotionsUseCase
         (promo): PosEvalManualCandidate => ({
           id: promo.id,
           title: promo.title,
-          type: promo.type === 'ORDER_DISCOUNT' ? 'ORDER_DISCOUNT' : 'PRODUCT_DISCOUNT',
+          type:
+            promo.type === 'ORDER_DISCOUNT'
+              ? 'ORDER_DISCOUNT'
+              : 'PRODUCT_DISCOUNT',
         }),
       );
 
@@ -208,10 +206,7 @@ export class PosEvaluatePromotionsUseCase
     // First slice (Unit 2): PRODUCT_DISCOUNT (PRODUCTS only) + ORDER_DISCOUNT.
     // CATEGORIES/BRANDS / BUY_X_GET_Y / ADVANCED are DEFERRED.
     if (promo.type === 'ORDER_DISCOUNT') return true;
-    if (
-      promo.type === 'PRODUCT_DISCOUNT' &&
-      promo.appliesTo === 'PRODUCTS'
-    ) {
+    if (promo.type === 'PRODUCT_DISCOUNT' && promo.appliesTo === 'PRODUCTS') {
       return true;
     }
     return false;
@@ -277,10 +272,7 @@ export class PosEvaluatePromotionsUseCase
     return this.pickBestByMaxDiscountThenLowestId(eligible);
   }
 
-  private computeLineDiscountCents(
-    promo: Promotion,
-    baseline: number,
-  ): number {
+  private computeLineDiscountCents(promo: Promotion, baseline: number): number {
     if (promo.discountType == null || promo.discountValue == null) return 0;
     if (baseline <= 0) return 0;
 
@@ -303,7 +295,8 @@ export class PosEvaluatePromotionsUseCase
       if (
         best === null ||
         c.discountCents > best.discountCents ||
-        (c.discountCents === best.discountCents && c.promotion.id < best.promotion.id)
+        (c.discountCents === best.discountCents &&
+          c.promotion.id < best.promotion.id)
       ) {
         best = c;
       }
@@ -417,7 +410,8 @@ export class PosEvaluatePromotionsUseCase
       if (
         best === null ||
         c.discountCents > best.discountCents ||
-        (c.discountCents === best.discountCents && c.promotion.id < best.promotion.id)
+        (c.discountCents === best.discountCents &&
+          c.promotion.id < best.promotion.id)
       ) {
         best = c;
       }

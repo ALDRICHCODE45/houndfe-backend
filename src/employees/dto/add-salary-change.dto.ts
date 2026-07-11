@@ -1,4 +1,12 @@
-import { IsInt, Min, IsOptional, IsString, Length, IsDateString, MinLength } from 'class-validator';
+import {
+  IsInt,
+  Min,
+  IsOptional,
+  IsString,
+  Length,
+  IsDateString,
+  MinLength,
+} from 'class-validator';
 
 export class AddSalaryChangeDto {
   @IsInt()

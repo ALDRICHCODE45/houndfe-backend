@@ -24,9 +24,7 @@ import {
 @Controller('admin/employees/:employeeId/emergency-contacts')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class EmployeeEmergencyContactsController {
-  constructor(
-    private readonly service: EmployeeEmergencyContactsService,
-  ) {}
+  constructor(private readonly service: EmployeeEmergencyContactsService) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)

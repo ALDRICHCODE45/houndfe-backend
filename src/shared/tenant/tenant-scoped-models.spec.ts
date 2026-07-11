@@ -27,7 +27,9 @@ describe('TENANT_SCOPED_MODELS — low-stock-alerts registration (A.1)', () => {
   );
 
   it('contains all four required models exactly once', () => {
-    const overlaps = REQUIRED.filter((model) => TENANT_SCOPED_MODELS.has(model));
+    const overlaps = REQUIRED.filter((model) =>
+      TENANT_SCOPED_MODELS.has(model),
+    );
     expect(overlaps).toEqual([...REQUIRED]);
   });
 });

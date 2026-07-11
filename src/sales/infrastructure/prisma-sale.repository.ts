@@ -12,7 +12,11 @@ import type {
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from '../domain/sale.repository';
-import { Sale, type SaleStatus, type AppliedOrderPromotionSnapshot } from '../domain/sale.entity';
+import {
+  Sale,
+  type SaleStatus,
+  type AppliedOrderPromotionSnapshot,
+} from '../domain/sale.entity';
 import { SaleItem } from '../domain/sale-item.entity';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -509,7 +513,8 @@ export class PrismaSaleRepository implements ISaleRepository {
         updatedAt: (saleData as any).updatedAt,
         appliedOrderPromotion: (saleData as any).appliedPromotion
           ? {
-              promotionId: (saleData as any).appliedPromotion.promotionId ?? null,
+              promotionId:
+                (saleData as any).appliedPromotion.promotionId ?? null,
               discountType:
                 ((saleData as any).appliedPromotion.discountType as
                   | 'amount'
@@ -638,8 +643,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         (persistedSale.promotionVetoes as Array<{ promotionId: string }>) ?? []
       ).map((v) => v.promotionId),
       optedInManualPromotionIds: (
-        (persistedSale.promotionOptIns as Array<{ promotionId: string }>) ??
-        []
+        (persistedSale.promotionOptIns as Array<{ promotionId: string }>) ?? []
       ).map((o) => o.promotionId),
     });
   }

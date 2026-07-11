@@ -577,7 +577,9 @@ describe('SalesController', () => {
       const user = makeMockUser('user-1');
       service.applyManualPromotion.mockResolvedValue({
         id: 'sale-1',
-        items: [{ id: 'item-1', promotionId: 'promo-m-1', unitPriceCents: 900 }],
+        items: [
+          { id: 'item-1', promotionId: 'promo-m-1', unitPriceCents: 900 },
+        ],
       });
 
       const result = await controller.applyManualPromotion(
@@ -589,7 +591,9 @@ describe('SalesController', () => {
 
       expect(result).toEqual({
         id: 'sale-1',
-        items: [{ id: 'item-1', promotionId: 'promo-m-1', unitPriceCents: 900 }],
+        items: [
+          { id: 'item-1', promotionId: 'promo-m-1', unitPriceCents: 900 },
+        ],
       });
       expect(service.applyManualPromotion).toHaveBeenCalledWith(
         'sale-1',

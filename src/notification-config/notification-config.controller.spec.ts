@@ -319,7 +319,8 @@ describe('NotificationConfigController — auth integration (C.2)', () => {
     service.replace.mockRejectedValue(
       new BadRequestException({
         error: 'INVALID_RECIPIENT',
-        message: 'Recipient(s) are not members of the current tenant: uForeign.',
+        message:
+          'Recipient(s) are not members of the current tenant: uForeign.',
       }),
     );
 

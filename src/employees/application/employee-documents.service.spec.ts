@@ -70,14 +70,26 @@ describe('EmployeeDocumentsService', () => {
       } as Express.Multer.File;
 
       await expect(
-        service.upload('missing-emp', fakeFile, { category: 'CONTRACT' as any }, 'user-1'),
+        service.upload(
+          'missing-emp',
+          fakeFile,
+          { category: 'CONTRACT' as any },
+          'user-1',
+        ),
       ).rejects.toThrow(EmployeeNotFoundError);
     });
 
     it('should call filesService.uploadAndRegister with allowed MIME types, then persist EmployeeDocument with fileId', async () => {
-      const { service, employeeRepo, filesService, documentCreate } = makeService();
-      employeeRepo.findById.mockResolvedValue({ id: 'emp-1', tenantId: 'tenant-1' });
-      filesService.uploadAndRegister.mockResolvedValue({ id: 'file-1', url: 'https://example.com/file-1' });
+      const { service, employeeRepo, filesService, documentCreate } =
+        makeService();
+      employeeRepo.findById.mockResolvedValue({
+        id: 'emp-1',
+        tenantId: 'tenant-1',
+      });
+      filesService.uploadAndRegister.mockResolvedValue({
+        id: 'file-1',
+        url: 'https://example.com/file-1',
+      });
 
       const createdRow = {
         id: 'doc-1',
@@ -136,7 +148,8 @@ describe('EmployeeDocumentsService', () => {
 
   describe('list()', () => {
     it('should filter by category when provided', async () => {
-      const { service, employeeRepo, documentFindMany, documentCount } = makeService();
+      const { service, employeeRepo, documentFindMany, documentCount } =
+        makeService();
       employeeRepo.findById.mockResolvedValue({ id: 'emp-1' });
       documentFindMany.mockResolvedValue([{ id: 'doc-1', category: 'NDA' }]);
       documentCount.mockResolvedValue(1);
@@ -145,7 +158,10 @@ describe('EmployeeDocumentsService', () => {
 
       expect(documentFindMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ employeeId: 'emp-1', category: 'NDA' }),
+          where: expect.objectContaining({
+            employeeId: 'emp-1',
+            category: 'NDA',
+          }),
         }),
       );
       expect(result.data).toHaveLength(1);
@@ -153,9 +169,12 @@ describe('EmployeeDocumentsService', () => {
     });
 
     it('should filter by expiringWithinDays cutoff', async () => {
-      const { service, employeeRepo, documentFindMany, documentCount } = makeService();
+      const { service, employeeRepo, documentFindMany, documentCount } =
+        makeService();
       employeeRepo.findById.mockResolvedValue({ id: 'emp-1' });
-      documentFindMany.mockResolvedValue([{ id: 'doc-1', expiresAt: new Date() }]);
+      documentFindMany.mockResolvedValue([
+        { id: 'doc-1', expiresAt: new Date() },
+      ]);
       documentCount.mockResolvedValue(1);
 
       await service.list('emp-1', { expiringWithinDays: 30 });
@@ -169,13 +188,16 @@ describe('EmployeeDocumentsService', () => {
       const expectedCutoff = new Date();
       expectedCutoff.setDate(expectedCutoff.getDate() + 30);
       const actualCutoff = findManyCall.where.expiresAt.lte as Date;
-      expect(Math.abs(actualCutoff.getTime() - expectedCutoff.getTime())).toBeLessThan(5000);
+      expect(
+        Math.abs(actualCutoff.getTime() - expectedCutoff.getTime()),
+      ).toBeLessThan(5000);
     });
   });
 
   describe('delete()', () => {
     it('should remove DB row and call filesService.delete when blob deletion succeeds', async () => {
-      const { service, documentFindUnique, documentDelete, filesService } = makeService();
+      const { service, documentFindUnique, documentDelete, filesService } =
+        makeService();
       documentFindUnique.mockResolvedValue({
         id: 'doc-1',
         employeeId: 'emp-1',
@@ -191,7 +213,8 @@ describe('EmployeeDocumentsService', () => {
     });
 
     it('should still delete DB row when filesService.delete throws (best-effort blob cleanup)', async () => {
-      const { service, documentFindUnique, documentDelete, filesService } = makeService();
+      const { service, documentFindUnique, documentDelete, filesService } =
+        makeService();
       documentFindUnique.mockResolvedValue({
         id: 'doc-1',
         employeeId: 'emp-1',
@@ -220,9 +243,9 @@ describe('EmployeeDocumentsService', () => {
         fileId: 'file-1',
       });
 
-      await expect(
-        service.getDownloadInfo('emp-1', 'doc-1'),
-      ).rejects.toThrow(EmployeeDocumentNotFoundError);
+      await expect(service.getDownloadInfo('emp-1', 'doc-1')).rejects.toThrow(
+        EmployeeDocumentNotFoundError,
+      );
     });
 
     it('should throw EmployeeDocumentNotFoundError when doc does not exist', async () => {

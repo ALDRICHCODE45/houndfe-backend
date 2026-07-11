@@ -9,7 +9,11 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
-import { ContractType, WorkModality, IdentityDocumentType } from '@prisma/client';
+import {
+  ContractType,
+  WorkModality,
+  IdentityDocumentType,
+} from '@prisma/client';
 
 export class CreateEmployeeDto {
   @IsString()

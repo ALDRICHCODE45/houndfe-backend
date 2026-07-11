@@ -55,7 +55,7 @@ jest.mock('inngest', () => {
 
 // Imported AFTER jest.mock so the mocked module is in place.
 import { InngestService } from './inngest.service';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+
 const inngestMock = require('inngest') as {
   Inngest: new (opts: { id: string; eventKey?: string; isDev?: boolean }) => {
     id: string;
@@ -67,7 +67,9 @@ const inngestMock = require('inngest') as {
   __mocks: { sendMock: jest.Mock; createFunctionMock: jest.Mock };
 };
 
-function makeConfigService(values: Record<string, string | undefined>): ConfigService {
+function makeConfigService(
+  values: Record<string, string | undefined>,
+): ConfigService {
   return {
     get: jest.fn((key: string) => values[key]),
     getOrThrow: jest.fn((key: string) => {
@@ -112,8 +114,7 @@ describe('InngestService (D.2)', () => {
   afterEach(() => {
     // Restore the original mocked constructor so other specs that share
     // the module-level mock don't see our wrapper.
-    (inngestMock as unknown as { Inngest: unknown }).Inngest =
-      OriginalInngest;
+    (inngestMock as unknown as { Inngest: unknown }).Inngest = OriginalInngest;
   });
 
   describe('client construction', () => {
@@ -249,7 +250,7 @@ describe('InngestService (D.2)', () => {
       void svc;
 
       expect(capturedConstructors).toHaveLength(1);
-      const opts = capturedConstructors[0] as CapturedOpts;
+      const opts = capturedConstructors[0];
       expect(opts.isDev).toBe(false);
       // Confirm the keys are still forwarded — fail-closed posture does
       // not break the existing eventKey wiring.
@@ -266,7 +267,7 @@ describe('InngestService (D.2)', () => {
       void svc;
 
       expect(capturedConstructors).toHaveLength(1);
-      expect((capturedConstructors[0] as CapturedOpts).isDev).toBe(false);
+      expect(capturedConstructors[0].isDev).toBe(false);
     });
 
     it('does NOT set isDev in dev mode (lets the Inngest Dev Server flow through unchanged)', () => {
@@ -281,7 +282,7 @@ describe('InngestService (D.2)', () => {
       expect(capturedConstructors).toHaveLength(1);
       // `isDev` is undefined — the SDK falls back to its default (read
       // INNGEST_DEV from env). We deliberately do not flip dev mode.
-      expect((capturedConstructors[0] as CapturedOpts).isDev).toBeUndefined();
+      expect(capturedConstructors[0].isDev).toBeUndefined();
     });
 
     it('does NOT set isDev in test mode (parity with dev)', () => {
@@ -294,7 +295,7 @@ describe('InngestService (D.2)', () => {
       void svc;
 
       expect(capturedConstructors).toHaveLength(1);
-      expect((capturedConstructors[0] as CapturedOpts).isDev).toBeUndefined();
+      expect(capturedConstructors[0].isDev).toBeUndefined();
     });
 
     it('forces isDev:false in production even when INNGEST_DEV is truthy in the env object (the bypass the gate is closing)', () => {
@@ -314,7 +315,7 @@ describe('InngestService (D.2)', () => {
       void svc;
 
       expect(capturedConstructors).toHaveLength(1);
-      const opts = capturedConstructors[0] as CapturedOpts;
+      const opts = capturedConstructors[0];
       expect(opts.isDev).toBe(false);
     });
   });

@@ -63,13 +63,15 @@ function makeServiceWithCls(opts: {
   const base = makeService();
   const ability = { can: jest.fn().mockReturnValue(opts.abilityCanResult) };
   const cls = {
-    get: jest
-      .fn()
-      .mockReturnValue(
-        opts.userId === null
-          ? { isSuperAdmin: false }
-          : { userId: opts.userId ?? 'user-1', tenantId: 'tenant-1', isSuperAdmin: false },
-      ),
+    get: jest.fn().mockReturnValue(
+      opts.userId === null
+        ? { isSuperAdmin: false }
+        : {
+            userId: opts.userId ?? 'user-1',
+            tenantId: 'tenant-1',
+            isSuperAdmin: false,
+          },
+    ),
   } as any;
   const caslAbilityFactory = {
     createForUser: jest.fn().mockResolvedValue(ability),
@@ -172,7 +174,12 @@ describe('EmployeeTimeOffService', () => {
       timeOffFindFirst.mockResolvedValue(null);
 
       await expect(
-        service.review('emp-1', 'to-wrong', { decision: 'APPROVED' as any }, 'reviewer-1'),
+        service.review(
+          'emp-1',
+          'to-wrong',
+          { decision: 'APPROVED' as any },
+          'reviewer-1',
+        ),
       ).rejects.toThrow(TimeOffNotFoundError);
     });
 
@@ -185,7 +192,12 @@ describe('EmployeeTimeOffService', () => {
       });
 
       await expect(
-        service.review('emp-1', 'to-1', { decision: 'APPROVED' as any }, 'reviewer-1'),
+        service.review(
+          'emp-1',
+          'to-1',
+          { decision: 'APPROVED' as any },
+          'reviewer-1',
+        ),
       ).rejects.toThrow(TimeOffInvalidTransitionError);
     });
 
@@ -258,9 +270,9 @@ describe('EmployeeTimeOffService', () => {
         startDate: new Date('2020-01-01'), // past
       });
 
-      await expect(
-        service.cancel('emp-1', 'to-1'),
-      ).rejects.toThrow(TimeOffInvalidTransitionError);
+      await expect(service.cancel('emp-1', 'to-1')).rejects.toThrow(
+        TimeOffInvalidTransitionError,
+      );
     });
   });
 
@@ -309,7 +321,8 @@ describe('EmployeeTimeOffService', () => {
   // ============================================================
   describe('listForEmployee()', () => {
     it('should strip reason on SICK rows when ability lacks read:EmployeeTimeOffMedical', async () => {
-      const { service, employeeRepo, timeOffFindMany, timeOffCount } = makeService();
+      const { service, employeeRepo, timeOffFindMany, timeOffCount } =
+        makeService();
       employeeRepo.findById.mockResolvedValue(mockEmployee);
 
       const sickRow = {
@@ -347,7 +360,8 @@ describe('EmployeeTimeOffService', () => {
     });
 
     it('should keep reason on SICK rows when ability has read:EmployeeTimeOffMedical', async () => {
-      const { service, employeeRepo, timeOffFindMany, timeOffCount } = makeService();
+      const { service, employeeRepo, timeOffFindMany, timeOffCount } =
+        makeService();
       employeeRepo.findById.mockResolvedValue(mockEmployee);
 
       const sickRow = {
@@ -379,7 +393,8 @@ describe('EmployeeTimeOffService', () => {
     });
 
     it('should leave non-SICK row reasons untouched regardless of ability', async () => {
-      const { service, employeeRepo, timeOffFindMany, timeOffCount } = makeService();
+      const { service, employeeRepo, timeOffFindMany, timeOffCount } =
+        makeService();
       employeeRepo.findById.mockResolvedValue(mockEmployee);
 
       const personalRow = {
@@ -417,8 +432,22 @@ describe('EmployeeTimeOffService', () => {
       employeeFindMany.mockResolvedValue([{ id: 'emp-2' }, { id: 'emp-3' }]);
 
       const pendingRows = [
-        { id: 'to-1', employeeId: 'emp-2', type: 'VACATION', status: 'PENDING', reason: null, startDate: new Date('2026-07-01') },
-        { id: 'to-2', employeeId: 'emp-3', type: 'PERSONAL', status: 'PENDING', reason: 'Doctor', startDate: new Date('2026-07-05') },
+        {
+          id: 'to-1',
+          employeeId: 'emp-2',
+          type: 'VACATION',
+          status: 'PENDING',
+          reason: null,
+          startDate: new Date('2026-07-01'),
+        },
+        {
+          id: 'to-2',
+          employeeId: 'emp-3',
+          type: 'PERSONAL',
+          status: 'PENDING',
+          reason: 'Doctor',
+          startDate: new Date('2026-07-05'),
+        },
       ];
       timeOffFindMany.mockResolvedValue(pendingRows);
 
@@ -494,8 +523,13 @@ describe('EmployeeTimeOffService', () => {
 
   describe('runtime ability resolution (CLS-driven)', () => {
     it('listForEmployee uses CLS-built ability to strip SICK reason when permission missing', async () => {
-      const { service, employeeRepo, prismaClient, ability, caslAbilityFactory } =
-        makeServiceWithCls({ abilityCanResult: false });
+      const {
+        service,
+        employeeRepo,
+        prismaClient,
+        ability,
+        caslAbilityFactory,
+      } = makeServiceWithCls({ abilityCanResult: false });
       employeeRepo.findById.mockResolvedValue(mockEmployee);
       prismaClient.employeeTimeOff.findMany.mockResolvedValue([
         {
@@ -516,14 +550,18 @@ describe('EmployeeTimeOffService', () => {
         tenantId: 'tenant-1',
         isSuperAdmin: false,
       });
-      expect(ability.can).toHaveBeenCalledWith('read', 'EmployeeTimeOffMedical');
+      expect(ability.can).toHaveBeenCalledWith(
+        'read',
+        'EmployeeTimeOffMedical',
+      );
       expect(result.data[0].reason).toBeNull();
     });
 
     it('listForEmployee keeps SICK reason when CLS-built ability grants medical permission', async () => {
-      const { service, employeeRepo, prismaClient, ability } = makeServiceWithCls({
-        abilityCanResult: true,
-      });
+      const { service, employeeRepo, prismaClient, ability } =
+        makeServiceWithCls({
+          abilityCanResult: true,
+        });
       employeeRepo.findById.mockResolvedValue(mockEmployee);
       prismaClient.employeeTimeOff.findMany.mockResolvedValue([
         {
@@ -540,7 +578,10 @@ describe('EmployeeTimeOffService', () => {
 
       const result = await service.listForEmployee('emp-1', {} as any);
 
-      expect(ability.can).toHaveBeenCalledWith('read', 'EmployeeTimeOffMedical');
+      expect(ability.can).toHaveBeenCalledWith(
+        'read',
+        'EmployeeTimeOffMedical',
+      );
       expect(result.data[0].reason).toBe('Gripe fuerte');
     });
 
@@ -563,7 +604,10 @@ describe('EmployeeTimeOffService', () => {
 
       const result = await service.listPendingApprovalsForManager('mgr-1');
 
-      expect(ability.can).toHaveBeenCalledWith('read', 'EmployeeTimeOffMedical');
+      expect(ability.can).toHaveBeenCalledWith(
+        'read',
+        'EmployeeTimeOffMedical',
+      );
       expect(result[0].reason).toBeNull();
     });
   });

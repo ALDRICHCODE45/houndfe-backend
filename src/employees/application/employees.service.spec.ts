@@ -8,7 +8,11 @@ import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 
 function makeService(opts?: {
   withRuntimeAbility?: { can: jest.Mock };
-  clsStore?: { userId?: string; tenantId?: string | null; isSuperAdmin?: boolean };
+  clsStore?: {
+    userId?: string;
+    tenantId?: string | null;
+    isSuperAdmin?: boolean;
+  };
 }) {
   const employeeRepo = {
     create: jest.fn(),
@@ -335,9 +339,9 @@ describe('EmployeesService', () => {
 
       // Trying to set B's manager to A. employeeId=B, proposedManagerId=A
       // Walk: start at A -> findManagerIdOf(A) returns B -> B === employeeId(B) -> CYCLE
-      await expect(
-        service.update('B', { managerId: 'A' }),
-      ).rejects.toThrow(ManagerCycleError);
+      await expect(service.update('B', { managerId: 'A' })).rejects.toThrow(
+        ManagerCycleError,
+      );
       expect(employeeRepo.update).not.toHaveBeenCalled();
     });
 
@@ -349,12 +353,12 @@ describe('EmployeesService', () => {
       );
       // Walk from A upward: A's manager is B, B's manager is C
       employeeRepo.findManagerIdOf
-        .mockResolvedValueOnce('B')  // A's manager is B
+        .mockResolvedValueOnce('B') // A's manager is B
         .mockResolvedValueOnce('C'); // B's manager is C -> C === employeeId -> CYCLE
 
-      await expect(
-        service.update('C', { managerId: 'A' }),
-      ).rejects.toThrow(ManagerCycleError);
+      await expect(service.update('C', { managerId: 'A' })).rejects.toThrow(
+        ManagerCycleError,
+      );
       expect(employeeRepo.update).not.toHaveBeenCalled();
     });
 
@@ -461,8 +465,8 @@ describe('EmployeesService', () => {
       const empA = makeEmployeeRecord({ id: 'A', managerId: null });
 
       employeeRepo.findById
-        .mockResolvedValueOnce(empC)  // initial lookup of C
-        .mockResolvedValueOnce(empB)  // lookup B (C's manager)
+        .mockResolvedValueOnce(empC) // initial lookup of C
+        .mockResolvedValueOnce(empB) // lookup B (C's manager)
         .mockResolvedValueOnce(empA); // lookup A (B's manager)
 
       const result = await service.findManagerChain('C');
@@ -498,7 +502,11 @@ describe('EmployeesService', () => {
       const denyingAbility = { can: jest.fn().mockReturnValue(false) };
       const { service, employeeRepo, caslAbilityFactory } = makeService({
         withRuntimeAbility: denyingAbility,
-        clsStore: { userId: 'user-1', tenantId: 'tenant-1', isSuperAdmin: false },
+        clsStore: {
+          userId: 'user-1',
+          tenantId: 'tenant-1',
+          isSuperAdmin: false,
+        },
       });
       employeeRepo.findById.mockResolvedValue(
         makeEmployeeRecord({ currentSalaryCents: 5000000 }),
@@ -518,7 +526,11 @@ describe('EmployeesService', () => {
       const allowingAbility = { can: jest.fn().mockReturnValue(true) };
       const { service, employeeRepo } = makeService({
         withRuntimeAbility: allowingAbility,
-        clsStore: { userId: 'user-1', tenantId: 'tenant-1', isSuperAdmin: false },
+        clsStore: {
+          userId: 'user-1',
+          tenantId: 'tenant-1',
+          isSuperAdmin: false,
+        },
       });
       employeeRepo.findById.mockResolvedValue(
         makeEmployeeRecord({
@@ -529,7 +541,10 @@ describe('EmployeesService', () => {
 
       const result = await service.findOne('emp-1');
 
-      expect(allowingAbility.can).toHaveBeenCalledWith('read', 'EmployeeSalary');
+      expect(allowingAbility.can).toHaveBeenCalledWith(
+        'read',
+        'EmployeeSalary',
+      );
       expect(result.currentSalaryCents).toBe(5000000);
       expect(result.currentSalaryCurrency).toBe('MXN');
     });
@@ -560,7 +575,10 @@ describe('EmployeesService', () => {
 
       const result = await service.findOne('emp-1', overrideAbility as any);
 
-      expect(overrideAbility.can).toHaveBeenCalledWith('read', 'EmployeeSalary');
+      expect(overrideAbility.can).toHaveBeenCalledWith(
+        'read',
+        'EmployeeSalary',
+      );
       expect(clsAbility.can).not.toHaveBeenCalled();
       expect(result.currentSalaryCents).toBe(5000000);
     });

@@ -79,14 +79,20 @@ describe('ProductsService — Product Image Upload', () => {
     repo = makeMockRepo();
     prisma = makeMockPrisma();
     filesService = makeMockFilesService();
-    service = new ProductsService(repo, prisma, filesService, {
-      getTenantId: jest.fn().mockReturnValue('tenant-1'),
-      getClient: jest.fn().mockReturnValue(prisma),
-    } as any, {
-      assertExists: jest.fn().mockResolvedValue(undefined),
-      search: jest.fn(),
-      findByKey: jest.fn(),
-    } as any);
+    service = new ProductsService(
+      repo,
+      prisma,
+      filesService,
+      {
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+        getClient: jest.fn().mockReturnValue(prisma),
+      } as any,
+      {
+        assertExists: jest.fn().mockResolvedValue(undefined),
+        search: jest.fn(),
+        findByKey: jest.fn(),
+      } as any,
+    );
   });
 
   describe('uploadProductImage (S15, S16)', () => {

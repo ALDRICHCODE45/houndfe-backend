@@ -56,9 +56,7 @@ export class SatCatalogController {
   async findOne(@Param('key') key: string) {
     const row = await this.service.findByKey(key);
     if (!row) {
-      throw new NotFoundException(
-        `SAT key "${key}" is not in the catalog.`,
-      );
+      throw new NotFoundException(`SAT key "${key}" is not in the catalog.`);
     }
     return row;
   }

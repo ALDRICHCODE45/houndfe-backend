@@ -101,9 +101,7 @@ export class NotificationConfigService {
       });
 
       const memberSet = new Set(rows.map((r) => r.userId));
-      const foreign = input.recipientUserIds.filter(
-        (id) => !memberSet.has(id),
-      );
+      const foreign = input.recipientUserIds.filter((id) => !memberSet.has(id));
 
       if (foreign.length > 0) {
         throw new BadRequestException({

@@ -51,27 +51,42 @@ describe('EmployeePositionService', () => {
       employeeRepo.findById.mockResolvedValue(null);
 
       await expect(
-        service.addPositionChange('missing', {
-          position: 'Senior Dev',
-          effectiveFrom: '2026-06-01',
-          reason: 'Promotion',
-        }, 'user-1'),
+        service.addPositionChange(
+          'missing',
+          {
+            position: 'Senior Dev',
+            effectiveFrom: '2026-06-01',
+            reason: 'Promotion',
+          },
+          'user-1',
+        ),
       ).rejects.toThrow(EmployeeNotFoundError);
     });
 
     it('should persist history + update Employee.currentPosition AND currentDepartment in single transaction', async () => {
       const { service, employeeRepo, $transaction } = makeService();
-      employeeRepo.findById.mockResolvedValue({ id: 'emp-1', tenantId: 'tenant-1' });
+      employeeRepo.findById.mockResolvedValue({
+        id: 'emp-1',
+        tenantId: 'tenant-1',
+      });
 
-      const historyRow = { id: 'hist-1', position: 'Senior Dev', department: 'Engineering' };
-      $transaction.mockResolvedValue([historyRow, {}]);
-
-      const result = await service.addPositionChange('emp-1', {
+      const historyRow = {
+        id: 'hist-1',
         position: 'Senior Dev',
         department: 'Engineering',
-        effectiveFrom: '2026-06-01',
-        reason: 'Promotion',
-      }, 'user-1');
+      };
+      $transaction.mockResolvedValue([historyRow, {}]);
+
+      const result = await service.addPositionChange(
+        'emp-1',
+        {
+          position: 'Senior Dev',
+          department: 'Engineering',
+          effectiveFrom: '2026-06-01',
+          reason: 'Promotion',
+        },
+        'user-1',
+      );
 
       expect($transaction).toHaveBeenCalledTimes(1);
       const txArgs = $transaction.mock.calls[0][0];
@@ -80,17 +95,29 @@ describe('EmployeePositionService', () => {
     });
 
     it('should handle null department correctly', async () => {
-      const { service, employeeRepo, $transaction, prismaClient } = makeService();
-      employeeRepo.findById.mockResolvedValue({ id: 'emp-1', tenantId: 'tenant-1' });
+      const { service, employeeRepo, $transaction, prismaClient } =
+        makeService();
+      employeeRepo.findById.mockResolvedValue({
+        id: 'emp-1',
+        tenantId: 'tenant-1',
+      });
 
-      const historyRow = { id: 'hist-2', position: 'Manager', department: null };
+      const historyRow = {
+        id: 'hist-2',
+        position: 'Manager',
+        department: null,
+      };
       $transaction.mockResolvedValue([historyRow, {}]);
 
-      await service.addPositionChange('emp-1', {
-        position: 'Manager',
-        effectiveFrom: '2026-06-01',
-        reason: 'Restructure',
-      }, 'user-1');
+      await service.addPositionChange(
+        'emp-1',
+        {
+          position: 'Manager',
+          effectiveFrom: '2026-06-01',
+          reason: 'Restructure',
+        },
+        'user-1',
+      );
 
       expect(prismaClient.employee.update).toHaveBeenCalledWith({
         where: { id: 'emp-1' },
@@ -108,8 +135,16 @@ describe('EmployeePositionService', () => {
       employeeRepo.findById.mockResolvedValue({ id: 'emp-1' });
 
       const rows = [
-        { id: 'h2', effectiveFrom: new Date('2026-06-01'), position: 'Senior Dev' },
-        { id: 'h1', effectiveFrom: new Date('2026-01-01'), position: 'Junior Dev' },
+        {
+          id: 'h2',
+          effectiveFrom: new Date('2026-06-01'),
+          position: 'Senior Dev',
+        },
+        {
+          id: 'h1',
+          effectiveFrom: new Date('2026-01-01'),
+          position: 'Junior Dev',
+        },
       ];
       positionHistoryFindMany.mockResolvedValue(rows);
 

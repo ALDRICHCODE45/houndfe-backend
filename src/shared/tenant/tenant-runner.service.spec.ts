@@ -87,7 +87,11 @@ describe('TenantRunnerService.runWithTenant (D.1)', () => {
     const { cls, activeStore } = makeCls();
     const runner = new TenantRunnerService(cls);
 
-    let observed: { tenantId?: unknown; userId?: unknown; isSuperAdmin?: unknown } = {};
+    let observed: {
+      tenantId?: unknown;
+      userId?: unknown;
+      isSuperAdmin?: unknown;
+    } = {};
     await runner.runWithTenant('tenant-A', async () => {
       observed = activeStore() as typeof observed;
     });
@@ -248,13 +252,14 @@ describe('TenantRunnerService.runWithTenant (D.1)', () => {
     // The runner opens its OWN `cls.run()` scope and OVERWRITES with the
     // supplied tenantId. Even if the implementation re-used the store
     // instead of opening a new scope, the explicit set() must win.
-    let store: Partial<TenantClsStore> = { tenantId: 'tenant-parent' };
+    const store: Partial<TenantClsStore> = { tenantId: 'tenant-parent' };
     const cls = {
       set: jest.fn((key: keyof TenantClsStore | string, value: unknown) => {
         (store as Record<string, unknown>)[key as string] = value;
       }),
-      get: jest.fn((key: keyof TenantClsStore | string) =>
-        (store as Record<string, unknown>)[key as string],
+      get: jest.fn(
+        (key: keyof TenantClsStore | string) =>
+          (store as Record<string, unknown>)[key as string],
       ),
       run: jest.fn(async (cb: () => Promise<unknown>) => cb()),
     } as unknown as jest.Mocked<ClsService<TenantClsStore>>;

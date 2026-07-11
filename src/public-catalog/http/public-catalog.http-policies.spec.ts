@@ -9,7 +9,9 @@ describe('CacheControlInterceptor', () => {
 
   beforeEach(() => {
     reflector = { get: jest.fn() };
-    interceptor = new CacheControlInterceptor(reflector as unknown as Reflector);
+    interceptor = new CacheControlInterceptor(
+      reflector as unknown as Reflector,
+    );
   });
 
   function mockContext(): { ctx: ExecutionContext; setHeader: jest.Mock } {

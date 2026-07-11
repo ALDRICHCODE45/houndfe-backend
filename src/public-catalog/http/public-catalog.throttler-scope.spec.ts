@@ -5,7 +5,10 @@ import { PublicCatalogModule } from '../public-catalog.module';
 describe('Throttler scope (CRITICAL-01 regression)', () => {
   it('should NOT register ThrottlerGuard as APP_GUARD in module providers', () => {
     // Extract module metadata to check providers
-    const metadata = Reflect.getMetadata('providers', PublicCatalogModule) as any[];
+    const metadata = Reflect.getMetadata(
+      'providers',
+      PublicCatalogModule,
+    ) as any[];
 
     // Find any provider that uses APP_GUARD token
     const appGuardProviders = metadata.filter(

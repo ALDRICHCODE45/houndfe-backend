@@ -39,7 +39,8 @@ export class TenantsMembersController {
   @Get()
   @RequirePermissions(['read', 'TenantMembership'])
   async findByTenant(@Param('tenantId', ParseUUIDPipe) tenantId: string) {
-    const data = await this.tenantsMembershipService.findByTenantDetailed(tenantId);
+    const data =
+      await this.tenantsMembershipService.findByTenantDetailed(tenantId);
     return { data };
   }
 

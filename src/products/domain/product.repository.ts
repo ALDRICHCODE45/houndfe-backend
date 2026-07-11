@@ -63,7 +63,9 @@ export interface IProductRepository {
       variantId?: string | null;
       quantity: number;
     }>,
-  ): Promise<import('../../stock-alerts/domain/stock-crossing').StockCrossing[]>;
+  ): Promise<
+    import('../../stock-alerts/domain/stock-crossing').StockCrossing[]
+  >;
 
   incrementStockForRestock(
     adjustments: Array<{

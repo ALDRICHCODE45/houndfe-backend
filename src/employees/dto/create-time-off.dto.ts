@@ -1,4 +1,10 @@
-import { IsEnum, IsDateString, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsEnum,
+  IsDateString,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 import { TimeOffType } from '@prisma/client';
 
 export class CreateTimeOffDto {

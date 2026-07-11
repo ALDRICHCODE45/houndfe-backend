@@ -81,7 +81,10 @@ describe('NotificationConfigService.read (C.1)', () => {
         enabledActions: ['LOW_STOCK'],
       }),
     });
-    const svc = new NotificationConfigService(port, makeTenantPrismaMock() as any);
+    const svc = new NotificationConfigService(
+      port,
+      makeTenantPrismaMock() as any,
+    );
 
     const view = await svc.read();
 
@@ -97,7 +100,10 @@ describe('NotificationConfigService.read (C.1)', () => {
     const port = makePort({
       find: jest.fn().mockResolvedValue({ ...baseView }),
     });
-    const svc = new NotificationConfigService(port, makeTenantPrismaMock() as any);
+    const svc = new NotificationConfigService(
+      port,
+      makeTenantPrismaMock() as any,
+    );
 
     expect(await svc.read()).toEqual({
       enabled: false,
@@ -148,7 +154,10 @@ describe('NotificationConfigService.replace — action-key policy (C.1)', () => 
 
   it('inspects the error payload to confirm error=UNKNOWN_ACTION_KEY', async () => {
     const port = makePort();
-    const svc = new NotificationConfigService(port, makeTenantPrismaMock() as any);
+    const svc = new NotificationConfigService(
+      port,
+      makeTenantPrismaMock() as any,
+    );
 
     try {
       await svc.replace({
@@ -243,7 +252,7 @@ describe('NotificationConfigService.replace — recipient tenant-membership (C.1
       expect(resp.error).toBe('INVALID_RECIPIENT');
       expect(typeof resp.message).toBe('string');
       // The message must include the offending ids so the caller can correct them.
-      expect((resp.message as string)).toContain('uForeign');
+      expect(resp.message as string).toContain('uForeign');
     }
   });
 

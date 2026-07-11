@@ -51,26 +51,37 @@ describe('EmployeeSalaryService', () => {
       employeeRepo.findById.mockResolvedValue(null);
 
       await expect(
-        service.addSalaryChange('missing', {
-          amountCents: 60000,
-          effectiveFrom: '2026-06-01',
-          reason: 'Annual raise',
-        }, 'user-1'),
+        service.addSalaryChange(
+          'missing',
+          {
+            amountCents: 60000,
+            effectiveFrom: '2026-06-01',
+            reason: 'Annual raise',
+          },
+          'user-1',
+        ),
       ).rejects.toThrow(EmployeeNotFoundError);
     });
 
     it('should persist history row AND update Employee.currentSalaryCents in single transaction', async () => {
       const { service, employeeRepo, $transaction } = makeService();
-      employeeRepo.findById.mockResolvedValue({ id: 'emp-1', tenantId: 'tenant-1' });
+      employeeRepo.findById.mockResolvedValue({
+        id: 'emp-1',
+        tenantId: 'tenant-1',
+      });
 
       const historyRow = { id: 'hist-1', amountCents: 60000, currency: 'MXN' };
       $transaction.mockResolvedValue([historyRow, {}]);
 
-      const result = await service.addSalaryChange('emp-1', {
-        amountCents: 60000,
-        effectiveFrom: '2026-06-01',
-        reason: 'Annual raise',
-      }, 'user-1');
+      const result = await service.addSalaryChange(
+        'emp-1',
+        {
+          amountCents: 60000,
+          effectiveFrom: '2026-06-01',
+          reason: 'Annual raise',
+        },
+        'user-1',
+      );
 
       expect($transaction).toHaveBeenCalledTimes(1);
       const txArgs = $transaction.mock.calls[0][0];
@@ -79,17 +90,25 @@ describe('EmployeeSalaryService', () => {
     });
 
     it('should default currency to MXN when not provided', async () => {
-      const { service, employeeRepo, $transaction, prismaClient } = makeService();
-      employeeRepo.findById.mockResolvedValue({ id: 'emp-1', tenantId: 'tenant-1' });
+      const { service, employeeRepo, $transaction, prismaClient } =
+        makeService();
+      employeeRepo.findById.mockResolvedValue({
+        id: 'emp-1',
+        tenantId: 'tenant-1',
+      });
 
       const historyRow = { id: 'hist-1', amountCents: 50000, currency: 'MXN' };
       $transaction.mockResolvedValue([historyRow, {}]);
 
-      await service.addSalaryChange('emp-1', {
-        amountCents: 50000,
-        effectiveFrom: '2026-06-01',
-        reason: 'New hire',
-      }, 'user-1');
+      await service.addSalaryChange(
+        'emp-1',
+        {
+          amountCents: 50000,
+          effectiveFrom: '2026-06-01',
+          reason: 'New hire',
+        },
+        'user-1',
+      );
 
       // Verify the create call uses MXN
       expect(prismaClient.employeeSalaryHistory.create).toHaveBeenCalledWith({

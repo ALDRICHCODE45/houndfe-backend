@@ -302,7 +302,11 @@ export class SalesController {
     @Body() _dto: RemoveManualPromotionDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.salesService.removeManualPromotion(id, user.userId, promotionId);
+    return this.salesService.removeManualPromotion(
+      id,
+      user.userId,
+      promotionId,
+    );
   }
 
   /**
@@ -321,6 +325,10 @@ export class SalesController {
     @Body() _dto: RemoveAppliedPromotionDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.salesService.removeAppliedPromotion(id, user.userId, promotionId);
+    return this.salesService.removeAppliedPromotion(
+      id,
+      user.userId,
+      promotionId,
+    );
   }
 }

@@ -696,15 +696,13 @@ export class ProductsService {
       // 1. priceList write — re-routed through the tx client so it
       //    joins the wrap.
       if (dto.priceCents !== undefined && defaultGlobalListId) {
-        await this.tenantPrisma
-          .getClient()
-          .priceList.updateMany({
-            where: {
-              productId: id,
-              globalPriceListId: defaultGlobalListId,
-            },
-            data: { priceCents: dto.priceCents },
-          });
+        await this.tenantPrisma.getClient().priceList.updateMany({
+          where: {
+            productId: id,
+            globalPriceListId: defaultGlobalListId,
+          },
+          data: { priceCents: dto.priceCents },
+        });
       }
 
       // 2. Save the product (already uses getClient() internally).
@@ -713,12 +711,10 @@ export class ProductsService {
       // 3. useStock true→false cascade: zero out variant minQuantity.
       //    Also re-routed through getClient() to join the same tx.
       if (dto.useStock === false && previousUseStock !== false) {
-        await this.tenantPrisma
-          .getClient()
-          .variant.updateMany({
-            where: { productId: id },
-            data: { minQuantity: 0 },
-          });
+        await this.tenantPrisma.getClient().variant.updateMany({
+          where: { productId: id },
+          data: { minQuantity: 0 },
+        });
       }
 
       // 4. Edit-path re-arm (gated on qty/min presence). The
@@ -916,9 +912,7 @@ export class ProductsService {
               ...(dto.barcode !== undefined
                 ? { barcode: dto.barcode?.trim() || null }
                 : {}),
-              ...(dto.quantity !== undefined
-                ? { quantity: dto.quantity }
-                : {}),
+              ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
               ...(variantUsesStock
                 ? dto.minQuantity !== undefined
                   ? { minQuantity: dto.minQuantity }
@@ -939,9 +933,7 @@ export class ProductsService {
 
         return updatedVariant;
       })
-      .then((updatedVariant) =>
-        this.enrichVariantCostResponse(updatedVariant),
-      );
+      .then((updatedVariant) => this.enrichVariantCostResponse(updatedVariant));
   }
 
   async removeVariant(productId: string, variantId: string) {
@@ -2429,12 +2421,10 @@ export class ProductsService {
 
     if (distinct.length === 0) return map;
 
-    const rows = await this.tenantPrisma
-      .getClient()
-      .priceList.findMany({
-        where: { id: { in: distinct } },
-        select: { id: true, globalPriceListId: true },
-      });
+    const rows = await this.tenantPrisma.getClient().priceList.findMany({
+      where: { id: { in: distinct } },
+      select: { id: true, globalPriceListId: true },
+    });
 
     for (const row of rows) {
       map.set(row.id, row.globalPriceListId);

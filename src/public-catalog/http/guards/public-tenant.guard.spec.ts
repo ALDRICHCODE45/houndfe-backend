@@ -54,7 +54,10 @@ describe('PublicTenantGuard', () => {
     const tenant = { id: 'tenant-1', slug: 'centro', name: 'Sucursal Centro' };
     prisma.tenant.findFirst.mockResolvedValue(tenant);
 
-    const request = { params: { tenantSlug: 'centro' }, publicTenant: undefined as unknown };
+    const request = {
+      params: { tenantSlug: 'centro' },
+      publicTenant: undefined as unknown,
+    };
     const ctx = {
       switchToHttp: () => ({ getRequest: () => request }),
     } as unknown as ExecutionContext;

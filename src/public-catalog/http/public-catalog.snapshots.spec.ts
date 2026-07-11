@@ -31,14 +31,27 @@ describe('Public catalog response snapshot tests', () => {
 
     // Whitelisted fields
     const expected = new Set([
-      'id', 'name', 'slug', 'description', 'category', 'brand',
-      'image', 'price', 'availability', 'hasVariants', 'rating', 'featuredLabel',
+      'id',
+      'name',
+      'slug',
+      'description',
+      'category',
+      'brand',
+      'image',
+      'price',
+      'availability',
+      'hasVariants',
+      'rating',
+      'featuredLabel',
     ]);
     expect(keys).toEqual(expected);
   });
 
   it('product card must NOT contain raw quantity fields', () => {
-    const result = toPublicProductCard(makeProduct()) as Record<string, unknown>;
+    const result = toPublicProductCard(makeProduct()) as Record<
+      string,
+      unknown
+    >;
     expect(result).not.toHaveProperty('quantity');
     expect(result).not.toHaveProperty('minQuantity');
     expect(result).not.toHaveProperty('purchaseNetCostCents');
@@ -69,22 +82,29 @@ describe('Public catalog response snapshot tests', () => {
       requiresPrescription: false,
       category: { id: 'cat-1', name: 'Alimento' },
       brand: { name: 'TestBrand' },
-      images: [{ id: 'img-1', url: 'https://cdn.example.com/snap.jpg', isMain: true }],
+      images: [
+        { id: 'img-1', url: 'https://cdn.example.com/snap.jpg', isMain: true },
+      ],
       priceLists: [{ priceCents: 99900 }],
-      variants: [{
-        id: 'var-1',
-        name: 'Grande',
-        option: 'Talla',
-        value: 'G',
-        quantity: 5,
-        minQuantity: 1,
-        images: [],
-        variantPrices: [{ priceCents: 109900 }],
-      }],
+      variants: [
+        {
+          id: 'var-1',
+          name: 'Grande',
+          option: 'Talla',
+          value: 'G',
+          quantity: 5,
+          minQuantity: 1,
+          images: [],
+          variantPrices: [{ priceCents: 109900 }],
+        },
+      ],
     };
 
     const tenant = { id: 't1', slug: 'centro', name: 'Centro' };
-    const result = toPublicProductDetail(detail, tenant) as Record<string, unknown>;
+    const result = toPublicProductDetail(detail, tenant) as Record<
+      string,
+      unknown
+    >;
 
     expect(result).not.toHaveProperty('quantity');
     expect(result).not.toHaveProperty('minQuantity');
@@ -92,7 +112,9 @@ describe('Public catalog response snapshot tests', () => {
     expect(result).not.toHaveProperty('purchaseNetCostCents');
 
     // Check variants too
-    const variantResult = (result.variants as Array<Record<string, unknown>>)[0];
+    const variantResult = (
+      result.variants as Array<Record<string, unknown>>
+    )[0];
     expect(variantResult).not.toHaveProperty('quantity');
     expect(variantResult).not.toHaveProperty('minQuantity');
   });

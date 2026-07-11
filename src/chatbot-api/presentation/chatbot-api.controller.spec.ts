@@ -158,9 +158,7 @@ describe('ChatbotApiController', () => {
         saleId: 'sale-bot-1',
         status: 'CANCELED',
         refundedCents: 0,
-        restockedItems: [
-          { productId: 'prod-1', variantId: null, quantity: 2 },
-        ],
+        restockedItems: [{ productId: 'prod-1', variantId: null, quantity: 2 }],
         canceledAt: '2026-06-23T00:00:00.000Z',
       }),
       getOrderHistoryByPhone: jest.fn().mockResolvedValue([

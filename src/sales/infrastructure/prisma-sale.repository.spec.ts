@@ -420,7 +420,9 @@ describe('PrismaSaleRepository', () => {
       const where = await findManyWhere({ status: ['CONFIRMED', 'CANCELED'] });
       expect(where.AND).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ status: { in: ['CONFIRMED', 'CANCELED'] } }),
+          expect.objectContaining({
+            status: { in: ['CONFIRMED', 'CANCELED'] },
+          }),
         ]),
       );
     });
@@ -2071,7 +2073,9 @@ describe('PrismaSaleRepository', () => {
       };
     }
 
-    function makeMockReloadedAfterSave(overrides: Record<string, unknown> = {}) {
+    function makeMockReloadedAfterSave(
+      overrides: Record<string, unknown> = {},
+    ) {
       // What findById returns after a save reload — includes the new relations.
       return makeMockSaleData(overrides);
     }
@@ -2285,7 +2289,9 @@ describe('PrismaSaleRepository', () => {
           }),
         );
 
-        const result = await repo.findDraftResponseById('sale-promo-no-discount');
+        const result = await repo.findDraftResponseById(
+          'sale-promo-no-discount',
+        );
 
         expect(result).not.toBeNull();
         expect(result?.subtotalCents).toBe(2000);
@@ -2876,11 +2882,14 @@ describe('PrismaSaleRepository', () => {
           });
           // We didn't spy on whether createMany was called with []; just assert
           // it wasn't called with the old id.
-          if ((prisma.salePromotionOptIn.createMany as jest.Mock).mock.calls.length) {
-            const createManyCall =
-              prisma.salePromotionOptIn.createMany.mock.calls[0][0] as {
-                data: Array<Record<string, unknown>>;
-              };
+          if (
+            (prisma.salePromotionOptIn.createMany as jest.Mock).mock.calls
+              .length
+          ) {
+            const createManyCall = prisma.salePromotionOptIn.createMany.mock
+              .calls[0][0] as {
+              data: Array<Record<string, unknown>>;
+            };
             expect(createManyCall.data).not.toContainEqual(
               expect.objectContaining({ promotionId: 'promo-m-old' }),
             );
@@ -2993,10 +3002,9 @@ describe('PrismaSaleRepository', () => {
         where: { saleId: 'sale-charge-w1-items' },
       });
       expect(prisma.saleItem.createMany).toHaveBeenCalledTimes(1);
-      const createManyCall =
-        prisma.saleItem.createMany.mock.calls[0][0] as {
-          data: Array<Record<string, unknown>>;
-        };
+      const createManyCall = prisma.saleItem.createMany.mock.calls[0][0] as {
+        data: Array<Record<string, unknown>>;
+      };
       expect(createManyCall.data).toHaveLength(1);
       // The persisted row carries the engine's recomputed audit fields
       // (promotionId / discountAmountCents / unitPriceCents) — not the stale

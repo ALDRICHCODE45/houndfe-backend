@@ -36,11 +36,7 @@ export class EmployeeTimeOffController {
     @Body() dto: CreateTimeOffDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.timeOffService.request(
-      employeeId,
-      dto,
-      user.userId,
-    );
+    return this.timeOffService.request(employeeId, dto, user.userId);
   }
 
   /** GET /admin/employees/:employeeId/time-off — list time-off for employee */
@@ -73,12 +69,7 @@ export class EmployeeTimeOffController {
     @Body() dto: ReviewTimeOffDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.timeOffService.review(
-      employeeId,
-      timeOffId,
-      dto,
-      user.userId,
-    );
+    return this.timeOffService.review(employeeId, timeOffId, dto, user.userId);
   }
 
   /** POST /admin/employees/:employeeId/time-off/:timeOffId/cancel */

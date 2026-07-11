@@ -44,7 +44,11 @@ describe('ValidatePublicCartUseCase', () => {
   it('should validate happy path with 2 available items and correct totals', async () => {
     mockClient.product.findMany.mockResolvedValue([
       makeDbProduct({ id: 'prod-1', priceLists: [{ priceCents: 100000 }] }),
-      makeDbProduct({ id: 'prod-2', name: 'Pedigree', priceLists: [{ priceCents: 50000 }] }),
+      makeDbProduct({
+        id: 'prod-2',
+        name: 'Pedigree',
+        priceLists: [{ priceCents: 50000 }],
+      }),
     ]);
 
     const result = await useCase.execute({
@@ -102,7 +106,12 @@ describe('ValidatePublicCartUseCase', () => {
 
   it('should return LOW_STOCK warning but item still contributes to total', async () => {
     mockClient.product.findMany.mockResolvedValue([
-      makeDbProduct({ id: 'prod-1', quantity: 3, minQuantity: 5, priceLists: [{ priceCents: 100000 }] }),
+      makeDbProduct({
+        id: 'prod-1',
+        quantity: 3,
+        minQuantity: 5,
+        priceLists: [{ priceCents: 100000 }],
+      }),
     ]);
 
     const result = await useCase.execute({
@@ -136,7 +145,9 @@ describe('ValidatePublicCartUseCase', () => {
     ]);
 
     const result = await useCase.execute({
-      items: [{ productId: 'prod-1', variantId: 'non-existent-var', quantity: 1 }],
+      items: [
+        { productId: 'prod-1', variantId: 'non-existent-var', quantity: 1 },
+      ],
     });
 
     expect(result.valid).toBe(false);
@@ -162,11 +173,25 @@ describe('ValidatePublicCartUseCase', () => {
   it('should exclude out_of_stock items from totalCents (CRITICAL-03 regression)', async () => {
     mockClient.product.findMany.mockResolvedValue([
       // Item 1: available with visible price — contributes to total
-      makeDbProduct({ id: 'prod-1', quantity: 50, priceLists: [{ priceCents: 100000 }] }),
+      makeDbProduct({
+        id: 'prod-1',
+        quantity: 50,
+        priceLists: [{ priceCents: 100000 }],
+      }),
       // Item 2: out_of_stock with visible price — must NOT contribute to total
-      makeDbProduct({ id: 'prod-2', name: 'Out of stock item', quantity: 0, priceLists: [{ priceCents: 50000 }] }),
+      makeDbProduct({
+        id: 'prod-2',
+        name: 'Out of stock item',
+        quantity: 0,
+        priceLists: [{ priceCents: 50000 }],
+      }),
       // Item 3: price hidden — must NOT contribute to total
-      makeDbProduct({ id: 'prod-3', name: 'Rx item', hidePriceInOnlineCatalog: true, priceLists: [{ priceCents: 75000 }] }),
+      makeDbProduct({
+        id: 'prod-3',
+        name: 'Rx item',
+        hidePriceInOnlineCatalog: true,
+        priceLists: [{ priceCents: 75000 }],
+      }),
     ]);
 
     const result = await useCase.execute({
@@ -189,9 +214,18 @@ describe('ValidatePublicCartUseCase', () => {
   it('should exclude out_of_stock from totalCents when no hidden prices exist', async () => {
     mockClient.product.findMany.mockResolvedValue([
       // Item 1: available — contributes 200000
-      makeDbProduct({ id: 'prod-1', quantity: 50, priceLists: [{ priceCents: 100000 }] }),
+      makeDbProduct({
+        id: 'prod-1',
+        quantity: 50,
+        priceLists: [{ priceCents: 100000 }],
+      }),
       // Item 2: out_of_stock — must NOT contribute (even though price is visible)
-      makeDbProduct({ id: 'prod-2', name: 'OOS', quantity: 0, priceLists: [{ priceCents: 50000 }] }),
+      makeDbProduct({
+        id: 'prod-2',
+        name: 'OOS',
+        quantity: 0,
+        priceLists: [{ priceCents: 50000 }],
+      }),
     ]);
 
     const result = await useCase.execute({
@@ -208,8 +242,17 @@ describe('ValidatePublicCartUseCase', () => {
 
   it('should include low_stock items in totalCents', async () => {
     mockClient.product.findMany.mockResolvedValue([
-      makeDbProduct({ id: 'prod-1', quantity: 50, priceLists: [{ priceCents: 100000 }] }),
-      makeDbProduct({ id: 'prod-2', quantity: 3, minQuantity: 5, priceLists: [{ priceCents: 50000 }] }),
+      makeDbProduct({
+        id: 'prod-1',
+        quantity: 50,
+        priceLists: [{ priceCents: 100000 }],
+      }),
+      makeDbProduct({
+        id: 'prod-2',
+        quantity: 3,
+        minQuantity: 5,
+        priceLists: [{ priceCents: 50000 }],
+      }),
     ]);
 
     const result = await useCase.execute({

@@ -119,7 +119,10 @@ export class EmployeesService {
     const employee = await this.employeeRepo.findById(id);
     if (!employee) throw new EmployeeNotFoundError(id);
     const effectiveAbility = ability ?? (await this.getCurrentAbility());
-    return this.stripSensitiveFields(this.toResponse(employee), effectiveAbility);
+    return this.stripSensitiveFields(
+      this.toResponse(employee),
+      effectiveAbility,
+    );
   }
 
   async update(id: string, dto: UpdateEmployeeDto) {

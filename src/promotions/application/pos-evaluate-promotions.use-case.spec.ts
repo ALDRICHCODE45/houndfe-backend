@@ -28,10 +28,7 @@ import {
   clampPercentageToSafeRange,
 } from './pos-evaluate-promotions.use-case';
 import type { IPromotionRepository } from '../domain/promotion.repository';
-import {
-  Promotion,
-  type DayOfWeek,
-} from '../domain/promotion.entity';
+import { Promotion, type DayOfWeek } from '../domain/promotion.entity';
 import type {
   PosEvalInput,
   PosEvalLine,
@@ -49,9 +46,7 @@ const NEXT_WEEK = new Date('2026-06-17T15:00:00.000Z');
 const ONE_HOUR_AGO = new Date('2026-06-10T14:00:00.000Z');
 const ONE_HOUR_FROM_NOW = new Date('2026-06-10T16:00:00.000Z');
 
-type PromoOverrides = Partial<
-  Parameters<typeof Promotion.fromPersistence>[0]
->;
+type PromoOverrides = Partial<Parameters<typeof Promotion.fromPersistence>[0]>;
 
 function makePromotion(overrides: PromoOverrides = {}): Promotion {
   return Promotion.fromPersistence({
@@ -257,7 +252,10 @@ describe('PosEvaluatePromotionsUseCase — eligibility (2.1)', () => {
     const useCase = new PosEvaluatePromotionsUseCase(repo);
 
     const result = await useCase.evaluate(
-      makeInput({ now: NOW, lines: [makeLine({ effectiveUnitPriceCents: 1000 })] }),
+      makeInput({
+        now: NOW,
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
     );
 
     expect(result.lines).toEqual([]);
@@ -272,7 +270,10 @@ describe('PosEvaluatePromotionsUseCase — eligibility (2.1)', () => {
     const useCase = new PosEvaluatePromotionsUseCase(repo);
 
     const result = await useCase.evaluate(
-      makeInput({ now: NOW, lines: [makeLine({ effectiveUnitPriceCents: 1000 })] }),
+      makeInput({
+        now: NOW,
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
     );
 
     expect(result.lines).toHaveLength(1);
@@ -305,9 +306,7 @@ describe('PosEvaluatePromotionsUseCase — eligibility (2.1)', () => {
     const repo = makeRepository([promo]);
     const useCase = new PosEvaluatePromotionsUseCase(repo);
 
-    const result = await useCase.evaluate(
-      makeInput({ customerId: null }),
-    );
+    const result = await useCase.evaluate(makeInput({ customerId: null }));
 
     expect(result.lines).toEqual([]);
     expect(result.order).toBeNull();
@@ -328,14 +327,10 @@ describe('PosEvaluatePromotionsUseCase — eligibility (2.1)', () => {
     const repo = makeRepository([promo]);
     const useCase = new PosEvaluatePromotionsUseCase(repo);
 
-    const before = await useCase.evaluate(
-      makeInput({ customerId: null }),
-    );
+    const before = await useCase.evaluate(makeInput({ customerId: null }));
     expect(before.lines).toEqual([]);
 
-    const after = await useCase.evaluate(
-      makeInput({ customerId: 'cust-1' }),
-    );
+    const after = await useCase.evaluate(makeInput({ customerId: 'cust-1' }));
     expect(after.lines).toHaveLength(1);
     expect(after.lines[0].promotionId).toBe('promo-specific');
   });
@@ -355,9 +350,7 @@ describe('PosEvaluatePromotionsUseCase — eligibility (2.1)', () => {
     const repo = makeRepository([promo]);
     const useCase = new PosEvaluatePromotionsUseCase(repo);
 
-    const result = await useCase.evaluate(
-      makeInput({ customerId: 'cust-2' }),
-    );
+    const result = await useCase.evaluate(makeInput({ customerId: 'cust-2' }));
 
     expect(result.lines).toEqual([]);
   });
@@ -439,9 +432,7 @@ describe('PosEvaluatePromotionsUseCase — C1 price-list id resolution (2.2)', (
     const promo = makePromotion({
       id: 'promo-c1-yes',
       // promo restricted to globalPriceListId = 'GPL-retail'
-      priceLists: [
-        { id: 'ppl-1', globalPriceListId: 'GPL-retail' },
-      ],
+      priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
     });
     const repo = makeRepository([promo]);
     const useCase = new PosEvaluatePromotionsUseCase(repo);
@@ -468,9 +459,7 @@ describe('PosEvaluatePromotionsUseCase — C1 price-list id resolution (2.2)', (
   it('NOT eligible when the resolved appliedGlobalPriceListId is NOT in the promo priceLists', async () => {
     const promo = makePromotion({
       id: 'promo-c1-no',
-      priceLists: [
-        { id: 'ppl-1', globalPriceListId: 'GPL-retail' },
-      ],
+      priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
     });
     const repo = makeRepository([promo]);
     const useCase = new PosEvaluatePromotionsUseCase(repo);
@@ -497,9 +486,7 @@ describe('PosEvaluatePromotionsUseCase — C1 price-list id resolution (2.2)', (
   it('NOT eligible when the line has no price list and the promo IS restricted', async () => {
     const promo = makePromotion({
       id: 'promo-c1-required',
-      priceLists: [
-        { id: 'ppl-1', globalPriceListId: 'GPL-retail' },
-      ],
+      priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
     });
     const repo = makeRepository([promo]);
     const useCase = new PosEvaluatePromotionsUseCase(repo);

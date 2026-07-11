@@ -80,9 +80,9 @@ describe('GetPublicProductDetailUseCase', () => {
   it('should throw 404 when product is not found', async () => {
     repo.findProductById.mockResolvedValue(null);
 
-    await expect(
-      useCase.execute('non-existent', tenant),
-    ).rejects.toThrow(NotFoundException);
+    await expect(useCase.execute('non-existent', tenant)).rejects.toThrow(
+      NotFoundException,
+    );
   });
 
   it('should not include raw quantity or cost fields in output', async () => {

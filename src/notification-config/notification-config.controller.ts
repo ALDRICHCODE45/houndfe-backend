@@ -20,13 +20,7 @@
  *   GET /notification-config   → tenant's `{ enabled, recipients, enabledActions }`
  *   PUT /notification-config   → overwrite tenant's config (full replace)
  */
-import {
-  Body,
-  Controller,
-  Get,
-  Put,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, Put, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';

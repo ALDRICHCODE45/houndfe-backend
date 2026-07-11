@@ -26,9 +26,6 @@ export class SaleNotCancellableError extends BusinessRuleViolationError {
 
 export class SaleDeliveredCannotCancelError extends BusinessRuleViolationError {
   constructor() {
-    super(
-      'SALE_DELIVERED_CANNOT_CANCEL',
-      'SALE_DELIVERED_CANNOT_CANCEL',
-    );
+    super('SALE_DELIVERED_CANNOT_CANCEL', 'SALE_DELIVERED_CANNOT_CANCEL');
   }
 }

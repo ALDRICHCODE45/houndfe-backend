@@ -68,10 +68,7 @@ export class PrismaSatKeyRepository implements ISatKeyRepository {
       AND: [
         this.activeClause(),
         {
-          OR: [
-            { key: { startsWith: n } },
-            { searchText: { contains: n } },
-          ],
+          OR: [{ key: { startsWith: n } }, { searchText: { contains: n } }],
         },
       ],
     };
@@ -109,10 +106,7 @@ export class PrismaSatKeyRepository implements ISatKeyRepository {
   private activeClause() {
     const now = this.now();
     return {
-      OR: [
-        { validTo: null },
-        { validTo: { gt: now } },
-      ],
+      OR: [{ validTo: null }, { validTo: { gt: now } }],
     };
   }
 

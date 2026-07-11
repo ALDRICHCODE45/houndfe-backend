@@ -30,9 +30,7 @@ const EMPTY_VIEW: NotificationConfigView = Object.freeze({
 }) as NotificationConfigView;
 
 @Injectable()
-export class PrismaNotificationConfigRepository
-  implements INotificationConfigRepository
-{
+export class PrismaNotificationConfigRepository implements INotificationConfigRepository {
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   async find(): Promise<NotificationConfigView> {
@@ -61,9 +59,7 @@ export class PrismaNotificationConfigRepository
     return {
       enabled: settings.enabled,
       recipients: recipients.map((r) => r.userId),
-      enabledActions: actions.map(
-        (a) => a.action,
-      ) as NotificationActionKey[],
+      enabledActions: actions.map((a) => a.action),
     };
   }
 
@@ -93,19 +89,25 @@ export class PrismaNotificationConfigRepository
         // `tenantId` is the unique key — placeholder is overridden by
         // the extension with the real CLS tenantId.
         where: { tenantId: '__CLS_RESOLVES__' },
-        create: { enabled: input.enabled } as Prisma.NotificationSettingsUncheckedCreateInput,
+        create: {
+          enabled: input.enabled,
+        } as Prisma.NotificationSettingsUncheckedCreateInput,
         update: { enabled: input.enabled },
       });
 
       await tx.notificationRecipient.deleteMany({});
       await tx.notificationRecipient.createMany({
-        data: input.recipientUserIds.map((userId) => ({ userId })) as Prisma.NotificationRecipientCreateManyInput[],
+        data: input.recipientUserIds.map((userId) => ({
+          userId,
+        })) as Prisma.NotificationRecipientCreateManyInput[],
         skipDuplicates: true,
       });
 
       await tx.notificationAction.deleteMany({});
       await tx.notificationAction.createMany({
-        data: input.enabledActions.map((action) => ({ action })) as Prisma.NotificationActionCreateManyInput[],
+        data: input.enabledActions.map((action) => ({
+          action,
+        })) as Prisma.NotificationActionCreateManyInput[],
         skipDuplicates: true,
       });
     });

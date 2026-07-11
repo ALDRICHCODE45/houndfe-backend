@@ -15,7 +15,13 @@ describe('ListPublicBranchesUseCase', () => {
 
   it('should return active branches sorted by name', async () => {
     const branches: PublicBranchDto[] = [
-      { id: 'b1', name: 'Centro', slug: 'centro', address: 'Av. Juárez 123', phone: '+525512345678' },
+      {
+        id: 'b1',
+        name: 'Centro',
+        slug: 'centro',
+        address: 'Av. Juárez 123',
+        phone: '+525512345678',
+      },
       { id: 'b2', name: 'Norte', slug: 'norte', address: null, phone: null },
     ];
     repo.findActiveBranches.mockResolvedValue(branches);

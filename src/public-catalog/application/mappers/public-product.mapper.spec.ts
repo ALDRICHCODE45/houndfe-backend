@@ -5,7 +5,9 @@ import {
   type ProductDetailWithIncludes,
 } from './public-product.mapper';
 
-function makeProduct(overrides: Partial<ProductWithIncludes> = {}): ProductWithIncludes {
+function makeProduct(
+  overrides: Partial<ProductWithIncludes> = {},
+): ProductWithIncludes {
   return {
     id: 'prod-1',
     name: 'Royal Canin 13.6kg',
@@ -97,7 +99,11 @@ describe('toPublicProductCard', () => {
     const product = makeProduct({
       hasVariants: true,
       variants: [
-        { quantity: 10, minQuantity: 2, variantPrices: [{ priceCents: 100000 }] },
+        {
+          quantity: 10,
+          minQuantity: 2,
+          variantPrices: [{ priceCents: 100000 }],
+        },
         { quantity: 5, minQuantity: 2, variantPrices: [{ priceCents: 80000 }] },
       ],
     });
@@ -110,7 +116,11 @@ describe('toPublicProductCard', () => {
       hasVariants: true,
       useStock: true,
       variants: [
-        { quantity: 0, minQuantity: 2, variantPrices: [{ priceCents: 100000 }] },
+        {
+          quantity: 0,
+          minQuantity: 2,
+          variantPrices: [{ priceCents: 100000 }],
+        },
         { quantity: 0, minQuantity: 2, variantPrices: [{ priceCents: 80000 }] },
       ],
     });

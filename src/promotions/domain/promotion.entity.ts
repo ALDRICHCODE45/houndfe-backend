@@ -306,9 +306,7 @@ export class Promotion {
       // Persisted column = the date-derived hint. If the operator has
       // manually ended, reflect that immediately so list filtering works
       // even before the row is re-fetched from the DB.
-      status: manuallyEnded
-        ? 'ENDED'
-        : deriveStatus(startDate, endDate, now),
+      status: manuallyEnded ? 'ENDED' : deriveStatus(startDate, endDate, now),
       manuallyEnded,
       startDate,
       endDate,

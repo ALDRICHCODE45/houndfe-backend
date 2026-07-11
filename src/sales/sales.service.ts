@@ -1427,16 +1427,10 @@ export class SalesService {
   async listApplicablePromotions(saleId: string, actorId: string) {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale) {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_FOUND',
-        'SALE_NOT_FOUND',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
     }
     if (sale.status !== 'DRAFT') {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_DRAFT',
-        'SALE_NOT_DRAFT',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
     if (sale.userId !== actorId) {
       throw new BusinessRuleViolationError(
@@ -1471,16 +1465,10 @@ export class SalesService {
   ) {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale) {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_FOUND',
-        'SALE_NOT_FOUND',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
     }
     if (sale.status !== 'DRAFT') {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_DRAFT',
-        'SALE_NOT_DRAFT',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
     if (sale.userId !== actorId) {
       throw new BusinessRuleViolationError(
@@ -1516,16 +1504,10 @@ export class SalesService {
   ) {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale) {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_FOUND',
-        'SALE_NOT_FOUND',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
     }
     if (sale.status !== 'DRAFT') {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_DRAFT',
-        'SALE_NOT_DRAFT',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
     if (sale.userId !== actorId) {
       throw new BusinessRuleViolationError(
@@ -1561,16 +1543,10 @@ export class SalesService {
   ) {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale) {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_FOUND',
-        'SALE_NOT_FOUND',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
     }
     if (sale.status !== 'DRAFT') {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_DRAFT',
-        'SALE_NOT_DRAFT',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
     if (sale.userId !== actorId) {
       throw new BusinessRuleViolationError(
@@ -1943,11 +1919,7 @@ export class SalesService {
       //   orderDiscountCents = appliedOrderPromotion?.discountAmountCents ?? 0
       //   totalCents = max(0, subtotalCents − orderDiscountCents)
       //   discountCents = min(subtotalCents, orderDiscountCents)
-      const {
-        subtotalCents,
-        discountCents,
-        totalCents,
-      } = sale.previewTotals();
+      const { subtotalCents, discountCents, totalCents } = sale.previewTotals();
 
       const tenderedCents = normalizedPayments.reduce(
         (acc, payment) => acc + payment.amountCents,
@@ -2155,7 +2127,10 @@ export class SalesService {
       // authorized actor in the same tenant may cancel. actorId is still
       // recorded as canceledByUserId for audit purposes.
       if (!sale) {
-        throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_FOUND',
+          'SALE_NOT_FOUND',
+        );
       }
 
       const restockedItems = sale.items.map((item) => ({

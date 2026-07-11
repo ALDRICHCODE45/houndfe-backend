@@ -492,18 +492,12 @@ export class Sale {
     // Total = what the customer actually pays (post-line − order discount,
     // clamped to 0 to never go negative when an order discount exceeds the
     // post-line sum).
-    const totalCents = Math.max(
-      0,
-      postLineSubtotalCents - orderDiscountCents,
-    );
+    const totalCents = Math.max(0, postLineSubtotalCents - orderDiscountCents);
     // discountCents = full savings (per-line + order combined) = subtotal - total.
     // Math.min guards against any floating-point round-trip making
     // `subtotalCents - totalCents` marginally exceed `subtotalCents`; the
     // invariant `discountCents ≤ subtotalCents` is preserved.
-    const discountCents = Math.min(
-      subtotalCents,
-      subtotalCents - totalCents,
-    );
+    const discountCents = Math.min(subtotalCents, subtotalCents - totalCents);
     return { subtotalCents, discountCents, totalCents };
   }
 

@@ -49,7 +49,13 @@ export class PublicCatalogController {
     return this.listProducts.execute({
       q: query.q,
       categoryId: query.categoryId,
-      sort: (query.sort as 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc') ?? 'newest',
+      sort:
+        (query.sort as
+          | 'relevance'
+          | 'price_asc'
+          | 'price_desc'
+          | 'newest'
+          | 'rating_desc') ?? 'newest',
       page: query.page ?? 1,
       limit: query.limit ?? 20,
     });

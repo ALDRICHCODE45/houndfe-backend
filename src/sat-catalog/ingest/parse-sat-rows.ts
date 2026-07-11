@@ -50,7 +50,8 @@ function mapInclusion(raw: string | undefined): SatInclusion {
 function parseIsoDate(raw: string | undefined): Date | null {
   if (!raw || !raw.trim()) return null;
   // Date-only inputs become midnight UTC; the column is DateTime? in Prisma.
-  const iso = raw.trim().length === 10 ? `${raw.trim()}T00:00:00.000Z` : raw.trim();
+  const iso =
+    raw.trim().length === 10 ? `${raw.trim()}T00:00:00.000Z` : raw.trim();
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? null : d;
 }
@@ -118,7 +119,9 @@ export function parseSatRows(csvText: string): ParsedSatRow[] {
 
     const description = descIdx >= 0 ? (fields[descIdx] ?? '').trim() : '';
     const includeIva = mapInclusion(ivaIdx >= 0 ? fields[ivaIdx] : undefined);
-    const includeIeps = mapInclusion(iepsIdx >= 0 ? fields[iepsIdx] : undefined);
+    const includeIeps = mapInclusion(
+      iepsIdx >= 0 ? fields[iepsIdx] : undefined,
+    );
     const validFrom = parseIsoDate(fromIdx >= 0 ? fields[fromIdx] : undefined);
     const validTo = parseIsoDate(toIdx >= 0 ? fields[toIdx] : undefined);
 

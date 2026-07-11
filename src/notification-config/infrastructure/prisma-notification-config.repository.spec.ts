@@ -57,9 +57,16 @@ describe('PrismaNotificationConfigRepository.find (B.2)', () => {
 
   it('returns the persisted view verbatim when all 3 tables are populated', async () => {
     const tp = makeTenantPrismaMock();
-    tp.client.notificationSettings.findFirst.mockResolvedValue({ enabled: true });
-    tp.client.notificationRecipient.findMany.mockResolvedValue([{ userId: 'u1' }, { userId: 'u2' }]);
-    tp.client.notificationAction.findMany.mockResolvedValue([{ action: 'LOW_STOCK' }]);
+    tp.client.notificationSettings.findFirst.mockResolvedValue({
+      enabled: true,
+    });
+    tp.client.notificationRecipient.findMany.mockResolvedValue([
+      { userId: 'u1' },
+      { userId: 'u2' },
+    ]);
+    tp.client.notificationAction.findMany.mockResolvedValue([
+      { action: 'LOW_STOCK' },
+    ]);
     expect(await makeRepo(tp).find()).toEqual({
       enabled: true,
       recipients: ['u1', 'u2'],
@@ -69,7 +76,9 @@ describe('PrismaNotificationConfigRepository.find (B.2)', () => {
 
   it('queries the tenant-scoped client WITHOUT manually passing tenantId (A.1)', async () => {
     const tp = makeTenantPrismaMock();
-    tp.client.notificationSettings.findFirst.mockResolvedValue({ enabled: true });
+    tp.client.notificationSettings.findFirst.mockResolvedValue({
+      enabled: true,
+    });
     tp.client.notificationRecipient.findMany.mockResolvedValue([]);
     tp.client.notificationAction.findMany.mockResolvedValue([]);
     await makeRepo(tp).find();
@@ -90,9 +99,13 @@ describe('PrismaNotificationConfigRepository.replace (B.2)', () => {
     tp.client.notificationRecipient.createMany.mockResolvedValue({ count: 3 });
     tp.client.notificationAction.deleteMany.mockResolvedValue({ count: 1 });
     tp.client.notificationAction.createMany.mockResolvedValue({ count: 0 });
-    tp.client.notificationSettings.findFirst.mockResolvedValue({ enabled: false });
+    tp.client.notificationSettings.findFirst.mockResolvedValue({
+      enabled: false,
+    });
     tp.client.notificationRecipient.findMany.mockResolvedValue([
-      { userId: 'u2' }, { userId: 'u3' }, { userId: 'u4' },
+      { userId: 'u2' },
+      { userId: 'u3' },
+      { userId: 'u4' },
     ]);
     tp.client.notificationAction.findMany.mockResolvedValue([]);
 
@@ -156,14 +169,21 @@ describe('PrismaNotificationConfigRepository.replace (B.2)', () => {
     const tp = makeTenantPrismaMock();
     // Cast bypasses TS literal-type narrowing on `NotificationActionKey`
     // ('LOW_STOCK' only); the RUNTIME must still reject 'LEAD_CREATED'.
-    const rejectUnknown = ['LEAD_CREATED', 'WHATEVER'] as unknown as NotificationActionKey[];
+    const rejectUnknown = [
+      'LEAD_CREATED',
+      'WHATEVER',
+    ] as unknown as NotificationActionKey[];
 
     for (const enabledActions of [
       rejectUnknown,
       ['LOW_STOCK', ...rejectUnknown] as unknown as NotificationActionKey[],
     ]) {
       await expect(
-        makeRepo(tp).replace({ enabled: true, recipientUserIds: [], enabledActions }),
+        makeRepo(tp).replace({
+          enabled: true,
+          recipientUserIds: [],
+          enabledActions,
+        }),
       ).rejects.toBeInstanceOf(BadRequestException);
     }
 
@@ -183,7 +203,10 @@ describe('PrismaNotificationConfigRepository.replace (B.2)', () => {
         enabledActions: ['LEAD_CREATED' as unknown as NotificationActionKey],
       });
     } catch (err) {
-      const resp = (err as BadRequestException).getResponse() as Record<string, unknown>;
+      const resp = (err as BadRequestException).getResponse() as Record<
+        string,
+        unknown
+      >;
       expect(resp.error).toBe('UNKNOWN_ACTION_KEY');
       expect(typeof resp.message).toBe('string');
     }

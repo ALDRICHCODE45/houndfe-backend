@@ -32,13 +32,14 @@ import { randomUUID } from 'crypto';
 import type { IStockAlertStateRepository } from '../domain/stock-alert-state.repository';
 
 type TxClient = {
-  $queryRaw: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>;
+  $queryRaw: (
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ) => Promise<unknown>;
 };
 
 @Injectable()
-export class PrismaStockAlertStateRepository
-  implements IStockAlertStateRepository
-{
+export class PrismaStockAlertStateRepository implements IStockAlertStateRepository {
   async seedAndFlip(input: {
     tx: unknown;
     tenantId: string;
