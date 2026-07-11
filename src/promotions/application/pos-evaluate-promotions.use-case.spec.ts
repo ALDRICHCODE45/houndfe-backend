@@ -801,6 +801,203 @@ describe('PosEvaluatePromotionsUseCase — best-wins, MANUAL, veto, manual-wins 
     // round(5000 * 5 / 100) = 250
     expect(result.order?.discountAmountCents).toBe(250);
   });
+
+  // -------------------------------------------------------------------------
+  // Veto-aware MANUAL apply: legacy corrupt drafts self-heal
+  //
+  // Pre-fix, the MANUAL apply branch in pickBestPerLine / pickBestOrderPromo
+  // checked ONLY optedInManualPromotionIds and ignored the veto set. A
+  // legacy draft where the same id was both opted-in AND vetoed would
+  // (a) be hidden from availableManualPromotions but (b) STILL be re-applied
+  // on the next recompute — the very bug reported. The fix: even when the
+  // id is in opted-in, the engine skips it if it is ALSO in the veto set.
+  // The "safe default" — veto wins for legacy data, while new drafts
+  // remain unrepresentable thanks to the entity cross-clear.
+  // -------------------------------------------------------------------------
+  it('MANUAL opted-in BUT ALSO vetoed is NOT applied (legacy corrupt drafts self-heal)', async () => {
+    const manual = makePromotion({
+      id: 'promo-corrupt',
+      method: 'MANUAL',
+      discountType: 'PERCENTAGE',
+      discountValue: 50,
+    });
+    const repo = makeRepository([manual]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-corrupt'],
+        vetoedPromotionIds: ['promo-corrupt'], // legacy corrupt state
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
+    );
+
+    // The corrupt id MUST NOT be re-applied to the line.
+    expect(result.lines).toEqual([]);
+    // And it MUST NOT appear in available (already excluded by both
+    // gates — this guards the existing behavior too).
+    expect(result.availableManualPromotions).toEqual([]);
+  });
+
+  it('MANUAL opted-in and NOT vetoed is applied (regression-safe)', async () => {
+    const manual = makePromotion({
+      id: 'promo-manual',
+      method: 'MANUAL',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+    });
+    const repo = makeRepository([manual]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-manual'],
+        vetoedPromotionIds: [],
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
+    );
+
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].promotionId).toBe('promo-manual');
+    // Not in available list (already opted-in).
+    expect(
+      result.availableManualPromotions.find((p) => p.id === 'promo-manual'),
+    ).toBeUndefined();
+  });
+
+  it('ORDER MANUAL opted-in BUT vetoed is NOT applied (pickBestOrderPromo veto-aware)', async () => {
+    const orderManual = makeOrderPromotion({
+      id: 'order-manual-corrupt',
+      method: 'MANUAL',
+      discountType: 'FIXED',
+      discountValue: 200,
+    });
+    const repo = makeRepository([orderManual]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['order-manual-corrupt'],
+        vetoedPromotionIds: ['order-manual-corrupt'],
+        lines: [
+          makeLine({
+            quantity: 5,
+            effectiveUnitPriceCents: 1000, // subtotal = 5000c
+          }),
+        ],
+      }),
+    );
+
+    expect(result.order).toBeNull();
+    expect(result.availableManualPromotions).toEqual([]);
+  });
+
+  it('ORDER MANUAL opted-in and NOT vetoed is applied (regression-safe)', async () => {
+    const orderManual = makeOrderPromotion({
+      id: 'order-manual',
+      method: 'MANUAL',
+      discountType: 'FIXED',
+      discountValue: 200,
+    });
+    const repo = makeRepository([orderManual]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['order-manual'],
+        vetoedPromotionIds: [],
+        lines: [
+          makeLine({
+            quantity: 5,
+            effectiveUnitPriceCents: 1000, // subtotal = 5000c
+          }),
+        ],
+      }),
+    );
+
+    expect(result.order).not.toBeNull();
+    expect(result.order?.promotionId).toBe('order-manual');
+    expect(result.order?.discountAmountCents).toBe(200);
+  });
+
+  it('AUTOMATIC not-vetoed still applies (regression-safe)', async () => {
+    const auto = makePromotion({
+      id: 'promo-auto',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+    });
+    const repo = makeRepository([auto]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        vetoedPromotionIds: [],
+        optedInManualPromotionIds: [],
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
+    );
+
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].promotionId).toBe('promo-auto');
+  });
+
+  it('MANUAL NOT opted-in still does NOT auto-apply (regression-safe)', async () => {
+    const manual = makePromotion({
+      id: 'promo-manual-no-optin',
+      method: 'MANUAL',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+    });
+    const repo = makeRepository([manual]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: [],
+        vetoedPromotionIds: [],
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
+    );
+
+    expect(result.lines).toEqual([]);
+    // But it DOES appear in availableManualPromotions.
+    expect(result.availableManualPromotions).toHaveLength(1);
+    expect(result.availableManualPromotions[0].id).toBe('promo-manual-no-optin');
+  });
+
+  it('availableManualPromotions still excludes opted-in AND vetoed (regression-safe)', async () => {
+    const manualEligible = makePromotion({
+      id: 'promo-eligible',
+      method: 'MANUAL',
+      discountType: 'PERCENTAGE',
+      discountValue: 5,
+    });
+    const manualOptedIn = makePromotion({
+      id: 'promo-opted-in',
+      method: 'MANUAL',
+      discountType: 'PERCENTAGE',
+      discountValue: 5,
+    });
+    const manualVetoed = makePromotion({
+      id: 'promo-vetoed',
+      method: 'MANUAL',
+      discountType: 'PERCENTAGE',
+      discountValue: 5,
+    });
+    const repo = makeRepository([manualEligible, manualOptedIn, manualVetoed]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-opted-in'],
+        vetoedPromotionIds: ['promo-vetoed'],
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
+    );
+
+    expect(result.availableManualPromotions).toHaveLength(1);
+    expect(result.availableManualPromotions[0].id).toBe('promo-eligible');
+  });
 });
 
 // ============================================================

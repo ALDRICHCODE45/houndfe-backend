@@ -401,8 +401,21 @@ export class Sale {
     this._appliedOrderPromotion = null;
   }
 
-  /** Add a promotion id to the veto set (idempotent). */
+  /**
+   * Add a promotion id to the veto set (idempotent).
+   *
+   * Cross-clears the opt-in set: if the same id is currently opted-in
+   * (the seller had manually applied it), the veto wins and the id is
+   * REMOVED from the opted-in set. This enforces the
+   * `optedInManualPromotionIds ∩ vetoedPromotionIds = ∅` invariant at
+   * the aggregate level — a draft can never reach the
+   * (opted-in, vetoed) corrupt state via entity mutations. Legacy
+   * corrupt drafts persisted in the DB before this guard are still
+   * tolerated at the engine layer (see engine MANUAL apply branch,
+   * which now also consults the veto set).
+   */
   addVetoedPromotion(promotionId: string): void {
+    this.optOutManualPromotion(promotionId);
     if (!this._vetoedPromotionIds.includes(promotionId)) {
       this._vetoedPromotionIds.push(promotionId);
     }
@@ -415,8 +428,19 @@ export class Sale {
     );
   }
 
-  /** Opt in a MANUAL promotion (idempotent). */
+  /**
+   * Opt in a MANUAL promotion (idempotent).
+   *
+   * Cross-clears the veto set: if the same id was previously vetoed
+   * (the seller vetoed it, then later opted it back in via applyManual),
+   * the opt-in wins and the id is REMOVED from the veto set. This is
+   * the reactivation path and enforces the
+   * `optedInManualPromotionIds ∩ vetoedPromotionIds = ∅` invariant at
+   * the aggregate level — see `addVetoedPromotion` for the symmetric
+   * guarantee.
+   */
   optInManualPromotion(promotionId: string): void {
+    this.removeVetoedPromotion(promotionId);
     if (!this._optedInManualPromotionIds.includes(promotionId)) {
       this._optedInManualPromotionIds.push(promotionId);
     }

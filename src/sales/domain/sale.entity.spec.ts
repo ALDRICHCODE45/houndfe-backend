@@ -1733,6 +1733,123 @@ describe('Sale Entity', () => {
       expect(sale.optedInManualPromotionIds).toEqual(['promo-n']);
     });
 
+    // -------------------------------------------------------------------------
+    // Work Unit — optInManualPromotion / addVetoedPromotion mutual exclusion
+    //
+    // Invariant: for every draft, optedInManualPromotionIds ∩
+    // vetoedPromotionIds = ∅. The entity owns this invariant — the
+    // cross-clearing behavior means a draft can NEVER reach the
+    // (opted-in, vetoed) corrupt state. Legacy corrupt drafts are
+    // tolerated at the engine layer (see engine spec) but never produced
+    // by new entity mutations.
+    // -------------------------------------------------------------------------
+    describe('optIn / veto mutual exclusion', () => {
+      function setsDisjoint(
+        sale: Sale,
+        optedId: string,
+        vetoedId: string,
+      ): void {
+        if (optedId === vetoedId) return; // same id, the disjointness is checked separately
+        const optedSet = new Set(sale.optedInManualPromotionIds);
+        const vetoedSet = new Set(sale.vetoedPromotionIds);
+        expect(optedSet.has(vetoedId)).toBe(false);
+        expect(vetoedSet.has(optedId)).toBe(false);
+      }
+
+      it('optInManualPromotion removes the id from the veto set when it was vetoed (cross-clear)', () => {
+        const sale = makeSaleWithItem(1000, 1);
+        sale.addVetoedPromotion('promo-m-1');
+        expect(sale.vetoedPromotionIds).toEqual(['promo-m-1']);
+        expect(sale.optedInManualPromotionIds).toEqual([]);
+
+        sale.optInManualPromotion('promo-m-1');
+
+        // The same id MUST NOT be in both sets after optIn.
+        expect(sale.optedInManualPromotionIds).toContain('promo-m-1');
+        expect(sale.vetoedPromotionIds).not.toContain('promo-m-1');
+      });
+
+      it('addVetoedPromotion removes the id from the opted-in set when it was opted-in (cross-clear)', () => {
+        const sale = makeSaleWithItem(1000, 1);
+        sale.optInManualPromotion('promo-m-1');
+        expect(sale.optedInManualPromotionIds).toContain('promo-m-1');
+        expect(sale.vetoedPromotionIds).toEqual([]);
+
+        sale.addVetoedPromotion('promo-m-1');
+
+        // The same id MUST NOT be in both sets after veto.
+        expect(sale.vetoedPromotionIds).toContain('promo-m-1');
+        expect(sale.optedInManualPromotionIds).not.toContain('promo-m-1');
+      });
+
+      it('optInManualPromotion is idempotent when id already opted-in (no spurious veto removal)', () => {
+        const sale = makeSaleWithItem(1000, 1);
+        sale.addVetoedPromotion('promo-keep-vetoed');
+        sale.optInManualPromotion('promo-m-1');
+
+        // Re-opt-in: must not affect unrelated vetoed entries.
+        sale.optInManualPromotion('promo-m-1');
+
+        expect(sale.optedInManualPromotionIds).toEqual(['promo-m-1']);
+        expect(sale.vetoedPromotionIds).toEqual(['promo-keep-vetoed']);
+      });
+
+      it('addVetoedPromotion is idempotent when id already vetoed (no spurious opt-in removal)', () => {
+        const sale = makeSaleWithItem(1000, 1);
+        sale.optInManualPromotion('promo-keep-opted');
+        sale.addVetoedPromotion('promo-auto-1');
+
+        // Re-veto: must not affect unrelated opted-in entries.
+        sale.addVetoedPromotion('promo-auto-1');
+
+        expect(sale.vetoedPromotionIds).toEqual(['promo-auto-1']);
+        expect(sale.optedInManualPromotionIds).toEqual(['promo-keep-opted']);
+      });
+
+      it('optOutManualPromotion remains a simple removal (cannot create corruption)', () => {
+        const sale = makeSaleWithItem(1000, 1);
+        sale.optInManualPromotion('promo-m-1');
+        sale.optOutManualPromotion('promo-m-1');
+        expect(sale.optedInManualPromotionIds).not.toContain('promo-m-1');
+        expect(sale.vetoedPromotionIds).not.toContain('promo-m-1');
+      });
+
+      it('removeVetoedPromotion remains a simple removal (cannot create corruption)', () => {
+        const sale = makeSaleWithItem(1000, 1);
+        sale.addVetoedPromotion('promo-auto-1');
+        sale.removeVetoedPromotion('promo-auto-1');
+        expect(sale.vetoedPromotionIds).not.toContain('promo-auto-1');
+        expect(sale.optedInManualPromotionIds).not.toContain('promo-auto-1');
+      });
+
+      it('property: any sequence of mutators keeps optedIn ∩ vetoed = ∅', () => {
+        const sale = makeSaleWithItem(1000, 1);
+        // Random-ish but deterministic sequence of cross-mutators that
+        // would, WITHOUT the cross-clear, leave some id in both sets.
+        sale.optInManualPromotion('promo-x');
+        sale.addVetoedPromotion('promo-x');
+        sale.optInManualPromotion('promo-y');
+        sale.addVetoedPromotion('promo-y');
+        sale.optInManualPromotion('promo-z');
+        sale.removeVetoedPromotion('promo-x');
+        sale.addVetoedPromotion('promo-z');
+        sale.optOutManualPromotion('promo-y');
+        sale.optInManualPromotion('promo-x');
+
+        // Whatever the final state, no id may live in BOTH sets.
+        const opted = new Set(sale.optedInManualPromotionIds);
+        for (const vetoedId of sale.vetoedPromotionIds) {
+          expect(opted.has(vetoedId)).toBe(false);
+        }
+        const vetoed = new Set(sale.vetoedPromotionIds);
+        for (const optedId of sale.optedInManualPromotionIds) {
+          expect(vetoed.has(optedId)).toBe(false);
+        }
+        // spot-check the two sets have distinct ids (sanity)
+        setsDisjoint(sale, 'promo-x', 'promo-y');
+      });
+    });
+
     it('fromPersistence maps appliedOrderPromotion + vetoedPromotionIds + optedInManualPromotionIds', () => {
       const sale = Sale.fromPersistence({
         id: BASE_SALE_ID,

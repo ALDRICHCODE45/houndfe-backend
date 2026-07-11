@@ -1478,11 +1478,10 @@ export class SalesService {
     }
 
     // Mutate BEFORE recompute so the engine sees the opt-in set.
+    // The entity's optInManualPromotion cross-clears the veto set
+    // when the same id was previously vetoed — reactivation path is
+    // owned by the aggregate, NOT duplicated here.
     sale.optInManualPromotion(promotionId);
-    // Reactivation: a previously-vetoed MANUAL id can be brought back
-    // by re-applying it. Remove from the veto set so subsequent
-    // recomputes treat it as eligible again.
-    sale.removeVetoedPromotion(promotionId);
 
     await this.recomputePromotions(sale);
     await this.saleRepo.save(sale);
@@ -1528,13 +1527,26 @@ export class SalesService {
   /**
    * 6.4 — `DELETE /sales/drafts/:id/promotions/:promotionId`
    *
-   * Veto an AUTO-applied promotion. Adds the id to
-   * `sale.vetoedPromotionIds` so the engine excludes it on every
-   * subsequent recompute (Unit 3 persists the veto rows; the persistence
-   * layer mirrors the in-memory set in `saleRepo.save`).
+   * Tolerant semantics: the frontend uses this endpoint generically to
+   * "remove" any applied promotion (it cannot tell MANUAL from
+   * AUTOMATIC because the draft response does not expose the promotion
+   * method). The correct behavior depends on whether the id is
+   * currently opted-in:
    *
-   * 6.5 — The Promotion catalog (status / method / discountValue) is
-   * NEVER mutated by this method. We only touch the per-draft veto set.
+   * - If the id IS in `sale.optedInManualPromotionIds` (the seller
+   *   had manually applied it) → OPT IT OUT. The promo returns to
+   *   the available list (the seller can re-apply it later). Adding
+   *   it to the veto set would create a (opted-in, vetoed) corrupt
+   *   state — the entity's `addVetoedPromotion` would also cross-clear
+   *   the opt-in, but opt-out is the right USER-FACING semantics:
+   *   for a manual promo "remove" means "stop using it", not
+   *   "ban it forever".
+   * - If the id is NOT opted-in (a genuine AUTO-applied promo) →
+   *   VETO it (existing behavior). The engine excludes it on every
+   *   subsequent recompute.
+   *
+   * The Promotion catalog (status / method / discountValue) is NEVER
+   * mutated — we only touch the per-draft opt-in / veto sets.
    */
   async removeAppliedPromotion(
     saleId: string,
@@ -1555,8 +1567,15 @@ export class SalesService {
       );
     }
 
-    // Mutate BEFORE recompute so the engine sees the updated veto set.
-    sale.addVetoedPromotion(promotionId);
+    // Mutate BEFORE recompute so the engine sees the updated sets.
+    if (sale.optedInManualPromotionIds.includes(promotionId)) {
+      // Manual promo the seller had opted-in: remove the opt-in so
+      // the promo returns to the available list. No veto added.
+      sale.optOutManualPromotion(promotionId);
+    } else {
+      // Genuine AUTO-applied (or already-opted-out) promo: veto.
+      sale.addVetoedPromotion(promotionId);
+    }
 
     await this.recomputePromotions(sale);
     await this.saleRepo.save(sale);

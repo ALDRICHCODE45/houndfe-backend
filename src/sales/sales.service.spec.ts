@@ -5764,6 +5764,197 @@ describe('SalesService', () => {
     });
 
     // ------------------------------------------------------------------------
+    // 6.4b — Tolerant semantics: removeAppliedPromotion on a MANUAL id
+    // (currently opted-in) opts it OUT instead of leaving it in the veto
+    // set. The frontend uses this endpoint generically to "remove" any
+    // applied promo; for a manual promo the correct semantics is "opt
+    // out" (so it returns to available-promotions) NOT "veto forever".
+    //
+    // The persisted state after the call MUST NOT contain the id in
+    // BOTH sets (the cross-clear invariant) and a subsequent recompute
+    // MUST NOT re-apply the promo (the user's "remove then re-appears"
+    // bug). For an AUTOMATIC id (not opted-in) the existing veto
+    // behavior is preserved.
+    // ------------------------------------------------------------------------
+    it('6.4b — removeAppliedPromotion on an opted-in MANUAL id OPTS IT OUT (does not veto)', async () => {
+      const saleId = 'sale-u6-remove-applied-manual';
+      const sale = buildDraftSaleWithItem(
+        saleId,
+        'item-u6-remove-applied-manual',
+      );
+      sale.optInManualPromotion('promo-m-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // After opt-out, the engine no longer considers the id opted-in.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => ({
+        lines:
+          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1')
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-m-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: '10% off',
+                },
+              ]
+            : [],
+        order: null,
+        availableManualPromotions: [
+          // The promo re-appears in the available list after opt-out.
+          { id: 'promo-m-1', title: '10% off', type: 'PRODUCT_DISCOUNT' },
+        ],
+      }));
+
+      await service.removeAppliedPromotion(saleId, 'user-1', 'promo-m-1');
+
+      // The id was removed from the opted-in set (opt-out semantics).
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.optedInManualPromotionIds).not.toContain('promo-m-1');
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.optedInManualPromotionIds).not.toContain('promo-m-1');
+      // CRITICAL: the id MUST NOT have been added to the veto set.
+      expect(savedSale.vetoedPromotionIds).not.toContain('promo-m-1');
+
+      // The opt-in must be reflected in the response shape too (status
+      // code 200 is implicit in `resolves`).
+    });
+
+    it('6.4b — removeAppliedPromotion on an opted-in MANUAL id does NOT re-apply on a following recompute', async () => {
+      const saleId = 'sale-u6-remove-applied-manual-no-reapply';
+      const sale = buildDraftSaleWithItem(
+        saleId,
+        'item-u6-remove-applied-manual-no-reapply',
+      );
+      sale.optInManualPromotion('promo-m-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      // First call: opt-out (manual promo removed from opt-in set).
+      // Second call: re-evaluate (no opt-in → no re-apply).
+      let callIndex = 0;
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        callIndex += 1;
+        const isOptIn =
+          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1');
+        return Promise.resolve({
+          lines: isOptIn
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-m-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: '10% off',
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+        });
+      });
+
+      await service.removeAppliedPromotion(saleId, 'user-1', 'promo-m-1');
+      // Trigger a second recompute (simulates the frontend recomputing
+      // totals after the removal — the bug was that the manual would
+      // re-appear here).
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      // The persisted sale after the removal must NOT have the id in
+      // either opted-in or vetoed sets — so any recompute that reads
+      // from this state cannot re-apply it.
+      expect(savedSale.optedInManualPromotionIds).not.toContain('promo-m-1');
+      expect(savedSale.vetoedPromotionIds).not.toContain('promo-m-1');
+      expect(callIndex).toBe(1);
+    });
+
+    it('6.4b — removeAppliedPromotion on an AUTOMATIC (non-opted-in) id still vetoes (existing behavior preserved)', async () => {
+      const saleId = 'sale-u6-remove-applied-auto';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-remove-applied-auto');
+      // Sanity: no opt-in for this id.
+      expect(sale.optedInManualPromotionIds).not.toContain('promo-auto-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockImplementation((input) => ({
+        lines:
+          !input.vetoedPromotionIds.includes('promo-auto-1') && input.lines[0]
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-auto-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: 'auto',
+                },
+              ]
+            : [],
+        order: null,
+        availableManualPromotions: [],
+      }));
+
+      await service.removeAppliedPromotion(saleId, 'user-1', 'promo-auto-1');
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.vetoedPromotionIds).toContain('promo-auto-1');
+      // The id MUST NOT have been added to the opted-in set either.
+      expect(savedSale.optedInManualPromotionIds).not.toContain('promo-auto-1');
+    });
+
+    it('6.4b — removeManualPromotion on an opted-in MANUAL id opts it out (regression-safe)', async () => {
+      const saleId = 'sale-u6-remove-manual-still-works';
+      const sale = buildDraftSaleWithItem(
+        saleId,
+        'item-u6-remove-manual-still-works',
+      );
+      sale.optInManualPromotion('promo-m-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+      });
+
+      await service.removeManualPromotion(saleId, 'user-1', 'promo-m-1');
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(savedSale.optedInManualPromotionIds).not.toContain('promo-m-1');
+      // And: not in veto set either (consistent with the entity's
+      // optOut being a simple removal — no spurious veto).
+      expect(savedSale.vetoedPromotionIds).not.toContain('promo-m-1');
+    });
+
+    it('6.4b — applyManualPromotion clears any existing veto for the same id (entity cross-clear)', async () => {
+      const saleId = 'sale-u6-apply-clears-veto';
+      const sale = buildDraftSaleWithItem(saleId, 'item-u6-apply-clears-veto');
+      sale.addVetoedPromotion('promo-m-1');
+      saleRepo.findById.mockResolvedValue(sale);
+
+      posEvaluateUseCase.evaluate.mockImplementation((input) => ({
+        lines:
+          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1')
+            ? [
+                {
+                  itemId: input.lines[0].itemId,
+                  promotionId: 'promo-m-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: 'reactivated',
+                },
+              ]
+            : [],
+        order: null,
+        availableManualPromotions: [],
+      }));
+
+      await service.applyManualPromotion(saleId, 'user-1', 'promo-m-1');
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      // After apply: opted-in AND NOT in veto set (entity cross-cleared).
+      expect(savedSale.optedInManualPromotionIds).toContain('promo-m-1');
+      expect(savedSale.vetoedPromotionIds).not.toContain('promo-m-1');
+    });
+
+    // ------------------------------------------------------------------------
     // 6.5 — remove endpoints MUST NOT mutate the Promotion catalog
     // ------------------------------------------------------------------------
     //

@@ -227,9 +227,16 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     const eligible: PerLineCandidate[] = [];
 
     for (const promo of candidates) {
-      // MANUAL only considered when opted-in.
+      // MANUAL only considered when opted-in. ALSO skip MANUAL ids that
+      // appear in the veto set — legacy corrupt drafts persisted before
+      // the entity cross-clear (sale.entity.ts#addVetoedPromotion /
+      // optInManualPromotion) may carry the same id in BOTH sets.
+      // The veto wins (safe default): such drafts self-heal on the
+      // next recompute instead of re-applying a promo the seller
+      // already dismissed.
       if (promo.method === 'MANUAL') {
         if (!input.optedInManualPromotionIds.includes(promo.id)) continue;
+        if (input.vetoedPromotionIds.includes(promo.id)) continue;
       } else {
         // AUTOMATIC — exclude vetoed ids.
         if (input.vetoedPromotionIds.includes(promo.id)) continue;
@@ -345,8 +352,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     for (const promo of candidates) {
       if (promo.type !== 'ORDER_DISCOUNT') continue;
 
+      // Symmetric to pickBestPerLine: MANUAL only when opted-in, and
+      // ALSO skip MANUAL ids in the veto set so legacy corrupt drafts
+      // (same id opted-in AND vetoed) self-heal on the next recompute.
       if (promo.method === 'MANUAL') {
         if (!input.optedInManualPromotionIds.includes(promo.id)) continue;
+        if (input.vetoedPromotionIds.includes(promo.id)) continue;
       } else {
         if (input.vetoedPromotionIds.includes(promo.id)) continue;
       }
