@@ -51,6 +51,59 @@ export function clampPercentageToSafeRange(percent: number): number {
   return Math.min(Math.max(Math.trunc(percent), 1), 99);
 }
 
+/**
+ * Tier returned by `matchTargetTier` — encodes BOTH "did the target
+ * hit this line?" AND "which specificity won?" in a single value, so
+ * the engine never needs a second predicate pass.
+ *
+ *   - 'VARIANT' : a VARIANTS-typed target hit the line's variantId.
+ *   - 'PRODUCT' : no VARIANTS hit, but a PRODUCTS-typed target hit the
+ *                 line's productId (back-compat: a PRODUCTS promo on
+ *                 product P1 still matches EVERY variant of P1).
+ *   - null      : no DEFAULT-side target hit the line.
+ */
+export type LineMatchTier = 'VARIANT' | 'PRODUCT' | null;
+
+/**
+ * Match predicate — pure, exported for both testability AND future
+ * reuse (online/cart engine `evaluate-cart-promotions.use-case.ts`).
+ *
+ * Specificity rule: VARIANTS wins over PRODUCTS when both hit the
+ * same line. The pre-pass in `pickBestPerLine` further drops any
+ * tier='PRODUCT' candidate when ANY candidate for that line is
+ * tier='VARIANT' (orthogonal filter; best-wins invariant untouched).
+ */
+export function matchTargetTier(
+  targetItems: ReadonlyArray<{ side: string; targetType: string; targetId: string }>,
+  line: { productId: string; variantId: string | null },
+): LineMatchTier {
+  const side = 'DEFAULT';
+  // VARIANTS first — strict === null on variantId so an unset variant
+  // never matches (defensive: structural guarantee).
+  if (
+    line.variantId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'VARIANTS' &&
+        ti.targetId === line.variantId,
+    )
+  ) {
+    return 'VARIANT';
+  }
+  if (
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'PRODUCTS' &&
+        ti.targetId === line.productId,
+    )
+  ) {
+    return 'PRODUCT';
+  }
+  return null;
+}
+
 const JS_DAY_OF_WEEK: ReadonlyArray<DayOfWeek> = [
   'SUNDAY', // 0
   'MONDAY', // 1
@@ -79,6 +132,8 @@ interface PerLineCandidate {
   promotion: Promotion;
   /** Customer discount in cents as it would apply to `effectiveUnitPriceCents`. */
   discountCents: number;
+  /** Specificity tier reported by `matchTargetTier` — drives precedence pre-pass. */
+  tier: 'VARIANT' | 'PRODUCT';
 }
 
 @Injectable()
@@ -219,17 +274,15 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         targetableManualPromotionIds.push(promo.id);
         continue;
       }
-      // PRODUCT_DISCOUNT (with appliesTo=PRODUCTS — isSupportedEngineType
-      // already gated the other applyTo branches). At least one line in
-      // the cart must match the target.
-      if (promo.type === 'PRODUCT_DISCOUNT' && promo.appliesTo === 'PRODUCTS') {
-        const hasMatchingLine = input.lines.some((line) =>
-          promo.targetItems.some(
-            (ti) =>
-              ti.side === 'DEFAULT' &&
-              ti.targetType === 'PRODUCTS' &&
-              ti.targetId === line.productId,
-          ),
+      // PRODUCT_DISCOUNT (appliesTo ∈ {PRODUCTS, VARIANTS} — both gated
+      // by `isSupportedEngineType` above). At least one line in the
+      // cart must match the target.
+      if (promo.type === 'PRODUCT_DISCOUNT' && this.isSupportedEngineType(promo)) {
+        // Self-heal semantics: any tier non-null counts as "still has a
+        // matching line". Precedence does NOT prune opt-ins — retention
+        // is about target presence, not about which promo wins.
+        const hasMatchingLine = input.lines.some(
+          (line) => matchTargetTier(promo.targetItems, line) !== null,
         );
         if (hasMatchingLine) {
           targetableManualPromotionIds.push(promo.id);
@@ -282,8 +335,15 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
   private isSupportedEngineType(promo: Promotion): boolean {
     // First slice (Unit 2): PRODUCT_DISCOUNT (PRODUCTS only) + ORDER_DISCOUNT.
     // CATEGORIES/BRANDS / BUY_X_GET_Y / ADVANCED are DEFERRED.
+    //
+    // W4: PRODUCT_DISCOUNT with appliesTo='VARIANTS' is now supported too.
+    // Both PRODUCTS and VARIANTS ride the same `matchTargetTier` helper,
+    // which encodes the VARIANT-wins-over-PRODUCTS precedence.
     if (promo.type === 'ORDER_DISCOUNT') return true;
-    if (promo.type === 'PRODUCT_DISCOUNT' && promo.appliesTo === 'PRODUCTS') {
+    if (
+      promo.type === 'PRODUCT_DISCOUNT' &&
+      (promo.appliesTo === 'PRODUCTS' || promo.appliesTo === 'VARIANTS')
+    ) {
       return true;
     }
     return false;
@@ -321,17 +381,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
       if (!this.passesPromotionWideGates(promo, input)) continue;
 
-      // PRODUCT_DISCOUNT with appliesTo=PRODUCTS, only target DEFAULT side.
+      // PRODUCT_DISCOUNT with appliesTo ∈ {PRODUCTS, VARIANTS}. The
+      // helper returns the specificity tier (or null when no hit).
       if (promo.type !== 'PRODUCT_DISCOUNT') continue;
-      if (promo.appliesTo !== 'PRODUCTS') continue;
 
-      const targetsProduct = promo.targetItems.some(
-        (ti) =>
-          ti.side === 'DEFAULT' &&
-          ti.targetType === 'PRODUCTS' &&
-          ti.targetId === line.productId,
-      );
-      if (!targetsProduct) continue;
+      const tier = matchTargetTier(promo.targetItems, line);
+      if (tier === null) continue;
 
       // Price-list gate — match against resolved global id (C1).
       if (promo.priceLists.length > 0) {
@@ -349,11 +404,23 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       // the entity will apply is the value we rank with.
       if (discountCents <= 0) continue;
 
-      eligible.push({ promotion: promo, discountCents });
+      eligible.push({ promotion: promo, discountCents, tier });
     }
 
     if (eligible.length === 0) return null;
-    return this.pickBestByMaxDiscountThenLowestId(eligible);
+
+    // ── Per-line precedence pre-pass ──
+    // When ANY candidate for this line is tier='VARIANT', drop every
+    // tier='PRODUCT' candidate so the documented best-wins invariant
+    // (max discount, ties→lowest id) runs only on the surviving tier.
+    // Rationale: VARIANT-wins is orthogonal to discount value — it must
+    // hold unconditionally regardless of which promo offers more cents.
+    const hasVariantTier = eligible.some((c) => c.tier === 'VARIANT');
+    const survivors = hasVariantTier
+      ? eligible.filter((c) => c.tier === 'VARIANT')
+      : eligible;
+
+    return this.pickBestByMaxDiscountThenLowestId(survivors);
   }
 
   private computeLineDiscountCents(promo: Promotion, baseline: number): number {

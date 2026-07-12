@@ -558,6 +558,16 @@ export class PromotionsService {
             select: { id: true },
           });
           break;
+        case 'VARIANTS':
+          // Tenant-scoped — symmetric with the PRODUCTS branch. Variants
+          // are tenant-scoped (`Variant.tenantId`, schema.prisma:~456), so
+          // a cross-tenant variant id is filtered out by the tenant
+          // middleware and surfaces here as a not-found row.
+          found = await tenantClient.variant.findMany({
+            where: { id: { in: uniqueIds } },
+            select: { id: true },
+          });
+          break;
         default:
           found = [];
       }
@@ -570,7 +580,9 @@ export class PromotionsService {
             ? 'Category'
             : targetType === 'BRANDS'
               ? 'Brand'
-              : 'Product';
+              : targetType === 'VARIANTS'
+                ? 'Variant'
+                : 'Product';
         throw new InvalidArgumentError(
           `${entityName} with id '${missing}' not found`,
           'INVALID_TARGET',
