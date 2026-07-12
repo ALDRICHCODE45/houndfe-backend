@@ -650,7 +650,31 @@ export class Sale {
       );
     }
 
+    // Capture the per-line promotionId BEFORE the splice. After the
+    // splice the line is gone and we can't ask it for its promo. If the
+    // removed line carried a MANUAL promo and NO other remaining line
+    // still references that promo, the SALE-scoped opt-in set now has
+    // an orphan — opt out so the next `addItem` of a matching product
+    // does NOT re-apply the still-opted-in MANUAL promo (the
+    // resurrection bug — see sales.service.ts:478+ recompute and
+    // SalesService.removeItem for the service-level caller).
+    //
+    // The "no other line still references that promo" guard preserves
+    // the two-lines-same-promo case: a seller who opted a promo in for
+    // two lines and then removed ONE line must NOT silently kill the
+    // opt-in the OTHER line still depends on. (Veto is a different
+    // concept — ban an AUTO promo — and is intentionally NOT used
+    // here; see Sale.addVetoedPromotion for the symmetric cross-clear
+    // and the §3 spec note on the opt-in/veto mutual-exclusion
+    // invariant.)
+    const removedPromotionId = this._items[itemIndex]?.promotionId ?? null;
     this._items.splice(itemIndex, 1);
+    if (
+      removedPromotionId !== null &&
+      !this._items.some((i) => i.promotionId === removedPromotionId)
+    ) {
+      this.optOutManualPromotion(removedPromotionId);
+    }
   }
 
   overrideItemPrice(itemId: string, input: OverrideSaleItemPriceInput): void {
@@ -725,7 +749,32 @@ export class Sale {
         'SALE_ITEM_NOT_FOUND',
       );
     }
+    // Capture the per-line promotionId BEFORE `item.removeDiscount()`
+    // nulls it (clearDiscountFields at sale-item.entity.ts:312-320
+    // resets `_promotionId = null` along with the other discount
+    // fields). After the discount is cleared, opt-out of the MANUAL
+    // promo iff no remaining line still references that promotionId.
+    //
+    // The "no other line still references that promo" guard preserves
+    // the two-lines-same-promo case: a seller who opted a promo in for
+    // two lines and then removed the discount from ONE line must NOT
+    // silently kill the opt-in the OTHER line still depends on. Manual
+    // free-form discounts (input.promotionId == null) leave
+    // `removedPromotionId` as null and skip the opt-out entirely.
+    //
+    // This is the SURGICAL Layer A fix for the resurrection bug. The
+    // durable Layer B self-heal lives in `recomputePromotions`
+    // (sales.service.ts:478+) for opt-ins that escape this path
+    // (e.g. stale opt-ins loaded from a prior session whose target
+    // line was removed before the fix was wired).
+    const removedPromotionId = item.promotionId;
     item.removeDiscount();
+    if (
+      removedPromotionId !== null &&
+      !this._items.some((i) => i.promotionId === removedPromotionId)
+    ) {
+      this.optOutManualPromotion(removedPromotionId);
+    }
   }
 
   removeGlobalDiscount(): Sale {

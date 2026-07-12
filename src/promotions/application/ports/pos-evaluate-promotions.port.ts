@@ -93,6 +93,39 @@ export interface PosEvalResult {
   order: PosEvalOrderResult | null;
   /** Eligible MANUAL promotions the seller could opt-in to (excludes opted-in + vetoed). */
   availableManualPromotions: PosEvalManualCandidate[];
+  /**
+   * The subset of `optedInManualPromotionIds` that STILL has at least one
+   * matching TARGET in the current cart (i.e. is NOT orphaned). Used by
+   * `SalesService.recomputePromotions` to prune opted-in MANUAL promos
+   * whose target is gone (the resurrection-bug self-healer).
+   *
+   * Semantics — distinct from `lines[]` and `availableManualPromotions[]`:
+   *   - `lines[]` reports per-line WINNERS (best-wins); an opted-in MANUAL
+   *     that lost best-wins, or that targets a line currently carrying a
+   *     manual free-form discount, does NOT appear here.
+   *   - `availableManualPromotions[]` reports promos the seller could opt
+   *     in to NOW (eligible + not yet opted-in + not vetoed).
+   *   - `targetableManualPromotionIds` reports the opted-in MANUAL promos
+   *     that still have a TARGET line in the cart (eligibility vs. the
+   *     cart shape, NOT vs. the best-wins ranking or per-line state
+   *     like `hasManualDiscount`).
+   *
+   * Per-promo inclusion rule (computed by the engine):
+   *   - ORDER_DISCOUNT MANUAL + opted-in: ALWAYS included (sale-level;
+   *     never "orphaned" by removal of a specific line — the sale still
+   *     exists, only the cart contents change).
+   *   - PRODUCT_DISCOUNT MANUAL + opted-in: included IFF at least one
+   *     line in the cart matches `promo.targetItems` (side=DEFAULT,
+   *     targetType=PRODUCTS, targetId=line.productId). The per-line
+   *     price-list gate, `hasManualDiscount`, and best-wins loss are
+   *     ALL "temporarily ineligible" — the target is still in the cart,
+   *     so the opt-in is RETAINED.
+   *   - Opted-in MANUAL ids whose promotion is INACTIVE / paused /
+   *     scheduled / customer-scope-blocked / vetoed are NOT included;
+   *     the engine does not look those up here (they're handled by
+   *     `passesPromotionWideGates` upstream).
+   */
+  targetableManualPromotionIds: string[];
 }
 
 export interface IPosEvaluatePromotionsUseCase {

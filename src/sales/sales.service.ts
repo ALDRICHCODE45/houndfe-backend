@@ -520,6 +520,53 @@ export class SalesService {
     } else {
       sale.clearAppliedOrderPromotion();
     }
+
+    // (6) Work Unit 7 — Layer B self-heal: prune opted-in MANUAL promos
+    //     that are ORPHANED (the cart no longer has a matching TARGET
+    //     line for them). The engine reports the distinction via
+    //     `result.targetableManualPromotionIds` (see
+    //     pos-evaluate-promotions.use-case.ts:147+) — the subset of the
+    //     current opt-in set whose target is still in the cart.
+    //
+    //     ORPHANED vs TEMPORARILY-INELIGIBLE — these are distinct, and
+    //     we MUST NOT confuse them. A promo is:
+    //       - ORPHANED: the cart has NO line that the promo's
+    //         targetItems could match. The opt-in has no possible
+    //         application ever. PRUNE.
+    //       - TEMPORARILY-INELIGIBLE: a line IS in the cart that
+    //         matches the target, but the promo can't apply right now
+    //         (line carries hasManualDiscount, price-list mismatch,
+    //         promo lost best-wins, daysOfWeek not today, customer
+    //         scope doesn't match the current customerId, etc.).
+    //         RETAIN — the seller's opt-in is still semantically valid
+    //         and a future state change (manual discount removed,
+    //         price list applied, competing winner gone) re-enables
+    //         the promo without forcing the seller to re-opt-in.
+    //
+    //     The engine's `targetableManualPromotionIds` answers EXACTLY
+    //     the orphaned-vs-ineligible question at the cart-shape level:
+    //     it includes an opted-in MANUAL id IFF the cart has at least
+    //     one line whose productId matches the target. Per-line
+    //     price-list gates, hasManualDiscount, and best-wins ranking
+    //     are NOT considered at this layer — the engine makes that
+    //     distinction in the `targetable` filter (see
+    //     pos-evaluate-promotions.use-case.ts:5b). ORDER_DISCOUNT
+    //     opt-ins are always included (sale-level, never orphaned by
+    //     removing a specific line — the sale still exists).
+    //
+    //     Without this prune, a stale opt-in (e.g. one that persisted
+    //     from a prior session whose target line was removed before
+    //     this fix was wired, or a manual delete from the DB) would
+    //     re-apply the MANUAL promo on the next addItem of ANY
+    //     matching product — the resurrection bug Layer A alone does
+    //     not cover.
+    const targetableSet = new Set(result.targetableManualPromotionIds);
+    const currentOptIns = sale.optedInManualPromotionIds;
+    for (const id of currentOptIns) {
+      if (!targetableSet.has(id)) {
+        sale.optOutManualPromotion(id);
+      }
+    }
   }
 
   /**
@@ -1301,6 +1348,15 @@ export class SalesService {
     }
 
     sale.removeItemDiscount(itemId);
+    // Work Unit 4 — recompute so any remaining promo state and the
+    // sale-level ORDER_DISCOUNT snapshot stay consistent after the
+    // per-line removal. Mirrors `removeItem` at sales.service.ts:903
+    // (which already recomputes). The aggregate-level opt-out in
+    // `sale.removeItemDiscount` (Layer A — sale.entity.ts#removeItemDiscount)
+    // already pruned the orphaned MANUAL opt-in; this recompute is the
+    // engine-level mirror that also catches stale opt-ins that escaped
+    // Layer A (Layer B — see recomputePromotions below).
+    await this.recomputePromotions(sale);
     await this.saleRepo.save(sale);
     this.eventEmitter.emit(
       'sale.item.discount.removed',

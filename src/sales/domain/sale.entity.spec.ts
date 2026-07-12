@@ -1541,6 +1541,182 @@ describe('Sale Entity', () => {
     });
   });
 
+  // ============================================================================
+  // Layer A — Aggregate-level opt-in cleanup on per-line removal.
+  //
+  // BUG: removing a MANUAL promo's line discount (removeItemDiscount) or
+  // deleting the line item (removeItem) cleaned the ITEM but never cleared
+  // the SALE-scoped opt-in set (`optedInManualPromotionIds`). The repo's
+  // `save` is deleteMany+createMany from the entity set (entity is source
+  // of truth), so the stale opt-in was re-persisted on every mutation.
+  // The next `addItem` of a matching product re-applied the still-opted-in
+  // MANUAL promo (engine dropped it from availableManualPromotions), and
+  // the line came back ALREADY discounted with promotionId set. The
+  // conditional opt-out guards below prevent that resurrection while
+  // preserving the "two lines same promo" case (do NOT opt-out while
+  // another line still carries the promo).
+  // ============================================================================
+  describe('opt-in cleanup on per-line removal (resurrection bug)', () => {
+    function makeSaleWithAppliedPromo(args: {
+      items: Array<{
+        id: string;
+        productId: string;
+        unitPriceCents?: number;
+        promotionId: string;
+      }>;
+    }) {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      for (const item of args.items) {
+        sale.addItem({
+          id: item.id,
+          saleId: BASE_SALE_ID,
+          productId: item.productId,
+          variantId: null,
+          productName: item.productId,
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: item.unitPriceCents ?? 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        sale.applyItemDiscount(item.id, {
+          type: 'percentage',
+          percent: 10,
+          discountTitle: '10% off',
+          promotionId: item.promotionId,
+        });
+      }
+      return sale;
+    }
+
+    // (a) RED today: removeItemDiscount on the only line carrying the
+    // MANUAL promo must opt-out of the now-orphaned SALE-level opt-in.
+    it('removeItemDiscount opts out of the MANUAL opt-in when no remaining line carries the promo', () => {
+      const sale = makeSaleWithAppliedPromo({
+        items: [
+          { id: 'item-m-1', productId: 'prod-m', promotionId: 'promo-m' },
+        ],
+      });
+      sale.optInManualPromotion('promo-m');
+      expect(sale.optedInManualPromotionIds).toEqual(['promo-m']);
+
+      sale.removeItemDiscount('item-m-1');
+
+      // The line discount is cleared…
+      expect(sale.items[0].discountType).toBeNull();
+      expect(sale.items[0].promotionId).toBeNull();
+      // …AND the SALE-scoped opt-in must be cleared too, so the next
+      // addItem of a matching product does NOT re-apply promo-m.
+      expect(sale.optedInManualPromotionIds).not.toContain('promo-m');
+    });
+
+    // (b) RED today: removeItem when the only line carrying the MANUAL
+    // promo must opt-out of the SALE-level opt-in. Mirror of (a).
+    it('removeItem opts out of the MANUAL opt-in when the removed line was the only one carrying the promo', () => {
+      const sale = makeSaleWithAppliedPromo({
+        items: [
+          { id: 'item-m-1', productId: 'prod-m', promotionId: 'promo-m' },
+        ],
+      });
+      sale.optInManualPromotion('promo-m');
+      expect(sale.optedInManualPromotionIds).toEqual(['promo-m']);
+
+      sale.removeItem('item-m-1');
+
+      // The line is gone…
+      expect(sale.items).toHaveLength(0);
+      // …AND the SALE-scoped opt-in must be cleared so the next
+      // addItem of a matching product does NOT re-apply promo-m.
+      expect(sale.optedInManualPromotionIds).not.toContain('promo-m');
+    });
+
+    // (c) NEGATIVE guard: two lines share the same MANUAL promo;
+    // removeItemDiscount on ONE must NOT opt-out (the other line still
+    // depends on the opt-in). This is the conditional guard — without
+    // the "no other line has it" check, a seller opting in a promo for
+    // two lines and then removing the discount from one would silently
+    // kill the opt-in for the other.
+    it('removeItemDiscount RETAINS the MANUAL opt-in when another line still carries the same promo', () => {
+      const sale = makeSaleWithAppliedPromo({
+        items: [
+          {
+            id: 'item-shared-1',
+            productId: 'prod-1',
+            promotionId: 'promo-shared',
+          },
+          {
+            id: 'item-shared-2',
+            productId: 'prod-2',
+            promotionId: 'promo-shared',
+          },
+        ],
+      });
+      sale.optInManualPromotion('promo-shared');
+      expect(sale.optedInManualPromotionIds).toEqual(['promo-shared']);
+
+      sale.removeItemDiscount('item-shared-1');
+
+      // First line cleared…
+      expect(sale.items[0].discountType).toBeNull();
+      expect(sale.items[0].promotionId).toBeNull();
+      // …but the second line still carries the promo, so the opt-in
+      // must be RETAINED.
+      expect(sale.optedInManualPromotionIds).toContain('promo-shared');
+    });
+
+    // Symmetric negative guard for removeItem.
+    it('removeItem RETAINS the MANUAL opt-in when another line still carries the same promo', () => {
+      const sale = makeSaleWithAppliedPromo({
+        items: [
+          {
+            id: 'item-shared-1',
+            productId: 'prod-1',
+            promotionId: 'promo-shared',
+          },
+          {
+            id: 'item-shared-2',
+            productId: 'prod-2',
+            promotionId: 'promo-shared',
+          },
+        ],
+      });
+      sale.optInManualPromotion('promo-shared');
+
+      sale.removeItem('item-shared-1');
+
+      expect(sale.items).toHaveLength(1);
+      // The remaining line still carries promo-shared → opt-in RETAINED.
+      expect(sale.optedInManualPromotionIds).toContain('promo-shared');
+    });
+
+    // Boundary: removeItemDiscount on a line with a MANUAL FREE-FORM
+    // discount (no promotionId) must NOT touch the opt-in set at all.
+    // The pre-fix behavior was a no-op for the line state and stays a
+    // no-op for the opt-in set.
+    it('removeItemDiscount on a manual free-form discount leaves the opt-in set untouched', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-mf',
+        saleId: BASE_SALE_ID,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.applyItemDiscount('item-mf', { type: 'amount', amountCents: 100 });
+      sale.optInManualPromotion('promo-m');
+      const beforeOptIn = [...sale.optedInManualPromotionIds];
+
+      sale.removeItemDiscount('item-mf');
+
+      // Manual free-form line had promotionId=null, so the conditional
+      // guard MUST skip the opt-out. The opt-in set is unchanged.
+      expect(sale.optedInManualPromotionIds).toEqual(beforeOptIn);
+    });
+  });
+
   // ── Delivery Metadata (Slice 6: bot sales) ──────────────────────────────────
 
   describe('setDeliveryMetadata - update carrier/tracking/ETA', () => {

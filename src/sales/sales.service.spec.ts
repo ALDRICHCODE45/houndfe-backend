@@ -74,6 +74,10 @@ function makeMockProductsService() {
  * `SalesService.recomputePromotions(sale)` driving port. Default mock
  * returns empty `lines` / null `order` so the existing tests stay green
  * when recompute is wired (a no-op when no promotions match).
+ *
+ * `targetableManualPromotionIds: []` is the Work Unit 7 self-heal
+ * signal: opted-in MANUAL promos whose target is gone. Default is
+ * empty (no opt-ins at all = nothing to prune).
  */
 function makeMockPosEvaluateUseCase() {
   return {
@@ -81,6 +85,7 @@ function makeMockPosEvaluateUseCase() {
       lines: [],
       order: null,
       availableManualPromotions: [],
+      targetableManualPromotionIds: [],
     }),
   } as any;
 }
@@ -4580,6 +4585,7 @@ describe('SalesService', () => {
             : [],
           order: null,
           availableManualPromotions: [],
+          targetableManualPromotionIds: [],
         });
       });
 
@@ -4653,6 +4659,7 @@ describe('SalesService', () => {
             : [],
           order: null,
           availableManualPromotions: [],
+          targetableManualPromotionIds: [],
         });
       });
 
@@ -4760,6 +4767,7 @@ describe('SalesService', () => {
         ],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       await service.updateItemQuantity(saleId, 'user-1', itemId, {
@@ -4821,6 +4829,7 @@ describe('SalesService', () => {
         lines: [],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       const result = await service.removeItem(saleId, 'user-1', itemAId);
@@ -4891,6 +4900,7 @@ describe('SalesService', () => {
         ],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       // findDraftResponseById reload for the response.
@@ -4959,6 +4969,7 @@ describe('SalesService', () => {
         lines: [],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       const result = await service.addItem(saleId, 'user-1', {
@@ -5181,6 +5192,7 @@ describe('SalesService', () => {
             : [],
           order: null,
           availableManualPromotions: [],
+          targetableManualPromotionIds: [],
         });
       });
 
@@ -5273,6 +5285,7 @@ describe('SalesService', () => {
           discountAmountCents: 500,
         },
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       const result = await service.chargeDraft(
@@ -5557,6 +5570,7 @@ describe('SalesService', () => {
               : [],
           order: null,
           availableManualPromotions: [],
+          targetableManualPromotionIds: [],
         });
       });
 
@@ -5602,6 +5616,14 @@ describe('SalesService', () => {
             : [],
         order: null,
         availableManualPromotions: [],
+        // Work Unit 7 — Layer B self-heal signal: the cart has a line
+        // for `prod-1` (via buildDraftSaleWithItem) and the promo
+        // targets it, so 'promo-m-1' IS in the targetable set. The
+        // recompute prunes opted-in ids that are NOT in this set
+        // (orphaned) — the test's intent is "opt-in is retained after
+        // reactivation", which requires the engine to report it as
+        // targetable here.
+        targetableManualPromotionIds: ['promo-m-1'],
       }));
 
       await service.applyManualPromotion(saleId, 'user-1', 'promo-m-1');
@@ -5691,6 +5713,7 @@ describe('SalesService', () => {
         lines: [],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       // Removing a non-opted-in id should NOT throw, just be idempotent.
@@ -5725,6 +5748,7 @@ describe('SalesService', () => {
             : [],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       }));
 
       await service.removeAppliedPromotion(saleId, 'user-1', 'promo-auto-1');
@@ -5750,6 +5774,7 @@ describe('SalesService', () => {
         lines: [],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       await expect(
@@ -5788,7 +5813,8 @@ describe('SalesService', () => {
       // After opt-out, the engine no longer considers the id opted-in.
       posEvaluateUseCase.evaluate.mockImplementation((input) => ({
         lines:
-          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1')
+          input.lines[0] &&
+          input.optedInManualPromotionIds.includes('promo-m-1')
             ? [
                 {
                   itemId: input.lines[0].itemId,
@@ -5836,7 +5862,8 @@ describe('SalesService', () => {
       posEvaluateUseCase.evaluate.mockImplementation((input) => {
         callIndex += 1;
         const isOptIn =
-          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1');
+          input.lines[0] &&
+          input.optedInManualPromotionIds.includes('promo-m-1');
         return Promise.resolve({
           lines: isOptIn
             ? [
@@ -5851,6 +5878,7 @@ describe('SalesService', () => {
             : [],
           order: null,
           availableManualPromotions: [],
+          targetableManualPromotionIds: [],
         });
       });
 
@@ -5869,7 +5897,10 @@ describe('SalesService', () => {
 
     it('6.4b — removeAppliedPromotion on an AUTOMATIC (non-opted-in) id still vetoes (existing behavior preserved)', async () => {
       const saleId = 'sale-u6-remove-applied-auto';
-      const sale = buildDraftSaleWithItem(saleId, 'item-u6-remove-applied-auto');
+      const sale = buildDraftSaleWithItem(
+        saleId,
+        'item-u6-remove-applied-auto',
+      );
       // Sanity: no opt-in for this id.
       expect(sale.optedInManualPromotionIds).not.toContain('promo-auto-1');
       saleRepo.findById.mockResolvedValue(sale);
@@ -5889,6 +5920,7 @@ describe('SalesService', () => {
             : [],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       }));
 
       await service.removeAppliedPromotion(saleId, 'user-1', 'promo-auto-1');
@@ -5912,6 +5944,7 @@ describe('SalesService', () => {
         lines: [],
         order: null,
         availableManualPromotions: [],
+        targetableManualPromotionIds: [],
       });
 
       await service.removeManualPromotion(saleId, 'user-1', 'promo-m-1');
@@ -5931,7 +5964,8 @@ describe('SalesService', () => {
 
       posEvaluateUseCase.evaluate.mockImplementation((input) => ({
         lines:
-          input.lines[0] && input.optedInManualPromotionIds.includes('promo-m-1')
+          input.lines[0] &&
+          input.optedInManualPromotionIds.includes('promo-m-1')
             ? [
                 {
                   itemId: input.lines[0].itemId,
@@ -5944,6 +5978,13 @@ describe('SalesService', () => {
             : [],
         order: null,
         availableManualPromotions: [],
+        // Work Unit 7 — Layer B self-heal signal: the cart has a line
+        // for `prod-1` (via buildDraftSaleWithItem) and the promo
+        // targets it, so 'promo-m-1' IS targetable. The recompute
+        // prunes opted-in ids that are NOT in this set; this test's
+        // intent is "opt-in is retained", which requires the engine
+        // to report it as targetable here.
+        targetableManualPromotionIds: ['promo-m-1'],
       }));
 
       await service.applyManualPromotion(saleId, 'user-1', 'promo-m-1');
@@ -5991,6 +6032,287 @@ describe('SalesService', () => {
       expect(proto).toContain('removeManualPromotion');
       expect(proto).toContain('removeAppliedPromotion');
       expect(proto).toContain('listApplicablePromotions');
+    });
+  });
+
+  // ============================================================================
+  // Work Unit 7 — MANUAL promo resurrection bug (opt-in stale after
+  // removeItemDiscount + removeItem) — Layer A + Layer B.
+  //
+  // BUG: the SALE-scoped opt-in set `optedInManualPromotionIds` was
+  // NEVER cleared by item-level remove paths. Removing a promo's line
+  // discount or deleting the line item cleaned the ITEM but left the
+  // OPT-IN record intact; `saleRepo.save` re-persisted it (the entity is
+  // source of truth, see prisma-sale.repository.ts save's
+  // `deleteMany + createMany` from `_optedInManualPromotionIds`). The
+  // next `addItem` of a matching product re-applied the still-opted-in
+  // MANUAL promo (engine dropped it from `availableManualPromotions`).
+  //
+  // FIX (two layers — see sales.service.ts:478+):
+  //   A. Aggregate cleanup — `Sale.removeItemDiscount` and
+  //      `Sale.removeItem` conditionally opt-out of the MANUAL promo,
+  //      but ONLY when no other line still carries the same
+  //      promotionId (the "two lines same promo" guard).
+  //   B. Self-heal — `recomputePromotions` prunes opted-in MANUAL
+  //      promos whose target line is gone (ORPHANED) using a new
+  //      engine signal `result.targetableManualPromotionIds`. This
+  //      closes ALL orphaning paths (e.g. a stale opt-in that
+  //      persisted from a prior session, or a cart-shape change that
+  //      removed the only matching line).
+  // ============================================================================
+  describe('Work Unit 7 — MANUAL promo resurrection (opt-in stale after remove paths)', () => {
+    /**
+     * Stateful engine mock — the centerpiece of the resurrection test.
+     *
+     * Emits a MANUAL line result IFF the id is in the opt-in set AND a
+     * line for `prod-1` is in the cart (i.e. the engine has a target to
+     * apply the promo to). `targetableManualPromotionIds` follows the
+     * same rule (the engine's Layer B signal). When not opted-in (or
+     * when the line is gone), the promo re-appears in
+     * `availableManualPromotions`.
+     */
+    function installResurrectionEngineMock() {
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const hasProd1Line = input.lines.some(
+          (l: { productId: string }) => l.productId === 'prod-1',
+        );
+        const isOptIn = input.optedInManualPromotionIds.includes('promo-m-1');
+        if (hasProd1Line && isOptIn) {
+          const line = input.lines[0];
+          return Promise.resolve({
+            lines: [
+              {
+                itemId: line.itemId,
+                promotionId: 'promo-m-1',
+                discountType: 'percentage',
+                discountValue: 10,
+                discountTitle: '10% off',
+              },
+            ],
+            order: null,
+            availableManualPromotions: [],
+            targetableManualPromotionIds: ['promo-m-1'],
+          });
+        }
+        return Promise.resolve({
+          lines: [],
+          order: null,
+          availableManualPromotions: [
+            {
+              id: 'promo-m-1',
+              title: '10% off',
+              type: 'PRODUCT_DISCOUNT',
+            },
+          ],
+          targetableManualPromotionIds: [],
+        });
+      });
+    }
+
+    // Layer A regression — full resurrection scenario.
+    // Drive: addItem → applyManual → removeItemDiscount → removeItem →
+    //        addItem(same product).
+    // Assert: the re-added line comes back WITHOUT a discount and the
+    //         applicable-promotions list is non-empty (promo re-listed).
+    it('resurrection: re-adding the same product after removeItemDiscount + removeItem does NOT carry the discount forward', async () => {
+      const saleId = 'sale-u7-resurrection';
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'Paracetamol',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+        imageUrl: null,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      installResurrectionEngineMock();
+
+      // (1) addItem(prod-1) — opt-in is empty, engine returns no line.
+      const add1 = await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 1,
+      });
+      const itemId = add1.items[0].id;
+      expect(add1.items[0].promotionId).toBeNull();
+      expect(add1.items[0].unitPriceCents).toBe(1000);
+
+      // (2) applyManualPromotion('promo-m-1') — opt-in is added,
+      //     engine returns the line; the discount is applied.
+      const applied = await service.applyManualPromotion(
+        saleId,
+        'user-1',
+        'promo-m-1',
+      );
+      expect(applied.items[0].promotionId).toBe('promo-m-1');
+      expect(applied.items[0].discountType).toBe('percentage');
+      expect(applied.items[0].unitPriceCents).toBe(900);
+
+      // (3) removeItemDiscount — Layer A opts out (no other line carries
+      //     the promo). recompute sees empty opt-in → no line.
+      const removed = await service.removeItemDiscount(
+        saleId,
+        itemId,
+        'user-1',
+      );
+      expect(removed.items[0].discountType).toBeNull();
+      expect(removed.items[0].promotionId).toBeNull();
+      // The opt-in set MUST be cleared (Layer A) — this is the assertion
+      // that fails RED before the fix.
+      const savedAfterRemoveDiscount = saleRepo.save.mock.calls.at(
+        -1,
+      )?.[0] as Sale;
+      expect(savedAfterRemoveDiscount.optedInManualPromotionIds).not.toContain(
+        'promo-m-1',
+      );
+
+      // (4) removeItem — cart is empty; nothing to opt-out from.
+      const noItem = await service.removeItem(saleId, 'user-1', itemId);
+      expect(noItem.items).toHaveLength(0);
+
+      // (5) addItem(prod-1) again — opt-in is still empty (Layer A
+      //     cleared it in step 3), so the engine returns no line. The
+      //     new line comes back WITHOUT the discount.
+      const readded = await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 1,
+      });
+      expect(readded.items[0].discountType).toBeNull();
+      expect(readded.items[0].promotionId).toBeNull();
+      expect(readded.items[0].unitPriceCents).toBe(1000);
+
+      // (6) listApplicablePromotions — the promo is back on the shelf
+      //     because the opt-in was cleared in step 3.
+      const list = await service.listApplicablePromotions(saleId, 'user-1');
+      expect(list.promotions).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: 'promo-m-1' })]),
+      );
+    });
+
+    // Layer B — orphaned opt-in self-heal on recompute.
+    // Drive: cart has no line for 'prod-gone', opt-in still references
+    //        'promo-m-orphan' from a prior session. Engine signals
+    //        it's not targetable. recompute prunes.
+    it('Layer B: recompute prunes opted-in MANUAL promos whose target line is gone (ORPHANED)', async () => {
+      const saleId = 'sale-u7-orphan';
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      // Stale opt-in from a prior session — the only line that targeted
+      // this promo was removed in a prior request. The draft was
+      // reloaded with the stale opt-in still in the set.
+      sale.optInManualPromotion('promo-m-orphan');
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-other',
+        productName: 'Other',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 500,
+        imageUrl: null,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      // Engine signals: 'promo-m-orphan' is opted-in but NOT in
+      // targetableManualPromotionIds (no line in the cart matches its
+      // targetItems). Layer B is the prune on this signal.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [], // empty: orphan
+      });
+
+      // Trigger a recompute via addItem of an UNRELATED product. The
+      // recompute is the layer-B side-effect we are testing.
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-other',
+        variantId: null,
+        quantity: 1,
+      });
+
+      // The orphan must have been pruned from the opted-in set.
+      const saved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(saved.optedInManualPromotionIds).not.toContain('promo-m-orphan');
+    });
+
+    // Layer B — temporarily-ineligible opt-in is RETAINED.
+    // Drive: cart has a line for 'prod-1' WITH a manual free-form discount
+    //        (so the line has `hasManualDiscount=true` and the engine
+    //        won't apply the MANUAL promo to it). The line is PRESENT
+    //        and matches the target, so the promo IS targetable.
+    //        recompute must RETAIN the opt-in.
+    it('Layer B: recompute RETAINS opted-in MANUAL promos whose target line is present but currently blocked (hasManualDiscount)', async () => {
+      const saleId = 'sale-u7-retain';
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      // Build a sale with: (a) a line for prod-1 carrying a manual
+      // free-form discount (no promotionId), and (b) an opted-in
+      // MANUAL promo targeting prod-1. The engine will see
+      // `hasManualDiscount=true` for the line → won't apply the
+      // MANUAL promo to it. But the line IS in the cart and matches
+      // the target, so the engine's `targetableManualPromotionIds`
+      // includes the id (Layer B's RETAIN signal).
+      sale.addItem({
+        id: 'item-retain',
+        saleId,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.applyItemDiscount('item-retain', {
+        type: 'amount',
+        amountCents: 100,
+      });
+      sale.optInManualPromotion('promo-m-1');
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-other',
+        productName: 'Other',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 500,
+        imageUrl: null,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      // Engine signals: opt-in is there, line is present and matches
+      // the target, so 'promo-m-1' IS in targetableManualPromotionIds
+      // (the line is "in stock" for the promo). No `lines[]` because
+      // the line has hasManualDiscount.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: ['promo-m-1'],
+      });
+
+      // Trigger a recompute via addItem of an unrelated product.
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-other',
+        variantId: null,
+        quantity: 1,
+      });
+
+      // The opt-in MUST be retained — the line is present, the promo
+      // is targetable. The seller removing the manual free-form
+      // discount would re-enable the MANUAL promo on the same line
+      // without needing to re-opt-in.
+      const saved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      expect(saved.optedInManualPromotionIds).toContain('promo-m-1');
     });
   });
 });

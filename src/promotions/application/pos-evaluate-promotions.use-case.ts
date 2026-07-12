@@ -167,10 +167,81 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         }),
       );
 
+    // 5b. targetableManualPromotionIds — the subset of
+    //     `optedInManualPromotionIds` that still has at least one matching
+    //     TARGET line in the current cart (i.e. is NOT orphaned). Consumed
+    //     by `SalesService.recomputePromotions` to prune opted-in MANUAL
+    //     promos whose target was removed (the resurrection-bug
+    //     self-healer — Layer B of the Work Unit 7 fix).
+    //
+    //     Rule per id (matches the engine's other MANUAL-only paths):
+    //     - MANUAL only (AUTOMATIC opt-in is not a thing).
+    //     - Not in the veto set (veto wins for symmetry with the line +
+    //       order best-wins branches; same corrupt-draft self-heal).
+    //     - ORDER_DISCOUNT: ALWAYS included (sale-level; the sale
+    //       still exists, only the cart contents change). This
+    //       intentionally leaves ORDER_DISCOUNT opt-ins "indefinitely
+    //       targetable" — even an empty cart retains the opt-in so the
+    //       seller can re-add items later and have the order discount
+    //       apply without re-opting-in.
+    //     - PRODUCT_DISCOUNT (appliesTo=PRODUCTS only — same gate as the
+    //       line-ranker): included IFF at least one line in the cart
+    //       matches `promo.targetItems` (side=DEFAULT,
+    //       targetType=PRODUCTS, targetId=line.productId). The per-line
+    //       price-list gate, `hasManualDiscount`, and best-wins loss
+    //       are ALL "temporarily ineligible" — the target is still in
+    //       the cart, so the opt-in is RETAINED.
+    //
+    //     Promotion-wide gates (status / daysOfWeek / customerScope /
+    //     supported engine type) are intentionally NOT applied here.
+    //     Rationale: those gates describe the PROMO's validity, not
+    //     the cart's shape. A paused / scheduled / customer-scope-
+    //     blocked promo is "not eligible right now" but its opt-in
+    //     should still be retained so a future state change re-enables
+    //     it without forcing the seller to re-opt-in. The cross-clear
+    //     invariant (vetoed ids are dropped by the `vetoedPromotionIds`
+    //     branch above) keeps the corrupt-state guard.
+    const targetableManualPromotionIds: string[] = [];
+    for (const promo of candidates) {
+      if (promo.method !== 'MANUAL') continue;
+      if (!input.optedInManualPromotionIds.includes(promo.id)) continue;
+      if (input.vetoedPromotionIds.includes(promo.id)) continue;
+      // Supported engine type: BUY_X_GET_Y / CATEGORIES / BRANDS / etc.
+      // are deferred (see `isSupportedEngineType`). The opt-in for an
+      // unsupported promo is a degenerate case (the engine will never
+      // apply it), but we still retain it — that's the same
+      // "temporarily ineligible" semantics as daysOfWeek / customerScope
+      // and keeps the surface symmetric.
+      if (!this.isSupportedEngineType(promo)) continue;
+
+      if (promo.type === 'ORDER_DISCOUNT') {
+        // Sale-level: always targetable as long as the sale exists.
+        targetableManualPromotionIds.push(promo.id);
+        continue;
+      }
+      // PRODUCT_DISCOUNT (with appliesTo=PRODUCTS — isSupportedEngineType
+      // already gated the other applyTo branches). At least one line in
+      // the cart must match the target.
+      if (promo.type === 'PRODUCT_DISCOUNT' && promo.appliesTo === 'PRODUCTS') {
+        const hasMatchingLine = input.lines.some((line) =>
+          promo.targetItems.some(
+            (ti) =>
+              ti.side === 'DEFAULT' &&
+              ti.targetType === 'PRODUCTS' &&
+              ti.targetId === line.productId,
+          ),
+        );
+        if (hasMatchingLine) {
+          targetableManualPromotionIds.push(promo.id);
+        }
+      }
+    }
+
     return {
       lines: lineResults,
       order: orderResult,
       availableManualPromotions,
+      targetableManualPromotionIds,
     };
   }
 
