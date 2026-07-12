@@ -36,6 +36,7 @@ export enum PromotionTargetTypeEnum {
   CATEGORIES = 'CATEGORIES',
   BRANDS = 'BRANDS',
   PRODUCTS = 'PRODUCTS',
+  VARIANTS = 'VARIANTS',
 }
 
 export enum CustomerScopeEnum {
