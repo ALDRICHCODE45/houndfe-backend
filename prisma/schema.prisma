@@ -90,6 +90,7 @@ enum PromotionTargetType {
   CATEGORIES
   BRANDS
   PRODUCTS
+  VARIANTS
 }
 
 enum CustomerScope {
