@@ -204,6 +204,18 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async findById(id: string): Promise<Sale | null> {
     const prisma = this.tenantPrisma.getClient();
+    // Explicit tenantId on the nested promotion-junction includes.
+    // createTenantScopedPrisma only injects tenantId at the TOP-LEVEL
+    // `where` / `data` and never recurses into nested `include` clauses
+    // (see src/shared/prisma/tenant-prisma.factory.ts), and
+    // SalePromotionOptIn / Veto / Applied are intentionally NOT in
+    // TENANT_SCOPED_MODELS — so the include must filter EXPLICITLY to
+    // match save's tenant-scoped deleteMany (mirrors the project
+    // convention used by price-lists.service.ts for non-allowlisted
+    // nested relations). Without this, a row from a different tenant
+    // leaks into `optedInManualPromotionIds` and the engine auto-applies
+    // a MANUAL promo with zero legitimate opt-in.
+    const tenantId = this.requireTenantId();
     const saleData = await prisma.sale.findUnique({
       where: { id },
       include: {
@@ -214,14 +226,16 @@ export class PrismaSaleRepository implements ISaleRepository {
         // discount. Item-level promotionId flows through `items: true`.
         promotionVetoes: {
           select: { promotionId: true },
+          where: { tenantId },
         },
         // Unit 6 close-out: load MANUAL opt-in set so a reload preserves the
         // seller's opt-in across draft mutations (addItem, assignCustomer,
         // etc.). Without this, a recompute drops the manual line discount.
         promotionOptIns: {
           select: { promotionId: true },
+          where: { tenantId },
         },
-        appliedPromotion: true,
+        appliedPromotion: { where: { tenantId } },
       },
     });
 
@@ -299,6 +313,11 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async findDraftResponseById(id: string): Promise<DraftSaleResponse | null> {
     const prisma = this.tenantPrisma.getClient();
+    // See findById above for why we pass `where: { tenantId }` on the
+    // promotion-junction includes (createTenantScopedPrisma does NOT
+    // recurse into nested includes; the convention is to filter
+    // EXPLICITLY — same as price-lists.service.ts).
+    const tenantId = this.requireTenantId();
     const saleData = await prisma.sale.findUnique({
       where: { id },
       include: {
@@ -326,13 +345,15 @@ export class PrismaSaleRepository implements ISaleRepository {
         // Unit 3 — W2: load veto + applied-promo for draft preview.
         promotionVetoes: {
           select: { promotionId: true },
+          where: { tenantId },
         },
         // Unit 6 close-out: load MANUAL opt-in set so draft preview totals
         // and recompute paths see the seller's opt-in.
         promotionOptIns: {
           select: { promotionId: true },
+          where: { tenantId },
         },
-        appliedPromotion: true,
+        appliedPromotion: { where: { tenantId } },
       },
     });
 
@@ -447,6 +468,11 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async findDraftsByUserId(userId: string): Promise<Sale[]> {
     const prisma = this.tenantPrisma.getClient();
+    // See findById above for why we pass `where: { tenantId }` on the
+    // promotion-junction includes (createTenantScopedPrisma does NOT
+    // recurse into nested includes; the convention is to filter
+    // EXPLICITLY — same as price-lists.service.ts).
+    const tenantId = this.requireTenantId();
     const sales = await prisma.sale.findMany({
       where: {
         userId,
@@ -456,11 +482,11 @@ export class PrismaSaleRepository implements ISaleRepository {
         items: true,
         shippingAddress: { select: { id: true } },
         // Unit 3 — W2: load veto + applied-promo on the draft-list path too.
-        promotionVetoes: { select: { promotionId: true } },
+        promotionVetoes: { select: { promotionId: true }, where: { tenantId } },
         // Unit 6 close-out: load MANUAL opt-in set on the draft-list path so
         // every draft the user owns surfaces its opt-in state.
-        promotionOptIns: { select: { promotionId: true } },
-        appliedPromotion: true,
+        promotionOptIns: { select: { promotionId: true }, where: { tenantId } },
+        appliedPromotion: { where: { tenantId } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -551,6 +577,10 @@ export class PrismaSaleRepository implements ISaleRepository {
       WHERE id = ${id} AND "tenantId" = ${tenantId}
       FOR UPDATE
     `;
+    // Same `where: { tenantId }` pattern as the other read paths — see
+    // findById for the full rationale (createTenantScopedPrisma does NOT
+    // recurse into nested includes; the convention is to filter
+    // EXPLICITLY).
     const saleData = await prisma.sale.findFirst({
       where: { id, tenantId },
       include: {
@@ -559,11 +589,11 @@ export class PrismaSaleRepository implements ISaleRepository {
         // Unit 3 — W2: charge path needs veto + applied-promo so the
         // charge-time recompute excludes vetoed ids and keeps the order
         // discount consistent with the draft preview.
-        promotionVetoes: { select: { promotionId: true } },
+        promotionVetoes: { select: { promotionId: true }, where: { tenantId } },
         // Unit 6 close-out: charge path needs the MANUAL opt-in set so the
         // charge-time recompute respects the seller's manual picks.
-        promotionOptIns: { select: { promotionId: true } },
-        appliedPromotion: true,
+        promotionOptIns: { select: { promotionId: true }, where: { tenantId } },
+        appliedPromotion: { where: { tenantId } },
       },
     });
 

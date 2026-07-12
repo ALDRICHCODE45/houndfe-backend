@@ -74,6 +74,16 @@ export interface PosEvalManualCandidate {
   id: string;
   title: string;
   type: 'PRODUCT_DISCOUNT' | 'ORDER_DISCOUNT';
+  /**
+   * Promotion method discriminator. Today every candidate in
+   * `availableManualPromotions` is MANUAL by construction (the engine
+   * filter at pos-evaluate-promotions.use-case.ts:147 only emits promos
+   * where `promo.method === 'MANUAL'`), but the field is exposed
+   * explicitly on the wire so the frontend can distinguish available
+   * MANUAL promos from applied ones without inferring from context, and
+   * never auto-opt-in to a candidate that doesn't carry `method='MANUAL'`.
+   */
+  method: 'MANUAL';
 }
 
 export interface PosEvalResult {

@@ -2931,6 +2931,120 @@ describe('PrismaSaleRepository', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Cross-tenant opt-in leak fix — tenant-symmetric reads.
+  //
+  // BUG: `save` clears opt-in / veto / applied rows tenant-scoped
+  // (`where: { saleId, tenantId }`), but the four read mappers include these
+  // junction tables WITHOUT a tenant filter. The createTenantScopedPrisma
+  // extension (src/shared/prisma/tenant-prisma.factory.ts) only injects
+  // tenantId at the TOP-LEVEL `where` / `data` and never recurses into
+  // nested `include` clauses, and SalePromotionOptIn / Veto / Applied are
+  // intentionally NOT in TENANT_SCOPED_MODELS. Net effect: a row belonging
+  // to a DIFFERENT tenant is read (and ends up in
+  // `optedInManualPromotionIds`, then applied by the engine) but never
+  // cleared. A MANUAL POS promotion auto-applies on addItem with zero
+  // legitimate opt-ins.
+  //
+  // FIX (this block): every read mapper that includes any of these junction
+  // tables MUST pass `where: { tenantId }` on the include — mirroring the
+  // save-side symmetry (price-lists.service.ts:42-50 is the project
+  // exemplar). These four tests are the regression guard; they prove the
+  // SQL constraint is in the query argument, which is what translates into
+  // `WHERE tenantId = ?` at execution time.
+  // ---------------------------------------------------------------------------
+  describe('tenant-symmetric reads for promotion junction tables', () => {
+    // Helper: extract the include object from the last findUnique /
+    // findFirst / findMany call the repo made. The find* call HAS already
+    // happened by the time the mapper short-circuits on null, so the
+    // `include` argument is captured in `mock.calls` even when we mock the
+    // resolved value to `null`.
+    function lastFindCallInclude(
+      method: 'findUnique' | 'findFirst' | 'findMany',
+    ): Record<string, unknown> {
+      const mock = prisma.sale[method];
+      const call = mock.mock.calls.at(-1)?.[0] as
+        | { include?: Record<string, unknown> }
+        | undefined;
+      if (!call?.include) {
+        throw new Error(
+          `Expected ${method} to be called with an include clause`,
+        );
+      }
+      return call.include;
+    }
+
+    function expectJunctionFilters(
+      include: Record<string, unknown>,
+      tenantId = 'tenant-1',
+    ) {
+      // promotionOptIns / promotionVetoes are plural: include shape is
+      // `{ select, where }` (or at minimum carries a `where`).
+      expect(include.promotionOptIns).toEqual(
+        expect.objectContaining({ where: { tenantId } }),
+      );
+      expect(include.promotionVetoes).toEqual(
+        expect.objectContaining({ where: { tenantId } }),
+      );
+      // appliedPromotion is a singular 1-to-0..1 relation (`SalePromotionApplied?`):
+      // Prisma supports `where` on singular includes too (confirmed in
+      // generated Sale$appliedPromotionArgs). Mirrors save-side deleteMany.
+      expect(include.appliedPromotion).toEqual(
+        expect.objectContaining({ where: { tenantId } }),
+      );
+    }
+
+    // ---- 1. findById ----
+    describe('findById filters promotion junction tables by tenantId', () => {
+      it('passes where: { tenantId } on every promotion junction include', async () => {
+        // Null short-circuits the mapper; we only need the include arg.
+        prisma.sale.findUnique.mockResolvedValue(null);
+
+        await repo.findById('sale-tenant-read');
+
+        const include = lastFindCallInclude('findUnique');
+        expectJunctionFilters(include);
+      });
+    });
+
+    // ---- 2. findDraftResponseById ----
+    describe('findDraftResponseById filters promotion junction tables by tenantId', () => {
+      it('passes where: { tenantId } on every promotion junction include', async () => {
+        prisma.sale.findUnique.mockResolvedValue(null);
+
+        await repo.findDraftResponseById('sale-tenant-read');
+
+        const include = lastFindCallInclude('findUnique');
+        expectJunctionFilters(include);
+      });
+    });
+
+    // ---- 3. findDraftsByUserId ----
+    describe('findDraftsByUserId filters promotion junction tables by tenantId', () => {
+      it('passes where: { tenantId } on every promotion junction include', async () => {
+        prisma.sale.findMany.mockResolvedValue([]);
+
+        await repo.findDraftsByUserId('user-1');
+
+        const include = lastFindCallInclude('findMany');
+        expectJunctionFilters(include);
+      });
+    });
+
+    // ---- 4. findByIdForUpdate ----
+    describe('findByIdForUpdate filters promotion junction tables by tenantId', () => {
+      it('passes where: { tenantId } on every promotion junction include', async () => {
+        prisma.$queryRaw.mockResolvedValue([]);
+        prisma.sale.findFirst.mockResolvedValue(null);
+
+        await repo.findByIdForUpdate('sale-tenant-read');
+
+        const include = lastFindCallInclude('findFirst');
+        expectJunctionFilters(include);
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Work Unit 5 — Tasks 5.6, 5.7, 5.8 (W1 + W2 + C2 charge persistence)
   //
   // `persistChargeConfirmation` previously wrote ONLY the Sale row + SalePayment

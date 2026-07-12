@@ -158,6 +158,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
             promo.type === 'ORDER_DISCOUNT'
               ? 'ORDER_DISCOUNT'
               : 'PRODUCT_DISCOUNT',
+          // The filter above already pinned `promo.method === 'MANUAL'`, so
+          // this is a constant — exposed on the wire (b84aab7) so the
+          // frontend can confirm the candidate is MANUAL before offering
+          // opt-in. The Promotion.method enum also has AUTOMATIC, but that
+          // branch never reaches this mapper.
+          method: 'MANUAL',
         }),
       );
 
