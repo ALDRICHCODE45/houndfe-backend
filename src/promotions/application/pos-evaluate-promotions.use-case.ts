@@ -51,6 +51,59 @@ export function clampPercentageToSafeRange(percent: number): number {
   return Math.min(Math.max(Math.trunc(percent), 1), 99);
 }
 
+/**
+ * Tier returned by `matchTargetTier` — encodes BOTH "did the target
+ * hit this line?" AND "which specificity won?" in a single value, so
+ * the engine never needs a second predicate pass.
+ *
+ *   - 'VARIANT' : a VARIANTS-typed target hit the line's variantId.
+ *   - 'PRODUCT' : no VARIANTS hit, but a PRODUCTS-typed target hit the
+ *                 line's productId (back-compat: a PRODUCTS promo on
+ *                 product P1 still matches EVERY variant of P1).
+ *   - null      : no DEFAULT-side target hit the line.
+ */
+export type LineMatchTier = 'VARIANT' | 'PRODUCT' | null;
+
+/**
+ * Match predicate — pure, exported for both testability AND future
+ * reuse (online/cart engine `evaluate-cart-promotions.use-case.ts`).
+ *
+ * Specificity rule: VARIANTS wins over PRODUCTS when both hit the
+ * same line. The pre-pass in `pickBestPerLine` further drops any
+ * tier='PRODUCT' candidate when ANY candidate for that line is
+ * tier='VARIANT' (orthogonal filter; best-wins invariant untouched).
+ */
+export function matchTargetTier(
+  targetItems: ReadonlyArray<{ side: string; targetType: string; targetId: string }>,
+  line: { productId: string; variantId: string | null },
+): LineMatchTier {
+  const side = 'DEFAULT';
+  // VARIANTS first — strict === null on variantId so an unset variant
+  // never matches (defensive: structural guarantee).
+  if (
+    line.variantId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'VARIANTS' &&
+        ti.targetId === line.variantId,
+    )
+  ) {
+    return 'VARIANT';
+  }
+  if (
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'PRODUCTS' &&
+        ti.targetId === line.productId,
+    )
+  ) {
+    return 'PRODUCT';
+  }
+  return null;
+}
+
 const JS_DAY_OF_WEEK: ReadonlyArray<DayOfWeek> = [
   'SUNDAY', // 0
   'MONDAY', // 1
