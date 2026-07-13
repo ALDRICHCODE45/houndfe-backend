@@ -43,6 +43,15 @@ interface MiniTargetItem {
 interface MiniLine {
   productId: string;
   variantId: string | null;
+  /**
+   * Optional resolved product.categoryId/brandId — populated by the
+   * caller (SalesService.buildPosEvalInput) AFTER batch-resolving
+   * the line's product via ProductsService.resolveProductCategoryBrandIds.
+   * NOT used by the existing PRODUCTS/VARIANTS branches; only the
+   * CATEGORIES/BRANDS branches read them.
+   */
+  categoryId?: string | null;
+  brandId?: string | null;
 }
 
 describe('matchTargetTier (W3) — pure helper', () => {
@@ -110,21 +119,119 @@ describe('matchTargetTier (W3) — pure helper', () => {
     });
   });
 
-  describe('CATEGORIES / BRANDS targeting (out of slice, must NOT match)', () => {
-    it('returns null for a CATEGORIES-typed target even if line.productId is set', () => {
+  describe('CATEGORIES targeting (scenario 2)', () => {
+    it('returns "CATEGORY" when a CATEGORIES-typed target hits line.categoryId', () => {
+      const result = matchTargetTier(
+        [{ side: 'DEFAULT', targetType: 'CATEGORIES', targetId: 'CAT1' }],
+        { productId: 'P1', variantId: 'V-A', categoryId: 'CAT1', brandId: null },
+      );
+      expect(result).toBe('CATEGORY');
+    });
+
+    it('returns null when a CATEGORIES-typed target does NOT hit line.categoryId', () => {
+      const result = matchTargetTier(
+        [{ side: 'DEFAULT', targetType: 'CATEGORIES', targetId: 'CAT1' }],
+        {
+          productId: 'P1',
+          variantId: 'V-A',
+          categoryId: 'CAT-OTHER',
+          brandId: null,
+        },
+      );
+      expect(result).toBeNull();
+    });
+
+    it('returns null when line.categoryId is null (null guard) — CATEGORIES never matches', () => {
+      // Scenario 5: a line whose product has a null categoryId MUST
+      // NOT match any CATEGORIES promotion. Mirrors the variantId
+      // != null guard at use-case.ts:84.
+      const result = matchTargetTier(
+        [{ side: 'DEFAULT', targetType: 'CATEGORIES', targetId: 'CAT1' }],
+        { productId: 'P1', variantId: 'V-A', categoryId: null, brandId: null },
+      );
+      expect(result).toBeNull();
+    });
+
+    it('returns null when line.categoryId is omitted (legacy callers) — CATEGORIES never matches', () => {
+      // Back-compat: callers that pre-date the widening (no
+      // categoryId/brandId field on the line) MUST NOT silently
+      // match a CATEGORIES target. The `!= null` guard fails on
+      // undefined too.
       const result = matchTargetTier(
         [{ side: 'DEFAULT', targetType: 'CATEGORIES', targetId: 'CAT1' }],
         { productId: 'P1', variantId: 'V-A' },
       );
       expect(result).toBeNull();
     });
+  });
 
-    it('returns null for a BRANDS-typed target even if line.productId is set', () => {
+  describe('BRANDS targeting (scenario 3)', () => {
+    it('returns "BRAND" when a BRANDS-typed target hits line.brandId', () => {
       const result = matchTargetTier(
         [{ side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' }],
-        { productId: 'P1', variantId: 'V-A' },
+        { productId: 'P1', variantId: null, categoryId: null, brandId: 'BR1' },
+      );
+      expect(result).toBe('BRAND');
+    });
+
+    it('returns null when a BRANDS-typed target does NOT hit line.brandId', () => {
+      const result = matchTargetTier(
+        [{ side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' }],
+        { productId: 'P1', variantId: null, categoryId: null, brandId: 'BR-OTHER' },
       );
       expect(result).toBeNull();
+    });
+
+    it('returns null when line.brandId is null (null guard) — BRANDS never matches', () => {
+      // Scenario 6: a line whose product has a null brandId MUST NOT
+      // match any BRANDS promotion.
+      const result = matchTargetTier(
+        [{ side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' }],
+        { productId: 'P1', variantId: null, categoryId: null, brandId: null },
+      );
+      expect(result).toBeNull();
+    });
+
+    it('returns null when line.brandId is omitted (legacy callers) — BRANDS never matches', () => {
+      const result = matchTargetTier(
+        [{ side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' }],
+        { productId: 'P1', variantId: null },
+      );
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('Specificity rule — VARIANT > {CATEGORY, BRAND}', () => {
+    it('returns "VARIANT" when VARIANTS V-A target AND CATEGORIES CAT1 target both hit a V-A line whose categoryId=CAT1', () => {
+      // Combined promo: VARIANTS V-A + CATEGORIES CAT1, applied to a
+      // V-A line whose product's categoryId is CAT1. VARIANTS is
+      // more specific → wins.
+      const items: MiniTargetItem[] = [
+        { side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        { side: 'DEFAULT', targetType: 'CATEGORIES', targetId: 'CAT1' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: 'V-A',
+        categoryId: 'CAT1',
+        brandId: null,
+      });
+      expect(result).toBe('VARIANT');
+    });
+
+    it('returns "CATEGORY" when a CATEGORIES-typed target hits a V-A line whose categoryId=CAT1 (no VARIANTS target)', () => {
+      // VARIANTS branch doesn't fire (no VARIANTS target); fall
+      // through to CATEGORIES — confirms the branch order.
+      const result = matchTargetTier(
+        [{ side: 'DEFAULT', targetType: 'CATEGORIES', targetId: 'CAT1' }],
+        {
+          productId: 'P1',
+          variantId: 'V-A',
+          categoryId: 'CAT1',
+          brandId: null,
+        },
+      );
+      expect(result).toBe('CATEGORY');
     });
   });
 
@@ -178,10 +285,13 @@ describe('matchTargetTier (W3) — pure helper', () => {
 
   describe('edge cases', () => {
     it('returns null when targetItems is empty', () => {
-      const result = matchTargetTier<MiniTargetItem, MiniLine>([], {
-        productId: 'P1',
-        variantId: 'V-A',
-      });
+      const result = matchTargetTier(
+        [] satisfies MiniTargetItem[],
+        {
+          productId: 'P1',
+          variantId: 'V-A',
+        } satisfies MiniLine,
+      );
       expect(result).toBeNull();
     });
 

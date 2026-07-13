@@ -56,26 +56,43 @@ export function clampPercentageToSafeRange(percent: number): number {
  * hit this line?" AND "which specificity won?" in a single value, so
  * the engine never needs a second predicate pass.
  *
- *   - 'VARIANT' : a VARIANTS-typed target hit the line's variantId.
- *   - 'PRODUCT' : no VARIANTS hit, but a PRODUCTS-typed target hit the
- *                 line's productId (back-compat: a PRODUCTS promo on
- *                 product P1 still matches EVERY variant of P1).
- *   - null      : no DEFAULT-side target hit the line.
+ *   - 'VARIANT'  : a VARIANTS-typed target hit the line's variantId.
+ *   - 'PRODUCT'  : no VARIANTS hit, but a PRODUCTS-typed target hit
+ *                  the line's productId (back-compat: a PRODUCTS
+ *                  promo on product P1 still matches EVERY variant
+ *                  of P1).
+ *   - 'CATEGORY' : no VARIANTS/PRODUCTS hit, but a CATEGORIES-typed
+ *                  target hit the line's resolved categoryId. Null
+ *                  categoryId is a structural no-match.
+ *   - 'BRAND'    : no VARIANTS/PRODUCTS hit, but a BRANDS-typed
+ *                  target hit the line's resolved brandId. Null
+ *                  brandId is a structural no-match. BRAND and
+ *                  CATEGORY are EQUAL-broadness peers (both ordinal
+ *                  1 in the pre-pass; best-wins tiebreaks).
+ *   - null       : no DEFAULT-side target hit the line.
  */
-export type LineMatchTier = 'VARIANT' | 'PRODUCT' | null;
+export type LineMatchTier = 'VARIANT' | 'PRODUCT' | 'CATEGORY' | 'BRAND' | null;
 
 /**
  * Match predicate — pure, exported for both testability AND future
  * reuse (online/cart engine `evaluate-cart-promotions.use-case.ts`).
  *
- * Specificity rule: VARIANTS wins over PRODUCTS when both hit the
- * same line. The pre-pass in `pickBestPerLine` further drops any
- * tier='PRODUCT' candidate when ANY candidate for that line is
- * tier='VARIANT' (orthogonal filter; best-wins invariant untouched).
+ * Specificity rule: VARIANTS > PRODUCTS > {CATEGORY, BRAND}. Branch
+ * order encodes fallthrough — VARIANT first, then PRODUCT, then the
+ * two peer tiers (CATEGORY before BRAND; the order between them is
+ * arbitrary because they're equal-broadness peers — best-wins
+ * resolves the peer tie at the per-line precedence pre-pass in
+ * `pickBestPerLine`). Null guards mirror `variantId != null` so an
+ * unset/unresolved categoryId/brandId never silently matches.
  */
 export function matchTargetTier(
   targetItems: ReadonlyArray<{ side: string; targetType: string; targetId: string }>,
-  line: { productId: string; variantId: string | null },
+  line: {
+    productId: string;
+    variantId: string | null;
+    categoryId?: string | null;
+    brandId?: string | null;
+  },
 ): LineMatchTier {
   const side = 'DEFAULT';
   // VARIANTS first — strict === null on variantId so an unset variant
@@ -100,6 +117,35 @@ export function matchTargetTier(
     )
   ) {
     return 'PRODUCT';
+  }
+  // CATEGORIES — null guard on line.categoryId so an unset/unresolved
+  // category (product with null categoryId OR id omitted from the
+  // resolver map) never silently matches. CATEGORIES comes before
+  // BRANDS by convention; both are tier-1 peers so the helper's
+  // branch order doesn't affect correctness — the engine's ordinal
+  // pre-pass resolves the peer tie by best-wins.
+  if (
+    line.categoryId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'CATEGORIES' &&
+        ti.targetId === line.categoryId,
+    )
+  ) {
+    return 'CATEGORY';
+  }
+  // BRANDS — null guard on line.brandId, symmetric with CATEGORIES.
+  if (
+    line.brandId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'BRANDS' &&
+        ti.targetId === line.brandId,
+    )
+  ) {
+    return 'BRAND';
   }
   return null;
 }
@@ -133,7 +179,7 @@ interface PerLineCandidate {
   /** Customer discount in cents as it would apply to `effectiveUnitPriceCents`. */
   discountCents: number;
   /** Specificity tier reported by `matchTargetTier` — drives precedence pre-pass. */
-  tier: 'VARIANT' | 'PRODUCT';
+  tier: 'VARIANT' | 'PRODUCT' | 'CATEGORY' | 'BRAND';
 }
 
 @Injectable()
@@ -334,15 +380,26 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
   private isSupportedEngineType(promo: Promotion): boolean {
     // First slice (Unit 2): PRODUCT_DISCOUNT (PRODUCTS only) + ORDER_DISCOUNT.
-    // CATEGORIES/BRANDS / BUY_X_GET_Y / ADVANCED are DEFERRED.
     //
     // W4: PRODUCT_DISCOUNT with appliesTo='VARIANTS' is now supported too.
     // Both PRODUCTS and VARIANTS ride the same `matchTargetTier` helper,
     // which encodes the VARIANT-wins-over-PRODUCTS precedence.
+    //
+    // W2: PRODUCT_DISCOUNT with appliesTo ∈ {CATEGORIES, BRANDS} is
+    // now supported as well. The matcher (`matchTargetTier`)
+    // branches out into CATEGORIES/BRANDS lines that compare the
+    // line's resolved categoryId/brandId against the DEFAULT-side
+    // targetItems. The per-line precedence pre-pass in
+    // `pickBestPerLine` keeps BRAND/CATEGORY candidates only when no
+    // VARIANT/PRODUCT candidate hits the same line (ordinal ladder:
+    // V=3, P=2, B=1, C=1).
     if (promo.type === 'ORDER_DISCOUNT') return true;
     if (
       promo.type === 'PRODUCT_DISCOUNT' &&
-      (promo.appliesTo === 'PRODUCTS' || promo.appliesTo === 'VARIANTS')
+      (promo.appliesTo === 'PRODUCTS' ||
+        promo.appliesTo === 'VARIANTS' ||
+        promo.appliesTo === 'CATEGORIES' ||
+        promo.appliesTo === 'BRANDS')
     ) {
       return true;
     }
@@ -409,16 +466,38 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
     if (eligible.length === 0) return null;
 
-    // ── Per-line precedence pre-pass ──
-    // When ANY candidate for this line is tier='VARIANT', drop every
-    // tier='PRODUCT' candidate so the documented best-wins invariant
-    // (max discount, ties→lowest id) runs only on the surviving tier.
-    // Rationale: VARIANT-wins is orthogonal to discount value — it must
-    // hold unconditionally regardless of which promo offers more cents.
-    const hasVariantTier = eligible.some((c) => c.tier === 'VARIANT');
-    const survivors = hasVariantTier
-      ? eligible.filter((c) => c.tier === 'VARIANT')
-      : eligible;
+    // ── Per-line precedence pre-pass (ordinal specificity ladder) ──
+    // Keep only candidates at the MAX ordinal present on this line,
+    // then best-wins (max discount, ties→lowest id). Ordinals:
+    //
+    //   VARIANT  = 3   (most specific)
+    //   PRODUCT  = 2
+    //   BRAND    = 1   (peer of CATEGORY — EQUAL-broadness)
+    //   CATEGORY = 1   (peer of BRAND   — EQUAL-broadness)
+    //
+    // Zero-regression argument: for VARIANT/PRODUCT-only inputs the
+    // max is 3 iff any VARIANT exists (keeps only VARIANT candidates
+    // — identical to the old `hasVariantTier` branch), else 2 (keeps
+    // all PRODUCT candidates — identical to the old `else` branch).
+    // BRAND and CATEGORY share ordinal 1, so when neither VARIANT nor
+    // PRODUCT hits the line both survive and compete on best-wins —
+    // no BRAND-over-CATEGORY hierarchy.
+    const TIER_ORDINAL: Record<
+      'VARIANT' | 'PRODUCT' | 'BRAND' | 'CATEGORY',
+      number
+    > = {
+      VARIANT: 3,
+      PRODUCT: 2,
+      BRAND: 1,
+      CATEGORY: 1,
+    };
+    const maxOrdinal = eligible.reduce(
+      (m, c) => Math.max(m, TIER_ORDINAL[c.tier]),
+      0,
+    );
+    const survivors = eligible.filter(
+      (c) => TIER_ORDINAL[c.tier] === maxOrdinal,
+    );
 
     return this.pickBestByMaxDiscountThenLowestId(survivors);
   }

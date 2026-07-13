@@ -64,6 +64,18 @@ function makeMockProductsService() {
     resolvePriceListGlobalIds: jest
       .fn()
       .mockResolvedValue(new Map<string, string>()),
+    // W4 — resolver for CATEGORIES/BRANDS targeting. Default empty
+    // map keeps existing tests green (no categoryId/brandId
+    // stamped, all engine lines null, CATEGORIES/BRANDS branches
+    // return null at matchTargetTier via the null guard).
+    resolveProductCategoryBrandIds: jest
+      .fn()
+      .mockResolvedValue(
+        new Map<
+          string,
+          { categoryId: string | null; brandId: string | null }
+        >(),
+      ),
     decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
   } as any;
@@ -5060,6 +5072,217 @@ describe('SalesService', () => {
       expect(lineA.appliedGlobalPriceListId).toBe('GPL-retail');
       expect(lineB.appliedPriceListId).toBe('PL-b');
       expect(lineB.appliedGlobalPriceListId).toBe('GPL-mayoreo');
+    });
+
+    // ============================================================================
+    // W4 — Category/Brand resolver wiring
+    //
+    // buildPosEvalInput MUST call ProductsService.resolveProductCategoryBrandIds
+    // once with the DISTINCT productIds from the current draft items,
+    // and stamp each engine input line with the resolved
+    // {categoryId, brandId} pair. A line whose product is missing from
+    // the resolver map (silently omitted by the resolver) MUST end up
+    // with `categoryId: null, brandId: null` — the engine's null
+    // guard at matchTargetTier then returns null for any CATEGORIES/
+    // BRANDS target on that line, which is exactly the "no match"
+    // semantics the spec demands.
+    // ============================================================================
+
+    it('recompute calls ProductsService.resolveProductCategoryBrandIds once with the DISTINCT productIds and stamps categoryId/brandId per line', async () => {
+      const saleId = 'sale-rec-cat-brand';
+      const itemAId = 'item-rec-cat-brand-a';
+      const itemBId = 'item-rec-cat-brand-b';
+      const itemCId = 'item-rec-cat-brand-c'; // duplicate productId of itemAId → distinct set still has 2 ids
+      // Two distinct productIds: 'P-A' (twice) and 'P-B'.
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: itemAId,
+            saleId,
+            productId: 'P-A',
+            variantId: null,
+            productName: 'A',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            appliedPriceListId: null,
+            priceSource: 'manual',
+          },
+          {
+            id: itemBId,
+            saleId,
+            productId: 'P-B',
+            variantId: null,
+            productName: 'B',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1500,
+            unitPriceCurrency: 'MXN',
+            appliedPriceListId: null,
+            priceSource: 'manual',
+          },
+          {
+            id: itemCId,
+            saleId,
+            productId: 'P-A', // duplicate productId
+            variantId: null,
+            productName: 'A again',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            appliedPriceListId: null,
+            priceSource: 'manual',
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      productsService.resolveProductCategoryBrandIds.mockResolvedValue(
+        new Map<
+          string,
+          { categoryId: string | null; brandId: string | null }
+        >([
+          ['P-A', { categoryId: 'CAT1', brandId: 'BR1' }],
+          ['P-B', { categoryId: null, brandId: 'BR2' }],
+          // 'P-MISSING' intentionally absent — silently omitted.
+        ]),
+      );
+
+      await service.updateItemQuantity(saleId, 'user-1', itemAId, {
+        quantity: 2,
+      });
+
+      // Resolver called ONCE (batch), with the DISTINCT productIds
+      // (the duplicate P-A collapses into one entry).
+      expect(
+        productsService.resolveProductCategoryBrandIds,
+      ).toHaveBeenCalledTimes(1);
+      const ids = (
+        productsService.resolveProductCategoryBrandIds as jest.Mock
+      ).mock.calls[0][0] as string[];
+      expect([...ids].sort()).toEqual(['P-A', 'P-B']);
+
+      // Engine input carries the resolved categoryId/brandId per
+      // line, sourced from the resolver map.
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      const lineA = input.lines.find(
+        (l: { itemId: string }) => l.itemId === itemAId,
+      );
+      const lineB = input.lines.find(
+        (l: { itemId: string }) => l.itemId === itemBId,
+      );
+      const lineC = input.lines.find(
+        (l: { itemId: string }) => l.itemId === itemCId,
+      );
+      // Both lines on P-A carry the same category/brand pair.
+      expect(lineA.categoryId).toBe('CAT1');
+      expect(lineA.brandId).toBe('BR1');
+      expect(lineC.categoryId).toBe('CAT1');
+      expect(lineC.brandId).toBe('BR1');
+      // P-B has null categoryId (resolver returned null for that row).
+      expect(lineB.categoryId).toBeNull();
+      expect(lineB.brandId).toBe('BR2');
+    });
+
+    it('recompute stamps categoryId=null, brandId=null for lines whose product is missing from the resolver map (no error)', async () => {
+      // The resolver silently omits missing ids from the map. The
+      // builder MUST fall back to {null, null} for those lines — no
+      // exception, no leaked `undefined`. This is the "products in
+      // the cart but not in the resolver" semantics: same line
+      // exists in the engine input, just with no category/brand
+      // info. The engine's null guard then correctly skips any
+      // CATEGORIES/BRANDS promotion on that line.
+      const saleId = 'sale-rec-cat-brand-missing';
+      const itemAId = 'item-rec-cat-brand-missing-a';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: itemAId,
+            saleId,
+            productId: 'P-MISSING',
+            variantId: null,
+            productName: 'Missing',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 500,
+            unitPriceCurrency: 'MXN',
+            appliedPriceListId: null,
+            priceSource: 'manual',
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      productsService.resolveProductCategoryBrandIds.mockResolvedValue(
+        new Map(), // empty — P-MISSING is not in the map
+      );
+
+      await service.updateItemQuantity(saleId, 'user-1', itemAId, {
+        quantity: 1,
+      });
+
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      const line = input.lines.find(
+        (l: { itemId: string }) => l.itemId === itemAId,
+      );
+      expect(line.categoryId).toBeNull();
+      expect(line.brandId).toBeNull();
+    });
+
+    it('recompute does NOT call resolveProductCategoryBrandIds when there are NO items in the cart', async () => {
+      // Empty cart → empty distinct productIds → resolver short-
+      // circuits on the empty array (no DB roundtrip). Pin the
+      // short-circuit so a future refactor that forgets the early
+      // return gets caught here.
+      const saleId = 'sale-rec-empty';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      // Trigger recompute through a method that goes through the
+      // full recompute path. We use updateItemQuantity on a non-
+      // existent item id; the path still calls recompute but with
+      // no items to resolve.
+      try {
+        await service.updateItemQuantity(saleId, 'user-1', 'no-such-item', {
+          quantity: 1,
+        });
+      } catch {
+        // expected — the item doesn't exist; we only care about
+        // the recompute side-effect (which still runs).
+      }
+
+      expect(
+        productsService.resolveProductCategoryBrandIds,
+      ).not.toHaveBeenCalled();
     });
   });
 

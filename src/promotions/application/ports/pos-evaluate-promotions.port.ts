@@ -36,6 +36,23 @@ export interface PosEvalLine {
   appliedPriceListId: string | null;
   /** `GlobalPriceList.id` (resolved) — used for promo price-list membership (C1). */
   appliedGlobalPriceListId: string | null;
+  /**
+   * Resolved product.categoryId — populated by
+   * `SalesService.buildPosEvalInput` via
+   * `ProductsService.resolveProductCategoryBrandIds` (tenant-scoped,
+   * batched once per recompute). `null` when the product has no
+   * category OR the id wasn't resolved (omitted-from-map). The
+   * `matchTargetTier` CATEGORIES branch reads this; the null value
+   * is a structural guard, not a runtime bug.
+   */
+  categoryId: string | null;
+  /**
+   * Resolved product.brandId — populated by
+   * `SalesService.buildPosEvalInput` (same resolver as categoryId).
+   * Symmetric semantics: `null` when unset or unresolved;
+   * `matchTargetTier` BRANDS branch reads this.
+   */
+  brandId: string | null;
   /** True when the seller applied a free-form manual discount — auto promo skips. */
   hasManualDiscount: boolean;
 }
