@@ -157,8 +157,11 @@ export class PromotionsService {
     const { data, total } = await this.repo.findAll(repoQuery);
     const now = new Date();
 
+    const responses = data.map((p) => p.toResponse(now));
+    await this.enrichVariantTargetItems(responses);
+
     return {
-      data: data.map((p) => p.toResponse(now)),
+      data: responses,
       meta: {
         page,
         limit,
@@ -173,7 +176,9 @@ export class PromotionsService {
   async findOne(id: string) {
     const promotion = await this.repo.findById(id);
     if (!promotion) throw new EntityNotFoundError('Promotion', id);
-    return promotion.toResponse();
+    const response = promotion.toResponse();
+    await this.enrichVariantTargetItems([response]);
+    return response;
   }
 
   // ==================== Update ====================
@@ -274,6 +279,83 @@ export class PromotionsService {
   }
 
   // ==================== Private Helpers ====================
+
+  /**
+   * Read-model enrichment: stamp variant context onto VARIANTS
+   * targetItems across one or more promotion response objects.
+   *
+   * `PromotionTargetItem.targetId` has NO FK to Variant/Product
+   * (schema.prisma) — so a Prisma `include` cannot bring the parent
+   * product. We do a SEPARATE, tenant-scoped batch lookup instead:
+   * collect every distinct VARIANTS targetId across the whole page
+   * into a single `variant.findMany` (one `IN (...)`, no N+1), build a
+   * lookup map, then mutate each VARIANTS item in place, adding the
+   * response-only fields `productId`, `variantName`, `productName`.
+   *
+   * Enrichment is keyed by `targetType === 'VARIANTS'` (any side —
+   * DEFAULT/BUY/GET). Non-VARIANTS items are left untouched. A
+   * targetId not present in the lookup (e.g. the variant was deleted
+   * but the promotion still references it) is skipped silently — the
+   * new fields stay absent and nothing throws.
+   */
+  private async enrichVariantTargetItems(
+    responses: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    type MutableTargetItem = PromotionTargetItemData & {
+      productId?: string;
+      variantName?: string;
+      productName?: string;
+    };
+
+    // Collect all VARIANTS items across every response, and the set of
+    // distinct variant ids to look up in one shot.
+    const variantItems: MutableTargetItem[] = [];
+    const variantIds = new Set<string>();
+
+    for (const response of responses) {
+      const items = response.targetItems as MutableTargetItem[] | undefined;
+      if (!items?.length) continue;
+      for (const item of items) {
+        if (item.targetType === 'VARIANTS') {
+          variantItems.push(item);
+          variantIds.add(item.targetId);
+        }
+      }
+    }
+
+    if (variantIds.size === 0) return;
+
+    const tenantClient = this.tenantPrisma.getClient();
+    const variants = await tenantClient.variant.findMany({
+      where: { id: { in: [...variantIds] } },
+      select: {
+        id: true,
+        productId: true,
+        name: true,
+        product: { select: { name: true } },
+      },
+    });
+
+    const byId = new Map<
+      string,
+      { productId: string; variantName: string; productName: string }
+    >();
+    for (const v of variants) {
+      byId.set(v.id, {
+        productId: v.productId,
+        variantName: v.name,
+        productName: v.product?.name ?? '',
+      });
+    }
+
+    for (const item of variantItems) {
+      const ctx = byId.get(item.targetId);
+      if (!ctx) continue; // deleted variant still referenced — skip silently
+      item.productId = ctx.productId;
+      item.variantName = ctx.variantName;
+      item.productName = ctx.productName;
+    }
+  }
 
   /**
    * Resolve target items from DTO.

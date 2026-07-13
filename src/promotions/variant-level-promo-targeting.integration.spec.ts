@@ -892,5 +892,90 @@ describeIfDb(
         expect(BASELINE_TENANT_ID).toBe(tenantId);
       });
     });
+
+    // ──────────────────────────────────────────────────────────
+    // Scenario 13: read-path VARIANTS enrichment through the real DB.
+    // findOne must stamp productId / variantName / productName onto the
+    // VARIANTS targetItem, resolved via the separate variant lookup.
+    // ──────────────────────────────────────────────────────────
+
+    describe('Scenario 13 — findOne enriches VARIANTS targetItems with variant context', () => {
+      it('returns productId, variantName and productName for the VARIANTS item', async () => {
+        const created = await service.create({
+          title: 'Variant enrichment read',
+          type: 'PRODUCT_DISCOUNT',
+          method: 'AUTOMATIC',
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+          appliesTo: 'VARIANTS',
+          targetItems: [{ targetType: 'VARIANTS', targetId: variantAId }],
+        } as never);
+
+        const result = await service.findOne(created.id as string);
+
+        const items = result.targetItems as Array<{
+          side: string;
+          targetType: string;
+          targetId: string;
+          productId?: string;
+          variantName?: string;
+          productName?: string;
+        }>;
+
+        expect(items).toHaveLength(1);
+        expect(items[0]).toMatchObject({
+          targetType: 'VARIANTS',
+          targetId: variantAId,
+          productId,
+          variantName: 'V-A',
+          productName: 'Integration Product P1',
+        });
+      });
+
+      it('does not throw and adds no fields when the referenced variant was deleted', async () => {
+        // Seed a promotion that references variantB, then delete variantB
+        // directly. The read path must skip enrichment for the dangling
+        // reference without throwing.
+        const promoId = crypto.randomUUID();
+        await prisma.promotion.create({
+          data: {
+            id: promoId,
+            tenantId,
+            title: 'Dangling variant ref',
+            type: 'PRODUCT_DISCOUNT',
+            method: 'AUTOMATIC',
+            status: 'ACTIVE',
+            customerScope: 'ALL',
+            discountType: 'PERCENTAGE',
+            discountValue: 10,
+            appliesTo: 'VARIANTS',
+          },
+        });
+        await prisma.promotionTargetItem.create({
+          data: {
+            promotionId: promoId,
+            tenantId,
+            side: 'DEFAULT',
+            targetType: 'VARIANTS',
+            targetId: variantBId,
+          },
+        });
+        await prisma.variant.delete({ where: { id: variantBId } });
+
+        const result = await service.findOne(promoId);
+        const items = result.targetItems as Array<{
+          targetId: string;
+          productId?: string;
+          variantName?: string;
+          productName?: string;
+        }>;
+
+        expect(items).toHaveLength(1);
+        expect(items[0].targetId).toBe(variantBId);
+        expect(items[0].productId).toBeUndefined();
+        expect(items[0].variantName).toBeUndefined();
+        expect(items[0].productName).toBeUndefined();
+      });
+    });
   },
 );
