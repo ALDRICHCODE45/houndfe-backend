@@ -310,31 +310,55 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
     // 5. availableManualPromotions — every eligible MANUAL promo the
     //    seller could opt-in to (not opted-in, not vetoed).
-    const availableManualPromotions = candidates
-      .filter(
-        (promo) =>
-          promo.method === 'MANUAL' &&
-          this.passesPromotionWideGates(promo, input) &&
-          this.isSupportedEngineType(promo) &&
-          !input.vetoedPromotionIds.includes(promo.id) &&
-          !input.optedInManualPromotionIds.includes(promo.id),
-      )
-      .map(
-        (promo): PosEvalManualCandidate => ({
-          id: promo.id,
-          title: promo.title,
-          type:
-            promo.type === 'ORDER_DISCOUNT'
-              ? 'ORDER_DISCOUNT'
-              : 'PRODUCT_DISCOUNT',
-          // The filter above already pinned `promo.method === 'MANUAL'`, so
-          // this is a constant — exposed on the wire (b84aab7) so the
-          // frontend can confirm the candidate is MANUAL before offering
-          // opt-in. The Promotion.method enum also has AUTOMATIC, but that
-          // branch never reaches this mapper.
-          method: 'MANUAL',
-        }),
-      );
+    //
+    //    WU6 (buy-x-get-y — design.md Decision 7, spec.md:108-130):
+    //    the wire type now includes BUY_X_GET_Y. The candidate is
+    //    emitted when the BXGY has at least one matching line in the
+    //    cart (same `matchTargetTier` predicate the per-line gate uses)
+    //    — a MANUAL BXGY with no matching line is degenerate (no line
+    //    can carry the reward) and is silently filtered out.
+    const availableManualPromotions: PosEvalManualCandidate[] = [];
+    for (const promo of candidates) {
+      if (promo.method !== 'MANUAL') continue;
+      if (!this.passesPromotionWideGates(promo, input)) continue;
+      if (!this.isSupportedEngineType(promo)) continue;
+      if (input.vetoedPromotionIds.includes(promo.id)) continue;
+      if (input.optedInManualPromotionIds.includes(promo.id)) continue;
+
+      // ORDER_DISCOUNT: sale-level, always surfaced (the sale exists).
+      // PRODUCT_DISCOUNT / BUY_X_GET_Y: only surfaced when at least one
+      // line matches the target — the same matcher the per-line gate
+      // uses, so the candidate never references a target the engine
+      // can't apply to. Branded as 'BUY_X_GET_Y' on the wire.
+      let wireType: PosEvalManualCandidate['type'];
+      if (promo.type === 'ORDER_DISCOUNT') {
+        wireType = 'ORDER_DISCOUNT';
+      } else if (promo.type === 'BUY_X_GET_Y') {
+        wireType = 'BUY_X_GET_Y';
+      } else if (promo.type === 'PRODUCT_DISCOUNT') {
+        wireType = 'PRODUCT_DISCOUNT';
+      } else {
+        continue; // unsupported
+      }
+      if (wireType !== 'ORDER_DISCOUNT') {
+        const hasMatchingLine = input.lines.some(
+          (line) => matchTargetTier(promo.targetItems, line) !== null,
+        );
+        if (!hasMatchingLine) continue;
+      }
+
+      availableManualPromotions.push({
+        id: promo.id,
+        title: promo.title,
+        type: wireType,
+        // The filter above already pinned `promo.method === 'MANUAL'`, so
+        // this is a constant — exposed on the wire (b84aab7) so the
+        // frontend can confirm the candidate is MANUAL before offering
+        // opt-in. The Promotion.method enum also has AUTOMATIC, but that
+        // branch never reaches this mapper.
+        method: 'MANUAL',
+      });
+    }
 
     // 5b. targetableManualPromotionIds — the subset of
     //     `optedInManualPromotionIds` that still has at least one matching
@@ -353,13 +377,20 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     //       targetable" — even an empty cart retains the opt-in so the
     //       seller can re-add items later and have the order discount
     //       apply without re-opting-in.
-    //     - PRODUCT_DISCOUNT (appliesTo=PRODUCTS only — same gate as the
-    //       line-ranker): included IFF at least one line in the cart
-    //       matches `promo.targetItems` (side=DEFAULT,
-    //       targetType=PRODUCTS, targetId=line.productId). The per-line
-    //       price-list gate, `hasManualDiscount`, and best-wins loss
-    //       are ALL "temporarily ineligible" — the target is still in
-    //       the cart, so the opt-in is RETAINED.
+    //     - PRODUCT_DISCOUNT (appliesTo ∈ {PRODUCTS, VARIANTS,
+    //       CATEGORIES, BRANDS} — same gate as the line-ranker):
+    //       included IFF at least one line in the cart matches
+    //       `promo.targetItems`. The per-line price-list gate,
+    //       `hasManualDiscount`, and best-wins loss are ALL
+    //       "temporarily ineligible" — the target is still in the
+    //       cart, so the opt-in is RETAINED.
+    //     - BUY_X_GET_Y (WU6 — spec.md:108-130, design.md Decision 7):
+    //       symmetric to PRODUCT_DISCOUNT — included IFF at least one
+    //       line in the cart matches `promo.targetItems` (same
+    //       `matchTargetTier` predicate the per-line BXGY gate uses).
+    //       qty < buyQuantity, hasManualDiscount, and best-wins loss
+    //       are all "temporarily ineligible" — the target is still in
+    //       the cart, so the opt-in is RETAINED across recomputes.
     //
     //     Promotion-wide gates (status / daysOfWeek / customerScope /
     //     supported engine type) are intentionally NOT applied here.
@@ -388,10 +419,15 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         targetableManualPromotionIds.push(promo.id);
         continue;
       }
-      // PRODUCT_DISCOUNT (appliesTo ∈ {PRODUCTS, VARIANTS} — both gated
-      // by `isSupportedEngineType` above). At least one line in the
-      // cart must match the target.
-      if (promo.type === 'PRODUCT_DISCOUNT' && this.isSupportedEngineType(promo)) {
+      // PRODUCT_DISCOUNT (appliesTo ∈ {PRODUCTS, VARIANTS,
+      // CATEGORIES, BRANDS} — gated by `isSupportedEngineType` above)
+      // OR BUY_X_GET_Y (WU6 — same matchTargetTier predicate).
+      // At least one line in the cart must match the target.
+      if (
+        (promo.type === 'PRODUCT_DISCOUNT' ||
+          promo.type === 'BUY_X_GET_Y') &&
+        this.isSupportedEngineType(promo)
+      ) {
         // Self-heal semantics: any tier non-null counts as "still has a
         // matching line". Precedence does NOT prune opt-ins — retention
         // is about target presence, not about which promo wins.

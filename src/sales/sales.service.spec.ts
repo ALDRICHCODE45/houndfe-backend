@@ -6937,4 +6937,199 @@ describe('SalesService', () => {
       expect(firstSnapshot.totalCents).toBe(5000);
     });
   });
+
+  // ==========================================================================
+  // Work Unit 6 — MANUAL BXGY wiring + opt-in survival (6.1, 6.2; spec.md:108-130)
+  // ==========================================================================
+  describe('Work Unit 6 BXGY — MANUAL BXGY candidate surface and opt-in survival (spec.md:108-130)', () => {
+    /**
+     * Build a draft sale with a single in-memory item — same shape as
+     * the WU4 helper, used by the MANUAL BXGY tests below.
+     */
+    function buildFreshBxgyDraft(
+      saleId: string,
+      itemId: string,
+      productId = 'prod-1',
+      unitPriceCents = 1000,
+      quantity = 3,
+    ): Sale {
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId,
+        productId,
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity,
+        unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    it('listApplicablePromotions surfaces a MANUAL BXGY candidate with type BUY_X_GET_Y (spec.md:117-120)', async () => {
+      // spec.md:117-120 — a MANUAL BXGY with at least one matching
+      // line is surfaced on the wire with type BUY_X_GET_Y. Frontend
+      // uses the type to render the right opt-in card.
+      const saleId = 'sale-u6-bxgy-list';
+      const sale = buildFreshBxgyDraft(saleId, 'item-u6-bxgy-list');
+      saleRepo.findById.mockResolvedValue(sale);
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-bxgy-manual', title: 'Manual 2x1', type: 'BUY_X_GET_Y' as const },
+        ],
+        targetableManualPromotionIds: [],
+      });
+
+      const result = await service.listApplicablePromotions(saleId, 'user-1');
+
+      expect(result.saleId).toBe(saleId);
+      expect(result.promotions).toEqual([
+        { id: 'promo-bxgy-manual', title: 'Manual 2x1', type: 'BUY_X_GET_Y' },
+      ]);
+    });
+
+    it('opted-in MANUAL BXGY survives two consecutive recomputes (spec.md:127-130)', async () => {
+      // spec.md:127-130 — a seller has opted in to a MANUAL BXGY on
+      // a draft with one matching line. After two consecutive
+      // recomputes, the MANUAL BXGY MUST remain applied across both
+      // (subject to eligibility re-evaluation — here both recomputes
+      // emit the same BXGY line result).
+      const saleId = 'sale-u6-bxgy-survive';
+      const itemId = 'item-u6-bxgy-survive';
+
+      // Recompute helper — the engine returns the BXGY line result
+      // ONLY when the MANUAL promo id is in `optedInManualPromotionIds`
+      // (mirrors how pickBestBuyXGetYPerLine filters MANUAL gating).
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines:
+            input.optedInManualPromotionIds.includes('promo-bxgy-manual') && line
+              ? [
+                  {
+                    kind: 'buy-x-get-y' as const,
+                    itemId: line.itemId,
+                    promotionId: 'promo-bxgy-manual',
+                    discountTitle: 'Manual 2x1 @ 50%',
+                    lineDiscountCents: 500, // qty 3 → floor(3/3)*1*round(1000*50/100)=500c
+                    perUnitRewardCents: 500,
+                    discountedUnitCount: 1,
+                  },
+                ]
+              : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: input.optedInManualPromotionIds.includes(
+            'promo-bxgy-manual',
+          )
+            ? ['promo-bxgy-manual']
+            : [],
+        });
+      });
+
+      // ── 1st recompute: empty draft + addItem + opt-in via applyManualPromotion ──
+      // To keep the test focused on the SURVIVAL invariant (not the
+      // opt-in flow itself, covered by 6.2), we model the opt-in as a
+      // pre-existing state on the seeded draft rather than exercising
+      // the apply endpoint twice.
+      saleRepo.findById.mockResolvedValueOnce(
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [],
+          optedInManualPromotionIds: ['promo-bxgy-manual'],
+        }),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 3,
+      });
+
+      const afterFirst = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const firstItem = afterFirst.items[0];
+      const firstItemId = firstItem.id;
+
+      // The MANUAL BXGY was applied on the first recompute.
+      expect(firstItem.promotionId).toBe('promo-bxgy-manual');
+      expect(firstItem.isBuyXGetYReward()).toBe(true);
+      expect(firstItem.discountAmountCents).toBe(500);
+      expect(firstItem.unitPriceCents).toBe(1000); // BXGY leaves unitPrice FULL
+      expect(firstItem.prePriceCentsBeforeDiscount).toBe(1000); // discriminator holds
+
+      // ── 2nd recompute: trigger via updateItemQuantity (no-op qty 3→3) ──
+      // Re-seed the draft carrying the prior BXGY state — same shape
+      // pattern as the WU4 5x test, so the recompute input is built
+      // from a line whose unitPrice/prePrice already encode the
+      // applied BXGY (no stacking on re-entry).
+      saleRepo.findById.mockResolvedValueOnce(
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: firstItemId,
+              saleId,
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'P',
+              variantName: null,
+              quantity: 3,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+              prePriceCentsBeforeDiscount: 1000,
+              discountType: 'amount',
+              discountValue: 500,
+              discountAmountCents: 500,
+              discountTitle: 'Manual 2x1 @ 50%',
+              promotionId: 'promo-bxgy-manual',
+            },
+          ],
+          optedInManualPromotionIds: ['promo-bxgy-manual'],
+        }),
+      );
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      await service.updateItemQuantity(saleId, 'user-1', firstItemId, {
+        quantity: 3,
+      });
+
+      const afterSecond = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const secondItem = afterSecond.items[0];
+
+      // The MANUAL BXGY MUST survive the second recompute.
+      expect(secondItem.promotionId).toBe('promo-bxgy-manual');
+      expect(secondItem.isBuyXGetYReward()).toBe(true);
+      expect(secondItem.discountAmountCents).toBe(500);
+      expect(secondItem.unitPriceCents).toBe(1000);
+      expect(secondItem.prePriceCentsBeforeDiscount).toBe(1000);
+      // The opt-in is RETAINED (self-heal retention): the engine's
+      // targetableManualPromotionIds still includes the promo id, so
+      // SalesService does not prune it.
+      expect(afterSecond.optedInManualPromotionIds).toContain('promo-bxgy-manual');
+    });
+  });
 });

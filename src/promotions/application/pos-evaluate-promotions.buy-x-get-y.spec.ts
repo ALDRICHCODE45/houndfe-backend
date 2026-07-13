@@ -641,3 +641,146 @@ describe('PosEvaluatePromotionsUseCase — BUY_X_GET_Y pass order (WU3, spec.md:
     expect(result.order!.discountAmountCents).toBe(360);
   });
 });
+
+/**
+ * WU6 — BUY_X_GET_Y MANUAL wiring (spec.md:108-130, design.md Decision 7).
+ *
+ *   - MANUAL BXGY appears in `availableManualPromotions` when ANY line
+ *     in the cart matches the BXGY target — the candidate mapper MUST
+ *     emit `type: 'BUY_X_GET_Y'` on the wire (port union + response DTO
+ *     extension).
+ *   - MANUAL BXGY appears in `targetableManualPromotionIds` for a
+ *     specific line that matches — same matchTargetTier predicate as
+ *     the per-line gate.
+ *   - Opted-in MANUAL BXGY is considered in best-wins: when the line
+ *     matches and qty >= buyQuantity, the engine emits the same
+ *     `kind: 'buy-x-get-y'` line result it does for AUTOMATIC BXGY.
+ *     The sales.service.spec.ts covers the two-recompute survival
+ *     contract; the engine only needs to emit a winner on opt-in.
+ */
+describe('PosEvaluatePromotionsUseCase — BUY_X_GET_Y MANUAL wiring (WU6, spec.md:108-130)', () => {
+  it('MANUAL BXGY with a matching line appears in availableManualPromotions with type BUY_X_GET_Y', async () => {
+    // spec.md:117-120 — a draft with one P1 line (qty 3) and one
+    // MANUAL BXGY (target P1) — without opt-in the promo is in
+    // availableManualPromotions (NOT in the applied list).
+    const bxgy = makeBuyXGetYPromotion({
+      id: 'promo-bxgy-manual-1',
+      method: 'MANUAL',
+      title: 'Manual 2x1 @ 50%',
+    });
+    const repo = makeRepository([bxgy]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        // Not opted-in — qty 3 → 1 group, but MANUAL is gated on opt-in.
+        lines: [makeLine({ quantity: 3 })],
+      }),
+    );
+
+    // NOT applied (MANUAL + not opted-in).
+    expect(result.lines).toEqual([]);
+
+    // Surfaced as a candidate with the new BUY_X_GET_Y wire type.
+    expect(result.availableManualPromotions).toHaveLength(1);
+    expect(result.availableManualPromotions[0]).toEqual({
+      id: 'promo-bxgy-manual-1',
+      title: 'Manual 2x1 @ 50%',
+      type: 'BUY_X_GET_Y',
+      method: 'MANUAL',
+    });
+  });
+
+  it('MANUAL BXGY with a matching line + opt-in → applied AND retained in targetableManualPromotionIds', async () => {
+    // spec.md:122-125 — opted-in MANUAL BXGY emits the same BXGY line
+    // result AND remains in targetableManualPromotionIds (self-heal
+    // keeps the opt-in across recomputes when the target is in the cart).
+    const bxgy = makeBuyXGetYPromotion({
+      id: 'promo-bxgy-manual-1',
+      method: 'MANUAL',
+      title: 'Manual 2x1 @ 50%',
+    });
+    const repo = makeRepository([bxgy]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-bxgy-manual-1'],
+        lines: [makeLine({ quantity: 3 })],
+      }),
+    );
+
+    // Applied as the BXGY line result.
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].promotionId).toBe('promo-bxgy-manual-1');
+    expect(result.lines[0].kind).toBe('buy-x-get-y');
+
+    // Self-heal: still in targetableManualPromotionIds (target present).
+    expect(result.targetableManualPromotionIds).toContain('promo-bxgy-manual-1');
+  });
+
+  it('opted-in MANUAL BXGY with NO matching line drops out of targetableManualPromotionIds (target gone)', async () => {
+    // Self-heal retention rule: when the target is REMOVED from the
+    // cart, the opted-in MANUAL BXGY MUST NOT appear in
+    // targetableManualPromotionIds — that's the resurrection-bug fix
+    // (the WU4 self-heal prunes opt-ins whose target is gone).
+    const bxgy = makeBuyXGetYPromotion({
+      id: 'promo-bxgy-manual-1',
+      method: 'MANUAL',
+      title: 'Manual 2x1 @ 50%',
+      targetItems: [
+        {
+          id: 't-P1',
+          side: 'DEFAULT',
+          targetType: 'PRODUCTS',
+          targetId: 'prod-1',
+        },
+      ],
+    });
+    const repo = makeRepository([bxgy]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-bxgy-manual-1'],
+        // No lines — target is gone.
+        lines: [],
+      }),
+    );
+
+    expect(result.lines).toEqual([]);
+    expect(result.targetableManualPromotionIds).not.toContain(
+      'promo-bxgy-manual-1',
+    );
+  });
+
+  it('MANUAL BXGY with NO matching line stays out of availableManualPromotions (target not in cart)', async () => {
+    // spec.md:117-120 — "when ANY line matches". A MANUAL BXGY whose
+    // target is NOT in the draft should NOT be surfaced (no line to
+    // apply it to). Same matcher used by the per-line gate.
+    const bxgy = makeBuyXGetYPromotion({
+      id: 'promo-bxgy-manual-P1',
+      method: 'MANUAL',
+      title: 'Manual 2x1 on P1',
+      targetItems: [
+        {
+          id: 't-P1',
+          side: 'DEFAULT',
+          targetType: 'PRODUCTS',
+          targetId: 'prod-1',
+        },
+      ],
+    });
+    const repo = makeRepository([bxgy]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        // Draft has P2 only — the BXGY is targeted at P1.
+        lines: [makeLine({ productId: 'prod-2', quantity: 3 })],
+      }),
+    );
+
+    expect(result.availableManualPromotions).toEqual([]);
+  });
+});

@@ -138,7 +138,14 @@ export interface PosEvalOrderResult {
 export interface PosEvalManualCandidate {
   id: string;
   title: string;
-  type: 'PRODUCT_DISCOUNT' | 'ORDER_DISCOUNT';
+  /**
+   * Engine-supported MANUAL promotion types only.
+   *
+   * WU6 (buy-x-get-y — design.md Decision 7): added `BUY_X_GET_Y` so
+   * MANUAL BXGY promotions surface on the wire with the correct type.
+   * Frontend uses this to render the candidate card variant.
+   */
+  type: 'PRODUCT_DISCOUNT' | 'ORDER_DISCOUNT' | 'BUY_X_GET_Y';
   /**
    * Promotion method discriminator. Today every candidate in
    * `availableManualPromotions` is MANUAL by construction (the engine
