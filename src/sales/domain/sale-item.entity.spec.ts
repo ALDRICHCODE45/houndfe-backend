@@ -630,4 +630,299 @@ describe('SaleItem Entity', () => {
       ).toThrow(/DISCOUNT_PERCENT_INVALID/);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 2 — BUY_X_GET_Y whole-line reward (design.md Decision 1)
+  //
+  // The BXGY path is a SEPARATE method from `applyDiscount`. It BYPASSES the
+  // per-unit clamp (sale-item.entity.ts:267 — `baseline − discount >= 1`) so
+  // a get-unit can surface at 0c (true free). `applyDiscount`'s percentage
+  // 1..99 clamp is unchanged — BXGY does not loosen PRODUCT_DISCOUNT.
+  //
+  // Contract:
+  //   - `unitPriceCents` stays FULL (the buy-price); `prePriceCentsBeforeDiscount`
+  //     equals `unitPriceCents` (EQUAL invariant — the discriminator).
+  //   - `discountAmountCents` carries the WHOLE-LINE reward `R` (not per-unit).
+  //   - `discountType = 'amount'` (rides the existing `amount` enum value).
+  //   - `discountValue` snapshots the per-unit reward for the receipt.
+  //   - `promotionId` set.
+  //
+  // The `isBuyXGetYReward()` discriminator (shared, column-derived) reads:
+  //   `promotionId != null && discountAmountCents > 0 &&
+  //    prePriceCentsBeforeDiscount != null &&
+  //    unitPriceCents === prePriceCentsBeforeDiscount`.
+  //
+  // Traces to spec.md:97-100 + 102-106 (100% produces a true free get-unit
+  // and partial percentages use the same NET representation).
+  // ---------------------------------------------------------------------------
+  describe('BUY_X_GET_Y reward — applyBuyXGetYReward + isBuyXGetYReward (WU2, spec.md:97-106)', () => {
+    function createBxgyCandidate(): SaleItem {
+      // qty 3, 1000c/unit — the canonical 2+1 example.
+      return SaleItem.create({
+        id: 'i-bxgy',
+        saleId: 's-bxgy',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+    }
+
+    describe('isBuyXGetYReward — discriminator', () => {
+      it('returns false on a fresh item (no reward applied)', () => {
+        const item = createBxgyCandidate();
+        expect(item.isBuyXGetYReward()).toBe(false);
+      });
+
+      it('returns false after a non-BXGY (PRODUCT_DISCOUNT percentage) applyDiscount', () => {
+        // Per-unit PD path mutates unitPriceCents DOWN (prePrice > unitPrice),
+        // so the discriminator's `unitPrice === prePrice` clause is false.
+        const item = createBxgyCandidate();
+        item.applyDiscount({
+          type: 'percentage',
+          percent: 20,
+          discountTitle: 'PD',
+          promotionId: 'promo-pd',
+        });
+        expect(item.isBuyXGetYReward()).toBe(false);
+        expect(item.promotionId).toBe('promo-pd');
+      });
+
+      it('returns false after a manual free-form discount (applyDiscount without promotionId)', () => {
+        const item = createBxgyCandidate();
+        item.applyDiscount({
+          type: 'amount',
+          amountCents: 100,
+          discountTitle: 'manual',
+        });
+        expect(item.isBuyXGetYReward()).toBe(false);
+        expect(item.promotionId).toBeNull();
+      });
+
+      it('returns true after applyBuyXGetYReward (whole-line cents, unitPrice UNCHANGED)', () => {
+        const item = createBxgyCandidate();
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 500, // R
+          perUnitRewardCents: 500, // snapshot for receipt
+          discountedUnitCount: 1,
+          discountTitle: 'Buy 2 Get 1 @ 50%',
+          promotionId: 'promo-bxgy',
+        });
+        expect(item.isBuyXGetYReward()).toBe(true);
+      });
+    });
+
+    describe('applyBuyXGetYReward — stored state contract', () => {
+      it('leaves unitPriceCents UNCHANGED (full buy-price) at 50%', () => {
+        // buy 2 get 1 @ 50% on qty 3 / 1000c → R = 500c. The unit price
+        // STAYS at 1000c — BXGY rides `discountAmountCents = R`, not
+        // per-unit amortization. This is the discriminator invariant:
+        // unitPrice === prePrice.
+        const item = createBxgyCandidate();
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 500,
+          perUnitRewardCents: 500,
+          discountedUnitCount: 1,
+          discountTitle: 'Buy 2 Get 1 @ 50%',
+          promotionId: 'promo-bxgy',
+        });
+        expect(item.unitPriceCents).toBe(1000);
+        expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+        expect(item.unitPriceCents).toBe(item.prePriceCentsBeforeDiscount);
+      });
+
+      it('leaves unitPriceCents UNCHANGED at 100% (true free get-unit)', () => {
+        // buy 2 get 1 @ 100% on qty 3 / 1000c → R = 1000c. The get-unit
+        // surfaces at 0c; unitPrice still 1000c; prePrice === unitPrice;
+        // discountAmountCents carries the WHOLE 1000c.
+        const item = createBxgyCandidate();
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 1000,
+          perUnitRewardCents: 1000,
+          discountedUnitCount: 1,
+          discountTitle: 'Buy 2 Get 1 FREE',
+          promotionId: 'promo-bxgy-free',
+        });
+        expect(item.unitPriceCents).toBe(1000);
+        expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+        expect(item.discountAmountCents).toBe(1000);
+        expect(item.discountValue).toBe(1000);
+        expect(item.discountType).toBe('amount');
+        expect(item.promotionId).toBe('promo-bxgy-free');
+      });
+
+      it('stores discountAmountCents as the WHOLE-LINE reward R (NOT per-unit)', () => {
+        // qty 6 / 1000c / buy 2 get 1 @ 50% → 2 groups × 500c per-unit = 1000c.
+        // The per-unit `discountValue` is 500c (snapshot), the stored
+        // `discountAmountCents` is the aggregate 1000c.
+        const item = SaleItem.create({
+          id: 'i-bxgy-multi',
+          saleId: 's-bxgy',
+          productId: 'p1',
+          variantId: null,
+          productName: 'P',
+          variantName: null,
+          quantity: 6,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 1000,
+          perUnitRewardCents: 500,
+          discountedUnitCount: 2,
+          discountTitle: 'Buy 2 Get 1 @ 50%',
+          promotionId: 'promo-bxgy-multi',
+        });
+        expect(item.discountAmountCents).toBe(1000);
+        expect(item.discountValue).toBe(500);
+        expect(item.discountType).toBe('amount');
+      });
+
+      it('stamps discountTitle + discountedAt + promotionId', () => {
+        const item = createBxgyCandidate();
+        const before = new Date();
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 500,
+          perUnitRewardCents: 500,
+          discountedUnitCount: 1,
+          discountTitle: 'Buy 2 Get 1 @ 50%',
+          promotionId: 'promo-bxgy',
+        });
+        const after = new Date();
+        expect(item.discountTitle).toBe('Buy 2 Get 1 @ 50%');
+        expect(item.promotionId).toBe('promo-bxgy');
+        expect(item.discountedAt).toBeInstanceOf(Date);
+        expect(item.discountedAt!.getTime()).toBeGreaterThanOrEqual(
+          before.getTime(),
+        );
+        expect(item.discountedAt!.getTime()).toBeLessThanOrEqual(
+          after.getTime() + 1,
+        );
+      });
+
+      it('does NOT mutate quantity, productId, variantId, or saleId', () => {
+        const item = createBxgyCandidate();
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 500,
+          perUnitRewardCents: 500,
+          discountedUnitCount: 1,
+          discountTitle: 'BXGY',
+          promotionId: 'promo-bxgy',
+        });
+        expect(item.quantity).toBe(3);
+        expect(item.productId).toBe('p1');
+        expect(item.variantId).toBeNull();
+        expect(item.saleId).toBe('s-bxgy');
+      });
+    });
+
+    describe('applyBuyXGetYReward — guard rails', () => {
+      it('rejects R <= 0 (zero reward is meaningless; floor yields it naturally)', () => {
+        const item = createBxgyCandidate();
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 0,
+            perUnitRewardCents: 0,
+            discountedUnitCount: 0,
+            discountTitle: 'noop',
+            promotionId: 'promo-bxgy',
+          }),
+        ).toThrow(/BXGY_REWARD_INVALID/);
+      });
+
+      it('rejects negative R', () => {
+        const item = createBxgyCandidate();
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: -10,
+            perUnitRewardCents: 500,
+            discountedUnitCount: 1,
+            discountTitle: 'bogus',
+            promotionId: 'promo-bxgy',
+          }),
+        ).toThrow(/BXGY_REWARD_INVALID/);
+      });
+
+      it('rejects R >= unitPriceCents × quantity (cannot reward more than the line subtotal)', () => {
+        // qty 3 × 1000c = 3000c max.
+        const item = createBxgyCandidate();
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 3000,
+            perUnitRewardCents: 1000,
+            discountedUnitCount: 3,
+            discountTitle: 'too-much',
+            promotionId: 'promo-bxgy',
+          }),
+        ).toThrow(/BXGY_REWARD_INVALID/);
+      });
+
+      it('accepts R = 1 (smallest non-zero reward)', () => {
+        const item = createBxgyCandidate();
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 1,
+          perUnitRewardCents: 1,
+          discountedUnitCount: 1,
+          discountTitle: '1c off',
+          promotionId: 'promo-bxgy-tiny',
+        });
+        expect(item.isBuyXGetYReward()).toBe(true);
+        expect(item.discountAmountCents).toBe(1);
+      });
+    });
+
+    describe('removeDiscount clears a BXGY reward (used by recompute clear/apply, WU4)', () => {
+      it('clears all BXGY fields and discriminator flips to false', () => {
+        const item = createBxgyCandidate();
+        item.applyBuyXGetYReward({
+          lineDiscountCents: 500,
+          perUnitRewardCents: 500,
+          discountedUnitCount: 1,
+          discountTitle: 'BXGY',
+          promotionId: 'promo-bxgy',
+        });
+        expect(item.isBuyXGetYReward()).toBe(true);
+
+        item.removeDiscount();
+
+        expect(item.isBuyXGetYReward()).toBe(false);
+        expect(item.discountType).toBeNull();
+        expect(item.discountValue).toBeNull();
+        expect(item.discountAmountCents).toBeNull();
+        expect(item.prePriceCentsBeforeDiscount).toBeNull();
+        expect(item.discountTitle).toBeNull();
+        expect(item.discountedAt).toBeNull();
+        expect(item.promotionId).toBeNull();
+        // unitPrice stays at full (it was never reduced — prePrice === unitPrice).
+        expect(item.unitPriceCents).toBe(1000);
+      });
+    });
+
+    describe('applyDiscount remains unchanged (regression-safe for PRODUCT_DISCOUNT path)', () => {
+      it('still rejects 100% percentage discount (PRODUCT_DISCOUNT 1..99 clamp intact)', () => {
+        const item = createBxgyCandidate();
+        expect(() =>
+          item.applyDiscount({
+            type: 'percentage',
+            percent: 100,
+            promotionId: 'promo-pd-100',
+          }),
+        ).toThrow(/DISCOUNT_PERCENT_INVALID/);
+      });
+
+      it('still enforces baseline − discount >= 1 (PRODUCT_DISCOUNT path invariant intact)', () => {
+        const item = createBxgyCandidate();
+        expect(() =>
+          item.applyDiscount({
+            type: 'amount',
+            amountCents: 3000,
+            promotionId: 'promo-pd-full',
+          }),
+        ).toThrow(/DISCOUNT_AMOUNT_INVALID/);
+      });
+    });
+  });
 });

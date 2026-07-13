@@ -2089,4 +2089,237 @@ describe('Sale Entity', () => {
       expect(sale.optedInManualPromotionIds).toEqual([]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 2 — BUY_X_GET_Y line reward + previewTotals NET (spec.md:97-106)
+  //
+  // A BXGY reward is a WHOLE-LINE cents amount `R` persisted on the
+  // winning line. `unitPriceCents` stays FULL; `prePriceCentsBeforeDiscount
+  // === unitPriceCents`. The NET subtotal is rendered by reading the
+  // column-derived `isBuyXGetYReward()` discriminator and subtracting R
+  // from `Σ unitPrice × qty`. The product subtotal (Σ prePrice × qty)
+  // remains the 3000c pre-discount base — `subtotalCents` does NOT shrink.
+  // `discountCents = subtotal − total` then carries R automatically.
+  // ---------------------------------------------------------------------------
+  describe('previewTotals — BUY_X_GET_Y NET line reward (WU2, spec.md:97-106)', () => {
+    function makeBxgySale(): Sale {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-bxgy',
+        saleId: BASE_SALE_ID,
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyBuyXGetYReward({
+        lineDiscountCents: 1000,
+        perUnitRewardCents: 1000,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 2 Get 1 FREE',
+        promotionId: 'promo-bxgy-free',
+      });
+      return sale;
+    }
+
+    function makePartialBxgySale(): Sale {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-bxgy-half',
+        saleId: BASE_SALE_ID,
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyBuyXGetYReward({
+        lineDiscountCents: 500,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 2 Get 1 @ 50%',
+        promotionId: 'promo-bxgy-half',
+      });
+      return sale;
+    }
+
+    it('100% BXGY: subtotal=3000, discount=1000, total=2000 (NET, true free get-unit)', () => {
+      const sale = makeBxgySale();
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(3000);
+      expect(totals.discountCents).toBe(1000);
+      expect(totals.totalCents).toBe(2000);
+    });
+
+    it('50% BXGY: subtotal=3000, discount=500, total=2500 (NET, partial reward)', () => {
+      const sale = makePartialBxgySale();
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(3000);
+      expect(totals.discountCents).toBe(500);
+      expect(totals.totalCents).toBe(2500);
+    });
+
+    it('multi-group BXGY (qty 6, 50%, 2 groups): subtotal=6000, discount=1000, total=5000', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-bxgy-multi',
+        saleId: BASE_SALE_ID,
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 6,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyBuyXGetYReward({
+        lineDiscountCents: 1000,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 2,
+        discountTitle: 'Buy 2 Get 1 @ 50%',
+        promotionId: 'promo-bxgy-multi',
+      });
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(6000);
+      expect(totals.discountCents).toBe(1000);
+      expect(totals.totalCents).toBe(5000);
+    });
+
+    it('mixed: BXGY line + PRODUCT_DISCOUNT line coexist (NET aggregation)', () => {
+      // Line A — qty 3 / 1000c / BXGY 50% → R=500c.
+      // Line B — qty 1 / 1000c / PD 100c/unit → applied unitPrice 900c,
+      //          prePrice 1000c, discountAmountCents 100c.
+      // Expected: subtotal = (1000×3) + (1000×1) = 4000c.
+      //           total    = (1000×3 − 500) + (900×1)     = 2500c + 900c = 3400c.
+      //           discount = 4000 − 3400                  = 600c.
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-bxgy',
+        saleId: BASE_SALE_ID,
+        productId: 'p1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyBuyXGetYReward({
+        lineDiscountCents: 500,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 1,
+        discountTitle: 'BXGY 50%',
+        promotionId: 'promo-bxgy',
+      });
+      sale.addItem({
+        id: 'item-pd',
+        saleId: BASE_SALE_ID,
+        productId: 'p2',
+        variantId: null,
+        productName: 'P2',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[1].applyDiscount({
+        type: 'amount',
+        amountCents: 100,
+        discountTitle: 'PD 100c',
+        promotionId: 'promo-pd',
+      });
+
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(4000);
+      expect(totals.totalCents).toBe(3400);
+      expect(totals.discountCents).toBe(600);
+    });
+
+    it('BXGY + order discount: subtotal is the pre-discount base; total subtracts both', () => {
+      // BXGY line (100%): qty 3 / 1000c / R=1000c → total line 2000c.
+      // Order 10% PERCENTAGE on postLine subtotal 2000c → R_order = 200c.
+      // Expected: subtotal = 3000c (BXGY base).
+      //           total    = max(0, 2000c − 200c) = 1800c.
+      //           discount = 3000 − 1800 = 1200c.
+      const sale = makeBxgySale();
+      sale.setAppliedOrderPromotion({
+        promotionId: 'promo-order',
+        discountType: 'percentage',
+        discountValue: 10,
+        discountAmountCents: 200,
+        discountTitle: '10% off',
+      });
+
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(3000);
+      expect(totals.totalCents).toBe(1800);
+      expect(totals.discountCents).toBe(1200);
+    });
+
+    it('non-BXGY regression: PRODUCT_DISCOUNT path totals unchanged (no discount-amount read-time shift)', () => {
+      // Line A — qty 1 / 1000c / PD 10% → unitPrice 900c, prePrice 1000c,
+      //          discountAmountCents 100c. NO BXGY — the new postLine
+      //          subtrahend MUST NOT subtract R (R is null) on this line.
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-pd-only',
+        saleId: BASE_SALE_ID,
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyDiscount({
+        type: 'percentage',
+        percent: 10,
+        discountTitle: 'PD 10%',
+        promotionId: 'promo-pd-only',
+      });
+
+      const totals = sale.previewTotals();
+      // subtotal = prePrice × qty = 1000c (pre-discount base).
+      // total    = unitPrice × qty = 900c.
+      // discount = 1000 − 900 = 100c.
+      expect(totals.subtotalCents).toBe(1000);
+      expect(totals.totalCents).toBe(900);
+      expect(totals.discountCents).toBe(100);
+    });
+
+    it('manual free-form discount regression: no promotionId, no read-time subtraction', () => {
+      // applyDiscount WITHOUT promotionId → manual free-form. The BXGY
+      // discriminator (`promotionId != null && ...`) is false → R is NOT
+      // subtracted on the postLine subtrahend. `unitPriceCents` is already
+      // reduced by the discount (per-unit path), so postLine is NET.
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-manual',
+        saleId: BASE_SALE_ID,
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyDiscount({
+        type: 'amount',
+        amountCents: 100,
+        discountTitle: 'manual',
+      });
+
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(1000);
+      expect(totals.totalCents).toBe(900);
+      expect(totals.discountCents).toBe(100);
+    });
+  });
 });

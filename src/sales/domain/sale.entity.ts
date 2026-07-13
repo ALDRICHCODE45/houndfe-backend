@@ -505,10 +505,20 @@ export class Sale {
           item.quantity,
       0,
     );
-    // Post-line sum = Σ(unitPriceCents × quantity). Per-line discounts are
-    // baked into `unitPriceCents`, so this is the sum AFTER per-line.
+    // Post-line sum = Σ(unitPriceCents × quantity). For per-unit discounts
+    // (PRODUCT_DISCOUNT, manual free-form) the reduction is already baked
+    // into `unitPriceCents`. For BUY_X_GET_Y whole-line rewards (design.md
+    // Decision 1) `unitPriceCents` STAYS FULL — the reward `R` rides
+    // `discountAmountCents` instead — so the sum is GROSS on those lines.
+    // The column-derived `item.isBuyXGetYReward()` discriminator subtracts
+    // `R` to render NET on this aggregate read path. The receipt mapper
+    // (`prisma-sale.repository.ts:1393`) applies the SAME discriminator so
+    // both readers compute NET identically.
     const postLineSubtotalCents = this._items.reduce(
-      (sum, item) => sum + item.subtotalCents,
+      (sum, item) =>
+        sum +
+        item.subtotalCents -
+        (item.isBuyXGetYReward() ? item.discountAmountCents! : 0),
       0,
     );
     const orderDiscountCents =

@@ -902,6 +902,245 @@ describe('PrismaSaleRepository', () => {
 
       expect(result).toBeNull();
     });
+
+    // ---------------------------------------------------------------------
+    // Work Unit 2 — BUY_X_GET_Y receipt/detail mapper (spec.md:97-106)
+    //
+    // The receipt mapper MUST render NET on the wire (no gross/net flip
+    // vs the per-line PRODUCT_DISCOUNT path). The discriminator is
+    // re-derived from the persisted Prisma row — the same columns the
+    // domain `SaleItem.isBuyXGetYReward()` reads — and `R` is subtracted
+    // from `subtotalCents = unitPriceCents × quantity`. The mapper also
+    // emits `rewardKind = 'buy_x_get_y'` on the wire so the frontend
+    // can render the "free"/reward badge without inferring it.
+    // ---------------------------------------------------------------------
+    describe('findOneWithRelations — BXGY receipt mapper NET + rewardKind (WU2, spec.md:97-106)', () => {
+      function makeBxgyRow(args: {
+        promotionId: string;
+        quantity: number;
+        unitPriceCents: number;
+        discountAmountCents: number;
+        discountValue: number;
+      }) {
+        return {
+          productName: 'P',
+          variantName: null,
+          imageUrl: null,
+          unitPriceCents: args.unitPriceCents,
+          quantity: args.quantity,
+          originalPriceCents: null,
+          priceSource: 'DEFAULT',
+          appliedPriceListId: null,
+          // BXGY rides the existing 'amount' enum value; prePrice === unitPrice.
+          discountType: 'AMOUNT',
+          discountValue: args.discountValue,
+          discountAmountCents: args.discountAmountCents,
+          discountTitle: 'Buy 2 Get 1',
+          prePriceCentsBeforeDiscount: args.unitPriceCents,
+          // WU2 — column-derived discriminator reads this; without it the
+          // mapper falls through to the gross branch.
+          promotionId: args.promotionId,
+        };
+      }
+
+      function makeSaleRow(items: unknown[], id = 'sale-bxgy') {
+        return {
+          id,
+          folio: 'V-BXGY',
+          status: 'CONFIRMED',
+          channel: 'POS',
+          register: 'Principal',
+          confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+          dueDate: null,
+          createdAt: new Date('2026-05-08T10:00:00.000Z'),
+          subtotalCents: 3000,
+          discountCents: 1000,
+          totalCents: 2000,
+          paidCents: 2000,
+          debtCents: 0,
+          changeDueCents: 0,
+          paymentStatus: 'PAID',
+          deliveryStatus: 'DELIVERED',
+          customer: null,
+          user: { id: 'u1', name: 'Caja 1' },
+          seller: null,
+          items,
+          payments: [],
+        };
+      }
+
+      it('emits NET subtotal + rewardKind="buy_x_get_y" for a 100% BXGY line (true free get-unit)', async () => {
+        // qty 3 × 1000c/unit, R=1000c (one full free get-unit at 1000c).
+        // Without the BXGY mapper change, `subtotalCents` would be 3000c
+        // (gross). After the change it MUST be 2000c (NET).
+        prisma.sale.findFirst.mockResolvedValue(
+          makeSaleRow([
+            makeBxgyRow({
+              promotionId: 'promo-bxgy-free',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 1000,
+              discountValue: 1000,
+            }),
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-bxgy');
+
+        expect(result?.items[0].subtotalCents).toBe(2000);
+        expect(result?.items[0].discountCents).toBe(1000);
+        expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+      });
+
+      it('emits NET subtotal + rewardKind="buy_x_get_y" for a 50% BXGY line (partial reward)', async () => {
+        // qty 3 × 1000c/unit, R=500c (50% off one get-unit).
+        prisma.sale.findFirst.mockResolvedValue(
+          makeSaleRow([
+            makeBxgyRow({
+              promotionId: 'promo-bxgy-half',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 500,
+              discountValue: 500,
+            }),
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-bxgy');
+
+        expect(result?.items[0].subtotalCents).toBe(2500);
+        expect(result?.items[0].discountCents).toBe(500);
+        expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+      });
+
+      it('emits rewardKind=null and keeps the per-unit subtotal for a PRODUCT_DISCOUNT line (non-BXGY regression)', async () => {
+        // PD line: prePrice (1000) > unitPrice (900) → discriminator's
+        // `unitPrice === prePrice` clause is FALSE → R is NOT subtracted;
+        // the per-unit `unitPrice × quantity` is already NET (the existing
+        // path). The mapper MUST surface rewardKind=null so the frontend
+        // doesn't render a "free"/reward badge for a non-BXGY line.
+        prisma.sale.findFirst.mockResolvedValue(
+          makeSaleRow([
+            {
+              productName: 'P',
+              variantName: null,
+              imageUrl: null,
+              unitPriceCents: 900,
+              quantity: 2,
+              originalPriceCents: 1000,
+              priceSource: 'DEFAULT',
+              appliedPriceListId: null,
+              discountType: 'PERCENTAGE',
+              discountValue: 10,
+              discountAmountCents: 100,
+              discountTitle: 'Promo 10%',
+              prePriceCentsBeforeDiscount: 1000,
+            },
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-pd');
+
+        // Per-unit PD: subtotalCents = unitPriceCents × quantity = 900 × 2 = 1800.
+        expect(result?.items[0].subtotalCents).toBe(1800);
+        expect(result?.items[0].discountCents).toBe(100);
+        expect(result?.items[0].rewardKind).toBeNull();
+      });
+
+      it('emits rewardKind=null and keeps the per-unit subtotal for a manual free-form discount (no promotionId)', async () => {
+        // Manual free-form: no promotionId → discriminator false → R not
+        // subtracted. `unitPriceCents` is already reduced by the discount.
+        prisma.sale.findFirst.mockResolvedValue(
+          makeSaleRow([
+            {
+              productName: 'P',
+              variantName: null,
+              imageUrl: null,
+              unitPriceCents: 800,
+              quantity: 1,
+              originalPriceCents: null,
+              priceSource: 'DEFAULT',
+              appliedPriceListId: null,
+              discountType: 'AMOUNT',
+              discountValue: 200,
+              discountAmountCents: 200,
+              discountTitle: 'manual',
+              prePriceCentsBeforeDiscount: 1000,
+            },
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-manual');
+
+        expect(result?.items[0].subtotalCents).toBe(800);
+        expect(result?.items[0].discountCents).toBe(200);
+        expect(result?.items[0].rewardKind).toBeNull();
+      });
+
+      it('mixed: BXGY line NET + PD line per-unit coexist on the same response', async () => {
+        // Two lines: BXGY 50% (qty 3 × 1000c, R=500c) + PD 10% (qty 1 ×
+        // 1000c, unitPrice 900c, prePrice 1000c, discountAmountCents 100c).
+        // Expected per-item:
+        //   BXGY → subtotal 2500c, discount 500c, rewardKind 'buy_x_get_y'.
+        //   PD   → subtotal  900c, discount 100c, rewardKind null.
+        prisma.sale.findFirst.mockResolvedValue({
+          id: 'sale-mixed',
+          folio: 'V-MIXED',
+          status: 'CONFIRMED',
+          channel: 'POS',
+          register: 'Principal',
+          confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+          dueDate: null,
+          createdAt: new Date('2026-05-08T10:00:00.000Z'),
+          subtotalCents: 4000,
+          discountCents: 600,
+          totalCents: 3400,
+          paidCents: 3400,
+          debtCents: 0,
+          changeDueCents: 0,
+          paymentStatus: 'PAID',
+          deliveryStatus: 'DELIVERED',
+          customer: null,
+          user: { id: 'u1', name: 'Caja 1' },
+          seller: null,
+          items: [
+            makeBxgyRow({
+              promotionId: 'promo-bxgy',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 500,
+              discountValue: 500,
+            }),
+            {
+              productName: 'P2',
+              variantName: null,
+              imageUrl: null,
+              unitPriceCents: 900,
+              quantity: 1,
+              originalPriceCents: 1000,
+              priceSource: 'DEFAULT',
+              appliedPriceListId: null,
+              discountType: 'PERCENTAGE',
+              discountValue: 10,
+              discountAmountCents: 100,
+              discountTitle: 'Promo 10%',
+              prePriceCentsBeforeDiscount: 1000,
+            },
+          ],
+          payments: [],
+        });
+
+        const result = await repo.findOneWithRelations('sale-mixed');
+
+        expect(result?.items[0].subtotalCents).toBe(2500);
+        expect(result?.items[0].discountCents).toBe(500);
+        expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+
+        expect(result?.items[1].subtotalCents).toBe(900);
+        expect(result?.items[1].discountCents).toBe(100);
+        expect(result?.items[1].rewardKind).toBeNull();
+      });
+    });
   });
 
   describe('save', () => {

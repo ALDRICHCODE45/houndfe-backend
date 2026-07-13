@@ -52,6 +52,15 @@ export interface SaleDetailItemDto {
   discountAmountCents: number | null;
   discountTitle: string | null;
   prePriceCentsBeforeDiscount: number | null;
+  /**
+   * Wire-level BXGY discriminator (design.md Decision 6; spec.md:97-106).
+   * `'buy_x_get_y'` iff the persisted row satisfies the column-derived
+   * predicate (`promotionId != null && discountAmountCents > 0 &&
+   * prePriceCentsBeforeDiscount != null && unitPriceCents ===
+   * prePriceCentsBeforeDiscount`). Null on every other line so the
+   * frontend can render the "free"/reward badge without inferring it.
+   */
+  rewardKind: 'buy_x_get_y' | null;
 }
 
 export interface SaleDetailPaymentDto {
