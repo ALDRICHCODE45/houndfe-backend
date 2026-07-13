@@ -87,6 +87,7 @@ type PrismaLookupMock = {
   product: { findMany: jest.Mock };
   customer: { findMany: jest.Mock };
   globalPriceList: { findMany: jest.Mock };
+  variant: { findMany: jest.Mock };
 };
 
 function makePrisma(
@@ -98,6 +99,7 @@ function makePrisma(
     product: { findMany: jest.fn().mockResolvedValue([]) },
     customer: { findMany: jest.fn().mockResolvedValue([]) },
     globalPriceList: { findMany: jest.fn().mockResolvedValue([]) },
+    variant: { findMany: jest.fn().mockResolvedValue([]) },
     ...overrides,
   };
 }
@@ -1584,6 +1586,327 @@ describe('PromotionsService', () => {
       ).rejects.toMatchObject({ code: 'duplicate_target' });
 
       expect(repo.save.mock.calls.length).toBe(0);
+    });
+  });
+
+  // ============================================================
+  // VARIANTS target-item variant-context enrichment (read path).
+  //
+  // The read responses (findOne / findAll) must enrich each
+  // targetItem whose targetType === 'VARIANTS' with three
+  // response-only fields resolved from a SEPARATE variant lookup
+  // (targetId has no FK): productId, variantName, productName.
+  // Non-VARIANTS items are untouched. A missing variant leaves the
+  // fields absent and does NOT throw. findAll batches the lookup
+  // into a single variant.findMany across the whole page.
+  // ============================================================
+  describe('VARIANTS target-item variant-context enrichment', () => {
+    type EnrichedTargetItem = {
+      id: string;
+      side: string;
+      targetType: string;
+      targetId: string;
+      productId?: string;
+      variantName?: string;
+      productName?: string;
+    };
+
+    it('findOne enriches VARIANTS items with productId, variantName, productName from the variant lookup', async () => {
+      const promo = makePromotion({
+        appliesTo: 'VARIANTS',
+        targetItems: [
+          {
+            id: 'ti-1',
+            side: 'DEFAULT',
+            targetType: 'VARIANTS',
+            targetId: 'var-1',
+          },
+        ],
+      });
+      const repo = makeRepo({ findById: jest.fn().mockResolvedValue(promo) });
+      const prisma = makePrisma({
+        variant: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'var-1',
+              productId: 'prod-1',
+              name: 'Rojo / M',
+              product: { name: 'Playera' },
+            },
+          ]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.findOne('promo-1');
+      const items = result.targetItems as EnrichedTargetItem[];
+
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        targetType: 'VARIANTS',
+        targetId: 'var-1',
+        productId: 'prod-1',
+        variantName: 'Rojo / M',
+        productName: 'Playera',
+      });
+      expect(prisma.variant.findMany).toHaveBeenCalledTimes(1);
+      expect(prisma.variant.findMany.mock.calls[0][0]).toMatchObject({
+        where: { id: { in: ['var-1'] } },
+      });
+    });
+
+    it('findOne leaves non-VARIANTS items untouched (no new fields)', async () => {
+      const promo = makePromotion({
+        appliesTo: 'CATEGORIES',
+        targetItems: [
+          {
+            id: 'ti-cat',
+            side: 'DEFAULT',
+            targetType: 'CATEGORIES',
+            targetId: 'cat-1',
+          },
+        ],
+      });
+      const repo = makeRepo({ findById: jest.fn().mockResolvedValue(promo) });
+      const prisma = makePrisma();
+      const service = makeService(repo, prisma);
+
+      const result = await service.findOne('promo-1');
+      const items = result.targetItems as EnrichedTargetItem[];
+
+      expect(items[0]).toEqual({
+        id: 'ti-cat',
+        side: 'DEFAULT',
+        targetType: 'CATEGORIES',
+        targetId: 'cat-1',
+      });
+      expect(items[0].productId).toBeUndefined();
+      expect(items[0].variantName).toBeUndefined();
+      expect(items[0].productName).toBeUndefined();
+      // No VARIANTS items → no variant lookup at all.
+      expect(prisma.variant.findMany).not.toHaveBeenCalled();
+    });
+
+    it('findOne does NOT throw and adds NO fields for a VARIANTS item whose variant is missing from the lookup', async () => {
+      const promo = makePromotion({
+        appliesTo: 'VARIANTS',
+        targetItems: [
+          {
+            id: 'ti-missing',
+            side: 'DEFAULT',
+            targetType: 'VARIANTS',
+            targetId: 'var-deleted',
+          },
+        ],
+      });
+      const repo = makeRepo({ findById: jest.fn().mockResolvedValue(promo) });
+      const prisma = makePrisma({
+        variant: { findMany: jest.fn().mockResolvedValue([]) },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.findOne('promo-1');
+      const items = result.targetItems as EnrichedTargetItem[];
+
+      expect(items[0]).toEqual({
+        id: 'ti-missing',
+        side: 'DEFAULT',
+        targetType: 'VARIANTS',
+        targetId: 'var-deleted',
+      });
+      expect(items[0].productId).toBeUndefined();
+    });
+
+    it('findOne enriches VARIANTS items on BUY/GET sides (enrich by targetType, not side)', async () => {
+      const promo = makePromotion({
+        type: 'ADVANCED',
+        discountType: null,
+        discountValue: null,
+        appliesTo: null,
+        buyQuantity: 1,
+        getQuantity: 1,
+        getDiscountPercent: 0,
+        buyTargetType: 'VARIANTS',
+        getTargetType: 'VARIANTS',
+        targetItems: [
+          {
+            id: 'ti-buy',
+            side: 'BUY',
+            targetType: 'VARIANTS',
+            targetId: 'var-buy',
+          },
+          {
+            id: 'ti-get',
+            side: 'GET',
+            targetType: 'VARIANTS',
+            targetId: 'var-get',
+          },
+        ],
+      });
+      const repo = makeRepo({ findById: jest.fn().mockResolvedValue(promo) });
+      const prisma = makePrisma({
+        variant: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'var-buy',
+              productId: 'prod-buy',
+              name: 'Buy V',
+              product: { name: 'Buy P' },
+            },
+            {
+              id: 'var-get',
+              productId: 'prod-get',
+              name: 'Get V',
+              product: { name: 'Get P' },
+            },
+          ]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.findOne('promo-1');
+      const items = result.targetItems as EnrichedTargetItem[];
+
+      const buy = items.find((i) => i.side === 'BUY')!;
+      const get = items.find((i) => i.side === 'GET')!;
+      expect(buy).toMatchObject({
+        productId: 'prod-buy',
+        variantName: 'Buy V',
+        productName: 'Buy P',
+      });
+      expect(get).toMatchObject({
+        productId: 'prod-get',
+        variantName: 'Get V',
+        productName: 'Get P',
+      });
+      expect(prisma.variant.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('findAll batches the variant lookup into ONE call with all distinct variant ids across the page', async () => {
+      const promo1 = makePromotion({
+        id: 'promo-1',
+        appliesTo: 'VARIANTS',
+        targetItems: [
+          {
+            id: 'ti-1',
+            side: 'DEFAULT',
+            targetType: 'VARIANTS',
+            targetId: 'var-1',
+          },
+          {
+            id: 'ti-2',
+            side: 'DEFAULT',
+            targetType: 'VARIANTS',
+            targetId: 'var-2',
+          },
+        ],
+      });
+      const promo2 = makePromotion({
+        id: 'promo-2',
+        appliesTo: 'VARIANTS',
+        targetItems: [
+          {
+            id: 'ti-3',
+            side: 'DEFAULT',
+            targetType: 'VARIANTS',
+            // duplicate of promo1's var-2 → must be de-duped in the IN(...)
+            targetId: 'var-2',
+          },
+          {
+            id: 'ti-4',
+            side: 'DEFAULT',
+            targetType: 'VARIANTS',
+            targetId: 'var-3',
+          },
+          {
+            id: 'ti-cat',
+            side: 'DEFAULT',
+            targetType: 'CATEGORIES',
+            targetId: 'cat-9',
+          },
+        ],
+      });
+      const repo = makeRepo({
+        findAll: jest
+          .fn()
+          .mockResolvedValue({ data: [promo1, promo2], total: 2 }),
+      });
+      const prisma = makePrisma({
+        variant: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'var-1',
+              productId: 'p1',
+              name: 'V1',
+              product: { name: 'P1' },
+            },
+            {
+              id: 'var-2',
+              productId: 'p2',
+              name: 'V2',
+              product: { name: 'P2' },
+            },
+            {
+              id: 'var-3',
+              productId: 'p3',
+              name: 'V3',
+              product: { name: 'P3' },
+            },
+          ]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.findAll(queryDto({ page: 1, limit: 20 }));
+
+      // Exactly ONE lookup for the whole page (no N+1).
+      expect(prisma.variant.findMany).toHaveBeenCalledTimes(1);
+      const inArg = prisma.variant.findMany.mock.calls[0][0].where.id
+        .in as string[];
+      expect([...inArg].sort()).toEqual(['var-1', 'var-2', 'var-3']);
+
+      const p1Items = result.data[0].targetItems as EnrichedTargetItem[];
+      const p2Items = result.data[1].targetItems as EnrichedTargetItem[];
+      expect(p1Items.find((i) => i.targetId === 'var-1')).toMatchObject({
+        productId: 'p1',
+        variantName: 'V1',
+        productName: 'P1',
+      });
+      expect(p2Items.find((i) => i.targetId === 'var-3')).toMatchObject({
+        productId: 'p3',
+        variantName: 'V3',
+        productName: 'P3',
+      });
+      // CATEGORIES item untouched.
+      expect(p2Items.find((i) => i.targetId === 'cat-9')).toEqual({
+        id: 'ti-cat',
+        side: 'DEFAULT',
+        targetType: 'CATEGORIES',
+        targetId: 'cat-9',
+      });
+    });
+
+    it('findAll does NOT call the variant lookup when the page has no VARIANTS items', async () => {
+      const promo = makePromotion({
+        appliesTo: 'CATEGORIES',
+        targetItems: [
+          {
+            id: 'ti-cat',
+            side: 'DEFAULT',
+            targetType: 'CATEGORIES',
+            targetId: 'cat-1',
+          },
+        ],
+      });
+      const repo = makeRepo({
+        findAll: jest.fn().mockResolvedValue({ data: [promo], total: 1 }),
+      });
+      const prisma = makePrisma();
+      const service = makeService(repo, prisma);
+
+      await service.findAll(queryDto({ page: 1, limit: 20 }));
+
+      expect(prisma.variant.findMany).not.toHaveBeenCalled();
     });
   });
 });
