@@ -52,6 +52,54 @@ export function clampPercentageToSafeRange(percent: number): number {
 }
 
 /**
+ * WU1 — Pure helper for BUY_X_GET_Y reward computation (design.md Decision 2;
+ * spec.md:60-91,102-106). Per-line (Q2): a single line must have
+ * `quantity >= buyQuantity` to trigger; the engine gates on that BEFORE
+ * calling this helper. Reward groups are repeatable (Q3): `floor(qty / (N+M))`,
+ * with the M discounted get-units per group being the cheapest pre-promo
+ * effective unit-price units of the line. When the line carries a single
+ * `effectiveUnitPriceCents` (the common case), the per-line saving equals
+ * `floor(qty / (N+M)) * M * Math.round((unitPrice * getDiscountPercent) / 100)`
+ * — Q8 rounding convention. Returns ZERO reward whenever `qty < N+M` (Q9).
+ *
+ * Co-located in the use-case module so the engine and its unit tests import
+ * the same symbol; the helper is pure (no DI, no I/O) and side-effect free.
+ *
+ * The reward rides the existing `amount` discount path — `R = lineDiscountCents`
+ * is stored on the winning line as the whole-line cents reward; see
+ * Decision 1 + Decision 6 for how both readers (previewTotals + receipt
+ * mapper) render this as NET under a column-derived discriminator.
+ */
+export function computeBuyXGetYReward(input: {
+  quantity: number;
+  effectiveUnitPriceCents: number;
+  /** N — units the customer must buy to qualify for the get-units. */
+  buyQuantity: number;
+  /** M — units the customer receives at a discount per reward group. */
+  getQuantity: number;
+  /** 0..100 — discount applied to the M get-units (per-unit, not line-total). */
+  getDiscountPercent: number;
+}): {
+  rewardGroups: number;
+  discountedUnitCount: number;
+  perUnitRewardCents: number;
+  lineDiscountCents: number;
+} {
+  const groupSize = input.buyQuantity + input.getQuantity;
+  const rewardGroups = Math.floor(input.quantity / groupSize);
+  const discountedUnitCount = rewardGroups * input.getQuantity;
+  const perUnitRewardCents = Math.round(
+    (input.effectiveUnitPriceCents * input.getDiscountPercent) / 100,
+  );
+  return {
+    rewardGroups,
+    discountedUnitCount,
+    perUnitRewardCents,
+    lineDiscountCents: discountedUnitCount * perUnitRewardCents,
+  };
+}
+
+/**
  * Tier returned by `matchTargetTier` — encodes BOTH "did the target
  * hit this line?" AND "which specificity won?" in a single value, so
  * the engine never needs a second predicate pass.
