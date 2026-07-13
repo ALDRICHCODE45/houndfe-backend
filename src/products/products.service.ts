@@ -2478,4 +2478,53 @@ export class ProductsService {
     }
     return map;
   }
+
+  /**
+   * Batch-resolve a set of `Product.id` to their resolved
+   * `categoryId` + `brandId` pair.
+   *
+   * Used by the POS promotion engine (W4 wiring) once per recompute
+   * to stamp CATEGORIES/BRANDS matches onto each `PosEvalLine`.
+   * The matcher (`matchTargetTier`) reads `line.categoryId` /
+   * `line.brandId` to compare against DEFAULT-side
+   * CATEGORIES/BRANDS targets.
+   *
+   * - Distinct ids → ONE tenant-scoped `product.findMany` call
+   *   (N+1-safe).
+   * - Empty input → no DB call.
+   * - Missing ids → silently omitted from the result map (the
+   *   caller falls back to `null` for those lines).
+   * - `null` `categoryId` / `brandId` on the row are PRESERVED in
+   *   the map — the engine's null-guard at `matchTargetTier` relies
+   *   on the value being `null` (NOT omitted) to decide "no match
+   *   for this line".
+   * - Tenant-scoped via `tenantPrisma.getClient()` (NOT the global
+   *   prisma client). `Product` has `tenantId` (schema.prisma:337).
+   */
+  async resolveProductCategoryBrandIds(
+    productIds: ReadonlyArray<string>,
+  ): Promise<
+    Map<string, { categoryId: string | null; brandId: string | null }>
+  > {
+    const distinct = [...new Set(productIds)];
+    const map = new Map<
+      string,
+      { categoryId: string | null; brandId: string | null }
+    >();
+
+    if (distinct.length === 0) return map;
+
+    const rows = await this.tenantPrisma.getClient().product.findMany({
+      where: { id: { in: distinct } },
+      select: { id: true, categoryId: true, brandId: true },
+    });
+
+    for (const row of rows) {
+      map.set(row.id, {
+        categoryId: row.categoryId,
+        brandId: row.brandId,
+      });
+    }
+    return map;
+  }
 }
