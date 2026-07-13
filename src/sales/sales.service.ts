@@ -620,6 +620,15 @@ export class SalesService {
           item.appliedPriceListId != null
             ? (priceListGlobalIdMap.get(item.appliedPriceListId) ?? null)
             : null,
+        // W1 — added to PosEvalLine port; W3/W4 will resolve them
+        // via ProductsService.resolveProductCategoryBrandIds and
+        // stamp the real values per line. For now `null` everywhere
+        // keeps the typecheck green and disables the new
+        // CATEGORIES/BRANDS branches (null-guard at matchTargetTier
+        // returns null for them), so behavior is identical to
+        // pre-W1.
+        categoryId: null,
+        brandId: null,
         hasManualDiscount:
           item.discountType !== null && item.promotionId === null,
       })),

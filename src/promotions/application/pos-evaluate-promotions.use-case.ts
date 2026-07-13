@@ -56,26 +56,43 @@ export function clampPercentageToSafeRange(percent: number): number {
  * hit this line?" AND "which specificity won?" in a single value, so
  * the engine never needs a second predicate pass.
  *
- *   - 'VARIANT' : a VARIANTS-typed target hit the line's variantId.
- *   - 'PRODUCT' : no VARIANTS hit, but a PRODUCTS-typed target hit the
- *                 line's productId (back-compat: a PRODUCTS promo on
- *                 product P1 still matches EVERY variant of P1).
- *   - null      : no DEFAULT-side target hit the line.
+ *   - 'VARIANT'  : a VARIANTS-typed target hit the line's variantId.
+ *   - 'PRODUCT'  : no VARIANTS hit, but a PRODUCTS-typed target hit
+ *                  the line's productId (back-compat: a PRODUCTS
+ *                  promo on product P1 still matches EVERY variant
+ *                  of P1).
+ *   - 'CATEGORY' : no VARIANTS/PRODUCTS hit, but a CATEGORIES-typed
+ *                  target hit the line's resolved categoryId. Null
+ *                  categoryId is a structural no-match.
+ *   - 'BRAND'    : no VARIANTS/PRODUCTS hit, but a BRANDS-typed
+ *                  target hit the line's resolved brandId. Null
+ *                  brandId is a structural no-match. BRAND and
+ *                  CATEGORY are EQUAL-broadness peers (both ordinal
+ *                  1 in the pre-pass; best-wins tiebreaks).
+ *   - null       : no DEFAULT-side target hit the line.
  */
-export type LineMatchTier = 'VARIANT' | 'PRODUCT' | null;
+export type LineMatchTier = 'VARIANT' | 'PRODUCT' | 'CATEGORY' | 'BRAND' | null;
 
 /**
  * Match predicate — pure, exported for both testability AND future
  * reuse (online/cart engine `evaluate-cart-promotions.use-case.ts`).
  *
- * Specificity rule: VARIANTS wins over PRODUCTS when both hit the
- * same line. The pre-pass in `pickBestPerLine` further drops any
- * tier='PRODUCT' candidate when ANY candidate for that line is
- * tier='VARIANT' (orthogonal filter; best-wins invariant untouched).
+ * Specificity rule: VARIANTS > PRODUCTS > {CATEGORY, BRAND}. Branch
+ * order encodes fallthrough — VARIANT first, then PRODUCT, then the
+ * two peer tiers (CATEGORY before BRAND; the order between them is
+ * arbitrary because they're equal-broadness peers — best-wins
+ * resolves the peer tie at the per-line precedence pre-pass in
+ * `pickBestPerLine`). Null guards mirror `variantId != null` so an
+ * unset/unresolved categoryId/brandId never silently matches.
  */
 export function matchTargetTier(
   targetItems: ReadonlyArray<{ side: string; targetType: string; targetId: string }>,
-  line: { productId: string; variantId: string | null },
+  line: {
+    productId: string;
+    variantId: string | null;
+    categoryId?: string | null;
+    brandId?: string | null;
+  },
 ): LineMatchTier {
   const side = 'DEFAULT';
   // VARIANTS first — strict === null on variantId so an unset variant
@@ -100,6 +117,35 @@ export function matchTargetTier(
     )
   ) {
     return 'PRODUCT';
+  }
+  // CATEGORIES — null guard on line.categoryId so an unset/unresolved
+  // category (product with null categoryId OR id omitted from the
+  // resolver map) never silently matches. CATEGORIES comes before
+  // BRANDS by convention; both are tier-1 peers so the helper's
+  // branch order doesn't affect correctness — the engine's ordinal
+  // pre-pass resolves the peer tie by best-wins.
+  if (
+    line.categoryId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'CATEGORIES' &&
+        ti.targetId === line.categoryId,
+    )
+  ) {
+    return 'CATEGORY';
+  }
+  // BRANDS — null guard on line.brandId, symmetric with CATEGORIES.
+  if (
+    line.brandId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'BRANDS' &&
+        ti.targetId === line.brandId,
+    )
+  ) {
+    return 'BRAND';
   }
   return null;
 }
@@ -133,7 +179,7 @@ interface PerLineCandidate {
   /** Customer discount in cents as it would apply to `effectiveUnitPriceCents`. */
   discountCents: number;
   /** Specificity tier reported by `matchTargetTier` — drives precedence pre-pass. */
-  tier: 'VARIANT' | 'PRODUCT';
+  tier: 'VARIANT' | 'PRODUCT' | 'CATEGORY' | 'BRAND';
 }
 
 @Injectable()

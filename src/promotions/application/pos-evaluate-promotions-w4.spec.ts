@@ -102,6 +102,8 @@ function makeLine(overrides: Partial<PosEvalLine> = {}): PosEvalLine {
     effectiveUnitPriceCents: 1000,
     appliedPriceListId: null,
     appliedGlobalPriceListId: null,
+    categoryId: null,
+    brandId: null,
     hasManualDiscount: false,
     ...overrides,
   };
