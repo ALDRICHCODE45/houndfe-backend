@@ -234,10 +234,12 @@ describe('PromotionsService', () => {
       expect(result.type).toBe('ORDER_DISCOUNT');
     });
 
-    it('should create a BUY_X_GET_Y promotion', async () => {
+    it('should create a targeted BUY_X_GET_Y promotion', async () => {
       const saved = makePromotion({ type: 'BUY_X_GET_Y' });
       const repo = makeRepo({ save: jest.fn().mockResolvedValue(saved) });
-      const prisma = makePrisma();
+      const prisma = makePrisma({
+        product: { findMany: jest.fn().mockResolvedValue([{ id: 'product-1' }]) },
+      });
       const service = makeService(repo, prisma);
 
       const result = await service.create(
@@ -247,11 +249,36 @@ describe('PromotionsService', () => {
           method: 'AUTOMATIC',
           buyQuantity: 2,
           getQuantity: 1,
-          getDiscountPercent: 0,
+          getDiscountPercent: 100,
+          appliesTo: 'PRODUCTS',
+          targetItems: [{ targetType: 'PRODUCTS', targetId: 'product-1' }],
         }),
       );
 
       expect(result.type).toBe('BUY_X_GET_Y');
+      expect(repo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reject BUY_X_GET_Y create without a target as INVALID_TARGET', async () => {
+      const repo = makeRepo();
+      const service = makeService(repo, makePrisma());
+
+      await expect(
+        service.create(
+          createDto({
+            title: 'Untargeted 2x1',
+            type: 'BUY_X_GET_Y',
+            method: 'AUTOMATIC',
+            buyQuantity: 2,
+            getQuantity: 1,
+            getDiscountPercent: 100,
+            appliesTo: 'PRODUCTS',
+            targetItems: [],
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_TARGET' });
+
+      expect(repo.save).not.toHaveBeenCalled();
     });
 
     it('should throw InvalidArgumentError when entity validation fails', async () => {
@@ -972,6 +999,37 @@ describe('PromotionsService', () => {
         ),
       ).rejects.toMatchObject({ code: 'INVALID_DATE_RANGE' });
       expect(repo.save.mock.calls.length).toBe(0);
+    });
+
+    it('should reject clearing BUY_X_GET_Y targets on update as INVALID_TARGET without mutating the promotion', async () => {
+      const targetItem = {
+        id: 'target-1',
+        side: 'DEFAULT' as const,
+        targetType: 'PRODUCTS' as const,
+        targetId: 'product-1',
+      };
+      const existing = makePromotion({
+        type: 'BUY_X_GET_Y',
+        discountType: null,
+        discountValue: null,
+        appliesTo: 'PRODUCTS',
+        buyQuantity: 2,
+        getQuantity: 1,
+        getDiscountPercent: 100,
+        targetItems: [targetItem],
+      });
+      const repo = makeRepo({
+        findById: jest.fn().mockResolvedValue(existing),
+      });
+      const service = makeService(repo, makePrisma());
+
+      await expect(
+        service.update('promo-1', updateDto({ targetItems: [] })),
+      ).rejects.toMatchObject({ code: 'INVALID_TARGET' });
+
+      expect(existing.appliesTo).toBe('PRODUCTS');
+      expect(existing.targetItems).toEqual([targetItem]);
+      expect(repo.save).not.toHaveBeenCalled();
     });
 
     it('should enforce ADVANCED side-target completeness on update', async () => {
