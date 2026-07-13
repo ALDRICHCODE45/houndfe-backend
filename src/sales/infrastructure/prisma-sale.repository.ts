@@ -1434,7 +1434,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           // Explicit wire flag so the frontend can render the
           // "free"/reward badge without inferring it.
-          rewardKind: isBxgy ? 'buy_x_get_y' : null,
+          rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
         };
       }),
       payments: sale.payments.map((payment) => ({
