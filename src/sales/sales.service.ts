@@ -587,6 +587,15 @@ export class SalesService {
    * state. Extracted from `recomputePromotions` so the non-mutating
    * `evaluatePromotionsForSale` can reuse it without duplicating the
    * batch-resolve + per-line construction logic.
+   *
+   * W4 — wires `ProductsService.resolveProductCategoryBrandIds` so
+   * each engine line carries the resolved `categoryId`/`brandId`
+   * for the CATEGORIES/BRANDS matcher. The resolver is invoked once
+   * per recompute with the DISTINCT productIds from the current
+   * items. Lines whose product is missing from the map (silently
+   * omitted by the resolver) fall back to `{ null, null }` — the
+   * engine's null guard at `matchTargetTier` then correctly skips
+   * any CATEGORIES/BRANDS promotion on those lines.
    */
   private async buildPosEvalInput(sale: Sale): Promise<PosEvalInput> {
     // Distinct non-null appliedPriceListIds.
@@ -605,33 +614,53 @@ export class SalesService {
           )
         : new Map<string, string>();
 
+    // Distinct non-null productIds for the CATEGORIES/BRANDS resolver.
+    // Resolver short-circuits on the empty array, so the `length > 0`
+    // guard is redundant but explicit (matches the price-list branch
+    // above — keeps the wiring symmetric and easy to read).
+    const distinctProductIds = [
+      ...new Set(
+        sale.items
+          .map((item) => item.productId)
+          .filter((id): id is string => id != null && id !== ''),
+      ),
+    ];
+    const productCategoryBrandMap =
+      distinctProductIds.length > 0
+        ? await this.productsService.resolveProductCategoryBrandIds(
+            distinctProductIds,
+          )
+        : new Map<string, { categoryId: string | null; brandId: string | null }>();
+
     return {
       now: new Date(),
       customerId: sale.customerId,
-      lines: sale.items.map((item) => ({
-        itemId: item.id,
-        productId: item.productId,
-        variantId: item.variantId,
-        quantity: item.quantity,
-        effectiveUnitPriceCents:
-          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
-        appliedPriceListId: item.appliedPriceListId,
-        appliedGlobalPriceListId:
-          item.appliedPriceListId != null
-            ? (priceListGlobalIdMap.get(item.appliedPriceListId) ?? null)
-            : null,
-        // W1 — added to PosEvalLine port; W3/W4 will resolve them
-        // via ProductsService.resolveProductCategoryBrandIds and
-        // stamp the real values per line. For now `null` everywhere
-        // keeps the typecheck green and disables the new
-        // CATEGORIES/BRANDS branches (null-guard at matchTargetTier
-        // returns null for them), so behavior is identical to
-        // pre-W1.
-        categoryId: null,
-        brandId: null,
-        hasManualDiscount:
-          item.discountType !== null && item.promotionId === null,
-      })),
+      lines: sale.items.map((item) => {
+        const resolved = productCategoryBrandMap.get(item.productId);
+        return {
+          itemId: item.id,
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+          effectiveUnitPriceCents:
+            item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
+          appliedPriceListId: item.appliedPriceListId,
+          appliedGlobalPriceListId:
+            item.appliedPriceListId != null
+              ? (priceListGlobalIdMap.get(item.appliedPriceListId) ?? null)
+              : null,
+          // W4 — stamp resolved categoryId/brandId per line. A
+          // missing product in the resolver map (silently omitted)
+          // falls back to `{ null, null }` so the engine's null
+          // guard at `matchTargetTier` returns null for any
+          // CATEGORIES/BRANDS target on those lines — exactly the
+          // "no match" semantics the spec demands.
+          categoryId: resolved?.categoryId ?? null,
+          brandId: resolved?.brandId ?? null,
+          hasManualDiscount:
+            item.discountType !== null && item.promotionId === null,
+        };
+      }),
       vetoedPromotionIds: sale.vetoedPromotionIds,
       optedInManualPromotionIds: sale.optedInManualPromotionIds,
     };
