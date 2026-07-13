@@ -490,9 +490,37 @@ export class SalesService {
     // (4) Apply each per-line result. Engine guarantees `hasManualDiscount
     //     === false` for lines it returns, so manual-discount lines are
     //     never re-applied here.
+    //
+    //     WU4 (BXGY) — discriminated result routing (design.md Decision 8;
+    //     spec.md:112-115,132-139). The engine emits a tagged
+    //     `kind:'buy-x-get-y'` result for BUY_X_GET_Y winners and the
+    //     untagged (per-unit) result for PRODUCT_DISCOUNT winners. The
+    //     per-unit branch routes to `SaleItem.applyDiscount` (existing
+    //     path, unchanged); the BXGY branch routes to
+    //     `SaleItem.applyBuyXGetYReward`, which:
+    //       - never mutates `unitPriceCents` (column-derived discriminator
+    //         holds: unitPrice === prePrice),
+    //       - stores the whole-line `R` in `discountAmountCents`,
+    //       - stamps `discountType='amount'`, `discountValue=perUnit`,
+    //         `promotionId`, `discountTitle`, `discountedAt`.
+    //     The clear loop above already handles BXGY (lines with
+    //     `promotionId != null` get `removeDiscount()`, which is a
+    //     no-op on the unit price because the BXGY invariant forces
+    //     unitPrice === prePrice) — so clear/re-apply converges byte-
+    //     equal across N consecutive recomputes.
     for (const lineResult of result.lines) {
       const item = sale.items.find((i) => i.id === lineResult.itemId);
       if (!item) continue;
+      if (lineResult.kind === 'buy-x-get-y') {
+        item.applyBuyXGetYReward({
+          lineDiscountCents: lineResult.lineDiscountCents,
+          perUnitRewardCents: lineResult.perUnitRewardCents,
+          discountedUnitCount: lineResult.discountedUnitCount,
+          discountTitle: lineResult.discountTitle,
+          promotionId: lineResult.promotionId,
+        });
+        continue;
+      }
       item.applyDiscount({
         type: lineResult.discountType,
         amountCents:
