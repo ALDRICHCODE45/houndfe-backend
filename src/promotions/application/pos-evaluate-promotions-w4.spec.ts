@@ -442,3 +442,277 @@ describe('PosEvaluatePromotionsUseCase — clamp invariant survives VARIANTS', (
     expect(clampPercentageToSafeRange(100)).toBe(99);
   });
 });
+
+// ============================================================
+// W2 — CATEGORIES / BRANDS gate flip + self-heal (RED-first)
+//
+// The engine's gate (`isSupportedEngineType`) currently returns
+// `false` for PRODUCT_DISCOUNT + appliesTo ∈ {CATEGORIES, BRANDS}.
+// After W2, those engine types MUST be accepted so the matcher can
+// apply them. Behavior pinned here:
+//   - An AUTO CATEGORIES promo on a matching line applies (gated in).
+//   - An AUTO BRANDS promo on a matching line applies (gated in).
+//   - An opted-in MANUAL CATEGORIES promo on a matching line is
+//     retained in `targetableManualPromotionIds` (self-heal gate).
+//   - An opted-in MANUAL BRANDS promo on a matching line is
+//     retained in `targetableManualPromotionIds`.
+//   - The `availableManualPromotions` list includes a MANUAL
+//     CATEGORIES / BRANDS promo for the seller's opt-in UI.
+// ============================================================
+
+describe('PosEvaluatePromotionsUseCase — CATEGORIES/BRANDS gate flip (W2)', () => {
+  it('applies an AUTO CATEGORIES promo on a line whose product.categoryId matches the target', async () => {
+    const promo = makePromotion({
+      id: 'promo-cat-auto',
+      appliesTo: 'CATEGORIES',
+      discountType: 'FIXED',
+      discountValue: 100,
+      targetItems: [
+        {
+          id: 'ti-c',
+          side: 'DEFAULT',
+          targetType: 'CATEGORIES',
+          targetId: 'CAT1',
+        },
+      ],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-CAT1',
+            productId: 'P1',
+            variantId: null,
+            categoryId: 'CAT1',
+            brandId: null,
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    // Gate accepts CATEGORIES + line matches → applied.
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].promotionId).toBe('promo-cat-auto');
+    expect(result.lines[0].discountValue).toBe(100);
+  });
+
+  it('applies an AUTO BRANDS promo on a line whose product.brandId matches the target', async () => {
+    const promo = makePromotion({
+      id: 'promo-brand-auto',
+      appliesTo: 'BRANDS',
+      discountType: 'FIXED',
+      discountValue: 75,
+      targetItems: [
+        { id: 'ti-b', side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' },
+      ],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-BR1',
+            productId: 'P1',
+            variantId: null,
+            categoryId: null,
+            brandId: 'BR1',
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].promotionId).toBe('promo-brand-auto');
+    expect(result.lines[0].discountValue).toBe(75);
+  });
+
+  it('a MANUAL CATEGORIES promo appears in availableManualPromotions (not opted-in yet)', async () => {
+    const promo = makePromotion({
+      id: 'promo-cat-manual',
+      method: 'MANUAL',
+      appliesTo: 'CATEGORIES',
+      discountType: 'FIXED',
+      discountValue: 50,
+      targetItems: [
+        {
+          id: 'ti-c',
+          side: 'DEFAULT',
+          targetType: 'CATEGORIES',
+          targetId: 'CAT1',
+        },
+      ],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-CAT1',
+            productId: 'P1',
+            categoryId: 'CAT1',
+            brandId: null,
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    // The seller's opt-in UI must include the MANUAL CATEGORIES
+    // promo for a line in CAT1 — gate accepts it.
+    expect(result.availableManualPromotions).toHaveLength(1);
+    expect(result.availableManualPromotions[0].id).toBe('promo-cat-manual');
+  });
+
+  it('a MANUAL BRANDS promo appears in availableManualPromotions (not opted-in yet)', async () => {
+    const promo = makePromotion({
+      id: 'promo-brand-manual',
+      method: 'MANUAL',
+      appliesTo: 'BRANDS',
+      discountType: 'FIXED',
+      discountValue: 50,
+      targetItems: [
+        { id: 'ti-b', side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' },
+      ],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-BR1',
+            productId: 'P1',
+            categoryId: null,
+            brandId: 'BR1',
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    expect(result.availableManualPromotions).toHaveLength(1);
+    expect(result.availableManualPromotions[0].id).toBe('promo-brand-manual');
+  });
+
+  it('an opted-in MANUAL CATEGORIES promo with a matching line is retained in targetableManualPromotionIds (self-heal)', async () => {
+    const promo = makePromotion({
+      id: 'promo-cat-opted',
+      method: 'MANUAL',
+      appliesTo: 'CATEGORIES',
+      discountType: 'FIXED',
+      discountValue: 200,
+      targetItems: [
+        {
+          id: 'ti-c',
+          side: 'DEFAULT',
+          targetType: 'CATEGORIES',
+          targetId: 'CAT1',
+        },
+      ],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-cat-opted'],
+        lines: [
+          makeLine({
+            itemId: 'item-CAT1',
+            productId: 'P1',
+            categoryId: 'CAT1',
+            brandId: null,
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    // The opt-in MUST be retained because the line still matches.
+    expect(result.targetableManualPromotionIds).toContain('promo-cat-opted');
+  });
+
+  it('an opted-in MANUAL BRANDS promo with a matching line is retained in targetableManualPromotionIds (self-heal)', async () => {
+    const promo = makePromotion({
+      id: 'promo-brand-opted',
+      method: 'MANUAL',
+      appliesTo: 'BRANDS',
+      discountType: 'FIXED',
+      discountValue: 200,
+      targetItems: [
+        { id: 'ti-b', side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' },
+      ],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-brand-opted'],
+        lines: [
+          makeLine({
+            itemId: 'item-BR1',
+            productId: 'P1',
+            categoryId: null,
+            brandId: 'BR1',
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    expect(result.targetableManualPromotionIds).toContain('promo-brand-opted');
+  });
+
+  it('an opted-in MANUAL CATEGORIES promo whose category is REMOVED from the cart is NOT in targetable (orphan prune)', async () => {
+    // Self-heal gate: only retain the opt-in while at least one
+    // line in the cart matches the target.
+    const promo = makePromotion({
+      id: 'promo-cat-opted-orphan',
+      method: 'MANUAL',
+      appliesTo: 'CATEGORIES',
+      discountType: 'FIXED',
+      discountValue: 200,
+      targetItems: [
+        {
+          id: 'ti-c',
+          side: 'DEFAULT',
+          targetType: 'CATEGORIES',
+          targetId: 'CAT1',
+        },
+      ],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    // Cart has a CAT2 line — the CAT1 target is gone.
+    const result = await useCase.evaluate(
+      makeInput({
+        optedInManualPromotionIds: ['promo-cat-opted-orphan'],
+        lines: [
+          makeLine({
+            itemId: 'item-CAT2',
+            productId: 'P2',
+            categoryId: 'CAT2',
+            brandId: null,
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    expect(result.targetableManualPromotionIds).not.toContain(
+      'promo-cat-opted-orphan',
+    );
+  });
+});
