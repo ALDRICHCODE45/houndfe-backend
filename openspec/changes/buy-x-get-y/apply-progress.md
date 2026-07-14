@@ -287,3 +287,80 @@ step for the maintainer: locally merge to `main` and run `sdd-verify`
 to confirm implementation matches spec.md and design.md before
 `sdd-archive`.
 
+---
+
+## WU8 — Draft NET per-line subtotal + rewardKind wire contract
+
+Front-end reported a contract gap: the DRAFT sale line did NOT expose a
+NET per-line subtotal. The confirmed-sale `findOneWithRelations` mapper
+already exposes `subtotalCents` (NET) and `rewardKind` (via
+`prisma-sale.repository.ts:1407,1421-1422,1437`), but the
+DRAFT path — `sale.toResponse()` in `src/sales/domain/sale.entity.ts:798`
+which spreads `SaleItem.toResponse()` (`src/sales/domain/sale-item.entity.ts:427`) —
+was missing both keys, so POS /wiz-pos rendered BXGY lines as gross.
+
+**Change (additive only):** extended `SaleItem.toResponse()` with two
+new keys, computed inline:
+
+- `subtotalCents = unitPriceCents * quantity
+   - (isBuyXGetYReward() ? (discountAmountCents ?? 0) : 0)`
+- `rewardKind    = isBuyXGetYReward() ? 'buy_x_get_y' : null`
+
+The existing `get subtotalCents()` at `:194-196` is intentionally
+UNCHANGED — it returns gross by design (used by `previewTotals` and
+other in-domain consumers). The new key is a separate wire-side field
+that mirrors the confirmed-sale mapper exactly. `isBuyXGetYReward()`
+(`sale-item.entity.ts:386-394`) is the existing column-derived
+discriminator — no reimplementation.
+
+**Typing / DTO wiring:** `toResponse()` returns an inferred object;
+the only typed reference is `ReturnType<SaleItem['toResponse']>[]`
+in `Sale.toResponse()` at `sale.entity.ts:819` and `DraftSaleResponse`
+at `sale.repository.ts:47-50`. New keys propagate automatically
+(no DTO/port edit needed, confirmed by green build).
+
+**Tests (RED → GREEN):** 6 new cases appended to
+`src/sales/domain/sale-item.entity.spec.ts` under a new
+`toResponse() — Draft NET subtotalCents + rewardKind (WU8)` describe block:
+
+- **BXGY 100% (one true-free get-unit):** unitPrice 20000, qty 2,
+  lineDiscount 20000 → `subtotalCents = 20000` (NET) and
+  `rewardKind = 'buy_x_get_y'`.
+- **BXGY 50% partial:** qty 3 × 1000c, R=500c → `subtotalCents = 2500`
+  and `rewardKind = 'buy_x_get_y'`.
+- **Per-unit PRODUCT_DISCOUNT:** prePrice 1000 → unitPrice 900,
+  qty 2 → `subtotalCents = 1800` (already NET, no subtraction)
+  and `rewardKind = null`.
+- **Manual free-form discount:** no `promotionId` → `rewardKind = null`,
+  `subtotalCents = unitPrice × qty`.
+- **Plain line (no discount):** `subtotalCents = unitPrice × qty`,
+  `rewardKind = null`.
+- **removeDiscount clears a BXGY reward:** after removal
+  `rewardKind` flips back to `null` and `subtotalCents` returns to
+  the un-discounted `unitPrice × qty` (3000c, gross = NET).
+
+**Verification:**
+
+- `pnpm run test -- sale-item.entity.spec.ts` → **56 / 56 GREEN**
+  (50 prior + 6 new WU8 tests).
+- `pnpm run test -- sales.service.spec.ts` → **179 / 179 GREEN**
+  (regression net for the draft-path consumers; the inferred type
+  change to the wire object propagates cleanly through `Sale.toResponse()`,
+  `findDraftResponseById`, and every POS-facing call site).
+- `pnpm run build` (full nest/tsc) → **EXIT 0** (no DTO/port interface
+  edits required — the inline return type auto-extends).
+
+**Decisions worth remembering:**
+
+- The wire key is named `subtotalCents` on BOTH surfaces (DRAFT and
+  confirmed) and is NET on both. Frontend uses one field.
+- The in-domain `get subtotalCents()` getter REMAINS gross — it feeds
+  `previewTotals()` and other PRE-DRAFT calculations where the
+  discount-aware `Sale.previewTotals()` handles NET vs gross math
+  correctly. Mixing the two would double-count.
+- The new wire key on the DRAFT is computed at the line level (per-item
+  NET), independent of `previewTotals()`'s order-discount-aware aggregate.
+  This is intentional: a per-line wire field should not include the
+  order-discount split; that's an aggregate concern.
+
+

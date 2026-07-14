@@ -925,4 +925,188 @@ describe('SaleItem Entity', () => {
       });
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 8 — Draft NET per-line subtotal + rewardKind wire contract
+  //
+  // The DRAFT toResponse() (sale-item.entity.ts:427-450) is the path the POS
+  // /wiz-pos frontend reads while the sale is still in-progress. Confirmed-
+  // sale lines already expose `subtotalCents` (NET) and `rewardKind` via the
+  // prisma-sale.repository mapper (see prisma-sale.repository.ts:1407,1421-1422
+  // and :1437). This WU closes the contract gap so the frontend reads the
+  // SAME field on both surfaces (the close-of-contract comment in the WU8
+  // brief).
+  //
+  // Formula mirrors the receipt mapper exactly:
+  //   subtotalCents = unitPriceCents * quantity
+  //                   - (isBuyXGetYReward() ? (discountAmountCents ?? 0) : 0)
+  //   rewardKind    = isBuyXGetYReward() ? 'buy_x_get_y' : null
+  //
+  // Per-unit PRODUCT_DISCOUNT path keeps `unitPrice < prePrice` so the BXGY
+  // discriminator is false → R=0 → no subtraction (NET = unitPrice × qty).
+  // ---------------------------------------------------------------------------
+  describe('toResponse() — Draft NET subtotalCents + rewardKind (WU8)', () => {
+    it('emits NET subtotalCents and rewardKind="buy_x_get_y" for a BXGY line (one true-free get-unit)', () => {
+      // Per WU8 brief: unitPrice 20000, qty 2, lineDiscount 20000 → NET 20000.
+      // gross would be 40000, BXGY subtracts R=20000 to render NET.
+      const item = SaleItem.create({
+        id: 'i-wu8-bxgy',
+        saleId: 's-wu8',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 20000,
+        unitPriceCurrency: 'MXN',
+      });
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 20000,
+        perUnitRewardCents: 20000,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 1 Get 1 FREE',
+        promotionId: 'promo-bxgy-bogo',
+      });
+
+      const response = item.toResponse();
+
+      expect(response.subtotalCents).toBe(20000);
+      expect(response.rewardKind).toBe('buy_x_get_y');
+    });
+
+    it('emits NET subtotalCents and rewardKind="buy_x_get_y" for a 50% BXGY partial reward', () => {
+      // qty 3 × 1000c, R=500c → NET = 3000 − 500 = 2500c.
+      const item = SaleItem.create({
+        id: 'i-wu8-bxgy-half',
+        saleId: 's-wu8',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 500,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 2 Get 1 @ 50%',
+        promotionId: 'promo-bxgy-half',
+      });
+
+      const response = item.toResponse();
+
+      expect(response.subtotalCents).toBe(2500);
+      expect(response.rewardKind).toBe('buy_x_get_y');
+    });
+
+    it('emits subtotalCents = unitPrice × qty (already NET) and rewardKind=null for a per-unit PRODUCT_DISCOUNT line', () => {
+      // prePrice 1000 / unitPrice 900 / qty 2 → NET = 900 × 2 = 1800. The
+      // per-unit `applyDiscount` path forces unitPrice < prePrice by ≥1, so
+      // the BXGY discriminator is false → R=0 → no subtraction.
+      const item = SaleItem.create({
+        id: 'i-wu8-pd',
+        saleId: 's-wu8',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 10,
+        discountTitle: 'Promo 10%',
+        promotionId: 'promo-pd',
+      });
+
+      const response = item.toResponse();
+
+      expect(item.unitPriceCents).toBe(900);
+      expect(response.subtotalCents).toBe(1800);
+      expect(response.rewardKind).toBeNull();
+    });
+
+    it('emits subtotalCents = unitPrice × qty (already NET) and rewardKind=null for a manual free-form discount', () => {
+      // Manual free-form: no promotionId → BXGY discriminator fails the
+      // first clause (promotionId !== null), so the subtraction is a no-op.
+      const item = SaleItem.create({
+        id: 'i-wu8-manual',
+        saleId: 's-wu8',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      item.applyDiscount({
+        type: 'amount',
+        amountCents: 200,
+        discountTitle: 'manual override',
+      });
+
+      const response = item.toResponse();
+
+      expect(item.unitPriceCents).toBe(800);
+      expect(response.subtotalCents).toBe(1600);
+      expect(response.rewardKind).toBeNull();
+    });
+
+    it('emits subtotalCents = unitPrice × qty (gross = NET) and rewardKind=null for a plain line (no discount)', () => {
+      const item = SaleItem.create({
+        id: 'i-wu8-plain',
+        saleId: 's-wu8',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      const response = item.toResponse();
+
+      expect(response.subtotalCents).toBe(3000);
+      expect(response.rewardKind).toBeNull();
+    });
+
+    it('drops rewardKind back to null after removeDiscount clears a BXGY reward', () => {
+      // After removeDiscount the BXGY discriminator returns false → rewardKind
+      // must flip to null and subtotalCents must equal the un-discounted
+      // `unitPriceCents × quantity`.
+      const item = SaleItem.create({
+        id: 'i-wu8-bxgy-removed',
+        saleId: 's-wu8',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 500,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 1,
+        discountTitle: 'BXGY',
+        promotionId: 'promo-bxgy',
+      });
+      expect(item.toResponse().rewardKind).toBe('buy_x_get_y');
+
+      item.removeDiscount();
+
+      const response = item.toResponse();
+      expect(response.rewardKind).toBeNull();
+      // unitPrice was never reduced by applyBuyXGetYReward (EQUAL invariant),
+      // so after removeDiscount the gross/identity subtotal is `1000 * 3 = 3000`.
+      expect(response.subtotalCents).toBe(3000);
+    });
+  });
 });

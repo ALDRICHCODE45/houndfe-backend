@@ -425,6 +425,35 @@ export class SaleItem {
   }
 
   toResponse() {
+    // Work Unit 8 — Draft NET per-line subtotal + rewardKind wire contract.
+    // The DRAFT surface (addItem / updateItemQuantity / previewTotals / etc.)
+    // used to emit gross `subtotalCents` and no `rewardKind`, so the POS
+    // /wiz-pos frontend rendered BXGY lines as gross. The confirmed-sale
+    // receipt mapper already exposes both keys (see prisma-sale.repository.ts:
+    // 1407, 1421-1422, 1437); this closes the contract gap so the frontend
+    // reads the SAME field on both surfaces.
+    //
+    // Formula mirrors the receipt mapper exactly:
+    //   subtotalCents = unitPriceCents * quantity
+    //                   - (isBuyXGetYReward() ? (discountAmountCents ?? 0) : 0)
+    //   rewardKind    = isBuyXGetYReward() ? 'buy_x_get_y' : null
+    //
+    // Per-unit PRODUCT_DISCOUNT path keeps `unitPrice < prePrice` so
+    // `isBuyXGetYReward()` returns false → R = 0 → no subtraction (the
+    // per-unit subtotal is already NET because `applyDiscount` reduced
+    // `unitPriceCents`). Manual free-form discounts fail the discriminator's
+    // first clause (promotionId null) and the same logic applies. Plain
+    // lines return gross = NET.
+    //
+    // NOTE: `subtotalCents` here is intentionally a NEW field on the
+    // returned wire object and DOES NOT touch the existing
+    // `get subtotalCents()` getter at :194-196, which still returns the
+    // gross value for previewTotals and other in-domain consumers. The
+    // emitted-key naming was chosen because both the receipt mapper and the
+    // draft-surface need a uniform wire-side NET field; renaming the getter
+    // would break every previewTotals call site.
+    const isBxgy = this.isBuyXGetYReward();
+    const bxgyRewardCents = isBxgy ? this.discountAmountCents ?? 0 : 0;
     return {
       id: this.id,
       productId: this.productId,
@@ -446,6 +475,12 @@ export class SaleItem {
       discountTitle: this.discountTitle,
       discountedAt: this.discountedAt,
       promotionId: this.promotionId,
+      // NET per-line subtotal — see formula in the block comment above.
+      subtotalCents:
+        this._unitPriceCents * this._quantity - bxgyRewardCents,
+      // Explicit wire flag so the frontend can render the "free"/reward
+      // badge without inferring it from the persisted columns.
+      rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
     };
   }
 }
