@@ -297,6 +297,8 @@ describe('PosEvaluatePromotionsUseCase — BUY_X_GET_Y counting (WU3, spec.md:60
       expect(line.lineDiscountCents).toBe(500);
       expect(line.perUnitRewardCents).toBe(500);
       expect(line.discountedUnitCount).toBe(1);
+      // WU1 — the exact promo percent is carried through the port result.
+      expect(line.getDiscountPercent).toBe(50);
     }
   });
 
@@ -423,6 +425,8 @@ describe('PosEvaluatePromotionsUseCase — BUY_X_GET_Y counting (WU3, spec.md:60
     if (line.kind === 'buy-x-get-y') {
       expect(line.perUnitRewardCents).toBe(33);
       expect(line.lineDiscountCents).toBe(33);
+      // WU1 — exact promo percent carried through (not derived).
+      expect(line.getDiscountPercent).toBe(33);
     } else {
       fail('expected buy-x-get-y kind');
     }

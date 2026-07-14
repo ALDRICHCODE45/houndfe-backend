@@ -112,6 +112,13 @@ export interface PosEvalBuyXGetYLineResult {
   perUnitRewardCents: number;
   /** Snapshot of the discounted-unit count (groups * M) for the receipt. */
   discountedUnitCount: number;
+  /**
+   * Exact `getDiscountPercent` (0..100; 100=free, 50=half) of the applied
+   * BUY_X_GET_Y promotion. Carried end-to-end so the reward line can expose
+   * the true percent instead of deriving it from cents (which drifts ±1 on
+   * odd sub-$1 prices).
+   */
+  getDiscountPercent: number;
 }
 
 /**
