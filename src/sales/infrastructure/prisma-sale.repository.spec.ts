@@ -1547,6 +1547,97 @@ describe('PrismaSaleRepository', () => {
       });
       expect(result.items).toHaveLength(0);
     });
+
+    // -------------------------------------------------------------------
+    // WU3 regression-lock — rewardDiscountPercent round-trip SURVIVAL.
+    //
+    // The confirmed-detail assertions (findOneWithRelations, above) prove
+    // the value on the READ wire, but that mapper BYPASSES
+    // `Sale.fromPersistence`. The re-save write path (draft `save()`
+    // delete+recreate) reloads the aggregate through `findById` →
+    // `Sale.fromPersistence` → `SaleItem.fromPersistence`, then re-persists
+    // via `saleItem.createMany`. Nothing proved that a persisted, NON-NULL
+    // `rewardDiscountPercent` SURVIVES that reload+resave instead of being
+    // silently wiped to null.
+    //
+    // This test reloads a BXGY reward line carrying the meaningful
+    // "2do al 50%" value (50) via `findById` (the repo reload map at
+    // ~:264/288 + the entity restore at sale-item.entity.ts:203), then
+    // re-saves it and asserts the createMany write payload still carries
+    // `rewardDiscountPercent: 50`. A future refactor that drops the field
+    // from ANY reload map or the entity restore turns THIS test red while
+    // the read-path tests stay green — which is the whole point.
+    // -------------------------------------------------------------------
+    it('round-trips a persisted BXGY rewardDiscountPercent=50 through findById reload + re-save (survives, not wiped)', async () => {
+      const bxgyItemRow = {
+        id: 'item-bxgy-rt',
+        saleId: 'sale-rt',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        imageUrl: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+        originalPriceCents: null,
+        priceSource: 'DEFAULT',
+        appliedPriceListId: null,
+        customPriceCents: null,
+        // BXGY rides the 'amount' enum; prePrice === unitPrice.
+        discountType: 'AMOUNT',
+        discountValue: 500,
+        discountAmountCents: 500,
+        // The persisted exact promo percent — 50 = "2do al 50%".
+        rewardDiscountPercent: 50,
+        prePriceCentsBeforeDiscount: 1000,
+        discountTitle: 'Buy 2 Get 1',
+        discountedAt: null,
+        promotionId: 'promo-bxgy-half',
+      };
+
+      const persistedRow = {
+        id: 'sale-rt',
+        userId: 'user-1',
+        status: 'DRAFT',
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus: 'DELIVERED',
+        customerId: null,
+        shippingAddressId: null,
+        sellerUserId: null,
+        dueDate: null,
+        confirmedAt: null,
+        folio: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [bxgyItemRow],
+        promotionVetoes: [],
+        promotionOptIns: [],
+        appliedPromotion: null,
+      };
+
+      // Every findUnique returns the persisted row: findById reload (below)
+      // AND the existence-check + end-of-save reload inside save().
+      prisma.sale.findUnique.mockResolvedValue(persistedRow as any);
+      prisma.sale.update.mockResolvedValue(persistedRow as any);
+
+      // Reload the aggregate through Sale.fromPersistence (repo reload map).
+      const reloaded = await repo.findById('sale-rt');
+      expect(reloaded).not.toBeNull();
+      expect(reloaded!.items[0].rewardDiscountPercent).toBe(50);
+
+      // Re-save the reloaded aggregate (the real draft delete+recreate path).
+      prisma.saleItem.createMany.mockClear();
+      await repo.save(reloaded!);
+
+      // The write payload MUST still carry the persisted percent — SURVIVED.
+      const createManyArgs = prisma.saleItem.createMany.mock.calls.find(
+        (call) => (call?.[0]?.data?.length ?? 0) > 0,
+      )?.[0];
+      expect(createManyArgs).toBeDefined();
+      expect(createManyArgs.data[0].rewardDiscountPercent).toBe(50);
+    });
   });
 
   describe('payment collection idempotency', () => {
