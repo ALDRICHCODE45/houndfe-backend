@@ -280,6 +280,14 @@
       "sessions": 1,
       "memories": 16,
       "prompts": 9
+    },
+    {
+      "id": "c112436d",
+      "created_by": "aldrich_code45",
+      "created_at": "2026-07-14T20:21:51Z",
+      "sessions": 8,
+      "memories": 25,
+      "prompts": 20
     }
   ]
 }
