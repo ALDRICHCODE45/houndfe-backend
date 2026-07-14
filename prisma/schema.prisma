@@ -722,6 +722,10 @@ model SaleItem {
   discountType                SaleItemDiscountType?
   discountValue               Int?
   discountAmountCents         Int?
+  // Exact BUY_X_GET_Y getDiscountPercent (0..100; 100=free, 50=half) of the
+  // applied promotion. Null on non-reward lines — mirrors the derived reward
+  // discriminator. Persisted so the confirmed receipt exposes the true percent.
+  rewardDiscountPercent       Int?
   prePriceCentsBeforeDiscount Int?
   discountTitle               String?
   discountedAt                DateTime?

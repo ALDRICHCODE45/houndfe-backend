@@ -123,6 +123,8 @@ export class PrismaSaleRepository implements ISaleRepository {
           discountType: item.discountType,
           discountValue: item.discountValue,
           discountAmountCents: item.discountAmountCents,
+          // WU3 — persist the exact BXGY reward percent from the entity.
+          rewardDiscountPercent: item.rewardDiscountPercent,
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
@@ -281,6 +283,9 @@ export class PrismaSaleRepository implements ISaleRepository {
         discountType: item.discountType as 'amount' | 'percentage' | null,
         discountValue: item.discountValue,
         discountAmountCents: item.discountAmountCents,
+        // WU3 — round-trip the persisted BXGY reward percent on reload so a
+        // subsequent re-save does not wipe it.
+        rewardDiscountPercent: item.rewardDiscountPercent ?? null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -397,6 +402,9 @@ export class PrismaSaleRepository implements ISaleRepository {
         discountType: item.discountType as 'amount' | 'percentage' | null,
         discountValue: item.discountValue,
         discountAmountCents: item.discountAmountCents,
+        // WU3 — round-trip the persisted BXGY reward percent on reload so a
+        // subsequent re-save does not wipe it.
+        rewardDiscountPercent: item.rewardDiscountPercent ?? null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -528,6 +536,8 @@ export class PrismaSaleRepository implements ISaleRepository {
           discountType: item.discountType as 'amount' | 'percentage' | null,
           discountValue: item.discountValue,
           discountAmountCents: item.discountAmountCents,
+          // WU3 — round-trip the persisted BXGY reward percent on reload.
+          rewardDiscountPercent: item.rewardDiscountPercent ?? null,
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
@@ -648,6 +658,9 @@ export class PrismaSaleRepository implements ISaleRepository {
         discountType: item.discountType as 'amount' | 'percentage' | null,
         discountValue: item.discountValue,
         discountAmountCents: item.discountAmountCents,
+        // WU3 — round-trip the persisted BXGY reward percent on reload so a
+        // subsequent re-save does not wipe it.
+        rewardDiscountPercent: item.rewardDiscountPercent ?? null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -842,6 +855,8 @@ export class PrismaSaleRepository implements ISaleRepository {
             discountType: item.discountType,
             discountValue: item.discountValue,
             discountAmountCents: item.discountAmountCents,
+            // WU3 — persist the exact BXGY reward percent from the entity.
+            rewardDiscountPercent: item.rewardDiscountPercent,
             prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
             discountTitle: item.discountTitle,
             discountedAt: item.discountedAt,
@@ -1336,6 +1351,9 @@ export class PrismaSaleRepository implements ISaleRepository {
             discountAmountCents: true,
             discountTitle: true,
             prePriceCentsBeforeDiscount: true,
+            // WU3 — the persisted exact BXGY promo percent surfaced on the
+            // confirmed detail wire, next to rewardKind.
+            rewardDiscountPercent: true,
             // WU2 — needed by the column-derived `isBuyXGetYReward()`
             // discriminator the receipt mapper re-derives on the wire
             // path (design.md Decision 6). The mapper previously omitted
@@ -1435,6 +1453,12 @@ export class PrismaSaleRepository implements ISaleRepository {
           // Explicit wire flag so the frontend can render the
           // "free"/reward badge without inferring it.
           rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
+          // WU3 — exact BXGY reward percent (0..100). Null on non-reward
+          // lines using the SAME `isBxgy` guard as `rewardKind`, so the
+          // frontend shows "GRATIS" only at 100%, else the real percent.
+          rewardDiscountPercent: isBxgy
+            ? item.rewardDiscountPercent ?? null
+            : null,
           // WUA — surface the line's source promotion id on the wire so
           // the frontend can link a confirmed-sale line back to its
           // catalog promo card without inferring it from `discountTitle`.
