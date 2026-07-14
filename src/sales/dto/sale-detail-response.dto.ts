@@ -61,6 +61,14 @@ export interface SaleDetailItemDto {
    * frontend can render the "free"/reward badge without inferring it.
    */
   rewardKind: 'buy_x_get_y' | null;
+  /**
+   * Id of the promotion the line was sourced from (WUA — frontend asks).
+   * Set when `item.promotionId` is non-null (AUTO PD winner, AUTO BXGY
+   * winner, or opted-in MANUAL winner). Null on plain lines (no promo
+   * applied) and on lines with a free-form seller discount. The value is
+   * already selected by the mapper so we just surface it on the wire.
+   */
+  promotionId: string | null;
 }
 
 export interface SaleDetailPaymentDto {

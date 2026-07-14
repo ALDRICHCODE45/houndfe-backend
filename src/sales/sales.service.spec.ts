@@ -6972,6 +6972,11 @@ describe('SalesService', () => {
       // spec.md:117-120 — a MANUAL BXGY with at least one matching
       // line is surfaced on the wire with type BUY_X_GET_Y. Frontend
       // uses the type to render the right opt-in card.
+      //
+      // WUB — sales.service threads the eligibility payload from the
+      // engine's `availableManualPromotions[]` through to the response
+      // DTO unchanged. We mock the engine payload carrying the new
+      // fields end-to-end and assert they survive on the wire.
       const saleId = 'sale-u6-bxgy-list';
       const sale = buildFreshBxgyDraft(saleId, 'item-u6-bxgy-list');
       saleRepo.findById.mockResolvedValue(sale);
@@ -6979,7 +6984,16 @@ describe('SalesService', () => {
         lines: [],
         order: null,
         availableManualPromotions: [
-          { id: 'promo-bxgy-manual', title: 'Manual 2x1', type: 'BUY_X_GET_Y' as const },
+          {
+            id: 'promo-bxgy-manual',
+            title: 'Manual 2x1',
+            type: 'BUY_X_GET_Y' as const,
+            method: 'MANUAL' as const,
+            eligible: false,
+            buyQuantity: 2,
+            getQuantity: 1,
+            unitsNeeded: 2,
+          },
         ],
         targetableManualPromotionIds: [],
       });
@@ -6988,7 +7002,16 @@ describe('SalesService', () => {
 
       expect(result.saleId).toBe(saleId);
       expect(result.promotions).toEqual([
-        { id: 'promo-bxgy-manual', title: 'Manual 2x1', type: 'BUY_X_GET_Y' },
+        {
+          id: 'promo-bxgy-manual',
+          title: 'Manual 2x1',
+          type: 'BUY_X_GET_Y',
+          method: 'MANUAL',
+          eligible: false,
+          buyQuantity: 2,
+          getQuantity: 1,
+          unitsNeeded: 2,
+        },
       ]);
     });
 

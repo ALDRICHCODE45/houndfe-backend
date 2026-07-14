@@ -47,6 +47,7 @@ import type { AvailablePricesResponseDto } from './dto/available-prices-response
 import type { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 import type { ChargeSaleDto } from './dto/charge-sale.dto';
 import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import type { ListApplicablePromotionsResponseDto } from './dto/list-applicable-promotions-response.dto';
 import type {
   SalesListBaseFilter,
   SalesListExtendedFilter,
@@ -1546,7 +1547,10 @@ export class SalesService {
    * vetoed ids, opted-in ids). Changing any of those via a mutation
    * endpoint will change the list on the next call.
    */
-  async listApplicablePromotions(saleId: string, actorId: string) {
+  async listApplicablePromotions(
+    saleId: string,
+    actorId: string,
+  ): Promise<ListApplicablePromotionsResponseDto> {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale) {
       throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
