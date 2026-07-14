@@ -1435,6 +1435,13 @@ export class PrismaSaleRepository implements ISaleRepository {
           // Explicit wire flag so the frontend can render the
           // "free"/reward badge without inferring it.
           rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
+          // WUA — surface the line's source promotion id on the wire so
+          // the frontend can link a confirmed-sale line back to its
+          // catalog promo card without inferring it from `discountTitle`.
+          // Null on plain lines (no promotion applied) and on lines with
+          // a free-form seller discount. Coerce undefined → null so the
+          // wire contract is `string | null` (never undefined).
+          promotionId: item.promotionId ?? null,
         };
       }),
       payments: sale.payments.map((payment) => ({

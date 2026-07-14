@@ -1077,6 +1077,84 @@ describe('PrismaSaleRepository', () => {
         expect(result?.items[0].rewardKind).toBeNull();
       });
 
+      it('emits promotionId on each item (BXGY line exposes its promo id, plain line emits null)', async () => {
+        // WU-A — frontend wants to know which line came from which promo
+        // on the confirmed sale detail. The BXGY line carries its source
+        // promotionId; the plain line carries null. The existing
+        // rewardKind test data is reused — the mapper now ALSO surfaces
+        // promotionId alongside it (the value is already selected).
+        prisma.sale.findFirst.mockResolvedValue(
+          makeSaleRow([
+            makeBxgyRow({
+              promotionId: 'promo-bxgy-free',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 1000,
+              discountValue: 1000,
+            }),
+            {
+              productName: 'Plain',
+              variantName: null,
+              imageUrl: null,
+              unitPriceCents: 1000,
+              quantity: 1,
+              originalPriceCents: null,
+              priceSource: 'DEFAULT',
+              appliedPriceListId: null,
+              discountType: null,
+              discountValue: null,
+              discountAmountCents: null,
+              discountTitle: null,
+              prePriceCentsBeforeDiscount: null,
+              // No promotionId → plain line, persists as null on the wire.
+            },
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-promoid');
+
+        // BXGY line carries the promo source id.
+        expect(result?.items[0].promotionId).toBe('promo-bxgy-free');
+        expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+        // Plain line emits null — frontend uses this to skip the promo
+        // badge and identify the line as "no promotion applied".
+        expect(result?.items[1].promotionId).toBeNull();
+        expect(result?.items[1].rewardKind).toBeNull();
+      });
+
+      it('emits promotionId on a non-BXGY promo line (PRODUCT_DISCOUNT carries its promo id, not BXGY shape)', async () => {
+        // WU-A — PD line: prePrice (1000) > unitPrice (900) → not BXGY
+        // (rewardKind stays null) BUT still carries the promotionId of
+        // the AUTO PD that won best-wins. The mapper MUST surface it so
+        // the frontend can link the line back to the catalog promo card.
+        prisma.sale.findFirst.mockResolvedValue(
+          makeSaleRow([
+            {
+              productName: 'P',
+              variantName: null,
+              imageUrl: null,
+              unitPriceCents: 900,
+              quantity: 2,
+              originalPriceCents: 1000,
+              priceSource: 'DEFAULT',
+              appliedPriceListId: null,
+              discountType: 'PERCENTAGE',
+              discountValue: 10,
+              discountAmountCents: 100,
+              discountTitle: 'Promo 10%',
+              prePriceCentsBeforeDiscount: 1000,
+              promotionId: 'promo-pd-10',
+            },
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-pd-promoid');
+
+        expect(result?.items[0].promotionId).toBe('promo-pd-10');
+        // Per-unit PD path: NOT BXGY (rewardKind=null).
+        expect(result?.items[0].rewardKind).toBeNull();
+      });
+
       it('mixed: BXGY line NET + PD line per-unit coexist on the same response', async () => {
         // Two lines: BXGY 50% (qty 3 × 1000c, R=500c) + PD 10% (qty 1 ×
         // 1000c, unitPrice 900c, prePrice 1000c, discountAmountCents 100c).

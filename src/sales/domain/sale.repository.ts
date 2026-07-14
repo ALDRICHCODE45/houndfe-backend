@@ -284,6 +284,13 @@ export interface ISaleRepository {
       discountTitle: string | null;
       prePriceCentsBeforeDiscount: number | null;
       rewardKind: 'buy_x_get_y' | null;
+      /**
+       * WUA — promotionId of the line's promo source (or null when no
+       * promotion was applied). Mirrors `SaleDetailItemDto.promotionId`
+       * on the wire. The value was already selected by the mapper for
+       * the BXGY discriminator — we're just promoting it to the wire.
+       */
+      promotionId: string | null;
     }>;
     payments: Array<{
       paymentId: string;
