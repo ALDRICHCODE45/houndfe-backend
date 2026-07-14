@@ -317,6 +317,18 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     //    cart (same `matchTargetTier` predicate the per-line gate uses)
     //    — a MANUAL BXGY with no matching line is degenerate (no line
     //    can carry the reward) and is silently filtered out.
+    //
+    //    WUB (frontend follow-up): each candidate now also carries
+    //    `eligible`, `buyQuantity`, `getQuantity`, `unitsNeeded` —
+    //    the frontend uses these to render an honest hint
+    //    ("2x1 · requiere 2 unidades") and to block a no-op apply.
+    //    For ORDER_DISCOUNT and PRODUCT_DISCOUNT the eligibility bit is
+    //    always true (they give something when surfaced) and the buy/get
+    //    fields are null. For BXGY the math is:
+    //      groupSize   = buyQuantity + getQuantity
+    //      maxMatchQty = max(line.quantity) over matching lines
+    //      eligible    = maxMatchQty >= groupSize
+    //      unitsNeeded = eligible ? 0 : (groupSize - maxMatchQty) // >=1
     const availableManualPromotions: PosEvalManualCandidate[] = [];
     for (const promo of candidates) {
       if (promo.method !== 'MANUAL') continue;
@@ -340,6 +352,40 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       } else {
         continue; // unsupported
       }
+
+      // Eligibility payload (WUB). ORDER_DISCOUNT and PRODUCT_DISCOUNT
+      // always give something when surfaced → eligible=true,
+      // buy/get=null, unitsNeeded=0. For BXGY we still surface the
+      // candidate (so the frontend can render an honest hint) and we
+      // compute the derived fields below — same `matchTargetTier`
+      // predicate the per-line gate uses.
+      let eligible: boolean;
+      let buyQuantity: number | null;
+      let getQuantity: number | null;
+      let unitsNeeded: number;
+      if (wireType === 'ORDER_DISCOUNT' || wireType === 'PRODUCT_DISCOUNT') {
+        eligible = true;
+        buyQuantity = null;
+        getQuantity = null;
+        unitsNeeded = 0;
+      } else {
+        // BUY_X_GET_Y
+        const buyQ = promo.buyQuantity ?? 0;
+        const getQ = promo.getQuantity ?? 0;
+        const groupSize = buyQ + getQ;
+        // Max matching line quantity — 0 if no line matches (degenerate;
+        // we still surface with eligible=false).
+        let maxMatchQty = 0;
+        for (const line of input.lines) {
+          if (matchTargetTier(promo.targetItems, line) === null) continue;
+          if (line.quantity > maxMatchQty) maxMatchQty = line.quantity;
+        }
+        eligible = maxMatchQty >= groupSize;
+        unitsNeeded = eligible ? 0 : groupSize - maxMatchQty;
+        buyQuantity = buyQ;
+        getQuantity = getQ;
+      }
+
       if (wireType !== 'ORDER_DISCOUNT') {
         const hasMatchingLine = input.lines.some(
           (line) => matchTargetTier(promo.targetItems, line) !== null,
@@ -357,6 +403,11 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         // opt-in. The Promotion.method enum also has AUTOMATIC, but that
         // branch never reaches this mapper.
         method: 'MANUAL',
+        // WUB — eligibility hint (see block comment above for semantics).
+        eligible,
+        buyQuantity,
+        getQuantity,
+        unitsNeeded,
       });
     }
 

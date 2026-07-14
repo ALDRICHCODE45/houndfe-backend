@@ -156,6 +156,33 @@ export interface PosEvalManualCandidate {
    * never auto-opt-in to a candidate that doesn't carry `method='MANUAL'`.
    */
   method: 'MANUAL';
+  /**
+   * Eligibility hint for opt-in UX (WUB — frontend follow-up). `true`
+   * iff applying the promo on the current cart shape would produce a
+   * non-zero saving. ORDER_DISCOUNT and PRODUCT_DISCOUNT: always true
+   * when surfaced (they give something). BUY_X_GET_Y: true iff
+   * `maxMatchQty >= buyQuantity + getQuantity`.
+   */
+  eligible: boolean;
+  /**
+   * For BXGY candidates only: the promo's `buyQuantity`. `null` for
+   * ORDER_DISCOUNT and PRODUCT_DISCOUNT candidates (the buy/get shape
+   * doesn't apply to them).
+   */
+  buyQuantity: number | null;
+  /**
+   * For BXGY candidates only: the promo's `getQuantity`. `null` for
+   * ORDER_DISCOUNT and PRODUCT_DISCOUNT candidates.
+   */
+  getQuantity: number | null;
+  /**
+   * Additional units the customer needs to add to make the candidate
+   * eligible (always 0 when `eligible` is already true). For BXGY:
+   * `eligible ? 0 : (groupSize - maxMatchQty)` (where `groupSize =
+   * buyQuantity + getQuantity`). For ORDER_DISCOUNT and PRODUCT_DISCOUNT:
+   * always 0.
+   */
+  unitsNeeded: number;
 }
 
 export interface PosEvalResult {
