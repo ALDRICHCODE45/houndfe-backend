@@ -519,6 +519,7 @@ export class SalesService {
           discountedUnitCount: lineResult.discountedUnitCount,
           discountTitle: lineResult.discountTitle,
           promotionId: lineResult.promotionId,
+          getDiscountPercent: lineResult.getDiscountPercent,
         });
         continue;
       }

@@ -27,6 +27,12 @@ export interface SaleItemProps {
    * Defaults to null so existing manual-discount call sites remain unchanged.
    */
   promotionId?: string | null;
+  /**
+   * Exact BUY_X_GET_Y `getDiscountPercent` (0..100) snapshot. Null on
+   * non-reward lines. Restored on reload so a confirmed sale entity carries
+   * the same percent it was persisted with.
+   */
+  rewardDiscountPercent?: number | null;
 }
 
 export interface ApplySaleItemDiscountInput {
@@ -70,6 +76,12 @@ export interface ApplyBuyXGetYRewardInput {
   discountTitle?: string;
   /** BXGY promotion id (drives the discriminator + cross-line retention). */
   promotionId: string;
+  /**
+   * Exact `getDiscountPercent` (0..100; 100=free, 50=half) of the applied
+   * BUY_X_GET_Y promotion. Stored verbatim (never derived from cents) so the
+   * reward line can expose the true percent end-to-end.
+   */
+  getDiscountPercent: number;
 }
 
 export interface OverrideSaleItemPriceInput {
@@ -89,6 +101,13 @@ export interface OverrideSaleItemPriceInput {
  * - Items are identified by product+variant combination for stacking
  */
 export class SaleItem {
+  /**
+   * Exact BUY_X_GET_Y `getDiscountPercent` (0..100; 100=free, 50=half) of the
+   * applied promotion. Null on non-reward lines — mirrors `rewardKind`
+   * exactly. Set by `applyBuyXGetYReward`, cleared by `clearDiscountFields`.
+   */
+  private _rewardDiscountPercent: number | null = null;
+
   private constructor(
     public readonly id: string,
     public readonly saleId: string,
@@ -158,7 +177,7 @@ export class SaleItem {
   }
 
   static fromPersistence(props: SaleItemProps): SaleItem {
-    return new SaleItem(
+    const item = new SaleItem(
       props.id,
       props.saleId,
       props.productId,
@@ -181,6 +200,8 @@ export class SaleItem {
       props.discountedAt ?? null,
       props.promotionId ?? null,
     );
+    item._rewardDiscountPercent = props.rewardDiscountPercent ?? null;
+    return item;
   }
 
   get quantity(): number {
@@ -217,6 +238,10 @@ export class SaleItem {
 
   get discountValue(): number | null {
     return this._discountValue;
+  }
+
+  get rewardDiscountPercent(): number | null {
+    return this._rewardDiscountPercent;
   }
 
   get discountAmountCents(): number | null {
@@ -364,6 +389,8 @@ export class SaleItem {
     this._discountTitle = input.discountTitle ?? null;
     this._discountedAt = new Date();
     this._promotionId = input.promotionId;
+    // Exact promo percent — carried verbatim, never derived from cents.
+    this._rewardDiscountPercent = input.getDiscountPercent ?? null;
   }
 
   /**
@@ -422,6 +449,8 @@ export class SaleItem {
     this._discountTitle = null;
     this._discountedAt = null;
     this._promotionId = null;
+    // Cleared alongside the reward state — mirrors rewardKind reset.
+    this._rewardDiscountPercent = null;
   }
 
   toResponse() {
@@ -481,6 +510,10 @@ export class SaleItem {
       // Explicit wire flag so the frontend can render the "free"/reward
       // badge without inferring it from the persisted columns.
       rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
+      // Exact BXGY reward percent (0..100). Null on non-reward lines — same
+      // `isBxgy` guard as `rewardKind`. Lets the frontend show "GRATIS" only
+      // at 100%, otherwise the real percent.
+      rewardDiscountPercent: isBxgy ? this._rewardDiscountPercent : null,
     };
   }
 }
