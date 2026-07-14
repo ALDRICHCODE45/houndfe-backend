@@ -6538,4 +6538,598 @@ describe('SalesService', () => {
       expect(saved.optedInManualPromotionIds).toContain('promo-m-1');
     });
   });
+
+  // ============================================================================
+  // Work Unit 4 (BXGY) — recomputePromotions applies/clears the BXGY
+  // reward idempotently (design.md Decision 8; spec.md:112-115,132-139).
+  //
+  //   4.1 RED: discriminated `kind:'buy-x-get-y'` line result routes to
+  //       `SaleItem.applyBuyXGetYReward` (not `applyDiscount`).
+  //   4.2 GREEN: 5 consecutive recomputes converge to byte-equal totals —
+  //       the reward rides whole-line cents and never mutates
+  //       `unitPriceCents`, so the helper output is stable across calls.
+  // ============================================================================
+  describe('Work Unit 4 BXGY — recomputePromotions applies BXGY idempotently', () => {
+    /**
+     * Build a draft sale with a single in-memory item that has no prior
+     * discount — i.e. the recompute input carries `effectiveUnitPriceCents
+     * === unitPriceCents === 1000` and `hasManualDiscount === false`.
+     */
+    function buildFreshDraftWithItem(
+      saleId: string,
+      itemId: string,
+      productId = 'prod-1',
+      unitPriceCents = 1000,
+      quantity = 6,
+    ): Sale {
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId,
+        productId,
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity,
+        unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    it('recomputePromotions routes a BXGY line result to applyBuyXGetYReward (4.1, spec.md:112-115)', async () => {
+      // spec.md:112-115 — an AUTOMATIC BXGY on a matching line (qty 6,
+      // 1000c/unit, buy 2 get 1 at 50%) emits a per-line saving of
+      // floor(6/3)*1*round(1000*50/100) = 2*500 = 1000c. The
+      // recompute loop must apply this via applyBuyXGetYReward so
+      // the column-derived discriminator (unitPrice === prePrice)
+      // holds.
+      const saleId = 'sale-bxgy-apply';
+      const itemId = 'item-bxgy-apply';
+      saleRepo.findById.mockResolvedValue(
+        buildFreshDraftWithItem(saleId, itemId),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      // Engine returns the BXGY discriminator on the matching line.
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  kind: 'buy-x-get-y',
+                  itemId: line.itemId,
+                  promotionId: 'promo-bxgy-auto',
+                  discountTitle: 'Buy 2 Get 1 @ 50%',
+                  lineDiscountCents: 1000,
+                  perUnitRewardCents: 500,
+                  discountedUnitCount: 2,
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 6,
+      });
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const item = savedSale.items[0];
+      const actualItemId = item.id;
+
+      // The apply path took applyBuyXGetYReward (not applyDiscount).
+      // Contract: unitPrice UNCHANGED (1000), prePrice === unitPrice
+      // (the column-derived discriminator), discountAmountCents = R
+      // (whole-line), discountValue = perUnit snapshot.
+      expect(item.unitPriceCents).toBe(1000);
+      expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+      expect(item.discountAmountCents).toBe(1000);
+      expect(item.discountValue).toBe(500);
+      expect(item.discountType).toBe('amount');
+      expect(item.promotionId).toBe('promo-bxgy-auto');
+      expect(item.isBuyXGetYReward()).toBe(true);
+      // Sanity: the input the engine saw carried the pre-promo base.
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      expect(input.lines[0].effectiveUnitPriceCents).toBe(1000);
+      expect(input.lines[0].hasManualDiscount).toBe(false);
+      expect(input.lines[0].itemId).toBe(actualItemId);
+    });
+
+    it('recomputePromotions clears a prior BXGY reward before re-applying the new one (4.2, idempotency)', async () => {
+      // design.md Decision 8 — clear/re-apply: every recompute must
+      // first remove any prior PROMO-sourced discount (BXGY lines
+      // have promotionId != null → removeDiscount() restores unit
+      // price and clears the discount fields) and THEN apply the
+      // new result. The sequence is critical: removeDiscount() on
+      // a BXGY line is a no-op for unit price (equal) but clears
+      // the discount fields so applyBuyXGetYReward can stamp fresh.
+      const saleId = 'sale-bxgy-clear-reapply';
+      const itemId = 'item-bxgy-clear';
+      // Seed the in-memory sale with a prior BXGY reward applied.
+      saleRepo.findById.mockResolvedValue(
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: itemId,
+              saleId,
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'P',
+              variantName: null,
+              quantity: 6,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+              prePriceCentsBeforeDiscount: 1000,
+              discountType: 'amount',
+              discountValue: 500,
+              discountAmountCents: 1000,
+              discountTitle: 'Buy 2 Get 1 @ 50% (stale)',
+              promotionId: 'promo-bxgy-auto',
+            },
+          ],
+        }),
+      );
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      // Engine returns a fresh BXGY reward (different discountedUnitCount
+      // snapshot, simulating a quantity change that flips the math).
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [
+          {
+            kind: 'buy-x-get-y',
+            itemId,
+            promotionId: 'promo-bxgy-auto',
+            discountTitle: 'Buy 2 Get 1 @ 50% (fresh)',
+            lineDiscountCents: 1000,
+            perUnitRewardCents: 500,
+            discountedUnitCount: 2,
+          },
+        ],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [],
+      });
+
+      // Trigger recompute via updateItemQuantity (no-op qty).
+      await service.updateItemQuantity(saleId, 'user-1', itemId, {
+        quantity: 6,
+      });
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const item = savedSale.items[0];
+
+      // Clear/re-apply must produce the FRESH state, not stack the
+      // stale reward on top of itself. The discountTitle is the
+      // tell — fresh is "fresh", stale would be "stale".
+      expect(item.discountTitle).toBe('Buy 2 Get 1 @ 50% (fresh)');
+      // The discriminator still holds (unitPrice === prePrice).
+      expect(item.isBuyXGetYReward()).toBe(true);
+      expect(item.unitPriceCents).toBe(1000);
+      expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+      expect(item.discountAmountCents).toBe(1000);
+    });
+
+    it('recomputePromotions routes a per-unit result to applyDiscount (4.1 regression — non-BXGY path UNCHANGED)', async () => {
+      // Spec.md:21-37 cross-type rule: when BOTH a PRODUCT_DISCOUNT
+      // and a BUY_X_GET_Y match a line, the engine picks one and
+      // emits a single discriminator. Here the engine picked the
+      // per-unit kind; recompute MUST route it through applyDiscount
+      // (existing path) and NOT through applyBuyXGetYReward. This
+      // is the regression guard that keeps the existing PD path
+      // untouched.
+      const saleId = 'sale-bxgy-pd-path';
+      const itemId = 'item-bxgy-pd-path';
+      saleRepo.findById.mockResolvedValue(
+        buildFreshDraftWithItem(saleId, itemId),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        // Per-unit kind (no `kind` discriminator → defaults to
+        // 'per-unit'). This is the regression-test invariant: the
+        // existing applyDiscount path keeps working unchanged.
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  itemId: line.itemId,
+                  promotionId: 'promo-pd-1',
+                  discountType: 'percentage',
+                  discountValue: 10,
+                  discountTitle: '10% off',
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 6,
+      });
+
+      const item = (saleRepo.save.mock.calls.at(-1)?.[0] as Sale).items[0];
+      // 10% of 1000 = 100 → unitPrice drops to 900 (per-unit path).
+      // This is the UNCHANGED per-unit behavior; BXGY would keep
+      // unitPrice at 1000.
+      expect(item.unitPriceCents).toBe(900);
+      expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+      expect(item.discountAmountCents).toBe(100);
+      expect(item.discountType).toBe('percentage');
+      // Not a BXGY reward — the unit-price drop breaks the
+      // column-derived discriminator.
+      expect(item.isBuyXGetYReward()).toBe(false);
+    });
+
+    it('five consecutive recomputes on the same draft converge to byte-equal totals (4.2, spec.md:132-139)', async () => {
+      // spec.md:132-139 — five recomputes on the same draft MUST
+      // produce identical totals (no compounding). The reward rides
+      // whole-line cents and never mutates unitPriceCents, so the
+      // helper output is stable across calls.
+      //
+      // NOTE: seed findById with an EMPTY draft — `addItem` STACKS
+      // onto an existing item of the same product+variant, so a
+      // pre-populated qty-6 item would stack to qty-12 and the math
+      // wouldn't be what the spec scenario describes.
+      const saleId = 'sale-bxgy-5x';
+      saleRepo.findById.mockResolvedValue(
+        Sale.create({ id: saleId, userId: 'user-1' }),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  kind: 'buy-x-get-y',
+                  itemId: line.itemId,
+                  promotionId: 'promo-bxgy-5x',
+                  discountTitle: 'Buy 2 Get 1 @ 50%',
+                  lineDiscountCents: 1000,
+                  perUnitRewardCents: 500,
+                  discountedUnitCount: 2,
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      // First recompute via addItem (empty seed → qty 6 after addItem).
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 6,
+      });
+      const afterFirst = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const itemId_5x = afterFirst.items[0].id;
+      const firstTotals = afterFirst.previewTotals();
+      const firstSnapshot = {
+        unitPriceCents: afterFirst.items[0].unitPriceCents,
+        prePriceCentsBeforeDiscount:
+          afterFirst.items[0].prePriceCentsBeforeDiscount,
+        discountAmountCents: afterFirst.items[0].discountAmountCents,
+        discountValue: afterFirst.items[0].discountValue,
+        discountType: afterFirst.items[0].discountType,
+        promotionId: afterFirst.items[0].promotionId,
+        subtotalCents: firstTotals.subtotalCents,
+        discountCents: firstTotals.discountCents,
+        totalCents: firstTotals.totalCents,
+      };
+
+      // Four more recomputes via updateItemQuantity no-op (qty 6→6).
+      // Each one re-runs the engine, clears the prior reward, re-applies
+      // the same result. The fifth save MUST be byte-equal to the first.
+      for (let i = 0; i < 4; i++) {
+        const previous = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+        const prevItem = previous.items[0];
+        saleRepo.findById.mockResolvedValue(
+          Sale.fromPersistence({
+            id: saleId,
+            userId: 'user-1',
+            status: 'DRAFT',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            items: [
+              {
+                id: itemId_5x,
+                saleId,
+                productId: 'prod-1',
+                variantId: null,
+                productName: 'P',
+                variantName: null,
+                quantity: prevItem.quantity,
+                unitPriceCents: prevItem.unitPriceCents,
+                unitPriceCurrency: 'MXN',
+                prePriceCentsBeforeDiscount:
+                  prevItem.prePriceCentsBeforeDiscount,
+                discountType: prevItem.discountType,
+                discountValue: prevItem.discountValue,
+                discountAmountCents: prevItem.discountAmountCents,
+                discountTitle: prevItem.discountTitle,
+                promotionId: prevItem.promotionId,
+              },
+            ],
+          }),
+        );
+        productsService.checkStockAvailability.mockResolvedValue({
+          available: true,
+          currentStock: 100,
+        });
+        await service.updateItemQuantity(saleId, 'user-1', itemId_5x, {
+          quantity: 6,
+        });
+      }
+
+      const afterFifth = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const fifthTotals = afterFifth.previewTotals();
+      const fifthSnapshot = {
+        unitPriceCents: afterFifth.items[0].unitPriceCents,
+        prePriceCentsBeforeDiscount:
+          afterFifth.items[0].prePriceCentsBeforeDiscount,
+        discountAmountCents: afterFifth.items[0].discountAmountCents,
+        discountValue: afterFifth.items[0].discountValue,
+        discountType: afterFifth.items[0].discountType,
+        promotionId: afterFifth.items[0].promotionId,
+        subtotalCents: fifthTotals.subtotalCents,
+        discountCents: fifthTotals.discountCents,
+        totalCents: fifthTotals.totalCents,
+      };
+
+      // Byte-equal across all five recomputes.
+      expect(fifthSnapshot).toEqual(firstSnapshot);
+      // Defensive: confirm the discriminator still holds.
+      expect(afterFifth.items[0].isBuyXGetYReward()).toBe(true);
+      // Sanity: subtotal / discount / total computed correctly.
+      // qty 6 * 1000c = 6000c subtotal; R = 1000c; total = 5000c.
+      expect(firstSnapshot.subtotalCents).toBe(6000);
+      expect(firstSnapshot.discountCents).toBe(1000);
+      expect(firstSnapshot.totalCents).toBe(5000);
+    });
+  });
+
+  // ==========================================================================
+  // Work Unit 6 — MANUAL BXGY wiring + opt-in survival (6.1, 6.2; spec.md:108-130)
+  // ==========================================================================
+  describe('Work Unit 6 BXGY — MANUAL BXGY candidate surface and opt-in survival (spec.md:108-130)', () => {
+    /**
+     * Build a draft sale with a single in-memory item — same shape as
+     * the WU4 helper, used by the MANUAL BXGY tests below.
+     */
+    function buildFreshBxgyDraft(
+      saleId: string,
+      itemId: string,
+      productId = 'prod-1',
+      unitPriceCents = 1000,
+      quantity = 3,
+    ): Sale {
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId,
+        productId,
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity,
+        unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    it('listApplicablePromotions surfaces a MANUAL BXGY candidate with type BUY_X_GET_Y (spec.md:117-120)', async () => {
+      // spec.md:117-120 — a MANUAL BXGY with at least one matching
+      // line is surfaced on the wire with type BUY_X_GET_Y. Frontend
+      // uses the type to render the right opt-in card.
+      const saleId = 'sale-u6-bxgy-list';
+      const sale = buildFreshBxgyDraft(saleId, 'item-u6-bxgy-list');
+      saleRepo.findById.mockResolvedValue(sale);
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [
+          { id: 'promo-bxgy-manual', title: 'Manual 2x1', type: 'BUY_X_GET_Y' as const },
+        ],
+        targetableManualPromotionIds: [],
+      });
+
+      const result = await service.listApplicablePromotions(saleId, 'user-1');
+
+      expect(result.saleId).toBe(saleId);
+      expect(result.promotions).toEqual([
+        { id: 'promo-bxgy-manual', title: 'Manual 2x1', type: 'BUY_X_GET_Y' },
+      ]);
+    });
+
+    it('opted-in MANUAL BXGY survives two consecutive recomputes (spec.md:127-130)', async () => {
+      // spec.md:127-130 — a seller has opted in to a MANUAL BXGY on
+      // a draft with one matching line. After two consecutive
+      // recomputes, the MANUAL BXGY MUST remain applied across both
+      // (subject to eligibility re-evaluation — here both recomputes
+      // emit the same BXGY line result).
+      const saleId = 'sale-u6-bxgy-survive';
+      const itemId = 'item-u6-bxgy-survive';
+
+      // Recompute helper — the engine returns the BXGY line result
+      // ONLY when the MANUAL promo id is in `optedInManualPromotionIds`
+      // (mirrors how pickBestBuyXGetYPerLine filters MANUAL gating).
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines:
+            input.optedInManualPromotionIds.includes('promo-bxgy-manual') && line
+              ? [
+                  {
+                    kind: 'buy-x-get-y' as const,
+                    itemId: line.itemId,
+                    promotionId: 'promo-bxgy-manual',
+                    discountTitle: 'Manual 2x1 @ 50%',
+                    lineDiscountCents: 500, // qty 3 → floor(3/3)*1*round(1000*50/100)=500c
+                    perUnitRewardCents: 500,
+                    discountedUnitCount: 1,
+                  },
+                ]
+              : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: input.optedInManualPromotionIds.includes(
+            'promo-bxgy-manual',
+          )
+            ? ['promo-bxgy-manual']
+            : [],
+        });
+      });
+
+      // ── 1st recompute: empty draft + addItem + opt-in via applyManualPromotion ──
+      // To keep the test focused on the SURVIVAL invariant (not the
+      // opt-in flow itself, covered by 6.2), we model the opt-in as a
+      // pre-existing state on the seeded draft rather than exercising
+      // the apply endpoint twice.
+      saleRepo.findById.mockResolvedValueOnce(
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [],
+          optedInManualPromotionIds: ['promo-bxgy-manual'],
+        }),
+      );
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 3,
+      });
+
+      const afterFirst = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const firstItem = afterFirst.items[0];
+      const firstItemId = firstItem.id;
+
+      // The MANUAL BXGY was applied on the first recompute.
+      expect(firstItem.promotionId).toBe('promo-bxgy-manual');
+      expect(firstItem.isBuyXGetYReward()).toBe(true);
+      expect(firstItem.discountAmountCents).toBe(500);
+      expect(firstItem.unitPriceCents).toBe(1000); // BXGY leaves unitPrice FULL
+      expect(firstItem.prePriceCentsBeforeDiscount).toBe(1000); // discriminator holds
+
+      // ── 2nd recompute: trigger via updateItemQuantity (no-op qty 3→3) ──
+      // Re-seed the draft carrying the prior BXGY state — same shape
+      // pattern as the WU4 5x test, so the recompute input is built
+      // from a line whose unitPrice/prePrice already encode the
+      // applied BXGY (no stacking on re-entry).
+      saleRepo.findById.mockResolvedValueOnce(
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: firstItemId,
+              saleId,
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'P',
+              variantName: null,
+              quantity: 3,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+              prePriceCentsBeforeDiscount: 1000,
+              discountType: 'amount',
+              discountValue: 500,
+              discountAmountCents: 500,
+              discountTitle: 'Manual 2x1 @ 50%',
+              promotionId: 'promo-bxgy-manual',
+            },
+          ],
+          optedInManualPromotionIds: ['promo-bxgy-manual'],
+        }),
+      );
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      await service.updateItemQuantity(saleId, 'user-1', firstItemId, {
+        quantity: 3,
+      });
+
+      const afterSecond = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const secondItem = afterSecond.items[0];
+
+      // The MANUAL BXGY MUST survive the second recompute.
+      expect(secondItem.promotionId).toBe('promo-bxgy-manual');
+      expect(secondItem.isBuyXGetYReward()).toBe(true);
+      expect(secondItem.discountAmountCents).toBe(500);
+      expect(secondItem.unitPriceCents).toBe(1000);
+      expect(secondItem.prePriceCentsBeforeDiscount).toBe(1000);
+      // The opt-in is RETAINED (self-heal retention): the engine's
+      // targetableManualPromotionIds still includes the promo id, so
+      // SalesService does not prune it.
+      expect(afterSecond.optedInManualPromotionIds).toContain('promo-bxgy-manual');
+    });
+  });
 });

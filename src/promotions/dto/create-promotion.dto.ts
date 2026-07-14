@@ -153,7 +153,7 @@ export class CreatePromotionDto {
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(99)
+  @Max(100)
   getDiscountPercent?: number;
 
   // ── ADVANCED only ──

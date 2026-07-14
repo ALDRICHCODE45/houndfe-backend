@@ -283,6 +283,7 @@ export interface ISaleRepository {
       discountAmountCents: number | null;
       discountTitle: string | null;
       prePriceCentsBeforeDiscount: number | null;
+      rewardKind: 'buy_x_get_y' | null;
     }>;
     payments: Array<{
       paymentId: string;

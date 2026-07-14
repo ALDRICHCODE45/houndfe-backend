@@ -43,6 +43,35 @@ export interface ApplySaleItemDiscountInput {
   promotionId?: string | null;
 }
 
+/**
+ * Input for `SaleItem.applyBuyXGetYReward` (BUY_X_GET_Y whole-line cents
+ * reward — design.md Decision 1; spec.md:97-106).
+ *
+ * The BXGY path is a SEPARATE method from `applyDiscount` and BYPASSES the
+ * per-unit clamp (sale-item.entity.ts:267 — `baseline − discount >= 1`) so a
+ * get-unit can surface at 0c (true free, getDiscountPercent=100). The
+ * per-unit `applyDiscount` percentage clamp (1..99) and the
+ * `baseline − discount >= 1` invariant are NOT on the BXGY path —
+ * `applyDiscount`'s contract is unchanged (zero PRODUCT_DISCOUNT regression
+ * surface, locked by spec.md:93-95).
+ *
+ * `unitPriceCents` stays FULL (the buy-price); `prePriceCentsBeforeDiscount`
+ * is set EQUAL to `unitPriceCents` — that EQUAL is the discriminator
+ * `isBuyXGetYReward()` reads.
+ */
+export interface ApplyBuyXGetYRewardInput {
+  /** R — whole-line cents reward (the line subtotal drop). */
+  lineDiscountCents: number;
+  /** Snapshot of the per-unit reward for the receipt wire field. */
+  perUnitRewardCents: number;
+  /** Snapshot of the discounted-unit count (groups * M) for the receipt. */
+  discountedUnitCount: number;
+  /** Optional human-readable label (e.g. "Buy 2 Get 1 @ 50%"). */
+  discountTitle?: string;
+  /** BXGY promotion id (drives the discriminator + cross-line retention). */
+  promotionId: string;
+}
+
 export interface OverrideSaleItemPriceInput {
   priceCents: number;
   priceSource: 'price_list' | 'custom';
@@ -288,6 +317,82 @@ export class SaleItem {
     this.clearDiscountFields();
   }
 
+  /**
+   * Apply a BUY_X_GET_Y whole-line cents reward `R` (design.md Decision 1;
+   * spec.md:97-106). Bypasses `applyDiscount`'s per-unit clamp so a
+   * get-unit can surface at 0c (true free, getDiscountPercent=100).
+   *
+   * Contract (locked by WU2 unit tests):
+   *   - `unitPriceCents` stays FULL — never mutated.
+   *   - `prePriceCentsBeforeDiscount = unitPriceCents` (EQUAL — the
+   *     discriminator).
+   *   - `discountAmountCents = R` (whole-line, NOT per-unit).
+   *   - `discountValue` snapshots the per-unit reward for the receipt.
+   *   - `discountType = 'amount'` (rides the existing enum value).
+   *   - `discountTitle`, `discountedAt`, `promotionId` set.
+   *
+   * Guard: `R` integer, `0 < R < unitPriceCents × quantity` (cannot reward
+   * more than the line subtotal, cannot reward zero or negative).
+   */
+  applyBuyXGetYReward(input: ApplyBuyXGetYRewardInput): void {
+    if (
+      !Number.isInteger(input.lineDiscountCents) ||
+      input.lineDiscountCents <= 0
+    ) {
+      throw new InvalidArgumentError(
+        'BXGY_REWARD_INVALID: lineDiscountCents must be a positive integer',
+      );
+    }
+    if (input.lineDiscountCents >= this._unitPriceCents * this._quantity) {
+      throw new InvalidArgumentError(
+        'BXGY_REWARD_INVALID: lineDiscountCents must be less than unitPriceCents * quantity',
+      );
+    }
+    if (!input.promotionId) {
+      throw new InvalidArgumentError(
+        'BXGY_REWARD_INVALID: promotionId is required',
+      );
+    }
+
+    // Snapshot the buy-price as the pre-discount base. BXGY never mutates
+    // `_unitPriceCents` — the EQUAL invariant `unitPrice === prePrice` is
+    // the column-derived discriminator `isBuyXGetYReward()`.
+    this._prePriceCentsBeforeDiscount = this._unitPriceCents;
+    this._discountType = 'amount';
+    this._discountValue = input.perUnitRewardCents;
+    this._discountAmountCents = input.lineDiscountCents;
+    this._discountTitle = input.discountTitle ?? null;
+    this._discountedAt = new Date();
+    this._promotionId = input.promotionId;
+  }
+
+  /**
+   * Column-derived BXGY discriminator (design.md Decision 1). Reads the
+   * same persisted columns the receipt/detail mapper reconstructs (see
+   * `prisma-sale.repository.ts:1392-1393`) so both readers compute NET
+   * identically — domain path (previewTotals) and wire path (mapper).
+   *
+   * Returns true iff:
+   *   - `promotionId` is set (promo-sourced, not manual free-form), AND
+   *   - `discountAmountCents > 0` (a reward exists), AND
+   *   - `prePriceCentsBeforeDiscount` is set (snapshot taken), AND
+   *   - `unitPriceCents === prePriceCentsBeforeDiscount` (BXGY never
+   *     mutated the unit price — the per-unit `applyDiscount` path always
+   *     forces `unitPrice < prePrice` by ≥1 via sale-item.entity.ts:267).
+   *
+   * This discriminator is unreachable by the per-unit path by invariant;
+   * a per-unit PD line fails the last clause.
+   */
+  isBuyXGetYReward(): boolean {
+    return (
+      this._promotionId !== null &&
+      this._discountAmountCents !== null &&
+      this._discountAmountCents > 0 &&
+      this._prePriceCentsBeforeDiscount !== null &&
+      this._unitPriceCents === this._prePriceCentsBeforeDiscount
+    );
+  }
+
   private computeDiscountAmountCents(
     input: ApplySaleItemDiscountInput,
     baseline: number,
@@ -320,6 +425,35 @@ export class SaleItem {
   }
 
   toResponse() {
+    // Work Unit 8 — Draft NET per-line subtotal + rewardKind wire contract.
+    // The DRAFT surface (addItem / updateItemQuantity / previewTotals / etc.)
+    // used to emit gross `subtotalCents` and no `rewardKind`, so the POS
+    // /wiz-pos frontend rendered BXGY lines as gross. The confirmed-sale
+    // receipt mapper already exposes both keys (see prisma-sale.repository.ts:
+    // 1407, 1421-1422, 1437); this closes the contract gap so the frontend
+    // reads the SAME field on both surfaces.
+    //
+    // Formula mirrors the receipt mapper exactly:
+    //   subtotalCents = unitPriceCents * quantity
+    //                   - (isBuyXGetYReward() ? (discountAmountCents ?? 0) : 0)
+    //   rewardKind    = isBuyXGetYReward() ? 'buy_x_get_y' : null
+    //
+    // Per-unit PRODUCT_DISCOUNT path keeps `unitPrice < prePrice` so
+    // `isBuyXGetYReward()` returns false → R = 0 → no subtraction (the
+    // per-unit subtotal is already NET because `applyDiscount` reduced
+    // `unitPriceCents`). Manual free-form discounts fail the discriminator's
+    // first clause (promotionId null) and the same logic applies. Plain
+    // lines return gross = NET.
+    //
+    // NOTE: `subtotalCents` here is intentionally a NEW field on the
+    // returned wire object and DOES NOT touch the existing
+    // `get subtotalCents()` getter at :194-196, which still returns the
+    // gross value for previewTotals and other in-domain consumers. The
+    // emitted-key naming was chosen because both the receipt mapper and the
+    // draft-surface need a uniform wire-side NET field; renaming the getter
+    // would break every previewTotals call site.
+    const isBxgy = this.isBuyXGetYReward();
+    const bxgyRewardCents = isBxgy ? this.discountAmountCents ?? 0 : 0;
     return {
       id: this.id,
       productId: this.productId,
@@ -341,6 +475,12 @@ export class SaleItem {
       discountTitle: this.discountTitle,
       discountedAt: this.discountedAt,
       promotionId: this.promotionId,
+      // NET per-line subtotal — see formula in the block comment above.
+      subtotalCents:
+        this._unitPriceCents * this._quantity - bxgyRewardCents,
+      // Explicit wire flag so the frontend can render the "free"/reward
+      // badge without inferring it from the persisted columns.
+      rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
     };
   }
 }

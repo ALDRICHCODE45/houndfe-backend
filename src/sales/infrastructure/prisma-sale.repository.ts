@@ -1336,6 +1336,12 @@ export class PrismaSaleRepository implements ISaleRepository {
             discountAmountCents: true,
             discountTitle: true,
             prePriceCentsBeforeDiscount: true,
+            // WU2 — needed by the column-derived `isBuyXGetYReward()`
+            // discriminator the receipt mapper re-derives on the wire
+            // path (design.md Decision 6). The mapper previously omitted
+            // this select; BXGY rows would have rendered as GROSS because
+            // `promotionId` came back undefined and the predicate failed.
+            promotionId: true,
           },
         },
         payments: {
@@ -1383,27 +1389,54 @@ export class PrismaSaleRepository implements ISaleRepository {
         : null,
       cashier: sale.user,
       seller: sale.seller,
-      items: sale.items.map((item) => ({
-        productName: item.productName,
-        variantName: item.variantName,
-        imageUrl: item.imageUrl,
-        unitPriceCents: item.unitPriceCents,
-        quantity: item.quantity,
-        discountCents: item.discountAmountCents ?? 0,
-        subtotalCents: item.unitPriceCents * item.quantity,
-        originalPriceCents: item.originalPriceCents,
-        priceSource: item.priceSource?.toLowerCase() as
-          | 'default'
-          | 'price_list'
-          | 'custom'
-          | null,
-        appliedPriceListId: item.appliedPriceListId,
-        discountType: item.discountType as 'amount' | 'percentage' | null,
-        discountValue: item.discountValue,
-        discountAmountCents: item.discountAmountCents,
-        discountTitle: item.discountTitle,
-        prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
-      })),
+      items: sale.items.map((item) => {
+        // Column-derived BXGY discriminator (design.md Decision 6). Same
+        // predicate the domain SaleItem.isBuyXGetYReward() reads — we
+        // re-derive it here from the persisted Prisma row so the wire
+        // path and the domain path agree without sharing state.
+        //
+        // Unreachable by the per-unit PRODUCT_DISCOUNT path by invariant
+        // (that path forces `unitPrice < prePrice` by ≥1 via
+        // sale-item.entity.ts:267). Manual free-form discounts leave
+        // `promotionId = null` and fail the first clause.
+        const isBxgy =
+          item.promotionId != null &&
+          item.prePriceCentsBeforeDiscount != null &&
+          item.unitPriceCents === item.prePriceCentsBeforeDiscount &&
+          (item.discountAmountCents ?? 0) > 0;
+        const bxgyRewardCents = isBxgy ? item.discountAmountCents ?? 0 : 0;
+        return {
+          productName: item.productName,
+          variantName: item.variantName,
+          imageUrl: item.imageUrl,
+          unitPriceCents: item.unitPriceCents,
+          quantity: item.quantity,
+          discountCents: item.discountAmountCents ?? 0,
+          // NET subtotal: for BXGY lines `unitPrice × qty` is GROSS (the
+          // reward `R` is stored in `discountAmountCents` instead of being
+          // amortized into `unitPriceCents`), so we subtract `R` to render
+          // NET. For every other line the per-unit path is already NET
+          // (unitPrice was reduced by the discount), so `bxgyRewardCents`
+          // is zero and the subtraction is a no-op.
+          subtotalCents:
+            item.unitPriceCents * item.quantity - bxgyRewardCents,
+          originalPriceCents: item.originalPriceCents,
+          priceSource: item.priceSource?.toLowerCase() as
+            | 'default'
+            | 'price_list'
+            | 'custom'
+            | null,
+          appliedPriceListId: item.appliedPriceListId,
+          discountType: item.discountType as 'amount' | 'percentage' | null,
+          discountValue: item.discountValue,
+          discountAmountCents: item.discountAmountCents,
+          discountTitle: item.discountTitle,
+          prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+          // Explicit wire flag so the frontend can render the
+          // "free"/reward badge without inferring it.
+          rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
+        };
+      }),
       payments: sale.payments.map((payment) => ({
         paymentId: payment.id,
         method: payment.method,

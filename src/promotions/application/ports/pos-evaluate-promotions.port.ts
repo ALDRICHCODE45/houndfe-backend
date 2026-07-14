@@ -68,7 +68,18 @@ export interface PosEvalInput {
   optedInManualPromotionIds: ReadonlyArray<string>;
 }
 
-export interface PosEvalLineResult {
+/**
+ * Per-line PER-UNIT engine result (existing PRODUCT_DISCOUNT / ORDER_DISCOUNT
+ * line path). Carries the per-unit discount shape that
+ * `SaleItem.applyDiscount` consumes directly. The `kind` discriminator
+ * is OPTIONAL and defaults to `'per-unit'` for backward compatibility with
+ * existing tests/literals that haven't been updated to tag the kind.
+ *
+ * design.md Decision 3 + Result-contract type — discriminated union with
+ * optional `kind` (default `'per-unit'` keeps existing literals compiling).
+ */
+export interface PosEvalPerUnitLineResult {
+  kind?: 'per-unit';
   itemId: string;
   promotionId: string;
   /** 'amount' for FIXED, 'percentage' for PERCENTAGE (incl. 100% clamped to 99). */
@@ -77,6 +88,43 @@ export interface PosEvalLineResult {
   discountValue: number;
   discountTitle: string;
 }
+
+/**
+ * Per-line BUY_X_GET_Y engine result (whole-line cents reward `R`).
+ * Carries the line-total reward shape that `SaleItem.applyBuyXGetYReward`
+ * consumes directly (design.md Decision 1). The wire BXGY row uses
+ * `lineDiscountCents` as `discountAmountCents` and `perUnitRewardCents`
+ * as `discountValue` — SaleItem maps them onto existing columns so no
+ * migration is needed.
+ *
+ * Invariant: `lineDiscountCents > 0`, and
+ * `lineDiscountCents < line.effectiveUnitPriceCents * line.quantity`
+ * (the entity enforces this — `applyBuyXGetYReward` throws otherwise).
+ */
+export interface PosEvalBuyXGetYLineResult {
+  kind: 'buy-x-get-y';
+  itemId: string;
+  promotionId: string;
+  discountTitle: string;
+  /** R — whole-line cents reward (the line subtotal drop). */
+  lineDiscountCents: number;
+  /** Snapshot of the per-unit reward for the receipt wire field. */
+  perUnitRewardCents: number;
+  /** Snapshot of the discounted-unit count (groups * M) for the receipt. */
+  discountedUnitCount: number;
+}
+
+/**
+ * Per-line engine result — discriminated union. The consumer
+ * (`SalesService.recomputePromotions`) branches on `kind` to choose
+ * between `SaleItem.applyDiscount` (per-unit) and
+ * `SaleItem.applyBuyXGetYReward` (whole-line cents). The discriminated
+ * shape is also how the engine's `computeAppliedDiscountCents` knows
+ * which discount math to use for the ORDER_DISCOUNT post-line subtotal.
+ */
+export type PosEvalLineResult =
+  | PosEvalPerUnitLineResult
+  | PosEvalBuyXGetYLineResult;
 
 export interface PosEvalOrderResult {
   promotionId: string;
@@ -90,7 +138,14 @@ export interface PosEvalOrderResult {
 export interface PosEvalManualCandidate {
   id: string;
   title: string;
-  type: 'PRODUCT_DISCOUNT' | 'ORDER_DISCOUNT';
+  /**
+   * Engine-supported MANUAL promotion types only.
+   *
+   * WU6 (buy-x-get-y — design.md Decision 7): added `BUY_X_GET_Y` so
+   * MANUAL BXGY promotions surface on the wire with the correct type.
+   * Frontend uses this to render the candidate card variant.
+   */
+  type: 'PRODUCT_DISCOUNT' | 'ORDER_DISCOUNT' | 'BUY_X_GET_Y';
   /**
    * Promotion method discriminator. Today every candidate in
    * `availableManualPromotions` is MANUAL by construction (the engine

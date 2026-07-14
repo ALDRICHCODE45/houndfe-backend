@@ -213,10 +213,13 @@ describe('Promotion Entity', () => {
       ).toThrow(InvalidArgumentError);
     });
 
-    it('should throw if getDiscountPercent > 99 for BUY_X_GET_Y', () => {
-      expect(() =>
-        Promotion.create({ ...validBuyXGetY, getDiscountPercent: 100 }),
-      ).toThrow(InvalidArgumentError);
+    it('should allow getDiscountPercent = 100 for BUY_X_GET_Y', () => {
+      const promo = Promotion.create({
+        ...validBuyXGetY,
+        getDiscountPercent: 100,
+      });
+
+      expect(promo.getDiscountPercent).toBe(100);
     });
 
     it('should throw if getDiscountPercent < 0 for BUY_X_GET_Y', () => {
@@ -274,6 +277,12 @@ describe('Promotion Entity', () => {
       });
       expect(promo.buyTargetType).toBe('BRANDS');
       expect(promo.getTargetType).toBe('CATEGORIES');
+    });
+
+    it('should reject getDiscountPercent = 100 for ADVANCED', () => {
+      expect(() =>
+        Promotion.create({ ...validAdvanced, getDiscountPercent: 100 }),
+      ).toThrow(InvalidArgumentError);
     });
 
     it('should throw if forbidden appliesTo is present for ADVANCED', () => {

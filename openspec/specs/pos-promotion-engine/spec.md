@@ -3,10 +3,16 @@
 ## Purpose
 
 Define the POS-grade promotion eligibility, per-line and sale-level
-application of `PRODUCT_DISCOUNT` + `ORDER_DISCOUNT`, best-wins selection,
-auto vs manual opt-in, manual-wins precedence, per-draft veto, and the
-promotion-id audit surface that connects the rule catalog
-(`Promotion`) to the POS Sale draft flow. Tax-agnostic; cents + `Math.round`.
+application of `PRODUCT_DISCOUNT` + `BUY_X_GET_Y` + `ORDER_DISCOUNT`,
+best-wins selection (including the cross-type real per-line total-savings
+comparator and the BUY_X_GET_Y pass ordering between the per-line
+`PRODUCT_DISCOUNT` and the sale-level `ORDER_DISCOUNT` passes), auto vs
+manual opt-in, manual-wins precedence, per-draft veto, the type-aware
+100% "free" cap (`BUY_X_GET_Y` may reach 100%; `ADVANCED` stays capped at
+99), the targeted-required constraint for `BUY_X_GET_Y`, the
+idempotent-recompute invariant, and the promotion-id audit surface that
+connects the rule catalog (`Promotion`) to the POS Sale draft flow.
+Tax-agnostic; cents + `Math.round`.
 
 ## Requirements
 
@@ -189,22 +195,23 @@ The engine MUST apply an eligible `ORDER_DISCOUNT` to the whole draft subtotal (
 
 ### Requirement: Best-Wins Selection Per Line And Per Sale
 
-When multiple promotions are eligible for the same line (`PRODUCT_DISCOUNT`) or for the same sale (`ORDER_DISCOUNT`), the engine MUST apply only the promotion that gives the highest customer discount in cents. Stacking (summing) MUST NOT occur. Ties resolve by lowest `promotionId` (deterministic). Manual seller free-form discounts are not promotions and are NOT considered in best-wins selection.
+When multiple promotions are eligible for the same line or for the same sale, the engine MUST apply only the promotion that gives the highest customer discount in cents. Stacking (summing) MUST NOT occur. Ties resolve by lowest `promotionId` (deterministic). Manual seller free-form discounts are not promotions and are NOT considered in best-wins selection. **Cross-type rule:** when a line is eligible for BOTH a `PRODUCT_DISCOUNT` AND a `BUY_X_GET_Y`, the engine compares REAL per-line TOTAL savings in cents and applies the larger; ties resolve by lowest `promotionId`. A `PRODUCT_DISCOUNT` line's total saving is its per-unit applied discount cents multiplied by line quantity. A `BUY_X_GET_Y` line's total saving is `floor(qty / (N+M)) * M * Math.round((unitPrice * getDiscountPercent) / 100)`. The `BUY_X_GET_Y` pass runs AFTER the per-line `PRODUCT_DISCOUNT` best-wins pass and BEFORE the `ORDER_DISCOUNT` pass, so the post-line subtotal fed to `ORDER_DISCOUNT` already reflects the BUY_X_GET_Y saving.
+(Previously: cross-type BUY_X_GET_Y comparison was out of scope; BUY_X_GET_Y itself was rejected at the engine gate. The cross-type best-wins rule now extends to BUY_X_GET_Y and compares real per-line total savings before fixed pass ordering.)
 
-#### Scenario: Best of two PRODUCT_DISCOUNT promos on the same line
-- GIVEN a line priced at 1000c and two eligible AUTOMATIC `PRODUCT_DISCOUNT` promos: P-A (PERCENTAGE 10% → 100c) and P-B (FIXED 200c → 200c)
-- WHEN the engine selects best-wins for that line
-- THEN P-B is applied and P-A is NOT; the final line price is 800c (no stacking to 700c)
+#### Scenario: BUY_X_GET_Y beats a smaller per-line PRODUCT_DISCOUNT on the same line
+- GIVEN a 1000c/unit line with qty 6, AUTOMATIC `PRODUCT_DISCOUNT` P-A FIXED 100c/unit whose per-line total saving is `100*6` = 600c, and AUTOMATIC `BUY_X_GET_Y` P-B (buy 2 get 1 at 50%) whose per-line total saving is `floor(6/3)*1*Math.round((1000*50)/100)` = 1000c
+- WHEN the engine evaluates
+- THEN P-B is applied and P-A is NOT (1000c > 600c; no stacking)
 
-#### Scenario: Best of two ORDER_DISCOUNT promos on the same sale
-- GIVEN a draft subtotal of 5000c and two eligible `ORDER_DISCOUNT` promos: P-X (PERCENTAGE 10% → 500c) and P-Y (FIXED 300c → 300c)
-- WHEN the engine selects best-wins for the sale
-- THEN P-X is applied and P-Y is NOT
+#### Scenario: Cross-type comparison uses real per-line totals and lowest-id ties
+- GIVEN case A is a 1000c/unit line with qty 3, `PRODUCT_DISCOUNT` P-A FIXED 500c/unit (total `500*3` = 1500c) versus `BUY_X_GET_Y` P-B buy 2 get 1 at 50% (total 500c); AND case B is a 1000c/unit line with qty 6, P-A FIXED 100c/unit (total 600c) versus P-B buy 2 get 1 at 30% (total `floor(6/3)*1*Math.round((1000*30)/100)` = 600c), with `P-B.id < P-A.id`
+- WHEN the engine evaluates each case independently
+- THEN case A applies P-A (1500c > 500c), while case B applies P-B (600c == 600c; lowest id wins); neither case stacks promotions
 
-#### Scenario: Tie resolves by lowest promotionId
-- GIVEN a line priced at 1000c and two eligible AUTOMATIC `PRODUCT_DISCOUNT` promos P-A and P-Z, each offering FIXED 100c, with `P-A.id < P-Z.id`
-- WHEN the engine selects best-wins
-- THEN P-A is applied
+#### Scenario: BUY_X_GET_Y pass runs between per-line PRODUCT_DISCOUNT and ORDER_DISCOUNT
+- GIVEN line L1 has qty 3 at 1000c/unit with an applied `BUY_X_GET_Y` saving 300c, line L2 has qty 1 at 1000c/unit with an applied `PRODUCT_DISCOUNT` saving 100c, and the sale has an `ORDER_DISCOUNT` PERCENTAGE 10% with `minPurchaseAmountCents = 0`
+- WHEN the engine evaluates
+- THEN the post-line subtotal fed to `ORDER_DISCOUNT` is `(3000-300)+(1000-100)` = 3600c, so its saving is 360c; the two line promotions remain on different lines and do NOT stack
 
 ### Requirement: AUTOMATIC Promotions Auto-Apply
 
@@ -412,19 +419,124 @@ The system MUST reject a `CATEGORIES` target whose `targetId` does not reference
 - WHEN `POST /promotions` creates a `BRANDS` promotion with `targetItems = [BR-MISSING]`
 - THEN the request is rejected with `INVALID_TARGET` (400) and no promotion row is created
 
+### Requirement: BUY_X_GET_Y Targeting Is Required
+
+A `BUY_X_GET_Y` promotion MUST declare an `appliesTo` value of `PRODUCTS`, `VARIANTS`, `CATEGORIES`, or `BRANDS` AND at least one `targetItems[].targetId`. A `BUY_X_GET_Y` promotion without a target MUST be rejected at create and update time with `INVALID_TARGET` (400). The matching predicate reuses the existing tier match logic (`PRODUCTS` matches every variant of a variant-bearing product; `VARIANTS` matches only the exact variant; `CATEGORIES`/`BRANDS` match by product `categoryId`/`brandId`).
+
+#### Scenario: BUY_X_GET_Y without a target is rejected
+- GIVEN a `BUY_X_GET_Y` with `appliesTo = null` or `targetItems = []`
+- WHEN `POST /promotions` runs
+- THEN the request is rejected with `INVALID_TARGET` (400) and no promotion row is created
+
+#### Scenario: Updating BUY_X_GET_Y to clear its target is rejected
+- GIVEN an existing `BUY_X_GET_Y` with a valid target
+- WHEN `PATCH /promotions/:id` sets `appliesTo = null` or `targetItems = []`
+- THEN the request is rejected with `INVALID_TARGET` (400) and the existing promotion row is NOT mutated
+
+#### Scenario: BUY_X_GET_Y with a valid PRODUCTS target is accepted
+- GIVEN `BUY_X_GET_Y`, `appliesTo = PRODUCTS`, `targetItems = [P1]`
+- WHEN `POST /promotions` runs
+- THEN the request succeeds and the promotion is persisted
+
+### Requirement: BUY_X_GET_Y Per-Line Eligibility And Counting
+
+A `BUY_X_GET_Y` promotion is eligible for a sale line only when ALL of: (a) the line matches the promotion's `appliesTo` + `targetItems`; (b) the line's `quantity >= buyQuantity`; (c) the promotion passes existing global gates (status, date window, days of week, customer scope, price lists, min purchase). A non-eligible line is silently skipped. The number of reward groups is `floor(lineQty / (buyQuantity + getQuantity))`. If `floor(...) == 0` (qty `>= buyQuantity` but `< N+M`) the promo yields ZERO reward.
+
+#### Scenario: Line below buyQuantity is not eligible
+- GIVEN `BUY_X_GET_Y` (buy 2 get 1 at 50%), a line matching the target with qty 1
+- WHEN the engine evaluates
+- THEN the line is NOT eligible (no reward)
+
+#### Scenario: Line at buyQuantity but below N+M yields zero reward
+- GIVEN `BUY_X_GET_Y` (buy 2 get 1 at 50%), a line matching the target with qty 2
+- WHEN the engine evaluates
+- THEN the line IS eligible but yields ZERO reward (no full N+M group)
+
+#### Scenario: Line at one full N+M group yields one reward group
+- GIVEN `BUY_X_GET_Y` (buy 2 get 1 at 50%), a line matching the target with qty 3 at 1000c/unit
+- WHEN the engine evaluates
+- THEN the line yields ONE reward group: 1 get-unit at 50% off = `Math.round((1000*50)/100)` = 500c saving
+
+#### Scenario: Line spanning multiple groups yields floor(Q/(N+M)) groups
+- GIVEN `BUY_X_GET_Y` (buy 2 get 1 at 50%), a line matching the target with qty 6 at 1000c/unit
+- WHEN the engine evaluates
+- THEN the line yields TWO reward groups: 2 get-units × 500c = 1000c total per-line saving
+
+### Requirement: BUY_X_GET_Y Cheapest-Unit Reward Selection And Rounding
+
+The M discounted get-units per reward group are the CHEAPEST pre-promotion effective unit-price units of the line. When the line carries a single `effectiveUnitPriceCents` (the common case — same line = same unit price), the per-line saving equals `floor(qty / (N+M)) * M * Math.round((unitPrice * getDiscountPercent) / 100)`. A line that is NOT targeted yields zero reward. Per-unit rounding MUST follow the engine convention: `Math.round((base * percent) / 100)`.
+
+#### Scenario: Per-unit rounding follows Math.round
+- GIVEN `BUY_X_GET_Y` (buy 1 get 1 at 33%), a line matching the target with qty 2 at 100c/unit
+- WHEN the engine evaluates
+- THEN the per-unit reward is `Math.round((100*33)/100)` = 33c; the per-line saving is 33c
+
+#### Scenario: Non-matching line yields zero reward
+- GIVEN `BUY_X_GET_Y` (buy 2 get 1 at 50%) on `targetItems = [P1]`, draft has one P1 line (qty 3) and one P2 line (qty 3)
+- WHEN the engine evaluates
+- THEN the P1 line yields 1 reward group; the P2 line yields ZERO reward (not targeted)
+
+### Requirement: BUY_X_GET_Y "Free" (100%)
+
+`getDiscountPercent = 100` MUST be accepted for `BUY_X_GET_Y` only; `ADVANCED` MUST remain capped at 99. The `BUY_X_GET_Y` reward path bypasses `SaleItem.applyDiscount`, whose percentage clamp MUST remain unchanged. At 100%, the get-unit surfaces at 0c and the single-line subtotal is NET. `previewTotals.subtotalCents` remains the 3000c pre-discount base, while `previewTotals.discountCents` is 1000c and `previewTotals.totalCents` is the 2000c NET amount. The receipt/detail mapper MUST emit the same 2000c NET line subtotal, 1000c discount, and `rewardKind = 'buy_x_get_y'`.
+
+#### Scenario: 100% produces a true free get-unit and partial percentages use the same NET representation
+- GIVEN case A is `BUY_X_GET_Y` (buy 2 get 1 at 100%) and case B is `BUY_X_GET_Y` (buy 2 get 1 at 50%), each evaluated independently on a matching single line with qty 3 at 1000c/unit
+- WHEN the engine evaluates each case, `previewTotals` runs, and the receipt/detail mapper serializes each line
+- THEN case A's get-unit surfaces at 0c; `previewTotals` is `subtotalCents = 3000`, `discountCents = 1000`, `totalCents = 2000`; the receipt line is `subtotalCents = 2000`, `discountCents = 1000`, `rewardKind = 'buy_x_get_y'`
+- AND case B's per-unit reward is `Math.round((1000*50)/100)` = 500c; `previewTotals` is `subtotalCents = 3000`, `discountCents = 500`, `totalCents = 2500`; the receipt line is `subtotalCents = 2500`, `discountCents = 500`, `rewardKind = 'buy_x_get_y'`
+
+### Requirement: BUY_X_GET_Y AUTOMATIC And MANUAL Wiring
+
+AUTOMATIC `BUY_X_GET_Y` promotions MUST auto-apply on every recompute, subject to the per-draft veto. MANUAL `BUY_X_GET_Y` promotions MUST appear in `availableManualPromotions` when ANY line in the draft matches the target, and MUST appear in `targetableManualPromotionIds` for a specific line that matches. The seller explicitly opts in via the existing apply action; the opt-in survives recomputes (subject to eligibility re-evaluation). The response DTO wire type for both surfaces MUST include `BUY_X_GET_Y`.
+
+#### Scenario: AUTOMATIC BUY_X_GET_Y auto-applies on recompute
+- GIVEN a draft with one matching line (qty 6) and one AUTOMATIC `BUY_X_GET_Y` (buy 2 get 1 at 50%)
+- WHEN a recompute runs
+- THEN the promo is in the applied list with the per-line saving 1000c
+
+#### Scenario: MANUAL BUY_X_GET_Y appears in availableManualPromotions when ANY matching line
+- GIVEN a draft with one P1 line (qty 3) and one MANUAL `BUY_X_GET_Y` (buy 2 get 1 at 50%, target P1)
+- WHEN a recompute runs without an explicit opt-in
+- THEN the promo is in `availableManualPromotions` and NOT in the applied list
+
+#### Scenario: MANUAL BUY_X_GET_Y appears in targetableManualPromotionIds for a specific matching line
+- GIVEN a draft with one P1 line (qty 3) and one MANUAL `BUY_X_GET_Y` (buy 2 get 1 at 50%, target P1)
+- WHEN a recompute runs
+- THEN `targetableManualPromotionIds` includes the promo id for the P1 line
+
+#### Scenario: Opted-in MANUAL BUY_X_GET_Y survives recompute
+- GIVEN a seller has opted in to a MANUAL `BUY_X_GET_Y` on a draft with one matching line
+- WHEN two consecutive recomputes run
+- THEN the MANUAL promo remains applied across both (subject to eligibility re-evaluation)
+
+### Requirement: BUY_X_GET_Y Idempotent Recompute
+
+`recomputePromotions` MUST clear the prior `BUY_X_GET_Y` reward and re-apply the new one on every recompute. Two or more consecutive recomputes on the same draft MUST produce identical totals (no compounding). The per-line saving, line `discountCents`, and `previewTotals` (subtotalCents / discountCents / totalCents) MUST be byte-equal across recomputes.
+
+#### Scenario: Five recomputes converge to identical totals
+- GIVEN a draft with a matching line and a `BUY_X_GET_Y` auto-applied
+- WHEN `recomputePromotions` runs five times consecutively
+- THEN the fifth run's `subtotalCents`, `discountCents`, and `totalCents` equal the first run's exactly (no compounding)
+
 ## Verification Surface
 
 - `src/promotions/application/pos-evaluate-promotions.use-case.spec.ts` (eligibility + best-wins + precedence; C1 price-list resolved-global-id; W3 99% clamp; manual opt-in; veto; manual-wins)
 - `src/promotions/application/match-target-tier.spec.ts` (table-driven: VARIANT/PRODUCT/BRAND/CATEGORY tier; null `variantId`/`categoryId`/`brandId` never matches its respective type)
 - `src/promotions/application/pos-evaluate-promotions-w4.spec.ts` (VARIANT-wins precedence scenarios 5–9; targetable/available-for-manual for VARIANTS; survives recompute)
 - `src/promotions/application/pos-evaluate-promotions-precedence.spec.ts` (NEW — ordinal `maxOrdinal` pre-pass: 4-tier V>P>{B,C}; 3-tier P>{B,C}; 2-tier B≡C best-wins (CAT wins, flips when BRAND>CAT, lowest-id tie); VARIANTS/PRODUCTS-only regression guard)
+- `src/promotions/application/pos-evaluate-promotions.buy-x-get-y-helper.spec.ts` (NEW — pure `computeBuyXGetYReward`: qty3/1000c/2+1/50, multi-group qty6/9/7, zero-group qty1 & qty2, 100% true-free, 33%/17% rounding, non-round 777c)
+- `src/promotions/application/pos-evaluate-promotions.buy-x-get-y.spec.ts` (NEW — engine pass: gate admits 4 appliesTo tiers; per-line counting + rounding + non-match; short-circuit on `hasManualDiscount`; cross-type total-saving best-wins (Q5) + ties→lowest id; pass-order L1+L2→ORDER 360c)
 - `src/promotions/infrastructure/prisma-promotion.repository.spec.ts` (resolve-price-list-global-ids batch; tenant-scoped)
 - `src/promotions/domain/promotion-target-variants.spec.ts` (entity accepts `appliesTo='VARIANTS'` + `TargetItemDto` shape)
 - `src/promotions/promotions-validate-variants.spec.ts` (`validateTargetIds` VARIANTS branch — accepted / not-found / cross-tenant; tenant-scoped client guard)
+- `src/promotions/domain/promotion.entity.spec.ts` (BXGY 100% accepted; ADVANCED 100% throws — type-aware cap; `validateByType` requires target for BXGY)
+- `src/promotions/dto/create-promotion.dto.spec.ts` (NEW — `getDiscountPercent` DTO bound 100 ok / 101 rejected)
 - `src/promotions/variant-level-promo-targeting.integration.spec.ts` (live-DB end-to-end sweep on Postgres :5433 — 12 spec-scenario-named cases; real T2 tenant for cross-tenant validation)
 - `src/promotions/category-brand-promo-targeting.integration.spec.ts` (NEW — live-DB e2e on Postgres :5433 — 11 spec-scenario-named cases: matcher 2–5, precedence P1–P3, validation V1–V4)
+- `src/promotions/buy-x-get-y.integration.spec.ts` (NEW — live-DB e2e on Postgres :5433 — 18 spec-scenario-named cases: BW-1..3, T-1..3, E-1..4, R-1..2, F-1 (2 sub-cases), M-1..4, I-1)
 - `src/products/resolve-product-category-brand-ids.spec.ts` (NEW — tenant-scoped resolver: distinct→1 call, empty→0, missing omitted, null preserved, `tenantPrisma.getClient` asserted)
-- `src/sales/sales.service.spec.ts` (recompute-on-mutation integration; opt-in persistence; veto persistence through charge tx; W4 stamps `categoryId`/`brandId` per PosEvalLine)
-- `src/sales/domain/sale-item.entity.spec.ts` (promotionId audit on line; applyDiscount with promotionId)
-- `src/sales/domain/sale.entity.spec.ts` (previewTotals — order-discount-aware subtotal/discount/total; S-1 clamp; appliedOrderPromotion / vetoedPromotionIds / optedInManualPromotionIds fields)
-- `src/sales/infrastructure/prisma-sale.repository.spec.ts` (W2: four read mappers load veto + applied-promo + opt-in; opt-in delete-then-createMany save; persistChargeConfirmation item re-write W1)
+- `src/sales/sales.service.spec.ts` (recompute-on-mutation integration; opt-in persistence; veto persistence through charge tx; W4 stamps `categoryId`/`brandId` per PosEvalLine; BXGY idempotent recompute 5× byte-equal; MANUAL BXGY candidate + targetable + opt-in survival)
+- `src/sales/domain/sale-item.entity.spec.ts` (promotionId audit on line; applyDiscount with promotionId; BXGY `applyBuyXGetYReward` / `isBuyXGetYReward` discriminator + guard rails; WU8 draft `toResponse()` NET `subtotalCents` + `rewardKind`)
+- `src/sales/domain/sale.entity.spec.ts` (previewTotals — order-discount-aware subtotal/discount/total; S-1 clamp; appliedOrderPromotion / vetoedPromotionIds / optedInManualPromotionIds fields; BXGY 100% previewTotals 3000/1000/2000, BXGY 50% 3000/500/2500, multi-group qty6 6000/1000/5000)
+- `src/sales/infrastructure/prisma-sale.repository.spec.ts` (W2: four read mappers load veto + applied-promo + opt-in; opt-in delete-then-createMany save; persistChargeConfirmation item re-write W1; BXGY receipt mapper NET subtotal + `rewardKind='buy_x_get_y'`; PD/manual regression `rewardKind=null`)

@@ -52,6 +52,54 @@ export function clampPercentageToSafeRange(percent: number): number {
 }
 
 /**
+ * WU1 — Pure helper for BUY_X_GET_Y reward computation (design.md Decision 2;
+ * spec.md:60-91,102-106). Per-line (Q2): a single line must have
+ * `quantity >= buyQuantity` to trigger; the engine gates on that BEFORE
+ * calling this helper. Reward groups are repeatable (Q3): `floor(qty / (N+M))`,
+ * with the M discounted get-units per group being the cheapest pre-promo
+ * effective unit-price units of the line. When the line carries a single
+ * `effectiveUnitPriceCents` (the common case), the per-line saving equals
+ * `floor(qty / (N+M)) * M * Math.round((unitPrice * getDiscountPercent) / 100)`
+ * — Q8 rounding convention. Returns ZERO reward whenever `qty < N+M` (Q9).
+ *
+ * Co-located in the use-case module so the engine and its unit tests import
+ * the same symbol; the helper is pure (no DI, no I/O) and side-effect free.
+ *
+ * The reward rides the existing `amount` discount path — `R = lineDiscountCents`
+ * is stored on the winning line as the whole-line cents reward; see
+ * Decision 1 + Decision 6 for how both readers (previewTotals + receipt
+ * mapper) render this as NET under a column-derived discriminator.
+ */
+export function computeBuyXGetYReward(input: {
+  quantity: number;
+  effectiveUnitPriceCents: number;
+  /** N — units the customer must buy to qualify for the get-units. */
+  buyQuantity: number;
+  /** M — units the customer receives at a discount per reward group. */
+  getQuantity: number;
+  /** 0..100 — discount applied to the M get-units (per-unit, not line-total). */
+  getDiscountPercent: number;
+}): {
+  rewardGroups: number;
+  discountedUnitCount: number;
+  perUnitRewardCents: number;
+  lineDiscountCents: number;
+} {
+  const groupSize = input.buyQuantity + input.getQuantity;
+  const rewardGroups = Math.floor(input.quantity / groupSize);
+  const discountedUnitCount = rewardGroups * input.getQuantity;
+  const perUnitRewardCents = Math.round(
+    (input.effectiveUnitPriceCents * input.getDiscountPercent) / 100,
+  );
+  return {
+    rewardGroups,
+    discountedUnitCount,
+    perUnitRewardCents,
+    lineDiscountCents: discountedUnitCount * perUnitRewardCents,
+  };
+}
+
+/**
  * Tier returned by `matchTargetTier` — encodes BOTH "did the target
  * hit this line?" AND "which specificity won?" in a single value, so
  * the engine never needs a second predicate pass.
@@ -214,6 +262,26 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       }
     }
 
+    // 3b. WU3 — Per-line BUY_X_GET_Y pass with cross-type TOTAL-saving
+    //     best-wins (design.md Decision 3; spec.md:21-37,60-96).
+    //
+    //     Runs AFTER the per-line PRODUCT_DISCOUNT loop and BEFORE the
+    //     order-subtotal machinery below, so the postLineSubtotalCents
+    //     fed to `pickBestOrderPromo` already reflects the BXGY saving.
+    //
+    //     The comparator (Q5 REVISED) compares REAL per-line TOTAL
+    //     savings — NOT per-unit:
+    //       pdTotalCents   = existingPd.linePerUnit * line.quantity
+    //       bxgyTotalCents = bxgyWinner.lineDiscountCents
+    //       bxgy wins IFF bxgyTotalCents > pdTotalCents
+    //              OR (bxgyTotalCents === pdTotalCents && bxgyWinner.id < existingPd.promotionId)
+    //
+    //     When BXGY wins, the existing per-unit result is REPLACED by
+    //     a discriminated `kind:'buy-x-get-y'` result carrying the
+    //     whole-line reward `R = lineDiscountCents`. No stacking: a
+    //     line carries at most ONE applied result.
+    this.evaluateBuyXGetYPass(input.lines, candidates, input, lineResults);
+
     // 4. Sale-level ORDER_DISCOUNT best-wins.
     //    Subtotal after per-line discounts has been applied.
     const lineDiscountByItemId = new Map<string, number>();
@@ -242,31 +310,55 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
     // 5. availableManualPromotions — every eligible MANUAL promo the
     //    seller could opt-in to (not opted-in, not vetoed).
-    const availableManualPromotions = candidates
-      .filter(
-        (promo) =>
-          promo.method === 'MANUAL' &&
-          this.passesPromotionWideGates(promo, input) &&
-          this.isSupportedEngineType(promo) &&
-          !input.vetoedPromotionIds.includes(promo.id) &&
-          !input.optedInManualPromotionIds.includes(promo.id),
-      )
-      .map(
-        (promo): PosEvalManualCandidate => ({
-          id: promo.id,
-          title: promo.title,
-          type:
-            promo.type === 'ORDER_DISCOUNT'
-              ? 'ORDER_DISCOUNT'
-              : 'PRODUCT_DISCOUNT',
-          // The filter above already pinned `promo.method === 'MANUAL'`, so
-          // this is a constant — exposed on the wire (b84aab7) so the
-          // frontend can confirm the candidate is MANUAL before offering
-          // opt-in. The Promotion.method enum also has AUTOMATIC, but that
-          // branch never reaches this mapper.
-          method: 'MANUAL',
-        }),
-      );
+    //
+    //    WU6 (buy-x-get-y — design.md Decision 7, spec.md:108-130):
+    //    the wire type now includes BUY_X_GET_Y. The candidate is
+    //    emitted when the BXGY has at least one matching line in the
+    //    cart (same `matchTargetTier` predicate the per-line gate uses)
+    //    — a MANUAL BXGY with no matching line is degenerate (no line
+    //    can carry the reward) and is silently filtered out.
+    const availableManualPromotions: PosEvalManualCandidate[] = [];
+    for (const promo of candidates) {
+      if (promo.method !== 'MANUAL') continue;
+      if (!this.passesPromotionWideGates(promo, input)) continue;
+      if (!this.isSupportedEngineType(promo)) continue;
+      if (input.vetoedPromotionIds.includes(promo.id)) continue;
+      if (input.optedInManualPromotionIds.includes(promo.id)) continue;
+
+      // ORDER_DISCOUNT: sale-level, always surfaced (the sale exists).
+      // PRODUCT_DISCOUNT / BUY_X_GET_Y: only surfaced when at least one
+      // line matches the target — the same matcher the per-line gate
+      // uses, so the candidate never references a target the engine
+      // can't apply to. Branded as 'BUY_X_GET_Y' on the wire.
+      let wireType: PosEvalManualCandidate['type'];
+      if (promo.type === 'ORDER_DISCOUNT') {
+        wireType = 'ORDER_DISCOUNT';
+      } else if (promo.type === 'BUY_X_GET_Y') {
+        wireType = 'BUY_X_GET_Y';
+      } else if (promo.type === 'PRODUCT_DISCOUNT') {
+        wireType = 'PRODUCT_DISCOUNT';
+      } else {
+        continue; // unsupported
+      }
+      if (wireType !== 'ORDER_DISCOUNT') {
+        const hasMatchingLine = input.lines.some(
+          (line) => matchTargetTier(promo.targetItems, line) !== null,
+        );
+        if (!hasMatchingLine) continue;
+      }
+
+      availableManualPromotions.push({
+        id: promo.id,
+        title: promo.title,
+        type: wireType,
+        // The filter above already pinned `promo.method === 'MANUAL'`, so
+        // this is a constant — exposed on the wire (b84aab7) so the
+        // frontend can confirm the candidate is MANUAL before offering
+        // opt-in. The Promotion.method enum also has AUTOMATIC, but that
+        // branch never reaches this mapper.
+        method: 'MANUAL',
+      });
+    }
 
     // 5b. targetableManualPromotionIds — the subset of
     //     `optedInManualPromotionIds` that still has at least one matching
@@ -285,13 +377,20 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     //       targetable" — even an empty cart retains the opt-in so the
     //       seller can re-add items later and have the order discount
     //       apply without re-opting-in.
-    //     - PRODUCT_DISCOUNT (appliesTo=PRODUCTS only — same gate as the
-    //       line-ranker): included IFF at least one line in the cart
-    //       matches `promo.targetItems` (side=DEFAULT,
-    //       targetType=PRODUCTS, targetId=line.productId). The per-line
-    //       price-list gate, `hasManualDiscount`, and best-wins loss
-    //       are ALL "temporarily ineligible" — the target is still in
-    //       the cart, so the opt-in is RETAINED.
+    //     - PRODUCT_DISCOUNT (appliesTo ∈ {PRODUCTS, VARIANTS,
+    //       CATEGORIES, BRANDS} — same gate as the line-ranker):
+    //       included IFF at least one line in the cart matches
+    //       `promo.targetItems`. The per-line price-list gate,
+    //       `hasManualDiscount`, and best-wins loss are ALL
+    //       "temporarily ineligible" — the target is still in the
+    //       cart, so the opt-in is RETAINED.
+    //     - BUY_X_GET_Y (WU6 — spec.md:108-130, design.md Decision 7):
+    //       symmetric to PRODUCT_DISCOUNT — included IFF at least one
+    //       line in the cart matches `promo.targetItems` (same
+    //       `matchTargetTier` predicate the per-line BXGY gate uses).
+    //       qty < buyQuantity, hasManualDiscount, and best-wins loss
+    //       are all "temporarily ineligible" — the target is still in
+    //       the cart, so the opt-in is RETAINED across recomputes.
     //
     //     Promotion-wide gates (status / daysOfWeek / customerScope /
     //     supported engine type) are intentionally NOT applied here.
@@ -320,10 +419,15 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         targetableManualPromotionIds.push(promo.id);
         continue;
       }
-      // PRODUCT_DISCOUNT (appliesTo ∈ {PRODUCTS, VARIANTS} — both gated
-      // by `isSupportedEngineType` above). At least one line in the
-      // cart must match the target.
-      if (promo.type === 'PRODUCT_DISCOUNT' && this.isSupportedEngineType(promo)) {
+      // PRODUCT_DISCOUNT (appliesTo ∈ {PRODUCTS, VARIANTS,
+      // CATEGORIES, BRANDS} — gated by `isSupportedEngineType` above)
+      // OR BUY_X_GET_Y (WU6 — same matchTargetTier predicate).
+      // At least one line in the cart must match the target.
+      if (
+        (promo.type === 'PRODUCT_DISCOUNT' ||
+          promo.type === 'BUY_X_GET_Y') &&
+        this.isSupportedEngineType(promo)
+      ) {
         // Self-heal semantics: any tier non-null counts as "still has a
         // matching line". Precedence does NOT prune opt-ins — retention
         // is about target presence, not about which promo wins.
@@ -393,9 +497,28 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     // `pickBestPerLine` keeps BRAND/CATEGORY candidates only when no
     // VARIANT/PRODUCT candidate hits the same line (ordinal ladder:
     // V=3, P=2, B=1, C=1).
+    //
+    // WU3 (buy-x-get-y — design.md Decision 4): BUY_X_GET_Y is now
+    // admitted for `appliesTo ∈ {PRODUCTS, VARIANTS, CATEGORIES,
+    // BRANDS}` — the same four tier types the matcher supports. The
+    // Q1 targeting-required contract is enforced upstream by
+    // `promotions.service.assertBuyXGetYTargeted` (out of this
+    // slice — WU5); the gate here only checks TYPE membership, not
+    // presence-of-target. An BXGY that somehow reaches the gate
+    // without a target silently fails to match any line and emits
+    // no per-line result — degenerate but never crashes.
     if (promo.type === 'ORDER_DISCOUNT') return true;
     if (
       promo.type === 'PRODUCT_DISCOUNT' &&
+      (promo.appliesTo === 'PRODUCTS' ||
+        promo.appliesTo === 'VARIANTS' ||
+        promo.appliesTo === 'CATEGORIES' ||
+        promo.appliesTo === 'BRANDS')
+    ) {
+      return true;
+    }
+    if (
+      promo.type === 'BUY_X_GET_Y' &&
       (promo.appliesTo === 'PRODUCTS' ||
         promo.appliesTo === 'VARIANTS' ||
         promo.appliesTo === 'CATEGORIES' ||
@@ -654,16 +777,234 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     return best as { promotion: Promotion; discountCents: number };
   }
 
+  // ============================================================
+  // Per-line BUY_X_GET_Y pass (WU3 — design.md Decision 3; spec.md:21-37,60-96)
+  // ============================================================
+
+  /**
+   * Per-line BUY_X_GET_Y pass with cross-type TOTAL-saving best-wins.
+   *
+   * For each line already considered by the per-line PRODUCT_DISCOUNT
+   * pass, evaluate every eligible BXGY promotion. If a BXGY candidate
+   * beats the existing PD line result by TOTAL saving (per-line
+   * cents, NOT per-unit), the line result is REPLACED by a
+   * discriminated `kind:'buy-x-get-y'` result carrying the
+   * whole-line reward `R`. Otherwise the existing per-unit PD result
+   * stays in place — no stacking, exactly one applied result per line.
+   *
+   * Invariants:
+   *   - `hasManualDiscount` short-circuit (mirrors `pickBestPerLine :419`)
+   *     — AUTOMATIC BXGY skips a line with a seller free-form discount.
+   *   - MANUAL gating symmetric to `pickBestPerLine (:431-437)`:
+   *     MANUAL only when opted-in; both MANUAL opted-in AND vetoed
+   *     self-heal on next recompute (veto wins).
+   *   - `passesPromotionWideGates` — date window, daysOfWeek,
+   *     customerScope, supported engine type.
+   *   - `matchTargetTier != null` — BXGY targets the line's resolved
+   *     productId/variantId/categoryId/brandId (same matcher as PD).
+   *   - Price-list gate — `line.appliedGlobalPriceListId` must be in
+   *     `promo.priceLists` when the promo is restricted (C1 fix).
+   *   - `lineDiscountCents > 0` — the helper yields 0 reward when
+   *     `qty < N+M` (Q9); the engine silently skips such lines.
+   *
+   * Mutates `lineResults` in place (replaces by itemId on BXGY win).
+   */
+  private evaluateBuyXGetYPass(
+    lines: ReadonlyArray<PosEvalLine>,
+    candidates: ReadonlyArray<Promotion>,
+    input: PosEvalInput,
+    lineResults: PosEvalLineResult[],
+  ): void {
+    for (const line of lines) {
+      // Manual free-form discount wins — AUTO BXGY skips this line
+      // (mirrors `pickBestPerLine` short-circuit at use-case.ts:419).
+      if (line.hasManualDiscount) continue;
+
+      // Locate the existing PD result for this line (if any) so the
+      // comparator can subtract its per-line TOTAL saving.
+      const existingIndex = lineResults.findIndex(
+        (r) => r.itemId === line.itemId,
+      );
+      const existingPd =
+        existingIndex >= 0 && lineResults[existingIndex].kind !== 'buy-x-get-y'
+          ? lineResults[existingIndex]
+          : null;
+
+      // Find the best BXGY candidate for this line (if any). Mirrors
+      // `pickBestPerLine` gating: MANUAL opt-in, veto, promotion-wide
+      // gates, target match, price-list gate, helper yield > 0.
+      const bxgyWinner = this.pickBestBuyXGetYPerLine(line, candidates, input);
+      if (!bxgyWinner) continue;
+
+      // Cross-type TOTAL-saving comparator (Q5 REVISED). The PD side
+      // is multiplied by line.quantity to get the line-total PD
+      // saving — `computeAppliedDiscountCents` returns per-unit by
+      // design (it mirrors what `applyDiscount` consumes).
+      const pdPerUnitCents = existingPd
+        ? this.computeAppliedDiscountCents(line, existingPd)
+        : 0;
+      const pdTotalCents = pdPerUnitCents * line.quantity;
+      const bxgyTotalCents = bxgyWinner.lineDiscountCents;
+
+      const bxgyWins =
+        bxgyTotalCents > pdTotalCents ||
+        (bxgyTotalCents === pdTotalCents &&
+          (existingPd === null
+            ? true
+            : bxgyWinner.promotion.id < existingPd.promotionId));
+
+      if (!bxgyWins) continue;
+
+      // Replace the existing per-unit PD result (if any) with the
+      // discriminated BXGY result. No stacking — one result per line.
+      const bxgyResult: PosEvalLineResult = {
+        kind: 'buy-x-get-y',
+        itemId: line.itemId,
+        promotionId: bxgyWinner.promotion.id,
+        discountTitle: bxgyWinner.promotion.title,
+        lineDiscountCents: bxgyWinner.lineDiscountCents,
+        perUnitRewardCents: bxgyWinner.perUnitRewardCents,
+        discountedUnitCount: bxgyWinner.discountedUnitCount,
+      };
+      if (existingIndex >= 0) {
+        lineResults[existingIndex] = bxgyResult;
+      } else {
+        lineResults.push(bxgyResult);
+      }
+    }
+  }
+
+  /**
+   * Per-line BUY_X_GET_Y candidate collector + best-wins. Mirrors
+   * `pickBestPerLine` for the gating layers (MANUAL opt-in / veto,
+   * promotion-wide gates, target match, price-list gate) but ranks
+   * candidates by the helper's LINE-TOTAL reward `R` instead of
+   * per-unit. Ties resolve to lowest `promotion.id` — symmetric with
+   * the per-unit best-wins branch.
+   *
+   * Returns `null` when:
+   *   - `line.hasManualDiscount` is true (mirrors use-case.ts:419).
+   *   - No BXGY candidate passes the gates.
+   *   - The helper yields `lineDiscountCents === 0` for every eligible
+   *     candidate (qty < N+M for all of them — Q9 silent skip).
+   */
+  private pickBestBuyXGetYPerLine(
+    line: PosEvalLine,
+    candidates: ReadonlyArray<Promotion>,
+    input: PosEvalInput,
+  ): {
+    promotion: Promotion;
+    lineDiscountCents: number;
+    perUnitRewardCents: number;
+    discountedUnitCount: number;
+  } | null {
+    if (line.hasManualDiscount) return null;
+
+    type BxgyCandidate = {
+      promotion: Promotion;
+      lineDiscountCents: number;
+      perUnitRewardCents: number;
+      discountedUnitCount: number;
+    };
+
+    const eligible: BxgyCandidate[] = [];
+    for (const promo of candidates) {
+      if (promo.type !== 'BUY_X_GET_Y') continue;
+
+      // MANUAL opt-in / veto gating — symmetric with pickBestPerLine.
+      if (promo.method === 'MANUAL') {
+        if (!input.optedInManualPromotionIds.includes(promo.id)) continue;
+        if (input.vetoedPromotionIds.includes(promo.id)) continue;
+      } else {
+        if (input.vetoedPromotionIds.includes(promo.id)) continue;
+      }
+
+      if (!this.passesPromotionWideGates(promo, input)) continue;
+
+      // BXGY requires a valid target tier on the line (Q1).
+      const tier = matchTargetTier(promo.targetItems, line);
+      if (tier === null) continue;
+
+      // Price-list gate (C1 fix) — same membership predicate as PD.
+      if (promo.priceLists.length > 0) {
+        const globalId = line.appliedGlobalPriceListId;
+        if (globalId == null) continue;
+        const allowed = promo.priceLists.some(
+          (pl) => pl.globalPriceListId === globalId,
+        );
+        if (!allowed) continue;
+      }
+
+      // Engine pre-gate on `qty >= buyQuantity` (spec.md:60-67). The
+      // helper itself also handles qty < N+M → zero reward (Q9), but
+      // the engine pre-gate avoids the helper call for the common
+      // below-threshold case AND aligns the eligibility with spec
+      // scenario :64-67.
+      if (
+        promo.buyQuantity == null ||
+        promo.getQuantity == null ||
+        promo.getDiscountPercent == null
+      ) {
+        continue;
+      }
+      if (line.quantity < promo.buyQuantity) continue;
+
+      const reward = computeBuyXGetYReward({
+        quantity: line.quantity,
+        effectiveUnitPriceCents: line.effectiveUnitPriceCents,
+        buyQuantity: promo.buyQuantity,
+        getQuantity: promo.getQuantity,
+        getDiscountPercent: promo.getDiscountPercent,
+      });
+      if (reward.lineDiscountCents <= 0) continue;
+
+      eligible.push({
+        promotion: promo,
+        lineDiscountCents: reward.lineDiscountCents,
+        perUnitRewardCents: reward.perUnitRewardCents,
+        discountedUnitCount: reward.discountedUnitCount,
+      });
+    }
+
+    if (eligible.length === 0) return null;
+
+    // Per-line best-wins: max line-total saving, ties → lowest id.
+    let best: BxgyCandidate | null = null;
+    for (const c of eligible) {
+      if (
+        best === null ||
+        c.lineDiscountCents > best.lineDiscountCents ||
+        (c.lineDiscountCents === best.lineDiscountCents &&
+          c.promotion.id < best.promotion.id)
+      ) {
+        best = c;
+      }
+    }
+    return best;
+  }
+
   /**
    * Compute the per-line discount the entity-side `applyDiscount`
    * would produce given the emitted result. Used to compute the
    * post-line-discount subtotal feeding ORDER_DISCOUNT best-wins.
    * Matches the math used in `pickBestPerLine`.
+   *
+   * WU3 (buy-x-get-y) — discriminated `PosEvalLineResult`: when the
+   * winning result is BXGY (kind === 'buy-x-get-y'), the LINE-TOTAL
+   * reward `R = lineDiscountCents` is returned verbatim. The BXGY
+   * path bypasses `SaleItem.applyDiscount` entirely (its 1..99%
+   * clamp and the `baseline − discount >= 1` invariant are NOT on
+   * the BXGY path), so we MUST return the whole-line number here
+   * (NOT per-unit × qty) — design.md Decision 1 + Decision 3.
    */
   private computeAppliedDiscountCents(
     line: PosEvalLine,
     result: PosEvalLineResult,
   ): number {
+    if (result.kind === 'buy-x-get-y') {
+      // BXGY: `lineDiscountCents` IS the per-line total reward R.
+      return result.lineDiscountCents;
+    }
     if (result.discountType === 'percentage') {
       // Same clamp + Math.round as the ranking path.
       const percent = clampPercentageToSafeRange(result.discountValue);

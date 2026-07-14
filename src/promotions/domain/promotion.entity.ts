@@ -177,10 +177,14 @@ function validateQuantityField(value: number, fieldName: string): void {
   }
 }
 
-function validateGetDiscountPercent(value: number): void {
-  if (value < 0 || value > 99) {
+function validateGetDiscountPercent(
+  value: number,
+  type: Extract<PromotionType, 'BUY_X_GET_Y' | 'ADVANCED'>,
+): void {
+  const max = type === 'BUY_X_GET_Y' ? 100 : 99;
+  if (value < 0 || value > max) {
     throw new InvalidArgumentError(
-      'getDiscountPercent must be between 0 and 99',
+      `getDiscountPercent must be between 0 and ${max} for ${type} type`,
       'INVALID_FIELD_VALUE',
     );
   }
@@ -471,7 +475,7 @@ function validateByType(params: CreatePromotionParams): void {
       );
       validateQuantityField(params.buyQuantity!, 'buyQuantity');
       validateQuantityField(params.getQuantity!, 'getQuantity');
-      validateGetDiscountPercent(gdp);
+      validateGetDiscountPercent(gdp, 'BUY_X_GET_Y');
       // Forbidden fields
       forbidField(params.discountType, 'discountType', type);
       forbidField(params.discountValue, 'discountValue', type);
@@ -494,7 +498,7 @@ function validateByType(params: CreatePromotionParams): void {
       );
       validateQuantityField(params.buyQuantity!, 'buyQuantity');
       validateQuantityField(params.getQuantity!, 'getQuantity');
-      validateGetDiscountPercent(gdp);
+      validateGetDiscountPercent(gdp, 'ADVANCED');
       // Forbidden fields
       forbidField(params.appliesTo, 'appliesTo', type);
       forbidField(params.discountType, 'discountType', type);

@@ -121,6 +121,11 @@ export class PromotionsService {
 
     // ── Attach relations ──
     promotion.targetItems = targetItems;
+    this.assertBuyXGetYTargeted(
+      promotion.type,
+      promotion.appliesTo,
+      promotion.targetItems,
+    );
     this.assertAdvancedSideTargets(promotion.type, {
       buyTargetType: promotion.buyTargetType,
       getTargetType: promotion.getTargetType,
@@ -199,6 +204,14 @@ export class PromotionsService {
     const mergedForValidation = this.buildMergedValidationParams(existing, dto);
     Promotion.create(mergedForValidation);
 
+    const targetInput = this.buildTargetResolutionInput(existing, dto);
+    const targetItems = await this.resolveTargetItems(targetInput);
+    this.assertBuyXGetYTargeted(
+      existing.type,
+      mergedForValidation.appliesTo ?? null,
+      targetItems,
+    );
+
     existing.title = mergedForValidation.title;
     existing.startDate = mergedForValidation.startDate ?? null;
     existing.endDate = mergedForValidation.endDate ?? null;
@@ -214,9 +227,7 @@ export class PromotionsService {
       mergedForValidation.getDiscountPercent ?? null;
     existing.buyTargetType = mergedForValidation.buyTargetType ?? null;
     existing.getTargetType = mergedForValidation.getTargetType ?? null;
-
-    const targetInput = this.buildTargetResolutionInput(existing, dto);
-    existing.targetItems = await this.resolveTargetItems(targetInput);
+    existing.targetItems = targetItems;
     this.assertAdvancedSideTargets(existing.type, {
       buyTargetType: existing.buyTargetType,
       getTargetType: existing.getTargetType,
@@ -564,6 +575,24 @@ export class PromotionsService {
         (dayItem) => dayItem.day as DayOfWeekEnum,
       ),
     };
+  }
+
+  private assertBuyXGetYTargeted(
+    type: Promotion['type'],
+    appliesTo: PromotionTargetType | null,
+    targetItems: PromotionTargetItemData[],
+  ): void {
+    if (type !== 'BUY_X_GET_Y') return;
+
+    const hasDefaultTarget = targetItems.some(
+      (item) => item.side === 'DEFAULT' && item.targetType === appliesTo,
+    );
+    if (!appliesTo || !hasDefaultTarget) {
+      throw new InvalidArgumentError(
+        'BUY_X_GET_Y promotions require appliesTo and at least one matching target item',
+        'INVALID_TARGET',
+      );
+    }
   }
 
   private assertAdvancedSideTargets(
