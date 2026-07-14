@@ -62,6 +62,13 @@ export interface SaleDetailItemDto {
    */
   rewardKind: 'buy_x_get_y' | null;
   /**
+   * Exact BUY_X_GET_Y `getDiscountPercent` (0..100; 100=free, 50=half) of the
+   * applied promotion, persisted verbatim (never derived from cents). Null on
+   * every non-reward line — same `isBxgy` guard as `rewardKind`. Lets the
+   * frontend show "GRATIS" only at 100%, otherwise the real percent.
+   */
+  rewardDiscountPercent: number | null;
+  /**
    * Id of the promotion the line was sourced from (WUA — frontend asks).
    * Set when `item.promotionId` is non-null (AUTO PD winner, AUTO BXGY
    * winner, or opted-in MANUAL winner). Null on plain lines (no promo

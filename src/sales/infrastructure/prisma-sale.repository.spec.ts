@@ -921,6 +921,7 @@ describe('PrismaSaleRepository', () => {
         unitPriceCents: number;
         discountAmountCents: number;
         discountValue: number;
+        rewardDiscountPercent?: number | null;
       }) {
         return {
           productName: 'P',
@@ -940,6 +941,9 @@ describe('PrismaSaleRepository', () => {
           // WU2 — column-derived discriminator reads this; without it the
           // mapper falls through to the gross branch.
           promotionId: args.promotionId,
+          // WU3 — the persisted exact promo percent. The helper MUST echo it
+          // back so the mapper can surface it on the wire.
+          rewardDiscountPercent: args.rewardDiscountPercent ?? null,
         };
       }
 
@@ -981,6 +985,7 @@ describe('PrismaSaleRepository', () => {
               unitPriceCents: 1000,
               discountAmountCents: 1000,
               discountValue: 1000,
+              rewardDiscountPercent: 100,
             }),
           ]),
         );
@@ -990,6 +995,8 @@ describe('PrismaSaleRepository', () => {
         expect(result?.items[0].subtotalCents).toBe(2000);
         expect(result?.items[0].discountCents).toBe(1000);
         expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+        // WU3 — exact persisted promo percent surfaces on the confirmed wire.
+        expect(result?.items[0].rewardDiscountPercent).toBe(100);
       });
 
       it('emits NET subtotal + rewardKind="buy_x_get_y" for a 50% BXGY line (partial reward)', async () => {
@@ -1002,6 +1009,7 @@ describe('PrismaSaleRepository', () => {
               unitPriceCents: 1000,
               discountAmountCents: 500,
               discountValue: 500,
+              rewardDiscountPercent: 50,
             }),
           ]),
         );
@@ -1011,6 +1019,8 @@ describe('PrismaSaleRepository', () => {
         expect(result?.items[0].subtotalCents).toBe(2500);
         expect(result?.items[0].discountCents).toBe(500);
         expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+        // WU3 — 50% (half) carried exactly, not derived from cents.
+        expect(result?.items[0].rewardDiscountPercent).toBe(50);
       });
 
       it('emits rewardKind=null and keeps the per-unit subtotal for a PRODUCT_DISCOUNT line (non-BXGY regression)', async () => {
@@ -1045,6 +1055,8 @@ describe('PrismaSaleRepository', () => {
         expect(result?.items[0].subtotalCents).toBe(1800);
         expect(result?.items[0].discountCents).toBe(100);
         expect(result?.items[0].rewardKind).toBeNull();
+        // WU3 — non-reward line carries null percent on the confirmed wire.
+        expect(result?.items[0].rewardDiscountPercent).toBeNull();
       });
 
       it('emits rewardKind=null and keeps the per-unit subtotal for a manual free-form discount (no promotionId)', async () => {
@@ -1075,6 +1087,8 @@ describe('PrismaSaleRepository', () => {
         expect(result?.items[0].subtotalCents).toBe(800);
         expect(result?.items[0].discountCents).toBe(200);
         expect(result?.items[0].rewardKind).toBeNull();
+        // WU3 — manual free-form line carries null percent.
+        expect(result?.items[0].rewardDiscountPercent).toBeNull();
       });
 
       it('emits promotionId on each item (BXGY line exposes its promo id, plain line emits null)', async () => {
@@ -1091,6 +1105,7 @@ describe('PrismaSaleRepository', () => {
               unitPriceCents: 1000,
               discountAmountCents: 1000,
               discountValue: 1000,
+              rewardDiscountPercent: 100,
             }),
             {
               productName: 'Plain',
@@ -1116,10 +1131,12 @@ describe('PrismaSaleRepository', () => {
         // BXGY line carries the promo source id.
         expect(result?.items[0].promotionId).toBe('promo-bxgy-free');
         expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+        expect(result?.items[0].rewardDiscountPercent).toBe(100);
         // Plain line emits null — frontend uses this to skip the promo
         // badge and identify the line as "no promotion applied".
         expect(result?.items[1].promotionId).toBeNull();
         expect(result?.items[1].rewardKind).toBeNull();
+        expect(result?.items[1].rewardDiscountPercent).toBeNull();
       });
 
       it('emits promotionId on a non-BXGY promo line (PRODUCT_DISCOUNT carries its promo id, not BXGY shape)', async () => {
@@ -1188,6 +1205,7 @@ describe('PrismaSaleRepository', () => {
               unitPriceCents: 1000,
               discountAmountCents: 500,
               discountValue: 500,
+              rewardDiscountPercent: 50,
             }),
             {
               productName: 'P2',
@@ -1213,10 +1231,12 @@ describe('PrismaSaleRepository', () => {
         expect(result?.items[0].subtotalCents).toBe(2500);
         expect(result?.items[0].discountCents).toBe(500);
         expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+        expect(result?.items[0].rewardDiscountPercent).toBe(50);
 
         expect(result?.items[1].subtotalCents).toBe(900);
         expect(result?.items[1].discountCents).toBe(100);
         expect(result?.items[1].rewardKind).toBeNull();
+        expect(result?.items[1].rewardDiscountPercent).toBeNull();
       });
     });
   });
@@ -1380,6 +1400,7 @@ describe('PrismaSaleRepository', () => {
             discountType: null,
             discountValue: null,
             discountAmountCents: null,
+            rewardDiscountPercent: null,
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,
@@ -1487,6 +1508,7 @@ describe('PrismaSaleRepository', () => {
             discountType: null,
             discountValue: null,
             discountAmountCents: null,
+            rewardDiscountPercent: null,
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,

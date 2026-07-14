@@ -728,10 +728,13 @@ describe('SaleItem Entity', () => {
           discountedUnitCount: 1,
           discountTitle: 'Buy 2 Get 1 @ 50%',
           promotionId: 'promo-bxgy',
+          getDiscountPercent: 50,
         });
         expect(item.unitPriceCents).toBe(1000);
         expect(item.prePriceCentsBeforeDiscount).toBe(1000);
         expect(item.unitPriceCents).toBe(item.prePriceCentsBeforeDiscount);
+        // WU2 — exact promo percent stored, not derived from cents.
+        expect(item.rewardDiscountPercent).toBe(50);
       });
 
       it('leaves unitPriceCents UNCHANGED at 100% (true free get-unit)', () => {
@@ -745,6 +748,7 @@ describe('SaleItem Entity', () => {
           discountedUnitCount: 1,
           discountTitle: 'Buy 2 Get 1 FREE',
           promotionId: 'promo-bxgy-free',
+          getDiscountPercent: 100,
         });
         expect(item.unitPriceCents).toBe(1000);
         expect(item.prePriceCentsBeforeDiscount).toBe(1000);
@@ -752,6 +756,8 @@ describe('SaleItem Entity', () => {
         expect(item.discountValue).toBe(1000);
         expect(item.discountType).toBe('amount');
         expect(item.promotionId).toBe('promo-bxgy-free');
+        // WU2 — 100% (true free) carried exactly.
+        expect(item.rewardDiscountPercent).toBe(100);
       });
 
       it('stores discountAmountCents as the WHOLE-LINE reward R (NOT per-unit)', () => {
@@ -966,12 +972,15 @@ describe('SaleItem Entity', () => {
         discountedUnitCount: 1,
         discountTitle: 'Buy 1 Get 1 FREE',
         promotionId: 'promo-bxgy-bogo',
+        getDiscountPercent: 100,
       });
 
       const response = item.toResponse();
 
       expect(response.subtotalCents).toBe(20000);
       expect(response.rewardKind).toBe('buy_x_get_y');
+      // WU2 — the exact promo percent surfaces on the draft wire object.
+      expect(response.rewardDiscountPercent).toBe(100);
     });
 
     it('emits NET subtotalCents and rewardKind="buy_x_get_y" for a 50% BXGY partial reward', () => {
@@ -993,12 +1002,15 @@ describe('SaleItem Entity', () => {
         discountedUnitCount: 1,
         discountTitle: 'Buy 2 Get 1 @ 50%',
         promotionId: 'promo-bxgy-half',
+        getDiscountPercent: 50,
       });
 
       const response = item.toResponse();
 
       expect(response.subtotalCents).toBe(2500);
       expect(response.rewardKind).toBe('buy_x_get_y');
+      // WU2 — 50% (half) carried exactly on the draft surface.
+      expect(response.rewardDiscountPercent).toBe(50);
     });
 
     it('emits subtotalCents = unitPrice × qty (already NET) and rewardKind=null for a per-unit PRODUCT_DISCOUNT line', () => {
@@ -1028,6 +1040,8 @@ describe('SaleItem Entity', () => {
       expect(item.unitPriceCents).toBe(900);
       expect(response.subtotalCents).toBe(1800);
       expect(response.rewardKind).toBeNull();
+      // WU2 — non-reward (per-unit PD) line carries null percent.
+      expect(response.rewardDiscountPercent).toBeNull();
     });
 
     it('emits subtotalCents = unitPrice × qty (already NET) and rewardKind=null for a manual free-form discount', () => {
@@ -1074,6 +1088,8 @@ describe('SaleItem Entity', () => {
 
       expect(response.subtotalCents).toBe(3000);
       expect(response.rewardKind).toBeNull();
+      // WU2 — plain line carries null percent.
+      expect(response.rewardDiscountPercent).toBeNull();
     });
 
     it('drops rewardKind back to null after removeDiscount clears a BXGY reward', () => {
@@ -1097,13 +1113,17 @@ describe('SaleItem Entity', () => {
         discountedUnitCount: 1,
         discountTitle: 'BXGY',
         promotionId: 'promo-bxgy',
+        getDiscountPercent: 50,
       });
       expect(item.toResponse().rewardKind).toBe('buy_x_get_y');
+      expect(item.toResponse().rewardDiscountPercent).toBe(50);
 
       item.removeDiscount();
 
       const response = item.toResponse();
       expect(response.rewardKind).toBeNull();
+      // WU2 — cleared alongside rewardKind on reward reset.
+      expect(response.rewardDiscountPercent).toBeNull();
       // unitPrice was never reduced by applyBuyXGetYReward (EQUAL invariant),
       // so after removeDiscount the gross/identity subtotal is `1000 * 3 = 3000`.
       expect(response.subtotalCents).toBe(3000);

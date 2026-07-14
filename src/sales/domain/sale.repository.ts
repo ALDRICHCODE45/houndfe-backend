@@ -285,6 +285,14 @@ export interface ISaleRepository {
       prePriceCentsBeforeDiscount: number | null;
       rewardKind: 'buy_x_get_y' | null;
       /**
+       * WU3 — exact BXGY reward percent (0..100), persisted verbatim. Null
+       * on non-reward lines (same `isBxgy` guard as `rewardKind`). CRITICAL:
+       * the port type MUST carry this so the mapper's return type matches the
+       * DTO (a prior identical change broke the build with TS2322 by omitting
+       * the shared field here).
+       */
+      rewardDiscountPercent: number | null;
+      /**
        * WUA — promotionId of the line's promo source (or null when no
        * promotion was applied). Mirrors `SaleDetailItemDto.promotionId`
        * on the wire. The value was already selected by the mapper for

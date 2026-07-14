@@ -6614,6 +6614,7 @@ describe('SalesService', () => {
                   lineDiscountCents: 1000,
                   perUnitRewardCents: 500,
                   discountedUnitCount: 2,
+                  getDiscountPercent: 50,
                 },
               ]
             : [],
@@ -6644,6 +6645,8 @@ describe('SalesService', () => {
       expect(item.discountType).toBe('amount');
       expect(item.promotionId).toBe('promo-bxgy-auto');
       expect(item.isBuyXGetYReward()).toBe(true);
+      // WU2 — the exact promo percent is threaded from engine → entity.
+      expect(item.rewardDiscountPercent).toBe(50);
       // Sanity: the input the engine saw carried the pre-promo base.
       const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
       expect(input.lines[0].effectiveUnitPriceCents).toBe(1000);

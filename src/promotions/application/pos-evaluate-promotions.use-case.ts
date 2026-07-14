@@ -916,6 +916,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         lineDiscountCents: bxgyWinner.lineDiscountCents,
         perUnitRewardCents: bxgyWinner.perUnitRewardCents,
         discountedUnitCount: bxgyWinner.discountedUnitCount,
+        getDiscountPercent: bxgyWinner.getDiscountPercent,
       };
       if (existingIndex >= 0) {
         lineResults[existingIndex] = bxgyResult;
@@ -948,6 +949,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     lineDiscountCents: number;
     perUnitRewardCents: number;
     discountedUnitCount: number;
+    getDiscountPercent: number;
   } | null {
     if (line.hasManualDiscount) return null;
 
@@ -956,6 +958,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       lineDiscountCents: number;
       perUnitRewardCents: number;
       discountedUnitCount: number;
+      getDiscountPercent: number;
     };
 
     const eligible: BxgyCandidate[] = [];
@@ -1014,6 +1017,8 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         lineDiscountCents: reward.lineDiscountCents,
         perUnitRewardCents: reward.perUnitRewardCents,
         discountedUnitCount: reward.discountedUnitCount,
+        // Narrowed non-null by the pre-gate above (promo.getDiscountPercent != null).
+        getDiscountPercent: promo.getDiscountPercent,
       });
     }
 
