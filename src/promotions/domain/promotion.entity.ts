@@ -181,7 +181,12 @@ function validateGetDiscountPercent(
   value: number,
   type: Extract<PromotionType, 'BUY_X_GET_Y' | 'ADVANCED'>,
 ): void {
-  const max = type === 'BUY_X_GET_Y' ? 100 : 99;
+  // WU3 (advanced-promotion-type, D3 correction) — ADVANCED's prior
+  // 99% cap is lifted to 100 to match BUY_X_GET_Y. Both promotion
+  // types now reach the same ceiling; >100 is still rejected
+  // universally. The rationale lives in the locked product decision
+  // (a true 100% free unit must be expressible on ADVANCED too).
+  const max = 100;
   if (value < 0 || value > max) {
     throw new InvalidArgumentError(
       `getDiscountPercent must be between 0 and ${max} for ${type} type`,
