@@ -2405,5 +2405,52 @@ describe('Sale Entity', () => {
       expect(totals.totalCents).toBe(2400);
       expect(sale.items[0].rewardKind).toBe('advanced');
     });
+
+    // D3 4R-review defense-in-depth: lock the sale-level aggregate for
+    // the qty=1 @ 100% ADVANCED edge. D3 lifts the 99% cap → true 100%
+    // free is now legitimate; FIX 1 relaxed the `R >= unitPrice × qty`
+    // BXGY guard to strict `>` so R == line subtotal (qty=1 R=1000) is
+    // valid (the whole line goes to zero). Without this assertion, the
+    // qty=3 test above proves 1-of-3 free, but no single test proves
+    // the entire line is free at qty=1. This is the load-bearing wire
+    // contract the POS relies on for the badge: `totalCents === 0`.
+    it('D3 100% ADVANCED at qty=1: the whole line is free (totalCents=0), rewardKind=advanced', () => {
+      // qty=1 @ 100% → R = 1 × 1000 = 1000c, equal to line subtotal.
+      // After FIX 1 the rail accepts this edge; previewTotals must
+      // surface NET=0 on the wire so the POS can render the
+      // "GRATIS" badge instead of a partial discount.
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-advanced-100-qty1',
+        saleId: BASE_SALE_ID,
+        productId: 'p-get-fullfree',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyBuyXGetYReward({
+        lineDiscountCents: 1000, // R == unitPrice × qty (the FIX 1 edge)
+        perUnitRewardCents: 1000,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 1 Get 1 @ 100% (ADVANCED)',
+        promotionId: 'promo-advanced-100-qty1',
+        getDiscountPercent: 100,
+        rewardKind: 'advanced',
+      });
+
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(1000);
+      expect(totals.discountCents).toBe(1000);
+      expect(totals.totalCents).toBe(0); // the whole line is free
+      // Wire contract: the line must surface the ADVANCED discriminator
+      // (not the BXGY fallback) so the POS renders the advanced badge.
+      expect(sale.items[0].rewardKind).toBe('advanced');
+      expect(sale.items[0].toResponse().rewardKind).toBe('advanced');
+      expect(sale.items[0].toResponse().subtotalCents).toBe(0);
+      expect(sale.items[0].toResponse().rewardDiscountPercent).toBe(100);
+    });
   });
 });

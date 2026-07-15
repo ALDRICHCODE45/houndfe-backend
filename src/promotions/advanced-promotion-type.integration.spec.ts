@@ -701,6 +701,90 @@ describeIfDb(
     });
 
     // ────────────────────────────────────────────────────────
+    // S6b — D3 4R-review defense-in-depth: 100% free at qty=1.
+    //
+    // S6 above uses qty=2 on the GET side, dodging the R==line edge
+    // that FIX 1 (D3 / sale-item.entity.ts applyBuyXGetYReward guard
+    // relaxed `>=` → `>`) made legitimate. The full-line-free qty=1
+    // path is now the load-bearing edge for the POS "GRATIS" badge
+    // on a single-unit reward line; without this end-to-end lock,
+    // the D3 true-free scenario remains PARTIAL. This scenario runs
+    // against Postgres :5433 and proves the engine emits a fully
+    // free GET line (lineDiscountCents == unitPrice × qty == 1000c,
+    // getDiscountPercent == 100, kind == 'advanced') so the wire
+    // surfaces NET=0 downstream.
+    //
+    // Fixture SKU prefix `ADV-S6B-` to keep names unique against S6
+    // and the rest of the integration suite (avoid the global
+    // `name` unique-constraint collision on Product).
+    // ────────────────────────────────────────────────────────
+    describe('S6b — 100% free GET unit at qty=1 (D3 true-free edge)', () => {
+      it('ADVANCED 100% on a single-unit GET line emits R == unitPrice × qty and kind=advanced', async () => {
+        const p = await seedProduct({ sku: 'ADV-S6B-P1' });
+        const vela = await seedProduct({
+          sku: 'ADV-S6B-VELA',
+          categoryId: CAT_HOME_DECOR_ID,
+        });
+
+        await createAdvanced({
+          promoId: id('adv-s6b'),
+          buyTargetType: 'CATEGORIES',
+          getTargetType: 'PRODUCTS',
+          buyTargetIds: [CAT_HOME_DECOR_ID],
+          getTargetIds: [p.productId],
+          buyQuantity: 1, // minimum trigger — a single BUY unit fires the reward
+          getQuantity: 1,
+          getDiscountPercent: 100,
+        });
+
+        const result = await engine.evaluate({
+          now: new Date(),
+          customerId: null,
+          lines: [
+            {
+              itemId: 'vela',
+              productId: vela.productId,
+              variantId: null,
+              quantity: 1, // 1 × 1 BUY unit satisfies buyQuantity=1
+              effectiveUnitPriceCents: 500,
+              appliedPriceListId: null,
+              appliedGlobalPriceListId: null,
+              categoryId: CAT_HOME_DECOR_ID,
+              brandId: null,
+              hasManualDiscount: false,
+            },
+            {
+              itemId: 'p1',
+              productId: p.productId,
+              variantId: null,
+              quantity: 1, // the D3 true-free edge: qty=1 @ 100% → R=unitPrice
+              effectiveUnitPriceCents: 1000,
+              appliedPriceListId: null,
+              appliedGlobalPriceListId: null,
+              categoryId: null,
+              brandId: null,
+              hasManualDiscount: false,
+            },
+          ],
+          vetoedPromotionIds: [],
+          optedInManualPromotionIds: [],
+        });
+
+        const p1Result = result.lines.find((l) => l.itemId === 'p1');
+        expect(p1Result).toBeDefined();
+        expect(p1Result!.kind).toBe('advanced');
+        if (p1Result!.kind === 'advanced') {
+          // floor(1/1) × 1 × 1000 = 1000c saving on one free unit —
+          // the GET line is FULLY free (R == unitPrice × qty).
+          expect(p1Result!.lineDiscountCents).toBe(1000);
+          expect(p1Result!.perUnitRewardCents).toBe(1000);
+          expect(p1Result!.discountedUnitCount).toBe(1);
+          expect(p1Result!.getDiscountPercent).toBe(100);
+        }
+      });
+    });
+
+    // ────────────────────────────────────────────────────────
     // S7 — ADVANCED saving flows into ORDER_DISCOUNT subtotal
     // ────────────────────────────────────────────────────────
     describe('S7 — ADVANCED saving flows into ORDER_DISCOUNT subtotal', () => {
