@@ -1239,6 +1239,223 @@ describe('PrismaSaleRepository', () => {
         expect(result?.items[1].rewardDiscountPercent).toBeNull();
       });
     });
+
+    // ---------------------------------------------------------------------
+    // Slice 2 / WU7 — D4 wire discriminator on the confirmed-receipt mapper.
+    //
+    // The mapper at prisma-sale.repository.ts:1420-1459 must READ the
+    // persisted `SaleItemRewardKind` column (added by the additive
+    // migration) and emit `rewardKind: 'buy_x_get_y' | 'advanced' | null`
+    // on the wire. Without the read, the mapper would have to fall back
+    // to the column-derived `isBuyXGetYReward()` predicate, which is
+    // BYTE-IDENTICAL for both kinds (same `prePriceCentsBeforeDiscount ===
+    // unitPriceCents + promotionId set + discountAmountCents > 0` shape) —
+    // and the wire would silently mislabel ADVANCED as BXGY (the Slice 1
+    // stub bug, closed by WU6 on the apply path).
+    //
+    // The persisted column is the SOURCE OF TRUTH on the confirmed-sale
+    // detail wire; the column-derived `isBxgy` predicate is the
+    // back-compat fallback for pre-migration rows whose column is null
+    // but whose shape still matches BXGY.
+    // ---------------------------------------------------------------------
+    describe('findOneWithRelations — ADVANCED rewardKind on the wire (WU7, spec.md:130-139)', () => {
+      function makeAdvancedRow(args: {
+        promotionId: string;
+        quantity: number;
+        unitPriceCents: number;
+        discountAmountCents: number;
+        discountValue: number;
+        rewardDiscountPercent?: number | null;
+        rewardKind?: 'BUY_X_GET_Y' | 'ADVANCED' | null;
+      }) {
+        return {
+          productName: 'Holder-X',
+          variantName: null,
+          imageUrl: null,
+          unitPriceCents: args.unitPriceCents,
+          quantity: args.quantity,
+          originalPriceCents: null,
+          priceSource: 'DEFAULT',
+          appliedPriceListId: null,
+          // BXGY-shaped row (same shape as BUY_X_GET_Y): rides the
+          // existing 'amount' enum value, prePrice === unitPrice.
+          discountType: 'AMOUNT',
+          discountValue: args.discountValue,
+          discountAmountCents: args.discountAmountCents,
+          discountTitle: 'Buy 3 Get 1 @ 100% (ADVANCED)',
+          prePriceCentsBeforeDiscount: args.unitPriceCents,
+          promotionId: args.promotionId,
+          rewardDiscountPercent: args.rewardDiscountPercent ?? null,
+          // WU7 — the new persisted D4 discriminator.
+          rewardKind: args.rewardKind ?? null,
+        };
+      }
+
+      function makeAdvancedSaleRow(items: unknown[], id = 'sale-advanced') {
+        return {
+          id,
+          folio: 'V-ADVANCED',
+          status: 'CONFIRMED',
+          channel: 'POS',
+          register: 'Principal',
+          confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+          dueDate: null,
+          createdAt: new Date('2026-05-08T10:00:00.000Z'),
+          subtotalCents: 3000,
+          discountCents: 1000,
+          totalCents: 2000,
+          paidCents: 2000,
+          debtCents: 0,
+          changeDueCents: 0,
+          paymentStatus: 'PAID',
+          deliveryStatus: 'DELIVERED',
+          customer: null,
+          user: { id: 'u1', name: 'Caja 1' },
+          seller: null,
+          items,
+          payments: [],
+        };
+      }
+
+      it('emits rewardKind="advanced" on the wire for a persisted ADVANCED row (100% true free get-unit)', async () => {
+        // 100% ADVANCED: qty 3 × 1000c/unit, R=1000c, one full free get-unit.
+        // Persisted column rewardKind='ADVANCED'. The mapper MUST surface
+        // 'advanced' on the wire (NOT 'buy_x_get_y' — that would be the
+        // Slice 1 stub bug).
+        prisma.sale.findFirst.mockResolvedValue(
+          makeAdvancedSaleRow([
+            makeAdvancedRow({
+              promotionId: 'promo-advanced-100',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 1000,
+              discountValue: 1000,
+              rewardDiscountPercent: 100,
+              rewardKind: 'ADVANCED',
+            }),
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-advanced-100');
+
+        expect(result?.items[0].rewardKind).toBe('advanced');
+        expect(result?.items[0].subtotalCents).toBe(2000);
+        expect(result?.items[0].discountCents).toBe(1000);
+        expect(result?.items[0].rewardDiscountPercent).toBe(100);
+        // Hardening: the wire must NOT emit 'buy_x_get_y' on an ADVANCED
+        // row — this is the Slice 1 stub regression guard.
+        expect(result?.items[0].rewardKind).not.toBe('buy_x_get_y');
+      });
+
+      it('emits rewardKind="advanced" for a 30% multi-group ADVANCED row (S2 spec scenario, 600c saving)', async () => {
+        // S2 spec scenario: 6 BUY units / buy 3 → 2 reward groups at 30%.
+        // 2 * 1 * round(1000*30/100) = 600c saving on the GET line.
+        // NET subtotal = 3*1000 - 600 = 2400c.
+        prisma.sale.findFirst.mockResolvedValue(
+          makeAdvancedSaleRow([
+            makeAdvancedRow({
+              promotionId: 'promo-advanced-s2',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 600,
+              discountValue: 300,
+              rewardDiscountPercent: 30,
+              rewardKind: 'ADVANCED',
+            }),
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-advanced-s2');
+
+        expect(result?.items[0].rewardKind).toBe('advanced');
+        expect(result?.items[0].subtotalCents).toBe(2400);
+        expect(result?.items[0].discountCents).toBe(600);
+        expect(result?.items[0].rewardDiscountPercent).toBe(30);
+      });
+
+      it('emits rewardKind="buy_x_get_y" for a persisted BUY_X_GET_Y row (regression)', async () => {
+        // The post-migration backfill sets rewardKind='BUY_X_GET_Y' on
+        // every BXGY-shaped row. The mapper MUST surface the lowercase
+        // wire value, exactly as before the migration.
+        prisma.sale.findFirst.mockResolvedValue(
+          makeAdvancedSaleRow([
+            makeAdvancedRow({
+              promotionId: 'promo-bxgy-backfill',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 500,
+              discountValue: 500,
+              rewardDiscountPercent: 50,
+              rewardKind: 'BUY_X_GET_Y',
+            }),
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-bxgy-backfill');
+
+        expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+        expect(result?.items[0].subtotalCents).toBe(2500);
+        expect(result?.items[0].discountCents).toBe(500);
+      });
+
+      it('falls back to the column-derived "buy_x_get_y" when rewardKind is null (pre-migration rows)', async () => {
+        // Back-compat: rows persisted BEFORE the migration ran carry
+        // rewardKind=null. The column shape (prePrice === unitPrice,
+        // promotionId set, discountAmountCents > 0) is still BXGY, so the
+        // mapper MUST emit 'buy_x_get_y' on those rows.
+        prisma.sale.findFirst.mockResolvedValue(
+          makeAdvancedSaleRow([
+            makeAdvancedRow({
+              promotionId: 'promo-bxgy-legacy',
+              quantity: 3,
+              unitPriceCents: 1000,
+              discountAmountCents: 500,
+              discountValue: 500,
+              rewardDiscountPercent: 50,
+              rewardKind: null, // pre-migration row
+            }),
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-bxgy-legacy');
+
+        expect(result?.items[0].rewardKind).toBe('buy_x_get_y');
+        expect(result?.items[0].subtotalCents).toBe(2500);
+      });
+
+      it('emits rewardKind=null for a non-reward row (regression — plain line still null)', async () => {
+        // PD line: prePrice (1000) > unitPrice (900) → column shape is
+        // NOT BXGY, rewardKind=null on the column. Wire MUST stay null.
+        prisma.sale.findFirst.mockResolvedValue(
+          makeAdvancedSaleRow([
+            {
+              productName: 'P',
+              variantName: null,
+              imageUrl: null,
+              unitPriceCents: 900,
+              quantity: 2,
+              originalPriceCents: 1000,
+              priceSource: 'DEFAULT',
+              appliedPriceListId: null,
+              discountType: 'PERCENTAGE',
+              discountValue: 10,
+              discountAmountCents: 100,
+              discountTitle: 'Promo 10%',
+              prePriceCentsBeforeDiscount: 1000,
+              promotionId: 'promo-pd-10',
+              rewardDiscountPercent: null,
+              rewardKind: null,
+            },
+          ]),
+        );
+
+        const result = await repo.findOneWithRelations('sale-pd-null');
+
+        expect(result?.items[0].rewardKind).toBeNull();
+        expect(result?.items[0].subtotalCents).toBe(1800);
+        expect(result?.items[0].rewardDiscountPercent).toBeNull();
+      });
+    });
   });
 
   describe('save', () => {
@@ -1401,6 +1618,8 @@ describe('PrismaSaleRepository', () => {
             discountValue: null,
             discountAmountCents: null,
             rewardDiscountPercent: null,
+            // WU7 — D4 wire discriminator on the persisted column.
+            rewardKind: null,
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,
@@ -1509,6 +1728,8 @@ describe('PrismaSaleRepository', () => {
             discountValue: null,
             discountAmountCents: null,
             rewardDiscountPercent: null,
+            // WU7 — D4 wire discriminator on the persisted column.
+            rewardKind: null,
             prePriceCentsBeforeDiscount: null,
             discountTitle: null,
             discountedAt: null,

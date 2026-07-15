@@ -60,7 +60,12 @@ export interface SaleDetailItemDto {
    * prePriceCentsBeforeDiscount`). Null on every other line so the
    * frontend can render the "free"/reward badge without inferring it.
    */
-  rewardKind: 'buy_x_get_y' | null;
+  // WU7 — D4 wire discriminator. Widened to include 'advanced' for the
+  // new ADVANCED promotion kind (Slice 2 / WU5). Both kinds ride the
+  // applyBuyXGetYReward rail; the column-derived predicate cannot
+  // distinguish them, so the mapper now reads the persisted
+  // `SaleItemRewardKind` column to populate this field.
+  rewardKind: 'buy_x_get_y' | 'advanced' | null;
   /**
    * Exact BUY_X_GET_Y `getDiscountPercent` (0..100; 100=free, 50=half) of the
    * applied promotion, persisted verbatim (never derived from cents). Null on

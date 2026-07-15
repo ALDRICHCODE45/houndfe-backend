@@ -2322,4 +2322,88 @@ describe('Sale Entity', () => {
       expect(totals.discountCents).toBe(100);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Slice 2 / WU7 — previewTotals for ADVANCED-shaped reward lines.
+  //
+  // The BXGY rail (applyBuyXGetYReward + `isBuyXGetYReward()` column-derived
+  // check) is shared between BUY_X_GET_Y and ADVANCED. previewTotals reads
+  // the same column-derived predicate to decide whether to subtract R from
+  // the post-line subtotal — so the aggregation math is identical for both
+  // kinds, and so are the totals. This block pins the ADVANCED scenarios
+  // (100% true-free; S2 multi-group 600c) at the sale-level aggregate,
+  // proving the rail works end-to-end through the WU6 routing close-out.
+  // ---------------------------------------------------------------------------
+  describe('previewTotals — ADVANCED reward aggregation (WU7, spec.md:130-139 + S2)', () => {
+    it('100% ADVANCED: subtotal=3000, discount=1000, total=2000 (true free GET unit)', () => {
+      // Spec scenario: ADVANCED buy 3 / get 1 of P1 at 100% on a line of
+      // qty 3 (1 free get-unit out of 3). Mirrors the existing WU2 BXGY
+      // 100% test setup — the BXGY guard requires `R < unitPrice × qty`,
+      // and on qty=3 with R=1000 the guard passes (3000 > 1000). The
+      // customer gets one unit free, NET line = 3*1000 - 1000 = 2000c.
+      // D3 cap lifted to 100 by WU3.
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-advanced-100',
+        saleId: BASE_SALE_ID,
+        productId: 'p-get',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyBuyXGetYReward({
+        lineDiscountCents: 1000,
+        perUnitRewardCents: 1000,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 3 Get 1 @ 100% (ADVANCED)',
+        promotionId: 'promo-advanced-100',
+        getDiscountPercent: 100,
+        rewardKind: 'advanced',
+      });
+
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(3000);
+      expect(totals.discountCents).toBe(1000);
+      expect(totals.totalCents).toBe(2000);
+      // And the wire surfaces the ADVANCED discriminator, not BXGY.
+      expect(sale.items[0].rewardKind).toBe('advanced');
+      expect(sale.items[0].toResponse().rewardKind).toBe('advanced');
+    });
+
+    it('S2 ADVANCED multi-group 30%: 6 BUY → 2 groups, 600c saving on 3 GET units at 1000c', () => {
+      // S2 spec scenario: ADVANCED buy 3 / get 1 of Holder-X at 30%, 6
+      // BUY units + 3 GET units. 2 reward groups × 1 × round(1000*30/100)
+      // = 600c saving. NET line subtotal = 3*1000 - 600 = 2400c.
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.addItem({
+        id: 'item-advanced-s2',
+        saleId: BASE_SALE_ID,
+        productId: 'p-get',
+        variantId: null,
+        productName: 'Holder-X',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.items[0].applyBuyXGetYReward({
+        lineDiscountCents: 600,
+        perUnitRewardCents: 300,
+        discountedUnitCount: 2,
+        discountTitle: 'Buy 3 Get 1 @ 30% (ADVANCED)',
+        promotionId: 'promo-advanced-s2',
+        getDiscountPercent: 30,
+        rewardKind: 'advanced',
+      });
+
+      const totals = sale.previewTotals();
+      expect(totals.subtotalCents).toBe(3000);
+      expect(totals.discountCents).toBe(600);
+      expect(totals.totalCents).toBe(2400);
+      expect(sale.items[0].rewardKind).toBe('advanced');
+    });
+  });
 });

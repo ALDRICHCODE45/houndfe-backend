@@ -283,7 +283,12 @@ export interface ISaleRepository {
       discountAmountCents: number | null;
       discountTitle: string | null;
       prePriceCentsBeforeDiscount: number | null;
-      rewardKind: 'buy_x_get_y' | null;
+      // WU7 — D4 wire discriminator. Slice 1 had `rewardKind: 'buy_x_get_y'
+      // | null`; WU7 widens to `| 'advanced'` (the new persisted kind).
+      // CRITICAL: the port type MUST carry the new value so the mapper's
+      // return type matches the interface (a prior identical change in WU3
+      // broke the build with TS2322 by omitting the shared field here).
+      rewardKind: 'buy_x_get_y' | 'advanced' | null;
       /**
        * WU3 — exact BXGY reward percent (0..100), persisted verbatim. Null
        * on non-reward lines (same `isBxgy` guard as `rewardKind`). CRITICAL:
