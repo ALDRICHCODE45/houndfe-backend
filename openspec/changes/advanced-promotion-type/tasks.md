@@ -107,8 +107,8 @@ except WU2 (port union edit).
 
 ### Phase 9: e2e Integration (WU9)
 
-- [ ] 9.1 RED: NEW `src/promotions/advanced-promotion-type.integration.spec.ts` (live DB :5433) — scenario-named cases: S1 category→product, S2 multi-group 2 apps, S3 same-entity rejected, S4 degenerate no-reward, S5 best-wins vs PD, plus 100% free GET (`totalCents=0`), plus ADVANCED saving flows into ORDER_DISCOUNT subtotal. Run `pnpm run test:integration -- advanced-promotion-type.integration.spec.ts --runInBand` → RED.
-- [ ] 9.2 GREEN: verify full stack green (no new impl expected — Slices 1–2 cover behavior; fix any seam gaps surfaced). Commit `test(promotions): add ADVANCED e2e integration suite (S1–S5 + 100% free)`.
+- [x] 9.1 RED: NEW `src/promotions/advanced-promotion-type.integration.spec.ts` (live DB :5433) — scenario-named cases: S1 category→product, S2 multi-group 2 apps, S3 same-entity rejected, S4 degenerate no-reward, S5 best-wins vs PD, plus 100% free GET (`totalCents=0`), plus ADVANCED saving flows into ORDER_DISCOUNT subtotal. Run `pnpm run test:integration -- advanced-promotion-type.integration.spec.ts --runInBand` → RED.
+- [x] 9.2 GREEN: verify full stack green (no new impl expected — Slices 1–2 cover behavior; fix any seam gaps surfaced). Commit `test(promotions): add ADVANCED e2e integration suite (S1–S5 + 100% free)`.
 
 ### Phase 10: Docs (WU10)
 
