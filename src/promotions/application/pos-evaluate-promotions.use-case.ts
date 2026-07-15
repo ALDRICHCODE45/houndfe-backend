@@ -401,6 +401,29 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     //     line carries at most ONE applied result.
     this.evaluateBuyXGetYPass(input.lines, candidates, input, lineResults);
 
+    // 3c. WU4 — Per-line ADVANCED pass (design.md Decisions 1+4+5;
+    //     spec.md:41-47,72-100,137-149,188-214). Cross-line:
+    //     aggregated BUY-side counting (D1) across the whole draft,
+    //     per-line reward applied to the matching GET-side lines.
+    //     Slots AFTER the per-line BXGY pass (so BXGY targets that
+    //     might also be ADVANCED BUY-side still resolve consistently)
+    //     and BEFORE the ORDER_DISCOUNT pass (so the post-line
+    //     subtotal reflects the ADVANCED saving).
+    //
+    //     The comparator extends the BXGY 2-way cross-type rule to a
+    //     3-way max on `lineTotalSavingCents`:
+    //       pdTotalCents      = existingPd.per-unit * line.quantity
+    //       bxgyTotalCents    = existingBXGY.lineDiscountCents
+    //       advancedTotalCents = advancedWinner.lineDiscountCents
+    //       Advanced wins IFF advancedTotalCents > max(pd, bxgy)
+    //              OR (tie && advancedId < max.id).
+    //
+    //     When ADVANCED wins, the existing line result (PD or BXGY)
+    //     is REPLACED by a discriminated `kind:'advanced'` result
+    //     carrying the whole-line reward R. No stacking: one result
+    //     per line.
+    this.evaluateAdvancedPass(input.lines, candidates, input, lineResults);
+
     // 4. Sale-level ORDER_DISCOUNT best-wins.
     //    Subtotal after per-line discounts has been applied.
     const lineDiscountByItemId = new Map<string, number>();
@@ -677,6 +700,15 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     // presence-of-target. An BXGY that somehow reaches the gate
     // without a target silently fails to match any line and emits
     // no per-line result — degenerate but never crashes.
+    //
+    // WU4 (advanced-promotion-type — design.md Decisions 1+2+4):
+    // ADVANCED is admitted when `buyTargetType` and `getTargetType`
+    // each resolve to one of the four supported tier types
+    // {PRODUCTS, VARIANTS, CATEGORIES, BRANDS}. null targets or
+    // unsupported values silently skip the candidate (spec.md:52-55).
+    // The buy/get disjoint check (D7) lives in promotions.service
+    // intake (Slice 3 / WU8) — the engine is free of overlap logic
+    // by construction.
     if (promo.type === 'ORDER_DISCOUNT') return true;
     if (
       promo.type === 'PRODUCT_DISCOUNT' &&
@@ -693,6 +725,19 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         promo.appliesTo === 'VARIANTS' ||
         promo.appliesTo === 'CATEGORIES' ||
         promo.appliesTo === 'BRANDS')
+    ) {
+      return true;
+    }
+    if (
+      promo.type === 'ADVANCED' &&
+      (promo.buyTargetType === 'PRODUCTS' ||
+        promo.buyTargetType === 'VARIANTS' ||
+        promo.buyTargetType === 'CATEGORIES' ||
+        promo.buyTargetType === 'BRANDS') &&
+      (promo.getTargetType === 'PRODUCTS' ||
+        promo.getTargetType === 'VARIANTS' ||
+        promo.getTargetType === 'CATEGORIES' ||
+        promo.getTargetType === 'BRANDS')
     ) {
       return true;
     }
@@ -1156,6 +1201,182 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       }
     }
     return best;
+  }
+
+  /**
+   * WU4 — Per-line ADVANCED pass with cross-type TOTAL-saving best-wins.
+   *
+   * The first cross-line pass: BUY-side matches are aggregated across
+   * the whole draft (D1), reward groups = floor(totalBuyMatchedQty /
+   * buyQuantity) (D2), and the resulting reward units are allocated
+   * across GET-side candidate lines sorted by `itemId` asc (spec
+   * resolution — deterministic allocation; cheapest-first deferred).
+   *
+   * For each GET-side line that receives reward units, the existing
+   * line result (PD or BXGY) is REPLACED by a discriminated
+   * `kind:'advanced'` result carrying the per-line reward `R =
+   * lineDiscountCents`. The comparator extends the BXGY 2-way rule
+   * to a 3-way cross-type max on `lineTotalSavingCents`:
+   *
+   *   pdTotalCents      = existingPd.per-unit * line.quantity
+   *   bxgyTotalCents    = existingBXGY.lineDiscountCents
+   *   advancedTotalCents = advancedWinner.lineDiscountCents
+   *
+   * ADVANCED wins IFF advancedTotalCents > max(pdTotalCents, bxgyTotalCents)
+   *   OR (tie && advancedId < best-existing-id).
+   *
+   * Invariants:
+   *   - AUTOMATIC only: MANUAL ADVANCED is silently skipped (D6) — the
+   *     gate at `isSupportedEngineType` admits only AUTOMATIC by
+   *     construction (MANUAL ADVANCED is never considered). The
+   *     manual surface / availableManualPromotions is NOT extended.
+   *   - `hasManualDiscount` short-circuit: AUTO ADVANCED skips a line
+   *     with a seller free-form discount — mirrors `pickBestPerLine`.
+   *   - BUY side must aggregate >= buyQuantity to trigger any reward
+   *     (D2); otherwise no result.
+   *   - At least one GET-side line must exist (D4 degenerate-cart
+   *     rule, S4 spec scenario) — otherwise no result.
+   *   - Intakerejects same-entity BUY/GET (D7) — engine sees only
+   *     disjoint target lists, so no cart line matches both sides.
+   *
+   * Mutates `lineResults` in place (replaces by itemId on ADVANCED win).
+   */
+  private evaluateAdvancedPass(
+    lines: ReadonlyArray<PosEvalLine>,
+    candidates: ReadonlyArray<Promotion>,
+    input: PosEvalInput,
+    lineResults: PosEvalLineResult[],
+  ): void {
+    for (const promo of candidates) {
+      if (promo.type !== 'ADVANCED') continue;
+      // D6 — AUTOMATIC only. MANUAL ADVANCED is silently skipped
+      // (no manual surface for ADVANCED in this slice). The gate
+      // below also filters MANUAL via veto list (symmetric with the
+      // other branches), but the explicit check pins D6 semantics.
+      if (promo.method !== 'AUTOMATIC') continue;
+      // Veto set (symmetric with the other per-line branches): AUTO
+      // ADVANCED is excluded when the seller vetoed this promo id.
+      if (input.vetoedPromotionIds.includes(promo.id)) continue;
+      // Promotion-wide gates — date window, daysOfWeek, customerScope,
+      // supported engine type (null target types rejected).
+      // Spec.md:43-55 — null or unsupported buy/get target types
+      // silently skip the candidate.
+      if (!this.passesPromotionWideGates(promo, input)) continue;
+      // The price-list gate is irrelevant for ADVANCED (it has no
+      // `appliesTo` and the engine does not consult `priceLists` for
+      // ADVANCED in this slice).
+      if (promo.buyQuantity == null || promo.getQuantity == null || promo.getDiscountPercent == null) {
+        continue;
+      }
+
+      // D1 — aggregated BUY-side quantity across the draft.
+      let totalBuyMatchedQty = 0;
+      for (const line of lines) {
+        if (line.hasManualDiscount) continue;
+        if (matchTargetTier(promo.targetItems, line, 'BUY') === null) continue;
+        totalBuyMatchedQty += line.quantity;
+      }
+
+      // D2 — per-group reward repeatability.
+      const rewardGroupCount = Math.floor(
+        totalBuyMatchedQty / promo.buyQuantity,
+      );
+      if (rewardGroupCount === 0) continue;
+
+      // S4 — degenerate-cart guard. If no line matches a GET-side
+      // target, the helper has nothing to allocate. Skip.
+      const getCandidateLines: Array<{
+        itemId: string;
+        effectiveUnitPriceCents: number;
+        quantity: number;
+      }> = [];
+      for (const line of lines) {
+        if (line.hasManualDiscount) continue;
+        if (matchTargetTier(promo.targetItems, line, 'GET') === null) continue;
+        getCandidateLines.push({
+          itemId: line.itemId,
+          effectiveUnitPriceCents: line.effectiveUnitPriceCents,
+          quantity: line.quantity,
+        });
+      }
+      if (getCandidateLines.length === 0) continue;
+
+      // Pure helper (mirrors computeBuyXGetYReward but multi-GET-line).
+      const { rewards } = computeAdvancedReward({
+        totalBuyMatchedQty,
+        buyQuantity: promo.buyQuantity,
+        getQuantity: promo.getQuantity,
+        getDiscountPercent: promo.getDiscountPercent,
+        getCandidateLines,
+      });
+
+      // Apply each reward to its line via the 3-way cross-type
+      // comparator. Replaces the existing PD / BXGY result on win.
+      for (const reward of rewards) {
+        const targetLine = lines.find((l) => l.itemId === reward.itemId);
+        if (!targetLine) continue;
+
+        const existingIndex = lineResults.findIndex(
+          (r) => r.itemId === reward.itemId,
+        );
+        const existing =
+          existingIndex >= 0 ? lineResults[existingIndex] : null;
+        const existingTotal = this.existingLineResultTotalCents(
+          targetLine,
+          existing,
+        );
+
+        // Cross-type 3-way comparator. ADVANCED wins iff its line-total
+        // saving > the best existing line-total saving, OR a tie
+        // resolved by lowest promotionId.
+        const advancedWins =
+          reward.lineDiscountCents > existingTotal ||
+          (reward.lineDiscountCents === existingTotal &&
+            (existing === null
+              ? true
+              : promo.id < (existing as { promotionId: string }).promotionId));
+
+        if (!advancedWins) continue;
+
+        const advancedResult: PosEvalLineResult = {
+          kind: 'advanced',
+          itemId: reward.itemId,
+          promotionId: promo.id,
+          discountTitle: promo.title,
+          lineDiscountCents: reward.lineDiscountCents,
+          perUnitRewardCents: reward.perUnitRewardCents,
+          discountedUnitCount: reward.discountedUnitCount,
+          getDiscountPercent: promo.getDiscountPercent,
+        };
+
+        if (existingIndex >= 0) {
+          lineResults[existingIndex] = advancedResult;
+        } else {
+          lineResults.push(advancedResult);
+        }
+      }
+    }
+  }
+
+  /**
+   * WU4 helper — return the line-total saving cents for the existing
+   * line result, used by the ADVANCED 3-way comparator. Mirrors the
+   * shape `pickBestBuyXGetYPerLine` produces for the existing PD
+   * result (per-unit × qty) and `computeAppliedDiscountCents`
+   * already produces for the BXGY shape (whole-line). Falls back to
+   * `existingTotal = 0` when no prior result is present.
+   */
+  private existingLineResultTotalCents(
+    line: PosEvalLine,
+    existing: PosEvalLineResult | null,
+  ): number {
+    if (existing === null) return 0;
+    if (existing.kind === 'buy-x-get-y' || existing.kind === 'advanced') {
+      // Whole-line reward — no multiplication needed.
+      return existing.lineDiscountCents;
+    }
+    // Per-unit PD result.
+    return this.computeAppliedDiscountCents(line, existing) * line.quantity;
   }
 
   /**
