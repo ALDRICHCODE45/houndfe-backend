@@ -409,8 +409,16 @@ export class SaleItem {
    *   - `discountType = 'amount'` (rides the existing enum value).
    *   - `discountTitle`, `discountedAt`, `promotionId` set.
    *
-   * Guard: `R` integer, `0 < R < unitPriceCents × quantity` (cannot reward
-   * more than the line subtotal, cannot reward zero or negative).
+   * Guard: `R` integer, `0 < R <= unitPriceCents × quantity` (cannot reward
+   * more than the line subtotal, cannot reward zero or negative). The
+   * upper bound is `<=` (not `<`) because a 100% ADVANCED reward on a
+   * full-line free scenario legitimately yields R == unitPriceCents ×
+   * quantity (true free). Equality is the edge of the over-reward
+   * invariant: BXGY structurally cannot reach it (the helper caps at
+   * floor(qty/(N+M)) × M × perUnit < qty × unitPrice), so relaxing the
+   * guard does not widen BXGY behavior — it only admits the legitimate
+   * full-free ADVANCED edge case that previously 500'd the POS add-item
+   * (D3 / 4R-review).
    */
   applyBuyXGetYReward(input: ApplyBuyXGetYRewardInput): void {
     if (
@@ -421,9 +429,9 @@ export class SaleItem {
         'BXGY_REWARD_INVALID: lineDiscountCents must be a positive integer',
       );
     }
-    if (input.lineDiscountCents >= this._unitPriceCents * this._quantity) {
+    if (input.lineDiscountCents > this._unitPriceCents * this._quantity) {
       throw new InvalidArgumentError(
-        'BXGY_REWARD_INVALID: lineDiscountCents must be less than unitPriceCents * quantity',
+        'BXGY_REWARD_INVALID: lineDiscountCents must be at most unitPriceCents * quantity',
       );
     }
     if (!input.promotionId) {

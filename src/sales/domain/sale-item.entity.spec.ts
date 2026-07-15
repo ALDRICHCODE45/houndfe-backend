@@ -852,13 +852,18 @@ describe('SaleItem Entity', () => {
         ).toThrow(/BXGY_REWARD_INVALID/);
       });
 
-      it('rejects R >= unitPriceCents × quantity (cannot reward more than the line subtotal)', () => {
-        // qty 3 × 1000c = 3000c max.
+      it('rejects R > unitPriceCents × quantity (cannot reward more than the line subtotal)', () => {
+        // qty 3 × 1000c = 3000c max. R=3500 strictly exceeds the cap.
+        // Equality (R == qty × unitPrice) is now VALID — the D3 / 4R-review
+        // full-line FREE edge case. The BXGY helper structurally cannot
+        // emit R == qty × eff (it caps at floor(qty/(N+M)) × M × perUnit <
+        // qty × eff), so this over-reward assertion pins the strict
+        // over-reward invariant without conflating it with equality.
         const item = createBxgyCandidate();
         expect(() =>
           item.applyBuyXGetYReward({
-            lineDiscountCents: 3000,
-            perUnitRewardCents: 1000,
+            lineDiscountCents: 3500,
+            perUnitRewardCents: 1500,
             discountedUnitCount: 3,
             discountTitle: 'too-much',
             promotionId: 'promo-bxgy',
@@ -877,6 +882,106 @@ describe('SaleItem Entity', () => {
         });
         expect(item.isBuyXGetYReward()).toBe(true);
         expect(item.discountAmountCents).toBe(1);
+      });
+
+      // D3 / 4R-review — full-line FREE reward MUST be valid. A 100%
+      // ADVANCED reward on qty=1 emits R == unitPriceCents × quantity,
+      // which the old `>=` guard rejected with `BXGY_REWARD_INVALID`
+      // and 500'd the POS add-item. The guard is now `>` (strict) so
+      // equality is accepted: a true-free single-unit line is the
+      // edge of the "R must be strictly less than the line subtotal"
+      // invariant — equal is still legitimate (the whole line goes
+      // to zero). BXGY structurally cannot reach equality (the helper
+      // caps rewards at floor(qty/(N+M))*M*perUnit < qty*unitPrice),
+      // so relaxing the guard does not widen BXGY's behavior.
+      it('accepts R == unitPriceCents × quantity (full-line free: qty=1 @ 100%)', () => {
+        const item = SaleItem.create({
+          id: 'i-free-1',
+          saleId: 's-free-1',
+          productId: 'p1',
+          variantId: null,
+          productName: 'P',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        // 100% ADVANCED on a qty=1 line: R = 1000 = unitPrice × qty.
+        // Must NOT throw — the wire contract is `totalCents == 0`.
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 1000,
+            perUnitRewardCents: 1000,
+            discountedUnitCount: 1,
+            discountTitle: 'ADVANCED 100%',
+            promotionId: 'promo-advanced-100-fullfree',
+            getDiscountPercent: 100,
+            rewardKind: 'advanced',
+          }),
+        ).not.toThrow();
+        expect(item.isBuyXGetYReward()).toBe(true);
+        expect(item.discountAmountCents).toBe(1000);
+        expect(item.rewardKind).toBe('advanced');
+        // unitPrice UNCHANGED (BXGY invariant): prePrice === unitPrice.
+        expect(item.unitPriceCents).toBe(1000);
+        expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+        // toResponse surfaces NET=0 on the wire for a fully-freed line.
+        expect(item.toResponse().subtotalCents).toBe(0);
+        expect(item.toResponse().rewardKind).toBe('advanced');
+        expect(item.toResponse().rewardDiscountPercent).toBe(100);
+      });
+
+      it('accepts R == unitPriceCents × quantity on qty≥1 (full multi-unit free line)', () => {
+        // qty=2 @ 100% → 2 reward groups, R = 2000 = 1000 × 2.
+        const item = SaleItem.create({
+          id: 'i-free-2',
+          saleId: 's-free-2',
+          productId: 'p1',
+          variantId: null,
+          productName: 'P',
+          variantName: null,
+          quantity: 2,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 2000,
+            perUnitRewardCents: 1000,
+            discountedUnitCount: 2,
+            discountTitle: 'ADVANCED 100% x2',
+            promotionId: 'promo-advanced-100-fullfree-q2',
+            getDiscountPercent: 100,
+            rewardKind: 'advanced',
+          }),
+        ).not.toThrow();
+        expect(item.discountAmountCents).toBe(2000);
+        expect(item.toResponse().subtotalCents).toBe(0);
+      });
+
+      it('still rejects R > unitPriceCents × quantity (over-reward invariant)', () => {
+        // qty=1, unitPrice=1000: R=1001 must STILL throw — the relaxation
+        // is equality only, not "any R up to line subtotal inclusive".
+        const item = SaleItem.create({
+          id: 'i-over',
+          saleId: 's-over',
+          productId: 'p1',
+          variantId: null,
+          productName: 'P',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 1001,
+            perUnitRewardCents: 1001,
+            discountedUnitCount: 1,
+            discountTitle: 'over-reward',
+            promotionId: 'promo-over',
+          }),
+        ).toThrow(/BXGY_REWARD_INVALID/);
       });
     });
 
