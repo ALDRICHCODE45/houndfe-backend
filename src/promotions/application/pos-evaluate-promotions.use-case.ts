@@ -117,9 +117,22 @@ export function computeBuyXGetYReward(input: {
  *                  brandId is a structural no-match. BRAND and
  *                  CATEGORY are EQUAL-broadness peers (both ordinal
  *                  1 in the pre-pass; best-wins tiebreaks).
- *   - null       : no DEFAULT-side target hit the line.
+ *   - null       : no target hit the line on the requested side.
  */
 export type LineMatchTier = 'VARIANT' | 'PRODUCT' | 'CATEGORY' | 'BRAND' | null;
+
+/**
+ * Side filter for `matchTargetTier`. Used by the ADVANCED pass to
+ * isolate BUY-side vs GET-side target lists on the same promotion.
+ * DEFAULT is the legacy single-side matcher that PRODUCT_DISCOUNT
+ * and BUY_X_GET_Y rely on — every existing call site defaults to it
+ * (no behavior change).
+ *
+ *   - 'DEFAULT' : match only targets whose `side === 'DEFAULT'`.
+ *   - 'BUY'     : match only targets whose `side === 'BUY'`.
+ *   - 'GET'     : match only targets whose `side === 'GET'`.
+ */
+export type TargetSide = 'DEFAULT' | 'BUY' | 'GET';
 
 /**
  * Match predicate — pure, exported for both testability AND future
@@ -132,6 +145,12 @@ export type LineMatchTier = 'VARIANT' | 'PRODUCT' | 'CATEGORY' | 'BRAND' | null;
  * resolves the peer tie at the per-line precedence pre-pass in
  * `pickBestPerLine`). Null guards mirror `variantId != null` so an
  * unset/unresolved categoryId/brandId never silently matches.
+ *
+ * WU1 (advanced-promotion-type): the helper now takes a `side`
+ * parameter. `side='DEFAULT'` is the unchanged legacy contract; the
+ * ADVANCED pass threads `'BUY'` / `'GET'` to isolate the per-side
+ * target list of an ADVANCED promotion (the engine sees both BUY and
+ * GET items in `promo.targetItems`, separated by `targetItem.side`).
  */
 export function matchTargetTier(
   targetItems: ReadonlyArray<{ side: string; targetType: string; targetId: string }>,
@@ -141,15 +160,16 @@ export function matchTargetTier(
     categoryId?: string | null;
     brandId?: string | null;
   },
+  side: TargetSide = 'DEFAULT',
 ): LineMatchTier {
-  const side = 'DEFAULT';
+  const effectiveSide = side;
   // VARIANTS first — strict === null on variantId so an unset variant
   // never matches (defensive: structural guarantee).
   if (
     line.variantId != null &&
     targetItems.some(
       (ti) =>
-        ti.side === side &&
+        ti.side === effectiveSide &&
         ti.targetType === 'VARIANTS' &&
         ti.targetId === line.variantId,
     )
@@ -159,7 +179,7 @@ export function matchTargetTier(
   if (
     targetItems.some(
       (ti) =>
-        ti.side === side &&
+        ti.side === effectiveSide &&
         ti.targetType === 'PRODUCTS' &&
         ti.targetId === line.productId,
     )
@@ -176,7 +196,7 @@ export function matchTargetTier(
     line.categoryId != null &&
     targetItems.some(
       (ti) =>
-        ti.side === side &&
+        ti.side === effectiveSide &&
         ti.targetType === 'CATEGORIES' &&
         ti.targetId === line.categoryId,
     )
@@ -188,7 +208,7 @@ export function matchTargetTier(
     line.brandId != null &&
     targetItems.some(
       (ti) =>
-        ti.side === side &&
+        ti.side === effectiveSide &&
         ti.targetType === 'BRANDS' &&
         ti.targetId === line.brandId,
     )
