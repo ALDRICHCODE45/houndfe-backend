@@ -123,6 +123,30 @@ except WU2 (port union edit).
 
 ---
 
+## Post-review correction (4R / 4 blockers + 1 cosmetic fold)
+
+> Single scoped correction transaction after the 4R review surfaced the
+> following issues. All five fixes landed in RED→GREEN→commit work-unit
+> commits on the same branch; no PR was opened.
+
+| Fix | Where | Commit | RED test summary |
+|-----|-------|--------|------------------|
+| FIX 1 (BLOCKER) | `src/sales/domain/sale-item.entity.ts:424` — relax `applyBuyXGetYReward` guard from `>=` to `>` so R == unitPriceCents × quantity is VALID (full-line free ADVANCED). | `3250a11` | qty=1 @ 100% ADVANCED reward flows through `applyBuyXGetYReward` without throwing; `totalCents==0`; over-reward (R > qty × eff) still throws. |
+| FIX 2 (CRITICAL) | `src/promotions/application/pos-evaluate-promotions.use-case.ts:1273-1316` — engine-level BUY/GET partition: a line consumed to satisfy BUY MUST NOT also be a GET candidate. | `015a3c3` | BUY=PRODUCTS:P + GET=CATEGORIES:C with P ∈ C and single P line → no ADVANCED result (no double benefit); legitimate disjoint case (P+q lines) rewards Q correctly. |
+| FIX 3 | Same file — skip zero/negative rewards in the ADVANCED loop (mirror BXGY guard at `:1177`). | `015a3c3` | 1c unit @ 1% → no ADVANCED result emitted (no throw downstream); 50c unit @ 1% → 1c reward emitted (regression: did not over-skip). |
+| FIX 4 | `src/sales/infrastructure/prisma-sale.repository.ts` — forward `rewardKind` in the four draft reload mappers (`findById`, `findDraftResponseById`, `findDraftsByUserId`, `findByIdForUpdate`). | `b082c88` | Persisted ADVANCED draft line reloads via all four mappers → `toResponse().rewardKind === 'advanced'`; pre-migration null column still falls back to `'buy_x_get_y'`. |
+| FIX 5 (cosmetic) | Same use-case file — remove `const effectiveSide = side` alias (inline at 4 call sites); fix typo `Intakerejects` → `Intake rejects`. | `015a3c3` | (folded into FIX 2/3 commit; no test) |
+
+**Verification (filtered only — strict TDD held):**
+- `pnpm run test:unit -- <15 touched boundary spec files>` → 719/719 GREEN in 1.8s.
+- `pnpm run test:integration -- advanced-promotion-type.integration.spec.ts --runInBand` → 7/7 GREEN on :5433.
+- `pnpm run test:integration -- buy-x-get-y.integration.spec.ts --runInBand` → 20/20 GREEN (BXGY regression: guard relaxation does not widen BXGY behavior).
+- `pnpm run build` → 0 errors.
+
+**Implementation COMPLETE, pending re-verify.** All five blockers fixed in one scoped correction transaction; no PR; branch left at `feat/advanced-promotion-type`.
+
+---
+
 ## Final Merge
 
 - [ ] 12.1 `pnpm run build` → 0 errors; run each touched spec file filtered (never full suite); `pnpm prisma migrate diff` zero drift outside D4 migration.
