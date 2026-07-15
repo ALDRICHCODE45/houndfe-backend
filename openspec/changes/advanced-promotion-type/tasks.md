@@ -78,21 +78,21 @@ except WU2 (port union edit).
 
 ### Phase 5: D4 Enum, Column, Migration, Backfill (WU5)
 
-- [ ] 5.1 RED: `src/sales/domain/sale-item.entity.spec.ts` — `applyBuyXGetYReward({...,rewardKind:'advanced'})` sets `_rewardKind`; `toResponse().rewardKind === 'advanced'`; BXGY path still emits `'buy_x_get_y'`; non-reward emits `null`; `clearDiscountFields` clears `_rewardKind`. Run → RED.
-- [ ] 5.2 GREEN (schema): `prisma/schema.prisma` add `enum SaleItemRewardKind { BUY_X_GET_Y ADVANCED }` + nullable `rewardKind` on `SaleItem` (:728). `pnpm prisma generate`.
-- [ ] 5.3 GREEN (migration): `pnpm prisma migrate dev --name add_sale_item_reward_kind` — CREATE TYPE + ADD COLUMN (nullable); backfill `UPDATE sale_items SET "rewardKind"='BUY_X_GET_Y' WHERE "promotionId" IS NOT NULL AND "prePriceCentsBeforeDiscount"="unitPriceCents" AND "discountAmountCents">0`.
-- [ ] 5.4 GREEN (entity): `sale-item.entity.ts` — `ApplyBuyXGetYRewardInput.rewardKind?` (:68, default `'buy_x_get_y'`); store `_rewardKind` in `applyBuyXGetYReward` (:362); emit in `toResponse` (:512, verified `:456-518`); clear in `clearDiscountFields`. Re-run → GREEN.
-- [ ] 5.5 **BUILD GATE** (shared enum/DTO changed): `pnpm run build` → 0 errors. Then verify `pnpm prisma migrate diff` shows zero drift outside this migration. Commit `feat(sales): add SaleItemRewardKind discriminator + additive migration + backfill`.
+- [x] 5.1 RED: `src/sales/domain/sale-item.entity.spec.ts` — `applyBuyXGetYReward({...,rewardKind:'advanced'})` sets `_rewardKind`; `toResponse().rewardKind === 'advanced'`; BXGY path still emits `'buy_x_get_y'`; non-reward emits `null`; `clearDiscountFields` clears `_rewardKind`. Run → RED.
+- [x] 5.2 GREEN (schema): `prisma/schema.prisma` add `enum SaleItemRewardKind { BUY_X_GET_Y ADVANCED }` + nullable `rewardKind` on `SaleItem` (:728). `pnpm prisma generate`.
+- [x] 5.3 GREEN (migration): `pnpm prisma migrate dev --name add_sale_item_reward_kind` — CREATE TYPE + ADD COLUMN (nullable); backfill `UPDATE sale_items SET "rewardKind"='BUY_X_GET_Y' WHERE "promotionId" IS NOT NULL AND "prePriceCentsBeforeDiscount"="unitPriceCents" AND "discountAmountCents">0`.
+- [x] 5.4 GREEN (entity): `sale-item.entity.ts` — `ApplyBuyXGetYRewardInput.rewardKind?` (:68, default `'buy_x_get_y'`); store `_rewardKind` in `applyBuyXGetYReward` (:362); emit in `toResponse` (:512, verified `:456-518`); clear in `clearDiscountFields`. Re-run → GREEN.
+- [x] 5.5 **BUILD GATE** (shared enum/DTO changed): `pnpm run build` → 0 errors. Then verify `pnpm prisma migrate diff` shows zero drift outside this migration. Commit `feat(sales): add SaleItemRewardKind discriminator + additive migration + backfill`.
 
 ### Phase 6: Sales Apply Routing + Idempotence (WU6)
 
-- [ ] 6.1 RED: `src/sales/sales.service.spec.ts` — `recomputePromotions` routes `kind:'advanced'` → `applyBuyXGetYReward({...,rewardKind:'advanced'})`; GET line carries `rewardKind='advanced'`; **idempotent 5× byte-equal** (`rewardKind`/`discountAmountCents`/`unitPriceCents`/`prePriceCentsBeforeDiscount`/`rewardDiscountPercent` + `previewTotals` identical, no compounding); prior ADVANCED rewards cleared each recompute. Run → RED.
-- [ ] 6.2 GREEN: `sales.service.ts:515` add `kind:'advanced'` route arm calling `applyBuyXGetYReward` with the discriminator on the GET-side `SaleItem`. Re-run → GREEN. Commit `feat(sales): route ADVANCED reward through applyBuyXGetYReward rail (idempotent)`.
+- [x] 6.1 RED: `src/sales/sales.service.spec.ts` — `recomputePromotions` routes `kind:'advanced'` → `applyBuyXGetYReward({...,rewardKind:'advanced'})`; GET line carries `rewardKind='advanced'`; **idempotent 5× byte-equal** (`rewardKind`/`discountAmountCents`/`unitPriceCents`/`prePriceCentsBeforeDiscount`/`rewardDiscountPercent` + `previewTotals` identical, no compounding); prior ADVANCED rewards cleared each recompute. Run → RED.
+- [x] 6.2 GREEN: `sales.service.ts:515` add `kind:'advanced'` route arm calling `applyBuyXGetYReward` with the discriminator on the GET-side `SaleItem`. Re-run → GREEN. Commit `feat(sales): route ADVANCED reward through applyBuyXGetYReward rail (idempotent)`.
 
 ### Phase 7: Receipt Mapper (WU7)
 
-- [ ] 7.1 RED: `src/sales/infrastructure/prisma-sale.repository.spec.ts` — confirmed-receipt mapper (:1420-1459) emits `rewardKind='advanced'` for ADVANCED rows, `'buy_x_get_y'` for BXGY (no regression); persist rewardKind on save. Extend `sale.entity.spec.ts`: `previewTotals` for ADVANCED 100% → `totalCents=0` on GET line; S2 multi-group 600c. Run → RED.
-- [ ] 7.2 GREEN: mapper reads persisted `rewardKind`; save writes it. Re-run → GREEN. Commit `feat(sales): read/persist rewardKind in confirmed-receipt mapper`.
+- [x] 7.1 RED: `src/sales/infrastructure/prisma-sale.repository.spec.ts` — confirmed-receipt mapper (:1420-1459) emits `rewardKind='advanced'` for ADVANCED rows, `'buy_x_get_y'` for BXGY (no regression); persist rewardKind on save. Extend `sale.entity.spec.ts`: `previewTotals` for ADVANCED 100% → `totalCents=0` on GET line; S2 multi-group 600c. Run → RED.
+- [x] 7.2 GREEN: mapper reads persisted `rewardKind`; save writes it. Re-run → GREEN. Commit `feat(sales): read/persist rewardKind in confirmed-receipt mapper`.
 
 **Slice 2 boundary:** revert Slice 2 → engine pass is a no-op at persistence (Slice 1 pure logic intact); drop column + type reverses migration. BXGY untouched.
 
