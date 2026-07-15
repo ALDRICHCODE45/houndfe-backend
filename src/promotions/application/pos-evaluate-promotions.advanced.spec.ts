@@ -785,3 +785,219 @@ describe('PosEvaluatePromotionsUseCase — ADVANCED pass order (after BXGY, befo
     expect(result.order!.discountAmountCents).toBe(600);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D7 / 4R-review — Engine-level BUY/GET partition (D7 was intake-only, the
+// cross-entity overlap case slipped through). A line that matches the BUY
+// side MUST NOT also be a GET candidate (a line is either BUY-side or
+// GET-side, never both). Without this partition, BUY=PRODUCTS:P +
+// GET=CATEGORIES:C with P ∈ C emits a double benefit (BUY-side
+// totalBuyMatchedQty counts the P line AND the same P line receives the
+// GET-side reward). The intake disjoint check only catches same
+// (targetType, targetId) overlap; this rule is the engine-level
+// guarantee that closes the cross-entity case.
+// ---------------------------------------------------------------------------
+describe('PosEvaluatePromotionsUseCase — ADVANCED engine-level BUY/GET partition (D7 cross-entity guard, 4R)', () => {
+  it('cross-entity overlap: BUY=PRODUCTS:P, GET=CATEGORIES:C, P∈C, single line of P → no ADVANCED result (partition rule)', async () => {
+    // The P line carries categoryId=C, so it matches both BUY (PRODUCTS:P)
+    // and GET (CATEGORIES:C). The partition rule says: this line is BUY-
+    // only, NOT a GET candidate. totalBuyMatchedQty includes its full
+    // quantity, but the GET pool has zero candidates → no reward emits,
+    // and the P line is NOT double-benefited.
+    const advanced = makeAdvancedPromotion(
+      {
+        buyTargetType: 'PRODUCTS',
+        buyTargetIds: ['P-cross'],
+        getTargetType: 'CATEGORIES',
+        getTargetIds: ['C-cross'],
+      },
+      { buyQuantity: 1, getQuantity: 1, getDiscountPercent: 50 },
+    );
+    const repo = makeRepository([advanced]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          // Single line: P-cross product, in C-cross category. Matches
+          // BUY (productId=P-cross) AND would match GET (categoryId=C-cross).
+          makeLine({
+            itemId: 'item-p-cross',
+            productId: 'P-cross',
+            categoryId: 'C-cross',
+            quantity: 3,
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    // Partition: no GET candidate → no ADVANCED result.
+    expect(result.lines.find((l) => l.kind === 'advanced')).toBeUndefined();
+  });
+
+  it('cross-entity disjoint reward: BUY=PRODUCTS:P, GET=CATEGORIES:C, P∈C, P line + separate Q line in C → Q line rewarded', async () => {
+    // Regression guard for the legitimate case: P line (qty 3, in
+    // category C) satisfies the BUY aggregate. A SEPARATE Q line
+    // (also in category C, NOT in BUY) is the only valid GET candidate.
+    // The partition only excludes the P line from the GET pool — the Q
+    // line (not a BUY-side match) is a free GET candidate and gets
+    // rewarded. The P line itself is BUY-only and never double-benefited.
+    const advanced = makeAdvancedPromotion(
+      {
+        buyTargetType: 'PRODUCTS',
+        buyTargetIds: ['P-legit'],
+        getTargetType: 'CATEGORIES',
+        getTargetIds: ['C-legit'],
+      },
+      { buyQuantity: 3, getQuantity: 1, getDiscountPercent: 50 },
+    );
+    const repo = makeRepository([advanced]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          // P-legit line (in C-legit): BUY-side match (PRODUCTS:P-legit).
+          // Partition: excluded from GET pool (CATEGORIES:C-legit).
+          makeLine({
+            itemId: 'item-p-legit',
+            productId: 'P-legit',
+            categoryId: 'C-legit',
+            quantity: 3,
+            effectiveUnitPriceCents: 1000,
+          }),
+          // Q-legit line (in C-legit): NOT a BUY-side match (Q≠P), but
+          // matches GET (CATEGORIES:C-legit). The legitimate GET target.
+          makeLine({
+            itemId: 'item-q-legit',
+            productId: 'Q-legit',
+            categoryId: 'C-legit',
+            quantity: 1,
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    // Q-legit receives the reward; P-legit is BUY-only and NOT rewarded.
+    const qLineResult = result.lines.find(
+      (l) => l.itemId === 'item-q-legit',
+    );
+    expect(qLineResult).toBeDefined();
+    expect(qLineResult!.kind).toBe('advanced');
+    if (qLineResult!.kind === 'advanced') {
+      // 1 group × 1 unit × Math.round(1000*50/100) = 500c saving.
+      expect(qLineResult!.lineDiscountCents).toBe(500);
+      expect(qLineResult!.perUnitRewardCents).toBe(500);
+    }
+    // The P-legit line is BUY-only and must NOT receive a reward.
+    const pLineResult = result.lines.find(
+      (l) => l.itemId === 'item-p-legit',
+    );
+    expect(pLineResult).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D3 / 4R-review — Zero-cent ADVANCED reward must be skipped. Without the
+// skip, a sub-cent per-unit GET reward (1c unit at <50%) emits a 0-saving
+// `kind:'advanced'` result. The comparator sees 0 > existingTotal (0)
+// false, then a tie + lower promotionId wins, so the result REPLACES the
+// prior result and `applyBuyXGetYReward` is called with R=0 → throws
+// `BXGY_REWARD_INVALID`. The BXGY collector at use-case.ts:1177 has the
+// same skip already (`if (reward.lineDiscountCents <= 0) continue`);
+// this mirrors it on the ADVANCED loop.
+// ---------------------------------------------------------------------------
+describe('PosEvaluatePromotionsUseCase — ADVANCED zero-skip (D3 / 4R-review)', () => {
+  it('sub-cent per-unit GET reward (1c unit at 1%) → no ADVANCED result emitted, no throw', async () => {
+    // effectiveUnitPriceCents=1, getDiscountPercent=1 →
+    //   perUnitRewardCents = Math.round(1*1/100) = 0
+    //   lineDiscountCents  = take * 0 = 0
+    // With the fix, the engine SKIPS this 0-saving reward so it never
+    // emits a `kind:'advanced'` result. Without the fix, the 0-saving
+    // result wins the comparator and downstream `applyBuyXGetYReward`
+    // throws on R=0.
+    const advanced = makeAdvancedPromotion(
+      {
+        buyTargetType: 'PRODUCTS',
+        buyTargetIds: ['P-1c'],
+        getTargetType: 'PRODUCTS',
+        getTargetIds: ['Q-1c'],
+      },
+      { buyQuantity: 1, getQuantity: 1, getDiscountPercent: 1 },
+    );
+    const repo = makeRepository([advanced]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-p-1c',
+            productId: 'P-1c',
+            quantity: 1,
+            effectiveUnitPriceCents: 1,
+          }),
+          makeLine({
+            itemId: 'item-q-1c',
+            productId: 'Q-1c',
+            quantity: 1,
+            effectiveUnitPriceCents: 1,
+          }),
+        ],
+      }),
+    );
+
+    // No ADVANCED result emitted — the 0-saving reward was skipped.
+    expect(result.lines.find((l) => l.kind === 'advanced')).toBeUndefined();
+  });
+
+  it('rounds-but-zero per-unit reward (e.g. 50c at 1% on qty 1 → perUnit=1, line=1, NOT zero — sanity)', async () => {
+    // Regression guard: the skip only applies to truly-zero or negative
+    // rewards. A 1c line reward (50c unit × 1% = 0.5 → round = 1c)
+    // is still emitted normally. This pins that we did not over-skip.
+    const advanced = makeAdvancedPromotion(
+      {
+        buyTargetType: 'PRODUCTS',
+        buyTargetIds: ['P-tiny'],
+        getTargetType: 'PRODUCTS',
+        getTargetIds: ['Q-tiny'],
+      },
+      { buyQuantity: 1, getQuantity: 1, getDiscountPercent: 1 },
+    );
+    const repo = makeRepository([advanced]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-p-tiny',
+            productId: 'P-tiny',
+            quantity: 1,
+            effectiveUnitPriceCents: 100,
+          }),
+          makeLine({
+            itemId: 'item-q-tiny',
+            productId: 'Q-tiny',
+            quantity: 1,
+            effectiveUnitPriceCents: 50,
+          }),
+        ],
+      }),
+    );
+
+    // perUnitRewardCents = Math.round(50*1/100) = 1. lineDiscountCents = 1*1 = 1.
+    // Not zero → emitted.
+    const qLineResult = result.lines.find(
+      (l) => l.itemId === 'item-q-tiny',
+    );
+    expect(qLineResult).toBeDefined();
+    expect(qLineResult!.kind).toBe('advanced');
+    if (qLineResult!.kind === 'advanced') {
+      expect(qLineResult!.lineDiscountCents).toBe(1);
+      expect(qLineResult!.perUnitRewardCents).toBe(1);
+    }
+  });
+});

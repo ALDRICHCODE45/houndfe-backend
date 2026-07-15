@@ -261,61 +261,60 @@ export function matchTargetTier(
   },
   side: TargetSide = 'DEFAULT',
 ): LineMatchTier {
-  const effectiveSide = side;
-  // VARIANTS first — strict === null on variantId so an unset variant
-  // never matches (defensive: structural guarantee).
-  if (
-    line.variantId != null &&
-    targetItems.some(
-      (ti) =>
-        ti.side === effectiveSide &&
-        ti.targetType === 'VARIANTS' &&
-        ti.targetId === line.variantId,
-    )
-  ) {
-    return 'VARIANT';
+// VARIANTS first — strict === null on variantId so an unset variant
+    // never matches (defensive: structural guarantee).
+    if (
+      line.variantId != null &&
+      targetItems.some(
+        (ti) =>
+          ti.side === side &&
+          ti.targetType === 'VARIANTS' &&
+          ti.targetId === line.variantId,
+      )
+    ) {
+      return 'VARIANT';
+    }
+    if (
+      targetItems.some(
+        (ti) =>
+          ti.side === side &&
+          ti.targetType === 'PRODUCTS' &&
+          ti.targetId === line.productId,
+      )
+    ) {
+      return 'PRODUCT';
+    }
+    // CATEGORIES — null guard on line.categoryId so an unset/unresolved
+    // category (product with null categoryId OR id omitted from the
+    // resolver map) never silently matches. CATEGORIES comes before
+    // BRANDS by convention; both are tier-1 peers so the helper's
+    // branch order doesn't affect correctness — the engine's ordinal
+    // pre-pass resolves the peer tie by best-wins.
+    if (
+      line.categoryId != null &&
+      targetItems.some(
+        (ti) =>
+          ti.side === side &&
+          ti.targetType === 'CATEGORIES' &&
+          ti.targetId === line.categoryId,
+      )
+    ) {
+      return 'CATEGORY';
+    }
+    // BRANDS — null guard on line.brandId, symmetric with CATEGORIES.
+    if (
+      line.brandId != null &&
+      targetItems.some(
+        (ti) =>
+          ti.side === side &&
+          ti.targetType === 'BRANDS' &&
+          ti.targetId === line.brandId,
+      )
+    ) {
+      return 'BRAND';
+    }
+    return null;
   }
-  if (
-    targetItems.some(
-      (ti) =>
-        ti.side === effectiveSide &&
-        ti.targetType === 'PRODUCTS' &&
-        ti.targetId === line.productId,
-    )
-  ) {
-    return 'PRODUCT';
-  }
-  // CATEGORIES — null guard on line.categoryId so an unset/unresolved
-  // category (product with null categoryId OR id omitted from the
-  // resolver map) never silently matches. CATEGORIES comes before
-  // BRANDS by convention; both are tier-1 peers so the helper's
-  // branch order doesn't affect correctness — the engine's ordinal
-  // pre-pass resolves the peer tie by best-wins.
-  if (
-    line.categoryId != null &&
-    targetItems.some(
-      (ti) =>
-        ti.side === effectiveSide &&
-        ti.targetType === 'CATEGORIES' &&
-        ti.targetId === line.categoryId,
-    )
-  ) {
-    return 'CATEGORY';
-  }
-  // BRANDS — null guard on line.brandId, symmetric with CATEGORIES.
-  if (
-    line.brandId != null &&
-    targetItems.some(
-      (ti) =>
-        ti.side === effectiveSide &&
-        ti.targetType === 'BRANDS' &&
-        ti.targetId === line.brandId,
-    )
-  ) {
-    return 'BRAND';
-  }
-  return null;
-}
 
 const JS_DAY_OF_WEEK: ReadonlyArray<DayOfWeek> = [
   'SUNDAY', // 0
@@ -1236,8 +1235,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
    *     (D2); otherwise no result.
    *   - At least one GET-side line must exist (D4 degenerate-cart
    *     rule, S4 spec scenario) — otherwise no result.
-   *   - Intakerejects same-entity BUY/GET (D7) — engine sees only
+   *   - Intake rejects same-entity BUY/GET (D7) — engine sees only
    *     disjoint target lists, so no cart line matches both sides.
+   *     The engine itself ALSO enforces a BUY/GET partition (a line
+   *     is BUY-side or GET-side, never both) to close the cross-
+   *     entity overlap case the intake check cannot see — see the
+   *     `buyMatchedItemIds` set inside this method.
    *
    * Mutates `lineResults` in place (replaces by itemId on ADVANCED win).
    */
@@ -1270,11 +1273,16 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       }
 
       // D1 — aggregated BUY-side quantity across the draft.
+      // We also track WHICH lines contributed to the BUY aggregate so
+      // the engine can partition them out of the GET candidate pool —
+      // see the D7 cross-entity guard below.
       let totalBuyMatchedQty = 0;
+      const buyMatchedItemIds = new Set<string>();
       for (const line of lines) {
         if (line.hasManualDiscount) continue;
         if (matchTargetTier(promo.targetItems, line, 'BUY') === null) continue;
         totalBuyMatchedQty += line.quantity;
+        buyMatchedItemIds.add(line.itemId);
       }
 
       // D2 — per-group reward repeatability.
@@ -1285,6 +1293,20 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
       // S4 — degenerate-cart guard. If no line matches a GET-side
       // target, the helper has nothing to allocate. Skip.
+      //
+      // D7 cross-entity guard (4R-review) — the BUY-side aggregation
+      // above captures a SET of BUY-matching line ids; a cart line that
+      // already satisfied the BUY side MUST NOT also be a GET candidate
+      // (partition: a line is BUY-side OR GET-side, never both). Without
+      // this, a cross-entity overlap like BUY=PRODUCTS:P +
+      // GET=CATEGORIES:C with P ∈ C would double-benefit the same line
+      // (counted in `totalBuyMatchedQty` AND rewarded on the GET pool).
+      // The intake-side `assertAdvancedSideTargets` disjoint check
+      // (promotions.service.ts:642) only catches EXACT same-(targetType,
+      // targetId) overlap; this engine-level partition closes the
+      // cross-entity case that the intake check cannot see. Lines that
+      // do NOT match BUY are free GET candidates (they neither paid for
+      // the reward nor received it from another source).
       const getCandidateLines: Array<{
         itemId: string;
         effectiveUnitPriceCents: number;
@@ -1293,6 +1315,8 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       for (const line of lines) {
         if (line.hasManualDiscount) continue;
         if (matchTargetTier(promo.targetItems, line, 'GET') === null) continue;
+        // D7 partition: BUY-side lines cannot also be GET-side.
+        if (buyMatchedItemIds.has(line.itemId)) continue;
         getCandidateLines.push({
           itemId: line.itemId,
           effectiveUnitPriceCents: line.effectiveUnitPriceCents,
@@ -1313,6 +1337,17 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       // Apply each reward to its line via the 3-way cross-type
       // comparator. Replaces the existing PD / BXGY result on win.
       for (const reward of rewards) {
+        // D3 / 4R-review — zero-saving ADVANCED rewards are skipped. The
+        // BXGY collector at use-case.ts:1177 already has this guard
+        // (`if (reward.lineDiscountCents <= 0) continue`); mirror it on
+        // the ADVANCED loop. Without this skip, a sub-cent per-unit GET
+        // reward (e.g. 1c unit at 1% → perUnit=0, line=0) emits a 0-
+        // saving `kind:'advanced'` result. The comparator sees 0 > 0
+        // false, then the tie+lower-id path lets it WIN (replacing any
+        // prior null/equal result), and the downstream sales.service
+        // routing calls `applyBuyXGetYReward` with R=0 → throws
+        // `BXGY_REWARD_INVALID` and 500's the POS add-item.
+        if (reward.lineDiscountCents <= 0) continue;
         const targetLine = lines.find((l) => l.itemId === reward.itemId);
         if (!targetLine) continue;
 
