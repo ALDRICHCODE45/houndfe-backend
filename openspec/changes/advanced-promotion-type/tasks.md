@@ -102,8 +102,8 @@ except WU2 (port union edit).
 
 ### Phase 8: D7 Disjoint Intake Rejection (WU8)
 
-- [ ] 8.1 RED: NEW `src/promotions/promotions-validate-side-disjoint.spec.ts` — S3: ADVANCED create AND update with `buyTargetItems=[P1]` & `getTargetItems=[P1]` (any product/variant/category/brand combo) rejected with code `advanced_overlapping_targets`, no row persisted; cross-entity (`[CAT1]`/`[P1]`) accepted. Run → RED.
-- [ ] 8.2 GREEN: `promotions.service.ts:598` implement `assertAdvancedSideTargets` disjoint check on create + update, throw `advanced_overlapping_targets`. Re-run → GREEN. Commit `feat(promotions): reject same-entity ADVANCED BUY/GET at intake (D7)`.
+- [x] 8.1 RED: NEW `src/promotions/promotions-validate-side-disjoint.spec.ts` — S3: ADVANCED create AND update with `buyTargetItems=[P1]` & `getTargetItems=[P1]` (any product/variant/category/brand combo) rejected with code `advanced_overlapping_targets`, no row persisted; cross-entity (`[CAT1]`/`[P1]`) accepted. Run → RED.
+- [x] 8.2 GREEN: `promotions.service.ts:598` implement `assertAdvancedSideTargets` disjoint check on create + update, throw `advanced_overlapping_targets`. Re-run → GREEN. Commit `feat(promotions): reject same-entity ADVANCED BUY/GET at intake (D7)`.
 
 ### Phase 9: e2e Integration (WU9)
 
