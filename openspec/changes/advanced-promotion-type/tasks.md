@@ -49,26 +49,26 @@ except WU2 (port union edit).
 
 ### Phase 1: Side-Aware Matcher (WU1)
 
-- [ ] 1.1 RED: rewrite `src/promotions/application/match-target-tier.spec.ts:269-284` — replace "BUY/GET ignored" with side-aware: `matchTargetTier(items,line,'BUY')` hits BUY-side P1, `'GET'` hits GET-side P2, `'DEFAULT'` returns null; add DEFAULT-unchanged case for PD/BXGY. Run `pnpm run test:unit -- match-target-tier.spec.ts` → RED.
-- [ ] 1.2 GREEN: `pos-evaluate-promotions.use-case.ts:136` add `side: TargetSide = 'DEFAULT'` param; replace hardcoded `const side='DEFAULT'` (:145) with the param threaded through the 4-tier ladder. Re-run → GREEN.
-- [ ] 1.3 Regression: `pnpm run test:unit -- pos-evaluate-promotions` (PD + BXGY DEFAULT specs) → still GREEN. Commit `feat(promotions): make matchTargetTier side-aware (BUY/GET/DEFAULT)`.
+- [x] 1.1 RED: rewrite `src/promotions/application/match-target-tier.spec.ts:269-284` — replace "BUY/GET ignored" with side-aware: `matchTargetTier(items,line,'BUY')` hits BUY-side P1, `'GET'` hits GET-side P2, `'DEFAULT'` returns null; add DEFAULT-unchanged case for PD/BXGY. Run `pnpm run test:unit -- match-target-tier.spec.ts` → RED.
+- [x] 1.2 GREEN: `pos-evaluate-promotions.use-case.ts:136` add `side: TargetSide = 'DEFAULT'` param; replace hardcoded `const side='DEFAULT'` (:145) with the param threaded through the 4-tier ladder. Re-run → GREEN.
+- [x] 1.3 Regression: `pnpm run test:unit -- pos-evaluate-promotions` (PD + BXGY DEFAULT specs) → still GREEN. Commit `feat(promotions): make matchTargetTier side-aware (BUY/GET/DEFAULT)`.
 
 ### Phase 2: Pure Reward Helper (WU2)
 
-- [ ] 2.1 RED: NEW `src/promotions/application/pos-evaluate-promotions.advanced-helper.spec.ts` — cases: single-group; S2 multi-group (buy6/3 → 2 apps, 600c); zero-group (floor→0); 100% true-free (0c unit); >100 not reachable here (entity-guarded); `Math.round(eff*pct/100)` rounding; multi-`getQuantity`; multi-GET-line lowest-`itemId` allocation order. Run → RED.
-- [ ] 2.2 GREEN: add `PosEvalAdvancedLineResult` to `ports/pos-evaluate-promotions.port.ts:132` (union member); implement pure `computeAdvancedReward` in `use-case.ts` (mirror `computeBuyXGetYReward:73-100`); GET candidate lines sorted `itemId` asc. Re-run → GREEN.
-- [ ] 2.3 **BUILD GATE** (port union changed): `pnpm run build` → 0 errors (guards against BXGY-precedent TS2322 port mismatch). Commit `feat(promotions): add pure computeAdvancedReward helper + port result`.
+- [x] 2.1 RED: NEW `src/promotions/application/pos-evaluate-promotions.advanced-helper.spec.ts` — cases: single-group; S2 multi-group (buy6/3 → 2 apps, 600c); zero-group (floor→0); 100% true-free (0c unit); >100 not reachable here (entity-guarded); `Math.round(eff*pct/100)` rounding; multi-`getQuantity`; multi-GET-line lowest-`itemId` allocation order. Run → RED.
+- [x] 2.2 GREEN: add `PosEvalAdvancedLineResult` to `ports/pos-evaluate-promotions.port.ts:132` (union member); implement pure `computeAdvancedReward` in `use-case.ts` (mirror `computeBuyXGetYReward:73-100`); GET candidate lines sorted `itemId` asc. Re-run → GREEN.
+- [x] 2.3 **BUILD GATE** (port union changed): `pnpm run build` → 0 errors (guards against BXGY-precedent TS2322 port mismatch). Commit `feat(promotions): add pure computeAdvancedReward helper + port result`.
 
 ### Phase 3: D3 Cap Lift (WU3)
 
-- [ ] 3.1 RED: `src/promotions/domain/promotion.entity.spec.ts` — ADVANCED `validateGetDiscountPercent`: assert `100` accepted (was rejected), `101` still rejected. Run `pnpm run test:unit -- promotion.entity.spec.ts` → RED.
-- [ ] 3.2 GREEN: `promotion.entity.ts:184` set `const max = 100` (both types; `>100` rejected). Re-run → GREEN. Commit `feat(promotions): lift ADVANCED get-discount cap 99→100 (true free)`.
+- [x] 3.1 RED: `src/promotions/domain/promotion.entity.spec.ts` — ADVANCED `validateGetDiscountPercent`: assert `100` accepted (was rejected), `101` still rejected. Run `pnpm run test:unit -- promotion.entity.spec.ts` → RED.
+- [x] 3.2 GREEN: `promotion.entity.ts:184` set `const max = 100` (both types; `>100` rejected). Re-run → GREEN. Commit `feat(promotions): lift ADVANCED get-discount cap 99→100 (true free)`.
 
 ### Phase 4: Advanced Engine Pass (WU4)
 
-- [ ] 4.1 RED: NEW `src/promotions/application/pos-evaluate-promotions.advanced.spec.ts` — gate admits 4 buy × 4 get target types (PRODUCTS/VARIANTS/CATEGORIES/BRANDS); null-target silently skipped; MANUAL silently skipped (D6); side-aware aggregated BUY counting (D1: S1 many-small-lines, single-line ≥N, out-of-target excluded); D5 best-wins 50% ADVANCED beats 20% PD; tie→lowest id; S4 degenerate cart (BUY met, no GET → no result). Run → RED.
-- [ ] 4.2 GREEN: admit ADVANCED in `isSupportedEngineType` (`use-case.ts:579`, gate on `buy/getTargetType`); implement `evaluateAdvancedPass` slotted `:284` (after BXGY `:283`, before ORDER `:304`); wire best-wins into comparator `:900-905` (3-way max via `lineTotalSavingCents`); `computeAppliedDiscountCents:1060` add `advanced`→`lineDiscountCents` for ORDER base. Re-run → GREEN.
-- [ ] 4.3 Regression: `pnpm run test:unit -- pos-evaluate-promotions` full engine suite → GREEN. Commit `feat(promotions): add cross-line evaluateAdvancedPass + 3-way best-wins`.
+- [x] 4.1 RED: NEW `src/promotions/application/pos-evaluate-promotions.advanced.spec.ts` — gate admits 4 buy × 4 get target types (PRODUCTS/VARIANTS/CATEGORIES/BRANDS); null-target silently skipped; MANUAL silently skipped (D6); side-aware aggregated BUY counting (D1: S1 many-small-lines, single-line ≥N, out-of-target excluded); D5 best-wins 50% ADVANCED beats 20% PD; tie→lowest id; S4 degenerate cart (BUY met, no GET → no result). Run → RED.
+- [x] 4.2 GREEN: admit ADVANCED in `isSupportedEngineType` (`use-case.ts:579`, gate on `buy/getTargetType`); implement `evaluateAdvancedPass` slotted `:284` (after BXGY `:283`, before ORDER `:304`); wire best-wins into comparator `:900-905` (3-way max via `lineTotalSavingCents`); `computeAppliedDiscountCents:1060` add `advanced`→`lineDiscountCents` for ORDER base. Re-run → GREEN.
+- [x] 4.3 Regression: `pnpm run test:unit -- pos-evaluate-promotions` full engine suite → GREEN. Commit `feat(promotions): add cross-line evaluateAdvancedPass + 3-way best-wins`.
 
 **Slice 1 boundary:** revert these 4 commits → `isSupportedEngineType` rejects ADVANCED again; PD/BXGY/ORDER untouched. No DB changes yet.
 
