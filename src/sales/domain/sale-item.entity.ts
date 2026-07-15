@@ -33,6 +33,14 @@ export interface SaleItemProps {
    * the same percent it was persisted with.
    */
   rewardDiscountPercent?: number | null;
+  /**
+   * Slice 2 / WU5 — D4 wire discriminator. Read from the new
+   * `SaleItem.rewardKind` column. Lowercase wire value: 'buy_x_get_y' |
+   * 'advanced' | null. The receipt mapper (prisma-sale.repository.ts:1420)
+   * persists uppercase Prisma enum values and the entity accepts both
+   * shapes on round-trip — see `fromPersistence` below.
+   */
+  rewardKind?: 'buy_x_get_y' | 'advanced' | null;
 }
 
 export interface ApplySaleItemDiscountInput {
@@ -82,6 +90,16 @@ export interface ApplyBuyXGetYRewardInput {
    * reward line can expose the true percent end-to-end.
    */
   getDiscountPercent: number;
+  /**
+   * Slice 2 / WU5 — D4 wire discriminator. Defaults to `'buy_x_get_y'` when
+   * omitted, preserving the BXGY contract for every existing call site
+   * (sales.service.ts:515 was the only pre-Slice-2 caller and it does not
+   * pass the field). Pass `'advanced'` for ADVANCED-kind engine results
+   * (sales.service.ts:515 WU6 close-out) so the wire emits
+   * `rewardKind: 'advanced'` — the Slice 1 stub at sales.service.ts:515-525
+   * silently relabeled ADVANCED as BXGY without this field.
+   */
+  rewardKind?: 'buy_x_get_y' | 'advanced';
 }
 
 export interface OverrideSaleItemPriceInput {
@@ -107,6 +125,21 @@ export class SaleItem {
    * exactly. Set by `applyBuyXGetYReward`, cleared by `clearDiscountFields`.
    */
   private _rewardDiscountPercent: number | null = null;
+  /**
+   * Slice 2 / WU5 — D4 wire discriminator (design.md Decision 4; spec.md
+   * MODIFIED Requirement: `rewardKind: 'advanced'` Wire Discriminator).
+   * The column-derived `isBuyXGetYReward()` predicate is byte-identical for
+   * BUY_X_GET_Y and ADVANCED lines (both reuse the same
+   * `prePriceCentsBeforeDiscount === unitPriceCents + promotionId set +
+   * discountAmountCents > 0` shape), so the engine CANNOT distinguish the
+   * two without a persisted discriminator. This field is set by
+   * `applyBuyXGetYReward({ ..., rewardKind })` and round-tripped by
+   * `fromPersistence({ ..., rewardKind })`. Default on call sites that
+   * don't pass the new field is `'buy_x_get_y'` (back-compat for every
+   * existing BXGY caller). Null on non-reward lines — mirrors
+   * `_rewardDiscountPercent` exactly.
+   */
+  private _rewardKind: 'buy_x_get_y' | 'advanced' | null = null;
 
   private constructor(
     public readonly id: string,
@@ -201,6 +234,11 @@ export class SaleItem {
       props.promotionId ?? null,
     );
     item._rewardDiscountPercent = props.rewardDiscountPercent ?? null;
+    // WU5 — round-trip the persisted D4 discriminator. The receipt mapper
+    // already passes the lowercase wire shape (`'buy_x_get_y' | 'advanced'`)
+    // directly, so no enum coercion is needed here; the field is null on
+    // non-reward rows.
+    item._rewardKind = props.rewardKind ?? null;
     return item;
   }
 
@@ -242,6 +280,21 @@ export class SaleItem {
 
   get rewardDiscountPercent(): number | null {
     return this._rewardDiscountPercent;
+  }
+
+  /**
+   * Slice 2 / WU5 — D4 wire discriminator. Returns the persisted
+   * `rewardKind` value when one is set (BXGY/ADVANCED); null otherwise
+   * (non-reward lines: per-unit PD, manual free-form, plain).
+   *
+   * Surfaced on the wire via `toResponse().rewardKind`. Read by the
+   * confirmed-sale receipt mapper after a persistence round-trip; written
+   * by `applyBuyXGetYReward({ ..., rewardKind })` and persisted via the
+   * new `SaleItem.rewardKind` column (additive migration; see
+   * prisma/migrations/<ts>_add_sale_item_reward_kind/migration.sql).
+   */
+  get rewardKind(): 'buy_x_get_y' | 'advanced' | null {
+    return this._rewardKind;
   }
 
   get discountAmountCents(): number | null {
@@ -391,6 +444,12 @@ export class SaleItem {
     this._promotionId = input.promotionId;
     // Exact promo percent — carried verbatim, never derived from cents.
     this._rewardDiscountPercent = input.getDiscountPercent ?? null;
+    // WU5 — D4 wire discriminator. Defaults to 'buy_x_get_y' for back-
+    // compat with every pre-Slice-2 BXGY call site that does not pass the
+    // new field. WU6 closes the sales.service.ts:515-525 Slice-1 stub by
+    // passing `rewardKind: 'advanced'` on the ADVANCED arm so the wire
+    // stops silently relabeling ADVANCED as BXGY.
+    this._rewardKind = input.rewardKind ?? 'buy_x_get_y';
   }
 
   /**
@@ -451,6 +510,10 @@ export class SaleItem {
     this._promotionId = null;
     // Cleared alongside the reward state — mirrors rewardKind reset.
     this._rewardDiscountPercent = null;
+    // WU5 — clear the D4 discriminator too. recompute clear/apply relies on
+    // this: a stale rewardKind would mislabel a non-reward line as
+    // BXGY/ADVANCED on the next toResponse() read.
+    this._rewardKind = null;
   }
 
   toResponse() {
@@ -465,7 +528,8 @@ export class SaleItem {
     // Formula mirrors the receipt mapper exactly:
     //   subtotalCents = unitPriceCents * quantity
     //                   - (isBuyXGetYReward() ? (discountAmountCents ?? 0) : 0)
-    //   rewardKind    = isBuyXGetYReward() ? 'buy_x_get_y' : null
+    //   rewardKind    = this._rewardKind
+    //                   ?? (isBuyXGetYReward() ? 'buy_x_get_y' : null)
     //
     // Per-unit PRODUCT_DISCOUNT path keeps `unitPrice < prePrice` so
     // `isBuyXGetYReward()` returns false → R = 0 → no subtraction (the
@@ -473,6 +537,13 @@ export class SaleItem {
     // `unitPriceCents`). Manual free-form discounts fail the discriminator's
     // first clause (promotionId null) and the same logic applies. Plain
     // lines return gross = NET.
+    //
+    // WU5 — the new `_rewardKind` is the authoritative source. The
+    // `isBuyXGetYReward()` column-derived fallback ONLY fires when the
+    // discriminator is not set (call site did not pass it AND the entity
+    // was not reloaded from persistence). In the persisted path (receipt
+    // mapper), the mapper passes `rewardKind` explicitly so the wire
+    // surfaces the column value verbatim — no fallback is taken.
     //
     // NOTE: `subtotalCents` here is intentionally a NEW field on the
     // returned wire object and DOES NOT touch the existing
@@ -507,9 +578,14 @@ export class SaleItem {
       // NET per-line subtotal — see formula in the block comment above.
       subtotalCents:
         this._unitPriceCents * this._quantity - bxgyRewardCents,
-      // Explicit wire flag so the frontend can render the "free"/reward
-      // badge without inferring it from the persisted columns.
-      rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
+      // WU5 — D4 wire discriminator. Authoritative source is `_rewardKind`;
+      // the column-derived `isBxgy` predicate is the back-compat fallback
+      // (only fires for the rare in-memory call site that did not pass
+      // `rewardKind` and was not reloaded from persistence). For ADVANCED
+      // rows the column-derived check returns true (same shape as BXGY),
+      // but `_rewardKind = 'advanced'` wins — so the wire is NEVER silently
+      // relabeled as BXGY (the Slice 1 stub bug).
+      rewardKind: this._rewardKind ?? (isBxgy ? 'buy_x_get_y' : null),
       // Exact BXGY reward percent (0..100). Null on non-reward lines — same
       // `isBxgy` guard as `rewardKind`. Lets the frontend show "GRATIS" only
       // at 100%, otherwise the real percent.
