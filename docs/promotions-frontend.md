@@ -38,10 +38,11 @@ Y soporta condiciones:
 ### Fuera de alcance (intencional)
 
 - Limitar por sucursales (branches)
-- Motor de cálculo de promociones en checkout/POS (stacking/aplicación efectiva)
 - Cron de sincronización de status
 
-> El módulo Promotions hoy es **definición/gestión de reglas (CRUD)**. La aplicación en venta vive en POS/Ventas.
+> El módulo Promotions hoy es **definición/gestión de reglas (CRUD) + motor de
+> evaluación en POS**. La aplicación efectiva en venta vive en POS/Ventas — ver
+> `docs/promotions-in-sale-frontend-prompt.md` para el contrato del lado venta.
 
 ---
 
@@ -216,13 +217,14 @@ Endpoint: `POST /promotions`
   - si `discountType=PERCENTAGE` → **1..100**
   - si `discountType=FIXED` → **> 0** (centavos)
 - `buyQuantity` / `getQuantity` → `>= 1`
-- `getDiscountPercent` → `0..99` (`0 = gratis`)
+- `getDiscountPercent` → `0..100` (`100 = gratis`)
 - `endDate < startDate` → error `INVALID_DATE_RANGE`
 - targets duplicados (mismo `side+targetType+targetId`) → error `duplicate_target`
 - para `ADVANCED`:
   - si envías `buyTargetType`, debe existir al menos un `buyTargetItems`
   - si envías `getTargetType`, debe existir al menos un `getTargetItems`
   - si no, error `advanced_missing_targets`
+  - las entidades de `buyTargetItems` y `getTargetItems` deben ser **disjuntas** (ningún `targetType+targetId` puede aparecer en ambos lados), si no, error `advanced_overlapping_targets`
 
 ---
 
@@ -566,6 +568,7 @@ Mandá fechas ISO con zona (`Z` o `-06:00`, etc.) para evitar desfasajes.
 | `400` | `INVALID_TARGET` | id inexistente en categorías/marcas/productos/clientes/price-lists |
 | `400` | `duplicate_target` | target repetido (mismo side+type+id) |
 | `400` | `advanced_missing_targets` | ADVANCED con `buyTargetType/getTargetType` sin sus items |
+| `400` | `advanced_overlapping_targets` | ADVANCED con la misma entidad (`targetType+targetId`) en `buyTargetItems` y `getTargetItems` |
 | `400` | `Bad Request` validación | UUID inválido en path o payload inválido DTO |
 
 ---
@@ -650,8 +653,8 @@ await fetch('/promotions', {
    - Evitá duplicar `daysOfWeek` para no chocar constraint única en DB.
 
 6. **Porcentajes UI legacy en saltos de 5%**
-   - Backend permite cualquier entero `0..99` para `getDiscountPercent`.
-   - Si quieren replicar legacy exacto, restringir en frontend a `0,5,10,...,95`.
+   - Backend permite cualquier entero `0..100` para `getDiscountPercent` (`100` = gratis).
+   - Si quieren replicar legacy exacto, restringir en frontend a `0,5,10,...,95,100`.
 
 ---
 
@@ -733,10 +736,69 @@ export interface PromotionResponse {
 
 ---
 
-## 16) Nota final para el equipo
+## 16) Semántica de aplicación en POS (motor + wire)
 
-Este módulo ya quedó preparado para operar como **catálogo de reglas promocionales**.
+> Contrato vigente a partir de `feat/advanced-promotion-type` (Slices 1+2+3). Lo que el POS
+> aplica sobre el carrito se modela con un único rail de reward. La diferencia entre
+> `BUY_X_GET_Y` y `ADVANCED` se reduce a **cómo se cuenta el BUY** (single-line vs.
+> agregado cross-line) y al discriminador `rewardKind` que la confirmación de venta
+> persiste en `SaleItem`.
 
-Cuando se implemente el motor de cálculo en POS, estas promociones se evaluarán sobre carrito/cliente/lista/día y se resolverá la acumulación de descuentos.
+### 16.1 Cuatro tipos, una sola tabla de prioridad
 
-Si necesitan, en un siguiente documento armamos la parte de **estrategia de aplicación en checkout** (prioridades, stacking, conflictos, redondeos, y trazabilidad por línea).
+| Tipo | Lo que descuenta | Cómo decide el ganador por línea |
+|---|---|---|
+| `PRODUCT_DISCOUNT` | una línea elegible | mejor descuento en centavos (`lineTotalSavingCents`) |
+| `BUY_X_GET_Y` | línea que matchea el `targetItems` (per-line `quantity >= buyQuantity`) | idem, 2-way max entre PD y BXGY |
+| `ADVANCED` | línea del lado GET, recompensada cuando la suma agregada de líneas BUY-side alcanza `buyQuantity` | idem, 3-way max entre PD, BXGY y ADVANCED |
+| `ORDER_DISCOUNT` | subtotal post-línea | único AUTO/MANUAL activo (sin stacking) |
+
+Tie-break: `promotionId` ascendente. No hay stacking de ganadores en una misma línea.
+
+### 16.2 ADVANCED — reglas de matching
+
+- **Lado BUY**: la suma de cantidades de las líneas del cart cuyo entity (VARIANT > PRODUCT > CATEGORY/BRAND) matchea un `buyTargetItems` (lado `BUY`) debe alcanzar `buyQuantity`. Las líneas se agregan a través del cart — una sola línea con `qty ≥ buyQuantity` también cuenta.
+- **Lado GET**: el descuento se aplica a líneas que matchean un `getTargetItems` (lado `GET`). Si no hay línea GET elegible, no hay reward (no error).
+- **Reward**: `floor(totalBuyMatchedQty / buyQuantity)` grupos; cada grupo descuenta `getQuantity` unidades del GET a `getDiscountPercent` del `effectiveUnitPriceCents` de esa línea.
+- **AUTOMATIC-only** en este slice: un ADVANCED con `method='MANUAL'` se ignora silenciosamente.
+- **Disjunto por construcción**: la API rechaza `buyTargetItems ∩ getTargetItems ≠ ∅` con `advanced_overlapping_targets` (D7) — el motor nunca tiene que razonar sobre overlap.
+
+### 16.3 Wire — discriminador `rewardKind`
+
+`SaleItem.toResponse()` y el mapper de la confirmación de venta emiten un campo nuevo:
+
+```json
+{
+  "promotionId": "…",
+  "unitPriceCents": 1000,
+  "prePriceCentsBeforeDiscount": 1000,
+  "discountAmountCents": 500,
+  "rewardDiscountPercent": 50,
+  "rewardKind": "advanced"
+}
+```
+
+| Valor | Cuándo se emite |
+|---|---|
+| `'buy_x_get_y'` | BXGY auto-aplicada (incluye 100% gratis) |
+| `'advanced'` | ADVANCED auto-aplicada (incluye 100% gratis) |
+| `null` | línea sin reward (manual discount, sin promo, etc.) |
+
+> No derivar `rewardKind` desde `promotionId` ni desde `discountAmountCents > 0`. Es un
+> campo persistido (`SaleItem.rewardKind`, enum `SaleItemRewardKind`) — sólo la
+> columna es fuente de verdad.
+
+### 16.4 100% gratis en ADVANCED
+
+`getDiscountPercent = 100` está permitido para ADVANCED (mismo clamp que BXGY).
+El get-unit se surfacea a 0c y la línea muestra:
+
+- `subtotalCents = effectiveUnitPriceCents × quantity`
+- `discountCents = subtotalCents` (total)
+- `totalCents = 0`
+- `rewardDiscountPercent = 100`
+- `rewardKind = 'advanced'`
+
+La guarda del rail compartido exige `discountAmountCents < unitPriceCents × quantity`,
+así que la línea del GET debe llegar con `qty ≥ 2` para que un 100% cierre (qty=1
+falla la guarda por 1 cent).

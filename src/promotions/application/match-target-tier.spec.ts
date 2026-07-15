@@ -266,11 +266,67 @@ describe('matchTargetTier (W3) — pure helper', () => {
     });
   });
 
-  describe('side discriminator', () => {
-    it('ignores non-DEFAULT-side targets (BUY/GET for BUY_X_GET_Y / ADVANCED)', () => {
-      // The engine only matches DEFAULT-side targets for PRODUCT_DISCOUNT.
-      // BUY/GET rows belong to BUY_X_GET_Y / ADVANCED which the engine
-      // never applies.
+  describe('side discriminator (WU1 — ADVANCED side-aware matcher)', () => {
+    it('BUY-side items match a PRODUCTS-typed target when side=BUY (ADVANCED buy side)', () => {
+      // The engine calls `matchTargetTier(items, line, 'BUY')` when
+      // counting BUY-side matches for ADVANCED. A BUY-side PRODUCTS
+      // target on P1 must hit a P1 line.
+      const items: MiniTargetItem[] = [
+        { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
+        { side: 'GET', targetType: 'PRODUCTS', targetId: 'P2' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: null,
+      }, 'BUY');
+      expect(result).toBe('PRODUCT');
+    });
+
+    it('GET-side items match a PRODUCTS-typed target when side=GET (ADVANCED get side)', () => {
+      // The engine calls `matchTargetTier(items, line, 'GET')` when
+      // evaluating which GET-side lines carry the reward. A GET-side
+      // PRODUCTS target on P2 must hit a P2 line.
+      const items: MiniTargetItem[] = [
+        { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
+        { side: 'GET', targetType: 'PRODUCTS', targetId: 'P2' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P2',
+        variantId: null,
+      }, 'GET');
+      expect(result).toBe('PRODUCT');
+    });
+
+    it("returns null when side='BUY' but only GET-side targets are present", () => {
+      // Side filter is exclusive: a BUY query must NOT match GET-side
+      // targets.
+      const items: MiniTargetItem[] = [
+        { side: 'GET', targetType: 'PRODUCTS', targetId: 'P1' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: null,
+      }, 'BUY');
+      expect(result).toBeNull();
+    });
+
+    it("returns null when side='GET' but only BUY-side targets are present", () => {
+      const items: MiniTargetItem[] = [
+        { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: null,
+      }, 'GET');
+      expect(result).toBeNull();
+    });
+
+    it("side='DEFAULT' (default) returns null when only BUY/GET-side targets are present — preserves PD/BXGY contract", () => {
+      // The DEFAULT side contract MUST be preserved byte-for-byte for
+      // existing PRODUCT_DISCOUNT and BUY_X_GET_Y call sites — those
+      // pass `side='DEFAULT'` (or no arg) and a BUY/GET-only target
+      // list MUST still return null (BUY/GET never belonged to the
+      // DEFAULT-side matcher).
       const items: MiniTargetItem[] = [
         { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
         { side: 'GET', targetType: 'PRODUCTS', targetId: 'P1' },
@@ -278,8 +334,64 @@ describe('matchTargetTier (W3) — pure helper', () => {
       const result = matchTargetTier(items, {
         productId: 'P1',
         variantId: null,
-      });
+      }, 'DEFAULT');
       expect(result).toBeNull();
+    });
+
+    it('side-aware VARIANTS tier: BUY-side VARIANTS target hits a V-A line when side=BUY', () => {
+      const items: MiniTargetItem[] = [
+        { side: 'BUY', targetType: 'VARIANTS', targetId: 'V-A' },
+        { side: 'GET', targetType: 'VARIANTS', targetId: 'V-B' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: 'V-A',
+      }, 'BUY');
+      expect(result).toBe('VARIANT');
+    });
+
+    it('side-aware CATEGORIES tier: GET-side CATEGORIES target hits the line.categoryId when side=GET', () => {
+      const items: MiniTargetItem[] = [
+        { side: 'BUY', targetType: 'CATEGORIES', targetId: 'CAT-BUY' },
+        { side: 'GET', targetType: 'CATEGORIES', targetId: 'CAT-GET' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: null,
+        categoryId: 'CAT-GET',
+        brandId: null,
+      }, 'GET');
+      expect(result).toBe('CATEGORY');
+    });
+
+    it('side-aware BRANDS tier: BUY-side BRANDS target hits the line.brandId when side=BUY', () => {
+      const items: MiniTargetItem[] = [
+        { side: 'BUY', targetType: 'BRANDS', targetId: 'BR-BUY' },
+        { side: 'GET', targetType: 'BRANDS', targetId: 'BR-GET' },
+      ];
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: null,
+        categoryId: null,
+        brandId: 'BR-BUY',
+      }, 'BUY');
+      expect(result).toBe('BRAND');
+    });
+
+    it('no side argument defaults to DEFAULT — legacy callers (PD/BXGY) get unchanged behavior', () => {
+      // When no `side` argument is passed, the matcher MUST default to
+      // 'DEFAULT' so the existing PRODUCT_DISCOUNT and BUY_X_GET_Y
+      // callers — which already pass no side — keep compiling and
+      // returning the same result as before.
+      const items: MiniTargetItem[] = [
+        { side: 'DEFAULT', targetType: 'PRODUCTS', targetId: 'P1' },
+      ];
+      // Note: no third argument.
+      const result = matchTargetTier(items, {
+        productId: 'P1',
+        variantId: null,
+      });
+      expect(result).toBe('PRODUCT');
     });
   });
 

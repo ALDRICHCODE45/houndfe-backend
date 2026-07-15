@@ -279,9 +279,22 @@ describe('Promotion Entity', () => {
       expect(promo.getTargetType).toBe('CATEGORIES');
     });
 
-    it('should reject getDiscountPercent = 100 for ADVANCED', () => {
+    it('should accept getDiscountPercent = 100 for ADVANCED (D3 — true free, cap lifted 99→100)', () => {
+      // WU3 — D3 correction: ADVANCED now also reaches 100% (true free),
+      // reusing BXGY's applyDiscount clamp. Per the locked product
+      // decision, the prior 99% cap on ADVANCED is lifted.
+      const promo = Promotion.create({
+        ...validAdvanced,
+        getDiscountPercent: 100,
+      });
+      expect(promo.getDiscountPercent).toBe(100);
+    });
+
+    it('should still reject getDiscountPercent > 100 for ADVANCED', () => {
+      // The cap on ADVANCED now sits at 100 (was 99). >100 is still
+      // universally rejected.
       expect(() =>
-        Promotion.create({ ...validAdvanced, getDiscountPercent: 100 }),
+        Promotion.create({ ...validAdvanced, getDiscountPercent: 101 }),
       ).toThrow(InvalidArgumentError);
     });
 

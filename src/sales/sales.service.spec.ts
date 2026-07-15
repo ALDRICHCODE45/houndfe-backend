@@ -6942,6 +6942,389 @@ describe('SalesService', () => {
   });
 
   // ==========================================================================
+  // Slice 2 / Work Unit 6 — ADVANCED rewardKind routing + idempotence
+  // (D4 wire discriminator close-out; spec.md:130-145)
+  //
+  // Slice 1 left a STUB at sales.service.ts:515-525 that routed BOTH
+  // 'buy-x-get-y' AND 'advanced' engine results through `applyBuyXGetYReward`
+  // WITHOUT the `rewardKind='advanced'` discriminator. The wire therefore
+  // emitted `rewardKind: 'buy_x_get_y'` for ADVANCED rows — silent
+  // relabeling. WU5 added the field to the entity; WU6 closes the routing
+  // so the ADVANCED arm passes `rewardKind: 'advanced'` and the wire
+  // surfaces it. This block also pins the idempotent 5× recompute contract
+  // (spec.md:5x recompute → byte-equal SaleItem rows; no compounding).
+  // ==========================================================================
+  describe('Work Unit 6 ADVANCED — recomputePromotions routes ADVANCED with rewardKind="advanced" (D4 close-out)', () => {
+    function buildAdvancedDraft(
+      saleId: string,
+      itemId: string,
+      quantity = 3,
+    ): Sale {
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      sale.addItem({
+        id: itemId,
+        saleId,
+        productId: 'p-get',
+        variantId: null,
+        productName: 'Holder-X',
+        variantName: null,
+        quantity,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    it('recomputePromotions routes kind:"advanced" to applyBuyXGetYReward with rewardKind="advanced" (WU6, spec.md:130-139)', async () => {
+      // The Slice 1 stub routed 'advanced' to applyBuyXGetYReward without
+      // the discriminator → wire emitted 'buy_x_get_y'. WU6 fixes that:
+      // the ADVANCED engine result now reaches the entity with the
+      // discriminator, and the wire surfaces `rewardKind: 'advanced'`.
+      //
+      // The test seeds the sale with a single item at qty 3 and triggers
+      // recompute via `updateItemQuantity`. addItem is intentionally NOT
+      // used: it stacks by product+variant and would change qty between
+      // calls, polluting the assertion.
+      const saleId = 'sale-advanced-apply';
+      const itemId = 'item-advanced-apply';
+      const seedSale = (): Sale =>
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: itemId,
+              saleId,
+              productId: 'p-get',
+              variantId: null,
+              productName: 'Holder-X',
+              variantName: null,
+              quantity: 3,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+            },
+          ],
+        });
+      saleRepo.findById.mockImplementation(() => Promise.resolve(seedSale()));
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  kind: 'advanced',
+                  itemId: line.itemId,
+                  promotionId: 'promo-advanced-auto',
+                  discountTitle: 'Buy 3 Get 1 @ 100% (ADVANCED)',
+                  lineDiscountCents: 1000,
+                  perUnitRewardCents: 1000,
+                  discountedUnitCount: 1,
+                  getDiscountPercent: 100,
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      await service.updateItemQuantity(saleId, 'user-1', itemId, {
+        quantity: 3,
+      });
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const item = savedSale.items[0];
+
+      // WU6 — the entity surfaces rewardKind='advanced' on the wire.
+      // (Without the fix, this would be 'buy_x_get_y' and the wire would
+      // silently mislabel the row.)
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
+      // The BXGY rail still applies: unitPrice UNCHANGED, prePrice ===
+      // unitPrice, discountAmountCents = R, discountType='amount'.
+      expect(item.unitPriceCents).toBe(1000);
+      expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+      expect(item.discountAmountCents).toBe(1000);
+      expect(item.discountValue).toBe(1000);
+      expect(item.discountType).toBe('amount');
+      expect(item.promotionId).toBe('promo-advanced-auto');
+      // 100% true-free: NET subtotal = unitPrice*qty - R = 3000 - 1000 = 2000c.
+      expect(item.toResponse().subtotalCents).toBe(2000);
+      expect(item.rewardDiscountPercent).toBe(100);
+    });
+
+    it('recomputePromotions does NOT silently relabel ADVANCED as BXGY (Slice 1 stub regression guard)', async () => {
+      // The exact failure mode of the Slice 1 stub: passing `kind:'advanced'`
+      // to applyBuyXGetYReward WITHOUT the discriminator made the wire emit
+      // 'buy_x_get_y'. This test pins the FIX: with WU6's routing, an
+      // ADVANCED result MUST emit 'advanced' on the wire (not 'buy_x_get_y').
+      // S2 spec scenario: 6 BUY units / buy 3 → 2 reward groups at 30%.
+      const saleId = 'sale-advanced-not-bxgy';
+      const itemId = 'item-advanced-not-bxgy';
+      const seedSale = (): Sale =>
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: itemId,
+              saleId,
+              productId: 'p-get',
+              variantId: null,
+              productName: 'Holder-X',
+              variantName: null,
+              quantity: 6,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+            },
+          ],
+        });
+      saleRepo.findById.mockImplementation(() => Promise.resolve(seedSale()));
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  kind: 'advanced',
+                  itemId: line.itemId,
+                  promotionId: 'promo-advanced-s2',
+                  discountTitle: 'Buy 3 Get 1 @ 30% (ADVANCED)',
+                  lineDiscountCents: 600,
+                  perUnitRewardCents: 300,
+                  discountedUnitCount: 2,
+                  getDiscountPercent: 30,
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      await service.updateItemQuantity(saleId, 'user-1', itemId, {
+        quantity: 6,
+      });
+
+      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const item = savedSale.items[0];
+
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
+      // And NOT 'buy_x_get_y' (the Slice 1 silent-relabel bug):
+      expect(item.toResponse().rewardKind).not.toBe('buy_x_get_y');
+      // S2 math: 2 groups * 1 * round(1000*30/100) = 600c saving.
+      expect(item.discountAmountCents).toBe(600);
+      expect(item.discountValue).toBe(300);
+    });
+
+    it('idempotent 5x recompute: 5 consecutive recomputes on the same draft produce byte-equal SaleItem rows (no compounding)', async () => {
+      // spec.md:5x recompute idempotence — every recompute must
+      // clear prior PROMO-sourced discounts and re-apply the new result
+      // so the SaleItem row converges to a stable state. The discriminator
+      // (`rewardKind='advanced'`) and the cents-snapshot fields MUST be
+      // identical across all 5 recomputes.
+      //
+      // The test seeds the sale with a single item of the correct qty and
+      // triggers 5 `updateItemQuantity` calls (which invoke the recompute
+      // loop on every call). addItem is intentionally NOT used here:
+      // addItem stacks by product+variant and would change qty between
+      // calls, polluting the idempotence assertion.
+      const saleId = 'sale-advanced-5x';
+      const itemId = 'item-advanced-5x';
+      const seedSale = (): Sale =>
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: itemId,
+              saleId,
+              productId: 'p-get',
+              variantId: null,
+              productName: 'Holder-X',
+              variantName: null,
+              quantity: 3,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+            },
+          ],
+        });
+      saleRepo.findById.mockImplementation(() => Promise.resolve(seedSale()));
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  kind: 'advanced',
+                  itemId: line.itemId,
+                  promotionId: 'promo-advanced-100',
+                  discountTitle: 'Buy 3 Get 1 @ 100% (ADVANCED)',
+                  lineDiscountCents: 1000,
+                  perUnitRewardCents: 1000,
+                  discountedUnitCount: 1,
+                  getDiscountPercent: 100,
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      // First recompute via updateItemQuantity to the SAME qty.
+      await service.updateItemQuantity(saleId, 'user-1', itemId, {
+        quantity: 3,
+      });
+
+      // Capture the first save's SaleItem row shape.
+      const firstSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const firstItem = firstSaved.items[0];
+      const firstSnapshot = {
+        rewardKind: firstItem.rewardKind,
+        rewardDiscountPercent: firstItem.rewardDiscountPercent,
+        unitPriceCents: firstItem.unitPriceCents,
+        prePriceCentsBeforeDiscount: firstItem.prePriceCentsBeforeDiscount,
+        discountAmountCents: firstItem.discountAmountCents,
+        discountValue: firstItem.discountValue,
+        discountType: firstItem.discountType,
+        promotionId: firstItem.promotionId,
+        subtotalCents: firstItem.toResponse().subtotalCents,
+      };
+
+      // Run 4 more recomputes by triggering `updateItemQuantity` to the
+      // SAME quantity (the recompute loop runs on every draft mutation).
+      for (let i = 0; i < 4; i++) {
+        await service.updateItemQuantity(saleId, 'user-1', itemId, {
+          quantity: 3,
+        });
+      }
+
+      // The 5th save's SaleItem row shape MUST equal the 1st.
+      const fifthSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const fifthItem = fifthSaved.items[0];
+      const fifthSnapshot = {
+        rewardKind: fifthItem.rewardKind,
+        rewardDiscountPercent: fifthItem.rewardDiscountPercent,
+        unitPriceCents: fifthItem.unitPriceCents,
+        prePriceCentsBeforeDiscount: fifthItem.prePriceCentsBeforeDiscount,
+        discountAmountCents: fifthItem.discountAmountCents,
+        discountValue: fifthItem.discountValue,
+        discountType: fifthItem.discountType,
+        promotionId: fifthItem.promotionId,
+        subtotalCents: fifthItem.toResponse().subtotalCents,
+      };
+
+      // The idempotence contract: every field on the spec's byte-equal
+      // list must be IDENTICAL across recomputes.
+      expect(fifthSnapshot).toEqual(firstSnapshot);
+      // And specifically the D4 discriminator is preserved.
+      expect(fifthItem.rewardKind).toBe('advanced');
+      expect(fifthItem.toResponse().rewardKind).toBe('advanced');
+    });
+
+    it('idempotent 5x recompute: previewTotals converges to identical subtotal/discount/total on the 5th run', async () => {
+      // spec.md:5x recompute also covers `previewTotals` (the sale-level
+      // aggregate). The 5th recompute's totals MUST equal the 1st's.
+      const saleId = 'sale-advanced-5x-preview';
+      const itemId = 'item-advanced-5x-preview';
+      const seedSale = (): Sale =>
+        Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: itemId,
+              saleId,
+              productId: 'p-get',
+              variantId: null,
+              productName: 'Holder-X',
+              variantName: null,
+              quantity: 3,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+            },
+          ],
+        });
+      saleRepo.findById.mockImplementation(() => Promise.resolve(seedSale()));
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        const line = input.lines[0];
+        return Promise.resolve({
+          lines: line
+            ? [
+                {
+                  kind: 'advanced',
+                  itemId: line.itemId,
+                  promotionId: 'promo-advanced-100',
+                  discountTitle: 'Buy 3 Get 1 @ 100% (ADVANCED)',
+                  lineDiscountCents: 1000,
+                  perUnitRewardCents: 1000,
+                  discountedUnitCount: 1,
+                  getDiscountPercent: 100,
+                },
+              ]
+            : [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      await service.updateItemQuantity(saleId, 'user-1', itemId, {
+        quantity: 3,
+      });
+      const firstSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const firstTotals = firstSaved.previewTotals();
+
+      for (let i = 0; i < 4; i++) {
+        await service.updateItemQuantity(saleId, 'user-1', itemId, {
+          quantity: 3,
+        });
+      }
+
+      const fifthSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const fifthTotals = fifthSaved.previewTotals();
+      expect(fifthTotals).toEqual(firstTotals);
+      // And the S2 100% ADVANCED math: subtotal=3000, discount=1000, total=2000.
+      expect(fifthTotals.subtotalCents).toBe(3000);
+      expect(fifthTotals.discountCents).toBe(1000);
+      expect(fifthTotals.totalCents).toBe(2000);
+    });
+  });
+
+  // ==========================================================================
   // Work Unit 6 — MANUAL BXGY wiring + opt-in survival (6.1, 6.2; spec.md:108-130)
   // ==========================================================================
   describe('Work Unit 6 BXGY — MANUAL BXGY candidate surface and opt-in survival (spec.md:108-130)', () => {

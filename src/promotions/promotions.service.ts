@@ -630,6 +630,32 @@ export class PromotionsService {
         );
       }
     }
+
+    // WU8 (advanced-promotion-type, D7) — BUY-side and GET-side target
+    // entities MUST be disjoint. The engine never receives a
+    // same-entity ADVANCED promotion because it has no overlap/
+    // partition logic. Reject at intake (create AND update) with
+    // `advanced_overlapping_targets` so the wire guarantee holds by
+    // construction. Disjoint is per-(targetType, targetId): the same
+    // id on different targetTypes (PRODUCTS vs BRANDS) is fine; the
+    // same id on the same targetType on both sides is not.
+    const buyKeys = new Set<string>();
+    for (const item of params.targetItems) {
+      if (item.side === 'BUY') {
+        buyKeys.add(`${item.targetType}:${item.targetId}`);
+      }
+    }
+    for (const item of params.targetItems) {
+      if (item.side === 'GET') {
+        const key = `${item.targetType}:${item.targetId}`;
+        if (buyKeys.has(key)) {
+          throw new InvalidArgumentError(
+            `ADVANCED promotions require disjoint BUY/GET target entities (${item.targetType} '${item.targetId}' appears on both sides)`,
+            'advanced_overlapping_targets',
+          );
+        }
+      }
+    }
   }
 
   /**

@@ -852,13 +852,18 @@ describe('SaleItem Entity', () => {
         ).toThrow(/BXGY_REWARD_INVALID/);
       });
 
-      it('rejects R >= unitPriceCents × quantity (cannot reward more than the line subtotal)', () => {
-        // qty 3 × 1000c = 3000c max.
+      it('rejects R > unitPriceCents × quantity (cannot reward more than the line subtotal)', () => {
+        // qty 3 × 1000c = 3000c max. R=3500 strictly exceeds the cap.
+        // Equality (R == qty × unitPrice) is now VALID — the D3 / 4R-review
+        // full-line FREE edge case. The BXGY helper structurally cannot
+        // emit R == qty × eff (it caps at floor(qty/(N+M)) × M × perUnit <
+        // qty × eff), so this over-reward assertion pins the strict
+        // over-reward invariant without conflating it with equality.
         const item = createBxgyCandidate();
         expect(() =>
           item.applyBuyXGetYReward({
-            lineDiscountCents: 3000,
-            perUnitRewardCents: 1000,
+            lineDiscountCents: 3500,
+            perUnitRewardCents: 1500,
             discountedUnitCount: 3,
             discountTitle: 'too-much',
             promotionId: 'promo-bxgy',
@@ -877,6 +882,106 @@ describe('SaleItem Entity', () => {
         });
         expect(item.isBuyXGetYReward()).toBe(true);
         expect(item.discountAmountCents).toBe(1);
+      });
+
+      // D3 / 4R-review — full-line FREE reward MUST be valid. A 100%
+      // ADVANCED reward on qty=1 emits R == unitPriceCents × quantity,
+      // which the old `>=` guard rejected with `BXGY_REWARD_INVALID`
+      // and 500'd the POS add-item. The guard is now `>` (strict) so
+      // equality is accepted: a true-free single-unit line is the
+      // edge of the "R must be strictly less than the line subtotal"
+      // invariant — equal is still legitimate (the whole line goes
+      // to zero). BXGY structurally cannot reach equality (the helper
+      // caps rewards at floor(qty/(N+M))*M*perUnit < qty*unitPrice),
+      // so relaxing the guard does not widen BXGY's behavior.
+      it('accepts R == unitPriceCents × quantity (full-line free: qty=1 @ 100%)', () => {
+        const item = SaleItem.create({
+          id: 'i-free-1',
+          saleId: 's-free-1',
+          productId: 'p1',
+          variantId: null,
+          productName: 'P',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        // 100% ADVANCED on a qty=1 line: R = 1000 = unitPrice × qty.
+        // Must NOT throw — the wire contract is `totalCents == 0`.
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 1000,
+            perUnitRewardCents: 1000,
+            discountedUnitCount: 1,
+            discountTitle: 'ADVANCED 100%',
+            promotionId: 'promo-advanced-100-fullfree',
+            getDiscountPercent: 100,
+            rewardKind: 'advanced',
+          }),
+        ).not.toThrow();
+        expect(item.isBuyXGetYReward()).toBe(true);
+        expect(item.discountAmountCents).toBe(1000);
+        expect(item.rewardKind).toBe('advanced');
+        // unitPrice UNCHANGED (BXGY invariant): prePrice === unitPrice.
+        expect(item.unitPriceCents).toBe(1000);
+        expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+        // toResponse surfaces NET=0 on the wire for a fully-freed line.
+        expect(item.toResponse().subtotalCents).toBe(0);
+        expect(item.toResponse().rewardKind).toBe('advanced');
+        expect(item.toResponse().rewardDiscountPercent).toBe(100);
+      });
+
+      it('accepts R == unitPriceCents × quantity on qty≥1 (full multi-unit free line)', () => {
+        // qty=2 @ 100% → 2 reward groups, R = 2000 = 1000 × 2.
+        const item = SaleItem.create({
+          id: 'i-free-2',
+          saleId: 's-free-2',
+          productId: 'p1',
+          variantId: null,
+          productName: 'P',
+          variantName: null,
+          quantity: 2,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 2000,
+            perUnitRewardCents: 1000,
+            discountedUnitCount: 2,
+            discountTitle: 'ADVANCED 100% x2',
+            promotionId: 'promo-advanced-100-fullfree-q2',
+            getDiscountPercent: 100,
+            rewardKind: 'advanced',
+          }),
+        ).not.toThrow();
+        expect(item.discountAmountCents).toBe(2000);
+        expect(item.toResponse().subtotalCents).toBe(0);
+      });
+
+      it('still rejects R > unitPriceCents × quantity (over-reward invariant)', () => {
+        // qty=1, unitPrice=1000: R=1001 must STILL throw — the relaxation
+        // is equality only, not "any R up to line subtotal inclusive".
+        const item = SaleItem.create({
+          id: 'i-over',
+          saleId: 's-over',
+          productId: 'p1',
+          variantId: null,
+          productName: 'P',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        expect(() =>
+          item.applyBuyXGetYReward({
+            lineDiscountCents: 1001,
+            perUnitRewardCents: 1001,
+            discountedUnitCount: 1,
+            discountTitle: 'over-reward',
+            promotionId: 'promo-over',
+          }),
+        ).toThrow(/BXGY_REWARD_INVALID/);
       });
     });
 
@@ -1127,6 +1232,255 @@ describe('SaleItem Entity', () => {
       // unitPrice was never reduced by applyBuyXGetYReward (EQUAL invariant),
       // so after removeDiscount the gross/identity subtotal is `1000 * 3 = 3000`.
       expect(response.subtotalCents).toBe(3000);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Work Unit 5 — D4 SaleItemRewardKind discriminator on the entity surface
+  //
+  // Slice 1 left the BXGY rail byte-identical to ADVANCED at the column level
+  // (the column-derived `isBuyXGetYReward()` predicate cannot distinguish
+  // them — both reuse the same `prePriceCentsBeforeDiscount === unitPriceCents
+  // + promotionId set + discountAmountCents > 0` shape). WU5 adds a NEW
+  // persisted enum `SaleItemRewardKind { BUY_X_GET_Y, ADVANCED }` and wires
+  // it through the entity so `applyBuyXGetYReward` carries a discriminator
+  // the wire can read directly. The default is `'buy_x_get_y'` (back-compat
+  // for every existing BXGY call site that does not pass the new field).
+  //
+  // Traces to spec.md MODIFIED Requirement: rewardKind wire discriminator (D4)
+  // + ADDED Requirement: ADVANCED — `rewardKind: 'advanced'` Wire Discriminator.
+  // ---------------------------------------------------------------------------
+  describe('WU5 — applyBuyXGetYReward rewardKind discriminator (D4)', () => {
+    function createCandidate(): SaleItem {
+      return SaleItem.create({
+        id: 'i-wu5',
+        saleId: 's-wu5',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+    }
+
+    it('defaults to null rewardKind on a fresh item', () => {
+      const item = createCandidate();
+      expect(item.rewardKind).toBeNull();
+      expect(item.toResponse().rewardKind).toBeNull();
+    });
+
+    it('stores rewardKind="buy_x_get_y" by default when applyBuyXGetYReward is called without the new field (back-compat)', () => {
+      // Pre-Slice-2 call sites do not pass rewardKind. The entity MUST
+      // default to 'buy_x_get_y' so the wire field is identical to what
+      // the old `isBuyXGetYReward()` discriminator used to emit.
+      const item = createCandidate();
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 500,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 2 Get 1 @ 50%',
+        promotionId: 'promo-bxgy',
+        getDiscountPercent: 50,
+      });
+      expect(item.rewardKind).toBe('buy_x_get_y');
+      expect(item.toResponse().rewardKind).toBe('buy_x_get_y');
+    });
+
+    it('stores rewardKind="buy_x_get_y" when explicitly passed', () => {
+      const item = createCandidate();
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 1000,
+        perUnitRewardCents: 1000,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 2 Get 1 FREE',
+        promotionId: 'promo-bxgy-free',
+        getDiscountPercent: 100,
+        rewardKind: 'buy_x_get_y',
+      });
+      expect(item.rewardKind).toBe('buy_x_get_y');
+      expect(item.toResponse().rewardKind).toBe('buy_x_get_y');
+    });
+
+    it('stores rewardKind="advanced" when applyBuyXGetYReward is called with the new discriminator', () => {
+      // WU5 / WU6 — the Slice-1 stub at sales.service.ts:515-525 routes BOTH
+      // 'buy-x-get-y' and 'advanced' engine results through applyBuyXGetYReward
+      // WITHOUT the discriminator. WU6 closes that stub by passing
+      // `rewardKind: 'advanced'` on the ADVANCED arm. This test pins the
+      // entity contract that the new field is honored verbatim and surfaces
+      // 'advanced' on the wire — so the migration of ADVANCED rows to
+      // `rewardKind='advanced'` is detectable (and not silently relabeled
+      // as BXGY).
+      const item = createCandidate();
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 1000,
+        perUnitRewardCents: 1000,
+        discountedUnitCount: 1,
+        discountTitle: 'Buy 3 Get 1 @ 100% (ADVANCED)',
+        promotionId: 'promo-advanced-100',
+        getDiscountPercent: 100,
+        rewardKind: 'advanced',
+      });
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
+    });
+
+    it('emits rewardKind="advanced" for an ADVANCED 30% multi-group reward (S2 spec scenario)', () => {
+      // Spec S2 — 6 BUY units + 3 GET units, getDiscountPercent=30, 2 reward
+      // groups → R = 2 * 1 * Math.round(1000*30/100) = 600c. The receipt
+      // wire MUST distinguish this from a BXGY line of the same shape.
+      const item = SaleItem.create({
+        id: 'i-wu5-advanced-s2',
+        saleId: 's-wu5',
+        productId: 'p-get',
+        variantId: null,
+        productName: 'Holder-X',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 600,
+        perUnitRewardCents: 300,
+        discountedUnitCount: 2,
+        discountTitle: 'Buy 3 Get 1 @ 30% (ADVANCED)',
+        promotionId: 'promo-advanced-s2',
+        getDiscountPercent: 30,
+        rewardKind: 'advanced',
+      });
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.isBuyXGetYReward()).toBe(true);
+      // Wire contract: the discriminator IS the persisted kind, not the
+      // column-derived shape — the test fails if the mapper falls back
+      // to the legacy 'buy_x_get_y' default.
+      expect(item.toResponse().rewardKind).toBe('advanced');
+      // NET = 3*1000 - 600 = 2400c. BXGY formula still applies to ADVANCED
+      // (same rail, different discriminator).
+      expect(item.toResponse().subtotalCents).toBe(2400);
+    });
+
+    it('round-trips rewardKind="advanced" through fromPersistence (D4 wire read)', () => {
+      // The receipt mapper reads the persisted column and reconstructs the
+      // entity. The entity MUST expose the persisted `advanced` value on
+      // the wire, not silently relabel it. This pins the read path —
+      // fromPersistence is the path the persistence layer takes on reload.
+      const item = SaleItem.fromPersistence({
+        id: 'i-wu5-persisted',
+        saleId: 's-wu5',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+        promotionId: 'promo-advanced',
+        discountType: 'amount',
+        discountValue: 1000,
+        discountAmountCents: 1000,
+        prePriceCentsBeforeDiscount: 1000,
+        rewardDiscountPercent: 100,
+        // The new persisted discriminator — WU5 surface.
+        rewardKind: 'advanced',
+      });
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
+    });
+
+    it('round-trips rewardKind="buy_x_get_y" through fromPersistence (regression)', () => {
+      // Back-compat: pre-Slice-2 BXGY rows (and the post-migration backfill)
+      // persist rewardKind='BUY_X_GET_Y' (uppercase enum) on the column.
+      // The mapper coerces it to the lowercase wire value.
+      const item = SaleItem.fromPersistence({
+        id: 'i-wu5-persisted-bxgy',
+        saleId: 's-wu5',
+        productId: 'p1',
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: 3,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+        promotionId: 'promo-bxgy',
+        discountType: 'amount',
+        discountValue: 500,
+        discountAmountCents: 500,
+        prePriceCentsBeforeDiscount: 1000,
+        rewardDiscountPercent: 50,
+        rewardKind: 'buy_x_get_y',
+      });
+      expect(item.rewardKind).toBe('buy_x_get_y');
+      expect(item.toResponse().rewardKind).toBe('buy_x_get_y');
+    });
+
+    it('clears rewardKind on removeDiscount (mirrors rewardDiscountPercent reset)', () => {
+      // recompute clear/apply loop relies on this: a stale rewardKind on
+      // the next recompute would mislabel a non-reward line as BXGY or
+      // ADVANCED. The clear contract MUST wipe every reward field, not
+      // just the discount fields.
+      const item = createCandidate();
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 1000,
+        perUnitRewardCents: 1000,
+        discountedUnitCount: 1,
+        discountTitle: 'ADVANCED 100%',
+        promotionId: 'promo-advanced',
+        getDiscountPercent: 100,
+        rewardKind: 'advanced',
+      });
+      expect(item.rewardKind).toBe('advanced');
+
+      item.removeDiscount();
+
+      expect(item.rewardKind).toBeNull();
+      expect(item.toResponse().rewardKind).toBeNull();
+      expect(item.rewardDiscountPercent).toBeNull();
+    });
+
+    it('emits rewardKind=null for a per-unit PRODUCT_DISCOUNT line (no regression on the non-reward path)', () => {
+      // The new `rewardKind` field is for reward lines only. A PD line
+      // (which never goes through `applyBuyXGetYReward`) MUST emit null —
+      // otherwise the frontend would render a "free"/reward badge on
+      // every PRODUCT_DISCOUNT line.
+      const item = createCandidate();
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 20,
+        discountTitle: 'PD 20%',
+        promotionId: 'promo-pd',
+      });
+      expect(item.rewardKind).toBeNull();
+      expect(item.toResponse().rewardKind).toBeNull();
+    });
+
+    it('switches rewardKind on re-apply (applyBuyXGetYReward twice — second call wins)', () => {
+      // recompute re-applies on every mutation. The second call MUST
+      // overwrite the first call's rewardKind (not concatenate or stack).
+      // This pins the deterministic idempotent recompute contract.
+      const item = createCandidate();
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 500,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 1,
+        discountTitle: 'BXGY 50%',
+        promotionId: 'promo-bxgy',
+        getDiscountPercent: 50,
+      });
+      expect(item.rewardKind).toBe('buy_x_get_y');
+
+      item.applyBuyXGetYReward({
+        lineDiscountCents: 1000,
+        perUnitRewardCents: 1000,
+        discountedUnitCount: 1,
+        discountTitle: 'ADVANCED 100%',
+        promotionId: 'promo-advanced',
+        getDiscountPercent: 100,
+        rewardKind: 'advanced',
+      });
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
     });
   });
 });

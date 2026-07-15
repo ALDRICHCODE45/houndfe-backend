@@ -125,6 +125,16 @@ export class PrismaSaleRepository implements ISaleRepository {
           discountAmountCents: item.discountAmountCents,
           // WU3 — persist the exact BXGY reward percent from the entity.
           rewardDiscountPercent: item.rewardDiscountPercent,
+          // WU7 — persist the D4 wire discriminator (SaleItemRewardKind
+          // enum). `rewardKind` is the entity's lowercase wire value; we
+          // coerce to the uppercase Prisma enum for the column. Null on
+          // non-reward lines — same null semantics as `rewardDiscountPercent`.
+          rewardKind:
+            item.rewardKind === 'buy_x_get_y'
+              ? 'BUY_X_GET_Y'
+              : item.rewardKind === 'advanced'
+                ? 'ADVANCED'
+                : null,
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
@@ -286,6 +296,19 @@ export class PrismaSaleRepository implements ISaleRepository {
         // WU3 — round-trip the persisted BXGY reward percent on reload so a
         // subsequent re-save does not wipe it.
         rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+        // WU7 (re-applied in D4/4R-review) — round-trip the D4 wire
+        // discriminator. Coerce the uppercase Prisma enum ('BUY_X_GET_Y'
+        // | 'ADVANCED' | null) to the entity's lowercase wire value
+        // ('buy_x_get_y' | 'advanced' | null). Without this, a reloaded
+        // ADVANCED draft line has _rewardKind=null and toResponse() falls
+        // back to the column-derived isBuyXGetYReward() back-compat
+        // path → emits 'buy_x_get_y' on the wire (silent mislabel).
+        rewardKind:
+          item.rewardKind === 'BUY_X_GET_Y'
+            ? 'buy_x_get_y'
+            : item.rewardKind === 'ADVANCED'
+              ? 'advanced'
+              : null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -405,6 +428,16 @@ export class PrismaSaleRepository implements ISaleRepository {
         // WU3 — round-trip the persisted BXGY reward percent on reload so a
         // subsequent re-save does not wipe it.
         rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+        // WU7 (re-applied in D4/4R-review) — D4 wire discriminator. Coerce
+        // the Prisma enum to the lowercase wire value. Without this,
+        // a reloaded ADVANCED draft line is silently relabeled as
+        // 'buy_x_get_y' via the column-derived back-compat fallback.
+        rewardKind:
+          item.rewardKind === 'BUY_X_GET_Y'
+            ? 'buy_x_get_y'
+            : item.rewardKind === 'ADVANCED'
+              ? 'advanced'
+              : null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -538,6 +571,14 @@ export class PrismaSaleRepository implements ISaleRepository {
           discountAmountCents: item.discountAmountCents,
           // WU3 — round-trip the persisted BXGY reward percent on reload.
           rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+          // WU7 (re-applied in D4/4R-review) — D4 wire discriminator.
+          // See findById for the rationale (silent mislabel bug).
+          rewardKind:
+            item.rewardKind === 'BUY_X_GET_Y'
+              ? 'buy_x_get_y'
+              : item.rewardKind === 'ADVANCED'
+                ? 'advanced'
+                : null,
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
@@ -661,6 +702,14 @@ export class PrismaSaleRepository implements ISaleRepository {
         // WU3 — round-trip the persisted BXGY reward percent on reload so a
         // subsequent re-save does not wipe it.
         rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+        // WU7 (re-applied in D4/4R-review) — D4 wire discriminator.
+        // See findById for the rationale (silent mislabel bug).
+        rewardKind:
+          item.rewardKind === 'BUY_X_GET_Y'
+            ? 'buy_x_get_y'
+            : item.rewardKind === 'ADVANCED'
+              ? 'advanced'
+              : null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -857,6 +906,16 @@ export class PrismaSaleRepository implements ISaleRepository {
             discountAmountCents: item.discountAmountCents,
             // WU3 — persist the exact BXGY reward percent from the entity.
             rewardDiscountPercent: item.rewardDiscountPercent,
+            // WU7 — persist the D4 wire discriminator (same coercion as
+            // the `save` path above). The charge-time in-tx re-write
+            // MUST carry the discriminator so a confirmed-sale row can
+            // be distinguished on the receipt mapper.
+            rewardKind:
+              item.rewardKind === 'buy_x_get_y'
+                ? 'BUY_X_GET_Y'
+                : item.rewardKind === 'advanced'
+                  ? 'ADVANCED'
+                  : null,
             prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
             discountTitle: item.discountTitle,
             discountedAt: item.discountedAt,
@@ -1360,6 +1419,20 @@ export class PrismaSaleRepository implements ISaleRepository {
             // this select; BXGY rows would have rendered as GROSS because
             // `promotionId` came back undefined and the predicate failed.
             promotionId: true,
+            // WU7 — D4 wire discriminator. The persisted `SaleItemRewardKind`
+            // enum column. The mapper is the AUTHORITATIVE source for the
+            // wire value on confirmed-sale rows: the column shape is
+            // byte-identical for BUY_X_GET_Y and ADVANCED (both reuse the
+            // applyBuyXGetYReward rail with `prePriceCentsBeforeDiscount
+            // === unitPriceCents + promotionId set + discountAmountCents
+            // > 0`), so the column-derived `isBxgy` predicate cannot
+            // distinguish the two — without this column, the wire would
+            // silently relabel ADVANCED as BXGY (the Slice 1 stub bug,
+            // closed by WU6 on the apply path). The mapper reads the
+            // column first; the column-derived predicate is the
+            // back-compat fallback for pre-migration rows whose column
+            // is null but whose shape still matches BXGY.
+            rewardKind: true,
           },
         },
         payments: {
@@ -1423,6 +1496,23 @@ export class PrismaSaleRepository implements ISaleRepository {
           item.unitPriceCents === item.prePriceCentsBeforeDiscount &&
           (item.discountAmountCents ?? 0) > 0;
         const bxgyRewardCents = isBxgy ? item.discountAmountCents ?? 0 : 0;
+        // WU7 — D4 wire discriminator. The persisted `rewardKind` column
+        // is the AUTHORITATIVE source on confirmed-sale rows (the
+        // column-derived `isBxgy` predicate is byte-identical for both
+        // BXGY and ADVANCED — without the column, the wire would
+        // silently mislabel ADVANCED as BXGY). The column is the
+        // Prisma enum (`'BUY_X_GET_Y' | 'ADVANCED'`); we coerce it to
+        // the lowercase wire shape. For pre-migration rows (column
+        // null), fall back to the legacy `isBxgy ? 'buy_x_get_y' : null`
+        // behavior so the contract is preserved end-to-end.
+        const persistedRewardKind: 'buy_x_get_y' | 'advanced' | null =
+          item.rewardKind === 'BUY_X_GET_Y'
+            ? 'buy_x_get_y'
+            : item.rewardKind === 'ADVANCED'
+              ? 'advanced'
+              : null;
+        const wireRewardKind =
+          persistedRewardKind ?? (isBxgy ? 'buy_x_get_y' : null);
         return {
           productName: item.productName,
           variantName: item.variantName,
@@ -1450,9 +1540,13 @@ export class PrismaSaleRepository implements ISaleRepository {
           discountAmountCents: item.discountAmountCents,
           discountTitle: item.discountTitle,
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
-          // Explicit wire flag so the frontend can render the
-          // "free"/reward badge without inferring it.
-          rewardKind: isBxgy ? ('buy_x_get_y' as const) : null,
+          // WU7 — D4 wire discriminator. The persisted `SaleItemRewardKind`
+          // column is the truth source on confirmed-sale rows; the
+          // column-derived `isBxgy` predicate is the back-compat fallback
+          // for pre-migration rows (column null). For ADVANCED rows this
+          // surfaces 'advanced' — the Slice 1 stub bug, closed by WU6 on
+          // the apply path and WU7 on the read path.
+          rewardKind: wireRewardKind,
           // WU3 — exact BXGY reward percent (0..100). Null on non-reward
           // lines using the SAME `isBxgy` guard as `rewardKind`, so the
           // frontend shows "GRATIS" only at 100%, else the real percent.

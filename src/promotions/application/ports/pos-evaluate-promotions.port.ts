@@ -122,6 +122,46 @@ export interface PosEvalBuyXGetYLineResult {
 }
 
 /**
+ * Per-line ADVANCED engine result (whole-line cents reward `R`).
+ * Carries the line-total reward shape that `SaleItem.applyBuyXGetYReward`
+ * consumes directly (design.md Decision 1 + Decision 4). The wire ADVANCED
+ * row uses `lineDiscountCents` as `discountAmountCents` and
+ * `perUnitRewardCents` as `discountValue` — same column mapping as BXGY,
+ * but with a distinct `rewardKind='advanced'` discriminator persisted on
+ * `SaleItem` (Slice 2 / WU5) so the wire can tell the two reward shapes
+ * apart.
+ *
+ * Distinct from `PosEvalBuyXGetYLineResult` because:
+ *   - cross-line eligibility source (D1 — BUY-side aggregated across
+ *     multiple cart lines, not per-line qty ≥ buyQuantity);
+ *   - persisted `rewardKind` differs at the wire ('buy_x_get_y' vs
+ *     'advanced' — Slice 2 wire).
+ *
+ * Same invariant as BXGY: `lineDiscountCents > 0`, and
+ * `lineDiscountCents < line.effectiveUnitPriceCents * line.quantity`
+ * (the entity enforces this — `applyBuyXGetYReward` throws otherwise).
+ */
+export interface PosEvalAdvancedLineResult {
+  kind: 'advanced';
+  itemId: string;
+  promotionId: string;
+  discountTitle: string;
+  /** R — whole-line cents reward (the line subtotal drop). */
+  lineDiscountCents: number;
+  /** Snapshot of the per-unit reward for the receipt wire field. */
+  perUnitRewardCents: number;
+  /** Snapshot of the discounted-unit count (groups * M) for the receipt. */
+  discountedUnitCount: number;
+  /**
+   * Exact `getDiscountPercent` (0..100; 100=free, 50=half) of the applied
+   * ADVANCED promotion. Carried end-to-end so the reward line can expose
+   * the true percent instead of deriving it from cents (which drifts ±1 on
+   * odd sub-$1 prices).
+   */
+  getDiscountPercent: number;
+}
+
+/**
  * Per-line engine result — discriminated union. The consumer
  * (`SalesService.recomputePromotions`) branches on `kind` to choose
  * between `SaleItem.applyDiscount` (per-unit) and
@@ -131,7 +171,8 @@ export interface PosEvalBuyXGetYLineResult {
  */
 export type PosEvalLineResult =
   | PosEvalPerUnitLineResult
-  | PosEvalBuyXGetYLineResult;
+  | PosEvalBuyXGetYLineResult
+  | PosEvalAdvancedLineResult;
 
 export interface PosEvalOrderResult {
   promotionId: string;

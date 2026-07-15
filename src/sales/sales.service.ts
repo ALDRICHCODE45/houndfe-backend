@@ -512,7 +512,22 @@ export class SalesService {
     for (const lineResult of result.lines) {
       const item = sale.items.find((i) => i.id === lineResult.itemId);
       if (!item) continue;
-      if (lineResult.kind === 'buy-x-get-y') {
+      if (
+        lineResult.kind === 'buy-x-get-y' ||
+        lineResult.kind === 'advanced'
+      ) {
+        // WU6 — close the Slice 1 stub. Slice 1 routed BOTH
+        // 'buy-x-get-y' AND 'advanced' through `applyBuyXGetYReward`
+        // WITHOUT the `rewardKind: 'advanced'` discriminator, so the
+        // entity defaulted to `'buy_x_get_y'` and the wire SILENTLY
+        // mislabeled ADVANCED rows as BXGY (design.md Decision 4; spec.md
+        // MODIFIED Requirement: `rewardKind: 'advanced'` Wire
+        // Discriminator). WU5 added the `rewardKind` field to the entity
+        // + the new persisted `SaleItemRewardKind` enum column; this
+        // branch is where the discriminator is wired through to the
+        // entity on every recompute. The `'buy-x-get-y'` arm intentionally
+        // omits the field (the entity defaults to `'buy_x_get_y'` for
+        // back-compat with every existing BXGY call site and row).
         item.applyBuyXGetYReward({
           lineDiscountCents: lineResult.lineDiscountCents,
           perUnitRewardCents: lineResult.perUnitRewardCents,
@@ -520,6 +535,8 @@ export class SalesService {
           discountTitle: lineResult.discountTitle,
           promotionId: lineResult.promotionId,
           getDiscountPercent: lineResult.getDiscountPercent,
+          rewardKind:
+            lineResult.kind === 'advanced' ? 'advanced' : 'buy_x_get_y',
         });
         continue;
       }
