@@ -100,6 +100,105 @@ export function computeBuyXGetYReward(input: {
 }
 
 /**
+ * WU2 — Pure helper for ADVANCED reward computation (design.md
+ * Decision 2; spec.md:60-91,102-106). Mirrors `computeBuyXGetYReward`
+ * but for the ADVANCED shape: the BUY-side match is AGGREGATED across
+ * the whole cart (D1 — `totalBuyMatchedQty` is the sum of all matching
+ * line quantities), and the reward can be split across MULTIPLE
+ * GET-side lines.
+ *
+ * Reward groups (D2): `floor(totalBuyMatchedQty / buyQuantity)` —
+ * each group discounts `getQuantity` GET units at `getDiscountPercent`
+ * of the line's own `effectiveUnitPriceCents`.
+ *
+ * Multi-GET-line allocation: deterministic lowest-`itemId` ascending
+ * (spec.md resolution). The helper sorts the candidate lines by
+ * `itemId` asc and walks them in that order until the reward pool is
+ * drained. A single line never receives more units than its own
+ * `quantity` (the unit-pool cap mirrors the receipt mapper invariant).
+ *
+ * The helper is pure (no DI, no I/O) and side-effect free.
+ *
+ * Returns:
+ *   - `rewardGroupCount` = `floor(totalBuyMatchedQty / buyQuantity)`.
+ *     Zero when BUY is unsatisfied → empty `rewards[]`.
+ *   - `rewards[]` — one entry per GET line that received at least one
+ *     discounted unit. Sorted by `itemId` asc. Each entry:
+ *       `{ itemId, discountedUnitCount, perUnitRewardCents,
+ *          lineDiscountCents }`.
+ *     `perUnitRewardCents` is the per-unit reward on THAT line (uses
+ *     the line's own `effectiveUnitPriceCents` so different GET lines
+ *     with different effective prices carry their own per-unit reward
+ *     cents).
+ *   - `lineDiscountCents = discountedUnitCount * perUnitRewardCents`.
+ */
+export function computeAdvancedReward(input: {
+  totalBuyMatchedQty: number;
+  buyQuantity: number;
+  getQuantity: number;
+  /** 0..100 — discount applied to the M get-units per reward group. */
+  getDiscountPercent: number;
+  /**
+   * Candidate GET-side lines (already filtered to lines that match a
+   * GET-side target item). Allocation walks them sorted by `itemId`
+   * ascending. Each line contributes `quantity` units to the pool.
+   */
+  getCandidateLines: ReadonlyArray<{
+    itemId: string;
+    effectiveUnitPriceCents: number;
+    quantity: number;
+  }>;
+}): {
+  rewardGroupCount: number;
+  rewards: Array<{
+    itemId: string;
+    discountedUnitCount: number;
+    perUnitRewardCents: number;
+    lineDiscountCents: number;
+  }>;
+} {
+  const rewardGroupCount = Math.floor(input.totalBuyMatchedQty / input.buyQuantity);
+  if (rewardGroupCount === 0) {
+    return { rewardGroupCount: 0, rewards: [] };
+  }
+
+  const totalDiscountedUnits = rewardGroupCount * input.getQuantity;
+
+  // Deterministic lowest-itemId asc — see design.md "Open Questions
+  // resolved" and the spec resolution note.
+  const sortedCandidates = [...input.getCandidateLines].sort((a, b) =>
+    a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0,
+  );
+
+  const rewards: Array<{
+    itemId: string;
+    discountedUnitCount: number;
+    perUnitRewardCents: number;
+    lineDiscountCents: number;
+  }> = [];
+
+  let remaining = totalDiscountedUnits;
+  for (const line of sortedCandidates) {
+    if (remaining <= 0) break;
+    const take = Math.min(line.quantity, remaining);
+    if (take <= 0) continue;
+    const perUnitRewardCents = Math.round(
+      (line.effectiveUnitPriceCents * input.getDiscountPercent) / 100,
+    );
+    const lineDiscountCents = take * perUnitRewardCents;
+    rewards.push({
+      itemId: line.itemId,
+      discountedUnitCount: take,
+      perUnitRewardCents,
+      lineDiscountCents,
+    });
+    remaining -= take;
+  }
+
+  return { rewardGroupCount, rewards };
+}
+
+/**
  * Tier returned by `matchTargetTier` — encodes BOTH "did the target
  * hit this line?" AND "which specificity won?" in a single value, so
  * the engine never needs a second predicate pass.
@@ -1077,8 +1176,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     line: PosEvalLine,
     result: PosEvalLineResult,
   ): number {
-    if (result.kind === 'buy-x-get-y') {
-      // BXGY: `lineDiscountCents` IS the per-line total reward R.
+    if (result.kind === 'buy-x-get-y' || result.kind === 'advanced') {
+      // BXGY / ADVANCED: `lineDiscountCents` IS the per-line total reward R.
+      // Both discriminated shapes share the same line-total reward
+      // shape (design.md Decision 1 + WU2). The wire `rewardKind`
+      // discriminator ('buy_x_get_y' vs 'advanced') is added in
+      // Slice 2 (WU5) — this engine stage is shape-agnostic.
       return result.lineDiscountCents;
     }
     if (result.discountType === 'percentage') {

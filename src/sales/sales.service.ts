@@ -512,7 +512,16 @@ export class SalesService {
     for (const lineResult of result.lines) {
       const item = sale.items.find((i) => i.id === lineResult.itemId);
       if (!item) continue;
-      if (lineResult.kind === 'buy-x-get-y') {
+      if (
+        lineResult.kind === 'buy-x-get-y' ||
+        lineResult.kind === 'advanced'
+      ) {
+        // Slice 1 STUB — Slice 2 (WU6) routes the discriminated
+        // ADVANCED result to `applyBuyXGetYReward` with
+        // `rewardKind: 'advanced'`. Slice 1 keeps BOTH discriminated
+        // shapes on the same applyBuyXGetYReward rail so the engine
+        // compiles and runs; the rewardKind field is added to the
+        // entity in Slice 2.
         item.applyBuyXGetYReward({
           lineDiscountCents: lineResult.lineDiscountCents,
           perUnitRewardCents: lineResult.perUnitRewardCents,
