@@ -112,8 +112,8 @@ except WU2 (port union edit).
 
 ### Phase 10: Docs (WU10)
 
-- [ ] 10.1 `docs/promotions-frontend.md` — document POS/evaluation semantics + new `rewardKind='advanced'` value.
-- [ ] 10.2 `docs/promotions-in-sale-frontend-prompt.md` — remove ADVANCED from deferred list (`:31, :241`). Commit `docs(promotions): document ADVANCED POS semantics + rewardKind=advanced`.
+- [x] 10.1 `docs/promotions-frontend.md` — document POS/evaluation semantics + new `rewardKind='advanced'` value.
+- [x] 10.2 `docs/promotions-in-sale-frontend-prompt.md` — remove ADVANCED from deferred list (`:31, :241`). Commit `docs(promotions): document ADVANCED POS semantics + rewardKind=advanced`.
 
 ### Phase 11: Archive Prep (non-requirement main-spec edits — archive phase applies)
 
