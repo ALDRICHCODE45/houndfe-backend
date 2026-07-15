@@ -296,6 +296,19 @@ export class PrismaSaleRepository implements ISaleRepository {
         // WU3 — round-trip the persisted BXGY reward percent on reload so a
         // subsequent re-save does not wipe it.
         rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+        // WU7 (re-applied in D4/4R-review) — round-trip the D4 wire
+        // discriminator. Coerce the uppercase Prisma enum ('BUY_X_GET_Y'
+        // | 'ADVANCED' | null) to the entity's lowercase wire value
+        // ('buy_x_get_y' | 'advanced' | null). Without this, a reloaded
+        // ADVANCED draft line has _rewardKind=null and toResponse() falls
+        // back to the column-derived isBuyXGetYReward() back-compat
+        // path → emits 'buy_x_get_y' on the wire (silent mislabel).
+        rewardKind:
+          item.rewardKind === 'BUY_X_GET_Y'
+            ? 'buy_x_get_y'
+            : item.rewardKind === 'ADVANCED'
+              ? 'advanced'
+              : null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -415,6 +428,16 @@ export class PrismaSaleRepository implements ISaleRepository {
         // WU3 — round-trip the persisted BXGY reward percent on reload so a
         // subsequent re-save does not wipe it.
         rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+        // WU7 (re-applied in D4/4R-review) — D4 wire discriminator. Coerce
+        // the Prisma enum to the lowercase wire value. Without this,
+        // a reloaded ADVANCED draft line is silently relabeled as
+        // 'buy_x_get_y' via the column-derived back-compat fallback.
+        rewardKind:
+          item.rewardKind === 'BUY_X_GET_Y'
+            ? 'buy_x_get_y'
+            : item.rewardKind === 'ADVANCED'
+              ? 'advanced'
+              : null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
@@ -548,6 +571,14 @@ export class PrismaSaleRepository implements ISaleRepository {
           discountAmountCents: item.discountAmountCents,
           // WU3 — round-trip the persisted BXGY reward percent on reload.
           rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+          // WU7 (re-applied in D4/4R-review) — D4 wire discriminator.
+          // See findById for the rationale (silent mislabel bug).
+          rewardKind:
+            item.rewardKind === 'BUY_X_GET_Y'
+              ? 'buy_x_get_y'
+              : item.rewardKind === 'ADVANCED'
+                ? 'advanced'
+                : null,
           prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
@@ -671,6 +702,14 @@ export class PrismaSaleRepository implements ISaleRepository {
         // WU3 — round-trip the persisted BXGY reward percent on reload so a
         // subsequent re-save does not wipe it.
         rewardDiscountPercent: item.rewardDiscountPercent ?? null,
+        // WU7 (re-applied in D4/4R-review) — D4 wire discriminator.
+        // See findById for the rationale (silent mislabel bug).
+        rewardKind:
+          item.rewardKind === 'BUY_X_GET_Y'
+            ? 'buy_x_get_y'
+            : item.rewardKind === 'ADVANCED'
+              ? 'advanced'
+              : null,
         prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,

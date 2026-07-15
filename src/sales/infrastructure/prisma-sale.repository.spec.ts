@@ -2667,6 +2667,178 @@ describe('PrismaSaleRepository', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // D4 / 4R-review — Draft reload must forward rewardKind. The four
+  // reload mappers in prisma-sale.repository.ts (findById, findDraftResponseById,
+  // findDraftsByUserId, findByIdForUpdate) currently forward
+  // rewardDiscountPercent but OMIT rewardKind, so a reloaded ADVANCED draft
+  // line has _rewardKind=null and toResponse() falls back to the
+  // column-derived 'buy_x_get_y' wire value (silent mislabel). The
+  // confirmed-receipt path (findOneWithRelations) is already correct.
+  // This block exercises the four draft/reload mappers.
+  // ---------------------------------------------------------------------------
+  describe('draft reload — rewardKind forward (D4 / 4R-review)', () => {
+    function makeAdvDraftMockSaleData(
+      overrides: Record<string, unknown> = {},
+    ) {
+      return {
+        id: 'sale-adv-draft',
+        userId: 'user-1',
+        status: 'DRAFT',
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus: 'NOT_APPLICABLE',
+        customerId: null,
+        shippingAddressId: null,
+        sellerUserId: null,
+        dueDate: null,
+        confirmedAt: null,
+        folio: null,
+        createdAt: new Date('2026-07-15'),
+        updatedAt: new Date('2026-07-15'),
+        items: [
+          {
+            id: 'item-adv-1',
+            saleId: 'sale-adv-draft',
+            productId: 'p-1',
+            variantId: null,
+            productName: 'Holder-X',
+            variantName: null,
+            quantity: 3,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            // BXGY-shaped persisted row (prePrice === unitPrice, promotionId
+            // set, discountAmount > 0). Without rewardKind forwarding, the
+            // column-derived isBuyXGetYReward() back-compat fallback emits
+            // 'buy_x_get_y' on the wire (the silent mislabel bug).
+            discountType: 'amount',
+            discountValue: 1000,
+            discountAmountCents: 1000,
+            prePriceCentsBeforeDiscount: 1000,
+            discountTitle: 'ADVANCED 100%',
+            discountedAt: new Date('2026-07-15'),
+            promotionId: 'promo-adv-auto',
+            // The ADVANCED column — the D4 wire discriminator.
+            rewardKind: 'ADVANCED',
+            rewardDiscountPercent: 100,
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    it('findDraftResponseById surfaces rewardKind="advanced" on a reloaded ADVANCED draft line', async () => {
+      prisma.sale.findUnique.mockResolvedValue(
+        makeAdvDraftMockSaleData() as any,
+      );
+
+      const result = (await repo.findDraftResponseById(
+        'sale-adv-draft',
+      )) as any;
+
+      expect(result).not.toBeNull();
+      expect(result.items[0].rewardKind).toBe('advanced');
+      // And NOT silently relabeled as BXGY (the bug):
+      expect(result.items[0].rewardKind).not.toBe('buy_x_get_y');
+      // NET subtotal survives the reload too (BXGY-shaped row math).
+      expect(result.items[0].subtotalCents).toBe(2000); // 3000 - 1000
+      expect(result.items[0].rewardDiscountPercent).toBe(100);
+    });
+
+    it('findDraftsByUserId surfaces rewardKind="advanced" on a reloaded ADVANCED draft line', async () => {
+      // findDraftsByUserId returns Sale[] — assert via toResponse() on
+      // the SaleItem, which is what the draft-list mapper spreads to
+      // the wire.
+      prisma.sale.findMany.mockResolvedValue([
+        makeAdvDraftMockSaleData() as any,
+      ]);
+
+      const sales = await repo.findDraftsByUserId('user-1');
+      expect(sales).toHaveLength(1);
+      const item = sales[0].items[0];
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).not.toBe('buy_x_get_y');
+    });
+
+    it('findById surfaces rewardKind="advanced" on a reloaded ADVANCED draft line', async () => {
+      // findById is the recompute-path reload (sales.service calls it
+      // before applying the engine result). It also flows the row through
+      // the sale entity (used by recomputePromotions), so the forward
+      // matters for the in-memory entity state.
+      prisma.sale.findUnique.mockResolvedValue(
+        makeAdvDraftMockSaleData() as any,
+      );
+
+      const sale = await repo.findById('sale-adv-draft');
+      expect(sale).not.toBeNull();
+      const item = sale!.items[0];
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
+    });
+
+    it('findByIdForUpdate surfaces rewardKind="advanced" on a reloaded ADVANCED draft line', async () => {
+      // Charge-path reload — also flows through the entity. Must not
+      // mislabel.
+      prisma.sale.findFirst.mockResolvedValue(
+        makeAdvDraftMockSaleData() as any,
+      );
+
+      const sale = await repo.findByIdForUpdate('sale-adv-draft');
+      expect(sale).not.toBeNull();
+      const item = sale!.items[0];
+      expect(item.rewardKind).toBe('advanced');
+      expect(item.toResponse().rewardKind).toBe('advanced');
+    });
+
+    it('pre-migration / null rewardKind falls back to the column-derived wire value (back-compat regression)', async () => {
+      // When the column is null (pre-migration row), toResponse() falls
+      // back to isBuyXGetYReward() ? 'buy_x_get_y' : null — same as the
+      // receipt mapper. This pins that the forward fix does NOT break
+      // back-compat for pre-migration rows.
+      prisma.sale.findUnique.mockResolvedValue(
+        makeAdvDraftMockSaleData({
+          items: [
+            {
+              id: 'item-pre-migration',
+              saleId: 'sale-adv-draft',
+              productId: 'p-1',
+              variantId: null,
+              productName: 'Holder-X',
+              variantName: null,
+              quantity: 3,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+              originalPriceCents: null,
+              priceSource: 'DEFAULT',
+              appliedPriceListId: null,
+              customPriceCents: null,
+              discountType: 'amount',
+              discountValue: 1000,
+              discountAmountCents: 1000,
+              prePriceCentsBeforeDiscount: 1000,
+              discountTitle: 'pre-migration BXGY',
+              discountedAt: new Date('2026-07-15'),
+              promotionId: 'promo-pre',
+              rewardKind: null,
+              rewardDiscountPercent: 100,
+            },
+          ],
+        }) as any,
+      );
+
+      const result = (await repo.findDraftResponseById(
+        'sale-adv-draft',
+      )) as any;
+      // Back-compat: pre-migration row still falls back to BXGY.
+      expect(result.items[0].rewardKind).toBe('buy_x_get_y');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Work Unit 3 — Tasks 3.5 / 3.6 / 3.7: Promotion persistence (W2 fix)
   //
   // CRITICAL (W2): every read mapper MUST load veto rows, the applied
