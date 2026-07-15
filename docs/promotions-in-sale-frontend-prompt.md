@@ -25,10 +25,11 @@ Two kinds of promotions, driven by each promotion's `method` field:
 **Scope of THIS slice (backend only supports these):**
 - `PRODUCT_DISCOUNT` where the promotion targets specific **products** (`appliesTo === 'PRODUCTS'`).
 - `ORDER_DISCOUNT` (a discount on the whole-cart total).
+- `BUY_X_GET_Y` — emits `rewardKind: 'buy_x_get_y'` on the GET line. Engine admits AUTOMATIC only.
+- `ADVANCED` — emits `rewardKind: 'advanced'` on the GET line. Engine admits AUTOMATIC only. BUY-side aggregated across the cart; supports `getDiscountPercent=100` (true free).
 
 **Explicitly NOT supported yet (do NOT build UI for these):**
 - `PRODUCT_DISCOUNT` scoped by CATEGORIES or BRANDS (deferred — engine does not handle them).
-- `BUY_X_GET_Y` and `ADVANCED` promotion types (deferred).
 - Per-promotion usage limits/caps (not modeled).
 
 ---
@@ -238,6 +239,5 @@ by 100 with floating point in a way that reintroduces rounding — format for di
 ## 8. Out of scope for the frontend
 
 - Do NOT build category/brand-scoped promo UI (backend doesn't support it yet).
-- Do NOT build BUY_X_GET_Y / ADVANCED promo UI.
 - Do NOT implement your own eligibility, best-wins, or discount math — the backend owns
   all of it. Your job is to READ the applied state and CALL the 4 endpoints.
