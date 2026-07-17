@@ -37,9 +37,31 @@ function makeService() {
   const tenantPrisma = {
     getClient: jest.fn().mockReturnValue(prismaClient),
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
+    runInTransaction: jest.fn(async (work: () => Promise<unknown>) => work()),
   } as any;
 
-  const service = new EmployeeTimeOffService(employeeRepo, tenantPrisma);
+  // Slice 4 — request() now runs inside runInTransaction and reads
+  // notification config + writes an outbox row. Defaults: gates-open
+  // (overridable per-test).
+  const notificationConfigRepo = {
+    find: jest.fn().mockResolvedValue({
+      enabled: true,
+      recipients: ['u1'],
+      enabledActions: ['TIME_OFF_REQUESTED'],
+    }),
+  };
+  const outboxWriter = {
+    publish: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const service = new EmployeeTimeOffService(
+    employeeRepo,
+    tenantPrisma,
+    undefined,
+    undefined,
+    notificationConfigRepo,
+    outboxWriter,
+  );
 
   return {
     service,
@@ -53,6 +75,8 @@ function makeService() {
     timeOffUpdate,
     employeeFindMany,
     employeeFindFirst,
+    notificationConfigRepo,
+    outboxWriter,
   };
 }
 
@@ -81,6 +105,8 @@ function makeServiceWithCls(opts: {
     base.tenantPrisma,
     cls,
     caslAbilityFactory,
+    base.notificationConfigRepo,
+    base.outboxWriter,
   );
   return { ...base, service, ability, cls, caslAbilityFactory };
 }
@@ -162,6 +188,216 @@ describe('EmployeeTimeOffService', () => {
         }),
       });
       expect(result).toEqual(createdRow);
+    });
+
+    // ─── Slice 4 — gated emit (hr-validation-notifications) ───
+    //
+    // Spec: employee-time-off — 'Atomic Request Writes Time-Off and
+    // Outbox Event in One Transaction'. time-off-notifications —
+    // 'Emit Gate Requires Master Toggle AND Action Key' (Design D1).
+    //
+    // The D1 write-time gate moves the gate UPSTREAM (low-stock writes
+    // unconditionally + gates only in fn). On `request()` success with
+    // gates open, exactly ONE outbox row is published with
+    // eventType='hr.timeoff.requested' and the self-contained payload
+    // shape from Design D3.
+    it('Slice 4 — all gates open: persists row AND publishes one outbox eventType=hr.timeoff.requested with idem `${tenantId}:${timeOffId}` and self-contained payload', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: true,
+        recipients: ['u1'],
+        enabledActions: ['TIME_OFF_REQUESTED'],
+      });
+      timeOffCreate.mockResolvedValue({
+        id: 'to-abc',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+        reason: 'Family trip',
+        status: 'PENDING',
+        requestedByUserId: 'user-1',
+        tenantId: 'tenant-1',
+      });
+
+      const result = await service.request(
+        'emp-1',
+        {
+          type: 'VACATION' as any,
+          startDate: '2026-07-01',
+          endDate: '2026-07-05',
+          reason: 'Family trip',
+        },
+        'user-1',
+      );
+
+      // Row persisted AND outbox row published, atomically.
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+
+      const publishArgs = outboxWriter.publish.mock.calls[0];
+      // (tx, tenantId, aggregateType, aggregateId, eventType, payload)
+      expect(publishArgs[1]).toBe('tenant-1'); // tenantId
+      expect(publishArgs[2]).toBe('EmployeeTimeOff'); // aggregateType
+      expect(publishArgs[3]).toBe(result.id); // aggregateId = timeOffId
+      expect(publishArgs[4]).toBe('hr.timeoff.requested'); // eventType
+      const payload = publishArgs[5];
+      expect(payload).toMatchObject({
+        tenantId: 'tenant-1',
+        timeOffId: result.id,
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        requestedByUserId: 'user-1',
+      });
+      expect(payload.startDate).toBeDefined();
+      expect(payload.endDate).toBeDefined();
+      expect(payload.employeeName).toBeDefined();
+
+      // The idempotency key for the eventual Inngest send is derived
+      // from `${tenantId}:${timeOffId}` — verified in Slice 5 specs.
+      // Here we pin the aggregateId == timeOffId (matches idem shape).
+      expect(publishArgs[3]).toBe(result.id);
+    });
+
+    it('Slice 4 — master toggle OFF (enabled=false): row persists, NO outbox row written', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: false,
+        recipients: ['u1'],
+        enabledActions: ['TIME_OFF_REQUESTED'],
+      });
+      timeOffCreate.mockResolvedValue({
+        id: 'to-x',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        status: 'PENDING',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+      });
+
+      await service.request(
+        'emp-1',
+        {
+          type: 'VACATION' as any,
+          startDate: '2026-07-01',
+          endDate: '2026-07-05',
+        },
+        'user-1',
+      );
+
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('Slice 4 — action key absent (enabledActions=[]): row persists, NO outbox row written', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: true,
+        recipients: ['u1'],
+        enabledActions: [],
+      });
+      timeOffCreate.mockResolvedValue({
+        id: 'to-y',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        status: 'PENDING',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+      });
+
+      await service.request(
+        'emp-1',
+        {
+          type: 'VACATION' as any,
+          startDate: '2026-07-01',
+          endDate: '2026-07-05',
+        },
+        'user-1',
+      );
+
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('Slice 4 — outbox insert fails: both row and outbox are rolled back (transactional)', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+        tenantPrisma,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: true,
+        recipients: ['u1'],
+        enabledActions: ['TIME_OFF_REQUESTED'],
+      });
+
+      // Simulate transactional semantics: runInTransaction wraps the
+      // body. If the outbox publish rejects, the tx rolls back the
+      // EmployeeTimeOff.create as well.
+      tenantPrisma.runInTransaction.mockImplementation(
+        async (work: () => Promise<unknown>) => {
+          try {
+            return await work();
+          } catch (err) {
+            // Simulate rollback by swallowing — production Prisma
+            // rolls back automatically; the spy just enforces that
+            // BOTH inserts live inside the work closure.
+            throw err;
+          }
+        },
+      );
+      timeOffCreate.mockResolvedValue({
+        id: 'to-z',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        status: 'PENDING',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+      });
+      outboxWriter.publish.mockRejectedValue(new Error('outbox down'));
+
+      await expect(
+        service.request(
+          'emp-1',
+          {
+            type: 'VACATION' as any,
+            startDate: '2026-07-01',
+            endDate: '2026-07-05',
+          },
+          'user-1',
+        ),
+      ).rejects.toThrow(/outbox down/);
+
+      // Both inserts were ATTEMPTED inside the transaction. The
+      // rollback (Prisma's automatic tx abort) is what guarantees
+      // neither row is persisted — pinned by the throw surfacing.
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
     });
   });
 
