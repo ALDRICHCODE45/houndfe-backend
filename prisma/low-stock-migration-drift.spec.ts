@@ -108,4 +108,60 @@ describe('low-stock migration drift guard (A.3)', () => {
     );
     expect(sql).not.toMatch(/DROP\s+COLUMN/i);
   });
+
+  // ─── Slice 2 — Employee.userId retirement (hr-validation-notifications) ───
+  // The destructive migration `retire_employee_userid` MUST remove the
+  // identity link in `employees`: the `userId` column, the
+  // `employees_userId_fkey` foreign key, the `employees_tenantId_userId_key`
+  // unique index, and the `User.employees` back-relation. The schema and
+  // the destructive migration MUST agree; this test pins both sides.
+  describe('hr-validation-notifications — Employee.userId retirement (Slice 2)', () => {
+    const employeesBlock = (() => {
+      const m = schemaText.match(/model\s+Employee\s*\{([\s\S]*?)\n\}/);
+      return m ? m[1] : '';
+    })();
+    const userBlock = (() => {
+      const m = schemaText.match(/model\s+User\s*\{([\s\S]*?)\n\}/);
+      return m ? m[1] : '';
+    })();
+
+    function findRetireMigrationDir(): string | null {
+      const entries = fs
+        .readdirSync(migrationsRoot, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .filter((name) => name.endsWith('_retire_employee_userid'));
+      if (entries.length === 0) return null;
+      return path.join(migrationsRoot, entries.sort().reverse()[0]);
+    }
+
+    it('schema Employee model has NO userId column', () => {
+      expect(employeesBlock).not.toMatch(/^\s*userId\s+/m);
+    });
+
+    it('schema Employee model has NO @@unique([tenantId, userId]) constraint', () => {
+      expect(employeesBlock).not.toMatch(/@@unique\(\[tenantId,\s*userId\]\)/);
+    });
+
+    it('schema User model has NO `employees Employee[]` back-relation', () => {
+      expect(userBlock).not.toMatch(/^\s*employees\s+Employee\[\]/m);
+    });
+
+    it('destructive migration retire_employee_userid drops the FK + index + column on employees ONLY', () => {
+      const dir = findRetireMigrationDir();
+      expect(dir).not.toBeNull();
+      const sql = fs.readFileSync(path.join(dir!, 'migration.sql'), 'utf8');
+      // The destructive path: drop FK, drop unique index, drop column.
+      expect(sql).toMatch(/ALTER\s+TABLE\s+"employees"\s+DROP\s+CONSTRAINT\s+"employees_userId_fkey"/i);
+      expect(sql).toMatch(/DROP\s+INDEX\s+"employees_tenantId_userId_key"/i);
+      expect(sql).toMatch(/ALTER\s+TABLE\s+"employees"\s+DROP\s+COLUMN\s+"userId"/i);
+      // Touches ONLY `employees` — the migration must NOT touch any
+      // other table (e.g. notifications, users, tenants).
+      const tableAlterations = sql.match(/ALTER\s+TABLE\s+"[a-z_]+"/gi) ?? [];
+      expect(tableAlterations.length).toBeGreaterThanOrEqual(2); // FK + COLUMN
+      for (const stmt of tableAlterations) {
+        expect(stmt).toMatch(/ALTER\s+TABLE\s+"employees"/i);
+      }
+    });
+  });
 });
