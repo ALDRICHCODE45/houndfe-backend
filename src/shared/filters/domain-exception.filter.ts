@@ -107,6 +107,10 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.BAD_REQUEST;
     if (exception.code === 'MANAGER_SELF_REFERENCE')
       return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'TIME_OFF_INVALID_DATE_RANGE')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'TIME_OFF_INVALID_TRANSITION')
+      return HttpStatus.CONFLICT;
     if (exception.code === 'INVALID_PRICE_OVERRIDE_INPUT')
       return HttpStatus.BAD_REQUEST;
     if (exception.code === 'INVALID_PRICE_LIST_FOR_ITEM')
