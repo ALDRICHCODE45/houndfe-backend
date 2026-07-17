@@ -4,6 +4,8 @@ import {
   BusinessRuleViolationError,
   EntityNotFoundError,
 } from '../domain/domain-error';
+import { TimeOffInvalidDateRangeError } from '../../employees/domain/errors/time-off-invalid-date-range.error';
+import { TimeOffInvalidTransitionError } from '../../employees/domain/errors/time-off-invalid-transition.error';
 
 describe('DomainExceptionFilter', () => {
   const makeHost = () => {
@@ -155,5 +157,38 @@ describe('DomainExceptionFilter', () => {
     );
 
     expect(status).toHaveBeenCalledWith(HttpStatus.FORBIDDEN);
+  });
+
+  it('maps TIME_OFF_INVALID_DATE_RANGE to 400', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status, json } = makeHost();
+
+    filter.catch(
+      new TimeOffInvalidDateRangeError('2026-07-10', '2026-07-01'),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.BAD_REQUEST);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.BAD_REQUEST,
+        error: 'TIME_OFF_INVALID_DATE_RANGE',
+      }),
+    );
+  });
+
+  it('maps TIME_OFF_INVALID_TRANSITION to 409', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status, json } = makeHost();
+
+    filter.catch(new TimeOffInvalidTransitionError('APPROVED', 'cancel'), host);
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.CONFLICT,
+        error: 'TIME_OFF_INVALID_TRANSITION',
+      }),
+    );
   });
 });
