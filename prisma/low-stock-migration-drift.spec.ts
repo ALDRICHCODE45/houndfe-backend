@@ -54,6 +54,42 @@ describe('low-stock migration drift guard (A.3)', () => {
     expect(schemaText).toMatch(/\bLOW_STOCK\b/);
   });
 
+  // ─── Slice 3 — TIME_OFF_REQUESTED registered in BOTH the Prisma
+  // enum AND the TS allowlist (hr-validation-notifications).
+  //
+  // Spec: notification-config — 'NotificationActionKey Registry Accepts
+  // TIME_OFF_REQUESTED' / 'Registry drift is caught by a test'.
+  // Drift between the two sides (Prisma enum vs TS
+  // NOTIFICATION_ACTION_KEYS) is a real risk: PUT would either reject
+  // valid keys or accept invalid ones depending on which side is stale.
+  it('schema NotificationActionKey enum declares BOTH LOW_STOCK and TIME_OFF_REQUESTED', () => {
+    const enumBlock =
+      schemaText.match(/enum\s+NotificationActionKey\s*\{([\s\S]*?)\n\}/) ??
+      [];
+    const body = enumBlock[1] ?? '';
+    expect(body).toMatch(/\bLOW_STOCK\b/);
+    expect(body).toMatch(/\bTIME_OFF_REQUESTED\b/);
+  });
+
+  it('TS allowlist NOTIFICATION_ACTION_KEYS declares BOTH LOW_STOCK and TIME_OFF_REQUESTED', () => {
+    // Re-require the module to read the live TS allowlist (not a
+    // snapshot of the file text). The drift test must inspect the
+    // runtime shape — file-grep would silently pass if a future
+    // refactor renames or moves the array.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const tsPath = path.join(repoRoot, 'src', 'notification-config', 'domain', 'notification-config.ts');
+    // Use a minimal regex read for portability — we only need to
+    // assert the array literal includes both literal strings.
+    const tsText = fs.readFileSync(tsPath, 'utf8');
+    const arrayMatch = tsText.match(
+      /NOTIFICATION_ACTION_KEYS[^=]*=\s*\[([\s\S]*?)\]\s*as\s+const/,
+    );
+    expect(arrayMatch).not.toBeNull();
+    const items = arrayMatch![1];
+    expect(items).toMatch(/'LOW_STOCK'/);
+    expect(items).toMatch(/'TIME_OFF_REQUESTED'/);
+  });
+
   it('schema restores updatedAt on EmployeeEmergencyContact (drift fix)', () => {
     // The previous schema dropped `updatedAt` while the DB still has the
     // column. Restoring it prevents the migration from emitting a DROP.

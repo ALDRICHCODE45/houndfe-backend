@@ -204,6 +204,7 @@ enum OutboxEventStatus {
 
 enum NotificationActionKey {
   LOW_STOCK
+  TIME_OFF_REQUESTED
 }
 
 // ============================================================================

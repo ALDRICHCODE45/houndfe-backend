@@ -7,10 +7,11 @@
  * or Prisma deps. v1 ships `LOW_STOCK` only; the adapter rejects anything
  * outside `NOTIFICATION_ACTION_KEYS` with `UNKNOWN_ACTION_KEY` (HTTP 400).
  */
-export type NotificationActionKey = 'LOW_STOCK';
+export type NotificationActionKey = 'LOW_STOCK' | 'TIME_OFF_REQUESTED';
 
 export const NOTIFICATION_ACTION_KEYS: readonly NotificationActionKey[] = [
   'LOW_STOCK',
+  'TIME_OFF_REQUESTED',
 ] as const;
 
 export interface NotificationConfigView {
