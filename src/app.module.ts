@@ -43,6 +43,8 @@ import { TenantModule } from './shared/tenant/tenant.module';
 import { StockAlertsModule } from './stock-alerts/stock-alerts.module';
 import { LowStockOutboxModule } from './stock-alerts/outbox/low-stock-outbox.module';
 import { LowStockInngestRegistrar } from './stock-alerts/inngest/low-stock-inngest-registrar';
+import { HrTimeOffOutboxModule } from './hr-time-off/outbox/hr-time-off-outbox.module';
+import { HrTimeOffInngestRegistrar } from './hr-time-off/inngest/hr-time-off-inngest-registrar';
 
 @Module({
   imports: [
@@ -99,12 +101,17 @@ import { LowStockInngestRegistrar } from './stock-alerts/inngest/low-stock-innge
     // module so the dep graph (InngestService + Mailer + TenantRunner)
     // doesn't pollute transitive module chains.
     LowStockOutboxModule,
+    // Slice 5 + Slice 6 — HR time-off outbox poller/dispatcher +
+    // Inngest fn registrar. Mirrors the low-stock wiring: own module
+    // for the outbox pipeline, top-level provider for the Inngest
+    // registrar.
+    HrTimeOffOutboxModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
   // NotificationConfigRepo + UserEmailLookup + TenantRunner) resolves
   // through AppModule's imports WITHOUT forcing those deps into every
   // transitive chain (e.g. ChatbotApiModule's tests).
-  providers: [LowStockInngestRegistrar],
+  providers: [LowStockInngestRegistrar, HrTimeOffInngestRegistrar],
 })
 export class AppModule {}
