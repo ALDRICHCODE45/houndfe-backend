@@ -85,8 +85,8 @@ describe('OutboxPollerService', () => {
   // event durably; the dedicated `LowStockOutboxPoller` (Slice F.4)
   // claims those rows instead. This exclusion is the predicate that
   // makes the dispatch paths DISJOINT.
-  describe('Slice F.3 — generic claim excludes stock.low.detected (dedicated poller owns it)', () => {
-    it('claim SELECT contains a `AND "eventType" <> \'stock.low.detected\'` predicate', async () => {
+  describe('Slice F.3 + Slice 4 — generic claim excludes stock.low.detected AND hr.timeoff.requested', () => {
+    it('claim SELECT contains a `NOT IN (\'stock.low.detected\', \'hr.timeoff.requested\')` predicate', async () => {
       const capturedCalls: string[] = [];
       const prisma = {
         $transaction: (work: (tx: unknown) => Promise<unknown>) => {
@@ -119,7 +119,13 @@ describe('OutboxPollerService', () => {
         capturedCalls.find((c) =>
           /SELECT\s+id\s+FROM\s+outbox_events/i.test(c),
         ) ?? '';
-      expect(claimSql).toContain(`"eventType" <> 'stock.low.detected'`);
+      // Slice 4: exclusion now covers BOTH dedicated event types —
+      // the low-stock poller claims `stock.low.detected`, the
+      // hr-time-off poller claims `hr.timeoff.requested`. The generic
+      // poller must skip both.
+      expect(claimSql).toContain(
+        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested')`,
+      );
     });
 
     it('non-alert PENDING rows still get claimed by the generic poller (exclusion is scoped, not broad)', async () => {

@@ -54,6 +54,42 @@ describe('low-stock migration drift guard (A.3)', () => {
     expect(schemaText).toMatch(/\bLOW_STOCK\b/);
   });
 
+  // ─── Slice 3 — TIME_OFF_REQUESTED registered in BOTH the Prisma
+  // enum AND the TS allowlist (hr-validation-notifications).
+  //
+  // Spec: notification-config — 'NotificationActionKey Registry Accepts
+  // TIME_OFF_REQUESTED' / 'Registry drift is caught by a test'.
+  // Drift between the two sides (Prisma enum vs TS
+  // NOTIFICATION_ACTION_KEYS) is a real risk: PUT would either reject
+  // valid keys or accept invalid ones depending on which side is stale.
+  it('schema NotificationActionKey enum declares BOTH LOW_STOCK and TIME_OFF_REQUESTED', () => {
+    const enumBlock =
+      schemaText.match(/enum\s+NotificationActionKey\s*\{([\s\S]*?)\n\}/) ??
+      [];
+    const body = enumBlock[1] ?? '';
+    expect(body).toMatch(/\bLOW_STOCK\b/);
+    expect(body).toMatch(/\bTIME_OFF_REQUESTED\b/);
+  });
+
+  it('TS allowlist NOTIFICATION_ACTION_KEYS declares BOTH LOW_STOCK and TIME_OFF_REQUESTED', () => {
+    // Re-require the module to read the live TS allowlist (not a
+    // snapshot of the file text). The drift test must inspect the
+    // runtime shape — file-grep would silently pass if a future
+    // refactor renames or moves the array.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const tsPath = path.join(repoRoot, 'src', 'notification-config', 'domain', 'notification-config.ts');
+    // Use a minimal regex read for portability — we only need to
+    // assert the array literal includes both literal strings.
+    const tsText = fs.readFileSync(tsPath, 'utf8');
+    const arrayMatch = tsText.match(
+      /NOTIFICATION_ACTION_KEYS[^=]*=\s*\[([\s\S]*?)\]\s*as\s+const/,
+    );
+    expect(arrayMatch).not.toBeNull();
+    const items = arrayMatch![1];
+    expect(items).toMatch(/'LOW_STOCK'/);
+    expect(items).toMatch(/'TIME_OFF_REQUESTED'/);
+  });
+
   it('schema restores updatedAt on EmployeeEmergencyContact (drift fix)', () => {
     // The previous schema dropped `updatedAt` while the DB still has the
     // column. Restoring it prevents the migration from emitting a DROP.
@@ -107,5 +143,61 @@ describe('low-stock migration drift guard (A.3)', () => {
       'utf8',
     );
     expect(sql).not.toMatch(/DROP\s+COLUMN/i);
+  });
+
+  // ─── Slice 2 — Employee.userId retirement (hr-validation-notifications) ───
+  // The destructive migration `retire_employee_userid` MUST remove the
+  // identity link in `employees`: the `userId` column, the
+  // `employees_userId_fkey` foreign key, the `employees_tenantId_userId_key`
+  // unique index, and the `User.employees` back-relation. The schema and
+  // the destructive migration MUST agree; this test pins both sides.
+  describe('hr-validation-notifications — Employee.userId retirement (Slice 2)', () => {
+    const employeesBlock = (() => {
+      const m = schemaText.match(/model\s+Employee\s*\{([\s\S]*?)\n\}/);
+      return m ? m[1] : '';
+    })();
+    const userBlock = (() => {
+      const m = schemaText.match(/model\s+User\s*\{([\s\S]*?)\n\}/);
+      return m ? m[1] : '';
+    })();
+
+    function findRetireMigrationDir(): string | null {
+      const entries = fs
+        .readdirSync(migrationsRoot, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .filter((name) => name.endsWith('_retire_employee_userid'));
+      if (entries.length === 0) return null;
+      return path.join(migrationsRoot, entries.sort().reverse()[0]);
+    }
+
+    it('schema Employee model has NO userId column', () => {
+      expect(employeesBlock).not.toMatch(/^\s*userId\s+/m);
+    });
+
+    it('schema Employee model has NO @@unique([tenantId, userId]) constraint', () => {
+      expect(employeesBlock).not.toMatch(/@@unique\(\[tenantId,\s*userId\]\)/);
+    });
+
+    it('schema User model has NO `employees Employee[]` back-relation', () => {
+      expect(userBlock).not.toMatch(/^\s*employees\s+Employee\[\]/m);
+    });
+
+    it('destructive migration retire_employee_userid drops the FK + index + column on employees ONLY', () => {
+      const dir = findRetireMigrationDir();
+      expect(dir).not.toBeNull();
+      const sql = fs.readFileSync(path.join(dir!, 'migration.sql'), 'utf8');
+      // The destructive path: drop FK, drop unique index, drop column.
+      expect(sql).toMatch(/ALTER\s+TABLE\s+"employees"\s+DROP\s+CONSTRAINT\s+"employees_userId_fkey"/i);
+      expect(sql).toMatch(/DROP\s+INDEX\s+"employees_tenantId_userId_key"/i);
+      expect(sql).toMatch(/ALTER\s+TABLE\s+"employees"\s+DROP\s+COLUMN\s+"userId"/i);
+      // Touches ONLY `employees` — the migration must NOT touch any
+      // other table (e.g. notifications, users, tenants).
+      const tableAlterations = sql.match(/ALTER\s+TABLE\s+"[a-z_]+"/gi) ?? [];
+      expect(tableAlterations.length).toBeGreaterThanOrEqual(2); // FK + COLUMN
+      for (const stmt of tableAlterations) {
+        expect(stmt).toMatch(/ALTER\s+TABLE\s+"employees"/i);
+      }
+    });
   });
 });

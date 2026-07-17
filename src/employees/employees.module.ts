@@ -15,9 +15,19 @@ import { EmployeePositionController } from './employee-position.controller';
 import { EmployeeDocumentsController } from './employee-documents.controller';
 import { EmployeeTimeOffController } from './employee-time-off.controller';
 import { EmployeeEmergencyContactsController } from './employee-emergency-contacts.controller';
+import { OutboxModule } from '../shared/outbox/outbox.module';
+import { NotificationConfigModule } from '../notification-config/notification-config.module';
 
 @Module({
-  imports: [AuthModule, FilesModule],
+  imports: [
+    AuthModule,
+    FilesModule,
+    // Slice 4 — provides OutboxWriterService + the
+    // NOTIFICATION_CONFIG_REPOSITORY token used by the gated emit in
+    // `EmployeeTimeOffService.request()`.
+    OutboxModule,
+    NotificationConfigModule,
+  ],
   controllers: [
     EmployeesController,
     EmployeeSalaryController,

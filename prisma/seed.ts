@@ -1149,13 +1149,6 @@ async function seedCentroEmployees(
     });
   }
 
-  if (recordedByUserId) {
-    await tx.employee.updateMany({
-      where: { tenantId: tenant.id, userId: recordedByUserId },
-      data: { userId: null },
-    });
-  }
-
   for (const seed of DEMO_EMPLOYEES) {
     const employee = employeeByNumber.get(seed.employeeNumber);
     if (!employee) {
@@ -1176,8 +1169,6 @@ async function seedCentroEmployees(
       where: { id: employee.id },
       data: {
         managerId,
-        userId:
-          seed.employeeNumber === 'EMP-006' ? recordedByUserId ?? null : undefined,
       },
     });
 

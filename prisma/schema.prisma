@@ -204,6 +204,7 @@ enum OutboxEventStatus {
 
 enum NotificationActionKey {
   LOW_STOCK
+  TIME_OFF_REQUESTED
 }
 
 // ============================================================================
@@ -940,7 +941,6 @@ model User {
   saleComments           SaleComment[]           @relation("SaleCommentAuthor")
   reviewedReceipts       ReceiptEvidence[]       @relation("ReceiptReviewer")
   notificationRecipients NotificationRecipient[]
-  employees              Employee[]
 
   @@map("users")
 }
@@ -1351,10 +1351,6 @@ model Employee {
   // Time-off
   annualVacationDays Int @default(0)
 
-  // Optional identity link. Employee remains a tenant-scoped HR aggregate.
-  userId String?
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
-
   // Org chart
   managerId    String?
   manager      Employee?  @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
@@ -1375,7 +1371,6 @@ model Employee {
   updatedAt DateTime @updatedAt
 
   @@unique([tenantId, employeeNumber])
-  @@unique([tenantId, userId])
   @@index([tenantId, terminationDate])
   @@index([tenantId, managerId])
   @@index([tenantId, status])

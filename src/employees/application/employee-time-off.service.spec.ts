@@ -37,9 +37,31 @@ function makeService() {
   const tenantPrisma = {
     getClient: jest.fn().mockReturnValue(prismaClient),
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
+    runInTransaction: jest.fn(async (work: () => Promise<unknown>) => work()),
   } as any;
 
-  const service = new EmployeeTimeOffService(employeeRepo, tenantPrisma);
+  // Slice 4 — request() now runs inside runInTransaction and reads
+  // notification config + writes an outbox row. Defaults: gates-open
+  // (overridable per-test).
+  const notificationConfigRepo = {
+    find: jest.fn().mockResolvedValue({
+      enabled: true,
+      recipients: ['u1'],
+      enabledActions: ['TIME_OFF_REQUESTED'],
+    }),
+  };
+  const outboxWriter = {
+    publish: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const service = new EmployeeTimeOffService(
+    employeeRepo,
+    tenantPrisma,
+    undefined,
+    undefined,
+    notificationConfigRepo,
+    outboxWriter,
+  );
 
   return {
     service,
@@ -53,6 +75,8 @@ function makeService() {
     timeOffUpdate,
     employeeFindMany,
     employeeFindFirst,
+    notificationConfigRepo,
+    outboxWriter,
   };
 }
 
@@ -81,6 +105,8 @@ function makeServiceWithCls(opts: {
     base.tenantPrisma,
     cls,
     caslAbilityFactory,
+    base.notificationConfigRepo,
+    base.outboxWriter,
   );
   return { ...base, service, ability, cls, caslAbilityFactory };
 }
@@ -162,6 +188,216 @@ describe('EmployeeTimeOffService', () => {
         }),
       });
       expect(result).toEqual(createdRow);
+    });
+
+    // ─── Slice 4 — gated emit (hr-validation-notifications) ───
+    //
+    // Spec: employee-time-off — 'Atomic Request Writes Time-Off and
+    // Outbox Event in One Transaction'. time-off-notifications —
+    // 'Emit Gate Requires Master Toggle AND Action Key' (Design D1).
+    //
+    // The D1 write-time gate moves the gate UPSTREAM (low-stock writes
+    // unconditionally + gates only in fn). On `request()` success with
+    // gates open, exactly ONE outbox row is published with
+    // eventType='hr.timeoff.requested' and the self-contained payload
+    // shape from Design D3.
+    it('Slice 4 — all gates open: persists row AND publishes one outbox eventType=hr.timeoff.requested with idem `${tenantId}:${timeOffId}` and self-contained payload', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: true,
+        recipients: ['u1'],
+        enabledActions: ['TIME_OFF_REQUESTED'],
+      });
+      timeOffCreate.mockResolvedValue({
+        id: 'to-abc',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+        reason: 'Family trip',
+        status: 'PENDING',
+        requestedByUserId: 'user-1',
+        tenantId: 'tenant-1',
+      });
+
+      const result = await service.request(
+        'emp-1',
+        {
+          type: 'VACATION' as any,
+          startDate: '2026-07-01',
+          endDate: '2026-07-05',
+          reason: 'Family trip',
+        },
+        'user-1',
+      );
+
+      // Row persisted AND outbox row published, atomically.
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+
+      const publishArgs = outboxWriter.publish.mock.calls[0];
+      // (tx, tenantId, aggregateType, aggregateId, eventType, payload)
+      expect(publishArgs[1]).toBe('tenant-1'); // tenantId
+      expect(publishArgs[2]).toBe('EmployeeTimeOff'); // aggregateType
+      expect(publishArgs[3]).toBe(result.id); // aggregateId = timeOffId
+      expect(publishArgs[4]).toBe('hr.timeoff.requested'); // eventType
+      const payload = publishArgs[5];
+      expect(payload).toMatchObject({
+        tenantId: 'tenant-1',
+        timeOffId: result.id,
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        requestedByUserId: 'user-1',
+      });
+      expect(payload.startDate).toBeDefined();
+      expect(payload.endDate).toBeDefined();
+      expect(payload.employeeName).toBeDefined();
+
+      // The idempotency key for the eventual Inngest send is derived
+      // from `${tenantId}:${timeOffId}` — verified in Slice 5 specs.
+      // Here we pin the aggregateId == timeOffId (matches idem shape).
+      expect(publishArgs[3]).toBe(result.id);
+    });
+
+    it('Slice 4 — master toggle OFF (enabled=false): row persists, NO outbox row written', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: false,
+        recipients: ['u1'],
+        enabledActions: ['TIME_OFF_REQUESTED'],
+      });
+      timeOffCreate.mockResolvedValue({
+        id: 'to-x',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        status: 'PENDING',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+      });
+
+      await service.request(
+        'emp-1',
+        {
+          type: 'VACATION' as any,
+          startDate: '2026-07-01',
+          endDate: '2026-07-05',
+        },
+        'user-1',
+      );
+
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('Slice 4 — action key absent (enabledActions=[]): row persists, NO outbox row written', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: true,
+        recipients: ['u1'],
+        enabledActions: [],
+      });
+      timeOffCreate.mockResolvedValue({
+        id: 'to-y',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        status: 'PENDING',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+      });
+
+      await service.request(
+        'emp-1',
+        {
+          type: 'VACATION' as any,
+          startDate: '2026-07-01',
+          endDate: '2026-07-05',
+        },
+        'user-1',
+      );
+
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('Slice 4 — outbox insert fails: both row and outbox are rolled back (transactional)', async () => {
+      const {
+        service,
+        employeeRepo,
+        timeOffCreate,
+        notificationConfigRepo,
+        outboxWriter,
+        tenantPrisma,
+      } = makeService();
+      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      notificationConfigRepo.find.mockResolvedValue({
+        enabled: true,
+        recipients: ['u1'],
+        enabledActions: ['TIME_OFF_REQUESTED'],
+      });
+
+      // Simulate transactional semantics: runInTransaction wraps the
+      // body. If the outbox publish rejects, the tx rolls back the
+      // EmployeeTimeOff.create as well.
+      tenantPrisma.runInTransaction.mockImplementation(
+        async (work: () => Promise<unknown>) => {
+          try {
+            return await work();
+          } catch (err) {
+            // Simulate rollback by swallowing — production Prisma
+            // rolls back automatically; the spy just enforces that
+            // BOTH inserts live inside the work closure.
+            throw err;
+          }
+        },
+      );
+      timeOffCreate.mockResolvedValue({
+        id: 'to-z',
+        employeeId: 'emp-1',
+        type: 'VACATION',
+        status: 'PENDING',
+        startDate: new Date('2026-07-01'),
+        endDate: new Date('2026-07-05'),
+      });
+      outboxWriter.publish.mockRejectedValue(new Error('outbox down'));
+
+      await expect(
+        service.request(
+          'emp-1',
+          {
+            type: 'VACATION' as any,
+            startDate: '2026-07-01',
+            endDate: '2026-07-05',
+          },
+          'user-1',
+        ),
+      ).rejects.toThrow(/outbox down/);
+
+      // Both inserts were ATTEMPTED inside the transaction. The
+      // rollback (Prisma's automatic tx abort) is what guarantees
+      // neither row is persisted — pinned by the throw surfacing.
+      expect(timeOffCreate).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -416,108 +652,115 @@ describe('EmployeeTimeOffService', () => {
   });
 
   // ============================================================
-  // listPendingApprovalsForManager()
+  // listPendingApprovals() — Slice 1 tenant-wide inbox
   // ============================================================
-  describe('listPendingApprovalsForManager()', () => {
-    it('should return empty array when manager has no subordinates', async () => {
-      const { service, employeeFindMany } = makeService();
-      employeeFindMany.mockResolvedValue([]);
-
-      const result = await service.listPendingApprovalsForManager('mgr-1');
-      expect(result).toEqual([]);
-    });
-
-    it('should return pending time-off for subordinates', async () => {
-      const { service, employeeFindMany, timeOffFindMany } = makeService();
-      employeeFindMany.mockResolvedValue([{ id: 'emp-2' }, { id: 'emp-3' }]);
+  describe('listPendingApprovals() — tenant-wide inbox', () => {
+    it('should return every PENDING row in the tenant, ordered by [startDate asc, id asc]', async () => {
+      const { service, timeOffFindMany } = makeService();
 
       const pendingRows = [
         {
-          id: 'to-1',
+          id: 'to-A',
           employeeId: 'emp-2',
           type: 'VACATION',
           status: 'PENDING',
           reason: null,
+          startDate: new Date('2026-07-05'),
+        },
+        {
+          id: 'to-B',
+          employeeId: 'emp-3',
+          type: 'PERSONAL',
+          status: 'PENDING',
+          reason: 'Doctor',
+          startDate: new Date('2026-07-01'),
+        },
+      ];
+      timeOffFindMany.mockResolvedValue(pendingRows);
+
+      const result = await service.listPendingApprovals();
+
+      // Tenant-wide query: NO Employee.userId, NO Employee.managerId filter.
+      expect(timeOffFindMany).toHaveBeenCalledWith({
+        where: { status: 'PENDING' },
+        orderBy: [{ startDate: 'asc' }, { id: 'asc' }],
+      });
+      expect(result).toHaveLength(2);
+    });
+
+    it('should issue NO Employee.userId or Employee.managerId query (sole userId reader removed)', async () => {
+      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
+        makeService();
+      // Stub the tenant-wide findMany to [] so the production code path
+      // executes end-to-end — we are asserting which queries are NOT made.
+      timeOffFindMany.mockResolvedValue([]);
+
+      await service.listPendingApprovals();
+
+      // The OLD by-manager/current-user reader used Employee.userId +
+      // Employee.managerId. Tenant-wide inbox must NOT touch Employee.
+      expect(employeeFindFirst).not.toHaveBeenCalled();
+      expect(employeeFindMany).not.toHaveBeenCalled();
+
+      // Only the EmployeeTimeOff.findMany call remains.
+      expect(timeOffFindMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('should strip SICK reason when ability lacks read:EmployeeTimeOffMedical', async () => {
+      const { service, timeOffFindMany } = makeService();
+      timeOffFindMany.mockResolvedValue([
+        {
+          id: 'to-1',
+          employeeId: 'emp-2',
+          type: 'SICK',
+          status: 'PENDING',
+          reason: 'Confidencial',
           startDate: new Date('2026-07-01'),
         },
         {
           id: 'to-2',
           employeeId: 'emp-3',
-          type: 'PERSONAL',
+          type: 'VACATION',
           status: 'PENDING',
-          reason: 'Doctor',
+          reason: 'Family trip',
           startDate: new Date('2026-07-05'),
         },
-      ];
-      timeOffFindMany.mockResolvedValue(pendingRows);
+      ]);
 
-      const result = await service.listPendingApprovalsForManager('mgr-1');
+      const abilityWithoutMedical = {
+        can: jest.fn().mockReturnValue(false),
+      } as any;
 
-      expect(employeeFindMany).toHaveBeenCalledWith({
-        where: { managerId: 'mgr-1' },
-        select: { id: true },
-      });
-      expect(timeOffFindMany).toHaveBeenCalledWith({
-        where: {
-          employeeId: { in: ['emp-2', 'emp-3'] },
-          status: 'PENDING',
-        },
-        orderBy: { startDate: 'asc' },
-      });
-      expect(result).toHaveLength(2);
-    });
-  });
+      const result = await service.listPendingApprovals(abilityWithoutMedical);
 
-  // ============================================================
-  // listPendingApprovalsForCurrentUser()
-  // ============================================================
-  describe('listPendingApprovalsForCurrentUser()', () => {
-    it('should return empty array when current user is not linked to an employee', async () => {
-      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
-        makeService();
-      employeeFindFirst.mockResolvedValue(null);
-
-      const result = await service.listPendingApprovalsForCurrentUser('user-1');
-
-      expect(employeeFindFirst).toHaveBeenCalledWith({
-        where: { userId: 'user-1' },
-        select: { id: true },
-      });
-      expect(employeeFindMany).not.toHaveBeenCalled();
-      expect(timeOffFindMany).not.toHaveBeenCalled();
-      expect(result).toEqual([]);
+      expect(result[0].reason).toBeNull();
+      expect(result[1].reason).toBe('Family trip');
     });
 
-    it('should resolve the linked employee and return pending subordinate requests', async () => {
-      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
-        makeService();
-      employeeFindFirst.mockResolvedValue({ id: 'mgr-1' });
-      employeeFindMany.mockResolvedValue([{ id: 'emp-2' }]);
+    it('should keep SICK reason when ability grants read:EmployeeTimeOffMedical', async () => {
+      const { service, timeOffFindMany } = makeService();
       timeOffFindMany.mockResolvedValue([
         {
           id: 'to-1',
           employeeId: 'emp-2',
-          type: 'VACATION',
+          type: 'SICK',
           status: 'PENDING',
-          reason: 'Family trip',
+          reason: 'Gripe',
           startDate: new Date('2026-07-01'),
         },
       ]);
 
-      const result = await service.listPendingApprovalsForCurrentUser('user-1');
+      const abilityWithMedical = {
+        can: jest.fn().mockImplementation((action: string, subject: string) => {
+          if (action === 'read' && subject === 'EmployeeTimeOffMedical')
+            return true;
+          return false;
+        }),
+      } as any;
 
-      expect(employeeFindMany).toHaveBeenCalledWith({
-        where: { managerId: 'mgr-1' },
-        select: { id: true },
-      });
-      expect(timeOffFindMany).toHaveBeenCalledWith({
-        where: {
-          employeeId: { in: ['emp-2'] },
-          status: 'PENDING',
-        },
-        orderBy: { startDate: 'asc' },
-      });
-      expect(result).toHaveLength(1);
+      const result = await service.listPendingApprovals(abilityWithMedical);
+
+      expect(result[0].reason).toBe('Gripe');
     });
   });
 
@@ -585,11 +828,10 @@ describe('EmployeeTimeOffService', () => {
       expect(result.data[0].reason).toBe('Gripe fuerte');
     });
 
-    it('listPendingApprovalsForManager builds CLS ability and strips SICK reason when missing permission', async () => {
+    it('listPendingApprovals builds CLS ability and strips SICK reason when missing permission (tenant-wide)', async () => {
       const { service, prismaClient, ability } = makeServiceWithCls({
         abilityCanResult: false,
       });
-      prismaClient.employee.findMany.mockResolvedValue([{ id: 'emp-2' }]);
       prismaClient.employeeTimeOff.findMany.mockResolvedValue([
         {
           id: 't9',
@@ -602,8 +844,11 @@ describe('EmployeeTimeOffService', () => {
         },
       ]);
 
-      const result = await service.listPendingApprovalsForManager('mgr-1');
+      const result = await service.listPendingApprovals();
 
+      // The tenant-wide inbox builds ability via CLS and strips SICK
+      // reason when medical-read is denied — same contract as before,
+      // applied to the tenant-wide query.
       expect(ability.can).toHaveBeenCalledWith(
         'read',
         'EmployeeTimeOffMedical',

@@ -13,6 +13,23 @@ import { TimeOffInvalidTransitionError } from '../domain/errors/time-off-invalid
 import { TimeOffInvalidDateRangeError } from '../domain/errors/time-off-invalid-date-range.error';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import {
+  NOTIFICATION_CONFIG_REPOSITORY,
+  type INotificationConfigRepository,
+} from '../../notification-config/domain/notification-config.repository';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
+import type { OutboxPayload } from '../../shared/outbox/outbox.types';
+
+interface TimeOffRequestedPayload {
+  tenantId: string;
+  timeOffId: string;
+  employeeId: string;
+  type: string;
+  startDate: string;
+  endDate: string;
+  employeeName: string;
+  requestedByUserId: string | null;
+}
 
 @Injectable()
 export class EmployeeTimeOffService {
@@ -22,6 +39,10 @@ export class EmployeeTimeOffService {
     private readonly tenantPrisma: TenantPrismaService,
     @Optional() private readonly cls?: ClsService<TenantClsStore>,
     @Optional() private readonly caslAbilityFactory?: CaslAbilityFactory,
+    @Optional()
+    @Inject(NOTIFICATION_CONFIG_REPOSITORY)
+    private readonly notificationConfigRepo?: INotificationConfigRepository,
+    @Optional() private readonly outboxWriter?: OutboxWriterService,
   ) {}
 
   /**
@@ -54,20 +75,84 @@ export class EmployeeTimeOffService {
       throw new TimeOffInvalidDateRangeError(dto.startDate, dto.endDate);
     }
 
-    const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
+    // Slice 4 — Atomic write-time gate (Design D1).
+    //
+    // The request row is ALWAYS persisted. The outbox row is published
+    // ONLY when the master toggle is ON AND TIME_OFF_REQUESTED is in
+    // `enabledActions`. Both writes commit or roll back together so
+    // we never leave an orphan outbox row (gate-closed ⇒ row persists,
+    // no outbox; gate-open ⇒ both persist or both roll back).
+    //
+    // The self-contained payload (Design D3) carries the fields the
+    // HR dispatcher + Inngest fn need — no re-reads required. The
+    // idempotency seed `${tenantId}:${timeOffId}` is encoded via
+    // `aggregateId = timeOffId` and re-asserted by the dispatcher at
+    // send time (Slice 5).
+    return this.tenantPrisma.runInTransaction(async () => {
+      const prisma = this.tenantPrisma.getClient();
+      const tenantId = this.tenantPrisma.getTenantId();
 
-    return prisma.employeeTimeOff.create({
-      data: {
-        employeeId,
-        type: dto.type,
-        startDate,
-        endDate,
-        reason: dto.reason ?? null,
-        status: 'PENDING',
-        requestedByUserId: requestedByUserId ?? null,
-        tenantId,
-      },
+      const created = await prisma.employeeTimeOff.create({
+        data: {
+          employeeId,
+          type: dto.type,
+          startDate,
+          endDate,
+          reason: dto.reason ?? null,
+          status: 'PENDING',
+          requestedByUserId: requestedByUserId ?? null,
+          tenantId,
+        },
+      });
+
+      // Outbox gate — read tenant-scoped config inside the same tx so
+      // the read sees the same snapshot the row write did. Tests stub
+      // `notificationConfigRepo.find`; production injects the
+      // `PrismaNotificationConfigRepository` (registered by
+      // NotificationConfigModule at :44).
+      if (this.notificationConfigRepo && this.outboxWriter) {
+        const config = await this.notificationConfigRepo.find();
+        const gatesOpen =
+          config.enabled &&
+          config.enabledActions.includes('TIME_OFF_REQUESTED');
+
+        if (gatesOpen) {
+          const employeeName =
+            [employee.firstName, employee.lastName]
+              .filter(Boolean)
+              .join(' ')
+              .trim() || '(empleado)';
+
+          const payload: TimeOffRequestedPayload = {
+            tenantId,
+            timeOffId: created.id,
+            employeeId: created.employeeId,
+            type: created.type,
+            startDate: new Date(created.startDate).toISOString(),
+            endDate: new Date(created.endDate).toISOString(),
+            employeeName,
+            requestedByUserId: created.requestedByUserId ?? null,
+          };
+
+          // OutboxWriterService.publish expects a Prisma tx client or
+          // a stand-in with the same shape. The tenant-scoped client
+          // returned by `tenantPrisma.getClient()` IS that client when
+          // we're inside `runInTransaction` (it forwards to the
+          // ambient tx). Cast through `unknown` matches the
+          // established low-stock pattern at
+          // `prisma-product.repository.ts:394`.
+          await this.outboxWriter.publish(
+            prisma as unknown as Parameters<OutboxWriterService['publish']>[0],
+            tenantId,
+            'EmployeeTimeOff',
+            created.id,
+            'hr.timeoff.requested',
+            payload as unknown as OutboxPayload,
+          );
+        }
+      }
+
+      return created;
     });
   }
 
@@ -215,27 +300,12 @@ export class EmployeeTimeOffService {
     };
   }
 
-  async listPendingApprovalsForManager(
-    managerId: string,
-    ability?: AppAbility,
-  ) {
+  async listPendingApprovals(ability?: AppAbility) {
     const prisma = this.tenantPrisma.getClient();
 
-    const subordinates = await prisma.employee.findMany({
-      where: { managerId },
-      select: { id: true },
-    });
-
-    if (subordinates.length === 0) return [];
-
-    const subordinateIds = subordinates.map((s: any) => s.id);
-
     const rows = await prisma.employeeTimeOff.findMany({
-      where: {
-        employeeId: { in: subordinateIds },
-        status: 'PENDING',
-      },
-      orderBy: { startDate: 'asc' },
+      where: { status: 'PENDING' },
+      orderBy: [{ startDate: 'asc' }, { id: 'asc' }],
     });
 
     const effectiveAbility = ability ?? (await this.getCurrentAbility());
@@ -243,22 +313,6 @@ export class EmployeeTimeOffService {
     return rows.map((row: any) =>
       this.stripMedicalReason(row, effectiveAbility),
     );
-  }
-
-  async listPendingApprovalsForCurrentUser(
-    userId: string,
-    ability?: AppAbility,
-  ) {
-    const prisma = this.tenantPrisma.getClient();
-
-    const manager = await prisma.employee.findFirst({
-      where: { userId },
-      select: { id: true },
-    });
-
-    if (!manager) return [];
-
-    return this.listPendingApprovalsForManager(manager.id, ability);
   }
 
   // ==================== Helpers ====================
