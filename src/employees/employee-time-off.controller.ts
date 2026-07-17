@@ -83,21 +83,15 @@ export class EmployeeTimeOffController {
     return this.timeOffService.cancel(employeeId, timeOffId);
   }
 
-  /** GET /admin/employees-time-off/pending-approvals — current manager view */
+  /** GET /admin/employees-time-off/pending-approvals — tenant-wide inbox */
   @Get('admin/employees-time-off/pending-approvals')
   @RequirePermissions(['read', 'EmployeeTimeOff'])
-  pendingApprovals(@CurrentUser() user: AuthenticatedUser) {
-    // Current manager view: backend resolves User -> Employee inside the tenant.
-    return this.timeOffService.listPendingApprovalsForCurrentUser(user.userId);
-  }
-
-  /** GET /admin/employees-time-off/pending-approvals/by-manager/:managerId — HR/admin view */
-  @Get('admin/employees-time-off/pending-approvals/by-manager/:managerId')
-  @RequirePermissions(['read', 'EmployeeTimeOff'])
-  pendingApprovalsByManager(
-    @Param('managerId', ParseUUIDPipe) managerId: string,
-  ) {
-    // HR/admin compatibility view for an explicit Employee manager id.
-    return this.timeOffService.listPendingApprovalsForManager(managerId);
+  pendingApprovals() {
+    // Slice 1 — tenant-wide pending-approvals inbox. The previous
+    // manager-scoped routes (`by-manager/:managerId` + current-user
+    // resolution) were removed: the sole `Employee.userId` reader
+    // retired along with the schema column. See
+    // `employee-time-off.service.ts` for the new query.
+    return this.timeOffService.listPendingApprovals();
   }
 }

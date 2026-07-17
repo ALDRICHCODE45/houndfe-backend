@@ -416,108 +416,115 @@ describe('EmployeeTimeOffService', () => {
   });
 
   // ============================================================
-  // listPendingApprovalsForManager()
+  // listPendingApprovals() — Slice 1 tenant-wide inbox
   // ============================================================
-  describe('listPendingApprovalsForManager()', () => {
-    it('should return empty array when manager has no subordinates', async () => {
-      const { service, employeeFindMany } = makeService();
-      employeeFindMany.mockResolvedValue([]);
-
-      const result = await service.listPendingApprovalsForManager('mgr-1');
-      expect(result).toEqual([]);
-    });
-
-    it('should return pending time-off for subordinates', async () => {
-      const { service, employeeFindMany, timeOffFindMany } = makeService();
-      employeeFindMany.mockResolvedValue([{ id: 'emp-2' }, { id: 'emp-3' }]);
+  describe('listPendingApprovals() — tenant-wide inbox', () => {
+    it('should return every PENDING row in the tenant, ordered by [startDate asc, id asc]', async () => {
+      const { service, timeOffFindMany } = makeService();
 
       const pendingRows = [
         {
-          id: 'to-1',
+          id: 'to-A',
           employeeId: 'emp-2',
           type: 'VACATION',
           status: 'PENDING',
           reason: null,
+          startDate: new Date('2026-07-05'),
+        },
+        {
+          id: 'to-B',
+          employeeId: 'emp-3',
+          type: 'PERSONAL',
+          status: 'PENDING',
+          reason: 'Doctor',
+          startDate: new Date('2026-07-01'),
+        },
+      ];
+      timeOffFindMany.mockResolvedValue(pendingRows);
+
+      const result = await service.listPendingApprovals();
+
+      // Tenant-wide query: NO Employee.userId, NO Employee.managerId filter.
+      expect(timeOffFindMany).toHaveBeenCalledWith({
+        where: { status: 'PENDING' },
+        orderBy: [{ startDate: 'asc' }, { id: 'asc' }],
+      });
+      expect(result).toHaveLength(2);
+    });
+
+    it('should issue NO Employee.userId or Employee.managerId query (sole userId reader removed)', async () => {
+      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
+        makeService();
+      // Stub the tenant-wide findMany to [] so the production code path
+      // executes end-to-end — we are asserting which queries are NOT made.
+      timeOffFindMany.mockResolvedValue([]);
+
+      await service.listPendingApprovals();
+
+      // The OLD by-manager/current-user reader used Employee.userId +
+      // Employee.managerId. Tenant-wide inbox must NOT touch Employee.
+      expect(employeeFindFirst).not.toHaveBeenCalled();
+      expect(employeeFindMany).not.toHaveBeenCalled();
+
+      // Only the EmployeeTimeOff.findMany call remains.
+      expect(timeOffFindMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('should strip SICK reason when ability lacks read:EmployeeTimeOffMedical', async () => {
+      const { service, timeOffFindMany } = makeService();
+      timeOffFindMany.mockResolvedValue([
+        {
+          id: 'to-1',
+          employeeId: 'emp-2',
+          type: 'SICK',
+          status: 'PENDING',
+          reason: 'Confidencial',
           startDate: new Date('2026-07-01'),
         },
         {
           id: 'to-2',
           employeeId: 'emp-3',
-          type: 'PERSONAL',
+          type: 'VACATION',
           status: 'PENDING',
-          reason: 'Doctor',
+          reason: 'Family trip',
           startDate: new Date('2026-07-05'),
         },
-      ];
-      timeOffFindMany.mockResolvedValue(pendingRows);
+      ]);
 
-      const result = await service.listPendingApprovalsForManager('mgr-1');
+      const abilityWithoutMedical = {
+        can: jest.fn().mockReturnValue(false),
+      } as any;
 
-      expect(employeeFindMany).toHaveBeenCalledWith({
-        where: { managerId: 'mgr-1' },
-        select: { id: true },
-      });
-      expect(timeOffFindMany).toHaveBeenCalledWith({
-        where: {
-          employeeId: { in: ['emp-2', 'emp-3'] },
-          status: 'PENDING',
-        },
-        orderBy: { startDate: 'asc' },
-      });
-      expect(result).toHaveLength(2);
-    });
-  });
+      const result = await service.listPendingApprovals(abilityWithoutMedical);
 
-  // ============================================================
-  // listPendingApprovalsForCurrentUser()
-  // ============================================================
-  describe('listPendingApprovalsForCurrentUser()', () => {
-    it('should return empty array when current user is not linked to an employee', async () => {
-      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
-        makeService();
-      employeeFindFirst.mockResolvedValue(null);
-
-      const result = await service.listPendingApprovalsForCurrentUser('user-1');
-
-      expect(employeeFindFirst).toHaveBeenCalledWith({
-        where: { userId: 'user-1' },
-        select: { id: true },
-      });
-      expect(employeeFindMany).not.toHaveBeenCalled();
-      expect(timeOffFindMany).not.toHaveBeenCalled();
-      expect(result).toEqual([]);
+      expect(result[0].reason).toBeNull();
+      expect(result[1].reason).toBe('Family trip');
     });
 
-    it('should resolve the linked employee and return pending subordinate requests', async () => {
-      const { service, employeeFindFirst, employeeFindMany, timeOffFindMany } =
-        makeService();
-      employeeFindFirst.mockResolvedValue({ id: 'mgr-1' });
-      employeeFindMany.mockResolvedValue([{ id: 'emp-2' }]);
+    it('should keep SICK reason when ability grants read:EmployeeTimeOffMedical', async () => {
+      const { service, timeOffFindMany } = makeService();
       timeOffFindMany.mockResolvedValue([
         {
           id: 'to-1',
           employeeId: 'emp-2',
-          type: 'VACATION',
+          type: 'SICK',
           status: 'PENDING',
-          reason: 'Family trip',
+          reason: 'Gripe',
           startDate: new Date('2026-07-01'),
         },
       ]);
 
-      const result = await service.listPendingApprovalsForCurrentUser('user-1');
+      const abilityWithMedical = {
+        can: jest.fn().mockImplementation((action: string, subject: string) => {
+          if (action === 'read' && subject === 'EmployeeTimeOffMedical')
+            return true;
+          return false;
+        }),
+      } as any;
 
-      expect(employeeFindMany).toHaveBeenCalledWith({
-        where: { managerId: 'mgr-1' },
-        select: { id: true },
-      });
-      expect(timeOffFindMany).toHaveBeenCalledWith({
-        where: {
-          employeeId: { in: ['emp-2'] },
-          status: 'PENDING',
-        },
-        orderBy: { startDate: 'asc' },
-      });
-      expect(result).toHaveLength(1);
+      const result = await service.listPendingApprovals(abilityWithMedical);
+
+      expect(result[0].reason).toBe('Gripe');
     });
   });
 
@@ -585,11 +592,10 @@ describe('EmployeeTimeOffService', () => {
       expect(result.data[0].reason).toBe('Gripe fuerte');
     });
 
-    it('listPendingApprovalsForManager builds CLS ability and strips SICK reason when missing permission', async () => {
+    it('listPendingApprovals builds CLS ability and strips SICK reason when missing permission (tenant-wide)', async () => {
       const { service, prismaClient, ability } = makeServiceWithCls({
         abilityCanResult: false,
       });
-      prismaClient.employee.findMany.mockResolvedValue([{ id: 'emp-2' }]);
       prismaClient.employeeTimeOff.findMany.mockResolvedValue([
         {
           id: 't9',
@@ -602,8 +608,11 @@ describe('EmployeeTimeOffService', () => {
         },
       ]);
 
-      const result = await service.listPendingApprovalsForManager('mgr-1');
+      const result = await service.listPendingApprovals();
 
+      // The tenant-wide inbox builds ability via CLS and strips SICK
+      // reason when medical-read is denied — same contract as before,
+      // applied to the tenant-wide query.
       expect(ability.can).toHaveBeenCalledWith(
         'read',
         'EmployeeTimeOffMedical',

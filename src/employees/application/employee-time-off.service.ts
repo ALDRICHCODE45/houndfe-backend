@@ -215,27 +215,12 @@ export class EmployeeTimeOffService {
     };
   }
 
-  async listPendingApprovalsForManager(
-    managerId: string,
-    ability?: AppAbility,
-  ) {
+  async listPendingApprovals(ability?: AppAbility) {
     const prisma = this.tenantPrisma.getClient();
 
-    const subordinates = await prisma.employee.findMany({
-      where: { managerId },
-      select: { id: true },
-    });
-
-    if (subordinates.length === 0) return [];
-
-    const subordinateIds = subordinates.map((s: any) => s.id);
-
     const rows = await prisma.employeeTimeOff.findMany({
-      where: {
-        employeeId: { in: subordinateIds },
-        status: 'PENDING',
-      },
-      orderBy: { startDate: 'asc' },
+      where: { status: 'PENDING' },
+      orderBy: [{ startDate: 'asc' }, { id: 'asc' }],
     });
 
     const effectiveAbility = ability ?? (await this.getCurrentAbility());
@@ -243,22 +228,6 @@ export class EmployeeTimeOffService {
     return rows.map((row: any) =>
       this.stripMedicalReason(row, effectiveAbility),
     );
-  }
-
-  async listPendingApprovalsForCurrentUser(
-    userId: string,
-    ability?: AppAbility,
-  ) {
-    const prisma = this.tenantPrisma.getClient();
-
-    const manager = await prisma.employee.findFirst({
-      where: { userId },
-      select: { id: true },
-    });
-
-    if (!manager) return [];
-
-    return this.listPendingApprovalsForManager(manager.id, ability);
   }
 
   // ==================== Helpers ====================
