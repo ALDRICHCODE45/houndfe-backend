@@ -277,9 +277,10 @@ describe('EmployeeDocumentsService', () => {
 
   describe('listExpiringTenantWide()', () => {
     it('should query by tenantId and expiresAt cutoff ordered by expiresAt asc', async () => {
-      const { service, documentFindMany } = makeService();
+      const { service, documentFindMany, employeeFindMany } = makeService();
       const docs = [{ id: 'doc-1', expiresAt: new Date() }];
       documentFindMany.mockResolvedValue(docs);
+      employeeFindMany.mockResolvedValue([]);
 
       const result = await service.listExpiringTenantWide(30);
 
