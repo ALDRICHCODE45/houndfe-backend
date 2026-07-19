@@ -209,7 +209,11 @@ describe('EmployeeTimeOffService', () => {
         notificationConfigRepo,
         outboxWriter,
       } = makeService();
-      employeeRepo.findById.mockResolvedValue(mockEmployee);
+      employeeRepo.findById.mockResolvedValue({
+        ...mockEmployee,
+        firstName: 'Luis',
+        lastName: 'Pérez',
+      });
       notificationConfigRepo.find.mockResolvedValue({
         enabled: true,
         recipients: ['u1'],
@@ -258,7 +262,7 @@ describe('EmployeeTimeOffService', () => {
       });
       expect(payload.startDate).toBeDefined();
       expect(payload.endDate).toBeDefined();
-      expect(payload.employeeName).toBeDefined();
+      expect(payload.employeeName).toBe('Luis Pérez');
 
       // The idempotency key for the eventual Inngest send is derived
       // from `${tenantId}:${timeOffId}` — verified in Slice 5 specs.
@@ -720,7 +724,7 @@ describe('EmployeeTimeOffService', () => {
   // ============================================================
   describe('listPendingApprovals() — tenant-wide inbox', () => {
     it('should return every PENDING row in the tenant, ordered by [startDate asc, id asc]', async () => {
-      const { service, timeOffFindMany } = makeService();
+      const { service, timeOffFindMany, employeeFindMany } = makeService();
 
       const pendingRows = [
         {
@@ -741,6 +745,20 @@ describe('EmployeeTimeOffService', () => {
         },
       ];
       timeOffFindMany.mockResolvedValue(pendingRows);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
+        },
+        {
+          id: 'emp-3',
+          firstName: 'Luis',
+          lastName: 'Pérez',
+          employeeNumber: 'E-003',
+        },
+      ]);
 
       const result = await service.listPendingApprovals();
 
@@ -771,7 +789,7 @@ describe('EmployeeTimeOffService', () => {
     });
 
     it('should strip SICK reason when ability lacks read:EmployeeTimeOffMedical', async () => {
-      const { service, timeOffFindMany } = makeService();
+      const { service, timeOffFindMany, employeeFindMany } = makeService();
       timeOffFindMany.mockResolvedValue([
         {
           id: 'to-1',
@@ -790,6 +808,20 @@ describe('EmployeeTimeOffService', () => {
           startDate: new Date('2026-07-05'),
         },
       ]);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
+        },
+        {
+          id: 'emp-3',
+          firstName: 'Luis',
+          lastName: 'Pérez',
+          employeeNumber: 'E-003',
+        },
+      ]);
 
       const abilityWithoutMedical = {
         can: jest.fn().mockReturnValue(false),
@@ -802,7 +834,7 @@ describe('EmployeeTimeOffService', () => {
     });
 
     it('should keep SICK reason when ability grants read:EmployeeTimeOffMedical', async () => {
-      const { service, timeOffFindMany } = makeService();
+      const { service, timeOffFindMany, employeeFindMany } = makeService();
       timeOffFindMany.mockResolvedValue([
         {
           id: 'to-1',
@@ -811,6 +843,14 @@ describe('EmployeeTimeOffService', () => {
           status: 'PENDING',
           reason: 'Gripe',
           startDate: new Date('2026-07-01'),
+        },
+      ]);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
         },
       ]);
 
@@ -1076,6 +1116,14 @@ describe('EmployeeTimeOffService', () => {
           startDate: new Date('2026-04-01'),
           endDate: new Date('2026-04-02'),
           reason: 'Confidencial',
+        },
+      ]);
+      prismaClient.employee.findMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
         },
       ]);
 
