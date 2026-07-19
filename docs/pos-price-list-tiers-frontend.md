@@ -92,7 +92,7 @@ Asigna o limpia la lista de precios de la venta. Dispara repricing inmediato de 
 
 **Response**: el draft completo repriceado.
 
-### `POST /sales/drafts/:id/assign-customer` (assignCustomer)
+### `PUT /sales/drafts/:id/customer` (assignCustomer) — existente, sin cambios de ruta
 
 **Cambio**: si el cliente asignado tiene `globalPriceListId` y **el cajero NO eligió explícitamente una lista** en la venta, el sistema automáticamente siembra esa lista en la venta (la asigna y reprica).
 
@@ -231,7 +231,7 @@ Body: { "productId": "prod-x", "quantity": 1 }
 → { "items": [{ "unitPriceCents": 50000 }] }  # precio default (PUBLICO)
 
 # 3. Asignar cliente mayorista (tiene globalPriceListId = "uuid-mayoreo")
-POST /sales/drafts/draft-2/assign-customer
+PUT /sales/drafts/draft-2/customer
 Body: { "customerId": "cust-mayoreo" }
 → { "globalPriceListId": "uuid-mayoreo", "items": [{ "unitPriceCents": 30000, "priceSource": "price_list" }] }
 # La lista se sembró y el precio se actualizó automáticamente
@@ -294,7 +294,7 @@ Body: { "globalPriceListId": "uuid-contado" }
 |---|---|
 | `POST /sales/drafts/:id/items` | `unitPriceCents` ahora es tier-aware. La respuesta incluye el draft repriceado. |
 | `PATCH .../items/:itemId/quantity` | Dispara repricing de TODAS las líneas. Tier-crossing actualiza precios. |
-| `POST .../assign-customer` | Siembra `globalPriceListId` del cliente si el cajero no eligió una. |
+| `PUT .../customer` | Siembra `globalPriceListId` del cliente si el cajero no eligió una. |
 | `GET /sales/drafts/:id` | Nuevo campo `globalPriceListId`. |
 | `GET /sales/drafts` | Nuevo campo `globalPriceListId` en cada draft. |
 
