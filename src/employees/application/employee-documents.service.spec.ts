@@ -15,6 +15,7 @@ function makeService() {
   const documentFindMany = jest.fn();
   const documentCount = jest.fn();
   const documentDelete = jest.fn();
+  const employeeFindMany = jest.fn();
 
   const prismaClient = {
     employeeDocument: {
@@ -23,6 +24,9 @@ function makeService() {
       findMany: documentFindMany,
       count: documentCount,
       delete: documentDelete,
+    },
+    employee: {
+      findMany: employeeFindMany,
     },
   };
 
@@ -54,6 +58,7 @@ function makeService() {
     documentFindMany,
     documentCount,
     documentDelete,
+    employeeFindMany,
   };
 }
 
@@ -283,7 +288,106 @@ describe('EmployeeDocumentsService', () => {
       expect(call.where.expiresAt.lte).toBeInstanceOf(Date);
       expect(call.where.expiresAt.not).toBeNull();
       expect(call.orderBy).toEqual({ expiresAt: 'asc' });
-      expect(result).toEqual(docs);
+      // Additive contract: the original document rows still flow through
+      // unchanged (identity fields are asserted in the describe below).
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject(docs[0]);
+    });
+  });
+
+  describe('listExpiringTenantWide() — inline employee identity', () => {
+    it('attaches fullName + employeeNumber from a batch employee lookup, preserving expiresAt order', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+
+      // findMany already returns docs ordered by expiresAt asc; the
+      // service must iterate DOCS (not employees) to keep that order.
+      documentFindMany.mockResolvedValue([
+        { id: 'doc-1', employeeId: 'emp-3', expiresAt: new Date('2026-07-01') },
+        { id: 'doc-2', employeeId: 'emp-2', expiresAt: new Date('2026-07-05') },
+      ]);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
+        },
+        {
+          id: 'emp-3',
+          firstName: 'Luis',
+          lastName: 'Pérez',
+          employeeNumber: 'E-003',
+        },
+      ]);
+
+      const result = await service.listExpiringTenantWide(30);
+
+      expect(result.map((r: any) => r.id)).toEqual(['doc-1', 'doc-2']);
+      expect(result[0]).toMatchObject({
+        employeeId: 'emp-3',
+        fullName: 'Luis Pérez',
+        employeeNumber: 'E-003',
+      });
+      expect(result[1]).toMatchObject({
+        employeeId: 'emp-2',
+        fullName: 'Ana Gómez',
+        employeeNumber: 'E-002',
+      });
+    });
+
+    it('queries the employee lookup once with the de-duplicated employeeIds', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([
+        { id: 'doc-1', employeeId: 'emp-2', expiresAt: new Date('2026-07-01') },
+        { id: 'doc-2', employeeId: 'emp-2', expiresAt: new Date('2026-07-02') },
+        { id: 'doc-3', employeeId: 'emp-3', expiresAt: new Date('2026-07-03') },
+      ]);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
+        },
+        {
+          id: 'emp-3',
+          firstName: 'Luis',
+          lastName: 'Pérez',
+          employeeNumber: 'E-003',
+        },
+      ]);
+
+      await service.listExpiringTenantWide(30);
+
+      // ONE batch read with the UNIQUE ids — no tenantId hand-added
+      // (Employee is auto tenant-scoped).
+      expect(employeeFindMany).toHaveBeenCalledTimes(1);
+      expect(employeeFindMany).toHaveBeenCalledWith({
+        where: { id: { in: ['emp-2', 'emp-3'] } },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          employeeNumber: true,
+        },
+      });
+    });
+
+    it('falls back to "(empleado)" and null employeeNumber when the employee is missing from the lookup', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([
+        {
+          id: 'doc-1',
+          employeeId: 'emp-missing',
+          expiresAt: new Date('2026-07-01'),
+        },
+      ]);
+      employeeFindMany.mockResolvedValue([]); // lookup resolves nothing
+
+      const result = await service.listExpiringTenantWide(30);
+
+      expect(result[0].fullName).toBe('(empleado)');
+      expect(result[0].employeeNumber).toBeNull();
     });
   });
 });
