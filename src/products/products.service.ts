@@ -2235,6 +2235,198 @@ export class ProductsService {
     }));
   }
 
+  /**
+   * WU1 — Tier-aware batch price resolver. Maps each input tuple
+   * `{ productId, variantId, priceListId, quantity }` to a tier-resolved
+   * `priceCents`. Constant 2 Prisma queries (`variantPrice.findMany` +
+   * `priceList.findMany`) regardless of line count — no N+1.
+   *
+   * Input partitioning:
+   *   - `variantId !== null` → resolved via VariantTierPrice (variant
+   *     tiers win over product tiers — spec scenario "Variant tiers beat
+   *     product tiers").
+   *   - `variantId === null` → resolved via TierPrice on `PriceList`.
+   *
+   * Resolution rules:
+   *   - Tier whose `minQuantity <= quantity` and whose `priceCents > 0`
+   *     is the candidate set. The tier with the highest `minQuantity`
+   *     wins. Tier rows with `priceCents <= 0` are ignored (zero-price
+   *     tier ignored — spec scenario).
+   *   - With no qualifying tier, the row's `priceCents` (base) applies
+   *     (below lowest tier uses list base price — spec scenario).
+   *   - No matching row at all → the input is omitted from the map; the
+   *     caller falls back to the default list (spec scenario "Missing
+   *     list price falls back to default list").
+   *
+   * Output structure: a `Map<key, Map<quantity, priceCents>>`. The outer
+   * key is `${productId}::${variantId ?? ''}::${priceListId ??
+   * '__default__'}`, derived fully from inputs (no object identity).
+   * The inner map lets the caller O(1)-read the resolved price for the
+   * exact quantity the resolver was asked — when inputs contain the
+   * same key with multiple quantities (e.g. addItem qty=3 of an
+   * existing line at qty=2 → cumulative qty=5 tier check), the
+   * resolver preserves each quantity's result.
+   *
+   * No DB call when inputs is empty (defensive — saves the spec's
+   * query-count budget on drafts with no resolvable items).
+   */
+  async batchResolvePriceMap(
+    inputs: ReadonlyArray<{
+      productId: string;
+      variantId: string | null;
+      priceListId: string | null;
+      quantity: number;
+    }>,
+  ): Promise<Map<string, Map<number, number>>> {
+    const outer = new Map<string, Map<number, number>>();
+    if (inputs.length === 0) return outer;
+
+    const variantInputs = inputs.filter(
+      (i) => i.variantId !== null && i.priceListId !== null,
+    );
+    const productInputs = inputs.filter(
+      (i) => i.variantId === null && i.priceListId !== null,
+    );
+
+    // Defaults (`priceListId === null`) are the caller's fallback; the
+    // resolver omits them from the DB roundtrip and lets the caller use
+    // `getProductInfoForSale` for the PUBLICO price.
+
+    // 1) Variant inputs — single VariantPrice.findMany on the
+    //    DISTINCT (variantId, priceListId) tuples. The mapping is
+    //    keyed on the row's (variantId, priceListId) so multiple
+    //    quantities of the same line resolve from one DB row.
+    const variantKeys = new Map<
+      string,
+      { variantId: string; priceListId: string }
+    >();
+    for (const inp of variantInputs) {
+      const k = `${inp.variantId as string}::${inp.priceListId as string}`;
+      if (!variantKeys.has(k)) {
+        variantKeys.set(k, {
+          variantId: inp.variantId as string,
+          priceListId: inp.priceListId as string,
+        });
+      }
+    }
+
+    type VariantRow = {
+      variantId: string;
+      priceListId: string;
+      priceCents: number;
+      tierPrices: Array<{ minQuantity: number; priceCents: number }>;
+    };
+
+    const variantRows: VariantRow[] = variantKeys.size
+      ? await this.tenantPrisma.getClient().variantPrice.findMany({
+          where: {
+            OR: Array.from(variantKeys.values()).map((k) => ({
+              variantId: k.variantId,
+              priceListId: k.priceListId,
+            })),
+          },
+          select: {
+            variantId: true,
+            priceListId: true,
+            priceCents: true,
+            tierPrices: {
+              orderBy: { minQuantity: 'asc' },
+              select: { minQuantity: true, priceCents: true },
+            },
+          },
+        })
+      : [];
+
+    const variantRowMap = new Map<string, VariantRow>();
+    for (const row of variantRows) {
+      variantRowMap.set(`${row.variantId}::${row.priceListId}`, row);
+    }
+
+    for (const inp of variantInputs) {
+      const row = variantRowMap.get(
+        `${inp.variantId}::${inp.priceListId}`,
+      );
+      if (!row) continue;
+      const tierCents = this.selectEffectivePrice(
+        row.priceCents,
+        row.tierPrices,
+        inp.quantity,
+      );
+      const key = `${inp.productId}::${(inp.variantId as string)}::${
+        inp.priceListId as string
+      }`;
+      const inner = outer.get(key) ?? new Map<number, number>();
+      inner.set(inp.quantity, tierCents);
+      outer.set(key, inner);
+    }
+
+    // 2) Product inputs — single PriceList.findMany on the
+    //    DISTINCT (productId, priceListId) tuples.
+    const productKeys = new Map<
+      string,
+      { productId: string; priceListId: string }
+    >();
+    for (const inp of productInputs) {
+      const k = `${inp.productId}::${inp.priceListId as string}`;
+      if (!productKeys.has(k)) {
+        productKeys.set(k, {
+          productId: inp.productId,
+          priceListId: inp.priceListId as string,
+        });
+      }
+    }
+
+    type ProductRow = {
+      productId: string;
+      id: string;
+      priceCents: number;
+      tierPrices: Array<{ minQuantity: number; priceCents: number }>;
+    };
+
+    const productRows: ProductRow[] = productKeys.size
+      ? await this.tenantPrisma.getClient().priceList.findMany({
+          where: {
+            OR: Array.from(productKeys.values()).map((k) => ({
+              productId: k.productId,
+              id: k.priceListId,
+            })),
+          },
+          select: {
+            productId: true,
+            id: true,
+            priceCents: true,
+            tierPrices: {
+              orderBy: { minQuantity: 'asc' },
+              select: { minQuantity: true, priceCents: true },
+            },
+          },
+        })
+      : [];
+
+    const productRowMap = new Map<string, ProductRow>();
+    for (const row of productRows) {
+      productRowMap.set(`${row.productId}::${row.id}`, row);
+    }
+
+    for (const inp of productInputs) {
+      const row = productRowMap.get(
+        `${inp.productId}::${inp.priceListId as string}`,
+      );
+      if (!row) continue;
+      const tierCents = this.selectEffectivePrice(
+        row.priceCents,
+        row.tierPrices,
+        inp.quantity,
+      );
+      const key = `${inp.productId}::::${inp.priceListId as string}`;
+      const inner = outer.get(key) ?? new Map<number, number>();
+      inner.set(inp.quantity, tierCents);
+      outer.set(key, inner);
+    }
+
+    return outer;
+  }
+
   async resolveListPrice(
     priceListId: string,
     productId: string,
@@ -2262,7 +2454,7 @@ export class ProductsService {
     quantity: number,
   ): number {
     const tier = [...tiers]
-      .filter((t) => quantity >= t.minQuantity)
+      .filter((t) => quantity >= t.minQuantity && t.priceCents > 0)
       .sort((a, b) => b.minQuantity - a.minQuantity)[0];
     return tier?.priceCents ?? basePriceCents;
   }

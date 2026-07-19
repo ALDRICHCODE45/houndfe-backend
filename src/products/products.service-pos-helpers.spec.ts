@@ -38,6 +38,11 @@ function makeMockPrisma(overrides: any = {}) {
     },
     priceList: {
       findFirst: jest.fn(),
+      findMany: jest.fn(),
+    },
+    variantPrice: {
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
     },
     productImage: {
       findFirst: jest.fn(),
@@ -493,6 +498,191 @@ describe('ProductsService — POS Helpers', () => {
       await expect(
         service.resolveListPrice('missing', 'prod-3', null, 1),
       ).rejects.toThrow(/INVALID_PRICE_LIST_FOR_ITEM/);
+    });
+  });
+
+  // WU1 — batchResolvePriceMap (POS Price List Tiers). Tier-aware
+  // re-resolver that batches all line lookups in exactly TWO Prisma
+  // queries (variant IN + product IN) regardless of line count.
+  describe('batchResolvePriceMap — tier-aware batch resolver (WU1, spec Tier-Aware Price Resolution)', () => {
+    type BatchInput = Parameters<
+      ReturnType<typeof createService>['batchResolvePriceMap']
+    >[0][number];
+    type MapType = Awaited<
+      ReturnType<ReturnType<typeof createService>['batchResolvePriceMap']>
+    >;
+
+    it('issues exactly two Prisma queries (1 variantPrice + 1 priceList) for N lines', async () => {
+      const variantQuery = jest.fn().mockResolvedValue([]);
+      const productQuery = jest.fn().mockResolvedValue([]);
+      prisma.variantPrice.findMany = variantQuery;
+      prisma.priceList.findMany = productQuery;
+
+      const inputs: BatchInput[] = [
+        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 3 },
+        { productId: 'p2', variantId: 'v2', priceListId: 'list-a', quantity: 5 },
+        { productId: 'p1', variantId: null, priceListId: '__default__', quantity: 1 },
+        { productId: 'p3', variantId: 'v3', priceListId: 'list-b', quantity: 10 },
+      ];
+      await service.batchResolvePriceMap(inputs);
+
+      expect(variantQuery).toHaveBeenCalledTimes(1);
+      expect(productQuery).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns empty map and zero queries on empty input', async () => {
+      const variantQuery = jest.fn();
+      const productQuery = jest.fn();
+      prisma.variantPrice.findMany = variantQuery;
+      prisma.priceList.findMany = productQuery;
+
+      const result = await service.batchResolvePriceMap([]);
+
+      expect(result.size).toBe(0);
+      expect(variantQuery).not.toHaveBeenCalled();
+      expect(productQuery).not.toHaveBeenCalled();
+    });
+
+    it('selects highest applicable tier per line (highest minQuantity <= quantity wins)', async () => {
+      // Two lines, same product, same variant, same list, two different
+      // quantities → two different tier prices. The map MUST contain both
+      // entries, each keyed on its (productId, variantId, priceListId)
+      // tuple and selecting the highest minQuantity ≤ quantity.
+      prisma.variantPrice.findMany = jest.fn().mockResolvedValue([
+        {
+          variantId: 'v1',
+          priceListId: 'list-a',
+          priceCents: 5000,
+          tierPrices: [
+            { minQuantity: 1, priceCents: 1000 },
+            { minQuantity: 5, priceCents: 800 },
+            { minQuantity: 10, priceCents: 600 },
+          ],
+        },
+      ]);
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
+
+      const inputs: BatchInput[] = [
+        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 3 },
+        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 7 },
+      ];
+      const result = (await service.batchResolvePriceMap(inputs)) as MapType;
+
+      expect(result.get('p1::v1::list-a')?.get(3)).toBe(1000);
+      expect(result.get('p1::v1::list-a')?.get(7)).toBe(800);
+    });
+
+    it('falls back to base priceCents below the lowest tier', async () => {
+      prisma.variantPrice.findMany = jest.fn().mockResolvedValue([
+        {
+          variantId: 'v1',
+          priceListId: 'list-a',
+          priceCents: 1000, // base
+          tierPrices: [{ minQuantity: 5, priceCents: 800 }],
+        },
+      ]);
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
+
+      const result = (await service.batchResolvePriceMap([
+        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 3 },
+      ])) as MapType;
+
+      expect(result.get('p1::v1::list-a')?.get(3)).toBe(1000);
+    });
+
+    it('ignores zero-price tier rows (treats as missing)', async () => {
+      prisma.variantPrice.findMany = jest.fn().mockResolvedValue([
+        {
+          variantId: 'v1',
+          priceListId: 'list-a',
+          priceCents: 1000,
+          tierPrices: [
+            { minQuantity: 1, priceCents: 900 },
+            { minQuantity: 5, priceCents: 0 }, // zero-price → ignored
+          ],
+        },
+      ]);
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
+
+      const result = (await service.batchResolvePriceMap([
+        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 6 },
+      ])) as MapType;
+
+      // No positive-price tier matches qty=6 (the 5-tier is 0c and
+      // ignored), so the resolver falls back to the 1-tier (900c).
+      expect(result.get('p1::v1::list-a')?.get(6)).toBe(900);
+    });
+
+    it('uses only VariantTierPrice rows for variant lines (variant tiers beat product tiers)', async () => {
+      // variant-tier price 800c; product-tier 600c should NOT apply to
+      // the variant line. Resolver picks the variant tier only.
+      prisma.variantPrice.findMany = jest.fn().mockResolvedValue([
+        {
+          variantId: 'v1',
+          priceListId: 'list-a',
+          priceCents: 1000,
+          tierPrices: [{ minQuantity: 1, priceCents: 800 }],
+        },
+      ]);
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([
+        // Product-level price row for the same (productId, list-a) —
+        // should be ignored entirely for this variantId-bearing input.
+        {
+          productId: 'p1',
+          globalPriceListId: 'gpl-a',
+          priceCents: 1000,
+          tierPrices: [{ minQuantity: 1, priceCents: 600 }],
+        },
+      ]);
+
+      const result = (await service.batchResolvePriceMap([
+        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 1 },
+      ])) as MapType;
+
+      expect(result.get('p1::v1::list-a')?.get(1)).toBe(800);
+    });
+
+    it('uses TierPrice (product-level) when variantId is null', async () => {
+      prisma.variantPrice.findMany = jest.fn().mockResolvedValue([]);
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([
+        {
+          id: 'list-a',
+          productId: 'p1',
+          priceCents: 1000,
+          tierPrices: [{ minQuantity: 1, priceCents: 800 }],
+        },
+      ]);
+
+      const result = (await service.batchResolvePriceMap([
+        {
+          productId: 'p1',
+          variantId: null,
+          priceListId: 'list-a',
+          quantity: 1,
+        },
+      ])) as MapType;
+
+      expect(result.get('p1::::list-a')?.get(1)).toBe(800);
+    });
+
+    it('returns no entry for inputs the resolver could not match (missing list → default fallback in caller)', async () => {
+      // No list row returned for this (productId, list-a) tuple — the
+      // resolver returns NO key in the map, leaving the caller free to
+      // apply its default-list fallback contract (spec: "missing list
+      // price falls back to default list").
+      prisma.variantPrice.findMany = jest.fn().mockResolvedValue([]);
+      prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
+
+      const result = (await service.batchResolvePriceMap([
+        {
+          productId: 'p1',
+          variantId: null,
+          priceListId: 'list-a',
+          quantity: 1,
+        },
+      ])) as MapType;
+
+      expect(result.get('p1::::list-a')).toBeUndefined();
     });
   });
 });

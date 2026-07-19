@@ -43,6 +43,108 @@ describe('Sale Entity', () => {
         }),
       ).toThrow(InvalidArgumentError);
     });
+
+    it('should default globalPriceListId to null and priceListExplicitlySet to false', () => {
+      const sale = Sale.create({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+      });
+
+      expect(sale.globalPriceListId).toBeNull();
+      expect(sale.priceListExplicitlySet).toBe(false);
+    });
+  });
+
+  describe('setGlobalPriceList - cashier-explicit price-list binding (WU1)', () => {
+    function makeSale() {
+      return Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+    }
+
+    it('stores globalPriceListId and flips priceListExplicitlySet to true on a non-null id', () => {
+      const sale = makeSale();
+
+      sale.setGlobalPriceList('gpl-mayoreo', true);
+
+      expect(sale.globalPriceListId).toBe('gpl-mayoreo');
+      expect(sale.priceListExplicitlySet).toBe(true);
+    });
+
+    it('clears globalPriceListId to null and still flips priceListExplicitlySet=true on an explicit null', () => {
+      // Per spec: "PUT price-list with null" is an EXPLICIT cashier
+      // choice — the discriminator is set to true even on a clear so a
+      // subsequent `assignCustomer` does NOT auto-seed.
+      const sale = makeSale();
+      sale.setGlobalPriceList('gpl-mayoreo', true);
+
+      sale.setGlobalPriceList(null, true);
+
+      expect(sale.globalPriceListId).toBeNull();
+      expect(sale.priceListExplicitlySet).toBe(true);
+    });
+
+    it('seeds without flipping the discriminator when explicit=false (assignCustomer seeding)', () => {
+      const sale = makeSale();
+
+      sale.setGlobalPriceList('gpl-mayoreo', false);
+
+      expect(sale.globalPriceListId).toBe('gpl-mayoreo');
+      expect(sale.priceListExplicitlySet).toBe(false);
+    });
+
+    it('throws InvalidArgumentError on empty-string globalPriceListId', () => {
+      const sale = makeSale();
+      expect(() => sale.setGlobalPriceList('', true)).toThrow(
+        InvalidArgumentError,
+      );
+    });
+  });
+
+  describe('toResponse - DRAFT surfaces globalPriceListId (WU1)', () => {
+    it('emits globalPriceListId on the wire', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+      sale.setGlobalPriceList('gpl-mayoreo', true);
+
+      const dto = sale.toResponse();
+      expect(dto).toHaveProperty('globalPriceListId', 'gpl-mayoreo');
+    });
+
+    it('emits globalPriceListId:null on a fresh draft', () => {
+      const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+
+      const dto = sale.toResponse();
+      expect(dto).toHaveProperty('globalPriceListId', null);
+    });
+  });
+
+  describe('fromPersistence - round-trips globalPriceListId + priceListExplicitlySet (WU1)', () => {
+    function commonProps() {
+      return {
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT' as const,
+        items: [],
+        createdAt: new Date('2025-01-01T00:00:00Z'),
+        updatedAt: new Date('2025-01-01T00:00:00Z'),
+      };
+    }
+
+    it('round-trips a sale with an explicit global price list', () => {
+      const sale = Sale.fromPersistence({
+        ...commonProps(),
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+      } as any);
+
+      expect(sale.globalPriceListId).toBe('gpl-mayoreo');
+      expect(sale.priceListExplicitlySet).toBe(true);
+    });
+
+    it('round-trips a legacy sale without the new fields (defaults to null/false)', () => {
+      const sale = Sale.fromPersistence(commonProps() as any);
+
+      expect(sale.globalPriceListId).toBeNull();
+      expect(sale.priceListExplicitlySet).toBe(false);
+    });
   });
 
   describe('fromPersistence - reconstitute from database', () => {

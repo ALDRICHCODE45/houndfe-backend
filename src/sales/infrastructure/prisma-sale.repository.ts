@@ -77,6 +77,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       dueDate: sale.dueDate,
       confirmedAt: sale.confirmedAt,
       folio: sale.folio,
+      // WU1 — sale-level price list binding + explicit-set discriminator.
+      globalPriceListId: sale.globalPriceListId,
+      priceListExplicitlySet: sale.priceListExplicitlySet,
     };
 
     if (!existing) {
@@ -271,6 +274,11 @@ export class PrismaSaleRepository implements ISaleRepository {
       dueDate: persistedSale.dueDate,
       confirmedAt: persistedSale.confirmedAt,
       folio: persistedSale.folio,
+      // WU1 — round-trip sale-level price-list binding. Legacy rows
+      // (pre-migration) read `null` / `undefined` here and the entity
+      // defaults to `null` / `false` on `fromPersistence`.
+      globalPriceListId: persistedSale.globalPriceListId ?? null,
+      priceListExplicitlySet: persistedSale.priceListExplicitlySet ?? false,
       items: persistedSale.items.map((item) => ({
         id: item.id,
         saleId: item.saleId,
@@ -403,6 +411,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       dueDate: saleData.dueDate,
       confirmedAt: saleData.confirmedAt,
       folio: saleData.folio,
+      // WU1 — round-trip sale-level price-list binding (same as findById).
+      globalPriceListId: saleData.globalPriceListId ?? null,
+      priceListExplicitlySet: saleData.priceListExplicitlySet ?? false,
       items: saleData.items.map((item) => ({
         id: item.id,
         saleId: item.saleId,
@@ -669,6 +680,11 @@ export class PrismaSaleRepository implements ISaleRepository {
       dueDate: persistedSale.dueDate,
       confirmedAt: persistedSale.confirmedAt,
       folio: persistedSale.folio,
+      // WU1 — round-trip sale-level price-list binding (charge path needs
+      // the binding in scope so chargeDraft can revalidate prices against
+      // the SAME list the recompute just used).
+      globalPriceListId: persistedSale.globalPriceListId ?? null,
+      priceListExplicitlySet: persistedSale.priceListExplicitlySet ?? false,
       totalCents: persistedSale.totalCents,
       paidCents: persistedSale.paidCents,
       debtCents: persistedSale.debtCents,
