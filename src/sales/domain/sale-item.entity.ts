@@ -120,7 +120,9 @@ export interface OverrideSaleItemPriceInput {
  */
 export interface RepriceSaleItemInput {
   priceCents: number;
-  priceSource: 'default' | 'price_list';
+  /** `'custom'` is accepted for type-safety but MUST throw at runtime —
+   *  callers route sticky lines through `overridePrice()`, never `reprice()`. */
+  priceSource: 'default' | 'price_list' | 'custom';
   appliedPriceListId: string | null;
 }
 

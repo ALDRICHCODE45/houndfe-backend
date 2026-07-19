@@ -315,7 +315,6 @@ export class Sale {
       undefined,
       undefined,
       undefined,
-      undefined,
       // WU1 — preserve the sale-level price list state across the
       // DRAFT→CONFIRMED transition. The repriced totals travel in
       // `totalCents` / `discountCents` (set by the charge path); the
@@ -375,16 +374,11 @@ export class Sale {
         this.carrierName,
         this.trackingRef,
         this.estimatedDeliveryAt,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        // WU1 — preserve the sale-level price list state across the
-        // CONFIRMED→CANCELED transition. The canceled-sale wire
-        // contract is unchanged; the binding is metadata only.
-        this._globalPriceListId,
-        this._priceListExplicitlySet,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       ),
       refundedCents,
     };
