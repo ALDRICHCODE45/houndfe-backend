@@ -46,6 +46,7 @@ import type { OverrideItemPriceDto } from './dto/override-item-price.dto';
 import type { AvailablePricesResponseDto } from './dto/available-prices-response.dto';
 import type { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 import type { ChargeSaleDto } from './dto/charge-sale.dto';
+import type { SetPriceListDto } from './dto/set-price-list.dto';
 import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import type { ListApplicablePromotionsResponseDto } from './dto/list-applicable-promotions-response.dto';
 import type {
@@ -1868,6 +1869,21 @@ export class SalesService {
       );
     }
 
+    // WU3 — seed the sale-level price list from
+    // `Customer.globalPriceListId` ONLY when the cashier has not
+    // explicitly chosen one. Sticky lines (custom price, manual
+    // discount, per-item override) are NOT touched — the upstream
+    // `repriceNonStickyLines` step inside recompute picks them up
+    // via the existing precedence rules.
+    const saleListBefore = sale.globalPriceListId;
+    const explicitBefore = sale.priceListExplicitlySet;
+    const customerList =
+      (customer as { globalPriceListId?: string | null }).globalPriceListId ??
+      null;
+    if (!explicitBefore && customerList !== null) {
+      sale.setGlobalPriceList(customerList, false);
+    }
+
     if (dto.shippingAddressId !== undefined && dto.shippingAddressId !== null) {
       const address = await prisma.customerAddress.findUnique({
         where: { id: dto.shippingAddressId },
@@ -2045,6 +2061,92 @@ export class SalesService {
         ),
       );
     }
+
+    return this.saleRepo.findDraftResponseById(sale.id);
+  }
+
+  /**
+   * WU3 — `PUT /sales/drafts/:id/price-list`. Cashier-explicit
+   * sale-level price-list binding.
+   *
+   * Contract:
+   *   - Body `{ globalPriceListId: string | null }`. Null clears.
+   *   - If a UUID is provided, it MUST exist in `global_price_lists`
+   *     (else 400 — the request is rejected and the draft is
+   *     unchanged).
+   *   - Binding flips `priceListExplicitlySet` to true (including on
+   *     null clears — explicit cashier choice, prevents auto-reseed
+   *     from `assignCustomer`).
+   *   - `recomputePricingAndPromotions` runs immediately so the
+   *     response carries the full repriced DTO (spec scenario
+   *     "Set list on loaded draft" — non-sticky lines reprice
+   *     tier-aware from the new list; sticky + per-item override
+   *     lines untouched).
+   *   - On an empty draft (no items), still stores the binding so a
+   *     future `addItem` reads from it (spec scenario "Set on empty
+   *     draft seeds future adds").
+   */
+  async setSalePriceList(
+    saleId: string,
+    userId: string,
+    dto: SetPriceListDto,
+  ) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_FOUND',
+        'SALE_NOT_FOUND',
+      );
+    }
+    if (sale.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_DRAFT',
+        'SALE_NOT_DRAFT',
+      );
+    }
+    if (sale.userId !== userId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    if (dto.globalPriceListId !== null && dto.globalPriceListId !== undefined) {
+      // Unknown-list rejection — the spec mandates a hard reject so a
+      // bad cashier payload cannot silently leave the draft in its
+      // current state. We read the catalog directly because a list-id
+      // lookup against `price_lists.productId` is product-scoped, but
+      // here we want the GLOBAL list metadata (no product bound yet at
+      // this call — the binding is sale-level).
+      const prisma = this.tenantPrisma.getClient();
+      const exists = await prisma.globalPriceList.findUnique({
+        where: { id: dto.globalPriceListId },
+        select: { id: true },
+      });
+      if (!exists) {
+        throw new BusinessRuleViolationError(
+          'PRICE_LIST_NOT_FOUND',
+          'PRICE_LIST_NOT_FOUND',
+        );
+      }
+    }
+
+    // Flip the binding + the explicit discriminator. Null clear still
+    // marks the choice as explicit so a future `assignCustomer`
+    // cannot reseed.
+    sale.setGlobalPriceList(
+      dto.globalPriceListId ?? null,
+      true,
+    );
+
+    // Re-run the full recompute (clear → reprice → eval) so the
+    // returned DTO carries post-reprice totals. On an empty draft the
+    // reprice + eval loops are no-ops (no items) but the set still
+    // persists — future `addItem` reads the binding through
+    // `findDraftResponseById` → `buildPosEvalInput`.
+    await this.recomputePricingAndPromotions(sale);
+
+    await this.saleRepo.save(sale);
 
     return this.saleRepo.findDraftResponseById(sale.id);
   }

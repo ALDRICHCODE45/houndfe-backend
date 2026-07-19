@@ -8158,4 +8158,406 @@ describe('SalesService', () => {
       ).rejects.toMatchObject({ code: 'PRICE_OUT_OF_DATE' });
     });
   });
+
+  // ==========================================================================
+  // WU3 — setSalePriceList use case (PUT /sales/drafts/:id/price-list)
+  // --------------------------------------------------------------------------
+  // Spec scenarios for "Sale-Level Price List Lifecycle":
+  //   - Set list on loaded draft → repriced response includes
+  //     globalPriceListId.
+  //   - Set on empty draft seeds future adds.
+  //   - Clear reverts to default, keeps overrides.
+  //   - Unknown list id rejected.
+  //   - Missing permission rejected.
+  // ==========================================================================
+  describe('WU3 — setSalePriceList (POS Price List Tiers endpoint)', () => {
+    function baseMockDraft(overrides: Record<string, unknown> = {}) {
+      return Sale.fromPersistence({
+        id: 'sale-pl-set',
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...overrides,
+      } as any);
+    }
+
+    it('binds the sale to the given list and reprices non-sticky lines', async () => {
+      const draft = baseMockDraft({
+        items: [
+          {
+            id: 'item-pl-1',
+            saleId: 'sale-pl-set',
+            productId: 'prod-pl',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+      // Catalog lookup returns the GlobalPriceList row.
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'gpl-mayoreo' }),
+        },
+      });
+      // Batch resolver returns tier price for the non-sticky line.
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        new Map([
+          [
+            'prod-pl::::gpl-mayoreo',
+            new Map<number, number>([[1, 800]]),
+          ],
+        ]),
+      );
+      // The full-response reload after save.
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: 'sale-pl-set',
+        globalPriceListId: 'gpl-mayoreo',
+        items: [],
+      });
+
+      const result = await service.setSalePriceList('sale-pl-set', 'user-1', {
+        globalPriceListId: 'gpl-mayoreo',
+      });
+
+      // Non-sticky line repriced.
+      expect(draft.globalPriceListId).toBe('gpl-mayoreo');
+      expect(draft.priceListExplicitlySet).toBe(true);
+      expect(draft.items[0].unitPriceCents).toBe(800);
+      expect(result).toBeDefined();
+    });
+
+    it('on an empty draft, just stores the binding (no DB query, no items to reprice)', async () => {
+      const draft = baseMockDraft();
+      saleRepo.findById.mockResolvedValue(draft);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'gpl-mayoreo' }),
+        },
+      });
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: 'sale-pl-set',
+        globalPriceListId: 'gpl-mayoreo',
+        items: [],
+      });
+
+      await service.setSalePriceList('sale-pl-set', 'user-1', {
+        globalPriceListId: 'gpl-mayoreo',
+      });
+
+      expect(draft.globalPriceListId).toBe('gpl-mayoreo');
+      expect(draft.priceListExplicitlySet).toBe(true);
+      // Empty draft → no resolver call (no items).
+      expect(productsService.batchResolvePriceMap).not.toHaveBeenCalled();
+    });
+
+    it('clear (null) reverts non-override non-sticky lines to default list and keeps overrides', async () => {
+      // Draft with one MAYOREO-priced line and one override-priced line.
+      const draft = baseMockDraft({
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+        items: [
+          {
+            id: 'item-mayoreo',
+            saleId: 'sale-pl-set',
+            productId: 'prod-may',
+            variantId: null,
+            productName: 'M',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 800,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'price_list' as const,
+            appliedPriceListId: 'pl-mayoreo',
+          },
+          {
+            id: 'item-override',
+            saleId: 'sale-pl-set',
+            productId: 'prod-ov',
+            variantId: null,
+            productName: 'O',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 700,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'price_list' as const,
+            appliedPriceListId: 'pl-especial',
+            originalPriceCents: 1000,
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue(null), // null body does not query
+        },
+      });
+      // No batch resolve — clearing on these lines has nothing to resolve from
+      // (effective price list = item.appliedPriceListId either way).
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: 'sale-pl-set',
+        globalPriceListId: null,
+        items: [],
+      });
+
+      await service.setSalePriceList('sale-pl-set', 'user-1', {
+        globalPriceListId: null,
+      });
+
+      // Sale-level binding null + explicit.
+      expect(draft.globalPriceListId).toBeNull();
+      expect(draft.priceListExplicitlySet).toBe(true);
+      // Both override lines untouched.
+      expect(draft.items.find((i) => i.id === 'item-mayoreo')!.appliedPriceListId).toBe(
+        'pl-mayoreo',
+      );
+      expect(draft.items.find((i) => i.id === 'item-override')!.appliedPriceListId).toBe(
+        'pl-especial',
+      );
+      expect(draft.items.find((i) => i.id === 'item-override')!.unitPriceCents).toBe(700);
+    });
+
+    it('rejects unknown globalPriceListId with PRICE_LIST_NOT_FOUND and leaves draft unchanged', async () => {
+      const draft = baseMockDraft({
+        globalPriceListId: null,
+        priceListExplicitlySet: false,
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue(null),
+        },
+      });
+
+      await expect(
+        service.setSalePriceList('sale-pl-set', 'user-1', {
+          globalPriceListId: 'gpl-does-not-exist',
+        }),
+      ).rejects.toMatchObject({ code: 'PRICE_LIST_NOT_FOUND' });
+
+      expect(draft.globalPriceListId).toBeNull();
+      expect(draft.priceListExplicitlySet).toBe(false);
+      // The cancel-no-mutate invariant — no save happens on rejection.
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects when sale is not in DRAFT status', async () => {
+      const draft = baseMockDraft();
+      // Mutate the status to CONFIRMED by re-creating the entity:
+      const confirmedDraft = Sale.fromPersistence({
+        id: 'sale-pl-set',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as any);
+      saleRepo.findById.mockResolvedValue(confirmedDraft);
+
+      await expect(
+        service.setSalePriceList('sale-pl-set', 'user-1', {
+          globalPriceListId: 'gpl-mayoreo',
+        }),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+    });
+
+    it('rejects when the actor does not own the draft', async () => {
+      const draft = baseMockDraft({ userId: 'other-user' });
+      saleRepo.findById.mockResolvedValue(draft);
+
+      await expect(
+        service.setSalePriceList('sale-pl-set', 'user-1', {
+          globalPriceListId: 'gpl-mayoreo',
+        }),
+      ).rejects.toMatchObject({ code: 'SALE_UPDATE_FORBIDDEN' });
+    });
+  });
+
+  // ==========================================================================
+  // WU3 Task 3.3 — assignCustomer seeding semantics
+  // --------------------------------------------------------------------------
+  // Spec scenarios for "assignCustomer Seeds Sale Price List":
+  //   - Wholesale customer seeds the sale list and reprices
+  //     non-sticky lines.
+  //   - Explicit cashier choice wins (priceListExplicitlySet=true
+  //     protects against reseed).
+  //   - Sticky lines survive seeding.
+  //   - Customer with null globalPriceListId → no change.
+  // ==========================================================================
+  describe('WU3 Task 3.3 — assignCustomer seeds Sale price list', () => {
+    function assignPrismaMock(
+      customerRow: { id: string; globalPriceListId?: string | null } | null,
+    ) {
+      return {
+        customer: {
+          findUnique: jest.fn().mockResolvedValue(customerRow),
+        },
+        customerAddress: {
+          findUnique: jest.fn(),
+        },
+      };
+    }
+
+    it('seeds globalPriceListId from customer.globalPriceListId when priceListExplicitlySet=false', async () => {
+      const saleId = 'sale-seed-1';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-seed-1',
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+          },
+        ],
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+      );
+      // Batch resolver returns tier price for the seeded list.
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        new Map([
+          [
+            'prod-1::::gpl-mayoreo',
+            new Map<number, number>([[1, 800]]),
+          ],
+        ]),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(
+        sale.toResponse(),
+      );
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-mayoreo',
+      });
+
+      expect(sale.globalPriceListId).toBe('gpl-mayoreo');
+      expect(sale.priceListExplicitlySet).toBe(false); // seeded, not cashier-picked
+      // Non-sticky line repriced.
+      expect(sale.items[0].unitPriceCents).toBe(800);
+    });
+
+    it('explicit cashier choice (priceListExplicitlySet=true) is NOT clobbered', async () => {
+      const saleId = 'sale-seed-2';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-seed-2',
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+          },
+        ],
+        globalPriceListId: 'gpl-especial', // cashier already picked
+        priceListExplicitlySet: true, // explicit
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-mayoreo',
+      });
+
+      // Sale list stays ESPECIAL; the cashier choice is preserved.
+      expect(sale.globalPriceListId).toBe('gpl-especial');
+      expect(sale.priceListExplicitlySet).toBe(true);
+    });
+
+    it('sticky (custom-price) line survives seeding', async () => {
+      const saleId = 'sale-seed-3';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-sticky',
+            saleId,
+            productId: 'prod-sticky',
+            variantId: null,
+            productName: 'Sticky',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 12345,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'custom' as const,
+            customPriceCents: 12345,
+          },
+        ],
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-mayoreo',
+      });
+
+      // Sale list seeded.
+      expect(sale.globalPriceListId).toBe('gpl-mayoreo');
+      // Sticky line untouched.
+      expect(sale.items[0].unitPriceCents).toBe(12345);
+      expect(sale.items[0].priceSource).toBe('custom');
+    });
+
+    it('customer with null globalPriceListId does NOT change sale list', async () => {
+      const saleId = 'sale-seed-4';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-pub', globalPriceListId: null }),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-pub',
+      });
+
+      expect(sale.globalPriceListId).toBeNull();
+      expect(sale.priceListExplicitlySet).toBe(false);
+    });
+  });
 });
