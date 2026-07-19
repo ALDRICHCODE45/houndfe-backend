@@ -597,6 +597,9 @@ export class PrismaSaleRepository implements ISaleRepository {
         })),
         confirmedAt: (saleData as any).confirmedAt,
         folio: (saleData as any).folio,
+        globalPriceListId: (saleData as any).globalPriceListId ?? null,
+        priceListExplicitlySet:
+          (saleData as any).priceListExplicitlySet ?? false,
         createdAt: (saleData as any).createdAt,
         updatedAt: (saleData as any).updatedAt,
         appliedOrderPromotion: (saleData as any).appliedPromotion

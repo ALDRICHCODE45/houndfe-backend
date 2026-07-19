@@ -2275,6 +2275,9 @@ export class ProductsService {
       productId: string;
       variantId: string | null;
       priceListId: string | null;
+      /** When set, `priceListId` is a GlobalPriceList UUID — the query
+       *  resolves it to the per-product PriceList via the FK. */
+      globalPriceListId?: string;
       quantity: number;
     }>,
   ): Promise<Map<string, Map<number, number>>> {
@@ -2320,15 +2323,17 @@ export class ProductsService {
     const variantRows: VariantRow[] = variantKeys.size
       ? await this.tenantPrisma.getClient().variantPrice.findMany({
           where: {
-            OR: Array.from(variantKeys.values()).map((k) => ({
-              variantId: k.variantId,
-              priceListId: k.priceListId,
-            })),
+            OR: Array.from(variantKeys.values()).flatMap((k) => [
+              { variantId: k.variantId, priceListId: k.priceListId },
+              // Global-list fallback: priceListId is a GlobalPriceList UUID.
+              { variantId: k.variantId, priceList: { globalPriceListId: k.priceListId } },
+            ]),
           },
           select: {
             variantId: true,
             priceListId: true,
             priceCents: true,
+            priceList: { select: { globalPriceListId: true } },
             tierPrices: {
               orderBy: { minQuantity: 'asc' },
               select: { minQuantity: true, priceCents: true },
@@ -2340,6 +2345,12 @@ export class ProductsService {
     const variantRowMap = new Map<string, VariantRow>();
     for (const row of variantRows) {
       variantRowMap.set(`${row.variantId}::${row.priceListId}`, row);
+      if (row.priceList?.globalPriceListId) {
+        variantRowMap.set(
+          `${row.variantId}::${row.priceList.globalPriceListId}`,
+          row,
+        );
+      }
     }
 
     for (const inp of variantInputs) {
@@ -2379,6 +2390,7 @@ export class ProductsService {
     type ProductRow = {
       productId: string;
       id: string;
+      globalPriceListId: string | null;
       priceCents: number;
       tierPrices: Array<{ minQuantity: number; priceCents: number }>;
     };
@@ -2386,14 +2398,16 @@ export class ProductsService {
     const productRows: ProductRow[] = productKeys.size
       ? await this.tenantPrisma.getClient().priceList.findMany({
           where: {
-            OR: Array.from(productKeys.values()).map((k) => ({
-              productId: k.productId,
-              id: k.priceListId,
-            })),
+            OR: Array.from(productKeys.values()).flatMap((k) => [
+              { productId: k.productId, id: k.priceListId },
+              // Global-list fallback: priceListId is a GlobalPriceList UUID.
+              { productId: k.productId, globalPriceListId: k.priceListId },
+            ]),
           },
           select: {
             productId: true,
             id: true,
+            globalPriceListId: true,
             priceCents: true,
             tierPrices: {
               orderBy: { minQuantity: 'asc' },
@@ -2406,6 +2420,12 @@ export class ProductsService {
     const productRowMap = new Map<string, ProductRow>();
     for (const row of productRows) {
       productRowMap.set(`${row.productId}::${row.id}`, row);
+      if (row.globalPriceListId) {
+        productRowMap.set(
+          `${row.productId}::${row.globalPriceListId}`,
+          row,
+        );
+      }
     }
 
     for (const inp of productInputs) {

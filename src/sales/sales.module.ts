@@ -26,7 +26,7 @@ import { ReceiptReviewService } from './review/receipt-review.service';
 import { RECEIPT_REVIEW_REPOSITORY } from './review/domain/receipt-review.repository';
 import { PrismaReceiptReviewRepository } from './review/infrastructure/prisma-receipt-review.repository';
 // Work Unit 4 — SalesModule depends on the POS promotion engine (via Symbol
-// port) so SalesService can call `recomputePromotions(sale)` after each
+// port) so SalesService can call `recomputePricingAndPromotions(sale)` after each
 // draft mutation. Hexagonal: we import the module to resolve the symbol,
 // but we depend on the I/O contract, not on the engine internals.
 import { PromotionsModule } from '../promotions/promotions.module';

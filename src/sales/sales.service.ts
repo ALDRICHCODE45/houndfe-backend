@@ -439,7 +439,7 @@ export class SalesService {
 
   /**
    * WU2 — `recomputePricingAndPromotions` (renamed from
-   * `recomputePricingAndPromotions` — the new name reflects the inserted reprice
+   * `recomputePromotions` — the new name reflects the inserted reprice
    * step). Called AFTER each draft mutation (`addItem`,
    * `updateItemQuantity`, `removeItem`, `assignCustomer`, `setSalePriceList`)
    * and BEFORE the caller's `saleRepo.save`. Same method is re-used at
@@ -686,6 +686,13 @@ export class SalesService {
     // resolver input list for the non-sticky subset. Sticky is detected
     // via the same conditions the engine applies (`hasManualDiscount`)
     // — manual-free-form AND custom-price lines are NEVER repriced.
+    //
+    // For sale-list-bound lines (no per-item `appliedPriceListId`
+    // override) the `effectiveListId` is a GlobalPriceList UUID —
+    // which `batchResolvePriceMap` translates internally via the
+    // `globalPriceListId` parameter (product branch: queries by
+    // `globalPriceListId` instead of `id`; variant branch: nested
+    // `priceList.globalPriceListId` filter).
     for (const item of sale.items) {
       const isManualDiscount =
         item.discountType !== null && item.promotionId === null;
@@ -709,8 +716,21 @@ export class SalesService {
       return;
     }
 
+    // Build inputs with the `globalPriceListId` discriminator so
+    // `batchResolvePriceMap` knows which IDs are GlobalPriceList UUIDs
+    // (needs translation) vs per-item `appliedPriceListId` overrides
+    // (already PriceList.id).
+    const resolvedInputs = nonStickyInputs.map((inp) => ({
+      ...inp,
+      globalPriceListId:
+        inp.priceListId === sale.globalPriceListId &&
+        sale.globalPriceListId !== null
+          ? (inp.priceListId as string)
+          : undefined,
+    }));
+
     const tierMap =
-      await this.productsService.batchResolvePriceMap(nonStickyInputs);
+      await this.productsService.batchResolvePriceMap(resolvedInputs);
 
     // Apply the resolved tier prices back onto the corresponding items.
     // The resolver drops input entries whose (productId, variantId,
@@ -721,7 +741,6 @@ export class SalesService {
     // call `SaleItem.reprice` (does NOT snapshot _originalPriceCents
     // and does NOT clear discount fields).
     for (const item of sale.items) {
-      // Skip the same sticky lines we skipped in the input build.
       const isManualDiscount =
         item.discountType !== null && item.promotionId === null;
       if (item.priceSource === 'custom' || isManualDiscount) {
@@ -2066,6 +2085,64 @@ export class SalesService {
   }
 
   /**
+   * Resolves the current catalog price for charge-time validation.
+   *
+   * For per-item price-list lines (`appliedPriceListId` set) the
+   * existing `resolveListPrice` path is used.  For sale-list-bound
+   * lines (price-source `price_list` but no per-item override) the
+   * resolution goes through `batchResolvePriceMap` with the
+   * `globalPriceListId` discriminator so the query uses the FK
+   * rather than treating the `sale.globalPriceListId` UUID as a
+   * `PriceList.id`.
+   */
+  private async resolveChargeValidationPrice(
+    item: { priceSource: string; appliedPriceListId: string | null; productId: string; variantId: string | null; quantity: number },
+    sale: { globalPriceListId: string | null },
+  ): Promise<number> {
+    if (
+      item.priceSource === 'price_list' &&
+      item.appliedPriceListId
+    ) {
+      return this.productsService.resolveListPrice(
+        item.appliedPriceListId,
+        item.productId,
+        item.variantId,
+        item.quantity,
+      );
+    }
+    if (
+      item.priceSource === 'price_list' &&
+      sale.globalPriceListId
+    ) {
+      const tierMap = await this.productsService.batchResolvePriceMap([
+        {
+          productId: item.productId,
+          variantId: item.variantId,
+          priceListId: sale.globalPriceListId,
+          globalPriceListId: sale.globalPriceListId,
+          quantity: item.quantity,
+        },
+      ]);
+      const key = `${item.productId}::${
+        item.variantId ?? ''
+      }::${sale.globalPriceListId}`;
+      const inner = tierMap.get(key);
+      const cents = inner?.get(item.quantity);
+      if (cents !== undefined) return cents;
+      throw new BusinessRuleViolationError(
+        'PRICE_OUT_OF_DATE',
+        'PRICE_OUT_OF_DATE',
+      );
+    }
+    return (
+      await this.productsService.getProductInfoForSale(
+        item.productId,
+        item.variantId,
+      )
+    ).unitPriceCents;
+  }
+
+  /**
    * WU3 — `PUT /sales/drafts/:id/price-list`. Cashier-explicit
    * sale-level price-list binding.
    *
@@ -2259,20 +2336,10 @@ export class SalesService {
       for (const item of sale.items) {
         if (item.priceSource === 'custom') continue;
 
-        const currentCents =
-          item.priceSource === 'price_list' && item.appliedPriceListId
-            ? await this.productsService.resolveListPrice(
-                item.appliedPriceListId,
-                item.productId,
-                item.variantId,
-                item.quantity,
-              )
-            : (
-                await this.productsService.getProductInfoForSale(
-                  item.productId,
-                  item.variantId,
-                )
-              ).unitPriceCents;
+        const currentCents = await this.resolveChargeValidationPrice(
+          item,
+          sale,
+        );
 
         const expectedBaseCents =
           item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;

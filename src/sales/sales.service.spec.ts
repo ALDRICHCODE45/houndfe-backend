@@ -91,7 +91,7 @@ function makeMockProductsService() {
 
 /**
  * Work Unit 4 — POS promotion engine (injected as Symbol token) is the
- * `SalesService.recomputePromotions(sale)` driving port. Default mock
+ * `SalesService.recomputePricingAndPromotions(sale)` driving port. Default mock
  * returns empty `lines` / null `order` so the existing tests stay green
  * when recompute is wired (a no-op when no promotions match).
  *
