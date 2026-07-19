@@ -828,6 +828,177 @@ describe('EmployeeTimeOffService', () => {
     });
   });
 
+  // ============================================================
+  // listPendingApprovals() — inline requester identity
+  // (fullName + employeeNumber denormalized from a batch lookup)
+  // ============================================================
+  describe('listPendingApprovals() — inline requester identity', () => {
+    it('attaches fullName + employeeNumber from a batch employee lookup, preserving row order', async () => {
+      const { service, timeOffFindMany, employeeFindMany } = makeService();
+
+      // The DB returns rows already ordered [startDate asc, id asc]; the
+      // service must iterate ROWS (not employees) to preserve that order.
+      timeOffFindMany.mockResolvedValue([
+        {
+          id: 'to-1',
+          employeeId: 'emp-3',
+          type: 'VACATION',
+          status: 'PENDING',
+          reason: null,
+          startDate: new Date('2026-07-01'),
+        },
+        {
+          id: 'to-2',
+          employeeId: 'emp-2',
+          type: 'PERSONAL',
+          status: 'PENDING',
+          reason: 'Trámite',
+          startDate: new Date('2026-07-05'),
+        },
+      ]);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
+        },
+        {
+          id: 'emp-3',
+          firstName: 'Luis',
+          lastName: 'Pérez',
+          employeeNumber: 'E-003',
+        },
+      ]);
+
+      const result = await service.listPendingApprovals();
+
+      // Order preserved (iterate rows, not employees).
+      expect(result.map((r: any) => r.id)).toEqual(['to-1', 'to-2']);
+      // Identity resolved per row by employeeId.
+      expect(result[0]).toMatchObject({
+        employeeId: 'emp-3',
+        fullName: 'Luis Pérez',
+        employeeNumber: 'E-003',
+      });
+      expect(result[1]).toMatchObject({
+        employeeId: 'emp-2',
+        fullName: 'Ana Gómez',
+        employeeNumber: 'E-002',
+      });
+      // Additive — original fields untouched.
+      expect(result[0].type).toBe('VACATION');
+      expect(result[1].reason).toBe('Trámite');
+    });
+
+    it('queries the employee lookup once with the de-duplicated employeeIds', async () => {
+      const { service, timeOffFindMany, employeeFindMany } = makeService();
+      timeOffFindMany.mockResolvedValue([
+        {
+          id: 'to-1',
+          employeeId: 'emp-2',
+          type: 'VACATION',
+          status: 'PENDING',
+          startDate: new Date('2026-07-01'),
+        },
+        {
+          id: 'to-2',
+          employeeId: 'emp-2',
+          type: 'PERSONAL',
+          status: 'PENDING',
+          startDate: new Date('2026-07-02'),
+        },
+        {
+          id: 'to-3',
+          employeeId: 'emp-3',
+          type: 'VACATION',
+          status: 'PENDING',
+          startDate: new Date('2026-07-03'),
+        },
+      ]);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
+        },
+        {
+          id: 'emp-3',
+          firstName: 'Luis',
+          lastName: 'Pérez',
+          employeeNumber: 'E-003',
+        },
+      ]);
+
+      await service.listPendingApprovals();
+
+      // ONE batch read with the UNIQUE ids — no tenantId hand-added
+      // (Employee is auto tenant-scoped).
+      expect(employeeFindMany).toHaveBeenCalledTimes(1);
+      expect(employeeFindMany).toHaveBeenCalledWith({
+        where: { id: { in: ['emp-2', 'emp-3'] } },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          employeeNumber: true,
+        },
+      });
+    });
+
+    it('falls back to "(empleado)" and null employeeNumber when the employee is missing from the lookup', async () => {
+      const { service, timeOffFindMany, employeeFindMany } = makeService();
+      timeOffFindMany.mockResolvedValue([
+        {
+          id: 'to-1',
+          employeeId: 'emp-missing',
+          type: 'VACATION',
+          status: 'PENDING',
+          reason: null,
+          startDate: new Date('2026-07-01'),
+        },
+      ]);
+      employeeFindMany.mockResolvedValue([]); // lookup resolves nothing
+
+      const result = await service.listPendingApprovals();
+
+      expect(result[0].fullName).toBe('(empleado)');
+      expect(result[0].employeeNumber).toBeNull();
+    });
+
+    it('still strips SICK reason for a non-privileged ability while adding identity fields', async () => {
+      const { service, timeOffFindMany, employeeFindMany } = makeService();
+      timeOffFindMany.mockResolvedValue([
+        {
+          id: 'to-1',
+          employeeId: 'emp-2',
+          type: 'SICK',
+          status: 'PENDING',
+          reason: 'Confidencial',
+          startDate: new Date('2026-07-01'),
+        },
+      ]);
+      employeeFindMany.mockResolvedValue([
+        {
+          id: 'emp-2',
+          firstName: 'Ana',
+          lastName: 'Gómez',
+          employeeNumber: 'E-002',
+        },
+      ]);
+      const abilityWithoutMedical = {
+        can: jest.fn().mockReturnValue(false),
+      } as any;
+
+      const result = await service.listPendingApprovals(abilityWithoutMedical);
+
+      expect(result[0].reason).toBeNull(); // medical stripping preserved
+      expect(result[0].fullName).toBe('Ana Gómez'); // identity added
+      expect(result[0].employeeNumber).toBe('E-002');
+    });
+  });
+
   describe('runtime ability resolution (CLS-driven)', () => {
     it('listForEmployee uses CLS-built ability to strip SICK reason when permission missing', async () => {
       const {

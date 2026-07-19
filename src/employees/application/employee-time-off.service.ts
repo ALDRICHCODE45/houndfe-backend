@@ -310,9 +310,35 @@ export class EmployeeTimeOffService {
 
     const effectiveAbility = ability ?? (await this.getCurrentAbility());
 
-    return rows.map((row: any) =>
-      this.stripMedicalReason(row, effectiveAbility),
+    // Denormalize requester identity inline so the frontend needs no
+    // capped second lookup. ONE batch read on the Employee model, which
+    // is auto tenant-scoped by the tenant Prisma client — do NOT hand-add
+    // tenantId here (cross-tenant ids are silently filtered out already).
+    const employeeIds = [...new Set(rows.map((row: any) => row.employeeId))];
+    const employees =
+      employeeIds.length > 0
+        ? await prisma.employee.findMany({
+            where: { id: { in: employeeIds } },
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              employeeNumber: true,
+            },
+          })
+        : [];
+    const employeeById = new Map<string, any>(
+      (employees ?? []).map((employee: any) => [employee.id, employee]),
     );
+
+    return rows.map((row: any) => {
+      const employee = employeeById.get(row.employeeId);
+      return {
+        ...this.stripMedicalReason(row, effectiveAbility),
+        fullName: buildDisplayName(employee?.firstName, employee?.lastName),
+        employeeNumber: employee?.employeeNumber ?? null,
+      };
+    });
   }
 
   // ==================== Helpers ====================
