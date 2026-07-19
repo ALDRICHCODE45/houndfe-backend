@@ -682,6 +682,14 @@ export class SalesService {
       quantity: number;
     }> = [];
 
+    // Resolve the effective list for lines without per-item override.
+    // When `sale.globalPriceListId` is null (cleared by cashier or
+    // not yet set) the fallback is the default (PUBLICO) GlobalPriceList
+    // — "Sin lista" still means PUBLICO; there is no true "no price list".
+    const effectiveGlobalListId =
+      sale.globalPriceListId ??
+      (await this.resolveDefaultGlobalPriceListId());
+
     // Walk all items, classify sticky vs non-sticky, and build the
     // resolver input list for the non-sticky subset. Sticky is detected
     // via the same conditions the engine applies (`hasManualDiscount`)
@@ -700,7 +708,7 @@ export class SalesService {
         continue;
       }
       const effectiveListId =
-        item.appliedPriceListId ?? sale.globalPriceListId;
+        item.appliedPriceListId ?? effectiveGlobalListId;
       if (effectiveListId === null) {
         continue;
       }
@@ -723,8 +731,8 @@ export class SalesService {
     const resolvedInputs = nonStickyInputs.map((inp) => ({
       ...inp,
       globalPriceListId:
-        inp.priceListId === sale.globalPriceListId &&
-        sale.globalPriceListId !== null
+        inp.priceListId === effectiveGlobalListId &&
+        effectiveGlobalListId !== null
           ? (inp.priceListId as string)
           : undefined,
     }));
@@ -747,7 +755,7 @@ export class SalesService {
         continue;
       }
       const effectiveListId =
-        item.appliedPriceListId ?? sale.globalPriceListId;
+        item.appliedPriceListId ?? effectiveGlobalListId;
       if (effectiveListId === null) {
         continue;
       }
@@ -764,6 +772,23 @@ export class SalesService {
         appliedPriceListId: item.appliedPriceListId, // preserve per-item override id
       });
     }
+  }
+
+  /**
+   * Returns the id of the default GlobalPriceList (isDefault=true).
+   *
+   * There is no true "no price list" state — every draft always has a
+   * pricing baseline. When the cashier clears the list (null) or a
+   * freshly-opened draft has not been bound yet, the repricing pipeline
+   * falls back to the default PUBLICO list via this method.
+   */
+  private async resolveDefaultGlobalPriceListId(): Promise<string | null> {
+    const prisma = this.tenantPrisma.getClient();
+    const row = await prisma.globalPriceList.findFirst({
+      where: { isDefault: true },
+      select: { id: true },
+    });
+    return row?.id ?? null;
   }
 
   /**

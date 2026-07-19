@@ -169,7 +169,11 @@ describe('SalesService', () => {
     posEvaluateUseCase = makeMockPosEvaluateUseCase();
     tenantPrisma = {
       getTenantId: jest.fn(() => 'tenant-1'),
-      getClient: jest.fn(() => ({}) as never),
+      getClient: jest.fn(() => ({
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+        },
+      }) as never),
     };
     service = createService(
       saleRepo,
@@ -1047,6 +1051,9 @@ describe('SalesService', () => {
             id: draftResponse.shippingAddress.id,
             customerId: draftResponse.customer.id,
           }),
+        },
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
         },
       };
       tenantPrisma.getClient = jest.fn(() => prismaClient as never);
@@ -4902,6 +4909,9 @@ describe('SalesService', () => {
         customerAddress: {
           findUnique: jest.fn(),
         },
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+        },
       });
 
       // Engine: customer-scoped promo applies only AFTER assignment.
@@ -8297,6 +8307,7 @@ describe('SalesService', () => {
       (tenantPrisma.getClient as jest.Mock).mockReturnValue({
         globalPriceList: {
           findUnique: jest.fn().mockResolvedValue(null), // null body does not query
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
         },
       });
       // No batch resolve — clearing on these lines has nothing to resolve from
@@ -8401,6 +8412,9 @@ describe('SalesService', () => {
         },
         customerAddress: {
           findUnique: jest.fn(),
+        },
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
         },
       };
     }
