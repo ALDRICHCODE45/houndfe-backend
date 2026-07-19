@@ -2317,6 +2317,7 @@ export class ProductsService {
       variantId: string;
       priceListId: string;
       priceCents: number;
+      priceList: { globalPriceListId: string | null } | null;
       tierPrices: Array<{ minQuantity: number; priceCents: number }>;
     };
 
