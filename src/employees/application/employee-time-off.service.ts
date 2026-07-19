@@ -328,7 +328,7 @@ export class EmployeeTimeOffService {
           })
         : [];
     const employeeById = new Map<string, any>(
-      (employees ?? []).map((employee: any) => [employee.id, employee]),
+      employees.map((employee: any) => [employee.id, employee]),
     );
 
     return rows.map((row: any) => {
