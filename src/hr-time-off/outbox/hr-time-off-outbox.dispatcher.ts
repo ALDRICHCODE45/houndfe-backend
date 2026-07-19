@@ -131,8 +131,16 @@ export class HrTimeOffOutboxDispatcher {
   }
 
   private async markPublished(event: DispatchableOutboxEvent): Promise<void> {
-    await this.prisma.outboxEvent.update({
-      where: { id: event.id },
+    // Compare-and-swap on lockToken: only the worker that STILL owns the
+    // lease may finalize the row. If this worker's 60s lease expired and
+    // another poll re-claimed the SAME row, the CAS matches ZERO rows
+    // (`count === 0`) and we skip — the new owner is authoritative, so a
+    // stale terminal write can never clobber its claim/state.
+    //
+    // `.update()` requires a UNIQUE where and cannot carry the non-unique
+    // `lockToken`; `.updateMany()` can, and returns `{ count }`.
+    const { count } = await this.prisma.outboxEvent.updateMany({
+      where: { id: event.id, lockToken: event.lockToken },
       data: {
         status: OutboxEventStatus.PUBLISHED,
         publishedAt: new Date(),
@@ -142,6 +150,13 @@ export class HrTimeOffOutboxDispatcher {
         lockedUntil: null,
       },
     });
+
+    if (count === 0) {
+      this.logger.debug(
+        '[HrTimeOffOutboxDispatcher] terminal write skipped — lock lost/expired for row',
+        { eventId: event.id, tenantId: event.tenantId },
+      );
+    }
   }
 
   private async markRetry(
@@ -153,8 +168,11 @@ export class HrTimeOffOutboxDispatcher {
     const delayMs = nextAttemptDelayMs(nextRetryCount);
     const nextAttemptAt = new Date(Date.now() + delayMs);
 
-    await this.prisma.outboxEvent.update({
-      where: { id: event.id },
+    // Same lockToken compare-and-swap as markPublished: a stale worker
+    // whose lease expired must not overwrite the state of the worker
+    // that re-claimed the row. `count === 0` ⇒ lock lost ⇒ skip.
+    const { count } = await this.prisma.outboxEvent.updateMany({
+      where: { id: event.id, lockToken: event.lockToken },
       data: {
         status,
         retryCount: nextRetryCount,
@@ -164,6 +182,13 @@ export class HrTimeOffOutboxDispatcher {
         lockedUntil: null,
       },
     });
+
+    if (count === 0) {
+      this.logger.debug(
+        '[HrTimeOffOutboxDispatcher] terminal write skipped — lock lost/expired for row',
+        { eventId: event.id, tenantId: event.tenantId },
+      );
+    }
   }
 }
 

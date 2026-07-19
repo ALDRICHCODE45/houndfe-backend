@@ -1,5 +1,5 @@
 /**
- * Slice 5 — HrTimeOffOutboxDispatcher tests (RED → GREEN).
+ * HrTimeOffOutboxDispatcher tests (Slice 5 + lockToken CAS hardening).
  *
  * Mirrors the LowStockOutboxDispatcher contract but for the HR time-off
  * pipeline (eventType='hr.timeoff.requested'). The dispatcher receives
@@ -18,10 +18,20 @@
  * reads). The dispatcher forwards `event.payload` directly to
  * `InngestService.send('hr/timeoff.requested', payload, idem)`.
  *
+ * lockToken CAS hardening: the terminal writes (`markPublished`,
+ * `markRetry`) match on BOTH id AND lockToken via
+ * `updateMany({ where: { id, lockToken }, ... })`. If a worker's 60s
+ * lease expires and another poll re-claims the SAME row, the stale
+ * worker's terminal write matches ZERO rows (`count === 0`) and is
+ * skipped — it can no longer clobber the new owner's claim/state.
+ * `.update()` requires a UNIQUE where and cannot carry the non-unique
+ * lockToken; `.updateMany()` can, and returns `{ count }`.
+ *
  * Spec: design.md "Durable dispatch flow (finding #10)" + Slice 5 +
  * time-off-notifications 'Delivery Is Durable' + 'Idempotency Key
  * Deduplicates Retries'.
  */
+import { Logger } from '@nestjs/common';
 import { OutboxEventStatus } from '@prisma/client';
 import type { DispatchableOutboxEvent } from '../../shared/outbox/outbox.types';
 import { HrTimeOffOutboxDispatcher } from './hr-time-off-outbox.dispatcher';
@@ -58,6 +68,47 @@ function buildClaimed(
 }
 
 describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
+  // ─── Regression (lockToken CAS guard) ─────────────────────────────
+  // The terminal write MUST match on BOTH id AND lockToken so a stale
+  // worker (whose lease expired and whose row was re-claimed) cannot
+  // clobber the new claim. Prisma `.update()` requires a UNIQUE where
+  // and cannot carry the non-unique lockToken — so the dispatcher must
+  // use `.updateMany({ where: { id, lockToken }, ... })`, which returns
+  // `{ count }`. This test is RED while the code still calls `.update`.
+  it('marks PUBLISHED via updateMany with a lockToken compare-and-swap (where: { id, lockToken })', async () => {
+    const inngestService = {
+      send: jest.fn().mockResolvedValue({ ids: ['evt-id'] }),
+    };
+    const updateManyMock = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = {
+      outboxEvent: {
+        // Present but MUST NOT be used — the guard requires updateMany.
+        update: jest.fn().mockResolvedValue({ id: 'evt-hr-1' }),
+        updateMany: updateManyMock,
+      },
+    };
+
+    const dispatcher = new HrTimeOffOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      5,
+    );
+
+    await dispatcher.dispatch(
+      buildClaimed({ id: 'evt-cas', lockToken: 'lock-cas' }),
+    );
+
+    expect(updateManyMock).toHaveBeenCalledTimes(1);
+    const arg = updateManyMock.mock.calls[0][0] as {
+      where: { id: string; lockToken: string };
+      data: { status: OutboxEventStatus };
+    };
+    expect(arg.where).toEqual({ id: 'evt-cas', lockToken: 'lock-cas' });
+    expect(arg.data.status).toBe(OutboxEventStatus.PUBLISHED);
+    // The plain `.update` (no lock re-check) must NOT be the write path.
+    expect(prisma.outboxEvent.update).not.toHaveBeenCalled();
+  });
+
   it('AWAITS InngestService.send with event name "hr/timeoff.requested" before marking PUBLISHED', async () => {
     const callOrder: string[] = [];
     const inngestService = {
@@ -66,15 +117,13 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
         return Promise.resolve({ ids: ['evt-id'] });
       }),
     };
-    const updateMock = jest.fn((args: unknown) => {
+    const updateManyMock = jest.fn((args: unknown) => {
       callOrder.push(
-        `update:${(args as { data: { status: string } }).data.status}`,
+        `updateMany:${(args as { data: { status: string } }).data.status}`,
       );
-      return Promise.resolve({ id: 'evt-hr-1' });
+      return Promise.resolve({ count: 1 });
     });
-    const prisma = {
-      outboxEvent: { update: updateMock },
-    };
+    const prisma = { outboxEvent: { updateMany: updateManyMock } };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
       inngestService as never,
@@ -84,9 +133,10 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
 
     await dispatcher.dispatch(buildClaimed());
 
-    // Resolve ORDER: send → update(PUBLISHED). A regression that
+    // Resolve ORDER: send → updateMany(PUBLISHED). A regression that
     // marks PUBLISHED before awaiting send would lose a rejected event.
-    expect(callOrder).toEqual(['send.resolve', 'update:PUBLISHED']);
+    expect(callOrder).toEqual(['send.resolve', 'updateMany:PUBLISHED']);
+    expect(inngestService.send.mock.calls[0][0]).toBe('hr/timeoff.requested');
   });
 
   it('sends with idempotency key `${tenantId}:${timeOffId}` (= aggregateId)', async () => {
@@ -94,9 +144,7 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
       send: jest.fn().mockResolvedValue({ ids: ['evt-id'] }),
     };
     const prisma = {
-      outboxEvent: {
-        update: jest.fn().mockResolvedValue({ id: 'evt-hr-1' }),
-      },
+      outboxEvent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
@@ -122,9 +170,7 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
       send: jest.fn().mockResolvedValue({ ids: ['evt-id'] }),
     };
     const prisma = {
-      outboxEvent: {
-        update: jest.fn().mockResolvedValue({ id: 'evt-hr-1' }),
-      },
+      outboxEvent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
@@ -142,6 +188,7 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
       (c: unknown[]) => c[2] as string,
     );
     expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe('tenant-1:timeoff-1');
     expect(keys[0]).toBe(keys[1]);
   });
 
@@ -149,10 +196,8 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
     const inngestService = {
       send: jest.fn().mockResolvedValue({ ids: ['evt-id'] }),
     };
-    const updateMock = jest.fn().mockResolvedValue({ id: 'evt-hr-1' });
-    const prisma = {
-      outboxEvent: { update: updateMock },
-    };
+    const updateManyMock = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = { outboxEvent: { updateMany: updateManyMock } };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
       inngestService as never,
@@ -162,9 +207,9 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
 
     await dispatcher.dispatch(buildClaimed({ id: 'evt-published' }));
 
-    expect(updateMock).toHaveBeenCalledTimes(1);
-    const arg = (updateMock.mock.calls[0] as unknown[][])[0] as {
-      where: { id: string };
+    expect(updateManyMock).toHaveBeenCalledTimes(1);
+    const arg = updateManyMock.mock.calls[0][0] as {
+      where: { id: string; lockToken: string };
       data: {
         status: OutboxEventStatus;
         publishedAt: Date;
@@ -182,14 +227,12 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
     expect(arg.data.publishedAt).toBeInstanceOf(Date);
   });
 
-  it('on reject under maxRetries: marks PENDING + bumps retryCount + bumps nextAttemptAt + records lastError', async () => {
+  it('on reject under maxRetries: marks PENDING + bumps retryCount + bumps nextAttemptAt + records lastError (CAS where)', async () => {
     const inngestService = {
       send: jest.fn().mockRejectedValue(new Error('Inngest down')),
     };
-    const updateMock = jest.fn().mockResolvedValue({ id: 'evt-hr-1' });
-    const prisma = {
-      outboxEvent: { update: updateMock },
-    };
+    const updateManyMock = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = { outboxEvent: { updateMany: updateManyMock } };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
       inngestService as never,
@@ -200,8 +243,9 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
     const before = Date.now();
     await dispatcher.dispatch(buildClaimed({ retryCount: 1 }));
 
-    expect(updateMock).toHaveBeenCalledTimes(1);
-    const arg = (updateMock.mock.calls[0] as unknown[][])[0] as {
+    expect(updateManyMock).toHaveBeenCalledTimes(1);
+    const arg = updateManyMock.mock.calls[0][0] as {
+      where: { id: string; lockToken: string };
       data: {
         status: OutboxEventStatus;
         retryCount: number;
@@ -211,6 +255,8 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
         lockedUntil: null;
       };
     };
+    // CAS where — the retry write is also lock-guarded.
+    expect(arg.where).toEqual({ id: 'evt-hr-1', lockToken: 'lock-1' });
     expect(arg.data.status).toBe(OutboxEventStatus.PENDING);
     expect(arg.data.retryCount).toBe(2);
     expect(arg.data.lastError).toMatch(/Inngest down/);
@@ -223,14 +269,15 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
     expect(arg.data.lockedUntil).toBeNull();
   });
 
-  it('on reject at maxRetries: marks FAILED', async () => {
+  it('on reject at maxRetries: marks FAILED + logs error', async () => {
+    const errorSpy = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
     const inngestService = {
       send: jest.fn().mockRejectedValue(new Error('dead-letter')),
     };
-    const updateMock = jest.fn().mockResolvedValue({ id: 'evt-hr-1' });
-    const prisma = {
-      outboxEvent: { update: updateMock },
-    };
+    const updateManyMock = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = { outboxEvent: { updateMany: updateManyMock } };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
       inngestService as never,
@@ -241,11 +288,14 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
     // retryCount=4 → next=5 === maxRetries ⇒ exhausted.
     await dispatcher.dispatch(buildClaimed({ retryCount: 4 }));
 
-    const arg = (updateMock.mock.calls[0] as unknown[][])[0] as {
+    const arg = updateManyMock.mock.calls[0][0] as {
       data: { status: OutboxEventStatus; retryCount: number };
     };
     expect(arg.data.status).toBe(OutboxEventStatus.FAILED);
     expect(arg.data.retryCount).toBe(5);
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 
   it('does NOT re-throw send rejections (dispatch() resolves cleanly)', async () => {
@@ -253,9 +303,7 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
       send: jest.fn().mockRejectedValue(new Error('boom')),
     };
     const prisma = {
-      outboxEvent: {
-        update: jest.fn().mockResolvedValue({ id: 'evt-hr-1' }),
-      },
+      outboxEvent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
@@ -277,9 +325,7 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
       send: jest.fn().mockResolvedValue({ ids: ['evt-id'] }),
     };
     const prisma = {
-      outboxEvent: {
-        update: jest.fn().mockResolvedValue({ id: 'evt-hr-1' }),
-      },
+      outboxEvent: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     };
 
     const dispatcher = new HrTimeOffOutboxDispatcher(
@@ -295,5 +341,62 @@ describe('HrTimeOffOutboxDispatcher (Slice 5)', () => {
     // Identity equality with the claimed row's payload (no field
     // mutation, no re-read).
     expect(sentPayload).toBe(claimed.payload);
+  });
+
+  // ─── CAS guard: lock lost/expired (count === 0) ───────────────────
+  // When the terminal write matches ZERO rows, another worker has
+  // re-claimed the row (this worker's lease expired). The slow worker
+  // must NOT throw and must NOT retry — it logs at debug and returns,
+  // leaving the row's state entirely to the new owner.
+  it('when updateMany matches no row on markPublished (count=0 — lock lost), dispatch() does NOT throw and logs at debug', async () => {
+    const debugSpy = jest
+      .spyOn(Logger.prototype, 'debug')
+      .mockImplementation(() => undefined);
+    const inngestService = {
+      send: jest.fn().mockResolvedValue({ ids: ['evt-id'] }),
+    };
+    const updateManyMock = jest.fn().mockResolvedValue({ count: 0 });
+    const prisma = { outboxEvent: { updateMany: updateManyMock } };
+
+    const dispatcher = new HrTimeOffOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      5,
+    );
+
+    await expect(
+      dispatcher.dispatch(buildClaimed({ id: 'evt-lost', lockToken: 'stale' })),
+    ).resolves.toBeUndefined();
+
+    expect(updateManyMock).toHaveBeenCalledTimes(1);
+    expect(debugSpy).toHaveBeenCalled();
+
+    debugSpy.mockRestore();
+  });
+
+  it('when updateMany matches no row on markRetry (count=0 — lock lost), dispatch() does NOT throw', async () => {
+    const debugSpy = jest
+      .spyOn(Logger.prototype, 'debug')
+      .mockImplementation(() => undefined);
+    const inngestService = {
+      send: jest.fn().mockRejectedValue(new Error('Inngest down')),
+    };
+    const updateManyMock = jest.fn().mockResolvedValue({ count: 0 });
+    const prisma = { outboxEvent: { updateMany: updateManyMock } };
+
+    const dispatcher = new HrTimeOffOutboxDispatcher(
+      inngestService as never,
+      prisma as never,
+      5,
+    );
+
+    await expect(
+      dispatcher.dispatch(buildClaimed({ retryCount: 1 })),
+    ).resolves.toBeUndefined();
+
+    expect(updateManyMock).toHaveBeenCalledTimes(1);
+    expect(debugSpy).toHaveBeenCalled();
+
+    debugSpy.mockRestore();
   });
 });
