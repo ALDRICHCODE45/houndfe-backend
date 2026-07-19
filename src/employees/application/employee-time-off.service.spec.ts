@@ -438,7 +438,8 @@ describe('EmployeeTimeOffService', () => {
     });
 
     it('should update row to APPROVED with reviewer fields', async () => {
-      const { service, timeOffFindFirst, timeOffUpdate } = makeService();
+      const { service, timeOffFindFirst, timeOffUpdate, outboxWriter } =
+        makeService();
       timeOffFindFirst.mockResolvedValue({
         id: 'to-1',
         employeeId: 'emp-1',
@@ -468,6 +469,42 @@ describe('EmployeeTimeOffService', () => {
         }),
       });
       expect(result).toEqual(updatedRow);
+      // Negative emit — approval is an authority lever, NOT a
+      // notification lever. Only request() writes to the outbox
+      // (Design D1: notification is gated at request-time, not review).
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('should NOT publish any outbox event when decision is REJECTED', async () => {
+      const { service, timeOffFindFirst, timeOffUpdate, outboxWriter } =
+        makeService();
+      timeOffFindFirst.mockResolvedValue({
+        id: 'to-1',
+        employeeId: 'emp-1',
+        status: 'PENDING',
+      });
+      timeOffUpdate.mockResolvedValue({
+        id: 'to-1',
+        status: 'REJECTED',
+        reviewerUserId: 'reviewer-1',
+      });
+
+      await service.review(
+        'emp-1',
+        'to-1',
+        { decision: 'REJECTED' as any, reviewerNotes: 'Not this time' },
+        'reviewer-1',
+      );
+
+      expect(timeOffUpdate).toHaveBeenCalledWith({
+        where: { id: 'to-1' },
+        data: expect.objectContaining({
+          status: 'REJECTED',
+          reviewerUserId: 'reviewer-1',
+        }),
+      });
+      // Rejection emits nothing to the outbox either.
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
   });
 
@@ -476,7 +513,8 @@ describe('EmployeeTimeOffService', () => {
   // ============================================================
   describe('cancel()', () => {
     it('should allow cancellation when status is PENDING', async () => {
-      const { service, timeOffFindFirst, timeOffUpdate } = makeService();
+      const { service, timeOffFindFirst, timeOffUpdate, outboxWriter } =
+        makeService();
       timeOffFindFirst.mockResolvedValue({
         id: 'to-1',
         employeeId: 'emp-1',
@@ -495,6 +533,32 @@ describe('EmployeeTimeOffService', () => {
         data: { status: 'CANCELLED' },
       });
       expect(result.status).toBe('CANCELLED');
+      // Cancellation writes nothing to the outbox — only request() does.
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('should NOT publish any outbox event when cancelling a future APPROVED row', async () => {
+      const { service, timeOffFindFirst, timeOffUpdate, outboxWriter } =
+        makeService();
+      timeOffFindFirst.mockResolvedValue({
+        id: 'to-1',
+        employeeId: 'emp-1',
+        status: 'APPROVED',
+        startDate: new Date('2099-07-01'), // future → cancellation allowed
+      });
+      timeOffUpdate.mockResolvedValue({
+        id: 'to-1',
+        status: 'CANCELLED',
+      });
+
+      const result = await service.cancel('emp-1', 'to-1');
+
+      expect(timeOffUpdate).toHaveBeenCalledWith({
+        where: { id: 'to-1' },
+        data: { status: 'CANCELLED' },
+      });
+      expect(result.status).toBe('CANCELLED');
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
 
     it('should reject cancellation when APPROVED and startDate already passed', async () => {
