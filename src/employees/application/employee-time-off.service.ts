@@ -7,6 +7,7 @@ import { CaslAbilityFactory } from '../../auth/authorization/casl-ability.factor
 import { CreateTimeOffDto } from '../dto/create-time-off.dto';
 import { ReviewTimeOffDto } from '../dto/review-time-off.dto';
 import { ListTimeOffQueryDto } from '../dto/list-time-off.query.dto';
+import { buildDisplayName } from './employee-display-name';
 import { EmployeeNotFoundError } from '../domain/errors/employee-not-found.error';
 import { TimeOffNotFoundError } from '../domain/errors/time-off-not-found.error';
 import { TimeOffInvalidTransitionError } from '../domain/errors/time-off-invalid-transition.error';
@@ -117,11 +118,10 @@ export class EmployeeTimeOffService {
           config.enabledActions.includes('TIME_OFF_REQUESTED');
 
         if (gatesOpen) {
-          const employeeName =
-            [employee.firstName, employee.lastName]
-              .filter(Boolean)
-              .join(' ')
-              .trim() || '(empleado)';
+          const employeeName = buildDisplayName(
+            employee.firstName,
+            employee.lastName,
+          );
 
           const payload: TimeOffRequestedPayload = {
             tenantId,
