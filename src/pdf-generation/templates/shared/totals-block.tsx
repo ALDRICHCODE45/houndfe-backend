@@ -56,14 +56,11 @@ export function TotalsBlock({
 }: TotalsBlockProps) {
   return (
     <View>
+      <Text style={SHARED_STYLES.receipt.sectionHeader}>TOTALES</Text>
       <TotalRow label="Subtotal" valueCents={subtotalCents} />
       <TotalRow
         label="Descuentos"
         valueCents={discountCents}
-        // Negative because discounts reduce the total — the
-        // label always says "Descuentos" (positive noun) but
-        // the value is prefixed with "-" for visual parity
-        // with the rest of the receipt's accounting math.
         signed
       />
       <TotalRow

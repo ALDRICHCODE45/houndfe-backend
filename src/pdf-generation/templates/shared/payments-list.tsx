@@ -52,16 +52,20 @@ export interface PaymentsListProps {
 export function PaymentsList({ payments }: PaymentsListProps) {
   if (payments.length === 0) {
     return (
-      <View style={SHARED_STYLES.payments.row}>
-        <Text style={SHARED_STYLES.payments.emptyRow}>
-          Sin pagos registrados.
-        </Text>
+      <View>
+        <Text style={SHARED_STYLES.receipt.sectionHeader}>PAGOS</Text>
+        <View style={SHARED_STYLES.payments.row}>
+          <Text style={SHARED_STYLES.payments.emptyRow}>
+            Sin pagos registrados.
+          </Text>
+        </View>
       </View>
     );
   }
 
   return (
     <View>
+      <Text style={SHARED_STYLES.receipt.sectionHeader}>PAGOS</Text>
       {payments.map((payment, index) => (
         <View
           // Same key strategy as LineItemsTable: positional index,

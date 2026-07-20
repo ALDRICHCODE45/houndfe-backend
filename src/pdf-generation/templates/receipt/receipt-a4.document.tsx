@@ -5,6 +5,7 @@ import {
   LineItemsTable,
   PaymentsList,
   ReceiptHeader,
+  SHARED_STYLES,
   TotalsBlock,
 } from '../shared';
 import type { ReceiptDocumentProps } from './receipt.types';
@@ -23,30 +24,31 @@ export function ReceiptA4Document({
         size={{ width: PAPER_SIZES.A4.width, height: PAPER_SIZES.A4.height }}
         style={styles.page}
       >
-        <ReceiptHeader {...business} folio={sale.folio} date={sale.date} />
+        <View style={SHARED_STYLES.receipt.outerBorder}>
+          <ReceiptHeader
+            {...business}
+            folio={sale.folio}
+            date={sale.date}
+            subtitle="FARMACIA"
+          />
 
-        <View style={styles.saleDetails}>
-          <MetaField label="Cajero" value={sale.cashier} />
-          <MetaField label="Vendedor" value={sale.seller} />
-        </View>
+          <View style={styles.saleDetails}>
+            <MetaField label="CAJERO" value={sale.cashier} />
+            <MetaField label="VENDEDOR" value={sale.seller} />
+          </View>
 
-        <View style={styles.customer}>
-          <CustomerSection customerName={customer.name} />
-        </View>
+          <View style={styles.customer}>
+            <CustomerSection customerName={customer.name} />
+          </View>
 
-        <Section title="Productos">
           <LineItemsTable items={items} />
-        </Section>
-
-        <Section title="Totales">
           <TotalsBlock {...totals} />
-        </Section>
-
-        <Section title="Pagos">
           <PaymentsList payments={payments} />
-        </Section>
 
-        <Text style={styles.footer}>Gracias por su compra.</Text>
+          <Text style={SHARED_STYLES.receipt.footer}>
+            Gracias por su compra.
+          </Text>
+        </View>
       </Page>
     </Document>
   );
@@ -61,21 +63,6 @@ function MetaField({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      {children}
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   page: {
     padding: 28,
@@ -86,7 +73,8 @@ const styles = StyleSheet.create({
   saleDetails: {
     flexDirection: 'row',
     gap: 28,
-    marginTop: 12,
+    marginTop: 8,
+    marginBottom: 4,
   },
   metaField: {
     flexDirection: 'row',
@@ -103,24 +91,5 @@ const styles = StyleSheet.create({
   },
   customer: {
     marginTop: 8,
-  },
-  section: {
-    marginTop: 14,
-  },
-  sectionTitle: {
-    borderBottomColor: '#eceaf0',
-    borderBottomWidth: 1,
-    color: '#493f54',
-    fontFamily: 'Helvetica-Bold',
-    fontSize: 9,
-    marginBottom: 6,
-    paddingBottom: 3,
-    textTransform: 'uppercase',
-  },
-  footer: {
-    color: '#938c9e',
-    fontSize: 8,
-    marginTop: 18,
-    textAlign: 'center',
   },
 });

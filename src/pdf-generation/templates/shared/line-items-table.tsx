@@ -52,125 +52,143 @@ export interface LineItemsTableProps {
 export function LineItemsTable({ items }: LineItemsTableProps) {
   if (items.length === 0) {
     return (
-      <View style={SHARED_STYLES.table.row}>
-        <Text style={SHARED_STYLES.table.emptyRow}>
-          Sin productos en esta venta.
-        </Text>
+      <View>
+        <Text style={SHARED_STYLES.receipt.sectionHeader}>PRODUCTOS</Text>
+        <View style={tableWrapper}>
+          <View style={SHARED_STYLES.table.row}>
+            <Text style={SHARED_STYLES.table.emptyRow}>---</Text>
+          </View>
+        </View>
       </View>
     );
   }
 
   return (
     <View>
-      {/* Header row — column titles. Re-rendered for every receipt
-          regardless of item count so the column meanings are always
-          visible, even on the thermal-ticket format where columns
-          collapse to fewer pixels. */}
-      <View style={SHARED_STYLES.table.headerRow}>
-        <Text
-          style={[
-            SHARED_STYLES.table.headerCell,
-            SHARED_STYLES.table.colProduct,
-          ]}
-        >
-          Producto
-        </Text>
-        <Text
-          style={[
-            SHARED_STYLES.table.headerCell,
-            SHARED_STYLES.table.colQuantity,
-          ]}
-        >
-          Cant
-        </Text>
-        <Text
-          style={[
-            SHARED_STYLES.table.headerCell,
-            SHARED_STYLES.table.colUnitPrice,
-          ]}
-        >
-          Precio Unit
-        </Text>
-        <Text
-          style={[
-            SHARED_STYLES.table.headerCell,
-            SHARED_STYLES.table.colDiscount,
-          ]}
-        >
-          Descuento
-        </Text>
-        <Text
-          style={[
-            SHARED_STYLES.table.headerCell,
-            SHARED_STYLES.table.colSubtotal,
-          ]}
-        >
-          Subtotal
-        </Text>
-      </View>
-
-      {items.map((item, index) => (
-        <View
-          // Composite key — receipts don't have stable IDs in the
-          // line-items view, so we use the positional index. The
-          // underlying data shape doesn't change across renders
-          // for the same sale, so this is safe.
-          key={`${item.productName}-${index}`}
-          style={SHARED_STYLES.table.row}
-        >
-          <View style={SHARED_STYLES.table.colProduct}>
-            <Text style={SHARED_STYLES.table.cell}>{item.productName}</Text>
-            {item.variantName ? (
-              <Text style={SHARED_STYLES.table.cellMuted}>
-                {item.variantName}
-              </Text>
-            ) : null}
-          </View>
+      <Text style={SHARED_STYLES.receipt.sectionHeader}>PRODUCTOS</Text>
+      <View style={tableWrapper}>
+        <View style={SHARED_STYLES.table.headerRow}>
           <Text
             style={[
-              SHARED_STYLES.table.cellNumeric,
+              SHARED_STYLES.table.headerCell,
+              SHARED_STYLES.table.colProduct,
+              SHARED_STYLES.table.headerCellBorder,
+            ]}
+          >
+            PRODUCTO
+          </Text>
+          <Text
+            style={[
+              SHARED_STYLES.table.headerCell,
               SHARED_STYLES.table.colQuantity,
+              SHARED_STYLES.table.headerCellBorder,
             ]}
           >
-            {formatQuantity(item.quantity)}
+            CANT
           </Text>
           <Text
             style={[
-              SHARED_STYLES.table.cellNumeric,
+              SHARED_STYLES.table.headerCell,
               SHARED_STYLES.table.colUnitPrice,
+              SHARED_STYLES.table.headerCellBorder,
             ]}
           >
-            {formatCurrency(item.unitPriceCents)}
+            PRECIO UNIT
           </Text>
-          <View style={SHARED_STYLES.table.colDiscount}>
-            {item.discountTitle && item.discountAmountCents ? (
-              <>
-                <Text
-                  style={[SHARED_STYLES.table.cellNumeric]}
-                >
-                  -{formatCurrency(item.discountAmountCents)}
-                </Text>
-                <Text style={SHARED_STYLES.table.cellMuted}>
-                  {item.discountTitle}
-                </Text>
-              </>
-            ) : (
-              <Text style={SHARED_STYLES.table.cellMuted}>—</Text>
-            )}
-          </View>
           <Text
             style={[
-              SHARED_STYLES.table.cellNumeric,
+              SHARED_STYLES.table.headerCell,
+              SHARED_STYLES.table.colDiscount,
+              SHARED_STYLES.table.headerCellBorder,
+            ]}
+          >
+            DESCUENTO
+          </Text>
+          <Text
+            style={[
+              SHARED_STYLES.table.headerCell,
               SHARED_STYLES.table.colSubtotal,
             ]}
           >
-            {formatCurrency(item.subtotalCents)}
+            SUBTOTAL
           </Text>
         </View>
-      ))}
+
+        {items.map((item, index) => (
+          <View
+            key={`${item.productName}-${index}`}
+            style={SHARED_STYLES.table.row}
+          >
+            <View
+              style={[
+                SHARED_STYLES.table.colProduct,
+                SHARED_STYLES.table.cellBorder,
+              ]}
+            >
+              <Text style={SHARED_STYLES.table.cell}>{item.productName}</Text>
+              {item.variantName ? (
+                <Text style={SHARED_STYLES.table.cellMuted}>
+                  {item.variantName}
+                </Text>
+              ) : null}
+            </View>
+            <Text
+              style={[
+                SHARED_STYLES.table.cellNumeric,
+                SHARED_STYLES.table.colQuantity,
+                SHARED_STYLES.table.cellBorder,
+              ]}
+            >
+              {formatQuantity(item.quantity)}
+            </Text>
+            <Text
+              style={[
+                SHARED_STYLES.table.cellNumeric,
+                SHARED_STYLES.table.colUnitPrice,
+                SHARED_STYLES.table.cellBorder,
+              ]}
+            >
+              {formatCurrency(item.unitPriceCents)}
+            </Text>
+            <View
+              style={[
+                SHARED_STYLES.table.colDiscount,
+                SHARED_STYLES.table.cellBorder,
+              ]}
+            >
+              {item.discountTitle && item.discountAmountCents ? (
+                <>
+                  <Text style={[SHARED_STYLES.table.cellNumeric]}>
+                    -{formatCurrency(item.discountAmountCents)}
+                  </Text>
+                  <Text style={SHARED_STYLES.table.cellMuted}>
+                    {item.discountTitle}
+                  </Text>
+                </>
+              ) : (
+                <Text style={SHARED_STYLES.table.cellMuted}>---</Text>
+              )}
+            </View>
+            <Text
+              style={[
+                SHARED_STYLES.table.cellNumeric,
+                SHARED_STYLES.table.colSubtotal,
+              ]}
+            >
+              {formatCurrency(item.subtotalCents)}
+            </Text>
+          </View>
+        ))}
+      </View>
     </View>
   );
 }
+
+const tableWrapper = {
+  borderWidth: 1,
+  borderColor: '#eceaf0',
+  borderStyle: 'solid' as const,
+};
 
 /**
  * Render an integer quantity as a trimmed string. Real data has

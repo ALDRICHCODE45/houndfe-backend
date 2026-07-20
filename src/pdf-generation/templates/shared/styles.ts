@@ -25,10 +25,9 @@
  * on the 227pt-wide ticket format the line-items table fits within
  * 207pt content width via proportional flex shrink.
  */
-import { StyleSheet } from '@react-pdf/renderer';
 
 const COLORS = {
-  // Brand Houndé palette (mirrors low-stock.email.tsx tokens).
+  // Brand HoundFe palette (mirrors low-stock.email.tsx tokens).
   ink: '#2c2434',
   inkSoft: '#493f54',
   textBody: '#443d4e',
@@ -45,7 +44,7 @@ const FONTS = {
   bodyBold: 'Helvetica-Bold',
 } as const;
 
-export const SHARED_STYLES = StyleSheet.create({
+export const SHARED_STYLES = {
   // ─── Receipt shell ─────────────────────────────────────────────
   receipt: {
     pagePadding: 20,
@@ -55,6 +54,49 @@ export const SHARED_STYLES = StyleSheet.create({
     fontFamily: FONTS.body,
     fontSize: 10,
     lineHeight: 1.4,
+    outerBorder: {
+      borderWidth: 1,
+      borderColor: COLORS.border,
+      borderStyle: 'solid' as const,
+    },
+    sectionHeader: {
+      fontFamily: FONTS.bodyBold,
+      fontSize: 9,
+      color: COLORS.inkSoft,
+      letterSpacing: 0.8,
+      textTransform: 'uppercase' as const,
+      marginTop: 10,
+      marginBottom: 4,
+    },
+    footer: {
+      fontFamily: FONTS.bodyBold,
+      fontSize: 9,
+      color: COLORS.inkSoft,
+      textAlign: 'center' as const,
+      marginTop: 12,
+    },
+    subtitle: {
+      fontFamily: FONTS.body,
+      fontSize: 8,
+      color: COLORS.textMuted,
+      letterSpacing: 1,
+      textTransform: 'uppercase' as const,
+    },
+    folioRow: {
+      flexDirection: 'row' as const,
+      justifyContent: 'space-between' as const,
+      marginBottom: 4,
+    },
+    folioBlock: {
+      textAlign: 'right' as const,
+      fontFamily: FONTS.body,
+      fontSize: 8,
+    },
+    folioValue: {
+      fontFamily: FONTS.bodyBold,
+      fontSize: 9,
+      color: COLORS.ink,
+    },
   },
 
   // ─── Meta labels (folio, date, branch) ──────────────────────────
@@ -102,11 +144,24 @@ export const SHARED_STYLES = StyleSheet.create({
   table: {
     headerRow: {
       flexDirection: 'row',
+      borderTopWidth: 1,
+      borderTopColor: COLORS.border,
+      borderTopStyle: 'solid',
       borderBottomWidth: 1,
       borderBottomColor: COLORS.border,
       borderBottomStyle: 'solid',
       paddingBottom: 4,
       marginBottom: 4,
+    },
+    headerCellBorder: {
+      borderRightWidth: 1,
+      borderRightColor: COLORS.border,
+      borderRightStyle: 'solid' as const,
+    },
+    cellBorder: {
+      borderRightWidth: 1,
+      borderRightColor: COLORS.divider,
+      borderRightStyle: 'solid' as const,
     },
     headerCell: {
       fontFamily: FONTS.bodyBold,
@@ -147,10 +202,10 @@ export const SHARED_STYLES = StyleSheet.create({
     colSubtotal: { flexGrow: 3, textAlign: 'right' as const },
     emptyRow: {
       paddingVertical: 8,
-      fontFamily: FONTS.body,
+      fontFamily: FONTS.bodyBold,
       fontSize: 9,
       color: COLORS.textMuted,
-      fontStyle: 'italic',
+      textAlign: 'center' as const,
     },
   },
 
@@ -254,4 +309,4 @@ export const SHARED_STYLES = StyleSheet.create({
       color: COLORS.ink,
     },
   },
-});
+} as const;

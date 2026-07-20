@@ -5,6 +5,7 @@ import {
   LineItemsTable,
   PaymentsList,
   ReceiptHeader,
+  SHARED_STYLES,
   TotalsBlock,
 } from '../shared';
 import type { ReceiptDocumentProps } from './receipt.types';
@@ -26,26 +27,38 @@ export function ReceiptTicketDocument({
         style={styles.page}
         wrap={false}
       >
-        <View style={styles.headerBlock}>
-          <ReceiptHeader {...business} folio={sale.folio} date={sale.date} />
+        <View style={SHARED_STYLES.receipt.outerBorder}>
+          <ReceiptHeader
+            {...business}
+            folio={sale.folio}
+            date={sale.date}
+            subtitle="FARMACIA"
+          />
+
           <View style={styles.saleMeta}>
-            <Text style={styles.metaText}>Cajero: {sale.cashier}</Text>
-            <Text style={styles.metaText}>Vendedor: {sale.seller}</Text>
+            <Text style={styles.metaText}>CAJERO: {sale.cashier}</Text>
+            <Text style={styles.metaText}>VENDEDOR: {sale.seller}</Text>
           </View>
-          <CustomerSection customerName={customer.name} />
-        </View>
 
-        <View style={styles.section}>
-          <LineItemsTable items={items} />
-        </View>
+          <View style={styles.customerBlock}>
+            <CustomerSection customerName={customer.name} />
+          </View>
 
-        <View style={styles.section}>
-          <TotalsBlock {...totals} />
-        </View>
+          <View style={styles.section}>
+            <LineItemsTable items={items} />
+          </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Pagos</Text>
-          <PaymentsList payments={payments} />
+          <View style={styles.section}>
+            <TotalsBlock {...totals} />
+          </View>
+
+          <View style={styles.section}>
+            <PaymentsList payments={payments} />
+          </View>
+
+          <Text style={SHARED_STYLES.receipt.footer}>
+            Gracias por su compra.
+          </Text>
         </View>
       </Page>
     </Document>
@@ -53,11 +66,11 @@ export function ReceiptTicketDocument({
 }
 
 function getTicketHeight(itemCount: number, paymentCount: number): number {
-  const shellHeight = 330;
+  const shellHeight = 380;
   const lineItemsHeight = itemCount * 32;
   const paymentsHeight = paymentCount * 28;
 
-  return Math.max(420, shellHeight + lineItemsHeight + paymentsHeight);
+  return Math.max(480, shellHeight + lineItemsHeight + paymentsHeight);
 }
 
 const styles = StyleSheet.create({
@@ -69,9 +82,6 @@ const styles = StyleSheet.create({
     fontSize: 8,
     lineHeight: 1.2,
   },
-  headerBlock: {
-    gap: 4,
-  },
   saleMeta: {
     marginTop: 5,
   },
@@ -80,17 +90,10 @@ const styles = StyleSheet.create({
     fontSize: 7,
     marginBottom: 2,
   },
+  customerBlock: {
+    marginTop: 4,
+  },
   section: {
     marginTop: 8,
-  },
-  sectionTitle: {
-    borderBottomColor: '#eceaf0',
-    borderBottomWidth: 1,
-    color: '#493f54',
-    fontFamily: 'Helvetica-Bold',
-    fontSize: 7,
-    marginBottom: 3,
-    paddingBottom: 2,
-    textTransform: 'uppercase',
   },
 });

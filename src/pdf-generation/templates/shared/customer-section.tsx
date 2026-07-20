@@ -25,7 +25,7 @@ export interface CustomerSectionProps {
   customerName: string | null | undefined;
 }
 
-export const PUBLIC_CUSTOMER_PLACEHOLDER = 'Público en General' as const;
+export const PUBLIC_CUSTOMER_PLACEHOLDER = 'PÚBLICO EN GENERAL' as const;
 
 export function CustomerSection({ customerName }: CustomerSectionProps) {
   const display =
@@ -35,7 +35,7 @@ export function CustomerSection({ customerName }: CustomerSectionProps) {
 
   return (
     <View style={SHARED_STYLES.customer.row}>
-      <Text style={SHARED_STYLES.customer.label}>Cliente</Text>
+      <Text style={SHARED_STYLES.customer.label}>CLIENTE</Text>
       <Text style={SHARED_STYLES.customer.value}>{display}</Text>
     </View>
   );

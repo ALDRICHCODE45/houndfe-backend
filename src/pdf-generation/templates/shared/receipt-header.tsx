@@ -46,6 +46,8 @@ export interface ReceiptHeaderProps {
   folio: string;
   /** ISO timestamp of when the sale was confirmed. */
   date: string;
+  /** Optional subtitle shown below the company name (default "FARMACIA"). */
+  subtitle?: string;
 }
 
 export function ReceiptHeader({
@@ -55,35 +57,40 @@ export function ReceiptHeader({
   phone,
   folio,
   date,
+  subtitle,
 }: ReceiptHeaderProps) {
   return (
     <View style={headerStyles.container}>
-      <View style={headerStyles.brandColumn}>
-        {logoUrl ? (
-          <Image
-            src={logoUrl}
-            style={headerStyles.logo}
-            // `cache={false}` keeps each render self-contained — logos
-            // can be re-pointed per request without stale cache entries.
-            cache={false}
-          />
-        ) : null}
-        <Text style={SHARED_STYLES.meta.companyName}>{companyName}</Text>
-        {address ? (
-          <Text style={SHARED_STYLES.meta.brandLine}>{address}</Text>
-        ) : null}
-        {phone ? (
-          <Text style={SHARED_STYLES.meta.brandLine}>{phone}</Text>
-        ) : null}
-      </View>
-      <View style={headerStyles.metaColumn}>
-        <View style={headerStyles.metaRow}>
-          <Text style={SHARED_STYLES.meta.label}>Folio</Text>
-          <Text style={SHARED_STYLES.meta.folio}>{folio}</Text>
+      <View style={headerStyles.topRow}>
+        <View style={headerStyles.brandCol}>
+          {logoUrl ? (
+            <Image
+              src={logoUrl}
+              style={headerStyles.logo}
+              cache={false}
+            />
+          ) : null}
+          <View style={headerStyles.nameStack}>
+            <Text style={SHARED_STYLES.meta.companyName}>{companyName}</Text>
+            <Text style={SHARED_STYLES.receipt.subtitle}>
+              {subtitle ?? 'FARMACIA'}
+            </Text>
+          </View>
+          {address ? (
+            <Text style={SHARED_STYLES.meta.brandLine}>{address}</Text>
+          ) : null}
+          {phone ? (
+            <Text style={SHARED_STYLES.meta.brandLine}>{phone}</Text>
+          ) : null}
         </View>
-        <View style={headerStyles.metaRow}>
-          <Text style={SHARED_STYLES.meta.label}>Fecha</Text>
-          <Text style={SHARED_STYLES.meta.value}>{formatReceiptDate(date)}</Text>
+        <View style={headerStyles.metaCol}>
+          <View style={SHARED_STYLES.receipt.folioRow}>
+            <Text style={SHARED_STYLES.meta.label}>FOLIO</Text>
+            <Text style={SHARED_STYLES.receipt.folioValue}>{folio}</Text>
+          </View>
+          <Text style={SHARED_STYLES.receipt.folioBlock}>
+            FECHA {formatReceiptDate(date)}
+          </Text>
         </View>
       </View>
     </View>
@@ -97,28 +104,28 @@ export function ReceiptHeader({
  */
 const headerStyles = {
   container: {
-    flexDirection: 'row' as const,
-    justifyContent: 'space-between' as const,
-    alignItems: 'flex-start' as const,
     paddingBottom: 8,
     borderBottomWidth: 1,
     borderBottomColor: SHARED_STYLES.divider.borderBottomColor,
     borderBottomStyle: 'solid' as const,
   },
-  brandColumn: {
+  topRow: {
+    flexDirection: 'row' as const,
+    justifyContent: 'space-between' as const,
+    alignItems: 'flex-start' as const,
+  },
+  brandCol: {
     flexDirection: 'column' as const,
     flexShrink: 1,
   },
-  metaColumn: {
+  nameStack: {
+    flexDirection: 'column' as const,
+  },
+  metaCol: {
     flexDirection: 'column' as const,
     alignItems: 'flex-end' as const,
     flexShrink: 0,
     marginLeft: 12,
-  },
-  metaRow: {
-    flexDirection: 'row' as const,
-    alignItems: 'baseline' as const,
-    marginBottom: 4,
   },
   logo: {
     width: 48,
