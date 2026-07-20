@@ -12,18 +12,19 @@
  * Imports:
  *   - `SalesModule` — exposes `SalesService.getSaleDetail()` so the
  *     PDF service can fetch the sale + line items + payments.
- *   - `TenantsModule` — exposes `TenantsService.findById()` so the
- *     PDF service can pull branch address + phone for the receipt
- *     header (per the design's "branding from constants + Tenant
- *     model, no DB migration" decision).
+ *   - `TenantsModule` — exports tenant primitives via `TENANT_REPOSITORY`
+ *     so the PDF service can pull branch address + phone for the
+ *     receipt header (per the design's "branding from constants +
+ *     Tenant model, no DB migration" decision).
  *
  * Providers:
- *   - `PdfGenerationService` — WU1 stub. Render orchestration,
- *     `OnModuleInit` font registration, error mapping arrive in WU4.
+ *   - `PdfGenerationService` — render orchestrator + `OnModuleInit`
+ *     font registration + format/status/error mapping.
  *
  * Controllers:
- *   - None in WU1. `GET /sales/:id/pdf` lands in WU4 with its guards
- *     (`JwtAuthGuard` → `TenantContextGuard` → `PermissionsGuard`).
+ *   - `PdfGenerationController` — `GET /sales/:id/pdf` with the
+ *     standard auth stack (`JwtAuthGuard` → `TenantContextGuard`
+ *     → `PermissionsGuard`).
  *
  * Exports:
  *   - None. The service is consumed internally by the module's own
@@ -33,12 +34,13 @@
 import { Module } from '@nestjs/common';
 import { SalesModule } from '../sales/sales.module';
 import { TenantsModule } from '../tenants/tenants.module';
+import { PdfGenerationController } from './pdf-generation.controller';
 import { PdfGenerationService } from './pdf-generation.service';
 
 @Module({
   imports: [SalesModule, TenantsModule],
   providers: [PdfGenerationService],
-  controllers: [],
+  controllers: [PdfGenerationController],
   exports: [],
 })
 export class PdfGenerationModule {}

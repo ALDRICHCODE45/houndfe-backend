@@ -81,9 +81,31 @@ export const LOGO_URL =
 export const PDF_GENERATION_SERVICE = Symbol.for('PdfGenerationService');
 
 /**
- * DI token for the custom-font registry. Used by WU4's `OnModuleInit`
- * to register Roboto Regular exactly once at boot (per design: "lazy
- * registration has redundant Font.register() calls + thread-safety
- * concern if called in parallel").
+ * WU4 — Font registration payload for `Font.register()`.
+ *
+ * Typed as the structural subset of `@react-pdf/font`'s `SingleLoad`
+ * shape: `{ family, src, fontStyle?, fontWeight? }`. We keep this
+ * constant in plain JSON-ish form (instead of importing the
+ * @react-pdf types at the constants layer) so:
+ *   - The constants module stays dependency-light.
+ *   - The font can be swapped (CDN URL, base64, or self-hosted) by
+ *     editing one constant.
+ *
+ * Font choice rationale: Roboto is the same family used by the
+ * existing email templates (`low-stock.email.tsx`,
+ * `time-off-request.email.tsx`); reusing it keeps brand type
+ * consistent across email + PDF. The CDN path matches the email
+ * pattern; if the asset is ever removed, the `OnModuleInit`
+ * defensive try/catch in `PdfGenerationService` logs a warning and
+ * falls back to bundled Helvetica so receipts still render.
+ *
+ * NOTE: only consumed by `PdfGenerationService.onModuleInit` — the
+ * `Symbol.for(...)` token name is historical and reserved for future
+ * DI overrides (e.g. injecting a different font bundle in tests).
  */
-export const PDF_FONT_REGISTRY = Symbol.for('PdfGeneration.FontRegistry');
+export const PDF_FONT_REGISTRY = {
+  family: 'Roboto',
+  src: 'https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Mu4mxKKTU1Kg.woff',
+  fontStyle: 'normal' as const,
+  fontWeight: 'normal' as const,
+} as const;

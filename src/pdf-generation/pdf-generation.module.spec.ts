@@ -10,14 +10,18 @@
  * Why reflect-metadata instead of `Test.createTestingModule`?
  *   - The PDF generation module is a *consumer* of SalesModule and
  *     TenantsModule. Booting those would pull in Prisma, AuthModule, etc.
- *   - For a skeleton (WU1), we just need to prove the module is shape-correct
- *     so a future runtime boot (in WU5 integration tests) won't fail with
- *     "PdfGenerationService provider not registered".
+ *   - For module-shape tests, we just need to prove the module is wired
+ *     correctly so a future runtime boot (in WU5 integration tests)
+ *     won't fail with "PdfGenerationController provider not registered".
  *   - `Reflect.getMetadata(MODULE_METADATA.PROVIDERS, ModuleClass)` is the
  *     idiomatic lightweight check used throughout this repo.
+ *
+ * WU4 update: the module now declares `PdfGenerationController`. The
+ * spec reflects that change — controllers are no longer empty.
  */
 import { MODULE_METADATA } from '@nestjs/common/constants';
 import { PdfGenerationModule } from './pdf-generation.module';
+import { PdfGenerationController } from './pdf-generation.controller';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesModule } from '../sales/sales.module';
 import { TenantsModule } from '../tenants/tenants.module';
@@ -50,14 +54,15 @@ describe('PdfGenerationModule', () => {
     expect(imports).toContain(TenantsModule);
   });
 
-  it('does not register any controllers in WU1 (controller arrives in WU4)', () => {
+  it('registers PdfGenerationController for GET /sales/:id/pdf', () => {
     const controllers = Reflect.getMetadata(
       MODULE_METADATA.CONTROLLERS,
       PdfGenerationModule,
     ) as unknown[] | undefined;
 
-    // WU1 ships a skeleton only. The PDF endpoint controller lands in WU4.
-    expect(controllers ?? []).toEqual([]);
+    // WU4 ships the controller — GET /sales/:id/pdf guarded by the
+    // standard JwtAuthGuard + TenantContextGuard + PermissionsGuard stack.
+    expect(controllers ?? []).toContain(PdfGenerationController);
   });
 
   it('does not export PdfGenerationService (consumed internally only)', () => {
