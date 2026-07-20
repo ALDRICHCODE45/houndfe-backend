@@ -964,7 +964,9 @@ describe('PosEvaluatePromotionsUseCase — best-wins, MANUAL, veto, manual-wins 
     expect(result.lines).toEqual([]);
     // But it DOES appear in availableManualPromotions.
     expect(result.availableManualPromotions).toHaveLength(1);
-    expect(result.availableManualPromotions[0].id).toBe('promo-manual-no-optin');
+    expect(result.availableManualPromotions[0].id).toBe(
+      'promo-manual-no-optin',
+    );
   });
 
   it('availableManualPromotions still excludes opted-in AND vetoed (regression-safe)', async () => {

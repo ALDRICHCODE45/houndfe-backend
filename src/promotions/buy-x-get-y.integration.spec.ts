@@ -90,7 +90,8 @@ describeIfDb('buy-x-get-y end-to-end (Integration - Real DB)', () => {
     });
 
     const tenant = await prisma.tenant.findFirst({ select: { id: true } });
-    if (!tenant) throw new Error('No tenant — globalSetup must have seeded one.');
+    if (!tenant)
+      throw new Error('No tenant — globalSetup must have seeded one.');
     tenantId = tenant.id;
 
     const cls: Pick<ClsService<TenantClsStore>, 'get'> = {
@@ -225,12 +226,14 @@ describeIfDb('buy-x-get-y end-to-end (Integration - Real DB)', () => {
       getDiscountPercent: overrides.getDiscountPercent ?? 50,
       appliesTo: 'PRODUCTS',
     });
-    promo.targetItems = [{
-      id: id('ti'),
-      side: 'DEFAULT',
-      targetType: 'PRODUCTS',
-      targetId: overrides.targetProductId,
-    }];
+    promo.targetItems = [
+      {
+        id: id('ti'),
+        side: 'DEFAULT',
+        targetType: 'PRODUCTS',
+        targetId: overrides.targetProductId,
+      },
+    ];
     return promo;
   }
 
@@ -250,12 +253,14 @@ describeIfDb('buy-x-get-y end-to-end (Integration - Real DB)', () => {
       discountValue: overrides.discountValue,
       appliesTo: 'PRODUCTS',
     });
-    promo.targetItems = [{
-      id: id('ti'),
-      side: 'DEFAULT',
-      targetType: 'PRODUCTS',
-      targetId: overrides.targetProductId,
-    }];
+    promo.targetItems = [
+      {
+        id: id('ti'),
+        side: 'DEFAULT',
+        targetType: 'PRODUCTS',
+        targetId: overrides.targetProductId,
+      },
+    ];
     return promo;
   }
 

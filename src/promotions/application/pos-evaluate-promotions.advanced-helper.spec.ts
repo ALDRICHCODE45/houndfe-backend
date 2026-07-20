@@ -80,7 +80,11 @@ describe('computeAdvancedReward (WU2) — pure helper', () => {
         getQuantity: 1,
         getDiscountPercent: 30,
         getCandidateLines: [
-          { itemId: 'item-holder-x', effectiveUnitPriceCents: 1000, quantity: 3 },
+          {
+            itemId: 'item-holder-x',
+            effectiveUnitPriceCents: 1000,
+            quantity: 3,
+          },
         ],
       });
 
@@ -273,9 +277,24 @@ describe('computeAdvancedReward (WU2) — pure helper', () => {
       expect(result.rewardGroupCount).toBe(3);
       // Allocated in itemId ascending order: A, M, Z.
       expect(result.rewards).toEqual([
-        { itemId: 'item-A', discountedUnitCount: 1, perUnitRewardCents: 500, lineDiscountCents: 500 },
-        { itemId: 'item-M', discountedUnitCount: 1, perUnitRewardCents: 500, lineDiscountCents: 500 },
-        { itemId: 'item-Z', discountedUnitCount: 1, perUnitRewardCents: 500, lineDiscountCents: 500 },
+        {
+          itemId: 'item-A',
+          discountedUnitCount: 1,
+          perUnitRewardCents: 500,
+          lineDiscountCents: 500,
+        },
+        {
+          itemId: 'item-M',
+          discountedUnitCount: 1,
+          perUnitRewardCents: 500,
+          lineDiscountCents: 500,
+        },
+        {
+          itemId: 'item-Z',
+          discountedUnitCount: 1,
+          perUnitRewardCents: 500,
+          lineDiscountCents: 500,
+        },
       ]);
     });
 
@@ -319,8 +338,18 @@ describe('computeAdvancedReward (WU2) — pure helper', () => {
 
       expect(result.rewardGroupCount).toBe(1);
       expect(result.rewards).toEqual([
-        { itemId: 'item-A', discountedUnitCount: 1, perUnitRewardCents: 500, lineDiscountCents: 500 },
-        { itemId: 'item-B', discountedUnitCount: 1, perUnitRewardCents: 500, lineDiscountCents: 500 },
+        {
+          itemId: 'item-A',
+          discountedUnitCount: 1,
+          perUnitRewardCents: 500,
+          lineDiscountCents: 500,
+        },
+        {
+          itemId: 'item-B',
+          discountedUnitCount: 1,
+          perUnitRewardCents: 500,
+          lineDiscountCents: 500,
+        },
       ]);
     });
   });

@@ -519,10 +519,30 @@ describe('ProductsService — POS Helpers', () => {
       prisma.priceList.findMany = productQuery;
 
       const inputs: BatchInput[] = [
-        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 3 },
-        { productId: 'p2', variantId: 'v2', priceListId: 'list-a', quantity: 5 },
-        { productId: 'p1', variantId: null, priceListId: '__default__', quantity: 1 },
-        { productId: 'p3', variantId: 'v3', priceListId: 'list-b', quantity: 10 },
+        {
+          productId: 'p1',
+          variantId: 'v1',
+          priceListId: 'list-a',
+          quantity: 3,
+        },
+        {
+          productId: 'p2',
+          variantId: 'v2',
+          priceListId: 'list-a',
+          quantity: 5,
+        },
+        {
+          productId: 'p1',
+          variantId: null,
+          priceListId: '__default__',
+          quantity: 1,
+        },
+        {
+          productId: 'p3',
+          variantId: 'v3',
+          priceListId: 'list-b',
+          quantity: 10,
+        },
       ];
       await service.batchResolvePriceMap(inputs);
 
@@ -563,10 +583,20 @@ describe('ProductsService — POS Helpers', () => {
       prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
 
       const inputs: BatchInput[] = [
-        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 3 },
-        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 7 },
+        {
+          productId: 'p1',
+          variantId: 'v1',
+          priceListId: 'list-a',
+          quantity: 3,
+        },
+        {
+          productId: 'p1',
+          variantId: 'v1',
+          priceListId: 'list-a',
+          quantity: 7,
+        },
       ];
-      const result = (await service.batchResolvePriceMap(inputs)) as MapType;
+      const result = await service.batchResolvePriceMap(inputs);
 
       expect(result.get('p1::v1::list-a')?.get(3)).toBe(1000);
       expect(result.get('p1::v1::list-a')?.get(7)).toBe(800);
@@ -583,9 +613,14 @@ describe('ProductsService — POS Helpers', () => {
       ]);
       prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
 
-      const result = (await service.batchResolvePriceMap([
-        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 3 },
-      ])) as MapType;
+      const result = await service.batchResolvePriceMap([
+        {
+          productId: 'p1',
+          variantId: 'v1',
+          priceListId: 'list-a',
+          quantity: 3,
+        },
+      ]);
 
       expect(result.get('p1::v1::list-a')?.get(3)).toBe(1000);
     });
@@ -604,9 +639,14 @@ describe('ProductsService — POS Helpers', () => {
       ]);
       prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
 
-      const result = (await service.batchResolvePriceMap([
-        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 6 },
-      ])) as MapType;
+      const result = await service.batchResolvePriceMap([
+        {
+          productId: 'p1',
+          variantId: 'v1',
+          priceListId: 'list-a',
+          quantity: 6,
+        },
+      ]);
 
       // No positive-price tier matches qty=6 (the 5-tier is 0c and
       // ignored), so the resolver falls back to the 1-tier (900c).
@@ -635,9 +675,14 @@ describe('ProductsService — POS Helpers', () => {
         },
       ]);
 
-      const result = (await service.batchResolvePriceMap([
-        { productId: 'p1', variantId: 'v1', priceListId: 'list-a', quantity: 1 },
-      ])) as MapType;
+      const result = await service.batchResolvePriceMap([
+        {
+          productId: 'p1',
+          variantId: 'v1',
+          priceListId: 'list-a',
+          quantity: 1,
+        },
+      ]);
 
       expect(result.get('p1::v1::list-a')?.get(1)).toBe(800);
     });
@@ -653,14 +698,14 @@ describe('ProductsService — POS Helpers', () => {
         },
       ]);
 
-      const result = (await service.batchResolvePriceMap([
+      const result = await service.batchResolvePriceMap([
         {
           productId: 'p1',
           variantId: null,
           priceListId: 'list-a',
           quantity: 1,
         },
-      ])) as MapType;
+      ]);
 
       expect(result.get('p1::::list-a')?.get(1)).toBe(800);
     });
@@ -673,14 +718,14 @@ describe('ProductsService — POS Helpers', () => {
       prisma.variantPrice.findMany = jest.fn().mockResolvedValue([]);
       prisma.priceList.findMany = jest.fn().mockResolvedValue([]);
 
-      const result = (await service.batchResolvePriceMap([
+      const result = await service.batchResolvePriceMap([
         {
           productId: 'p1',
           variantId: null,
           priceListId: 'list-a',
           quantity: 1,
         },
-      ])) as MapType;
+      ]);
 
       expect(result.get('p1::::list-a')).toBeUndefined();
     });

@@ -69,8 +69,8 @@ function makeTenantPrisma(prisma: any) {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
     getClient: jest.fn().mockReturnValue(prisma),
     isInTransaction: jest.fn().mockReturnValue(false),
-    runInTransaction: jest.fn(
-      async (work: (client: any) => Promise<unknown>) => work(prisma),
+    runInTransaction: jest.fn(async (work: (client: any) => Promise<unknown>) =>
+      work(prisma),
     ),
   } as any;
 }

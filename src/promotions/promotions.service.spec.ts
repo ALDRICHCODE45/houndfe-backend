@@ -238,7 +238,9 @@ describe('PromotionsService', () => {
       const saved = makePromotion({ type: 'BUY_X_GET_Y' });
       const repo = makeRepo({ save: jest.fn().mockResolvedValue(saved) });
       const prisma = makePrisma({
-        product: { findMany: jest.fn().mockResolvedValue([{ id: 'product-1' }]) },
+        product: {
+          findMany: jest.fn().mockResolvedValue([{ id: 'product-1' }]),
+        },
       });
       const service = makeService(repo, prisma);
 

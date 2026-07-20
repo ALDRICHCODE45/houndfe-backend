@@ -25,7 +25,12 @@ import {
 import { HR_TIME_OFF_OUTBOX_DISPATCHER_MAX_RETRIES } from './hr-time-off-outbox.dispatcher';
 
 @Module({
-  imports: [DatabaseModule, ConfigModule, ScheduleModule.forRoot(), InngestModule],
+  imports: [
+    DatabaseModule,
+    ConfigModule,
+    ScheduleModule.forRoot(),
+    InngestModule,
+  ],
   controllers: [],
   providers: [
     HrTimeOffOutboxPoller,

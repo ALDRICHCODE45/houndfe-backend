@@ -207,9 +207,7 @@ describe('PosEvaluatePromotionsUseCase — BUY_X_GET_Y gate (WU3, spec.md:60-96)
 
     const result = await useCase.evaluate(
       makeInput({
-        lines: [
-          makeLine({ variantId: 'var-1', quantity: 3 }),
-        ],
+        lines: [makeLine({ variantId: 'var-1', quantity: 3 })],
       }),
     );
 
@@ -414,9 +412,7 @@ describe('PosEvaluatePromotionsUseCase — BUY_X_GET_Y counting (WU3, spec.md:60
 
     const result = await useCase.evaluate(
       makeInput({
-        lines: [
-          makeLine({ effectiveUnitPriceCents: 100, quantity: 2 }),
-        ],
+        lines: [makeLine({ effectiveUnitPriceCents: 100, quantity: 2 })],
       }),
     );
 
@@ -702,149 +698,148 @@ describe('PosEvaluatePromotionsUseCase — BUY_X_GET_Y MANUAL wiring (WU6, spec.
       buyQuantity: 2,
       getQuantity: 1,
       unitsNeeded: 0,
-  });
-});
-
-/**
- * WUB — Eligibility data on `availableManualPromotions[]` (frontend follow-up).
- *
- * Contract (additive, see design.md Decision 7 follow-up):
- *   - ORDER_DISCOUNT / PRODUCT_DISCOUNT: `eligible=true`,
- *     `buyQuantity=null`, `getQuantity=null`, `unitsNeeded=0` — always
- *     give something when surfaced.
- *   - BUY_X_GET_Y: keep surfacing the candidate whenever at least one
- *     line matches the target — `buyQuantity` and `getQuantity` are the
- *     promotion's values; `eligible` and `unitsNeeded` are derived from
- *     the max matching `line.quantity` against `groupSize =
- *     buyQuantity + getQuantity`:
- *       eligible     = maxMatchQty >= groupSize
- *       unitsNeeded  = eligible ? 0 : (groupSize - maxMatchQty)  // >= 1
- *
- * The buy/get fields let the frontend render an honest hint
- * ("2x1 · requiere 2 unidades") and block a no-op apply.
- */
-describe('PosEvaluatePromotionsUseCase — MANUAL candidate eligibility data (WUB)', () => {
-  it('BXGY buy2get1 with matching line qty=1 → eligible=false, unitsNeeded=2', async () => {
-    // qty=1 < groupSize=3 → not eligible. unitsNeeded = 3 - 1 = 2.
-    const bxgy = makeBuyXGetYPromotion({
-      id: 'promo-bxgy-e1',
-      method: 'MANUAL',
-      title: '2x1',
-      buyQuantity: 2,
-      getQuantity: 1,
-    });
-    const repo = makeRepository([bxgy]);
-    const useCase = new PosEvaluatePromotionsUseCase(repo);
-
-    const result = await useCase.evaluate(
-      makeInput({ lines: [makeLine({ quantity: 1 })] }),
-    );
-
-    expect(result.availableManualPromotions).toHaveLength(1);
-    expect(result.availableManualPromotions[0]).toEqual({
-      id: 'promo-bxgy-e1',
-      title: '2x1',
-      type: 'BUY_X_GET_Y',
-      method: 'MANUAL',
-      eligible: false,
-      buyQuantity: 2,
-      getQuantity: 1,
-      unitsNeeded: 2,
     });
   });
 
-  it('BXGY buy2get1 with matching line qty=2 → eligible=false, unitsNeeded=1', async () => {
-    // qty=2 < groupSize=3 → still not eligible. unitsNeeded = 3 - 2 = 1.
-    const bxgy = makeBuyXGetYPromotion({
-      id: 'promo-bxgy-e2',
-      method: 'MANUAL',
-      title: '2x1',
-      buyQuantity: 2,
-      getQuantity: 1,
+  /**
+   * WUB — Eligibility data on `availableManualPromotions[]` (frontend follow-up).
+   *
+   * Contract (additive, see design.md Decision 7 follow-up):
+   *   - ORDER_DISCOUNT / PRODUCT_DISCOUNT: `eligible=true`,
+   *     `buyQuantity=null`, `getQuantity=null`, `unitsNeeded=0` — always
+   *     give something when surfaced.
+   *   - BUY_X_GET_Y: keep surfacing the candidate whenever at least one
+   *     line matches the target — `buyQuantity` and `getQuantity` are the
+   *     promotion's values; `eligible` and `unitsNeeded` are derived from
+   *     the max matching `line.quantity` against `groupSize =
+   *     buyQuantity + getQuantity`:
+   *       eligible     = maxMatchQty >= groupSize
+   *       unitsNeeded  = eligible ? 0 : (groupSize - maxMatchQty)  // >= 1
+   *
+   * The buy/get fields let the frontend render an honest hint
+   * ("2x1 · requiere 2 unidades") and block a no-op apply.
+   */
+  describe('PosEvaluatePromotionsUseCase — MANUAL candidate eligibility data (WUB)', () => {
+    it('BXGY buy2get1 with matching line qty=1 → eligible=false, unitsNeeded=2', async () => {
+      // qty=1 < groupSize=3 → not eligible. unitsNeeded = 3 - 1 = 2.
+      const bxgy = makeBuyXGetYPromotion({
+        id: 'promo-bxgy-e1',
+        method: 'MANUAL',
+        title: '2x1',
+        buyQuantity: 2,
+        getQuantity: 1,
+      });
+      const repo = makeRepository([bxgy]);
+      const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+      const result = await useCase.evaluate(
+        makeInput({ lines: [makeLine({ quantity: 1 })] }),
+      );
+
+      expect(result.availableManualPromotions).toHaveLength(1);
+      expect(result.availableManualPromotions[0]).toEqual({
+        id: 'promo-bxgy-e1',
+        title: '2x1',
+        type: 'BUY_X_GET_Y',
+        method: 'MANUAL',
+        eligible: false,
+        buyQuantity: 2,
+        getQuantity: 1,
+        unitsNeeded: 2,
+      });
     });
-    const repo = makeRepository([bxgy]);
-    const useCase = new PosEvaluatePromotionsUseCase(repo);
 
-    const result = await useCase.evaluate(
-      makeInput({ lines: [makeLine({ quantity: 2 })] }),
-    );
+    it('BXGY buy2get1 with matching line qty=2 → eligible=false, unitsNeeded=1', async () => {
+      // qty=2 < groupSize=3 → still not eligible. unitsNeeded = 3 - 2 = 1.
+      const bxgy = makeBuyXGetYPromotion({
+        id: 'promo-bxgy-e2',
+        method: 'MANUAL',
+        title: '2x1',
+        buyQuantity: 2,
+        getQuantity: 1,
+      });
+      const repo = makeRepository([bxgy]);
+      const useCase = new PosEvaluatePromotionsUseCase(repo);
 
-    expect(result.availableManualPromotions).toHaveLength(1);
-    expect(result.availableManualPromotions[0]).toEqual({
-      id: 'promo-bxgy-e2',
-      title: '2x1',
-      type: 'BUY_X_GET_Y',
-      method: 'MANUAL',
-      eligible: false,
-      buyQuantity: 2,
-      getQuantity: 1,
-      unitsNeeded: 1,
+      const result = await useCase.evaluate(
+        makeInput({ lines: [makeLine({ quantity: 2 })] }),
+      );
+
+      expect(result.availableManualPromotions).toHaveLength(1);
+      expect(result.availableManualPromotions[0]).toEqual({
+        id: 'promo-bxgy-e2',
+        title: '2x1',
+        type: 'BUY_X_GET_Y',
+        method: 'MANUAL',
+        eligible: false,
+        buyQuantity: 2,
+        getQuantity: 1,
+        unitsNeeded: 1,
+      });
+    });
+
+    it('BXGY buy2get1 with matching line qty=3 → eligible=true, unitsNeeded=0', async () => {
+      // qty=3 >= groupSize=3 → exactly enough for one full group → eligible.
+      // unitsNeeded = 0.
+      const bxgy = makeBuyXGetYPromotion({
+        id: 'promo-bxgy-e3',
+        method: 'MANUAL',
+        title: '2x1',
+        buyQuantity: 2,
+        getQuantity: 1,
+      });
+      const repo = makeRepository([bxgy]);
+      const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+      const result = await useCase.evaluate(
+        makeInput({ lines: [makeLine({ quantity: 3 })] }),
+      );
+
+      expect(result.availableManualPromotions).toHaveLength(1);
+      expect(result.availableManualPromotions[0]).toEqual({
+        id: 'promo-bxgy-e3',
+        title: '2x1',
+        type: 'BUY_X_GET_Y',
+        method: 'MANUAL',
+        eligible: true,
+        buyQuantity: 2,
+        getQuantity: 1,
+        unitsNeeded: 0,
+      });
+    });
+
+    it('PRODUCT_DISCOUNT candidate carries eligible=true / buy=null / get=null / unitsNeeded=0', async () => {
+      // ORDER_DISCOUNT and PRODUCT_DISCOUNT candidates always give
+      // something when surfaced, so eligible=true and the buy/get fields
+      // are null (they don't apply to non-BXGY types).
+      const pd = makePromotion({
+        id: 'promo-pd-m',
+        method: 'MANUAL',
+        type: 'PRODUCT_DISCOUNT',
+        title: '10% off',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+      });
+      const repo = makeRepository([pd]);
+      const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+      const result = await useCase.evaluate(
+        makeInput({ lines: [makeLine({ quantity: 1 })] }),
+      );
+
+      expect(result.availableManualPromotions).toHaveLength(1);
+      expect(result.availableManualPromotions[0]).toEqual({
+        id: 'promo-pd-m',
+        title: '10% off',
+        type: 'PRODUCT_DISCOUNT',
+        method: 'MANUAL',
+        eligible: true,
+        buyQuantity: null,
+        getQuantity: null,
+        unitsNeeded: 0,
+      });
     });
   });
-
-  it('BXGY buy2get1 with matching line qty=3 → eligible=true, unitsNeeded=0', async () => {
-    // qty=3 >= groupSize=3 → exactly enough for one full group → eligible.
-    // unitsNeeded = 0.
-    const bxgy = makeBuyXGetYPromotion({
-      id: 'promo-bxgy-e3',
-      method: 'MANUAL',
-      title: '2x1',
-      buyQuantity: 2,
-      getQuantity: 1,
-    });
-    const repo = makeRepository([bxgy]);
-    const useCase = new PosEvaluatePromotionsUseCase(repo);
-
-    const result = await useCase.evaluate(
-      makeInput({ lines: [makeLine({ quantity: 3 })] }),
-    );
-
-    expect(result.availableManualPromotions).toHaveLength(1);
-    expect(result.availableManualPromotions[0]).toEqual({
-      id: 'promo-bxgy-e3',
-      title: '2x1',
-      type: 'BUY_X_GET_Y',
-      method: 'MANUAL',
-      eligible: true,
-      buyQuantity: 2,
-      getQuantity: 1,
-      unitsNeeded: 0,
-    });
-  });
-
-  it('PRODUCT_DISCOUNT candidate carries eligible=true / buy=null / get=null / unitsNeeded=0', async () => {
-    // ORDER_DISCOUNT and PRODUCT_DISCOUNT candidates always give
-    // something when surfaced, so eligible=true and the buy/get fields
-    // are null (they don't apply to non-BXGY types).
-    const pd = makePromotion({
-      id: 'promo-pd-m',
-      method: 'MANUAL',
-      type: 'PRODUCT_DISCOUNT',
-      title: '10% off',
-      discountType: 'PERCENTAGE',
-      discountValue: 10,
-    });
-    const repo = makeRepository([pd]);
-    const useCase = new PosEvaluatePromotionsUseCase(repo);
-
-    const result = await useCase.evaluate(
-      makeInput({ lines: [makeLine({ quantity: 1 })] }),
-    );
-
-    expect(result.availableManualPromotions).toHaveLength(1);
-    expect(result.availableManualPromotions[0]).toEqual({
-      id: 'promo-pd-m',
-      title: '10% off',
-      type: 'PRODUCT_DISCOUNT',
-      method: 'MANUAL',
-      eligible: true,
-      buyQuantity: null,
-      getQuantity: null,
-      unitsNeeded: 0,
-    });
-  });
-});
-
 
   it('MANUAL BXGY with a matching line + opt-in → applied AND retained in targetableManualPromotionIds', async () => {
     // spec.md:122-125 — opted-in MANUAL BXGY emits the same BXGY line
@@ -871,7 +866,9 @@ describe('PosEvaluatePromotionsUseCase — MANUAL candidate eligibility data (WU
     expect(result.lines[0].kind).toBe('buy-x-get-y');
 
     // Self-heal: still in targetableManualPromotionIds (target present).
-    expect(result.targetableManualPromotionIds).toContain('promo-bxgy-manual-1');
+    expect(result.targetableManualPromotionIds).toContain(
+      'promo-bxgy-manual-1',
+    );
   });
 
   it('opted-in MANUAL BXGY with NO matching line drops out of targetableManualPromotionIds (target gone)', async () => {

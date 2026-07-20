@@ -12,7 +12,11 @@ export type PromotionType =
 export type PromotionMethod = 'AUTOMATIC' | 'MANUAL';
 export type PromotionStatus = 'ACTIVE' | 'SCHEDULED' | 'ENDED';
 export type DiscountType = 'PERCENTAGE' | 'FIXED';
-export type PromotionTargetType = 'CATEGORIES' | 'BRANDS' | 'PRODUCTS' | 'VARIANTS';
+export type PromotionTargetType =
+  | 'CATEGORIES'
+  | 'BRANDS'
+  | 'PRODUCTS'
+  | 'VARIANTS';
 export type CustomerScope = 'ALL' | 'REGISTERED_ONLY' | 'SPECIFIC';
 export type DayOfWeek =
   | 'MONDAY'

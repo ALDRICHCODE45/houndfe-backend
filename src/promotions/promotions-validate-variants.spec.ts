@@ -327,9 +327,7 @@ describe('PromotionsService.validateTargetIds — VARIANTS uses tenant-scoped cl
     const repo = makeRepo({
       save: jest.fn().mockImplementation((p: Promotion) => p),
     });
-    const variantFindMany = jest
-      .fn()
-      .mockResolvedValue([{ id: 'V-A' }]);
+    const variantFindMany = jest.fn().mockResolvedValue([{ id: 'V-A' }]);
     const prisma = makePrisma({
       variant: { findMany: variantFindMany },
     });

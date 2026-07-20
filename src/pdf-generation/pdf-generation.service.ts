@@ -126,7 +126,10 @@ export class PdfGenerationService implements OnModuleInit {
    * possible point in the pipeline.
    */
   validateFormat(format: unknown): asserts format is FormatKey {
-    if (typeof format !== 'string' || !SUPPORTED_FORMATS.includes(format as FormatKey)) {
+    if (
+      typeof format !== 'string' ||
+      !SUPPORTED_FORMATS.includes(format as FormatKey)
+    ) {
       throw new BadRequestException('INVALID_FORMAT');
     }
   }
@@ -137,7 +140,7 @@ export class PdfGenerationService implements OnModuleInit {
    * the default when no `format` query param is provided" rule.
    */
   resolveFormat(format: string | undefined): FormatKey {
-    const candidate = (format && format.length > 0 ? format : DEFAULT_FORMAT_KEY);
+    const candidate = format && format.length > 0 ? format : DEFAULT_FORMAT_KEY;
     this.validateFormat(candidate);
     return candidate;
   }
@@ -201,7 +204,9 @@ export class PdfGenerationService implements OnModuleInit {
     let stream: Readable;
     try {
       stream = (await renderToStream(
-        createElement(Template, props) as unknown as Parameters<typeof renderToStream>[0],
+        createElement(Template, props) as unknown as Parameters<
+          typeof renderToStream
+        >[0],
       )) as Readable;
     } catch (err) {
       this.logger.error(

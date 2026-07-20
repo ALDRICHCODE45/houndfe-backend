@@ -1,8 +1,4 @@
-import {
-  IsOptional,
-  IsUUID,
-  ValidateIf,
-} from 'class-validator';
+import { IsOptional, IsUUID, ValidateIf } from 'class-validator';
 
 /**
  * WU3 — Body for `PUT /sales/drafts/:id/price-list` (POS Price List

@@ -169,11 +169,14 @@ describe('SalesService', () => {
     posEvaluateUseCase = makeMockPosEvaluateUseCase();
     tenantPrisma = {
       getTenantId: jest.fn(() => 'tenant-1'),
-      getClient: jest.fn(() => ({
-        globalPriceList: {
-          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
-        },
-      }) as never),
+      getClient: jest.fn(
+        () =>
+          ({
+            globalPriceList: {
+              findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+            },
+          }) as never,
+      ),
     };
     service = createService(
       saleRepo,
@@ -5166,10 +5169,7 @@ describe('SalesService', () => {
         currentStock: 100,
       });
       productsService.resolveProductCategoryBrandIds.mockResolvedValue(
-        new Map<
-          string,
-          { categoryId: string | null; brandId: string | null }
-        >([
+        new Map<string, { categoryId: string | null; brandId: string | null }>([
           ['P-A', { categoryId: 'CAT1', brandId: 'BR1' }],
           ['P-B', { categoryId: null, brandId: 'BR2' }],
           // 'P-MISSING' intentionally absent — silently omitted.
@@ -5185,9 +5185,8 @@ describe('SalesService', () => {
       expect(
         productsService.resolveProductCategoryBrandIds,
       ).toHaveBeenCalledTimes(1);
-      const ids = (
-        productsService.resolveProductCategoryBrandIds as jest.Mock
-      ).mock.calls[0][0] as string[];
+      const ids = (productsService.resolveProductCategoryBrandIds as jest.Mock)
+        .mock.calls[0][0] as string[];
       expect([...ids].sort()).toEqual(['P-A', 'P-B']);
 
       // Engine input carries the resolved categoryId/brandId per
@@ -7435,7 +7434,8 @@ describe('SalesService', () => {
         const line = input.lines[0];
         return Promise.resolve({
           lines:
-            input.optedInManualPromotionIds.includes('promo-bxgy-manual') && line
+            input.optedInManualPromotionIds.includes('promo-bxgy-manual') &&
+            line
               ? [
                   {
                     kind: 'buy-x-get-y' as const,
@@ -7450,11 +7450,10 @@ describe('SalesService', () => {
               : [],
           order: null,
           availableManualPromotions: [],
-          targetableManualPromotionIds: input.optedInManualPromotionIds.includes(
-            'promo-bxgy-manual',
-          )
-            ? ['promo-bxgy-manual']
-            : [],
+          targetableManualPromotionIds:
+            input.optedInManualPromotionIds.includes('promo-bxgy-manual')
+              ? ['promo-bxgy-manual']
+              : [],
         });
       });
 
@@ -7556,7 +7555,9 @@ describe('SalesService', () => {
       // The opt-in is RETAINED (self-heal retention): the engine's
       // targetableManualPromotionIds still includes the promo id, so
       // SalesService does not prune it.
-      expect(afterSecond.optedInManualPromotionIds).toContain('promo-bxgy-manual');
+      expect(afterSecond.optedInManualPromotionIds).toContain(
+        'promo-bxgy-manual',
+      );
     });
   });
 
@@ -7662,9 +7663,8 @@ describe('SalesService', () => {
       });
 
       expect(productsService.batchResolvePriceMap).toHaveBeenCalledTimes(1);
-      const inputs = (
-        productsService.batchResolvePriceMap as jest.Mock
-      ).mock.calls[0][0] as Array<{
+      const inputs = (productsService.batchResolvePriceMap as jest.Mock).mock
+        .calls[0][0] as Array<{
         productId: string;
         variantId: string | null;
         priceListId: string | null;
@@ -7698,10 +7698,7 @@ describe('SalesService', () => {
       // Batch resolver returns a tier price 800c for the line at qty=5.
       (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
         new Map([
-          [
-            'prod-bxgy::::gpl-mayoreo',
-            new Map<number, number>([[1, 800]]),
-          ],
+          ['prod-bxgy::::gpl-mayoreo', new Map<number, number>([[1, 800]])],
         ]),
       );
 
@@ -7787,9 +7784,8 @@ describe('SalesService', () => {
         quantity: 2,
       });
 
-      const inputs = (
-        productsService.batchResolvePriceMap as jest.Mock
-      ).mock.calls[0]?.[0] as Array<unknown> | undefined;
+      const inputs = (productsService.batchResolvePriceMap as jest.Mock).mock
+        .calls[0]?.[0] as Array<unknown> | undefined;
       // Sticky line is filtered out — empty input → no DB query.
       expect(inputs ?? []).toHaveLength(0);
       expect(draft.items[0].unitPriceCents).toBe(12345);
@@ -7844,9 +7840,8 @@ describe('SalesService', () => {
         quantity: 3,
       });
 
-      const inputs = (
-        productsService.batchResolvePriceMap as jest.Mock
-      ).mock.calls[0]?.[0] as Array<unknown> | undefined;
+      const inputs = (productsService.batchResolvePriceMap as jest.Mock).mock
+        .calls[0]?.[0] as Array<unknown> | undefined;
       // Manual-discount line is sticky → skipped by reprice.
       expect(inputs ?? []).toHaveLength(0);
       expect(draft.items[0].unitPriceCents).toBe(900);
@@ -7899,9 +7894,8 @@ describe('SalesService', () => {
         quantity: 3,
       });
 
-      const inputs = (
-        productsService.batchResolvePriceMap as jest.Mock
-      ).mock.calls[0][0] as Array<{
+      const inputs = (productsService.batchResolvePriceMap as jest.Mock).mock
+        .calls[0][0] as Array<{
         productId: string;
         variantId: string | null;
         priceListId: string | null;
@@ -7929,10 +7923,7 @@ describe('SalesService', () => {
       // per-unit 10% PRODUCT_DISCOUNT for every line.
       (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
         new Map([
-          [
-            'prod-idem::::gpl-mayoreo',
-            new Map<number, number>([[1, 800]]),
-          ],
+          ['prod-idem::::gpl-mayoreo', new Map<number, number>([[1, 800]])],
         ]),
       );
       posEvaluateUseCase.evaluate.mockImplementation((input) =>
@@ -8220,10 +8211,7 @@ describe('SalesService', () => {
       // Batch resolver returns tier price for the non-sticky line.
       (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
         new Map([
-          [
-            'prod-pl::::gpl-mayoreo',
-            new Map<number, number>([[1, 800]]),
-          ],
+          ['prod-pl::::gpl-mayoreo', new Map<number, number>([[1, 800]])],
         ]),
       );
       // The full-response reload after save.
@@ -8326,13 +8314,15 @@ describe('SalesService', () => {
       expect(draft.globalPriceListId).toBeNull();
       expect(draft.priceListExplicitlySet).toBe(true);
       // Both override lines untouched.
-      expect(draft.items.find((i) => i.id === 'item-mayoreo')!.appliedPriceListId).toBe(
-        'pl-mayoreo',
-      );
-      expect(draft.items.find((i) => i.id === 'item-override')!.appliedPriceListId).toBe(
-        'pl-especial',
-      );
-      expect(draft.items.find((i) => i.id === 'item-override')!.unitPriceCents).toBe(700);
+      expect(
+        draft.items.find((i) => i.id === 'item-mayoreo')!.appliedPriceListId,
+      ).toBe('pl-mayoreo');
+      expect(
+        draft.items.find((i) => i.id === 'item-override')!.appliedPriceListId,
+      ).toBe('pl-especial');
+      expect(
+        draft.items.find((i) => i.id === 'item-override')!.unitPriceCents,
+      ).toBe(700);
     });
 
     it('rejects unknown globalPriceListId with PRICE_LIST_NOT_FOUND and leaves draft unchanged', async () => {
@@ -8444,20 +8434,18 @@ describe('SalesService', () => {
       } as any);
       saleRepo.findById.mockResolvedValue(sale);
       (tenantPrisma.getClient as jest.Mock).mockReturnValue(
-        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+        assignPrismaMock({
+          id: 'cust-mayoreo',
+          globalPriceListId: 'gpl-mayoreo',
+        }),
       );
       // Batch resolver returns tier price for the seeded list.
       (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
         new Map([
-          [
-            'prod-1::::gpl-mayoreo',
-            new Map<number, number>([[1, 800]]),
-          ],
+          ['prod-1::::gpl-mayoreo', new Map<number, number>([[1, 800]])],
         ]),
       );
-      saleRepo.findDraftResponseById.mockResolvedValue(
-        sale.toResponse(),
-      );
+      saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
 
       await service.assignCustomer(saleId, 'user-1', {
         customerId: 'cust-mayoreo',
@@ -8496,7 +8484,10 @@ describe('SalesService', () => {
       } as any);
       saleRepo.findById.mockResolvedValue(sale);
       (tenantPrisma.getClient as jest.Mock).mockReturnValue(
-        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+        assignPrismaMock({
+          id: 'cust-mayoreo',
+          globalPriceListId: 'gpl-mayoreo',
+        }),
       );
       saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
 
@@ -8535,7 +8526,10 @@ describe('SalesService', () => {
       } as any);
       saleRepo.findById.mockResolvedValue(sale);
       (tenantPrisma.getClient as jest.Mock).mockReturnValue(
-        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+        assignPrismaMock({
+          id: 'cust-mayoreo',
+          globalPriceListId: 'gpl-mayoreo',
+        }),
       );
       saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
 

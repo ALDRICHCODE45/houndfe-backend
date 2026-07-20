@@ -108,7 +108,8 @@ describeIfDb(
       });
 
       const tenant = await prisma.tenant.findFirst({ select: { id: true } });
-      if (!tenant) throw new Error('No tenant — globalSetup must have seeded one.');
+      if (!tenant)
+        throw new Error('No tenant — globalSetup must have seeded one.');
       tenantId = tenant.id;
 
       const cls: Pick<ClsService<TenantClsStore>, 'get'> = {
@@ -120,7 +121,9 @@ describeIfDb(
       };
 
       tenantPrisma = new TenantPrismaService(
-        prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
+        prisma as unknown as ConstructorParameters<
+          typeof TenantPrismaService
+        >[0],
         cls as ClsService<TenantClsStore>,
       );
       repository = new PrismaPromotionRepository(tenantPrisma);
@@ -593,10 +596,12 @@ describeIfDb(
             // Satisfies the BUY-side aggregate (1 × CAT_HOME_DECOR vela).
             {
               itemId: 'vela-trigger',
-              productId: (await seedProduct({
-                sku: 'ADV-S5-VELA',
-                categoryId: CAT_HOME_DECOR_ID,
-              })).productId,
+              productId: (
+                await seedProduct({
+                  sku: 'ADV-S5-VELA',
+                  categoryId: CAT_HOME_DECOR_ID,
+                })
+              ).productId,
               variantId: null,
               quantity: 1,
               effectiveUnitPriceCents: 100,

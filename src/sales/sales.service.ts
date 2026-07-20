@@ -526,10 +526,7 @@ export class SalesService {
     for (const lineResult of result.lines) {
       const item = sale.items.find((i) => i.id === lineResult.itemId);
       if (!item) continue;
-      if (
-        lineResult.kind === 'buy-x-get-y' ||
-        lineResult.kind === 'advanced'
-      ) {
+      if (lineResult.kind === 'buy-x-get-y' || lineResult.kind === 'advanced') {
         // WU6 — close the Slice 1 stub. Slice 1 routed BOTH
         // 'buy-x-get-y' AND 'advanced' through `applyBuyXGetYReward`
         // WITHOUT the `rewardKind: 'advanced'` discriminator, so the
@@ -638,7 +635,7 @@ export class SalesService {
    * without changing the draft. Read-only — the spec scenario for
    * `GET /sales/drafts/:id/applicable-promotions` is non-mutating.
    */
-   private async evaluatePromotionsForSale(sale: Sale) {
+  private async evaluatePromotionsForSale(sale: Sale) {
     const input = await this.buildPosEvalInput(sale);
     return this.posEvaluatePromotions.evaluate(input);
   }
@@ -687,8 +684,7 @@ export class SalesService {
     // not yet set) the fallback is the default (PUBLICO) GlobalPriceList
     // — "Sin lista" still means PUBLICO; there is no true "no price list".
     const effectiveGlobalListId =
-      sale.globalPriceListId ??
-      (await this.resolveDefaultGlobalPriceListId());
+      sale.globalPriceListId ?? (await this.resolveDefaultGlobalPriceListId());
 
     // Walk all items, classify sticky vs non-sticky, and build the
     // resolver input list for the non-sticky subset. Sticky is detected
@@ -707,8 +703,7 @@ export class SalesService {
       if (item.priceSource === 'custom' || isManualDiscount) {
         continue;
       }
-      const effectiveListId =
-        item.appliedPriceListId ?? effectiveGlobalListId;
+      const effectiveListId = item.appliedPriceListId ?? effectiveGlobalListId;
       if (effectiveListId === null) {
         continue;
       }
@@ -733,7 +728,7 @@ export class SalesService {
       globalPriceListId:
         inp.priceListId === effectiveGlobalListId &&
         effectiveGlobalListId !== null
-          ? (inp.priceListId as string)
+          ? inp.priceListId
           : undefined,
     }));
 
@@ -754,8 +749,7 @@ export class SalesService {
       if (item.priceSource === 'custom' || isManualDiscount) {
         continue;
       }
-      const effectiveListId =
-        item.appliedPriceListId ?? effectiveGlobalListId;
+      const effectiveListId = item.appliedPriceListId ?? effectiveGlobalListId;
       if (effectiveListId === null) {
         continue;
       }
@@ -839,7 +833,10 @@ export class SalesService {
         ? await this.productsService.resolveProductCategoryBrandIds(
             distinctProductIds,
           )
-        : new Map<string, { categoryId: string | null; brandId: string | null }>();
+        : new Map<
+            string,
+            { categoryId: string | null; brandId: string | null }
+          >();
 
     return {
       now: new Date(),
@@ -2121,13 +2118,16 @@ export class SalesService {
    * `PriceList.id`.
    */
   private async resolveChargeValidationPrice(
-    item: { priceSource: string; appliedPriceListId: string | null; productId: string; variantId: string | null; quantity: number },
+    item: {
+      priceSource: string;
+      appliedPriceListId: string | null;
+      productId: string;
+      variantId: string | null;
+      quantity: number;
+    },
     sale: { globalPriceListId: string | null },
   ): Promise<number> {
-    if (
-      item.priceSource === 'price_list' &&
-      item.appliedPriceListId
-    ) {
+    if (item.priceSource === 'price_list' && item.appliedPriceListId) {
       return this.productsService.resolveListPrice(
         item.appliedPriceListId,
         item.productId,
@@ -2135,10 +2135,7 @@ export class SalesService {
         item.quantity,
       );
     }
-    if (
-      item.priceSource === 'price_list' &&
-      sale.globalPriceListId
-    ) {
+    if (item.priceSource === 'price_list' && sale.globalPriceListId) {
       const tierMap = await this.productsService.batchResolvePriceMap([
         {
           productId: item.productId,
@@ -2188,23 +2185,13 @@ export class SalesService {
    *     future `addItem` reads from it (spec scenario "Set on empty
    *     draft seeds future adds").
    */
-  async setSalePriceList(
-    saleId: string,
-    userId: string,
-    dto: SetPriceListDto,
-  ) {
+  async setSalePriceList(saleId: string, userId: string, dto: SetPriceListDto) {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale) {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_FOUND',
-        'SALE_NOT_FOUND',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
     }
     if (sale.status !== 'DRAFT') {
-      throw new BusinessRuleViolationError(
-        'SALE_NOT_DRAFT',
-        'SALE_NOT_DRAFT',
-      );
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
     if (sale.userId !== userId) {
       throw new BusinessRuleViolationError(
@@ -2236,10 +2223,7 @@ export class SalesService {
     // Flip the binding + the explicit discriminator. Null clear still
     // marks the choice as explicit so a future `assignCustomer`
     // cannot reseed.
-    sale.setGlobalPriceList(
-      dto.globalPriceListId ?? null,
-      true,
-    );
+    sale.setGlobalPriceList(dto.globalPriceListId ?? null, true);
 
     // Re-run the full recompute (clear → reprice → eval) so the
     // returned DTO carries post-reprice totals. On an empty draft the

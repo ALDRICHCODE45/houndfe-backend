@@ -1514,7 +1514,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           item.prePriceCentsBeforeDiscount != null &&
           item.unitPriceCents === item.prePriceCentsBeforeDiscount &&
           (item.discountAmountCents ?? 0) > 0;
-        const bxgyRewardCents = isBxgy ? item.discountAmountCents ?? 0 : 0;
+        const bxgyRewardCents = isBxgy ? (item.discountAmountCents ?? 0) : 0;
         // WU7 — D4 wire discriminator. The persisted `rewardKind` column
         // is the AUTHORITATIVE source on confirmed-sale rows (the
         // column-derived `isBxgy` predicate is byte-identical for both
@@ -1545,8 +1545,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           // NET. For every other line the per-unit path is already NET
           // (unitPrice was reduced by the discount), so `bxgyRewardCents`
           // is zero and the subtraction is a no-op.
-          subtotalCents:
-            item.unitPriceCents * item.quantity - bxgyRewardCents,
+          subtotalCents: item.unitPriceCents * item.quantity - bxgyRewardCents,
           originalPriceCents: item.originalPriceCents,
           priceSource: item.priceSource?.toLowerCase() as
             | 'default'
@@ -1570,7 +1569,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           // lines using the SAME `isBxgy` guard as `rewardKind`, so the
           // frontend shows "GRATIS" only at 100%, else the real percent.
           rewardDiscountPercent: isBxgy
-            ? item.rewardDiscountPercent ?? null
+            ? (item.rewardDiscountPercent ?? null)
             : null,
           // WUA — surface the line's source promotion id on the wire so
           // the frontend can link a confirmed-sale line back to its

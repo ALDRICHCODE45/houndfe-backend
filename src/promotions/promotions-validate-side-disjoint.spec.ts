@@ -277,13 +277,15 @@ describe('PromotionsService.assertAdvancedSideTargets — D7 disjoint BUY/GET (W
       const repo = makeRepo();
       const prisma = makePrisma({
         product: {
-          findMany: jest.fn().mockResolvedValue([
-            { id: 'p1' },
-            { id: 'p2' },
-            { id: 'p3' },
-            { id: 'p4' },
-            { id: 'p5' },
-          ]),
+          findMany: jest
+            .fn()
+            .mockResolvedValue([
+              { id: 'p1' },
+              { id: 'p2' },
+              { id: 'p3' },
+              { id: 'p4' },
+              { id: 'p5' },
+            ]),
         },
       });
       const service = makeService(repo, prisma);
@@ -359,10 +361,7 @@ describe('PromotionsService.assertAdvancedSideTargets — D7 disjoint BUY/GET (W
       });
       const prisma = makePrisma({
         product: {
-          findMany: jest.fn().mockResolvedValue([
-            { id: 'p1' },
-            { id: 'p2' },
-          ]),
+          findMany: jest.fn().mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
         },
       });
       const service = makeService(repo, prisma);
@@ -472,9 +471,9 @@ describe('PromotionsService.assertAdvancedSideTargets — D7 disjoint BUY/GET (W
         getTargetItems: [{ targetId: 'cat-lg' }],
       };
 
-      await expect(
-        service.update('promo-1', dto),
-      ).rejects.toMatchObject({ code: 'advanced_overlapping_targets' });
+      await expect(service.update('promo-1', dto)).rejects.toMatchObject({
+        code: 'advanced_overlapping_targets',
+      });
 
       // No save, no mutation of the existing entity.
       expect(repo.save).not.toHaveBeenCalled();

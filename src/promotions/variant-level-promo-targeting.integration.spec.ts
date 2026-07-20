@@ -74,7 +74,9 @@ describeIfDb(
       };
 
       tenantPrisma = new TenantPrismaService(
-        prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
+        prisma as unknown as ConstructorParameters<
+          typeof TenantPrismaService
+        >[0],
         cls as ClsService<TenantClsStore>,
       );
       repository = new PrismaPromotionRepository(tenantPrisma);
@@ -333,7 +335,9 @@ describeIfDb(
         });
 
         expect(result.lines).toHaveLength(2);
-        expect(result.lines.every((l) => l.promotionId === promo.id)).toBe(true);
+        expect(result.lines.every((l) => l.promotionId === promo.id)).toBe(
+          true,
+        );
       });
     });
 
@@ -797,7 +801,9 @@ describeIfDb(
               { targetType: 'VARIANTS', targetId: 'V-MISSING-DOES-NOT-EXIST' },
             ],
           } as never),
-        ).rejects.toThrow(/Variant with id 'V-MISSING-DOES-NOT-EXIST' not found/);
+        ).rejects.toThrow(
+          /Variant with id 'V-MISSING-DOES-NOT-EXIST' not found/,
+        );
 
         const afterCount = await prisma.promotion.count();
         const afterTargetCount = await prisma.promotionTargetItem.count();
@@ -847,7 +853,9 @@ describeIfDb(
           },
         };
         const tenantPrismaT1 = new TenantPrismaService(
-          prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
+          prisma as unknown as ConstructorParameters<
+            typeof TenantPrismaService
+          >[0],
           clsT1 as ClsService<TenantClsStore>,
         );
         const serviceT1 = new PromotionsService(
@@ -870,9 +878,7 @@ describeIfDb(
             discountType: 'PERCENTAGE',
             discountValue: 15,
             appliesTo: 'VARIANTS',
-            targetItems: [
-              { targetType: 'VARIANTS', targetId: variantT2.id },
-            ],
+            targetItems: [{ targetType: 'VARIANTS', targetId: variantT2.id }],
           } as never),
         ).rejects.toThrow(/Variant with id/);
 
@@ -911,7 +917,7 @@ describeIfDb(
           targetItems: [{ targetType: 'VARIANTS', targetId: variantAId }],
         } as never);
 
-        const result = await service.findOne(created.id as string);
+        const result = await service.findOne(created.id);
 
         const items = result.targetItems as Array<{
           side: string;

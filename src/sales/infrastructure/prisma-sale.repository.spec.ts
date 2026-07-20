@@ -2204,15 +2204,13 @@ describe('PrismaSaleRepository', () => {
 
       // 1st findUnique: existing-row probe (none). 2nd findUnique: reload
       // after save (returns the just-persisted row).
-      prisma.sale.findUnique
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce(
-          baseMockSaleData({
-            id: 'sale-save-pl',
-            globalPriceListId: 'gpl-mayoreo',
-            priceListExplicitlySet: true,
-          }),
-        );
+      prisma.sale.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(
+        baseMockSaleData({
+          id: 'sale-save-pl',
+          globalPriceListId: 'gpl-mayoreo',
+          priceListExplicitlySet: true,
+        }),
+      );
       prisma.sale.create.mockResolvedValue({ id: 'sale-save-pl' });
 
       await repo.save(sale);
@@ -2780,9 +2778,7 @@ describe('PrismaSaleRepository', () => {
   // This block exercises the four draft/reload mappers.
   // ---------------------------------------------------------------------------
   describe('draft reload — rewardKind forward (D4 / 4R-review)', () => {
-    function makeAdvDraftMockSaleData(
-      overrides: Record<string, unknown> = {},
-    ) {
+    function makeAdvDraftMockSaleData(overrides: Record<string, unknown> = {}) {
       return {
         id: 'sale-adv-draft',
         userId: 'user-1',

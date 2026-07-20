@@ -403,7 +403,9 @@ describe('SaleItem Entity', () => {
   // or any discount field (the manual-discount sticky guard relies on
   // this — see recomputeNonStickyLines).
   describe('reprice - re-tier line at addItem / qty change / sale-list switch (WU1)', () => {
-    function makeItem(overrides: Partial<Parameters<typeof SaleItem.create>[0]> = {}) {
+    function makeItem(
+      overrides: Partial<Parameters<typeof SaleItem.create>[0]> = {},
+    ) {
       return SaleItem.create({
         id: '550e8400-e29b-41d4-a716-446655440010',
         saleId: '550e8400-e29b-41d4-a716-446655440000',

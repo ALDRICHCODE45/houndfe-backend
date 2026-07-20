@@ -123,7 +123,12 @@ describe('matchTargetTier (W3) — pure helper', () => {
     it('returns "CATEGORY" when a CATEGORIES-typed target hits line.categoryId', () => {
       const result = matchTargetTier(
         [{ side: 'DEFAULT', targetType: 'CATEGORIES', targetId: 'CAT1' }],
-        { productId: 'P1', variantId: 'V-A', categoryId: 'CAT1', brandId: null },
+        {
+          productId: 'P1',
+          variantId: 'V-A',
+          categoryId: 'CAT1',
+          brandId: null,
+        },
       );
       expect(result).toBe('CATEGORY');
     });
@@ -177,7 +182,12 @@ describe('matchTargetTier (W3) — pure helper', () => {
     it('returns null when a BRANDS-typed target does NOT hit line.brandId', () => {
       const result = matchTargetTier(
         [{ side: 'DEFAULT', targetType: 'BRANDS', targetId: 'BR1' }],
-        { productId: 'P1', variantId: null, categoryId: null, brandId: 'BR-OTHER' },
+        {
+          productId: 'P1',
+          variantId: null,
+          categoryId: null,
+          brandId: 'BR-OTHER',
+        },
       );
       expect(result).toBeNull();
     });
@@ -275,10 +285,14 @@ describe('matchTargetTier (W3) — pure helper', () => {
         { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
         { side: 'GET', targetType: 'PRODUCTS', targetId: 'P2' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P1',
-        variantId: null,
-      }, 'BUY');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P1',
+          variantId: null,
+        },
+        'BUY',
+      );
       expect(result).toBe('PRODUCT');
     });
 
@@ -290,10 +304,14 @@ describe('matchTargetTier (W3) — pure helper', () => {
         { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
         { side: 'GET', targetType: 'PRODUCTS', targetId: 'P2' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P2',
-        variantId: null,
-      }, 'GET');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P2',
+          variantId: null,
+        },
+        'GET',
+      );
       expect(result).toBe('PRODUCT');
     });
 
@@ -303,10 +321,14 @@ describe('matchTargetTier (W3) — pure helper', () => {
       const items: MiniTargetItem[] = [
         { side: 'GET', targetType: 'PRODUCTS', targetId: 'P1' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P1',
-        variantId: null,
-      }, 'BUY');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P1',
+          variantId: null,
+        },
+        'BUY',
+      );
       expect(result).toBeNull();
     });
 
@@ -314,10 +336,14 @@ describe('matchTargetTier (W3) — pure helper', () => {
       const items: MiniTargetItem[] = [
         { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P1',
-        variantId: null,
-      }, 'GET');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P1',
+          variantId: null,
+        },
+        'GET',
+      );
       expect(result).toBeNull();
     });
 
@@ -331,10 +357,14 @@ describe('matchTargetTier (W3) — pure helper', () => {
         { side: 'BUY', targetType: 'PRODUCTS', targetId: 'P1' },
         { side: 'GET', targetType: 'PRODUCTS', targetId: 'P1' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P1',
-        variantId: null,
-      }, 'DEFAULT');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P1',
+          variantId: null,
+        },
+        'DEFAULT',
+      );
       expect(result).toBeNull();
     });
 
@@ -343,10 +373,14 @@ describe('matchTargetTier (W3) — pure helper', () => {
         { side: 'BUY', targetType: 'VARIANTS', targetId: 'V-A' },
         { side: 'GET', targetType: 'VARIANTS', targetId: 'V-B' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P1',
-        variantId: 'V-A',
-      }, 'BUY');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P1',
+          variantId: 'V-A',
+        },
+        'BUY',
+      );
       expect(result).toBe('VARIANT');
     });
 
@@ -355,12 +389,16 @@ describe('matchTargetTier (W3) — pure helper', () => {
         { side: 'BUY', targetType: 'CATEGORIES', targetId: 'CAT-BUY' },
         { side: 'GET', targetType: 'CATEGORIES', targetId: 'CAT-GET' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P1',
-        variantId: null,
-        categoryId: 'CAT-GET',
-        brandId: null,
-      }, 'GET');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P1',
+          variantId: null,
+          categoryId: 'CAT-GET',
+          brandId: null,
+        },
+        'GET',
+      );
       expect(result).toBe('CATEGORY');
     });
 
@@ -369,12 +407,16 @@ describe('matchTargetTier (W3) — pure helper', () => {
         { side: 'BUY', targetType: 'BRANDS', targetId: 'BR-BUY' },
         { side: 'GET', targetType: 'BRANDS', targetId: 'BR-GET' },
       ];
-      const result = matchTargetTier(items, {
-        productId: 'P1',
-        variantId: null,
-        categoryId: null,
-        brandId: 'BR-BUY',
-      }, 'BUY');
+      const result = matchTargetTier(
+        items,
+        {
+          productId: 'P1',
+          variantId: null,
+          categoryId: null,
+          brandId: 'BR-BUY',
+        },
+        'BUY',
+      );
       expect(result).toBe('BRAND');
     });
 

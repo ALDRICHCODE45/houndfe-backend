@@ -72,9 +72,7 @@ function makeMockRes(): Response {
 // every test in `afterEach` below.
 let pipeSpy: jest.SpyInstance | undefined;
 beforeEach(() => {
-  pipeSpy = jest
-    .spyOn(Readable.prototype, 'pipe')
-    .mockReturnThis();
+  pipeSpy = jest.spyOn(Readable.prototype, 'pipe').mockReturnThis();
 });
 afterEach(() => {
   pipeSpy?.mockRestore();
@@ -164,7 +162,12 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser();
       const res = makeMockRes();
 
-      await controller.generatePdf('00000000-0000-4000-8000-000000000001', undefined, user, res);
+      await controller.generatePdf(
+        '00000000-0000-4000-8000-000000000001',
+        undefined,
+        user,
+        res,
+      );
 
       expect(res.set).toHaveBeenCalledWith(
         expect.objectContaining({

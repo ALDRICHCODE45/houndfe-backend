@@ -2327,7 +2327,10 @@ export class ProductsService {
             OR: Array.from(variantKeys.values()).flatMap((k) => [
               { variantId: k.variantId, priceListId: k.priceListId },
               // Global-list fallback: priceListId is a GlobalPriceList UUID.
-              { variantId: k.variantId, priceList: { globalPriceListId: k.priceListId } },
+              {
+                variantId: k.variantId,
+                priceList: { globalPriceListId: k.priceListId },
+              },
             ]),
           },
           select: {
@@ -2355,16 +2358,14 @@ export class ProductsService {
     }
 
     for (const inp of variantInputs) {
-      const row = variantRowMap.get(
-        `${inp.variantId}::${inp.priceListId}`,
-      );
+      const row = variantRowMap.get(`${inp.variantId}::${inp.priceListId}`);
       if (!row) continue;
       const tierCents = this.selectEffectivePrice(
         row.priceCents,
         row.tierPrices,
         inp.quantity,
       );
-      const key = `${inp.productId}::${(inp.variantId as string)}::${
+      const key = `${inp.productId}::${inp.variantId as string}::${
         inp.priceListId as string
       }`;
       const inner = outer.get(key) ?? new Map<number, number>();
@@ -2422,10 +2423,7 @@ export class ProductsService {
     for (const row of productRows) {
       productRowMap.set(`${row.productId}::${row.id}`, row);
       if (row.globalPriceListId) {
-        productRowMap.set(
-          `${row.productId}::${row.globalPriceListId}`,
-          row,
-        );
+        productRowMap.set(`${row.productId}::${row.globalPriceListId}`, row);
       }
     }
 

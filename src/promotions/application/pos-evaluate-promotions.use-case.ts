@@ -157,7 +157,9 @@ export function computeAdvancedReward(input: {
     lineDiscountCents: number;
   }>;
 } {
-  const rewardGroupCount = Math.floor(input.totalBuyMatchedQty / input.buyQuantity);
+  const rewardGroupCount = Math.floor(
+    input.totalBuyMatchedQty / input.buyQuantity,
+  );
   if (rewardGroupCount === 0) {
     return { rewardGroupCount: 0, rewards: [] };
   }
@@ -252,7 +254,11 @@ export type TargetSide = 'DEFAULT' | 'BUY' | 'GET';
  * GET items in `promo.targetItems`, separated by `targetItem.side`).
  */
 export function matchTargetTier(
-  targetItems: ReadonlyArray<{ side: string; targetType: string; targetId: string }>,
+  targetItems: ReadonlyArray<{
+    side: string;
+    targetType: string;
+    targetId: string;
+  }>,
   line: {
     productId: string;
     variantId: string | null;
@@ -261,60 +267,60 @@ export function matchTargetTier(
   },
   side: TargetSide = 'DEFAULT',
 ): LineMatchTier {
-// VARIANTS first — strict === null on variantId so an unset variant
-    // never matches (defensive: structural guarantee).
-    if (
-      line.variantId != null &&
-      targetItems.some(
-        (ti) =>
-          ti.side === side &&
-          ti.targetType === 'VARIANTS' &&
-          ti.targetId === line.variantId,
-      )
-    ) {
-      return 'VARIANT';
-    }
-    if (
-      targetItems.some(
-        (ti) =>
-          ti.side === side &&
-          ti.targetType === 'PRODUCTS' &&
-          ti.targetId === line.productId,
-      )
-    ) {
-      return 'PRODUCT';
-    }
-    // CATEGORIES — null guard on line.categoryId so an unset/unresolved
-    // category (product with null categoryId OR id omitted from the
-    // resolver map) never silently matches. CATEGORIES comes before
-    // BRANDS by convention; both are tier-1 peers so the helper's
-    // branch order doesn't affect correctness — the engine's ordinal
-    // pre-pass resolves the peer tie by best-wins.
-    if (
-      line.categoryId != null &&
-      targetItems.some(
-        (ti) =>
-          ti.side === side &&
-          ti.targetType === 'CATEGORIES' &&
-          ti.targetId === line.categoryId,
-      )
-    ) {
-      return 'CATEGORY';
-    }
-    // BRANDS — null guard on line.brandId, symmetric with CATEGORIES.
-    if (
-      line.brandId != null &&
-      targetItems.some(
-        (ti) =>
-          ti.side === side &&
-          ti.targetType === 'BRANDS' &&
-          ti.targetId === line.brandId,
-      )
-    ) {
-      return 'BRAND';
-    }
-    return null;
+  // VARIANTS first — strict === null on variantId so an unset variant
+  // never matches (defensive: structural guarantee).
+  if (
+    line.variantId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'VARIANTS' &&
+        ti.targetId === line.variantId,
+    )
+  ) {
+    return 'VARIANT';
   }
+  if (
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'PRODUCTS' &&
+        ti.targetId === line.productId,
+    )
+  ) {
+    return 'PRODUCT';
+  }
+  // CATEGORIES — null guard on line.categoryId so an unset/unresolved
+  // category (product with null categoryId OR id omitted from the
+  // resolver map) never silently matches. CATEGORIES comes before
+  // BRANDS by convention; both are tier-1 peers so the helper's
+  // branch order doesn't affect correctness — the engine's ordinal
+  // pre-pass resolves the peer tie by best-wins.
+  if (
+    line.categoryId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'CATEGORIES' &&
+        ti.targetId === line.categoryId,
+    )
+  ) {
+    return 'CATEGORY';
+  }
+  // BRANDS — null guard on line.brandId, symmetric with CATEGORIES.
+  if (
+    line.brandId != null &&
+    targetItems.some(
+      (ti) =>
+        ti.side === side &&
+        ti.targetType === 'BRANDS' &&
+        ti.targetId === line.brandId,
+    )
+  ) {
+    return 'BRAND';
+  }
+  return null;
+}
 
 const JS_DAY_OF_WEEK: ReadonlyArray<DayOfWeek> = [
   'SUNDAY', // 0
@@ -616,8 +622,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       // OR BUY_X_GET_Y (WU6 — same matchTargetTier predicate).
       // At least one line in the cart must match the target.
       if (
-        (promo.type === 'PRODUCT_DISCOUNT' ||
-          promo.type === 'BUY_X_GET_Y') &&
+        (promo.type === 'PRODUCT_DISCOUNT' || promo.type === 'BUY_X_GET_Y') &&
         this.isSupportedEngineType(promo)
       ) {
         // Self-heal semantics: any tier non-null counts as "still has a
@@ -1268,7 +1273,11 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       // The price-list gate is irrelevant for ADVANCED (it has no
       // `appliesTo` and the engine does not consult `priceLists` for
       // ADVANCED in this slice).
-      if (promo.buyQuantity == null || promo.getQuantity == null || promo.getDiscountPercent == null) {
+      if (
+        promo.buyQuantity == null ||
+        promo.getQuantity == null ||
+        promo.getDiscountPercent == null
+      ) {
         continue;
       }
 
@@ -1354,8 +1363,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         const existingIndex = lineResults.findIndex(
           (r) => r.itemId === reward.itemId,
         );
-        const existing =
-          existingIndex >= 0 ? lineResults[existingIndex] : null;
+        const existing = existingIndex >= 0 ? lineResults[existingIndex] : null;
         const existingTotal = this.existingLineResultTotalCents(
           targetLine,
           existing,

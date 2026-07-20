@@ -205,22 +205,18 @@ describe('PosEvaluatePromotionsUseCase — ADVANCED gate (WU4, spec.md:43-55)', 
       // target list, so a single line cannot match both sides here.
       const buyLine = makeLine({
         itemId: 'item-buy',
-        productId:
-          buyType === 'PRODUCTS' ? 'buy-target-id' : 'P-DUMMY',
+        productId: buyType === 'PRODUCTS' ? 'buy-target-id' : 'P-DUMMY',
         variantId: buyType === 'VARIANTS' ? 'buy-target-id' : null,
-        categoryId:
-          buyType === 'CATEGORIES' ? 'buy-target-id' : null,
+        categoryId: buyType === 'CATEGORIES' ? 'buy-target-id' : null,
         brandId: buyType === 'BRANDS' ? 'buy-target-id' : null,
         quantity: 1,
         effectiveUnitPriceCents: 100,
       });
       const getLine = makeLine({
         itemId: 'item-get',
-        productId:
-          getType === 'PRODUCTS' ? 'get-target-id' : 'P-GET-DUMMY',
+        productId: getType === 'PRODUCTS' ? 'get-target-id' : 'P-GET-DUMMY',
         variantId: getType === 'VARIANTS' ? 'get-target-id' : null,
-        categoryId:
-          getType === 'CATEGORIES' ? 'get-target-id' : null,
+        categoryId: getType === 'CATEGORIES' ? 'get-target-id' : null,
         brandId: getType === 'BRANDS' ? 'get-target-id' : null,
         quantity: 1,
         effectiveUnitPriceCents: 100,
@@ -881,9 +877,7 @@ describe('PosEvaluatePromotionsUseCase — ADVANCED engine-level BUY/GET partiti
     );
 
     // Q-legit receives the reward; P-legit is BUY-only and NOT rewarded.
-    const qLineResult = result.lines.find(
-      (l) => l.itemId === 'item-q-legit',
-    );
+    const qLineResult = result.lines.find((l) => l.itemId === 'item-q-legit');
     expect(qLineResult).toBeDefined();
     expect(qLineResult!.kind).toBe('advanced');
     if (qLineResult!.kind === 'advanced') {
@@ -892,9 +886,7 @@ describe('PosEvaluatePromotionsUseCase — ADVANCED engine-level BUY/GET partiti
       expect(qLineResult!.perUnitRewardCents).toBe(500);
     }
     // The P-legit line is BUY-only and must NOT receive a reward.
-    const pLineResult = result.lines.find(
-      (l) => l.itemId === 'item-p-legit',
-    );
+    const pLineResult = result.lines.find((l) => l.itemId === 'item-p-legit');
     expect(pLineResult).toBeUndefined();
   });
 });
@@ -990,9 +982,7 @@ describe('PosEvaluatePromotionsUseCase — ADVANCED zero-skip (D3 / 4R-review)',
 
     // perUnitRewardCents = Math.round(50*1/100) = 1. lineDiscountCents = 1*1 = 1.
     // Not zero → emitted.
-    const qLineResult = result.lines.find(
-      (l) => l.itemId === 'item-q-tiny',
-    );
+    const qLineResult = result.lines.find((l) => l.itemId === 'item-q-tiny');
     expect(qLineResult).toBeDefined();
     expect(qLineResult!.kind).toBe('advanced');
     if (qLineResult!.kind === 'advanced') {

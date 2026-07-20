@@ -282,9 +282,9 @@ describe('PdfGenerationService', () => {
 
       // Font registration MUST have been attempted exactly once at boot.
       expect(renderer.Font.register).toHaveBeenCalledTimes(1);
-      expect(
-        renderer.Font.registerHyphenationCallback,
-      ).toHaveBeenCalledTimes(1);
+      expect(renderer.Font.registerHyphenationCallback).toHaveBeenCalledTimes(
+        1,
+      );
 
       // First arg to register must declare the font family name.
       const regArg = renderer.Font.register.mock.calls[0][0] as Record<

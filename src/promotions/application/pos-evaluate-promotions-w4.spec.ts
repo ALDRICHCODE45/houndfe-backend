@@ -134,7 +134,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANT-wins precedence (scenario 5)'
       discountType: 'FIXED',
       discountValue: 50,
       targetItems: [
-        { id: 'ti-pv', side: 'DEFAULT', targetType: 'PRODUCTS', targetId: 'P1' },
+        {
+          id: 'ti-pv',
+          side: 'DEFAULT',
+          targetType: 'PRODUCTS',
+          targetId: 'P1',
+        },
       ],
     });
     const promoPW = makePromotion({
@@ -143,7 +148,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANT-wins precedence (scenario 5)'
       discountType: 'FIXED',
       discountValue: 30,
       targetItems: [
-        { id: 'ti-pw', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-pw',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const repo = makeRepository([promoPV, promoPW]);
@@ -152,8 +162,18 @@ describe('PosEvaluatePromotionsUseCase — VARIANT-wins precedence (scenario 5)'
     const result = await useCase.evaluate(
       makeInput({
         lines: [
-          makeLine({ itemId: 'item-A', productId: 'P1', variantId: 'V-A', effectiveUnitPriceCents: 1000 }),
-          makeLine({ itemId: 'item-B', productId: 'P1', variantId: 'V-B', effectiveUnitPriceCents: 1000 }),
+          makeLine({
+            itemId: 'item-A',
+            productId: 'P1',
+            variantId: 'V-A',
+            effectiveUnitPriceCents: 1000,
+          }),
+          makeLine({
+            itemId: 'item-B',
+            productId: 'P1',
+            variantId: 'V-B',
+            effectiveUnitPriceCents: 1000,
+          }),
         ],
       }),
     );
@@ -187,7 +207,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS wins regardless of discount 
       discountType: 'FIXED',
       discountValue: 10,
       targetItems: [
-        { id: 'ti-v', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-v',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const promoProducts = makePromotion({
@@ -205,7 +230,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS wins regardless of discount 
     const result = await useCase.evaluate(
       makeInput({
         lines: [
-          makeLine({ itemId: 'item-A', productId: 'P1', variantId: 'V-A', effectiveUnitPriceCents: 1000 }),
+          makeLine({
+            itemId: 'item-A',
+            productId: 'P1',
+            variantId: 'V-A',
+            effectiveUnitPriceCents: 1000,
+          }),
         ],
       }),
     );
@@ -230,7 +260,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS on different variant does no
       discountType: 'FIXED',
       discountValue: 30,
       targetItems: [
-        { id: 'ti-y', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-B' },
+        {
+          id: 'ti-y',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-B',
+        },
       ],
     });
     const repo = makeRepository([promoY]);
@@ -239,7 +274,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS on different variant does no
     const result = await useCase.evaluate(
       makeInput({
         lines: [
-          makeLine({ itemId: 'item-A', productId: 'P1', variantId: 'V-A', effectiveUnitPriceCents: 1000 }),
+          makeLine({
+            itemId: 'item-A',
+            productId: 'P1',
+            variantId: 'V-A',
+            effectiveUnitPriceCents: 1000,
+          }),
         ],
       }),
     );
@@ -261,7 +301,12 @@ describe('PosEvaluatePromotionsUseCase — MANUAL VARIANTS in targetable set (sc
       discountType: 'FIXED',
       discountValue: 100,
       targetItems: [
-        { id: 'ti-m', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-m',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const repo = makeRepository([promoM]);
@@ -271,7 +316,12 @@ describe('PosEvaluatePromotionsUseCase — MANUAL VARIANTS in targetable set (sc
       makeInput({
         optedInManualPromotionIds: ['promo-M'],
         lines: [
-          makeLine({ itemId: 'item-A', productId: 'P1', variantId: 'V-A', effectiveUnitPriceCents: 1000 }),
+          makeLine({
+            itemId: 'item-A',
+            productId: 'P1',
+            variantId: 'V-A',
+            effectiveUnitPriceCents: 1000,
+          }),
         ],
       }),
     );
@@ -294,7 +344,12 @@ describe('PosEvaluatePromotionsUseCase — opted-in MANUAL VARIANTS survives rec
       discountType: 'FIXED',
       discountValue: 100,
       targetItems: [
-        { id: 'ti-m', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-m',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const repo = makeRepository([promoM]);
@@ -305,7 +360,12 @@ describe('PosEvaluatePromotionsUseCase — opted-in MANUAL VARIANTS survives rec
       makeInput({
         optedInManualPromotionIds: ['promo-M'],
         lines: [
-          makeLine({ itemId: 'item-A', productId: 'P1', variantId: 'V-A', effectiveUnitPriceCents: 1000 }),
+          makeLine({
+            itemId: 'item-A',
+            productId: 'P1',
+            variantId: 'V-A',
+            effectiveUnitPriceCents: 1000,
+          }),
         ],
       }),
     );
@@ -316,8 +376,18 @@ describe('PosEvaluatePromotionsUseCase — opted-in MANUAL VARIANTS survives rec
       makeInput({
         optedInManualPromotionIds: ['promo-M'],
         lines: [
-          makeLine({ itemId: 'item-A', productId: 'P1', variantId: 'V-A', effectiveUnitPriceCents: 1000 }),
-          makeLine({ itemId: 'item-P2', productId: 'P2', variantId: null, effectiveUnitPriceCents: 500 }),
+          makeLine({
+            itemId: 'item-A',
+            productId: 'P1',
+            variantId: 'V-A',
+            effectiveUnitPriceCents: 1000,
+          }),
+          makeLine({
+            itemId: 'item-P2',
+            productId: 'P2',
+            variantId: null,
+            effectiveUnitPriceCents: 500,
+          }),
         ],
       }),
     );
@@ -353,8 +423,18 @@ describe('PosEvaluatePromotionsUseCase — PRODUCTS still hits every variant (re
     const result = await useCase.evaluate(
       makeInput({
         lines: [
-          makeLine({ itemId: 'item-A', productId: 'P1', variantId: 'V-A', effectiveUnitPriceCents: 1000 }),
-          makeLine({ itemId: 'item-B', productId: 'P1', variantId: 'V-B', effectiveUnitPriceCents: 1000 }),
+          makeLine({
+            itemId: 'item-A',
+            productId: 'P1',
+            variantId: 'V-A',
+            effectiveUnitPriceCents: 1000,
+          }),
+          makeLine({
+            itemId: 'item-B',
+            productId: 'P1',
+            variantId: 'V-B',
+            effectiveUnitPriceCents: 1000,
+          }),
         ],
       }),
     );
@@ -377,7 +457,12 @@ describe('PosEvaluatePromotionsUseCase — MANUAL VARIANTS respects price-list +
       discountType: 'FIXED',
       discountValue: 100,
       targetItems: [
-        { id: 'ti-v', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-v',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const repo = makeRepository([promoV]);
@@ -409,7 +494,12 @@ describe('PosEvaluatePromotionsUseCase — MANUAL VARIANTS respects price-list +
       discountValue: 100,
       priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
       targetItems: [
-        { id: 'ti-v', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-v',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const repo = makeRepository([promoV]);

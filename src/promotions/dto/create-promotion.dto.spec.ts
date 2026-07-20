@@ -22,17 +22,13 @@ function makeDto(
 
 describe('CreatePromotionDto BUY_X_GET_Y getDiscountPercent', () => {
   it('accepts BUY_X_GET_Y at 100 percent', async () => {
-    const errors = await validate(
-      makeDto(PromotionTypeEnum.BUY_X_GET_Y, 100),
-    );
+    const errors = await validate(makeDto(PromotionTypeEnum.BUY_X_GET_Y, 100));
 
     expect(errors).toHaveLength(0);
   });
 
   it('rejects BUY_X_GET_Y above 100 percent', async () => {
-    const errors = await validate(
-      makeDto(PromotionTypeEnum.BUY_X_GET_Y, 101),
-    );
+    const errors = await validate(makeDto(PromotionTypeEnum.BUY_X_GET_Y, 101));
 
     expect(errors).toEqual(
       expect.arrayContaining([

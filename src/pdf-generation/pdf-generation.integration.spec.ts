@@ -424,8 +424,10 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
 
     const tenantPrismaProvider = {
       provide: TenantPrismaService,
-      useFactory: (prismaSvc: PrismaService, clsSvc: ClsService<TenantClsStore>) =>
-        new TenantPrismaService(prismaSvc, clsSvc),
+      useFactory: (
+        prismaSvc: PrismaService,
+        clsSvc: ClsService<TenantClsStore>,
+      ) => new TenantPrismaService(prismaSvc, clsSvc),
       inject: [PrismaService, ClsService],
     };
 
@@ -525,7 +527,7 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
       cls.run(() => {
         const auth = req.headers?.authorization as string | undefined;
         let tenantId: string | null = null;
-        let isSuperAdmin = false;
+        const isSuperAdmin = false;
         let userId: string | null = null;
         if (auth) {
           const token = auth.replace('Bearer ', '');
@@ -672,7 +674,9 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
 
   it('sanity check — same-tenant CONFIRMED sale for tenant B is reachable as tenant B', async () => {
     const response = await request(app.getHttpServer() as SupertestApp)
-      .get(`/sales/${fixtures.otherTenantConfirmedSaleId}/pdf?format=receipt-a4`)
+      .get(
+        `/sales/${fixtures.otherTenantConfirmedSaleId}/pdf?format=receipt-a4`,
+      )
       .set('Authorization', 'Bearer tenant-b');
 
     expect(response.status).toBe(200);

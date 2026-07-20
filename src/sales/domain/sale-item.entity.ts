@@ -600,7 +600,7 @@ export class SaleItem {
     // draft-surface need a uniform wire-side NET field; renaming the getter
     // would break every previewTotals call site.
     const isBxgy = this.isBuyXGetYReward();
-    const bxgyRewardCents = isBxgy ? this.discountAmountCents ?? 0 : 0;
+    const bxgyRewardCents = isBxgy ? (this.discountAmountCents ?? 0) : 0;
     return {
       id: this.id,
       productId: this.productId,
@@ -623,8 +623,7 @@ export class SaleItem {
       discountedAt: this.discountedAt,
       promotionId: this.promotionId,
       // NET per-line subtotal — see formula in the block comment above.
-      subtotalCents:
-        this._unitPriceCents * this._quantity - bxgyRewardCents,
+      subtotalCents: this._unitPriceCents * this._quantity - bxgyRewardCents,
       // WU5 — D4 wire discriminator. Authoritative source is `_rewardKind`;
       // the column-derived `isBxgy` predicate is the back-compat fallback
       // (only fires for the rare in-memory call site that did not pass

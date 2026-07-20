@@ -35,9 +35,7 @@
  * The `VARIANTS/PRODUCTS-only` regression block at the bottom of this
  * file pins this equivalence.
  */
-import {
-  PosEvaluatePromotionsUseCase,
-} from './pos-evaluate-promotions.use-case';
+import { PosEvaluatePromotionsUseCase } from './pos-evaluate-promotions.use-case';
 import type { IPromotionRepository } from '../domain/promotion.repository';
 import { Promotion } from '../domain/promotion.entity';
 import type {
@@ -144,7 +142,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANT wins over BRAND/CATEGORY (4-t
       discountType: 'FIXED',
       discountValue: 10,
       targetItems: [
-        { id: 'ti-v', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-v',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const promoB = makePromotion({
@@ -430,7 +433,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS/PRODUCTS-only regression gua
       discountType: 'FIXED',
       discountValue: 50,
       targetItems: [
-        { id: 'ti-pv', side: 'DEFAULT', targetType: 'PRODUCTS', targetId: 'P1' },
+        {
+          id: 'ti-pv',
+          side: 'DEFAULT',
+          targetType: 'PRODUCTS',
+          targetId: 'P1',
+        },
       ],
     });
     const promoPW = makePromotion({
@@ -439,7 +447,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS/PRODUCTS-only regression gua
       discountType: 'FIXED',
       discountValue: 30,
       targetItems: [
-        { id: 'ti-pw', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-pw',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const repo = makeRepository([promoPV, promoPW]);
@@ -472,7 +485,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS/PRODUCTS-only regression gua
       discountType: 'FIXED',
       discountValue: 50,
       targetItems: [
-        { id: 'ti-pv', side: 'DEFAULT', targetType: 'PRODUCTS', targetId: 'P1' },
+        {
+          id: 'ti-pv',
+          side: 'DEFAULT',
+          targetType: 'PRODUCTS',
+          targetId: 'P1',
+        },
       ],
     });
     const promoPW = makePromotion({
@@ -481,7 +499,12 @@ describe('PosEvaluatePromotionsUseCase — VARIANTS/PRODUCTS-only regression gua
       discountType: 'FIXED',
       discountValue: 30,
       targetItems: [
-        { id: 'ti-pw', side: 'DEFAULT', targetType: 'VARIANTS', targetId: 'V-A' },
+        {
+          id: 'ti-pw',
+          side: 'DEFAULT',
+          targetType: 'VARIANTS',
+          targetId: 'V-A',
+        },
       ],
     });
     const repo = makeRepository([promoPV, promoPW]);

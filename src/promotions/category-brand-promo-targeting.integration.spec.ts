@@ -121,7 +121,9 @@ describeIfDb(
       };
 
       tenantPrisma = new TenantPrismaService(
-        prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
+        prisma as unknown as ConstructorParameters<
+          typeof TenantPrismaService
+        >[0],
         cls as ClsService<TenantClsStore>,
       );
       repository = new PrismaPromotionRepository(tenantPrisma);

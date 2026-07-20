@@ -86,7 +86,7 @@ describe('OutboxPollerService', () => {
   // claims those rows instead. This exclusion is the predicate that
   // makes the dispatch paths DISJOINT.
   describe('Slice F.3 + Slice 4 — generic claim excludes stock.low.detected AND hr.timeoff.requested', () => {
-    it('claim SELECT contains a `NOT IN (\'stock.low.detected\', \'hr.timeoff.requested\')` predicate', async () => {
+    it("claim SELECT contains a `NOT IN ('stock.low.detected', 'hr.timeoff.requested')` predicate", async () => {
       const capturedCalls: string[] = [];
       const prisma = {
         $transaction: (work: (tx: unknown) => Promise<unknown>) => {

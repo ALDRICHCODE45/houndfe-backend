@@ -49,7 +49,9 @@ const TIME_OFF_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 
 function makeMockTimeOffService() {
   return {
-    request: jest.fn().mockResolvedValue({ id: TIME_OFF_ID, status: 'PENDING' }),
+    request: jest
+      .fn()
+      .mockResolvedValue({ id: TIME_OFF_ID, status: 'PENDING' }),
     listForEmployee: jest
       .fn()
       .mockResolvedValue({ data: [], total: 0, page: 1, limit: 20 }),

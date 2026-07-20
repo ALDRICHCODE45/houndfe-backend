@@ -56,9 +56,7 @@ function makeFakeInngest() {
     }
   }
   return {
-    Inngest: FakeInngest as unknown as new (opts: {
-      id: string;
-    }) => unknown,
+    Inngest: FakeInngest as unknown as new (opts: { id: string }) => unknown,
     captured,
   };
 }
@@ -103,8 +101,9 @@ interface BuildInput {
 }
 
 describe('time-off-notification Inngest function (Slice 6)', () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { buildTimeOffNotificationFunctions } = require('./time-off-notification.functions');
+  const {
+    buildTimeOffNotificationFunctions,
+  } = require('./time-off-notification.functions');
 
   function setup() {
     const { Inngest, captured } = makeFakeInngest();
@@ -122,7 +121,9 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
       }),
     };
     const userEmailLookup = {
-      resolveEmailsByUserIds: jest.fn().mockResolvedValue(['a@x.com', 'b@x.com']),
+      resolveEmailsByUserIds: jest
+        .fn()
+        .mockResolvedValue(['a@x.com', 'b@x.com']),
     };
     const mailer = { send: jest.fn().mockResolvedValue(undefined) };
 
@@ -153,11 +154,7 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
   });
 
   it('extracts tenantId from payload.tenantId and runs inside runWithTenant for every step', async () => {
-    const {
-      fn,
-      step,
-      tenantRunner,
-    } = setup();
+    const { fn, step, tenantRunner } = setup();
     const ctx = {
       event: { id: 'evt-1', name: 'hr/timeoff.requested', data: basePayload() },
       step,
@@ -200,15 +197,15 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
     // the module surface — but the public builder only takes a
     // notificationConfigRepository object. Re-call buildTimeOffNotificationFunctions
     // by going through setup() with our cfg override.
-    const captured = (setupInstance as unknown as { captured: unknown[] });
+    const captured = setupInstance as unknown as { captured: unknown[] };
     void captured;
 
     // Reuse the captured fn from setup() — the existing `fn` was built
     // with a config mock we can override post-hoc.
     // Easier path: build a separate fn in this test.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const localBuild = require('./time-off-notification.functions')
-      .buildTimeOffNotificationFunctions;
+
+    const localBuild =
+      require('./time-off-notification.functions').buildTimeOffNotificationFunctions;
     const { Inngest } = makeFakeInngest();
     const tenantRunner = {
       runWithTenant: jest.fn(async (_id: string, fn: () => Promise<unknown>) =>
@@ -234,7 +231,9 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
       },
       step,
     };
-    const result = await (localFn.handler as (c: unknown) => Promise<unknown>)(ctx2);
+    const result = await (localFn.handler as (c: unknown) => Promise<unknown>)(
+      ctx2,
+    );
 
     expect(result).toEqual({ skipped: 'master-disabled' });
     expect(localMailer.send).not.toHaveBeenCalled();
@@ -246,9 +245,8 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
   });
 
   it('re-gates config: action key absent → skipped, mailer NEVER called', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const localBuild = require('./time-off-notification.functions')
-      .buildTimeOffNotificationFunctions;
+    const localBuild =
+      require('./time-off-notification.functions').buildTimeOffNotificationFunctions;
     const { Inngest } = makeFakeInngest();
     const { step } = makeFakeStep();
     const tenantRunner = {
@@ -288,9 +286,8 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
   });
 
   it('empty recipients → mailer NEVER called, row marked PUBLISHED-equivalent (skipped no-recipients)', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const localBuild = require('./time-off-notification.functions')
-      .buildTimeOffNotificationFunctions;
+    const localBuild =
+      require('./time-off-notification.functions').buildTimeOffNotificationFunctions;
     const { Inngest } = makeFakeInngest();
     const { step } = makeFakeStep();
     const tenantRunner = {
@@ -330,9 +327,8 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
   });
 
   it('no active recipients (lookup returns []) → mailer NEVER called', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const localBuild = require('./time-off-notification.functions')
-      .buildTimeOffNotificationFunctions;
+    const localBuild =
+      require('./time-off-notification.functions').buildTimeOffNotificationFunctions;
     const { Inngest } = makeFakeInngest();
     const { step } = makeFakeStep();
     const tenantRunner = {
@@ -402,9 +398,8 @@ describe('time-off-notification Inngest function (Slice 6)', () => {
   });
 
   it('mailer throws → the throw surfaces (Inngest retries via retries config)', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const localBuild = require('./time-off-notification.functions')
-      .buildTimeOffNotificationFunctions;
+    const localBuild =
+      require('./time-off-notification.functions').buildTimeOffNotificationFunctions;
     const { Inngest } = makeFakeInngest();
     const { step } = makeFakeStep();
     const tenantRunner = {
