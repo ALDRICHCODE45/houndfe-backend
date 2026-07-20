@@ -10,6 +10,7 @@
  * - OrdersModule: Orders bounded context
  * - AuthModule: Authentication bounded context
  * - PromotionsModule: Promotions bounded context
+ * - PdfGenerationModule: PDF receipts/tickets (WU5)
  */
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
@@ -45,6 +46,10 @@ import { LowStockOutboxModule } from './stock-alerts/outbox/low-stock-outbox.mod
 import { LowStockInngestRegistrar } from './stock-alerts/inngest/low-stock-inngest-registrar';
 import { HrTimeOffOutboxModule } from './hr-time-off/outbox/hr-time-off-outbox.module';
 import { HrTimeOffInngestRegistrar } from './hr-time-off/inngest/hr-time-off-inngest-registrar';
+// WU5 — PDF generation for confirmed sales (rebranded receipts/tickets).
+// Lives in its own module so the template registry stays decoupled from
+// the sales bounded context (future invoice/report/quote templates land here).
+import { PdfGenerationModule } from './pdf-generation/pdf-generation.module';
 
 @Module({
   imports: [
@@ -106,6 +111,11 @@ import { HrTimeOffInngestRegistrar } from './hr-time-off/inngest/hr-time-off-inn
     // for the outbox pipeline, top-level provider for the Inngest
     // registrar.
     HrTimeOffOutboxModule,
+    // WU5 — PDF generation module. Reuses SalesModule (via DI for
+    // `SalesService.getSaleDetail`) and TenantsModule. Placed at the
+    // end of the bounded-context list because it has no outbound
+    // dependencies on the time-off/stock-alert pipelines.
+    PdfGenerationModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +

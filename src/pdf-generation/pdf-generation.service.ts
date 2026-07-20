@@ -158,6 +158,12 @@ export class PdfGenerationService implements OnModuleInit {
    *   5. `renderToStream(<Template {...props} />)` returns a Node
    *      `Readable` we hand back to the controller.
    *
+   * Returns `{ stream, folio }` instead of just the stream so the
+   * controller can put the human-readable folio in the
+   * `Content-Disposition: attachment; filename="recibo-{folio}.pdf"`
+   * header (spec mandate). The folio is fetched as part of
+   * `getSaleDetail` — no extra DB roundtrip.
+   *
    * Note: the second arg is `tenantId` (string) for future-proofing;
    * today the tenant context is already enforced by CLS through the
    * SalesService's repository. The arg is accepted (not used for
@@ -168,7 +174,7 @@ export class PdfGenerationService implements OnModuleInit {
     saleId: string,
     _tenantId: string,
     format: FormatKey,
-  ): Promise<Readable> {
+  ): Promise<{ stream: Readable; folio: string }> {
     let sale: SaleDetailResponseDto;
     try {
       sale = await this.salesService.getSaleDetail(saleId);
@@ -204,7 +210,7 @@ export class PdfGenerationService implements OnModuleInit {
       throw new InternalServerErrorException('PDF_GENERATION_FAILED');
     }
 
-    return stream;
+    return { stream, folio: sale.folio ?? saleId };
   }
 
   /**

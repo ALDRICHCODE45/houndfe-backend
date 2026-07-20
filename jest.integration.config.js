@@ -27,6 +27,15 @@
  * `runInBand` is a per-invocation flag (`pnpm run test:integration`
  * passes it). Multiple Jest workers hammering one test DB is a recipe
  * for cross-spec interference on truncation-style cleanup.
+ *
+ * WU5 — extends the unit config's `@react-pdf/renderer` ESM shims
+ * (transformIgnorePatterns + yoga-layout moduleNameMapper). Without
+ * these, the PDF generation integration spec can't import the
+ * controller chain — `PdfGenerationService` imports
+ * `@react-pdf/renderer` at the top level, which fails Jest's CJS
+ * transformer. The spec itself MOCKS the renderer at the module
+ * boundary, so the real Yoga WASM engine never runs — but Jest still
+ * has to parse the import to know it's been mocked.
  */
 module.exports = {
   moduleFileExtensions: ['js', 'json', 'ts', 'tsx'],
@@ -51,4 +60,15 @@ module.exports = {
   setupFiles: ['<rootDir>/test/integration/setup/load-env.ts'],
   globalSetup: '<rootDir>/test/integration/setup/global-setup.ts',
   globalTeardown: '<rootDir>/test/integration/setup/global-teardown.ts',
+  // WU5 — mirror the unit config's @react-pdf/renderer ESM shims.
+  // See `jest.config.js` for the rationale behind each entry.
+  moduleNameMapper: {
+    '^yoga-layout$': '<rootDir>/src/pdf-generation/__mocks__/yoga-layout.cjs',
+    '^yoga-layout/load$':
+      '<rootDir>/src/pdf-generation/__mocks__/yoga-layout.cjs',
+  },
+  transformIgnorePatterns: [
+    'node_modules/(?!(?:\\.pnpm/[^/]+/node_modules/)?(?:@react-pdf/[^/]+|fontkit|png-js|jay-peg|linebreak|restructure|color-string|color-name)(?:/|$))',
+    '\\.pnp\\.[^\\/]+$',
+  ],
 };

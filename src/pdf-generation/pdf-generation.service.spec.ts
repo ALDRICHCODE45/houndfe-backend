@@ -152,13 +152,18 @@ describe('PdfGenerationService', () => {
     const expectedStream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
     renderer.renderToStream.mockReturnValue(expectedStream);
 
-    const stream = await service.generateSalePdf(
+    const result = await service.generateSalePdf(
       sale.id,
       'tenant-1',
       DEFAULT_FORMAT_KEY,
     );
 
-    expect(stream).toBe(expectedStream);
+    // WU5 — return shape changed from `Readable` to `{ stream, folio }`
+    // so the controller can stamp the human-readable folio into the
+    // `Content-Disposition` filename. The stream we hand back is the
+    // exact same Node Readable from the renderer.
+    expect(result.stream).toBe(expectedStream);
+    expect(result.folio).toBe(sale.folio);
     expect(renderer.renderToStream).toHaveBeenCalledTimes(1);
     // Verify the template that was rendered is the A4 one.
     const renderedElement = renderer.renderToStream.mock.calls[0][0];

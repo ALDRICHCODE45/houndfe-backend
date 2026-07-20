@@ -87,7 +87,7 @@ export class PdfGenerationController {
       throw new Error('TENANT_CONTEXT_REQUIRED');
     }
 
-    const stream = await this.pdfService.generateSalePdf(
+    const { stream, folio } = await this.pdfService.generateSalePdf(
       id,
       tenantId,
       resolvedFormat,
@@ -95,25 +95,31 @@ export class PdfGenerationController {
 
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': this.buildContentDisposition(id),
+      'Content-Disposition': this.buildContentDisposition(folio),
     });
-    res.send(stream);
+    // WU5 — pipe the Node Readable to the response stream instead of
+    // `res.send(stream)`. Express's `res.send(stream)` historically
+    // pipes Node Streams, but the version of Express bundled with
+    // @nestjs/platform-express@11.x serializes Readable objects as
+    // JSON when it can't detect them as a legacy Node Stream (the
+    // underlying `instanceof Stream` check uses `node:stream` and
+    // misses `Readable.from(...)` instances in some Node versions).
+    // Piping explicitly avoids the JSON serialization footgun and
+    // works identically across Node 18 / 20 / 22.
+    stream.pipe(res);
   }
 
   /**
    * Build the download filename. Spec mandates
-   * `attachment; filename="recibo-{folio}.pdf"`. We use the sale id
-   * as a fallback when folio is unavailable (defensive — confirmed
-   * sales always carry a folio, but the controller is the wrong
-   * layer to assume so).
+   * `attachment; filename="recibo-{folio}.pdf"`. The folio is
+   * already on the service's return tuple (no extra DB roundtrip
+   * — it comes from `SalesService.getSaleDetail` which the service
+   * already called to validate the sale). We sanitize to a safe
+   * filename charset because some folios (e.g. legacy imports) can
+   * contain `/` or other path-unsafe characters.
    */
-  private buildContentDisposition(_saleId: string): string {
-    // Folio isn't on the stream surface; we set the disposition
-    // header BEFORE rendering and rely on a generic placeholder.
-    // The FE can rename the downloaded file client-side using the
-    // stream's body or a separate header if it wants the real
-    // folio in the filename. For now: sale id → a stable name.
-    const safeId = _saleId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 36);
-    return `attachment; filename="recibo-${safeId}.pdf"`;
+  private buildContentDisposition(folio: string): string {
+    const safeFolio = folio.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 64);
+    return `attachment; filename="recibo-${safeFolio}.pdf"`;
   }
 }

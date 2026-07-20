@@ -1,5 +1,5 @@
 /**
- * PdfGenerationController — HTTP endpoint tests (WU4).
+ * PdfGenerationController — HTTP endpoint tests (WU4 + WU5 polish).
  *
  * What we verify:
  *   - `GET /sales/:id/pdf` with no format defaults to A4.
@@ -9,6 +9,8 @@
  *   - Service throws BadRequestException (DRAFT sale) → 400.
  *   - Response headers carry `Content-Type: application/pdf` and
  *     `Content-Disposition: attachment; filename="recibo-{folio}.pdf"`.
+ *     WU5 polish: filename uses the human-readable folio returned
+ *     by the service, not the URL id.
  *
  * Mocking strategy:
  *   - We instantiate the controller directly with a mock service.
@@ -50,12 +52,33 @@ function makeMockUser(tenantId = 'tenant-1'): AuthenticatedUser {
 }
 
 function makeMockRes(): Response {
+  // WU5 — controller uses `stream.pipe(res)` instead of
+  // `res.send(stream)` because Express's res.send JSON-serializes
+  // Readable streams on @nestjs/platform-express@11.x. The real
+  // Node `Readable.pipe()` calls `dest.on('drain')` /
+  // `dest.on('close')` / `dest.on('finish')` AND `dest.destroy()`
+  // internally, so we don't try to mock `res` deep enough to make a
+  // real pipe work — instead, we spy on `Readable.prototype.pipe`
+  // and stub the call. The mock `res` only needs `set` for the
+  // header assertion; pipe itself is observed via the spy.
   const res: Partial<Response> = {
     set: jest.fn().mockReturnThis(),
-    send: jest.fn().mockReturnThis(),
   };
   return res as Response;
 }
+
+// Spy on Readable.prototype.pipe so the controller's stream-pipe
+// doesn't actually try to write to a mock res. We restore after
+// every test in `afterEach` below.
+let pipeSpy: jest.SpyInstance | undefined;
+beforeEach(() => {
+  pipeSpy = jest
+    .spyOn(Readable.prototype, 'pipe')
+    .mockReturnThis();
+});
+afterEach(() => {
+  pipeSpy?.mockRestore();
+});
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -75,7 +98,7 @@ describe('PdfGenerationController', () => {
     it('defaults to A4 format when no format query param is supplied', async () => {
       const stream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
       service.resolveFormat.mockReturnValue('receipt-a4');
-      service.generateSalePdf.mockResolvedValue(stream);
+      service.generateSalePdf.mockResolvedValue({ stream, folio: 'A-0001' });
 
       const user = makeMockUser();
       const res = makeMockRes();
@@ -93,7 +116,7 @@ describe('PdfGenerationController', () => {
     it('uses the ticket template when format=receipt-ticket', async () => {
       const stream = Readable.from([Buffer.from('%PDF-1.4 ticket')]);
       service.resolveFormat.mockReturnValue('receipt-ticket');
-      service.generateSalePdf.mockResolvedValue(stream);
+      service.generateSalePdf.mockResolvedValue({ stream, folio: 'A-0001' });
 
       const user = makeMockUser();
       const res = makeMockRes();
@@ -111,7 +134,7 @@ describe('PdfGenerationController', () => {
     it('sets Content-Type and Content-Disposition headers on the response', async () => {
       const stream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
       service.resolveFormat.mockReturnValue('receipt-a4');
-      service.generateSalePdf.mockResolvedValue(stream);
+      service.generateSalePdf.mockResolvedValue({ stream, folio: 'A-0001' });
 
       const user = makeMockUser();
       const res = makeMockRes();
@@ -126,7 +149,51 @@ describe('PdfGenerationController', () => {
           ),
         }),
       );
-      expect(res.send).toHaveBeenCalledWith(stream);
+      expect(pipeSpy).toHaveBeenCalledWith(res);
+    });
+
+    it('uses the folio (not the URL id) for the Content-Disposition filename', async () => {
+      // WU5 polish — the spec mandates `recibo-{folio}.pdf`. The
+      // service returns the folio; the controller stamps it into the
+      // header. We pass a URL id that intentionally differs from the
+      // folio to prove the header reads from the folio, not the id.
+      const stream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
+      service.resolveFormat.mockReturnValue('receipt-a4');
+      service.generateSalePdf.mockResolvedValue({ stream, folio: 'B-0042' });
+
+      const user = makeMockUser();
+      const res = makeMockRes();
+
+      await controller.generatePdf('00000000-0000-4000-8000-000000000001', undefined, user, res);
+
+      expect(res.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          'Content-Disposition': 'attachment; filename="recibo-B-0042.pdf"',
+        }),
+      );
+    });
+
+    it('sanitizes unsafe characters out of the folio for the filename', async () => {
+      // Defensive — a folio with `/` (legacy import) must not produce
+      // a path-traversal filename. The regex strips everything that
+      // isn't alnum or hyphen.
+      const stream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
+      service.resolveFormat.mockReturnValue('receipt-a4');
+      service.generateSalePdf.mockResolvedValue({
+        stream,
+        folio: 'B/0042*?<>',
+      });
+
+      const user = makeMockUser();
+      const res = makeMockRes();
+
+      await controller.generatePdf('sale-1', undefined, user, res);
+
+      expect(res.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          'Content-Disposition': 'attachment; filename="recibo-B0042.pdf"',
+        }),
+      );
     });
 
     it('passes through 404 NotFoundException from the service', async () => {
@@ -141,7 +208,7 @@ describe('PdfGenerationController', () => {
       await expect(
         controller.generatePdf('sale-99', undefined, user, res),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(res.send).not.toHaveBeenCalled();
+      expect(pipeSpy).not.toHaveBeenCalled();
     });
 
     it('passes through 400 BadRequestException (SALE_NOT_CONFIRMED) from the service', async () => {
@@ -156,7 +223,7 @@ describe('PdfGenerationController', () => {
       await expect(
         controller.generatePdf('sale-1', undefined, user, res),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(res.send).not.toHaveBeenCalled();
+      expect(pipeSpy).not.toHaveBeenCalled();
     });
 
     it('passes through 500 InternalServerErrorException (PDF_GENERATION_FAILED) from the service', async () => {
@@ -198,7 +265,7 @@ describe('PdfGenerationController', () => {
     it('extracts tenantId from the authenticated user', async () => {
       const stream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
       service.resolveFormat.mockReturnValue('receipt-a4');
-      service.generateSalePdf.mockResolvedValue(stream);
+      service.generateSalePdf.mockResolvedValue({ stream, folio: 'A-0001' });
 
       const user = makeMockUser('tenant-42');
       const res = makeMockRes();
