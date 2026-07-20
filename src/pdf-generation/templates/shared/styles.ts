@@ -155,17 +155,17 @@ export const SHARED_STYLES = {
       fontFamily: FONTS.bodyBold,
       fontSize: 18,
       color: COLORS.ink,
-      marginBottom: 2,
+      marginBottom: 5,
     },
     // Smaller company-name variant for narrow formats (e.g. 80mm
     // ticket). The default 18pt HoundFe word dominates the header
-    // and visually collides with the FARMACIA subtitle below; 14pt
-    // gives the subtitle room to breathe on a 227pt page.
+    // and visually collides with the subtitle below; 14pt gives
+    // the subtitle room to breathe on a 227pt page.
     companyNameSmall: {
       fontFamily: FONTS.bodyBold,
       fontSize: 14,
       color: COLORS.ink,
-      marginBottom: 2,
+      marginBottom: 5,
     },
     brandLine: {
       fontFamily: FONTS.body,
