@@ -46,7 +46,7 @@ export interface ReceiptHeaderProps {
   folio: string;
   /** ISO timestamp of when the sale was confirmed. */
   date: string;
-  /** Optional subtitle shown below the company name (default "FARMACIA"). */
+  /** Optional subtitle shown below the company name (default "PUNTO DE VENTA"). */
   subtitle?: string;
   /**
    * Size variant for the company name. `'small'` uses a 14pt token
@@ -83,7 +83,7 @@ export function ReceiptHeader({
             <View style={headerStyles.nameStack}>
               <Text style={companyNameStyle}>{companyName}</Text>
               <Text style={SHARED_STYLES.receipt.subtitle}>
-                {subtitle ?? 'FARMACIA'}
+                {subtitle ?? 'PUNTO DE VENTA'}
               </Text>
             </View>
           </View>

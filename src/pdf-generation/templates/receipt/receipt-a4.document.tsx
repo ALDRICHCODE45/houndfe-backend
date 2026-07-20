@@ -24,13 +24,13 @@ export function ReceiptA4Document({
         size={{ width: PAPER_SIZES.A4.width, height: PAPER_SIZES.A4.height }}
         style={styles.page}
       >
-        <View style={SHARED_STYLES.receipt.outerBorder}>
+        <View>
           <View style={SHARED_STYLES.receipt.brandAccentBar} />
           <ReceiptHeader
             {...business}
             folio={sale.folio}
             date={sale.date}
-            subtitle="FARMACIA"
+            subtitle="PUNTO DE VENTA"
           />
 
           <View style={styles.saleDetails}>

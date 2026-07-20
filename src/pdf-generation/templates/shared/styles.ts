@@ -97,13 +97,6 @@ export const SHARED_STYLES = {
       color: COLORS.inkSoft,
       textAlign: 'center' as const,
       marginTop: 12,
-      // Thin yellow hairline above the "Gracias" line — mirrors the
-      // top accent bar at the bottom of the receipt so the brand
-      // color brackets the whole page.
-      borderTopWidth: 1,
-      borderTopColor: COLORS.brand,
-      borderTopStyle: 'solid' as const,
-      paddingTop: 8,
     },
     subtitle: {
       fontFamily: FONTS.body,

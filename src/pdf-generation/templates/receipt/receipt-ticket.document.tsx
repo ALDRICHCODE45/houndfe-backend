@@ -27,13 +27,13 @@ export function ReceiptTicketDocument({
         style={styles.page}
         wrap={false}
       >
-        <View style={SHARED_STYLES.receipt.outerBorder}>
+        <View>
           <View style={SHARED_STYLES.receipt.brandAccentBar} />
           <ReceiptHeader
             companyName={business.companyName}
             folio={sale.folio}
             date={sale.date}
-            subtitle="FARMACIA"
+            subtitle="PUNTO DE VENTA"
             titleSize="small"
           />
 
