@@ -35,6 +35,8 @@ function makeMockSalesService() {
     applyManualPromotion: jest.fn(),
     removeManualPromotion: jest.fn(),
     removeAppliedPromotion: jest.fn(),
+    // WU3 — POS Price List Tiers.
+    setSalePriceList: jest.fn(),
   } as any;
 }
 
@@ -661,6 +663,61 @@ describe('SalesController', () => {
       await expect(
         controller.applyManualPromotion('sale-1', 'promo-m-1', {}, user),
       ).rejects.toThrow('PROMOTION_NOT_FOUND');
+    });
+  });
+
+  // ==========================================================================
+  // WU3 — PUT /sales/drafts/:id/price-list endpoint
+  // --------------------------------------------------------------------------
+  // RBAC: the controller-level guards (JwtAuthGuard, TenantContextGuard,
+  // PermissionsGuard) are applied at @UseGuards. The method-level
+  // @RequirePermissions(['update', 'Sale']) decorator enforces the same
+  // permission shape as the other draft-mutation routes (addItem /
+  // updateItemQuantity / removeItem / assignCustomer).
+  // ==========================================================================
+  describe('WU3 — PUT /sales/drafts/:id/price-list', () => {
+    it('passes userId + saleId + body through to service.setSalePriceList', async () => {
+      const user = makeMockUser('user-1');
+      const dto = { globalPriceListId: 'gpl-mayoreo' };
+      const draft = {
+        id: 'sale-1',
+        userId: 'user-1',
+        status: 'DRAFT',
+        globalPriceListId: 'gpl-mayoreo',
+        items: [],
+      };
+      service.setSalePriceList.mockResolvedValue(draft);
+
+      const result = await controller.setSalePriceList('sale-1', dto, user);
+
+      expect(service.setSalePriceList).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        dto,
+      );
+      expect(result).toEqual(draft);
+    });
+
+    it('accepts explicit null on globalPriceListId (cashier clear)', async () => {
+      const user = makeMockUser('user-1');
+      const dto = { globalPriceListId: null };
+      const draft = {
+        id: 'sale-1',
+        userId: 'user-1',
+        status: 'DRAFT',
+        globalPriceListId: null,
+        items: [],
+      };
+      service.setSalePriceList.mockResolvedValue(draft);
+
+      const result = await controller.setSalePriceList('sale-1', dto, user);
+
+      expect(service.setSalePriceList).toHaveBeenCalledWith(
+        'sale-1',
+        'user-1',
+        { globalPriceListId: null },
+      );
+      expect(result).toEqual(draft);
     });
   });
 });

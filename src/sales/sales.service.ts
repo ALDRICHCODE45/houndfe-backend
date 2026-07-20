@@ -46,6 +46,7 @@ import type { OverrideItemPriceDto } from './dto/override-item-price.dto';
 import type { AvailablePricesResponseDto } from './dto/available-prices-response.dto';
 import type { ApplyItemDiscountDto } from './dto/apply-item-discount.dto';
 import type { ChargeSaleDto } from './dto/charge-sale.dto';
+import type { SetPriceListDto } from './dto/set-price-list.dto';
 import type { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import type { ListApplicablePromotionsResponseDto } from './dto/list-applicable-promotions-response.dto';
 import type {
@@ -428,7 +429,7 @@ export class SalesService {
     },
     /**
      * Work Unit 4 — POS promotion engine port (Symbol-injected from
-     * PromotionsModule). Drives `recomputePromotions(sale)` after every
+     * PromotionsModule). Drives `recomputePricingAndPromotions(sale)` after every
      * draft mutation. Hexagonal: we depend on the I/O contract only, not
      * on promotions internals.
      */
@@ -437,58 +438,71 @@ export class SalesService {
   ) {}
 
   /**
-   * Work Unit 4 — recompute POS promotions on the in-memory sale aggregate.
+   * WU2 — `recomputePricingAndPromotions` (renamed from
+   * `recomputePromotions` — the new name reflects the inserted reprice
+   * step). Called AFTER each draft mutation (`addItem`,
+   * `updateItemQuantity`, `removeItem`, `assignCustomer`, `setSalePriceList`)
+   * and BEFORE the caller's `saleRepo.save`. Same method is re-used at
+   * charge time by Unit 5 inside the charge tx.
    *
-   * Called AFTER each draft mutation (`addItem`, `updateItemQuantity`,
-   * `removeItem`, `assignCustomer`) and BEFORE the caller's `saleRepo.save`.
-   * Same method is re-used at charge time by Unit 5 inside the charge tx.
-   *
-   * Steps (per design.md — "Recompute Placement & Transaction Boundaries"):
-   *  1. Collect the DISTINCT non-null `appliedPriceListId`s from the items
-   *     and batch-resolve each to its `globalPriceListId` via
-   *     `ProductsService.resolvePriceListGlobalIds` (C1 fix). Tenant-scoped.
-   *  2. Build `PosEvalInput` from the CURRENT item state:
+   * Pipeline (clear → reprice → eval, in this order):
+   *  1. Clear PROMO-sourced discounts. Manual free-form discount lines
+   *     are LEFT untouched (manual wins).
+   *  2. `repriceNonStickyLines` — for every non-sticky line, batch-resolve
+   *     the tier-aware price via `ProductsService.batchResolvePriceMap`
+   *     (constant 2 Prisma queries regardless of line count). Sticky
+   *     lines (custom price, manual discount, per-item
+   *     `appliedPriceListId` override) are SKIPPED — their price is
+   *     preserved verbatim. Reprice uses this precedence:
+   *       (a) `appliedPriceListId` per-item override — re-tiers within
+   *           that list on qty change,
+   *       (b) `sale.globalPriceListId` — tier-aware from the sale list,
+   *       (c) `null` — caller falls back to PUBLICO default via
+   *           `getProductInfoForSale`.
+   *  3. Build `PosEvalInput` from the REPRICED item state:
    *       `effectiveUnitPriceCents = item.prePriceCentsBeforeDiscount
-   *         ?? item.unitPriceCents`  ← S3, pre-promo base so recompute
-   *         never compounds on re-entry.
-   *       `appliedGlobalPriceListId` from the resolution map (null when no
-   *         override or unresolved).
+   *         ?? item.unitPriceCents`  ← tier-adjusted (post-reprice).
+   *       `appliedGlobalPriceListId` from the existing
+   *         `resolvePriceListGlobalIds` map.
    *       `hasManualDiscount = item.discountType !== null
    *         && item.promotionId === null`  ← auto-promo skips this line.
-   *  3. Call the engine (`posEvaluatePromotions.evaluate(input)`).
-   *  4. For each item that currently has a PROMO-sourced discount
-   *     (`promotionId != null`), clear it before applying new results.
-   *     Manual free-form discount lines are LEFT untouched (manual wins).
+   *  4. Call the engine (`posEvaluatePromotions.evaluate(input)`).
    *  5. Apply each engine `lines[]` result via `item.applyDiscount({...,
-   *     promotionId})`. Engine only emits lines for items that should
-   *     receive an auto promo, so manual-discount lines are not affected.
+   *     promotionId})` or `applyBuyXGetYReward({...,rewardKind})`. Engine
+   *     only emits lines for items that should receive an auto promo, so
+   *     manual-discount lines are not affected.
    *  6. Set or clear `sale.appliedOrderPromotion` from `result.order`.
+   *  7. Self-heal: prune opted-in MANUAL promos whose target is gone.
    *
-   * Recompute mutates the in-memory aggregate only — the caller persists
-   * via `saleRepo.save` after this method returns. This keeps the
-   * transactional boundary where the existing `save` lives.
-   *
-   * SAFE NO-OP: when no promotions match, the engine returns empty `lines`
-   * and `null` `order`. Every item with `promotionId != null` is cleared
-   * (recompute drops the auto-promo) and no new discount is applied. So
-   * the ~1600 existing tests that don't involve promotions stay green:
-   * the default mock returns empty and the in-memory sale ends in the
-   * same state it was in (modulo any prior auto-promo being cleared,
-   * which doesn't happen when no engine result is wired).
+   * Idempotency: given the same `sale` state (no mutations in between),
+   * N recomputes are BYTE-EQUAL. The BXGY discriminator
+   * (`prePriceCentsBeforeDiscount === unitPriceCents + promotionId set +
+   * discountAmountCents > 0`) holds because reprice runs BEFORE the
+   * engine input is built — `effectiveUnitPriceCents` is the tier-adjusted
+   * price, never an add-time frozen base.
    */
-  private async recomputePromotions(sale: Sale): Promise<void> {
-    // (1) Build input + (2) call engine — see `buildPosEvalInput`.
-    const result = await this.evaluatePromotionsForSale(sale);
-
-    // (3) Clear prior PROMO-sourced discounts before applying the new results.
-    //     Manual free-form discounts are skipped (no `promotionId`).
+  private async recomputePricingAndPromotions(sale: Sale): Promise<void> {
+    // (1) Clear prior PROMO-sourced discounts. Manual free-form
+    //     discounts are skipped (no `promotionId`).
     for (const item of sale.items) {
       if (item.promotionId != null) {
         item.removeDiscount();
       }
     }
 
-    // (4) Apply each per-line result. Engine guarantees `hasManualDiscount
+    // (2) Reprice non-sticky lines tier-aware (per spec: clear →
+    //     reprice → eval). Mutations to `_unitPriceCents` and
+    //     `_appliedPriceListId` only; `_originalPriceCents` and the
+    //     discount fields are left untouched on every line, sticky or
+    //     not, by design.
+    await this.repriceNonStickyLines(sale);
+
+    // (3) Build input + (4) call engine — see `buildPosEvalInput`.
+    //     `effectiveUnitPriceCents` reads the post-reprice
+    //     `unitPriceCents` so the engine sees the tier-adjusted price.
+    const result = await this.evaluatePromotionsForSale(sale);
+
+    // (5) Apply each per-line result. Engine guarantees `hasManualDiscount
     //     === false` for lines it returns, so manual-discount lines are
     //     never re-applied here.
     //
@@ -624,14 +638,162 @@ export class SalesService {
    * without changing the draft. Read-only — the spec scenario for
    * `GET /sales/drafts/:id/applicable-promotions` is non-mutating.
    */
-  private async evaluatePromotionsForSale(sale: Sale) {
+   private async evaluatePromotionsForSale(sale: Sale) {
     const input = await this.buildPosEvalInput(sale);
     return this.posEvaluatePromotions.evaluate(input);
   }
 
   /**
+   * WU2 — Tier-aware repricing loop on non-sticky lines. Runs ONCE per
+   * recompute between the promo-discount clear and the engine input
+   * build. Constant 2 Prisma queries regardless of line count via
+   * `ProductsService.batchResolvePriceMap`.
+   *
+   * "Sticky" lines are SKIPPED entirely — their unit price is preserved
+   * verbatim across recomputes. A line is sticky iff ANY of:
+   *   - `priceSource === 'custom'` (cashier set a custom price)
+   *   - manual discount present (`discountType !== null` AND
+   *     `promotionId === null` — the same `hasManualDiscount` rule the
+   *     engine uses to skip manual-discount lines on auto-promo eval)
+   *
+   * For non-sticky lines, the effective price-list is resolved in this
+   * precedence:
+   *   1. `item.appliedPriceListId` (per-item override) — re-tiers
+   *      within that list on qty change.
+   *   2. `sale.globalPriceListId` (sale-level list, may be null on
+   *      freshly opened drafts).
+   *   3. Default PUBLICO list — caller responsibility; the resolver
+   *      simply omits missing entries so the per-item default-list
+   *      fallback applies.
+   *
+   * Lines whose effective list resolved a price get `item.reprice(...)`
+   * (mutates `_unitPriceCents` + `_priceSource` + `_appliedPriceListId`
+   * — does NOT snapshot `_originalPriceCents` and does NOT clear any
+   * discount field).
+   *
+   * Empty input → no DB call (defensive — matches the
+   * `batchResolvePriceMap` contract).
+   */
+  private async repriceNonStickyLines(sale: Sale): Promise<void> {
+    const nonStickyInputs: Array<{
+      productId: string;
+      variantId: string | null;
+      priceListId: string;
+      quantity: number;
+    }> = [];
+
+    // Resolve the effective list for lines without per-item override.
+    // When `sale.globalPriceListId` is null (cleared by cashier or
+    // not yet set) the fallback is the default (PUBLICO) GlobalPriceList
+    // — "Sin lista" still means PUBLICO; there is no true "no price list".
+    const effectiveGlobalListId =
+      sale.globalPriceListId ??
+      (await this.resolveDefaultGlobalPriceListId());
+
+    // Walk all items, classify sticky vs non-sticky, and build the
+    // resolver input list for the non-sticky subset. Sticky is detected
+    // via the same conditions the engine applies (`hasManualDiscount`)
+    // — manual-free-form AND custom-price lines are NEVER repriced.
+    //
+    // For sale-list-bound lines (no per-item `appliedPriceListId`
+    // override) the `effectiveListId` is a GlobalPriceList UUID —
+    // which `batchResolvePriceMap` translates internally via the
+    // `globalPriceListId` parameter (product branch: queries by
+    // `globalPriceListId` instead of `id`; variant branch: nested
+    // `priceList.globalPriceListId` filter).
+    for (const item of sale.items) {
+      const isManualDiscount =
+        item.discountType !== null && item.promotionId === null;
+      if (item.priceSource === 'custom' || isManualDiscount) {
+        continue;
+      }
+      const effectiveListId =
+        item.appliedPriceListId ?? effectiveGlobalListId;
+      if (effectiveListId === null) {
+        continue;
+      }
+      nonStickyInputs.push({
+        productId: item.productId,
+        variantId: item.variantId,
+        priceListId: effectiveListId,
+        quantity: item.quantity,
+      });
+    }
+
+    if (nonStickyInputs.length === 0) {
+      return;
+    }
+
+    // Build inputs with the `globalPriceListId` discriminator so
+    // `batchResolvePriceMap` knows which IDs are GlobalPriceList UUIDs
+    // (needs translation) vs per-item `appliedPriceListId` overrides
+    // (already PriceList.id).
+    const resolvedInputs = nonStickyInputs.map((inp) => ({
+      ...inp,
+      globalPriceListId:
+        inp.priceListId === effectiveGlobalListId &&
+        effectiveGlobalListId !== null
+          ? (inp.priceListId as string)
+          : undefined,
+    }));
+
+    const tierMap =
+      await this.productsService.batchResolvePriceMap(resolvedInputs);
+
+    // Apply the resolved tier prices back onto the corresponding items.
+    // The resolver drops input entries whose (productId, variantId,
+    // priceListId) tuple has no row in the catalog — those lines keep
+    // their current unit price (the caller applies the default-list
+    // fallback at the next mutation that re-runs reprice). For lines
+    // where the resolver returned a hit at the line's current quantity,
+    // call `SaleItem.reprice` (does NOT snapshot _originalPriceCents
+    // and does NOT clear discount fields).
+    for (const item of sale.items) {
+      const isManualDiscount =
+        item.discountType !== null && item.promotionId === null;
+      if (item.priceSource === 'custom' || isManualDiscount) {
+        continue;
+      }
+      const effectiveListId =
+        item.appliedPriceListId ?? effectiveGlobalListId;
+      if (effectiveListId === null) {
+        continue;
+      }
+      const key = `${item.productId}::${
+        item.variantId ?? ''
+      }::${effectiveListId}`;
+      const inner = tierMap.get(key);
+      if (!inner) continue;
+      const resolvedCents = inner.get(item.quantity);
+      if (resolvedCents === undefined) continue;
+      item.reprice({
+        priceCents: resolvedCents,
+        priceSource: 'price_list',
+        appliedPriceListId: item.appliedPriceListId, // preserve per-item override id
+      });
+    }
+  }
+
+  /**
+   * Returns the id of the default GlobalPriceList (isDefault=true).
+   *
+   * There is no true "no price list" state — every draft always has a
+   * pricing baseline. When the cashier clears the list (null) or a
+   * freshly-opened draft has not been bound yet, the repricing pipeline
+   * falls back to the default PUBLICO list via this method.
+   */
+  private async resolveDefaultGlobalPriceListId(): Promise<string | null> {
+    const prisma = this.tenantPrisma.getClient();
+    const row = await prisma.globalPriceList.findFirst({
+      where: { isDefault: true },
+      select: { id: true },
+    });
+    return row?.id ?? null;
+  }
+
+  /**
    * Work Unit 6 — Build the engine input from the sale's current item
-   * state. Extracted from `recomputePromotions` so the non-mutating
+   * state. Extracted from `recomputePricingAndPromotions` so the non-mutating
    * `evaluatePromotionsForSale` can reuse it without duplicating the
    * batch-resolve + per-line construction logic.
    *
@@ -901,7 +1063,7 @@ export class SalesService {
     // Work Unit 4 — recompute POS promotions on the new item state BEFORE
     // persisting. Same-engine call (so charge totals will agree with the
     // draft preview once Unit 5 wires charge).
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
 
     await this.saleRepo.save(sale);
 
@@ -969,7 +1131,7 @@ export class SalesService {
     sale.updateItemQuantity(itemId, dto.quantity);
 
     // Work Unit 4 — recompute (qty change can flip eligibility / re-apply).
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
 
     await this.saleRepo.save(sale);
 
@@ -1032,7 +1194,7 @@ export class SalesService {
     sale.removeItem(itemId);
     // Work Unit 4 — recompute so any ORDER_DISCOUNT no longer references the
     // removed item, and remaining items re-evaluate against the new state.
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
     await this.saleRepo.save(sale);
     this.eventEmitter.emit(
       'sale.item.removed',
@@ -1346,7 +1508,7 @@ export class SalesService {
     // discount / `promotionId` on the line. Without recompute, an eligible
     // auto-promo would silently disappear on override. Recompute re-applies
     // it on the NEW baseline (promo-on-top-of-price-list).
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
 
     await this.saleRepo.save(sale);
     const updated = sale.items.find((i) => i.id === itemId)!;
@@ -1440,8 +1602,8 @@ export class SalesService {
     // `sale.removeItemDiscount` (Layer A — sale.entity.ts#removeItemDiscount)
     // already pruned the orphaned MANUAL opt-in; this recompute is the
     // engine-level mirror that also catches stale opt-ins that escaped
-    // Layer A (Layer B — see recomputePromotions below).
-    await this.recomputePromotions(sale);
+    // Layer A (Layer B — see recomputePricingAndPromotions below).
+    await this.recomputePricingAndPromotions(sale);
     await this.saleRepo.save(sale);
     this.eventEmitter.emit(
       'sale.item.discount.removed',
@@ -1627,7 +1789,7 @@ export class SalesService {
     // owned by the aggregate, NOT duplicated here.
     sale.optInManualPromotion(promotionId);
 
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
     await this.saleRepo.save(sale);
 
     return sale.toResponse();
@@ -1662,7 +1824,7 @@ export class SalesService {
     // Mutate BEFORE recompute so the engine sees the updated opt-in set.
     sale.optOutManualPromotion(promotionId);
 
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
     await this.saleRepo.save(sale);
 
     return sale.toResponse();
@@ -1721,7 +1883,7 @@ export class SalesService {
       sale.addVetoedPromotion(promotionId);
     }
 
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
     await this.saleRepo.save(sale);
 
     return sale.toResponse();
@@ -1751,6 +1913,21 @@ export class SalesService {
       );
     }
 
+    // WU3 — seed the sale-level price list from
+    // `Customer.globalPriceListId` ONLY when the cashier has not
+    // explicitly chosen one. Sticky lines (custom price, manual
+    // discount, per-item override) are NOT touched — the upstream
+    // `repriceNonStickyLines` step inside recompute picks them up
+    // via the existing precedence rules.
+    const saleListBefore = sale.globalPriceListId;
+    const explicitBefore = sale.priceListExplicitlySet;
+    const customerList =
+      (customer as { globalPriceListId?: string | null }).globalPriceListId ??
+      null;
+    if (!explicitBefore && customerList !== null) {
+      sale.setGlobalPriceList(customerList, false);
+    }
+
     if (dto.shippingAddressId !== undefined && dto.shippingAddressId !== null) {
       const address = await prisma.customerAddress.findUnique({
         where: { id: dto.shippingAddressId },
@@ -1775,7 +1952,7 @@ export class SalesService {
     // Work Unit 4 — recompute (SPECIFIC / REGISTERED_ONLY promos only become
     // eligible after the eligible customer is assigned; removing the customer
     // would re-drop them).
-    await this.recomputePromotions(sale);
+    await this.recomputePricingAndPromotions(sale);
     await this.saleRepo.save(sale);
 
     this.eventEmitter.emit(
@@ -1932,6 +2109,150 @@ export class SalesService {
     return this.saleRepo.findDraftResponseById(sale.id);
   }
 
+  /**
+   * Resolves the current catalog price for charge-time validation.
+   *
+   * For per-item price-list lines (`appliedPriceListId` set) the
+   * existing `resolveListPrice` path is used.  For sale-list-bound
+   * lines (price-source `price_list` but no per-item override) the
+   * resolution goes through `batchResolvePriceMap` with the
+   * `globalPriceListId` discriminator so the query uses the FK
+   * rather than treating the `sale.globalPriceListId` UUID as a
+   * `PriceList.id`.
+   */
+  private async resolveChargeValidationPrice(
+    item: { priceSource: string; appliedPriceListId: string | null; productId: string; variantId: string | null; quantity: number },
+    sale: { globalPriceListId: string | null },
+  ): Promise<number> {
+    if (
+      item.priceSource === 'price_list' &&
+      item.appliedPriceListId
+    ) {
+      return this.productsService.resolveListPrice(
+        item.appliedPriceListId,
+        item.productId,
+        item.variantId,
+        item.quantity,
+      );
+    }
+    if (
+      item.priceSource === 'price_list' &&
+      sale.globalPriceListId
+    ) {
+      const tierMap = await this.productsService.batchResolvePriceMap([
+        {
+          productId: item.productId,
+          variantId: item.variantId,
+          priceListId: sale.globalPriceListId,
+          globalPriceListId: sale.globalPriceListId,
+          quantity: item.quantity,
+        },
+      ]);
+      const key = `${item.productId}::${
+        item.variantId ?? ''
+      }::${sale.globalPriceListId}`;
+      const inner = tierMap.get(key);
+      const cents = inner?.get(item.quantity);
+      if (cents !== undefined) return cents;
+      throw new BusinessRuleViolationError(
+        'PRICE_OUT_OF_DATE',
+        'PRICE_OUT_OF_DATE',
+      );
+    }
+    return (
+      await this.productsService.getProductInfoForSale(
+        item.productId,
+        item.variantId,
+      )
+    ).unitPriceCents;
+  }
+
+  /**
+   * WU3 — `PUT /sales/drafts/:id/price-list`. Cashier-explicit
+   * sale-level price-list binding.
+   *
+   * Contract:
+   *   - Body `{ globalPriceListId: string | null }`. Null clears.
+   *   - If a UUID is provided, it MUST exist in `global_price_lists`
+   *     (else 400 — the request is rejected and the draft is
+   *     unchanged).
+   *   - Binding flips `priceListExplicitlySet` to true (including on
+   *     null clears — explicit cashier choice, prevents auto-reseed
+   *     from `assignCustomer`).
+   *   - `recomputePricingAndPromotions` runs immediately so the
+   *     response carries the full repriced DTO (spec scenario
+   *     "Set list on loaded draft" — non-sticky lines reprice
+   *     tier-aware from the new list; sticky + per-item override
+   *     lines untouched).
+   *   - On an empty draft (no items), still stores the binding so a
+   *     future `addItem` reads from it (spec scenario "Set on empty
+   *     draft seeds future adds").
+   */
+  async setSalePriceList(
+    saleId: string,
+    userId: string,
+    dto: SetPriceListDto,
+  ) {
+    const sale = await this.saleRepo.findById(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_FOUND',
+        'SALE_NOT_FOUND',
+      );
+    }
+    if (sale.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        'SALE_NOT_DRAFT',
+        'SALE_NOT_DRAFT',
+      );
+    }
+    if (sale.userId !== userId) {
+      throw new BusinessRuleViolationError(
+        'SALE_UPDATE_FORBIDDEN',
+        'SALE_UPDATE_FORBIDDEN',
+      );
+    }
+
+    if (dto.globalPriceListId !== null && dto.globalPriceListId !== undefined) {
+      // Unknown-list rejection — the spec mandates a hard reject so a
+      // bad cashier payload cannot silently leave the draft in its
+      // current state. We read the catalog directly because a list-id
+      // lookup against `price_lists.productId` is product-scoped, but
+      // here we want the GLOBAL list metadata (no product bound yet at
+      // this call — the binding is sale-level).
+      const prisma = this.tenantPrisma.getClient();
+      const exists = await prisma.globalPriceList.findUnique({
+        where: { id: dto.globalPriceListId },
+        select: { id: true },
+      });
+      if (!exists) {
+        throw new BusinessRuleViolationError(
+          'PRICE_LIST_NOT_FOUND',
+          'PRICE_LIST_NOT_FOUND',
+        );
+      }
+    }
+
+    // Flip the binding + the explicit discriminator. Null clear still
+    // marks the choice as explicit so a future `assignCustomer`
+    // cannot reseed.
+    sale.setGlobalPriceList(
+      dto.globalPriceListId ?? null,
+      true,
+    );
+
+    // Re-run the full recompute (clear → reprice → eval) so the
+    // returned DTO carries post-reprice totals. On an empty draft the
+    // reprice + eval loops are no-ops (no items) but the set still
+    // persists — future `addItem` reads the binding through
+    // `findDraftResponseById` → `buildPosEvalInput`.
+    await this.recomputePricingAndPromotions(sale);
+
+    await this.saleRepo.save(sale);
+
+    return this.saleRepo.findDraftResponseById(sale.id);
+  }
+
   async clearShippingAddress(saleId: string, userId: string): Promise<void> {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale)
@@ -2040,20 +2361,10 @@ export class SalesService {
       for (const item of sale.items) {
         if (item.priceSource === 'custom') continue;
 
-        const currentCents =
-          item.priceSource === 'price_list' && item.appliedPriceListId
-            ? await this.productsService.resolveListPrice(
-                item.appliedPriceListId,
-                item.productId,
-                item.variantId,
-                item.quantity,
-              )
-            : (
-                await this.productsService.getProductInfoForSale(
-                  item.productId,
-                  item.variantId,
-                )
-              ).unitPriceCents;
+        const currentCents = await this.resolveChargeValidationPrice(
+          item,
+          sale,
+        );
 
         const expectedBaseCents =
           item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;
@@ -2072,7 +2383,7 @@ export class SalesService {
       // charged totalCents / discountCents reflect the current state, not
       // whatever was last persisted. Reads go through the tenant+tx-scoped
       // prisma client because we are inside `runInTransaction`.
-      await this.recomputePromotions(sale);
+      await this.recomputePricingAndPromotions(sale);
 
       // Work Unit 5 — inline totals use the SAME helper the draft preview
       // uses (`sale.previewTotals()`, Unit 3). This is the single source of

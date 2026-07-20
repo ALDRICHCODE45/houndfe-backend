@@ -37,6 +37,7 @@ import { SetShippingAddressDto } from './dto/set-shipping-address.dto';
 import { ApplyManualPromotionDto } from './dto/apply-manual-promotion.dto';
 import { RemoveManualPromotionDto } from './dto/remove-manual-promotion.dto';
 import { RemoveAppliedPromotionDto } from './dto/remove-applied-promotion.dto';
+import { SetPriceListDto } from './dto/set-price-list.dto';
 
 @Controller('sales/drafts')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -165,6 +166,37 @@ export class SalesController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.salesService.clearShippingAddress(id, user.userId);
+  }
+
+  /**
+   * WU3 — `PUT /sales/drafts/:id/price-list` (POS Price List Tiers).
+   *
+   * Cashier-explicit sale-level price-list binding. Body
+   * `{ globalPriceListId: string | null }`:
+   *   - present (UUID) → binds the sale to that list; reprices all
+   *     non-sticky, non-override lines tier-aware immediately.
+   *   - null            → clears the binding on a draft with non-
+   *     override lines (those revert to the default list); sticky /
+   *     per-item-override lines keep their own prices verbatim.
+   *
+   * Auth/RBAC: identical to the other draft-mutation routes
+   * (`@UseGuards` at the controller + `@RequirePermissions(['update',
+   * 'Sale'])`). The service layer is the source of truth on
+   * ownership + DRAFT status + unknown-list rejection (returns 400).
+   *
+   * Response: the full repriced sale DTO with `globalPriceListId`
+   * surfaced — the FE contract (spec scenario: "Set list on loaded
+   * draft").
+   */
+  @Put(':id/price-list')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Sale'])
+  setSalePriceList(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetPriceListDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.setSalePriceList(id, user.userId, dto);
   }
 
   @Get(':id/items/:itemId/available-prices')

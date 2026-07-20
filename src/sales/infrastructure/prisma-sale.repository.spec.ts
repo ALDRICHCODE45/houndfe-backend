@@ -1594,6 +1594,9 @@ describe('PrismaSaleRepository', () => {
           dueDate: null,
           confirmedAt: undefined,
           folio: undefined,
+          // WU1 — sale-level price list binding (defaults on a fresh sale).
+          globalPriceListId: null,
+          priceListExplicitlySet: false,
           tenantId: 'tenant-1',
         },
       });
@@ -1705,6 +1708,9 @@ describe('PrismaSaleRepository', () => {
           dueDate: null,
           confirmedAt: undefined,
           folio: undefined,
+          // WU1 — sale-level price list binding (defaults on a fresh sale).
+          globalPriceListId: null,
+          priceListExplicitlySet: false,
         },
       });
       expect(prisma.saleItem.createMany).toHaveBeenCalledWith({
@@ -2122,6 +2128,103 @@ describe('PrismaSaleRepository', () => {
       const result = await repo.findById('sale-with-shipping');
 
       expect(result?.shippingAddressId).toBe('addr-1');
+    });
+  });
+
+  // WU1 — repo persistence + reload round-trip for the sale-level
+  // price-list binding (globalPriceListId + priceListExplicitlySet).
+  describe('WU1 — sale-level price-list round-trip', () => {
+    function baseMockSaleData(
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> {
+      return {
+        id: 'sale-pl',
+        userId: 'user-1',
+        status: 'DRAFT',
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus: 'DELIVERED',
+        customerId: null,
+        shippingAddressId: null,
+        sellerUserId: null,
+        dueDate: null,
+        confirmedAt: null,
+        folio: null,
+        createdAt: new Date('2026-07-19'),
+        updatedAt: new Date('2026-07-19'),
+        promotionVetoes: [],
+        promotionOptIns: [],
+        appliedPromotion: null,
+        items: [],
+        ...overrides,
+      };
+    }
+
+    it('findById loads globalPriceListId + priceListExplicitlySet', async () => {
+      prisma.sale.findUnique.mockResolvedValue(
+        baseMockSaleData({
+          globalPriceListId: 'gpl-mayoreo',
+          priceListExplicitlySet: true,
+        }),
+      );
+
+      const result = await repo.findById('sale-pl');
+
+      expect(result).not.toBeNull();
+      expect(result!.globalPriceListId).toBe('gpl-mayoreo');
+      expect(result!.priceListExplicitlySet).toBe(true);
+    });
+
+    it('findById defaults globalPriceListId to null + priceListExplicitlySet to false when columns absent', async () => {
+      // Simulates a legacy sale row that pre-dates the WU1 migration.
+      prisma.sale.findUnique.mockResolvedValue(baseMockSaleData());
+
+      const result = await repo.findById('sale-pl');
+
+      expect(result).not.toBeNull();
+      expect(result!.globalPriceListId).toBeNull();
+      expect(result!.priceListExplicitlySet).toBe(false);
+    });
+
+    it('save persists globalPriceListId + priceListExplicitlySet on the Sale row', async () => {
+      const sale = Sale.fromPersistence({
+        id: 'sale-save-pl',
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        appliedOrderPromotion: null,
+        vetoedPromotionIds: [],
+        optedInManualPromotionIds: [],
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+      });
+      sale.setGlobalPriceList('gpl-mayoreo', true);
+
+      // 1st findUnique: existing-row probe (none). 2nd findUnique: reload
+      // after save (returns the just-persisted row).
+      prisma.sale.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          baseMockSaleData({
+            id: 'sale-save-pl',
+            globalPriceListId: 'gpl-mayoreo',
+            priceListExplicitlySet: true,
+          }),
+        );
+      prisma.sale.create.mockResolvedValue({ id: 'sale-save-pl' });
+
+      await repo.save(sale);
+
+      expect(prisma.sale.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            globalPriceListId: 'gpl-mayoreo',
+            priceListExplicitlySet: true,
+          }),
+        }),
+      );
     });
   });
 

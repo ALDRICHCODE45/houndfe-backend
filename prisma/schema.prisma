@@ -561,6 +561,7 @@ model GlobalPriceList {
   priceLists          PriceList[]
   customers           Customer[]
   promotionPriceLists PromotionPriceList[]
+  sales               Sale[]
 
   @@map("global_price_lists")
 }
@@ -689,12 +690,20 @@ model Sale {
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
 
+  // Work Unit — POS Price List Tiers. Nullable sale-level price-list
+  // assignment — `assignCustomer` seeds from `Customer.globalPriceListId`
+  // when `priceListExplicitlySet` is false; explicit `PUT /price-list`
+  // flips the discriminator to true (including null clears).
+  globalPriceListId      String?
+  priceListExplicitlySet Boolean @default(false)
+
   // Relations
   tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user               User                  @relation("SaleCashier", fields: [userId], references: [id], onDelete: Restrict)
   seller             User?                 @relation("SaleSeller", fields: [sellerUserId], references: [id], onDelete: SetNull)
   customer           Customer?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
   shippingAddress    CustomerAddress?      @relation(fields: [shippingAddressId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  globalPriceList    GlobalPriceList?      @relation(fields: [globalPriceListId], references: [id], onDelete: SetNull)
   items              SaleItem[]
   payments           SalePayment[]
   refunds            SaleRefund[]

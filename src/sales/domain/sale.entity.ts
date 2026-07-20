@@ -93,6 +93,21 @@ export interface SaleFromPersistenceProps {
    * Default: empty array.
    */
   optedInManualPromotionIds?: ReadonlyArray<string>;
+  /**
+   * WU1 — Sale-level price list binding. Null = no list chosen (default
+   * tier-aware or the catalog PUBLICO list). Tier-aware re-resolution on
+   * non-sticky lines happens in `recomputePricingAndPromotions`
+   * (sales.service.ts) using `batchResolvePriceMap`.
+   */
+  globalPriceListId?: string | null;
+  /**
+   * WU1 — Cashier-explicit price-list discriminator. False on
+   * freshly-created drafts and after `assignCustomer` auto-seeds;
+   * flipped to true on `PUT /price-list` (including a null clear). When
+   * true, `assignCustomer` MUST NOT auto-seed — protects the cashier's
+   * choice against an unrelated customer change.
+   */
+  priceListExplicitlySet?: boolean;
 }
 
 /**
@@ -135,6 +150,9 @@ export class Sale {
   private _appliedOrderPromotion: AppliedOrderPromotionSnapshot | null;
   private _vetoedPromotionIds: string[];
   private _optedInManualPromotionIds: string[];
+  // WU1 — sale-level price list binding.
+  private _globalPriceListId: string | null;
+  private _priceListExplicitlySet: boolean;
 
   private constructor(
     public readonly id: string,
@@ -166,6 +184,10 @@ export class Sale {
     appliedOrderPromotion: AppliedOrderPromotionSnapshot | null = null,
     vetoedPromotionIds: ReadonlyArray<string> = [],
     optedInManualPromotionIds: ReadonlyArray<string> = [],
+    // WU1 — sale-level price list binding. Null + false on a fresh
+    // `Sale.create({...})`; round-trip from persistence via `fromPersistence`.
+    globalPriceListId: string | null = null,
+    priceListExplicitlySet: boolean = false,
   ) {
     this._items = items;
     this._customerId = customerId;
@@ -178,6 +200,8 @@ export class Sale {
     this._appliedOrderPromotion = appliedOrderPromotion;
     this._vetoedPromotionIds = [...vetoedPromotionIds];
     this._optedInManualPromotionIds = [...optedInManualPromotionIds];
+    this._globalPriceListId = globalPriceListId;
+    this._priceListExplicitlySet = priceListExplicitlySet;
   }
 
   static create(props: CreateSaleProps): Sale {
@@ -237,6 +261,11 @@ export class Sale {
       props.appliedOrderPromotion ?? null,
       props.vetoedPromotionIds ?? [],
       props.optedInManualPromotionIds ?? [],
+      // WU1 — round-trip the optional persistence fields. `?? null` /
+      // `?? false` lets legacy rows reload cleanly (existing drafts do
+      // not have the new columns populated yet).
+      props.globalPriceListId ?? null,
+      props.priceListExplicitlySet ?? false,
     );
   }
 
@@ -280,6 +309,18 @@ export class Sale {
       this.canceledByUserId,
       this.createdAt,
       this.updatedAt,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      // WU1 — preserve the sale-level price list state across the
+      // DRAFT→CONFIRMED transition. The repriced totals travel in
+      // `totalCents` / `discountCents` (set by the charge path); the
+      // binding itself is the cashier's standing choice and stays.
+      this._globalPriceListId,
+      this._priceListExplicitlySet,
     );
   }
 
@@ -333,6 +374,11 @@ export class Sale {
         this.carrierName,
         this.trackingRef,
         this.estimatedDeliveryAt,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       ),
       refundedCents,
     };
@@ -389,6 +435,40 @@ export class Sale {
   /** MANUAL promotion ids the seller has opted into on this draft. */
   get optedInManualPromotionIds(): ReadonlyArray<string> {
     return this._optedInManualPromotionIds;
+  }
+
+  /**
+   * WU1 — Sale-level price-list binding. Null when no list is bound;
+   * non-sticky lines reprice tier-aware from this list during recompute.
+   * Surfaced on `toResponse()` for the FE contract.
+   */
+  get globalPriceListId(): string | null {
+    return this._globalPriceListId;
+  }
+
+  /**
+   * WU1 — Cashier-explicit setter discriminator. False on freshly-created
+   * drafts and after `assignCustomer` auto-seeds. True after any
+   * `PUT /price-list` (including a null clear). `assignCustomer` only
+   * seeds when this flag is false.
+   */
+  get priceListExplicitlySet(): boolean {
+    return this._priceListExplicitlySet;
+  }
+
+  /**
+   * WU1 — Set the sale-level price list. `id === null` is a clear;
+   * `explicit === true` records the cashier's choice (including the
+   * null clear so an unrelated `assignCustomer` cannot re-seed). Called
+   * from `SalesService.setSalePriceList` (PUT endpoint).
+   */
+  setGlobalPriceList(id: string | null, explicit: boolean): void {
+    this.ensureDraft();
+    if (id !== null && (typeof id !== 'string' || id.trim() === '')) {
+      throw new InvalidArgumentError('INVALID_PRICE_LIST_ID');
+    }
+    this._globalPriceListId = id;
+    this._priceListExplicitlySet = explicit;
   }
 
   /** Replace the sale-level ORDER_DISCOUNT snapshot. */
@@ -823,6 +903,16 @@ export class Sale {
     subtotalCents?: number;
     /** Live discount (subtotalCents − totalCents). Only present for DRAFT sales. */
     discountCents?: number;
+    /**
+     * WU1 — Sale-level price list binding. Null on drafts with no
+     * cashier-chosen list and no seeded customer list. Surfaced
+     * verbatim so the frontend can render the active list and switch
+     * it via `PUT /sales/drafts/:id/price-list`. The
+     * `priceListExplicitlySet` discriminator is intentionally
+     * omitted from the wire — it is internal bookkeeping for
+     * `assignCustomer` and carries no FE-contract meaning.
+     */
+    globalPriceListId?: string | null;
   } {
     const base = {
       id: this.id,
@@ -848,6 +938,9 @@ export class Sale {
       items: this._items.map((item) => item.toResponse()),
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
+      // WU1 — exposed on ALL surfaces (draft, confirmed, canceled). The
+      // binding is set on DRAFT and travels forward with the sale.
+      globalPriceListId: this._globalPriceListId,
     };
     // For DRAFT sales, surface live preview totals on the response. The
     // persisted `totalCents` is 0 for drafts (subtotalCents / discountCents /

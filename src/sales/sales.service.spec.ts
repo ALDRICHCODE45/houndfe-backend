@@ -76,6 +76,14 @@ function makeMockProductsService() {
           { categoryId: string | null; brandId: string | null }
         >(),
       ),
+    // WU2 — tier-aware batch resolver. Default empty map keeps the
+    // existing tests green (no resolved tier prices → engine reads the
+    // current `unitPriceCents` baseline; engine-driven flows stay
+    // byte-identical to pre-WU1). WU2/WU3 tests override this mock
+    // with explicit per-product tier maps.
+    batchResolvePriceMap: jest
+      .fn()
+      .mockResolvedValue(new Map<string, Map<number, number>>()),
     decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
   } as any;
@@ -83,7 +91,7 @@ function makeMockProductsService() {
 
 /**
  * Work Unit 4 — POS promotion engine (injected as Symbol token) is the
- * `SalesService.recomputePromotions(sale)` driving port. Default mock
+ * `SalesService.recomputePricingAndPromotions(sale)` driving port. Default mock
  * returns empty `lines` / null `order` so the existing tests stay green
  * when recompute is wired (a no-op when no promotions match).
  *
@@ -161,7 +169,11 @@ describe('SalesService', () => {
     posEvaluateUseCase = makeMockPosEvaluateUseCase();
     tenantPrisma = {
       getTenantId: jest.fn(() => 'tenant-1'),
-      getClient: jest.fn(() => ({}) as never),
+      getClient: jest.fn(() => ({
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+        },
+      }) as never),
     };
     service = createService(
       saleRepo,
@@ -1039,6 +1051,9 @@ describe('SalesService', () => {
             id: draftResponse.shippingAddress.id,
             customerId: draftResponse.customer.id,
           }),
+        },
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
         },
       };
       tenantPrisma.getClient = jest.fn(() => prismaClient as never);
@@ -4894,6 +4909,9 @@ describe('SalesService', () => {
         customerAddress: {
           findUnique: jest.fn(),
         },
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+        },
       });
 
       // Engine: customer-scoped promo applies only AFTER assignment.
@@ -7539,6 +7557,1021 @@ describe('SalesService', () => {
       // targetableManualPromotionIds still includes the promo id, so
       // SalesService does not prune it.
       expect(afterSecond.optedInManualPromotionIds).toContain('promo-bxgy-manual');
+    });
+  });
+
+  // ==========================================================================
+  // WU2 — Reprice Pipeline (recomputePricingAndPromotions)
+  // --------------------------------------------------------------------------
+  // The recompute pipeline is reordered to clear → reprice → eval. Reprice
+  // runs per non-sticky line via the batch resolver. Sticky lines (custom,
+  // manual discount, per-item override) keep their price.
+  //
+  // Tests in this block exercise the public service surface (addItem /
+  // updateItemQuantity / assignCustomer / overrideItemPrice / etc.) and
+  // assert:
+  //   - batchResolvePriceMap is called once per recompute with the sale's
+  //     non-sticky lines.
+  //   - engine.evaluate is called AFTER reprice so the engine's input
+  //     carries the repriced `unitPriceCents` (BXGY discriminator holds).
+  //   - sticky lines are untouched.
+  //   - 5x successive recomputes (no mutations in between) are byte-equal.
+  // ==========================================================================
+  describe('WU2 — reprice pipeline + chargeDraft alignment', () => {
+    // Helpers ----------------------------------------------------------------
+    function buildDraftWithSaleListAndItem(opts: {
+      saleId: string;
+      itemId: string;
+      productId: string;
+      unitPriceCents: number;
+      quantity: number;
+      globalPriceListId: string | null;
+      priceListExplicitlySet?: boolean;
+    }) {
+      const sale = Sale.create({ id: opts.saleId, userId: 'user-1' });
+      if (opts.globalPriceListId !== null) {
+        sale.setGlobalPriceList(
+          opts.globalPriceListId,
+          opts.priceListExplicitlySet ?? true,
+        );
+      }
+      sale.addItem({
+        id: opts.itemId,
+        saleId: opts.saleId,
+        productId: opts.productId,
+        variantId: null,
+        productName: 'P',
+        variantName: null,
+        quantity: opts.quantity,
+        unitPriceCents: opts.unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+      return sale;
+    }
+
+    // ---- 2.1.a — addItem triggers batchResolvePriceMap with the sale list
+    it('addItem calls batchResolvePriceMap once with the sale-level list as effectivePriceListId', async () => {
+      const saleId = 'sale-wu2-add';
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'P',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      // Engine returns empty so the line keeps its repriced baseline.
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [],
+      });
+      // Set the sale-level MAYOREO list BEFORE the addItem call (sale is
+      // already loaded with the binding in this test).
+      const sale = buildDraftWithSaleListAndItem({
+        saleId,
+        itemId: 'item-wu2-1',
+        productId: 'prod-1',
+        unitPriceCents: 1000,
+        quantity: 1,
+        globalPriceListId: 'gpl-mayoreo',
+      });
+      // addItem finds the existing draft + the user adds another qty via
+      // the public API path; simulate a freshly-loaded entity (no items)
+      // so addItem exercises the full addItem → recompute → save loop.
+      const draftNoItems = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+      });
+      saleRepo.findById.mockResolvedValue(draftNoItems);
+
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 1,
+      });
+
+      expect(productsService.batchResolvePriceMap).toHaveBeenCalledTimes(1);
+      const inputs = (
+        productsService.batchResolvePriceMap as jest.Mock
+      ).mock.calls[0][0] as Array<{
+        productId: string;
+        variantId: string | null;
+        priceListId: string | null;
+        quantity: number;
+      }>;
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0]).toMatchObject({
+        productId: 'prod-1',
+        variantId: null,
+        priceListId: 'gpl-mayoreo',
+        quantity: 1,
+      });
+    });
+
+    // ---- 2.1.b — reprice runs BEFORE the engine so BXGY discriminator
+    // (unitPrice === prePriceCentsBeforeDiscount) holds
+    it('runs reprice BEFORE engine.evaluate so BXGY engine sees the tier-adjusted unitPrice', async () => {
+      const saleId = 'sale-wu2-bxgy-discriminator';
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-bxgy',
+        productName: 'BXGY product',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      // Batch resolver returns a tier price 800c for the line at qty=5.
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        new Map([
+          [
+            'prod-bxgy::::gpl-mayoreo',
+            new Map<number, number>([[1, 800]]),
+          ],
+        ]),
+      );
+
+      // Capture the unitPriceCents the engine receives — the spec scenario
+      // "Reprice ordered between discount-clear and engine build" requires
+      // the engine input line to carry the REPRICED unit price, not the
+      // add-time frozen 1000c snapshot.
+      let capturedLine: { unitPriceCents?: number } | undefined;
+      posEvaluateUseCase.evaluate.mockImplementation((input) => {
+        capturedLine = input.lines[0];
+        return Promise.resolve({
+          lines: [],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        });
+      });
+
+      const draft = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-bxgy',
+        variantId: null,
+        quantity: 1,
+      });
+
+      expect(capturedLine).toBeDefined();
+      expect(capturedLine!.effectiveUnitPriceCents).toBe(800);
+    });
+
+    // ---- 2.1.c — sticky line (custom price) is SKIPPED by reprice
+    it('skips reprice on a sticky (priceSource=custom) line — original price preserved', async () => {
+      const saleId = 'sale-wu2-sticky-custom';
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-sticky',
+        productName: 'Sticky',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      const draft = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-sticky',
+            saleId,
+            productId: 'prod-sticky',
+            variantId: null,
+            productName: 'Sticky',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 12345,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'custom' as const,
+            customPriceCents: 12345,
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+
+      await service.updateItemQuantity(saleId, 'user-1', 'item-sticky', {
+        quantity: 2,
+      });
+
+      const inputs = (
+        productsService.batchResolvePriceMap as jest.Mock
+      ).mock.calls[0]?.[0] as Array<unknown> | undefined;
+      // Sticky line is filtered out — empty input → no DB query.
+      expect(inputs ?? []).toHaveLength(0);
+      expect(draft.items[0].unitPriceCents).toBe(12345);
+      expect(draft.items[0].priceSource).toBe('custom');
+    });
+
+    // ---- 2.1.d — manual-discount sticky line is SKIPPED by reprice
+    it('skips reprice on a line carrying a manual free-form discount (priceSource stays, discount stays)', async () => {
+      const saleId = 'sale-wu2-sticky-discount';
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-md',
+        productName: 'Manual discount',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      const draft = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-md',
+            saleId,
+            productId: 'prod-md',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 900,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+            discountType: 'amount' as const,
+            discountValue: 100,
+            discountAmountCents: 100,
+            prePriceCentsBeforeDiscount: 1000,
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+
+      await service.updateItemQuantity(saleId, 'user-1', 'item-md', {
+        quantity: 3,
+      });
+
+      const inputs = (
+        productsService.batchResolvePriceMap as jest.Mock
+      ).mock.calls[0]?.[0] as Array<unknown> | undefined;
+      // Manual-discount line is sticky → skipped by reprice.
+      expect(inputs ?? []).toHaveLength(0);
+      expect(draft.items[0].unitPriceCents).toBe(900);
+      expect(draft.items[0].prePriceCentsBeforeDiscount).toBe(1000);
+    });
+
+    // ---- 2.1.e — per-item override line keeps its own appliedPriceListId
+    it('per-item override line is repriced from its OWN appliedPriceListId, not the sale-level list', async () => {
+      const saleId = 'sale-wu2-override';
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-ov',
+        productName: 'Override',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+
+      const draft = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-ov',
+            saleId,
+            productId: 'prod-ov',
+            variantId: null,
+            productName: 'Override',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 800,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'price_list' as const,
+            appliedPriceListId: 'pl-especial',
+            originalPriceCents: 1000,
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        globalPriceListId: 'gpl-mayoreo', // sale-level list — must NOT clobber
+        priceListExplicitlySet: true,
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+
+      await service.updateItemQuantity(saleId, 'user-1', 'item-ov', {
+        quantity: 3,
+      });
+
+      const inputs = (
+        productsService.batchResolvePriceMap as jest.Mock
+      ).mock.calls[0][0] as Array<{
+        productId: string;
+        variantId: string | null;
+        priceListId: string | null;
+        quantity: number;
+      }>;
+      // Override lines re-tier within their own list on qty change.
+      expect(inputs).toEqual([
+        {
+          productId: 'prod-ov',
+          variantId: null,
+          priceListId: 'pl-especial',
+          quantity: 3,
+        },
+      ]);
+    });
+
+    // ---- 2.1.f — 5x successive recomputes are byte-equal (idempotency)
+    it('five successive recomputes on the same draft are byte-equal (idempotency contract)', async () => {
+      const saleId = 'sale-wu2-idempotency';
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      // 1-tier price = 800c on the MAYOREO list. Engine returns a
+      // per-unit 10% PRODUCT_DISCOUNT for every line.
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        new Map([
+          [
+            'prod-idem::::gpl-mayoreo',
+            new Map<number, number>([[1, 800]]),
+          ],
+        ]),
+      );
+      posEvaluateUseCase.evaluate.mockImplementation((input) =>
+        Promise.resolve({
+          lines: input.lines.map((l) => ({
+            itemId: l.itemId,
+            promotionId: 'promo-auto-1',
+            discountType: 'percentage',
+            discountValue: 10,
+            discountTitle: '10% off',
+          })),
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      // Build the first draft with a KNOWN itemId so the snapshot and
+      // the reload compare byte-equal (randomUUID from addItem would
+      // diverge across snapshots).
+      const draft0 = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-idem',
+            saleId,
+            productId: 'prod-idem',
+            variantId: null,
+            productName: 'Idempotency',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 720, // already-discounted state
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+            discountType: 'percentage' as const,
+            discountValue: 10,
+            discountAmountCents: 80,
+            prePriceCentsBeforeDiscount: 800,
+            promotionId: 'promo-auto-1',
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+      });
+      saleRepo.findById.mockResolvedValue(draft0);
+
+      // First recompute — run via updateItemQuantity at the same qty
+      // so we get a deterministic recompute trigger.
+      await service.updateItemQuantity(saleId, 'user-1', 'item-idem', {
+        quantity: 1,
+      });
+      // Snapshot the pricing-state fields (timestamps intentionally
+      // excluded — `applyDiscount` rewrites `discountedAt` on every
+      // recompute; the spec's "byte-equal" contract is on the pricing
+      // shape, not wall-clock milliseconds).
+      const stripInstability = (dto: any): any => ({
+        ...dto,
+        createdAt: 'SNAPSHOT',
+        updatedAt: 'SNAPSHOT',
+        items: dto.items.map((item: any) => ({
+          ...item,
+          discountedAt: 'SNAPSHOT',
+        })),
+      });
+      const snapshot = JSON.stringify(stripInstability(draft0.toResponse()));
+
+      // 4 more recomputes with NO mutations in between — same input,
+      // same entity (re-reload each time to drive a fresh recompute
+      // path through the public service surface).
+      for (let i = 0; i < 4; i++) {
+        const reloaded = Sale.fromPersistence({
+          id: saleId,
+          userId: 'user-1',
+          status: 'DRAFT',
+          items: [
+            {
+              id: 'item-idem',
+              saleId,
+              productId: 'prod-idem',
+              variantId: null,
+              productName: 'Idempotency',
+              variantName: null,
+              quantity: 1,
+              unitPriceCents: 720,
+              unitPriceCurrency: 'MXN',
+              priceSource: 'default' as const,
+              discountType: 'percentage' as const,
+              discountValue: 10,
+              discountAmountCents: 80,
+              prePriceCentsBeforeDiscount: 800,
+              promotionId: 'promo-auto-1',
+            },
+          ],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          globalPriceListId: 'gpl-mayoreo',
+          priceListExplicitlySet: true,
+        });
+        saleRepo.findById.mockResolvedValue(reloaded);
+
+        await service.updateItemQuantity(saleId, 'user-1', 'item-idem', {
+          quantity: 1,
+        });
+        const next = JSON.stringify(stripInstability(reloaded.toResponse()));
+        expect(next).toBe(snapshot);
+      }
+    });
+
+    // ---- 2.2.a — chargeDraft totals == preview totals after tier-crossing
+    it('chargeDraft totals match getSaleDetail totals after a tier-crossing quantity change (no PRICE_OUT_OF_DATE)', async () => {
+      // Draft already repriced to the 5-tier price (800c base). User
+      // raises qty from 4→5 → recompute would normally reprice again.
+      // The charge tx must NOT throw PRICE_OUT_OF_DATE because no
+      // catalog drift has occurred (the resolver returns 800c, the line
+      // base IS 800c).
+      const saleId = 'sale-wu2-charge-tier';
+      const draft = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-tier',
+            saleId,
+            productId: 'prod-tier',
+            variantId: null,
+            productName: 'Tier',
+            variantName: null,
+            quantity: 5,
+            unitPriceCents: 800,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'price_list' as const,
+            appliedPriceListId: 'pl-mayoreo',
+            prePriceCentsBeforeDiscount: 800,
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(draft);
+      // The resolveListPrice path (used by chargeDraft validation)
+      // returns the SAME 800c the line was repriced to → no drift.
+      productsService.resolveListPrice.mockResolvedValue(800);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-tier',
+        productName: 'Tier',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 800,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+
+      // Stub a SAVE that mirrors the public contract.
+      saleRepo.findOneWithRelations.mockResolvedValue({} as any);
+      saleRepo.persistChargeConfirmation.mockResolvedValue({
+        saleId,
+        folio: 'F-001',
+        subtotalCents: 4000,
+        discountCents: 0,
+        totalCents: 4000,
+        paidCents: 4000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date().toISOString(),
+      });
+
+      // The pure-validation path is enough — we just need to assert no
+      // PRICE_OUT_OF_DATE thrown and that the txn persisted.
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      await expect(
+        service.chargeDraft(
+          saleId,
+          'user-1',
+          {
+            method: 'cash',
+            amountCents: 5000,
+          } as any,
+          'idem-wu2-charge-1',
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    // ---- 2.2.b — genuine catalog drift still rejected
+    it('rejects chargeDraft with PRICE_OUT_OF_DATE on a genuine catalog drift after the last recompute', async () => {
+      const saleId = 'sale-wu2-charge-drift';
+      const draft = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-drift',
+            saleId,
+            productId: 'prod-drift',
+            variantId: null,
+            productName: 'Drift',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+            prePriceCentsBeforeDiscount: 1000,
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(draft);
+      // Catalog WAS edited — new base price is 1200c, line base is 1000c.
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-drift',
+        productName: 'Drift',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 1200,
+      });
+
+      await expect(
+        service.chargeDraft(
+          saleId,
+          'user-1',
+          {
+            method: 'cash',
+            amountCents: 2000,
+          } as any,
+          'idem-wu2-charge-drift',
+        ),
+      ).rejects.toMatchObject({ code: 'PRICE_OUT_OF_DATE' });
+    });
+  });
+
+  // ==========================================================================
+  // WU3 — setSalePriceList use case (PUT /sales/drafts/:id/price-list)
+  // --------------------------------------------------------------------------
+  // Spec scenarios for "Sale-Level Price List Lifecycle":
+  //   - Set list on loaded draft → repriced response includes
+  //     globalPriceListId.
+  //   - Set on empty draft seeds future adds.
+  //   - Clear reverts to default, keeps overrides.
+  //   - Unknown list id rejected.
+  //   - Missing permission rejected.
+  // ==========================================================================
+  describe('WU3 — setSalePriceList (POS Price List Tiers endpoint)', () => {
+    function baseMockDraft(overrides: Record<string, unknown> = {}) {
+      return Sale.fromPersistence({
+        id: 'sale-pl-set',
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...overrides,
+      } as any);
+    }
+
+    it('binds the sale to the given list and reprices non-sticky lines', async () => {
+      const draft = baseMockDraft({
+        items: [
+          {
+            id: 'item-pl-1',
+            saleId: 'sale-pl-set',
+            productId: 'prod-pl',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+      // Catalog lookup returns the GlobalPriceList row.
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'gpl-mayoreo' }),
+        },
+      });
+      // Batch resolver returns tier price for the non-sticky line.
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        new Map([
+          [
+            'prod-pl::::gpl-mayoreo',
+            new Map<number, number>([[1, 800]]),
+          ],
+        ]),
+      );
+      // The full-response reload after save.
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: 'sale-pl-set',
+        globalPriceListId: 'gpl-mayoreo',
+        items: [],
+      });
+
+      const result = await service.setSalePriceList('sale-pl-set', 'user-1', {
+        globalPriceListId: 'gpl-mayoreo',
+      });
+
+      // Non-sticky line repriced.
+      expect(draft.globalPriceListId).toBe('gpl-mayoreo');
+      expect(draft.priceListExplicitlySet).toBe(true);
+      expect(draft.items[0].unitPriceCents).toBe(800);
+      expect(result).toBeDefined();
+    });
+
+    it('on an empty draft, just stores the binding (no DB query, no items to reprice)', async () => {
+      const draft = baseMockDraft();
+      saleRepo.findById.mockResolvedValue(draft);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'gpl-mayoreo' }),
+        },
+      });
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: 'sale-pl-set',
+        globalPriceListId: 'gpl-mayoreo',
+        items: [],
+      });
+
+      await service.setSalePriceList('sale-pl-set', 'user-1', {
+        globalPriceListId: 'gpl-mayoreo',
+      });
+
+      expect(draft.globalPriceListId).toBe('gpl-mayoreo');
+      expect(draft.priceListExplicitlySet).toBe(true);
+      // Empty draft → no resolver call (no items).
+      expect(productsService.batchResolvePriceMap).not.toHaveBeenCalled();
+    });
+
+    it('clear (null) reverts non-override non-sticky lines to default list and keeps overrides', async () => {
+      // Draft with one MAYOREO-priced line and one override-priced line.
+      const draft = baseMockDraft({
+        globalPriceListId: 'gpl-mayoreo',
+        priceListExplicitlySet: true,
+        items: [
+          {
+            id: 'item-mayoreo',
+            saleId: 'sale-pl-set',
+            productId: 'prod-may',
+            variantId: null,
+            productName: 'M',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 800,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'price_list' as const,
+            appliedPriceListId: 'pl-mayoreo',
+          },
+          {
+            id: 'item-override',
+            saleId: 'sale-pl-set',
+            productId: 'prod-ov',
+            variantId: null,
+            productName: 'O',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 700,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'price_list' as const,
+            appliedPriceListId: 'pl-especial',
+            originalPriceCents: 1000,
+          },
+        ],
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue(null), // null body does not query
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+        },
+      });
+      // No batch resolve — clearing on these lines has nothing to resolve from
+      // (effective price list = item.appliedPriceListId either way).
+      saleRepo.findDraftResponseById.mockResolvedValue({
+        id: 'sale-pl-set',
+        globalPriceListId: null,
+        items: [],
+      });
+
+      await service.setSalePriceList('sale-pl-set', 'user-1', {
+        globalPriceListId: null,
+      });
+
+      // Sale-level binding null + explicit.
+      expect(draft.globalPriceListId).toBeNull();
+      expect(draft.priceListExplicitlySet).toBe(true);
+      // Both override lines untouched.
+      expect(draft.items.find((i) => i.id === 'item-mayoreo')!.appliedPriceListId).toBe(
+        'pl-mayoreo',
+      );
+      expect(draft.items.find((i) => i.id === 'item-override')!.appliedPriceListId).toBe(
+        'pl-especial',
+      );
+      expect(draft.items.find((i) => i.id === 'item-override')!.unitPriceCents).toBe(700);
+    });
+
+    it('rejects unknown globalPriceListId with PRICE_LIST_NOT_FOUND and leaves draft unchanged', async () => {
+      const draft = baseMockDraft({
+        globalPriceListId: null,
+        priceListExplicitlySet: false,
+      });
+      saleRepo.findById.mockResolvedValue(draft);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        globalPriceList: {
+          findUnique: jest.fn().mockResolvedValue(null),
+        },
+      });
+
+      await expect(
+        service.setSalePriceList('sale-pl-set', 'user-1', {
+          globalPriceListId: 'gpl-does-not-exist',
+        }),
+      ).rejects.toMatchObject({ code: 'PRICE_LIST_NOT_FOUND' });
+
+      expect(draft.globalPriceListId).toBeNull();
+      expect(draft.priceListExplicitlySet).toBe(false);
+      // The cancel-no-mutate invariant — no save happens on rejection.
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects when sale is not in DRAFT status', async () => {
+      const draft = baseMockDraft();
+      // Mutate the status to CONFIRMED by re-creating the entity:
+      const confirmedDraft = Sale.fromPersistence({
+        id: 'sale-pl-set',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as any);
+      saleRepo.findById.mockResolvedValue(confirmedDraft);
+
+      await expect(
+        service.setSalePriceList('sale-pl-set', 'user-1', {
+          globalPriceListId: 'gpl-mayoreo',
+        }),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+    });
+
+    it('rejects when the actor does not own the draft', async () => {
+      const draft = baseMockDraft({ userId: 'other-user' });
+      saleRepo.findById.mockResolvedValue(draft);
+
+      await expect(
+        service.setSalePriceList('sale-pl-set', 'user-1', {
+          globalPriceListId: 'gpl-mayoreo',
+        }),
+      ).rejects.toMatchObject({ code: 'SALE_UPDATE_FORBIDDEN' });
+    });
+  });
+
+  // ==========================================================================
+  // WU3 Task 3.3 — assignCustomer seeding semantics
+  // --------------------------------------------------------------------------
+  // Spec scenarios for "assignCustomer Seeds Sale Price List":
+  //   - Wholesale customer seeds the sale list and reprices
+  //     non-sticky lines.
+  //   - Explicit cashier choice wins (priceListExplicitlySet=true
+  //     protects against reseed).
+  //   - Sticky lines survive seeding.
+  //   - Customer with null globalPriceListId → no change.
+  // ==========================================================================
+  describe('WU3 Task 3.3 — assignCustomer seeds Sale price list', () => {
+    function assignPrismaMock(
+      customerRow: { id: string; globalPriceListId?: string | null } | null,
+    ) {
+      return {
+        customer: {
+          findUnique: jest.fn().mockResolvedValue(customerRow),
+        },
+        customerAddress: {
+          findUnique: jest.fn(),
+        },
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+        },
+      };
+    }
+
+    it('seeds globalPriceListId from customer.globalPriceListId when priceListExplicitlySet=false', async () => {
+      const saleId = 'sale-seed-1';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-seed-1',
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+          },
+        ],
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+      );
+      // Batch resolver returns tier price for the seeded list.
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        new Map([
+          [
+            'prod-1::::gpl-mayoreo',
+            new Map<number, number>([[1, 800]]),
+          ],
+        ]),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(
+        sale.toResponse(),
+      );
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-mayoreo',
+      });
+
+      expect(sale.globalPriceListId).toBe('gpl-mayoreo');
+      expect(sale.priceListExplicitlySet).toBe(false); // seeded, not cashier-picked
+      // Non-sticky line repriced.
+      expect(sale.items[0].unitPriceCents).toBe(800);
+    });
+
+    it('explicit cashier choice (priceListExplicitlySet=true) is NOT clobbered', async () => {
+      const saleId = 'sale-seed-2';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-seed-2',
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'P',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'default' as const,
+          },
+        ],
+        globalPriceListId: 'gpl-especial', // cashier already picked
+        priceListExplicitlySet: true, // explicit
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-mayoreo',
+      });
+
+      // Sale list stays ESPECIAL; the cashier choice is preserved.
+      expect(sale.globalPriceListId).toBe('gpl-especial');
+      expect(sale.priceListExplicitlySet).toBe(true);
+    });
+
+    it('sticky (custom-price) line survives seeding', async () => {
+      const saleId = 'sale-seed-3';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'item-sticky',
+            saleId,
+            productId: 'prod-sticky',
+            variantId: null,
+            productName: 'Sticky',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 12345,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'custom' as const,
+            customPriceCents: 12345,
+          },
+        ],
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-mayoreo', globalPriceListId: 'gpl-mayoreo' }),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-mayoreo',
+      });
+
+      // Sale list seeded.
+      expect(sale.globalPriceListId).toBe('gpl-mayoreo');
+      // Sticky line untouched.
+      expect(sale.items[0].unitPriceCents).toBe(12345);
+      expect(sale.items[0].priceSource).toBe('custom');
+    });
+
+    it('customer with null globalPriceListId does NOT change sale list', async () => {
+      const saleId = 'sale-seed-4';
+      const sale = Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      } as any);
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(
+        assignPrismaMock({ id: 'cust-pub', globalPriceListId: null }),
+      );
+      saleRepo.findDraftResponseById.mockResolvedValue(sale.toResponse());
+
+      await service.assignCustomer(saleId, 'user-1', {
+        customerId: 'cust-pub',
+      });
+
+      expect(sale.globalPriceListId).toBeNull();
+      expect(sale.priceListExplicitlySet).toBe(false);
     });
   });
 });

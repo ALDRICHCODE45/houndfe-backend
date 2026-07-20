@@ -110,6 +110,23 @@ export interface OverrideSaleItemPriceInput {
 }
 
 /**
+ * Input for `SaleItem.reprice` (POS Price List Tiers — WU1). Distinct
+ * from `OverrideSaleItemPriceInput`: `reprice` is engine-driven tier
+ * re-resolution on non-sticky lines (addItem / updateItemQuantity /
+ * sale-list switch) and MUST NOT snapshot `_originalPriceCents` or clear
+ * any discount field — those side-effects belong to `overridePrice`. The
+ * `priceSource` is therefore restricted to `'default' | 'price_list'`;
+ * `'custom'` would mark the line sticky and is rejected here.
+ */
+export interface RepriceSaleItemInput {
+  priceCents: number;
+  /** `'custom'` is accepted for type-safety but MUST throw at runtime —
+   *  callers route sticky lines through `overridePrice()`, never `reprice()`. */
+  priceSource: 'default' | 'price_list' | 'custom';
+  appliedPriceListId: string | null;
+}
+
+/**
  * SaleItem Entity - represents a line item in a POS sale
  *
  * Business rules:
@@ -350,6 +367,28 @@ export class SaleItem {
     this._appliedPriceListId = input.appliedPriceListId;
     this._customPriceCents = input.customPriceCents;
     this.clearDiscountFields();
+  }
+
+  /**
+   * WU1 — `reprice` is the engine-driven tier re-resolver on non-sticky
+   * lines (addItem / updateItemQuantity / sale-list switch). Mutates
+   * `_unitPriceCents` + `_priceSource` + optional `_appliedPriceListId`
+   * only — NEVER snapshots `_originalPriceCents`, NEVER touches discount
+   * fields. The `priceSource` is restricted to `'default' | 'price_list'`;
+   * `'custom'` is rejected because marking a line sticky is
+   * `overridePrice`'s contract.
+   */
+  reprice(input: RepriceSaleItemInput): void {
+    if (input.priceSource === 'custom') {
+      throw new InvalidArgumentError('INVALID_REPRICE_INPUT');
+    }
+    if (!Number.isInteger(input.priceCents) || input.priceCents < 0) {
+      throw new InvalidArgumentError('INVALID_REPRICE_INPUT');
+    }
+
+    this._unitPriceCents = input.priceCents;
+    this._priceSource = input.priceSource;
+    this._appliedPriceListId = input.appliedPriceListId;
   }
 
   applyDiscount(input: ApplySaleItemDiscountInput): void {

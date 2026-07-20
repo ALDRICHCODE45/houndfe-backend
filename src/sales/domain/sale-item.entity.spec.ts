@@ -394,6 +394,145 @@ describe('SaleItem Entity', () => {
     });
   });
 
+  // Work Unit 1 — SaleItem.reprice (POS Price List Tiers). Distinct from
+  // `overridePrice` (which snapshots `_originalPriceCents`, clears discount
+  // fields, and marks the line sticky); `reprice` is the engine-driven
+  // re-tier at addItem / updateItemQuantity / sale-list-switch time on
+  // non-sticky lines. It mutates `_unitPriceCents` + `_priceSource` +
+  // optional `_appliedPriceListId` and NEVER touches `originalPriceCents`
+  // or any discount field (the manual-discount sticky guard relies on
+  // this — see recomputeNonStickyLines).
+  describe('reprice - re-tier line at addItem / qty change / sale-list switch (WU1)', () => {
+    function makeItem(overrides: Partial<Parameters<typeof SaleItem.create>[0]> = {}) {
+      return SaleItem.create({
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        saleId: '550e8400-e29b-41d4-a716-446655440000',
+        productId: 'prod-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+        ...overrides,
+      });
+    }
+
+    it('sets _unitPriceCents and _priceSource to the resolved tier price (price_list)', () => {
+      const item = makeItem({ unitPriceCents: 1000 });
+
+      item.reprice({
+        priceCents: 800,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-1',
+      });
+
+      expect(item.unitPriceCents).toBe(800);
+      expect(item.priceSource).toBe('price_list');
+      expect(item.appliedPriceListId).toBe('list-1');
+    });
+
+    it('sets _unitPriceCents to the default-list price when appliedPriceListId is null', () => {
+      const item = makeItem({ unitPriceCents: 1000 });
+
+      item.reprice({
+        priceCents: 1000,
+        priceSource: 'default',
+        appliedPriceListId: null,
+      });
+
+      expect(item.unitPriceCents).toBe(1000);
+      expect(item.priceSource).toBe('default');
+      expect(item.appliedPriceListId).toBeNull();
+    });
+
+    it('does NOT snapshot originalPriceCents (no _originalPriceCents side-effect)', () => {
+      const item = makeItem({ unitPriceCents: 1000 });
+
+      item.reprice({
+        priceCents: 800,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-1',
+      });
+
+      expect(item.originalPriceCents).toBeNull();
+    });
+
+    it('does NOT clear discount fields (promotion/manual state preserved across reprice)', () => {
+      const item = makeItem({ unitPriceCents: 1000 });
+      item.applyDiscount({
+        type: 'amount',
+        amountCents: 100,
+        discountTitle: 'manual 1.00',
+      });
+
+      const promotionIdBefore = item.promotionId;
+
+      item.reprice({
+        priceCents: 900,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-1',
+      });
+
+      // Discount fields untouched by reprice — only overridePrice clears
+      // them (`clearDiscountFields` at sale-item.entity.ts:511).
+      expect(item.discountType).toBe('amount');
+      expect(item.discountValue).toBe(100);
+      expect(item.discountAmountCents).toBe(100);
+      expect(item.prePriceCentsBeforeDiscount).toBe(1000);
+      expect(item.discountTitle).toBe('manual 1.00');
+      expect(item.promotionId).toBe(promotionIdBefore);
+    });
+
+    it('updates _appliedPriceListId when called on a per-item overridden line (re-tier within SAME list)', () => {
+      const item = makeItem({ unitPriceCents: 800 });
+      item.overridePrice({
+        priceCents: 800,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-1',
+        customPriceCents: null,
+      });
+
+      item.reprice({
+        priceCents: 700,
+        priceSource: 'price_list',
+        appliedPriceListId: 'list-1',
+      });
+
+      expect(item.unitPriceCents).toBe(700);
+      expect(item.appliedPriceListId).toBe('list-1');
+      // originalPriceCents was set by overridePrice and stays put — reprice
+      // never mutates it.
+      expect(item.originalPriceCents).toBe(800);
+    });
+
+    it('throws InvalidArgumentError when priceCents is negative', () => {
+      const item = makeItem({ unitPriceCents: 1000 });
+      expect(() =>
+        item.reprice({
+          priceCents: -1,
+          priceSource: 'price_list',
+          appliedPriceListId: 'list-1',
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    it('rejects the priceSource="custom" source (reprice MUST NOT mark a line sticky)', () => {
+      const item = makeItem({ unitPriceCents: 1000 });
+      // Reprice is for tier-aware re-resolution. A custom price marks a
+      // line sticky and is owned by overridePrice; reprice refuses the
+      // 'custom' source so the engine path cannot accidentally turn a
+      // non-sticky line into a sticky one.
+      expect(() =>
+        item.reprice({
+          priceCents: 900,
+          priceSource: 'custom',
+          appliedPriceListId: null,
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+  });
+
   describe('discount behavior', () => {
     it('applies percentage discount and stores metadata', () => {
       const item = SaleItem.create({

@@ -76,6 +76,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.NOT_FOUND;
     if (exception.code === 'SALE_NOT_DRAFT') return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_ALREADY_CONFIRMED') return HttpStatus.CONFLICT;
+    if (exception.code === 'PRICE_LIST_NOT_FOUND')
+      return HttpStatus.BAD_REQUEST;
     if (exception.code === 'PRICE_OUT_OF_DATE') return HttpStatus.CONFLICT;
     if (exception.code === 'STOCK_INSUFFICIENT_AT_CONFIRM')
       return HttpStatus.CONFLICT;
