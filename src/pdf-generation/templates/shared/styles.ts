@@ -33,7 +33,14 @@ const COLORS = {
   textBody: '#443d4e',
   textMuted: '#938c9e',
   brand: '#f6bb13',
+  // Brand-tinted surface: a soft yellow wash (~10% perceived opacity)
+  // used as the background of the grand-total row. Kept as a literal
+  // here rather than derived so the value is stable across renders.
+  brandSurface: '#fef9e6',
   surface: '#fbfafc',
+  // Lighter divider for table rows — visually subtle so the eye reads
+  // the receipt by color blocks instead of a hard grid.
+  rowDivider: '#f5f3f7',
   border: '#eceaf0',
   divider: '#eceaf0',
   white: '#ffffff',
@@ -59,6 +66,15 @@ export const SHARED_STYLES = {
       borderColor: COLORS.border,
       borderStyle: 'solid' as const,
     },
+    // Brand accent bar — a 3pt solid yellow strip rendered at the
+    // very top of every receipt page. This is the primary brand-color
+    // element of the redesign; it replaces the gray border grid as
+    // the receipt's primary visual marker.
+    brandAccentBar: {
+      height: 3,
+      backgroundColor: COLORS.brand,
+      marginBottom: 8,
+    },
     sectionHeader: {
       fontFamily: FONTS.bodyBold,
       fontSize: 9,
@@ -67,6 +83,13 @@ export const SHARED_STYLES = {
       textTransform: 'uppercase' as const,
       marginTop: 10,
       marginBottom: 4,
+      // Yellow underline carries the brand color through the middle of
+      // the receipt (PRODUCTOS / TOTALES / PAGOS) without relying on
+      // vertical/horizontal borders for visual structure.
+      borderBottomWidth: 2,
+      borderBottomColor: COLORS.brand,
+      borderBottomStyle: 'solid' as const,
+      paddingBottom: 4,
     },
     footer: {
       fontFamily: FONTS.bodyBold,
@@ -74,23 +97,44 @@ export const SHARED_STYLES = {
       color: COLORS.inkSoft,
       textAlign: 'center' as const,
       marginTop: 12,
+      // Thin yellow hairline above the "Gracias" line — mirrors the
+      // top accent bar at the bottom of the receipt so the brand
+      // color brackets the whole page.
+      borderTopWidth: 1,
+      borderTopColor: COLORS.brand,
+      borderTopStyle: 'solid' as const,
+      paddingTop: 8,
     },
     subtitle: {
       fontFamily: FONTS.body,
       fontSize: 8,
       color: COLORS.textMuted,
-      letterSpacing: 1,
+      // Tight tracking: 1 made "FARMACIA" spread wide enough to
+      // collide with the descenders of the HoundFe title above on
+      // the narrow ticket format. 0.4 keeps the word legible while
+      // staying visually tight under the title.
+      letterSpacing: 0.4,
       textTransform: 'uppercase' as const,
+    },
+    folioBox: {
+      minWidth: 95,
+      borderWidth: 1,
+      borderColor: COLORS.border,
+      borderStyle: 'solid' as const,
+      paddingHorizontal: 6,
+      paddingVertical: 5,
     },
     folioRow: {
       flexDirection: 'row' as const,
       justifyContent: 'space-between' as const,
+      alignItems: 'baseline' as const,
       marginBottom: 4,
     },
     folioBlock: {
       textAlign: 'right' as const,
       fontFamily: FONTS.body,
       fontSize: 8,
+      color: COLORS.textMuted,
     },
     folioValue: {
       fontFamily: FONTS.bodyBold,
@@ -120,6 +164,16 @@ export const SHARED_STYLES = {
       color: COLORS.ink,
       marginBottom: 2,
     },
+    // Smaller company-name variant for narrow formats (e.g. 80mm
+    // ticket). The default 18pt HoundFe word dominates the header
+    // and visually collides with the FARMACIA subtitle below; 14pt
+    // gives the subtitle room to breathe on a 227pt page.
+    companyNameSmall: {
+      fontFamily: FONTS.bodyBold,
+      fontSize: 14,
+      color: COLORS.ink,
+      marginBottom: 2,
+    },
     brandLine: {
       fontFamily: FONTS.body,
       fontSize: 8,
@@ -142,16 +196,22 @@ export const SHARED_STYLES = {
 
   // ─── Line-items table ───────────────────────────────────────────
   table: {
+    // Wrapper keeps its outer boundary but in a barely-there row
+    // divider color — visual structure is carried by the section
+    // header underline + header-row fill, not by a hard border grid.
+    wrapper: {
+      borderWidth: 1,
+      borderColor: COLORS.rowDivider,
+      borderStyle: 'solid' as const,
+    },
     headerRow: {
       flexDirection: 'row',
-      borderTopWidth: 1,
-      borderTopColor: COLORS.border,
-      borderTopStyle: 'solid',
+      // Surface-gray fill separates the header from data rows by
+      // color rather than by a thick top+bottom border grid.
+      backgroundColor: COLORS.surface,
       borderBottomWidth: 1,
-      borderBottomColor: COLORS.border,
+      borderBottomColor: COLORS.rowDivider,
       borderBottomStyle: 'solid',
-      paddingBottom: 4,
-      marginBottom: 4,
     },
     headerCellBorder: {
       borderRightWidth: 1,
@@ -164,28 +224,49 @@ export const SHARED_STYLES = {
       borderRightStyle: 'solid' as const,
     },
     headerCell: {
+      paddingHorizontal: 3,
+      paddingVertical: 4,
       fontFamily: FONTS.bodyBold,
       fontSize: 8,
       color: COLORS.textMuted,
       letterSpacing: 0.4,
       textTransform: 'uppercase',
     },
+    ticketHeaderCell: {
+      paddingHorizontal: 1,
+      paddingVertical: 3,
+      fontSize: 6.5,
+      letterSpacing: 0,
+    },
     row: {
       flexDirection: 'row',
-      paddingVertical: 4,
       borderBottomWidth: 1,
-      borderBottomColor: COLORS.divider,
+      borderBottomColor: COLORS.rowDivider,
       borderBottomStyle: 'solid',
+    },
+    cellContainer: {
+      paddingHorizontal: 3,
+      paddingVertical: 4,
+    },
+    ticketCellContainer: {
+      paddingHorizontal: 1,
+      paddingVertical: 3,
     },
     cell: {
       fontFamily: FONTS.body,
       fontSize: 10,
       color: COLORS.ink,
     },
+    ticketCell: {
+      fontSize: 7,
+    },
     cellMuted: {
       fontFamily: FONTS.body,
       fontSize: 9,
       color: COLORS.textMuted,
+    },
+    ticketCellMuted: {
+      fontSize: 6.5,
     },
     cellNumeric: {
       fontFamily: FONTS.body,
@@ -193,13 +274,36 @@ export const SHARED_STYLES = {
       color: COLORS.ink,
       textAlign: 'right',
     },
+    ticketCellNumeric: {
+      fontSize: 7,
+    },
     // Column proportions: product | qty | unit | discount | subtotal.
     // `flexGrow` sums to 14 across the row.
-    colProduct: { flexGrow: 6 },
-    colQuantity: { flexGrow: 1, textAlign: 'right' as const },
-    colUnitPrice: { flexGrow: 2, textAlign: 'right' as const },
-    colDiscount: { flexGrow: 2, textAlign: 'right' as const },
-    colSubtotal: { flexGrow: 3, textAlign: 'right' as const },
+    colProduct: { flexBasis: 0, flexGrow: 6, flexShrink: 1 },
+    colQuantity: {
+      flexBasis: 0,
+      flexGrow: 1,
+      flexShrink: 1,
+      textAlign: 'right' as const,
+    },
+    colUnitPrice: {
+      flexBasis: 0,
+      flexGrow: 2,
+      flexShrink: 1,
+      textAlign: 'right' as const,
+    },
+    colDiscount: {
+      flexBasis: 0,
+      flexGrow: 2,
+      flexShrink: 1,
+      textAlign: 'right' as const,
+    },
+    colSubtotal: {
+      flexBasis: 0,
+      flexGrow: 3,
+      flexShrink: 1,
+      textAlign: 'right' as const,
+    },
     emptyRow: {
       paddingVertical: 8,
       fontFamily: FONTS.bodyBold,
@@ -215,6 +319,19 @@ export const SHARED_STYLES = {
       flexDirection: 'row',
       justifyContent: 'space-between',
       paddingVertical: 3,
+    },
+    // Wrapper around the grand-total (Total) row: a soft yellow tint
+    // so the eye lands on it after scanning top-down. The label/value
+    // text inside stays bold + brand color — this fill is the block's
+    // primary brand-color element.
+    grandTotalRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      backgroundColor: COLORS.brandSurface,
+      paddingHorizontal: 6,
+      paddingVertical: 5,
+      marginTop: 2,
+      marginBottom: 2,
     },
     label: {
       fontFamily: FONTS.body,

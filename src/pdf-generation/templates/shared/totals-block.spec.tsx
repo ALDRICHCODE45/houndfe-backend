@@ -7,6 +7,7 @@
  */
 import { Document, Page, renderToBuffer } from '@react-pdf/renderer';
 import { TotalsBlock } from './totals-block';
+import { SHARED_STYLES } from './styles';
 
 const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
 
@@ -117,5 +118,15 @@ describe('TotalsBlock', () => {
     expect(
       (TotalsBlock as unknown as { $$typeof?: unknown }).$$typeof,
     ).toBeUndefined();
+  });
+
+  it('Total row has a subtle yellow tint background via grandTotalRow token', () => {
+    // The grand-total row gets a soft yellow tint (#fef9e6) so the
+    // eye lands on it after scanning the receipt top-down. The label
+    // and value themselves stay bold + brand yellow.
+    expect(SHARED_STYLES.totals).toHaveProperty(
+      'grandTotalRow',
+      expect.objectContaining({ backgroundColor: '#fef9e6' }),
+    );
   });
 });

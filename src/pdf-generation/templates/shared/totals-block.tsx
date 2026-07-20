@@ -115,8 +115,16 @@ function TotalRow({ label, valueCents, signed, emphasis }: TotalRowProps) {
       ? `-${formatCurrency(valueCents)}`
       : formatCurrency(valueCents);
 
+  // Grand-total row wraps the label/value in a soft-yellow tinted
+  // View so the eye lands on it after scanning the receipt top-down.
+  // Other rows use the plain row token.
+  const rowStyle =
+    emphasis === 'grand'
+      ? SHARED_STYLES.totals.grandTotalRow
+      : SHARED_STYLES.totals.row;
+
   return (
-    <View style={SHARED_STYLES.totals.row}>
+    <View style={rowStyle}>
       <Text style={labelStyle}>{label}</Text>
       <Text style={valueStyle}>{display}</Text>
     </View>

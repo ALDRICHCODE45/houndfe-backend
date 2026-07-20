@@ -12,8 +12,18 @@
  * each shared block composes into a valid PDF — NOT to lock down visual
  * layout. WU3 (template composition) will own the visual contract.
  */
-import { Document, Page, renderToBuffer, Text, View } from '@react-pdf/renderer';
+import { readFileSync } from 'node:fs';
+import {
+  Document,
+  Page,
+  renderToBuffer,
+  Text,
+  View,
+} from '@react-pdf/renderer';
 import { ReceiptHeader } from './receipt-header';
+import { SHARED_STYLES } from './styles';
+
+const SOURCE = readFileSync(`${__dirname}/receipt-header.tsx`, 'utf8');
 
 /**
  * PDF binary headers per the PDF 1.4 spec: every PDF file starts with
@@ -103,12 +113,61 @@ describe('ReceiptHeader', () => {
     expect(buffer.subarray(0, 4).equals(PDF_MAGIC)).toBe(true);
   });
 
+  it('renders folio and date inside a bordered box', () => {
+    expect(SHARED_STYLES.receipt).toHaveProperty(
+      'folioBox',
+      expect.objectContaining({
+        borderWidth: 1,
+        borderColor: '#eceaf0',
+      }),
+    );
+    expect(SOURCE).toContain('style={SHARED_STYLES.receipt.folioBox}');
+  });
+
+  it('accepts a titleSize="small" prop that swaps the company name size', () => {
+    // The ticket format is narrow (~227pt). The default 18pt
+    // company name dominates the header; we expose a `titleSize`
+    // variant so the ticket document can render a smaller title.
+    const tree = JSON.stringify(
+      ReceiptHeader({
+        companyName: 'HoundFe',
+        folio: 'A-0001',
+        date: '2026-07-20T15:30:00.000Z',
+        titleSize: 'small',
+      }),
+    );
+
+    // The small variant should produce a 14pt company name (down from
+    // the default 18pt) so the FARMACIA subtitle stops colliding
+    // with the title's descenders on the narrow ticket format.
+    expect(tree).toContain('"fontSize":14');
+    // The small company-name token must exist alongside the default.
+    expect(SHARED_STYLES.meta.companyNameSmall).toEqual(
+      expect.objectContaining({ fontSize: 14 }),
+    );
+    expect(SHARED_STYLES.meta.companyName).toEqual(
+      expect.objectContaining({ fontSize: 18 }),
+    );
+  });
+
+  it('subtitle uses tight letter-spacing so it does not collide with the title', () => {
+    // The previous subtitle had `letterSpacing: 1` which spread the
+    // "FARMACIA" word so wide that its letters visually overlapped
+    // the descenders of the HoundFe title above. Tightening the
+    // tracking to 0.4 keeps the subtitle legible without overlap.
+    expect(SHARED_STYLES.receipt.subtitle).toEqual(
+      expect.objectContaining({ letterSpacing: 0.4 }),
+    );
+  });
+
   it('exports a function component (not a class, not a React element)', () => {
     // A bare contract assertion: ReceiptHeader must be a callable function
     // so template code can pass props directly (`<ReceiptHeader ... />`).
     expect(typeof ReceiptHeader).toBe('function');
     // Should NOT be a React element (no .type === undefined sentinel).
-    expect((ReceiptHeader as unknown as { $$typeof?: unknown }).$$typeof).toBeUndefined();
+    expect(
+      (ReceiptHeader as unknown as { $$typeof?: unknown }).$$typeof,
+    ).toBeUndefined();
   });
 
   it('Text and View primitives remain importable from @react-pdf/renderer', () => {

@@ -28,16 +28,18 @@ export function ReceiptTicketDocument({
         wrap={false}
       >
         <View style={SHARED_STYLES.receipt.outerBorder}>
+          <View style={SHARED_STYLES.receipt.brandAccentBar} />
           <ReceiptHeader
-            {...business}
+            companyName={business.companyName}
             folio={sale.folio}
             date={sale.date}
             subtitle="FARMACIA"
+            titleSize="small"
           />
 
           <View style={styles.saleMeta}>
-            <Text style={styles.metaText}>CAJERO: {sale.cashier}</Text>
-            <Text style={styles.metaText}>VENDEDOR: {sale.seller}</Text>
+            <MetaField label="CAJERO" value={sale.cashier} />
+            <MetaField label="VENDEDOR" value={sale.seller} />
           </View>
 
           <View style={styles.customerBlock}>
@@ -45,7 +47,7 @@ export function ReceiptTicketDocument({
           </View>
 
           <View style={styles.section}>
-            <LineItemsTable items={items} />
+            <LineItemsTable items={items} variant="ticket" />
           </View>
 
           <View style={styles.section}>
@@ -65,6 +67,15 @@ export function ReceiptTicketDocument({
   );
 }
 
+function MetaField({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.metaField}>
+      <Text style={styles.metaLabel}>{label}</Text>
+      <Text style={styles.metaValue}>{value}</Text>
+    </View>
+  );
+}
+
 function getTicketHeight(itemCount: number, paymentCount: number): number {
   const shellHeight = 380;
   const lineItemsHeight = itemCount * 32;
@@ -75,20 +86,33 @@ function getTicketHeight(itemCount: number, paymentCount: number): number {
 
 const styles = StyleSheet.create({
   page: {
-    paddingHorizontal: 10,
-    paddingVertical: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
     color: '#2c2434',
     fontFamily: 'Helvetica',
     fontSize: 8,
     lineHeight: 1.2,
   },
   saleMeta: {
+    flexDirection: 'row',
+    gap: 10,
     marginTop: 5,
   },
-  metaText: {
-    color: '#493f54',
+  metaField: {
+    flexDirection: 'row',
+    gap: 3,
+    flexShrink: 1,
+  },
+  metaLabel: {
+    color: '#938c9e',
+    fontFamily: 'Helvetica-Bold',
+    fontSize: 6.5,
+    textTransform: 'uppercase',
+  },
+  metaValue: {
+    color: '#2c2434',
+    fontFamily: 'Helvetica',
     fontSize: 7,
-    marginBottom: 2,
   },
   customerBlock: {
     marginTop: 4,

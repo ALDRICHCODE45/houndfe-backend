@@ -25,6 +25,7 @@ export function ReceiptA4Document({
         style={styles.page}
       >
         <View style={SHARED_STYLES.receipt.outerBorder}>
+          <View style={SHARED_STYLES.receipt.brandAccentBar} />
           <ReceiptHeader
             {...business}
             folio={sale.folio}
@@ -41,7 +42,7 @@ export function ReceiptA4Document({
             <CustomerSection customerName={customer.name} />
           </View>
 
-          <LineItemsTable items={items} />
+          <LineItemsTable items={items} variant="a4" />
           <TotalsBlock {...totals} />
           <PaymentsList payments={payments} />
 

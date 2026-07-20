@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
 import { renderToBuffer } from '@react-pdf/renderer';
 import { ReceiptA4Document } from './receipt-a4.document';
 import type { ReceiptDocumentProps } from './receipt.types';
+
+const SOURCE = readFileSync(`${__dirname}/receipt-a4.document.tsx`, 'utf8');
 
 const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
 
@@ -54,5 +57,15 @@ describe('ReceiptA4Document', () => {
     expect(buffer).toBeInstanceOf(Buffer);
     expect(buffer.length).toBeGreaterThan(0);
     expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
+  });
+
+  it('uses full product headers', () => {
+    expect(SOURCE).toContain('<LineItemsTable items={items} variant="a4" />');
+  });
+
+  it('renders the brand accent bar above the receipt content', () => {
+    // The 3pt-tall yellow accent bar at the top of every receipt is
+    // the primary brand-color element of the redesign.
+    expect(SOURCE).toContain('SHARED_STYLES.receipt.brandAccentBar');
   });
 });

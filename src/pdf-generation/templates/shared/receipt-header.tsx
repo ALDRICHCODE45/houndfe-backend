@@ -48,6 +48,13 @@ export interface ReceiptHeaderProps {
   date: string;
   /** Optional subtitle shown below the company name (default "FARMACIA"). */
   subtitle?: string;
+  /**
+   * Size variant for the company name. `'small'` uses a 14pt token
+   * suited for narrow formats (e.g. 80mm ticket) where the default
+   * 18pt would collide with the FARMACIA subtitle below it.
+   * Defaults to `'default'` (18pt).
+   */
+  titleSize?: 'default' | 'small';
 }
 
 export function ReceiptHeader({
@@ -58,23 +65,27 @@ export function ReceiptHeader({
   folio,
   date,
   subtitle,
+  titleSize = 'default',
 }: ReceiptHeaderProps) {
+  const companyNameStyle =
+    titleSize === 'small'
+      ? SHARED_STYLES.meta.companyNameSmall
+      : SHARED_STYLES.meta.companyName;
+
   return (
     <View style={headerStyles.container}>
       <View style={headerStyles.topRow}>
         <View style={headerStyles.brandCol}>
-          {logoUrl ? (
-            <Image
-              src={logoUrl}
-              style={headerStyles.logo}
-              cache={false}
-            />
-          ) : null}
-          <View style={headerStyles.nameStack}>
-            <Text style={SHARED_STYLES.meta.companyName}>{companyName}</Text>
-            <Text style={SHARED_STYLES.receipt.subtitle}>
-              {subtitle ?? 'FARMACIA'}
-            </Text>
+          <View style={headerStyles.identityRow}>
+            {logoUrl ? (
+              <Image src={logoUrl} style={headerStyles.logo} cache={false} />
+            ) : null}
+            <View style={headerStyles.nameStack}>
+              <Text style={companyNameStyle}>{companyName}</Text>
+              <Text style={SHARED_STYLES.receipt.subtitle}>
+                {subtitle ?? 'FARMACIA'}
+              </Text>
+            </View>
           </View>
           {address ? (
             <Text style={SHARED_STYLES.meta.brandLine}>{address}</Text>
@@ -84,13 +95,15 @@ export function ReceiptHeader({
           ) : null}
         </View>
         <View style={headerStyles.metaCol}>
-          <View style={SHARED_STYLES.receipt.folioRow}>
-            <Text style={SHARED_STYLES.meta.label}>FOLIO</Text>
-            <Text style={SHARED_STYLES.receipt.folioValue}>{folio}</Text>
+          <View style={SHARED_STYLES.receipt.folioBox}>
+            <View style={SHARED_STYLES.receipt.folioRow}>
+              <Text style={SHARED_STYLES.meta.label}>FOLIO</Text>
+              <Text style={SHARED_STYLES.receipt.folioValue}>{folio}</Text>
+            </View>
+            <Text style={SHARED_STYLES.receipt.folioBlock}>
+              FECHA {formatReceiptDate(date)}
+            </Text>
           </View>
-          <Text style={SHARED_STYLES.receipt.folioBlock}>
-            FECHA {formatReceiptDate(date)}
-          </Text>
         </View>
       </View>
     </View>
@@ -116,21 +129,27 @@ const headerStyles = {
   },
   brandCol: {
     flexDirection: 'column' as const,
+    flexGrow: 1,
     flexShrink: 1,
+  },
+  identityRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
   },
   nameStack: {
     flexDirection: 'column' as const,
+    flexShrink: 1,
   },
   metaCol: {
     flexDirection: 'column' as const,
     alignItems: 'flex-end' as const,
     flexShrink: 0,
-    marginLeft: 12,
+    marginLeft: 6,
   },
   logo: {
-    width: 48,
-    height: 48,
-    marginBottom: 4,
+    width: 24,
+    height: 24,
+    marginRight: 4,
     objectFit: 'contain' as const,
   },
 };

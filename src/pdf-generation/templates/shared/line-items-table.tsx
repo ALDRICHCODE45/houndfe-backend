@@ -45,16 +45,48 @@ export interface LineItem {
   subtotalCents: number;
 }
 
+export type LineItemsTableVariant = 'a4' | 'ticket';
+
 export interface LineItemsTableProps {
   items: LineItem[];
+  variant?: LineItemsTableVariant;
 }
 
-export function LineItemsTable({ items }: LineItemsTableProps) {
+const HEADER_LABELS = {
+  a4: {
+    product: 'PRODUCTO',
+    quantity: 'CANT',
+    unitPrice: 'PRECIO UNIT',
+    discount: 'DESCUENTO',
+    subtotal: 'SUBTOTAL',
+  },
+  ticket: {
+    product: 'PROD',
+    quantity: 'CANT',
+    unitPrice: 'P.UNIT',
+    discount: 'DESC',
+    subtotal: 'SUBT',
+  },
+} as const;
+
+export function LineItemsTable({ items, variant = 'a4' }: LineItemsTableProps) {
+  const labels = HEADER_LABELS[variant];
+  const ticketHeaderStyles =
+    variant === 'ticket' ? [SHARED_STYLES.table.ticketHeaderCell] : [];
+  const ticketCellContainerStyles =
+    variant === 'ticket' ? [SHARED_STYLES.table.ticketCellContainer] : [];
+  const ticketCellStyles =
+    variant === 'ticket' ? [SHARED_STYLES.table.ticketCell] : [];
+  const ticketCellMutedStyles =
+    variant === 'ticket' ? [SHARED_STYLES.table.ticketCellMuted] : [];
+  const ticketCellNumericStyles =
+    variant === 'ticket' ? [SHARED_STYLES.table.ticketCellNumeric] : [];
+
   if (items.length === 0) {
     return (
       <View>
         <Text style={SHARED_STYLES.receipt.sectionHeader}>PRODUCTOS</Text>
-        <View style={tableWrapper}>
+        <View style={SHARED_STYLES.table.wrapper}>
           <View style={SHARED_STYLES.table.row}>
             <Text style={SHARED_STYLES.table.emptyRow}>---</Text>
           </View>
@@ -66,51 +98,52 @@ export function LineItemsTable({ items }: LineItemsTableProps) {
   return (
     <View>
       <Text style={SHARED_STYLES.receipt.sectionHeader}>PRODUCTOS</Text>
-      <View style={tableWrapper}>
+      <View style={SHARED_STYLES.table.wrapper}>
         <View style={SHARED_STYLES.table.headerRow}>
           <Text
             style={[
               SHARED_STYLES.table.headerCell,
+              ...ticketHeaderStyles,
               SHARED_STYLES.table.colProduct,
-              SHARED_STYLES.table.headerCellBorder,
             ]}
           >
-            PRODUCTO
+            {labels.product}
           </Text>
           <Text
             style={[
               SHARED_STYLES.table.headerCell,
+              ...ticketHeaderStyles,
               SHARED_STYLES.table.colQuantity,
-              SHARED_STYLES.table.headerCellBorder,
             ]}
           >
-            CANT
+            {labels.quantity}
           </Text>
           <Text
             style={[
               SHARED_STYLES.table.headerCell,
+              ...ticketHeaderStyles,
               SHARED_STYLES.table.colUnitPrice,
-              SHARED_STYLES.table.headerCellBorder,
             ]}
           >
-            PRECIO UNIT
+            {labels.unitPrice}
           </Text>
           <Text
             style={[
               SHARED_STYLES.table.headerCell,
+              ...ticketHeaderStyles,
               SHARED_STYLES.table.colDiscount,
-              SHARED_STYLES.table.headerCellBorder,
             ]}
           >
-            DESCUENTO
+            {labels.discount}
           </Text>
           <Text
             style={[
               SHARED_STYLES.table.headerCell,
+              ...ticketHeaderStyles,
               SHARED_STYLES.table.colSubtotal,
             ]}
           >
-            SUBTOTAL
+            {labels.subtotal}
           </Text>
         </View>
 
@@ -121,13 +154,21 @@ export function LineItemsTable({ items }: LineItemsTableProps) {
           >
             <View
               style={[
+                SHARED_STYLES.table.cellContainer,
+                ...ticketCellContainerStyles,
                 SHARED_STYLES.table.colProduct,
-                SHARED_STYLES.table.cellBorder,
               ]}
             >
-              <Text style={SHARED_STYLES.table.cell}>{item.productName}</Text>
+              <Text style={[SHARED_STYLES.table.cell, ...ticketCellStyles]}>
+                {item.productName}
+              </Text>
               {item.variantName ? (
-                <Text style={SHARED_STYLES.table.cellMuted}>
+                <Text
+                  style={[
+                    SHARED_STYLES.table.cellMuted,
+                    ...ticketCellMutedStyles,
+                  ]}
+                >
                   {item.variantName}
                 </Text>
               ) : null}
@@ -135,8 +176,10 @@ export function LineItemsTable({ items }: LineItemsTableProps) {
             <Text
               style={[
                 SHARED_STYLES.table.cellNumeric,
+                ...ticketCellNumericStyles,
+                SHARED_STYLES.table.cellContainer,
+                ...ticketCellContainerStyles,
                 SHARED_STYLES.table.colQuantity,
-                SHARED_STYLES.table.cellBorder,
               ]}
             >
               {formatQuantity(item.quantity)}
@@ -144,34 +187,57 @@ export function LineItemsTable({ items }: LineItemsTableProps) {
             <Text
               style={[
                 SHARED_STYLES.table.cellNumeric,
+                ...ticketCellNumericStyles,
+                SHARED_STYLES.table.cellContainer,
+                ...ticketCellContainerStyles,
                 SHARED_STYLES.table.colUnitPrice,
-                SHARED_STYLES.table.cellBorder,
               ]}
             >
               {formatCurrency(item.unitPriceCents)}
             </Text>
             <View
               style={[
+                SHARED_STYLES.table.cellContainer,
+                ...ticketCellContainerStyles,
                 SHARED_STYLES.table.colDiscount,
-                SHARED_STYLES.table.cellBorder,
               ]}
             >
               {item.discountTitle && item.discountAmountCents ? (
                 <>
-                  <Text style={[SHARED_STYLES.table.cellNumeric]}>
+                  <Text
+                    style={[
+                      SHARED_STYLES.table.cellNumeric,
+                      ...ticketCellNumericStyles,
+                    ]}
+                  >
                     -{formatCurrency(item.discountAmountCents)}
                   </Text>
-                  <Text style={SHARED_STYLES.table.cellMuted}>
+                  <Text
+                    style={[
+                      SHARED_STYLES.table.cellMuted,
+                      ...ticketCellMutedStyles,
+                    ]}
+                  >
                     {item.discountTitle}
                   </Text>
                 </>
               ) : (
-                <Text style={SHARED_STYLES.table.cellMuted}>---</Text>
+                <Text
+                  style={[
+                    SHARED_STYLES.table.cellMuted,
+                    ...ticketCellMutedStyles,
+                  ]}
+                >
+                  ---
+                </Text>
               )}
             </View>
             <Text
               style={[
                 SHARED_STYLES.table.cellNumeric,
+                ...ticketCellNumericStyles,
+                SHARED_STYLES.table.cellContainer,
+                ...ticketCellContainerStyles,
                 SHARED_STYLES.table.colSubtotal,
               ]}
             >
@@ -183,12 +249,6 @@ export function LineItemsTable({ items }: LineItemsTableProps) {
     </View>
   );
 }
-
-const tableWrapper = {
-  borderWidth: 1,
-  borderColor: '#eceaf0',
-  borderStyle: 'solid' as const,
-};
 
 /**
  * Render an integer quantity as a trimmed string. Real data has
