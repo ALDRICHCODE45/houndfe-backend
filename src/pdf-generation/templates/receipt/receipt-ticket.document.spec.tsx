@@ -6,7 +6,7 @@ const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
 
 const receipt: ReceiptDocumentProps = {
   business: {
-    companyName: 'Houndé',
+    companyName: 'HoundFe',
   },
   sale: {
     folio: 'T-0042',

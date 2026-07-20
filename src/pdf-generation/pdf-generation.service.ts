@@ -201,7 +201,7 @@ export class PdfGenerationService implements OnModuleInit {
     let stream: Readable;
     try {
       stream = (await renderToStream(
-        createElement(Template, props),
+        createElement(Template, props) as unknown as Parameters<typeof renderToStream>[0],
       )) as Readable;
     } catch (err) {
       this.logger.error(

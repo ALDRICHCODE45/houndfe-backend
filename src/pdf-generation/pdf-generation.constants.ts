@@ -61,7 +61,7 @@ export type FormatKey =
  * "header shows company name as text only"), so templates wrap
  * the `<Image src={LOGO_URL} />` in a try-render fallback.
  */
-export const COMPANY_NAME = 'Houndé' as const;
+export const COMPANY_NAME = 'HoundFe' as const;
 
 export const LOGO_URL =
   'https://houndfe.sfo3.cdn.digitaloceanspaces.com/brand/houndfe-logo-email.png';

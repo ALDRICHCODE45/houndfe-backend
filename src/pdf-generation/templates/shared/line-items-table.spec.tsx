@@ -13,7 +13,7 @@ const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
 
 const FIXTURE_ITEMS: LineItem[] = [
   {
-    productName: 'Camiseta Houndé',
+    productName: 'Camiseta HoundFe',
     variantName: 'Talla M / Negro',
     quantity: 2,
     unitPriceCents: 25000,

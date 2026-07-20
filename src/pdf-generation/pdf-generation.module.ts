@@ -32,13 +32,14 @@
  *     should be a deliberate decision, not implicit.
  */
 import { Module } from '@nestjs/common';
+import { AuthModule } from '../auth/auth.module';
 import { SalesModule } from '../sales/sales.module';
 import { TenantsModule } from '../tenants/tenants.module';
 import { PdfGenerationController } from './pdf-generation.controller';
 import { PdfGenerationService } from './pdf-generation.service';
 
 @Module({
-  imports: [SalesModule, TenantsModule],
+  imports: [AuthModule, SalesModule, TenantsModule],
   providers: [PdfGenerationService],
   controllers: [PdfGenerationController],
   exports: [],

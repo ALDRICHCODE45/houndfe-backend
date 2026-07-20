@@ -28,7 +28,7 @@ describe('ReceiptHeader', () => {
       <Document>
         <Page size="A4">
           <ReceiptHeader
-            companyName="Houndé"
+            companyName="HoundFe"
             folio="A-0001"
             date="2026-07-20T15:30:00.000Z"
           />
@@ -47,7 +47,7 @@ describe('ReceiptHeader', () => {
         <Page size="A4">
           <ReceiptHeader
             logoUrl="https://example.com/logo.png"
-            companyName="Houndé"
+            companyName="HoundFe"
             address="Av. Reforma 123, CDMX"
             phone="+52 55 1234 5678"
             folio="A-0002"
@@ -68,7 +68,7 @@ describe('ReceiptHeader', () => {
       <Document>
         <Page size="A4">
           <ReceiptHeader
-            companyName="Houndé"
+            companyName="HoundFe"
             address="Av. Reforma 123"
             folio="A-0003"
             date="2026-07-20T15:30:00.000Z"
@@ -89,7 +89,7 @@ describe('ReceiptHeader', () => {
       <Document>
         <Page size={{ width: 227, height: 600 }}>
           <ReceiptHeader
-            companyName="Houndé"
+            companyName="HoundFe"
             address="Sucursal Centro"
             phone="555-0100"
             folio="T-0042"

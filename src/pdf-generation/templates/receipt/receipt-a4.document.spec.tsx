@@ -6,7 +6,7 @@ const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
 
 const receipt: ReceiptDocumentProps = {
   business: {
-    companyName: 'Houndé',
+    companyName: 'HoundFe',
     address: 'Av. Reforma 123, CDMX',
     phone: '+52 55 1234 5678',
   },

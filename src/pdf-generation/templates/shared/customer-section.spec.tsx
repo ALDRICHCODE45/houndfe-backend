@@ -42,7 +42,6 @@ describe('CustomerSection', () => {
     const buffer = await renderToBuffer(
       <Document>
         <Page size="A4">
-          {/* @ts-expect-error: undefined is a runtime possibility */}
           <CustomerSection customerName={undefined} />
         </Page>
       </Document>,
