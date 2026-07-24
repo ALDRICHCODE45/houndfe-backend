@@ -76,6 +76,7 @@ function makeRepo(
     findById: jest.fn(),
     findAll: jest.fn(),
     delete: jest.fn(),
+    deleteMany: jest.fn(),
     updateStatus: jest.fn(),
     ...overrides,
   } as jest.Mocked<IPromotionRepository>;
@@ -88,6 +89,9 @@ type PrismaLookupMock = {
   customer: { findMany: jest.Mock };
   globalPriceList: { findMany: jest.Mock };
   variant: { findMany: jest.Mock };
+  promotion: { findMany: jest.Mock };
+  saleItem: { findMany: jest.Mock };
+  salePromotionApplied: { findMany: jest.Mock };
 };
 
 function makePrisma(
@@ -100,6 +104,9 @@ function makePrisma(
     customer: { findMany: jest.fn().mockResolvedValue([]) },
     globalPriceList: { findMany: jest.fn().mockResolvedValue([]) },
     variant: { findMany: jest.fn().mockResolvedValue([]) },
+    promotion: { findMany: jest.fn().mockResolvedValue([]) },
+    saleItem: { findMany: jest.fn().mockResolvedValue([]) },
+    salePromotionApplied: { findMany: jest.fn().mockResolvedValue([]) },
     ...overrides,
   };
 }
@@ -1967,6 +1974,189 @@ describe('PromotionsService', () => {
       await service.findAll(queryDto({ page: 1, limit: 20 }));
 
       expect(prisma.variant.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ==================== Batch-Deletable Service Contract ====================
+
+  describe('validateForBatchDeletion()', () => {
+    it('returns valid=true when no IDs are referenced by sales and all exist in tenant', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        promotion: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.validateForBatchDeletion([
+        'p1',
+        'p2',
+        'p3',
+      ]);
+
+      expect(result.valid).toBe(true);
+      expect(prisma.saleItem.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            promotionId: { in: ['p1', 'p2', 'p3'] },
+          }),
+        }),
+      );
+      expect(prisma.salePromotionApplied.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            promotionId: { in: ['p1', 'p2', 'p3'] },
+          }),
+        }),
+      );
+    });
+
+    it('returns offendingIds when a SaleItem references one of the IDs', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        promotion: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]),
+        },
+        saleItem: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ promotionId: 'p2' }]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.validateForBatchDeletion([
+        'p1',
+        'p2',
+        'p3',
+      ]);
+
+      expect(result.valid).toBe(false);
+      expect(result.code).toBe('PROMOTION_REFERENCED_BY_SALE');
+      expect(result.offendingIds).toEqual(['p2']);
+    });
+
+    it('returns offendingIds when a SalePromotionApplied references one of the IDs', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        promotion: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]),
+        },
+        salePromotionApplied: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ promotionId: 'p3' }]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.validateForBatchDeletion([
+        'p1',
+        'p2',
+        'p3',
+      ]);
+
+      expect(result.valid).toBe(false);
+      expect(result.offendingIds).toEqual(['p3']);
+    });
+
+    it('deduplicates offendingIds across SaleItem and SalePromotionApplied', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        promotion: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
+        },
+        saleItem: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ promotionId: 'p2' }]),
+        },
+        salePromotionApplied: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ promotionId: 'p2' }, { promotionId: 'p1' }]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.validateForBatchDeletion(['p1', 'p2']);
+
+      expect(result.valid).toBe(false);
+      expect([...(result.offendingIds ?? [])].sort()).toEqual(['p1', 'p2']);
+    });
+
+    it('returns offendingIds for IDs that do not exist in this tenant', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        promotion: {
+          findMany: jest.fn().mockResolvedValue([{ id: 'p1' }]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.validateForBatchDeletion(['p1', 'p2', 'p3']);
+
+      expect(result.valid).toBe(false);
+      expect(result.code).toBe('BATCH_DELETE_NOT_FOUND');
+      expect([...(result.offendingIds ?? [])].sort()).toEqual(['p2', 'p3']);
+    });
+
+    it('rejects the whole batch when ANY id is missing (all-or-nothing)', async () => {
+      const repo = makeRepo();
+      const prisma = makePrisma({
+        promotion: {
+          findMany: jest.fn().mockResolvedValue([{ id: 'p1' }]),
+        },
+        saleItem: {
+          findMany: jest.fn().mockResolvedValue([{ promotionId: 'p1' }]),
+        },
+      });
+      const service = makeService(repo, prisma);
+
+      const result = await service.validateForBatchDeletion(['p1', 'p2']);
+
+      expect(result.valid).toBe(false);
+      // BOTH the FK reference and the missing ID surface as offending.
+      expect([...(result.offendingIds ?? [])].sort()).toEqual(['p1', 'p2']);
+      expect(result.code).toBe('PROMOTION_REFERENCED_BY_SALE');
+    });
+  });
+
+  describe('executeInTransaction()', () => {
+    it('calls repo.deleteMany with the supplied ids and returns the count', async () => {
+      const repo = makeRepo({
+        deleteMany: jest.fn().mockResolvedValue(2),
+      });
+      const prisma = makePrisma();
+      const service = makeService(repo, prisma);
+
+      const count = await service.executeInTransaction(['p1', 'p2']);
+
+      expect(count).toBe(2);
+      expect(repo.deleteMany).toHaveBeenCalledWith(['p1', 'p2']);
+    });
+
+    it('returns 0 for an empty array (no DB roundtrip)', async () => {
+      const repo = makeRepo({
+        deleteMany: jest.fn().mockResolvedValue(0),
+      });
+      const prisma = makePrisma();
+      const service = makeService(repo, prisma);
+
+      const count = await service.executeInTransaction([]);
+
+      expect(count).toBe(0);
+      // The repo is allowed to no-op for empty arrays; we don't pin the
+      // call shape here so the service stays loose.
     });
   });
 });

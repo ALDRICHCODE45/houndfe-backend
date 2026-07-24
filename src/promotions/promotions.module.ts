@@ -7,6 +7,8 @@
  * - PromotionsController for HTTP endpoints
  * - EvaluateCartPromotionsUseCase (chatbot-api path)
  * - PosEvaluatePromotionsUseCase (POS sale recompute path, Unit 2 — unwired)
+ * - BatchDeleteModule.forFeature — wires the `POST /promotions/batch-delete`
+ *   endpoint via the shared abstraction
  *
  * Imports AuthModule for JWT + CASL permission guards.
  * Exports PromotionsService, both use-case symbols, so other modules
@@ -22,9 +24,19 @@ import { EvaluateCartPromotionsUseCase } from './application/evaluate-cart-promo
 import { EVALUATE_CART_PROMOTIONS_USE_CASE } from './application/ports/evaluate-cart-promotions.port';
 import { PosEvaluatePromotionsUseCase } from './application/pos-evaluate-promotions.use-case';
 import { POS_EVALUATE_PROMOTIONS_USE_CASE } from './application/ports/pos-evaluate-promotions.port';
+import {
+  BatchDeleteModule,
+  BatchDeleteOrchestrator,
+  BatchDeleteDto,
+} from '../shared/batch-delete';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import type { BatchDeletableService } from '../shared/batch-delete/batch-delete.types';
 
 @Module({
-  imports: [AuthModule], // Provides JwtAuthGuard, PermissionsGuard, CaslAbilityFactory
+  imports: [
+    AuthModule, // Provides JwtAuthGuard, PermissionsGuard, CaslAbilityFactory
+    BatchDeleteModule.forFeature(),
+  ],
   controllers: [PromotionsController],
   providers: [
     PromotionsService,
@@ -33,6 +45,24 @@ import { POS_EVALUATE_PROMOTIONS_USE_CASE } from './application/ports/pos-evalua
     {
       provide: PROMOTION_REPOSITORY,
       useClass: PrismaPromotionRepository,
+    },
+    {
+      // Build the orchestrator subclass that wires TenantPrismaService
+      // + PromotionsService. The factory returns a new concrete
+      // orchestrator instance for each injection request — the
+      // orchestrator is stateless (it holds no mutable state) so
+      // sharing across requests is safe.
+      provide: BatchDeleteOrchestrator,
+      useFactory: (
+        tenantPrisma: TenantPrismaService,
+        service: BatchDeletableService,
+      ): BatchDeleteOrchestrator =>
+        new (class extends BatchDeleteOrchestrator {
+          constructor() {
+            super(tenantPrisma, service);
+          }
+        })(),
+      inject: [TenantPrismaService, PromotionsService],
     },
     {
       provide: EVALUATE_CART_PROMOTIONS_USE_CASE,

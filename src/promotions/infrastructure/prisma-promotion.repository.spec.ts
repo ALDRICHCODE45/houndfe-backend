@@ -6,6 +6,10 @@ type PrismaRepoMock = {
     findMany: jest.Mock<Promise<unknown[]>, [Record<string, unknown>]>;
     count: jest.Mock<Promise<number>, [Record<string, unknown>]>;
     delete: jest.Mock<Promise<void>, [{ where: { id: string } }]>;
+    deleteMany: jest.Mock<
+      Promise<{ count: number }>,
+      [Record<string, unknown>]
+    >;
   };
   promotionTargetItem: { deleteMany: jest.Mock<Promise<unknown>, []> };
   promotionCustomer: { deleteMany: jest.Mock<Promise<unknown>, []> };
@@ -26,6 +30,9 @@ function makePrisma(): PrismaRepoMock {
       delete: jest
         .fn<Promise<void>, [{ where: { id: string } }]>()
         .mockResolvedValue(undefined),
+      deleteMany: jest
+        .fn<Promise<{ count: number }>, [Record<string, unknown>]>()
+        .mockResolvedValue({ count: 0 }),
     },
     promotionTargetItem: { deleteMany: jest.fn<Promise<unknown>, []>() },
     promotionCustomer: { deleteMany: jest.fn<Promise<unknown>, []>() },
@@ -127,6 +134,61 @@ describe('PrismaPromotionRepository', () => {
       expect(prisma.promotionCustomer.deleteMany.mock.calls.length).toBe(0);
       expect(prisma.promotionPriceList.deleteMany.mock.calls.length).toBe(0);
       expect(prisma.promotionDayOfWeek.deleteMany.mock.calls.length).toBe(0);
+    });
+  });
+
+  describe('deleteMany()', () => {
+    it('passes the id list into prisma.promotion.deleteMany', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      prisma.promotion.deleteMany.mockResolvedValue({ count: 3 });
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+
+      const deleted = await repo.deleteMany(['a', 'b', 'c']);
+
+      expect(deleted).toBe(3);
+      expect(prisma.promotion.deleteMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a', 'b', 'c'] } },
+      });
+    });
+
+    it('short-circuits to 0 for an empty list (no DB roundtrip)', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+
+      const deleted = await repo.deleteMany([]);
+
+      expect(deleted).toBe(0);
+      expect(prisma.promotion.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('returns the count of rows actually removed', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      prisma.promotion.deleteMany.mockResolvedValue({ count: 0 });
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+
+      const deleted = await repo.deleteMany(['non-existent']);
+
+      expect(deleted).toBe(0);
+    });
+
+    it('uses tenantPrisma.getClient() so the ambient CLS tx wraps the delete', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+
+      await repo.deleteMany(['x']);
+
+      expect(tenantPrisma.getClient).toHaveBeenCalled();
     });
   });
 });

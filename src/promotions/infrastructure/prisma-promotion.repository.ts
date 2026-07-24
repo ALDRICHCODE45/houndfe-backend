@@ -266,6 +266,25 @@ export class PrismaPromotionRepository implements IPromotionRepository {
   }
 
   // ============================================================
+  // deleteMany — batch hard delete (cascade handles join tables)
+  //
+  // Returns the count of actually-deleted rows so the orchestrator
+  // can echo `{ deleted: N }` to the caller. Joins (targetItems,
+  // customers, priceLists, daysOfWeek) cascade via Prisma schema.
+  // `tenantPrisma.getClient()` honours the ambient CLS tx so the
+  // entire batch is atomic — a single FK violation rolls back
+  // every row.
+  // ============================================================
+  async deleteMany(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const prisma = this.tenantPrisma.getClient();
+    const result = await prisma.promotion.deleteMany({
+      where: { id: { in: ids } },
+    });
+    return result.count;
+  }
+
+  // ============================================================
   // updateStatus — patch status + optional endDate
   // ============================================================
   async updateStatus(

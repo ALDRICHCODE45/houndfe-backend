@@ -45,9 +45,10 @@ import type {
   PromotionType,
   TargetSide,
 } from './domain/promotion.entity';
+import { BatchDeletableService, ValidationResult } from '../shared/batch-delete/batch-delete.types';
 
 @Injectable()
-export class PromotionsService {
+export class PromotionsService extends BatchDeletableService {
   /**
    * Business timezone for promotion date-range normalization.
    *
@@ -66,6 +67,7 @@ export class PromotionsService {
     private readonly tenantPrisma: TenantPrismaService,
     configService: ConfigService,
   ) {
+    super();
     this.businessTimezone = configService.get<string>(
       'PROMOTIONS_BUSINESS_TIMEZONE',
       'America/Mexico_City',
@@ -287,6 +289,102 @@ export class PromotionsService {
     const updated = await this.repo.findById(id);
     if (!updated) throw new EntityNotFoundError('Promotion', id);
     return updated.toResponse();
+  }
+
+  // ==================== BatchDeletableService ====================
+
+  /**
+   * Pre-flight validation for batch deletion.
+   *
+   * Two checks, BOTH must pass for the orchestrator to proceed:
+   *   1. Tenant ownership — every supplied id resolves to a promotion
+   *      row that lives in the current tenant (tenant-scoped Prisma
+   *      client via `tenantPrisma.getClient()`). Cross-tenant IDs
+   *      surface as missing rows.
+   *   2. Sale-reference guard — neither `SaleItem.promotionId` nor
+   *      `SalePromotionApplied.promotionId` references ANY id in the
+   *      batch. Even ONE reference blocks the whole batch (R12 —
+   *      all-or-nothing).
+   *
+   * Returns `{ valid: false, offendingIds, code, reason }` on any
+   * failure. The orchestrator maps that into a
+   * `BatchDeleteValidationError` → 409 with offendingIds + reason
+   * serialized into the response body.
+   */
+  async validateForBatchDeletion(ids: string[]): Promise<ValidationResult> {
+    if (ids.length === 0) {
+      return { valid: true };
+    }
+    const tenantClient = this.tenantPrisma.getClient();
+
+    // 1. Resolve which ids actually live in this tenant. tenantId is
+    //    auto-applied by the tenant middleware (see tenant-prisma.factory);
+    //    we only need to project the id column.
+    const existing = await tenantClient.promotion.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
+    });
+    const existingIds = new Set(existing.map((row) => row.id));
+    const missingIds = ids.filter((id) => !existingIds.has(id));
+
+    // 2. Sale-reference guard: any row in either table referencing
+    //    an id in the batch blocks the whole batch.
+    const [saleItemHits, appliedHits] = await Promise.all([
+      tenantClient.saleItem.findMany({
+        where: { promotionId: { in: ids } },
+        select: { promotionId: true },
+      }),
+      tenantClient.salePromotionApplied.findMany({
+        where: { promotionId: { in: ids } },
+        select: { promotionId: true },
+      }),
+    ]);
+
+    const offending = new Set<string>();
+    for (const hit of saleItemHits) {
+      if (hit.promotionId !== null) offending.add(hit.promotionId);
+    }
+    for (const hit of appliedHits) {
+      if (hit.promotionId !== null) offending.add(hit.promotionId);
+    }
+    for (const id of missingIds) offending.add(id);
+
+    if (offending.size === 0) {
+      return { valid: true };
+    }
+
+    const offendingList = [...offending];
+    // Prioritise the FK-referenced code over the not-found code so
+    // a caller that happens to send a mix of both still gets the
+    // actionable error.
+    const hasSaleRef = offendingList.some(
+      (id) => !missingIds.includes(id),
+    );
+    const code = hasSaleRef
+      ? 'PROMOTION_REFERENCED_BY_SALE'
+      : 'BATCH_DELETE_NOT_FOUND';
+    const reason = hasSaleRef
+      ? `Promotion(s) referenced by existing sale records cannot be deleted: ${offendingList.join(', ')}`
+      : `Promotion(s) not found in this tenant: ${offendingList.join(', ')}`;
+
+    return {
+      valid: false,
+      offendingIds: offendingList,
+      code,
+      reason,
+    };
+  }
+
+  /**
+   * Hard-delete the supplied promotion ids inside the current ambient
+   * CLS transaction. Caller MUST have already passed
+   * `validateForBatchDeletion` — this method does no FK / tenant
+   * validation of its own (it just runs `deleteMany` and returns the
+   * Prisma row count).
+   */
+  async executeInTransaction(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    return this.repo.deleteMany(ids);
   }
 
   // ==================== Private Helpers ====================

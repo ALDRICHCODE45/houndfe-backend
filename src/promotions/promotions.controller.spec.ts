@@ -11,6 +11,8 @@ import {
   PromotionMethodEnum,
 } from './dto/create-promotion.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
+import type { BatchDeleteOrchestrator } from '../shared/batch-delete';
+import { BatchDeleteDto } from '../shared/batch-delete';
 
 type MockPromotionsService = {
   create: jest.MockedFunction<PromotionsService['create']>;
@@ -32,14 +34,25 @@ function makeService(): MockPromotionsService {
   };
 }
 
+function makeOrchestrator(): jest.Mocked<
+  Pick<BatchDeleteOrchestrator, 'execute'>
+> {
+  return {
+    execute: jest.fn().mockResolvedValue({ deleted: 7 }),
+  };
+}
+
 describe('PromotionsController', () => {
   let controller: PromotionsController;
   let service: MockPromotionsService;
+  let orchestrator: jest.Mocked<Pick<BatchDeleteOrchestrator, 'execute'>>;
 
   beforeEach(() => {
     service = makeService();
+    orchestrator = makeOrchestrator();
     controller = new PromotionsController(
       service as unknown as PromotionsService,
+      orchestrator as unknown as BatchDeleteOrchestrator,
     );
   });
 
@@ -119,5 +132,28 @@ describe('PromotionsController', () => {
 
     expect(service.endPromotion.mock.calls[0][0]).toBe('promo-1');
     expect(result).toEqual(expected);
+  });
+
+  it('batchDelete() delegates to BatchDeleteOrchestrator.execute with dto.ids', async () => {
+    const dto: BatchDeleteDto = {
+      ids: [
+        '00000000-0000-4000-8000-000000000001',
+        '00000000-0000-4000-8000-000000000002',
+      ],
+    };
+
+    const result = await controller.batchDelete(dto);
+
+    expect(result).toEqual({ deleted: 7 });
+    expect(orchestrator.execute).toHaveBeenCalledWith(dto.ids);
+  });
+
+  it('batchDelete() propagates errors from the orchestrator', async () => {
+    const boom = new Error('orchestrator boom');
+    orchestrator.execute.mockRejectedValueOnce(boom);
+
+    await expect(
+      controller.batchDelete({ ids: ['00000000-0000-4000-8000-000000000001'] }),
+    ).rejects.toBe(boom);
   });
 });
