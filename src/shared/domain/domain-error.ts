@@ -76,3 +76,28 @@ export class SystemRoleProtectedError extends DomainError {
     );
   }
 }
+
+/**
+ * BatchDeleteValidationError - Pre-flight failure from a
+ * `BatchDeletableService.validateForBatchDeletion()` call.
+ *
+ * Carries `offendingIds` so the HTTP layer can surface exactly which
+ * IDs blocked the batch (filter serializes it into the response body).
+ * The `code` defaults to `BATCH_DELETE_FK_CONSTRAINT` for FK-style
+ * failures; call sites that want a more specific HTTP mapping can pass
+ * a domain code such as `PROMOTION_REFERENCED_BY_SALE`.
+ *
+ * Spec: batch-delete/spec.md R6 (response contract).
+ */
+export class BatchDeleteValidationError extends BusinessRuleViolationError {
+  public readonly offendingIds: string[];
+
+  constructor(
+    offendingIds: string[],
+    reason: string,
+    code: string = 'BATCH_DELETE_FK_CONSTRAINT',
+  ) {
+    super(reason, code);
+    this.offendingIds = offendingIds;
+  }
+}

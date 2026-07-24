@@ -27,6 +27,7 @@ import {
   InvalidRefreshTokenError,
   InsufficientPermissionsError,
   SystemRoleProtectedError,
+  BatchDeleteValidationError,
 } from '../domain/domain-error';
 
 @Catch(DomainError)
@@ -41,12 +42,24 @@ export class DomainExceptionFilter implements ExceptionFilter {
 
     this.logger.warn(`[${exception.code}] ${exception.message}`);
 
-    response.status(status).json({
+    // R6 (response contract): offending IDs + reason must survive into
+    // the response body for batch-delete callers. `any` is intentional —
+    // the response shape is open for this one extra field.
+    const body: Record<string, unknown> = {
       statusCode: status,
       error: exception.code,
       message: exception.message,
       timestamp: exception.timestamp.toISOString(),
-    });
+    };
+
+    if (exception instanceof BatchDeleteValidationError) {
+      body.offendingIds = exception.offendingIds;
+      if (exception.message) {
+        body.reason = exception.message;
+      }
+    }
+
+    response.status(status).json(body);
   }
 
   /**
@@ -123,6 +136,14 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.BAD_REQUEST;
     if (exception.code === 'DISCOUNT_AMOUNT_INVALID')
       return HttpStatus.BAD_REQUEST;
+
+    // ── batch-delete ──
+    if (exception.code === 'BATCH_DELETE_NOT_FOUND')
+      return HttpStatus.NOT_FOUND;
+    if (exception.code === 'BATCH_DELETE_FK_CONSTRAINT')
+      return HttpStatus.CONFLICT;
+    if (exception.code === 'PROMOTION_REFERENCED_BY_SALE')
+      return HttpStatus.CONFLICT;
 
     if (exception instanceof EntityNotFoundError) return HttpStatus.NOT_FOUND;
     if (exception instanceof EntityAlreadyExistsError)

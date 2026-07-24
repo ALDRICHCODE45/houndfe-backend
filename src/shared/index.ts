@@ -6,3 +6,4 @@ export * from './filters/domain-exception.filter';
 export * from './tenant/tenant-context.guard';
 export * from './tenant/tenant-cls-store.interface';
 export * from './tenant/tenant-scoped-models.constant';
+export * from './batch-delete';

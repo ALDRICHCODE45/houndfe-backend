@@ -3,6 +3,7 @@ import { DomainExceptionFilter } from './domain-exception.filter';
 import {
   BusinessRuleViolationError,
   EntityNotFoundError,
+  BatchDeleteValidationError,
 } from '../domain/domain-error';
 import { TimeOffInvalidDateRangeError } from '../../employees/domain/errors/time-off-invalid-date-range.error';
 import { TimeOffInvalidTransitionError } from '../../employees/domain/errors/time-off-invalid-transition.error';
@@ -188,6 +189,91 @@ describe('DomainExceptionFilter', () => {
       expect.objectContaining({
         statusCode: HttpStatus.CONFLICT,
         error: 'TIME_OFF_INVALID_TRANSITION',
+      }),
+    );
+  });
+
+  // ── batch-delete ──────────────────────────────────────────────
+
+  it('maps BATCH_DELETE_NOT_FOUND to 404', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError(
+        'BATCH_DELETE_NOT_FOUND',
+        'BATCH_DELETE_NOT_FOUND',
+      ),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.NOT_FOUND);
+  });
+
+  it('maps BATCH_DELETE_FK_CONSTRAINT to 409', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError(
+        'BATCH_DELETE_FK_CONSTRAINT',
+        'BATCH_DELETE_FK_CONSTRAINT',
+      ),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+  });
+
+  it('maps PROMOTION_REFERENCED_BY_SALE to 409', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError(
+        'PROMOTION_REFERENCED_BY_SALE',
+        'PROMOTION_REFERENCED_BY_SALE',
+      ),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+  });
+
+  it('serializes offendingIds + reason on BatchDeleteValidationError', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status, json } = makeHost();
+
+    const err = new BatchDeleteValidationError(
+      ['p2', 'p4'],
+      'Promotion referenced by a SaleItem',
+      'PROMOTION_REFERENCED_BY_SALE',
+    );
+    filter.catch(err, host);
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.CONFLICT,
+        error: 'PROMOTION_REFERENCED_BY_SALE',
+        offendingIds: ['p2', 'p4'],
+        reason: 'Promotion referenced by a SaleItem',
+      }),
+    );
+  });
+
+  it('BatchDeleteValidationError without overriding code uses BATCH_DELETE_FK_CONSTRAINT', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status, json } = makeHost();
+
+    const err = new BatchDeleteValidationError(['x'], 'fk blocker');
+    filter.catch(err, host);
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 'BATCH_DELETE_FK_CONSTRAINT',
+        offendingIds: ['x'],
       }),
     );
   });

@@ -13,7 +13,13 @@
 import { MongoAbility } from '@casl/ability';
 
 /** All possible actions users can perform. */
-export type AppActions = 'create' | 'read' | 'update' | 'delete' | 'manage';
+export type AppActions =
+  | 'create'
+  | 'read'
+  | 'update'
+  | 'delete'
+  | 'batch_delete'
+  | 'manage';
 
 /** All possible subjects (resources) in the application. */
 export type AppSubjects =
@@ -123,6 +129,11 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'Promotion',
     action: 'manage',
     description: 'Full promotion management',
+  },
+  {
+    subject: 'Promotion',
+    action: 'batch_delete',
+    description: 'Eliminar múltiples promociones a la vez',
   },
 
   // Customer permissions
