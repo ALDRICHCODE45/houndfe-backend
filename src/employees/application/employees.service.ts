@@ -17,9 +17,13 @@ import { ManagerCycleError } from '../domain/errors/manager-cycle.error';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import {
+  BatchDeletableService,
+  ValidationResult,
+} from '../../shared/batch-delete/batch-delete.types';
 
 @Injectable()
-export class EmployeesService {
+export class EmployeesService extends BatchDeletableService {
   private readonly logger = new Logger(EmployeesService.name);
 
   constructor(
@@ -28,7 +32,9 @@ export class EmployeesService {
     private readonly tenantPrisma: TenantPrismaService,
     @Optional() private readonly cls?: ClsService<TenantClsStore>,
     @Optional() private readonly caslAbilityFactory?: CaslAbilityFactory,
-  ) {}
+  ) {
+    super();
+  }
 
   /**
    * Build the CASL ability for the current request, using CLS context.
@@ -344,5 +350,67 @@ export class EmployeesService {
       delete result.currentSalaryCurrency;
     }
     return result;
+  }
+
+  // ==================== BatchDeletableService ====================
+
+  /**
+   * Pre-flight validation for batch deletion.
+   *
+   * Spec: `employee-batch-delete/spec.md` R3 (validation rules).
+   *
+   * Single check — every supplied id must resolve to an Employee row
+   * that lives in the current tenant (tenant-scoped Prisma client via
+   * `tenantPrisma.getClient()`). Cross-tenant IDs surface as missing
+   * rows because the tenant middleware filters by `tenantId`
+   * automatically.
+   *
+   * The 5 child tables (`EmployeeSalaryHistory`,
+   * `EmployeePositionHistory`, `EmployeeDocument`, `EmployeeTimeOff`,
+   * `EmployeeEmergencyContact`) cascade via the Prisma schema, so no
+   * FK-guard is needed at this layer. The self-relation on
+   * `managerId` is `SetNull`, so deleting a manager does not orphan
+   * their subordinates.
+   *
+   * Returns `{ valid: false, offendingIds, code, reason }` on any
+   * failure. The orchestrator maps that into a
+   * `BatchDeleteValidationError` → 404 with offendingIds + reason
+   * serialized into the response body.
+   */
+  async validateForBatchDeletion(ids: string[]): Promise<ValidationResult> {
+    if (ids.length === 0) {
+      return { valid: true };
+    }
+    const tenantClient = this.tenantPrisma.getClient();
+
+    const existing = await tenantClient.employee.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
+    });
+    const existingIds = new Set(existing.map((row: { id: string }) => row.id));
+    const missingIds = ids.filter((id) => !existingIds.has(id));
+
+    if (missingIds.length === 0) {
+      return { valid: true };
+    }
+
+    return {
+      valid: false,
+      offendingIds: missingIds,
+      code: 'BATCH_DELETE_NOT_FOUND',
+      reason: `Employee(s) not found in this tenant: ${missingIds.join(', ')}`,
+    };
+  }
+
+  /**
+   * Hard-delete the supplied employee ids inside the current ambient
+   * CLS transaction. Caller MUST have already passed
+   * `validateForBatchDeletion` — this method does no validation of
+   * its own (it just runs `repo.deleteMany` and returns the Prisma
+   * row count).
+   */
+  async executeInTransaction(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    return this.employeeRepo.deleteMany(ids);
   }
 }

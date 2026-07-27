@@ -92,6 +92,28 @@ export class PrismaEmployeeRepository implements IEmployeeRepository {
     await prisma.employee.delete({ where: { id } });
   }
 
+  // ============================================================
+  // deleteMany — batch hard delete (cascade handles 5 child tables)
+  //
+  // Returns the count of actually-deleted rows so the orchestrator
+  // can echo `{ deleted: N }` to the caller. Joins to
+  // `EmployeeSalaryHistory`, `EmployeePositionHistory`,
+  // `EmployeeDocument`, `EmployeeTimeOff`, and
+  // `EmployeeEmergencyContact` cascade via Prisma schema. The
+  // self-relation on `managerId` is `SetNull` so deleting a manager
+  // never orphans their subordinates. `tenantPrisma.getClient()`
+  // honours the ambient CLS tx so the entire batch is atomic — a
+  // single FK violation rolls back every row.
+  // ============================================================
+  async deleteMany(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const prisma = this.tenantPrisma.getClient();
+    const result = await prisma.employee.deleteMany({
+      where: { id: { in: ids } },
+    });
+    return result.count;
+  }
+
   async findSubordinates(managerId: string): Promise<any[]> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.employee.findMany({

@@ -20,6 +20,7 @@ function makeService(opts?: {
     findAll: jest.fn(),
     update: jest.fn(),
     delete: jest.fn(),
+    deleteMany: jest.fn(),
     findSubordinates: jest.fn(),
     findManagerIdOf: jest.fn(),
   };
@@ -527,6 +528,97 @@ describe('EmployeesService', () => {
       await expect(service.findManagerChain('missing')).rejects.toThrow(
         EmployeeNotFoundError,
       );
+    });
+  });
+
+  describe('BatchDeletableService — validateForBatchDeletion + executeInTransaction', () => {
+    it('validateForBatchDeletion returns valid=true when all ids exist in tenant', async () => {
+      const tenantClient = {
+        employee: {
+          findMany: jest.fn().mockResolvedValue([
+            { id: '00000000-0000-4000-8000-000000000001' },
+            { id: '00000000-0000-4000-8000-000000000002' },
+          ]),
+        },
+      };
+      const { service, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(tenantClient);
+
+      const result = await service.validateForBatchDeletion([
+        '00000000-0000-4000-8000-000000000001',
+        '00000000-0000-4000-8000-000000000002',
+      ]);
+
+      expect(result).toEqual({ valid: true });
+      expect(tenantClient.employee.findMany).toHaveBeenCalledWith({
+        where: { id: { in: [
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000002',
+        ] } },
+        select: { id: true },
+      });
+    });
+
+    it('validateForBatchDeletion returns valid=false with offendingIds + BATCH_DELETE_NOT_FOUND when some ids are missing', async () => {
+      const tenantClient = {
+        employee: {
+          findMany: jest.fn().mockResolvedValue([
+            { id: '00000000-0000-4000-8000-000000000001' },
+          ]),
+        },
+      };
+      const { service, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(tenantClient);
+
+      const result = await service.validateForBatchDeletion([
+        '00000000-0000-4000-8000-000000000001',
+        '00000000-0000-4000-8000-000000000099',
+      ]);
+
+      expect(result.valid).toBe(false);
+      expect(result.code).toBe('BATCH_DELETE_NOT_FOUND');
+      expect(result.offendingIds).toEqual([
+        '00000000-0000-4000-8000-000000000099',
+      ]);
+      expect(result.reason).toContain(
+        '00000000-0000-4000-8000-000000000099',
+      );
+    });
+
+    it('validateForBatchDeletion returns valid=true for an empty list (no DB roundtrip)', async () => {
+      const tenantClient = {
+        employee: { findMany: jest.fn() },
+      };
+      const { service, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(tenantClient);
+
+      const result = await service.validateForBatchDeletion([]);
+
+      expect(result).toEqual({ valid: true });
+      expect(tenantClient.employee.findMany).not.toHaveBeenCalled();
+    });
+
+    it('executeInTransaction delegates to repo.deleteMany and returns its count', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.deleteMany.mockResolvedValue(5);
+
+      const deleted = await service.executeInTransaction([
+        '00000000-0000-4000-8000-000000000001',
+      ]);
+
+      expect(deleted).toBe(5);
+      expect(employeeRepo.deleteMany).toHaveBeenCalledWith([
+        '00000000-0000-4000-8000-000000000001',
+      ]);
+    });
+
+    it('executeInTransaction short-circuits to 0 for an empty list (no repo call)', async () => {
+      const { service, employeeRepo } = makeService();
+
+      const deleted = await service.executeInTransaction([]);
+
+      expect(deleted).toBe(0);
+      expect(employeeRepo.deleteMany).not.toHaveBeenCalled();
     });
   });
 

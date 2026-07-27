@@ -329,6 +329,11 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     action: 'manage',
     description: 'Full employee management',
   },
+  {
+    subject: 'Employee',
+    action: 'batch_delete',
+    description: 'Eliminar múltiples empleados a la vez',
+  },
 
   // EmployeeSalary permissions (sensitive — Tier 2 financial)
   {

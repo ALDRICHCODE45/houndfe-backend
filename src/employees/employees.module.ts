@@ -17,6 +17,12 @@ import { EmployeeTimeOffController } from './employee-time-off.controller';
 import { EmployeeEmergencyContactsController } from './employee-emergency-contacts.controller';
 import { OutboxModule } from '../shared/outbox/outbox.module';
 import { NotificationConfigModule } from '../notification-config/notification-config.module';
+import {
+  BatchDeleteModule,
+  BatchDeleteOrchestrator,
+} from '../shared/batch-delete';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import type { BatchDeletableService } from '../shared/batch-delete/batch-delete.types';
 
 @Module({
   imports: [
@@ -27,6 +33,10 @@ import { NotificationConfigModule } from '../notification-config/notification-co
     // `EmployeeTimeOffService.request()`.
     OutboxModule,
     NotificationConfigModule,
+    // Slice — wires `BatchDeleteGuard` + `CaslAbilityFactory` for the
+    // `POST /admin/employees/batch-delete` route. Mirrors the Promotions
+    // pilot pattern from `batch-delete` SDD change.
+    BatchDeleteModule.forFeature(),
   ],
   controllers: [
     EmployeesController,
@@ -46,6 +56,24 @@ import { NotificationConfigModule } from '../notification-config/notification-co
     {
       provide: EMPLOYEE_REPOSITORY,
       useClass: PrismaEmployeeRepository,
+    },
+    {
+      // Build the orchestrator subclass that wires TenantPrismaService
+      // + EmployeesService (the BatchDeletableService for employees).
+      // The factory returns a new concrete orchestrator instance for
+      // each injection request — the orchestrator is stateless so
+      // sharing across requests is safe.
+      provide: BatchDeleteOrchestrator,
+      useFactory: (
+        tenantPrisma: TenantPrismaService,
+        service: BatchDeletableService,
+      ): BatchDeleteOrchestrator =>
+        new (class extends BatchDeleteOrchestrator {
+          constructor() {
+            super(tenantPrisma, service);
+          }
+        })(),
+      inject: [TenantPrismaService, EmployeesService],
     },
   ],
   exports: [EmployeesService],

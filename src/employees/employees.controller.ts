@@ -21,11 +21,19 @@ import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { ListEmployeesQueryDto } from './dto/list-employees.query.dto';
 import { TerminateEmployeeDto } from './dto/terminate-employee.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
+import {
+  BatchDeleteDto,
+  BatchDeleteGuard,
+  BatchDeleteOrchestrator,
+} from '../shared/batch-delete';
 
 @Controller('admin/employees')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class EmployeesController {
-  constructor(private readonly employeesService: EmployeesService) {}
+  constructor(
+    private readonly employeesService: EmployeesService,
+    private readonly batchDeleteOrchestrator: BatchDeleteOrchestrator,
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
@@ -87,5 +95,32 @@ export class EmployeesController {
   @RequirePermissions(['read', 'Employee'])
   findManagerChain(@Param('id', ParseUUIDPipe) id: string) {
     return this.employeesService.findManagerChain(id);
+  }
+
+  // ==================== Batch Delete ====================
+
+  /**
+   * `POST /admin/employees/batch-delete`
+   *
+   * All-or-nothing deletion of multiple employees. Pre-flight
+   * validation rejects the whole batch if any ID does not exist in
+   * the current tenant — see `EmployeesService.validateForBatchDeletion`
+   * for the rules. The 5 child tables (`EmployeeSalaryHistory`,
+   * `EmployeePositionHistory`, `EmployeeDocument`, `EmployeeTimeOff`,
+   * `EmployeeEmergencyContact`) cascade via the Prisma schema.
+   *
+   * Permission enforcement:
+   *  - `@RequirePermissions(['batch_delete', 'Employee'])` is read by
+   *    both the standard `PermissionsGuard` (chain) and the dedicated
+   *    `BatchDeleteGuard` (R10: manage does NOT imply batch_delete).
+   */
+  @Post('batch-delete')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(BatchDeleteGuard)
+  @RequirePermissions(['batch_delete', 'Employee'])
+  async batchDelete(
+    @Body() dto: BatchDeleteDto,
+  ): Promise<{ deleted: number }> {
+    return this.batchDeleteOrchestrator.execute(dto.ids);
   }
 }
