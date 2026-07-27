@@ -109,4 +109,29 @@ export class PromotionsController {
   async batchDelete(@Body() dto: BatchDeleteDto): Promise<{ deleted: number }> {
     return this.batchDeleteOrchestrator.execute(dto.ids);
   }
+
+  // ==================== Batch End (inline) ====================
+
+  /**
+   * `POST /promotions/batch-end`
+   *
+   * Inline batch end — every id in `dto.ids` is flipped to
+   * `status = ENDED` with `manuallyEnded = true` and `endDate`
+   * stamped (if not already set) by `Promotion.end()`. The whole
+   * sequence runs inside `tenantPrisma.runInTransaction()` so a
+   * single failure rolls back every flip.
+   *
+   * The inline pattern (no shared orchestrator) mirrors the
+   * `batch-delete` DTO contract: same request body, same 404
+   * shape on missing ids (`BATCH_DELETE_NOT_FOUND` →
+   * `BatchDeleteValidationError → 404`). The `update:Promotion`
+   * permission is reused — ending is logically an UPDATE, not a
+   * DELETE.
+   */
+  @Post('batch-end')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Promotion'])
+  async batchEnd(@Body() dto: BatchDeleteDto): Promise<{ ended: number }> {
+    return this.promotionsService.batchEnd(dto.ids);
+  }
 }

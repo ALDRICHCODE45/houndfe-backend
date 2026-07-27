@@ -21,6 +21,7 @@ type MockPromotionsService = {
   update: jest.MockedFunction<PromotionsService['update']>;
   remove: jest.MockedFunction<PromotionsService['remove']>;
   endPromotion: jest.MockedFunction<PromotionsService['endPromotion']>;
+  batchEnd: jest.MockedFunction<PromotionsService['batchEnd']>;
 };
 
 function makeService(): MockPromotionsService {
@@ -31,6 +32,7 @@ function makeService(): MockPromotionsService {
     update: jest.fn(),
     remove: jest.fn(),
     endPromotion: jest.fn(),
+    batchEnd: jest.fn(),
   };
 }
 
@@ -154,6 +156,33 @@ describe('PromotionsController', () => {
 
     await expect(
       controller.batchDelete({ ids: ['00000000-0000-4000-8000-000000000001'] }),
+    ).rejects.toBe(boom);
+  });
+
+  // ==================== batchEnd ====================
+
+  it('batchEnd() should call service.batchEnd with dto.ids', async () => {
+    const dto: BatchDeleteDto = {
+      ids: [
+        '00000000-0000-4000-8000-000000000001',
+        '00000000-0000-4000-8000-000000000002',
+      ],
+    };
+    service.batchEnd.mockResolvedValue({ ended: 2 });
+
+    const result = await controller.batchEnd(dto);
+
+    expect(result).toEqual({ ended: 2 });
+    expect(service.batchEnd).toHaveBeenCalledWith(dto.ids);
+    expect(service.batchEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it('batchEnd() propagates service errors', async () => {
+    const boom = new Error('service boom');
+    service.batchEnd.mockRejectedValueOnce(boom);
+
+    await expect(
+      controller.batchEnd({ ids: ['00000000-0000-4000-8000-000000000001'] }),
     ).rejects.toBe(boom);
   });
 });

@@ -2159,4 +2159,217 @@ describe('PromotionsService', () => {
       // call shape here so the service stays loose.
     });
   });
+
+  // ============================================================
+  // batchEnd — inline batch-status flow (mirrors batchTerminate
+  // on the employee side). Validates tenant ownership, then for
+  // every supplied id: load → entity.end() → repo.updateStatus.
+  // Wraps the whole sequence in tenantPrisma.runInTransaction
+  // so a single failure rolls back every flip (all-or-nothing).
+  // ============================================================
+  describe('batchEnd()', () => {
+    it('should end every supplied id, returning { ended: N }', async () => {
+      const promo1 = makePromotion({ id: 'p1' });
+      const promo2 = makePromotion({ id: 'p2' });
+      const promo3 = makePromotion({ id: 'p3' });
+
+      const tenantClient = {
+        promotion: {
+          findMany: jest.fn().mockResolvedValue([
+            { id: 'p1' },
+            { id: 'p2' },
+            { id: 'p3' },
+          ]),
+          findUniqueOrThrow: jest.fn(),
+        },
+      };
+
+      const tenantPrisma = {
+        getClient: jest.fn().mockReturnValue(tenantClient),
+        runInTransaction: jest.fn(async (work: () => Promise<unknown>) =>
+          work(),
+        ),
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      };
+
+      // Spy order: findById is called per id, then updateStatus once.
+      const repo = {
+        ...makeRepo(),
+        findById: jest
+          .fn()
+          .mockResolvedValueOnce(promo1)
+          .mockResolvedValueOnce(promo2)
+          .mockResolvedValueOnce(promo3),
+        updateStatus: jest.fn().mockResolvedValue(undefined),
+      };
+      const prisma = makePrisma();
+
+      const service = new PromotionsService(
+        repo as unknown as IPromotionRepository,
+        prisma as unknown as PrismaService,
+        tenantPrisma as unknown as TenantPrismaService,
+        makeConfigService(),
+      );
+
+      const result = await service.batchEnd(['p1', 'p2', 'p3']);
+
+      expect(result).toEqual({ ended: 3 });
+      expect(repo.findById).toHaveBeenCalledTimes(3);
+      expect(repo.updateStatus).toHaveBeenCalledTimes(3);
+      // All three rows ended with ENDED status and an endDate stamp.
+      for (const call of repo.updateStatus.mock.calls) {
+        expect(call[1]).toBe('ENDED');
+        expect(call[2]).toBeTruthy();
+      }
+    });
+
+    it('should throw BatchDeleteValidationError (BATCH_DELETE_NOT_FOUND) when an id is missing', async () => {
+      const tenantClient = {
+        promotion: {
+          findMany: jest.fn().mockResolvedValue([
+            { id: 'p1' },
+            { id: 'p2' },
+          ]),
+        },
+      };
+      const tenantPrisma = {
+        getClient: jest.fn().mockReturnValue(tenantClient),
+        runInTransaction: jest.fn(async (work: () => Promise<unknown>) =>
+          work(),
+        ),
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      };
+      const repo = {
+        ...makeRepo(),
+        findById: jest.fn(),
+        updateStatus: jest.fn(),
+      };
+      const prisma = makePrisma();
+
+      const service = new PromotionsService(
+        repo as unknown as IPromotionRepository,
+        prisma as unknown as PrismaService,
+        tenantPrisma as unknown as TenantPrismaService,
+        makeConfigService(),
+      );
+
+      await expect(
+        service.batchEnd(['p1', 'p2', 'p-missing']),
+      ).rejects.toMatchObject({
+        code: 'BATCH_DELETE_NOT_FOUND',
+        offendingIds: ['p-missing'],
+      });
+
+      // No id was flipped because the pre-flight rejected the batch.
+      expect(repo.updateStatus).not.toHaveBeenCalled();
+      expect(repo.findById).not.toHaveBeenCalled();
+    });
+
+    it('should run the whole batch inside runInTransaction (atomic — single failure rolls back)', async () => {
+      const promo1 = makePromotion({ id: 'p1' });
+
+      const tenantClient = {
+        promotion: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
+        },
+      };
+      const tenantPrisma = {
+        getClient: jest.fn().mockReturnValue(tenantClient),
+        runInTransaction: jest.fn(async (work: () => Promise<unknown>) =>
+          work(),
+        ),
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      };
+
+      // First findById returns the row, but updateStatus throws on
+      // the second call so we can prove the throw escapes the tx.
+      const repo = {
+        ...makeRepo(),
+        findById: jest
+          .fn()
+          .mockResolvedValueOnce(promo1)
+          .mockResolvedValueOnce(makePromotion({ id: 'p2' })),
+        updateStatus: jest
+          .fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error('db boom')),
+      };
+      const prisma = makePrisma();
+
+      const service = new PromotionsService(
+        repo as unknown as IPromotionRepository,
+        prisma as unknown as PrismaService,
+        tenantPrisma as unknown as TenantPrismaService,
+        makeConfigService(),
+      );
+
+      await expect(service.batchEnd(['p1', 'p2'])).rejects.toThrow('db boom');
+
+      // The tx wrapper was invoked — proving the work was enclosed.
+      expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('should be a no-op returning { ended: 0 } for an empty list (no DB roundtrip)', async () => {
+      const tenantPrisma = {
+        getClient: jest.fn(),
+        runInTransaction: jest.fn(),
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      };
+      const repo = makeRepo();
+      const prisma = makePrisma();
+
+      const service = new PromotionsService(
+        repo as unknown as IPromotionRepository,
+        prisma as unknown as PrismaService,
+        tenantPrisma as unknown as TenantPrismaService,
+        makeConfigService(),
+      );
+
+      const result = await service.batchEnd([]);
+
+      expect(result).toEqual({ ended: 0 });
+      expect(repo.findById).not.toHaveBeenCalled();
+      expect(repo.updateStatus).not.toHaveBeenCalled();
+      expect(tenantPrisma.runInTransaction).not.toHaveBeenCalled();
+    });
+
+    it('should throw EntityNotFoundError when a tenant-owned id vanishes between pre-flight and the per-id flip', async () => {
+      // Tenant pre-flight returned the id, but the per-id findById
+      // surfaced null — race condition where another writer deleted
+      // the row between the two checks. The tx wrapper aborts on
+      // this thrown error.
+      const tenantClient = {
+        promotion: {
+          findMany: jest.fn().mockResolvedValue([{ id: 'p1' }]),
+        },
+      };
+      const tenantPrisma = {
+        getClient: jest.fn().mockReturnValue(tenantClient),
+        runInTransaction: jest.fn(async (work: () => Promise<unknown>) =>
+          work(),
+        ),
+        getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      };
+      const repo = {
+        ...makeRepo(),
+        findById: jest.fn().mockResolvedValue(null),
+        updateStatus: jest.fn(),
+      };
+      const prisma = makePrisma();
+
+      const service = new PromotionsService(
+        repo as unknown as IPromotionRepository,
+        prisma as unknown as PrismaService,
+        tenantPrisma as unknown as TenantPrismaService,
+        makeConfigService(),
+      );
+
+      await expect(service.batchEnd(['p1'])).rejects.toThrow(
+        EntityNotFoundError,
+      );
+      expect(repo.updateStatus).not.toHaveBeenCalled();
+    });
+  });
 });

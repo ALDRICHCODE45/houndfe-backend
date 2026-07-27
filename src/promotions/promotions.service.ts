@@ -29,6 +29,7 @@ import {
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
 import { PromotionQueryDto } from './dto/promotion-query.dto';
 import {
+  BatchDeleteValidationError,
   EntityNotFoundError,
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
@@ -289,6 +290,66 @@ export class PromotionsService extends BatchDeletableService {
     const updated = await this.repo.findById(id);
     if (!updated) throw new EntityNotFoundError('Promotion', id);
     return updated.toResponse();
+  }
+
+  // ============================================================
+  // batchEnd — inline batch-status endpoint. Mirrors the single
+  // `endPromotion()` path (load → entity.end() → repo.updateStatus)
+  // but applies it across the whole id list and wraps the whole
+  // sequence in `tenantPrisma.runInTransaction()` so a single
+  // failure rolls back every flip (all-or-nothing).
+  //
+  // Pre-flight validates tenant ownership through
+  // `tenantPrisma.getClient()`. Any missing id throws a
+  // `BatchDeleteValidationError` with code `BATCH_DELETE_NOT_FOUND`
+  // so the `DomainExceptionFilter` translates it to a 404 with
+  // `offendingIds` + `reason` (matches the batch-delete contract
+  // for callers).
+  //
+  // Empty-array short-circuit: returns `{ ended: 0 }` without any
+  // DB roundtrip. Upstream `BatchDeleteDto` enforces
+  // `@ArrayMinSize(1)` so this branch is defensive only.
+  // ============================================================
+  async batchEnd(ids: string[]): Promise<{ ended: number }> {
+    if (ids.length === 0) {
+      return { ended: 0 };
+    }
+
+    // ── Pre-flight: tenant ownership for the whole batch ──
+    const tenantClient = this.tenantPrisma.getClient();
+    const existing = await tenantClient.promotion.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
+    });
+    const existingIds = new Set(existing.map((row) => row.id));
+    const missingIds = ids.filter((id) => !existingIds.has(id));
+    if (missingIds.length > 0) {
+      throw new BatchDeleteValidationError(
+        missingIds,
+        `Promotion(s) not found in this tenant: ${missingIds.join(', ')}`,
+        'BATCH_DELETE_NOT_FOUND',
+      );
+    }
+
+    // ── Apply: per-id flip inside the ambient CLS tx ──
+    return this.tenantPrisma.runInTransaction(async () => {
+      let ended = 0;
+      for (const id of ids) {
+        const promotion = await this.repo.findById(id);
+        if (!promotion) {
+          // Race-condition guard: a writer removed the row between
+          // our pre-flight and the per-id flip. Surface as a 404.
+          throw new EntityNotFoundError('Promotion', id);
+        }
+        // `entity.end()` is idempotent — calling it on an
+        // already-ended promotion is a no-op (it preserves the
+        // existing endDate and returns immediately).
+        promotion.end();
+        await this.repo.updateStatus(id, 'ENDED', promotion.endDate);
+        ended++;
+      }
+      return { ended };
+    });
   }
 
   // ==================== BatchDeletableService ====================
