@@ -20,9 +20,9 @@
 
 ### Unit 3 — Final pass
 
-- [ ] 3.1 Run full test suite + build (`pnpm run test` + `pnpm run build`)
-- [ ] 3.2 Commit 1: `feat(employees): add batch terminate and reactivate endpoints`
-- [ ] 3.3 Commit 2: `feat(promotions): add batch end endpoint`
+- [x] 3.1 Run full test suite + build (`pnpm run test` + `pnpm run build`)
+- [x] 3.2 Commit 1: `feat(employees): add batch terminate and reactivate endpoints` → `14c7106`
+- [x] 3.3 Commit 2: `feat(promotions): add batch end endpoint` → `e559ed4`
 
 ## Notes
 
