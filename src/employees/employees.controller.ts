@@ -123,4 +123,44 @@ export class EmployeesController {
   ): Promise<{ deleted: number }> {
     return this.batchDeleteOrchestrator.execute(dto.ids);
   }
+
+  // ==================== Batch Status (inline) ====================
+
+  /**
+   * `POST /admin/employees/batch-terminate`
+   *
+   * Inline batch terminate — every id in `dto.ids` is flipped to
+   * `status = TERMINATED` and `terminationDate = now()` in a single
+   * Prisma `updateMany`. The inline pattern (no shared orchestrator)
+   * mirrors the inline batch-delete DTO contract: same request body,
+   * same 404 shape on missing ids. The `update:Employee` permission
+   * is reused — terminating is logically an UPDATE, not a DELETE.
+   */
+  @Post('batch-terminate')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Employee'])
+  async batchTerminate(
+    @Body() dto: BatchDeleteDto,
+  ): Promise<{ updated: number }> {
+    return this.employeesService.batchTerminate(dto.ids);
+  }
+
+  /**
+   * `POST /admin/employees/batch-reactivate`
+   *
+   * Inline batch reactivate — every id in `dto.ids` is flipped to
+   * `status = ACTIVE` and `terminationDate = null` in a single
+   * Prisma `updateMany`. Mirrors the `batchTerminate` contract for
+   * requests, response (`{ updated: N }`), and 404 shape on
+   * missing ids. Reuses `update:Employee` — reactivating is also
+   * logically an UPDATE.
+   */
+  @Post('batch-reactivate')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Employee'])
+  async batchReactivate(
+    @Body() dto: BatchDeleteDto,
+  ): Promise<{ updated: number }> {
+    return this.employeesService.batchReactivate(dto.ids);
+  }
 }

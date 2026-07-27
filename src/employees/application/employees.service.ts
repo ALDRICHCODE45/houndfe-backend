@@ -14,7 +14,10 @@ import { ListEmployeesQueryDto } from '../dto/list-employees.query.dto';
 import { EmployeeNotFoundError } from '../domain/errors/employee-not-found.error';
 import { ManagerSelfReferenceError } from '../domain/errors/manager-self-reference.error';
 import { ManagerCycleError } from '../domain/errors/manager-cycle.error';
-import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import {
+  BatchDeleteValidationError,
+  BusinessRuleViolationError,
+} from '../../shared/domain/domain-error';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import {
@@ -226,6 +229,89 @@ export class EmployeesService extends BatchDeletableService {
     });
 
     return this.toResponse(updated);
+  }
+
+  // ============================================================
+  // batchTerminate — inline batch-status endpoint. Mirrors the
+  // single-record `terminate()` pre-flight (`EmployeeNotFoundError
+  // → 404`) but applies the validation across the whole id list
+  // and delegates the actual flip to `repo.updateStatusMany`.
+  //
+  // Tenant ownership is verified by `tenantPrisma.getClient()` —
+  // cross-tenant ids surface as missing rows because the tenant
+  // middleware filters by `tenantId` automatically. Any missing id
+  // throws `BatchDeleteValidationError` with
+  // `code = 'BATCH_DELETE_NOT_FOUND'` so the
+  // `DomainExceptionFilter` translates it to a 404 with
+  // `offendingIds` + `reason` in the response body (matches the
+  // `batch-delete` response contract).
+  //
+  // Empty-array short-circuit: returns `{ updated: 0 }` without
+  // any DB roundtrip. Upstream `BatchDeleteDto` enforces
+  // `@ArrayMinSize(1)` so this branch is defensive only.
+  // ============================================================
+  async batchTerminate(ids: string[]): Promise<{ updated: number }> {
+    if (ids.length === 0) {
+      return { updated: 0 };
+    }
+    await this.assertAllIdsExist(ids);
+    const updated = await this.employeeRepo.updateStatusMany(
+      ids,
+      'TERMINATED',
+    );
+    return { updated };
+  }
+
+  // ============================================================
+  // batchReactivate — inline batch-status endpoint. Mirrors the
+  // single-record `reactivate()` pre-flight but applies the
+  // validation across the whole id list. Note we intentionally
+  // do NOT enforce "only reactivate TERMINATED ones" in the
+  // service layer — flipping an ACTIVE row back to ACTIVE is a
+  // harmless no-op and `updateStatusMany` reports whatever
+  // Prisma actually changed, so the caller always sees the
+  // observable truth. Same 404 contract as `batchTerminate` for
+  // cross-tenant / missing ids.
+  // ============================================================
+  async batchReactivate(ids: string[]): Promise<{ updated: number }> {
+    if (ids.length === 0) {
+      return { updated: 0 };
+    }
+    await this.assertAllIdsExist(ids);
+    const updated = await this.employeeRepo.updateStatusMany(
+      ids,
+      'ACTIVE',
+    );
+    return { updated };
+  }
+
+  /**
+   * Confirm every supplied id resolves to an Employee row that lives
+   * in the current tenant. Throws `BatchDeleteValidationError`
+   * (→ 404 via `DomainExceptionFilter`) with the SAME
+   * `BATCH_DELETE_NOT_FOUND` code as `batch-delete` so callers do
+   * not have to branch on the endpoint they hit.
+   *
+   * Shared between `batchTerminate` and `batchReactivate` — both
+   * endpoints make the same "all ids live in this tenant" promise.
+   */
+  private async assertAllIdsExist(ids: string[]): Promise<void> {
+    const tenantClient = this.tenantPrisma.getClient();
+    const existing = await tenantClient.employee.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
+    });
+    const existingIds = new Set(
+      existing.map((row: { id: string }) => row.id),
+    );
+    const missingIds = ids.filter((id) => !existingIds.has(id));
+    if (missingIds.length > 0) {
+      throw new BatchDeleteValidationError(
+        missingIds,
+        `Employee(s) not found in this tenant: ${missingIds.join(', ')}`,
+        'BATCH_DELETE_NOT_FOUND',
+      );
+    }
   }
 
   async findSubordinates(id: string, ability?: AppAbility) {

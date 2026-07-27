@@ -4,7 +4,10 @@ import { EmployeeNotFoundError } from '../domain/errors/employee-not-found.error
 import { EmployeeNumberConflictError } from '../domain/errors/employee-number-conflict.error';
 import { ManagerSelfReferenceError } from '../domain/errors/manager-self-reference.error';
 import { ManagerCycleError } from '../domain/errors/manager-cycle.error';
-import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import {
+  BatchDeleteValidationError,
+  BusinessRuleViolationError,
+} from '../../shared/domain/domain-error';
 
 function makeService(opts?: {
   withRuntimeAbility?: { can: jest.Mock };
@@ -21,6 +24,7 @@ function makeService(opts?: {
     update: jest.fn(),
     delete: jest.fn(),
     deleteMany: jest.fn(),
+    updateStatusMany: jest.fn(),
     findSubordinates: jest.fn(),
     findManagerIdOf: jest.fn(),
   };
@@ -290,6 +294,156 @@ describe('EmployeesService', () => {
       await expect(service.reactivate('emp-1')).rejects.toThrow(
         BusinessRuleViolationError,
       );
+    });
+  });
+
+  // ============================================================
+  // batchTerminate / batchReactivate
+  // ------------------------------------------------------------
+  // Inline batch-status flow — no shared orchestrator (mirrors
+  // the batch-delete DTO inline pattern). Service validates
+  // tenant ownership through `tenantPrisma.getClient()` then
+  // delegates the actual flip to `repo.updateStatusMany`.
+  // ============================================================
+
+  describe('batchTerminate()', () => {
+    it('should validate tenant ownership then flip every supplied id to TERMINATED via repo.updateStatusMany', async () => {
+      const tenantClient = {
+        employee: {
+          findMany: jest.fn().mockResolvedValue([
+            { id: '00000000-0000-4000-8000-000000000001' },
+            { id: '00000000-0000-4000-8000-000000000002' },
+          ]),
+        },
+      };
+      const { service, employeeRepo, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(tenantClient);
+      employeeRepo.updateStatusMany.mockResolvedValue(2);
+
+      const result = await service.batchTerminate([
+        '00000000-0000-4000-8000-000000000001',
+        '00000000-0000-4000-8000-000000000002',
+      ]);
+
+      expect(result).toEqual({ updated: 2 });
+      expect(employeeRepo.updateStatusMany).toHaveBeenCalledWith(
+        [
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000002',
+        ],
+        'TERMINATED',
+      );
+      expect(tenantClient.employee.findMany).toHaveBeenCalledWith({
+        where: { id: { in: [
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000002',
+        ] } },
+        select: { id: true },
+      });
+    });
+
+    it('should throw BatchDeleteValidationError (BATCH_DELETE_NOT_FOUND) when any id is missing from the tenant (all-or-nothing)', async () => {
+      const tenantClient = {
+        employee: {
+          // Only one of the two ids exists in the tenant.
+          findMany: jest
+            .fn()
+            .mockResolvedValue([
+              { id: '00000000-0000-4000-8000-000000000001' },
+            ]),
+        },
+      };
+      const { service, employeeRepo, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(tenantClient);
+
+      await expect(
+        service.batchTerminate([
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000099',
+        ]),
+      ).rejects.toMatchObject({
+        code: 'BATCH_DELETE_NOT_FOUND',
+        offendingIds: ['00000000-0000-4000-8000-000000000099'],
+      });
+
+      expect(employeeRepo.updateStatusMany).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 without touching the repo for an empty id list (no DB roundtrip)', async () => {
+      const { service, employeeRepo, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        employee: { findMany: jest.fn() },
+      });
+
+      const result = await service.batchTerminate([]);
+
+      expect(result).toEqual({ updated: 0 });
+      expect(employeeRepo.updateStatusMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('batchReactivate()', () => {
+    it('should validate tenant ownership then flip every supplied id to ACTIVE via repo.updateStatusMany', async () => {
+      const tenantClient = {
+        employee: {
+          findMany: jest.fn().mockResolvedValue([
+            { id: '00000000-0000-4000-8000-000000000001' },
+            { id: '00000000-0000-4000-8000-000000000002' },
+          ]),
+        },
+      };
+      const { service, employeeRepo, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(tenantClient);
+      employeeRepo.updateStatusMany.mockResolvedValue(2);
+
+      const result = await service.batchReactivate([
+        '00000000-0000-4000-8000-000000000001',
+        '00000000-0000-4000-8000-000000000002',
+      ]);
+
+      expect(result).toEqual({ updated: 2 });
+      expect(employeeRepo.updateStatusMany).toHaveBeenCalledWith(
+        [
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000002',
+        ],
+        'ACTIVE',
+      );
+    });
+
+    it('should throw BatchDeleteValidationError when any id is missing from the tenant', async () => {
+      const tenantClient = {
+        employee: {
+          findMany: jest
+            .fn()
+            .mockResolvedValue([
+              { id: '00000000-0000-4000-8000-000000000001' },
+            ]),
+        },
+      };
+      const { service, employeeRepo, tenantPrisma } = makeService();
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue(tenantClient);
+
+      await expect(
+        service.batchReactivate([
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000099',
+        ]),
+      ).rejects.toMatchObject({
+        code: 'BATCH_DELETE_NOT_FOUND',
+        offendingIds: ['00000000-0000-4000-8000-000000000099'],
+      });
+
+      expect(employeeRepo.updateStatusMany).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 without touching the repo for an empty id list', async () => {
+      const { service, employeeRepo } = makeService();
+
+      const result = await service.batchReactivate([]);
+
+      expect(result).toEqual({ updated: 0 });
+      expect(employeeRepo.updateStatusMany).not.toHaveBeenCalled();
     });
   });
 

@@ -14,6 +14,8 @@ function buildController() {
     remove: jest.fn(),
     terminate: jest.fn(),
     reactivate: jest.fn(),
+    batchTerminate: jest.fn(),
+    batchReactivate: jest.fn(),
     findSubordinates: jest.fn(),
     findManagerChain: jest.fn(),
   } as unknown as jest.Mocked<EmployeesService>;
@@ -119,6 +121,100 @@ describe('EmployeesController', () => {
 
       await expect(
         controller.batchDelete({
+          ids: ['00000000-0000-4000-8000-000000000001'],
+        }),
+      ).rejects.toBe(boom);
+    });
+  });
+
+  describe('POST /admin/employees/batch-terminate', () => {
+    it('should be decorated with @Post("batch-terminate")', () => {
+      const handler = EmployeesController.prototype.batchTerminate;
+      const path = Reflect.getMetadata('path', handler);
+      const method = Reflect.getMetadata('method', handler);
+      expect(method).toBe(RequestMethod.POST);
+      expect(path).toBe('batch-terminate');
+    });
+
+    it('should be decorated with @HttpCode(200)', () => {
+      const handler = EmployeesController.prototype.batchTerminate;
+      const statusCode = Reflect.getMetadata('__httpCode__', handler);
+      expect(statusCode).toBe(200);
+    });
+
+    it('should declare a single dto parameter (body)', () => {
+      const handler = EmployeesController.prototype.batchTerminate;
+      expect(handler.length).toBe(1);
+    });
+
+    it('should delegate to service.batchTerminate with dto.ids', async () => {
+      const { controller, employeesService } = buildController();
+      const dto: BatchDeleteDto = {
+        ids: [
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000002',
+        ],
+      };
+      employeesService.batchTerminate.mockResolvedValue({ updated: 2 });
+
+      const result = await controller.batchTerminate(dto);
+
+      expect(result).toEqual({ updated: 2 });
+      expect(employeesService.batchTerminate).toHaveBeenCalledWith(dto.ids);
+      expect(employeesService.batchTerminate).toHaveBeenCalledTimes(1);
+    });
+
+    it('should propagate service errors (e.g. BatchDeleteValidationError → 404)', async () => {
+      const { controller, employeesService } = buildController();
+      const boom = new Error('service boom');
+      employeesService.batchTerminate.mockRejectedValueOnce(boom);
+
+      await expect(
+        controller.batchTerminate({
+          ids: ['00000000-0000-4000-8000-000000000001'],
+        }),
+      ).rejects.toBe(boom);
+    });
+  });
+
+  describe('POST /admin/employees/batch-reactivate', () => {
+    it('should be decorated with @Post("batch-reactivate")', () => {
+      const handler = EmployeesController.prototype.batchReactivate;
+      const path = Reflect.getMetadata('path', handler);
+      const method = Reflect.getMetadata('method', handler);
+      expect(method).toBe(RequestMethod.POST);
+      expect(path).toBe('batch-reactivate');
+    });
+
+    it('should be decorated with @HttpCode(200)', () => {
+      const handler = EmployeesController.prototype.batchReactivate;
+      const statusCode = Reflect.getMetadata('__httpCode__', handler);
+      expect(statusCode).toBe(200);
+    });
+
+    it('should delegate to service.batchReactivate with dto.ids', async () => {
+      const { controller, employeesService } = buildController();
+      const dto: BatchDeleteDto = {
+        ids: [
+          '00000000-0000-4000-8000-000000000001',
+          '00000000-0000-4000-8000-000000000002',
+        ],
+      };
+      employeesService.batchReactivate.mockResolvedValue({ updated: 2 });
+
+      const result = await controller.batchReactivate(dto);
+
+      expect(result).toEqual({ updated: 2 });
+      expect(employeesService.batchReactivate).toHaveBeenCalledWith(dto.ids);
+    });
+
+    it('should propagate service errors', async () => {
+      const { controller, employeesService } = buildController();
+      const boom = new Error('service boom');
+      employeesService.batchReactivate.mockRejectedValueOnce(boom);
+
+      await expect(
+        controller.batchReactivate({
           ids: ['00000000-0000-4000-8000-000000000001'],
         }),
       ).rejects.toBe(boom);

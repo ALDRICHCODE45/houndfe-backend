@@ -5,6 +5,7 @@ import type {
   IEmployeeRepository,
   EmployeeListOptions,
   EmployeeListResult,
+  EmployeeStatus,
 } from '../domain/employee.repository';
 import { EmployeeNumberConflictError } from '../domain/errors/employee-number-conflict.error';
 
@@ -110,6 +111,38 @@ export class PrismaEmployeeRepository implements IEmployeeRepository {
     const prisma = this.tenantPrisma.getClient();
     const result = await prisma.employee.deleteMany({
       where: { id: { in: ids } },
+    });
+    return result.count;
+  }
+
+  // ============================================================
+  // updateStatusMany — batch status flip (terminate / reactivate)
+  //
+  // Updates every employee whose id is in `ids` in a single Prisma
+  // `updateMany`. When the target status is `TERMINATED` we stamp
+  // `terminationDate = new Date()` so the column stays consistent
+  // with the single-record `terminate()` path (see EmployeesService.
+  // terminate). For any other status (currently just `ACTIVE` via
+  // reactivation) we clear `terminationDate` to NULL — matching the
+  // single-record `reactivate()` shape.
+  //
+  // Returns the count of actually-updated rows so the service can
+  // echo `{ updated: N }` to the caller. `tenantPrisma.getClient()`
+  // honours the ambient CLS tx so the entire batch is atomic.
+  // ============================================================
+  async updateStatusMany(
+    ids: string[],
+    status: EmployeeStatus,
+  ): Promise<number> {
+    if (ids.length === 0) return 0;
+    const prisma = this.tenantPrisma.getClient();
+    const result = await prisma.employee.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        status,
+        terminationDate:
+          status === 'TERMINATED' ? new Date() : null,
+      },
     });
     return result.count;
   }
