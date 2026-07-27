@@ -18,6 +18,7 @@ export interface IEmployeeRepository {
   findById(id: string): Promise<any | null>;
   findAll(options: EmployeeListOptions): Promise<EmployeeListResult>;
   update(id: string, data: any): Promise<any>;
+  delete(id: string): Promise<void>;
   findSubordinates(managerId: string): Promise<any[]>;
   findManagerIdOf(employeeId: string): Promise<string | null>;
 }

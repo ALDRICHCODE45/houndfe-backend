@@ -87,6 +87,11 @@ export class PrismaEmployeeRepository implements IEmployeeRepository {
     }
   }
 
+  async delete(id: string): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+    await prisma.employee.delete({ where: { id } });
+  }
+
   async findSubordinates(managerId: string): Promise<any[]> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.employee.findMany({

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -52,6 +53,13 @@ export class EmployeesController {
     @Body() dto: UpdateEmployeeDto,
   ) {
     return this.employeesService.update(id, dto);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['delete', 'Employee'])
+  remove(@Param('id', ParseUUIDPipe) id: string) {
+    return this.employeesService.remove(id);
   }
 
   @Post(':id/terminate')

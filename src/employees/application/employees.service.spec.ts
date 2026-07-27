@@ -19,6 +19,7 @@ function makeService(opts?: {
     findById: jest.fn(),
     findAll: jest.fn(),
     update: jest.fn(),
+    delete: jest.fn(),
     findSubordinates: jest.fn(),
     findManagerIdOf: jest.fn(),
   };
@@ -454,6 +455,38 @@ describe('EmployeesService', () => {
       await expect(service.findSubordinates('missing')).rejects.toThrow(
         EmployeeNotFoundError,
       );
+    });
+  });
+
+  describe('remove()', () => {
+    it('should call repo.delete with the id when employee exists', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(makeEmployeeRecord());
+      employeeRepo.delete.mockResolvedValue(undefined);
+
+      await service.remove('emp-1');
+
+      expect(employeeRepo.findById).toHaveBeenCalledWith('emp-1');
+      expect(employeeRepo.delete).toHaveBeenCalledWith('emp-1');
+      expect(employeeRepo.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it('should throw EmployeeNotFoundError when employee does not exist and not call repo.delete', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(null);
+
+      await expect(service.remove('missing')).rejects.toThrow(
+        EmployeeNotFoundError,
+      );
+      expect(employeeRepo.delete).not.toHaveBeenCalled();
+    });
+
+    it('should propagate repo.delete errors (e.g. FK violations surface as 500)', async () => {
+      const { service, employeeRepo } = makeService();
+      employeeRepo.findById.mockResolvedValue(makeEmployeeRecord());
+      employeeRepo.delete.mockRejectedValue(new Error('db boom'));
+
+      await expect(service.remove('emp-1')).rejects.toThrow('db boom');
     });
   });
 

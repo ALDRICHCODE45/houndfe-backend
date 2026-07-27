@@ -232,6 +232,12 @@ export class EmployeesService {
     );
   }
 
+  async remove(id: string): Promise<void> {
+    const employee = await this.employeeRepo.findById(id);
+    if (!employee) throw new EmployeeNotFoundError(id);
+    await this.employeeRepo.delete(id);
+  }
+
   async findManagerChain(id: string, ability?: AppAbility) {
     const employee = await this.employeeRepo.findById(id);
     if (!employee) throw new EmployeeNotFoundError(id);
