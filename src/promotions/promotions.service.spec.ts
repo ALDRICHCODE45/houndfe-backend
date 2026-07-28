@@ -1597,6 +1597,41 @@ describe('PromotionsService', () => {
     });
   });
 
+  // ── activatePromotion ─────────────────────────────────────
+
+  describe('activatePromotion()', () => {
+    it('should reactivate a manually ended promotion and persist its derived status', async () => {
+      const existing = makePromotion({ status: 'ENDED', manuallyEnded: true });
+      const updated = makePromotion({ status: 'ACTIVE', manuallyEnded: false });
+      const repo = makeRepo({
+        findById: jest
+          .fn()
+          .mockResolvedValueOnce(existing)
+          .mockResolvedValueOnce(updated),
+        updateStatus: jest.fn().mockResolvedValue(undefined),
+      });
+      const service = makeService(repo, makePrisma());
+
+      const result = await service.activatePromotion('promo-1');
+
+      expect(repo.updateStatus).toHaveBeenCalledWith(
+        'promo-1',
+        'ACTIVE',
+        null,
+        false,
+      );
+      expect(result.status).toBe('ACTIVE');
+    });
+
+    it('should throw EntityNotFoundError when activating a non-existent promotion', async () => {
+      const repo = makeRepo({ findById: jest.fn().mockResolvedValue(null) });
+      const service = makeService(repo, makePrisma());
+
+      await expect(service.activatePromotion('nonexistent')).rejects.toThrow(
+        EntityNotFoundError,
+      );
+    });
+  });
   describe('create() ADVANCED target-side validation', () => {
     it('should reject ADVANCED when buyTargetType is set but buyTargetItems is missing', async () => {
       const repo = makeRepo();
@@ -1976,8 +2011,6 @@ describe('PromotionsService', () => {
       expect(prisma.variant.findMany).not.toHaveBeenCalled();
     });
   });
-
-  // ==================== Batch-Deletable Service Contract ====================
 
   describe('validateForBatchDeletion()', () => {
     it('returns valid=true when no IDs are referenced by sales and all exist in tenant', async () => {

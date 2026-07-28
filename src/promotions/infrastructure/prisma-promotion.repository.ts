@@ -291,6 +291,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
     id: string,
     status: 'ENDED' | 'ACTIVE' | 'SCHEDULED',
     endDate?: Date | null,
+    manuallyEnded?: boolean,
   ): Promise<void> {
     const prisma = this.tenantPrisma.getClient();
     await prisma.promotion.update({
@@ -302,7 +303,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
         // For ACTIVE/SCHEDULED writes we leave the flag untouched to
         // preserve operator intent across status flips that originated
         // outside of `Promotion.end()`.
-        ...(status === 'ENDED' ? { manuallyEnded: true } : {}),
+        manuallyEnded: manuallyEnded ?? status === 'ENDED',
         ...(endDate !== undefined ? { endDate } : {}),
         updatedAt: new Date(),
       },

@@ -161,7 +161,7 @@ describe('PromotionsController', () => {
 
   // ==================== batchEnd ====================
 
-  it('batchEnd() should call service.batchEnd with dto.ids', async () => {
+
     const dto: BatchDeleteDto = {
       ids: [
         '00000000-0000-4000-8000-000000000001',

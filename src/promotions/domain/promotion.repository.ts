@@ -37,6 +37,7 @@ export interface IPromotionRepository {
     id: string,
     status: 'ENDED' | 'ACTIVE' | 'SCHEDULED',
     endDate?: Date | null,
+    manuallyEnded?: boolean,
   ): Promise<void>;
 }
 

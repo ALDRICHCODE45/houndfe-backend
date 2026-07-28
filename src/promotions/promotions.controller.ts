@@ -87,7 +87,12 @@ export class PromotionsController {
     return this.promotionsService.endPromotion(id);
   }
 
-  // ==================== Batch Delete ====================
+  @Patch(':id/activate')
+  @RequirePermissions(['update', 'Promotion'])
+  activatePromotion(@Param('id', ParseUUIDPipe) id: string) {
+    return this.promotionsService.activatePromotion(id);
+  }
+
 
   /**
    * `POST /promotions/batch-delete`
@@ -109,8 +114,6 @@ export class PromotionsController {
   async batchDelete(@Body() dto: BatchDeleteDto): Promise<{ deleted: number }> {
     return this.batchDeleteOrchestrator.execute(dto.ids);
   }
-
-  // ==================== Batch End (inline) ====================
 
   /**
    * `POST /promotions/batch-end`

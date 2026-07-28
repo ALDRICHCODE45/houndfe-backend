@@ -393,8 +393,13 @@ export class Promotion {
     this.updatedAt = new Date();
   }
 
-  // ============================================================
-  // recomputeStatus — write-time status sync.
+  activate(): void {
+    if (!this.manuallyEnded) return;
+    this.manuallyEnded = false;
+    this.recomputeStatus();
+    this.updatedAt = new Date();
+  }
+
   // Service calls this on every update() so the persisted `status`
   // column reflects the current date window. Manually-ended rows stay
   // ENDED; the manual flag is never silently cleared by this method.

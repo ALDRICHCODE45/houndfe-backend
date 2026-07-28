@@ -292,10 +292,25 @@ export class PromotionsService extends BatchDeletableService {
     return updated.toResponse();
   }
 
-  // ============================================================
-  // batchEnd — inline batch-status endpoint. Mirrors the single
-  // `endPromotion()` path (load → entity.end() → repo.updateStatus)
+  async activatePromotion(id: string) {
+    const promotion = await this.repo.findById(id);
+    if (!promotion) throw new EntityNotFoundError('Promotion', id);
+
+    promotion.activate();
+    await this.repo.updateStatus(
+      id,
+      promotion.status,
+      promotion.endDate,
+      promotion.manuallyEnded,
+    );
+
+    const updated = await this.repo.findById(id);
+    if (!updated) throw new EntityNotFoundError('Promotion', id);
+    return updated.toResponse();
+  }
+
   // but applies it across the whole id list and wraps the whole
+
   // sequence in `tenantPrisma.runInTransaction()` so a single
   // failure rolls back every flip (all-or-nothing).
   //

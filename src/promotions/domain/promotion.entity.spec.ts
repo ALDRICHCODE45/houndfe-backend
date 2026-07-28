@@ -478,8 +478,44 @@ describe('Promotion Entity', () => {
   });
 
   // ============================================================
-  // fromPersistence
+  // activate() METHOD
   // ============================================================
+  describe('activate()', () => {
+    const validBase = {
+      id: BASE_ID,
+      title: 'Activatable Promo',
+      type: 'ORDER_DISCOUNT' as const,
+      method: 'AUTOMATIC' as const,
+      discountType: 'PERCENTAGE' as const,
+      discountValue: 10,
+      startDate: new Date('2026-07-01T00:00:00.000Z'),
+      endDate: new Date('2026-08-01T00:00:00.000Z'),
+    };
+
+    it('should clear manuallyEnded and recompute status from the date window', () => {
+      const promo = Promotion.create(validBase);
+      promo.end();
+      expect(promo.manuallyEnded).toBe(true);
+
+      promo.activate();
+
+      expect(promo.manuallyEnded).toBe(false);
+      expect(promo.status).toBe('ACTIVE');
+      expect(promo.getEffectiveStatus(new Date('2026-07-10T00:00:00.000Z'))).toBe('ACTIVE');
+    });
+
+    it('should be idempotent when already active', () => {
+      const promo = Promotion.create(validBase);
+      const updatedAt = promo.updatedAt;
+
+      promo.activate();
+
+      expect(promo.manuallyEnded).toBe(false);
+      expect(promo.status).toBe('ACTIVE');
+      expect(promo.updatedAt).toBe(updatedAt);
+    });
+  });
+
   describe('fromPersistence', () => {
     it('should reconstruct entity from persistence data', () => {
       const now = new Date();
