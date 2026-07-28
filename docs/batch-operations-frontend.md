@@ -9,14 +9,16 @@
 
 ## 1. Resumen de endpoints
 
-| Método | Endpoint | Permiso | Descripción |
-|--------|----------|---------|-------------|
-| `POST` | `/promotions/batch-delete` | `batch_delete:Promotion` | Eliminar múltiples promos |
-| `POST` | `/promotions/batch-end` | `update:Promotion` | Finalizar múltiples promos |
-| `DELETE` | `/admin/employees/:id` | `delete:Employee` | Eliminar un empleado |
-| `POST` | `/admin/employees/batch-delete` | `batch_delete:Employee` | Eliminar múltiples empleados |
-| `POST` | `/admin/employees/batch-terminate` | `update:Employee` | Terminar múltiples empleados |
-| `POST` | `/admin/employees/batch-reactivate` | `update:Employee` | Reactivar múltiples empleados |
+| Método   | Endpoint                            | Permiso                  | Descripción                   |
+| -------- | ----------------------------------- | ------------------------ | ----------------------------- |
+| `POST`   | `/promotions/batch-delete`          | `batch_delete:Promotion` | Eliminar múltiples promos     |
+| `POST`   | `/promotions/batch-end`             | `update:Promotion`       | Finalizar múltiples promos    |
+| `POST`   | `/promotions/batch-activate`        | `update:Promotion`       | Reactivar múltiples promos    |
+| `PATCH`  | `/promotions/:id/activate`          | `update:Promotion`       | Reactivar una promo           |
+| `DELETE` | `/admin/employees/:id`              | `delete:Employee`        | Eliminar un empleado          |
+| `POST`   | `/admin/employees/batch-delete`     | `batch_delete:Employee`  | Eliminar múltiples empleados  |
+| `POST`   | `/admin/employees/batch-terminate`  | `update:Employee`        | Terminar múltiples empleados  |
+| `POST`   | `/admin/employees/batch-reactivate` | `update:Employee`        | Reactivar múltiples empleados |
 
 Todos requieren JWT (Bearer token). El tenant se determina automáticamente del token.
 
@@ -41,11 +43,11 @@ Content-Type: application/json
 
 ### Reglas de validación
 
-| Regla | Error si... |
-|-------|-------------|
-| `@ArrayMinSize(1)` | Array vacío `[]` |
-| `@ArrayMaxSize(100)` | Más de 100 IDs |
-| `@ArrayUnique()` | IDs duplicados |
+| Regla                          | Error si...            |
+| ------------------------------ | ---------------------- |
+| `@ArrayMinSize(1)`             | Array vacío `[]`       |
+| `@ArrayMaxSize(100)`           | Más de 100 IDs         |
+| `@ArrayUnique()`               | IDs duplicados         |
 | `@IsUUID('4', { each: true })` | Algún ID no es UUID v4 |
 
 ---
@@ -54,7 +56,8 @@ Content-Type: application/json
 
 ### 3.1 `POST /promotions/batch-delete`
 
-**Permiso**: `batch_delete:Promotion`  
+**Permiso**: `batch_delete:Promotion`
+
 > ⚠️ Este permiso es **explícito e independiente** de `manage:Promotion` y `delete:Promotion`. Ver sección 7.
 
 #### Éxito — 200 OK
@@ -103,6 +106,7 @@ Content-Type: application/json
 #### Validación DTO — 400 Bad Request
 
 Formato estándar de NestJS/class-validator:
+
 ```json
 {
   "statusCode": 400,
@@ -137,6 +141,60 @@ Finaliza múltiples promociones (equivalente a `PATCH /promotions/:id/end` por c
 }
 ```
 
+### 3.3 `POST /promotions/batch-activate`
+
+**Permiso**: `update:Promotion`
+
+Reactiva múltiples promociones (limpia `manuallyEnded = false` y recalcula el estado desde las fechas). Idempotente: reactivar una promo no finalizada manualmente es no-op. All-or-nothing: si una falla, ninguna se modifica.
+
+#### Éxito — 200 OK
+
+```json
+{
+  "activated": 3
+}
+```
+
+#### IDs no encontrados — 404 Not Found
+
+```json
+{
+  "statusCode": 404,
+  "error": "BATCH_DELETE_NOT_FOUND",
+  "message": "Promotion(s) not found in this tenant: 550e8400-...",
+  "offendingIds": ["550e8400-e29b-41d4-a716-446655440099"],
+  "timestamp": "2026-07-24T18:30:00.000Z"
+}
+```
+
+### 3.4 `PATCH /promotions/:id/activate`
+
+**Permiso**: `update:Promotion`
+
+Reactiva una promoción individual. Equivalente al batch-activate para un solo ID. Retorna la promoción actualizada con su nuevo `status`.
+
+#### Éxito — 200 OK
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "3x2 en productos seleccionados",
+  "status": "ACTIVE",
+  "...": "..."
+}
+```
+
+#### No encontrada — 404 Not Found
+
+```json
+{
+  "statusCode": 404,
+  "error": "ENTITY_NOT_FOUND",
+  "message": "Promotion with id \"...\" not found",
+  "timestamp": "2026-07-24T18:30:00.000Z"
+}
+```
+
 ---
 
 ## 4. Empleados
@@ -164,7 +222,8 @@ Sin body.
 
 ### 4.2 `POST /admin/employees/batch-delete`
 
-**Permiso**: `batch_delete:Employee`  
+**Permiso**: `batch_delete:Employee`
+
 > ⚠️ Este permiso es **explícito e independiente** de `manage:Employee` y `delete:Employee`.
 
 #### Éxito — 200 OK
@@ -199,9 +258,7 @@ Termina múltiples empleados (equivalente a `POST /admin/employees/:id/terminate
 
 ```json
 {
-  "ids": [
-    "550e8400-e29b-41d4-a716-446655440000"
-  ],
+  "ids": ["550e8400-e29b-41d4-a716-446655440000"],
   "reason": "Finalización de contrato"
 }
 ```
@@ -236,9 +293,7 @@ Reactive múltiples empleados (equivalente a `POST /admin/employees/:id/reactiva
 
 ```json
 {
-  "ids": [
-    "550e8400-e29b-41d4-a716-446655440000"
-  ]
+  "ids": ["550e8400-e29b-41d4-a716-446655440000"]
 }
 ```
 
@@ -266,14 +321,14 @@ Reactive múltiples empleados (equivalente a `POST /admin/employees/:id/reactiva
 
 ## 5. Tabla de códigos de error
 
-| HTTP | Código | Significado | Campo extra |
-|------|--------|-------------|-------------|
-| 400 | `Bad Request` | Body inválido (DTO validation) | `message: string[]` |
-| 401 | `Unauthorized` | JWT inválido o expirado | — |
-| 403 | `INSUFFICIENT_PERMISSIONS` | Sin permiso requerido | — |
-| 404 | `ENTITY_NOT_FOUND` | Recurso individual no existe | — |
-| 404 | `BATCH_DELETE_NOT_FOUND` | IDs no existen en el tenant | `offendingIds: string[]` |
-| 409 | `PROMOTION_REFERENCED_BY_SALE` | Promo referenciada por venta (solo batch-delete) | `offendingIds: string[]` |
+| HTTP | Código                         | Significado                                      | Campo extra              |
+| ---- | ------------------------------ | ------------------------------------------------ | ------------------------ |
+| 400  | `Bad Request`                  | Body inválido (DTO validation)                   | `message: string[]`      |
+| 401  | `Unauthorized`                 | JWT inválido o expirado                          | —                        |
+| 403  | `INSUFFICIENT_PERMISSIONS`     | Sin permiso requerido                            | —                        |
+| 404  | `ENTITY_NOT_FOUND`             | Recurso individual no existe                     | —                        |
+| 404  | `BATCH_DELETE_NOT_FOUND`       | IDs no existen en el tenant                      | `offendingIds: string[]` |
+| 409  | `PROMOTION_REFERENCED_BY_SALE` | Promo referenciada por venta (solo batch-delete) | `offendingIds: string[]` |
 
 ---
 
@@ -293,13 +348,13 @@ Reactive múltiples empleados (equivalente a `POST /admin/employees/:id/reactiva
 
 Llamar `GET /auth/me/permissions` y buscar los permisos requeridos:
 
-| Funcionalidad | Buscar en response |
-|---------------|-------------------|
-| Batch delete promos | `{ action: "batch_delete", subject: "Promotion" }` |
-| Batch end promos | `{ action: "update", subject: "Promotion" }` |
-| Delete empleado | `{ action: "delete", subject: "Employee" }` |
-| Batch delete empleados | `{ action: "batch_delete", subject: "Employee" }` |
-| Terminate/reactivate | `{ action: "update", subject: "Employee" }` |
+| Funcionalidad          | Buscar en response                                 |
+| ---------------------- | -------------------------------------------------- |
+| Batch delete promos    | `{ action: "batch_delete", subject: "Promotion" }` |
+| Batch end promos       | `{ action: "update", subject: "Promotion" }`       |
+| Delete empleado        | `{ action: "delete", subject: "Employee" }`        |
+| Batch delete empleados | `{ action: "batch_delete", subject: "Employee" }`  |
+| Terminate/reactivate   | `{ action: "update", subject: "Employee" }`        |
 
 > ⚠️ `{ action: "manage", subject: "Promotion" }` **NO** implica `batch_delete`. Los permisos batch_delete son explícitos.
 
@@ -308,33 +363,39 @@ Llamar `GET /auth/me/permissions` y buscar los permisos requeridos:
 ## 7. Notas importantes
 
 ### All-or-nothing
+
 Todos los endpoints batch son **atómicos**: si un solo ID del lote falla, **ninguno** se procesa. No hay operaciones parciales.
 
 ### Promociones
+
 - **batch-delete**: si una promo fue usada en alguna venta, no se puede eliminar. Para "desactivarla" usar `batch-end` o `PATCH /promotions/:id/end`.
 - **batch-end**: idempotente — finalizar una promo ya finalizada es no-op.
 - El estado (ACTIVE, ENDED, SCHEDULED) no bloquea ninguna operación.
 
 ### Empleados
+
 - **DELETE (individual o batch)**: hard delete con cascade. **Irreversible**. Destruye todo el historial (salarios, puestos, documentos, time-off, contactos).
 - **batch-terminate**: soft-delete. Conserva el historial. Recomendado sobre delete.
 - **batch-reactivate**: revierte una terminación. Solo funciona en empleados TERMINATED.
 - El `managerId` de los subordinados se pone en `NULL` al eliminar.
 
 ### Límite
+
 Máximo **100 IDs por request**. Configurable vía `BATCH_DELETE_MAX_SIZE`.
 
 ### Transacción
+
 Todas las operaciones batch corren en una transacción de base de datos. Si el servidor se cae a medio camino, la DB revierte automáticamente.
 
 ---
 
 ## 8. Endpoints individuales relacionados
 
-| Método | Endpoint | Descripción |
-|--------|----------|-------------|
-| `DELETE` | `/promotions/:id` | Eliminar una promo |
-| `PATCH` | `/promotions/:id/end` | Finalizar una promo |
-| `DELETE` | `/admin/employees/:id` | Eliminar un empleado |
-| `POST` | `/admin/employees/:id/terminate` | Terminar un empleado |
-| `POST` | `/admin/employees/:id/reactivate` | Reactivar un empleado |
+| Método   | Endpoint                          | Descripción           |
+| -------- | --------------------------------- | --------------------- |
+| `DELETE` | `/promotions/:id`                 | Eliminar una promo    |
+| `PATCH`  | `/promotions/:id/end`             | Finalizar una promo   |
+| `PATCH`  | `/promotions/:id/activate`        | Reactivar una promo   |
+| `DELETE` | `/admin/employees/:id`            | Eliminar un empleado  |
+| `POST`   | `/admin/employees/:id/terminate`  | Terminar un empleado  |
+| `POST`   | `/admin/employees/:id/reactivate` | Reactivar un empleado |
