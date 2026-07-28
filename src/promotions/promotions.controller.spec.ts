@@ -22,6 +22,7 @@ type MockPromotionsService = {
   remove: jest.MockedFunction<PromotionsService['remove']>;
   endPromotion: jest.MockedFunction<PromotionsService['endPromotion']>;
   batchEnd: jest.MockedFunction<PromotionsService['batchEnd']>;
+  batchActivate: jest.MockedFunction<PromotionsService['batchActivate']>;
 };
 
 function makeService(): MockPromotionsService {
@@ -33,6 +34,7 @@ function makeService(): MockPromotionsService {
     remove: jest.fn(),
     endPromotion: jest.fn(),
     batchEnd: jest.fn(),
+    batchActivate: jest.fn(),
   };
 }
 
@@ -159,9 +161,27 @@ describe('PromotionsController', () => {
     ).rejects.toBe(boom);
   });
 
+  // ==================== batchActivate ====================
+
+  it('batchActivate() delegates to service.batchActivate with dto.ids', async () => {
+    const dto: BatchDeleteDto = {
+      ids: [
+        '00000000-0000-4000-8000-000000000001',
+        '00000000-0000-4000-8000-000000000002',
+      ],
+    };
+    service.batchActivate.mockResolvedValue({ activated: 2 });
+
+    const result = await controller.batchActivate(dto);
+
+    expect(result).toEqual({ activated: 2 });
+    expect(service.batchActivate).toHaveBeenCalledWith(dto.ids);
+    expect(service.batchActivate).toHaveBeenCalledTimes(1);
+  });
+
   // ==================== batchEnd ====================
 
-
+  it('batchEnd() delegates to service.batchEnd with dto.ids', async () => {
     const dto: BatchDeleteDto = {
       ids: [
         '00000000-0000-4000-8000-000000000001',

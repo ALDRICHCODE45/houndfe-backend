@@ -309,21 +309,56 @@ export class PromotionsService extends BatchDeletableService {
     return updated.toResponse();
   }
 
-  // but applies it across the whole id list and wraps the whole
+  // ============================================================
+  // batchActivate — inline batch-status endpoint.
+  //
+  // Mirrors `batchEnd()` contract: same pre-flight tenant check,
+  // same all-or-nothing transaction, same error contract
+  // (BATCH_DELETE_NOT_FOUND → 404 with offendingIds + reason).
+  // `activate()` is idempotent — calling it on a non-manually-ended
+  // promotion is a no-op.
+  // ============================================================
+  async batchActivate(ids: string[]): Promise<{ activated: number }> {
+    if (ids.length === 0) return { activated: 0 };
 
-  // sequence in `tenantPrisma.runInTransaction()` so a single
-  // failure rolls back every flip (all-or-nothing).
+    const tenantClient = this.tenantPrisma.getClient();
+    const existing = await tenantClient.promotion.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
+    });
+    const existingIds = new Set(existing.map((row) => row.id));
+    const missingIds = ids.filter((id) => !existingIds.has(id));
+    if (missingIds.length > 0) {
+      throw new BatchDeleteValidationError(
+        missingIds,
+        `Promotion(s) not found in this tenant: ${missingIds.join(', ')}`,
+        'BATCH_DELETE_NOT_FOUND',
+      );
+    }
+
+    return this.tenantPrisma.runInTransaction(async () => {
+      let activated = 0;
+      for (const id of ids) {
+        const promotion = await this.repo.findById(id);
+        if (!promotion) throw new EntityNotFoundError('Promotion', id);
+        promotion.activate();
+        await this.repo.updateStatus(
+          id,
+          promotion.status,
+          promotion.endDate,
+          promotion.manuallyEnded,
+        );
+        activated++;
+      }
+      return { activated };
+    });
+  }
+
+  // ============================================================
+  // batchEnd — inline batch-status endpoint.
   //
-  // Pre-flight validates tenant ownership through
-  // `tenantPrisma.getClient()`. Any missing id throws a
-  // `BatchDeleteValidationError` with code `BATCH_DELETE_NOT_FOUND`
-  // so the `DomainExceptionFilter` translates it to a 404 with
-  // `offendingIds` + `reason` (matches the batch-delete contract
-  // for callers).
-  //
-  // Empty-array short-circuit: returns `{ ended: 0 }` without any
-  // DB roundtrip. Upstream `BatchDeleteDto` enforces
-  // `@ArrayMinSize(1)` so this branch is defensive only.
+  // Mirrors the batchActivate contract: same pre-flight, same
+  // all-or-nothing transaction. `entity.end()` is idempotent.
   // ============================================================
   async batchEnd(ids: string[]): Promise<{ ended: number }> {
     if (ids.length === 0) {

@@ -116,6 +116,23 @@ export class PromotionsController {
   }
 
   /**
+   * `POST /promotions/batch-activate`
+   *
+   * Inline batch activate — clears `manuallyEnded` on every id
+   * and recomputes the effective status from the date window.
+   * Idempotent: non-manually-ended promotions are no-ops.
+   * All-or-nothing inside `tenantPrisma.runInTransaction()`.
+   */
+  @Post('batch-activate')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Promotion'])
+  async batchActivate(
+    @Body() dto: BatchDeleteDto,
+  ): Promise<{ activated: number }> {
+    return this.promotionsService.batchActivate(dto.ids);
+  }
+
+  /**
    * `POST /promotions/batch-end`
    *
    * Inline batch end — every id in `dto.ids` is flipped to
