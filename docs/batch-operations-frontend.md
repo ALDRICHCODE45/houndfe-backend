@@ -250,9 +250,9 @@ Sin body.
 
 **Permiso**: `update:Employee`
 
-Termina múltiples empleados (equivalente a `POST /admin/employees/:id/terminate`). El campo `terminationDate` se pone en `now()` y `status = 'TERMINATED'`. Requiere el body de `TerminateEmployeeDto` (con `reason`).
+Termina múltiples empleados (equivalente a `POST /admin/employees/:id/terminate`). El campo `terminationDate` se pone en `now()` y `status = 'TERMINATED'`. Acepta un `reason` opcional para el motivo de baja.
 
-> ⚠️ **A diferencia de otros batch, este endpoint acepta un body extendido** que incluye `reason` para el motivo de terminación. Ver request abajo.
+> ⚠️ **A diferencia de otros batch, este endpoint acepta un body extendido** con un `reason` opcional. Si no se envía, el campo queda vacío en la DB.
 
 #### Request
 

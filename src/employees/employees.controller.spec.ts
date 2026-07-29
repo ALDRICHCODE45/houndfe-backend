@@ -3,6 +3,7 @@ import { EmployeesService } from './application/employees.service';
 import { RequestMethod } from '@nestjs/common';
 import type { BatchDeleteOrchestrator } from '../shared/batch-delete';
 import { BatchDeleteDto } from '../shared/batch-delete';
+import { BatchTerminateEmployeeDto } from './dto/batch-terminate-employee.dto';
 import 'reflect-metadata';
 
 function buildController() {
@@ -149,7 +150,7 @@ describe('EmployeesController', () => {
 
     it('should delegate to service.batchTerminate with dto.ids', async () => {
       const { controller, employeesService } = buildController();
-      const dto: BatchDeleteDto = {
+      const dto: BatchTerminateEmployeeDto = {
         ids: [
           '00000000-0000-4000-8000-000000000001',
           '00000000-0000-4000-8000-000000000002',
@@ -160,8 +161,21 @@ describe('EmployeesController', () => {
       const result = await controller.batchTerminate(dto);
 
       expect(result).toEqual({ updated: 2 });
-      expect(employeesService.batchTerminate).toHaveBeenCalledWith(dto.ids);
+      expect(employeesService.batchTerminate).toHaveBeenCalledWith(dto.ids, undefined);
       expect(employeesService.batchTerminate).toHaveBeenCalledTimes(1);
+    });
+
+    it('should pass reason to service when provided', async () => {
+      const { controller, employeesService } = buildController();
+      const dto: BatchTerminateEmployeeDto = {
+        ids: ['00000000-0000-4000-8000-000000000001'],
+        reason: 'baja global',
+      };
+      employeesService.batchTerminate.mockResolvedValue({ updated: 1 });
+
+      await controller.batchTerminate(dto);
+
+      expect(employeesService.batchTerminate).toHaveBeenCalledWith(dto.ids, 'baja global');
     });
 
     it('should propagate service errors (e.g. BatchDeleteValidationError → 404)', async () => {

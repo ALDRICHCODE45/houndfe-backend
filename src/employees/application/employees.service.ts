@@ -250,7 +250,7 @@ export class EmployeesService extends BatchDeletableService {
   // any DB roundtrip. Upstream `BatchDeleteDto` enforces
   // `@ArrayMinSize(1)` so this branch is defensive only.
   // ============================================================
-  async batchTerminate(ids: string[]): Promise<{ updated: number }> {
+  async batchTerminate(ids: string[], reason?: string): Promise<{ updated: number }> {
     if (ids.length === 0) {
       return { updated: 0 };
     }
@@ -258,6 +258,7 @@ export class EmployeesService extends BatchDeletableService {
     const updated = await this.employeeRepo.updateStatusMany(
       ids,
       'TERMINATED',
+      reason,
     );
     return { updated };
   }

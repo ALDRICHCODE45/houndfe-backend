@@ -26,6 +26,7 @@ import {
   BatchDeleteGuard,
   BatchDeleteOrchestrator,
 } from '../shared/batch-delete';
+import { BatchTerminateEmployeeDto } from './dto/batch-terminate-employee.dto';
 
 @Controller('admin/employees')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -140,9 +141,9 @@ export class EmployeesController {
   @HttpCode(HttpStatus.OK)
   @RequirePermissions(['update', 'Employee'])
   async batchTerminate(
-    @Body() dto: BatchDeleteDto,
+    @Body() dto: BatchTerminateEmployeeDto,
   ): Promise<{ updated: number }> {
-    return this.employeesService.batchTerminate(dto.ids);
+    return this.employeesService.batchTerminate(dto.ids, dto.reason);
   }
 
   /**

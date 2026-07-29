@@ -133,16 +133,21 @@ export class PrismaEmployeeRepository implements IEmployeeRepository {
   async updateStatusMany(
     ids: string[],
     status: EmployeeStatus,
+    terminationReason?: string,
   ): Promise<number> {
     if (ids.length === 0) return 0;
     const prisma = this.tenantPrisma.getClient();
+    const data: Record<string, unknown> = {
+      status,
+      terminationDate:
+        status === 'TERMINATED' ? new Date() : null,
+    };
+    if (terminationReason !== undefined) {
+      data.terminationReason = terminationReason;
+    }
     const result = await prisma.employee.updateMany({
       where: { id: { in: ids } },
-      data: {
-        status,
-        terminationDate:
-          status === 'TERMINATED' ? new Date() : null,
-      },
+      data,
     });
     return result.count;
   }

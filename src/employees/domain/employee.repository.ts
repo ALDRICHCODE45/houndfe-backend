@@ -54,7 +54,7 @@ export interface IEmployeeRepository {
    * Returns the number of rows actually updated so the service can
    * echo `{ updated: N }` to the caller.
    */
-  updateStatusMany(ids: string[], status: EmployeeStatus): Promise<number>;
+  updateStatusMany(ids: string[], status: EmployeeStatus, terminationReason?: string): Promise<number>;
   findSubordinates(managerId: string): Promise<any[]>;
   findManagerIdOf(employeeId: string): Promise<string | null>;
 }
