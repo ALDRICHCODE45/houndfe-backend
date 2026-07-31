@@ -54,6 +54,13 @@ export interface QuotationItemProps {
  *   preserves the engine's per-line attribution.
  */
 export class QuotationItem {
+  /**
+   * WU3 — promotion title snapshot. Set by `applyDiscount`; surfaced on
+   * the wire via `toResponse().discountTitle`. Null on non-discounted
+   * lines. Mirrors `SaleItem.discountTitle`.
+   */
+  private _discountTitle: string | null = null;
+
   private constructor(
     public readonly id: string,
     public readonly quotationId: string,
@@ -65,8 +72,8 @@ export class QuotationItem {
     private _unitPriceCents: number,
     public readonly unitPriceCurrency: string,
     private _priceSource: QuotationItemPriceSource,
-    public readonly appliedPriceListId: string | null,
-    public readonly customPriceCents: number | null,
+    private _appliedPriceListId: string | null,
+    private _customPriceCents: number | null,
     private _discountType: QuotationItemDiscountType | null,
     private _discountValue: number | null,
     private _discountAmountCents: number,
@@ -156,6 +163,14 @@ export class QuotationItem {
     return this._priceSource;
   }
 
+  get appliedPriceListId(): string | null {
+    return this._appliedPriceListId;
+  }
+
+  get customPriceCents(): number | null {
+    return this._customPriceCents;
+  }
+
   get discountType(): QuotationItemDiscountType | null {
     return this._discountType;
   }
@@ -166,6 +181,10 @@ export class QuotationItem {
 
   get discountAmountCents(): number {
     return this._discountAmountCents;
+  }
+
+  get discountTitle(): string | null {
+    return this._discountTitle;
   }
 
   get promotionId(): string | null {
@@ -183,6 +202,142 @@ export class QuotationItem {
 
   matches(productId: string, variantId: string | null): boolean {
     return this.productId === productId && this.variantId === variantId;
+  }
+
+  /**
+   * WU3 — Engine-driven tier re-resolution on non-sticky lines (addItem,
+   * updateItemQuantity, setPriceList). Mutates `_unitPriceCents` +
+   * `_priceSource` + `_appliedPriceListId` only — NEVER touches discount
+   * fields and NEVER sets `priceSource: 'CUSTOM'` (the sticky override
+   * is exclusively an `overridePrice` contract).
+   *
+   * Mirrors `SaleItem.reprice` (sales/domain/sale-item.entity.ts:381).
+   * The `priceSource` is restricted to `'PRICE_LIST'` here; `'CUSTOM'` is
+   * rejected because marking a line sticky is `overridePrice`'s contract.
+   */
+  reprice(input: {
+    priceCents: number;
+    priceSource: 'PRICE_LIST' | 'CUSTOM';
+    appliedPriceListId: string | null;
+  }): void {
+    if (input.priceSource === 'CUSTOM') {
+      throw new InvalidArgumentError('INVALID_REPRICE_INPUT');
+    }
+    if (!Number.isInteger(input.priceCents) || input.priceCents < 0) {
+      throw new InvalidArgumentError('INVALID_REPRICE_INPUT');
+    }
+    this._unitPriceCents = input.priceCents;
+    this._priceSource = input.priceSource;
+    this._appliedPriceListId = input.appliedPriceListId;
+  }
+
+  /**
+   * WU3 — Cashier-explicit price override. Marks the line sticky
+   * (`priceSource = 'CUSTOM'`) and clears any prior per-line discount
+   * fields so the recompute can re-apply AUTO promos on the new baseline.
+   * Mirrors `SaleItem.overridePrice` (sales/domain/sale-item.entity.ts:348).
+   */
+  overridePrice(input: {
+    priceCents: number;
+    priceSource: 'PRICE_LIST' | 'CUSTOM';
+    appliedPriceListId: string | null;
+    customPriceCents: number | null;
+  }): void {
+    if (input.priceSource === 'PRICE_LIST') {
+      if (!input.appliedPriceListId || input.customPriceCents !== null) {
+        throw new InvalidArgumentError('INVALID_PRICE_OVERRIDE_INPUT');
+      }
+    }
+    if (input.priceSource === 'CUSTOM') {
+      if (!input.customPriceCents || input.appliedPriceListId !== null) {
+        throw new InvalidArgumentError('INVALID_PRICE_OVERRIDE_INPUT');
+      }
+    }
+    if (!Number.isInteger(input.priceCents) || input.priceCents < 0) {
+      throw new InvalidArgumentError('INVALID_PRICE_OVERRIDE_INPUT');
+    }
+    this._unitPriceCents = input.priceCents;
+    this._priceSource = input.priceSource;
+    this._appliedPriceListId = input.appliedPriceListId;
+    this._customPriceCents = input.customPriceCents;
+    this.clearDiscountFields();
+  }
+
+  /**
+   * WU3 — Apply a per-line discount (the engine's per-unit result row).
+   * Mirrors `SaleItem.applyDiscount` (sales/domain/sale-item.entity.ts:394).
+   * Used by the recompute pipeline after every draft mutation.
+   */
+  applyDiscount(input: {
+    type: 'amount' | 'percentage';
+    amountCents?: number;
+    percent?: number;
+    discountTitle?: string;
+    promotionId?: string | null;
+  }): void {
+    const hasAmount = input.amountCents !== undefined;
+    const hasPercent = input.percent !== undefined;
+
+    if (hasAmount === hasPercent) {
+      throw new InvalidArgumentError('INVALID_DISCOUNT_INPUT');
+    }
+    if (input.type === 'amount' && !hasAmount) {
+      throw new InvalidArgumentError('INVALID_DISCOUNT_INPUT');
+    }
+    if (input.type === 'percentage' && !hasPercent) {
+      throw new InvalidArgumentError('INVALID_DISCOUNT_INPUT');
+    }
+
+    const baseline = this._unitPriceCents;
+    const discountAmountCents = this.computeDiscountAmountCents(input, baseline);
+    if (baseline - discountAmountCents < 1) {
+      throw new InvalidArgumentError('DISCOUNT_AMOUNT_INVALID');
+    }
+
+    this._discountType = input.type;
+    this._discountValue =
+      input.type === 'amount' ? input.amountCents! : input.percent!;
+    this._discountAmountCents = discountAmountCents;
+    this._discountTitle = input.discountTitle ?? null;
+    this._promotionId = input.promotionId ?? null;
+    this._unitPriceCents = baseline - discountAmountCents;
+  }
+
+  /**
+   * WU3 — Remove any per-line discount applied by `applyDiscount` (manual
+   * or promo-sourced). Restores `unitPriceCents` to the pre-discount
+   * baseline. Mirrors `SaleItem.removeDiscount`
+   * (sales/domain/sale-item.entity.ts:430).
+   */
+  removeDiscount(): void {
+    if (this._discountAmountCents > 0) {
+      this._unitPriceCents += this._discountAmountCents;
+    }
+    this.clearDiscountFields();
+  }
+
+  private clearDiscountFields(): void {
+    this._discountType = null;
+    this._discountValue = null;
+    this._discountAmountCents = 0;
+    this._promotionId = null;
+  }
+
+  private computeDiscountAmountCents(
+    input: {
+      type: 'amount' | 'percentage';
+      amountCents?: number;
+      percent?: number;
+    },
+    baseline: number,
+  ): number {
+    if (input.type === 'amount') {
+      return Math.min(input.amountCents ?? 0, baseline);
+    }
+    // percentage — clamp 1..99 (mirrors the engine's clamp invariant).
+    const raw = input.percent ?? 0;
+    const safePercent = Math.min(Math.max(Math.trunc(raw), 1), 99);
+    return Math.round((baseline * safePercent) / 100);
   }
 
   toResponse() {

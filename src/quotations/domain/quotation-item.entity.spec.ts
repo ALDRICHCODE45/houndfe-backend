@@ -5,6 +5,7 @@
  */
 import { QuotationItem } from './quotation-item.entity';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
+import type { QuotationItemProps } from './quotation-item.entity';
 
 describe('QuotationItem Entity', () => {
   const validItemProps = {
@@ -237,6 +238,217 @@ describe('QuotationItem Entity', () => {
         variantId: 'var-x',
       });
       expect(item.matches('prod-001', 'var-y')).toBe(false);
+    });
+  });
+
+  describe('WU3 — reprice (engine-driven tier re-resolution)', () => {
+    it('updates unitPriceCents + priceSource + appliedPriceListId', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.reprice({
+        priceCents: 800,
+        priceSource: 'PRICE_LIST',
+        appliedPriceListId: 'pl-1',
+      });
+      expect(item.unitPriceCents).toBe(800);
+      expect(item.priceSource).toBe('PRICE_LIST');
+      expect(item.appliedPriceListId).toBe('pl-1');
+    });
+
+    it('rejects priceSource=CUSTOM (sticky is owned by overridePrice)', () => {
+      const item = QuotationItem.create(validItemProps);
+      expect(() =>
+        item.reprice({
+          priceCents: 800,
+          priceSource: 'CUSTOM',
+          appliedPriceListId: null,
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    it('rejects negative priceCents', () => {
+      const item = QuotationItem.create(validItemProps);
+      expect(() =>
+        item.reprice({
+          priceCents: -1,
+          priceSource: 'PRICE_LIST',
+          appliedPriceListId: null,
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    it('does NOT clear discount fields (promo state preserved across reprice)', () => {
+      const item = QuotationItem.create({
+        ...validItemProps,
+        discountType: 'percentage',
+        discountValue: 10,
+        discountAmountCents: 500,
+        promotionId: 'promo-1',
+      });
+      item.reprice({
+        priceCents: 800,
+        priceSource: 'PRICE_LIST',
+        appliedPriceListId: 'pl-1',
+      });
+      // Discount fields untouched — only overridePrice clears them.
+      expect(item.discountType).toBe('percentage');
+      expect(item.discountValue).toBe(10);
+      expect(item.discountAmountCents).toBe(500);
+      expect(item.promotionId).toBe('promo-1');
+    });
+  });
+
+  describe('WU3 — overridePrice (cashier-explicit sticky override)', () => {
+    it('mutates priceSource to CUSTOM and clears discount fields', () => {
+      const item = QuotationItem.create({
+        ...validItemProps,
+        discountType: 'percentage',
+        discountValue: 10,
+        discountAmountCents: 500,
+        promotionId: 'promo-1',
+      });
+      item.overridePrice({
+        priceCents: 2500,
+        priceSource: 'CUSTOM',
+        appliedPriceListId: null,
+        customPriceCents: 2500,
+      });
+      expect(item.unitPriceCents).toBe(2500);
+      expect(item.priceSource).toBe('CUSTOM');
+      expect(item.customPriceCents).toBe(2500);
+      expect(item.appliedPriceListId).toBeNull();
+      // Discount fields cleared so the recompute re-applies eligible AUTO promos.
+      expect(item.discountType).toBeNull();
+      expect(item.discountValue).toBeNull();
+      expect(item.discountAmountCents).toBe(0);
+      expect(item.promotionId).toBeNull();
+    });
+
+    it('rejects a CUSTOM override with a non-null appliedPriceListId', () => {
+      const item = QuotationItem.create(validItemProps);
+      expect(() =>
+        item.overridePrice({
+          priceCents: 100,
+          priceSource: 'CUSTOM',
+          appliedPriceListId: 'pl-1',
+          customPriceCents: 100,
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    it('rejects a PRICE_LIST override with a null customPriceCents', () => {
+      const item = QuotationItem.create(validItemProps);
+      // PRICE_LIST requires a priceListId AND customPriceCents === null.
+      expect(() =>
+        item.overridePrice({
+          priceCents: 100,
+          priceSource: 'PRICE_LIST',
+          appliedPriceListId: null,
+          customPriceCents: null,
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+  });
+
+  describe('WU3 — applyDiscount (per-line discount applier)', () => {
+    it('applies a percentage discount and rewrites unitPriceCents to the NET', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 10,
+        discountTitle: '10% off',
+        promotionId: 'promo-1',
+      });
+      expect(item.discountType).toBe('percentage');
+      expect(item.discountValue).toBe(10);
+      expect(item.discountAmountCents).toBe(500); // 10% of 5000
+      expect(item.unitPriceCents).toBe(4500); // 5000 - 500
+      expect(item.promotionId).toBe('promo-1');
+    });
+
+    it('applies an amount discount', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.applyDiscount({
+        type: 'amount',
+        amountCents: 200,
+        discountTitle: '$2 off',
+        promotionId: 'promo-1',
+      });
+      expect(item.discountType).toBe('amount');
+      expect(item.discountValue).toBe(200);
+      expect(item.discountAmountCents).toBe(200);
+      expect(item.unitPriceCents).toBe(4800);
+    });
+
+    it('clamps percentage to 1..99 in the applied amount', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.applyDiscount({ type: 'percentage', percent: 100 });
+      // The raw value is stored verbatim (matches SaleItem behavior);
+      // the clamp is applied to the math on `discountAmountCents` to
+      // prevent 100% from wiping the line.
+      expect(item.discountAmountCents).toBe(4950); // 99% of 5000
+      expect(item.unitPriceCents).toBe(50); // 5000 - 4950
+    });
+
+    it('rejects a discount that would push unitPriceCents < 1', () => {
+      const item = QuotationItem.create(validItemProps);
+      expect(() =>
+        item.applyDiscount({ type: 'amount', amountCents: 10000 }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    it('rejects an input with both amountCents and percent set', () => {
+      const item = QuotationItem.create(validItemProps);
+      expect(() =>
+        item.applyDiscount({
+          type: 'amount',
+          amountCents: 100,
+          percent: 10,
+        }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    it('stores promotionId when present (promo-sourced discount)', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 5,
+        promotionId: 'promo-x',
+      });
+      expect(item.promotionId).toBe('promo-x');
+    });
+
+    it('leaves promotionId null when omitted (manual free-form discount)', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 5,
+      });
+      expect(item.promotionId).toBeNull();
+    });
+  });
+
+  describe('WU3 — removeDiscount', () => {
+    it('restores unitPriceCents to the pre-discount baseline', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 10,
+        promotionId: 'promo-1',
+      });
+      expect(item.unitPriceCents).toBe(4500);
+      item.removeDiscount();
+      expect(item.unitPriceCents).toBe(5000);
+      expect(item.discountType).toBeNull();
+      expect(item.discountValue).toBeNull();
+      expect(item.discountAmountCents).toBe(0);
+      expect(item.promotionId).toBeNull();
+    });
+
+    it('is idempotent', () => {
+      const item = QuotationItem.create(validItemProps);
+      item.removeDiscount();
+      item.removeDiscount();
+      expect(item.unitPriceCents).toBe(5000);
     });
   });
 });

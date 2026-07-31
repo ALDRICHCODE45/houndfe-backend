@@ -47,28 +47,28 @@ Chain strategy: stacked-to-main
 ## WU3 — Items + promotions + expiry
 
 ### RED
-- [ ] T022. addItem resolves price, no stock check, recompute
-- [ ] T023. updateItemQuantity rejects qty<1, recompute
-- [ ] T024. removeItem + recompute
-- [ ] T025. overrideItemPrice (CUSTOM, recompute)
-- [ ] T026. apply/removeManualPromotion
-- [ ] T027. listApplicableManualPromotions
-- [ ] T028. vetoPromotion
-- [ ] T029. setExpiry + lazy flip
-- [ ] T030. cancel + idempotent
+- [x] T022. addItem resolves price, no stock check, recompute
+- [x] T023. updateItemQuantity rejects qty<1, recompute
+- [x] T024. removeItem + recompute
+- [x] T025. overrideItemPrice (CUSTOM, recompute)
+- [x] T026. apply/removeManualPromotion
+- [x] T027. listApplicableManualPromotions
+- [x] T028. vetoPromotion
+- [x] T029. setExpiry + lazy flip
+- [x] T030. cancel + idempotent
 
 ### GREEN
-- [ ] T031. Widen PosEvalInput with context?: 'SALE'|'QUOTATION'
-- [ ] T032. Add context branch in engine (default SALE)
-- [ ] T033. Tests: default SALE, QUOTATION==SALE
-- [ ] T034. Service: addItem, updateItemQuantity, removeItem, overrideItemPrice
-- [ ] T035. Service: apply/removeManualPromotion, listApplicable, vetoPromotion
-- [ ] T036. Service: setExpiry, cancel
-- [ ] T037. Controller: items/promos/expiry/cancel endpoints
-- [ ] T038. DTOs: AddItem, UpdateQty, OverridePrice, ApplyManualPromo, SetExpiry, Cancel
+- [x] T031. Widen PosEvalInput with context?: 'SALE'|'QUOTATION'
+- [x] T032. Add context branch in engine (default SALE)
+- [x] T033. Tests: default SALE, QUOTATION==SALE
+- [x] T034. Service: addItem, updateItemQuantity, removeItem, overrideItemPrice
+- [x] T035. Service: apply/removeManualPromotion, listApplicable, vetoPromotion
+- [x] T036. Service: setExpiry, cancel
+- [x] T037. Controller: items/promos/expiry/cancel endpoints
+- [x] T038. DTOs: AddItem, UpdateQty, OverridePrice, ApplyManualPromo, SetExpiry, Cancel
 
 ### REFACTOR
-- [ ] T039. Confirm recompute idempotency
+- [x] T039. Confirm recompute idempotency
 
 ## WU4 — PDF + email + send
 

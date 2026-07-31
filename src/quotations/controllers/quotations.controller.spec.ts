@@ -1,9 +1,10 @@
 /**
- * QuotationsController — HTTP Layer Tests (RED phase)
+ * QuotationsController — HTTP Layer Tests.
  *
- * Covers T019 — Controller routes pass through to the service with the
- * right guards + decorators + parameter shape. Suite-style assertions
- * keep the wiring honest without re-running integration logic.
+ * WU2 covers the suite-style assertions for the WU2 routes (openDraft,
+ * findAll, findOne, assignCustomer, setPriceList).
+ * WU3 adds the items/promotions/expiry/cancel routes. Each test mocks
+ * the service and asserts the controller passes args through correctly.
  */
 import { QuotationsController } from './quotations.controller';
 import type { QuotationsService } from '../application/quotations.service';
@@ -14,6 +15,16 @@ function makeMockService() {
     openDraft: jest.fn(),
     assignCustomer: jest.fn(),
     setPriceList: jest.fn(),
+    addItem: jest.fn(),
+    updateItemQuantity: jest.fn(),
+    removeItem: jest.fn(),
+    overrideItemPrice: jest.fn(),
+    applyManualPromotion: jest.fn(),
+    removeManualPromotion: jest.fn(),
+    vetoPromotion: jest.fn(),
+    optInPromotion: jest.fn(),
+    setExpiry: jest.fn(),
+    cancel: jest.fn(),
     findOne: jest.fn(),
     findAll: jest.fn(),
   } as any;
@@ -29,7 +40,7 @@ function makeMockUser(userId: string): AuthenticatedUser {
   };
 }
 
-describe('QuotationsController — WU2', () => {
+describe('QuotationsController', () => {
   let service: ReturnType<typeof makeMockService>;
   let controller: QuotationsController;
 
@@ -119,6 +130,131 @@ describe('QuotationsController — WU2', () => {
 
       expect(service.setPriceList).toHaveBeenCalledWith('q-1', dto);
       expect(result).toEqual({ id: 'q-1' });
+    });
+  });
+
+  describe('Item endpoints (T037)', () => {
+    it('POST /quotations/drafts/:id/items delegates to addItem', async () => {
+      service.addItem.mockResolvedValue({ id: 'q-1', items: [] });
+      const dto = { productId: 'prod-1', quantity: 2 };
+
+      const result = await controller.addItem('q-1', dto);
+
+      expect(service.addItem).toHaveBeenCalledWith('q-1', dto);
+      expect(result).toEqual({ id: 'q-1', items: [] });
+    });
+
+    it('PATCH /quotations/drafts/:id/items/:itemId/quantity delegates to updateItemQuantity', async () => {
+      service.updateItemQuantity.mockResolvedValue({ id: 'q-1' });
+      const dto = { quantity: 5 };
+
+      const result = await controller.updateItemQuantity(
+        'q-1',
+        'item-1',
+        dto,
+      );
+
+      expect(service.updateItemQuantity).toHaveBeenCalledWith(
+        'q-1',
+        'item-1',
+        dto,
+      );
+      expect(result).toEqual({ id: 'q-1' });
+    });
+
+    it('DELETE /quotations/drafts/:id/items/:itemId delegates to removeItem', async () => {
+      service.removeItem.mockResolvedValue({ id: 'q-1' });
+
+      const result = await controller.removeItem('q-1', 'item-1');
+
+      expect(service.removeItem).toHaveBeenCalledWith('q-1', 'item-1');
+      expect(result).toEqual({ id: 'q-1' });
+    });
+
+    it('PATCH /quotations/drafts/:id/items/:itemId/price delegates to overrideItemPrice', async () => {
+      service.overrideItemPrice.mockResolvedValue({ id: 'q-1' });
+      const dto = { unitPriceCents: 2000 };
+
+      const result = await controller.overrideItemPrice(
+        'q-1',
+        'item-1',
+        dto,
+      );
+
+      expect(service.overrideItemPrice).toHaveBeenCalledWith(
+        'q-1',
+        'item-1',
+        dto,
+      );
+      expect(result).toEqual({ id: 'q-1' });
+    });
+  });
+
+  describe('Manual promotion endpoints (T037)', () => {
+    it('PUT /quotations/drafts/:id/manual-promotions/:promoId delegates to applyManualPromotion', async () => {
+      service.applyManualPromotion.mockResolvedValue({ id: 'q-1' });
+
+      const result = await controller.applyManualPromotion('q-1', 'promo-1');
+
+      expect(service.applyManualPromotion).toHaveBeenCalledWith(
+        'q-1',
+        'promo-1',
+      );
+      expect(result).toEqual({ id: 'q-1' });
+    });
+
+    it('DELETE /quotations/drafts/:id/manual-promotions/:promoId delegates to removeManualPromotion', async () => {
+      service.removeManualPromotion.mockResolvedValue({ id: 'q-1' });
+
+      const result = await controller.removeManualPromotion('q-1', 'promo-1');
+
+      expect(service.removeManualPromotion).toHaveBeenCalledWith(
+        'q-1',
+        'promo-1',
+      );
+      expect(result).toEqual({ id: 'q-1' });
+    });
+  });
+
+  describe('Auto promotion veto / opt-in endpoints (T037)', () => {
+    it('POST /quotations/drafts/:id/promotions/:promoId/veto delegates to vetoPromotion', async () => {
+      service.vetoPromotion.mockResolvedValue({ id: 'q-1' });
+
+      const result = await controller.vetoPromotion('q-1', 'promo-1');
+
+      expect(service.vetoPromotion).toHaveBeenCalledWith('q-1', 'promo-1');
+      expect(result).toEqual({ id: 'q-1' });
+    });
+
+    it('DELETE /quotations/drafts/:id/promotions/:promoId/veto delegates to optInPromotion', async () => {
+      service.optInPromotion.mockResolvedValue({ id: 'q-1' });
+
+      const result = await controller.optInPromotion('q-1', 'promo-1');
+
+      expect(service.optInPromotion).toHaveBeenCalledWith('q-1', 'promo-1');
+      expect(result).toEqual({ id: 'q-1' });
+    });
+  });
+
+  describe('Expiry + cancel endpoints (T037)', () => {
+    it('PATCH /quotations/drafts/:id/expiry delegates to setExpiry', async () => {
+      service.setExpiry.mockResolvedValue({ id: 'q-1' });
+      const dto = { expiresAt: '2026-12-31T00:00:00Z' };
+
+      const result = await controller.setExpiry('q-1', dto);
+
+      expect(service.setExpiry).toHaveBeenCalledWith('q-1', dto);
+      expect(result).toEqual({ id: 'q-1' });
+    });
+
+    it('POST /quotations/drafts/:id/cancel delegates to cancel', async () => {
+      service.cancel.mockResolvedValue({ id: 'q-1', status: 'CANCELLED' });
+      const dto = { cancelReason: 'CUSTOMER_REQUEST' as const };
+
+      const result = await controller.cancel('q-1', dto);
+
+      expect(service.cancel).toHaveBeenCalledWith('q-1', dto);
+      expect(result).toEqual({ id: 'q-1', status: 'CANCELLED' });
     });
   });
 });

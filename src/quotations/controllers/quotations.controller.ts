@@ -1,15 +1,17 @@
 /**
  * QuotationsController — HTTP driver for the Quotations bounded context.
  *
- * WU2 surface:
- *   - `POST  /quotations/drafts`              — create a draft.
- *   - `GET   /quotations`                     — paginated list.
- *   - `GET   /quotations/:id`                 — single-quotation detail.
- *   - `PUT   /quotations/drafts/:id/customer` — assign customer.
- *   - `PUT   /quotations/drafts/:id/price-list` — set price list.
- *
- * WU3 will add item/promotion/expiry/send-cancel endpoints on this same
- * controller — kept out of scope here per the WU2 boundary.
+ * WU3 surface (additive on top of WU2):
+ *   - `POST   /quotations/drafts/:id/items`                       — addItem
+ *   - `PATCH  /quotations/drafts/:id/items/:itemId/quantity`      — updateItemQuantity
+ *   - `DELETE /quotations/drafts/:id/items/:itemId`               — removeItem
+ *   - `PATCH  /quotations/drafts/:id/items/:itemId/price`         — overrideItemPrice
+ *   - `PUT    /quotations/drafts/:id/manual-promotions/:promoId`  — applyManualPromotion
+ *   - `DELETE /quotations/drafts/:id/manual-promotions/:promoId`  — removeManualPromotion
+ *   - `PATCH  /quotations/drafts/:id/expiry`                      — setExpiry
+ *   - `POST   /quotations/drafts/:id/cancel`                      — cancel
+ *   - `POST   /quotations/drafts/:id/promotions/:promoId/veto`    — vetoPromotion
+ *   - `DELETE /quotations/drafts/:id/promotions/:promoId/veto`    — optInPromotion
  *
  * All routes are guarded by the standard triple
  * (JWT + tenant-context + permissions). The permission strings pair
@@ -19,11 +21,13 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Put,
   Query,
@@ -42,6 +46,11 @@ import { CreateQuotationDto } from '../dto/create-quotation.dto';
 import { AssignCustomerDto } from '../dto/assign-customer.dto';
 import { SetPriceListDto } from '../dto/set-price-list.dto';
 import { QuotationQueryDto } from '../dto/quotation-query.dto';
+import { AddQuotationItemDto } from '../dto/add-quotation-item.dto';
+import { UpdateQuotationItemQuantityDto } from '../dto/update-quotation-item-quantity.dto';
+import { OverrideQuotationItemPriceDto } from '../dto/override-quotation-item-price.dto';
+import { SetQuotationExpiryDto } from '../dto/set-quotation-expiry.dto';
+import { CancelQuotationDto } from '../dto/cancel-quotation.dto';
 
 @Controller('quotations')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -120,5 +129,163 @@ export class QuotationsController {
     @Body() dto: SetPriceListDto,
   ) {
     return this.quotationsService.setPriceList(id, dto);
+  }
+
+  // ── Items ──────────────────────────────────────────────────────────
+
+  /**
+   * `POST /quotations/drafts/:id/items` — add an item to a DRAFT
+   * quotation. The service resolves the product/variant via
+   * `ProductsService.getProductInfoForSale` and the recompute pipeline
+   * re-resolves prices when a price list is bound. No stock check.
+   */
+  @Post('drafts/:id/items')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(['update', 'Quotation'])
+  addItem(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: AddQuotationItemDto,
+  ) {
+    return this.quotationsService.addItem(id, dto);
+  }
+
+  /**
+   * `PATCH /quotations/drafts/:id/items/:itemId/quantity` — update
+   * the quantity of an existing item. Quantity 0 is rejected by the
+   * entity's `updateItemQuantity` (→ 400 via `InvalidArgumentError`).
+   */
+  @Patch('drafts/:id/items/:itemId/quantity')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  updateItemQuantity(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('itemId', new ParseUUIDPipe()) itemId: string,
+    @Body() dto: UpdateQuotationItemQuantityDto,
+  ) {
+    return this.quotationsService.updateItemQuantity(id, itemId, dto);
+  }
+
+  /**
+   * `DELETE /quotations/drafts/:id/items/:itemId` — remove an item
+   * from a DRAFT quotation. Triggers a recompute so the remaining
+   * items re-evaluate against the new state.
+   */
+  @Delete('drafts/:id/items/:itemId')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  removeItem(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('itemId', new ParseUUIDPipe()) itemId: string,
+  ) {
+    return this.quotationsService.removeItem(id, itemId);
+  }
+
+  /**
+   * `PATCH /quotations/drafts/:id/items/:itemId/price` — override the
+   * unit price of an existing item. Sets `priceSource = 'CUSTOM'` so
+   * subsequent recomputes skip the line (sticky). The recompute
+   * re-applies any eligible AUTO promo on the NEW baseline.
+   */
+  @Patch('drafts/:id/items/:itemId/price')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  overrideItemPrice(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('itemId', new ParseUUIDPipe()) itemId: string,
+    @Body() dto: OverrideQuotationItemPriceDto,
+  ) {
+    return this.quotationsService.overrideItemPrice(id, itemId, dto);
+  }
+
+  // ── Manual promotions ──────────────────────────────────────────────
+
+  /**
+   * `PUT /quotations/drafts/:id/manual-promotions/:promoId` — opt a
+   * MANUAL promotion in. Idempotent; cross-clears the veto set when
+   * the same id was previously vetoed (reactivation path).
+   */
+  @Put('drafts/:id/manual-promotions/:promoId')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  applyManualPromotion(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('promoId', new ParseUUIDPipe()) promoId: string,
+  ) {
+    return this.quotationsService.applyManualPromotion(id, promoId);
+  }
+
+  /**
+   * `DELETE /quotations/drafts/:id/manual-promotions/:promoId` —
+   * remove a MANUAL opt-in. Idempotent.
+   */
+  @Delete('drafts/:id/manual-promotions/:promoId')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  removeManualPromotion(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('promoId', new ParseUUIDPipe()) promoId: string,
+  ) {
+    return this.quotationsService.removeManualPromotion(id, promoId);
+  }
+
+  // ── Automatic promotions (veto / opt-in) ──────────────────────────
+
+  /**
+   * `POST /quotations/drafts/:id/promotions/:promoId/veto` — remove an
+   * auto-applied AUTOMATIC promotion from a DRAFT quotation (veto).
+   * The veto persists across recomputes.
+   */
+  @Post('drafts/:id/promotions/:promoId/veto')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  vetoPromotion(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('promoId', new ParseUUIDPipe()) promoId: string,
+  ) {
+    return this.quotationsService.vetoPromotion(id, promoId);
+  }
+
+  /**
+   * `DELETE /quotations/drafts/:id/promotions/:promoId/veto` —
+   * re-opt a previously vetoed AUTOMATIC promotion (reactivation).
+   */
+  @Delete('drafts/:id/promotions/:promoId/veto')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  optInPromotion(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('promoId', new ParseUUIDPipe()) promoId: string,
+  ) {
+    return this.quotationsService.optInPromotion(id, promoId);
+  }
+
+  // ── Expiry + cancel ────────────────────────────────────────────────
+
+  /**
+   * `PATCH /quotations/drafts/:id/expiry` — set or clear the optional
+   * expiry date. The lazy EXPIRED transition happens on read.
+   */
+  @Patch('drafts/:id/expiry')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  setExpiry(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: SetQuotationExpiryDto,
+  ) {
+    return this.quotationsService.setExpiry(id, dto);
+  }
+
+  /**
+   * `POST /quotations/drafts/:id/cancel` — cancel a quotation with a
+   * reason. Idempotent on CANCELLED.
+   */
+  @Post('drafts/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  cancel(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: CancelQuotationDto,
+  ) {
+    return this.quotationsService.cancel(id, dto);
   }
 }

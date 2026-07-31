@@ -1039,3 +1039,133 @@ describe('PosEvaluatePromotionsUseCase — dayOfWeek mapping', () => {
     });
   }
 });
+
+// ============================================================
+// WU3 (Quotations) — PosEvalInput.context discriminant (T033)
+// ============================================================
+describe('PosEvaluatePromotionsUseCase — context discriminant (WU3)', () => {
+  it('defaults to SALE when context is omitted (backward compat — T033)', async () => {
+    const promo = makePromotion({
+      id: 'promo-default',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    // No `context` field — the existing call sites stay byte-equal.
+    const input = makeInput({
+      lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+    });
+    expect(input.context).toBeUndefined();
+
+    const result = await useCase.evaluate(input);
+
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].promotionId).toBe('promo-default');
+  });
+
+  it('context="QUOTATION" produces identical results to context="SALE" (T033)', async () => {
+    const promo = makePromotion({
+      id: 'promo-eq',
+      discountType: 'PERCENTAGE',
+      discountValue: 15,
+    });
+    const orderPromo = makeOrderPromotion({
+      id: 'promo-order',
+      discountType: 'PERCENTAGE',
+      discountValue: 5,
+    });
+
+    const repoSale = makeRepository([promo, orderPromo]);
+    const useCaseSale = new PosEvaluatePromotionsUseCase(repoSale);
+    const resultSale = await useCaseSale.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-1',
+            productId: 'prod-1',
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+        context: 'SALE',
+      }),
+    );
+
+    const repoQuotation = makeRepository([promo, orderPromo]);
+    const useCaseQuotation = new PosEvaluatePromotionsUseCase(repoQuotation);
+    const resultQuotation = await useCaseQuotation.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-1',
+            productId: 'prod-1',
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+        context: 'QUOTATION',
+      }),
+    );
+
+    // Per-line: same promotion, same discount, same kind.
+    expect(resultQuotation.lines).toEqual(resultSale.lines);
+    // Order-level: same promotion, same value.
+    expect(resultQuotation.order).toEqual(resultSale.order);
+    // Available MANUAL: same length (both empty — repo has no MANUAL promos).
+    expect(resultQuotation.availableManualPromotions).toEqual(
+      resultSale.availableManualPromotions,
+    );
+    // Targetable MANUAL: same length.
+    expect(resultQuotation.targetableManualPromotionIds).toEqual(
+      resultSale.targetableManualPromotionIds,
+    );
+  });
+
+  it('context="QUOTATION" still respects veto + opt-in sets (regression)', async () => {
+    const promo = makePromotion({
+      id: 'promo-a',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+        vetoedPromotionIds: ['promo-a'],
+        context: 'QUOTATION',
+      }),
+    );
+
+    expect(result.lines).toEqual([]);
+  });
+
+  it('omitted context is byte-equal to context="SALE"', async () => {
+    const promo = makePromotion({
+      id: 'promo-byte-eq',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+    });
+
+    const repoOmitted = makeRepository([promo]);
+    const useCaseOmitted = new PosEvaluatePromotionsUseCase(repoOmitted);
+    const resultOmitted = await useCaseOmitted.evaluate(
+      makeInput({
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
+    );
+
+    const repoSale = makeRepository([promo]);
+    const useCaseSale = new PosEvaluatePromotionsUseCase(repoSale);
+    const resultSale = await useCaseSale.evaluate(
+      makeInput({
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+        context: 'SALE',
+      }),
+    );
+
+    expect(resultOmitted.lines).toEqual(resultSale.lines);
+    expect(resultOmitted.order).toEqual(resultSale.order);
+  });
+});

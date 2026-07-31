@@ -262,6 +262,55 @@ export class Quotation {
     this._items = [];
   }
 
+  /**
+   * WU3 — Override an item's unit price. Delegates to
+   * `QuotationItem.overridePrice` which marks the line sticky
+   * (`priceSource = 'CUSTOM'`) and clears prior per-line discount
+   * fields so the recompute can re-apply AUTO promos on the new
+   * baseline. Mirrors `Sale.overrideItemPrice`.
+   */
+  overrideItemPrice(
+    itemId: string,
+    input: {
+      priceCents: number;
+      priceSource: 'PRICE_LIST' | 'CUSTOM';
+      appliedPriceListId: string | null;
+      customPriceCents: number | null;
+    },
+  ): void {
+    this.ensureDraft();
+    const item = this._items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new QuotationItemNotFoundError(itemId);
+    }
+    item.overridePrice(input);
+  }
+
+  /**
+   * WU3 — Apply the engine's per-line result row. Only the per-unit
+   * `PRODUCT_DISCOUNT` shape is supported on quotations (BXGY/ADVANCED
+   * whole-line rewards are excluded by the engine's `isSupportedEngineType`
+   * gate when the quotation surfaces its `context` — the WU3 widening is
+   * additive but the engine evaluator is identical at this layer).
+   */
+  applyItemDiscount(
+    itemId: string,
+    input: {
+      type: 'amount' | 'percentage';
+      amountCents?: number;
+      percent?: number;
+      discountTitle?: string;
+      promotionId?: string | null;
+    },
+  ): void {
+    this.ensureDraft();
+    const item = this._items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new QuotationItemNotFoundError(itemId);
+    }
+    item.applyDiscount(input);
+  }
+
   // ── Customer + price list ────────────────────────────────────────────
 
   /**
@@ -423,9 +472,14 @@ export class Quotation {
    *   discountCents = Σ per-line discountAmountCents
    *   totalCents    = Σ (unitPriceCents × quantity)  (NET, clamped to ≥ 0)
    *
-   * For WU1 there is no engine-driven per-line discount, so
-   * `discountCents === 0` and `totalCents === subtotalCents`. WU3 widens
-   * the entity via the engine-driven recompute path.
+   * WU3 — the engine-driven recompute path can apply per-line discounts
+   * (`item.unitPriceCents` is mutated by `applyDiscount` and the saving
+   * rides on `discountAmountCents`). The subtotal sums the per-line
+   * `discountAmountCents` (the engine's per-line saving) and the total
+   * sums the post-discount `unitPriceCents × quantity` (NET).
+   *
+   * On a fresh DRAFT with no items `subtotalCents === discountCents === 0`
+   * and `totalCents === 0`. Symmetric to Sale's `previewTotals()`.
    */
   recomputeTotals(): {
     subtotalCents: number;
@@ -433,11 +487,17 @@ export class Quotation {
     totalCents: number;
   } {
     const subtotalCents = this._items.reduce(
+      (sum, item) =>
+        sum +
+        (item.unitPriceCents + (item.discountAmountCents ?? 0)) *
+          item.quantity,
+      0,
+    );
+    const totalCents = this._items.reduce(
       (sum, item) => sum + item.unitPriceCents * item.quantity,
       0,
     );
-    const totalCents = subtotalCents;
-    const discountCents = 0;
+    const discountCents = Math.max(0, subtotalCents - totalCents);
     return { subtotalCents, discountCents, totalCents };
   }
 

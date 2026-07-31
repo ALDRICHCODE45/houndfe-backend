@@ -2,37 +2,36 @@
  * QuotationsService — Application layer (Use Cases) for the Quotations
  * bounded context.
  *
- * WU2 — Service core + draft CRUD + customer + price-list mutation +
- * lazy EXPIRED on read. The recompute pipeline is wired but is a
- * no-op stub at this layer — WU3 implements the real
- * clear → reprice → eval with the engine's `context='QUOTATION'`
- * branch.
+ * WU3 — Items + promotions + price override + expiry + cancel + engine
+ * widening (context='QUOTATION'). The recompute pipeline is now wired:
+ *   clear (PROMO discounts) → reprice (non-sticky lines, via ProductsService)
+ *   → eval (engine, context='QUOTATION') → apply (per-line discount).
  *
- * The dependency surface stays tight:
- *   - `IQuotationRepository`              — domain port (DI token).
- *   - `TenantPrismaService`               — tenant-scoped Prisma client
- *                                          for catalog lookups
- *                                          (`Customer.globalPriceListId`,
- *                                          `GlobalPriceList` existence).
+ * The dependency surface here:
+ *   - `IQuotationRepository`                  — domain port (DI token).
+ *   - `TenantPrismaService`                   — tenant-scoped Prisma client
+ *                                              for catalog lookups
+ *                                              (Customer, GlobalPriceList).
+ *   - `ProductsService`                       — price-list resolution
+ *                                              (`batchResolvePriceMap`,
+ *                                              `getProductInfoForSale`)
+ *                                              and `resolvePriceListGlobalIds`
+ *                                              for the engine's C1 fix.
+ *   - `IPosEvaluatePromotionsUseCase`         — engine port. The service
+ *                                              passes `context: 'QUOTATION'`
+ *                                              on every recompute (the only
+ *                                              new write that sets the
+ *                                              context explicitly).
  *
- * Why no `CustomerService` injection: We only need the customer's
- * `globalPriceListId` for the auto-seed (and the customer's existence
- * for the 404 guard). Reading the catalog row directly through
- * `TenantPrismaService.getClient()` keeps the dependency graph minimal
- * and avoids forcing a `CustomersModule` import solely for a single
- * column. The SalesService follows the exact same pattern (see the
- * `customer.findUnique` call in `assignCustomer`).
- *
- * Why no `ProductsService` injection in WU2: Item-management methods
- * (`addItem`, `removeItem`, etc.) are WU3. WU2 only touches the draft
- * header fields and the lazy EXPIRED transition, neither of which
- * needs products.
- *
- * Why no `PosEvaluatePromotions` injection in WU2: `recomputePricingAndPromotions`
- * is a no-op stub here — the real engine call lands in WU3 along with
- * the `context='QUOTATION'` widening. We deliberately avoid pulling in
- * the PromotionsModule dependency at this layer to keep WU2 a clean
- * revert boundary (T021).
+ * The recompute pipeline mirrors `SalesService.recomputePricingAndPromotions`
+ * exactly (clear → reprice → eval → apply) — see sales.service.ts:484 for
+ * the full design contract. The two divergences are:
+ *   1. The eval call passes `context: 'QUOTATION'`.
+ *   2. Quotes don't carry BXGY/ADVANCED whole-line cents rewards in this
+ *      slice (the engine only emits `per-unit` results for the
+ *      `Quotation` aggregate — the wire discriminator is the same
+ *      `kind?: 'per-unit'` default, so existing engine consumer code
+ *      routes identically).
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -54,6 +53,37 @@ import {
 } from '../../shared/domain/domain-error';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { QuotationResponseDto } from '../dto/quotation-response.dto';
+import { ProductsService } from '../../products/products.service';
+import type {
+  IPosEvaluatePromotionsUseCase,
+  PosEvalInput,
+  PosEvalLineResult,
+} from '../../promotions/application/ports/pos-evaluate-promotions.port';
+import { POS_EVALUATE_PROMOTIONS_USE_CASE } from '../../promotions/application/ports/pos-evaluate-promotions.port';
+import type { QuotationItem } from '../domain/quotation-item.entity';
+import type { QuotationCancelReason } from '../domain/quotation.entity';
+
+export interface AddQuotationItemInput {
+  productId: string;
+  variantId?: string | null;
+  quantity: number;
+}
+
+export interface UpdateQuotationItemQuantityInput {
+  quantity: number;
+}
+
+export interface OverrideQuotationItemPriceInput {
+  unitPriceCents: number;
+}
+
+export interface SetQuotationExpiryInput {
+  expiresAt?: string | null;
+}
+
+export interface CancelQuotationInput {
+  cancelReason: QuotationCancelReason;
+}
 
 @Injectable()
 export class QuotationsService {
@@ -61,6 +91,9 @@ export class QuotationsService {
     @Inject(QUOTATION_REPOSITORY)
     private readonly quotationRepo: IQuotationRepository,
     private readonly tenantPrisma: TenantPrismaService,
+    private readonly productsService: ProductsService,
+    @Inject(POS_EVALUATE_PROMOTIONS_USE_CASE)
+    private readonly posEvaluatePromotions: IPosEvaluatePromotionsUseCase,
   ) {}
 
   // ──────────────────────────────────────────────────────────────────
@@ -79,9 +112,7 @@ export class QuotationsService {
    *      true so a future `assignCustomer` does NOT re-seed).
    *
    * The recompute step is intentionally skipped — an empty draft has
-   * no items, so there is nothing to reprice or re-evaluate. WU3 wires
-   * the recompute into `assignCustomer` + `setPriceList` once items
-   * exist.
+   * no items, so there is nothing to reprice or re-evaluate.
    */
   async openDraft(
     sellerUserId: string,
@@ -127,18 +158,330 @@ export class QuotationsService {
   }
 
   /**
-   * Assign a customer to an existing DRAFT quotation.
-   *
-   * Mirrors `SalesService.assignCustomer` minus the
-   * shipping-address / outbox paths that don't apply to quotations.
+   * Add an item to a DRAFT quotation.
    *
    * Order of operations:
    *   1. Load the draft (404 if absent in the current tenant).
-   *   2. Verify the status is DRAFT (422 if not).
+   *   2. Verify the status is DRAFT (409 if not).
+   *   3. Resolve product info via `ProductsService.getProductInfoForSale`
+   *      (default PUBLICO price + product/variant names). The catalog
+   *      lookup is the same path the POS uses for sales — shareable
+   *      validation: sellInPos, hasVariants check, etc.
+   *   4. Add the item to the entity (stacks when same productId +
+   *      variantId already exists). priceSource = 'PRICE_LIST' so the
+   *      recompute can re-resolve against the bound price list.
+   *   5. Recompute (engine with context='QUOTATION').
+   *   6. Persist + return the response.
+   *
+   * NO stock check — the spec requirement "Stock Checks Bypassed" is
+   * enforced by an explicit absence of the `checkStockAvailability` call
+   * the Sale equivalent uses. A quotation is a pricing promise, not a
+   * stock reservation.
+   */
+  async addItem(
+    id: string,
+    input: AddQuotationItemInput,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    const productInfo = await this.productsService.getProductInfoForSale(
+      input.productId,
+      input.variantId ?? null,
+    );
+
+    draft.addItem({
+      id: randomUUID(),
+      quotationId: draft.id,
+      productId: productInfo.productId,
+      variantId: productInfo.variantId,
+      productName: productInfo.productName,
+      variantName: productInfo.variantName,
+      quantity: input.quantity,
+      unitPriceCents: productInfo.unitPriceCents,
+      unitPriceCurrency: 'MXN',
+      priceSource: 'PRICE_LIST',
+    });
+
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Update the quantity of an existing item in a DRAFT quotation.
+   *
+   * `quantity = 0` is rejected by the entity's `updateItemQuantity`
+   * (it throws `InvalidArgumentError` because the entity's invariant
+   * forbids qty < 1). The spec scenario "Quantity zero is rejected with
+   * 400" maps to a `BusinessRuleViolationError` whose code is
+   * `InvalidArgumentError` — the existing 400 mapping via the
+   * DomainExceptionFilter applies.
+   */
+  async updateItemQuantity(
+    id: string,
+    itemId: string,
+    input: UpdateQuotationItemQuantityInput,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.updateItemQuantity(itemId, input.quantity);
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Remove an item from a DRAFT quotation. Triggers a recompute so the
+   * remaining items re-evaluate against the new state.
+   */
+  async removeItem(
+    id: string,
+    itemId: string,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.removeItem(itemId);
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Override the unit price of an item in a DRAFT quotation.
+   *
+   * Sets `priceSource = 'CUSTOM'` so subsequent recomputes skip the
+   * line (it's "sticky" — the cashier's override wins). The override
+   * also clears any prior per-line discount fields on the item so the
+   * recompute re-applies an eligible AUTO promo on the NEW baseline
+   * (matches Sale's `overrideItemPrice` contract).
+   */
+  async overrideItemPrice(
+    id: string,
+    itemId: string,
+    input: OverrideQuotationItemPriceInput,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.overrideItemPrice(itemId, {
+      priceCents: input.unitPriceCents,
+      priceSource: 'CUSTOM',
+      appliedPriceListId: null,
+      customPriceCents: input.unitPriceCents,
+    });
+
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Opt in a MANUAL promotion. The entity's `optInManualPromotion` is
+   * idempotent and cross-clears the veto set when the same id was
+   * previously vetoed (reactivation path). Triggers a recompute so the
+   * engine sees the opt-in (best-wins now includes the manual
+   * candidate).
+   */
+  async applyManualPromotion(
+    id: string,
+    promotionId: string,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.optInManualPromotion(promotionId);
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Remove a MANUAL opt-in. Idempotent — removing an id that is not
+   * currently opted-in is a safe no-op. The recompute runs so any
+   * per-line discount sourced from the now-removed opt-in is cleared.
+   */
+  async removeManualPromotion(
+    id: string,
+    promotionId: string,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.optOutManualPromotion(promotionId);
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Remove an auto-applied AUTOMATIC promotion from a DRAFT quotation
+   * (veto). The veto persists across recomputes (the entity's
+   * `addVetoedPromotion` is idempotent and cross-clears the opt-in set
+   * if the same id was previously opted-in).
+   */
+  async vetoPromotion(
+    id: string,
+    promotionId: string,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.addVetoedPromotion(promotionId);
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Re-opt a previously vetoed promotion (reactivation). The entity's
+   * `optInManualPromotion` cross-clears the veto set when the same id
+   * was previously vetoed — but this method is for AUTOMATIC promos
+   * (which are opt-out by default). We therefore explicitly remove the
+   * id from the veto set so the engine re-evaluates the AUTO line.
+   */
+  async optInPromotion(
+    id: string,
+    promotionId: string,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.removeVetoedPromotion(promotionId);
+    await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Set or clear the expiry date on a DRAFT quotation. `null` clears
+   * the expiry (the quotation never auto-transitions to EXPIRED).
+   * The lazy EXPIRED transition happens on read via
+   * `getEffectiveStatus` — `setExpiry` does NOT mutate the persisted
+   * status.
+   */
+  async setExpiry(
+    id: string,
+    input: SetQuotationExpiryInput,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.setExpiry(
+      input.expiresAt === null || input.expiresAt === undefined
+        ? null
+        : new Date(input.expiresAt),
+    );
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Cancel a draft/sent/expired quotation. Idempotent: cancelling an
+   * already-CANCELLED quotation returns the persisted instance unchanged
+   * (the entity's `cancel` is idempotent on its own internal state; the
+   * service short-circuits the read for spec compliance).
+   */
+  async cancel(
+    id: string,
+    input: CancelQuotationInput,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+
+    // Idempotent: same `cancel` returns the same instance (entity-level
+    // invariant). The persisted row is unchanged on a re-cancel.
+    const cancelled = draft.cancel(input.cancelReason);
+    const persisted = await this.quotationRepo.save(cancelled);
+    return this.toResponse(persisted);
+  }
+
+  /**
+   * Assign a customer to an existing DRAFT quotation.
+   *
+   * Order of operations:
+   *   1. Load the draft (404 if absent in the current tenant).
+   *   2. Verify the status is DRAFT (409 if not).
    *   3. Verify the customer exists (404 if absent).
    *   4. Seed `globalPriceListId` from the customer's default unless
    *      the cashier has already set one explicitly.
-   *   5. Recompute (WU2 stub — no-op until WU3).
+   *   5. Recompute (the price-list switch may re-tier existing items).
    *   6. Persist + return the response.
    */
   async assignCustomer(
@@ -176,15 +519,10 @@ export class QuotationsService {
   /**
    * Override the draft's price list.
    *
-   * Mirrors `SalesService.setSalePriceList` (WU3 task 3.4) but for the
-   * quotation aggregate. The unknown-list rejection is enforced here
-   * (returns `BusinessRuleViolationError` → 400 — mirrors
-   * `PRICE_LIST_NOT_FOUND`); on rejection we do NOT mutate the draft,
-   * so the cashier can correct the payload without losing prior state.
-   *
-   * WU2 — the recompute is wired but is a no-op. The entity-level
-   * pricing invariants (`priceListExplicitlySet` flag, `setGlobalPriceList`)
-   * are the only side effects on the aggregate today.
+   * The unknown-list rejection is enforced here (returns
+   * `BusinessRuleViolationError` → 400 — mirrors `PRICE_LIST_NOT_FOUND`);
+   * on rejection we do NOT mutate the draft, so the cashier can correct
+   * the payload without losing prior state.
    */
   async setPriceList(
     id: string,
@@ -280,19 +618,285 @@ export class QuotationsService {
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // Internal — helpers
+  // Internal — recompute pipeline (clear → reprice → eval → apply)
   // ──────────────────────────────────────────────────────────────────
 
   /**
-   * WU2 — Stub. The real pipeline (clear → reprice → eval with
-   * `context='QUOTATION'`) lands in WU3, along with the entity-level
-   * engine-result appliers. Today it is a deliberate no-op so WU2
-   * cleanly reverses (T021 rule-of-three).
+   * WU3 — Promotion engine recompute. Pipeline mirrors the Sale
+   * equivalent (`sales.service.ts:484`) with the engine context set to
+   * `'QUOTATION'`:
+   *
+   *   1. Clear PROMO-sourced discounts on items. Manual free-form
+   *      discounts are flagged by `promotionId === null` and PRESERVED
+   *      by the `removeDiscount()` skip — same rule Sale uses.
+   *   2. Reprice non-sticky lines tier-aware via
+   *      `ProductsService.batchResolvePriceMap`. Lines with
+   *      `priceSource === 'CUSTOM'` are SKIPPED (sticky). Lines without
+   *      a resolvable price list fallback to the default PUBLICO list.
+   *   3. Build `PosEvalInput` from the REPRICED item state. Pass
+   *      `context: 'QUOTATION'` so the engine sees the new forward-
+   *      looking discriminant.
+   *   4. Call the engine (`posEvaluatePromotions.evaluate(input)`).
+   *   5. Apply each per-line engine result via `item.applyDiscount`.
+   *      BXGY/ADVANCED whole-line rewards are not on the quotation
+   *      surface in this slice (the engine emits identical per-unit
+   *      results for both contexts), so the WU3 path routes ALL
+   *      `lineResults` through the per-unit `applyDiscount` branch.
+   *
+   * Idempotency: called twice in a row with no mutations between
+   * yields byte-identical items, totals, and applied state. The
+   * clear/reprice/apply loop is convergent on every line because the
+   * input to the engine is rebuilt from the entity's current state
+   * AND the entity's discount fields are CLEARED before the engine
+   * reads them.
    */
-  private async recomputePricingAndPromotions(_draft: Quotation): Promise<void> {
-    // No-op for WU2 — see class header.
-    return Promise.resolve();
+  private async recomputePricingAndPromotions(
+    draft: Quotation,
+  ): Promise<void> {
+    // (1) Clear prior PROMO-sourced discounts. Manual free-form
+    //     discounts (promotionId === null) are skipped.
+    for (const item of draft.items) {
+      if (item.promotionId != null) {
+        item.removeDiscount();
+      }
+    }
+
+    // (2) Reprice non-sticky lines (PRICE_LIST source) via the
+    //     ProductsService batch resolver. CUSTOM lines are sticky and
+    //     are SKIPPED — the cashier's override wins.
+    await this.repriceNonStickyLines(draft);
+
+    // (3) Build the engine input + (4) call the engine.
+    const result = await this.evaluatePromotions(draft);
+
+    // (5) Apply each per-line result. WU3 narrows the engine's
+    //     discriminated union to the per-unit branch only — BXGY and
+    //     ADVANCED whole-line rewards are not on the quotation surface
+    //     in this slice.
+    for (const lineResult of result.lines) {
+      const item = draft.items.find((i) => i.id === lineResult.itemId);
+      if (!item) continue;
+      this.applyLineResultToItem(item, lineResult);
+    }
+
+    // (6) Self-heal: prune opted-in MANUAL promos whose target is gone
+    //     (mirrors Sale's sales.service.ts:621 Layer B fix). Quotes
+    //     don't have a sale-level ORDER_DISCOUNT snapshot, so the
+    //     pruning is the only post-apply mutation.
+    const targetableSet = new Set(result.targetableManualPromotionIds);
+    const currentOptIns = draft.optedInManualPromotionIds;
+    for (const promotionId of currentOptIns) {
+      if (!targetableSet.has(promotionId)) {
+        draft.optOutManualPromotion(promotionId);
+      }
+    }
   }
+
+  /**
+   * WU3 — Tier-aware repricing loop on non-sticky lines. Mirrors
+   * `SalesService.repriceNonStickyLines` (sales.service.ts:674) but
+   * for the quotation aggregate.
+   *
+   * A line is "sticky" (SKIPPED) iff `priceSource === 'CUSTOM'`. The
+   * engine's `applyDiscount` path operates on the post-reprice
+   * `unitPriceCents` so the manual-free-form discount shape is
+   * preserved (the Sale equivalent also has a `hasManualDiscount` gate
+   * — quotations don't carry manual free-form discounts in this slice,
+   * so the gate is omitted).
+   */
+  private async repriceNonStickyLines(draft: Quotation): Promise<void> {
+    const nonStickyInputs: Array<{
+      productId: string;
+      variantId: string | null;
+      priceListId: string;
+      quantity: number;
+      globalPriceListId?: string;
+    }> = [];
+
+    const effectiveGlobalListId =
+      draft.globalPriceListId ?? (await this.resolveDefaultGlobalPriceListId());
+
+    for (const item of draft.items) {
+      if (item.priceSource === 'CUSTOM') continue;
+      const effectiveListId = item.appliedPriceListId ?? effectiveGlobalListId;
+      if (effectiveListId === null) continue;
+      nonStickyInputs.push({
+        productId: item.productId,
+        variantId: item.variantId,
+        priceListId: effectiveListId,
+        quantity: item.quantity,
+        globalPriceListId:
+          effectiveListId === effectiveGlobalListId &&
+          effectiveGlobalListId !== null
+            ? effectiveGlobalListId
+            : undefined,
+      });
+    }
+
+    if (nonStickyInputs.length === 0) return;
+
+    const tierMap =
+      await this.productsService.batchResolvePriceMap(nonStickyInputs);
+
+    for (const item of draft.items) {
+      if (item.priceSource === 'CUSTOM') continue;
+      const effectiveListId = item.appliedPriceListId ?? effectiveGlobalListId;
+      if (effectiveListId === null) continue;
+      const key = `${item.productId}::${
+        item.variantId ?? ''
+      }::${effectiveListId}`;
+      const inner = tierMap.get(key);
+      if (!inner) continue;
+      const resolvedCents = inner.get(item.quantity);
+      if (resolvedCents === undefined) continue;
+      item.reprice({
+        priceCents: resolvedCents,
+        priceSource: 'PRICE_LIST',
+        appliedPriceListId: item.appliedPriceListId,
+      });
+    }
+  }
+
+  /**
+   * Returns the id of the default GlobalPriceList (isDefault=true).
+   * Mirrors `SalesService.resolveDefaultGlobalPriceListId`. When no
+   * default exists, the caller falls back to a null list (the batch
+   * resolver omits null-list entries from the map).
+   */
+  private async resolveDefaultGlobalPriceListId(): Promise<string | null> {
+    const prisma = this.tenantPrisma.getClient();
+    const row = await prisma.globalPriceList.findFirst({
+      where: { isDefault: true },
+      select: { id: true },
+    });
+    return row?.id ?? null;
+  }
+
+  /**
+   * Non-mutating engine call: builds the `PosEvalInput` from the draft
+   * state and runs the engine. Mirrors
+   * `SalesService.evaluatePromotionsForSale` (sales.service.ts:638) but
+   * wires the C1 price-list resolution + the category/brand resolver
+   * for the engine's `matchTargetTier` PRE-pass.
+   *
+   * WU3 — passes `context: 'QUOTATION'` on the wire. The engine treats
+   * both contexts identically in this slice.
+   */
+  private async evaluatePromotions(draft: Quotation) {
+    const input = await this.buildPosEvalInput(draft);
+    return this.posEvaluatePromotions.evaluate(input);
+  }
+
+  /**
+   * Build `PosEvalInput` from the current draft state. The
+   * `effectiveUnitPriceCents` is the post-reprice `unitPriceCents`
+   * (no prePriceBXGY column on quotations — the round-trip is a
+   * direct read; the engine's per-unit `applyDiscount` rewrites
+   * `unitPriceCents` to the NET price).
+   *
+   * The `categoryId` / `brandId` fields are batch-resolved once per
+   * recompute via `ProductsService.resolveProductCategoryBrandIds` —
+   * same pattern as Sale.
+   */
+  private async buildPosEvalInput(draft: Quotation): Promise<PosEvalInput> {
+    const distinctPriceListIds = [
+      ...new Set(
+        draft.items
+          .map((item) => item.appliedPriceListId)
+          .filter((id): id is string => id != null && id !== ''),
+      ),
+    ];
+    const priceListGlobalIdMap =
+      distinctPriceListIds.length > 0
+        ? await this.productsService.resolvePriceListGlobalIds(
+            distinctPriceListIds,
+          )
+        : new Map<string, string>();
+
+    const distinctProductIds = [
+      ...new Set(
+        draft.items
+          .map((item) => item.productId)
+          .filter((id): id is string => id != null && id !== ''),
+      ),
+    ];
+    const productCategoryBrandMap =
+      distinctProductIds.length > 0
+        ? await this.productsService.resolveProductCategoryBrandIds(
+            distinctProductIds,
+          )
+        : new Map<
+            string,
+            { categoryId: string | null; brandId: string | null }
+          >();
+
+    return {
+      now: new Date(),
+      customerId: draft.customerId,
+      lines: draft.items.map((item) => {
+        const resolved = productCategoryBrandMap.get(item.productId);
+        return {
+          itemId: item.id,
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+          effectiveUnitPriceCents: item.unitPriceCents,
+          appliedPriceListId: item.appliedPriceListId,
+          appliedGlobalPriceListId:
+            item.appliedPriceListId != null
+              ? (priceListGlobalIdMap.get(item.appliedPriceListId) ?? null)
+              : null,
+          categoryId: resolved?.categoryId ?? null,
+          brandId: resolved?.brandId ?? null,
+          hasManualDiscount: false, // quotations don't carry manual free-form discounts in this slice
+        };
+      }),
+      vetoedPromotionIds: draft.vetoedPromotionIds,
+      optedInManualPromotionIds: draft.optedInManualPromotionIds,
+      context: 'QUOTATION',
+    };
+  }
+
+  /**
+   * WU3 — Per-line result applier. The engine emits a discriminated
+   * union; for the QUOTATION context we only consume the per-unit
+   * `PRODUCT_DISCOUNT` shape (BXGY/ADVANCED whole-line rewards are not
+   * on the quotation surface in this slice). The discriminated
+   * `kind?: 'per-unit'` default keeps the existing engine consumer
+   * working without changing the engine.
+   */
+  private applyLineResultToItem(
+    item: QuotationItem,
+    lineResult: PosEvalLineResult,
+  ): void {
+    if (
+      lineResult.kind === 'buy-x-get-y' ||
+      lineResult.kind === 'advanced'
+    ) {
+      // BXGY/ADVANCED emissions are not on the QUOTATION surface in this
+      // slice. The engine still emits the same shape (the QUOTATION
+      // context is a forward-looking gate) — silently skip rather than
+      // throw to keep the recompute idempotent.
+      return;
+    }
+    item.applyDiscount({
+      type: lineResult.discountType,
+      amountCents:
+        lineResult.discountType === 'amount'
+          ? lineResult.discountValue
+          : undefined,
+      percent:
+        lineResult.discountType === 'percentage'
+          ? lineResult.discountValue
+          : undefined,
+      discountTitle: lineResult.discountTitle,
+      promotionId: lineResult.promotionId,
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Internal — helpers
+  // ──────────────────────────────────────────────────────────────────
 
   /**
    * Catalog-side guard for `assignCustomer` and `openDraft({customerId})`.

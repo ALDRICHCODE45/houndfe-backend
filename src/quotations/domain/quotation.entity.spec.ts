@@ -593,6 +593,82 @@ describe('Quotation Entity', () => {
       const b = q.recomputeTotals();
       expect(a).toEqual(b);
     });
+
+    it('WU3 — incorporates per-line discountAmountCents into subtotal + discount', () => {
+      const q = Quotation.create({ id: newQuotationId(), sellerUserId: SELLER });
+      q.addItem(validItemProps('item-1', { quantity: 2, unitPriceCents: 5000 }));
+      // Apply a 10% discount to item-1 (engine-driven).
+      const item = q.items[0];
+      item.applyDiscount({
+        type: 'percentage',
+        percent: 10,
+        promotionId: 'promo-1',
+      });
+
+      // After applyDiscount: unitPriceCents = 4500 (NET), discountAmountCents = 500
+      const totals = q.recomputeTotals();
+      // subtotalCents = (unitPriceCents + discountAmountCents) × qty = 5000 × 2 = 10000
+      expect(totals.subtotalCents).toBe(10000);
+      // totalCents = unitPriceCents × qty = 4500 × 2 = 9000
+      expect(totals.totalCents).toBe(9000);
+      // discountCents = subtotal - total = 10000 - 9000 = 1000
+      expect(totals.discountCents).toBe(1000);
+    });
+  });
+
+  describe('WU3 — overrideItemPrice (T025)', () => {
+    it('marks the line sticky (CUSTOM) and clears prior discount fields', () => {
+      const q = Quotation.create({ id: newQuotationId(), sellerUserId: SELLER });
+      q.addItem(validItemProps('item-1', { quantity: 1, unitPriceCents: 1000 }));
+      // Apply a discount first to verify the override clears it.
+      q.items[0].applyDiscount({
+        type: 'percentage',
+        percent: 10,
+        promotionId: 'promo-1',
+      });
+
+      q.overrideItemPrice('item-1', {
+        priceCents: 2500,
+        priceSource: 'CUSTOM',
+        appliedPriceListId: null,
+        customPriceCents: 2500,
+      });
+
+      expect(q.items[0].unitPriceCents).toBe(2500);
+      expect(q.items[0].priceSource).toBe('CUSTOM');
+      expect(q.items[0].customPriceCents).toBe(2500);
+      expect(q.items[0].appliedPriceListId).toBeNull();
+      expect(q.items[0].discountType).toBeNull();
+      expect(q.items[0].promotionId).toBeNull();
+    });
+
+    it('throws on non-DRAFT quotation', () => {
+      const q = Quotation.fromPersistence({
+        id: 'q-sent',
+        sellerUserId: SELLER,
+        customerId: null,
+        globalPriceListId: null,
+        priceListExplicitlySet: false,
+        status: 'SENT',
+        expiresAt: null,
+        cancelReason: null,
+        subtotalCents: 0,
+        discountCents: 0,
+        totalCents: 0,
+        manuallyEnded: false,
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      expect(() =>
+        q.overrideItemPrice('item-1', {
+          priceCents: 100,
+          priceSource: 'CUSTOM',
+          appliedPriceListId: null,
+          customPriceCents: 100,
+        }),
+      ).toThrow(BusinessRuleViolationError);
+    });
   });
 
   describe('toResponse', () => {
