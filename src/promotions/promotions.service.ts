@@ -296,13 +296,15 @@ export class PromotionsService extends BatchDeletableService {
     const promotion = await this.repo.findById(id);
     if (!promotion) throw new EntityNotFoundError('Promotion', id);
 
-    promotion.activate();
-    await this.repo.updateStatus(
-      id,
-      promotion.status,
-      promotion.endDate,
-      promotion.manuallyEnded,
-    );
+    const changed = promotion.activate();
+    if (changed) {
+      await this.repo.updateStatus(
+        id,
+        promotion.status,
+        promotion.endDate,
+        promotion.manuallyEnded,
+      );
+    }
 
     const updated = await this.repo.findById(id);
     if (!updated) throw new EntityNotFoundError('Promotion', id);
@@ -341,14 +343,16 @@ export class PromotionsService extends BatchDeletableService {
       for (const id of ids) {
         const promotion = await this.repo.findById(id);
         if (!promotion) throw new EntityNotFoundError('Promotion', id);
-        promotion.activate();
-        await this.repo.updateStatus(
-          id,
-          promotion.status,
-          promotion.endDate,
-          promotion.manuallyEnded,
-        );
-        activated++;
+        const changed = promotion.activate();
+        if (changed) {
+          await this.repo.updateStatus(
+            id,
+            promotion.status,
+            promotion.endDate,
+            promotion.manuallyEnded,
+          );
+          activated++;
+        }
       }
       return { activated };
     });

@@ -393,11 +393,33 @@ export class Promotion {
     this.updatedAt = new Date();
   }
 
-  activate(): void {
-    if (!this.manuallyEnded) return;
+  /**
+   * Re-activate a promotion that is currently ENDED.
+   *
+   * Handles BOTH scenarios:
+   *   1. Manually ended (via `Promotion.end()`)          → clears the flag.
+   *   2. Naturally expired (endDate < now)                → clears endDate
+   *      so the promotion becomes open-ended.
+   *
+   * If the promotion is already ACTIVE or SCHEDULED and neither
+   * manually-ended nor naturally-expired, this is a no-op and
+   * returns `false` so callers can skip a wasted DB write.
+   *
+   * @returns `true` when the promotion's state actually changed.
+   */
+  activate(now: Date = new Date()): boolean {
+    const wasManuallyEnded = this.manuallyEnded;
+    const endDateExpired = this.endDate !== null && this.endDate < now;
+
+    if (!wasManuallyEnded && !endDateExpired) return false;
+
     this.manuallyEnded = false;
-    this.recomputeStatus();
+    if (endDateExpired) {
+      this.endDate = null;
+    }
+    this.recomputeStatus(now);
     this.updatedAt = new Date();
+    return true;
   }
 
   // Service calls this on every update() so the persisted `status`

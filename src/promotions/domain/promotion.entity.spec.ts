@@ -497,22 +497,99 @@ describe('Promotion Entity', () => {
       promo.end();
       expect(promo.manuallyEnded).toBe(true);
 
-      promo.activate();
+      const changed = promo.activate(new Date('2026-07-10T00:00:00.000Z'));
 
+      expect(changed).toBe(true);
       expect(promo.manuallyEnded).toBe(false);
       expect(promo.status).toBe('ACTIVE');
       expect(promo.getEffectiveStatus(new Date('2026-07-10T00:00:00.000Z'))).toBe('ACTIVE');
     });
 
-    it('should be idempotent when already active', () => {
+    it('should be idempotent when already active — returns false and does not mutate', () => {
       const promo = Promotion.create(validBase);
       const updatedAt = promo.updatedAt;
+      const endDate = promo.endDate;
 
-      promo.activate();
+      const changed = promo.activate(new Date('2026-07-10T00:00:00.000Z'));
 
+      expect(changed).toBe(false);
       expect(promo.manuallyEnded).toBe(false);
       expect(promo.status).toBe('ACTIVE');
       expect(promo.updatedAt).toBe(updatedAt);
+      expect(promo.endDate).toBe(endDate); // endDate preserved
+    });
+
+    it('should activate a naturally-expired promotion by clearing its past endDate', () => {
+      // endDate passed, manuallyEnded=false → natural expiration
+      const pastStart = new Date('2026-06-01T00:00:00.000Z');
+      const pastEnd = new Date('2026-06-30T00:00:00.000Z');
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: pastStart,
+        endDate: pastEnd,
+      });
+      expect(promo.manuallyEnded).toBe(false);
+      expect(promo.getEffectiveStatus(new Date('2026-07-10T00:00:00.000Z'))).toBe('ENDED');
+
+      const changed = promo.activate(new Date('2026-07-10T00:00:00.000Z'));
+
+      expect(changed).toBe(true);
+      expect(promo.manuallyEnded).toBe(false);
+      expect(promo.endDate).toBeNull(); // cleared so promotion becomes open-ended
+      expect(promo.status).toBe('ACTIVE');
+      expect(promo.getEffectiveStatus(new Date('2026-07-10T00:00:00.000Z'))).toBe('ACTIVE');
+    });
+
+    it('should activate a manually-ended promotion with a past endDate', () => {
+      // manuallyEnded=true AND endDate is in the past
+      const pastStart = new Date('2026-06-01T00:00:00.000Z');
+      const pastEnd = new Date('2026-06-30T00:00:00.000Z');
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: pastStart,
+        endDate: pastEnd,
+      });
+      promo.end(); // manuallyEnded=true
+      expect(promo.manuallyEnded).toBe(true);
+      expect(promo.status).toBe('ENDED');
+
+      const changed = promo.activate(new Date('2026-07-10T00:00:00.000Z'));
+
+      expect(changed).toBe(true);
+      expect(promo.manuallyEnded).toBe(false);
+      expect(promo.endDate).toBeNull(); // past endDate cleared
+      expect(promo.status).toBe('ACTIVE');
+    });
+
+    it('should preserve a valid future endDate when activating a manually-ended promotion', () => {
+      // manuallyEnded=true but endDate is still in the future
+      const promo = Promotion.create(validBase); // endDate Aug 1
+      promo.end();
+      expect(promo.manuallyEnded).toBe(true);
+
+      const changed = promo.activate(new Date('2026-07-10T00:00:00.000Z'));
+
+      expect(changed).toBe(true);
+      expect(promo.manuallyEnded).toBe(false);
+      expect(promo.endDate).toEqual(new Date('2026-08-01T00:00:00.000Z')); // preserved
+      expect(promo.status).toBe('ACTIVE');
+    });
+
+    it('should return false for SCHEDULED promotions (nothing to activate)', () => {
+      const futureStart = new Date('2026-08-01T00:00:00.000Z');
+      const futureEnd = new Date('2026-09-01T00:00:00.000Z');
+      const promo = Promotion.create({
+        ...validBase,
+        startDate: futureStart,
+        endDate: futureEnd,
+      });
+      expect(promo.getEffectiveStatus(new Date('2026-07-10T00:00:00.000Z'))).toBe('SCHEDULED');
+
+      const changed = promo.activate(new Date('2026-07-10T00:00:00.000Z'));
+
+      expect(changed).toBe(false);
+      expect(promo.status).toBe('SCHEDULED');
+      expect(promo.endDate).toEqual(futureEnd);
     });
   });
 
