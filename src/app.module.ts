@@ -50,6 +50,7 @@ import { HrTimeOffInngestRegistrar } from './hr-time-off/inngest/hr-time-off-inn
 // Lives in its own module so the template registry stays decoupled from
 // the sales bounded context (future invoice/report/quote templates land here).
 import { PdfGenerationModule } from './pdf-generation/pdf-generation.module';
+import { QuotationsModule } from './quotations/quotations.module';
 
 @Module({
   imports: [
@@ -116,6 +117,10 @@ import { PdfGenerationModule } from './pdf-generation/pdf-generation.module';
     // end of the bounded-context list because it has no outbound
     // dependencies on the time-off/stock-alert pipelines.
     PdfGenerationModule,
+    // WU2 — Quotations bounded context (service core + draft CRUD +
+    // customer + price list). WU3 widens the engine dependency,
+    // WU4 adds the PDF/email wiring through PdfGenerationModule.
+    QuotationsModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +

@@ -2,6 +2,55 @@ import { Quotation } from './quotation.entity';
 import type { QuotationStatus } from './quotation.entity';
 
 /**
+ * WU2 — Service-layer input contracts. Kept on the repository port so
+ * the service module doesn't grow a parallel "dto.types" barrel; the
+ * adapter-side implementation can drop unknown fields without coupling
+ * to its concrete consumer. Pure data carriers — validation lives in
+ * the controller's DTO class.
+ */
+export interface CreateQuotationInput {
+  customerId?: string;
+  globalPriceListId?: string | null;
+}
+
+export interface AssignCustomerInput {
+  customerId: string;
+}
+
+export interface SetPriceListInput {
+  globalPriceListId?: string | null;
+}
+
+/**
+ * FindAll input from the service layer. The DTO layer applies defaults
+ * before this is constructed (page=1, limit=20, sort defaults), so the
+ * service can rely on the values being present after the controller
+ * pipes the query through `ValidationPipe`.
+ */
+export interface QuotationFindAllInput {
+  page: number;
+  limit: number;
+  status?: QuotationStatus;
+  customerId?: string;
+  createdFrom?: Date;
+  createdTo?: Date;
+  sortBy?: 'createdAt' | 'updatedAt' | 'totalCents' | 'expiresAt';
+  sortOrder?: 'asc' | 'desc';
+}
+
+export interface QuotationListPagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface QuotationListResult {
+  data: import('../dto/quotation-response.dto').QuotationResponseDto[];
+  pagination: QuotationListPagination;
+}
+
+/**
  * Pagination + filter query for the quotation list endpoint. Mirrors the
  * PromotionFindAllQuery shape but with quotation-specific filters.
  *
