@@ -25,14 +25,17 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  NotFoundException,
   Param,
   ParseUUIDPipe,
   Patch,
   Post,
   Put,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
@@ -42,6 +45,8 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 
 import { QuotationsService } from '../application/quotations.service';
+import { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
+import { QuotationNotFoundError } from '../domain/quotation.errors';
 import { CreateQuotationDto } from '../dto/create-quotation.dto';
 import { AssignCustomerDto } from '../dto/assign-customer.dto';
 import { SetPriceListDto } from '../dto/set-price-list.dto';
@@ -55,7 +60,12 @@ import { CancelQuotationDto } from '../dto/cancel-quotation.dto';
 @Controller('quotations')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class QuotationsController {
-  constructor(private readonly quotationsService: QuotationsService) {}
+  constructor(
+    private readonly quotationsService: QuotationsService,
+    // WU4 — injected so the PREVIEW route renders in-process without
+    // a back-coupling between PdfGenerationModule ↔ QuotationsModule.
+    private readonly pdfService: PdfGenerationService,
+  ) {}
 
   /**
    * `POST /quotations/drafts` — Open a new DRAFT quotation.
@@ -314,10 +324,56 @@ export class QuotationsController {
     @Param('id', new ParseUUIDPipe()) id: string,
     @Query('email') email: string | undefined,
   ) {
-    // Default to sending the email. The controller's `email=true|false`
-    // query param shape matches the spec's intent ("Send Quotation Email
-    // (Auto-SENT)" — sending is the default).
     const sendEmail = email !== 'false';
     return this.quotationsService.send(id, sendEmail);
+  }
+
+  // ── PDF preview (WU4) ────────────────────────────────────────────────
+
+  /**
+   * WU4 — `GET /quotations/:id/pdf?format=quotation-a4` — render the
+   * quotation PDF. Works in ANY status (DRAFT/SENT/EXPIRED/CANCELLED)
+   * because a sales rep may want to preview a draft before sending.
+   *
+   * Moved here from `PdfGenerationController` to avoid a circular DI
+   * dependency: `QuotationsModule` already imports `PdfGenerationModule`
+   * (for the send flow), so the `PdfGenerationService` is available.
+   */
+  @Get(':id/pdf')
+  @RequirePermissions(['read', 'Quotation'])
+  async generatePdf(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Query('format') format: string | undefined,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    const resolvedFormat = this.pdfService.resolveFormat(format);
+
+    let quotation;
+    try {
+      quotation = await this.quotationsService.findOne(id);
+    } catch (err) {
+      if (err instanceof QuotationNotFoundError) {
+        throw new NotFoundException(err.message);
+      }
+      throw err;
+    }
+
+    const { stream, folio } = await this.pdfService.renderQuotationPdf(
+      quotation,
+      resolvedFormat,
+    );
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': this.buildQuotationContentDisposition(
+        folio ?? quotation.id,
+      ),
+    });
+    stream.pipe(res);
+  }
+
+  private buildQuotationContentDisposition(folio: string): string {
+    const safeFolio = folio.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 64);
+    return `inline; filename="cotizacion-${safeFolio}.pdf"`;
   }
 }
