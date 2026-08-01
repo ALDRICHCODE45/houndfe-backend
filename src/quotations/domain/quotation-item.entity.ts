@@ -352,11 +352,15 @@ export class QuotationItem {
       unitPriceCents: this.unitPriceCents,
       unitPriceCurrency: this.unitPriceCurrency,
       priceSource: this._priceSource,
-      appliedPriceListId: this.appliedPriceListId,
-      customPriceCents: this.customPriceCents,
+      appliedPriceListId: this._appliedPriceListId,
+      customPriceCents: this._customPriceCents,
       discountType: this._discountType,
       discountValue: this._discountValue,
       discountAmountCents: this._discountAmountCents,
+      // WU4 — surface the per-line discount title on the wire so the
+      // PDF template + email body can render the discount column
+      // verbatim (matches the Sale item contract).
+      discountTitle: this._discountTitle,
       promotionId: this._promotionId,
       /** NET per-line subtotal. For WU1, equals `unitPrice × qty` because no
        *  per-line discount has been applied yet. WU3 widens this once the

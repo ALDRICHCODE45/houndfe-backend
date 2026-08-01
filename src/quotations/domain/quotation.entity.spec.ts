@@ -698,4 +698,83 @@ describe('Quotation Entity', () => {
       expect(response.cancelReason).toBeNull();
     });
   });
+
+  // ── WU4 — send() ──────────────────────────────────────────────────────
+
+  describe('lifecycle — send() (WU4)', () => {
+    const itemProps = (overrides: Record<string, unknown> = {}) => ({
+      id: 'item-1',
+      quotationId: 'q-1',
+      productId: 'prod-1',
+      variantId: null,
+      productName: 'Camisa',
+      variantName: null,
+      quantity: 2,
+      unitPriceCents: 5000,
+      ...overrides,
+    });
+
+    it('send flips a DRAFT quotation with items to SENT', () => {
+      const q = Quotation.create({
+        id: 'q-1',
+        sellerUserId: SELLER,
+      });
+      q.addItem(itemProps() as never);
+      expect(q.status).toBe('DRAFT');
+
+      const sentAt = new Date('2026-07-15T10:00:00Z');
+      const sent = q.send(sentAt);
+
+      expect(sent.status).toBe('SENT');
+      // updatedAt is the timestamp the caller passed in.
+      expect(sent.updatedAt).toEqual(sentAt);
+      // Original instance is NOT mutated (entity invariants are
+      // preserved — the service persists the returned instance, not
+      // the original DRAFT).
+      expect(q.status).toBe('DRAFT');
+    });
+
+    it('send throws QuotationNotDraftError when called on a SENT quotation', () => {
+      const q = Quotation.create({ id: 'q-1', sellerUserId: SELLER });
+      q.addItem(itemProps() as never);
+      const sent = q.send();
+      expect(() => sent.send()).toThrow(/SENT status/i);
+    });
+
+    it('send throws QuotationHasNoItemsError when the draft has zero items', () => {
+      const q = Quotation.create({ id: 'q-1', sellerUserId: SELLER });
+      expect(() => q.send()).toThrow(/no items/i);
+    });
+
+    it('send preserves items, customer, price list, expiry, and promotions', () => {
+      // WU4 — the send factory must round-trip the aggregate's
+      // invariants: a SENT quotation is the same DRAFT with a flipped
+      // status, no data loss.
+      const q = Quotation.create({ id: 'q-1', sellerUserId: SELLER });
+      q.assignCustomer('cust-1', 'pl-1');
+      q.addItem(itemProps() as never);
+      q.optInManualPromotion('promo-1');
+      q.setExpiry(new Date('2026-12-31T00:00:00Z'));
+
+      const sent = q.send();
+
+      expect(sent.items).toHaveLength(1);
+      expect(sent.customerId).toBe('cust-1');
+      expect(sent.globalPriceListId).toBe('pl-1');
+      expect(sent.optedInManualPromotionIds).toEqual(['promo-1']);
+      expect(sent.expiresAt).toEqual(new Date('2026-12-31T00:00:00Z'));
+    });
+
+    it('send returns a new instance (original is preserved for repo.save)', () => {
+      // The service contract: call `draft.send()`, persist the
+      // returned `sent` via `repo.save(sent)`. The original DRAFT is
+      // left untouched so a future rollback (e.g. Resend error keeps
+      // DRAFT) doesn't lose the entity state.
+      const q = Quotation.create({ id: 'q-1', sellerUserId: SELLER });
+      q.addItem(itemProps() as never);
+      const sent = q.send();
+      expect(sent).not.toBe(q);
+      expect(sent.id).toBe(q.id);
+    });
+  });
 });

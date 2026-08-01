@@ -86,8 +86,11 @@ module.exports = {
   //   - `yoga-layout` is REMOVED from the whitelist because
   //     `moduleNameMapper` above redirects it to a CJS mock — we
   //     never want Jest to read the real ESM/WASM package.
+  //   - `@react-email/components` + `@react-email/render` — the email
+  //     template + render call. Same pnpm-aware shape as the
+  //     @react-pdf entries.
   transformIgnorePatterns: [
-    'node_modules/(?!(?:\\.pnpm/[^/]+/node_modules/)?(?:@react-pdf/[^/]+|fontkit|png-js|jay-peg|linebreak|restructure|color-string|color-name)(?:/|$))',
+    'node_modules/(?!(?:\\.pnpm/[^/]+/node_modules/)?(?:@react-pdf/[^/]+|@react-email/[^/]+|fontkit|png-js|jay-peg|linebreak|restructure|color-string|color-name)(?:/|$))',
     '\\.pnp\\.[^\\/]+$',
   ],
 };

@@ -25,6 +25,7 @@ function makeMockService() {
     optInPromotion: jest.fn(),
     setExpiry: jest.fn(),
     cancel: jest.fn(),
+    send: jest.fn(),
     findOne: jest.fn(),
     findAll: jest.fn(),
   } as any;
@@ -255,6 +256,80 @@ describe('QuotationsController', () => {
 
       expect(service.cancel).toHaveBeenCalledWith('q-1', dto);
       expect(result).toEqual({ id: 'q-1', status: 'CANCELLED' });
+    });
+  });
+
+  // ── WU4 — send endpoint (T052) ─────────────────────────────────────
+
+  describe('POST /quotations/drafts/:id/send (WU4 / T052)', () => {
+    it('defaults to sendEmail=true when no query param is provided', async () => {
+      service.send.mockResolvedValue({
+        id: 'q-1',
+        status: 'SENT',
+        effectiveStatus: 'SENT',
+        sentTo: 'maria@example.com',
+      });
+
+      const result = await controller.send('q-1', undefined);
+
+      expect(service.send).toHaveBeenCalledWith('q-1', true);
+      expect(result).toEqual({
+        id: 'q-1',
+        status: 'SENT',
+        effectiveStatus: 'SENT',
+        sentTo: 'maria@example.com',
+      });
+    });
+
+    it('passes sendEmail=true through to the service', async () => {
+      service.send.mockResolvedValue({
+        id: 'q-1',
+        status: 'SENT',
+        effectiveStatus: 'SENT',
+        sentTo: 'maria@example.com',
+      });
+
+      await controller.send('q-1', 'true');
+
+      expect(service.send).toHaveBeenCalledWith('q-1', true);
+    });
+
+    it('passes sendEmail=false through to the service (finalize without email)', async () => {
+      service.send.mockResolvedValue({
+        id: 'q-1',
+        status: 'SENT',
+        effectiveStatus: 'SENT',
+        sentTo: null,
+      });
+
+      await controller.send('q-1', 'false');
+
+      expect(service.send).toHaveBeenCalledWith('q-1', false);
+    });
+
+    it('returns the wire envelope from the service verbatim', async () => {
+      const envelope = {
+        id: 'q-1',
+        status: 'SENT' as const,
+        effectiveStatus: 'SENT' as const,
+        sentTo: 'maria@example.com',
+      };
+      service.send.mockResolvedValue(envelope);
+
+      const result = await controller.send('q-1', 'true');
+
+      expect(result).toEqual(envelope);
+    });
+
+    it('lets service errors propagate (no swallowing)', async () => {
+      // The DomainExceptionFilter maps QuotationNotFoundError → 404,
+      // QuotationNotDraftError → 409, QuotationHasNoItemsError →
+      // 422, QuotationCustomerHasNoEmailError → 422,
+      // ServiceUnavailableException → 502. The controller itself
+      // is a thin pass-through.
+      service.send.mockRejectedValue(new Error('boom'));
+
+      await expect(controller.send('q-1', 'true')).rejects.toThrow('boom');
     });
   });
 });

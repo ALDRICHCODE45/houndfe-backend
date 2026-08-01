@@ -1,11 +1,13 @@
 /**
- * PdfGenerationService — render orchestrator for `GET /sales/:id/pdf`.
+ * PdfGenerationService — render orchestrator for `GET /sales/:id/pdf`
+ * and `GET /quotations/:id/pdf` (WU4).
  *
  * Why this service exists:
  *   - Single seam between the HTTP layer (PdfGenerationController, WU4)
  *     and the React-PDF template registry (`templates/registry.ts`).
  *   - Owns three concerns that don't belong in the controller:
- *       1. Sale-fetch + tenant-isolation (`SalesService.getSaleDetail`,
+ *       1. Sale/Quotation fetch + tenant-isolation
+ *          (`SalesService.getSaleDetail` / `QuotationsService.findOne`,
  *          tenant-scoped via CLS).
  *       2. Format validation + template selection
  *          (`getTemplate(format)` from the registry).
@@ -26,13 +28,14 @@
  *   |-----------------------------------------|------------------------------------|------|
  *   | Sale not found / wrong tenant           | `NotFoundException`                | 404  |
  *   | Sale status !== 'CONFIRMED'             | `BadRequestException('SALE_NOT_CONFIRMED')` | 400  |
+ *   | Quotation not found / wrong tenant      | `NotFoundException`                | 404  |
  *   | Renderer throws                         | `InternalServerErrorException('PDF_GENERATION_FAILED')` | 500  |
  *   | Invalid `format` param                  | `BadRequestException('INVALID_FORMAT')`     | 400  | (controller)
  *
- * The status guard runs AFTER `getSaleDetail` returns. The real
- * repository already filters on `status: 'CONFIRMED'`, so in practice
- * the guard catches DRAFT sales only via mock/test paths (where the
- * design's contract must still hold).
+ * WU4 addition: the `renderQuotationPdf` path renders a quotation in
+ * any status (DRAFT previews are allowed by spec). There is no status
+ * guard — the only failure path is `NotFoundException` (no quotation
+ * in the tenant) or a renderer crash mapped to 500.
  */
 import {
   BadRequestException,
@@ -62,10 +65,15 @@ import type {
   ReceiptSale,
   ReceiptCustomer,
 } from './templates/receipt/receipt.types';
+import type {
+  QuotationDocumentProps,
+} from './templates/quotation/quotation-a4.document';
+import type { QuotationResponseDto } from '../quotations/dto/quotation-response.dto';
 
 const SUPPORTED_FORMATS: readonly FormatKey[] = [
   DEFAULT_FORMAT_KEY,
   'receipt-ticket',
+  'quotation-a4',
 ] as const;
 
 @Injectable()
@@ -271,6 +279,158 @@ export class PdfGenerationService implements OnModuleInit {
         changeDueCents: sale.changeDueCents,
       },
       payments,
+    };
+  }
+
+  /**
+   * WU4 — Render a quotation PDF to a Node Readable stream.
+   *
+   * Accepts the wire-level `QuotationResponseDto` directly (rather
+   * than re-fetching via `QuotationsService.findOne`) so this method
+   * doesn't depend on `QuotationsService` — the controller fetches
+   * the quotation first (404 path) then hands the DTO to this
+   * service. This breaks the `QuotationsModule ↔ PdfGenerationModule`
+   * DI cycle that would otherwise require `forwardRef`.
+   *
+   * Pipeline:
+   *   1. Build `QuotationDocumentProps` from the wire shape.
+   *   2. `getTemplate(format)` picks the React component. Currently
+   *      only `quotation-a4` is registered for quotations — the
+   *      controller's `validateFormat` already rejects unknown keys
+   *      before this method runs.
+   *   3. `renderToStream(<Template {...props} />)` returns a Node
+   *      `Readable` we hand back to the controller.
+   *
+   * Returns `{ stream, folio }` (folio = the quotation id) so the
+   * controller can stamp it into the `Content-Disposition` filename
+   * (`cotizacion-{id}.pdf`).
+   *
+   * **No status guard** — quotations are renderable in any status
+   * per the spec scenario "PDF preview DRAFT/SENT/EXPIRED".
+   */
+  async renderQuotationPdf(
+    quotation: QuotationResponseDto,
+    format: FormatKey,
+  ): Promise<{ stream: Readable; folio: string }> {
+    const props = this.buildQuotationProps(quotation);
+    const Template = getTemplate(format);
+
+    let stream: Readable;
+    try {
+      stream = (await renderToStream(
+        createElement(Template, props) as unknown as Parameters<
+          typeof renderToStream
+        >[0],
+      )) as Readable;
+    } catch (err) {
+      this.logger.error(
+        `PDF render failed for quotation ${quotation.id} (format=${format}): ${(err as Error).message}`,
+      );
+      throw new InternalServerErrorException('PDF_GENERATION_FAILED');
+    }
+
+    return { stream, folio: quotation.id };
+  }
+
+  /**
+   * WU4 — Render a quotation PDF to an in-memory `Buffer`. Used by the
+   * `send()` atomic flow inside `QuotationsService` to attach the PDF
+   * to a Resend email without going through the HTTP boundary.
+   *
+   * Accepts the wire-level `QuotationResponseDto` directly (rather
+   * than re-fetching via `QuotationsService.findOne`) so this method
+   * doesn't depend on `QuotationsService` — the send flow already
+   * has the entity in hand and would otherwise pay a redundant
+   * DB roundtrip. This also avoids a `QuotationsModule ↔
+   * PdfGenerationModule` DI cycle: `QuotationsModule` consumes this
+   * service directly, no back-reference needed.
+   *
+   * Returns the raw bytes so the caller can hand them to
+   * `mailer.send({ attachments: [{ content, filename }] })` (Resend
+   * accepts base64 strings; we convert via `Buffer.toString('base64')`
+   * in the service to keep this seam narrow).
+   *
+   * Same error mapping as `renderQuotationPdf` — renderer crash →
+   * 500. The send flow catches the 500 and rolls back the SENT
+   * transition (status stays DRAFT).
+   */
+  async renderQuotationPdfToBuffer(
+    quotation: QuotationResponseDto,
+    format: FormatKey,
+  ): Promise<Buffer> {
+    const props = this.buildQuotationProps(quotation);
+    const Template = getTemplate(format);
+
+    try {
+      // Lazy import to avoid pulling `@react-pdf/renderer` into the
+      // bundle during cold module init when `renderToStream` is the
+      // only path. Both calls (`renderToStream` and `renderToBuffer`)
+      // share the same Yoga WASM instance — keeping them co-located
+      // here matches the receipt pipeline.
+      const { renderToBuffer } = await import('@react-pdf/renderer');
+      return await renderToBuffer(
+        createElement(Template, props) as unknown as Parameters<
+          typeof renderToBuffer
+        >[0],
+      );
+    } catch (err) {
+      this.logger.error(
+        `PDF buffer render failed for quotation ${quotation.id} (format=${format}): ${(err as Error).message}`,
+      );
+      throw new InternalServerErrorException('PDF_GENERATION_FAILED');
+    }
+  }
+
+  /**
+   * Map the persisted `QuotationResponseDto` into the shape the
+   * quotation template expects. Side-effect-free so the unit tests
+   * can pin the mapping without booting the renderer.
+   */
+  private buildQuotationProps(
+    quotation: QuotationResponseDto,
+  ): QuotationDocumentProps {
+    const items: LineItem[] = quotation.items.map((item) => ({
+      productName: item.productName,
+      variantName: item.variantName,
+      quantity: item.quantity,
+      unitPriceCents: item.unitPriceCents,
+      discountTitle: item.discountTitle ?? null,
+      discountAmountCents: item.discountAmountCents ?? null,
+      subtotalCents: item.subtotalCents,
+    }));
+
+    return {
+      business: {
+        companyName: COMPANY_NAME,
+        logoUrl: LOGO_URL,
+      },
+      quotation: {
+        id: quotation.id,
+        date:
+          quotation.createdAt instanceof Date
+            ? quotation.createdAt.toISOString()
+            : new Date(quotation.createdAt).toISOString(),
+        expiresAt: quotation.expiresAt
+          ? quotation.expiresAt instanceof Date
+            ? quotation.expiresAt.toISOString()
+            : new Date(quotation.expiresAt).toISOString()
+          : null,
+      },
+      customer: {
+        name: quotation.customer
+          ? [quotation.customer.firstName, quotation.customer.lastName]
+              .filter(Boolean)
+              .join(' ')
+              .trim() || null
+          : null,
+        email: quotation.customer?.email ?? null,
+      },
+      items,
+      totals: {
+        subtotalCents: quotation.subtotalCents,
+        discountCents: quotation.discountCents,
+        totalCents: quotation.totalCents,
+      },
     };
   }
 }

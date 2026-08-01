@@ -10,11 +10,20 @@
  * the test mocks provide stubbed no-op implementations so the existing
  * WU2 assertions (which don't exercise items/promotions) keep their
  * green-pass contract.
+ *
+ * WU4 covers T042–T045 + T047 (atomic send flow). The mailer and PDF
+ * service are mocked at the port level (`MAILER` + `PdfGenerationService`)
+ * so the tests don't boot the real Resend adapter or the Yoga WASM
+ * engine.
  */
 import { randomUUID } from 'node:crypto';
 import { QuotationsService } from './quotations.service';
 import { Quotation } from '../domain/quotation.entity';
-import { QuotationNotFoundError } from '../domain/quotation.errors';
+import {
+  QuotationCustomerHasNoEmailError,
+  QuotationHasNoItemsError,
+  QuotationNotFoundError,
+} from '../domain/quotation.errors';
 import type { IQuotationRepository, QuotationFindAllQuery } from '../domain/quotation.repository';
 import {
   EntityNotFoundError,
@@ -24,6 +33,9 @@ import {
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ProductsService } from '../../products/products.service';
 import type { IPosEvaluatePromotionsUseCase } from '../../promotions/application/ports/pos-evaluate-promotions.port';
+import type { IMailer, SendMailInput } from '../../notifications/email/mailer.port';
+import type { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
+import { ServiceUnavailableException } from '@nestjs/common';
 
 const SELLER = 'seller-1';
 const TENANT = 'tenant-1';
@@ -100,17 +112,33 @@ const makeEngine = (): jest.Mocked<IPosEvaluatePromotionsUseCase> =>
     })),
   }) as never;
 
+const makeMailer = (): jest.Mocked<IMailer> =>
+  ({
+    send: jest.fn(async () => undefined),
+  }) as jest.Mocked<IMailer>;
+
+const makePdfService = (): jest.Mocked<Pick<PdfGenerationService, 'renderQuotationPdfToBuffer'>> =>
+  ({
+    renderQuotationPdfToBuffer: jest.fn(
+      async () => Buffer.from('%PDF-1.4 fake'),
+    ),
+  }) as never;
+
 const buildService = (
   repo: jest.Mocked<IQuotationRepository>,
   tenantPrisma: ReturnType<typeof makeTenantPrisma>,
   productsService: ReturnType<typeof makeProductsService> = makeProductsService(),
   engine: ReturnType<typeof makeEngine> = makeEngine(),
+  mailer: jest.Mocked<IMailer> = makeMailer(),
+  pdfService: jest.Mocked<Pick<PdfGenerationService, 'renderQuotationPdfToBuffer'>> = makePdfService(),
 ) =>
   new QuotationsService(
     repo,
     tenantPrisma as never,
     productsService as never,
     engine as never,
+    mailer,
+    pdfService as never,
   );
 
 describe('QuotationsService — WU2', () => {
@@ -1192,6 +1220,320 @@ describe('QuotationsService — WU2', () => {
       expect(second.totalCents).toBe(firstTotals.total);
       expect((engine.evaluate as jest.Mock).mock.calls.length).toBe(
         engineCallsBefore + 1,
+      );
+    });
+  });
+
+  // ── WU4 — send() atomic flow ───────────────────────────────────────
+
+  describe('WU4 — send() (T042–T045, T047)', () => {
+    const draftWithItemAndCustomer = (overrides: Record<string, unknown> = {}) =>
+      makeQuotation({
+        items: [
+          {
+            id: 'item-1',
+            quotationId: 'q-1',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Camisa',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 5000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+        customerId: 'cust-1',
+        ...overrides,
+      });
+
+    const customerWithEmail = {
+      id: 'cust-1',
+      firstName: 'Maria',
+      lastName: null,
+      globalPriceListId: null,
+    };
+
+    const makeCustomerPrisma = (customer: typeof customerWithEmail | null) =>
+      makeTenantPrisma({
+        customer: {
+          findUnique: jest.fn(async () =>
+            customer
+              ? { ...customer, email: 'maria@example.com' }
+              : null,
+          ),
+        },
+      });
+
+    it('send flips a DRAFT quotation to SENT on Resend success (T042)', async () => {
+      const draft = draftWithItemAndCustomer();
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(async (q) => q),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeCustomerPrisma(customerWithEmail),
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      const result = await service.send(draft.id);
+
+      expect(result).toEqual({
+        id: draft.id,
+        status: 'SENT',
+        effectiveStatus: 'SENT',
+        sentTo: 'maria@example.com',
+      });
+      // The mailer MUST have been called with the rendered HTML +
+      // PDF attachment.
+      expect(mailer.send).toHaveBeenCalledTimes(1);
+      const mailInput = (mailer.send as jest.Mock).mock.calls[0][0] as SendMailInput;
+      expect(mailInput.to).toEqual(['maria@example.com']);
+      expect(mailInput.subject).toContain('Cotización');
+      expect(mailInput.attachments).toHaveLength(1);
+      expect(mailInput.attachments![0].filename).toMatch(/^cotizacion-.+\.pdf$/);
+      expect(mailInput.attachments![0].contentType).toBe('application/pdf');
+      // The save MUST carry the SENT entity — verify by inspecting the
+      // save call args.
+      expect(repo.save).toHaveBeenCalledTimes(1);
+      const persistedArg = (repo.save as jest.Mock).mock.calls[0][0] as Quotation;
+      expect(persistedArg.status).toBe('SENT');
+    });
+
+    it('send rejects with 422 QUOTATION_CUSTOMER_HAS_NO_EMAIL when customer has no email (T043)', async () => {
+      const draft = draftWithItemAndCustomer();
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      // Customer exists but with email=null
+      const prisma = makeTenantPrisma({
+        customer: {
+          findUnique: jest.fn(async () => ({
+            id: 'cust-1',
+            firstName: 'Maria',
+            lastName: null,
+            email: null,
+          })),
+        },
+      });
+      const service = buildService(
+        repo,
+        prisma,
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      await expect(service.send(draft.id)).rejects.toBeInstanceOf(
+        QuotationCustomerHasNoEmailError,
+      );
+      // No email was sent; no PDF was rendered; no save happened.
+      expect(mailer.send).not.toHaveBeenCalled();
+      expect(pdfService.renderQuotationPdfToBuffer).not.toHaveBeenCalled();
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('send rejects with 422 QUOTATION_CUSTOMER_HAS_NO_EMAIL when customer is missing (T043)', async () => {
+      const draft = draftWithItemAndCustomer();
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeCustomerPrisma(null),
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      await expect(service.send(draft.id)).rejects.toBeInstanceOf(
+        QuotationCustomerHasNoEmailError,
+      );
+      expect(mailer.send).not.toHaveBeenCalled();
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('send returns 502 ServiceUnavailableException on Resend failure — status stays DRAFT (T044)', async () => {
+      const draft = draftWithItemAndCustomer();
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(async (q) => q),
+      });
+      const mailer = makeMailer();
+      mailer.send.mockRejectedValueOnce(new Error('Resend 502: bad gateway'));
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeCustomerPrisma(customerWithEmail),
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      await expect(service.send(draft.id)).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      // The PDF was rendered (the render precedes the mailer call),
+      // but the SENT transition never happened.
+      expect(pdfService.renderQuotationPdfToBuffer).toHaveBeenCalledTimes(1);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('send throws 409 QUOTATION_NOT_DRAFT when called on a SENT quotation (T045)', async () => {
+      const sent = draftWithItemAndCustomer({ status: 'SENT' });
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === sent.id ? sent : null)),
+        save: jest.fn(),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeCustomerPrisma(customerWithEmail),
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      try {
+        await service.send(sent.id);
+        fail('expected BusinessRuleViolationError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(BusinessRuleViolationError);
+        expect((err as BusinessRuleViolationError).code).toBe(
+          'QUOTATION_NOT_DRAFT',
+        );
+      }
+      expect(mailer.send).not.toHaveBeenCalled();
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('send throws 422 QUOTATION_HAS_NO_ITEMS when the draft has zero items (T045)', async () => {
+      const draft = makeQuotation({ items: [] });
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeCustomerPrisma(customerWithEmail),
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      await expect(service.send(draft.id)).rejects.toBeInstanceOf(
+        QuotationHasNoItemsError,
+      );
+      expect(mailer.send).not.toHaveBeenCalled();
+      expect(pdfService.renderQuotationPdfToBuffer).not.toHaveBeenCalled();
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('send throws 404 QuotationNotFoundError when the id does not exist', async () => {
+      const repo = makeRepo({
+        findById: jest.fn(async () => null),
+        save: jest.fn(),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeTenantPrisma(),
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      await expect(
+        service.send('00000000-0000-4000-8000-000000000099'),
+      ).rejects.toBeInstanceOf(QuotationNotFoundError);
+      expect(mailer.send).not.toHaveBeenCalled();
+    });
+
+    it('send with sendEmail=false skips the mailer and still flips to SENT (T047)', async () => {
+      // A "finalize without email" path for sales reps who deliver
+      // the PDF in person. The SENT transition is identical; only
+      // the mailer call is skipped.
+      const draft = draftWithItemAndCustomer();
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(async (q) => q),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeTenantPrisma(), // no customer — fine when sendEmail=false
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      const result = await service.send(draft.id, false);
+
+      expect(result).toEqual({
+        id: draft.id,
+        status: 'SENT',
+        effectiveStatus: 'SENT',
+        sentTo: null,
+      });
+      expect(mailer.send).not.toHaveBeenCalled();
+      // PDF still rendered (it's a side-effect — even a finalize-without-
+      // email path produces the PDF for the in-person handoff).
+      expect(pdfService.renderQuotationPdfToBuffer).toHaveBeenCalledTimes(1);
+      expect(repo.save).toHaveBeenCalledTimes(1);
+      expect(((repo.save as jest.Mock).mock.calls[0][0] as Quotation).status).toBe(
+        'SENT',
+      );
+    });
+
+    it('send renders the PDF in the correct format with the wire DTO', async () => {
+      const draft = draftWithItemAndCustomer();
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(async (q) => q),
+      });
+      const mailer = makeMailer();
+      const pdfService = makePdfService();
+      const service = buildService(
+        repo,
+        makeCustomerPrisma(customerWithEmail),
+        undefined,
+        undefined,
+        mailer,
+        pdfService,
+      );
+
+      await service.send(draft.id, false);
+
+      expect(pdfService.renderQuotationPdfToBuffer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: draft.id,
+          status: 'DRAFT',
+          customerId: 'cust-1',
+        }),
+        'quotation-a4',
       );
     });
   });

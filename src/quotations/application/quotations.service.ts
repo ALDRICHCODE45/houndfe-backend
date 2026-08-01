@@ -33,8 +33,9 @@
  *      `kind?: 'per-unit'` default, so existing engine consumer code
  *      routes identically).
  */
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { render } from '@react-email/components';
 
 import { Quotation } from '../domain/quotation.entity';
 import {
@@ -46,7 +47,12 @@ import {
   QUOTATION_REPOSITORY,
   IQuotationRepository,
 } from '../domain/quotation.repository';
-import { QuotationNotFoundError } from '../domain/quotation.errors';
+import {
+  QuotationCustomerHasNoEmailError,
+  QuotationHasNoItemsError,
+  QuotationNotDraftError,
+  QuotationNotFoundError,
+} from '../domain/quotation.errors';
 import {
   EntityNotFoundError,
   BusinessRuleViolationError,
@@ -62,6 +68,16 @@ import type {
 import { POS_EVALUATE_PROMOTIONS_USE_CASE } from '../../promotions/application/ports/pos-evaluate-promotions.port';
 import type { QuotationItem } from '../domain/quotation-item.entity';
 import type { QuotationCancelReason } from '../domain/quotation.entity';
+import {
+  MAILER,
+  type IMailer,
+  type SendMailInput,
+} from '../../notifications/email/mailer.port';
+import { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
+import {
+  QuotationEmail,
+  type QuotationEmailProps,
+} from '../../notifications/email/templates/quotation-email';
 
 export interface AddQuotationItemInput {
   productId: string;
@@ -85,6 +101,20 @@ export interface CancelQuotationInput {
   cancelReason: QuotationCancelReason;
 }
 
+/**
+ * WU4 — Result envelope for the `send()` atomic flow. Mirrors the
+ * spec scenario "Send succeeds — status flips to SENT": the response
+ * payload is the wire shape with `effectiveStatus` updated, plus the
+ * raw status code so the FE can route on a single typed field.
+ */
+export interface SendQuotationResult {
+  id: string;
+  status: 'SENT';
+  effectiveStatus: 'SENT';
+  /** Recipient address the email was sent to (null when `sendEmail=false`). */
+  sentTo: string | null;
+}
+
 @Injectable()
 export class QuotationsService {
   constructor(
@@ -94,6 +124,23 @@ export class QuotationsService {
     private readonly productsService: ProductsService,
     @Inject(POS_EVALUATE_PROMOTIONS_USE_CASE)
     private readonly posEvaluatePromotions: IPosEvaluatePromotionsUseCase,
+    /**
+     * WU4 — outbound email port. Only consumed by `send()`. The
+     * `MAILER` token resolves to `ResendMailer` (or the dev logger
+     * fallback). The adapter THROWS on Resend failure so the atomic
+     * flow can rollback the SENT transition on error.
+     */
+    @Inject(MAILER)
+    private readonly mailer: IMailer,
+    /**
+     * WU4 — PDF rendering port. Only consumed by `send()` (and the
+     * PDF preview route). `@Optional()` so the existing service tests
+     * that don't import PdfGenerationModule keep passing without a
+     * second provider; production wires the module so the dependency
+     * is always present.
+     */
+    @Optional()
+    private readonly pdfService?: PdfGenerationService,
   ) {}
 
   // ──────────────────────────────────────────────────────────────────
@@ -571,6 +618,11 @@ export class QuotationsService {
    * both `status` (persisted) AND `effectiveStatus` (lazy-resolved)
    * so the FE can render the badge without re-computing.
    *
+   * WU4 — also loads the assigned customer's `{id, name, email}` so
+   * the PDF preview / send flow can stamp the customer's identity
+   * on the rendered document without a second DB roundtrip. Null when
+   * the quotation has no customer assigned.
+   *
    * Tenant scoping: the repository's `findById` is tenant-scoped; a
    * cross-tenant id returns `null` which we translate to 404.
    */
@@ -579,7 +631,8 @@ export class QuotationsService {
     if (!draft) {
       throw new QuotationNotFoundError(id);
     }
-    return this.toResponse(draft);
+    const customer = await this.loadCustomerForWire(draft.customerId);
+    return this.toResponse(draft, customer);
   }
 
   /**
@@ -611,9 +664,236 @@ export class QuotationsService {
 
     const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
 
+    // WU4 — batch-load each row's customer (or null) so the list
+    // surface mirrors the single-quotation detail. The set is
+    // typically small (one customer per quotation by design) so the
+    // batch `findMany` is cheap; if the same customer shows up on N
+    // rows the map dedupes them implicitly via the cache.
+    const customerCache = new Map<
+      string,
+      | {
+          id: string;
+          firstName: string;
+          lastName: string | null;
+          email: string | null;
+        }
+      | null
+    >();
+    const loadCustomerCached = async (customerId: string | null) => {
+      if (!customerId) return null;
+      if (customerCache.has(customerId)) {
+        return customerCache.get(customerId) ?? null;
+      }
+      const customer = await this.loadCustomerForWire(customerId);
+      customerCache.set(customerId, customer);
+      return customer;
+    };
+
+    const enriched = await Promise.all(
+      data.map(async (d) =>
+        this.toResponse(d, await loadCustomerCached(d.customerId)),
+      ),
+    );
+
     return {
-      data: data.map((d) => this.toResponse(d)),
+      data: enriched,
       pagination: { page, limit, total, totalPages },
+    };
+  }
+
+  /**
+   * WU4 — Send a quotation (atomic PDF render + email + SENT transition).
+   *
+   * This is the ONLY gate to `SENT` status (per spec scenario "Send
+   * is the only gate to SENT"). The flow is:
+   *
+   *   1. Load the DRAFT quotation (404 if missing in tenant).
+   *   2. Validate `status === 'DRAFT'` — otherwise 409.
+   *   3. Validate `items.length >= 1` — otherwise 422
+   *      `QUOTATION_HAS_NO_ITEMS`.
+   *   4. If `sendEmail === true`: validate the customer has an email —
+   *      otherwise 422 `QUOTATION_CUSTOMER_HAS_NO_EMAIL`.
+   *   5. Render the PDF to a Buffer (in-memory).
+   *   6. If `sendEmail === true`: render the React Email HTML and call
+   *      `MAILER.send({ to, subject, html, attachments })`.
+   *   7. ONLY if every step above succeeds: call `quotation.send()`
+   *      → status='SENT', then `repo.save(sent)`.
+   *
+   * On Resend failure (the mailer throws) the flow aborts BEFORE the
+   * SENT transition — the persisted quotation stays DRAFT and the
+   * caller sees a `ServiceUnavailableException` (502).
+   *
+   * Why we render the PDF BEFORE the SENT flip:
+   *   - Symmetric to the spec data flow (design.md §send-and-pdf):
+   *     render → mailer → SENT. The renderer can throw (yoga-layout
+   *     blowup, missing font) and we want the entity to stay DRAFT.
+   *   - The alternative — flip to SENT first, then send the email —
+   *     would leave a SENT quotation whose PDF was never delivered,
+   *     contradicting the spec's atomicity requirement.
+   *
+   * Why we keep `sendEmail=false` as a valid call path:
+   *   - Future FE workflows might want a "finalize" path that doesn't
+   *     trigger an outbound email (e.g. a sales rep who delivers the
+   *     PDF in person). The status transition is identical; only the
+   *     mailer call is skipped.
+   *
+   * @returns `{ id, status: 'SENT', effectiveStatus: 'SENT', sentTo }`
+   */
+  async send(
+    id: string,
+    sendEmail: boolean = true,
+  ): Promise<SendQuotationResult> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      // The domain `QuotationNotDraftError` is the canonical carrier
+      // for the 409 contract — mapped to HTTP 409 by the
+      // DomainExceptionFilter (`BusinessRuleViolationError` → 409).
+      throw new QuotationNotDraftError(draft.status);
+    }
+    if (draft.items.length === 0) {
+      throw new QuotationHasNoItemsError(id);
+    }
+
+    // Load the assigned customer — we need name + email for the
+    // email body + recipient list. Resolved AFTER the status guard
+    // so an unrenderable draft doesn't pay the customer roundtrip.
+    const customer = await this.loadCustomerForWire(draft.customerId);
+
+    if (sendEmail) {
+      if (!customer || !customer.email) {
+        throw new QuotationCustomerHasNoEmailError(id);
+      }
+    }
+
+    if (!this.pdfService) {
+      // Defense-in-depth — the module imports PdfGenerationModule so
+      // this branch is unreachable in production. A misconfigured test
+      // graph that forgets to wire the service gets a clean 500.
+      throw new ServiceUnavailableException(
+        'PDF_GENERATION_UNAVAILABLE',
+      );
+    }
+
+    // Build the wire DTO once — both the PDF renderer and the email
+    // template consume the same view (customer snapshot, totals,
+    // items). Building it here keeps the contract honest: a single
+    // snapshot drives both downstream calls.
+    const draftResponse = draft.toResponse();
+    const wireDto: import('../dto/quotation-response.dto').QuotationResponseDto = {
+      ...draftResponse,
+      customer,
+      effectiveStatus: draft.getEffectiveStatus(),
+    } as import('../dto/quotation-response.dto').QuotationResponseDto;
+
+    // Step 5: render the PDF in-memory. Failure here surfaces as a
+    // 500 (InternalServerErrorException inside PdfGenerationService).
+    // The entity is NOT yet touched, so the status stays DRAFT.
+    const pdfBuffer = await this.pdfService.renderQuotationPdfToBuffer(
+      wireDto,
+      'quotation-a4',
+    );
+
+    // Step 6: send the email (if requested). The mailer THROWS on
+    // Resend failure — we wrap the throw in a 502-mappable
+    // ServiceUnavailableException so the FE can branch on the
+    // HTTP status code without parsing the upstream error string.
+    let sentTo: string | null = null;
+    if (sendEmail && customer?.email) {
+      try {
+        const mailInput = await this.buildQuotationMailInput({
+          customer,
+          draftResponse: wireDto,
+          pdfBuffer,
+        });
+        await this.mailer.send(mailInput);
+        sentTo = customer.email;
+      } catch (err) {
+        // The persisted quotation is still DRAFT — we never
+        // reached the SENT flip below. Surface a 502 with the
+        // upstream error message so the FE can prompt the
+        // cashier to retry.
+        throw new ServiceUnavailableException(
+          `QUOTATION_EMAIL_SEND_FAILED: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Step 7: flip to SENT and persist. The atomicity guarantee
+    // lives here: the email has already been delivered (or skipped)
+    // before this transition, so a failure above keeps the entity
+    // in DRAFT.
+    const sent = draft.send();
+    const persisted = await this.quotationRepo.save(sent);
+
+    return {
+      id: persisted.id,
+      status: 'SENT',
+      effectiveStatus: 'SENT',
+      sentTo,
+    };
+  }
+
+  /**
+   * WU4 — Compose the `SendMailInput` for the quotation email. Side-
+   * effect-free so the unit tests can pin the subject + attachment
+   * shape without booting the renderer or the mailer.
+   *
+   * Subject: `Cotización #XXXX — [Business Name]` (short id, uppercased
+   * for inbox readability — full UUID is in the body).
+   *
+   * Attachment: the rendered PDF as `application/pdf` base64, named
+   * `cotizacion-{shortId}.pdf` so the recipient downloads a stable,
+   * recognizable filename.
+   */
+  private async buildQuotationMailInput(args: {
+    customer: {
+      id: string;
+      firstName: string;
+      lastName: string | null;
+      email: string | null;
+    };
+    draftResponse: QuotationResponseDto;
+    pdfBuffer: Buffer;
+  }): Promise<SendMailInput> {
+    const { customer, draftResponse, pdfBuffer } = args;
+    const shortId = draftResponse.id.slice(0, 8).toUpperCase();
+    const fullName = [customer.firstName, customer.lastName]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+
+    const emailProps: QuotationEmailProps = {
+      businessName: 'HoundFe',
+      quotationId: draftResponse.id,
+      quotationDate:
+        draftResponse.createdAt instanceof Date
+          ? draftResponse.createdAt.toISOString()
+          : new Date(draftResponse.createdAt).toISOString(),
+      itemCount: draftResponse.items.length,
+      totalFormatted: formatCurrency(draftResponse.totalCents),
+      expiresAtIso: draftResponse.expiresAt
+        ? draftResponse.expiresAt instanceof Date
+          ? draftResponse.expiresAt.toISOString()
+          : new Date(draftResponse.expiresAt).toISOString()
+        : null,
+      customerName: fullName || null,
+      sellerName: draftResponse.sellerUserId,
+    };
+
+    return {
+      to: customer.email ? [customer.email] : [],
+      subject: `Cotización #${shortId} — HoundFe`,
+      html: await render(QuotationEmail(emailProps)),
+      attachments: [
+        {
+          filename: `cotizacion-${shortId}.pdf`,
+          content: pdfBuffer.toString('base64'),
+          contentType: 'application/pdf',
+        },
+      ],
     };
   }
 
@@ -927,12 +1207,77 @@ export class QuotationsService {
    * the lazy `effectiveStatus` so callers don't have to recompute. The
    * entity carries the persisted status verbatim; the lazy field is a
    * pure view-only addition.
+   *
+   * WU4 — also threads the customer snapshot through. The repository
+   * returns the entity without the customer row (to keep the
+   * `findById` aggregate lean), so the service does a single
+   * `findUnique` per read here. The PDF preview + send flow consume
+   * `customer.email` directly from the wire shape.
    */
-  private toResponse(draft: Quotation): QuotationResponseDto {
+  private toResponse(
+    draft: Quotation,
+    customer: {
+      id: string;
+      firstName: string;
+      lastName: string | null;
+      email: string | null;
+    } | null = null,
+  ): QuotationResponseDto {
     const wire = draft.toResponse();
     return {
       ...wire,
       effectiveStatus: draft.getEffectiveStatus(),
+      customer,
     } as QuotationResponseDto;
   }
+
+  /**
+   * WU4 — Lookup helper for the wire `customer` field. Returns null
+   * when the quotation has no customer assigned. Returns the snapshot
+   * `{ id, firstName, lastName, email }` when assigned — the email
+   * rides along so the PDF preview / send flow can stamp the
+   * recipient address on the rendered document.
+   *
+   * The wire surface uses `firstName` + `lastName` (the Customer
+   * schema splits them, no `name` column). Consumers that need a
+   * single display name compose `${firstName} ${lastName}` at the
+   * presentation boundary (PDF template + email template).
+   *
+   * Reads from the same tenant-scoped Prisma client the rest of the
+   * service uses, so the cross-tenant guard is implicit.
+   */
+  private async loadCustomerForWire(
+    customerId: string | null,
+  ): Promise<
+    | { id: string; firstName: string; lastName: string | null; email: string | null }
+    | null
+  > {
+    if (!customerId) return null;
+    const prisma = this.tenantPrisma.getClient();
+    const row = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { id: true, firstName: true, lastName: true, email: true },
+    });
+    if (!row) return null;
+    return {
+      id: row.id,
+      firstName: row.firstName,
+      lastName: row.lastName ?? null,
+      email: row.email ?? null,
+    };
+  }
+}
+
+/**
+ * Format cents as a fixed-decimal currency string (`$X.XX`). Mirrors
+ * the helper in the PDF templates — duplicated here (not shared via
+ * the PDF module) because the email body and the PDF render are two
+ * independent consumers; hoisting would require a shared "utils"
+ * module that neither context currently owns. If a third consumer
+ * appears the helpers should converge.
+ */
+function formatCurrency(cents: number): string {
+  const sign = cents < 0 ? '-' : '';
+  const abs = Math.abs(cents) / 100;
+  return `${sign}$${abs.toFixed(2)}`;
 }

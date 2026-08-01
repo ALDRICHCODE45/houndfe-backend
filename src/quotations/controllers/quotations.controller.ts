@@ -288,4 +288,36 @@ export class QuotationsController {
   ) {
     return this.quotationsService.cancel(id, dto);
   }
+
+  // ── Send (WU4) ──────────────────────────────────────────────────────
+
+  /**
+   * WU4 — `POST /quotations/drafts/:id/send` — atomic send flow.
+   *
+   * Renders the PDF in-memory, optionally emails it to the assigned
+   * customer, and flips the quotation to `SENT` — all-or-nothing.
+   * The `email` query param defaults to `true`; pass `email=false`
+   * for a "finalize without email" path (in-person PDF delivery).
+   *
+   * Status code mapping (handled by the DomainExceptionFilter):
+   *   - `QuotationNotFoundError`              → 404
+   *   - `QuotationNotDraftError`              → 409
+   *   - `QuotationHasNoItemsError`            → 422 (code `QUOTATION_HAS_NO_ITEMS`)
+   *   - `QuotationCustomerHasNoEmailError`    → 422 (code `QUOTATION_CUSTOMER_HAS_NO_EMAIL`)
+   *   - `ServiceUnavailableException`         → 502 (Resend failure — status stays DRAFT)
+   *   - `InternalServerErrorException`        → 500 (PDF render failure)
+   */
+  @Post('drafts/:id/send')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  send(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Query('email') email: string | undefined,
+  ) {
+    // Default to sending the email. The controller's `email=true|false`
+    // query param shape matches the spec's intent ("Send Quotation Email
+    // (Auto-SENT)" — sending is the default).
+    const sendEmail = email !== 'false';
+    return this.quotationsService.send(id, sendEmail);
+  }
 }

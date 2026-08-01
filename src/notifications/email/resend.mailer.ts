@@ -100,6 +100,13 @@ export class ResendMailer implements IMailer {
       to: input.to,
       subject: input.subject,
       html: input.html,
+      // WU4 — Resend accepts base64 attachment content. We forward
+      // them verbatim; the mailer port defines the shape so the
+      // dev-logger fallback can also see the metadata.
+      attachments: input.attachments?.map((a) => ({
+        filename: a.filename,
+        content: a.content,
+      })),
     });
 
     if (result.error) {
@@ -137,6 +144,11 @@ export class ResendMailer implements IMailer {
       recipientCount: input.to.length,
       subject: input.subject,
       htmlBytes: input.html.length,
+      // WU4 — record attachment metadata so a developer can spot a
+      // missing attachment without dumping bytes into the log.
+      attachmentCount: input.attachments?.length ?? 0,
+      attachmentFilenames:
+        input.attachments?.map((a) => a.filename) ?? [],
       // The full html is intentionally NOT logged in production;
       // in dev we emit a truncated preview so the developer can spot
       // obvious render bugs without flooding the log.

@@ -7,6 +7,7 @@ import {
   type QuotationItemProps,
 } from './quotation-item.entity';
 import {
+  QuotationHasNoItemsError,
   QuotationItemNotFoundError,
   QuotationNotDraftError,
 } from './quotation.errors';
@@ -420,6 +421,61 @@ export class Quotation {
     return this._expiresAt.getTime() <= reference.getTime()
       ? 'EXPIRED'
       : this.status;
+  }
+
+  // ── Send (WU4) ───────────────────────────────────────────────────────
+
+  /**
+   * WU4 — Transition the quotation from DRAFT to SENT.
+   *
+   * The send flow is the ONLY gate to `SENT` — there is no manual
+   * transition in the controller surface (per spec scenario "Send is
+   * the only gate to SENT"). The service layer calls this method
+   * AFTER the email provider confirms the PDF was delivered, so a
+   * failure upstream keeps the entity in DRAFT and the throw propagates.
+   *
+   * Validations (enforced here so the domain is the source of truth,
+   * not the service):
+   *   - `status === 'DRAFT'` — otherwise `QuotationNotDraftError` (409
+   *     via the DomainExceptionFilter).
+   *   - `items.length >= 1` — otherwise `QuotationHasNoItemsError` (422).
+   *
+   * Returns a new instance with `status === 'SENT'` and a fresh
+   * `updatedAt`. Mirrors the `cancel` factory pattern (the entity's
+   * `status` field is `readonly`, so an in-place mutation would not
+   * type-check).
+   *
+   * The caller (`QuotationsService.send`) is responsible for
+   * persisting via `repo.save(sent)`.
+   */
+  send(sentAt: Date = new Date()): Quotation {
+    if (this.status !== 'DRAFT') {
+      throw new QuotationNotDraftError(this.status);
+    }
+    if (this._items.length === 0) {
+      throw new QuotationHasNoItemsError(this.id);
+    }
+
+    return new Quotation(
+      this.id,
+      this.sellerUserId,
+      'SENT',
+      this.subtotalCents,
+      this.discountCents,
+      this.totalCents,
+      this.manuallyEnded,
+      this.cancelReason,
+      this.canceledAt,
+      this.createdAt,
+      sentAt,
+      this._customerId,
+      this._globalPriceListId,
+      this._priceListExplicitlySet,
+      this._expiresAt,
+      [...this._items],
+      [...this._vetoedPromotionIds],
+      [...this._optedInManualPromotionIds],
+    );
   }
 
   // ── Cancel ───────────────────────────────────────────────────────────

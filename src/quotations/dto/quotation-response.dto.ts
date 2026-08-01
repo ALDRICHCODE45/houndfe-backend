@@ -35,6 +35,13 @@ export interface QuotationItemResponseDto {
   discountType: 'amount' | 'percentage' | null;
   discountValue: number | null;
   discountAmountCents: number;
+  /**
+   * WU4 — Human-readable discount title (e.g. "Cliente frecuente",
+   * "Promo 2x1"). Mirrors `SaleDetailItemDto.discountTitle` so the
+   * PDF receipt + email body can render the discount row verbatim.
+   * Null when no discount is applied to the line.
+   */
+  discountTitle: string | null;
   promotionId: string | null;
   subtotalCents: number;
   createdAt?: Date;
@@ -59,6 +66,15 @@ export interface QuotationResponseDto {
   items: QuotationItemResponseDto[];
   vetoedPromotionIds: string[];
   optedInManualPromotionIds: string[];
+  /**
+   * WU4 — Customer identity snapshot (id + name + email) on the wire.
+   * Mirrors `SaleDetailResponseDto.customer` so the FE can render the
+   * PDF preview / customer chip without a separate `/customers/:id`
+   * roundtrip. Null when the quotation has no customer assigned.
+   * The email is required for the `send()` flow (a missing email is
+   * rejected with 422 `QUOTATION_CUSTOMER_HAS_NO_EMAIL`).
+   */
+  customer: { id: string; firstName: string; lastName: string | null; email: string | null } | null;
   createdAt: Date;
   updatedAt: Date;
 }

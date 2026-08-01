@@ -16,6 +16,13 @@
  *   - `html` is the rendered React Email output (`render(<Email .../>)`).
  *     Adapters MUST NOT mutate it; they MUST forward it verbatim.
  *
+ *   - `attachments` (optional, WU4 addition) carries base64-encoded
+ *     file payloads. The Resend adapter forwards them as
+ *     `attachments: [{ filename, content }]` to the upstream SDK.
+ *     The dev-logger fallback records the attachment count and
+ *     filenames so a developer can spot a missing attachment without
+ *     dumping bytes.
+ *
  *   - Implementations THROW on rejection (Resend 4xx/5xx, network).
  *     The dedicated outbox dispatcher (Slice F.5) interprets a throw
  *     as "send failed ⇒ keep PENDING + retry"; a silent no-op would
@@ -29,10 +36,20 @@
  * Spec coverage:
  *   - design.md "Inngest + Resend Wiring" (MAILER paragraph).
  */
+export interface SendMailAttachment {
+  /** Filename as the recipient will see it in the inbox. */
+  filename: string;
+  /** Base64-encoded file bytes. */
+  content: string;
+  /** MIME type (e.g. `application/pdf`). */
+  contentType: string;
+}
+
 export interface SendMailInput {
   to: string[];
   subject: string;
   html: string;
+  attachments?: SendMailAttachment[];
 }
 
 export interface IMailer {

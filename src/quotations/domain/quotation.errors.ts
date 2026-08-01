@@ -41,3 +41,36 @@ export class QuotationNotFoundError extends EntityNotFoundError {
     super('Quotation', id);
   }
 }
+
+/**
+ * WU4 — Raised by `Quotation.send()` when the entity has zero items.
+ * The HTTP layer maps this to a 422 (the spec scenario "Send on
+ * quotation with no items is rejected"). Distinct from the
+ * non-DRAFT / has-no-customer errors because the domain rule is
+ * "a quotation must carry at least one line to be sent", not a
+ * state-machine guard.
+ */
+export class QuotationHasNoItemsError extends BusinessRuleViolationError {
+  constructor(id: string) {
+    super(
+      `Quotation ${id} cannot be sent because it has no items`,
+      'QUOTATION_HAS_NO_ITEMS',
+    );
+  }
+}
+
+/**
+ * WU4 — Raised by `QuotationsService.send()` when the assigned customer
+ * has no email address on file. The HTTP layer maps this to a 422 with
+ * code `QUOTATION_CUSTOMER_HAS_NO_EMAIL` (spec scenario "Customer has
+ * no email — rejected with 422"). A quotation must carry an email-
+ * reachable customer to be sent.
+ */
+export class QuotationCustomerHasNoEmailError extends BusinessRuleViolationError {
+  constructor(id: string) {
+    super(
+      `Quotation ${id} cannot be sent: assigned customer has no email address`,
+      'QUOTATION_CUSTOMER_HAS_NO_EMAIL',
+    );
+  }
+}
