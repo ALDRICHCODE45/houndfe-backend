@@ -73,23 +73,23 @@ Chain strategy: stacked-to-main
 ## WU4 — PDF + email + send
 
 ### RED
-- [ ] T040. QuotationPdf renders "COTIZACIÓN", no payment
-- [ ] T041. renderQuotationPdf stream + unknown format
-- [ ] T042. send() flips SENT on Resend success
-- [ ] T043. send() 422 on customer.email=null
-- [ ] T044. send() 502 on Resend fail (atomic)
-- [ ] T045. send() 409 non-DRAFT, 422 empty
-- [ ] T046. PDF preview DRAFT/SENT/EXPIRED
-- [ ] T047. QuotationEmail + MAILER.send attachment
+- [x] T040. QuotationPdf renders "COTIZACIÓN", no payment
+- [x] T041. renderQuotationPdf stream + unknown format
+- [x] T042. send() flips SENT on Resend success
+- [x] T043. send() 422 on customer.email=null
+- [x] T044. send() 502 on Resend fail (atomic)
+- [x] T045. send() 409 non-DRAFT, 422 empty
+- [x] T046. PDF preview DRAFT/SENT/EXPIRED
+- [x] T047. QuotationEmail + MAILER.send attachment
 
 ### GREEN
-- [ ] T048. Extend FormatKey with 'quotation-a4'
-- [ ] T049. QuotationPdf.tsx + registry (drop payment/cambio)
-- [ ] T050. renderQuotationPdf in service + GET /quotations/:id/pdf route
-- [ ] T051. Import QuotationsModule in PdfGenerationModule
-- [ ] T052. QuotationEmail.tsx
-- [ ] T053. QuotationsService.send() (atomic PDF+mail+SENT)
-- [ ] T054. POST /quotations/drafts/:id/send endpoint
+- [x] T048. Extend FormatKey with 'quotation-a4'
+- [x] T049. QuotationPdf.tsx + registry (drop payment/cambio)
+- [x] T050. renderQuotationPdf in service + GET /quotations/:id/pdf route
+- [x] T051. Import QuotationsModule in PdfGenerationModule
+- [x] T052. QuotationEmail.tsx
+- [x] T053. QuotationsService.send() (atomic PDF+mail+SENT)
+- [x] T054. POST /quotations/drafts/:id/send endpoint
 
 ### REFACTOR
-- [ ] T055. Extract shared template header/footer if needed
+- [x] T055. Extract shared template header/footer if needed
