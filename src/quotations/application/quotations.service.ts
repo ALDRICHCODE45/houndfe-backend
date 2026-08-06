@@ -33,7 +33,12 @@
  *      `kind?: 'per-unit'` default, so existing engine consumer code
  *      routes identically).
  */
-import { Inject, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Optional,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { render } from '@react-email/components';
 
@@ -299,10 +304,7 @@ export class QuotationsService {
    * Remove an item from a DRAFT quotation. Triggers a recompute so the
    * remaining items re-evaluate against the new state.
    */
-  async removeItem(
-    id: string,
-    itemId: string,
-  ): Promise<QuotationResponseDto> {
+  async removeItem(id: string, itemId: string): Promise<QuotationResponseDto> {
     const draft = await this.quotationRepo.findById(id);
     if (!draft) {
       throw new QuotationNotFoundError(id);
@@ -552,10 +554,7 @@ export class QuotationsService {
    * 0 (exento) and 1 (e.g. 0.16 for 16%). taxCents is recomputed
    * automatically in toResponse().
    */
-  async setTaxRate(
-    id: string,
-    rate: number,
-  ): Promise<QuotationResponseDto> {
+  async setTaxRate(id: string, rate: number): Promise<QuotationResponseDto> {
     const draft = await this.quotationRepo.findById(id);
     if (!draft) {
       throw new QuotationNotFoundError(id);
@@ -658,7 +657,10 @@ export class QuotationsService {
       );
     }
 
-    if (input.globalPriceListId !== undefined && input.globalPriceListId !== null) {
+    if (
+      input.globalPriceListId !== undefined &&
+      input.globalPriceListId !== null
+    ) {
       // Catalog existence check — mirrors sale.setSalePriceList but the
       // code label is `PRICE_LIST_NOT_FOUND` so the DomainExceptionFilter
       // maps to HTTP 400.
@@ -728,8 +730,13 @@ export class QuotationsService {
       limit,
       status: input.status,
       customerId: input.customerId,
+      search: input.search,
       createdFrom: input.createdFrom,
       createdTo: input.createdTo,
+      expiresFrom: input.expiresFrom,
+      expiresTo: input.expiresTo,
+      minTotalCents: input.minTotalCents,
+      maxTotalCents: input.maxTotalCents,
       sortBy: input.sortBy ?? 'createdAt',
       sortOrder: input.sortOrder ?? 'desc',
     });
@@ -743,13 +750,12 @@ export class QuotationsService {
     // rows the map dedupes them implicitly via the cache.
     const customerCache = new Map<
       string,
-      | {
-          id: string;
-          firstName: string;
-          lastName: string | null;
-          email: string | null;
-        }
-      | null
+      {
+        id: string;
+        firstName: string;
+        lastName: string | null;
+        email: string | null;
+      } | null
     >();
     const loadCustomerCached = async (customerId: string | null) => {
       if (!customerId) return null;
@@ -844,9 +850,7 @@ export class QuotationsService {
       // Defense-in-depth — the module imports PdfGenerationModule so
       // this branch is unreachable in production. A misconfigured test
       // graph that forgets to wire the service gets a clean 500.
-      throw new ServiceUnavailableException(
-        'PDF_GENERATION_UNAVAILABLE',
-      );
+      throw new ServiceUnavailableException('PDF_GENERATION_UNAVAILABLE');
     }
 
     // Build the wire DTO once — both the PDF renderer and the email
@@ -854,11 +858,12 @@ export class QuotationsService {
     // items). Building it here keeps the contract honest: a single
     // snapshot drives both downstream calls.
     const draftResponse = draft.toResponse();
-    const wireDto: import('../dto/quotation-response.dto').QuotationResponseDto = {
-      ...draftResponse,
-      customer,
-      effectiveStatus: draft.getEffectiveStatus(),
-    } as import('../dto/quotation-response.dto').QuotationResponseDto;
+    const wireDto: import('../dto/quotation-response.dto').QuotationResponseDto =
+      {
+        ...draftResponse,
+        customer,
+        effectiveStatus: draft.getEffectiveStatus(),
+      } as import('../dto/quotation-response.dto').QuotationResponseDto;
 
     // Step 5: render the PDF in-memory. Failure here surfaces as a
     // 500 (InternalServerErrorException inside PdfGenerationService).
@@ -1002,9 +1007,7 @@ export class QuotationsService {
    * AND the entity's discount fields are CLEARED before the engine
    * reads them.
    */
-  private async recomputePricingAndPromotions(
-    draft: Quotation,
-  ): Promise<void> {
+  private async recomputePricingAndPromotions(draft: Quotation): Promise<void> {
     // (1) Clear prior PROMO-sourced discounts. Manual free-form
     //     discounts (promotionId === null) are skipped.
     for (const item of draft.items) {
@@ -1221,10 +1224,7 @@ export class QuotationsService {
     item: QuotationItem,
     lineResult: PosEvalLineResult,
   ): void {
-    if (
-      lineResult.kind === 'buy-x-get-y' ||
-      lineResult.kind === 'advanced'
-    ) {
+    if (lineResult.kind === 'buy-x-get-y' || lineResult.kind === 'advanced') {
       // BXGY/ADVANCED emissions are not on the QUOTATION surface in this
       // slice. The engine still emits the same shape (the QUOTATION
       // context is a forward-looking gate) — silently skip rather than
@@ -1343,10 +1343,12 @@ export class QuotationsService {
    */
   private async loadCustomerForWire(
     customerId: string | null,
-  ): Promise<
-    | { id: string; firstName: string; lastName: string | null; email: string | null }
-    | null
-  > {
+  ): Promise<{
+    id: string;
+    firstName: string;
+    lastName: string | null;
+    email: string | null;
+  } | null> {
     if (!customerId) return null;
     const prisma = this.tenantPrisma.getClient();
     const row = await prisma.customer.findUnique({

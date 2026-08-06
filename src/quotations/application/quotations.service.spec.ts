@@ -24,7 +24,10 @@ import {
   QuotationHasNoItemsError,
   QuotationNotFoundError,
 } from '../domain/quotation.errors';
-import type { IQuotationRepository, QuotationFindAllQuery } from '../domain/quotation.repository';
+import type {
+  IQuotationRepository,
+  QuotationFindAllQuery,
+} from '../domain/quotation.repository';
 import {
   EntityNotFoundError,
   BusinessRuleViolationError,
@@ -33,7 +36,10 @@ import {
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ProductsService } from '../../products/products.service';
 import type { IPosEvaluatePromotionsUseCase } from '../../promotions/application/ports/pos-evaluate-promotions.port';
-import type { IMailer, SendMailInput } from '../../notifications/email/mailer.port';
+import type {
+  IMailer,
+  SendMailInput,
+} from '../../notifications/email/mailer.port';
 import type { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
 import { ServiceUnavailableException } from '@nestjs/common';
 
@@ -81,19 +87,31 @@ const makeTenantPrisma = (
   tenantId: string | null = TENANT,
 ): jest.Mocked<Pick<TenantPrismaService, 'getClient' | 'getTenantId'>> =>
   ({
-    getClient: jest.fn(() => ({
-      customer: { findUnique: jest.fn(async () => null) },
-      globalPriceList: { findFirst: jest.fn(async () => null), findUnique: jest.fn(async () => null) },
-      promotion: {
-        findUnique: jest.fn(async () => ({ id: 'any', method: 'MANUAL' })),
-      },
-      ...client,
-    } as never)),
+    getClient: jest.fn(
+      () =>
+        ({
+          customer: { findUnique: jest.fn(async () => null) },
+          globalPriceList: {
+            findFirst: jest.fn(async () => null),
+            findUnique: jest.fn(async () => null),
+          },
+          promotion: {
+            findUnique: jest.fn(async () => ({ id: 'any', method: 'MANUAL' })),
+          },
+          ...client,
+        }) as never,
+    ),
     getTenantId: jest.fn(() => tenantId),
   }) as never;
 
 const makeProductsService = (): jest.Mocked<
-  Pick<ProductsService, 'getProductInfoForSale' | 'batchResolvePriceMap' | 'resolvePriceListGlobalIds' | 'resolveProductCategoryBrandIds'>
+  Pick<
+    ProductsService,
+    | 'getProductInfoForSale'
+    | 'batchResolvePriceMap'
+    | 'resolvePriceListGlobalIds'
+    | 'resolveProductCategoryBrandIds'
+  >
 > =>
   ({
     getProductInfoForSale: jest.fn(),
@@ -111,7 +129,9 @@ const makeEngine = (): jest.Mocked<IPosEvaluatePromotionsUseCase> =>
       // Self-heal: echo the opted-in ids back so the service does NOT
       // prune them. Tests that exercise the self-heal can override this
       // mock to return an empty list.
-      targetableManualPromotionIds: [...(input?.optedInManualPromotionIds ?? [])],
+      targetableManualPromotionIds: [
+        ...(input?.optedInManualPromotionIds ?? []),
+      ],
     })),
   }) as never;
 
@@ -120,20 +140,26 @@ const makeMailer = (): jest.Mocked<IMailer> =>
     send: jest.fn(async () => undefined),
   }) as jest.Mocked<IMailer>;
 
-const makePdfService = (): jest.Mocked<Pick<PdfGenerationService, 'renderQuotationPdfToBuffer'>> =>
+const makePdfService = (): jest.Mocked<
+  Pick<PdfGenerationService, 'renderQuotationPdfToBuffer'>
+> =>
   ({
-    renderQuotationPdfToBuffer: jest.fn(
-      async () => Buffer.from('%PDF-1.4 fake'),
+    renderQuotationPdfToBuffer: jest.fn(async () =>
+      Buffer.from('%PDF-1.4 fake'),
     ),
   }) as never;
 
 const buildService = (
   repo: jest.Mocked<IQuotationRepository>,
   tenantPrisma: ReturnType<typeof makeTenantPrisma>,
-  productsService: ReturnType<typeof makeProductsService> = makeProductsService(),
+  productsService: ReturnType<
+    typeof makeProductsService
+  > = makeProductsService(),
   engine: ReturnType<typeof makeEngine> = makeEngine(),
   mailer: jest.Mocked<IMailer> = makeMailer(),
-  pdfService: jest.Mocked<Pick<PdfGenerationService, 'renderQuotationPdfToBuffer'>> = makePdfService(),
+  pdfService: jest.Mocked<
+    Pick<PdfGenerationService, 'renderQuotationPdfToBuffer'>
+  > = makePdfService(),
 ) =>
   new QuotationsService(
     repo,
@@ -399,12 +425,12 @@ describe('QuotationsService — WU2', () => {
         globalPriceListId: 'gpl-mayoreo',
       });
 
-      expect(prisma.getClient().globalPriceList.findUnique).toHaveBeenCalledWith(
-        {
-          where: { id: 'gpl-mayoreo' },
-          select: { id: true },
-        },
-      );
+      expect(
+        prisma.getClient().globalPriceList.findUnique,
+      ).toHaveBeenCalledWith({
+        where: { id: 'gpl-mayoreo' },
+        select: { id: true },
+      });
       expect(draft.globalPriceListId).toBe('gpl-mayoreo');
       expect(draft.priceListExplicitlySet).toBe(true); // cashier explicit
       expect(repo.save).toHaveBeenCalledWith(draft);
@@ -577,6 +603,44 @@ describe('QuotationsService — WU2', () => {
         createdTo,
         sortBy: 'totalCents',
         sortOrder: 'asc',
+      });
+    });
+
+    it('forwards the advanced filters to the repository (search, status[], customerId[], expiry + total ranges)', async () => {
+      const repo = makeRepo({
+        findAll: jest.fn(async () => ({ data: [], total: 0 })),
+      });
+      const prisma = makeTenantPrisma();
+      const service = buildService(repo, prisma);
+
+      const expiresFrom = new Date('2026-07-01T00:00:00Z');
+      const expiresTo = new Date('2026-07-31T23:59:59Z');
+      await service.findAll({
+        page: 1,
+        limit: 20,
+        search: '  Maria  ',
+        status: ['DRAFT', 'SENT'],
+        customerId: [randomUUID(), randomUUID()],
+        expiresFrom,
+        expiresTo,
+        minTotalCents: 0,
+        maxTotalCents: 50000,
+      });
+
+      const passed = (repo.findAll as jest.Mock).mock
+        .calls[0][0] as QuotationFindAllQuery;
+      expect(passed).toMatchObject({
+        page: 1,
+        limit: 20,
+        search: '  Maria  ',
+        status: ['DRAFT', 'SENT'],
+        customerId: expect.any(Array),
+        expiresFrom,
+        expiresTo,
+        minTotalCents: 0,
+        maxTotalCents: 50000,
+        sortBy: 'createdAt',
+        sortOrder: 'desc',
       });
     });
 
@@ -1134,7 +1198,8 @@ describe('QuotationsService — WU2', () => {
       // Replace the repo mock so the next call returns the CANCELLED
       // entity (simulating a real persistence round-trip — the entity
       // layer is the source of truth).
-      const persistedFirst = (repo.save as jest.Mock).mock.calls[0][0] as Quotation;
+      const persistedFirst = (repo.save as jest.Mock).mock
+        .calls[0][0] as Quotation;
       expect(persistedFirst.status).toBe('CANCELLED');
       (repo.findById as jest.Mock).mockResolvedValueOnce(persistedFirst);
       const second = await service.cancel(persistedFirst.id, {
@@ -1207,7 +1272,8 @@ describe('QuotationsService — WU2', () => {
         discount: first.discountCents,
         total: first.totalCents,
       };
-      const engineCallsBefore = (engine.evaluate as jest.Mock).mock.calls.length;
+      const engineCallsBefore = (engine.evaluate as jest.Mock).mock.calls
+        .length;
 
       // Second recompute via updateItemQuantity with the same value —
       // items stay the same; engine still runs but the input is byte-
@@ -1230,7 +1296,9 @@ describe('QuotationsService — WU2', () => {
   // ── WU4 — send() atomic flow ───────────────────────────────────────
 
   describe('WU4 — send() (T042–T045, T047)', () => {
-    const draftWithItemAndCustomer = (overrides: Record<string, unknown> = {}) =>
+    const draftWithItemAndCustomer = (
+      overrides: Record<string, unknown> = {},
+    ) =>
       makeQuotation({
         items: [
           {
@@ -1260,9 +1328,7 @@ describe('QuotationsService — WU2', () => {
       makeTenantPrisma({
         customer: {
           findUnique: jest.fn(async () =>
-            customer
-              ? { ...customer, email: 'maria@example.com' }
-              : null,
+            customer ? { ...customer, email: 'maria@example.com' } : null,
           ),
         },
       });
@@ -1295,16 +1361,20 @@ describe('QuotationsService — WU2', () => {
       // The mailer MUST have been called with the rendered HTML +
       // PDF attachment.
       expect(mailer.send).toHaveBeenCalledTimes(1);
-      const mailInput = (mailer.send as jest.Mock).mock.calls[0][0] as SendMailInput;
+      const mailInput = (mailer.send as jest.Mock).mock
+        .calls[0][0] as SendMailInput;
       expect(mailInput.to).toEqual(['maria@example.com']);
       expect(mailInput.subject).toContain('Cotización');
       expect(mailInput.attachments).toHaveLength(1);
-      expect(mailInput.attachments![0].filename).toMatch(/^cotizacion-.+\.pdf$/);
+      expect(mailInput.attachments![0].filename).toMatch(
+        /^cotizacion-.+\.pdf$/,
+      );
       expect(mailInput.attachments![0].contentType).toBe('application/pdf');
       // The save MUST carry the SENT entity — verify by inspecting the
       // save call args.
       expect(repo.save).toHaveBeenCalledTimes(1);
-      const persistedArg = (repo.save as jest.Mock).mock.calls[0][0] as Quotation;
+      const persistedArg = (repo.save as jest.Mock).mock
+        .calls[0][0] as Quotation;
       expect(persistedArg.status).toBe('SENT');
     });
 
@@ -1506,9 +1576,9 @@ describe('QuotationsService — WU2', () => {
       // email path produces the PDF for the in-person handoff).
       expect(pdfService.renderQuotationPdfToBuffer).toHaveBeenCalledTimes(1);
       expect(repo.save).toHaveBeenCalledTimes(1);
-      expect(((repo.save as jest.Mock).mock.calls[0][0] as Quotation).status).toBe(
-        'SENT',
-      );
+      expect(
+        ((repo.save as jest.Mock).mock.calls[0][0] as Quotation).status,
+      ).toBe('SENT');
     });
 
     it('send renders the PDF in the correct format with the wire DTO', async () => {
