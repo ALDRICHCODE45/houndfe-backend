@@ -299,6 +299,20 @@ export class QuotationsController {
     return this.quotationsService.cancel(id, dto);
   }
 
+  // ── Delete (hard-delete DRAFT / CANCELLED) ──────────────────────────
+
+  /**
+   * `DELETE /quotations/:id` — hard-delete a quotation. Only DRAFT and
+   * CANCELLED are deletable. SENT and EXPIRED are permanent records
+   * (already communicated to the customer).
+   */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermissions(['delete', 'Quotation'])
+  async remove(@Param('id', new ParseUUIDPipe()) id: string): Promise<void> {
+    return this.quotationsService.remove(id);
+  }
+
   // ── Send (WU4) ──────────────────────────────────────────────────────
 
   /**

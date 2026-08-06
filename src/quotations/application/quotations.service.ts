@@ -520,6 +520,25 @@ export class QuotationsService {
   }
 
   /**
+   * Hard-delete a quotation. Only DRAFT and CANCELLED quotations are
+   * deletable — SENT and EXPIRED are permanent audit records (they were
+   * already communicated to the customer).
+   */
+  async remove(id: string): Promise<void> {
+    const quotation = await this.quotationRepo.findById(id);
+    if (!quotation) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (quotation.status === 'SENT' || quotation.status === 'EXPIRED') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${quotation.status} status; only DRAFT and CANCELLED can be deleted`,
+        'QUOTATION_CANNOT_DELETE',
+      );
+    }
+    await this.quotationRepo.delete(id);
+  }
+
+  /**
    * Assign a customer to an existing DRAFT quotation.
    *
    * Order of operations:
