@@ -358,11 +358,10 @@ export class QuotationsService {
   }
 
   /**
-   * Opt in a MANUAL promotion. The entity's `optInManualPromotion` is
-   * idempotent and cross-clears the veto set when the same id was
-   * previously vetoed (reactivation path). Triggers a recompute so the
-   * engine sees the opt-in (best-wins now includes the manual
-   * candidate).
+   * Opt in a MANUAL promotion. Rejects AUTOMATIC promotions with
+   * PROMOTION_IS_NOT_MANUAL — for AUTOMATIC promos use the veto
+   * endpoints (DELETE /promotions/:promoId/veto to apply,
+   * POST /promotions/:promoId/veto to remove).
    */
   async applyManualPromotion(
     id: string,
@@ -378,6 +377,11 @@ export class QuotationsService {
         'QUOTATION_NOT_DRAFT',
       );
     }
+
+    // Guard: only MANUAL promotions can be applied through this endpoint.
+    // AUTOMATIC promotions are engine-evaluated; the cashier controls them
+    // via veto/opt-in, not via manual opt-in.
+    await this.assertPromotionIsManual(promotionId);
 
     draft.optInManualPromotion(promotionId);
     await this.recomputePricingAndPromotions(draft);
@@ -1219,6 +1223,29 @@ export class QuotationsService {
       id: row.id,
       globalPriceListId: row.globalPriceListId ?? null,
     };
+  }
+
+  /**
+   * Assert the promotion exists and has `method: 'MANUAL'`. Throws
+   * `BusinessRuleViolationError` with code `PROMOTION_IS_NOT_MANUAL`
+   * when the caller tries to manually opt-in an AUTOMATIC promotion —
+   * AUTOMATIC promos are controlled via veto/opt-in endpoints.
+   */
+  private async assertPromotionIsManual(promotionId: string): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+    const promo = await prisma.promotion.findUnique({
+      where: { id: promotionId },
+      select: { id: true, method: true },
+    });
+    if (!promo) {
+      throw new EntityNotFoundError('Promotion', promotionId);
+    }
+    if (promo.method !== 'MANUAL') {
+      throw new BusinessRuleViolationError(
+        `Promotion ${promotionId} is method=${promo.method}, not MANUAL. Use veto/opt-in endpoints for AUTOMATIC promotions.`,
+        'PROMOTION_IS_NOT_MANUAL',
+      );
+    }
   }
 
   /**

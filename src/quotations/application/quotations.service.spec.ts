@@ -84,6 +84,9 @@ const makeTenantPrisma = (
     getClient: jest.fn(() => ({
       customer: { findUnique: jest.fn(async () => null) },
       globalPriceList: { findFirst: jest.fn(async () => null), findUnique: jest.fn(async () => null) },
+      promotion: {
+        findUnique: jest.fn(async () => ({ id: 'any', method: 'MANUAL' })),
+      },
       ...client,
     } as never)),
     getTenantId: jest.fn(() => tenantId),
