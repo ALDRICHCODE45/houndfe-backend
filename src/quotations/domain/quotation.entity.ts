@@ -430,6 +430,17 @@ export class Quotation {
     this._customerNotes = notes;
   }
 
+  setTaxRate(rate: number): void {
+    this.ensureDraft();
+    if (rate < 0 || rate > 1) {
+      throw new InvalidArgumentError(
+        'Tax rate must be between 0 and 1',
+        'INVALID_TAX_RATE',
+      );
+    }
+    this._taxRate = rate;
+  }
+
   /**
    * Lazy status read — applies the `EXPIRED` transition on any read past
    * `expiresAt` (idempotent). CANCELLED is preserved across the check

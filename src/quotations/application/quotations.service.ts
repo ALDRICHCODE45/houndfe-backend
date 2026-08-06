@@ -548,6 +548,31 @@ export class QuotationsService {
   }
 
   /**
+   * Override the tax rate for a DRAFT quotation. Rate must be between
+   * 0 (exento) and 1 (e.g. 0.16 for 16%). taxCents is recomputed
+   * automatically in toResponse().
+   */
+  async setTaxRate(
+    id: string,
+    rate: number,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.setTaxRate(rate);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
    * Hard-delete a quotation. Only DRAFT and CANCELLED quotations are
    * deletable — SENT and EXPIRED are permanent audit records (they were
    * already communicated to the customer).

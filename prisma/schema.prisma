@@ -1366,6 +1366,7 @@ model Quotation {
   // its expiry (mirrors `promotion.manuallyEnded` semantics).
   manuallyEnded          Boolean                @default(false)
   customerNotes          String?                @db.VarChar(280)
+  taxRate                Float                  @default(0.16)
   tenantId               String
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt

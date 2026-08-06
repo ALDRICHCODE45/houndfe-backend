@@ -79,6 +79,7 @@ export class PrismaQuotationRepository implements IQuotationRepository {
         totalCents: quotation.totalCents,
         manuallyEnded: quotation.manuallyEnded,
         customerNotes: quotation.customerNotes,
+        taxRate: quotation.taxRate,
       } as Prisma.QuotationUncheckedCreateInput,
       update: {
         sellerUserId: quotation.sellerUserId,
@@ -94,6 +95,7 @@ export class PrismaQuotationRepository implements IQuotationRepository {
         totalCents: quotation.totalCents,
         manuallyEnded: quotation.manuallyEnded,
         customerNotes: quotation.customerNotes,
+        taxRate: quotation.taxRate,
         updatedAt: new Date(),
       },
     });
@@ -264,6 +266,7 @@ export class PrismaQuotationRepository implements IQuotationRepository {
       totalCents: data.totalCents,
       manuallyEnded: data.manuallyEnded,
       customerNotes: data.customerNotes,
+      taxRate: data.taxRate,
       items: data.items.map((item) => ({
         id: item.id,
         quotationId: item.quotationId,

@@ -56,6 +56,7 @@ import { UpdateQuotationItemQuantityDto } from '../dto/update-quotation-item-qua
 import { OverrideQuotationItemPriceDto } from '../dto/override-quotation-item-price.dto';
 import { SetQuotationExpiryDto } from '../dto/set-quotation-expiry.dto';
 import { SetQuotationNotesDto } from '../dto/set-notes.dto';
+import { SetQuotationTaxRateDto } from '../dto/set-tax-rate.dto';
 import { CancelQuotationDto } from '../dto/cancel-quotation.dto';
 
 @Controller('quotations')
@@ -284,6 +285,21 @@ export class QuotationsController {
     @Body() dto: SetQuotationNotesDto,
   ) {
     return this.quotationsService.setNotes(id, dto.customerNotes ?? null);
+  }
+
+  /**
+   * `PATCH /quotations/drafts/:id/tax-rate` — override the IVA tax rate
+   * for a DRAFT quotation. Rate is a decimal between 0 (exento) and 1.
+   * taxCents is recomputed automatically from the new rate.
+   */
+  @Patch('drafts/:id/tax-rate')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  setTaxRate(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: SetQuotationTaxRateDto,
+  ) {
+    return this.quotationsService.setTaxRate(id, dto.taxRate);
   }
 
   // ── Expiry + cancel ────────────────────────────────────────────────
