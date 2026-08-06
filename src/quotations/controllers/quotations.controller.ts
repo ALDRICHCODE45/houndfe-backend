@@ -55,6 +55,7 @@ import { AddQuotationItemDto } from '../dto/add-quotation-item.dto';
 import { UpdateQuotationItemQuantityDto } from '../dto/update-quotation-item-quantity.dto';
 import { OverrideQuotationItemPriceDto } from '../dto/override-quotation-item-price.dto';
 import { SetQuotationExpiryDto } from '../dto/set-quotation-expiry.dto';
+import { SetQuotationNotesDto } from '../dto/set-notes.dto';
 import { CancelQuotationDto } from '../dto/cancel-quotation.dto';
 
 @Controller('quotations')
@@ -267,6 +268,22 @@ export class QuotationsController {
     @Param('promoId', new ParseUUIDPipe()) promoId: string,
   ) {
     return this.quotationsService.optInPromotion(id, promoId);
+  }
+
+  // ── Notes ────────────────────────────────────────────────────────────
+
+  /**
+   * `PATCH /quotations/drafts/:id/notes` — set or clear customer-facing
+   * notes on a DRAFT quotation. Max 280 characters.
+   */
+  @Patch('drafts/:id/notes')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  setNotes(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: SetQuotationNotesDto,
+  ) {
+    return this.quotationsService.setNotes(id, dto.customerNotes ?? null);
   }
 
   // ── Expiry + cancel ────────────────────────────────────────────────

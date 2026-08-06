@@ -69,6 +69,8 @@ export interface QuotationFromPersistenceProps {
   items: QuotationItemProps[];
   vetoedPromotionIds: ReadonlyArray<string>;
   optedInManualPromotionIds: ReadonlyArray<string>;
+  customerNotes?: string | null;
+  taxRate?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -99,6 +101,8 @@ export class Quotation {
   private _expiresAt: Date | null;
   private _vetoedPromotionIds: string[];
   private _optedInManualPromotionIds: string[];
+  private _customerNotes: string | null;
+  private _taxRate: number;
 
   private constructor(
     public readonly id: string,
@@ -119,6 +123,8 @@ export class Quotation {
     items: QuotationItem[] = [],
     vetoedPromotionIds: ReadonlyArray<string> = [],
     optedInManualPromotionIds: ReadonlyArray<string> = [],
+    customerNotes: string | null = null,
+    taxRate: number = 0.16,
   ) {
     this._items = items;
     this._customerId = customerId;
@@ -127,6 +133,8 @@ export class Quotation {
     this._expiresAt = expiresAt;
     this._vetoedPromotionIds = [...vetoedPromotionIds];
     this._optedInManualPromotionIds = [...optedInManualPromotionIds];
+    this._customerNotes = customerNotes;
+    this._taxRate = taxRate;
   }
 
   // ── Factories ────────────────────────────────────────────────────────
@@ -182,6 +190,8 @@ export class Quotation {
       items,
       props.vetoedPromotionIds ?? [],
       props.optedInManualPromotionIds ?? [],
+      props.customerNotes ?? null,
+      props.taxRate ?? 0.16,
     );
   }
 
@@ -219,6 +229,14 @@ export class Quotation {
 
   get optedInManualPromotionIds(): ReadonlyArray<string> {
     return this._optedInManualPromotionIds;
+  }
+
+  get customerNotes(): string | null {
+    return this._customerNotes;
+  }
+
+  get taxRate(): number {
+    return this._taxRate;
   }
 
   /** Add a new line or stack the quantity on a matching product+variant. */
@@ -401,6 +419,17 @@ export class Quotation {
     this._expiresAt = date;
   }
 
+  setNotes(notes: string | null): void {
+    this.ensureDraft();
+    if (notes && notes.length > 280) {
+      throw new InvalidArgumentError(
+        'Customer notes must be 280 characters or fewer',
+        'NOTES_TOO_LONG',
+      );
+    }
+    this._customerNotes = notes;
+  }
+
   /**
    * Lazy status read — applies the `EXPIRED` transition on any read past
    * `expiresAt` (idempotent). CANCELLED is preserved across the check
@@ -577,6 +606,9 @@ export class Quotation {
       appliedPromotions: this.computeAppliedPromotions(),
       vetoedPromotionIds: [...this._vetoedPromotionIds],
       optedInManualPromotionIds: [...this._optedInManualPromotionIds],
+      customerNotes: this._customerNotes,
+      taxRate: this._taxRate,
+      taxCents: Math.round(totals.totalCents * this._taxRate / (1 + this._taxRate)),
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };

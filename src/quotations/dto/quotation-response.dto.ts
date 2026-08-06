@@ -75,6 +75,9 @@ export interface QuotationResponseDto {
   items: QuotationItemResponseDto[];
   /** Promotions currently applied to items, deduplicated by promotionId. */
   appliedPromotions: AppliedPromotionDto[];
+  customerNotes: string | null;
+  taxRate: number;
+  taxCents: number;
   vetoedPromotionIds: string[];
   optedInManualPromotionIds: string[];
   /**

@@ -524,6 +524,30 @@ export class QuotationsService {
   }
 
   /**
+   * Set or clear customer-facing notes on a DRAFT quotation.
+   * Max 280 characters — enforced by the entity.
+   */
+  async setNotes(
+    id: string,
+    notes: string | null,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (draft.status !== 'DRAFT') {
+      throw new BusinessRuleViolationError(
+        `Quotation is in ${draft.status} status; mutation is not allowed`,
+        'QUOTATION_NOT_DRAFT',
+      );
+    }
+
+    draft.setNotes(notes);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+  }
+
+  /**
    * Hard-delete a quotation. Only DRAFT and CANCELLED quotations are
    * deletable — SENT and EXPIRED are permanent audit records (they were
    * already communicated to the customer).
