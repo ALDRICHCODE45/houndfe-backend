@@ -19,6 +19,15 @@
  */
 import type { QuotationStatus } from '../domain/quotation.entity';
 
+export interface AppliedPromotionDto {
+  /** ID of the promotion entity. */
+  promotionId: string;
+  /** Human-readable promotion title (e.g. "10% off en jeans"). */
+  title: string;
+  /** Total discount in cents this promotion contributed across all items. */
+  discountCents: number;
+}
+
 export interface QuotationItemResponseDto {
   id: string;
   quotationId: string;
@@ -64,6 +73,8 @@ export interface QuotationResponseDto {
   totalCents: number;
   manuallyEnded: boolean;
   items: QuotationItemResponseDto[];
+  /** Promotions currently applied to items, deduplicated by promotionId. */
+  appliedPromotions: AppliedPromotionDto[];
   vetoedPromotionIds: string[];
   optedInManualPromotionIds: string[];
   /**

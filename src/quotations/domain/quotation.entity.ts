@@ -574,11 +574,41 @@ export class Quotation {
       totalCents: totals.totalCents,
       manuallyEnded: this.manuallyEnded,
       items: this._items.map((item) => item.toResponse()),
+      appliedPromotions: this.computeAppliedPromotions(),
       vetoedPromotionIds: [...this._vetoedPromotionIds],
       optedInManualPromotionIds: [...this._optedInManualPromotionIds],
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };
+  }
+
+  /**
+   * Derive the `appliedPromotions` snapshot from items that carry a
+   * `promotionId`. Deduplicated by promotionId, discount summed across
+   * all items that the promotion touched.
+   */
+  private computeAppliedPromotions() {
+    const byPromo = new Map<
+      string,
+      { title: string; discountCents: number }
+    >();
+    for (const item of this._items) {
+      if (!item.promotionId) continue;
+      const existing = byPromo.get(item.promotionId);
+      if (existing) {
+        existing.discountCents += item.discountAmountCents;
+      } else {
+        byPromo.set(item.promotionId, {
+          title: item.discountTitle ?? item.promotionId,
+          discountCents: item.discountAmountCents,
+        });
+      }
+    }
+    return Array.from(byPromo.entries()).map(([promotionId, v]) => ({
+      promotionId,
+      title: v.title,
+      discountCents: v.discountCents,
+    }));
   }
 
   // ── Internal ─────────────────────────────────────────────────────────
