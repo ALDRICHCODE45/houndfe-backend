@@ -196,6 +196,44 @@ enum SaleItemRewardKind {
   ADVANCED
 }
 
+// ============================================================================
+// QUOTATIONS ENUMS
+// ============================================================================
+// Quotation lifecycle states. Distinct from Sale (which uses
+// DRAFT/CONFIRMED/CANCELED) because a quotation is a pre-sale pricing
+// document — it goes DRAFT → SENT → EXPIRED/CANCELLED, never CONFIRMED.
+enum QuotationStatus {
+  DRAFT
+  SENT
+  EXPIRED
+  CANCELLED
+}
+
+// Reason captured when a quotation is cancelled. Mirrors SaleCancelReason
+// minus the order-specific cases (a quotation never reaches order
+// confirmation) and adds PRICE_OBJECTION (sales-rep override path) +
+// EXPIRED (auto-cancel path).
+enum QuotationCancelReason {
+  CUSTOMER_REQUEST
+  PRICE_OBJECTION
+  EXPIRED
+  OTHER
+}
+
+// Quotation line item price source. Distinct from SaleItemPriceSource
+// (which has DEFAULT) because a quotation always resolves through a
+// price list — DEFAULT would mean "no list found", which is a 4xx error,
+// not a normal value.
+enum QuotationItemPriceSource {
+  PRICE_LIST
+  CUSTOM
+}
+
+enum QuotationItemDiscountType {
+  amount
+  percentage
+}
+
 enum OutboxEventStatus {
   PENDING
   PUBLISHED
@@ -274,6 +312,10 @@ model Tenant {
   salePromotionApplied      SalePromotionApplied[]
   salePromotionVetoes       SalePromotionVeto[]
   salePromotionOptIns       SalePromotionOptIn[]
+  quotations                Quotation[]
+  quotationItems            QuotationItem[]
+  quotationPromotionVetoes  QuotationPromotionVeto[]
+  quotationPromotionOptIns  QuotationPromotionOptIn[]
   outboxEvents              OutboxEvent[]
   customers                 Customer[]
   customerAddresses         CustomerAddress[]
@@ -392,13 +434,14 @@ model Product {
   updatedAt DateTime @updatedAt
 
   // Relations
-  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  orderItems OrderItem[]
-  saleItems  SaleItem[]
-  images     ProductImage[]
-  variants   Variant[]
-  lots       Lot[]
-  priceLists PriceList[]
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderItems     OrderItem[]
+  saleItems      SaleItem[]
+  quotationItems QuotationItem[]
+  images         ProductImage[]
+  variants       Variant[]
+  lots           Lot[]
+  priceLists     PriceList[]
 
   @@index([tenantId])
   @@index([tenantId, includeInOnlineCatalog, categoryId])
@@ -476,11 +519,12 @@ model Variant {
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  product       Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
-  images        ProductImage[]
-  variantPrices VariantPrice[]
-  saleItems     SaleItem[]
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product        Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  images         ProductImage[]
+  variantPrices  VariantPrice[]
+  saleItems      SaleItem[]
+  quotationItems QuotationItem[]
 
   @@index([tenantId])
   @@map("variants")
@@ -562,6 +606,7 @@ model GlobalPriceList {
   customers           Customer[]
   promotionPriceLists PromotionPriceList[]
   sales               Sale[]
+  quotations          Quotation[]
 
   @@map("global_price_lists")
 }
@@ -946,6 +991,7 @@ model User {
   tenantMemberships      TenantMembership[]
   sales                  Sale[]                  @relation("SaleCashier")
   salesAsSeller          Sale[]                  @relation("SaleSeller")
+  quotationsAsSeller     Quotation[]             @relation("QuotationSeller")
   salePayments           SalePayment[]
   saleComments           SaleComment[]           @relation("SaleCommentAuthor")
   reviewedReceipts       ReceiptEvidence[]       @relation("ReceiptReviewer")
@@ -1033,8 +1079,9 @@ model Customer {
   isTrusted              Boolean @default(false)
   tenantId               String
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sales  Sale[]
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sales      Sale[]
+  quotations Quotation[]
 
   // Price list assignment (optional — auto-apply on sales)
   globalPriceListId String?
@@ -1133,16 +1180,19 @@ model Promotion {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant       Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant                Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   // Relations
-  targetItems  PromotionTargetItem[]
-  customers    PromotionCustomer[]
-  priceLists   PromotionPriceList[]
-  daysOfWeek   PromotionDayOfWeek[]
-  appliedItems SaleItem[]
-  appliedSales SalePromotionApplied[]
-  saleVetoes   SalePromotionVeto[]
-  saleOptIns   SalePromotionOptIn[]
+  targetItems           PromotionTargetItem[]
+  customers             PromotionCustomer[]
+  priceLists            PromotionPriceList[]
+  daysOfWeek            PromotionDayOfWeek[]
+  appliedItems          SaleItem[]
+  appliedSales          SalePromotionApplied[]
+  saleVetoes            SalePromotionVeto[]
+  saleOptIns            SalePromotionOptIn[]
+  appliedQuotationItems QuotationItem[]
+  quotationVetoes       QuotationPromotionVeto[]
+  quotationOptIns       QuotationPromotionOptIn[]
 
   @@index([tenantId])
   @@index([type])
@@ -1279,6 +1329,138 @@ model SalePromotionOptIn {
   @@unique([saleId, promotionId])
   @@index([tenantId])
   @@map("sale_promotion_opt_ins")
+}
+
+// ============================================================================
+// QUOTATIONS MODELS
+// ============================================================================
+// Pre-sale pricing documents. Independent lifecycle (DRAFT → SENT →
+// EXPIRED/CANCELLED). Shares the promotion engine + price-list resolver
+// with Sale via the `pos-evaluate-promotions` port (no schema-level
+// coupling). WU1 covers the persistence foundation; the service /
+// controller layer lands in WU2.
+
+model Quotation {
+  id                     String                 @id @default(uuid())
+  // The sales rep who created the quotation. FK is Restrict so deleting
+  // a user that owns historical quotations is a deliberate admin action
+  // rather than an accidental cascade.
+  sellerUserId           String
+  customerId             String?
+  globalPriceListId      String?
+  // Cashier-explicit price-list discriminator (mirrors Sale). False on
+  // freshly-created drafts and after `assignCustomer` auto-seeds; true
+  // after any `PUT /price-list` (including a null clear). When true,
+  // `assignCustomer` MUST NOT auto-seed.
+  priceListExplicitlySet Boolean                @default(false)
+  status                 QuotationStatus        @default(DRAFT)
+  expiresAt              DateTime?
+  cancelReason           QuotationCancelReason?
+  canceledAt             DateTime?
+  // Persisted totals — recomputed by the engine on every draft mutation
+  // (WU3) and surfaced verbatim on the wire (WU2).
+  subtotalCents          Int                    @default(0)
+  discountCents          Int                    @default(0)
+  totalCents             Int                    @default(0)
+  // Operator override — when true, the quotation stays SENT even past
+  // its expiry (mirrors `promotion.manuallyEnded` semantics).
+  manuallyEnded          Boolean                @default(false)
+  customerNotes          String?                @db.VarChar(280)
+  taxRate                Float                  @default(0.16)
+  tenantId               String
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  // Relations
+  tenant          Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  seller          User                      @relation("QuotationSeller", fields: [sellerUserId], references: [id], onDelete: Restrict)
+  customer        Customer?                 @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  globalPriceList GlobalPriceList?          @relation(fields: [globalPriceListId], references: [id], onDelete: SetNull)
+  items           QuotationItem[]
+  promotionVetoes QuotationPromotionVeto[]
+  promotionOptIns QuotationPromotionOptIn[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([sellerUserId])
+  @@index([customerId])
+  @@index([expiresAt])
+  @@map("quotations")
+}
+
+model QuotationItem {
+  id                  String                     @id @default(uuid())
+  quotationId         String
+  productId           String
+  variantId           String?
+  productName         String
+  variantName         String?
+  quantity            Int
+  unitPriceCents      Int
+  unitPriceCurrency   String                     @default("MXN")
+  priceSource         QuotationItemPriceSource?
+  appliedPriceListId  String?
+  customPriceCents    Int?
+  discountType        QuotationItemDiscountType?
+  discountValue       Int?
+  discountAmountCents Int                        @default(0)
+  // Promotion back-reference (audit). SetNull preserves the item row if
+  // the Promotion is later deleted.
+  promotionId         String?
+  tenantId            String
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+
+  // Relations
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  quotation Quotation  @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  product   Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variant   Variant?   @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  promotion Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+
+  @@index([quotationId])
+  @@index([tenantId])
+  @@index([promotionId])
+  @@map("quotation_items")
+}
+
+// Per-draft veto set: a (quotation, promotion) pair the seller has
+// dismissed. promotionId is non-null and Cascade so the unique pair
+// stays well-defined even if the promotion is later deleted. Mirrors
+// SalePromotionVeto shape EXACTLY for save symmetry.
+model QuotationPromotionVeto {
+  id          String   @id @default(uuid())
+  tenantId    String
+  quotationId String
+  promotionId String
+  createdAt   DateTime @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  @@unique([quotationId, promotionId])
+  @@index([tenantId])
+  @@map("quotation_promotion_vetoes")
+}
+
+// Per-draft MANUAL opt-in set: a (quotation, promotion) pair the seller
+// has opted into. Mirrors QuotationPromotionVeto shape EXACTLY.
+model QuotationPromotionOptIn {
+  id          String   @id @default(uuid())
+  tenantId    String
+  quotationId String
+  promotionId String
+  createdAt   DateTime @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  @@unique([quotationId, promotionId])
+  @@index([tenantId])
+  @@map("quotation_promotion_opt_ins")
 }
 
 // ============================================================================

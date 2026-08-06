@@ -107,12 +107,14 @@ function makeMockSalesService() {
 
 // `renderToStream` is a top-level export of `@react-pdf/renderer`; jest
 // auto-mocks the whole module. We override the specific export with a
-// stub that resolves to a Readable we control.
+// stub that resolves to a Readable we control. WU4 also stubs
+// `renderToBuffer` (used by `renderQuotationPdfToBuffer`).
 jest.mock('@react-pdf/renderer', () => {
   const real = jest.requireActual('@react-pdf/renderer');
   return {
     ...real,
     renderToStream: jest.fn(),
+    renderToBuffer: jest.fn(),
     Font: {
       ...real.Font,
       register: jest.fn(),
@@ -380,6 +382,262 @@ describe('PdfGenerationService', () => {
     expect(payments[0]).toMatchObject({
       method: 'CASH',
       amountCents: 10000,
+    });
+  });
+
+  // ── WU4 — Quotation rendering ──────────────────────────────────────
+
+  describe('renderQuotationPdf (WU4 / T047)', () => {
+    // ── Mocks ─────────────────────────────────────────────────────────
+
+    function makeQuotationResponse(
+      overrides: Partial<{
+        id: string;
+        status: string;
+        createdAt: Date;
+        expiresAt: Date | null;
+        customerId: string | null;
+        customer: {
+          id: string;
+          firstName: string;
+          lastName: string | null;
+          email: string | null;
+        } | null;
+        items: Array<Record<string, unknown>>;
+        subtotalCents: number;
+        discountCents: number;
+        totalCents: number;
+      }> = {},
+    ) {
+      return {
+        id: '00000000-0000-4000-8000-000000000010',
+        sellerUserId: 'user-1',
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        globalPriceListId: null,
+        priceListExplicitlySet: false,
+        expiresAt: null,
+        cancelReason: null,
+        canceledAt: null,
+        subtotalCents: 10000,
+        discountCents: 0,
+        totalCents: 10000,
+        manuallyEnded: false,
+        items: [
+          {
+            id: 'item-1',
+            quotationId: '00000000-0000-4000-8000-000000000010',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Camisa',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 5000,
+            unitPriceCurrency: 'MXN',
+            priceSource: 'PRICE_LIST',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            discountType: null,
+            discountValue: null,
+            discountAmountCents: 0,
+            discountTitle: null,
+            promotionId: null,
+            subtotalCents: 10000,
+          },
+        ],
+        vetoedPromotionIds: [],
+        optedInManualPromotionIds: [],
+        customer: {
+          id: 'cust-1',
+          firstName: 'Maria',
+          lastName: null,
+          email: 'maria@example.com',
+        },
+        createdAt: new Date('2026-07-20T15:00:00.000Z'),
+        updatedAt: new Date('2026-07-20T15:00:00.000Z'),
+        ...overrides,
+      };
+    }
+
+    it('returns a Readable stream for a quotation in any status (T046)', async () => {
+      const quotation = makeQuotationResponse();
+      const expectedStream = Readable.from([
+        Buffer.from('%PDF-1.4 fake-quotation'),
+      ]);
+      renderer.renderToStream.mockReturnValue(expectedStream);
+
+      const result = await service.renderQuotationPdf(
+        quotation as never,
+        'quotation-a4',
+      );
+
+      expect(result.stream).toBe(expectedStream);
+      expect(result.folio).toBe(quotation.id);
+      expect(renderer.renderToStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT enforce a status guard (DRAFT previews are allowed — T046)', async () => {
+      // The spec scenario "PDF preview DRAFT/SENT/EXPIRED" — every
+      // status renders. A DRAFT quotation must NOT throw.
+      const draftQuotation = makeQuotationResponse({ status: 'DRAFT' });
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      await expect(
+        service.renderQuotationPdf(draftQuotation as never, 'quotation-a4'),
+      ).resolves.toBeDefined();
+    });
+
+    it('renders a SENT quotation as well (T046)', async () => {
+      const sentQuotation = makeQuotationResponse({ status: 'SENT' });
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      await expect(
+        service.renderQuotationPdf(sentQuotation as never, 'quotation-a4'),
+      ).resolves.toBeDefined();
+    });
+
+    it('renders an EXPIRED quotation as well (T046)', async () => {
+      const expiredQuotation = makeQuotationResponse({ status: 'EXPIRED' });
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      await expect(
+        service.renderQuotationPdf(expiredQuotation as never, 'quotation-a4'),
+      ).resolves.toBeDefined();
+    });
+
+    it('feeds the template a populated QuotationDocumentProps derived from the quotation', async () => {
+      const quotation = makeQuotationResponse({
+        customer: {
+          id: 'cust-1',
+          firstName: 'Maria',
+          lastName: null,
+          email: 'maria@example.com',
+        },
+      });
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      await service.renderQuotationPdf(quotation as never, 'quotation-a4');
+
+      const renderedElement = renderer.renderToStream.mock.calls[0][0];
+      const props = renderedElement.props as Record<string, unknown>;
+
+      expect(props).toMatchObject({
+        business: {
+          companyName: COMPANY_NAME,
+          logoUrl: LOGO_URL,
+        },
+        quotation: {
+          id: quotation.id,
+          // The date string round-trips through the wire DTO.
+          date: '2026-07-20T15:00:00.000Z',
+          expiresAt: null,
+        },
+        customer: {
+          name: 'Maria',
+          email: 'maria@example.com',
+        },
+        totals: {
+          subtotalCents: 10000,
+          discountCents: 0,
+          totalCents: 10000,
+        },
+      });
+
+      const items = (props.items as unknown[]).slice();
+      expect(items.length).toBe(1);
+      expect(items[0]).toMatchObject({
+        productName: 'Camisa',
+        quantity: 2,
+        unitPriceCents: 5000,
+        subtotalCents: 10000,
+      });
+    });
+
+    it('wraps renderer failures in InternalServerErrorException (PDF_GENERATION_FAILED)', async () => {
+      const quotation = makeQuotationResponse();
+      renderer.renderToStream.mockImplementation(() => {
+        throw new Error('yoga-layout blew up');
+      });
+
+      try {
+        await service.renderQuotationPdf(
+          quotation as never,
+          'quotation-a4',
+        );
+        fail('expected InternalServerErrorException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(InternalServerErrorException);
+        expect((err as InternalServerErrorException).message).toBe(
+          'PDF_GENERATION_FAILED',
+        );
+      }
+    });
+  });
+
+  describe('renderQuotationPdfToBuffer (WU4 / T047)', () => {
+    function makeQuotationResponse() {
+      return {
+        id: '00000000-0000-4000-8000-000000000020',
+        sellerUserId: 'user-1',
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        globalPriceListId: null,
+        priceListExplicitlySet: false,
+        expiresAt: null,
+        cancelReason: null,
+        canceledAt: null,
+        subtotalCents: 10000,
+        discountCents: 0,
+        totalCents: 10000,
+        manuallyEnded: false,
+        items: [],
+        vetoedPromotionIds: [],
+        optedInManualPromotionIds: [],
+        customer: { id: 'cust-1', name: 'Maria', email: 'maria@example.com' },
+        createdAt: new Date('2026-07-20T15:00:00.000Z'),
+        updatedAt: new Date('2026-07-20T15:00:00.000Z'),
+      };
+    }
+
+    it('returns a Buffer with PDF magic bytes (T047)', async () => {
+      // The renderToBuffer branch is lazy-imported at runtime — we
+      // mock it via the same renderer mock that the rest of the spec
+      // uses. The renderer mock module already exposes renderToBuffer
+      // via `requireActual`, so we stub it here.
+      renderer.renderToBuffer = jest.fn(async () =>
+        Buffer.from('%PDF-1.4 buffer'),
+      );
+
+      const quotation = makeQuotationResponse();
+      const buffer = await service.renderQuotationPdfToBuffer(
+        quotation as never,
+        'quotation-a4',
+      );
+
+      expect(buffer).toBeInstanceOf(Buffer);
+      expect(buffer.length).toBeGreaterThan(0);
+      const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
+      expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
+    });
+
+    it('wraps buffer-render failures in InternalServerErrorException', async () => {
+      renderer.renderToBuffer = jest.fn(async () => {
+        throw new Error('yoga-layout blew up');
+      });
+
+      const quotation = makeQuotationResponse();
+      try {
+        await service.renderQuotationPdfToBuffer(
+          quotation as never,
+          'quotation-a4',
+        );
+        fail('expected InternalServerErrorException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(InternalServerErrorException);
+        expect((err as InternalServerErrorException).message).toBe(
+          'PDF_GENERATION_FAILED',
+        );
+      }
     });
   });
 });

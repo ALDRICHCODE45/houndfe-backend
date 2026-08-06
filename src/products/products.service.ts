@@ -1977,6 +1977,15 @@ export class ProductsService {
       ),
       images,
       lots,
+      ...(product.hasVariants
+        ? {
+            variantStockTotal: (variants as { quantity: number }[]).reduce(
+              (total, v) => total + v.quantity,
+              0,
+            ),
+            variantCount: variants.length,
+          }
+        : {}),
     };
   }
 

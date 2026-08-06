@@ -66,6 +66,19 @@ export interface PosEvalInput {
   vetoedPromotionIds: ReadonlyArray<string>;
   /** Per-draft MANUAL opt-in set. */
   optedInManualPromotionIds: ReadonlyArray<string>;
+  /**
+   * WU3 (Quotations) — Context discriminant. `'SALE'` for POS drafts;
+   * `'QUOTATION'` for pre-sale quotation drafts. The engine treats
+   * `context === 'SALE'` and `context === 'QUOTATION'` identically in
+   * this slice — the field is a forward-looking gate so future promotion
+   * targeting rules can opt in/out per context without code changes.
+   *
+   * Default: `'SALE'` (additive — every existing call site that omits
+   * the field continues to behave exactly as before; the
+   * `QuotationsService.recomputePricingAndPromotions` is the only new
+   * write that sets `context: 'QUOTATION'` explicitly).
+   */
+  context?: 'SALE' | 'QUOTATION';
 }
 
 /**

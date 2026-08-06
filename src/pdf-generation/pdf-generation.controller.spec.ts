@@ -1,24 +1,8 @@
 /**
- * PdfGenerationController — HTTP endpoint tests (WU4 + WU5 polish).
+ * PdfGenerationController — HTTP endpoint tests (sale receipt PDF only).
  *
- * What we verify:
- *   - `GET /sales/:id/pdf` with no format defaults to A4.
- *   - `GET /sales/:id/pdf?format=receipt-ticket` switches templates.
- *   - Invalid format → 400 INVALID_FORMAT.
- *   - Service throws NotFoundException → controller surfaces 404.
- *   - Service throws BadRequestException (DRAFT sale) → 400.
- *   - Response headers carry `Content-Type: application/pdf` and
- *     `Content-Disposition: attachment; filename="recibo-{folio}.pdf"`.
- *     WU5 polish: filename uses the human-readable folio returned
- *     by the service, not the URL id.
- *
- * Mocking strategy:
- *   - We instantiate the controller directly with a mock service.
- *     Guards (`JwtAuthGuard`, `TenantContextGuard`, `PermissionsGuard`)
- *     are applied via decorators on the class; they're not exercised
- *     here — those are tested by the integration suite (WU5) and the
- *     guard unit specs. This mirrors the sales controller spec
- *     pattern (`src/sales/sales.controller.spec.ts`).
+ * The quotation PDF route lives in QuotationsController; its tests are in
+ * src/quotations/controllers/quotations.controller.spec.ts.
  */
 import { Readable } from 'node:stream';
 import {
@@ -36,6 +20,7 @@ import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface
 function makeMockPdfService() {
   return {
     generateSalePdf: jest.fn(),
+    renderQuotationPdf: jest.fn(),
     validateFormat: jest.fn(),
     resolveFormat: jest.fn(),
   };
@@ -52,24 +37,12 @@ function makeMockUser(tenantId = 'tenant-1'): AuthenticatedUser {
 }
 
 function makeMockRes(): Response {
-  // WU5 — controller uses `stream.pipe(res)` instead of
-  // `res.send(stream)` because Express's res.send JSON-serializes
-  // Readable streams on @nestjs/platform-express@11.x. The real
-  // Node `Readable.pipe()` calls `dest.on('drain')` /
-  // `dest.on('close')` / `dest.on('finish')` AND `dest.destroy()`
-  // internally, so we don't try to mock `res` deep enough to make a
-  // real pipe work — instead, we spy on `Readable.prototype.pipe`
-  // and stub the call. The mock `res` only needs `set` for the
-  // header assertion; pipe itself is observed via the spy.
   const res: Partial<Response> = {
     set: jest.fn().mockReturnThis(),
   };
   return res as Response;
 }
 
-// Spy on Readable.prototype.pipe so the controller's stream-pipe
-// doesn't actually try to write to a mock res. We restore after
-// every test in `afterEach` below.
 let pipeSpy: jest.SpyInstance | undefined;
 beforeEach(() => {
   pipeSpy = jest.spyOn(Readable.prototype, 'pipe').mockReturnThis();
@@ -86,9 +59,7 @@ describe('PdfGenerationController', () => {
 
   beforeEach(() => {
     service = makeMockPdfService();
-    controller = new PdfGenerationController(
-      service as unknown as PdfGenerationService,
-    );
+    controller = new PdfGenerationController(service as any);
     jest.clearAllMocks();
   });
 
@@ -101,7 +72,7 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser();
       const res = makeMockRes();
 
-      await controller.generatePdf('sale-1', undefined, user, res);
+      await controller.generateSalePdf('sale-1', undefined, user, res);
 
       expect(service.resolveFormat).toHaveBeenCalledWith(undefined);
       expect(service.generateSalePdf).toHaveBeenCalledWith(
@@ -119,7 +90,7 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser();
       const res = makeMockRes();
 
-      await controller.generatePdf('sale-1', 'receipt-ticket', user, res);
+      await controller.generateSalePdf('sale-1', 'receipt-ticket', user, res);
 
       expect(service.resolveFormat).toHaveBeenCalledWith('receipt-ticket');
       expect(service.generateSalePdf).toHaveBeenCalledWith(
@@ -137,7 +108,7 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser();
       const res = makeMockRes();
 
-      await controller.generatePdf('sale-1', undefined, user, res);
+      await controller.generateSalePdf('sale-1', undefined, user, res);
 
       expect(res.set).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -151,10 +122,6 @@ describe('PdfGenerationController', () => {
     });
 
     it('uses the folio (not the URL id) for the Content-Disposition filename', async () => {
-      // WU5 polish — the spec mandates `recibo-{folio}.pdf`. The
-      // service returns the folio; the controller stamps it into the
-      // header. We pass a URL id that intentionally differs from the
-      // folio to prove the header reads from the folio, not the id.
       const stream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
       service.resolveFormat.mockReturnValue('receipt-a4');
       service.generateSalePdf.mockResolvedValue({ stream, folio: 'B-0042' });
@@ -162,7 +129,7 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser();
       const res = makeMockRes();
 
-      await controller.generatePdf(
+      await controller.generateSalePdf(
         '00000000-0000-4000-8000-000000000001',
         undefined,
         user,
@@ -177,9 +144,6 @@ describe('PdfGenerationController', () => {
     });
 
     it('sanitizes unsafe characters out of the folio for the filename', async () => {
-      // Defensive — a folio with `/` (legacy import) must not produce
-      // a path-traversal filename. The regex strips everything that
-      // isn't alnum or hyphen.
       const stream = Readable.from([Buffer.from('%PDF-1.4 fake')]);
       service.resolveFormat.mockReturnValue('receipt-a4');
       service.generateSalePdf.mockResolvedValue({
@@ -190,7 +154,7 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser();
       const res = makeMockRes();
 
-      await controller.generatePdf('sale-1', undefined, user, res);
+      await controller.generateSalePdf('sale-1', undefined, user, res);
 
       expect(res.set).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -209,7 +173,7 @@ describe('PdfGenerationController', () => {
       const res = makeMockRes();
 
       await expect(
-        controller.generatePdf('sale-99', undefined, user, res),
+        controller.generateSalePdf('sale-99', undefined, user, res),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(pipeSpy).not.toHaveBeenCalled();
     });
@@ -224,7 +188,7 @@ describe('PdfGenerationController', () => {
       const res = makeMockRes();
 
       await expect(
-        controller.generatePdf('sale-1', undefined, user, res),
+        controller.generateSalePdf('sale-1', undefined, user, res),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(pipeSpy).not.toHaveBeenCalled();
     });
@@ -239,7 +203,7 @@ describe('PdfGenerationController', () => {
       const res = makeMockRes();
 
       await expect(
-        controller.generatePdf('sale-1', undefined, user, res),
+        controller.generateSalePdf('sale-1', undefined, user, res),
       ).rejects.toBeInstanceOf(InternalServerErrorException);
     });
 
@@ -251,17 +215,15 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser();
       const res = makeMockRes();
 
-      // First call: rejected with BadRequestException('INVALID_FORMAT').
       let caught: unknown;
       try {
-        await controller.generatePdf('sale-1', 'pdf-bogus', user, res);
+        await controller.generateSalePdf('sale-1', 'pdf-bogus', user, res);
       } catch (err) {
         caught = err;
       }
       expect(caught).toBeInstanceOf(BadRequestException);
       expect((caught as BadRequestException).message).toBe('INVALID_FORMAT');
 
-      // Service was never reached — format validation short-circuits.
       expect(service.generateSalePdf).not.toHaveBeenCalled();
     });
 
@@ -273,7 +235,7 @@ describe('PdfGenerationController', () => {
       const user = makeMockUser('tenant-42');
       const res = makeMockRes();
 
-      await controller.generatePdf('sale-1', undefined, user, res);
+      await controller.generateSalePdf('sale-1', undefined, user, res);
 
       expect(service.generateSalePdf).toHaveBeenCalledWith(
         'sale-1',

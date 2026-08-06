@@ -12,6 +12,13 @@ export const TENANT_SCOPED_MODELS = new Set([
   'OrderItem',
   'Sale',
   'SaleItem',
+  // Quotations (WU1) — five tables, one bounded context. Without these
+  // entries, `findAll` / `findById` / `delete` would not auto-inject
+  // tenantId into the WHERE clause and a cross-tenant row could leak.
+  'Quotation',
+  'QuotationItem',
+  'QuotationPromotionVeto',
+  'QuotationPromotionOptIn',
   'Customer',
   'CustomerAddress',
   'Promotion',

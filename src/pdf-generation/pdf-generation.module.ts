@@ -22,14 +22,16 @@
  *     font registration + format/status/error mapping.
  *
  * Controllers:
- *   - `PdfGenerationController` — `GET /sales/:id/pdf` with the
- *     standard auth stack (`JwtAuthGuard` → `TenantContextGuard`
+ *   - `PdfGenerationController` — `GET /sales/:id/pdf` (sale) +
+ *     `GET /quotations/:id/pdf` (quotation, WU4) with the standard
+ *     auth stack (`JwtAuthGuard` → `TenantContextGuard`
  *     → `PermissionsGuard`).
  *
  * Exports:
- *   - None. The service is consumed internally by the module's own
- *     controller. If a future caller needs the service, exporting
- *     should be a deliberate decision, not implicit.
+ *   - `PdfGenerationService` (WU4) — consumed by `QuotationsService`
+ *     to render the PDF in-memory during the `send()` atomic flow.
+ *     The controller consumes `QuotationsService` directly for the
+ *     preview route; both seams share the same render method.
  */
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
@@ -42,6 +44,6 @@ import { PdfGenerationService } from './pdf-generation.service';
   imports: [AuthModule, SalesModule, TenantsModule],
   providers: [PdfGenerationService],
   controllers: [PdfGenerationController],
-  exports: [],
+  exports: [PdfGenerationService],
 })
 export class PdfGenerationModule {}

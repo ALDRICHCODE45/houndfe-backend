@@ -16,8 +16,10 @@
  *   - `Reflect.getMetadata(MODULE_METADATA.PROVIDERS, ModuleClass)` is the
  *     idiomatic lightweight check used throughout this repo.
  *
- * WU4 update: the module now declares `PdfGenerationController`. The
- * spec reflects that change — controllers are no longer empty.
+ * WU4 update: the module declares `PdfGenerationController` (sale +
+ * quotation routes). WU4 also exports `PdfGenerationService` so the
+ * `QuotationsModule`'s `send()` flow can render the PDF in-memory
+ * without a circular import.
  */
 import { MODULE_METADATA } from '@nestjs/common/constants';
 import { PdfGenerationModule } from './pdf-generation.module';
@@ -54,26 +56,29 @@ describe('PdfGenerationModule', () => {
     expect(imports).toContain(TenantsModule);
   });
 
-  it('registers PdfGenerationController for GET /sales/:id/pdf', () => {
+  it('registers PdfGenerationController for GET /sales/:id/pdf + GET /quotations/:id/pdf (WU4)', () => {
     const controllers = Reflect.getMetadata(
       MODULE_METADATA.CONTROLLERS,
       PdfGenerationModule,
     ) as unknown[] | undefined;
 
-    // WU4 ships the controller — GET /sales/:id/pdf guarded by the
-    // standard JwtAuthGuard + TenantContextGuard + PermissionsGuard stack.
+    // WU4 ships the controller for both sale + quotation routes,
+    // guarded by the standard JwtAuthGuard + TenantContextGuard +
+    // PermissionsGuard stack.
     expect(controllers ?? []).toContain(PdfGenerationController);
   });
 
-  it('does not export PdfGenerationService (consumed internally only)', () => {
+  it('exports PdfGenerationService for cross-module render (WU4)', () => {
     const exports = Reflect.getMetadata(
       MODULE_METADATA.EXPORTS,
       PdfGenerationModule,
     ) as unknown[] | undefined;
 
-    // Nothing else in the app needs PdfGenerationService yet. If a future
-    // caller needs it, exporting should be a deliberate decision, not an
-    // accident of the foundation commit.
-    expect(exports ?? []).toEqual([]);
+    // WU4 — QuotationsService.send() calls renderQuotationPdfToBuffer
+    // inside PdfGenerationService. The export is a deliberate seam
+    // for the send-time render; the existing in-module caller
+    // (PdfGenerationController) still resolves via DI without
+    // touching the export list.
+    expect(exports ?? []).toContain(PdfGenerationService);
   });
 });

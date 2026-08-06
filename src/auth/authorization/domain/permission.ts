@@ -46,6 +46,7 @@ export type AppSubjects =
   | 'EmployeeTimeOffMedical'
   | 'EmployeeEmergencyContact'
   | 'NotificationConfig'
+  | 'Quotation'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -446,5 +447,31 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'NotificationConfig',
     action: 'update',
     description: 'Update per-tenant notification configuration',
+  },
+
+  // Quotation permissions (WU2 — pre-sale priced documents).
+  // Mirrors the Sale permission shape minus `batch_delete` and `manage`
+  // (the WU2 surface only needs the four CRUD-style actions used by
+  // the controller routes; PDF/email/send flows land in WU4 with
+  // their own guard set).
+  {
+    subject: 'Quotation',
+    action: 'create',
+    description: 'Open new quotation drafts',
+  },
+  {
+    subject: 'Quotation',
+    action: 'read',
+    description: 'View quotation drafts and details',
+  },
+  {
+    subject: 'Quotation',
+    action: 'update',
+    description: 'Mutate quotation drafts (customer, price list, items)',
+  },
+  {
+    subject: 'Quotation',
+    action: 'delete',
+    description: 'Cancel or delete quotations',
   },
 ];

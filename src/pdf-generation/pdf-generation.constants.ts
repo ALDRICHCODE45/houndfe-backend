@@ -50,7 +50,10 @@ export const PAPER_SIZES = {
  */
 export const DEFAULT_FORMAT_KEY = 'receipt-a4' as const;
 
-export type FormatKey = typeof DEFAULT_FORMAT_KEY | 'receipt-ticket';
+export type FormatKey =
+  | typeof DEFAULT_FORMAT_KEY
+  | 'receipt-ticket'
+  | 'quotation-a4';
 
 /**
  * Branding defaults — same houndfe-logo asset used by the email
