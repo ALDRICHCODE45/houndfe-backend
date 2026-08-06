@@ -188,35 +188,10 @@ export class PrismaQuotationRepository implements IQuotationRepository {
   // ============================================================
   async findAll(query: QuotationFindAllQuery): Promise<QuotationFindAllResult> {
     const prisma = this.tenantPrisma.getClient();
-    const {
-      page,
-      limit,
-      status,
-      customerId,
-      createdFrom,
-      createdTo,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-    } = query;
+    const { page, limit, sortBy = 'createdAt', sortOrder = 'desc' } = query;
 
     const skip = (page - 1) * limit;
-
-    const where: Prisma.QuotationWhereInput = {};
-    if (status) {
-      where.status = status as Prisma.EnumQuotationStatusFilter;
-    }
-    if (customerId) {
-      where.customerId = customerId;
-    }
-    if (createdFrom || createdTo) {
-      where.createdAt = {};
-      if (createdFrom) {
-        where.createdAt.gte = createdFrom;
-      }
-      if (createdTo) {
-        where.createdAt.lte = createdTo;
-      }
-    }
+    const where = this.buildWhere(query);
 
     const [rows, total] = await Promise.all([
       prisma.quotation.findMany({
@@ -233,6 +208,81 @@ export class PrismaQuotationRepository implements IQuotationRepository {
       data: rows.map((r) => this.toDomain(r)),
       total,
     };
+  }
+
+  /**
+   * Compose the `where` clause for findAll. Each filter is a single
+   * clause; multiple clauses are AND-ed (mirrors the Sale repository's
+   * `buildExtendedWhere`). A single clause is returned directly so the
+   * generated SQL stays flat when there is only one filter.
+   *
+   * Semantics: OR inside each multi-value group (`status`, `customerId`,
+   * `search` first/last name), AND between groups. `expiresAt`/`totalCents`
+   * ranges use `!== undefined` checks so a `0` bound (e.g. minTotalCents=0)
+   * is honored.
+   */
+  private buildWhere(query: QuotationFindAllQuery): Prisma.QuotationWhereInput {
+    const andClauses: Prisma.QuotationWhereInput[] = [];
+
+    if (query.status?.length) {
+      andClauses.push({ status: { in: query.status } });
+    }
+
+    if (query.customerId?.length) {
+      andClauses.push({ customerId: { in: query.customerId } });
+    }
+
+    const search = query.search?.trim();
+    if (search) {
+      andClauses.push({
+        OR: [
+          {
+            customer: { firstName: { contains: search, mode: 'insensitive' } },
+          },
+          { customer: { lastName: { contains: search, mode: 'insensitive' } } },
+        ],
+      });
+    }
+
+    if (query.createdFrom || query.createdTo) {
+      const createdRange: Prisma.DateTimeFilter = {};
+      if (query.createdFrom) {
+        createdRange.gte = query.createdFrom;
+      }
+      if (query.createdTo) {
+        createdRange.lte = query.createdTo;
+      }
+      andClauses.push({ createdAt: createdRange });
+    }
+
+    if (query.expiresFrom !== undefined || query.expiresTo !== undefined) {
+      andClauses.push({
+        expiresAt: {
+          ...(query.expiresFrom !== undefined
+            ? { gte: query.expiresFrom }
+            : {}),
+          ...(query.expiresTo !== undefined ? { lte: query.expiresTo } : {}),
+        },
+      });
+    }
+
+    if (
+      query.minTotalCents !== undefined ||
+      query.maxTotalCents !== undefined
+    ) {
+      andClauses.push({
+        totalCents: {
+          ...(query.minTotalCents !== undefined
+            ? { gte: query.minTotalCents }
+            : {}),
+          ...(query.maxTotalCents !== undefined
+            ? { lte: query.maxTotalCents }
+            : {}),
+        },
+      });
+    }
+
+    return andClauses.length === 1 ? andClauses[0] : { AND: andClauses };
   }
 
   // ============================================================
@@ -281,10 +331,7 @@ export class PrismaQuotationRepository implements IQuotationRepository {
           (item.priceSource as 'PRICE_LIST' | 'CUSTOM' | null) ?? 'PRICE_LIST',
         appliedPriceListId: item.appliedPriceListId,
         customPriceCents: item.customPriceCents,
-        discountType: item.discountType as
-          | 'amount'
-          | 'percentage'
-          | null,
+        discountType: item.discountType as 'amount' | 'percentage' | null,
         discountValue: item.discountValue,
         discountAmountCents: item.discountAmountCents ?? 0,
         promotionId: item.promotionId,
@@ -292,9 +339,7 @@ export class PrismaQuotationRepository implements IQuotationRepository {
         updatedAt: item.updatedAt,
       })),
       vetoedPromotionIds: data.promotionVetoes.map((v) => v.promotionId),
-      optedInManualPromotionIds: data.promotionOptIns.map(
-        (o) => o.promotionId,
-      ),
+      optedInManualPromotionIds: data.promotionOptIns.map((o) => o.promotionId),
       createdAt: data.createdAt,
       updatedAt: data.updatedAt,
     });

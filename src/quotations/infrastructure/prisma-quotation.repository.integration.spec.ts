@@ -186,7 +186,9 @@ describeIfDb('PrismaQuotationRepository (Integration - Real DB)', () => {
     });
 
     it('returns null for a non-existent quotation id', async () => {
-      const fetched = await repo.findById('00000000-0000-0000-0000-000000000099');
+      const fetched = await repo.findById(
+        '00000000-0000-0000-0000-000000000099',
+      );
       expect(fetched).toBeNull();
     });
   });
@@ -226,6 +228,262 @@ describeIfDb('PrismaQuotationRepository (Integration - Real DB)', () => {
       expect(third.data).toHaveLength(1);
     });
 
+    it('applies multi-status OR (DRAFT,SENT) and excludes other statuses', async () => {
+      await repo.save(
+        Quotation.create({ id: newQuotationId(), sellerUserId: userId }),
+      );
+      await prisma.quotation.create({
+        data: {
+          id: newQuotationId(),
+          sellerUserId: userId,
+          tenantId,
+          status: 'SENT',
+          subtotalCents: 0,
+          discountCents: 0,
+          totalCents: 0,
+        },
+      });
+      await prisma.quotation.create({
+        data: {
+          id: newQuotationId(),
+          sellerUserId: userId,
+          tenantId,
+          status: 'CANCELLED',
+          cancelReason: 'CUSTOMER_REQUEST',
+          subtotalCents: 0,
+          discountCents: 0,
+          totalCents: 0,
+        },
+      });
+
+      const result = await repo.findAll({
+        page: 1,
+        limit: 10,
+        status: ['DRAFT', 'SENT'],
+      });
+
+      expect(result.total).toBe(2);
+      expect(result.data.map((q) => q.status).sort()).toEqual([
+        'DRAFT',
+        'SENT',
+      ]);
+    });
+
+    it('applies multi-customer OR', async () => {
+      const customerA = await prisma.customer.create({
+        data: {
+          id: randomUUID(),
+          firstName: 'Alice',
+          lastName: 'Adams',
+          tenantId,
+        },
+        select: { id: true },
+      });
+      const customerB = await prisma.customer.create({
+        data: {
+          id: randomUUID(),
+          firstName: 'Bob',
+          lastName: 'Brown',
+          tenantId,
+        },
+        select: { id: true },
+      });
+
+      const seed = async (customerId: string | null) => {
+        await prisma.quotation.create({
+          data: {
+            id: newQuotationId(),
+            sellerUserId: userId,
+            tenantId,
+            customerId,
+            status: 'DRAFT',
+            subtotalCents: 0,
+            discountCents: 0,
+            totalCents: 0,
+          },
+        });
+      };
+      await seed(customerA.id);
+      await seed(customerA.id);
+      await seed(customerB.id);
+      await seed(null);
+
+      const result = await repo.findAll({
+        page: 1,
+        limit: 10,
+        customerId: [customerA.id, customerB.id],
+      });
+
+      expect(result.total).toBe(3);
+      result.data.forEach((q) => {
+        expect([customerA.id, customerB.id]).toContain(q.customerId);
+      });
+    });
+
+    it('matches search on customer firstName OR lastName case-insensitively', async () => {
+      const maria = await prisma.customer.create({
+        data: {
+          id: randomUUID(),
+          firstName: 'Maria',
+          lastName: 'Gonzalez',
+          tenantId,
+        },
+        select: { id: true },
+      });
+      const lopez = await prisma.customer.create({
+        data: {
+          id: randomUUID(),
+          firstName: 'Juan',
+          lastName: 'LOPEZ',
+          tenantId,
+        },
+        select: { id: true },
+      });
+      const unrelated = await prisma.customer.create({
+        data: {
+          id: randomUUID(),
+          firstName: 'Pedro',
+          lastName: 'Sanchez',
+          tenantId,
+        },
+        select: { id: true },
+      });
+
+      const seed = async (customerId: string | null) => {
+        await prisma.quotation.create({
+          data: {
+            id: newQuotationId(),
+            sellerUserId: userId,
+            tenantId,
+            customerId,
+            status: 'DRAFT',
+            subtotalCents: 0,
+            discountCents: 0,
+            totalCents: 0,
+          },
+        });
+      };
+      await seed(maria.id);
+      await seed(lopez.id);
+      await seed(unrelated.id);
+      await seed(null);
+
+      const byFirstName = await repo.findAll({
+        page: 1,
+        limit: 10,
+        search: 'MARIA',
+      });
+      expect(byFirstName.total).toBe(1);
+      expect(byFirstName.data[0].customerId).toBe(maria.id);
+
+      const byLastName = await repo.findAll({
+        page: 1,
+        limit: 10,
+        search: 'lopez',
+      });
+      expect(byLastName.total).toBe(1);
+      expect(byLastName.data[0].customerId).toBe(lopez.id);
+
+      const noMatch = await repo.findAll({
+        page: 1,
+        limit: 10,
+        search: '   ',
+      });
+      expect(noMatch.total).toBe(4);
+    });
+
+    it('filters by expiry range and excludes null-expiry rows', async () => {
+      const seed = async (expiresAt: Date | null) => {
+        await prisma.quotation.create({
+          data: {
+            id: newQuotationId(),
+            sellerUserId: userId,
+            tenantId,
+            status: 'SENT',
+            expiresAt,
+            subtotalCents: 0,
+            discountCents: 0,
+            totalCents: 0,
+          },
+        });
+      };
+      await seed(new Date('2026-07-15T12:00:00Z'));
+      await seed(new Date('2025-01-01T00:00:00Z'));
+      await seed(null);
+
+      const result = await repo.findAll({
+        page: 1,
+        limit: 10,
+        expiresFrom: new Date('2026-07-01T00:00:00Z'),
+        expiresTo: new Date('2026-07-31T23:59:59Z'),
+      });
+
+      expect(result.total).toBe(1);
+      expect(result.data[0].expiresAt?.toISOString()).toBe(
+        '2026-07-15T12:00:00.000Z',
+      );
+    });
+
+    it('applies the total range with minTotalCents=0 (falsy-zero safe)', async () => {
+      const seed = async (totalCents: number) => {
+        await prisma.quotation.create({
+          data: {
+            id: newQuotationId(),
+            sellerUserId: userId,
+            tenantId,
+            status: 'DRAFT',
+            subtotalCents: totalCents,
+            discountCents: 0,
+            totalCents,
+          },
+        });
+      };
+      await seed(0);
+      await seed(1500);
+      await seed(50000);
+
+      const result = await repo.findAll({
+        page: 1,
+        limit: 10,
+        minTotalCents: 0,
+        maxTotalCents: 2000,
+      });
+
+      expect(result.total).toBe(2);
+      expect(result.data.map((q) => q.totalCents).sort()).toEqual([0, 1500]);
+    });
+
+    it('combines filters with pagination', async () => {
+      const seed = async (status: string, totalCents: number) => {
+        await prisma.quotation.create({
+          data: {
+            id: newQuotationId(),
+            sellerUserId: userId,
+            tenantId,
+            status: status as 'DRAFT' | 'SENT',
+            subtotalCents: totalCents,
+            discountCents: 0,
+            totalCents,
+          },
+        });
+      };
+      await seed('SENT', 5000);
+      await seed('SENT', 1500);
+      await seed('DRAFT', 3000);
+      await seed('SENT', 25000);
+
+      const result = await repo.findAll({
+        page: 1,
+        limit: 1,
+        status: ['SENT'],
+        minTotalCents: 0,
+        maxTotalCents: 10000,
+      });
+
+      expect(result.total).toBe(2);
+      expect(result.data).toHaveLength(1);
+    });
+
     it('returns an empty result when no quotations exist', async () => {
       const result = await repo.findAll({ page: 1, limit: 10 });
       expect(result.total).toBe(0);
@@ -236,9 +494,7 @@ describeIfDb('PrismaQuotationRepository (Integration - Real DB)', () => {
   describe('cross-tenant isolation', () => {
     it('does NOT leak quotations belonging to a different tenant', async () => {
       const ownId = newQuotationId();
-      await repo.save(
-        Quotation.create({ id: ownId, sellerUserId: userId }),
-      );
+      await repo.save(Quotation.create({ id: ownId, sellerUserId: userId }));
 
       // Create a second tenant with its own user + quotation
       const otherTenantId = randomUUID();
@@ -289,9 +545,7 @@ describeIfDb('PrismaQuotationRepository (Integration - Real DB)', () => {
   describe('delete', () => {
     it('removes a quotation from the database', async () => {
       const id = newQuotationId();
-      await repo.save(
-        Quotation.create({ id, sellerUserId: userId }),
-      );
+      await repo.save(Quotation.create({ id, sellerUserId: userId }));
 
       const fetched = await repo.findById(id);
       expect(fetched).not.toBeNull();

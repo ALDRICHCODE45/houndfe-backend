@@ -1,12 +1,12 @@
 import { Transform, Type } from 'class-transformer';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import {
-  IsEnum,
-  IsInt,
-  IsOptional,
-  IsUUID,
-  Max,
-  Min,
-} from 'class-validator';
+  CsvEnum,
+  CsvUuid,
+  DateRange,
+  MultiValue,
+  NumericRange,
+} from '../../shared/listing';
 
 /**
  * Query string for `GET /quotations`.
@@ -16,16 +16,25 @@ import {
  *
  * Filters:
  *   - `page`/`limit`     — pagination (defaults 1/20, capped at 100).
- *   - `status`           — single QuotationStatus filter (exact match).
- *                          Multi-value + customer-name search are out of
- *                          WU2 scope (spec only requires status,
- *                          customerId, date range).
- *   - `customerId`       — UUID filter, exact match.
+ *   - `status`           — CSV multi-value QuotationStatus filter (OR).
+ *                          A single value keeps the legacy exact-match
+ *                          behaviour (backward compatible).
+ *   - `customerId`       — CSV multi-value UUID filter (OR).
+ *   - `search`           — case-insensitive `contains` on the assigned
+ *                          customer's `firstName` / `lastName` only.
  *   - `createdFrom`/
  *     `createdTo`        — inclusive date range on `createdAt`.
+ *   - `expiresFrom`/
+ *     `expiresTo`        — inclusive date range on `expiresAt`. Rows with
+ *                          `expiresAt = NULL` never match a range.
+ *   - `minTotalCents`/
+ *     `maxTotalCents`    — inclusive range on `totalCents` (0 is valid).
  *   - `sortBy`           — `createdAt` | `updatedAt` | `expiresAt` |
  *                          `totalCents`. Defaults to `createdAt`.
  *   - `sortOrder`        — `asc` | `desc`. Defaults to `desc`.
+ *
+ * Semantics: OR inside each multi-value group, AND between groups;
+ * stable with page/limit/sort.
  *
  * The lazy EXPIRED transition is applied in the service layer after the
  * DB read (and when status='SENT' is filtered) — the SQL filter stays
@@ -41,6 +50,13 @@ export enum ListQuotationsSortBy {
 export enum ListQuotationsSortOrder {
   asc = 'asc',
   desc = 'desc',
+}
+
+export enum ListQuotationsStatus {
+  DRAFT = 'DRAFT',
+  SENT = 'SENT',
+  EXPIRED = 'EXPIRED',
+  CANCELLED = 'CANCELLED',
 }
 
 const coerceOptionalDate = (value: unknown): unknown => {
@@ -71,12 +87,16 @@ export class QuotationQueryDto {
   sortOrder: ListQuotationsSortOrder = ListQuotationsSortOrder.desc;
 
   @IsOptional()
-  @IsEnum(['DRAFT', 'SENT', 'EXPIRED', 'CANCELLED'])
-  status?: 'DRAFT' | 'SENT' | 'EXPIRED' | 'CANCELLED';
+  @CsvEnum(ListQuotationsStatus, { max: 50, field: 'status' })
+  status?: MultiValue<ListQuotationsStatus>;
 
   @IsOptional()
-  @IsUUID()
-  customerId?: string;
+  @CsvUuid({ max: 200, field: 'customerId' })
+  customerId?: MultiValue<string>;
+
+  @IsOptional()
+  @IsString()
+  search?: string;
 
   @IsOptional()
   @Transform(({ value }) => coerceOptionalDate(value))
@@ -85,4 +105,22 @@ export class QuotationQueryDto {
   @IsOptional()
   @Transform(({ value }) => coerceOptionalDate(value))
   createdTo?: Date;
+
+  @IsOptional()
+  @Transform(({ value }) => coerceOptionalDate(value))
+  @DateRange({ peer: 'expiresTo', role: 'from', field: 'expiresAt' })
+  expiresFrom?: Date;
+
+  @IsOptional()
+  @Transform(({ value }) => coerceOptionalDate(value))
+  @DateRange({ peer: 'expiresFrom', role: 'to', field: 'expiresAt' })
+  expiresTo?: Date;
+
+  @IsOptional()
+  @NumericRange({ peer: 'maxTotalCents', role: 'min', field: 'total' })
+  minTotalCents?: number;
+
+  @IsOptional()
+  @NumericRange({ peer: 'minTotalCents', role: 'max', field: 'total' })
+  maxTotalCents?: number;
 }

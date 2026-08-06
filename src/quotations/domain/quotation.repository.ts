@@ -30,10 +30,20 @@ export interface SetPriceListInput {
 export interface QuotationFindAllInput {
   page: number;
   limit: number;
-  status?: QuotationStatus;
-  customerId?: string;
+  status?: QuotationStatus[];
+  customerId?: string[];
+  /** Case-insensitive `contains` on the customer's `firstName`/`lastName`. */
+  search?: string;
   createdFrom?: Date;
   createdTo?: Date;
+  /** Inclusive range on `expiresAt` (`gte` when set). */
+  expiresFrom?: Date;
+  /** Inclusive range on `expiresAt` (`lte` when set). */
+  expiresTo?: Date;
+  /** Inclusive `gte` bound on `totalCents` (0 is valid). */
+  minTotalCents?: number;
+  /** Inclusive `lte` bound on `totalCents` (0 is valid). */
+  maxTotalCents?: number;
   sortBy?: 'createdAt' | 'updatedAt' | 'totalCents' | 'expiresAt';
   sortOrder?: 'asc' | 'desc';
 }
@@ -54,19 +64,35 @@ export interface QuotationListResult {
  * Pagination + filter query for the quotation list endpoint. Mirrors the
  * PromotionFindAllQuery shape but with quotation-specific filters.
  *
- * `status` is the persisted status. For lazy EXPIRED filtering, the
- * caller resolves `getEffectiveStatus(now)` on each row after the read —
- * the DB query stays simple (status IN [...]) and the EXPIRED transition
- * happens in the service layer.
+ * `status` is the persisted status (multi-value, OR). For lazy EXPIRED
+ * filtering, the caller resolves `getEffectiveStatus(now)` on each row
+ * after the read — the DB query stays simple (status IN [...]) and the
+ * EXPIRED transition happens in the service layer.
+ *
+ * Filter semantics: OR inside each multi-value group (`status`,
+ * `customerId`), AND between groups. `search` matches the customer's
+ * `firstName`/`lastName` case-insensitively (customer name only, not
+ * folio). `expiresFrom`/`expiresTo` and `minTotalCents`/`maxTotalCents`
+ * are inclusive ranges; `minTotalCents=0` is a valid lower bound.
  */
 export interface QuotationFindAllQuery {
   page: number;
   limit: number;
-  status?: QuotationStatus;
-  customerId?: string;
+  status?: QuotationStatus[];
+  customerId?: string[];
+  /** Case-insensitive `contains` on the customer's `firstName`/`lastName`. */
+  search?: string;
   /** Date-range filter on `createdAt`. */
   createdFrom?: Date;
   createdTo?: Date;
+  /** Inclusive `gte` bound on `expiresAt` (rows with NULL never match). */
+  expiresFrom?: Date;
+  /** Inclusive `lte` bound on `expiresAt` (rows with NULL never match). */
+  expiresTo?: Date;
+  /** Inclusive `gte` bound on `totalCents` (0 is valid). */
+  minTotalCents?: number;
+  /** Inclusive `lte` bound on `totalCents` (0 is valid). */
+  maxTotalCents?: number;
   sortBy?: 'createdAt' | 'updatedAt' | 'totalCents' | 'expiresAt';
   sortOrder?: 'asc' | 'desc';
 }
