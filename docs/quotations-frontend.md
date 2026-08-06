@@ -27,8 +27,11 @@
 | `POST`   | `/quotations/drafts/:id/promotions/:promoId/veto`     | `update:Quotation`   | Vetar promoción AUTOMATIC                    |
 | `DELETE` | `/quotations/drafts/:id/promotions/:promoId/veto`     | `update:Quotation`   | Re-aceptar promo vetada (opt-in)             |
 | `PATCH`  | `/quotations/drafts/:id/expiry`                       | `update:Quotation`   | Poner/quitar fecha de expiración             |
+| `PATCH`  | `/quotations/drafts/:id/notes`                        | `update:Quotation`   | Persistir notas para el cliente (280 max)    |
+| `PATCH`  | `/quotations/drafts/:id/tax-rate`                     | `update:Quotation`   | Cambiar tasa de IVA (0 = exento)             |
 | `POST`   | `/quotations/drafts/:id/send`                         | `update:Quotation`   | Enviar cotización por email + marcar SENT    |
 | `POST`   | `/quotations/drafts/:id/cancel`                       | `update:Quotation`   | Cancelar cotización                          |
+| `DELETE` | `/quotations/:id`                                     | `delete:Quotation`   | Eliminar cotización (solo DRAFT/CANCELLED)   |
 
 Todos requieren JWT (Bearer token). El tenant se determina del token automáticamente.
 
@@ -427,6 +430,94 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 
 ---
 
+### 3.16 `PATCH /quotations/drafts/:id/notes` — Notas para el cliente
+
+Persiste las notas visibles al cliente en el PDF/email. Se guardan en el backend (no en localStorage).
+
+**Request**:
+```json
+{
+  "customerNotes": "Entrega en sucursal Norte. Contactar a Juan al 555-1234."
+}
+```
+
+**Limpiar notas**:
+```json
+{
+  "customerNotes": null
+}
+```
+
+**Response** `200`: `QuotationResponseDto` completo con `customerNotes` actualizado.
+
+**Reglas**:
+- Máximo **280 caracteres**.
+- Solo funciona en estado `DRAFT`.
+
+**Errores**:
+| HTTP | Código | Causa |
+|------|--------|-------|
+| `400` | `NOTES_TOO_LONG` | Más de 280 caracteres |
+| `409` | `QUOTATION_NOT_DRAFT` | No está en DRAFT |
+| `404` | — | Cotización no encontrada |
+
+---
+
+### 3.17 `PATCH /quotations/drafts/:id/tax-rate` — Tasa de IVA
+
+Cambia la tasa de IVA de la cotización caso por caso (exención de IVA incluida). El `taxCents` se recalcula automáticamente del lado del backend.
+
+**Request**:
+```json
+{
+  "taxRate": 0
+}
+```
+
+**Valores válidos**:
+| taxRate | Significado            |
+|---------|------------------------|
+| `0`     | Exento de IVA          |
+| `0.08`  | IVA 8%                 |
+| `0.16`  | IVA 16% (default)      |
+| `0.21`  | IVA 21%                |
+
+**Response** `200`: `QuotationResponseDto` completo con `taxRate` y `taxCents` actualizados.
+
+**Reglas**:
+- `taxRate` debe ser un número entre `0` y `1`.
+- Solo funciona en estado `DRAFT`.
+- `taxCents` se calcula como `totalCents * taxRate / (1 + taxRate)` (IVA incluido en precios).
+- Si `taxRate` es `0`, `taxCents` es `0`.
+
+**Errores**:
+| HTTP | Código | Causa |
+|------|--------|-------|
+| `400` | `INVALID_TAX_RATE` | `taxRate` fuera de rango [0, 1] |
+| `409` | `QUOTATION_NOT_DRAFT` | No está en DRAFT |
+| `404` | — | Cotización no encontrada |
+
+---
+
+### 3.18 `DELETE /quotations/:id` — Eliminar cotización
+
+Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden eliminar — `SENT` y `EXPIRED` son registros permanentes (ya fueron comunicados al cliente).
+
+**Response** `204 No Content` (body vacío).
+
+**Reglas**:
+- Mostrar el botón de eliminar solo si `status === 'DRAFT' || status === 'CANCELLED'`.
+- Confirmación previa obligatoria: "¿Eliminar la cotización? Esta acción no se puede deshacer."
+
+**Errores**:
+| HTTP | Código | Causa |
+|------|--------|-------|
+| `409` | `QUOTATION_CANNOT_DELETE` | La cotización está en `SENT` o `EXPIRED` |
+| `404` | — | Cotización no encontrada |
+| `403` | — | Sin permiso `delete:Quotation` |
+
+---
+
 ## 4. Modelo de datos — shape de respuesta
 
 ### `QuotationResponseDto`
@@ -449,17 +540,19 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
   canceledAt: string | null;           // ISO 8601
   subtotalCents: number;               // subtotal en centavos (sin descuentos)
   discountCents: number;               // descuento total aplicado en centavos
-  totalCents: number;                  // total final = subtotal - discount
+  taxRate: number;                     // tasa de IVA (0 = exento, 0.16 = 16%)
+  taxCents: number;                    // monto de IVA en centavos
+  totalCents: number;                  // total final = subtotal - discount (IVA incluido)
   manuallyEnded: boolean;              // interno — siempre false para cotizaciones
   items: QuotationItemResponseDto[];
   appliedPromotions: {                 // promos aplicadas (manuales + automáticas)
-    id: string;
     promotionId: string;
     title: string;
     discountCents: number;
   }[];
   vetoedPromotionIds: string[];        // IDs de promos vetadas
   optedInManualPromotionIds: string[]; // IDs de promos MANUAL aplicadas
+  customerNotes: string | null;        // notas para el cliente (max 280 chars)
   createdAt: string;                   // ISO 8601
   updatedAt: string;                   // ISO 8601
 }
@@ -595,6 +688,26 @@ La transición `SENT → EXPIRED` ocurre al **leer** la cotización, no en backg
 ### 7.5 Items con precio manual
 Cuando un item tiene `priceSource: 'CUSTOM'` y `manuallyAdjusted: true`, mostrá un indicador visual (ícono de lápiz ✏️ o badge) para que el vendedor sepa que ese precio fue cambiado manualmente y no se actualizará al cambiar la lista de precios.
 
+### 7.6 Stock de productos con variantes — `variantStockTotal`
+
+`GET /products/:id` ahora incluye `variantStockTotal` y `variantCount` para productos con variantes (fix backend):
+
+```json
+{
+  "hasVariants": true,
+  "variantStockTotal": 180,
+  "variantCount": 3,
+  "quantity": 0
+}
+```
+
+**Importante**: para productos con variantes, `quantity` a nivel producto es `0` (el stock real vive en las variantes). Usar:
+```typescript
+const stockQty = p.hasVariants && p.variantStockTotal != null
+  ? p.variantStockTotal
+  : p.quantity;
+```
+
 ---
 
 ## 8. Errores comunes — tabla de referencia rápida
@@ -603,10 +716,14 @@ Cuando un item tiene `priceSource: 'CUSTOM'` y `manuallyAdjusted: true`, mostrá
 | ---- | --------------------------- | ------------------------------------------------ | ----------------------------------------- |
 | 400  | `INVALID_FORMAT`            | Formato de PDF no soportado                      | Solo usar `quotation-a4`                  |
 | 400  | `Invalid quantity`          | Cantidad < 1                                     | Validar antes de enviar                   |
+| 400  | `INVALID_TAX_RATE`          | `taxRate` fuera de rango [0, 1]                  | Validar con slider/select de tasas        |
+| 400  | `NOTES_TOO_LONG`            | Notas superan los 280 caracteres                 | Mostrar contador 0/280 y bloquear envío   |
+| 400  | `PROMOTION_IS_NOT_MANUAL`   | PUT manual-promotions con promo AUTOMATIC        | Usar endpoints de veto para AUTOMATIC     |
 | 401  | —                           | Token expirado o inválido                        | Redirigir a login                         |
 | 403  | —                           | Sin permiso (`read:Quotation`, etc.)             | Ocultar botones sin permiso               |
 | 404  | —                           | ID no existe o no pertenece al tenant            | Mostrar "No encontrado"                   |
 | 409  | `Quotation is not DRAFT`    | Intentando editar una cotización ya enviada/cancelada | Deshabilitar edición si status ≠ DRAFT |
+| 409  | `QUOTATION_CANNOT_DELETE`   | Intentando eliminar una cotización SENT/EXPIRED  | Ocultar botón eliminar si no es DRAFT/CANCELLED |
 | 422  | `QUOTATION_HAS_NO_ITEMS`    | Intentando enviar cotización sin productos       | Validar items.length > 0 antes de enviar  |
 | 422  | `QUOTATION_CUSTOMER_HAS_NO_EMAIL` | Cliente sin email al intentar enviar       | Pedir email antes de enviar               |
 | 500  | `PDF_GENERATION_FAILED`     | Error al generar el PDF                          | Reintentar, reportar si persiste          |
@@ -621,17 +738,18 @@ Cuando un item tiene `priceSource: 'CUSTOM'` y `manuallyAdjusted: true`, mostrá
 | Crear cotización    | `create:Quotation`      |
 | Ver lista/detalle   | `read:Quotation`        |
 | Editar (items, etc) | `update:Quotation`      |
-| Eliminar (si aplica)| `delete:Quotation`      |
+| Eliminar cotización | `delete:Quotation`      |
 | Ver PDF             | `read:Quotation`        |
 
-Si un usuario no tiene `update:Quotation`, ocultá todos los botones de edición/items/promos/send/cancel en DRAFT. Si no tiene `create:Quotation`, ocultá "Crear cotización" del menú del cliente.
+Si un usuario no tiene `update:Quotation`, ocultá todos los botones de edición/items/promos/send/cancel en DRAFT. Si no tiene `create:Quotation`, ocultá "Crear cotización" del menú del cliente. Si no tiene `delete:Quotation`, ocultá el botón de eliminar.
 
 ---
 
 ## 10. Notas técnicas
 
-- **Migración**: El schema de cotizaciones es nuevo (5 tablas + 4 enums). No afecta tablas existentes. `prisma migrate deploy` es seguro en prod.
+- **Migración**: El schema de cotizaciones es nuevo (5 tablas + 4 enums) + 2 columnas nuevas (`customerNotes`, `taxRate`). No afecta tablas existentes. `prisma migrate deploy` es seguro en prod.
 - **Tenant isolation**: Todas las queries pasan por `TenantPrismaService`. Un ID de otro tenant devuelve 404, no 403.
 - **Engine widening**: `PosEvalInput` ahora acepta `context?: 'SALE' | 'QUOTATION'`. Las ventas existentes no se ven afectadas (default `'SALE'`).
-- **No stock checks**: La cotización no valida stock. Si el frontend quiere mostrar badges de "stock bajo", puede llamar al endpoint de productos por separado.
+- **IVA configurable**: El `taxRate` default es `0.16`. Se puede cambiar por cotización vía `PATCH /tax-rate`. A futuro se integrará el IVA por producto (`Product.ivaRate`: IVA_16/IVA_8/IVA_0/IVA_EXENTO).
+- **No stock checks**: La cotización no valida stock. Para badges de stock, `GET /products/:id` incluye `variantStockTotal` (fix aplicado).
 - **PDF streaming**: El PDF se streamea directo al response, no se bufferea en memoria (para items ≤50). Para el envío por email, se renderiza en memoria como Buffer.
