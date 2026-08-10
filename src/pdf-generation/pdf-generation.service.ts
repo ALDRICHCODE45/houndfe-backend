@@ -59,6 +59,7 @@ import {
 import { getTemplate } from './templates/registry';
 import type { SaleDetailResponseDto } from '../sales/dto/sale-detail-response.dto';
 import type { LineItem, Payment } from './templates/shared';
+import { registerModernFont } from './templates/shared';
 import type {
   ReceiptDocumentProps,
   ReceiptBusiness,
@@ -102,7 +103,7 @@ export class PdfGenerationService implements OnModuleInit {
    * hyphenation rules, just the registration so future templates
    * can opt in.
    */
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
     try {
       Font.register(PDF_FONT_REGISTRY as Parameters<typeof Font.register>[0]);
       this.logger.log(
@@ -122,6 +123,22 @@ export class PdfGenerationService implements OnModuleInit {
       // and move on. Receipts render fine without hyphenation.
       this.logger.warn(
         `Font.registerHyphenationCallback failed: ${(err as Error).message}`,
+      );
+    }
+
+    // PILOT — register the Inter family (static weights) for the modern
+    // quotation template. `registerModernFont` pre-flights the font CDN
+    // and resolves to Helvetica when unreachable, so a boot-time font
+    // outage never hard-fails a quotation render (react-pdf 4.x throws
+    // at render when a requested weight cannot be fetched). Awaited so
+    // the first quotation render already binds to the resolved family.
+    try {
+      const family = await registerModernFont();
+      this.logger.log(`Modern font resolved for PDF rendering: "${family}".`);
+    } catch (err) {
+      this.logger.warn(
+        `Modern font registration failed — using Helvetica. ` +
+          `Error: ${(err as Error).message}`,
       );
     }
   }

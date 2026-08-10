@@ -1,422 +1,587 @@
 /**
- * Shared StyleSheet for the PDF receipt templates.
+ * Shared StyleSheet for the PDF templates.
  *
- * Centralised here so every block (header, items, totals, payments,
- * customer) renders with the same typography, spacing, and color
- * palette. Templates compose these shared styles into larger Page
- * layouts without redefining colors or font sizes — a single token
+ * Centralised here so every block (header, customer, items, totals,
+ * payments, operator meta) renders with the same typography, spacing,
+ * and color palette. Templates compose these shared styles into larger
+ * Page layouts without redefining colors or font sizes — a single token
  * change here updates every rendered section.
  *
- * Tokens are sourced from the HoundFe brand manual (same family as
- * `src/notifications/email/templates/low-stock.email.tsx`), so PDF
- * output visually pairs with the email surface on the same product.
+ * All sizes are PDF points (1pt = 1/72 inch). Two formats consume this
+ * sheet:
+ *   - A4 (595pt wide, 40pt page padding ≈ 555pt content width).
+ *   - Ticket (80mm thermal, 227pt wide, 16pt padding ≈ 211pt content).
  *
- * Layout contract:
- *   - `receipt` is the named block-style bag used by every shared
- *     component via `styles.receipt.<token>`.
- *   - `table` is the column-flex style bag for `LineItemsTable`.
- *   - `totals` is the label/value flex style bag for `TotalsBlock`.
- *   - `payments` is the row-flex style bag for `PaymentsList`.
- *   - `meta` is the small-label style bag for `ReceiptHeader` (folio,
- *     date, branch info).
+ * Token namespaces:
+ *   - `modern` — the Stripe/Shopify/Square-inspired token set used by the
+ *     receipt-a4 / receipt-ticket templates and the quotation-a4 pilot.
+ *     Clean hierarchy, zero table grid lines, single blue accent, the
+ *     grand total as the focal point. Palette: ink #111827, grays
+ *     #6B7280/#9CA3AF/#E5E7EB, accent blue #2563EB. No yellow. Spacing
+ *     follows the 4/8/12/16/24/32 scale.
+ *   - `modern.ticket` — the compact 80mm-ticket overrides. Same palette,
+ *     same Inter family, same visual language, but a reduced spacing
+ *     scale (4/6/8/12) and smaller type so everything fits the 227pt
+ *     width without the A4 cards (which carry padding 16).
  *
- * All sizes are PDF points (1pt = 1/72 inch). Column widths below
- * are tuned for A4 minus 40pt page padding (≈555pt content width);
- * on the 227pt-wide ticket format the line-items table fits within
- * 207pt content width via proportional flex shrink.
+ * Typography: Inter (static weights 400/600/700/800, registered in
+ * pdf-generation.constants). The design value here is 'Inter'; the
+ * runtime family is resolved through `getModernFontFamily()` so a
+ * font-CDN outage falls back to Helvetica instead of failing renders.
  */
 
-const COLORS = {
-  // Brand HoundFe palette (mirrors low-stock.email.tsx tokens).
-  ink: '#2c2434',
-  inkSoft: '#493f54',
-  textBody: '#443d4e',
-  textMuted: '#938c9e',
-  brand: '#f6bb13',
-  // Brand-tinted surface: a soft yellow wash (~10% perceived opacity)
-  // used as the background of the grand-total row. Kept as a literal
-  // here rather than derived so the value is stable across renders.
-  brandSurface: '#fef9e6',
-  surface: '#fbfafc',
-  // Lighter divider for table rows — visually subtle so the eye reads
-  // the receipt by color blocks instead of a hard grid.
-  rowDivider: '#f5f3f7',
-  border: '#eceaf0',
-  divider: '#eceaf0',
-  white: '#ffffff',
-} as const;
-
-const FONTS = {
-  body: 'Helvetica',
-  bodyBold: 'Helvetica-Bold',
-} as const;
-
 export const SHARED_STYLES = {
-  // ─── Receipt shell ─────────────────────────────────────────────
-  receipt: {
-    pagePadding: 20,
-    sectionGap: 12,
-    blockGap: 6,
-    color: COLORS.ink,
-    fontFamily: FONTS.body,
-    fontSize: 10,
-    lineHeight: 1.4,
-    outerBorder: {
-      borderWidth: 1,
-      borderColor: COLORS.border,
-      borderStyle: 'solid' as const,
+  // ─── Modern design tokens (quotation-a4 pilot + receipt redesign) ───
+  //
+  // Direction: clean hierarchy, single blue accent, the grand total as
+  // the visual focal point. Palette: ink #111827, grays
+  // #6B7280/#9CA3AF/#E5E7EB, accent blue #2563EB. No yellow. Cards are
+  // light surfaces (#F9FAFB + hairline border + 8pt radius) standing in
+  // for box-shadows (not supported by react-pdf). Spacing uses the
+  // 4/8/12/16/24/32 scale.
+  modern: {
+    palette: {
+      ink: '#111827',
+      inkSoft: '#374151',
+      gray: '#6B7280',
+      grayLight: '#9CA3AF',
+      border: '#E5E7EB',
+      surface: '#F9FAFB',
+      accent: '#2563EB',
+      white: '#FFFFFF',
     },
-    // Brand accent bar — a 3pt solid yellow strip rendered at the
-    // very top of every receipt page. This is the primary brand-color
-    // element of the redesign; it replaces the gray border grid as
-    // the receipt's primary visual marker.
-    brandAccentBar: {
-      height: 3,
-      backgroundColor: COLORS.brand,
-      marginBottom: 8,
+    fontFamily: 'Inter',
+    // 4/8/12/16/24/32 spacing scale.
+    spacing: { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 },
+    page: {
+      padding: 20,
+      fontFamily: 'Inter',
+      fontSize: 10,
+      color: '#111827',
+      lineHeight: 1.5,
     },
-    sectionHeader: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 9,
-      color: COLORS.inkSoft,
-      letterSpacing: 0.8,
-      textTransform: 'uppercase' as const,
-      marginTop: 10,
-      marginBottom: 4,
-      // Yellow underline carries the brand color through the middle of
-      // the receipt (PRODUCTOS / TOTALES / PAGOS) without relying on
-      // vertical/horizontal borders for visual structure.
-      borderBottomWidth: 2,
-      borderBottomColor: COLORS.brand,
-      borderBottomStyle: 'solid' as const,
-      paddingBottom: 4,
-    },
-    footer: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 9,
-      color: COLORS.inkSoft,
-      textAlign: 'center' as const,
-      marginTop: 12,
-    },
-    subtitle: {
-      fontFamily: FONTS.body,
+    // Small uppercase section/meta label.
+    eyebrow: {
       fontSize: 8,
-      color: COLORS.textMuted,
-      // Tight tracking: 1 made "FARMACIA" spread wide enough to
-      // collide with the descenders of the HoundFe title above on
-      // the narrow ticket format. 0.4 keeps the word legible while
-      // staying visually tight under the title.
-      letterSpacing: 0.4,
-      textTransform: 'uppercase' as const,
-    },
-    folioBox: {
-      minWidth: 95,
-      borderWidth: 1,
-      borderColor: COLORS.border,
-      borderStyle: 'solid' as const,
-      paddingHorizontal: 6,
-      paddingVertical: 5,
-    },
-    folioRow: {
-      flexDirection: 'row' as const,
-      justifyContent: 'space-between' as const,
-      alignItems: 'baseline' as const,
-      marginBottom: 4,
-    },
-    folioBlock: {
-      textAlign: 'right' as const,
-      fontFamily: FONTS.body,
-      fontSize: 8,
-      color: COLORS.textMuted,
-    },
-    folioValue: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 9,
-      color: COLORS.ink,
-    },
-  },
-
-  // ─── Meta labels (folio, date, branch) ──────────────────────────
-  meta: {
-    label: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 8,
-      color: COLORS.textMuted,
+      fontWeight: 600,
+      color: '#6B7280',
       letterSpacing: 0.5,
       textTransform: 'uppercase',
-      marginBottom: 2,
     },
-    value: {
-      fontFamily: FONTS.body,
-      fontSize: 10,
-      color: COLORS.ink,
+    // Card surface — substitutes for box-shadow (not supported by
+    // react-pdf) via a light fill + hairline border.
+    card: {
+      backgroundColor: '#F9FAFB',
+      border: '1 solid #E5E7EB',
+      borderRadius: 8,
+      padding: 16,
     },
-    companyName: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 18,
-      color: COLORS.ink,
-      marginBottom: 5,
-    },
-    // Smaller company-name variant for narrow formats (e.g. 80mm
-    // ticket). The default 18pt HoundFe word dominates the header
-    // and visually collides with the subtitle below; 14pt gives
-    // the subtitle room to breathe on a 227pt page.
-    companyNameSmall: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 14,
-      color: COLORS.ink,
-      marginBottom: 5,
-    },
-    brandLine: {
-      fontFamily: FONTS.body,
-      fontSize: 8,
-      color: COLORS.inkSoft,
-    },
-    folio: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 12,
-      color: COLORS.ink,
-    },
-  },
-
-  // ─── Section dividers ───────────────────────────────────────────
-  divider: {
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.divider,
-    borderBottomStyle: 'solid',
-    marginVertical: 8,
-  },
-
-  // ─── Line-items table ───────────────────────────────────────────
-  table: {
-    // Wrapper keeps its outer boundary but in a barely-there row
-    // divider color — visual structure is carried by the section
-    // header underline + header-row fill, not by a hard border grid.
-    wrapper: {
-      borderWidth: 1,
-      borderColor: COLORS.rowDivider,
-      borderStyle: 'solid' as const,
-    },
-    headerRow: {
-      flexDirection: 'row',
-      // Surface-gray fill separates the header from data rows by
-      // color rather than by a thick top+bottom border grid.
-      backgroundColor: COLORS.surface,
-      borderBottomWidth: 1,
-      borderBottomColor: COLORS.rowDivider,
-      borderBottomStyle: 'solid',
-    },
-    headerCellBorder: {
-      borderRightWidth: 1,
-      borderRightColor: COLORS.border,
-      borderRightStyle: 'solid' as const,
-    },
-    cellBorder: {
-      borderRightWidth: 1,
-      borderRightColor: COLORS.divider,
-      borderRightStyle: 'solid' as const,
-    },
-    headerCell: {
-      paddingHorizontal: 3,
-      paddingVertical: 4,
-      fontFamily: FONTS.bodyBold,
-      fontSize: 8,
-      color: COLORS.textMuted,
-      letterSpacing: 0.4,
-      textTransform: 'uppercase',
-    },
-    ticketHeaderCell: {
-      paddingHorizontal: 1,
-      paddingVertical: 3,
-      fontSize: 6.5,
-      letterSpacing: 0,
-    },
-    row: {
-      flexDirection: 'row',
-      borderBottomWidth: 1,
-      borderBottomColor: COLORS.rowDivider,
-      borderBottomStyle: 'solid',
-    },
-    cellContainer: {
-      paddingHorizontal: 3,
-      paddingVertical: 4,
-    },
-    ticketCellContainer: {
-      paddingHorizontal: 1,
-      paddingVertical: 3,
-    },
-    cell: {
-      fontFamily: FONTS.body,
-      fontSize: 10,
-      color: COLORS.ink,
-    },
-    ticketCell: {
-      fontSize: 7,
-    },
-    cellMuted: {
-      fontFamily: FONTS.body,
-      fontSize: 9,
-      color: COLORS.textMuted,
-    },
-    ticketCellMuted: {
-      fontSize: 6.5,
-    },
-    cellNumeric: {
-      fontFamily: FONTS.body,
-      fontSize: 10,
-      color: COLORS.ink,
-      textAlign: 'right',
-    },
-    ticketCellNumeric: {
-      fontSize: 7,
-    },
-    // Column proportions: product | qty | unit | discount | subtotal.
-    // `flexGrow` sums to 14 across the row.
-    colProduct: { flexBasis: 0, flexGrow: 6, flexShrink: 1 },
-    colQuantity: {
-      flexBasis: 0,
-      flexGrow: 1,
-      flexShrink: 1,
-      textAlign: 'right' as const,
-    },
-    colUnitPrice: {
-      flexBasis: 0,
-      flexGrow: 2,
-      flexShrink: 1,
-      textAlign: 'right' as const,
-    },
-    colDiscount: {
-      flexBasis: 0,
-      flexGrow: 2,
-      flexShrink: 1,
-      textAlign: 'right' as const,
-    },
-    colSubtotal: {
-      flexBasis: 0,
-      flexGrow: 3,
-      flexShrink: 1,
-      textAlign: 'right' as const,
-    },
-    emptyRow: {
+    cardCompact: {
+      backgroundColor: '#F9FAFB',
+      border: '1 solid #E5E7EB',
+      borderRadius: 8,
       paddingVertical: 8,
-      fontFamily: FONTS.bodyBold,
-      fontSize: 9,
-      color: COLORS.textMuted,
-      textAlign: 'center' as const,
+      paddingHorizontal: 12,
     },
-  },
+    header: {
+      row: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        marginBottom: 24,
+      },
+      brandRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+      },
+      logo: {
+        width: 28,
+        height: 28,
+        marginRight: 10,
+        objectFit: 'contain',
+      },
+      companyName: {
+        fontSize: 16,
+        fontWeight: 700,
+        color: '#111827',
+      },
+      companySub: {
+        fontSize: 9,
+        color: '#6B7280',
+        marginTop: 2,
+      },
+      metaTitle: {
+        fontSize: 8,
+        fontWeight: 600,
+        color: '#6B7280',
+        letterSpacing: 0.6,
+        textTransform: 'uppercase',
+      },
+      metaFolio: {
+        fontSize: 10,
+        fontWeight: 600,
+        color: '#111827',
+        marginTop: 4,
+      },
+      metaDate: {
+        fontSize: 9,
+        color: '#6B7280',
+        marginTop: 2,
+      },
+    },
+    // Operator meta row (cashier / seller) — small gray uppercase labels
+    // next to ink values, rendered as label/value pairs by the receipt
+    // documents.
+    operator: {
+      label: {
+        fontSize: 8,
+        fontWeight: 600,
+        color: '#6B7280',
+        letterSpacing: 0.5,
+        textTransform: 'uppercase',
+      },
+      value: {
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: '#111827',
+      },
+    },
+    customer: {
+      block: {
+        marginBottom: 24,
+      },
+      name: {
+        fontSize: 12,
+        fontWeight: 600,
+        color: '#111827',
+        marginTop: 4,
+      },
+      email: {
+        fontSize: 9.5,
+        color: '#6B7280',
+        marginTop: 2,
+      },
+    },
+    items: {
+      block: {
+        marginBottom: 24,
+      },
+      // One item = one row, separated by vertical rhythm, no grid lines.
+      row: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        marginBottom: 12,
+      },
+      productName: {
+        fontSize: 11,
+        fontWeight: 600,
+        color: '#111827',
+      },
+      productVariant: {
+        fontSize: 9,
+        color: '#6B7280',
+        marginTop: 2,
+      },
+      qtyLine: {
+        fontSize: 9,
+        color: '#6B7280',
+        textAlign: 'right',
+      },
+      lineTotal: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: '#111827',
+        textAlign: 'right',
+        marginTop: 2,
+      },
+      empty: {
+        fontSize: 10,
+        color: '#6B7280',
+        fontStyle: 'italic',
+        marginTop: 4,
+      },
+    },
+    totals: {
+      block: {
+        marginBottom: 24,
+      },
+      row: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'baseline',
+        marginBottom: 8,
+      },
+      label: {
+        fontSize: 10,
+        color: '#6B7280',
+      },
+      value: {
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: '#111827',
+        textAlign: 'right',
+      },
+      divider: {
+        borderBottomWidth: 1,
+        borderBottomColor: '#E5E7EB',
+        borderBottomStyle: 'solid',
+        marginVertical: 12,
+      },
+      // Highlighted grand-total card — the visual focal point.
+      totalCard: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        backgroundColor: '#F9FAFB',
+        border: '1 solid #E5E7EB',
+        borderRadius: 8,
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+      },
+      totalLabel: {
+        fontSize: 11,
+        fontWeight: 600,
+        color: '#374151',
+      },
+      totalValue: {
+        fontSize: 18,
+        fontWeight: 800,
+        color: '#2563EB',
+        textAlign: 'right',
+      },
+    },
+    payments: {
+      block: {
+        marginBottom: 24,
+      },
+      // One payment = one clean row: method (bold) + meta on the left,
+      // amount on the right. No divider lines — vertical rhythm only.
+      row: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        marginBottom: 8,
+      },
+      method: {
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: '#111827',
+      },
+      reference: {
+        fontSize: 8.5,
+        color: '#6B7280',
+        marginTop: 2,
+      },
+      timestamp: {
+        fontSize: 8.5,
+        color: '#9CA3AF',
+        marginTop: 2,
+      },
+      amount: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: '#111827',
+        textAlign: 'right',
+      },
+      empty: {
+        fontSize: 10,
+        color: '#6B7280',
+        fontStyle: 'italic',
+        marginTop: 4,
+      },
+    },
+    footer: {
+      expiry: {
+        fontSize: 9.5,
+        color: '#6B7280',
+        textAlign: 'center',
+        marginBottom: 16,
+      },
+      thanks: {
+        fontSize: 11,
+        fontWeight: 600,
+        color: '#111827',
+        textAlign: 'center',
+        marginBottom: 4,
+      },
+      disclaimer: {
+        fontSize: 8.5,
+        color: '#6B7280',
+        textAlign: 'center',
+      },
+    },
 
-  // ─── Totals block ───────────────────────────────────────────────
-  totals: {
-    row: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      paddingVertical: 3,
-    },
-    // Wrapper around the grand-total (Total) row: a soft yellow tint
-    // so the eye lands on it after scanning top-down. The label/value
-    // text inside stays bold + brand color — this fill is the block's
-    // primary brand-color element.
-    grandTotalRow: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      backgroundColor: COLORS.brandSurface,
-      paddingHorizontal: 6,
-      paddingVertical: 5,
-      marginTop: 2,
-      marginBottom: 2,
-    },
-    label: {
-      fontFamily: FONTS.body,
-      fontSize: 10,
-      color: COLORS.textBody,
-    },
-    value: {
-      fontFamily: FONTS.body,
-      fontSize: 10,
-      color: COLORS.ink,
-      textAlign: 'right',
-    },
-    labelBold: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 11,
-      color: COLORS.ink,
-    },
-    valueBold: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 11,
-      color: COLORS.ink,
-      textAlign: 'right',
-    },
-    grandTotalLabel: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 13,
-      color: COLORS.ink,
-    },
-    grandTotalValue: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 13,
-      color: COLORS.brand,
-      textAlign: 'right',
-    },
-  },
-
-  // ─── Payments list ──────────────────────────────────────────────
-  payments: {
-    row: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      paddingVertical: 3,
-    },
-    method: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 9,
-      color: COLORS.ink,
-    },
-    amount: {
-      fontFamily: FONTS.body,
-      fontSize: 10,
-      color: COLORS.ink,
-      textAlign: 'right',
-    },
-    reference: {
-      fontFamily: FONTS.body,
-      fontSize: 8,
-      color: COLORS.textMuted,
-    },
-    timestamp: {
-      fontFamily: FONTS.body,
-      fontSize: 8,
-      color: COLORS.textMuted,
-    },
-    emptyRow: {
-      fontFamily: FONTS.body,
-      fontSize: 9,
-      color: COLORS.textMuted,
-      fontStyle: 'italic',
-      paddingVertical: 4,
-    },
-  },
-
-  // ─── Customer section ───────────────────────────────────────────
-  customer: {
-    row: {
-      flexDirection: 'row',
-      alignItems: 'baseline',
-      paddingVertical: 2,
-    },
-    label: {
-      fontFamily: FONTS.bodyBold,
-      fontSize: 8,
-      color: COLORS.textMuted,
-      letterSpacing: 0.4,
-      textTransform: 'uppercase',
-      marginRight: 6,
-    },
-    value: {
-      fontFamily: FONTS.body,
-      fontSize: 11,
-      color: COLORS.ink,
+    // ─── Ticket (80mm thermal) compact overrides ─────────────────────
+    //
+    // RULE OF GOLD: the ticket CANNOT reuse the A4 cards (padding 16 —
+    // they do not fit the 227pt width). This namespace is the compact
+    // twin of `modern`: same palette, same Inter family, same visual
+    // language, but a reduced spacing scale (4/6/8/12) and smaller type.
+    // Page height is computed by `getTicketHeight()` in the ticket
+    // document and the page uses `wrap={false}` — every token here must
+    // stay tight enough that real content never exceeds that height.
+    ticket: {
+      page: {
+        padding: 8,
+        fontFamily: 'Inter',
+        fontSize: 8,
+        color: '#111827',
+        lineHeight: 1.35,
+      },
+      eyebrow: {
+        fontSize: 6.5,
+        fontWeight: 600,
+        color: '#6B7280',
+        letterSpacing: 0.5,
+        textTransform: 'uppercase',
+        marginBottom: 4,
+      },
+      header: {
+        container: {
+          marginBottom: 8,
+        },
+        row: {
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+        },
+        brandRow: {
+          flexDirection: 'row',
+          alignItems: 'center',
+          flexShrink: 1,
+        },
+        logo: {
+          width: 18,
+          height: 18,
+          marginRight: 6,
+          objectFit: 'contain',
+        },
+        companyName: {
+          fontSize: 12,
+          fontWeight: 700,
+          color: '#111827',
+        },
+        companySub: {
+          fontSize: 7,
+          color: '#6B7280',
+          marginTop: 1,
+        },
+        // Compact meta card — padding 4-6 (NOT the A4 card's 16) and a
+        // subtle hairline border, so it stays inside the 227pt width.
+        metaCard: {
+          backgroundColor: '#F9FAFB',
+          border: '1 solid #E5E7EB',
+          borderRadius: 6,
+          paddingVertical: 4,
+          paddingHorizontal: 6,
+          alignItems: 'flex-end',
+          flexShrink: 0,
+          marginLeft: 6,
+        },
+        metaTitle: {
+          fontSize: 6.5,
+          fontWeight: 600,
+          color: '#6B7280',
+          letterSpacing: 0.5,
+          textTransform: 'uppercase',
+        },
+        metaFolio: {
+          fontSize: 7.5,
+          fontWeight: 700,
+          color: '#111827',
+          marginTop: 2,
+        },
+        metaDate: {
+          fontSize: 6.5,
+          color: '#6B7280',
+          marginTop: 1,
+        },
+      },
+      operator: {
+        row: {
+          flexDirection: 'row',
+          marginBottom: 6,
+        },
+        field: {
+          flexDirection: 'row',
+          alignItems: 'baseline',
+          marginRight: 10,
+          flexShrink: 1,
+        },
+        label: {
+          fontSize: 6.5,
+          fontWeight: 600,
+          color: '#6B7280',
+          letterSpacing: 0.5,
+          textTransform: 'uppercase',
+          marginRight: 3,
+        },
+        value: {
+          fontSize: 7.5,
+          fontWeight: 600,
+          color: '#111827',
+        },
+      },
+      customer: {
+        block: {
+          marginBottom: 8,
+        },
+        row: {
+          flexDirection: 'row',
+          alignItems: 'baseline',
+        },
+        label: {
+          fontSize: 6.5,
+          fontWeight: 600,
+          color: '#6B7280',
+          letterSpacing: 0.5,
+          textTransform: 'uppercase',
+          marginRight: 4,
+        },
+        value: {
+          fontSize: 8,
+          fontWeight: 600,
+          color: '#111827',
+        },
+      },
+      items: {
+        block: {
+          marginBottom: 8,
+        },
+        row: {
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          marginBottom: 6,
+        },
+        productName: {
+          fontSize: 8,
+          fontWeight: 600,
+          color: '#111827',
+        },
+        productVariant: {
+          fontSize: 6.5,
+          color: '#6B7280',
+          marginTop: 1,
+        },
+        qtyLine: {
+          fontSize: 6.5,
+          color: '#6B7280',
+          textAlign: 'right',
+        },
+        lineTotal: {
+          fontSize: 8,
+          fontWeight: 700,
+          color: '#111827',
+          textAlign: 'right',
+          marginTop: 1,
+        },
+        empty: {
+          fontSize: 8,
+          color: '#6B7280',
+          fontStyle: 'italic',
+          marginTop: 2,
+        },
+      },
+      totals: {
+        block: {
+          marginBottom: 8,
+        },
+        row: {
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          marginBottom: 4,
+        },
+        label: {
+          fontSize: 8,
+          color: '#6B7280',
+        },
+        value: {
+          fontSize: 8,
+          fontWeight: 600,
+          color: '#111827',
+          textAlign: 'right',
+        },
+        divider: {
+          borderBottomWidth: 1,
+          borderBottomColor: '#E5E7EB',
+          borderBottomStyle: 'solid',
+          marginVertical: 6,
+        },
+        // Grand total — no card fill on the ticket (it would eat the
+        // narrow width); the blue bold value is the focal point.
+        totalRow: {
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        },
+        totalLabel: {
+          fontSize: 9,
+          fontWeight: 700,
+          color: '#374151',
+        },
+        totalValue: {
+          fontSize: 15,
+          fontWeight: 800,
+          color: '#2563EB',
+          textAlign: 'right',
+        },
+      },
+      payments: {
+        block: {
+          marginBottom: 4,
+        },
+        row: {
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          marginBottom: 5,
+        },
+        method: {
+          fontSize: 8,
+          fontWeight: 600,
+          color: '#111827',
+        },
+        reference: {
+          fontSize: 6.5,
+          color: '#6B7280',
+          marginTop: 1,
+        },
+        timestamp: {
+          fontSize: 6.5,
+          color: '#9CA3AF',
+          marginTop: 1,
+        },
+        amount: {
+          fontSize: 8.5,
+          fontWeight: 700,
+          color: '#111827',
+          textAlign: 'right',
+        },
+        empty: {
+          fontSize: 8,
+          color: '#6B7280',
+          fontStyle: 'italic',
+          marginTop: 2,
+        },
+      },
+      footer: {
+        thanks: {
+          fontSize: 9,
+          fontWeight: 600,
+          color: '#111827',
+          textAlign: 'center',
+          marginTop: 8,
+          marginBottom: 3,
+        },
+        disclaimer: {
+          fontSize: 6.5,
+          color: '#6B7280',
+          textAlign: 'center',
+        },
+      },
     },
   },
 } as const;

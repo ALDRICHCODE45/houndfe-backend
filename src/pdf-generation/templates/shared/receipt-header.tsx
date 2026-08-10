@@ -1,17 +1,14 @@
 /**
- * ReceiptHeader — top section of every receipt.
+ * ReceiptHeader — top section of every receipt (modern design).
  *
  * Renders:
  *   - Logo (if `logoUrl` resolves), with a graceful text-only
  *     fallback to the company name when no logo is provided OR
  *     the `<Image>` fails to load at render time.
- *   - Company name (always shown; this is the receipt's primary
- *     brand marker even when the logo is present).
- *   - Branch address + phone (optional; per-tenant from
- *     `TenantsService.findById` at request time).
- *   - Folio + confirmed date, right-aligned. These are the
- *     receipt's unique identifiers — operators use them to look
- *     the sale up in the POS.
+ *   - Company name + "Punto de Venta" subtitle (the receipt's
+ *     primary brand marker).
+ *   - A light-gray meta card (right) carrying the document title
+ *     (default "RECIBO"), the folio, and the formatted date.
  *
  * Per spec ("Graceful degradation on missing logo"): when the
  * logo URL is absent or unreachable, the header must still produce
@@ -21,11 +18,18 @@
  * error handling for the unreachable-URL branch (a failed image
  * silently drops the bitmap, leaving the text intact).
  *
- * Width: the component fills the available page width via flex.
- * On a 595pt A4 page (40pt padding = 555pt content) it lays out
- * the brand block on the left and the folio/date block on the
- * right; on a 227pt ticket page the same flex layout collapses
- * proportionally.
+ * Variants:
+ *   - `a4` — brand block (28pt logo + 16pt name) on the left, the
+ *     meta card with padding 12 on the right.
+ *   - `ticket` — compact twin for the 80mm thermal format: smaller
+ *     brand (18pt logo + 12pt name, no subtitle) and a meta card with
+ *     padding 4-6 so it stays inside the 227pt width. Per the ticket
+ *     redesign rule, the A4 card padding (16) must not be used here.
+ *
+ * `address` / `phone` are accepted for interface compatibility (the
+ * per-tenant branch info passed by the service) but are intentionally
+ * NOT rendered: the modern aesthetic keeps the header to brand + meta
+ * card only, matching the approved quotation pilot.
  */
 import { Image, Text, View } from '@react-pdf/renderer';
 import { SHARED_STYLES } from './styles';
@@ -38,72 +42,71 @@ export interface ReceiptHeaderProps {
   logoUrl?: string;
   /** Brand / company name shown beside or below the logo. Required. */
   companyName: string;
-  /** Optional branch street address (per-tenant). */
+  /** Optional branch street address (per-tenant). Kept for API compat; not rendered. */
   address?: string;
-  /** Optional branch phone (per-tenant). */
+  /** Optional branch phone (per-tenant). Kept for API compat; not rendered. */
   phone?: string;
   /** Sale folio / receipt number — the unique human identifier. */
   folio: string;
   /** ISO timestamp of when the sale was confirmed. */
   date: string;
-  /** Optional subtitle shown below the company name (default "PUNTO DE VENTA"). */
+  /** Optional subtitle shown below the company name (default "Punto de Venta"). */
   subtitle?: string;
   /**
-   * Size variant for the company name. `'small'` uses a 14pt token
-   * suited for narrow formats (e.g. 80mm ticket) where the default
-   * 18pt would collide with the FARMACIA subtitle below it.
-   * Defaults to `'default'` (18pt).
+   * Document title shown inside the meta card. Defaults to "RECIBO".
+   * The quotation template renders its own autonomous header with
+   * "COTIZACIÓN"; this shared block is receipt-specific.
    */
-  titleSize?: 'default' | 'small';
+  title?: string;
+  /** Layout variant: A4 (card padding 12) or ticket (card padding 4-6). */
+  variant?: 'a4' | 'ticket';
 }
 
 export function ReceiptHeader({
   logoUrl,
   companyName,
-  address,
-  phone,
   folio,
   date,
   subtitle,
-  titleSize = 'default',
+  title = 'RECIBO',
+  variant = 'a4',
 }: ReceiptHeaderProps) {
-  const companyNameStyle =
-    titleSize === 'small'
-      ? SHARED_STYLES.meta.companyNameSmall
-      : SHARED_STYLES.meta.companyName;
+  const isTicket = variant === 'ticket';
+  const tokens = isTicket
+    ? SHARED_STYLES.modern.ticket.header
+    : SHARED_STYLES.modern.header;
+  // A4 meta card = the shared compact card (padding 8/12, radius 8);
+  // the ticket has its own tighter card token (padding 4-6).
+  const metaCardStyle = isTicket
+    ? SHARED_STYLES.modern.ticket.header.metaCard
+    : SHARED_STYLES.modern.cardCompact;
 
   return (
-    <View style={headerStyles.container}>
-      <View style={headerStyles.topRow}>
-        <View style={headerStyles.brandCol}>
-          <View style={headerStyles.identityRow}>
-            {logoUrl ? (
-              <Image src={logoUrl} style={headerStyles.logo} cache={false} />
-            ) : null}
-            <View style={headerStyles.nameStack}>
-              <Text style={companyNameStyle}>{companyName}</Text>
-              <Text style={SHARED_STYLES.receipt.subtitle}>
-                {subtitle ?? 'PUNTO DE VENTA'}
+    <View
+      style={
+        isTicket
+          ? SHARED_STYLES.modern.ticket.header.container
+          : headerStyles.container
+      }
+    >
+      <View style={tokens.row}>
+        <View style={tokens.brandRow}>
+          {logoUrl ? (
+            <Image src={logoUrl} style={tokens.logo} cache={false} />
+          ) : null}
+          <View style={headerStyles.nameStack}>
+            <Text style={tokens.companyName}>{companyName}</Text>
+            {!isTicket ? (
+              <Text style={tokens.companySub}>
+                {subtitle ?? 'Punto de Venta'}
               </Text>
-            </View>
+            ) : null}
           </View>
-          {address ? (
-            <Text style={SHARED_STYLES.meta.brandLine}>{address}</Text>
-          ) : null}
-          {phone ? (
-            <Text style={SHARED_STYLES.meta.brandLine}>{phone}</Text>
-          ) : null}
         </View>
-        <View style={headerStyles.metaCol}>
-          <View style={SHARED_STYLES.receipt.folioBox}>
-            <View style={SHARED_STYLES.receipt.folioRow}>
-              <Text style={SHARED_STYLES.meta.label}>FOLIO</Text>
-              <Text style={SHARED_STYLES.receipt.folioValue}>{folio}</Text>
-            </View>
-            <Text style={SHARED_STYLES.receipt.folioBlock}>
-              FECHA {formatReceiptDate(date)}
-            </Text>
-          </View>
+        <View style={[metaCardStyle, headerStyles.metaCard]}>
+          <Text style={tokens.metaTitle}>{title}</Text>
+          <Text style={tokens.metaFolio}>FOLIO #{folio}</Text>
+          <Text style={tokens.metaDate}>FECHA {formatReceiptDate(date)}</Text>
         </View>
       </View>
     </View>
@@ -112,45 +115,29 @@ export function ReceiptHeader({
 
 /**
  * Local layout styles for the two-column header. Lives next to the
- * component (not in the shared stylesheet) because the column flex
- * layout is specific to this block's brand-meta split.
+ * component (not in the shared stylesheet) because the A4 column flex
+ * layout + bottom hairline are specific to this block's brand-meta split.
+ * The ticket variant uses the shared `modern.ticket.header` tokens only.
  */
 const headerStyles = {
   container: {
-    paddingBottom: 8,
+    marginBottom: 24,
+    paddingBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: SHARED_STYLES.divider.borderBottomColor,
+    borderBottomColor: SHARED_STYLES.modern.palette.border,
     borderBottomStyle: 'solid' as const,
-  },
-  topRow: {
-    flexDirection: 'row' as const,
-    justifyContent: 'space-between' as const,
-    alignItems: 'flex-start' as const,
-  },
-  brandCol: {
-    flexDirection: 'column' as const,
-    flexGrow: 1,
-    flexShrink: 1,
-  },
-  identityRow: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
   },
   nameStack: {
     flexDirection: 'column' as const,
     flexShrink: 1,
   },
-  metaCol: {
-    flexDirection: 'column' as const,
+  // Meta card alignment (the A4 card is `cardCompact`; the ticket has its
+  // own compact card token). Shared alignment keeps the block right-anchored
+  // on both variants.
+  metaCard: {
     alignItems: 'flex-end' as const,
     flexShrink: 0,
     marginLeft: 6,
-  },
-  logo: {
-    width: 24,
-    height: 24,
-    marginRight: 4,
-    objectFit: 'contain' as const,
   },
 };
 

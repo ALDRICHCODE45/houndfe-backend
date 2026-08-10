@@ -5,6 +5,10 @@
  * `renderToBuffer`. We verify the component composes into a valid PDF
  * (non-empty + `%PDF` magic bytes) and accepts the full prop surface
  * including the no-discount and has-discount edge cases.
+ *
+ * Structural assertions cover the modern line-less contract: one row per
+ * item (name + variant + `qty × unit` + line total) with no column
+ * headers and no grid lines, plus the ticket variant's name truncation.
  */
 import { readFileSync } from 'node:fs';
 import { Document, Page, renderToBuffer } from '@react-pdf/renderer';
@@ -107,7 +111,7 @@ describe('LineItemsTable', () => {
     const buffer = await renderToBuffer(
       <Document>
         <Page size={{ width: 227, height: 600 }}>
-          <LineItemsTable items={FIXTURE_ITEMS} />
+          <LineItemsTable items={FIXTURE_ITEMS} variant="ticket" />
         </Page>
       </Document>,
     );
@@ -117,9 +121,8 @@ describe('LineItemsTable', () => {
   });
 
   it('handles line items with null discountTitle (no discount column value)', async () => {
-    // The discount column needs to render "-"/empty for items without a
-    // discount. We feed an item with discountTitle=null and verify the
-    // PDF still renders cleanly.
+    // Per-line discounts are folded into the subtotal in the modern
+    // design; a null discountTitle must still render cleanly.
     const items: LineItem[] = [
       {
         productName: 'Sin descuento',
@@ -144,77 +147,82 @@ describe('LineItemsTable', () => {
     expect(buffer.subarray(0, 4).equals(PDF_MAGIC)).toBe(true);
   });
 
-  it('uses abbreviated column labels for the ticket variant', () => {
-    const ticketProps = {
-      items: FIXTURE_ITEMS,
-      variant: 'ticket' as const,
-    };
-    const tree = JSON.stringify(LineItemsTable(ticketProps));
-
-    expect(tree).toContain('"PROD"');
-    expect(tree).toContain('"CANT"');
-    expect(tree).toContain('"P.UNIT"');
-    expect(tree).toContain('"DESC"');
-    expect(tree).toContain('"SUBT"');
-    expect(tree).not.toContain('"PRECIO UNIT"');
-    expect(SHARED_STYLES.table).toHaveProperty(
-      'ticketHeaderCell',
-      expect.objectContaining({ fontSize: 6.5, letterSpacing: 0 }),
-    );
-  });
-
-  it('keeps full column labels for the A4 variant', () => {
-    const a4Props = {
-      items: FIXTURE_ITEMS,
-      variant: 'a4' as const,
-    };
-    const tree = JSON.stringify(LineItemsTable(a4Props));
-
-    expect(tree).toContain('"PRODUCTO"');
-    expect(tree).toContain('"CANT"');
-    expect(tree).toContain('"PRECIO UNIT"');
-    expect(tree).toContain('"DESCUENTO"');
-    expect(tree).toContain('"SUBTOTAL"');
-  });
-
-  it('applies a surface fill to the header row and removes cell borders', () => {
-    // Color-driven redesign (vs. the prior border-grid look):
-    // - Header row uses a surface-gray fill for separation (no borders).
-    // - No right border on any header cell (0 occurrences of headerCellBorder).
-    // - No right border on any data cell (0 occurrences of cellBorder).
-    expect(
-      (SOURCE.match(/SHARED_STYLES\.table\.headerCellBorder/g) ?? []).length,
-    ).toBe(0);
-    expect(
-      (SOURCE.match(/SHARED_STYLES\.table\.cellBorder/g) ?? []).length,
-    ).toBe(0);
-    expect(SHARED_STYLES.table.headerRow).toEqual(
-      expect.objectContaining({ backgroundColor: '#fbfafc' }),
-    );
-  });
-
-  it('exposes the shared brand accent bar token used by document layouts', () => {
-    // The line-items-table doesn't render the accent bar itself —
-    // the receipt documents do — but the table reuses the same
-    // styles module so the token must exist on `SHARED_STYLES`.
-    expect(SHARED_STYLES.receipt).toHaveProperty(
-      'brandAccentBar',
-      expect.objectContaining({
-        height: 3,
-        backgroundColor: '#f6bb13',
+  it('renders line-less rows with no column headers for the A4 variant', () => {
+    // The modern design drops the 5-column grid (PRODUCTO / CANT /
+    // PRECIO UNIT / DESCUENTO / SUBTOTAL) in favor of one clean row per
+    // item: name left, `qty × unit` + line total right.
+    const a4Tree = JSON.stringify(
+      LineItemsTable({
+        items: FIXTURE_ITEMS,
+        variant: 'a4' as const,
       }),
     );
+
+    expect(a4Tree).toContain('Camiseta HoundFe');
+    expect(a4Tree).toContain('Talla M / Negro');
+    // `qty × unit` renders as JSX segments ("2", " ×", " ", "$250.00").
+    expect(a4Tree).toContain('" ×"');
+    expect(a4Tree).toContain('"$250.00"');
+    expect(a4Tree).toContain('"$450.00"');
+    // No column header labels anywhere in the tree.
+    expect(a4Tree).not.toContain('PRECIO UNIT');
+    expect(a4Tree).not.toContain('SUBTOTAL');
+    expect(a4Tree).not.toContain('PRODUCTO');
   });
 
-  it('section header has a brand-color underline (border-bottom)', () => {
-    // Section headers (PRODUCTOS / TOTALES / PAGOS) sit above a 2pt
-    // solid yellow underline that carries the brand color through the
-    // middle of the receipt instead of relying on borders.
-    expect(SHARED_STYLES.receipt.sectionHeader).toEqual(
-      expect.objectContaining({
-        borderBottomWidth: 2,
-        borderBottomColor: '#f6bb13',
+  it('truncates long product names on the ticket variant with an ellipsis', () => {
+    // The 227pt ticket cannot wrap a very long name without pushing the
+    // line total off the edge — names over ~40 chars get clipped with an
+    // ellipsis (react-pdf 4.x has no text-overflow ellipsis).
+    const longName =
+      'Arnés de seguridad con reflectores y hebillas ajustables premium';
+    const ticketTree = JSON.stringify(
+      LineItemsTable({
+        items: [
+          {
+            productName: longName,
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 12900,
+            subtotalCents: 12900,
+          },
+        ],
+        variant: 'ticket' as const,
       }),
+    );
+
+    expect(longName.length).toBeGreaterThan(40);
+    expect(ticketTree).toContain('…');
+    // The TEXT child must be the truncated prefix + ellipsis (the full
+    // name only survives inside the React `key`, never as rendered text).
+    expect(ticketTree).toContain('Arnés de seguridad con reflectores y he…');
+  });
+
+  it('renders the items list through the modern token set (no legacy grid tokens)', () => {
+    // Source-level guarantee: the modern list uses `SHARED_STYLES.modern.items`
+    // and never touches the removed legacy `table` grid bag.
+    expect(SOURCE).toContain('SHARED_STYLES.modern.items');
+    expect(SOURCE).toContain('SHARED_STYLES.modern.ticket.items');
+    expect((SOURCE.match(/SHARED_STYLES\.table\./g) ?? []).length).toBe(0);
+    expect((SOURCE.match(/SHARED_STYLES\.receipt\./g) ?? []).length).toBe(0);
+    expect(SHARED_STYLES.modern.items).toHaveProperty(
+      'row',
+      expect.objectContaining({ marginBottom: 12 }),
+    );
+    expect(SHARED_STYLES.modern.items).toHaveProperty(
+      'lineTotal',
+      expect.objectContaining({ fontSize: 11, fontWeight: 700 }),
+    );
+  });
+
+  it('keeps the ticket item tokens compact for the 227pt width', () => {
+    expect(SHARED_STYLES.modern.ticket.items).toHaveProperty(
+      'productName',
+      expect.objectContaining({ fontSize: 8 }),
+    );
+    expect(SHARED_STYLES.modern.ticket.items).toHaveProperty(
+      'productVariant',
+      expect.objectContaining({ fontSize: 6.5 }),
     );
   });
 

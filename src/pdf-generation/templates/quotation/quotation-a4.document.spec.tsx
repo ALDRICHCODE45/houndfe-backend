@@ -11,8 +11,8 @@
  *     scenario "quotation-a4 footer has no payment lines").
  *   - The expiry line renders "Válido hasta: DD/MM/YYYY" when
  *     `expiresAt` is set, and "Sin fecha de expiración" when null.
- *   - Items table renders the line items, including the discount
- *     column for promoted lines.
+ *   - Items render through the modern line-less `ItemsList` (no grid
+ *     table) with product name + variant and the per-line amount.
  *   - Totals render the three expected rows (Subtotal, Descuentos,
  *     Total) — no Pagado / Deuda / Cambio.
  */
@@ -67,20 +67,22 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
   });
 
-  it('uses the LineItemsTable shared block (A4 variant)', async () => {
-    // Source-level guarantee — keeps the items table consistent with
-    // the receipt template. If a future refactor moves the table
-    // out of `LineItemsTable`, this test fails loudly so we don't
-    // silently diverge the visual contract.
+  it('renders items through the modern quotation items list (no grid table)', async () => {
+    // Source-level guarantee — the pilot intentionally drops the shared
+    // `LineItemsTable` grid in favor of the quotation-specific, line-less
+    // `ItemsList`. If a future refactor swaps the rendering block, this
+    // test fails loudly so the redesigned visual contract stays intact.
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
-    expect(source).toContain('<LineItemsTable items={items} variant="a4" />');
+    expect(source).toContain('<ItemsList items={items} />');
+    expect(source).not.toContain('<LineItemsTable');
   });
 
-  it('renders the brand accent bar above the document content', async () => {
+  it('renders the modern header with the COTIZACIÓN meta card', async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
-    expect(source).toContain('SHARED_STYLES.receipt.brandAccentBar');
+    expect(source).toContain('SHARED_STYLES.modern.header');
+    expect(source).toContain('COTIZACIÓN');
   });
 
   it('exposes a QuotationDocumentProps type with no payment fields', () => {

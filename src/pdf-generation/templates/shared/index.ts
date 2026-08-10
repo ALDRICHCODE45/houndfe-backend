@@ -29,3 +29,9 @@ export {
 } from './customer-section';
 
 export { SHARED_STYLES } from './styles';
+
+export type { ModernFontFamily } from './modern-font';
+export {
+  getModernFontFamily,
+  registerModernFont,
+} from './modern-font';

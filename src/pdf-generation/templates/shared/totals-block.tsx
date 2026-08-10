@@ -1,32 +1,36 @@
 /**
- * TotalsBlock — financial summary at the bottom of every receipt.
+ * TotalsBlock — financial summary at the bottom of every receipt (modern).
  *
- * Six rows, in this order:
+ * Rows, in this order:
  *   1. Subtotal  — pre-discount sum of line items.
  *   2. Descuentos — total discounts applied (positive cents).
- *   3. Total      — post-discount grand total. Bold, brand-yellow
- *                    so the eye lands on it after scanning the
- *                    receipt top-down.
- *   4. Pagado     — amount the customer paid across all payments.
- *   5. Deuda      — outstanding balance for credit sales.
- *   6. Cambio     — change due back to the customer (cash overpay).
+ *   3. Pagado / Deuda / Cambio — payment settlement rows rendered only
+ *      when their value is non-zero (a fully-paid cash sale with no
+ *      change prints none of them). Kept discrete gray rows so the
+ *      credit-sale balance stays visible without stealing focus.
+ *   4. TOTAL      — post-discount grand total on a highlighted card:
+ *      label + 18pt 800 value in the accent blue #2563EB. This is the
+ *      document's focal point.
+ *
+ * A subtle divider separates the plain rows from the grand-total card.
+ * There is NO IVA row — the grand total already includes IVA in this
+ * system, so printing one would double-count for the customer.
  *
  * All inputs are cents (numbers). Zero is a valid value for every
- * field — a fully-paid, no-change sale has 0 in every row except
- * `paidCents` and `totalCents`. The component renders zeros as
- * "$0.00" (never blank) so the section's row count is stable.
+ * field. The component renders Subtotal/Descuentos zeros as "$0.00"
+ * (never blank) so the section's row count is stable; the settlement
+ * rows (Pagado/Deuda/Cambio) are omitted at zero to avoid noise.
  *
- * Style hierarchy: the block uses three type weights —
- *   - `label` / `value` for the supporting rows.
- *   - `labelBold` / `valueBold` for `Total` (one step heavier).
- *   - `grandTotalLabel` / `grandTotalValue` for the grand total
- *     when the optional `totalCents` prop is rendered larger
- *     (here `Total` doubles as the grand total; we keep that
- *     single bold row to stay aligned with the spec).
+ * `paidCents` / `debtCents` / `changeDueCents` are part of the prop
+ * contract (the service maps the full `SaleDetailResponseDto` totals and
+ * `ReceiptDocumentProps` is typed against this surface).
  *
- * Renders inside any width: A4 (≈555pt) lays out label left,
- * value right with comfortable breathing room; ticket (≈207pt)
- * collapses the same way without overflow.
+ * Variants:
+ *   - `a4` — full-size rows (10-10.5pt) + grand-total card (padding 16).
+ *   - `ticket` — compact rows (8pt) + the total value in 15pt 800 blue,
+ *     the largest size that fits the 227pt width. The ticket drops the
+ *     card fill (it would eat the narrow width) — the blue value alone
+ *     is the focal point.
  */
 import { Text, View } from '@react-pdf/renderer';
 import { SHARED_STYLES } from './styles';
@@ -38,12 +42,14 @@ export interface TotalsBlockProps {
   discountCents: number;
   /** Final grand total after discounts, in cents. */
   totalCents: number;
-  /** Amount the customer paid across all payment methods, in cents. */
+  /** Amount the customer paid across all payment methods, in cents. Rendered only when non-zero. */
   paidCents: number;
-  /** Outstanding balance (total - paid) for credit sales, in cents. */
+  /** Outstanding balance (total - paid) for credit sales, in cents. Rendered only when non-zero. */
   debtCents: number;
-  /** Change returned to the customer (paid - total) when overpaid, in cents. */
+  /** Change returned to the customer (paid - total) when overpaid, in cents. Rendered only when non-zero. */
   changeDueCents: number;
+  /** Layout variant: A4 (grand-total card) or ticket (compact blue value). */
+  variant?: 'a4' | 'ticket';
 }
 
 export function TotalsBlock({
@@ -53,80 +59,69 @@ export function TotalsBlock({
   paidCents,
   debtCents,
   changeDueCents,
+  variant = 'a4',
 }: TotalsBlockProps) {
-  return (
-    <View>
-      <Text style={SHARED_STYLES.receipt.sectionHeader}>TOTALES</Text>
-      <TotalRow label="Subtotal" valueCents={subtotalCents} />
-      <TotalRow
-        label="Descuentos"
-        valueCents={discountCents}
-        signed
-      />
-      <TotalRow
-        label="Total"
-        valueCents={totalCents}
-        emphasis="grand"
-      />
-      <TotalRow label="Pagado" valueCents={paidCents} />
-      <TotalRow label="Deuda" valueCents={debtCents} />
-      <TotalRow label="Cambio" valueCents={changeDueCents} />
-    </View>
-  );
-}
-
-interface TotalRowProps {
-  label: string;
-  /** Cents value. Always rendered as "$X.XX"; sign handled per-row. */
-  valueCents: number;
-  /** When true, prefix the value with "-" (used for discounts). */
-  signed?: boolean;
-  /** "bold" uses the larger body-bold style for `Total`; "grand" uses
-   *  the brand-yellow grand-total style. */
-  emphasis?: 'bold' | 'grand';
-}
-
-/**
- * Single label-value row of the totals block. Internal — kept
- * next to `TotalsBlock` rather than exported because no other
- * template needs to render the same row shape.
- */
-function TotalRow({ label, valueCents, signed, emphasis }: TotalRowProps) {
-  const labelStyle =
-    emphasis === 'grand'
-      ? SHARED_STYLES.totals.grandTotalLabel
-      : emphasis === 'bold'
-        ? SHARED_STYLES.totals.labelBold
-        : SHARED_STYLES.totals.label;
-
-  const valueStyle =
-    emphasis === 'grand'
-      ? SHARED_STYLES.totals.grandTotalValue
-      : emphasis === 'bold'
-        ? SHARED_STYLES.totals.valueBold
-        : SHARED_STYLES.totals.value;
-
-  // The `signed` prop renders "-$X.XX" for discounts (positive
-  // cents → displayed as a negative). The other rows render the
-  // raw value, including negative values if the caller passes
-  // them (e.g. a refund line item).
-  const display =
-    signed && valueCents > 0
-      ? `-${formatCurrency(valueCents)}`
-      : formatCurrency(valueCents);
-
-  // Grand-total row wraps the label/value in a soft-yellow tinted
-  // View so the eye lands on it after scanning the receipt top-down.
-  // Other rows use the plain row token.
-  const rowStyle =
-    emphasis === 'grand'
-      ? SHARED_STYLES.totals.grandTotalRow
-      : SHARED_STYLES.totals.row;
+  const isTicket = variant === 'ticket';
+  const tokens = isTicket
+    ? SHARED_STYLES.modern.ticket.totals
+    : SHARED_STYLES.modern.totals;
 
   return (
-    <View style={rowStyle}>
-      <Text style={labelStyle}>{label}</Text>
-      <Text style={valueStyle}>{display}</Text>
+    <View style={tokens.block}>
+      <View style={tokens.row}>
+        <Text style={tokens.label}>Subtotal</Text>
+        <Text style={tokens.value}>{formatCurrency(subtotalCents)}</Text>
+      </View>
+      <View style={tokens.row}>
+        <Text style={tokens.label}>Descuentos</Text>
+        <Text style={tokens.value}>
+          {discountCents > 0
+            ? `-${formatCurrency(discountCents)}`
+            : formatCurrency(discountCents)}
+        </Text>
+      </View>
+
+      {/* Settlement rows — only when the value matters (≠ 0). A credit
+          sale prints Deuda; a cash overpay prints Cambio; a fully paid
+          sale prints nothing between Descuentos and TOTAL. */}
+      {paidCents > 0 ? (
+        <View style={tokens.row}>
+          <Text style={tokens.label}>Pagado</Text>
+          <Text style={tokens.value}>{formatCurrency(paidCents)}</Text>
+        </View>
+      ) : null}
+      {debtCents > 0 ? (
+        <View style={tokens.row}>
+          <Text style={tokens.label}>Deuda</Text>
+          <Text style={tokens.value}>{formatCurrency(debtCents)}</Text>
+        </View>
+      ) : null}
+      {changeDueCents > 0 ? (
+        <View style={tokens.row}>
+          <Text style={tokens.label}>Cambio</Text>
+          <Text style={tokens.value}>{formatCurrency(changeDueCents)}</Text>
+        </View>
+      ) : null}
+
+      <View style={tokens.divider} />
+
+      {isTicket ? (
+        <View style={SHARED_STYLES.modern.ticket.totals.totalRow}>
+          <Text style={SHARED_STYLES.modern.ticket.totals.totalLabel}>
+            TOTAL
+          </Text>
+          <Text style={SHARED_STYLES.modern.ticket.totals.totalValue}>
+            {formatCurrency(totalCents)}
+          </Text>
+        </View>
+      ) : (
+        <View style={SHARED_STYLES.modern.totals.totalCard}>
+          <Text style={SHARED_STYLES.modern.totals.totalLabel}>TOTAL</Text>
+          <Text style={SHARED_STYLES.modern.totals.totalValue}>
+            {formatCurrency(totalCents)}
+          </Text>
+        </View>
+      )}
     </View>
   );
 }

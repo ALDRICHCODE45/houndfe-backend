@@ -1,8 +1,11 @@
 /**
- * PaymentsList — payment methods section of every receipt.
+ * PaymentsList — payment methods section of every receipt (modern).
  *
  * Lists each `Payment` the customer used: method, amount, optional
- * reference number, optional timestamp. One row per payment.
+ * reference number, optional timestamp. One clean row per payment:
+ *   - Left: method (bold) with the reference + timestamp below it in gray.
+ *   - Right: the amount (bold).
+ * No divider lines — rows are separated by vertical rhythm only.
  *
  * `reference` is null for cash and most card-present payments;
  * we still print the method and amount (those are the customer-facing
@@ -24,6 +27,11 @@
  * the array as-given (POS code already orders them chronologically
  * via the timeline). Sorting here would risk out-of-order refunds
  * vs. charges.
+ *
+ * Variants:
+ *   - `a4` — full-size tokens (method 10.5pt 600, amount 11pt 700).
+ *   - `ticket` — compact twin (method 8pt, amount 8.5pt) for the
+ *     80mm thermal width.
  */
 import { Text, View } from '@react-pdf/renderer';
 import { SHARED_STYLES } from './styles';
@@ -47,49 +55,51 @@ export interface Payment {
 
 export interface PaymentsListProps {
   payments: Payment[];
+  /** Layout variant: A4 (full-size) or ticket (compact). */
+  variant?: 'a4' | 'ticket';
 }
 
-export function PaymentsList({ payments }: PaymentsListProps) {
+export function PaymentsList({ payments, variant = 'a4' }: PaymentsListProps) {
+  const isTicket = variant === 'ticket';
+  const tokens = isTicket
+    ? SHARED_STYLES.modern.ticket.payments
+    : SHARED_STYLES.modern.payments;
+  const eyebrow = isTicket
+    ? SHARED_STYLES.modern.ticket.eyebrow
+    : SHARED_STYLES.modern.eyebrow;
+
   if (payments.length === 0) {
     return (
-      <View>
-        <Text style={SHARED_STYLES.receipt.sectionHeader}>PAGOS</Text>
-        <View style={SHARED_STYLES.payments.row}>
-          <Text style={SHARED_STYLES.payments.emptyRow}>
-            Sin pagos registrados.
-          </Text>
-        </View>
+      <View style={tokens.block}>
+        <Text style={eyebrow}>Pagos</Text>
+        <Text style={tokens.empty}>Sin pagos registrados.</Text>
       </View>
     );
   }
 
   return (
-    <View>
-      <Text style={SHARED_STYLES.receipt.sectionHeader}>PAGOS</Text>
+    <View style={tokens.block}>
+      <Text style={eyebrow}>Pagos</Text>
       {payments.map((payment, index) => (
         <View
           // Same key strategy as LineItemsTable: positional index,
           // safe because the data shape doesn't reorder across
           // renders for the same sale.
           key={`${payment.method}-${index}`}
-          style={paymentRowStyles.row}
+          style={tokens.row}
         >
           <View style={paymentRowStyles.leftColumn}>
-            <Text style={SHARED_STYLES.payments.method}>
-              {formatMethod(payment.method)}
-            </Text>
+            <Text style={tokens.method}>{formatMethod(payment.method)}</Text>
             {payment.reference ? (
-              <Text style={SHARED_STYLES.payments.reference}>
-                Ref: {payment.reference}
-              </Text>
+              <Text style={tokens.reference}>Ref: {payment.reference}</Text>
             ) : null}
             {payment.paidAt ? (
-              <Text style={SHARED_STYLES.payments.timestamp}>
+              <Text style={tokens.timestamp}>
                 {formatTimestamp(payment.paidAt)}
               </Text>
             ) : null}
           </View>
-          <Text style={SHARED_STYLES.payments.amount}>
+          <Text style={tokens.amount}>
             {formatCurrency(payment.amountCents)}
           </Text>
         </View>
@@ -99,22 +109,14 @@ export function PaymentsList({ payments }: PaymentsListProps) {
 }
 
 /**
- * Local layout — slightly different from the shared `payments.row`
- * because each row here is a 2-column flex (method+meta on left,
- * amount on right) rather than a simple label-value pair.
+ * Local layout — 2-column flex (method+meta on left, amount on right).
+ * The left column shrinks so a long method name never pushes the
+ * amount off the row on the narrow ticket.
  */
 const paymentRowStyles = {
-  row: {
-    flexDirection: 'row' as const,
-    justifyContent: 'space-between' as const,
-    alignItems: 'flex-start' as const,
-    paddingVertical: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: SHARED_STYLES.divider.borderBottomColor,
-    borderBottomStyle: 'solid' as const,
-  },
   leftColumn: {
     flexDirection: 'column' as const,
+    flexGrow: 1,
     flexShrink: 1,
     paddingRight: 8,
   },

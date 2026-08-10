@@ -7,10 +7,10 @@
  * rather than pixel-perfect text snapshots. The PDF binary is opaque to a
  * snapshot matcher and would just produce noise on every style tweak.
  *
- * The "renders header content" assertions are kept intentionally shallow
- * (no `expect(...).toMatchSnapshot()`) because the goal of WU2 is to prove
- * each shared block composes into a valid PDF — NOT to lock down visual
- * layout. WU3 (template composition) will own the visual contract.
+ * Structural assertions cover the modern header contract: the A4 meta
+ * card (surface fill + hairline border), the ticket variant swapping to
+ * the compact company-name token, and the "Punto de Venta" subtitle
+ * staying visually tight under the title.
  */
 import { readFileSync } from 'node:fs';
 import {
@@ -100,8 +100,6 @@ describe('ReceiptHeader', () => {
         <Page size={{ width: 227, height: 600 }}>
           <ReceiptHeader
             companyName="HoundFe"
-            address="Sucursal Centro"
-            phone="555-0100"
             folio="T-0042"
             date="2026-07-20T15:30:00.000Z"
           />
@@ -113,50 +111,69 @@ describe('ReceiptHeader', () => {
     expect(buffer.subarray(0, 4).equals(PDF_MAGIC)).toBe(true);
   });
 
-  it('renders folio and date inside a bordered box', () => {
-    expect(SHARED_STYLES.receipt).toHaveProperty(
-      'folioBox',
+  it('renders folio and date inside the modern light-gray meta card', () => {
+    // The A4 meta card carries the document title + folio + date. It is a
+    // light surface (#F9FAFB) with a hairline border + 8pt radius — the
+    // modern card treatment that replaces the legacy bordered folio box.
+    expect(SHARED_STYLES.modern.cardCompact).toEqual(
       expect.objectContaining({
-        borderWidth: 1,
-        borderColor: '#eceaf0',
+        border: '1 solid #E5E7EB',
+        borderRadius: 8,
       }),
     );
-    expect(SOURCE).toContain('style={SHARED_STYLES.receipt.folioBox}');
+    expect(SHARED_STYLES.modern.header).toHaveProperty('metaTitle');
+    expect(SHARED_STYLES.modern.header).toHaveProperty('metaFolio');
+    expect(SHARED_STYLES.modern.header).toHaveProperty('metaDate');
+    expect(SOURCE).toContain('SHARED_STYLES.modern.header');
+    expect(SOURCE).toContain('formatReceiptDate');
   });
 
-  it('accepts a titleSize="small" prop that swaps the company name size', () => {
-    // The ticket format is narrow (~227pt). The default 18pt
-    // company name dominates the header; we expose a `titleSize`
-    // variant so the ticket document can render a smaller title.
-    const tree = JSON.stringify(
+  it('renders a compact meta card on the ticket variant (padding 4-6)', () => {
+    // RULE OF GOLD: the ticket cannot copy the A4 card padding (16/12).
+    // Its meta card drops to padding 4-6 so it stays inside 227pt.
+    expect(SHARED_STYLES.modern.ticket.header.metaCard).toEqual(
+      expect.objectContaining({ paddingVertical: 4 }),
+    );
+    expect(SHARED_STYLES.modern.ticket.header.metaCard).toEqual(
+      expect.objectContaining({ paddingHorizontal: 6 }),
+    );
+  });
+
+  it('accepts a variant="ticket" prop that swaps to the compact company name', () => {
+    // The ticket format is narrow (~227pt). The A4 16pt company name
+    // dominates the header, so the ticket variant binds to a smaller
+    // 12pt token via the shared `modern.ticket.header` bag.
+    const a4Tree = JSON.stringify(
       ReceiptHeader({
         companyName: 'HoundFe',
         folio: 'A-0001',
         date: '2026-07-20T15:30:00.000Z',
-        titleSize: 'small',
+      }),
+    );
+    const ticketTree = JSON.stringify(
+      ReceiptHeader({
+        companyName: 'HoundFe',
+        folio: 'T-0042',
+        date: '2026-07-20T15:30:00.000Z',
+        variant: 'ticket',
       }),
     );
 
-    // The small variant should produce a 14pt company name (down from
-    // the default 18pt) so the FARMACIA subtitle stops colliding
-    // with the title's descenders on the narrow ticket format.
-    expect(tree).toContain('"fontSize":14');
-    // The small company-name token must exist alongside the default.
-    expect(SHARED_STYLES.meta.companyNameSmall).toEqual(
-      expect.objectContaining({ fontSize: 14 }),
+    expect(a4Tree).toContain('"fontSize":16');
+    expect(ticketTree).toContain('"fontSize":12');
+    expect(SHARED_STYLES.modern.header.companyName).toEqual(
+      expect.objectContaining({ fontSize: 16 }),
     );
-    expect(SHARED_STYLES.meta.companyName).toEqual(
-      expect.objectContaining({ fontSize: 18 }),
+    expect(SHARED_STYLES.modern.ticket.header.companyName).toEqual(
+      expect.objectContaining({ fontSize: 12 }),
     );
   });
 
-  it('subtitle uses tight letter-spacing so it does not collide with the title', () => {
-    // The previous subtitle had `letterSpacing: 1` which spread the
-    // "FARMACIA" word so wide that its letters visually overlapped
-    // the descenders of the HoundFe title above. Tightening the
-    // tracking to 0.4 keeps the subtitle legible without overlap.
-    expect(SHARED_STYLES.receipt.subtitle).toEqual(
-      expect.objectContaining({ letterSpacing: 0.4 }),
+  it('keeps the "Punto de Venta" subtitle visually tight under the title', () => {
+    // The subtitle must not collide with the company-name descenders, so
+    // it stays a small gray line (9pt, 2pt gap) below the 16pt title.
+    expect(SHARED_STYLES.modern.header.companySub).toEqual(
+      expect.objectContaining({ fontSize: 9, marginTop: 2 }),
     );
   });
 

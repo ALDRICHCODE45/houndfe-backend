@@ -63,9 +63,12 @@ describe('ReceiptA4Document', () => {
     expect(SOURCE).toContain('<LineItemsTable items={items} variant="a4" />');
   });
 
-  it('renders the brand accent bar above the receipt content', () => {
-    // The 3pt-tall yellow accent bar at the top of every receipt is
-    // the primary brand-color element of the redesign.
-    expect(SOURCE).toContain('SHARED_STYLES.receipt.brandAccentBar');
+  it('renders through the modern token set with the runtime font family', () => {
+    // The redesigned A4 receipt binds to the modern page tokens (no
+    // legacy brand accent bar) and resolves the Inter/Helvetica family
+    // at render time so a font-CDN outage degrades safely.
+    expect(SOURCE).toContain('SHARED_STYLES.modern.page');
+    expect(SOURCE).toContain('getModernFontFamily()');
+    expect(SOURCE).not.toContain('SHARED_STYLES.receipt');
   });
 });

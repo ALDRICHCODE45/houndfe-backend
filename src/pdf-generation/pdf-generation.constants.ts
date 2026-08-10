@@ -110,3 +110,53 @@ export const PDF_FONT_REGISTRY = {
   fontStyle: 'normal' as const,
   fontWeight: 'normal' as const,
 } as const;
+
+/**
+ * PILOT — Inter font registration payload (static weights 400/600/700/800)
+ * for the modern quotation template.
+ *
+ * The same `{ family, fonts: [...] }` bulk shape @react-pdf/font uses to
+ * register several weights of one family in a single call. Consumed by
+ * `registerModernFont()` in `templates/shared/modern-font.ts`, which
+ * pre-flights the CDN and falls back to Helvetica when the font cannot be
+ * fetched — react-pdf 4.x throws at render if a requested weight is
+ * unreachable, so a plain `Font.register` try/catch alone cannot guarantee
+ * a safe fallback.
+ *
+ * Why static WOFF (inter-ui 3.3.2) instead of gstatic? Two verified
+ * failures rule out the obvious candidates:
+ *   - Google's CSS2 API serves Inter v20 as a VARIABLE font (single `wght`
+ *     axis); react-pdf/fontkit loads a variable font as a single static
+ *     instance, so every weight would render identically.
+ *   - @fontsource/inter ships static per-weight WOFF2 files, but fontkit's
+ *     TTFSubset crashes on certain glyph sets of those files
+ *     (`Offset is outside the bounds of the DataView`) and the `latin-ext`
+ *     split omits ASCII (textkit silently falls back to Helvetica).
+ * The inter-ui 3.3.2 static WOFF files have full Latin + Latin-1 coverage
+ * (all ASCII, plus á é í ó ú ñ ¿ ¡ ×) and subset cleanly.
+ */
+export const PDF_INTER_FONT_REGISTRY = {
+  family: 'Inter',
+  fonts: [
+    {
+      src: 'https://cdn.jsdelivr.net/npm/inter-ui@3.3.2/Inter%20(web%20hinted)/Inter-Regular.woff',
+      fontWeight: 400,
+      fontStyle: 'normal',
+    },
+    {
+      src: 'https://cdn.jsdelivr.net/npm/inter-ui@3.3.2/Inter%20(web%20hinted)/Inter-SemiBold.woff',
+      fontWeight: 600,
+      fontStyle: 'normal',
+    },
+    {
+      src: 'https://cdn.jsdelivr.net/npm/inter-ui@3.3.2/Inter%20(web%20hinted)/Inter-Bold.woff',
+      fontWeight: 700,
+      fontStyle: 'normal',
+    },
+    {
+      src: 'https://cdn.jsdelivr.net/npm/inter-ui@3.3.2/Inter%20(web%20hinted)/Inter-ExtraBold.woff',
+      fontWeight: 800,
+      fontStyle: 'normal',
+    },
+  ],
+} as const;

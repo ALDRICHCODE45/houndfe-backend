@@ -264,7 +264,24 @@ describe('PdfGenerationService', () => {
   // ── OnModuleInit ───────────────────────────────────────────────────
 
   describe('onModuleInit', () => {
-    it('registers Roboto font and Spanish hyphenation callback without throwing', async () => {
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+      // The modern font pre-flight (`registerModernFont`) probes the font
+      // CDN before registering Inter; stub `fetch` so unit tests never
+      // touch the network and stay deterministic.
+      globalThis.fetch = jest.fn(async () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => new ArrayBuffer(0),
+      })) as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('registers Roboto + Inter fonts and the Spanish hyphenation callback without throwing', async () => {
       // No-op renderToStream for this path; we just want the boot to
       // finish cleanly.
       renderer.Font.register.mockReturnValue(undefined);
@@ -282,18 +299,23 @@ describe('PdfGenerationService', () => {
 
       await freshModule.init();
 
-      // Font registration MUST have been attempted exactly once at boot.
-      expect(renderer.Font.register).toHaveBeenCalledTimes(1);
+      // Both font families MUST be registered at boot: the legacy Roboto
+      // registry and the modern Inter registry (bulk, 4 static weights).
+      expect(renderer.Font.register).toHaveBeenCalledTimes(2);
       expect(renderer.Font.registerHyphenationCallback).toHaveBeenCalledTimes(
         1,
       );
 
-      // First arg to register must declare the font family name.
-      const regArg = renderer.Font.register.mock.calls[0][0] as Record<
-        string,
-        unknown
-      >;
-      expect(regArg.family).toBeTruthy();
+      const families = renderer.Font.register.mock.calls.map(
+        (call) => (call[0] as { family?: string }).family,
+      );
+      expect(families).toContain('Roboto');
+      expect(families).toContain('Inter');
+      // The Inter payload carries the four static weights.
+      const interArg = renderer.Font.register.mock.calls.find(
+        (call) => (call[0] as { family?: string }).family === 'Inter',
+      )?.[0] as { fonts?: Array<{ fontWeight?: number }> } | undefined;
+      expect(interArg?.fonts).toHaveLength(4);
     });
 
     it('does not crash module boot if Font.register throws', async () => {

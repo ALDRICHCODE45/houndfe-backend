@@ -120,13 +120,32 @@ describe('TotalsBlock', () => {
     ).toBeUndefined();
   });
 
-  it('Total row has a subtle yellow tint background via grandTotalRow token', () => {
-    // The grand-total row gets a soft yellow tint (#fef9e6) so the
-    // eye lands on it after scanning the receipt top-down. The label
-    // and value themselves stay bold + brand yellow.
-    expect(SHARED_STYLES.totals).toHaveProperty(
-      'grandTotalRow',
-      expect.objectContaining({ backgroundColor: '#fef9e6' }),
+  it('grand total renders on a highlighted card with the blue 18pt value', () => {
+    // The modern grand-total card is the document's focal point: a light
+    // surface (#F9FAFB) with a hairline border, and the value in 18pt 800
+    // accent blue #2563EB (replacing the legacy yellow tint + 13pt value).
+    expect(SHARED_STYLES.modern.totals).toHaveProperty(
+      'totalCard',
+      expect.objectContaining({ backgroundColor: '#F9FAFB' }),
+    );
+    expect(SHARED_STYLES.modern.totals.totalValue).toEqual(
+      expect.objectContaining({
+        fontSize: 18,
+        fontWeight: 800,
+        color: '#2563EB',
+      }),
+    );
+  });
+
+  it('keeps the ticket total compact but still blue and bold', () => {
+    // The 227pt ticket cannot host the 18pt value; 15pt is the largest
+    // size that fits without the A4 card fill.
+    expect(SHARED_STYLES.modern.ticket.totals.totalValue).toEqual(
+      expect.objectContaining({
+        fontSize: 15,
+        fontWeight: 800,
+        color: '#2563EB',
+      }),
     );
   });
 });

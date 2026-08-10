@@ -1,8 +1,15 @@
 /**
- * LineItemsTable — middle section of every receipt.
+ * LineItemsTable — middle section of every receipt (modern design).
  *
- * Renders the list of purchased line items in a 5-column flexbox
- * table: Producto / Cant / Precio Unit / Descuento / Subtotal.
+ * Renders the list of purchased line items as clean, line-less rows:
+ *   - Left: product name (bold) with the variant below it in gray.
+ *   - Right: `qty × unit` in gray and the bold line total.
+ *
+ * There are NO column headers and NO table grid lines — rows are
+ * separated by vertical rhythm only, mirroring the approved quotation
+ * pilot's `ItemsList`. Per-line discounts are folded into the line
+ * subtotal (the total block reports the aggregate discount), so the
+ * discount columns of the legacy grid are gone.
  *
  * Data model: the prop shape is a *narrowed* subset of
  * `SaleDetailItemDto` (see `src/sales/dto/sale-detail-response.dto.ts`)
@@ -14,14 +21,15 @@
  * pipeline.
  *
  * Empty list: per spec, a sale can legitimately have zero line
- * items (refunded, voided, fully-discounted edge case). The table
+ * items (refunded, voided, fully-discounted edge case). The block
  * renders a single italic placeholder so the section isn't visually
  * missing — keeps the receipt's section count stable across sales.
  *
- * Discount column: when `discountTitle` is null the cell shows a
- * muted dash. We render the discount title (not just the cents)
- * because the spec calls out promotion names as part of the
- * receipt's audit trail (e.g. "Promo 2x1", "Black Friday -20%").
+ * Variants:
+ *   - `a4` — full-size tokens (name 11pt, variant 9pt, total 11pt 700).
+ *   - `ticket` — compact twin for the 80mm thermal format. Product
+ *     names are truncated (~40 chars + ellipsis) so a long name cannot
+ *     push the line total off the 211pt content width.
  */
 import { Text, View } from '@react-pdf/renderer';
 import { SHARED_STYLES } from './styles';
@@ -52,202 +60,92 @@ export interface LineItemsTableProps {
   variant?: LineItemsTableVariant;
 }
 
-const HEADER_LABELS = {
-  a4: {
-    product: 'PRODUCTO',
-    quantity: 'CANT',
-    unitPrice: 'PRECIO UNIT',
-    discount: 'DESCUENTO',
-    subtotal: 'SUBTOTAL',
-  },
-  ticket: {
-    product: 'PROD',
-    quantity: 'CANT',
-    unitPrice: 'P.UNIT',
-    discount: 'DESC',
-    subtotal: 'SUBT',
-  },
-} as const;
+// Max product-name length on the ticket before we ellipsize. The ticket
+// content width is ~211pt; at 8pt Inter a 40-char name ≈ 175pt, leaving
+// room for the right-aligned `2 × $125.00` total column.
+const TICKET_NAME_MAX_CHARS = 40;
 
 export function LineItemsTable({ items, variant = 'a4' }: LineItemsTableProps) {
-  const labels = HEADER_LABELS[variant];
-  const ticketHeaderStyles =
-    variant === 'ticket' ? [SHARED_STYLES.table.ticketHeaderCell] : [];
-  const ticketCellContainerStyles =
-    variant === 'ticket' ? [SHARED_STYLES.table.ticketCellContainer] : [];
-  const ticketCellStyles =
-    variant === 'ticket' ? [SHARED_STYLES.table.ticketCell] : [];
-  const ticketCellMutedStyles =
-    variant === 'ticket' ? [SHARED_STYLES.table.ticketCellMuted] : [];
-  const ticketCellNumericStyles =
-    variant === 'ticket' ? [SHARED_STYLES.table.ticketCellNumeric] : [];
+  const isTicket = variant === 'ticket';
+  const tokens = isTicket
+    ? SHARED_STYLES.modern.ticket.items
+    : SHARED_STYLES.modern.items;
+  const eyebrow = isTicket
+    ? SHARED_STYLES.modern.ticket.eyebrow
+    : SHARED_STYLES.modern.eyebrow;
 
   if (items.length === 0) {
     return (
-      <View>
-        <Text style={SHARED_STYLES.receipt.sectionHeader}>PRODUCTOS</Text>
-        <View style={SHARED_STYLES.table.wrapper}>
-          <View style={SHARED_STYLES.table.row}>
-            <Text style={SHARED_STYLES.table.emptyRow}>---</Text>
-          </View>
-        </View>
+      <View style={tokens.block}>
+        <Text style={eyebrow}>Productos</Text>
+        <Text style={tokens.empty}>---</Text>
       </View>
     );
   }
 
   return (
-    <View>
-      <Text style={SHARED_STYLES.receipt.sectionHeader}>PRODUCTOS</Text>
-      <View style={SHARED_STYLES.table.wrapper}>
-        <View style={SHARED_STYLES.table.headerRow}>
-          <Text
-            style={[
-              SHARED_STYLES.table.headerCell,
-              ...ticketHeaderStyles,
-              SHARED_STYLES.table.colProduct,
-            ]}
-          >
-            {labels.product}
-          </Text>
-          <Text
-            style={[
-              SHARED_STYLES.table.headerCell,
-              ...ticketHeaderStyles,
-              SHARED_STYLES.table.colQuantity,
-            ]}
-          >
-            {labels.quantity}
-          </Text>
-          <Text
-            style={[
-              SHARED_STYLES.table.headerCell,
-              ...ticketHeaderStyles,
-              SHARED_STYLES.table.colUnitPrice,
-            ]}
-          >
-            {labels.unitPrice}
-          </Text>
-          <Text
-            style={[
-              SHARED_STYLES.table.headerCell,
-              ...ticketHeaderStyles,
-              SHARED_STYLES.table.colDiscount,
-            ]}
-          >
-            {labels.discount}
-          </Text>
-          <Text
-            style={[
-              SHARED_STYLES.table.headerCell,
-              ...ticketHeaderStyles,
-              SHARED_STYLES.table.colSubtotal,
-            ]}
-          >
-            {labels.subtotal}
-          </Text>
-        </View>
-
-        {items.map((item, index) => (
-          <View
-            key={`${item.productName}-${index}`}
-            style={SHARED_STYLES.table.row}
-          >
-            <View
-              style={[
-                SHARED_STYLES.table.cellContainer,
-                ...ticketCellContainerStyles,
-                SHARED_STYLES.table.colProduct,
-              ]}
-            >
-              <Text style={[SHARED_STYLES.table.cell, ...ticketCellStyles]}>
-                {item.productName}
-              </Text>
-              {item.variantName ? (
-                <Text
-                  style={[
-                    SHARED_STYLES.table.cellMuted,
-                    ...ticketCellMutedStyles,
-                  ]}
-                >
-                  {item.variantName}
-                </Text>
-              ) : null}
-            </View>
-            <Text
-              style={[
-                SHARED_STYLES.table.cellNumeric,
-                ...ticketCellNumericStyles,
-                SHARED_STYLES.table.cellContainer,
-                ...ticketCellContainerStyles,
-                SHARED_STYLES.table.colQuantity,
-              ]}
-            >
-              {formatQuantity(item.quantity)}
+    <View style={tokens.block}>
+      <Text style={eyebrow}>Productos</Text>
+      {items.map((item, index) => (
+        <View key={`${item.productName}-${index}`} style={tokens.row}>
+          <View style={lineRowStyles.leftColumn}>
+            <Text style={tokens.productName}>
+              {isTicket
+                ? truncateProductName(item.productName)
+                : item.productName}
             </Text>
-            <Text
-              style={[
-                SHARED_STYLES.table.cellNumeric,
-                ...ticketCellNumericStyles,
-                SHARED_STYLES.table.cellContainer,
-                ...ticketCellContainerStyles,
-                SHARED_STYLES.table.colUnitPrice,
-              ]}
-            >
+            {item.variantName ? (
+              <Text style={tokens.productVariant}>
+                {isTicket
+                  ? truncateProductName(item.variantName)
+                  : item.variantName}
+              </Text>
+            ) : null}
+          </View>
+          <View style={lineRowStyles.rightColumn}>
+            <Text style={tokens.qtyLine}>
+              {formatQuantity(item.quantity)} ×{' '}
               {formatCurrency(item.unitPriceCents)}
             </Text>
-            <View
-              style={[
-                SHARED_STYLES.table.cellContainer,
-                ...ticketCellContainerStyles,
-                SHARED_STYLES.table.colDiscount,
-              ]}
-            >
-              {item.discountTitle && item.discountAmountCents ? (
-                <>
-                  <Text
-                    style={[
-                      SHARED_STYLES.table.cellNumeric,
-                      ...ticketCellNumericStyles,
-                    ]}
-                  >
-                    -{formatCurrency(item.discountAmountCents)}
-                  </Text>
-                  <Text
-                    style={[
-                      SHARED_STYLES.table.cellMuted,
-                      ...ticketCellMutedStyles,
-                    ]}
-                  >
-                    {item.discountTitle}
-                  </Text>
-                </>
-              ) : (
-                <Text
-                  style={[
-                    SHARED_STYLES.table.cellMuted,
-                    ...ticketCellMutedStyles,
-                  ]}
-                >
-                  ---
-                </Text>
-              )}
-            </View>
-            <Text
-              style={[
-                SHARED_STYLES.table.cellNumeric,
-                ...ticketCellNumericStyles,
-                SHARED_STYLES.table.cellContainer,
-                ...ticketCellContainerStyles,
-                SHARED_STYLES.table.colSubtotal,
-              ]}
-            >
+            <Text style={tokens.lineTotal}>
               {formatCurrency(item.subtotalCents)}
             </Text>
           </View>
-        ))}
-      </View>
+        </View>
+      ))}
     </View>
   );
+}
+
+/**
+ * Local column layout for each line — left (name/variant) flexes and
+ * shrinks, right (qty/unit + total) stays anchored to the row edge.
+ */
+const lineRowStyles = {
+  leftColumn: {
+    flexDirection: 'column' as const,
+    flexGrow: 1,
+    flexShrink: 1,
+    paddingRight: 8,
+  },
+  rightColumn: {
+    flexDirection: 'column' as const,
+    alignItems: 'flex-end' as const,
+    flexShrink: 0,
+  },
+};
+
+/**
+ * Truncate long names on the narrow ticket with a trailing ellipsis.
+ * react-pdf 4.x has no text-overflow ellipsis, so we clip at the
+ * character level. Only the ticket variant truncates; A4 lets names
+ * wrap naturally.
+ */
+function truncateProductName(value: string): string {
+  if (value.length <= TICKET_NAME_MAX_CHARS) {
+    return value;
+  }
+  return `${value.slice(0, TICKET_NAME_MAX_CHARS - 1)}…`;
 }
 
 /**

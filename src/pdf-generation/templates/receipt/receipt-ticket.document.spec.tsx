@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { renderToBuffer } from '@react-pdf/renderer';
 import { ReceiptTicketDocument } from './receipt-ticket.document';
 import type { ReceiptDocumentProps } from './receipt.types';
+import { SHARED_STYLES } from '../shared';
 
 const SOURCE = readFileSync(`${__dirname}/receipt-ticket.document.tsx`, 'utf8');
 
@@ -55,41 +56,61 @@ describe('ReceiptTicketDocument', () => {
     expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
   });
 
-  it('renders cashier and seller inline in one row', () => {
-    expect(SOURCE).toMatch(/saleMeta:\s*\{\s*flexDirection: 'row'/);
+  it('renders cashier and seller inline in one compact operator row', () => {
     expect(SOURCE).toContain(
-      '<MetaField label="CAJERO" value={sale.cashier} />',
+      '<OperatorMeta cashier={sale.cashier} seller={sale.seller} />',
     );
-    expect(SOURCE).toContain(
-      '<MetaField label="VENDEDOR" value={sale.seller} />',
+    expect(SHARED_STYLES.modern.ticket.operator).toHaveProperty(
+      'row',
+      expect.objectContaining({ flexDirection: 'row' }),
     );
   });
 
-  it('uses abbreviated product headers', () => {
+  it('uses the compact ticket product rows', () => {
     expect(SOURCE).toContain(
       '<LineItemsTable items={items} variant="ticket" />',
     );
+    expect(SHARED_STYLES.modern.ticket.items).toHaveProperty(
+      'row',
+      expect.objectContaining({ flexDirection: 'row' }),
+    );
   });
 
-  it('uses a smaller company title and hides address/phone for the ticket', () => {
-    // The ticket (227pt wide) cannot fit the default 18pt HoundFe
-    // title plus the long address/phone block — the descenders of the
-    // title collide with the FARMACIA subtitle, and address/phone
-    // dominate the header. The ticket document opts into a compact
-    // header by passing `titleSize="small"` and omitting address/phone.
-    expect(SOURCE).toContain('titleSize="small"');
+  it('uses the compact ticket header variant and hides address/phone for the ticket', () => {
+    // The ticket (227pt wide) cannot fit the A4 16pt brand block plus a
+    // long address/phone line. The ticket document opts into the compact
+    // header by passing `variant="ticket"` and omitting address/phone.
+    expect(SOURCE).toContain('variant="ticket"');
     expect(SOURCE).not.toContain('address={business.address}');
     expect(SOURCE).not.toContain('phone={business.phone}');
   });
 
-  it('renders the brand accent bar above the receipt content', () => {
-    expect(SOURCE).toContain('SHARED_STYLES.receipt.brandAccentBar');
+  it('renders through the modern ticket token set with the runtime font family', () => {
+    // The redesigned ticket binds to the compact `modern.ticket` tokens
+    // (no legacy brand accent bar) and resolves the font family at render
+    // time so a font-CDN outage degrades safely.
+    expect(SOURCE).toContain('SHARED_STYLES.modern.ticket.page');
+    expect(SOURCE).toContain('getModernFontFamily()');
+    expect(SOURCE).not.toContain('SHARED_STYLES.receipt');
   });
 
   it('uses tighter ticket page padding (8pt) than the A4 page', () => {
-    // 8pt horizontal / 8pt vertical keeps the receipt snug against
-    // the 227pt-wide page without bleeding into the print margin.
-    expect(SOURCE).toMatch(/paddingHorizontal:\s*8/);
-    expect(SOURCE).toMatch(/paddingVertical:\s*8/);
+    // 8pt keeps the receipt snug against the 227pt-wide page without
+    // bleeding into the print margin. The A4 page uses the modern.page
+    // padding (20pt).
+    expect(SHARED_STYLES.modern.ticket.page).toEqual(
+      expect.objectContaining({ padding: 8 }),
+    );
+    expect(SHARED_STYLES.modern.page).toEqual(
+      expect.objectContaining({ padding: 20 }),
+    );
+  });
+
+  it('keeps the ticket total at the largest blue size that fits (15pt)', () => {
+    // The ticket cannot host the A4 18pt total value; 15pt bold blue is
+    // the maximum that fits the 227pt width.
+    expect(SHARED_STYLES.modern.ticket.totals.totalValue).toEqual(
+      expect.objectContaining({ fontSize: 15, color: '#2563EB' }),
+    );
   });
 });
