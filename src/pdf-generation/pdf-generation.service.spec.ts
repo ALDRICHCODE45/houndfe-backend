@@ -425,6 +425,7 @@ describe('PdfGenerationService', () => {
           lastName: string | null;
           email: string | null;
         } | null;
+        seller: { id: string; name: string } | null;
         items: Array<Record<string, unknown>>;
         subtotalCents: number;
         discountCents: number;
@@ -474,6 +475,10 @@ describe('PdfGenerationService', () => {
           firstName: 'Maria',
           lastName: null,
           email: 'maria@example.com',
+        },
+        seller: {
+          id: 'user-1',
+          name: 'Ana Vendedora',
         },
         createdAt: new Date('2026-07-20T15:00:00.000Z'),
         updatedAt: new Date('2026-07-20T15:00:00.000Z'),
@@ -558,6 +563,9 @@ describe('PdfGenerationService', () => {
           name: 'Maria',
           email: 'maria@example.com',
         },
+        seller: {
+          name: 'Ana Vendedora',
+        },
         totals: {
           subtotalCents: 10000,
           discountCents: 0,
@@ -573,6 +581,20 @@ describe('PdfGenerationService', () => {
         unitPriceCents: 5000,
         subtotalCents: 10000,
       });
+    });
+
+    it('falls back to sellerUserId when the wire DTO carries no seller snapshot', async () => {
+      // The `send()` flow builds its wire DTO from the entity directly
+      // (no `seller` snapshot), so buildQuotationProps must fall back to
+      // the raw `sellerUserId` — never an empty Vendedor row on the PDF.
+      const quotation = makeQuotationResponse({ seller: undefined });
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      await service.renderQuotationPdf(quotation as never, 'quotation-a4');
+
+      const renderedElement = renderer.renderToStream.mock.calls[0][0];
+      const props = renderedElement.props as Record<string, unknown>;
+      expect(props.seller).toEqual({ name: 'user-1' });
     });
 
     it('wraps renderer failures in InternalServerErrorException (PDF_GENERATION_FAILED)', async () => {

@@ -40,6 +40,9 @@ const baseProps: QuotationDocumentProps = {
     name: 'María López',
     email: 'maria@example.com',
   },
+  seller: {
+    name: 'Ana Vendedora',
+  },
   items: [
     {
       productName: 'Collar clásico',
@@ -83,6 +86,30 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
     expect(source).toContain('SHARED_STYLES.modern.header');
     expect(source).toContain('COTIZACIÓN');
+  });
+
+  it('renders the seller display name in the header meta card', async () => {
+    // Spec: the assignable seller must appear on the quotation A4 PDF.
+    // Source-level guarantee — the header renders a `VENDEDOR` line fed
+    // from the `sellerName` prop (resolved from `seller.name`).
+    const buffer = await renderToBuffer(<QuotationA4Document {...baseProps} />);
+    expect(buffer.length).toBeGreaterThan(0);
+
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
+    expect(source).toContain('VENDEDOR {sellerName}');
+    expect(source).toContain('sellerName={seller?.name ?? null}');
+  });
+
+  it('renders without a VENDEDOR line when seller is null', async () => {
+    const propsNoSeller: QuotationDocumentProps = {
+      ...baseProps,
+      seller: null,
+    };
+    const buffer = await renderToBuffer(
+      <QuotationA4Document {...propsNoSeller} />,
+    );
+    expect(buffer.length).toBeGreaterThan(0);
   });
 
   it('exposes a QuotationDocumentProps type with no payment fields', () => {
