@@ -8,6 +8,7 @@
  *
  * Visible contract (unchanged from the legacy layout):
  *   - Header title "COTIZACIÓN" + folio (quotation id) + creation date.
+ *   - Seller display name ("VENDEDOR …") in the header meta card.
  *   - Customer name AND email (the email travels with the PDF send).
  *   - Line items with product name + variant; discount lines are folded
  *     into the per-line quantity/unit subtotal (see `ItemsList`).
@@ -56,6 +57,8 @@ export interface QuotationDocumentProps {
     name: string | null;
     email: string | null;
   };
+  /** Seller display name (the person who brought in the client). */
+  seller: { name: string } | null;
   items: LineItem[];
   totals: {
     subtotalCents: number;
@@ -68,6 +71,7 @@ export function QuotationA4Document({
   business,
   quotation,
   customer,
+  seller,
   items,
   totals,
 }: QuotationDocumentProps) {
@@ -87,6 +91,7 @@ export function QuotationA4Document({
             companyName={business.companyName}
             folio={quotation.id}
             date={quotation.date}
+            sellerName={seller?.name ?? null}
           />
 
           <CustomerCard customer={customer} />
@@ -104,18 +109,21 @@ export function QuotationA4Document({
 
 /**
  * Header — brand block on the left (logo + company name + "Punto de Venta"),
- * and a light-gray meta card on the right carrying COTIZACIÓN / FOLIO / FECHA.
+ * and a light-gray meta card on the right carrying COTIZACIÓN / FOLIO / FECHA
+ * / VENDEDOR.
  */
 function QuotationHeader({
   logoUrl,
   companyName,
   folio,
   date,
+  sellerName,
 }: {
   logoUrl?: string;
   companyName: string;
   folio: string;
   date: string;
+  sellerName: string | null;
 }) {
   return (
     <View style={SHARED_STYLES.modern.header.row}>
@@ -145,6 +153,11 @@ function QuotationHeader({
         <Text style={SHARED_STYLES.modern.header.metaDate}>
           FECHA {formatDateEsMX(date)}
         </Text>
+        {sellerName ? (
+          <Text style={SHARED_STYLES.modern.header.metaDate}>
+            VENDEDOR {sellerName}
+          </Text>
+        ) : null}
       </View>
     </View>
   );

@@ -23,6 +23,7 @@ import {
   QuotationCustomerHasNoEmailError,
   QuotationHasNoItemsError,
   QuotationNotFoundError,
+  QuotationSellerNotFoundError,
 } from '../domain/quotation.errors';
 import type {
   IQuotationRepository,
@@ -1633,6 +1634,77 @@ describe('QuotationsService — WU2', () => {
         }),
         'quotation-a4',
       );
+    });
+  });
+
+  describe('assignSeller', () => {
+    it('assigns a different seller on a DRAFT quotation and returns the response with the seller name', async () => {
+      const draft = makeQuotation({ sellerUserId: SELLER });
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(async (q) => q),
+      });
+      const prisma = makeTenantPrisma({
+        user: {
+          findUnique: jest.fn(async () => ({
+            id: 'seller-2',
+            name: 'Pedro Pérez',
+          })),
+        },
+      });
+      const service = buildService(repo, prisma);
+
+      const result = await service.assignSeller(draft.id, {
+        sellerUserId: 'seller-2',
+      });
+
+      expect(repo.save).toHaveBeenCalledTimes(1);
+      const saved = (repo.save as jest.Mock).mock.calls[0][0] as Quotation;
+      expect(saved.sellerUserId).toBe('seller-2');
+      expect(result.sellerUserId).toBe('seller-2');
+      expect(result.seller).toEqual({ id: 'seller-2', name: 'Pedro Pérez' });
+    });
+
+    it('falls back to the raw seller id on the wire when the user record is missing', async () => {
+      // The seller-name fallback lives in `loadSellerNameForWire` (used
+      // by `toResponse`) — a quotation whose seller user was later
+      // deleted still renders the UUID as the display name.
+      const draft = makeQuotation({ sellerUserId: SELLER });
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+      });
+      // Default `makeTenantPrisma` user.findUnique → null.
+      const service = buildService(repo, makeTenantPrisma());
+
+      const result = await service.findOne(draft.id);
+
+      expect(result.seller).toEqual({ id: SELLER, name: SELLER });
+    });
+
+    it('throws 404 QuotationNotFoundError when the quotation is missing', async () => {
+      const repo = makeRepo({
+        findById: jest.fn(async () => null),
+      });
+      const service = buildService(repo, makeTenantPrisma());
+
+      await expect(
+        service.assignSeller('missing-id', { sellerUserId: 'seller-2' }),
+      ).rejects.toBeInstanceOf(QuotationNotFoundError);
+    });
+
+    it('throws 404 QuotationSellerNotFoundError when the seller user does not exist', async () => {
+      const draft = makeQuotation({ sellerUserId: SELLER });
+      const repo = makeRepo({
+        findById: jest.fn(async (id) => (id === draft.id ? draft : null)),
+        save: jest.fn(),
+      });
+      // Default `makeTenantPrisma` user.findUnique → null (seller missing).
+      const service = buildService(repo, makeTenantPrisma());
+
+      await expect(
+        service.assignSeller(draft.id, { sellerUserId: 'ghost-user' }),
+      ).rejects.toBeInstanceOf(QuotationSellerNotFoundError);
+      expect(repo.save).not.toHaveBeenCalled();
     });
   });
 });

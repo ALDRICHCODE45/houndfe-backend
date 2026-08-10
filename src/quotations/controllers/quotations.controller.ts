@@ -12,6 +12,7 @@
  *   - `POST   /quotations/drafts/:id/cancel`                      — cancel
  *   - `POST   /quotations/drafts/:id/promotions/:promoId/veto`    — vetoPromotion
  *   - `DELETE /quotations/drafts/:id/promotions/:promoId/veto`    — optInPromotion
+ *   - `PUT    /quotations/drafts/:id/seller`                      — assignSeller (DRAFT-only)
  *
  * All routes are guarded by the standard triple
  * (JWT + tenant-context + permissions). The permission strings pair
@@ -49,6 +50,7 @@ import { PdfGenerationService } from '../../pdf-generation/pdf-generation.servic
 import { QuotationNotFoundError } from '../domain/quotation.errors';
 import { CreateQuotationDto } from '../dto/create-quotation.dto';
 import { AssignCustomerDto } from '../dto/assign-customer.dto';
+import { AssignSellerDto } from '../dto/assign-seller.dto';
 import { SetPriceListDto } from '../dto/set-price-list.dto';
 import { QuotationQueryDto } from '../dto/quotation-query.dto';
 import { AddQuotationItemDto } from '../dto/add-quotation-item.dto';
@@ -125,6 +127,28 @@ export class QuotationsController {
     @Body() dto: AssignCustomerDto,
   ) {
     return this.quotationsService.assignCustomer(id, dto);
+  }
+
+  /**
+   * `PUT /quotations/drafts/:id/seller` — assign the seller user who
+   * brought in the client. Distinct from the authenticated user who
+   * created/sends the quotation. Mirrors `PUT /sales/:id/seller`.
+   *
+   * Status code mapping (handled by the DomainExceptionFilter):
+   *   - `QuotationNotFoundError`          → 404 (quotation missing)
+   *   - `QuotationSellerNotFoundError`    → 404 (seller user missing)
+   *   - `QuotationNotDraftError`          → 409 (quotation not DRAFT)
+   *
+   * Only allowed while the quotation is DRAFT.
+   */
+  @Put('drafts/:id/seller')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Quotation'])
+  assignSeller(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: AssignSellerDto,
+  ) {
+    return this.quotationsService.assignSeller(id, dto);
   }
 
   /**

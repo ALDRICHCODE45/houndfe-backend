@@ -14,6 +14,7 @@ function makeMockService() {
   return {
     openDraft: jest.fn(),
     assignCustomer: jest.fn(),
+    assignSeller: jest.fn(),
     setPriceList: jest.fn(),
     addItem: jest.fn(),
     updateItemQuantity: jest.fn(),
@@ -119,6 +120,37 @@ describe('QuotationsController', () => {
 
       expect(service.assignCustomer).toHaveBeenCalledWith('q-1', dto);
       expect(result).toEqual({ id: 'q-1' });
+    });
+  });
+
+  describe('PUT /quotations/drafts/:id/seller', () => {
+    it('passes (id, dto) to service.assignSeller', async () => {
+      service.assignSeller.mockResolvedValue({
+        id: 'q-1',
+        sellerUserId: 'seller-2',
+        seller: { id: 'seller-2', name: 'Pedro Pérez' },
+      });
+      const dto = { sellerUserId: 'seller-2' };
+
+      const result = await controller.assignSeller('q-1', dto);
+
+      expect(service.assignSeller).toHaveBeenCalledWith('q-1', dto);
+      expect(result).toEqual({
+        id: 'q-1',
+        sellerUserId: 'seller-2',
+        seller: { id: 'seller-2', name: 'Pedro Pérez' },
+      });
+    });
+
+    it('lets service errors propagate (no swallowing)', async () => {
+      // The DomainExceptionFilter maps QuotationNotFoundError /
+      // QuotationSellerNotFoundError → 404 and QuotationNotDraftError
+      // → 409. The controller is a thin pass-through.
+      service.assignSeller.mockRejectedValue(new Error('boom'));
+
+      await expect(
+        controller.assignSeller('q-1', { sellerUserId: 'seller-2' }),
+      ).rejects.toThrow('boom');
     });
   });
 

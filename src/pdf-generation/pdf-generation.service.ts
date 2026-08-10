@@ -442,6 +442,13 @@ export class PdfGenerationService implements OnModuleInit {
           : null,
         email: quotation.customer?.email ?? null,
       },
+      // The seller display name rides on `seller.name` when present; the
+      // send-flow wire DTO (built in `QuotationsService.send` from the
+      // entity directly) does NOT carry the `seller` snapshot, so we fall
+      // back to the raw `sellerUserId` — never render an empty Vendedor row.
+      seller: {
+        name: quotation.seller?.name ?? quotation.sellerUserId,
+      },
       items,
       totals: {
         subtotalCents: quotation.subtotalCents,
