@@ -98,6 +98,10 @@ const makeTenantPrisma = (
           promotion: {
             findUnique: jest.fn(async () => ({ id: 'any', method: 'MANUAL' })),
           },
+          // User lookup used by `loadSellerNameForWire` when composing
+          // the quotation email. Defaults to null so send() falls back
+          // to the raw seller UUID unless a test overrides it.
+          user: { findUnique: jest.fn(async () => null) },
           ...client,
         }) as never,
     ),
@@ -1341,9 +1345,22 @@ describe('QuotationsService — WU2', () => {
       });
       const mailer = makeMailer();
       const pdfService = makePdfService();
+      // Seller exists in the tenant user table → the email must render
+      // the display name, not the raw UUID.
+      const prisma = makeTenantPrisma({
+        user: {
+          findUnique: jest.fn(async () => ({ id: SELLER, name: 'Berlín Pérez' })),
+        },
+        customer: {
+          findUnique: jest.fn(async () => ({
+            ...customerWithEmail,
+            email: 'maria@example.com',
+          })),
+        },
+      });
       const service = buildService(
         repo,
-        makeCustomerPrisma(customerWithEmail),
+        prisma,
         undefined,
         undefined,
         mailer,
@@ -1370,6 +1387,14 @@ describe('QuotationsService — WU2', () => {
         /^cotizacion-.+\.pdf$/,
       );
       expect(mailInput.attachments![0].contentType).toBe('application/pdf');
+      // The rendered HTML must carry the seller's display name (not
+      // the UUID) and a readable localized date (not the raw ISO).
+      const createdAtIso = (draft.createdAt ?? new Date()).toISOString();
+      expect(mailInput.html).toContain('Berlín Pérez');
+      expect(mailInput.html).not.toContain(SELLER);
+      // Localized date renders as DD/MM/YYYY — the raw ISO never leaks.
+      expect(mailInput.html).toMatch(/\d{2}\/\d{2}\/\d{4}/);
+      expect(mailInput.html).not.toContain(createdAtIso);
       // The save MUST carry the SENT entity — verify by inspecting the
       // save call args.
       expect(repo.save).toHaveBeenCalledTimes(1);

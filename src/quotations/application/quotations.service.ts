@@ -924,6 +924,11 @@ export class QuotationsService {
    * Attachment: the rendered PDF as `application/pdf` base64, named
    * `cotizacion-{shortId}.pdf` so the recipient downloads a stable,
    * recognizable filename.
+   *
+   * Readability: `quotationDate` is localized here (the template
+   * contract says the service owns localization) and `sellerName` is
+   * resolved from the user record — the wire DTO only carries the
+   * seller's UUID, never a display name.
    */
   private async buildQuotationMailInput(args: {
     customer: {
@@ -942,13 +947,17 @@ export class QuotationsService {
       .join(' ')
       .trim();
 
+    // Resolve the seller's display name — the response DTO only has
+    // the user UUID. Fall back to the UUID (previous behavior) when
+    // the user record is missing, so the email never breaks.
+    const sellerName = await this.loadSellerNameForWire(
+      draftResponse.sellerUserId,
+    );
+
     const emailProps: QuotationEmailProps = {
       businessName: 'HoundFe',
       quotationId: draftResponse.id,
-      quotationDate:
-        draftResponse.createdAt instanceof Date
-          ? draftResponse.createdAt.toISOString()
-          : new Date(draftResponse.createdAt).toISOString(),
+      quotationDate: formatEmailDate(draftResponse.createdAt),
       itemCount: draftResponse.items.length,
       totalFormatted: formatCurrency(draftResponse.totalCents),
       expiresAtIso: draftResponse.expiresAt
@@ -957,7 +966,7 @@ export class QuotationsService {
           : new Date(draftResponse.expiresAt).toISOString()
         : null,
       customerName: fullName || null,
-      sellerName: draftResponse.sellerUserId,
+      sellerName,
     };
 
     return {
@@ -1363,6 +1372,25 @@ export class QuotationsService {
       email: row.email ?? null,
     };
   }
+
+  /**
+   * Resolve a seller user's display name for the quotation email.
+   *
+   * The quotation DTO carries only `sellerUserId`; the email template
+   * renders a human-readable name. Reads the tenant-scoped `user`
+   * table by id and returns `name` when found, falling back to the
+   * raw id so an email never renders an empty Vendedor row.
+   */
+  private async loadSellerNameForWire(
+    sellerUserId: string,
+  ): Promise<string> {
+    const prisma = this.tenantPrisma.getClient();
+    const row = await prisma.user.findUnique({
+      where: { id: sellerUserId },
+      select: { name: true },
+    });
+    return row?.name ?? sellerUserId;
+  }
 }
 
 /**
@@ -1377,4 +1405,32 @@ function formatCurrency(cents: number): string {
   const sign = cents < 0 ? '-' : '';
   const abs = Math.abs(cents) / 100;
   return `${sign}$${abs.toFixed(2)}`;
+}
+
+/**
+ * Format a quotation timestamp as a readable Spanish date-time
+ * (`DD/MM/YYYY, HH:MM`). The email template contract says the service
+ * owns localization, so we never send a raw ISO string to the inbox.
+ *
+ * Uses `Intl.DateTimeFormat('es-MX')` (same locale as the receipt
+ * header and sibling email templates) and falls back to the raw ISO
+ * input if the value cannot be parsed.
+ */
+function formatEmailDate(value: Date | string): string {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return typeof value === 'string' ? value : '';
+  }
+  try {
+    return new Intl.DateTimeFormat('es-MX', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date);
+  } catch {
+    return date.toISOString().replace('T', ' ').slice(0, 16);
+  }
 }
