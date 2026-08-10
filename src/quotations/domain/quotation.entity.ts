@@ -95,6 +95,7 @@ export interface QuotationFromPersistenceProps {
  */
 export class Quotation {
   private _items: QuotationItem[] = [];
+  private _sellerUserId: string;
   private _customerId: string | null;
   private _globalPriceListId: string | null;
   private _priceListExplicitlySet: boolean;
@@ -106,7 +107,7 @@ export class Quotation {
 
   private constructor(
     public readonly id: string,
-    public readonly sellerUserId: string,
+    sellerUserId: string,
     public readonly status: QuotationStatus,
     public readonly subtotalCents: number = 0,
     public readonly discountCents: number = 0,
@@ -127,6 +128,7 @@ export class Quotation {
     taxRate: number = 0.16,
   ) {
     this._items = items;
+    this._sellerUserId = sellerUserId;
     this._customerId = customerId;
     this._globalPriceListId = globalPriceListId;
     this._priceListExplicitlySet = priceListExplicitlySet;
@@ -199,6 +201,10 @@ export class Quotation {
 
   get items(): ReadonlyArray<QuotationItem> {
     return this._items;
+  }
+
+  get sellerUserId(): string {
+    return this._sellerUserId;
   }
 
   get customerId(): string | null {
@@ -371,6 +377,19 @@ export class Quotation {
     }
     this._globalPriceListId = id;
     this._priceListExplicitlySet = explicit;
+  }
+
+  // ── Seller assignment ────────────────────────────────────────────────
+
+  /**
+   * Assign the seller user who brought in the client. Distinct from the
+   * authenticated user who created/sends the quotation — a sales rep may
+   * hand the document to a different seller. Mirrors `Sale.assignSeller`.
+   * Only allowed while the quotation is DRAFT.
+   */
+  assignSeller(userId: string): void {
+    this.ensureDraft();
+    this._sellerUserId = userId;
   }
 
   // ── Promotion state (veto / opt-in) ──────────────────────────────────

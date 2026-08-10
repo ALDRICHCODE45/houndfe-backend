@@ -89,6 +89,14 @@ export interface QuotationResponseDto {
    * rejected with 422 `QUOTATION_CUSTOMER_HAS_NO_EMAIL`).
    */
   customer: { id: string; firstName: string; lastName: string | null; email: string | null } | null;
+  /**
+   * Seller identity snapshot (id + display name) on the wire. Mirrors
+   * `customer` so the FE can render the Vendedor chip / PDF header
+   * without a separate `/users/:id` roundtrip. The name falls back to
+   * the raw `sellerUserId` when the user record is missing, so this is
+   * effectively always populated — kept nullable for forward-compat.
+   */
+  seller: { id: string; name: string } | null;
   createdAt: Date;
   updatedAt: Date;
 }

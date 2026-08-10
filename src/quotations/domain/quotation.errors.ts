@@ -74,3 +74,14 @@ export class QuotationCustomerHasNoEmailError extends BusinessRuleViolationError
     );
   }
 }
+
+/**
+ * Raised by `QuotationsService.assignSeller` when the target seller user
+ * does not exist in the tenant. The HTTP layer maps this to a 404 via
+ * the `SELLER_NOT_FOUND` code (see `DomainExceptionFilter`).
+ */
+export class QuotationSellerNotFoundError extends BusinessRuleViolationError {
+  constructor() {
+    super('SELLER_NOT_FOUND', 'SELLER_NOT_FOUND');
+  }
+}

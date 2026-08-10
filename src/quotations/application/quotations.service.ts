@@ -57,6 +57,7 @@ import {
   QuotationHasNoItemsError,
   QuotationNotDraftError,
   QuotationNotFoundError,
+  QuotationSellerNotFoundError,
 } from '../domain/quotation.errors';
 import {
   EntityNotFoundError,
@@ -64,6 +65,7 @@ import {
 } from '../../shared/domain/domain-error';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { QuotationResponseDto } from '../dto/quotation-response.dto';
+import type { AssignSellerDto } from '../dto/assign-seller.dto';
 import { ProductsService } from '../../products/products.service';
 import type {
   IPosEvaluatePromotionsUseCase,
@@ -626,10 +628,47 @@ export class QuotationsService {
     if (!draft.priceListExplicitlySet && customer.globalPriceListId) {
       draft.setGlobalPriceList(customer.globalPriceListId, false);
     }
-
     draft.assignCustomer(customer.id, draft.globalPriceListId);
 
     await this.recomputePricingAndPromotions(draft);
+    const persisted = await this.quotationRepo.save(draft);
+    return this.toResponse(persisted);
+
+  }
+
+  /**
+   * Assign a different seller user to an existing DRAFT quotation.
+   *
+   * The seller (the person who brought in the client) may differ from
+   * the authenticated user who created/sends the quotation. Mirrors the
+   * sales `assignSeller` contract:
+   *
+   *   1. Load the draft (404 if absent in the current tenant).
+   *   2. Verify the seller user exists in the tenant (404 if absent).
+   *   3. Mutate the entity (`assignSeller` enforces the DRAFT-only rule).
+   *   4. Persist + return the response (carries `seller: { id, name }`).
+   *
+   * The DRAFT-only guard lives on the entity (`assignSeller` →
+   * `ensureDraft`), so a non-DRAFT quotation throws
+   * `QuotationNotDraftError` → 409 before any write happens.
+   */
+  async assignSeller(
+    id: string,
+    dto: AssignSellerDto,
+  ): Promise<QuotationResponseDto> {
+    const draft = await this.quotationRepo.findById(id);
+    if (!draft) {
+      throw new QuotationNotFoundError(id);
+    }
+
+    const seller = await this.tenantPrisma
+      .getClient()
+      .user.findUnique({ where: { id: dto.sellerUserId } });
+    if (!seller) {
+      throw new QuotationSellerNotFoundError();
+    }
+
+    draft.assignSeller(dto.sellerUserId);
     const persisted = await this.quotationRepo.save(draft);
     return this.toResponse(persisted);
   }
@@ -1317,8 +1356,15 @@ export class QuotationsService {
    * `findById` aggregate lean), so the service does a single
    * `findUnique` per read here. The PDF preview + send flow consume
    * `customer.email` directly from the wire shape.
+   *
+   * Assign-seller — resolves the seller's display name via
+   * `loadSellerNameForWire` (fallback: the raw UUID) and surfaces
+   * `seller: { id, name }` on the wire. Like the per-row customer
+   * lookup, this is one `findUnique` per `toResponse` call — the
+   * `findAll` path maps rows in a `Promise.all`, consistent with the
+   * existing per-row customer enrichment.
    */
-  private toResponse(
+  private async toResponse(
     draft: Quotation,
     customer: {
       id: string;
@@ -1326,12 +1372,14 @@ export class QuotationsService {
       lastName: string | null;
       email: string | null;
     } | null = null,
-  ): QuotationResponseDto {
+  ): Promise<QuotationResponseDto> {
     const wire = draft.toResponse();
+    const sellerName = await this.loadSellerNameForWire(draft.sellerUserId);
     return {
       ...wire,
       effectiveStatus: draft.getEffectiveStatus(),
       customer,
+      seller: { id: draft.sellerUserId, name: sellerName },
     } as QuotationResponseDto;
   }
 

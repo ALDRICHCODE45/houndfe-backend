@@ -777,4 +777,52 @@ describe('Quotation Entity', () => {
       expect(sent.id).toBe(q.id);
     });
   });
+
+  describe('lifecycle — assignSeller (seller re-assignment, DRAFT-only)', () => {
+    const nonDraftQuotation = (status: 'SENT' | 'EXPIRED' | 'CANCELLED') =>
+      Quotation.fromPersistence({
+        id: `q-${status.toLowerCase()}`,
+        sellerUserId: SELLER,
+        customerId: null,
+        globalPriceListId: null,
+        priceListExplicitlySet: false,
+        status,
+        expiresAt: null,
+        cancelReason: status === 'CANCELLED' ? 'OTHER' : null,
+        subtotalCents: 0,
+        discountCents: 0,
+        totalCents: 0,
+        manuallyEnded: false,
+        items: [],
+        vetoedPromotionIds: [],
+        optedInManualPromotionIds: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+    it('mutates sellerUserId on a DRAFT quotation', () => {
+      const q = Quotation.create({ id: newQuotationId(), sellerUserId: SELLER });
+      q.assignSeller('seller-2');
+      expect(q.sellerUserId).toBe('seller-2');
+    });
+
+    it('throws on a SENT quotation', () => {
+      const q = nonDraftQuotation('SENT');
+      expect(() => q.assignSeller('seller-2')).toThrow(/SENT status/i);
+    });
+
+    it('throws on an EXPIRED quotation', () => {
+      const q = nonDraftQuotation('EXPIRED');
+      expect(() => q.assignSeller('seller-2')).toThrow(
+        BusinessRuleViolationError,
+      );
+    });
+
+    it('throws on a CANCELLED quotation', () => {
+      const q = nonDraftQuotation('CANCELLED');
+      expect(() => q.assignSeller('seller-2')).toThrow(
+        BusinessRuleViolationError,
+      );
+    });
+  });
 });
