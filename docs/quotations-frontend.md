@@ -17,6 +17,7 @@
 | `GET`    | `/quotations/:id`                                     | `read:Quotation`     | Detalle de una cotización                    |
 | `GET`    | `/quotations/:id/pdf?format=quotation-a4`             | `read:Quotation`     | Descargar/preview PDF                        |
 | `PUT`    | `/quotations/drafts/:id/customer`                     | `update:Quotation`   | Asignar cliente (auto-seed price list)       |
+| `PUT`    | `/quotations/drafts/:id/seller`                       | `update:Quotation`   | Asignar vendedor (solo DRAFT)                |
 | `PUT`    | `/quotations/drafts/:id/price-list`                   | `update:Quotation`   | Cambiar lista de precios                     |
 | `POST`   | `/quotations/drafts/:id/items`                        | `update:Quotation`   | Agregar producto                             |
 | `PATCH`  | `/quotations/drafts/:id/items/:itemId/quantity`       | `update:Quotation`   | Cambiar cantidad                             |
@@ -201,7 +202,46 @@ Renderiza el PDF de la cotización. Funciona en **cualquier estado** (DRAFT, SEN
 
 ---
 
-### 3.6 `PUT /quotations/drafts/:id/price-list` — Cambiar lista de precios
+### 3.6 `PUT /quotations/drafts/:id/seller` — Asignar vendedor
+
+Asigna un vendedor distinto al usuario autenticado (la persona que trajo al cliente puede diferir de quien crea/envía la cotización). Solo permitido mientras la cotización esté en `DRAFT`. El vendedor se muestra en el email **y** en el PDF A4.
+
+**Request**:
+```json
+{
+  "sellerUserId": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Response** `200`: cotización actualizada (mismo shape que detalle). El campo `seller` del response ahora trae `{ id, name }` con el nombre a mostrar del vendedor:
+
+```json
+{
+  "id": "a1b2c3d4-...",
+  "sellerUserId": "550e8400-e29b-41d4-a716-446655440000",
+  "seller": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "Pedro Pérez"
+  },
+  "status": "DRAFT"
+}
+```
+
+**Reglas**:
+- Cualquier usuario del tenant puede ser elegido (se valida que exista).
+- `sellerUserId` debe ser un UUID válido (`@IsUUID`), si no → `400 Bad Request` por validación de DTO.
+- El `name` del `seller` cae al `sellerUserId` crudo si el usuario no se encuentra al resolver el wire (nunca renderiza una fila "Vendedor" vacía).
+
+**Errores**:
+| Código | Mensaje | Causa |
+|--------|---------|-------|
+| `404` | `Quotation not found` | ID de cotización no existe |
+| `404` | `SELLER_NOT_FOUND` | El `sellerUserId` no existe en el tenant |
+| `409` | `Quotation is not DRAFT` | Solo se puede cambiar en estado DRAFT |
+
+---
+
+### 3.7 `PUT /quotations/drafts/:id/price-list` — Cambiar lista de precios
 
 **Request**:
 ```json
@@ -228,7 +268,7 @@ Para **quitar** la lista de precios y volver a la default global:
 
 ---
 
-### 3.7 `POST /quotations/drafts/:id/items` — Agregar producto
+### 3.8 `POST /quotations/drafts/:id/items` — Agregar producto
 
 **Request**:
 ```json
@@ -261,7 +301,7 @@ Para **quitar** la lista de precios y volver a la default global:
 
 ---
 
-### 3.8 `PATCH /quotations/drafts/:id/items/:itemId/quantity` — Cambiar cantidad
+### 3.9 `PATCH /quotations/drafts/:id/items/:itemId/quantity` — Cambiar cantidad
 
 **Request**:
 ```json
@@ -281,13 +321,13 @@ Para **quitar** la lista de precios y volver a la default global:
 
 ---
 
-### 3.9 `DELETE /quotations/drafts/:id/items/:itemId` — Quitar producto
+### 3.10 `DELETE /quotations/drafts/:id/items/:itemId` — Quitar producto
 
 **Response** `200`: cotización actualizada con el item removido y totales recalculados.
 
 ---
 
-### 3.10 `PATCH /quotations/drafts/:id/items/:itemId/price` — Sobrescribir precio
+### 3.11 `PATCH /quotations/drafts/:id/items/:itemId/price` — Sobrescribir precio
 
 **Request**:
 ```json
@@ -307,7 +347,7 @@ Para **quitar** la lista de precios y volver a la default global:
 
 ---
 
-### 3.11 Promociones manuales
+### 3.12 Promociones manuales
 
 #### `PUT /quotations/drafts/:id/manual-promotions/:promoId` — Aplicar
 
@@ -328,7 +368,7 @@ Quita una promo MANUAL previamente aplicada. Idempotente (no falla si ya estaba 
 
 ---
 
-### 3.12 Promociones automáticas (veto/opt-in)
+### 3.13 Promociones automáticas (veto/opt-in)
 
 #### `POST /quotations/drafts/:id/promotions/:promoId/veto` — Vetar
 
@@ -348,7 +388,7 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 
 ---
 
-### 3.13 `PATCH /quotations/drafts/:id/expiry` — Fecha de expiración
+### 3.14 `PATCH /quotations/drafts/:id/expiry` — Fecha de expiración
 
 **Request** (setear):
 ```json
@@ -372,7 +412,7 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 
 ---
 
-### 3.14 `POST /quotations/drafts/:id/send` — Enviar por email
+### 3.15 `POST /quotations/drafts/:id/send` — Enviar por email
 
 **Query params**:
 | Parámetro | Tipo    | Default | Descripción                                       |
@@ -403,7 +443,7 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 
 ---
 
-### 3.15 `POST /quotations/drafts/:id/cancel` — Cancelar
+### 3.16 `POST /quotations/drafts/:id/cancel` — Cancelar
 
 **Request**:
 ```json
@@ -430,7 +470,7 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 
 ---
 
-### 3.16 `PATCH /quotations/drafts/:id/notes` — Notas para el cliente
+### 3.17 `PATCH /quotations/drafts/:id/notes` — Notas para el cliente
 
 Persiste las notas visibles al cliente en el PDF/email. Se guardan en el backend (no en localStorage).
 
@@ -463,7 +503,7 @@ Persiste las notas visibles al cliente en el PDF/email. Se guardan en el backend
 
 ---
 
-### 3.17 `PATCH /quotations/drafts/:id/tax-rate` — Tasa de IVA
+### 3.18 `PATCH /quotations/drafts/:id/tax-rate` — Tasa de IVA
 
 Cambia la tasa de IVA de la cotización caso por caso (exención de IVA incluida). El `taxCents` se recalcula automáticamente del lado del backend.
 
@@ -499,7 +539,7 @@ Cambia la tasa de IVA de la cotización caso por caso (exención de IVA incluida
 
 ---
 
-### 3.18 `DELETE /quotations/:id` — Eliminar cotización
+### 3.19 `DELETE /quotations/:id` — Eliminar cotización
 
 Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden eliminar — `SENT` y `EXPIRED` son registros permanentes (ya fueron comunicados al cliente).
 
@@ -525,6 +565,11 @@ Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden elimina
 ```typescript
 {
   id: string;                          // UUID
+  sellerUserId: string;                // UUID del vendedor actual
+  seller: {                            // snapshot de identidad del vendedor
+    id: string;
+    name: string;                      // nombre a mostrar (fallback: UUID crudo)
+  } | null;
   customerId: string | null;
   customer: {                          // null si no hay customer asignado
     id: string;
