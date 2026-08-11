@@ -155,6 +155,7 @@ function makePersistenceProduct(
     quantity: overrides.quantity ?? 0,
     minQuantity: 0,
     hasVariants: overrides.hasVariants ?? false,
+    serviceDetail: null,
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
   };
@@ -1734,6 +1735,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
       quantity: overrides.quantity ?? 5,
       minQuantity: overrides.minQuantity ?? 3,
       hasVariants: false,
+      serviceDetail: null,
       createdAt: now,
       updatedAt: now,
     };

@@ -37,6 +37,22 @@ type TxClient = {
   [key: string]: unknown;
 };
 
+/**
+ * ServiceDetail relation payload — included on every product read so
+ * `Product.fromPersistence` always has the optional 1:1 row at hand.
+ * SERVICE rows always have a serviceDetail; PRODUCT rows always have
+ * `serviceDetail: null`. The shape is consumed by `toDomain` and by the
+ * service layer's `buildFullResponse`.
+ */
+const PRODUCT_WITH_SERVICE_DETAIL_INCLUDE = {
+  serviceDetail: true,
+} as const satisfies Prisma.ProductInclude;
+
+type PrismaProductWithServiceDetail = Prisma.ProductGetPayload<{
+  include: typeof PRODUCT_WITH_SERVICE_DETAIL_INCLUDE;
+}>;
+
+
 @Injectable()
 export class PrismaProductRepository implements IProductRepository {
   constructor(
@@ -48,7 +64,10 @@ export class PrismaProductRepository implements IProductRepository {
 
   async findById(id: string): Promise<Product | null> {
     const prisma = this.tenantPrisma.getClient();
-    const data = await prisma.product.findUnique({ where: { id } });
+    const data = await prisma.product.findUnique({
+      where: { id },
+      include: PRODUCT_WITH_SERVICE_DETAIL_INCLUDE,
+    });
     return data ? this.toDomain(data) : null;
   }
 
@@ -56,6 +75,7 @@ export class PrismaProductRepository implements IProductRepository {
     const prisma = this.tenantPrisma.getClient();
     const data = await prisma.product.findFirst({
       where: { sku: sku.toUpperCase() },
+      include: PRODUCT_WITH_SERVICE_DETAIL_INCLUDE,
     });
     return data ? this.toDomain(data) : null;
   }
@@ -64,6 +84,7 @@ export class PrismaProductRepository implements IProductRepository {
     const prisma = this.tenantPrisma.getClient();
     const data = await prisma.product.findFirst({
       where: { barcode },
+      include: PRODUCT_WITH_SERVICE_DETAIL_INCLUDE,
     });
     return data ? this.toDomain(data) : null;
   }
@@ -72,6 +93,7 @@ export class PrismaProductRepository implements IProductRepository {
     const prisma = this.tenantPrisma.getClient();
     const data = await prisma.product.findMany({
       orderBy: { createdAt: 'desc' },
+      include: PRODUCT_WITH_SERVICE_DETAIL_INCLUDE,
     });
     return data.map((d) => this.toDomain(d));
   }
@@ -137,6 +159,7 @@ export class PrismaProductRepository implements IProductRepository {
         hasVariants: p.hasVariants,
         tenantId,
       } as Prisma.ProductUncheckedCreateInput,
+      include: PRODUCT_WITH_SERVICE_DETAIL_INCLUDE,
     });
     return this.toDomain(saved);
   }
@@ -601,7 +624,7 @@ export class PrismaProductRepository implements IProductRepository {
     }
   }
 
-  private toDomain(data: PrismaProduct): Product {
+  private toDomain(data: PrismaProductWithServiceDetail): Product {
     return Product.fromPersistence({
       id: data.id,
       name: data.name,
@@ -628,6 +651,14 @@ export class PrismaProductRepository implements IProductRepository {
       quantity: data.quantity,
       minQuantity: data.minQuantity,
       hasVariants: data.hasVariants,
+      serviceDetail: data.serviceDetail
+        ? {
+            id: data.serviceDetail.id,
+            productId: data.serviceDetail.productId,
+            capacity: data.serviceDetail.capacity,
+            notes: data.serviceDetail.notes,
+          }
+        : null,
       createdAt: data.createdAt,
       updatedAt: data.updatedAt,
     });

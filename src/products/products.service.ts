@@ -561,6 +561,7 @@ export class ProductsService {
           select: { priceCents: true },
           take: 1,
         },
+        serviceDetail: true,
       },
       ...(skip !== undefined ? { skip } : {}),
       ...(take !== undefined ? { take } : {}),
@@ -593,6 +594,14 @@ export class ProductsService {
         quantity: product.quantity,
         minQuantity: product.minQuantity,
         hasVariants: product.hasVariants,
+        serviceDetail: product.serviceDetail
+          ? {
+              id: product.serviceDetail.id,
+              productId: product.serviceDetail.productId,
+              capacity: product.serviceDetail.capacity,
+              notes: product.serviceDetail.notes,
+            }
+          : null,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
       }).toResponse();
