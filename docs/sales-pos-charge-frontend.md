@@ -17,6 +17,7 @@
 - [3) Endpoint: Cobrar draft](#3-endpoint-cobrar-draft)
 - [4) Idempotencia (MUY importante)](#4-idempotencia-muy-importante)
 - [5) Endpoint: Registrar pago sobre venta confirmada](#5-endpoint-registrar-pago-sobre-venta-confirmada)
+- [5.5) Editar o limpiar la referencia de un pago](#55-editar-o-limpiar-la-referencia-de-un-pago)
 - [6) Endpoint: Listar ventas confirmadas](#6-endpoint-listar-ventas-confirmadas)
 - [7) Endpoint: Detalle de venta](#7-endpoint-detalle-de-venta)
 - [8) Due date (vencimiento de deuda)](#8-due-date-vencimiento-de-deuda)
@@ -101,6 +102,7 @@ Se habilitaron 4 capacidades del módulo de ventas POS:
 | `PATCH /sales/:id/comments/:commentId` | `update:SaleComment` |
 | `DELETE /sales/:id/comments/:commentId` | `delete:SaleComment` |
 | `POST /sales/:id/payments` | `update:Sale` |
+| `PATCH /sales/:saleId/payments/:paymentId/reference` | `update:Sale` |
 | `PATCH /sales/:id/due-date` | `update:Sale` |
 | `GET /sales` | `read:Sale` |
 | `GET /sales/:id` | `read:Sale` |
@@ -397,7 +399,7 @@ Idempotency-Key: <uuid-o-string-unico>
 | `payments` | `PaymentEntry[]` | Sí | Máximo 5 entries |
 | `payments[].method` | `'cash' \| 'card_credit' \| 'card_debit' \| 'transfer'` | Sí | `'credit'` **NO permitido** en array |
 | `payments[].amountCents` | `number` entero | Sí | `>= 0` |
-| `payments[].reference` | `string` | Condicional | **Obligatorio** para `card_credit`, `card_debit`, `transfer`. NO enviar para `cash`. |
+| `payments[].reference` | `string` | Opcional | **Ya NO es obligatorio** para `card_credit`, `card_debit`, `transfer`. Puede omitirse al cobrar y cargarse después con `PATCH /sales/:saleId/payments/:paymentId/reference` (ver §5.5). NO enviar para `cash`. |
 
 #### Formato legacy (sigue funcionando): un solo pago
 
@@ -435,7 +437,6 @@ Ambos formatos aceptan opcionalmente `dueDate` (ISO-8601) en el body. Aplica sol
 | Mezcla de formato legacy + array | `AMBIGUOUS_PAYMENT_SHAPE` | 422 |
 | Más de 5 entries en `payments[]` | `TOO_MANY_PAYMENTS` | 422 |
 | `method: 'credit'` dentro del array `payments[]` | `CREDIT_METHOD_NOT_VALID_IN_MULTI` | 422 |
-| `card_credit`/`card_debit`/`transfer` sin `reference` (o solo espacios) | `REFERENCE_REQUIRED` | 422 |
 | Método no reconocido | `PAYMENT_METHOD_NOT_SUPPORTED` | 422 |
 | Crédito legacy con `amountCents > 0` | `INVALID_CREDIT_CHARGE` | 422 |
 | Tarjeta/transferencia con monto mayor al total | `PAYMENT_AMOUNT_INVALID` | 422 |
@@ -629,6 +630,73 @@ Este endpoint es para **cobrar deuda** de ventas que quedaron con `paymentStatus
 ### 5.4) Concurrencia segura
 
 Si dos cajeros intentan cobrar la misma deuda al mismo tiempo, el backend usa `SELECT FOR UPDATE` para serializar los pagos. El segundo request verá los montos actualizados y será rechazado si excede la deuda restante.
+
+---
+
+## 5.5) Editar o limpiar la referencia de un pago
+
+> **Nuevo (2026-08-11)**. Permite completar, corregir o limpiar la `reference` de un pago YA registrado. Es la contraparte de hacer la referencia opcional al cobrar: si al momento del pago no se tiene el número (transferencia, voucher, etc.), se cobra sin él y se carga después desde el detalle de la venta.
+
+```http
+PATCH /sales/:saleId/payments/:paymentId/reference
+Authorization: Bearer <jwt>
+```
+
+- Sin `Idempotency-Key` — es un update simple (mismo patrón que `PATCH /sales/:id/due-date`).
+- Permiso: `update:Sale`.
+
+### 5.5.1) Body
+
+```json
+{ "reference": "TRF-001" }
+```
+
+| Campo | Tipo | Requerido | Reglas |
+|---|---|---|---|
+| `reference` | `string` \| `null` | Sí | **String** → corrige/establece la referencia. **`null`** o `""` (string vacío o solo espacios) → **limpia** la referencia (se guarda como `null`). |
+
+### 5.5.2) Reglas
+
+- El `paymentId` debe pertenecer a la venta `saleId`. Si el pago no existe o pertenece a otra venta → `404 ENTITY_NOT_FOUND` (`SalePayment with id "..." not found`).
+- Cualquier usuario con permiso `update:Sale` puede editar la referencia de cualquier pago de la venta (no requiere ser el cajero que lo registró).
+- No cambia montos, `paidCents`, `debtCents` ni `paymentStatus` — es metadata del pago únicamente.
+- El `method` NO se puede cambiar con este endpoint (para eso se registraría otro pago).
+
+### 5.5.3) Respuesta `200 OK`
+
+```json
+{
+  "paymentId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "method": "CARD_DEBIT",
+  "amountCents": 25000,
+  "reference": "TRF-001",
+  "paidAt": "2026-05-06T14:43:00.000Z"
+}
+```
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| `paymentId` | `string` (UUID) | ID del pago editado (coincide con `payments[].paymentId` del detalle) |
+| `method` | `string` | **MAYÚSCULAS**: `CASH`, `CARD_CREDIT`, `CARD_DEBIT`, `TRANSFER`, `CREDIT` |
+| `amountCents` | `number` | Monto del pago (sin cambios) |
+| `reference` | `string` \| `null` | Referencia luego de la edición (`null` si se limpió) |
+| `paidAt` | `string` (ISO) | Timestamp original del pago |
+
+### 5.5.4) Ejemplo curl
+
+```bash
+# Establecer/corregir referencia
+curl -X PATCH "$API_URL/sales/$SALE_ID/payments/$PAYMENT_ID/reference" \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{ "reference": "TRF-001" }'
+
+# Limpiar referencia (null o string vacío)
+curl -X PATCH "$API_URL/sales/$SALE_ID/payments/$PAYMENT_ID/reference" \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{ "reference": null }'
+```
 
 ---
 
@@ -960,6 +1028,7 @@ Venta no encontrada o de otro tenant → `404`.
   ],
   "payments": [
     {
+      "paymentId": "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "method": "CASH",
       "amountCents": 60000,
       "tenderedCents": 60000,
@@ -968,6 +1037,7 @@ Venta no encontrada o de otro tenant → `404`.
       "paidAt": "2026-05-06T14:43:00.000Z"
     },
     {
+      "paymentId": "c1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "method": "CARD_DEBIT",
       "amountCents": 40000,
       "tenderedCents": 40000,
@@ -1057,11 +1127,12 @@ Venta no encontrada o de otro tenant → `404`.
 
 | Campo | Tipo | Nullable | Descripción |
 |---|---|---|---|
+| `paymentId` | `string` (UUID) | No | **ID del pago.** Usarlo como `:paymentId` en `PATCH /sales/:saleId/payments/:paymentId/reference` (ver §5.5). |
 | `method` | `string` | No | **⚠️ MAYÚSCULAS**: `'CASH'`, `'CARD_CREDIT'`, `'CARD_DEBIT'`, `'TRANSFER'`, `'CREDIT'` |
 | `amountCents` | `number` | No | Monto del pago |
 | `tenderedCents` | `number` | No | = `amountCents` (por ahora siempre igual) |
 | `changeCents` | `number` | No | Siempre `0` (el cambio vive en `Sale.changeDueCents`, no por pago) |
-| `reference` | `string` | Sí | Referencia del pago (voucher, número de transferencia, etc.) |
+| `reference` | `string` | Sí | Referencia del pago (voucher, número de transferencia, etc.). `null` si no se cargó o se limpió. **Editable** vía §5.5. |
 | `paidAt` | `string` (ISO) | No | Timestamp del pago |
 
 > **⚠️ CUIDADO con el case de `method`**: En los REQUEST bodies se envía en **minúsculas** (`cash`, `card_credit`). En la RESPUESTA del detalle viene en **MAYÚSCULAS** (`CASH`, `CARD_CREDIT`). Mapear consistentemente en el frontend.
@@ -1214,7 +1285,6 @@ curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
 | `AMBIGUOUS_PAYMENT_SHAPE` | 422 | Se envió `method` + `payments[]` | Bug del frontend — usar UN solo formato |
 | `TOO_MANY_PAYMENTS` | 422 | Más de 5 entries en `payments[]` | Limitar UI a máximo 5 métodos |
 | `CREDIT_METHOD_NOT_VALID_IN_MULTI` | 422 | `method: 'credit'` dentro de `payments[]` | Usar formato legacy para crédito puro |
-| `REFERENCE_REQUIRED` | 422 | Tarjeta/transferencia sin referencia | Pedir referencia en UI |
 | `PAYMENT_METHOD_NOT_SUPPORTED` | 422 | Método no reconocido | Bug del frontend |
 | `INVALID_CREDIT_CHARGE` | 422 | Crédito con `amountCents > 0` | Bug del frontend |
 | `PAYMENT_AMOUNT_INVALID` | 422 | No-cash sobre-paga, o negativo | Validar en frontend antes de enviar |
@@ -1255,6 +1325,14 @@ curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
 | `INVALID_DUE_DATE` | 422 | `PATCH`: `dueDate` anterior a hoy (UTC start-of-day) **o** cualquier path donde `dueDate < confirmedAt` | Mostrar mensaje: "La fecha de vencimiento no puede ser anterior a hoy" y refrescar reglas de negocio del formulario |
 | `SALE_FULLY_PAID` | 409 | `PATCH /sales/:id/due-date` sobre venta ya `PAID` | Refrescar — la deuda ya se saldó |
 | `SALE_NOT_FOUND` | 404 | Venta no existe o de otro tenant | Refrescar listado |
+
+### 9.5) Errores de edición de referencia (`PATCH /sales/:saleId/payments/:paymentId/reference`)
+
+| Código | HTTP | Cuándo pasa | Acción sugerida |
+|---|---|---|---|
+| Validación DTO | 400 | `reference` no es string ni null (ej: número, objeto) | Bug del frontend |
+| UUID inválido | 400 | `:saleId` o `:paymentId` no son UUID válidos | Bug del frontend |
+| `ENTITY_NOT_FOUND` | 404 | Pago no existe o no pertenece a la venta | Refrescar detalle — el pago pudo eliminarse con la venta |
 
 ---
 
@@ -1605,7 +1683,7 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 ### Cobro
 - [ ] Enviar siempre `Idempotency-Key` (UUID).
 - [ ] Decidir formato: usar `payments[]` para nuevas integraciones, legacy solo para backward compat.
-- [ ] Validar que `card_credit`/`card_debit`/`transfer` incluyan `reference` antes de enviar.
+- [ ] `reference` es **opcional** — NO bloquear el cobro si no se tiene el número de transferencia/voucher (se puede cargar después, ver "Edición posterior").
 - [ ] Limitar UI a máximo 5 métodos de pago simultáneos.
 - [ ] No ofrecer `credit` como opción dentro de `payments[]` — solo en formato legacy.
 - [ ] Si la suma de pagos < total → verificar que haya cliente asignado ANTES de enviar.
@@ -1636,6 +1714,15 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 - [ ] `customer: null` → "Público en General".
 - [ ] `payments[].method` viene en MAYÚSCULAS — mapear para display.
 - [ ] `payments[].reference` ahora es campo directo (puede ser `null`).
+- [ ] Guardar `payments[].paymentId` por pago — es la llave para editar su referencia después.
+
+### Edición posterior (referencia de pago)
+- [ ] Permitir editar la referencia de un pago desde el detalle de la venta cuando `paymentId` existe (cualquier pago con `method !== 'CASH'` es candidato).
+- [ ] `PATCH /sales/:saleId/payments/:paymentId/reference` con `{ "reference": "..." }` para corregir.
+- [ ] Para limpiar, enviar `{ "reference": null }` (o `""`).
+- [ ] NO enviar `Idempotency-Key` en este PATCH.
+- [ ] Manejar `404` si el `paymentId` no existe o no pertenece a la venta (refrescar detalle).
+- [ ] Después de editar, actualizar el detalle local con la `reference` devuelta (o re-fetch `GET /sales/:id`).
 
 ### General
 - [ ] Renderizar montos en centavos con conversión segura a decimal (`/ 100`).
@@ -1661,6 +1748,7 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 
 ### Cambios recientes (con fecha)
 
+- **2026-08-11** — La referencia de pago dejó de ser obligatoria al cobrar (`/charge`) y al registrar pago sobre deuda (`/payments`). El campo sigue disponible, pero ya no bloquea el cobro si no se tiene el número. Nuevo endpoint `PATCH /sales/:saleId/payments/:paymentId/reference` para **completar, corregir o limpiar** la referencia de un pago ya registrado (§5.5). El detalle de venta ahora expone `payments[].paymentId` como llave para editar (§7.4). Eliminado el error `REFERENCE_REQUIRED`.
 - **2026-05-16** — Nuevo endpoint público `GET /users/assignable` para alimentar el picker de vendedor en §2.6. Permiso `read:Sale`.
 - **2026-05-15** — Agregado campo `dueDate: string | null` a las responses de `GET /sales` (listado, ver §6) y `GET /sales/:id` (detalle, ver §7). Aplica solo a ventas con `paymentStatus !== 'PAID'`.
 - **2026-05-15** — Clarificación de scope de eventos: los eventos `sale.customer.*`, `sale.shipping-address.*` y `sale.seller.*` son **in-process (EventEmitter2)** y NO se exponen al frontend. Solo los outbox events (`sale.confirmed`, `sale.payment.received`, `sale.fully.paid`) son consumibles externamente. Ver §2.5.1, §2.6 y §10.
@@ -1680,6 +1768,6 @@ GET /sales?paymentStatus=PARTIAL&page=1&limit=20
 | `PAYMENT_EXCEEDS_DEBT` HTTP | Documentado como 409 | **Corregido: es 422** |
 | Timeline | 1 `PAYMENT_RECEIVED` por venta | N `PAYMENT_RECEIVED` (uno por pago) |
 | `SalePayment.reference` | En `metadataJson` | Campo directo en DB y response |
-| Nuevos errores | — | `AMBIGUOUS_PAYMENT_SHAPE`, `TOO_MANY_PAYMENTS`, `CREDIT_METHOD_NOT_VALID_IN_MULTI`, `REFERENCE_REQUIRED`, `SALE_NOT_CONFIRMABLE_FOR_PAYMENT` |
+| Nuevos errores | — | `AMBIGUOUS_PAYMENT_SHAPE`, `TOO_MANY_PAYMENTS`, `CREDIT_METHOD_NOT_VALID_IN_MULTI`, `SALE_NOT_CONFIRMABLE_FOR_PAYMENT` |
 | Eventos de dominio | No existían | `sale.confirmed`, `sale.payment.received`, `sale.fully.paid` (outbox) |
 | `dueDate` | No existía | Campo nuevo en `Sale`, expuesto en `GET /sales`, `GET /sales/:id`, y mutable vía `PATCH /sales/:id/due-date`. Ver §8. |
