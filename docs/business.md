@@ -56,6 +56,14 @@ En creación/edición de producto se puede configurar:
 | Crear lista global (`POST /price-lists`)               | Siempre                                         | Auto-crea `PriceList(priceCents=0)` para **todos** los productos + `VariantPrice(priceCents=0)` para variantes | Mantener matriz completa producto/variante × lista               |
 | Crear lote (`POST /products/:id/lots`)                 | `useLotsAndExpirations=false`                   | Rechaza operación (`LOTS_NOT_ENABLED`)                                                                         | No se permiten lotes sin toggle activo                           |
 | Crear lote (`POST /products/:id/lots`)                 | `hasVariants=true`                              | Rechaza operación (`PRODUCT_HAS_VARIANTS`)                                                                     | No hay lotes en productos con variantes                          |
+| Crear lote (`POST /products/:id/lots`)                 | `type=SERVICE`                                  | Rechaza operación (`LOTS_NOT_ALLOWED_ON_SERVICE`, 400)                                                         | R2 — servicios no manejan inventario                             |
+| Crear/editar producto `type=SERVICE` con `sku`         | siempre                                         | Rechaza operación (`INVALID_ARGUMENT`, 400)                                                                    | R1 — servicios no tienen SKU                                     |
+| Crear/editar producto `type=SERVICE` con `barcode`     | siempre                                         | Rechaza operación (`INVALID_ARGUMENT`, 400)                                                                    | R1 — servicios no tienen barcode                                 |
+| Crear/editar producto `type=SERVICE` con `brandId`     | siempre                                         | Rechaza operación (`INVALID_ARGUMENT`, 400)                                                                    | R1 — servicios no tienen marca                                   |
+| Crear producto `type=SERVICE`                          | siempre                                         | Backend fuerza `useStock=false`, `useLotsAndExpirations=false`, `quantity=0`, `minQuantity=0`, `sku=null`, `barcode=null`, `brandId=null`, `purchaseNetCostCents=0`, `purchaseGrossCostCents=0`; crea fila `ServiceDetail` 1:1 | R1 + R4 — normalización + tabla de detalle                      |
+| Editar producto `type=PRODUCT→SERVICE`                 | `quantity>0` o lotes activos                    | Rechaza operación (`PRODUCT_TYPE_CHANGE_BLOCKED`, 400)                                                          | R5 — no perder stock al "convertir"                              |
+| Editar producto `type=SERVICE→PRODUCT`                 | siempre                                         | Limpia fila `ServiceDetail` y restaura defaults PRODUCT (admin agrega stock después)                           | R4 + R5 — limpiar rastro de servicio                             |
+| Editar producto `type=SERVICE` con `serviceDetail`     | siempre                                         | Upsert en la fila 1:1 (`capacity` ≥ 1, `notes` ≤ 500)                                                         | R4 — detalle editable por variante de servicio                   |
 | Crear imagen con `isMain=true`                         | Siempre                                         | Limpia main previo en mismo ámbito (`variantId` igual o `null`)                                                | Debe haber una sola imagen principal por ámbito                  |
 | `priceCents` en crear/editar producto                  | Informado                                       | Afecta **solo** lista `PUBLICO`                                                                                | `PUBLICO` es la lista base del producto                          |
 | Crear/editar variante con `useStock=false` en producto | Siempre                                         | Backend normaliza `variant.minQuantity=0`                                                                      | Si no hay control de stock, umbral mínimo por variante no aplica |
@@ -183,6 +191,23 @@ Formato de error de dominio:
 
 ## Lo que NO está en alcance hoy
 
-- Comportamiento especial por `type=SERVICE`: hoy se persiste el tipo, pero **no** hay reglas diferenciales de inventario/precio por ser servicio.
 - Reasignar lista default a otra distinta de `PUBLICO`: hoy no hay endpoint para mutar `isDefault`.
 - Validación previa de existencia de `categoryId` en servicio de productos: se depende de FK de DB (si mandás un id inválido, puede fallar a nivel persistencia).
+
+---
+
+## SERVICE — reglas diferenciales
+
+`type=SERVICE` (p. ej. "Paseo de perros") tiene comportamiento distinto de `type=PRODUCT`. Resumen para frontend:
+
+- **Campos bloqueados al crear/editar** (devuelven 400 con `INVALID_ARGUMENT`): `sku`, `barcode`, `brandId`, `lots[]`, `useLotsAndExpirations=true`.
+- **Defaults forzados al crear SERVICE**: `useStock=false`, `useLotsAndExpirations=false`, `quantity=0`, `minQuantity=0`, `sku=null`, `barcode=null`, `brandId=null`, `purchaseNetCostCents=0`, `purchaseGrossCostCents=0`.
+- **Unidades permitidas para variantes de servicio** (UnitOfMeasure): `HORA`, `SESION`, `DIA`, `CONSULTA`, `CURSO`, `PAQUETE`. Las 8 unidades tradicionales siguen disponibles para PRODUCT.
+- **ServiceDetail** (sub-recurso 1:1): objeto opcional en create/update con `capacity?: number ≥ 1` y `notes?: string ≤ 500`. La fila existe siempre para productos SERVICE (campos nullables); la respuesta de `GET /products` siempre incluye `serviceDetail: {capacity, notes} | null`.
+- **Cambio de tipo** (`PATCH /products/:id` con `type`):
+  - `PRODUCT → SERVICE` se **bloquea** con 400 (`PRODUCT_TYPE_CHANGE_BLOCKED`) si `quantity>0` o hay lotes activos. Mensaje al admin: "no se puede convertir mientras tenga stock o lotes".
+  - `SERVICE → PRODUCT` se permite siempre. Backend limpia la fila `ServiceDetail` y restaura defaults. El admin debe agregar stock en un PATCH posterior.
+- **Filtro por tipo** (`GET /products?type=SERVICE|PRODUCT`): acepta ambos valores; sin `type` devuelve los dos tipos.
+- **Lotes en servicio**: `POST /products/:id/lots` rechaza con 400 (`LOTS_NOT_ALLOWED_ON_SERVICE`).
+- **POS**: los SERVICE aparecen en `GET /sales/pos-catalog` igual que los PRODUCT. La venta funciona idéntica — el path de stock en `decrementStockForCharge` ya respeta `useStock=false` (R6).
+- **SAT CFDI / unit key para invoice**: la unidad de la variante (HORA, SESION, etc.) llega al PDF tal cual desde el variant. Confirmar con contabilidad que el `satKey` aplica para servicios antes del primer comprobante fiscal de un servicio.
