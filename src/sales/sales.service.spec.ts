@@ -1376,7 +1376,7 @@ describe('SalesService', () => {
       ).rejects.toThrow('CREDIT_METHOD_NOT_VALID_IN_MULTI');
     });
 
-    it('rejects missing reference for card/transfer with REFERENCE_REQUIRED', async () => {
+    it('accepts card/transfer payment without reference (reference is optional)', async () => {
       const sale = buildDraftSale(
         'sale-charge-array-reference',
         'user-1',
@@ -1384,16 +1384,18 @@ describe('SalesService', () => {
       );
       setupHappyPathDraft(sale);
 
-      await expect(
-        service.chargeDraft(
-          sale.id,
-          'user-1',
-          {
-            payments: [{ method: 'card_debit', amountCents: 2000 }],
-          } as never,
-          'idem-array-reference',
-        ),
-      ).rejects.toThrow('REFERENCE_REQUIRED');
+      const result = await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          payments: [{ method: 'card_debit', amountCents: 2000 }],
+        } as never,
+        'idem-array-reference',
+      );
+
+      expect(result.paymentStatus).toBe('PAID');
+      expect(result.paidCents).toBe(2000);
+      expect(result.debtCents).toBe(0);
     });
 
     it('rejects more than five payment entries with TOO_MANY_PAYMENTS', async () => {

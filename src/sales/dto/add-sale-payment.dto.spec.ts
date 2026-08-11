@@ -81,13 +81,13 @@ describe('AddSalePaymentDto', () => {
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it('rejects non-cash payment without reference', async () => {
+  it('accepts non-cash payment without reference (reference is optional)', async () => {
     const dto = toDto({
       payments: [{ method: 'card_debit', amountCents: 1000 }],
     });
 
     const errors = await validate(dto);
 
-    expect(errors.length).toBeGreaterThan(0);
+    expect(errors).toHaveLength(0);
   });
 });

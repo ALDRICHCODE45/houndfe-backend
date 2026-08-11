@@ -230,7 +230,6 @@ function chargeValidationError(
     | 'PAYMENT_AMOUNT_INSUFFICIENT'
     | 'AMBIGUOUS_PAYMENT_SHAPE'
     | 'CREDIT_METHOD_NOT_VALID_IN_MULTI'
-    | 'REFERENCE_REQUIRED'
     | 'TOO_MANY_PAYMENTS',
 ): never {
   throw new BusinessRuleViolationError(code, code);
@@ -262,13 +261,6 @@ function normalizeChargeRequestPayments(
 
       if (entry.method === 'credit') {
         chargeValidationError('CREDIT_METHOD_NOT_VALID_IN_MULTI');
-      }
-
-      if (
-        ['card_credit', 'card_debit', 'transfer'].includes(entry.method) &&
-        (!entry.reference || entry.reference.trim().length === 0)
-      ) {
-        chargeValidationError('REFERENCE_REQUIRED');
       }
 
       return {

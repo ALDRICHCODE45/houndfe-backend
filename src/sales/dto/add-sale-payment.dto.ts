@@ -41,24 +41,6 @@ class CollectionPaymentShapeConstraint implements ValidatorConstraintInterface {
   }
 }
 
-@ValidatorConstraint({ name: 'collectionReferenceRequirement', async: false })
-class CollectionReferenceRequirementConstraint implements ValidatorConstraintInterface {
-  validate(value: unknown, args?: ValidationArguments): boolean {
-    const dto = args?.object as AddSalePaymentDto | undefined;
-    if (!dto?.payments?.length) {
-      return true;
-    }
-
-    return dto.payments.every((payment) => {
-      if (payment.method === 'cash') {
-        return true;
-      }
-
-      return Boolean(payment.reference?.trim().length);
-    });
-  }
-}
-
 export class AddSalePaymentEntryDto {
   @IsIn(['cash', 'card_credit', 'card_debit', 'transfer'])
   method: CollectionPaymentMethod;
@@ -74,7 +56,6 @@ export class AddSalePaymentEntryDto {
 
 export class AddSalePaymentDto {
   @Validate(CollectionPaymentShapeConstraint)
-  @Validate(CollectionReferenceRequirementConstraint)
   private readonly shapeAndReferenceValidation = true;
 
   @IsOptional()
