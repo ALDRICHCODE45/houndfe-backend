@@ -1154,6 +1154,54 @@ export class PrismaSaleRepository implements ISaleRepository {
     };
   }
 
+  async updatePaymentReference(input: {
+    saleId: string;
+    paymentId: string;
+    reference: string | null;
+  }): Promise<{
+    paymentId: string;
+    method: string;
+    amountCents: number;
+    reference: string | null;
+    paidAt: Date;
+  } | null> {
+    const prisma = this.tenantPrisma.getClient();
+
+    // Scoped by saleId (plus tenantId auto-injected by the tenant-scoped
+    // client at the top-level where), so a payment belonging to a different
+    // sale — or a missing payment — surfaces as P2025 and maps to null →
+    // the service turns that into a 404.
+    try {
+      const updated = await prisma.salePayment.update({
+        where: { id: input.paymentId, saleId: input.saleId },
+        data: { reference: input.reference },
+        select: {
+          id: true,
+          method: true,
+          amountCents: true,
+          reference: true,
+          createdAt: true,
+        },
+      });
+
+      return {
+        paymentId: updated.id,
+        method: updated.method,
+        amountCents: updated.amountCents,
+        reference: updated.reference,
+        paidAt: updated.createdAt,
+      };
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   private buildBaseWhere(input: SalesListBaseFilter): Prisma.SaleWhereInput {
     const where: Prisma.SaleWhereInput = {
       status: 'CONFIRMED',

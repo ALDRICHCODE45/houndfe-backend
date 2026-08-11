@@ -45,6 +45,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     persistCancellation: jest.fn(),
     persistCollectedPayment: jest.fn(),
     persistCollectedPayments: jest.fn(),
+    updatePaymentReference: jest.fn(),
     findManyConfirmed: jest.fn(),
     countConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
@@ -1153,6 +1154,94 @@ describe('SalesService', () => {
         'sale.shipping-address.cleared',
         expect.any(SaleShippingAddressClearedEvent),
       );
+    });
+  });
+
+  describe('updatePaymentReference', () => {
+    const paymentId = '1c5fdc6f-5c9f-4b3d-8b1a-9f0e2b7a4c01';
+
+    const updatedPayment = {
+      paymentId,
+      method: 'CARD_DEBIT',
+      amountCents: 2000,
+      reference: 'REF-1',
+      paidAt: new Date('2026-05-08T10:20:00.000Z'),
+    };
+
+    it('sets the payment reference and returns the updated payment', async () => {
+      saleRepo.updatePaymentReference.mockResolvedValue(updatedPayment);
+
+      const result = await service.updatePaymentReference('sale-1', paymentId, {
+        reference: 'REF-1',
+      });
+
+      expect(saleRepo.updatePaymentReference).toHaveBeenCalledWith({
+        saleId: 'sale-1',
+        paymentId,
+        reference: 'REF-1',
+      });
+      expect(result).toEqual(updatedPayment);
+    });
+
+    it('normalizes empty string to null (clears the reference)', async () => {
+      saleRepo.updatePaymentReference.mockResolvedValue({
+        ...updatedPayment,
+        reference: null,
+      });
+
+      const result = await service.updatePaymentReference('sale-1', paymentId, {
+        reference: '',
+      });
+
+      expect(saleRepo.updatePaymentReference).toHaveBeenCalledWith({
+        saleId: 'sale-1',
+        paymentId,
+        reference: null,
+      });
+      expect(result.reference).toBeNull();
+    });
+
+    it('normalizes explicit null reference to null (clears the reference)', async () => {
+      saleRepo.updatePaymentReference.mockResolvedValue({
+        ...updatedPayment,
+        reference: null,
+      });
+
+      const result = await service.updatePaymentReference('sale-1', paymentId, {
+        reference: null,
+      });
+
+      expect(saleRepo.updatePaymentReference).toHaveBeenCalledWith({
+        saleId: 'sale-1',
+        paymentId,
+        reference: null,
+      });
+      expect(result.reference).toBeNull();
+    });
+
+    it('throws 404 when the payment does not belong to the sale', async () => {
+      saleRepo.updatePaymentReference.mockResolvedValue(null);
+
+      await expect(
+        service.updatePaymentReference('sale-other', paymentId, {
+          reference: 'REF-1',
+        }),
+      ).rejects.toThrow(EntityNotFoundError);
+      expect(saleRepo.updatePaymentReference).toHaveBeenCalledWith({
+        saleId: 'sale-other',
+        paymentId,
+        reference: 'REF-1',
+      });
+    });
+
+    it('throws 404 when the payment does not exist', async () => {
+      saleRepo.updatePaymentReference.mockResolvedValue(null);
+
+      await expect(
+        service.updatePaymentReference('sale-1', 'missing-payment', {
+          reference: 'REF-1',
+        }),
+      ).rejects.toThrow(EntityNotFoundError);
     });
   });
 
@@ -4242,6 +4331,7 @@ describe('SalesService', () => {
         items: [],
         payments: [
           {
+            paymentId: 'pmt-1',
             method: 'CASH',
             amountCents: 1000,
             tenderedCents: 1000,
@@ -4351,6 +4441,7 @@ describe('SalesService', () => {
         ],
         payments: [
           {
+            paymentId: 'pmt-1',
             method: 'CASH',
             amountCents: 1000,
             tenderedCents: 1000,
@@ -4362,6 +4453,7 @@ describe('SalesService', () => {
             user: null,
           },
           {
+            paymentId: 'pmt-2',
             method: 'TRANSFER',
             amountCents: 800,
             tenderedCents: 800,
@@ -4406,6 +4498,8 @@ describe('SalesService', () => {
       expect(result.payments[0].paidAt).toBe('2026-05-08T10:20:00.000Z');
       expect(result.payments[0].reference).toBe('CASH-1');
       expect(result.payments[1].reference).toBe('TRF-2');
+      expect(result.payments[0].paymentId).toBe('pmt-1');
+      expect(result.payments[1].paymentId).toBe('pmt-2');
     });
 
     it('throws 400 for invalid UUID input', async () => {

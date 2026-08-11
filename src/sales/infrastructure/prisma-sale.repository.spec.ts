@@ -5,6 +5,7 @@
  */
 import { PrismaSaleRepository } from './prisma-sale.repository';
 import { Sale } from '../domain/sale.entity';
+import { Prisma } from '@prisma/client';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -34,6 +35,7 @@ function makeMockPrisma() {
       create: jest.fn(),
       createMany: jest.fn(),
       aggregate: jest.fn(),
+      update: jest.fn(),
     },
     saleRefund: {
       createMany: jest.fn(),
@@ -2009,6 +2011,93 @@ describe('PrismaSaleRepository', () => {
 
       expect(result.paymentIds).toHaveLength(3);
       expect(new Set(result.paymentIds).size).toBe(3);
+    });
+  });
+
+  describe('updatePaymentReference', () => {
+    it('persists the reference update scoped to the sale and returns the mapped payment', async () => {
+      prisma.salePayment.update.mockResolvedValue({
+        id: 'pmt-1',
+        method: 'CARD_DEBIT',
+        amountCents: 2000,
+        reference: 'REF-1',
+        createdAt: new Date('2026-05-08T10:20:00.000Z'),
+      });
+
+      const result = await repo.updatePaymentReference({
+        saleId: 'sale-1',
+        paymentId: 'pmt-1',
+        reference: 'REF-1',
+      });
+
+      expect(prisma.salePayment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'pmt-1', saleId: 'sale-1' },
+          data: { reference: 'REF-1' },
+        }),
+      );
+      expect(result).toEqual({
+        paymentId: 'pmt-1',
+        method: 'CARD_DEBIT',
+        amountCents: 2000,
+        reference: 'REF-1',
+        paidAt: new Date('2026-05-08T10:20:00.000Z'),
+      });
+    });
+
+    it('persists a null reference (clear)', async () => {
+      prisma.salePayment.update.mockResolvedValue({
+        id: 'pmt-1',
+        method: 'TRANSFER',
+        amountCents: 800,
+        reference: null,
+        createdAt: new Date('2026-05-08T10:30:00.000Z'),
+      });
+
+      const result = await repo.updatePaymentReference({
+        saleId: 'sale-1',
+        paymentId: 'pmt-1',
+        reference: null,
+      });
+
+      expect(prisma.salePayment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'pmt-1', saleId: 'sale-1' },
+          data: { reference: null },
+        }),
+      );
+      expect(result?.reference).toBeNull();
+    });
+
+    it('returns null when the payment is not found (P2025)', async () => {
+      prisma.salePayment.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Record not found', {
+          code: 'P2025',
+          clientVersion: '6.19.2',
+        }),
+      );
+
+      const result = await repo.updatePaymentReference({
+        saleId: 'sale-1',
+        paymentId: 'missing-payment',
+        reference: 'REF-1',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('rethrows non-P2025 errors', async () => {
+      prisma.salePayment.update.mockRejectedValue(
+        new Error('database unreachable'),
+      );
+
+      await expect(
+        repo.updatePaymentReference({
+          saleId: 'sale-1',
+          paymentId: 'pmt-1',
+          reference: 'REF-1',
+        }),
+      ).rejects.toThrow('database unreachable');
     });
   });
 

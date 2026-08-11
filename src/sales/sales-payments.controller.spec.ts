@@ -3,11 +3,15 @@ import { SalesPaymentsController } from './sales-payments.controller';
 import type { SalesService } from './sales.service';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 
-type PaymentsServiceMock = Pick<SalesService, 'addPayment'>;
+type PaymentsServiceMock = Pick<
+  SalesService,
+  'addPayment' | 'updatePaymentReference'
+>;
 
 function makeMockService(): jest.Mocked<PaymentsServiceMock> {
   return {
     addPayment: jest.fn(),
+    updatePaymentReference: jest.fn(),
   };
 }
 
@@ -93,5 +97,58 @@ describe('SalesPaymentsController', () => {
       },
       'idem-key-2',
     );
+  });
+
+  describe('updatePaymentReference', () => {
+    const saleId = '66f64f29-cde5-41ac-baf2-30ce8e503f1a';
+    const paymentId = '1c5fdc6f-5c9f-4b3d-8b1a-9f0e2b7a4c01';
+
+    it('forwards PATCH params and body to service', async () => {
+      const service = makeMockService();
+      const controller = new SalesPaymentsController(
+        service as unknown as SalesService,
+      );
+      service.updatePaymentReference.mockResolvedValue({
+        paymentId,
+        method: 'CARD_DEBIT',
+        amountCents: 2000,
+        reference: 'REF-1',
+        paidAt: new Date('2026-05-08T10:20:00.000Z'),
+      });
+
+      await controller.updatePaymentReference(saleId, paymentId, {
+        reference: 'REF-1',
+      });
+
+      expect(service.updatePaymentReference).toHaveBeenCalledWith(
+        saleId,
+        paymentId,
+        { reference: 'REF-1' },
+      );
+    });
+
+    it('forwards null reference (clear) to service', async () => {
+      const service = makeMockService();
+      const controller = new SalesPaymentsController(
+        service as unknown as SalesService,
+      );
+      service.updatePaymentReference.mockResolvedValue({
+        paymentId,
+        method: 'CARD_DEBIT',
+        amountCents: 2000,
+        reference: null,
+        paidAt: new Date('2026-05-08T10:20:00.000Z'),
+      });
+
+      await controller.updatePaymentReference(saleId, paymentId, {
+        reference: null,
+      });
+
+      expect(service.updatePaymentReference).toHaveBeenCalledWith(
+        saleId,
+        paymentId,
+        { reference: null },
+      );
+    });
   });
 });

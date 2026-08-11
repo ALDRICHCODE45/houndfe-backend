@@ -5,6 +5,7 @@ import {
   Headers,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -16,6 +17,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { SalesService } from './sales.service';
 import { AddSalePaymentDto } from './dto/add-sale-payment.dto';
+import { UpdateSalePaymentReferenceDto } from './dto/update-sale-payment-reference.dto';
 
 @Controller('sales')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -42,5 +44,15 @@ export class SalesPaymentsController {
       dto,
       normalizedIdempotencyKey,
     );
+  }
+
+  @Patch(':saleId/payments/:paymentId/reference')
+  @RequirePermissions(['update', 'Sale'])
+  updatePaymentReference(
+    @Param('saleId', ParseUUIDPipe) saleId: string,
+    @Param('paymentId', ParseUUIDPipe) paymentId: string,
+    @Body() dto: UpdateSalePaymentReferenceDto,
+  ) {
+    return this.salesService.updatePaymentReference(saleId, paymentId, dto);
   }
 }

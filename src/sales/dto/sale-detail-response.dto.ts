@@ -84,6 +84,7 @@ export interface SaleDetailItemDto {
 }
 
 export interface SaleDetailPaymentDto {
+  paymentId: string;
   method: string;
   amountCents: number;
   tenderedCents: number;

@@ -211,6 +211,18 @@ export interface ISaleRepository {
     totalCents: number;
   }>;
 
+  updatePaymentReference(input: {
+    saleId: string;
+    paymentId: string;
+    reference: string | null;
+  }): Promise<{
+    paymentId: string;
+    method: string;
+    amountCents: number;
+    reference: string | null;
+    paidAt: Date;
+  } | null>;
+
   findManyConfirmed(
     input: SalesListExtendedFilter & {
       page: number;

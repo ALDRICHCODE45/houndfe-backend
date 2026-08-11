@@ -59,6 +59,7 @@ import type { AssignCustomerDto } from './dto/assign-customer.dto';
 import type { AssignSellerDto } from './dto/assign-seller.dto';
 import type { SetShippingAddressDto } from './dto/set-shipping-address.dto';
 import type { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
+import type { UpdateSalePaymentReferenceDto } from './dto/update-sale-payment-reference.dto';
 import { buildSaleTimeline } from './domain/build-sale-timeline';
 import type {
   PersistedChargePayment,
@@ -1349,6 +1350,7 @@ export class SalesService {
       seller: sale.seller,
       items: sale.items,
       payments: sale.payments.map((payment) => ({
+        paymentId: payment.paymentId,
         method: payment.method,
         amountCents: payment.amountCents,
         tenderedCents: payment.tenderedCents,
@@ -3023,5 +3025,34 @@ export class SalesService {
 
       return payload;
     });
+  }
+
+  /**
+   * PATCH /sales/:saleId/payments/:paymentId/reference
+   *
+   * Updates the `reference` of an existing payment belonging to the given
+   * sale. `reference` accepts a string (non-empty) or null (clear); an empty
+   * string is normalized to null so the stored value stays nullable. The
+   * update is scoped to the sale via the repository port, so a payment that
+   * does not belong to the sale (or does not exist) yields a 404.
+   */
+  async updatePaymentReference(
+    saleId: string,
+    paymentId: string,
+    dto: UpdateSalePaymentReferenceDto,
+  ) {
+    const normalized = dto.reference?.trim() ? dto.reference : null;
+
+    const updated = await this.saleRepo.updatePaymentReference({
+      saleId,
+      paymentId,
+      reference: normalized,
+    });
+
+    if (!updated) {
+      throw new EntityNotFoundError('SalePayment', paymentId);
+    }
+
+    return updated;
   }
 }
