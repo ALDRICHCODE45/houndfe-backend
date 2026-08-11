@@ -400,6 +400,14 @@
       "sessions": 1,
       "memories": 5,
       "prompts": 5
+    },
+    {
+      "id": "f7c004ca",
+      "created_by": "aldrich_code45",
+      "created_at": "2026-08-11T01:10:14Z",
+      "sessions": 1,
+      "memories": 0,
+      "prompts": 1
     }
   ]
 }
