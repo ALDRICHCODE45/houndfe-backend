@@ -6,6 +6,8 @@
  */
 import { Product } from './product.entity';
 
+export type { ProductServiceDetail } from './product.entity';
+
 /**
  * Re-exported for callers that want to declare a return type locally
  * without importing from the stock-alerts bounded context. The shape

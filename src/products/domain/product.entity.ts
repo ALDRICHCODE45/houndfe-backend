@@ -36,7 +36,20 @@ export type UnitOfMeasure =
   | 'CENTIMETRO'
   | 'KILOGRAMO'
   | 'GRAMO'
-  | 'LITRO';
+  | 'LITRO'
+  | 'HORA'
+  | 'SESION'
+  | 'DIA'
+  | 'CONSULTA'
+  | 'CURSO'
+  | 'PAQUETE';
+
+export interface ProductServiceDetail {
+  id: string;
+  productId: string;
+  capacity: number | null;
+  notes: string | null;
+}
 
 export const VALID_UNITS: UnitOfMeasure[] = [
   'UNIDAD',
@@ -93,6 +106,7 @@ export interface ProductProps {
   quantity: number;
   minQuantity: number;
   hasVariants: boolean;
+  serviceDetail: ProductServiceDetail | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -121,6 +135,7 @@ export class Product {
   public quantity: number;
   public minQuantity: number;
   public hasVariants: boolean;
+  public serviceDetail: ProductServiceDetail | null;
   public readonly createdAt: Date;
   public updatedAt: Date;
 
@@ -148,6 +163,7 @@ export class Product {
     this.quantity = props.quantity;
     this.minQuantity = props.minQuantity;
     this.hasVariants = props.hasVariants;
+    this.serviceDetail = props.serviceDetail;
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
     this.normalizeStockConfiguration();
@@ -257,6 +273,7 @@ export class Product {
       quantity,
       minQuantity,
       hasVariants: params.hasVariants ?? false,
+      serviceDetail: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -287,9 +304,10 @@ export class Product {
     useStock: boolean;
     useLotsAndExpirations: boolean;
     quantity: number;
-    minQuantity: number;
-    hasVariants: boolean;
-    createdAt: Date;
+     minQuantity: number;
+     hasVariants: boolean;
+     serviceDetail?: ProductServiceDetail | null;
+     createdAt: Date;
     updatedAt: Date;
   }): Product {
     return new Product({
@@ -318,9 +336,10 @@ export class Product {
       useStock: data.useStock,
       useLotsAndExpirations: data.useLotsAndExpirations,
       quantity: data.quantity,
-      minQuantity: data.minQuantity,
-      hasVariants: data.hasVariants,
-      createdAt: new Date(data.createdAt),
+       minQuantity: data.minQuantity,
+       hasVariants: data.hasVariants,
+       serviceDetail: data.serviceDetail ?? null,
+       createdAt: new Date(data.createdAt),
       updatedAt: new Date(data.updatedAt),
     });
   }
@@ -470,9 +489,15 @@ export class Product {
       useStock: this.useStock,
       useLotsAndExpirations: this.useLotsAndExpirations,
       quantity: this.quantity,
-      minQuantity: this.minQuantity,
-      hasVariants: this.hasVariants,
-      createdAt: this.createdAt.toISOString(),
+       minQuantity: this.minQuantity,
+       hasVariants: this.hasVariants,
+       serviceDetail: this.serviceDetail
+         ? {
+             capacity: this.serviceDetail.capacity,
+             notes: this.serviceDetail.notes,
+           }
+         : null,
+       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
     };
   }

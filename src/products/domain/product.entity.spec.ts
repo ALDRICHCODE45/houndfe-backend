@@ -254,8 +254,15 @@ describe('Product Entity', () => {
       });
       const persisted = product.toPersistence();
 
+      const serviceDetail = {
+        id: 'detail-1',
+        productId: product.id,
+        capacity: 4,
+        notes: 'Bring leash',
+      };
       const reconstructed = Product.fromPersistence({
         ...persisted,
+        serviceDetail,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
@@ -263,6 +270,11 @@ describe('Product Entity', () => {
       expect(reconstructed.id).toBe(product.id);
       expect(reconstructed.sku).toBe('SKU-001');
       expect(reconstructed.ivaRate.value).toBe('IVA_0');
+      expect(reconstructed.serviceDetail).toEqual(serviceDetail);
+      expect(reconstructed.toResponse().serviceDetail).toEqual({
+        capacity: 4,
+        notes: 'Bring leash',
+      });
     });
   });
 });
