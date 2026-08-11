@@ -28,6 +28,12 @@ enum UnitOfMeasure {
   KILOGRAMO
   GRAMO
   LITRO
+  HORA
+  SESION
+  DIA
+  CONSULTA
+  CURSO
+  PAQUETE
 }
 
 enum IvaRate {
@@ -442,11 +448,22 @@ model Product {
   variants       Variant[]
   lots           Lot[]
   priceLists     PriceList[]
+  serviceDetail  ServiceDetail?
 
   @@index([tenantId])
   @@index([tenantId, includeInOnlineCatalog, categoryId])
   @@index([tenantId, includeInOnlineCatalog, createdAt(sort: Desc)])
   @@map("products")
+}
+
+model ServiceDetail {
+  id        String  @id @default(uuid())
+  productId String  @unique
+  capacity  Int?
+  notes     String?
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("service_details")
 }
 
 // ============================================================================
