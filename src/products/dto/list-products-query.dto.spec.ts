@@ -76,6 +76,22 @@ describe('ListProductsQueryDto', () => {
     });
   });
 
+  describe('type', () => {
+    it('accepts PRODUCT and SERVICE filters', async () => {
+      for (const type of ['PRODUCT', 'SERVICE']) {
+        const { dto, errors } = await validateDto({ type });
+        expect(errors).toHaveLength(0);
+        expect(dto.type).toBe(type);
+      }
+    });
+
+    it('rejects unknown product types', async () => {
+      const { errors } = await validateDto({ type: 'OTHER' });
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].property).toBe('type');
+    });
+  });
+
   describe('page', () => {
     it('coerces a numeric string into an integer when implicit conversion is on', async () => {
       const { dto, errors } = await validateDto({ page: '2' });

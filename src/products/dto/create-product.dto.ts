@@ -125,6 +125,28 @@ export class CreateImageInlineDto {
   sortOrder?: number;
 }
 
+/**
+ * Inline ServiceDetail DTO — optional sub-resource for SERVICE products.
+ *
+ * `capacity` represents the maximum number of bookings/pets/attendees the
+ * service can host at once. `notes` is a free-form string the merchant
+ * uses to record the service schedule, inclusions, etc. Both fields are
+ * nullable at the DB layer (the table keeps a 1:1 row even for the
+ * `Paseo de perros` MVP, which stores nothing in either column). The DTO
+ * accepts absent or null to match.
+ */
+export class ServiceDetailDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  capacity?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+}
+
 export class CreateProductDto {
   @IsString()
   @MaxLength(100)
@@ -162,6 +184,12 @@ export class CreateProductDto {
     'KILOGRAMO',
     'GRAMO',
     'LITRO',
+    'HORA',
+    'SESION',
+    'DIA',
+    'CONSULTA',
+    'CURSO',
+    'PAQUETE',
   ])
   unit?: string;
 
@@ -274,4 +302,16 @@ export class CreateProductDto {
   @ValidateNested({ each: true })
   @Type(() => CreateImageInlineDto)
   images?: CreateImageInlineDto[];
+
+  /**
+   * ServiceDetail payload — only meaningful when `type === 'SERVICE'`.
+   * The product's `type` is what actually persists the row at the DB
+   * layer; this DTO only validates the optional fields. The service
+   * layer (`ProductsService.create`) will upsert a `service_details`
+   * row in the same transaction, ignoring the field for PRODUCTs.
+   */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ServiceDetailDto)
+  serviceDetail?: ServiceDetailDto;
 }

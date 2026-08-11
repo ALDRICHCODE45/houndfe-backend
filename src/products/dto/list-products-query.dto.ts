@@ -23,7 +23,7 @@
  * weaken validation on mutation endpoints.
  */
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class ListProductsQueryDto {
   /**
@@ -59,4 +59,13 @@ export class ListProductsQueryDto {
   @Min(1)
   @Max(100)
   limit?: number;
+
+  /**
+   * Product type filter. Omit to receive both PRODUCT and SERVICE rows.
+   * Forwarded to `ProductsService.findAll` which appends
+   * `WHERE Product.type = ?` to the Prisma query.
+   */
+  @IsOptional()
+  @IsEnum(['PRODUCT', 'SERVICE'])
+  type?: 'PRODUCT' | 'SERVICE';
 }

@@ -36,7 +36,20 @@ export type UnitOfMeasure =
   | 'CENTIMETRO'
   | 'KILOGRAMO'
   | 'GRAMO'
-  | 'LITRO';
+  | 'LITRO'
+  | 'HORA'
+  | 'SESION'
+  | 'DIA'
+  | 'CONSULTA'
+  | 'CURSO'
+  | 'PAQUETE';
+
+export interface ProductServiceDetail {
+  id: string;
+  productId: string;
+  capacity: number | null;
+  notes: string | null;
+}
 
 export const VALID_UNITS: UnitOfMeasure[] = [
   'UNIDAD',
@@ -47,7 +60,27 @@ export const VALID_UNITS: UnitOfMeasure[] = [
   'KILOGRAMO',
   'GRAMO',
   'LITRO',
+  'HORA',
+  'SESION',
+  'DIA',
+  'CONSULTA',
+  'CURSO',
+  'PAQUETE',
 ];
+
+export const SERVICE_FORCED_DEFAULTS = {
+  type: 'SERVICE',
+  sku: null,
+  barcode: null,
+  brandId: null,
+  purchaseCostMode: 'NET',
+  purchaseNetCostCents: 0,
+  purchaseGrossCostCents: 0,
+  useStock: false,
+  useLotsAndExpirations: false,
+  quantity: 0,
+  minQuantity: 0,
+} as const;
 
 export interface ProductProps {
   id: string;
@@ -73,6 +106,7 @@ export interface ProductProps {
   quantity: number;
   minQuantity: number;
   hasVariants: boolean;
+  serviceDetail: ProductServiceDetail | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -101,6 +135,7 @@ export class Product {
   public quantity: number;
   public minQuantity: number;
   public hasVariants: boolean;
+  public serviceDetail: ProductServiceDetail | null;
   public readonly createdAt: Date;
   public updatedAt: Date;
 
@@ -128,6 +163,7 @@ export class Product {
     this.quantity = props.quantity;
     this.minQuantity = props.minQuantity;
     this.hasVariants = props.hasVariants;
+    this.serviceDetail = props.serviceDetail;
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
     this.normalizeStockConfiguration();
@@ -170,14 +206,23 @@ export class Product {
       );
     }
 
-    const sku = params.sku?.trim().toUpperCase() || null;
-    const barcode = params.barcode?.trim() || null;
+    const isService = type === SERVICE_FORCED_DEFAULTS.type;
+    const sku = isService
+      ? SERVICE_FORCED_DEFAULTS.sku
+      : params.sku?.trim().toUpperCase() || null;
+    const barcode = isService
+      ? SERVICE_FORCED_DEFAULTS.barcode
+      : params.barcode?.trim() || null;
 
     const ivaRate = IvaRate.create(params.ivaRate ?? 'IVA_16');
     const iepsRate = IepsRate.create(params.iepsRate ?? 'NO_APLICA');
 
-    const costMode = params.purchaseCostMode ?? 'NET';
-    const costValue = params.purchaseCostValue ?? 0;
+    const costMode = isService
+      ? SERVICE_FORCED_DEFAULTS.purchaseCostMode
+      : (params.purchaseCostMode ?? 'NET');
+    const costValue = isService
+      ? SERVICE_FORCED_DEFAULTS.purchaseNetCostCents
+      : (params.purchaseCostValue ?? 0);
     const purchaseCost = PurchaseCost.create(
       costMode,
       costValue,
@@ -185,8 +230,12 @@ export class Product {
       iepsRate.multiplier,
     );
 
-    const quantity = params.quantity ?? 0;
-    const minQuantity = params.minQuantity ?? 0;
+    const quantity = isService
+      ? SERVICE_FORCED_DEFAULTS.quantity
+      : (params.quantity ?? 0);
+    const minQuantity = isService
+      ? SERVICE_FORCED_DEFAULTS.minQuantity
+      : (params.minQuantity ?? 0);
 
     if (quantity < 0) {
       throw new InvalidArgumentError('Quantity cannot be negative');
@@ -207,7 +256,7 @@ export class Product {
       unit,
       satKey: params.satKey ?? null,
       categoryId: params.categoryId ?? null,
-      brandId: params.brandId ?? null,
+      brandId: isService ? SERVICE_FORCED_DEFAULTS.brandId : (params.brandId ?? null),
       sellInPos: params.sellInPos ?? true,
       includeInOnlineCatalog: params.includeInOnlineCatalog ?? true,
       requiresPrescription: params.requiresPrescription ?? false,
@@ -215,11 +264,16 @@ export class Product {
       ivaRate,
       iepsRate,
       purchaseCost,
-      useStock: params.useStock ?? true,
-      useLotsAndExpirations: params.useLotsAndExpirations ?? false,
+      useStock: isService
+        ? SERVICE_FORCED_DEFAULTS.useStock
+        : (params.useStock ?? true),
+      useLotsAndExpirations: isService
+        ? SERVICE_FORCED_DEFAULTS.useLotsAndExpirations
+        : (params.useLotsAndExpirations ?? false),
       quantity,
       minQuantity,
       hasVariants: params.hasVariants ?? false,
+      serviceDetail: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -250,9 +304,10 @@ export class Product {
     useStock: boolean;
     useLotsAndExpirations: boolean;
     quantity: number;
-    minQuantity: number;
-    hasVariants: boolean;
-    createdAt: Date;
+     minQuantity: number;
+     hasVariants: boolean;
+     serviceDetail?: ProductServiceDetail | null;
+     createdAt: Date;
     updatedAt: Date;
   }): Product {
     return new Product({
@@ -281,9 +336,10 @@ export class Product {
       useStock: data.useStock,
       useLotsAndExpirations: data.useLotsAndExpirations,
       quantity: data.quantity,
-      minQuantity: data.minQuantity,
-      hasVariants: data.hasVariants,
-      createdAt: new Date(data.createdAt),
+       minQuantity: data.minQuantity,
+       hasVariants: data.hasVariants,
+       serviceDetail: data.serviceDetail ?? null,
+       createdAt: new Date(data.createdAt),
       updatedAt: new Date(data.updatedAt),
     });
   }
@@ -305,6 +361,23 @@ export class Product {
 
     if (this.useLotsAndExpirations) {
       this.quantity = 0;
+    }
+  }
+
+  static assertTypeChangeAllowed(
+    current: Product,
+    nextType: ProductType,
+    activeLots: boolean | number = false,
+  ): void {
+    if (current.type !== 'PRODUCT' || nextType !== 'SERVICE') return;
+
+    const hasActiveLots =
+      typeof activeLots === 'number' ? activeLots > 0 : activeLots;
+    if (current.quantity > 0 || hasActiveLots) {
+      throw new BusinessRuleViolationError(
+        'Cannot convert a PRODUCT to SERVICE while stock or active lots remain',
+        'PRODUCT_TYPE_CHANGE_BLOCKED',
+      );
     }
   }
 
@@ -416,9 +489,15 @@ export class Product {
       useStock: this.useStock,
       useLotsAndExpirations: this.useLotsAndExpirations,
       quantity: this.quantity,
-      minQuantity: this.minQuantity,
-      hasVariants: this.hasVariants,
-      createdAt: this.createdAt.toISOString(),
+       minQuantity: this.minQuantity,
+       hasVariants: this.hasVariants,
+       serviceDetail: this.serviceDetail
+         ? {
+             capacity: this.serviceDetail.capacity,
+             notes: this.serviceDetail.notes,
+           }
+         : null,
+       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
     };
   }

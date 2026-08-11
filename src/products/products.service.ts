@@ -286,6 +286,40 @@ export class ProductsService {
       }
     }
 
+    // ── Pre-validation: SERVICE rejection of inventory fields (R1) ──
+    //
+    // The Product entity forces useStock=false / sku=null / barcode=null /
+    // brandId=null silently when type=SERVICE, but the user-facing rule
+    // is: NEVER accept those fields with type=SERVICE. Returning 400 with
+    // a clear message beats silently dropping data — see spec R1.
+    if (dto.type === 'SERVICE') {
+      if (dto.sku !== undefined && dto.sku !== null) {
+        throw new InvalidArgumentError(
+          'sku: SERVICE products cannot have a SKU',
+        );
+      }
+      if (dto.barcode !== undefined && dto.barcode !== null) {
+        throw new InvalidArgumentError(
+          'barcode: SERVICE products cannot have a barcode',
+        );
+      }
+      if (dto.brandId !== undefined && dto.brandId !== null) {
+        throw new InvalidArgumentError(
+          'brandId: SERVICE products cannot have a brand',
+        );
+      }
+      if (dto.lots?.length) {
+        throw new InvalidArgumentError(
+          'lots: SERVICE products cannot have lots',
+        );
+      }
+      if (dto.useLotsAndExpirations === true) {
+        throw new InvalidArgumentError(
+          'useLotsAndExpirations: SERVICE products cannot enable lots',
+        );
+      }
+    }
+
     // ── Build domain entity ──
 
     // ── SAT catalog validation (Slice D): create has no prior value, so any
@@ -497,6 +531,28 @@ export class ProductsService {
           })) as Prisma.ProductImageCreateManyInput[],
         });
       }
+
+      // 7. ServiceDetail (R4) — only when type=SERVICE. Upsert
+      //    semantics: if a row already exists for this productId, update
+      //    its capacity/notes; otherwise create a new one. The
+      //    `productId @unique` constraint makes upsert trivial. All
+      //    fields are nullable so the row is always valid even when the
+      //    DTO omits serviceDetail entirely. ServiceDetail is tenant-
+      //    scoped transitively through its parent Product.
+      if (product.type === 'SERVICE') {
+        await tx.serviceDetail.upsert({
+          where: { productId },
+          create: {
+            productId,
+            capacity: dto.serviceDetail?.capacity ?? null,
+            notes: dto.serviceDetail?.notes ?? null,
+          },
+          update: {
+            capacity: dto.serviceDetail?.capacity ?? null,
+            notes: dto.serviceDetail?.notes ?? null,
+          },
+        });
+      }
     });
 
     return this.buildFullResponse(productId);
@@ -533,6 +589,16 @@ export class ProductsService {
         }
       : undefined;
 
+    // R8 — `?type=PRODUCT|SERVICE` filter. Combined with the search
+    // term via AND (filter narrows; search matches). The DTO already
+    // validates the enum; here we forward to Prisma's `where.type`.
+    const finalWhere: Prisma.ProductWhereInput | undefined = (() => {
+      if (where && query.type) return { AND: [where, { type: query.type }] };
+      if (where) return where;
+      if (query.type) return { type: query.type };
+      return undefined;
+    })();
+
     // Pagination is opt-in: applied only when EITHER `page` or `limit` is
     // supplied. Each field falls back to a sensible default (page=1,
     // limit=20) so callers can specify just `?limit=5` or just `?page=2`.
@@ -549,7 +615,7 @@ export class ProductsService {
     const take = hasPagination ? limit : undefined;
 
     const products = await tenantClient.product.findMany({
-      ...(where !== undefined ? { where } : {}),
+      ...(finalWhere !== undefined ? { where: finalWhere } : {}),
       orderBy: { createdAt: 'desc' },
       include: {
         category: { select: { id: true, name: true } },
@@ -561,6 +627,7 @@ export class ProductsService {
           select: { priceCents: true },
           take: 1,
         },
+        serviceDetail: true,
       },
       ...(skip !== undefined ? { skip } : {}),
       ...(take !== undefined ? { take } : {}),
@@ -593,6 +660,14 @@ export class ProductsService {
         quantity: product.quantity,
         minQuantity: product.minQuantity,
         hasVariants: product.hasVariants,
+        serviceDetail: product.serviceDetail
+          ? {
+              id: product.serviceDetail.id,
+              productId: product.serviceDetail.productId,
+              capacity: product.serviceDetail.capacity,
+              notes: product.serviceDetail.notes,
+            }
+          : null,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
       }).toResponse();
@@ -631,6 +706,55 @@ export class ProductsService {
     const product = await this.productRepo.findById(id);
     if (!product) throw new EntityNotFoundError('Product', id);
     const previousUseStock = product.useStock;
+    const previousType = product.type;
+
+    // R5 — Type-change protection. Block PRODUCT→SERVICE when stock or
+    // active lots remain. SERVICE→PRODUCT is always allowed; the
+    // SERVICE_FORCED_DEFAULTS get restored at the entity factory. The
+    // active-lots count is queried ONLY when the user is actually
+    // attempting a PRODUCT→SERVICE change — otherwise it's a wasted DB
+    // roundtrip on every other patch.
+    if (dto.type !== undefined && dto.type !== previousType) {
+      if (previousType === 'PRODUCT' && dto.type === 'SERVICE') {
+        const activeLotCount = await this.tenantPrisma
+          .getClient()
+          .lot.count({ where: { productId: id, quantity: { gt: 0 } } });
+        try {
+          Product.assertTypeChangeAllowed(product, dto.type, activeLotCount);
+        } catch (e) {
+          // Re-throw InvalidArgumentError as-is for NestJS to surface
+          // as 400. BusinessRuleViolationError also maps to 400.
+          throw e;
+        }
+        // R1: SERVICE normalization also applies on the update path.
+        // Force-clear inventory fields the moment we commit the change.
+        product.sku = null;
+        product.barcode = null;
+        product.brandId = null;
+        const { PurchaseCost } =
+          await import('./domain/value-objects/purchase-cost.value-object');
+        product.purchaseCost = PurchaseCost.create(
+          'NET',
+          0,
+          product.ivaRate.multiplier,
+          product.iepsRate.multiplier,
+        );
+        product.useStock = false;
+        product.useLotsAndExpirations = false;
+        product.quantity = 0;
+        product.minQuantity = 0;
+      } else if (previousType === 'SERVICE' && dto.type === 'PRODUCT') {
+        // Restore PRODUCT defaults. The user will add stock/lots in
+        // a follow-up call. We do not auto-populate stock; the entity
+        // already has useStock/quantity=0/minQuantity=0 from the
+        // SERVICE_FORCED_DEFAULTS.
+        product.useStock = dto.useStock ?? true;
+        product.useLotsAndExpirations = dto.useLotsAndExpirations ?? false;
+        product.quantity = dto.quantity ?? 0;
+        product.minQuantity = dto.minQuantity ?? 0;
+        if (dto.brandId !== undefined) product.brandId = dto.brandId || null;
+      }
+    }
 
     // SKU uniqueness check — exclude this product only
     if (dto.sku !== undefined && dto.sku !== null) {
@@ -772,6 +896,37 @@ export class ProductsService {
           productId: id,
           variantId: null,
         });
+      }
+
+      // 5. ServiceDetail (R4) — sync the 1:1 row with the post-update
+      //    state. Three cases:
+      //    a) final type=SERVICE & dto.serviceDetail present → upsert
+      //    b) final type=SERVICE & dto.serviceDetail absent → no-op
+      //       (existing row is kept; users clear it explicitly)
+      //    c) final type=PRODUCT (was SERVICE or always PRODUCT) →
+      //       delete the row to keep the relation consistent.
+      if (product.type === 'SERVICE') {
+        if (dto.serviceDetail !== undefined) {
+          await this.tenantPrisma.getClient().serviceDetail.upsert({
+            where: { productId: id },
+            create: {
+              productId: id,
+              capacity: dto.serviceDetail?.capacity ?? null,
+              notes: dto.serviceDetail?.notes ?? null,
+            },
+            update: {
+              capacity: dto.serviceDetail?.capacity ?? null,
+              notes: dto.serviceDetail?.notes ?? null,
+            },
+          });
+        }
+      } else {
+        // Final type=PRODUCT → clear the row if it exists. Catches
+        // both "SERVICE→PRODUCT" type changes and the edge case where
+        // a PRODUCT row somehow had a stale service_detail (data fix).
+        await this.tenantPrisma
+          .getClient()
+          .serviceDetail.deleteMany({ where: { productId: id } });
       }
     });
 
@@ -1242,6 +1397,15 @@ export class ProductsService {
     const tenantId = this.tenantPrisma.getTenantId();
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
+
+    // R2 — SERVICE products cannot have lots. Returns 400 to the
+    // client before the business-rule gate runs.
+    if (product.type === 'SERVICE') {
+      throw new BusinessRuleViolationError(
+        'Lots are not allowed on service products',
+        'LOTS_NOT_ALLOWED_ON_SERVICE',
+      );
+    }
 
     if (!product.useLotsAndExpirations) {
       throw new BusinessRuleViolationError(

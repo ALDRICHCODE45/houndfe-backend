@@ -34,41 +34,35 @@ describe('Product Entity', () => {
       expect(product.hasVariants).toBe(false);
     });
 
-    it('should create with all explicit params', () => {
+    it('should normalize SERVICE fields to safe defaults', () => {
       const product = Product.create({
         ...validParams,
         type: 'SERVICE',
         sku: 'abc-123',
-        location: 'A1',
-        description: 'Producto de prueba',
         barcode: '7501234567890',
-        unit: 'KILOGRAMO',
-        satKey: '01010101',
-        categoryId: 'cat-id',
-        sellInPos: false,
-        includeInOnlineCatalog: false,
-        chargeProductTaxes: false,
-        ivaRate: 'IVA_8',
-        iepsRate: 'IEPS_8',
-        purchaseCostMode: 'NET',
-        purchaseCostValue: 10000, // 100.00 MXN
-        useStock: false,
+        brandId: 'brand-id',
+        unit: 'HORA',
+        purchaseCostMode: 'GROSS',
+        purchaseCostValue: 10000,
+        useStock: true,
+        useLotsAndExpirations: true,
         quantity: 50,
         minQuantity: 5,
         hasVariants: true,
       });
 
       expect(product.type).toBe('SERVICE');
-      expect(product.sku).toBe('ABC-123'); // uppercased
-      expect(product.location).toBe('A1');
-      expect(product.description).toBe('Producto de prueba');
-      expect(product.barcode).toBe('7501234567890');
-      expect(product.unit).toBe('KILOGRAMO');
-      expect(product.ivaRate.value).toBe('IVA_8');
-      expect(product.iepsRate.value).toBe('IEPS_8');
-      expect(product.purchaseCost.netCents).toBe(10000);
-      // gross = net * (1 + 0.08 + 0.08) = 10000 * 1.16 = 11600
-      expect(product.purchaseCost.grossCents).toBe(11600);
+      expect(product.sku).toBeNull();
+      expect(product.barcode).toBeNull();
+      expect(product.brandId).toBeNull();
+      expect(product.unit).toBe('HORA');
+      expect(product.purchaseCost.mode).toBe('NET');
+      expect(product.purchaseCost.netCents).toBe(0);
+      expect(product.purchaseCost.grossCents).toBe(0);
+      expect(product.useStock).toBe(false);
+      expect(product.useLotsAndExpirations).toBe(false);
+      expect(product.quantity).toBe(0);
+      expect(product.minQuantity).toBe(0);
       expect(product.hasVariants).toBe(true);
     });
 
@@ -122,6 +116,32 @@ describe('Product Entity', () => {
 
       expect(product.quantity).toBe(0);
       expect(product.minQuantity).toBe(3);
+    });
+  });
+
+  describe('assertTypeChangeAllowed', () => {
+    it('allows SERVICE to PRODUCT conversion', () => {
+      const service = Product.create({ ...validParams, type: 'SERVICE' });
+
+      expect(() =>
+        Product.assertTypeChangeAllowed(service, 'PRODUCT', false),
+      ).not.toThrow();
+    });
+
+    it('rejects PRODUCT to SERVICE conversion when quantity remains', () => {
+      const product = Product.create({ ...validParams, quantity: 1 });
+
+      expect(() =>
+        Product.assertTypeChangeAllowed(product, 'SERVICE', false),
+      ).toThrow(BusinessRuleViolationError);
+    });
+
+    it('rejects PRODUCT to SERVICE conversion when an active lot exists', () => {
+      const product = Product.create(validParams);
+
+      expect(() =>
+        Product.assertTypeChangeAllowed(product, 'SERVICE', true),
+      ).toThrow(BusinessRuleViolationError);
     });
   });
 
@@ -234,8 +254,15 @@ describe('Product Entity', () => {
       });
       const persisted = product.toPersistence();
 
+      const serviceDetail = {
+        id: 'detail-1',
+        productId: product.id,
+        capacity: 4,
+        notes: 'Bring leash',
+      };
       const reconstructed = Product.fromPersistence({
         ...persisted,
+        serviceDetail,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
@@ -243,6 +270,11 @@ describe('Product Entity', () => {
       expect(reconstructed.id).toBe(product.id);
       expect(reconstructed.sku).toBe('SKU-001');
       expect(reconstructed.ivaRate.value).toBe('IVA_0');
+      expect(reconstructed.serviceDetail).toEqual(serviceDetail);
+      expect(reconstructed.toResponse().serviceDetail).toEqual({
+        capacity: 4,
+        notes: 'Bring leash',
+      });
     });
   });
 });

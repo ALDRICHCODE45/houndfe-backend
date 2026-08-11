@@ -62,6 +62,13 @@ function makeMockPrisma() {
         }),
       ),
     },
+    lot: {
+      count: jest.fn().mockResolvedValue(0),
+    },
+    serviceDetail: {
+      upsert: jest.fn().mockResolvedValue(undefined),
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
   } as any;
 }
 
@@ -96,6 +103,18 @@ function createService(
       ) => work(prisma),
     ),
   } as any;
+  // ServiceDetail mock — the service calls
+  // `tenantPrisma.getClient().serviceDetail.upsert/deleteMany` in the
+  // create/update path. Inline `prisma` mocks above usually don't
+  // include it, so we splice in no-op methods on the SAME object that
+  // getClient() returns to keep all existing PRODUCT-path tests green.
+  (prisma as any).serviceDetail = {
+    upsert: jest.fn().mockResolvedValue(undefined),
+    deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+  };
+  (prisma as any).lot = (prisma as any).lot ?? {
+    count: jest.fn().mockResolvedValue(0),
+  };
   return new ProductsService(
     repo,
     prisma,
@@ -155,6 +174,7 @@ function makePersistenceProduct(
     quantity: overrides.quantity ?? 0,
     minQuantity: 0,
     hasVariants: overrides.hasVariants ?? false,
+    serviceDetail: null,
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
   };
@@ -1734,6 +1754,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
       quantity: overrides.quantity ?? 5,
       minQuantity: overrides.minQuantity ?? 3,
       hasVariants: false,
+      serviceDetail: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -1793,6 +1814,11 @@ describe('ProductsService — update() edit-path re-arm', () => {
           }),
         ),
       },
+      serviceDetail: {
+        upsert: jest.fn().mockResolvedValue(undefined),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      lot: { count: jest.fn().mockResolvedValue(0) },
       $queryRaw: jest.fn().mockResolvedValue([{ q: 10, m: 3 }]),
     };
 
@@ -1823,6 +1849,11 @@ describe('ProductsService — update() edit-path re-arm', () => {
       },
       priceList: { updateMany: jest.fn() },
       variant: { updateMany: jest.fn() },
+      serviceDetail: {
+        upsert: jest.fn().mockResolvedValue(undefined),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      lot: { count: jest.fn().mockResolvedValue(0) },
     } as any;
 
     const service = createService(realRepo as any, prisma);
@@ -1889,6 +1920,22 @@ describe('ProductsService — update() edit-path re-arm', () => {
         updateMany: jest.fn().mockImplementation(() => {
           recordCall('txClient.variant.updateMany');
           return Promise.resolve({ count: 0 });
+        }),
+      },
+      serviceDetail: {
+        upsert: jest.fn().mockImplementation(() => {
+          recordCall('txClient.serviceDetail.upsert');
+          return Promise.resolve(undefined);
+        }),
+        deleteMany: jest.fn().mockImplementation(() => {
+          recordCall('txClient.serviceDetail.deleteMany');
+          return Promise.resolve({ count: 0 });
+        }),
+      },
+      lot: {
+        count: jest.fn().mockImplementation(() => {
+          recordCall('txClient.lot.count');
+          return Promise.resolve(0);
         }),
       },
     };
