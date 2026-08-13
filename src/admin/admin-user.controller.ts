@@ -35,7 +35,7 @@ export class AdminUserController {
   @Get()
   @RequirePermissions(['read', 'User'])
   findAll(@Query() query: PaginationQueryDto) {
-    return this.adminUserService.findAll(query.page ?? 1, query.limit ?? 20);
+    return this.adminUserService.findAll(query);
   }
 
   @Get(':id')
