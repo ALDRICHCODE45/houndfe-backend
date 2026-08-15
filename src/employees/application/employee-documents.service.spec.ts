@@ -276,13 +276,13 @@ describe('EmployeeDocumentsService', () => {
   });
 
   describe('listExpiringTenantWide()', () => {
-    it('should query by tenantId and expiresAt cutoff ordered by expiresAt asc', async () => {
+    it('should query by tenantId and expiresAt cutoff ordered by expiresAt asc by default', async () => {
       const { service, documentFindMany, employeeFindMany } = makeService();
       const docs = [{ id: 'doc-1', expiresAt: new Date() }];
       documentFindMany.mockResolvedValue(docs);
       employeeFindMany.mockResolvedValue([]);
 
-      const result = await service.listExpiringTenantWide(30);
+      const result = await service.listExpiringTenantWide({});
 
       const call = documentFindMany.mock.calls[0][0];
       expect(call.where.tenantId).toBe('tenant-1');
@@ -291,8 +291,183 @@ describe('EmployeeDocumentsService', () => {
       expect(call.orderBy).toEqual({ expiresAt: 'asc' });
       // Additive contract: the original document rows still flow through
       // unchanged (identity fields are asserted in the describe below).
-      expect(result).toHaveLength(1);
-      expect(result[0]).toMatchObject(docs[0]);
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]).toMatchObject(docs[0]);
+    });
+
+    it('should default the cutoff to now + 30 days when daysUntilExpiry is omitted', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([]);
+      employeeFindMany.mockResolvedValue([]);
+
+      await service.listExpiringTenantWide({});
+
+      const call = documentFindMany.mock.calls[0][0];
+      const expectedCutoff = new Date();
+      expectedCutoff.setDate(expectedCutoff.getDate() + 30);
+      const actualCutoff = call.where.expiresAt.lte as Date;
+      expect(
+        Math.abs(actualCutoff.getTime() - expectedCutoff.getTime()),
+      ).toBeLessThan(5000);
+    });
+
+    it('should use daysUntilExpiry from the query when provided', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([]);
+      employeeFindMany.mockResolvedValue([]);
+
+      await service.listExpiringTenantWide({ daysUntilExpiry: 60 });
+
+      const call = documentFindMany.mock.calls[0][0];
+      const expectedCutoff = new Date();
+      expectedCutoff.setDate(expectedCutoff.getDate() + 60);
+      const actualCutoff = call.where.expiresAt.lte as Date;
+      expect(
+        Math.abs(actualCutoff.getTime() - expectedCutoff.getTime()),
+      ).toBeLessThan(5000);
+    });
+
+    it('should return { data, meta } with totalPages = ceil(total / limit)', async () => {
+      const { service, documentFindMany, documentCount, employeeFindMany } =
+        makeService();
+      documentFindMany.mockResolvedValue([
+        { id: 'doc-1', employeeId: 'emp-1', expiresAt: new Date('2026-07-01') },
+      ]);
+      documentCount.mockResolvedValue(45);
+      employeeFindMany.mockResolvedValue([]);
+
+      const result = await service.listExpiringTenantWide({ page: 3, limit: 20 });
+
+      expect(documentFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 40, take: 20 }),
+      );
+      expect(result.data).toHaveLength(1);
+      expect(result.meta).toEqual({ total: 45, page: 3, limit: 20, totalPages: 3 });
+    });
+
+    it('should return totalPages 0 when there are no rows', async () => {
+      const { service, documentFindMany, documentCount, employeeFindMany } =
+        makeService();
+      documentFindMany.mockResolvedValue([]);
+      documentCount.mockResolvedValue(0);
+      employeeFindMany.mockResolvedValue([]);
+
+      const result = await service.listExpiringTenantWide({});
+
+      expect(result.data).toHaveLength(0);
+      expect(result.meta).toEqual({ total: 0, page: 1, limit: 20, totalPages: 0 });
+    });
+  });
+
+  describe('listExpiringTenantWide() — search', () => {
+    it('should reject single-character searches with SEARCH_QUERY_TOO_SHORT', async () => {
+      const { service } = makeService();
+
+      await expect(service.listExpiringTenantWide({ search: 'a' })).rejects.toThrow(
+        'SEARCH_QUERY_TOO_SHORT',
+      );
+    });
+
+    it('should build a relation OR filter over employee identity for search >= 2 chars', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([]);
+      employeeFindMany.mockResolvedValue([]);
+
+      await service.listExpiringTenantWide({ search: 'LUIS' });
+
+      const call = documentFindMany.mock.calls[0][0];
+      expect(call.where).toEqual({
+        tenantId: 'tenant-1',
+        expiresAt: { lte: expect.any(Date), not: null },
+        OR: [
+          {
+            employee: {
+              firstName: { contains: 'LUIS', mode: 'insensitive' },
+            },
+          },
+          {
+            employee: {
+              lastName: { contains: 'LUIS', mode: 'insensitive' },
+            },
+          },
+          {
+            employee: {
+              employeeNumber: { contains: 'LUIS', mode: 'insensitive' },
+            },
+          },
+        ],
+      });
+    });
+
+    it('should match category via the enum values that contain the search term (Prisma enums do not support contains)', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([]);
+      employeeFindMany.mockResolvedValue([]);
+
+      await service.listExpiringTenantWide({ search: 'contract' });
+
+      const call = documentFindMany.mock.calls[0][0];
+      expect(call.where.OR).toEqual([
+        {
+          employee: {
+            firstName: { contains: 'contract', mode: 'insensitive' },
+          },
+        },
+        {
+          employee: {
+            lastName: { contains: 'contract', mode: 'insensitive' },
+          },
+        },
+        {
+          employee: {
+            employeeNumber: { contains: 'contract', mode: 'insensitive' },
+          },
+        },
+        { category: { in: ['CONTRACT'] } },
+      ]);
+    });
+
+    it('should omit the OR filter when search is undefined', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([]);
+      employeeFindMany.mockResolvedValue([]);
+
+      await service.listExpiringTenantWide({});
+
+      const call = documentFindMany.mock.calls[0][0];
+      expect(call.where.OR).toBeUndefined();
+    });
+  });
+
+  describe('listExpiringTenantWide() — sorting', () => {
+    it('should map sortBy employeeName to employee.firstName orderBy', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([]);
+      employeeFindMany.mockResolvedValue([]);
+
+      await service.listExpiringTenantWide({
+        sortBy: 'employeeName',
+        sortOrder: 'desc',
+      });
+
+      expect(documentFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { employee: { firstName: 'desc' } } }),
+      );
+    });
+
+    it('should map other sort fields directly onto the document', async () => {
+      const { service, documentFindMany, employeeFindMany } = makeService();
+      documentFindMany.mockResolvedValue([]);
+      employeeFindMany.mockResolvedValue([]);
+
+      await service.listExpiringTenantWide({
+        sortBy: 'createdAt',
+        sortOrder: 'asc',
+      });
+
+      expect(documentFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { createdAt: 'asc' } }),
+      );
     });
   });
 
@@ -321,15 +496,15 @@ describe('EmployeeDocumentsService', () => {
         },
       ]);
 
-      const result = await service.listExpiringTenantWide(30);
+      const result = await service.listExpiringTenantWide({});
 
-      expect(result.map((r: any) => r.id)).toEqual(['doc-1', 'doc-2']);
-      expect(result[0]).toMatchObject({
+      expect(result.data.map((r: any) => r.id)).toEqual(['doc-1', 'doc-2']);
+      expect(result.data[0]).toMatchObject({
         employeeId: 'emp-3',
         fullName: 'Luis Pérez',
         employeeNumber: 'E-003',
       });
-      expect(result[1]).toMatchObject({
+      expect(result.data[1]).toMatchObject({
         employeeId: 'emp-2',
         fullName: 'Ana Gómez',
         employeeNumber: 'E-002',
@@ -358,7 +533,7 @@ describe('EmployeeDocumentsService', () => {
         },
       ]);
 
-      await service.listExpiringTenantWide(30);
+      await service.listExpiringTenantWide({});
 
       // ONE batch read with the UNIQUE ids — no tenantId hand-added
       // (Employee is auto tenant-scoped).
@@ -385,10 +560,10 @@ describe('EmployeeDocumentsService', () => {
       ]);
       employeeFindMany.mockResolvedValue([]); // lookup resolves nothing
 
-      const result = await service.listExpiringTenantWide(30);
+      const result = await service.listExpiringTenantWide({});
 
-      expect(result[0].fullName).toBe('(empleado)');
-      expect(result[0].employeeNumber).toBeNull();
+      expect(result.data[0].fullName).toBe('(empleado)');
+      expect(result.data[0].employeeNumber).toBeNull();
     });
   });
 });

@@ -1,4 +1,5 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
+import { EmployeeDocumentCategory, Prisma } from '@prisma/client';
 import type { IEmployeeRepository } from '../domain/employee.repository';
 import { EMPLOYEE_REPOSITORY } from '../domain/employee.repository';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
@@ -8,6 +9,11 @@ import { EmployeeNotFoundError } from '../domain/errors/employee-not-found.error
 import { EmployeeDocumentNotFoundError } from '../domain/errors/employee-document-not-found.error';
 import type { UploadEmployeeDocumentDto } from '../dto/upload-employee-document.dto';
 import type { ListEmployeeDocumentsQueryDto } from '../dto/list-employee-documents.query.dto';
+import type {
+  ExpiringDocumentSortField,
+  ExpiringDocumentSortOrder,
+  ListExpiringDocumentsQueryDto,
+} from '../dto/list-expiring-documents.query.dto';
 
 const EMPLOYEE_DOCUMENT_ALLOWED_MIMES = [
   'application/pdf',
@@ -137,24 +143,86 @@ export class EmployeeDocumentsService {
     }
   }
 
-  async listExpiringTenantWide(daysUntilExpiry: number) {
+  async listExpiringTenantWide(query: ListExpiringDocumentsQueryDto) {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
+
+    const search = query.search;
+    if (search !== undefined && search.length === 1) {
+      throw new BadRequestException('SEARCH_QUERY_TOO_SHORT');
+    }
+
+    const daysUntilExpiry = query.daysUntilExpiry ?? 30;
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const sortBy: ExpiringDocumentSortField = query.sortBy ?? 'expiresAt';
+    const sortOrder: ExpiringDocumentSortOrder = query.sortOrder ?? 'asc';
+    const skip = (page - 1) * limit;
+
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() + daysUntilExpiry);
 
-    const rows = await prisma.employeeDocument.findMany({
-      where: {
-        tenantId,
-        expiresAt: { lte: cutoff, not: null },
-      },
-      orderBy: { expiresAt: 'asc' },
-    });
+    // `category` is a Prisma enum, whose filter only supports equals/in/notIn —
+    // `contains` is NOT supported on enums. To keep case-insensitive "contains"
+    // semantics for category searches, match the enum VALUES that contain the
+    // term (e.g. search "contract" matches CONTRACT).
+    const matchingCategories =
+      typeof search === 'string' && search.length >= 2
+        ? Object.values(EmployeeDocumentCategory).filter((category) =>
+            category.toLowerCase().includes(search.toLowerCase()),
+          )
+        : [];
+
+    const where: Prisma.EmployeeDocumentWhereInput = {
+      tenantId,
+      expiresAt: { lte: cutoff, not: null },
+      ...(typeof search === 'string' && search.length >= 2
+        ? {
+            OR: [
+              {
+                employee: {
+                  firstName: { contains: search, mode: 'insensitive' },
+                },
+              },
+              {
+                employee: {
+                  lastName: { contains: search, mode: 'insensitive' },
+                },
+              },
+              {
+                employee: {
+                  employeeNumber: { contains: search, mode: 'insensitive' },
+                },
+              },
+              ...(matchingCategories.length > 0
+                ? [{ category: { in: matchingCategories } }]
+                : []),
+            ],
+          }
+        : {}),
+    };
+
+    const orderBy: Prisma.EmployeeDocumentOrderByWithRelationInput =
+      sortBy === 'employeeName'
+        ? { employee: { firstName: sortOrder } }
+        : { [sortBy]: sortOrder };
+
+    const [rows, total] = await Promise.all([
+      prisma.employeeDocument.findMany({
+        where,
+        orderBy,
+        skip,
+        take: limit,
+      }),
+      prisma.employeeDocument.count({ where }),
+    ]);
 
     // Denormalize employee identity inline so the frontend needs no
     // capped second lookup. ONE batch read on the Employee model, which
     // is auto tenant-scoped by the tenant Prisma client — do NOT hand-add
     // tenantId here (cross-tenant ids are silently filtered out already).
+    // Only the CURRENT PAGE is denormalized (page subset), keeping the
+    // lookup bounded by `limit`.
     const employeeIds = [...new Set(rows.map((row: any) => row.employeeId))];
     const employees =
       employeeIds.length > 0
@@ -172,7 +240,7 @@ export class EmployeeDocumentsService {
       employees.map((employee: any) => [employee.id, employee]),
     );
 
-    return rows.map((row: any) => {
+    const data = rows.map((row: any) => {
       const employee = employeeById.get(row.employeeId);
       return {
         ...row,
@@ -180,5 +248,10 @@ export class EmployeeDocumentsService {
         employeeNumber: employee?.employeeNumber ?? null,
       };
     });
+
+    return {
+      data,
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
   }
 }

@@ -566,15 +566,50 @@ Sin body. Borra primero el registro en DB, luego intenta borrar el blob en DO Sp
 |---|---|
 | Permiso | `read:EmployeeDocument` |
 | HTTP | 200 OK |
-| Controller | `src/employees/employee-documents.controller.ts:96-101` |
+| Controller | `src/employees/employee-documents.controller.ts:94-101` |
 
-**Query params**:
+**Query params** (`ListExpiringDocumentsQueryDto`):
 
 | Param | Tipo | Default | Descripción |
 |---|---|---|---|
-| `daysUntilExpiry` | `number` (string en URL, se parsea con `parseInt`) | `30` | Documentos que expiran dentro de N días |
+| `daysUntilExpiry` | `number` | `30` | Documentos que expiran dentro de N días (mín 1) |
+| `page` | `number` | `1` | Página (mín 1) |
+| `limit` | `number` | `20` | Resultados por página (mín 1, máx 100) |
+| `search` | `string` | — | Búsqueda case-insensitive sobre `firstName`/`lastName`/`employeeNumber` del empleado y `category` del documento. Mínimo 2 caracteres (con 1 carácter lanza `SEARCH_QUERY_TOO_SHORT`). Vacío/espacios = sin filtro |
+| `sortBy` | `string` | `expiresAt` | `expiresAt` \| `createdAt` \| `category` \| `employeeName` |
+| `sortOrder` | `string` | `asc` | `asc` \| `desc` |
 
-**Response**: Array de `EmployeeDocument` (de TODOS los empleados del tenant), ordenado por `expiresAt` asc (los que expiran antes, primero).
+El orden por defecto se mantiene: `expiresAt` asc (los que expiran antes, primero).
+
+**Response**: Objeto paginado — **REEMPLAZA** el array plano anterior (breaking change):
+
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "employeeId": "uuid",
+      "fileId": "uuid",
+      "category": "CONTRACT",
+      "expiresAt": "2026-09-01",
+      "notes": null,
+      "uploadedByUserId": "uuid",
+      "tenantId": "uuid",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "fullName": "Ana Gómez",
+      "employeeNumber": "E-001"
+    }
+  ],
+  "meta": {
+    "total": 42,
+    "page": 1,
+    "limit": 20,
+    "totalPages": 3
+  }
+}
+```
+
+Cada item incluye `fullName` y `employeeNumber` resueltos server-side (misma política de denormalización inline que el listado por empleado, pero limitada a la página actual) — el frontend DEBE usar estos campos en lugar de hacer un segundo lookup paginado contra un cache de `listForPicker`.
 
 Notar que la ruta es `/admin/employees-documents/expiring` (con guión, plural), NO bajo un `:employeeId` — es una vista global del tenant.
 

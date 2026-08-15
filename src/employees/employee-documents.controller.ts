@@ -21,6 +21,7 @@ import { RequirePermissions } from '../auth/authorization/decorators/require-per
 import { EmployeeDocumentsService } from './application/employee-documents.service';
 import { UploadEmployeeDocumentDto } from './dto/upload-employee-document.dto';
 import { ListEmployeeDocumentsQueryDto } from './dto/list-employee-documents.query.dto';
+import { ListExpiringDocumentsQueryDto } from './dto/list-expiring-documents.query.dto';
 
 @Controller()
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -95,8 +96,7 @@ export class EmployeeDocumentsController {
    */
   @Get('admin/employees-documents/expiring')
   @RequirePermissions(['read', 'EmployeeDocument'])
-  listExpiring(@Query('daysUntilExpiry') daysUntilExpiry: string) {
-    const days = parseInt(daysUntilExpiry, 10) || 30;
-    return this.documentsService.listExpiringTenantWide(days);
+  listExpiring(@Query() query: ListExpiringDocumentsQueryDto) {
+    return this.documentsService.listExpiringTenantWide(query);
   }
 }
