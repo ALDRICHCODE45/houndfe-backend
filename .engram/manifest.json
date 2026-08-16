@@ -432,6 +432,14 @@
       "sessions": 0,
       "memories": 3,
       "prompts": 5
+    },
+    {
+      "id": "da04cee0",
+      "created_by": "aldrich_code45",
+      "created_at": "2026-08-16T21:23:02Z",
+      "sessions": 1,
+      "memories": 5,
+      "prompts": 8
     }
   ]
 }
