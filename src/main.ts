@@ -33,8 +33,23 @@ async function bootstrap() {
     new PrismaExceptionFilter(),
   );
 
-  // CORS — permite todas las origenes (solo para desarrollo)
-  app.enableCors();
+  // CORS — orígenes desde CORS_ORIGINS (lista separada por comas).
+  // En producción debe estar seteado con los orígenes legítimos
+  // (p.ej. https://sistem.houndfe.com,http://localhost:4173).
+  // Sin la variable se permite todo con warning (fallback de desarrollo).
+  const corsOrigins = (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (corsOrigins.length > 0) {
+    app.enableCors({ origin: corsOrigins, credentials: true });
+  } else {
+    logger.warn(
+      'CORS_ORIGINS no definido — CORS abierto a cualquier origen (solo para desarrollo)',
+    );
+    app.enableCors();
+  }
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);

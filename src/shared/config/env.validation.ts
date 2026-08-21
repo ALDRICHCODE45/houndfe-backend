@@ -170,5 +170,9 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
     // tenant location. The PromotionsService validates the zone is a
     // known IANA name at first use, so a typo fails loudly at boot.
     PROMOTIONS_BUSINESS_TIMEZONE: Joi.string().default('America/Mexico_City'),
+
+    // CORS — comma-separated list of allowed origins (production).
+    // Absent → open CORS with a boot warning (dev fallback).
+    CORS_ORIGINS: Joi.string().optional().default(''),
   });
 }
