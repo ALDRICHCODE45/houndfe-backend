@@ -71,3 +71,6 @@ docs/hounfeLogos/
 docs/email-preview.html
 # Local Pi runtime state
 .atl/
+
+# Produccion — NO commitear nunca (secretos reales)
+.env.production

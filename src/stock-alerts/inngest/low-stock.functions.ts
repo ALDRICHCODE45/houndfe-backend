@@ -7,7 +7,7 @@
  * wires the actual `InngestService` instance + DI-resolved ports.
  *
  * **Coalescing (design Decision 3).** The function declares
- * `batchEvents: { maxSize: 50, timeout: '60s', key: 'event.data.tenantId' }`
+ * `batchEvents: { maxSize: 5, timeout: '60s', key: 'event.data.tenantId' }`
  * so multiple crossings for the SAME tenant within the 60-second
  * window collapse to a single function run that renders ONE email
  * with every distinct item. Replays / retries of the same event
@@ -118,7 +118,7 @@ export function buildLowStockFunctions(
       triggers: [{ event: 'stock/low.detected' }],
       // design Decision 3
       batchEvents: {
-        maxSize: 50,
+        maxSize: 5,
         timeout: '60s',
         key: 'event.data.tenantId',
       },

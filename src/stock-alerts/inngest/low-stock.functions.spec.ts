@@ -11,7 +11,7 @@
  * **Spec coverage (notification-config/spec.md + design.md "Inngest +
  * Resend Wiring" / Decision 3 — coalescing):**
  *
- *   - "Coalesce": `batchEvents: { maxSize: 50, timeout: '60s',
+ *   - "Coalesce": `batchEvents: { maxSize: 5, timeout: '60s',
  *     key: 'event.data.tenantId' }` is set; multiple events for the
  *     same tenant produce ONE email render.
  *   - "Disabled config short-circuits": when
@@ -163,7 +163,7 @@ describe('low-stock Inngest function (F.2)', () => {
       concurrency: { limit: 5 },
     });
     expect((options as { batchEvents?: unknown }).batchEvents).toEqual({
-      maxSize: 50,
+      maxSize: 5,
       timeout: '60s',
       key: 'event.data.tenantId',
     });
