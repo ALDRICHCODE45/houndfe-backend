@@ -1,0 +1,17 @@
+# Contexto de build — nunca subir secretos ni artefactos locales a la imagen
+node_modules
+dist
+coverage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.md
+docs
+openspec
+.atl
+.engram
+.codegraph
+test
+coverage
