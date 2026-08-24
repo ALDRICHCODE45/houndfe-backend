@@ -12,9 +12,13 @@ import { AdminPermissionController } from './admin-permission.controller';
 import { AdminUserService } from './admin-user.service';
 import { AdminRoleService } from './admin-role.service';
 import { AdminPermissionService } from './admin-permission.service';
+import { AdminPaymentDetailModule } from './payment-details/admin-payment-detail.module';
 
 @Module({
-  imports: [AuthModule], // Provides repository tokens, guards, ability factory
+  imports: [
+    AuthModule, // Provides repository tokens, guards, ability factory
+    AdminPaymentDetailModule, // Q1 / WU1 — nested PaymentDetail CRUD
+  ],
   controllers: [
     AdminUserController,
     AdminRoleController,

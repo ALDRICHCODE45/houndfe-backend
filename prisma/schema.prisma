@@ -343,6 +343,7 @@ model Tenant {
   notificationRecipients    NotificationRecipient[]
   notificationActions       NotificationAction[]
   stockAlertStates          StockAlertState[]
+  paymentDetails            PaymentDetail[]
 
   @@map("tenants")
 }
@@ -989,6 +990,34 @@ model OutboxEvent {
   @@index([tenantId, aggregateType, aggregateId, createdAt])
   @@index([lockToken])
   @@map("outbox_events")
+}
+
+// ============================================================================
+// PAYMENT DETAIL — tenant-scoped bank account records (Q1 / WU1)
+// ============================================================================
+// Per-tenant bank reference (CLABE + account number + beneficiary). Used by
+// the WhatsApp bot to tell the customer where to transfer. Multiple rows per
+// tenant are allowed (multi-branch / multi-account); `isActive` distinguishes
+// the active account from history. Delete is logical (`isActive=false`), never
+// hard delete — D2 design decision. Cross-tenant CLABE collision is permitted
+// (different branches of the same bank); same tenant must have unique CLABE.
+
+model PaymentDetail {
+  id            String   @id @default(uuid())
+  tenantId      String
+  bankName      String
+  beneficiary   String
+  clabe         String
+  accountNumber String
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, clabe])
+  @@index([tenantId])
+  @@map("payment_detail")
 }
 
 // ============================================================================

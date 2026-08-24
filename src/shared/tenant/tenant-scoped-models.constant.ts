@@ -39,4 +39,8 @@ export const TENANT_SCOPED_MODELS = new Set([
   'NotificationRecipient',
   'NotificationAction',
   'StockAlertState',
+  // PaymentDetail (Q1 / WU1) — bank account reference for the WhatsApp bot.
+  // Tenant-scoped via CLS so cross-tenant reads auto-fail (404 surface) and
+  // cross-tenant writes auto-insert the caller's tenantId.
+  'PaymentDetail',
 ]);

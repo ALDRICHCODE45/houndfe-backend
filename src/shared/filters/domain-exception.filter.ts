@@ -59,6 +59,19 @@ export class DomainExceptionFilter implements ExceptionFilter {
       }
     }
 
+    // D7 — BusinessRuleViolationError carries an optional `details` payload
+    // (e.g. PROMO_RE_QUOTE returns { recomputedTotalCents, expectedTotalCents,
+    // discountCents }). Spread it into the response body so the caller gets
+    // a flat envelope with the contextual fields directly readable. The
+    // spread uses Object.assign to keep `body` typed (Record<string, unknown>)
+    // and not lose its prior keys.
+    if (
+      exception instanceof BusinessRuleViolationError &&
+      exception.details
+    ) {
+      Object.assign(body, exception.details);
+    }
+
     response.status(status).json(body);
   }
 
@@ -143,6 +156,12 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'BATCH_DELETE_FK_CONSTRAINT')
       return HttpStatus.CONFLICT;
     if (exception.code === 'PROMOTION_REFERENCED_BY_SALE')
+      return HttpStatus.CONFLICT;
+
+    // ── PaymentDetail (Q1 / WU1) ──
+    if (exception.code === 'NO_ACTIVE_PAYMENT_DETAIL')
+      return HttpStatus.NOT_FOUND;
+    if (exception.code === 'DUPLICATE_CLABE')
       return HttpStatus.CONFLICT;
 
     if (exception instanceof EntityNotFoundError) return HttpStatus.NOT_FOUND;

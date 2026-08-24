@@ -47,6 +47,7 @@ export type AppSubjects =
   | 'EmployeeEmergencyContact'
   | 'NotificationConfig'
   | 'Quotation'
+  | 'PaymentDetail'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -473,5 +474,30 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'Quotation',
     action: 'delete',
     description: 'Cancel or delete quotations',
+  },
+
+  // PaymentDetail permissions (Q1 / WU1 — bank account reference for the
+  // WhatsApp bot). Mirrors the Quotation shape (four CRUD actions, no
+  // `batch_delete` or `manage` — the controller doesn't need them).
+  // PermissionSeeder auto-upserts on boot.
+  {
+    subject: 'PaymentDetail',
+    action: 'read',
+    description: 'View payment details',
+  },
+  {
+    subject: 'PaymentDetail',
+    action: 'create',
+    description: 'Create payment details',
+  },
+  {
+    subject: 'PaymentDetail',
+    action: 'update',
+    description: 'Update payment details',
+  },
+  {
+    subject: 'PaymentDetail',
+    action: 'delete',
+    description: 'Delete (logical) payment details',
   },
 ];

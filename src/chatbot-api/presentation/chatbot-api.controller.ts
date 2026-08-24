@@ -163,4 +163,18 @@ export class ChatbotApiController {
       cashierUserId: body.cashierUserId,
     });
   }
+
+  /**
+   * Q1 / WU1 — GET /chatbot-api/payment-details — return the active tenant
+   * bank account (CLABE / beneficiary / account number) the customer
+   * should transfer to. Method-level `@RequiredScopes` overrides the
+   * class-level `catalog:read` default (D3 — `ServiceAuthGuard` uses
+   * `getAllAndOverride`, so method scopes REPLACE class scopes).
+   * Returns 404 NO_ACTIVE_PAYMENT_DETAIL when no active row exists.
+   */
+  @Get('payment-details')
+  @RequiredScopes('payment-details:read')
+  getActivePaymentDetail() {
+    return this.chatbotApiService.getActivePaymentDetail();
+  }
 }

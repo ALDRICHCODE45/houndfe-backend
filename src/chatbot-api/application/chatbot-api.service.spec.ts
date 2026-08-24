@@ -61,6 +61,18 @@ type MockIdempotencyRecord = {
   saleId: string | null;
 };
 
+type MockPaymentDetail = {
+  id: string;
+  tenantId: string;
+  bankName: string;
+  beneficiary: string;
+  clabe: string;
+  accountNumber: string;
+  isActive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 type MockTenantClient = {
   customerAddress: {
     findFirst: jest.Mock<Promise<MockCustomerAddress | null>, [unknown?]>;
@@ -80,6 +92,10 @@ type MockTenantClient = {
   };
   receiptEvidence: {
     create: jest.Mock<Promise<{ id: string; status: string }>, [unknown?]>;
+  };
+  // Q1 / WU1 — PaymentDetail read for the bot endpoint.
+  paymentDetail: {
+    findFirst: jest.Mock<Promise<MockPaymentDetail | null>, [unknown?]>;
   };
 };
 
@@ -230,6 +246,10 @@ describe('ChatbotApiService', () => {
       },
       receiptEvidence: {
         create: jest.fn<Promise<{ id: string; status: string }>, [unknown?]>(),
+      },
+      // Q1 / WU1 — PaymentDetail read for the bot endpoint.
+      paymentDetail: {
+        findFirst: jest.fn<Promise<MockPaymentDetail | null>, [unknown?]>(),
       },
     };
     tenantPrisma = {
@@ -1026,6 +1046,53 @@ describe('ChatbotApiService', () => {
 
       expect(client.sale.findMany).not.toHaveBeenCalled();
       expect(result).toEqual([]);
+    });
+  });
+
+  // ── Q1 / WU1 — getActivePaymentDetail (bot read endpoint) ──────────────
+
+  describe('getActivePaymentDetail', () => {
+    it('returns the active tenant account projection', async () => {
+      const client = tenantPrisma.getClient();
+      const updatedAt = new Date('2026-08-24T12:00:00.000Z');
+      client.paymentDetail.findFirst.mockResolvedValue({
+        id: 'pd-1',
+        tenantId: 'tenant-1',
+        bankName: 'BBVA',
+        beneficiary: 'Tienda XYZ',
+        clabe: '012345678901234567',
+        accountNumber: '1234567890',
+        isActive: true,
+        createdAt: updatedAt,
+        updatedAt,
+      });
+
+      const result = await service.getActivePaymentDetail();
+
+      expect(client.paymentDetail.findFirst).toHaveBeenCalledWith({
+        where: { tenantId: 'tenant-1', isActive: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      expect(result).toEqual({
+        id: 'pd-1',
+        bankName: 'BBVA',
+        beneficiary: 'Tienda XYZ',
+        clabe: '012345678901234567',
+        accountNumber: '1234567890',
+        isActive: true,
+        updatedAt: '2026-08-24T12:00:00.000Z',
+      });
+      // tenantId is intentionally NOT exposed on the wire (admin-only).
+      expect(result).not.toHaveProperty('tenantId');
+    });
+
+    it('throws NO_ACTIVE_PAYMENT_DETAIL when no active row exists', async () => {
+      const client = tenantPrisma.getClient();
+      client.paymentDetail.findFirst.mockResolvedValue(null);
+
+      await expect(service.getActivePaymentDetail()).rejects.toMatchObject({
+        code: 'NO_ACTIVE_PAYMENT_DETAIL',
+      });
     });
   });
 });

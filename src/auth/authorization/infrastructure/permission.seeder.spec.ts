@@ -114,4 +114,36 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
     await expect(seeder.onApplicationBootstrap()).resolves.not.toThrow();
     await expect(seeder.onApplicationBootstrap()).resolves.not.toThrow();
   });
+
+  // ── Q1 / WU1 — PaymentDetail permissions are auto-seeded ───────────────
+
+  it('upserts (PaymentDetail, read/create/update/delete) from the registry', async () => {
+    const { prisma, permissionUpsertCalls } = makePrismaStub();
+
+    const seeder = new PermissionSeeder(prisma);
+    await seeder.onApplicationBootstrap();
+
+    const paymentDetailCalls = permissionUpsertCalls
+      .filter((c) => c.where.subject_action.subject === 'PaymentDetail')
+      .map((c) => c.where.subject_action.action)
+      .sort();
+
+    expect(paymentDetailCalls).toEqual([
+      'create',
+      'delete',
+      'read',
+      'update',
+    ]);
+  });
+
+  it('writes 4 PaymentDetail rows on a single seeder run', async () => {
+    const { prisma, permissionUpsertCalls } = makePrismaStub();
+    const seeder = new PermissionSeeder(prisma);
+    await seeder.onApplicationBootstrap();
+
+    const count = permissionUpsertCalls.filter(
+      (c) => c.where.subject_action.subject === 'PaymentDetail',
+    ).length;
+    expect(count).toBe(4);
+  });
 });

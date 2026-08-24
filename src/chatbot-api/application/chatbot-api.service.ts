@@ -35,6 +35,7 @@ import type { CustomerUpsertRequestDto } from '../presentation/dto/customer-upse
 import type { StockCheckResponse } from '../presentation/dto/stock-check.response';
 import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
 import type { AttachReceiptResponse } from '../presentation/dto/attach-receipt.request';
+import type { PaymentDetailResponse } from '../presentation/dto/payment-detail.response';
 import type {
   OrderHistoryItem,
   OrderHistoryPayment,
@@ -395,6 +396,41 @@ export class ChatbotApiService {
     return this.salesService.cancelSale(input.saleId, input.cashierUserId, {
       reason: input.reason,
     });
+  }
+
+  /**
+   * Q1 / WU1 — Return the active tenant `PaymentDetail` (bank account the
+   * bot tells the customer to transfer to). Tenant-scoped via CLS, ordered
+   * by `updatedAt DESC` per D2 so multi-active rows return the newest.
+   * Throws `BusinessRuleViolationError('NO_ACTIVE_PAYMENT_DETAIL', ...)`
+   * when the tenant has no active account — the `DomainExceptionFilter`
+   * translates that to 404.
+   */
+  async getActivePaymentDetail(): Promise<PaymentDetailResponse> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+
+    const active = await prisma.paymentDetail.findFirst({
+      where: { tenantId, isActive: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    if (!active) {
+      throw new BusinessRuleViolationError(
+        'No active payment detail for tenant',
+        'NO_ACTIVE_PAYMENT_DETAIL',
+      );
+    }
+
+    return {
+      id: active.id,
+      bankName: active.bankName,
+      beneficiary: active.beneficiary,
+      clabe: active.clabe,
+      accountNumber: active.accountNumber,
+      isActive: active.isActive,
+      updatedAt: active.updatedAt.toISOString(),
+    };
   }
 
   /**

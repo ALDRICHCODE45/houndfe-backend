@@ -13,6 +13,8 @@ import { ServiceCredential } from '../domain/service-credential.entity';
 import { ServiceAuthGuard } from './guards/service-auth.guard';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
 import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import { DomainExceptionFilter } from '../../shared/filters/domain-exception.filter';
 
 function makeCredential(scopes: string[], rawToken = 'svc_valid-key') {
   return ServiceCredential.fromPersistence({
@@ -42,6 +44,7 @@ describe('ChatbotApiController', () => {
     setDeliveryMetadata: jest.Mock;
     getOrderHistoryByPhone: jest.Mock;
     cancelBotSale: jest.Mock;
+    getActivePaymentDetail: jest.Mock;
   };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
@@ -161,6 +164,15 @@ describe('ChatbotApiController', () => {
         restockedItems: [{ productId: 'prod-1', variantId: null, quantity: 2 }],
         canceledAt: '2026-06-23T00:00:00.000Z',
       }),
+      getActivePaymentDetail: jest.fn().mockResolvedValue({
+        id: 'pd-1',
+        bankName: 'BBVA',
+        beneficiary: 'Tienda XYZ',
+        clabe: '012345678901234567',
+        accountNumber: '1234567890',
+        isActive: true,
+        updatedAt: '2026-08-24T12:00:00.000Z',
+      }),
       getOrderHistoryByPhone: jest.fn().mockResolvedValue([
         {
           saleId: 'sale-bot-1',
@@ -231,6 +243,17 @@ describe('ChatbotApiController', () => {
           );
         }
 
+        // Q1 / WU1 — credential with the bot's payment-details:read scope.
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_payment-key').digest('hex')
+        ) {
+          return makeCredential(
+            ['payment-details:read', 'catalog:read'],
+            'svc_payment-key',
+          );
+        }
+
         return null;
       }),
       touchLastUsedAt: jest.fn(),
@@ -256,6 +279,9 @@ describe('ChatbotApiController', () => {
         transform: true,
       }),
     );
+    // Register the global DomainExceptionFilter so BusinessRuleViolationError
+    // surfaces as the right HTTP status (e.g. NO_ACTIVE_PAYMENT_DETAIL → 404).
+    app.useGlobalFilters(new DomainExceptionFilter());
     await app.init();
   });
 
@@ -718,5 +744,49 @@ describe('ChatbotApiController', () => {
       .set('Authorization', 'Bearer svc_sales-key')
       .send({ reason: 'CUSTOMER_REQUEST' })
       .expect(400);
+  });
+
+  // ── Q1 / WU1 — GET /chatbot-api/payment-details ────────────────────────
+
+  it('GET /chatbot-api/payment-details returns 200 for a credential with payment-details:read', async () => {
+    await request(httpServer())
+      .get('/chatbot-api/payment-details')
+      .set('Authorization', 'Bearer svc_payment-key')
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        expect(body).toEqual({
+          id: 'pd-1',
+          bankName: 'BBVA',
+          beneficiary: 'Tienda XYZ',
+          clabe: '012345678901234567',
+          accountNumber: '1234567890',
+          isActive: true,
+          updatedAt: '2026-08-24T12:00:00.000Z',
+        });
+      });
+    expect(service.getActivePaymentDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it('GET /chatbot-api/payment-details returns 403 for a credential without payment-details:read', async () => {
+    // svc_valid-key only has catalog:read — the method-level override
+    // requires payment-details:read, so the scope check fails (D3).
+    await request(httpServer())
+      .get('/chatbot-api/payment-details')
+      .set('Authorization', 'Bearer svc_valid-key')
+      .expect(403);
+    expect(service.getActivePaymentDetail).not.toHaveBeenCalled();
+  });
+
+  it('GET /chatbot-api/payment-details returns 404 NO_ACTIVE_PAYMENT_DETAIL', async () => {
+    service.getActivePaymentDetail.mockRejectedValueOnce(
+      new BusinessRuleViolationError(
+        'No active payment detail for tenant',
+        'NO_ACTIVE_PAYMENT_DETAIL',
+      ),
+    );
+    await request(httpServer())
+      .get('/chatbot-api/payment-details')
+      .set('Authorization', 'Bearer svc_payment-key')
+      .expect(404);
   });
 });

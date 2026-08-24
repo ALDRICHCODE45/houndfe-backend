@@ -24,8 +24,17 @@ export class EntityNotFoundError extends DomainError {
 }
 
 export class BusinessRuleViolationError extends DomainError {
-  constructor(message: string, code: string = 'BUSINESS_RULE_VIOLATION') {
+  public readonly details?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    code: string = 'BUSINESS_RULE_VIOLATION',
+    details?: Record<string, unknown>,
+  ) {
     super(message, code);
+    if (details) {
+      this.details = details;
+    }
   }
 }
 

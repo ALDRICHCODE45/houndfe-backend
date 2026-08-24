@@ -277,4 +277,80 @@ describe('DomainExceptionFilter', () => {
       }),
     );
   });
+
+  // ── Q1 / WU1 — PaymentDetail codes + D7 details spread ─────────────────
+
+  it('maps NO_ACTIVE_PAYMENT_DETAIL to 404', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError(
+        'NO_ACTIVE_PAYMENT_DETAIL',
+        'NO_ACTIVE_PAYMENT_DETAIL',
+      ),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.NOT_FOUND);
+  });
+
+  it('maps DUPLICATE_CLABE to 409', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError('DUPLICATE_CLABE', 'DUPLICATE_CLABE'),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+  });
+
+  it('spreads BusinessRuleViolationError.details into the response body (D7)', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status, json } = makeHost();
+
+    // Use DUPLICATE_CLABE (Q1 / WU1) for the status code, but the payload
+    // shape is what PROMO_RE_QUOTE will eventually carry too (WU3 lands
+    // its status mapping). The spread mechanic is identical and code-agnostic.
+    const err = new BusinessRuleViolationError(
+      'DUPLICATE_CLABE',
+      'DUPLICATE_CLABE',
+      {
+        recomputedTotalCents: 900,
+        expectedTotalCents: 1000,
+        discountCents: 100,
+      },
+    );
+    filter.catch(err, host);
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.CONFLICT,
+        error: 'DUPLICATE_CLABE',
+        message: 'DUPLICATE_CLABE',
+        recomputedTotalCents: 900,
+        expectedTotalCents: 1000,
+        discountCents: 100,
+      }),
+    );
+  });
+
+  it('omits `details` spread when BusinessRuleViolationError has none', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, json } = makeHost();
+
+    const err = new BusinessRuleViolationError('X', 'X');
+    filter.catch(err, host);
+
+    const calledWith = (json.mock.calls[0]?.[0] ?? {}) as Record<
+      string,
+      unknown
+    >;
+    expect(calledWith).not.toHaveProperty('recomputedTotalCents');
+    expect(calledWith).not.toHaveProperty('expectedTotalCents');
+    expect(calledWith).not.toHaveProperty('discountCents');
+  });
 });
