@@ -242,24 +242,24 @@ validation semantics.
 
 The system MUST update
 `openspec/program/whatsapp-ai-chatbot/PROGRAM-CONTEXT.md` so the
-endpoint reference reflects the code reality: ten routes total (the
+endpoint reference reflects the code reality: eleven routes total (the
 existing nine plus `POST /chatbot-api/sales/:saleId/cancel`, which is
 already implemented at
 `src/chatbot-api/presentation/chatbot-api.controller.ts` but was missing
-from the doc). The doc MUST also include the new
-`GET /chatbot-api/payment-details` route introduced by this change, the
-new `payment-details:read` scope, the new `discountCents` field on
+from the doc, plus the new `GET /chatbot-api/payment-details` route
+introduced by this change). The doc MUST also include the new
+`payment-details:read` scope, the new `discountCents` field on
 `BotSaleResponse`, and a §4.3 idempotency section that describes the
 atomic pattern (acquire / replay / conflict / in_flight) instead of the
 old non-atomic upsert description. The §4.5 endpoint summary table
-MUST be corrected from 9 to 10 entries.
+MUST be corrected from 9 to 11 entries.
 
-#### Scenario: Endpoint count is corrected to 10
+#### Scenario: Endpoint count is corrected to 11
 
 - GIVEN `PROGRAM-CONTEXT.md` currently lists 9 endpoints
 - WHEN the change is applied
-- THEN the §4.5 endpoint summary table lists 10 rows
-- AND the total count line reads "Total: 10 endpoints" (replacing the
+- THEN the §4.5 endpoint summary table lists 11 rows
+- AND the total count line reads "Total: 11 endpoints" (replacing the
   9-endpoint count)
 
 #### Scenario: Cancel endpoint is documented

@@ -133,8 +133,13 @@ ServiceCredential {
 Bot sale registration uses a dedicated `SaleIdempotency` table:
 - **Header**: `X-Idempotency-Key` (sent with `POST /chatbot-api/sales`)
 - **Scope**: Per-tenant, operation `bot_sale_register`, keyed by the idempotency key value
-- **Behavior**: If key already exists with `status: SUCCEEDED`, returns cached `responseJson` without re-creating the sale
-- **Flow**: Reserve slot as `IN_FLIGHT` → create sale → mark `SUCCEEDED` with response
+- **Key validation**: Missing, empty (after trim) or > 200-char keys are rejected with `400 INVALID_IDEMPOTENCY_KEY` **before any DB read** (validated by `ParseIdempotencyKeyPipe`).
+- **Atomic acquire**: The slot is claimed with an atomic `create` on the unique constraint `[tenantId, operation, key]` inside the same pattern the POS charge path uses. Four outcomes:
+  - `acquired` → proceed to `confirmBotSale`, then stamp `SUCCEEDED` with the response JSON.
+  - `replay` → key already `SUCCEEDED` → returns the cached `responseJson` without re-creating the sale.
+  - `conflict` → same key, **different payload hash** → `409 IDEMPOTENCY_KEY_CONFLICT`.
+  - `in_flight` → same key, same payload, still running → `409 IDEMPOTENCY_KEY_IN_FLIGHT`.
+- **Request hash**: SHA-256 over the canonicalized payload `{ cashierUserId, customerId, shippingAddressId, items }` with items sorted by `(productId, variantId)`; display names are excluded so re-labels never break replay.
 - **Ambiguity**: Namespace is shared across credentials within the same tenant (acceptable for single-bot-per-branch v1; see W-003 in archive)
 
 ### 4.4 Endpoint Reference
