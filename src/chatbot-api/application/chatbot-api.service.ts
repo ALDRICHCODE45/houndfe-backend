@@ -60,6 +60,13 @@ export type RegisterBotSaleInput = {
     unitPriceCents: number;
   }>;
   idempotencyKey: string;
+  // Q2 / WU3 — optional re-quote guard. When set, the server compares
+  // this expected total against the engine-recomputed `totalCents`
+  // (D7). Mismatch → `PROMO_RE_QUOTE` 409 with the three relevant
+  // fields in the body so the bot can re-quote and re-issue. When
+  // omitted, the server still runs the engine and persists the
+  // recomputed totals; only the comparison is skipped.
+  expectedTotalCents?: number;
 };
 
 export type AttachReceiptInput = {
@@ -289,9 +296,25 @@ export class ChatbotApiService {
     if (idempotency.kind === 'replay') {
       // The cached payload is whatever the previous successful call
       // stamped into `responseJson`. Cast through `unknown` so legacy
-      // cached rows survive the wire-evolution (WU3 adds
-      // `discountCents`; pre-WU3 rows simply lack the field).
-      return idempotency.payload as BotSaleResponse;
+      // cached rows survive the wire-evolution. WU3-06 — normalize
+      // additively: pre-WU3 cached rows lack `discountCents`, so we
+      // backfill it with 0 to keep the response shape consistent for
+      // the bot (design risk mitigation in tasks.md).
+      const cached = idempotency.payload as Partial<BotSaleResponse>;
+      return {
+        saleId: cached.saleId ?? '',
+        folio: cached.folio ?? null,
+        paymentStatus:
+          (cached.paymentStatus as BotSaleResponse['paymentStatus']) ??
+          'CREDIT',
+        channel: cached.channel ?? 'ONLINE',
+        deliveryStatus: cached.deliveryStatus ?? 'PENDING',
+        totalCents: cached.totalCents ?? 0,
+        discountCents: cached.discountCents ?? 0,
+        paidCents: cached.paidCents ?? 0,
+        debtCents: cached.debtCents ?? 0,
+        confirmedAt: cached.confirmedAt ?? null,
+      };
     }
 
     if (idempotency.kind === 'conflict') {
@@ -315,6 +338,10 @@ export class ChatbotApiService {
       customerId: input.customerId,
       shippingAddressId: input.shippingAddressId ?? null,
       items: input.items,
+      // Q2 / WU3 — pass the optional re-quote guard through to the
+      // sales service. When omitted, the sales service skips the
+      // comparison but still runs the engine + persists totals.
+      expectedTotalCents: input.expectedTotalCents,
     });
 
     const response: BotSaleResponse = {
@@ -324,6 +351,9 @@ export class ChatbotApiService {
       channel: confirmedSale.channel,
       deliveryStatus: confirmedSale.deliveryStatus,
       totalCents: confirmedSale.totalCents,
+      // Q2 / WU3 — engine-recomputed discount from
+      // `sale.previewTotals()`. 0 when no promotion applied.
+      discountCents: confirmedSale.discountCents,
       paidCents: confirmedSale.paidCents,
       debtCents: confirmedSale.debtCents,
       confirmedAt: confirmedSale.confirmedAt,

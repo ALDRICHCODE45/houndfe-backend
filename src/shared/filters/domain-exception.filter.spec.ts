@@ -307,6 +307,26 @@ describe('DomainExceptionFilter', () => {
     expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
   });
 
+  it('maps PROMO_RE_QUOTE to 409 (Q2 / WU3)', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError(
+        'Promotion re-quote required: client total differs from engine recomputation',
+        'PROMO_RE_QUOTE',
+        {
+          recomputedTotalCents: 1800,
+          expectedTotalCents: 2000,
+          discountCents: 200,
+        },
+      ),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+  });
+
   it('spreads BusinessRuleViolationError.details into the response body (D7)', () => {
     const filter = new DomainExceptionFilter();
     const { host, status, json } = makeHost();

@@ -164,6 +164,13 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'DUPLICATE_CLABE')
       return HttpStatus.CONFLICT;
 
+    // ── Q2 / WU3 — promotion re-quote ──
+    // The `details` payload `{ recomputedTotalCents, expectedTotalCents,
+    // discountCents }` is spread into the response body by the
+    // BusinessRuleViolationError branch above (D7).
+    if (exception.code === 'PROMO_RE_QUOTE')
+      return HttpStatus.CONFLICT;
+
     if (exception instanceof EntityNotFoundError) return HttpStatus.NOT_FOUND;
     if (exception instanceof EntityAlreadyExistsError)
       return HttpStatus.CONFLICT;

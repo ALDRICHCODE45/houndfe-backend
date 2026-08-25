@@ -1,4 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import { Customer } from '../../customers/domain/customer.entity';
 import type { ICustomerRepository } from '../../customers/domain/customer.repository';
 import type { IPublicCatalogRepository } from '../../public-catalog/application/ports/public-catalog.repository';
@@ -794,6 +795,7 @@ describe('ChatbotApiService', () => {
         channel: 'ONLINE',
         deliveryStatus: 'PENDING',
         totalCents: 519800,
+        discountCents: 0,
         paidCents: 0,
         debtCents: 519800,
         confirmedAt: '2026-06-11T00:00:00.000Z',
@@ -857,6 +859,7 @@ describe('ChatbotApiService', () => {
         paymentStatus: 'CREDIT',
         channel: 'ONLINE',
         totalCents: 519800,
+        discountCents: 0,
         paidCents: 0,
         debtCents: 519800,
         deliveryStatus: 'PENDING',
@@ -928,6 +931,7 @@ describe('ChatbotApiService', () => {
             channel: 'ONLINE',
             deliveryStatus: 'PENDING',
             totalCents: 519800,
+            discountCents: 0,
             paidCents: 0,
             debtCents: 519800,
             confirmedAt: '2026-06-11T00:00:00.000Z',
@@ -940,6 +944,7 @@ describe('ChatbotApiService', () => {
         channel: 'ONLINE',
         deliveryStatus: 'PENDING',
         totalCents: 519800,
+        discountCents: 0,
         paidCents: 0,
         debtCents: 519800,
         confirmedAt: '2026-06-11T00:00:00.000Z',
@@ -1011,6 +1016,7 @@ describe('ChatbotApiService', () => {
         channel: 'ONLINE',
         deliveryStatus: 'PENDING',
         totalCents: 619700,
+        discountCents: 0,
         paidCents: 0,
         debtCents: 619700,
         confirmedAt: '2026-06-11T00:00:00.000Z',
@@ -1048,6 +1054,7 @@ describe('ChatbotApiService', () => {
         channel: 'ONLINE',
         deliveryStatus: 'PENDING',
         totalCents: 519800,
+        discountCents: 0,
         paidCents: 0,
         debtCents: 519800,
         confirmedAt: '2026-06-11T00:00:00.000Z',
@@ -1077,6 +1084,157 @@ describe('ChatbotApiService', () => {
       const secondHash =
         saleRepository.acquireSaleRegistrationIdempotency.mock.calls[1]?.[1];
       expect(firstHash).not.toBe(secondHash);
+    });
+
+    // Q2 / WU3-09 expectedTotalCents pass-through + replay normalization
+
+    it('passes expectedTotalCents through to confirmBotSale (D7 re-quote guard)', async () => {
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'acquired',
+        token: 'idem-req',
+      });
+      salesService.confirmBotSale.mockResolvedValue({
+        saleId: 'sale-bot-1',
+        folio: 'A-2606-000001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents: 1800,
+        discountCents: 200,
+        paidCents: 0,
+        debtCents: 1800,
+        confirmedAt: '2026-06-11T00:00:00.000Z',
+      });
+
+      await service.registerBotSale({
+        ...botSaleInput,
+        expectedTotalCents: 1800,
+      });
+
+      expect(salesService.confirmBotSale).toHaveBeenCalledWith(
+        expect.objectContaining({
+          expectedTotalCents: 1800,
+        }),
+      );
+    });
+
+    it('propagates PROMO_RE_QUOTE rejection from confirmBotSale through to the wire (no replay normalization swallows the 409)', async () => {
+      // The service MUST NOT mask engine rejections as a replay or a
+      // generic 500; PROMO_RE_QUOTE bubbles up so the DomainExceptionFilter
+      // renders 409 with the details spread.
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'acquired',
+        token: 'idem-promo',
+      });
+      salesService.confirmBotSale.mockRejectedValue(
+        new BusinessRuleViolationError(
+          'Promotion re-quote required',
+          'PROMO_RE_QUOTE',
+          {
+            recomputedTotalCents: 1800,
+            expectedTotalCents: 2000,
+            discountCents: 200,
+          },
+        ),
+      );
+
+      await expect(
+        service.registerBotSale({
+          ...botSaleInput,
+          expectedTotalCents: 2000,
+        }),
+      ).rejects.toMatchObject({
+        code: 'PROMO_RE_QUOTE',
+        details: {
+          recomputedTotalCents: 1800,
+          expectedTotalCents: 2000,
+          discountCents: 200,
+        },
+      });
+      // The acquire slot is NOT stamped SUCCEEDED -- the engine raised
+      // before any side effect. The next acquire for the same key will
+      // return 'in_flight' (D10: no FAILED marking).
+      expect(
+        saleRepository.markSaleRegistrationIdempotencySucceeded,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('returns the engine-recomputed discountCents in the wire response on acquired (Q2 surface)', async () => {
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'acquired',
+        token: 'idem-discount',
+      });
+      salesService.confirmBotSale.mockResolvedValue({
+        saleId: 'sale-bot-1',
+        folio: 'A-2606-000001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents: 1800,
+        discountCents: 200,
+        paidCents: 0,
+        debtCents: 1800,
+        confirmedAt: '2026-06-11T00:00:00.000Z',
+      });
+
+      const result = await service.registerBotSale(botSaleInput);
+
+      expect(result.discountCents).toBe(200);
+      expect(result.totalCents).toBe(1800);
+    });
+
+    it('normalizes a legacy cached replay (no discountCents key) with discountCents=0 (WU3-06 backward compat)', async () => {
+      // Pre-WU3 cached rows lack discountCents. The service MUST
+      // normalize additively so legacy responses still match the
+      // current BotSaleResponse shape (design risk mitigation in tasks.md).
+      const legacyCached = {
+        saleId: 'sale-bot-legacy',
+        folio: 'BOT-OLD-1',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        totalCents: 519800,
+        // discountCents intentionally missing
+        paidCents: 0,
+        debtCents: 519800,
+        deliveryStatus: 'PENDING',
+        confirmedAt: '2026-05-01T00:00:00.000Z',
+      };
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'replay',
+        payload: legacyCached,
+      });
+
+      const result = await service.registerBotSale(botSaleInput);
+
+      expect(result.saleId).toBe('sale-bot-legacy');
+      expect(result.discountCents).toBe(0); // normalized to 0
+      expect(result.totalCents).toBe(519800);
+      expect(result.deliveryStatus).toBe('PENDING');
+      expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+    });
+
+    it('preserves discountCents on a current replay (does not zero out a positive value)', async () => {
+      const cached = {
+        saleId: 'sale-bot-current',
+        folio: 'BOT-NEW-1',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        totalCents: 1800,
+        discountCents: 200, // current shape
+        paidCents: 0,
+        debtCents: 1800,
+        deliveryStatus: 'PENDING',
+        confirmedAt: '2026-06-11T00:00:00.000Z',
+      };
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'replay',
+        payload: cached,
+      });
+
+      const result = await service.registerBotSale(botSaleInput);
+
+      expect(result.discountCents).toBe(200);
+      expect(result.totalCents).toBe(1800);
     });
   });
 

@@ -106,7 +106,11 @@ export class ChatbotApiController {
         quantity: item.quantity,
         unitPriceCents: item.unitPriceCents,
       })),
-      idempotencyKey,
+          idempotencyKey,
+          // Q2 / WU3 — pass through the optional re-quote guard so the
+          // server can compare the bot's pre-computed total against the
+          // engine-recomputed total. Undefined when omitted (no comparison).
+          expectedTotalCents: body.expectedTotalCents,
     });
   }
 

@@ -120,6 +120,13 @@ type ConfirmBotSaleInput = {
     quantity: number;
     unitPriceCents: number;
   }>;
+  // Q2 / WU3 — optional re-quote guard. When set, the server compares
+  // this expected total against the engine-recomputed `totalCents`
+  // (D7). Mismatch → `PROMO_RE_QUOTE` 409 with `{ recomputedTotalCents,
+  // expectedTotalCents, discountCents }` so the bot can re-quote and
+  // re-issue. When omitted, the comparison is skipped but the engine
+  // still runs and `discountCents` is still surfaced on the response.
+  expectedTotalCents?: number;
 };
 
 type ConfirmBotSaleResult = {
@@ -129,6 +136,10 @@ type ConfirmBotSaleResult = {
   channel: 'ONLINE';
   deliveryStatus: 'PENDING';
   totalCents: number;
+  // Q2 / WU3 — engine-recomputed discount from
+  // `sale.previewTotals()` (subtotalCents − totalCents). 0 when no
+  // promotion applied. Additive field for the bot wire shape.
+  discountCents: number;
   paidCents: 0;
   debtCents: number;
   confirmedAt: string;
@@ -875,6 +886,13 @@ export class SalesService {
     debtCents: number;
     paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
     confirmedAt: Date;
+    // Q2 / WU3 — additive outbox payload keys. Downstream consumers
+    // ignore unknown keys. Both are required for `confirmBotSale` (the
+    // engine-recomputed totals are the single source of truth) and
+    // optional for the POS charge path (which can also forward them
+    // post-`previewTotals`).
+    subtotalCents?: number;
+    discountCents?: number;
   }): Promise<void> {
     await this.outboxWriter.publish(
       this.tenantPrisma.getClient(),
@@ -892,6 +910,15 @@ export class SalesService {
         debtCents: input.debtCents,
         paymentStatus: input.paymentStatus,
         confirmedAt: input.confirmedAt.toISOString(),
+        // Q2 / WU3 — WU3-04: additive outbox fields. Only included
+        // when provided (the bot path always sets both; the POS path
+        // can opt-in later if downstream consumers need them).
+        ...(input.subtotalCents !== undefined
+          ? { subtotalCents: input.subtotalCents }
+          : {}),
+        ...(input.discountCents !== undefined
+          ? { discountCents: input.discountCents }
+          : {}),
       },
     );
   }
@@ -2691,6 +2718,7 @@ export class SalesService {
         );
 
         if (!hasMatchingLivePrice) {
+          // D6 — PRICE_OUT_OF_DATE stays 409 (existing mapping).
           throw new BusinessRuleViolationError(
             'PRICE_OUT_OF_DATE',
             'PRICE_OUT_OF_DATE',
@@ -2722,12 +2750,69 @@ export class SalesService {
         });
       }
 
+      // D5 — bind the customer's default price list BEFORE the engine
+      // runs. Without this, `recomputePricingAndPromotions` →
+      // `repriceNonStickyLines` would fall back to the PUBLICO default
+      // list and could silently re-quote non-sticky lines against a
+      // list the bot may not have quoted. The same auto-seed pattern
+      // lives in `SalesService.assignCustomer` (sales.service.ts:1913).
+      // When the customer has no list, `null` lets the engine fall
+      // back to PUBLICO via `resolveDefaultGlobalPriceListId()`.
+      const prisma = this.tenantPrisma.getClient();
+      const customer = await prisma.customer.findUnique({
+        where: { id: input.customerId },
+      });
+      if (!customer) {
+        throw new BusinessRuleViolationError(
+          'CUSTOMER_NOT_FOUND',
+          'CUSTOMER_NOT_FOUND',
+        );
+      }
+      const customerList =
+        (customer as { globalPriceListId?: string | null })
+          .globalPriceListId ?? null;
+      sale.setGlobalPriceList(customerList, false);
+
+      // D4 — re-evaluate the bot cart with the FULL POS promotions
+      // engine (the same call `chargeDraft` uses at sales.service.ts:2364).
+      // This handles PRODUCT_DISCOUNT / ORDER_DISCOUNT / BXGY / ADVANCED,
+      // tier-aware reprice, customer scope, date windows, daysOfWeek,
+      // and price-list gating. The simplified `evaluate-cart` engine is
+      // NOT used here (see exploration.md).
+      await this.recomputePricingAndPromotions(sale);
+
+      // D4 — totals are the SINGLE source of truth from
+      // `sale.previewTotals()`: the same helper the draft preview and the
+      // POS charge path use. Never hand-roll `originalPriceCents` (which
+      // is null for bot items added via `addItem`). Returns:
+      //   subtotalCents = ∑((prePrice ?? unitPrice) × qty)
+      //   totalCents    = post-line − order discount (clamped ≥ 0)
+      //   discountCents = subtotalCents − totalCents (always ≥ 0)
+      const { subtotalCents, discountCents, totalCents } = sale.previewTotals();
+
+      // D7 — optional re-quote guard. When the bot sent an expected
+      // total, compare it against the engine-recomputed total. Drift
+      // → `PROMO_RE_QUOTE` 409 with the three relevant fields so the
+      // bot can re-quote and re-issue. NO stock, folio, or outbox side
+      // effects happen on this branch (we throw before `save` /
+      // `decrementStockForCharge` / `persistChargeConfirmation`).
+      if (
+        input.expectedTotalCents !== undefined &&
+        input.expectedTotalCents !== totalCents
+      ) {
+        throw new BusinessRuleViolationError(
+          'Promotion re-quote required: client total differs from engine recomputation',
+          'PROMO_RE_QUOTE',
+          {
+            recomputedTotalCents: totalCents,
+            expectedTotalCents: input.expectedTotalCents,
+            discountCents,
+          },
+        );
+      }
+
       await this.saleRepo.save(sale);
 
-      const totalCents = input.items.reduce(
-        (sum, item) => sum + item.unitPriceCents * item.quantity,
-        0,
-      );
       const paidCents = 0 as const;
       const debtCents = totalCents;
 
@@ -2750,12 +2835,16 @@ export class SalesService {
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
       const dueDate = resolveDueDate(undefined, confirmedAt, 'CREDIT');
 
+      // Q2 / WU3 — persist the real engine-recomputed discountCents
+      // (was hardcoded `0` pre-WU3), plus the per-line promo state from
+      // the recompute + the applied-order-promo snapshot so the charge
+      // row carries the same totals as the wire response.
       await this.saleRepo.persistChargeConfirmation({
         saleId,
         userId: input.cashierUserId,
         payments: [],
-        subtotalCents: totalCents,
-        discountCents: 0,
+        subtotalCents,
+        discountCents,
         totalCents,
         paidCents,
         debtCents,
@@ -2768,6 +2857,8 @@ export class SalesService {
         dueDate,
         confirmedAt,
         folio,
+        items: sale.items,
+        appliedOrderPromotion: sale.appliedOrderPromotion ?? null,
       });
 
       await this.publishSaleConfirmedEvent({
@@ -2775,6 +2866,8 @@ export class SalesService {
         tenantId,
         actorId: input.cashierUserId,
         folio,
+        subtotalCents,
+        discountCents,
         totalCents,
         paidCents,
         debtCents,
@@ -2789,6 +2882,7 @@ export class SalesService {
         channel: 'ONLINE',
         deliveryStatus: 'PENDING',
         totalCents,
+        discountCents,
         paidCents,
         debtCents,
         confirmedAt: confirmedAt.toISOString(),

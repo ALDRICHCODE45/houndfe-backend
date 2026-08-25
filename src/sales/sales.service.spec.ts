@@ -2969,6 +2969,19 @@ describe('SalesService', () => {
       saleRepo.save.mockImplementation(async (sale) => sale);
       saleRepo.allocateNextFolio.mockResolvedValue('A-2606-000001');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      // Q2 / WU3 — confirmBotSale resolves the customer's default price
+      // list (D5) before the engine runs; without the mock the
+      // `prisma.customer.findUnique` call throws.
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        customer: {
+          findUnique: jest
+            .fn()
+            .mockResolvedValue({ id: 'customer-1', globalPriceListId: null }),
+        },
+        globalPriceList: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+        },
+      });
     };
 
     it('confirms bot sale in one transaction with stock, folio, seller attribution, and default credit due date', async () => {
@@ -3032,6 +3045,8 @@ describe('SalesService', () => {
           debtCents: 2000,
           paymentStatus: 'CREDIT',
           confirmedAt: expect.any(String),
+          subtotalCents: 2000,
+          discountCents: 0,
         },
       );
 
@@ -3060,6 +3075,7 @@ describe('SalesService', () => {
         channel: 'ONLINE',
         deliveryStatus: 'PENDING',
         totalCents: 2000,
+        discountCents: 0,
         paidCents: 0,
         debtCents: 2000,
         confirmedAt: expect.any(String),
@@ -3128,6 +3144,9 @@ describe('SalesService', () => {
         debtCents: 2000,
         paymentStatus: 'CREDIT',
         confirmedAt: expect.any(String),
+        // Q2 / WU3 — engine-recomputed totals on the outbox payload.
+        subtotalCents: 2000,
+        discountCents: 0,
       });
     });
 
@@ -3142,6 +3161,259 @@ describe('SalesService', () => {
       expect(publishedEventTypes).toEqual(['sale.confirmed']);
       expect(publishedEventTypes).not.toContain('sale.payment.received');
       expect(publishedEventTypes).not.toContain('sale.fully.paid');
+    })
+    // ── Q2 / WU3: server-side engine re-evaluation (spec: sales delta) ──
+
+    it('persists engine-recomputed discountCents=200 for a 10% AUTOMATIC PRODUCT_DISCOUNT (per-line)', async () => {
+      // Bot quotes 1000c for 2 qty; engine applies a 10% per-line discount
+      // -> totalCents=1800, discountCents=200. The itemId is derived from
+      // the engine input because confirmBotSale builds SaleItems with
+      // generated UUIDs — a hardcoded id would never match a line and
+      // discountCents would stay 0.
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockImplementation(
+        async (input: { lines: Array<{ itemId: string }> }) => ({
+          lines: [
+            {
+              itemId: input.lines[0]?.itemId,
+              discountType: 'percentage',
+              discountValue: 10,
+              discountTitle: '10% off Royal Canin',
+              promotionId: 'promo-product-1',
+            },
+          ],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      const result = await service.confirmBotSale(botSaleInput);
+
+      expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 2000,
+          discountCents: 200,
+          totalCents: 1800,
+        }),
+      );
+      expect(result.discountCents).toBe(200);
+      expect(result.totalCents).toBe(1800);
+    });
+
+    it('persists engine-recomputed ORDER_DISCOUNT separately from per-line (previewTotals subtracts order from post-line sum)', async () => {
+      // No per-line promo; engine emits an ORDER_DISCOUNT of 500c. Bot
+      // quoted 1000c x 2 = 2000 post-line sum; 500c order discount
+      // subtracted -> totalCents=1500, discountCents=500.
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: {
+          promotionId: 'promo-order-1',
+          discountType: 'amount',
+          discountValue: 500,
+          discountTitle: '$500 off order',
+          discountAmountCents: 500,
+        },
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [],
+      });
+
+      const result = await service.confirmBotSale(botSaleInput);
+
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 2000,
+          discountCents: 500,
+          totalCents: 1500,
+          appliedOrderPromotion: expect.objectContaining({
+            promotionId: 'promo-order-1',
+            discountAmountCents: 500,
+          }),
+        }),
+      );
+      expect(result.discountCents).toBe(500);
+      expect(result.totalCents).toBe(1500);
+    });
+
+    it('persists engine-recomputed BXGY reward via previewTotals NET (kind=buy-x-get-y)', async () => {
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockImplementation(
+        async (input: { lines: Array<{ itemId: string }> }) => ({
+          lines: [
+            {
+              itemId: input.lines[0]?.itemId,
+              kind: 'buy-x-get-y',
+              lineDiscountCents: 250,
+              perUnitRewardCents: 125,
+              discountedUnitCount: 2,
+              discountTitle: 'Buy 2 get 1',
+              promotionId: 'promo-bxgy-1',
+              getDiscountPercent: 50,
+            },
+          ],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      const result = await service.confirmBotSale(botSaleInput);
+
+      // 1000c x 2 = 2000 base; BXGY reward of 250 -> NET 1750.
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 2000,
+          discountCents: 250,
+          totalCents: 1750,
+        }),
+      );
+      expect(result.discountCents).toBe(250);
+      expect(result.totalCents).toBe(1750);
+    });
+
+    it('persists engine-recomputed ADVANCED reward via previewTotals (kind=advanced)', async () => {
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockImplementation(
+        async (input: { lines: Array<{ itemId: string }> }) => ({
+          lines: [
+            {
+              itemId: input.lines[0]?.itemId,
+              kind: 'advanced',
+              lineDiscountCents: 300,
+              perUnitRewardCents: 150,
+              discountedUnitCount: 2,
+              discountTitle: 'Tiered $300 off',
+              promotionId: 'promo-advanced-1',
+              getDiscountPercent: 30,
+            },
+          ],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      const result = await service.confirmBotSale(botSaleInput);
+
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 2000,
+          discountCents: 300,
+          totalCents: 1700,
+        }),
+      );
+      expect(result.discountCents).toBe(300);
+      expect(result.totalCents).toBe(1700);
+    });
+
+    it('accepts matching expectedTotalCents and persists engine-recomputed totals', async () => {
+      // Bot's pre-computed 1800 matches the engine total (10% off applied).
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockImplementation(
+        async (input: { lines: Array<{ itemId: string }> }) => ({
+          lines: [
+            {
+              itemId: input.lines[0]?.itemId,
+              discountType: 'percentage',
+              discountValue: 10,
+              discountTitle: '10% off Royal Canin',
+              promotionId: 'promo-product-1',
+            },
+          ],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      const result = await service.confirmBotSale({
+        ...botSaleInput,
+        expectedTotalCents: 1800,
+      });
+
+      expect(result.totalCents).toBe(1800);
+      expect(result.discountCents).toBe(200);
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          totalCents: 1800,
+          discountCents: 200,
+        }),
+      );
+    });
+
+    it('rejects mismatched expectedTotalCents with PROMO_RE_QUOTE BusinessRuleViolationError carrying details (no persistence side effects)', async () => {
+      // Bot sent expectedTotalCents=2000 but the engine applied a 10%
+      // promo -> totalCents=1800. PROMO_RE_QUOTE 409 with details.
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockImplementation(
+        async (input: { lines: Array<{ itemId: string }> }) => ({
+          lines: [
+            {
+              itemId: input.lines[0]?.itemId,
+              discountType: 'percentage',
+              discountValue: 10,
+              discountTitle: '10% off Royal Canin',
+              promotionId: 'promo-product-1',
+            },
+          ],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      await expect(
+        service.confirmBotSale({
+          ...botSaleInput,
+          expectedTotalCents: 2000,
+        }),
+      ).rejects.toMatchObject({
+        code: 'PROMO_RE_QUOTE',
+        details: {
+          recomputedTotalCents: 1800,
+          expectedTotalCents: 2000,
+          discountCents: 200,
+        },
+      });
+
+      // PROMO_RE_QUOTE throws BEFORE any persistence / stock / folio /
+      // outbox side effects (spec scenario "no sale is persisted, no stock
+      // is decremented, no event is emitted").
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+      expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('skips the expectedTotalCents comparison when omitted (no PROMO_RE_QUOTE on mismatch)', async () => {
+      // No expectedTotalCents -> the engine runs, discounts apply, but the
+      // comparison is skipped -> no PROMO_RE_QUOTE even though the bot's
+      // quoted 2000 differs from the engine's 1800.
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockImplementation(
+        async (input: { lines: Array<{ itemId: string }> }) => ({
+          lines: [
+            {
+              itemId: input.lines[0]?.itemId,
+              discountType: 'percentage',
+              discountValue: 10,
+              discountTitle: '10% off Royal Canin',
+              promotionId: 'promo-product-1',
+            },
+          ],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      const result = await service.confirmBotSale(botSaleInput);
+
+      expect(result.totalCents).toBe(1800);
+      expect(result.discountCents).toBe(200);
     });
   });
 

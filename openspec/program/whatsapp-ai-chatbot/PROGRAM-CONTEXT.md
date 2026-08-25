@@ -372,6 +372,7 @@ interface CustomerUpsertResponse {
     quantity: number;                  // @IsInt(), @Min(1)
     unitPriceCents: number;            // @IsInt(), @Min(0)
   }>;
+  expectedTotalCents?: number;         // @IsOptional(), @IsInt(), @Min(0) — re-quote guard
 }
 ```
 
@@ -384,6 +385,7 @@ interface BotSaleResponse {
   channel: string;                     // always "ONLINE" for bot sales
   deliveryStatus: string;              // initial: "PENDING"
   totalCents: number;
+  discountCents: number;               // engine-recomputed (subtotal − total); 0 when no promo
   paidCents: number;
   debtCents: number;
   confirmedAt: string | null;          // ISO 8601
@@ -395,6 +397,8 @@ interface BotSaleResponse {
 - `cashierUserId` must be a seeded bot-dedicated User record (FK constraint on `Sale.userId`). The bot's identity is attributed via `BotAuditLog`, not the sale's userId.
 - Routes through `SalesService.confirmBotSale()` which enforces all domain invariants: folio allocation, stock decrement, price validation, dueDate, domain event emission (`sale.confirmed` outbox event).
 - Idempotent: same `X-Idempotency-Key` returns the cached response.
+- **Server-side promotion re-evaluation**: the server re-evaluates the cart with the **full POS promotions engine** at confirm time (not the simplified `evaluate-cart` preview). The persisted `discountCents` is the real engine-recomputed value (subtotal − total). `unitPriceCents` is still validated against the applicable price list (`PRICE_OUT_OF_DATE` → 409).
+- **Optional re-quote guard**: when `expectedTotalCents` is sent and differs from the engine-recomputed total, the request fails with `409 PROMO_RE_QUOTE` and body `{ recomputedTotalCents, expectedTotalCents, discountCents }` — the bot should re-quote with the returned totals and re-issue. No sale is persisted, no stock is decremented, no event is emitted on this branch.
 
 ---
 
@@ -510,6 +514,53 @@ interface OrderHistoryResponse {
 
 ---
 
+#### 4.4.10 POST `/chatbot-api/sales/:saleId/cancel`
+
+**Scopes**: `sales:write`
+
+**Request body:**
+```typescript
+{
+  reason: "CUSTOMER_REQUEST" | "ORDER_ERROR" | "OUT_OF_STOCK" | "DUPLICATE_SALE" | "OTHER";
+  cashierUserId: string;                 // @IsUUID()
+}
+```
+
+**Response** `200`: the canceled sale.
+
+**Notes**:
+- Cancels a bot-created sale through `SalesService.cancelSale` (same path as POS cancellation): restocks items, builds refunds, emits `sale.canceled`.
+- Idempotent via a derived `sale:cancel:<saleId>` idempotency key.
+- The `cashierUserId` is recorded as `canceledByUserId` for audit; creator-ownership is NOT enforced (any authorized actor in the tenant may cancel).
+
+---
+
+#### 4.4.11 GET `/chatbot-api/payment-details`
+
+**Scopes**: `payment-details:read`
+
+**Response** `200`:
+```typescript
+{
+  id: string;
+  bankName: string;
+  beneficiary: string;
+  clabe: string;
+  accountNumber: string;
+  isActive: boolean;
+  updatedAt: string;                     // ISO 8601
+}
+```
+
+**Errors**: `404 NO_ACTIVE_PAYMENT_DETAIL` when the tenant has no active payment detail.
+
+**Notes**:
+- Returns the **active** payment detail of the bot's tenant (most recently updated active row; multiple rows per tenant are allowed, exactly one is expected active — an operational rule, not DB-enforced).
+- Used by the bot to render the bank-transfer message (AFIRME / beneficiary / CLABE / account) after order confirmation (R11).
+- Managed by humans via the admin CRUD (`/admin/payment-details`) with RBAC permissions `read/create/update/delete:PaymentDetail`; the bot scope is read-only.
+
+---
+
 ### 4.5 Endpoint Summary Table
 
 | # | Method | Path | Scopes | Idempotent | Status |
@@ -523,8 +574,10 @@ interface OrderHistoryResponse {
 | 7 | POST | `/chatbot-api/sales/:saleId/receipts` | `sales:write` | No | 201 |
 | 8 | PATCH | `/chatbot-api/sales/:saleId/delivery` | `sales:write` | No | 200 |
 | 9 | GET | `/chatbot-api/customers/by-phone/:phone/orders` | `customers:read` | N/A (read) | 200 |
+| 10 | POST | `/chatbot-api/sales/:saleId/cancel` | `sales:write` | Yes (derived key) | 200 |
+| 11 | GET | `/chatbot-api/payment-details` | `payment-details:read` | N/A (read) | 200 / 404 |
 
-**Total: 9 endpoints** (4 GET, 3 POST, 1 PUT, 1 PATCH)
+**Total: 11 endpoints** (5 GET, 4 POST, 1 PUT, 1 PATCH)
 
 ---
 
@@ -568,7 +621,7 @@ SaleIdempotencyStatus: IN_FLIGHT | SUCCEEDED | FAILED
 
 ### Slice 1: `chatbot-api-foundation` (archived 2026-06-11)
 
-**Delivered**: Complete internal API for the chatbot service (9 endpoints, auth, audit, rate limiting, idempotency). All 49 implementation tasks complete. 56 chatbot-api tests, 1136 full suite with zero regressions. 4 additive Prisma migrations.
+**Delivered**: Complete internal API for the chatbot service (11 endpoints, auth, audit, rate limiting, atomic idempotency). All 49 implementation tasks complete. 56 chatbot-api tests, 1136 full suite with zero regressions. 4 additive Prisma migrations.
 
 **Verdict**: PASS_WITH_WARNINGS (0 critical, 5 warnings, 4 suggestions).
 
