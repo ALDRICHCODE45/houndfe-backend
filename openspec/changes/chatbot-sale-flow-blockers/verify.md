@@ -100,14 +100,13 @@ No scope creep beyond the assigned 3 work units detected.
 
 | Severity | Description | Location |
 |---|---|---|
-| ❌ CRITICAL | **§4.3 idempotency doc rewrite not applied.** `PROGRAM-CONTEXT.md` §4.3 still describes the OLD non-atomic flow ("Reserve slot as `IN_FLIGHT` → create sale → mark `SUCCEEDED`") and does **not** describe the atomic `acquire → replay \| conflict \| in_flight` pattern, `requestHash` matching on canonical payload, or the `IDEMPOTENCY_KEY_CONFLICT` (409) / `IDEMPOTENCY_KEY_IN_FLIGHT` (409) rejection codes. This directly fails the spec scenario "Idempotency section describes the atomic pattern" (chatbot-api-foundation/spec.md, `Chatbot API Endpoint Documentation Drift Fix`) and the `WU3-07` rewrite sub-item, whose checkbox is stale. | `openspec/program/whatsapp-ai-chatbot/PROGRAM-CONTEXT.md` §4.3 |
-| ⚠️ WARNING | **Spec arithmetic inconsistency (10 vs 11 endpoints).** `chatbot-api-foundation/spec.md` "Chatbot API Endpoint Documentation Drift Fix" says "ten routes total" / "corrected from 9 to 10" / "Total: 10 endpoints", but the code has **11** routes (9 pre-existing + `cancel` + `payment-details`). The implementation and `tasks.md WU3-07` correctly reconcile to 11. The spec text should be corrected to 11 at archive time. | `specs/chatbot-api-foundation/spec.md` |
-| ⚠️ WARNING | **`apply-progress.md` covers WU1 only.** The artifact is titled "WU1 Apply Progress — Q1 PaymentDetail" and its status table lists only `WU1-01…WU1-20`. WU2 and WU3 have no apply-progress record (no per-WU implementation status, no deviations, no TDD/verification evidence). Non-blocking for code correctness; SDD hygiene gap. | `openspec/changes/chatbot-sale-flow-blockers/apply-progress.md` |
+| ✅ RESOLVED | **§4.3 idempotency doc rewrite was missing at first verify pass.** Rewritten: atomic `acquire → replay \| conflict \| in_flight`, SHA-256 `requestHash` over canonical payload, `400 INVALID_IDEMPOTENCY_KEY` pre-DB, `409 IDEMPOTENCY_KEY_CONFLICT` / `409 IDEMPOTENCY_KEY_IN_FLIGHT`. Landed in `c3d6d28`. | `openspec/program/whatsapp-ai-chatbot/PROGRAM-CONTEXT.md` §4.3 |
+| ✅ RESOLVED | **Spec arithmetic inconsistency (10 vs 11 endpoints).** `chatbot-api-foundation/spec.md` corrected to 11 routes / "Total: 11 endpoints". Landed in `c3d6d28`. | `specs/chatbot-api-foundation/spec.md` |
+| ✅ RESOLVED | **`apply-progress.md` covered WU1 only.** Extended with WU2 (atomic idempotency) and WU3 (engine re-eval + docs) progress records. Landed in `c3d6d28`. | `openspec/changes/chatbot-sale-flow-blockers/apply-progress.md` |
 | ℹ️ NOTE | **Spec wording "validated at the DTO layer" vs pipe.** The spec says the idempotency key "MUST be validated at the DTO layer"; the implementation uses `ParseIdempotencyKeyPipe` via a custom `@IdempotencyKey()` param decorator (the design-open-question resolution in WU2-03). Intent satisfied (non-empty ≤200, `400 INVALID_IDEMPOTENCY_KEY` before any DB read). Wording-only deviation. | `parse-idempotency-key.pipe.ts`, `idempotency-key.decorator.ts` |
 | ℹ️ NOTE | **Strict TDD not active.** `openspec/config.yaml` has `apply.tdd: false`; no `TDD Cycle Evidence` table required. TDD verification checks skipped by design. | `openspec/config.yaml` |
 
 ---
-
 ## 6. Assertion Quality (spot-check)
 
 New tests are substantive, not tautological/smoke-only:
