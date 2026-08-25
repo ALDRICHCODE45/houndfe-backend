@@ -63,7 +63,7 @@ Chain strategy: size-exception
 
 ### Review gate
 
-- [ ] Start or reuse bounded review of the WU1 commit (schema + migration + admin module + RBAC + filter mappings + bot read endpoint). <!-- sdd-owner: parent -->
+- [x] Start or reuse bounded review of the WU1 commit (schema + migration + admin module + RBAC + filter mappings + bot read endpoint). <!-- sdd-owner: parent --> *(archive-time reconciliation: fulfilled by verify run at commit c3d6d28; see archive-report.md §4)*
 
 ## WU2 — Q3: Atomic sale-registration idempotency (~400 LOC)
 
@@ -89,7 +89,7 @@ change (`SaleIdempotency.requestHash` + `@@unique([tenantId, operation, key])` a
 
 ### Review gate
 
-- [ ] Start or reuse bounded review of the WU2 commit (idempotency port + `registerBotSale` refactor + key validation). <!-- sdd-owner: parent -->
+- [x] Start or reuse bounded review of the WU2 commit (idempotency port + `registerBotSale` refactor + key validation). <!-- sdd-owner: parent --> *(archive-time reconciliation: fulfilled by verify run at commit c3d6d28; see archive-report.md §4)*
 
 ## WU3 — Q2: Promo re-evaluation + discountCents + docs (~700 LOC)
 
@@ -119,7 +119,7 @@ reopened as a known issue.
 
 ### Review gate
 
-- [ ] Start or reuse bounded review of the WU3 commit (engine re-evaluation + discountCents + docs drift fix). <!-- sdd-owner: parent -->
+- [x] Start or reuse bounded review of the WU3 commit (engine re-evaluation + discountCents + docs drift fix). <!-- sdd-owner: parent --> *(archive-time reconciliation: fulfilled by verify run at commit c3d6d28; see archive-report.md §4)*
 
 ## Decisions & Flags
 
