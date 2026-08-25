@@ -201,6 +201,15 @@ describe('ChatbotApiService', () => {
   let customerRepository: jest.Mocked<ICustomerRepository>;
   let evaluateCartPromotionsUseCase: jest.Mocked<IEvaluateCartPromotionsUseCase>;
   let salesService: jest.Mocked<Pick<SalesService, 'confirmBotSale'>>;
+  // Q3 / WU2 — mock the atomic idempotency port so `registerBotSale` can
+  // exercise the four outcomes (acquired / replay / conflict / in_flight)
+  // without touching Prisma. Only the two new methods are stubbed here
+  // because the bot path no longer calls `prisma.saleIdempotency.*`
+  // directly (delegated to the repo port).
+  let saleRepository: {
+    acquireSaleRegistrationIdempotency: jest.Mock;
+    markSaleRegistrationIdempotencySucceeded: jest.Mock;
+  };
   let tenantPrisma: MockTenantPrisma;
   let service: ChatbotApiService;
 
@@ -223,6 +232,12 @@ describe('ChatbotApiService', () => {
     };
     salesService = {
       confirmBotSale: jest.fn(),
+    };
+    saleRepository = {
+      acquireSaleRegistrationIdempotency: jest.fn(),
+      markSaleRegistrationIdempotencySucceeded: jest
+        .fn()
+        .mockResolvedValue(undefined),
     };
     const tenantClient: MockTenantClient = {
       customerAddress: {
@@ -261,6 +276,7 @@ describe('ChatbotApiService', () => {
       customerRepository,
       evaluateCartPromotionsUseCase,
       salesService as unknown as SalesService,
+      saleRepository as never,
       tenantPrisma as unknown as TenantPrismaService,
     );
   });
@@ -765,20 +781,11 @@ describe('ChatbotApiService', () => {
     };
 
     it('delegates bot sale confirmation to SalesService and returns the mapped response', async () => {
-      const client = tenantPrisma.getClient();
-
-      client.saleIdempotency.findUnique.mockResolvedValue(null);
-      client.saleIdempotency.upsert.mockResolvedValue({
-        id: 'idem-1',
-        status: 'IN_FLIGHT',
-        responseJson: null,
-        saleId: null,
-      });
-      client.saleIdempotency.update.mockResolvedValue({
-        id: 'idem-1',
-        status: 'SUCCEEDED',
-        responseJson: {},
-        saleId: 'sale-bot-1',
+      // Q3 / WU2 — first call wins, the repo returns { kind: 'acquired' },
+      // the service confirms the sale, then stamps SUCCEEDED.
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'acquired',
+        token: 'idem-1',
       });
       salesService.confirmBotSale.mockResolvedValue({
         saleId: 'sale-bot-1',
@@ -794,6 +801,16 @@ describe('ChatbotApiService', () => {
 
       const result = await service.registerBotSale(botSaleInput);
 
+      // The acquire passes the idempotency key + the canonical
+      // SHA-256 hash of the request payload (D9). We assert the key is
+      // forwarded; the hash itself is deterministic on the input.
+      expect(
+        saleRepository.acquireSaleRegistrationIdempotency,
+      ).toHaveBeenCalledWith('bot-order-abc-123', expect.any(String));
+      expect(
+        saleRepository.acquireSaleRegistrationIdempotency.mock
+          .calls[0]?.[1] as string,
+      ).toMatch(/^[0-9a-f]{64}$/);
       expect(salesService.confirmBotSale).toHaveBeenCalledTimes(1);
       expect(salesService.confirmBotSale).toHaveBeenCalledWith({
         cashierUserId: 'user-cashier-1',
@@ -810,6 +827,18 @@ describe('ChatbotApiService', () => {
           },
         ],
       });
+      expect(
+        saleRepository.markSaleRegistrationIdempotencySucceeded,
+      ).toHaveBeenCalledWith(
+        'idem-1',
+        'sale-bot-1',
+        expect.objectContaining({
+          saleId: 'sale-bot-1',
+          folio: 'A-2606-000001',
+          paymentStatus: 'CREDIT',
+          channel: 'ONLINE',
+        }),
+      );
       expect(result.saleId).toBe('sale-bot-1');
       expect(result.folio).toBe('A-2606-000001');
       expect(result.paymentStatus).toBe('CREDIT');
@@ -817,7 +846,11 @@ describe('ChatbotApiService', () => {
     });
 
     it('returns cached response without creating a duplicate sale on idempotency replay', async () => {
-      const client = tenantPrisma.getClient();
+      // Q3 / WU2 — the repo returns { kind: 'replay', payload } when a
+      // SUCCEEDED row with matching hash already exists; the service
+      // MUST return that cached payload verbatim and skip
+      // `confirmBotSale` entirely (preserves the existing replay
+      // semantics from line ~799).
       const cached = {
         saleId: 'sale-bot-existing',
         folio: 'BOT-0001',
@@ -828,17 +861,222 @@ describe('ChatbotApiService', () => {
         debtCents: 519800,
         deliveryStatus: 'PENDING',
       };
-      client.saleIdempotency.findUnique.mockResolvedValue({
-        id: 'idem-1',
-        status: 'SUCCEEDED',
-        responseJson: cached,
-        saleId: 'sale-bot-existing',
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'replay',
+        payload: cached,
       });
 
       const result = await service.registerBotSale(botSaleInput);
 
       expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+      expect(
+        saleRepository.markSaleRegistrationIdempotencySucceeded,
+      ).not.toHaveBeenCalled();
       expect(result.saleId).toBe('sale-bot-existing');
+    });
+
+    // Q3 / WU2 — conflict / in_flight / order-independent hash
+    // scenarios (WU2-06). The first two are wire-level rejections;
+    // the third pins D9's canonical-payload contract.
+
+    it('throws IDEMPOTENCY_KEY_CONFLICT and skips confirmBotSale when the repo returns conflict', async () => {
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'conflict',
+      });
+
+      await expect(service.registerBotSale(botSaleInput)).rejects.toMatchObject(
+        {
+          code: 'IDEMPOTENCY_KEY_CONFLICT',
+        },
+      );
+      expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+      expect(
+        saleRepository.markSaleRegistrationIdempotencySucceeded,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('throws IDEMPOTENCY_KEY_IN_FLIGHT and skips confirmBotSale when the repo returns in_flight', async () => {
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'in_flight',
+      });
+
+      await expect(service.registerBotSale(botSaleInput)).rejects.toMatchObject(
+        {
+          code: 'IDEMPOTENCY_KEY_IN_FLIGHT',
+        },
+      );
+      expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+      expect(
+        saleRepository.markSaleRegistrationIdempotencySucceeded,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('retry after the original request completed (first acquire, then replay) returns the cached response', async () => {
+      // Concurrency scenario: two requests with the same key arrive
+      // back-to-back. The first acquire returns 'acquired' and
+      // confirms the sale; the second acquire (after SUCCEEDED is
+      // stamped) returns 'replay' and serves the cached payload.
+      // Verify both halves from the bot service's perspective.
+      saleRepository.acquireSaleRegistrationIdempotency
+        .mockResolvedValueOnce({ kind: 'acquired', token: 'idem-1' })
+        .mockResolvedValueOnce({
+          kind: 'replay',
+          payload: {
+            saleId: 'sale-bot-1',
+            folio: 'A-2606-000001',
+            paymentStatus: 'CREDIT',
+            channel: 'ONLINE',
+            deliveryStatus: 'PENDING',
+            totalCents: 519800,
+            paidCents: 0,
+            debtCents: 519800,
+            confirmedAt: '2026-06-11T00:00:00.000Z',
+          },
+        });
+      salesService.confirmBotSale.mockResolvedValue({
+        saleId: 'sale-bot-1',
+        folio: 'A-2606-000001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents: 519800,
+        paidCents: 0,
+        debtCents: 519800,
+        confirmedAt: '2026-06-11T00:00:00.000Z',
+      });
+
+      const first = await service.registerBotSale(botSaleInput);
+      const second = await service.registerBotSale(botSaleInput);
+
+      expect(first.saleId).toBe('sale-bot-1');
+      expect(second.saleId).toBe('sale-bot-1');
+      expect(salesService.confirmBotSale).toHaveBeenCalledTimes(1);
+      expect(first).toEqual(second);
+    });
+
+    it('produces the same canonical requestHash regardless of item order (D9)', async () => {
+      // Two requests with the same key + same items in different
+      // order MUST hash identically so the bot retrying with
+      // reordered items replays instead of conflict-ing. Display
+      // names must also be ignored so catalog re-labels don't
+      // change the hash.
+      saleRepository.acquireSaleRegistrationIdempotency
+        .mockResolvedValueOnce({ kind: 'acquired', token: 'idem-A' })
+        .mockResolvedValueOnce({ kind: 'conflict' });
+
+      const multiItemInput = {
+        ...botSaleInput,
+        items: [
+          {
+            productId: 'prod-1',
+            variantId: 'var-1',
+            productName: 'Royal Canin Mini',
+            variantName: '3 kg',
+            quantity: 2,
+            unitPriceCents: 259900,
+          },
+          {
+            productId: 'prod-2',
+            variantId: null,
+            productName: 'Stainless Bowl',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 99900,
+          },
+        ],
+      };
+
+      // Reordered with intentionally re-labeled display names — the
+      // canonical hash must ignore both order AND productName /
+      // variantName (D9).
+      const reordered = {
+        ...multiItemInput,
+        items: [
+          {
+            ...multiItemInput.items[1],
+            productName: 'Stainless Bowl RENAMED',
+          },
+          {
+            ...multiItemInput.items[0],
+            productName: 'Royal Canin Mini RENAMED',
+            variantName: '3 kg REPACKED',
+          },
+        ],
+      };
+
+      salesService.confirmBotSale.mockResolvedValue({
+        saleId: 'sale-bot-1',
+        folio: 'A-2606-000001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents: 619700,
+        paidCents: 0,
+        debtCents: 619700,
+        confirmedAt: '2026-06-11T00:00:00.000Z',
+      });
+
+      await service.registerBotSale(multiItemInput);
+      // Different item order, different display names, but the
+      // same core fields — the canonical hash must be byte-identical.
+      await expect(service.registerBotSale(reordered)).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+      });
+
+      const firstHash =
+        saleRepository.acquireSaleRegistrationIdempotency.mock.calls[0]?.[1];
+      const secondHash =
+        saleRepository.acquireSaleRegistrationIdempotency.mock.calls[1]?.[1];
+      expect(firstHash).toBeDefined();
+      expect(secondHash).toBeDefined();
+      expect(firstHash).toBe(secondHash);
+    });
+
+    it('produces a different requestHash when the same key ships a different quantity (true payload mismatch)', async () => {
+      // Sanity counter-test to the order-independence assertion:
+      // quantity changes MUST change the hash, otherwise a retried
+      // accidental cart-edit would silently replay the original
+      // sale (D9 + spec "requestHash mismatch" scenario).
+      saleRepository.acquireSaleRegistrationIdempotency
+        .mockResolvedValueOnce({ kind: 'acquired', token: 'idem-A' })
+        .mockResolvedValueOnce({ kind: 'conflict' });
+
+      salesService.confirmBotSale.mockResolvedValue({
+        saleId: 'sale-bot-1',
+        folio: 'A-2606-000001',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        totalCents: 519800,
+        paidCents: 0,
+        debtCents: 519800,
+        confirmedAt: '2026-06-11T00:00:00.000Z',
+      });
+
+      await service.registerBotSale(botSaleInput);
+
+      const edited = {
+        ...botSaleInput,
+        items: [
+          {
+            productId: 'prod-1',
+            variantId: 'var-1',
+            productName: 'Royal Canin Mini',
+            variantName: '3 kg',
+            quantity: 3, // was 2
+            unitPriceCents: 259900,
+          },
+        ],
+      };
+      await expect(service.registerBotSale(edited)).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+      });
+
+      const firstHash =
+        saleRepository.acquireSaleRegistrationIdempotency.mock.calls[0]?.[1];
+      const secondHash =
+        saleRepository.acquireSaleRegistrationIdempotency.mock.calls[1]?.[1];
+      expect(firstHash).not.toBe(secondHash);
     });
   });
 

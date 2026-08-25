@@ -1764,9 +1764,53 @@ export class PrismaSaleRepository implements ISaleRepository {
     return this.markIdempotencySucceeded(token, saleId, payload);
   }
 
-  private async acquireIdempotency(
-    operation: 'sale_charge' | 'sale_payment' | 'sale_cancel',
+  /**
+   * Q3 / WU2 — Bot sale registration idempotency acquire. Delegates to
+   * the widened private `acquireIdempotency` helper with
+   * `operation='bot_sale_register'` and `saleId=null` (D8 — the saleId
+   * is only known after `confirmBotSale` runs). The bot path uses the
+   * SAME atomic `create → P2002 → re-read` flow as the POS charge path,
+   * so all four outcome semantics are inherited verbatim — see
+   * `acquireIdempotency` for the discriminated-union contract.
+   */
+  async acquireSaleRegistrationIdempotency(
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  > {
+    return this.acquireIdempotency(
+      'bot_sale_register',
+      null,
+      key,
+      requestHash,
+    );
+  }
+
+  /**
+   * Q3 / WU2 — Stamp the `bot_sale_register` slot SUCCEEDED after
+   * `confirmBotSale` returns. Thin delegate to `markIdempotencySucceeded`
+   * so the success marker stays byte-identical to the POS charge /
+   * payment / cancel paths.
+   */
+  async markSaleRegistrationIdempotencySucceeded(
+    token: string,
     saleId: string,
+    payload: unknown,
+  ): Promise<void> {
+    return this.markIdempotencySucceeded(token, saleId, payload);
+  }
+
+  private async acquireIdempotency(
+    operation:
+      | 'sale_charge'
+      | 'sale_payment'
+      | 'sale_cancel'
+      | 'bot_sale_register',
+    saleId: string | null,
     key: string,
     requestHash: string,
   ): Promise<

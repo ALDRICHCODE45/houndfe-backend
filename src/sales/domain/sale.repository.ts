@@ -134,6 +134,37 @@ export interface ISaleRepository {
     payload: unknown,
   ): Promise<void>;
 
+  /**
+   * Q3 / WU2 — Bot sale registration idempotency. Reserves the
+   * `SaleIdempotency` slot atomically for `operation='bot_sale_register'`
+   * (D8). Unlike the charge/payment/cancel variants, the `saleId` is
+   * `null` at acquire time and only filled by
+   * `markSaleRegistrationIdempotencySucceeded` after `confirmBotSale`
+   * produces the real sale id.
+   *
+   * Returns the same four-outcome discriminated union as the other
+   * idempotency acquire methods — `replay` (caller returns the cached
+   * `BotSaleResponse`), `conflict` (caller throws
+   * `IDEMPOTENCY_KEY_CONFLICT`, 409), `in_flight` (caller throws
+   * `IDEMPOTENCY_KEY_IN_FLIGHT`, 409), `acquired` (caller proceeds to
+   * `confirmBotSale` and stamps SUCCEEDED).
+   */
+  acquireSaleRegistrationIdempotency(
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  >;
+
+  markSaleRegistrationIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void>;
+
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
 
   allocateNextFolio(now?: Date): Promise<string>;

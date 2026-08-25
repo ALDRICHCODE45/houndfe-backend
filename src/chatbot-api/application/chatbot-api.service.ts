@@ -1,6 +1,6 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
 import { Customer } from '../../customers/domain/customer.entity';
 import {
   CUSTOMER_REPOSITORY,
@@ -42,6 +42,8 @@ import type {
   OrderHistoryResponse,
 } from '../presentation/dto/order-history.response';
 import { SalesService } from '../../sales/sales.service';
+import { SALE_REPOSITORY } from '../../sales/domain/sale.repository';
+import type { ISaleRepository } from '../../sales/domain/sale.repository';
 
 // ── Bot Sale Input Types ────────────────────────────────────────────────────
 
@@ -113,6 +115,12 @@ export class ChatbotApiService {
     @Inject(EVALUATE_CART_PROMOTIONS_USE_CASE)
     private readonly evaluateCartPromotionsUseCase: IEvaluateCartPromotionsUseCase,
     private readonly salesService: SalesService,
+    // Q3 / WU2 — bot registration uses the SALE_REPOSITORY port's atomic
+    // idempotency acquire (mirrors the POS charge / payment / cancel
+    // pattern). The token returned on `acquired` is stamped SUCCEEDED via
+    // `markSaleRegistrationIdempotencySucceeded` after `confirmBotSale`.
+    @Inject(SALE_REPOSITORY)
+    private readonly saleRepository: ISaleRepository,
     private readonly tenantPrisma: TenantPrismaService,
   ) {}
 
@@ -240,50 +248,68 @@ export class ChatbotApiService {
 
   /**
    * Register a bot-created ONLINE sale.
-   * Creates a CONFIRMED CREDIT (pending-payment) sale directly via Prisma.
-   * Idempotent: replays the original response for the same idempotency key.
    *
-   * NOTE: `cashierUserId` must be a valid User.id (FK constraint on Sale.userId).
-   * The bot credential identity is recorded in BotAuditLog (Slice 7).
+   * Q3 / WU2 — atomic idempotency: mirrors the POS charge pattern
+   * (`acquireChargeIdempotency`) exactly. The four outcomes are:
+   *
+   * - `replay`    → return the cached `BotSaleResponse` (preserves the
+   *                 original saleId / folio / totals).
+   * - `conflict`  → same key, different payload hash →
+   *                 `BusinessRuleViolationError('IDEMPOTENCY_KEY_CONFLICT', ...)`
+   *                 (DomainExceptionFilter maps to 409).
+   * - `in_flight` → same key, same payload, still running →
+   *                 `BusinessRuleViolationError('IDEMPOTENCY_KEY_IN_FLIGHT', ...)`
+   *                 (also 409).
+   * - `acquired`  → proceed to `confirmBotSale`, then stamp SUCCEEDED.
+   *
+   * The `requestHash` is `SHA-256(JSON.stringify(canonicalPayload))` (D9)
+   * over `{ cashierUserId, customerId, shippingAddressId, items }` with
+   * items sorted by `(productId, variantId)`. Display names are
+   * intentionally excluded so re-labels never break replay.
+   *
+   * The idempotency key itself is validated upstream by
+   * `ParseIdempotencyKeyPipe` (WU2-03) — by the time control reaches this
+   * method, `input.idempotencyKey` is a non-empty trimmed string
+   * (≤ 200 chars).
+   *
+   * D10: `FAILED` is never written. If `confirmBotSale` throws after
+   * `acquired`, the slot stays `IN_FLIGHT`; the next acquire for the same
+   * key returns `in_flight` (matching hash) or `conflict` (mismatched
+   * hash). Manual cleanup is the accepted mitigation.
    */
   async registerBotSale(input: RegisterBotSaleInput): Promise<BotSaleResponse> {
-    const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
+    const requestHash = computeRegisterBotSaleRequestHash(input);
 
-    // Idempotency check: return cached response if key was already processed
-    const existing = await prisma.saleIdempotency.findUnique({
-      where: {
-        tenantId_operation_key: {
-          tenantId,
-          operation: 'bot_sale_register',
-          key: input.idempotencyKey,
-        },
-      },
-    });
-    if (existing?.status === 'SUCCEEDED' && existing.responseJson) {
-      return existing.responseJson as unknown as BotSaleResponse;
+    const idempotency =
+      await this.saleRepository.acquireSaleRegistrationIdempotency(
+        input.idempotencyKey,
+        requestHash,
+      );
+
+    if (idempotency.kind === 'replay') {
+      // The cached payload is whatever the previous successful call
+      // stamped into `responseJson`. Cast through `unknown` so legacy
+      // cached rows survive the wire-evolution (WU3 adds
+      // `discountCents`; pre-WU3 rows simply lack the field).
+      return idempotency.payload as BotSaleResponse;
     }
 
-    // Reserve the idempotency slot
-    await prisma.saleIdempotency.upsert({
-      where: {
-        tenantId_operation_key: {
-          tenantId,
-          operation: 'bot_sale_register',
-          key: input.idempotencyKey,
-        },
-      },
-      create: {
-        id: randomUUID(),
-        tenantId,
-        operation: 'bot_sale_register',
-        key: input.idempotencyKey,
-        requestHash: input.idempotencyKey,
-        status: 'IN_FLIGHT',
-      },
-      update: {},
-    });
+    if (idempotency.kind === 'conflict') {
+      throw new BusinessRuleViolationError(
+        'Idempotency key was already used with a different payload',
+        'IDEMPOTENCY_KEY_CONFLICT',
+      );
+    }
 
+    if (idempotency.kind === 'in_flight') {
+      throw new BusinessRuleViolationError(
+        'Idempotency key is still being processed for a matching payload',
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+      );
+    }
+
+    // idempotency.kind === 'acquired'
+    const token = idempotency.token;
     const confirmedSale = await this.salesService.confirmBotSale({
       cashierUserId: input.cashierUserId,
       customerId: input.customerId,
@@ -303,21 +329,11 @@ export class ChatbotApiService {
       confirmedAt: confirmedSale.confirmedAt,
     };
 
-    // Mark idempotency as succeeded with the cached response
-    await prisma.saleIdempotency.update({
-      where: {
-        tenantId_operation_key: {
-          tenantId,
-          operation: 'bot_sale_register',
-          key: input.idempotencyKey,
-        },
-      },
-      data: {
-        status: 'SUCCEEDED',
-        responseJson: response,
-        saleId: confirmedSale.saleId,
-      },
-    });
+    await this.saleRepository.markSaleRegistrationIdempotencySucceeded(
+      token,
+      confirmedSale.saleId,
+      response,
+    );
 
     return response;
   }
@@ -534,6 +550,46 @@ function updateCustomer(
 
 function normalizePhonePart(value: string): string {
   return value.replace(/\D/g, '');
+}
+
+/**
+ * Build the canonical request hash for `registerBotSale` (D9).
+ *
+ * The hash is `SHA-256(JSON.stringify(canonicalPayload))` over a fixed
+ * subset of the bot's input — display-name fields like `productName` /
+ * `variantName` are intentionally excluded so that catalog re-labels do
+ * not break idempotent replay. Items are sorted ascending by
+ * `(productId, variantId)` so the same cart in a different order produces
+ * the same hash (mirrors `sortPaymentsForHash` for the POS charge path).
+ *
+ * `shippingAddressId` is included as-is (null when omitted) so two
+ * requests that differ only by shipping address are flagged as a
+ * `conflict`, not a silent replay.
+ */
+function computeRegisterBotSaleRequestHash(
+  input: RegisterBotSaleInput,
+): string {
+  const canonicalPayload = {
+    cashierUserId: input.cashierUserId,
+    customerId: input.customerId,
+    shippingAddressId: input.shippingAddressId ?? null,
+    items: [...input.items]
+      .map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+      }))
+      .sort((a, b) =>
+        `${a.productId}|${a.variantId ?? ''}`.localeCompare(
+          `${b.productId}|${b.variantId ?? ''}`,
+        ),
+      ),
+  };
+
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalPayload))
+    .digest('hex');
 }
 
 function deriveStockState(

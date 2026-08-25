@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
+import { IdempotencyKey } from './decorators/idempotency-key.decorator';
 import { CatalogSearchQueryDto } from './dto/catalog-search.query';
 import { EvaluateCartRequestDto } from './dto/evaluate-cart.request';
 import {
@@ -83,7 +84,15 @@ export class ChatbotApiController {
   @RequiredScopes('sales:create')
   registerBotSale(
     @Body() body: RegisterBotSaleRequestDto,
-    @Headers('x-idempotency-key') idempotencyKey: string,
+    // Q3 / WU2 — custom param decorator composes `Headers('x-idempotency-key')`
+    // with `ParseIdempotencyKeyPipe`. NestJS's built-in `@Headers(property)`
+    // does not accept a pipe second argument (only `@Param` and `@Query` do),
+    // so the decorator reads the raw header value and runs it through the
+    // pipe BEFORE the service is invoked. Missing / empty / oversized
+    // keys are rejected with `INVALID_IDEMPOTENCY_KEY` → 400 via
+    // `DomainExceptionFilter`, before any DB read on `saleIdempotency`.
+    @IdempotencyKey()
+    idempotencyKey: string,
   ) {
     return this.chatbotApiService.registerBotSale({
       cashierUserId: body.cashierUserId,
@@ -97,7 +106,7 @@ export class ChatbotApiController {
         quantity: item.quantity,
         unitPriceCents: item.unitPriceCents,
       })),
-      idempotencyKey: idempotencyKey ?? '',
+      idempotencyKey,
     });
   }
 

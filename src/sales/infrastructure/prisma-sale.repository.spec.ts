@@ -1883,6 +1883,138 @@ describe('PrismaSaleRepository', () => {
     });
   });
 
+  // -----------------------------------------------------------------
+  // Q3 / WU2 — bot sale registration idempotency (WU2-05). The bot
+  // path reuses the private `acquireIdempotency` helper widened to
+  // `operation='bot_sale_register'` and `saleId: string | null`.
+  // These tests pin the four outcome semantics + the `saleId=null`
+  // invariant at acquire time (D8).
+  // -----------------------------------------------------------------
+  describe('bot sale registration idempotency (Q3 / WU2)', () => {
+    it('acquires the slot with operation=bot_sale_register and saleId=null on first attempt', async () => {
+      prisma.saleIdempotency.create.mockResolvedValue({ id: 'idem-bot-1' });
+
+      const result = await repo.acquireSaleRegistrationIdempotency(
+        'key-bot-1',
+        'hash-bot-1',
+      );
+
+      expect(result).toEqual({ kind: 'acquired', token: 'idem-bot-1' });
+      expect(prisma.saleIdempotency.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          tenantId: 'tenant-1',
+          operation: 'bot_sale_register',
+          key: 'key-bot-1',
+          requestHash: 'hash-bot-1',
+          status: 'IN_FLIGHT',
+          // D8 — saleId is null at acquire; it's only stamped by
+          // `markSaleRegistrationIdempotencySucceeded` after
+          // `confirmBotSale` produces the real sale id.
+          saleId: null,
+        }),
+      });
+    });
+
+    it('replays the cached responseJson when the row exists with matching hash + SUCCEEDED status', async () => {
+      prisma.saleIdempotency.create.mockRejectedValue({ code: 'P2002' });
+      prisma.saleIdempotency.findUnique.mockResolvedValue({
+        id: 'idem-bot-existing',
+        requestHash: 'hash-bot-1',
+        status: 'SUCCEEDED',
+        responseJson: { saleId: 'sale-bot-existing', totalCents: 519800 },
+        saleId: 'sale-bot-existing',
+      });
+
+      const result = await repo.acquireSaleRegistrationIdempotency(
+        'key-bot-1',
+        'hash-bot-1',
+      );
+
+      expect(result).toEqual({
+        kind: 'replay',
+        payload: { saleId: 'sale-bot-existing', totalCents: 519800 },
+      });
+      expect(prisma.saleIdempotency.findUnique).toHaveBeenCalledWith({
+        where: {
+          tenantId_operation_key: {
+            tenantId: 'tenant-1',
+            operation: 'bot_sale_register',
+            key: 'key-bot-1',
+          },
+        },
+      });
+    });
+
+    it('returns conflict when the existing row has a different requestHash', async () => {
+      prisma.saleIdempotency.create.mockRejectedValue({ code: 'P2002' });
+      prisma.saleIdempotency.findUnique.mockResolvedValue({
+        id: 'idem-bot-existing',
+        requestHash: 'hash-bot-OLD',
+        status: 'SUCCEEDED',
+        responseJson: { saleId: 'sale-bot-existing' },
+        saleId: 'sale-bot-existing',
+      });
+
+      const result = await repo.acquireSaleRegistrationIdempotency(
+        'key-bot-1',
+        'hash-bot-NEW',
+      );
+
+      expect(result).toEqual({ kind: 'conflict' });
+    });
+
+    it('returns in_flight when the existing row has matching hash but IN_FLIGHT status', async () => {
+      prisma.saleIdempotency.create.mockRejectedValue({ code: 'P2002' });
+      prisma.saleIdempotency.findUnique.mockResolvedValue({
+        id: 'idem-bot-existing',
+        requestHash: 'hash-bot-1',
+        status: 'IN_FLIGHT',
+        responseJson: null,
+        saleId: null,
+      });
+
+      const result = await repo.acquireSaleRegistrationIdempotency(
+        'key-bot-1',
+        'hash-bot-1',
+      );
+
+      expect(result).toEqual({ kind: 'in_flight' });
+    });
+
+    it('markSaleRegistrationIdempotencySucceeded stamps SUCCEEDED + saleId + responseJson', async () => {
+      prisma.saleIdempotency.updateMany.mockResolvedValue({ count: 1 });
+
+      await repo.markSaleRegistrationIdempotencySucceeded(
+        'idem-bot-1',
+        'sale-bot-new',
+        { saleId: 'sale-bot-new', folio: 'A-2606-000099' },
+      );
+
+      expect(prisma.saleIdempotency.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'idem-bot-1',
+          tenantId: 'tenant-1',
+        },
+        data: {
+          status: 'SUCCEEDED',
+          responseJson: {
+            saleId: 'sale-bot-new',
+            folio: 'A-2606-000099',
+          },
+          saleId: 'sale-bot-new',
+        },
+      });
+    });
+
+    it('rejects bot acquire when tenant context is empty (TENANT_CONTEXT_REQUIRED)', async () => {
+      tenantPrisma.getTenantId.mockReturnValue('');
+
+      await expect(
+        repo.acquireSaleRegistrationIdempotency('key', 'hash'),
+      ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
+    });
+  });
+
   describe('persistCollectedPayment', () => {
     it('recomputes paid/debt from ledger + new amount in transaction', async () => {
       prisma.sale.findFirst.mockResolvedValue({ totalCents: 5000 });

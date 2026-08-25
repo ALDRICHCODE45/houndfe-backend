@@ -630,6 +630,93 @@ describe('ChatbotApiController', () => {
       });
   });
 
+  // ── Q3 / WU2 — X-Idempotency-Key pipe rejects before any DB read ─────
+
+  it('POST /chatbot-api/sales returns 400 INVALID_IDEMPOTENCY_KEY when the header is missing', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .send(validBotSalePayload)
+      .expect(400)
+      .expect(({ body }: { body: { error?: string; message?: string } }) => {
+        // InvalidArgumentError → DomainExceptionFilter → 400 with code in
+        // `error` and human-readable message in `message`. The header
+        // arrives as `undefined` (not a string), which the pipe rejects
+        // with the "must be a string" message — both branches still
+        // produce `INVALID_IDEMPOTENCY_KEY` so the wire contract is
+        // uniform.
+        expect(body.error).toBe('INVALID_IDEMPOTENCY_KEY');
+        expect(body.message).toMatch(/idempotency key/i);
+      });
+    // CRITICAL: pipe runs BEFORE the service is invoked, so the bot
+    // service's registerBotSale is never called (no DB read).
+    expect(service.registerBotSale).not.toHaveBeenCalled();
+  });
+
+  it('POST /chatbot-api/sales returns 400 INVALID_IDEMPOTENCY_KEY when the header is empty', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', '')
+      .send(validBotSalePayload)
+      .expect(400)
+      .expect(({ body }: { body: { error?: string } }) => {
+        expect(body.error).toBe('INVALID_IDEMPOTENCY_KEY');
+      });
+    expect(service.registerBotSale).not.toHaveBeenCalled();
+  });
+
+  it('POST /chatbot-api/sales returns 400 INVALID_IDEMPOTENCY_KEY when the header is whitespace only', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', '   ')
+      .send(validBotSalePayload)
+      .expect(400)
+      .expect(({ body }: { body: { error?: string } }) => {
+        expect(body.error).toBe('INVALID_IDEMPOTENCY_KEY');
+      });
+    expect(service.registerBotSale).not.toHaveBeenCalled();
+  });
+
+  it('POST /chatbot-api/sales returns 400 INVALID_IDEMPOTENCY_KEY when the key exceeds 200 characters', async () => {
+    const oversized = 'a'.repeat(201);
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', oversized)
+      .send(validBotSalePayload)
+      .expect(400)
+      .expect(({ body }: { body: { error?: string; message?: string } }) => {
+        expect(body.error).toBe('INVALID_IDEMPOTENCY_KEY');
+        expect(body.message).toMatch(/maximum length of 200 characters/i);
+      });
+    expect(service.registerBotSale).not.toHaveBeenCalled();
+  });
+
+  it('POST /chatbot-api/sales forwards the trimmed idempotency key to the service (whitespace trimmed away)', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', '  bot-order-abc-trimmed  ')
+      .send(validBotSalePayload)
+      .expect(201)
+      .expect(({ body }: { body: unknown }) => {
+        expect(service.registerBotSale).toHaveBeenCalledWith(
+          expect.objectContaining({
+            idempotencyKey: 'bot-order-abc-trimmed',
+          }),
+        );
+        expect(body).toEqual(
+          expect.objectContaining({
+            saleId: 'sale-bot-1',
+            paymentStatus: 'CREDIT',
+            channel: 'ONLINE',
+          }),
+        );
+      });
+  });
+
   it('POST /chatbot-api/sales/:saleId/receipts attaches a receipt and returns PENDING status', async () => {
     await request(httpServer())
       .post(`/chatbot-api/sales/${saleId}/receipts`)

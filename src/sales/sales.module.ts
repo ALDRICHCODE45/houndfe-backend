@@ -59,6 +59,6 @@ import { PromotionsModule } from '../promotions/promotions.module';
     },
     SaleEventListener,
   ],
-  exports: [SalesService],
+  exports: [SalesService, SALE_REPOSITORY],
 })
 export class SalesModule {}
