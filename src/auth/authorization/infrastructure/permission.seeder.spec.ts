@@ -146,4 +146,36 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
     ).length;
     expect(count).toBe(4);
   });
+
+  // ── custom-payment-methods / WU1 — PaymentMethod permissions are auto-seeded ──
+
+  it('upserts (PaymentMethod, read/create/update/delete) from the registry', async () => {
+    const { prisma, permissionUpsertCalls } = makePrismaStub();
+
+    const seeder = new PermissionSeeder(prisma);
+    await seeder.onApplicationBootstrap();
+
+    const paymentMethodCalls = permissionUpsertCalls
+      .filter((c) => c.where.subject_action.subject === 'PaymentMethod')
+      .map((c) => c.where.subject_action.action)
+      .sort();
+
+    expect(paymentMethodCalls).toEqual([
+      'create',
+      'delete',
+      'read',
+      'update',
+    ]);
+  });
+
+  it('writes 4 PaymentMethod rows on a single seeder run', async () => {
+    const { prisma, permissionUpsertCalls } = makePrismaStub();
+    const seeder = new PermissionSeeder(prisma);
+    await seeder.onApplicationBootstrap();
+
+    const count = permissionUpsertCalls.filter(
+      (c) => c.where.subject_action.subject === 'PaymentMethod',
+    ).length;
+    expect(count).toBe(4);
+  });
 });

@@ -164,6 +164,24 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'DUPLICATE_CLABE')
       return HttpStatus.CONFLICT;
 
+    // ── Custom Payment Methods (custom-payment-methods / WU2 — D9) ──
+    // The sales-spec asserts specific codes/statuses for the
+    // charge/collection resolver path:
+    //   PAYMENT_METHOD_NOT_FOUND        → 404
+    //   INACTIVE_PAYMENT_METHOD         → 409
+    //   PAYMENT_METHOD_CATEGORY_MISMATCH → 400
+    //   DUPLICATE_NAME                  → 409 (admin CRUD path — same
+    //                                     code as the @@unique([tenantId,
+    //                                     name]) constraint violation).
+    if (exception.code === 'PAYMENT_METHOD_NOT_FOUND')
+      return HttpStatus.NOT_FOUND;
+    if (exception.code === 'INACTIVE_PAYMENT_METHOD')
+      return HttpStatus.CONFLICT;
+    if (exception.code === 'PAYMENT_METHOD_CATEGORY_MISMATCH')
+      return HttpStatus.BAD_REQUEST;
+    if (exception.code === 'DUPLICATE_NAME')
+      return HttpStatus.CONFLICT;
+
     // ── Q2 / WU3 — promotion re-quote ──
     // The `details` payload `{ recomputedTotalCents, expectedTotalCents,
     // discountCents }` is spread into the response body by the

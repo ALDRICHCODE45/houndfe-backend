@@ -43,4 +43,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   // Tenant-scoped via CLS so cross-tenant reads auto-fail (404 surface) and
   // cross-tenant writes auto-insert the caller's tenantId.
   'PaymentDetail',
+  // PaymentMethod (custom-payment-methods / WU1) — tenant-scoped tender-
+  // method catalog. Silent allowlist — omitting this entry re-enables
+  // cross-tenant reads via the TenantPrismaService WHERE-injection
+  // extension. The defense-in-depth `where: { id, tenantId }` in the
+  // Prisma adapter is the second layer; this allowlist is the first.
+  'PaymentMethod',
 ]);

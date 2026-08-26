@@ -48,6 +48,7 @@ export type AppSubjects =
   | 'NotificationConfig'
   | 'Quotation'
   | 'PaymentDetail'
+  | 'PaymentMethod'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -499,5 +500,27 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'PaymentDetail',
     action: 'delete',
     description: 'Delete (logical) payment details',
+  },
+
+  // PaymentMethod permissions (custom-payment-methods / WU1).
+  {
+    subject: 'PaymentMethod',
+    action: 'read',
+    description: 'View payment methods',
+  },
+  {
+    subject: 'PaymentMethod',
+    action: 'create',
+    description: 'Create payment methods',
+  },
+  {
+    subject: 'PaymentMethod',
+    action: 'update',
+    description: 'Update payment methods',
+  },
+  {
+    subject: 'PaymentMethod',
+    action: 'delete',
+    description: 'Delete (logical) payment methods',
   },
 ];

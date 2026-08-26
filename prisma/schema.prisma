@@ -203,6 +203,21 @@ enum SaleItemRewardKind {
 }
 
 // ============================================================================
+// CUSTOM PAYMENT METHODS (custom-payment-methods / WU1) — D6
+// ============================================================================
+// Tenant-scoped, admin-configurable tender-method catalog. The enum is a
+// STRICT 4-value subset of SalePaymentMethod (no CREDIT — design.md D6).
+// `SalePaymentMethod` itself is UNTOUCHED. The persisted SalePayment.method
+// continues to hold the base category (CASH / CARD_CREDIT / CARD_DEBIT /
+// TRANSFER); the branded identity rides on metadataJson.catalog (see D5).
+enum PaymentMethodCategory {
+  CASH
+  CARD_CREDIT
+  CARD_DEBIT
+  TRANSFER
+}
+
+// ============================================================================
 // QUOTATIONS ENUMS
 // ============================================================================
 // Quotation lifecycle states. Distinct from Sale (which uses
@@ -344,6 +359,7 @@ model Tenant {
   notificationActions       NotificationAction[]
   stockAlertStates          StockAlertState[]
   paymentDetails            PaymentDetail[]
+  paymentMethods            PaymentMethod[]
 
   @@map("tenants")
 }
@@ -1018,6 +1034,47 @@ model PaymentDetail {
   @@unique([tenantId, clabe])
   @@index([tenantId])
   @@map("payment_detail")
+}
+
+// ============================================================================
+// PAYMENT METHOD — tenant-scoped tender-method catalog (custom-payment-methods / WU1)
+// ============================================================================
+// Admin-configurable branded payment methods (e.g. "Mercado Pago", "OXXO Pay").
+// Each row maps to exactly ONE base SalePaymentMethod category via the
+// `PaymentMethodCategory` enum (4 values, NO CREDIT — D6). The persisted
+// `SalePayment.method` stays a base category (no CUSTOM enum anywhere — D11),
+// the branded identity rides on `metadataJson.catalog.paymentMethodId` /
+// `name` / `subtitle` (D5). This row is NEVER a live FK from `sale_payments` —
+// the snapshot is the only reference, so renaming / deactivating a catalog
+// row does NOT rewrite historical `SalePayment` rows.
+//
+// Business rules:
+//   - `name` is REQUIRED, trimmed, unique per tenant (enforced via @@unique
+//     composite). Cross-tenant name collision is permitted (matches the
+//     `SalePaymentMethod` enum precedent).
+//   - `subtitle` MAY be null (displayed only when set — D10 read path falls
+//     back to the base-category label when null).
+//   - `isActive @default(true)` distinguishes the live POS selectors from
+//     history; DELETE is logical (isActive=false), re-activation is via PATCH.
+//   - `metadataJson Json?` is reserved for future extensibility (catalog
+//     schema versioning, merchant-side config, etc.) — never read by the
+//     current scope; not returned on the POS projection (D4).
+model PaymentMethod {
+  id           String              @id @default(uuid())
+  tenantId     String
+  name         String
+  category     PaymentMethodCategory
+  subtitle     String?
+  isActive     Boolean             @default(true)
+  metadataJson Json?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("payment_methods")
 }
 
 // ============================================================================

@@ -13,11 +13,13 @@ import { AdminUserService } from './admin-user.service';
 import { AdminRoleService } from './admin-role.service';
 import { AdminPermissionService } from './admin-permission.service';
 import { AdminPaymentDetailModule } from './payment-details/admin-payment-detail.module';
+import { AdminPaymentMethodModule } from './payment-methods/admin-payment-method.module';
 
 @Module({
   imports: [
     AuthModule, // Provides repository tokens, guards, ability factory
     AdminPaymentDetailModule, // Q1 / WU1 — nested PaymentDetail CRUD
+    AdminPaymentMethodModule, // custom-payment-methods / WU1 — tender-method catalog CRUD; exports PAYMENT_METHOD_RESOLVER
   ],
   controllers: [
     AdminUserController,
