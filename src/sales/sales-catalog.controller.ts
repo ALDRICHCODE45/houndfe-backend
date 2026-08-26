@@ -2,7 +2,8 @@
  * SalesCatalogController - HTTP Adapter for POS Catalog Search.
  *
  * Translates HTTP requests to service calls for POS catalog endpoint.
- * Handles: GET /sales/pos-catalog, GET /sales/pos-catalog/:productId
+ * Handles: GET /sales/pos-catalog, GET /sales/pos-catalog/:productId,
+ * and GET /sales/payment-methods (custom-payment-methods / WU2 / D4).
  */
 import {
   Controller,
@@ -40,5 +41,18 @@ export class SalesCatalogController {
   @RequirePermissions(['read', 'Sale'])
   getProductDetail(@Param('productId', ParseUUIDPipe) productId: string) {
     return this.salesService.getProductDetail(productId);
+  }
+
+  /**
+   * GET /sales/payment-methods — Custom Payment Methods (WU2 / D4).
+   * POS selector projection: returns active, tenant-scoped catalog rows
+   * as `{ id, name, category, subtitle }`. Same `read:Sale` scope as
+   * `pos-catalog` (NOT `read:PaymentMethod`) so the POS auth token can
+   * use the endpoint without an extra role grant.
+   */
+  @Get('payment-methods')
+  @RequirePermissions(['read', 'Sale'])
+  listActivePaymentMethods() {
+    return this.salesService.listActivePaymentMethods();
   }
 }

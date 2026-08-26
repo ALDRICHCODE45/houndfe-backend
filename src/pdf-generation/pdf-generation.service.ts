@@ -275,11 +275,18 @@ export class PdfGenerationService implements OnModuleInit {
       subtotalCents: item.subtotalCents,
     }));
 
+    // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+    // pass through `paymentMethodName` / `paymentMethodSubtitle` from
+    // the persisted snapshot so the receipt template can prefer the
+    // branded label over the base-category fallback. Legacy rows
+    // carry `null` here and the template falls back to `formatMethod`.
     const payments: Payment[] = sale.payments.map((payment) => ({
       method: payment.method,
       amountCents: payment.amountCents,
       reference: payment.reference,
       paidAt: payment.paidAt,
+      paymentMethodName: payment.paymentMethodName ?? null,
+      paymentMethodSubtitle: payment.paymentMethodSubtitle ?? null,
     }));
 
     return {

@@ -51,6 +51,14 @@ export interface Payment {
   reference?: string | null;
   /** Optional ISO timestamp of when this payment was captured. */
   paidAt?: string | null;
+  // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+  // optional branded identity from the persisted
+  // `SalePayment.metadataJson.catalog` snapshot. When present, the
+  // template prefers this over the base-category label map
+  // (`formatMethod`). Legacy rows carry null and the fallback label
+  // renders.
+  paymentMethodName?: string | null;
+  paymentMethodSubtitle?: string | null;
 }
 
 export interface PaymentsListProps {
@@ -89,8 +97,16 @@ export function PaymentsList({ payments, variant = 'a4' }: PaymentsListProps) {
           style={tokens.row}
         >
           <View style={paymentRowStyles.leftColumn}>
-            <Text style={tokens.method}>{formatMethod(payment.method)}</Text>
-            {payment.reference ? (
+            <Text style={tokens.method}>
+              {payment.paymentMethodName
+                ? payment.paymentMethodName
+                : formatMethod(payment.method)}
+            </Text>
+            {payment.paymentMethodSubtitle ? (
+              <Text style={tokens.reference}>
+                {payment.paymentMethodSubtitle}
+              </Text>
+            ) : payment.reference ? (
               <Text style={tokens.reference}>Ref: {payment.reference}</Text>
             ) : null}
             {payment.paidAt ? (

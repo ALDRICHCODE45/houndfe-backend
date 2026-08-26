@@ -10,6 +10,13 @@ export type PersistedChargePayment = {
   method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
   amountCents: number;
   reference?: string;
+  // Custom Payment Methods (custom-payment-methods / WU2 — D7): the
+  // sales service attaches a `metadataJson` snapshot under the
+  // dedicated `catalog` key when an entry carried a `paymentMethodId`.
+  // The adapter writes `undefined → Prisma.JsonNull` exactly like
+  // `persistCollectedPayments` so legacy charge rows stay absent on
+  // the wire.
+  metadataJson?: unknown;
 };
 
 export type PersistedSalePaymentRecord = {
@@ -359,6 +366,15 @@ export interface ISaleRepository {
       createdAt: Date;
       userId: string | null;
       user: { id: string; name: string } | null;
+      // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+      // optional branded identity surfaced from `metadataJson.catalog`.
+      // Null on legacy rows (no `catalog` key); the mapper MUST default
+      // to null when the snapshot is absent so `getSaleDetail` can omit
+      // the wire fields on legacy rows. Payment method id is opaque
+      // (no live FK).
+      paymentMethodId: string | null;
+      paymentMethodName: string | null;
+      paymentMethodSubtitle: string | null;
     }>;
   } | null>;
 }

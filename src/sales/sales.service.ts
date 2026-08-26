@@ -77,6 +77,10 @@ import {
   ISaleCommentRepository,
   SALE_COMMENT_REPOSITORY,
 } from './comments/domain/sale-comment.repository';
+import {
+  IPaymentMethodResolver,
+  PAYMENT_METHOD_RESOLVER,
+} from '../admin/payment-methods/domain/payment-method.resolver';
 
 type SupportedChargeMethod =
   | 'cash'
@@ -96,6 +100,8 @@ type CollectionPaymentEntry = {
   amountCents: number;
   reference?: string;
   metadataJson?: unknown;
+  // Custom Payment Methods (custom-payment-methods / WU2 — D5)
+  paymentMethodId?: string;
 };
 
 type AddPaymentAuthMode = 'owner' | 'reviewer';
@@ -104,6 +110,8 @@ type ChargePaymentEntry = {
   method: SupportedChargeMethod;
   amountCents: number;
   reference?: string;
+  // Custom Payment Methods (custom-payment-methods / WU2 — D5)
+  paymentMethodId?: string;
 };
 
 type CanonicalChargePayment = PersistedChargePayment;
@@ -275,10 +283,15 @@ function normalizeChargeRequestPayments(
         chargeValidationError('CREDIT_METHOD_NOT_VALID_IN_MULTI');
       }
 
+      // Custom Payment Methods (custom-payment-methods / WU2 — D5):
+      // copy `paymentMethodId` so the downstream hash + canonicalization
+      // see it. Legacy entries (no `paymentMethodId`) stay byte-identical
+      // to today — JSON.stringify drops undefined keys.
       return {
         method: entry.method,
         amountCents: entry.amountCents,
         reference: entry.reference,
+        paymentMethodId: entry.paymentMethodId,
       };
     });
   }
@@ -297,36 +310,87 @@ function normalizeChargeRequestPayments(
     );
   }
 
+  // Custom Payment Methods (custom-payment-methods / WU2): also copy
+  // the top-level `paymentMethodId` for the legacy single-payment shape.
   return [
     {
       method: dto.method,
       amountCents: dto.amountCents,
+      paymentMethodId: dto.paymentMethodId,
     },
   ];
 }
 
-function toCanonicalChargePayments(
+/**
+ * Custom Payment Methods (custom-payment-methods / WU2 — D5/D8): for
+ * every non-credit entry that carries a `paymentMethodId`, resolve
+ * the catalog row via the resolver and attach a snapshot under
+ * `metadataJson.catalog = { paymentMethodId, name, subtitle? }`.
+ * `subtitle` is omitted when null. Entries without `paymentMethodId`
+ * (legacy path) skip the resolver call entirely and get
+ * `metadataJson: undefined`, which `persistChargeConfirmation` writes
+ * as `Prisma.JsonNull` (D7) — byte-identical to pre-change behavior.
+ */
+async function toCanonicalChargePayments(
   payments: ChargePaymentEntry[],
-): CanonicalChargePayment[] {
-  return payments
-    .filter(
-      (payment): payment is CanonicalChargePayment =>
-        payment.method !== 'credit',
-    )
-    .map((payment) => ({
+  resolver: IPaymentMethodResolver,
+  tenantId: string,
+): Promise<CanonicalChargePayment[]> {
+  const result: CanonicalChargePayment[] = [];
+  for (const payment of payments) {
+    if (payment.method === 'credit') {
+      continue;
+    }
+    if (!payment.paymentMethodId) {
+      result.push({
+        method: payment.method,
+        amountCents: payment.amountCents,
+        reference: payment.reference,
+      });
+      continue;
+    }
+    const resolved = await resolver.resolveActive({
+      paymentMethodId: payment.paymentMethodId,
+      tenantId,
+      expectedCategory: payment.method,
+    });
+    const catalogSnapshot: {
+      paymentMethodId: string;
+      name: string;
+      subtitle?: string;
+    } = {
+      paymentMethodId: payment.paymentMethodId,
+      name: resolved.name,
+    };
+    if (resolved.subtitle !== null) {
+      catalogSnapshot.subtitle = resolved.subtitle;
+    }
+    result.push({
       method: payment.method,
       amountCents: payment.amountCents,
       reference: payment.reference,
-    }));
+      metadataJson: { catalog: catalogSnapshot },
+    });
+  }
+  return result;
 }
 
+/**
+ * Custom Payment Methods (custom-payment-methods / WU2 — D8): include
+ * `paymentMethodId` in the sort key ONLY when present. Two custom
+ * methods sharing a base category hash differently; legacy entries
+ * (no `paymentMethodId`) hash byte-identically to the pre-change
+ * implementation (key suffix empty; JSON.stringify drops undefined).
+ */
 function sortPaymentsForHash(
   payments: ChargePaymentEntry[],
 ): ChargePaymentEntry[] {
+  const key = (p: ChargePaymentEntry) =>
+    `${p.method}|${p.amountCents}|${p.reference ?? ''}${
+      p.paymentMethodId ? `|${p.paymentMethodId}` : ''
+    }`;
   return [...payments].sort((left, right) =>
-    `${left.method}|${left.amountCents}|${left.reference ?? ''}`.localeCompare(
-      `${right.method}|${right.amountCents}|${right.reference ?? ''}`,
-    ),
+    key(left).localeCompare(key(right)),
   );
 }
 
@@ -358,7 +422,14 @@ function normalizeCollectionRequestPayments(dto: {
   method?: string;
   amountCents?: number;
   reference?: string;
-  payments?: Array<{ method: string; amountCents: number; reference?: string }>;
+  // Custom Payment Methods (custom-payment-methods / WU2 — D5)
+  paymentMethodId?: string;
+  payments?: Array<{
+    method: string;
+    amountCents: number;
+    reference?: string;
+    paymentMethodId?: string;
+  }>;
 }): CollectionPaymentEntry[] {
   const hasLegacy = dto.method !== undefined || dto.amountCents !== undefined;
   const hasArray = dto.payments !== undefined;
@@ -384,10 +455,13 @@ function normalizeCollectionRequestPayments(dto: {
         );
       }
 
+      // Custom Payment Methods (custom-payment-methods / WU2 — D5):
+      // copy `paymentMethodId` so the owner-mode resolver + hash see it.
       return {
         method: entry.method,
         amountCents: entry.amountCents,
         reference: entry.reference,
+        paymentMethodId: entry.paymentMethodId,
       };
     });
   }
@@ -411,6 +485,7 @@ function normalizeCollectionRequestPayments(dto: {
       method: dto.method,
       amountCents: dto.amountCents,
       reference: dto.reference,
+      paymentMethodId: dto.paymentMethodId,
     },
   ];
 }
@@ -439,6 +514,13 @@ export class SalesService {
      */
     @Inject(POS_EVALUATE_PROMOTIONS_USE_CASE)
     private readonly posEvaluatePromotions: IPosEvaluatePromotionsUseCase,
+    // Custom Payment Methods (custom-payment-methods / WU2 — D3): narrow
+    // read port exported by `AdminPaymentMethodModule`
+    // (`PAYMENT_METHOD_RESOLVER`). Concrete implementation owns tenant
+    // scoping via `IPaymentMethodRepository.findById(id, tenantId)`;
+    // sales depends only on the I/O contract.
+    @Inject(PAYMENT_METHOD_RESOLVER)
+    private readonly paymentMethodResolver: IPaymentMethodResolver,
   ) {}
 
   /**
@@ -1268,6 +1350,25 @@ export class SalesService {
     return this.productsService.searchForPOS(dto);
   }
 
+  /**
+   * Custom Payment Methods (custom-payment-methods / WU2 — D4):
+   * POS read projection of active catalog rows. Reads the tenant id
+   * from `TenantPrismaService` (the controller already enforces tenant
+   * scoping via `TenantContextGuard`) and delegates to the resolver's `listActive(tenantId)`. Returns the narrow
+   * `{ id, name, category, subtitle }` shape the POS selector needs
+   * (no `metadataJson`, no `tenantId`, no timestamps).
+   */
+  async listActivePaymentMethods() {
+    const tenantId = this.tenantPrisma.getTenantId();
+    if (!tenantId) {
+      throw new BusinessRuleViolationError(
+        'TENANT_CONTEXT_REQUIRED',
+        'TENANT_CONTEXT_REQUIRED',
+      );
+    }
+    return this.paymentMethodResolver.listActive(tenantId);
+  }
+
   async listSales(query: ListSalesQueryDto): Promise<SaleListResponseDto> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
@@ -1376,6 +1477,11 @@ export class SalesService {
       cashier: sale.cashier,
       seller: sale.seller,
       items: sale.items,
+      // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+      // spread the three catalog fields only when non-null so legacy rows
+      // (no `catalog` key in metadataJson) stay absent on the wire.
+      // Matches the spec scenario "Legacy rows fall back to base-category
+      // label".
       payments: sale.payments.map((payment) => ({
         paymentId: payment.paymentId,
         method: payment.method,
@@ -1384,6 +1490,9 @@ export class SalesService {
         changeCents: payment.changeCents,
         reference: payment.reference,
         paidAt: payment.paidAt.toISOString(),
+        paymentMethodId: payment.paymentMethodId ?? undefined,
+        paymentMethodName: payment.paymentMethodName ?? undefined,
+        paymentMethodSubtitle: payment.paymentMethodSubtitle ?? undefined,
       })),
       timeline: buildSaleTimeline({
         createdAt: sale.createdAt,
@@ -1391,6 +1500,10 @@ export class SalesService {
         deliveryStatus: sale.deliveryStatus,
         register: sale.register,
         cashier: sale.cashier,
+        // Pass-through for the timeline `PAYMENT_RECEIVED` event;
+        // `build-sale-timeline.ts` propagates them onto the wire shape.
+        // Legacy rows pass `undefined` and the event keeps the
+        // base-category fallback label.
         payments: sale.payments.map((payment) => ({
           method: payment.method,
           amountCents: payment.amountCents,
@@ -1398,6 +1511,8 @@ export class SalesService {
           createdAt: payment.createdAt,
           userId: payment.userId,
           user: payment.user,
+          paymentMethodName: payment.paymentMethodName ?? undefined,
+          paymentMethodSubtitle: payment.paymentMethodSubtitle ?? undefined,
         })),
         comments: comments.map((comment) => ({
           id: comment.id,
@@ -2296,7 +2411,7 @@ export class SalesService {
     idempotencyKey: string,
   ) {
     const normalizedPayments = normalizeChargeRequestPayments(dto);
-    const hashPayments = sortPaymentsForHash(normalizedPayments);
+        const hashPayments = sortPaymentsForHash(normalizedPayments);
 
     const requestHash = createHash('sha256')
       .update(
@@ -2455,7 +2570,16 @@ export class SalesService {
       const changeDueCents =
         hasCash && paymentStatus === 'PAID' ? tenderedCents - totalCents : 0;
 
-      const canonicalPayments = toCanonicalChargePayments(normalizedPayments);
+      // Custom Payment Methods (custom-payment-methods / WU2 — D5/D8):
+      // resolve each non-credit entry via `IPaymentMethodResolver` and
+      // attach `metadataJson.catalog` to the canonical row. Reviewer mode
+      // is unreachable here (this is `chargeDraft`, not `addPayment`) so
+      // only the owner path runs. Reviewer / bot path is untouched.
+      const canonicalPayments = await toCanonicalChargePayments(
+        normalizedPayments,
+        this.paymentMethodResolver,
+        tenantId,
+      );
 
       const stockAdjustments = sale.items.map((item) => ({
         productId: item.productId,
@@ -2999,23 +3123,20 @@ export class SalesService {
       method?: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
       amountCents?: number;
       reference?: string;
+      // Custom Payment Methods (custom-payment-methods / WU2 — D5)
+      paymentMethodId?: string;
       payments?: Array<{
         method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
         amountCents: number;
         reference?: string;
+        paymentMethodId?: string;
       }>;
     },
     idempotencyKey: string,
     authMode: AddPaymentAuthMode = 'owner',
   ) {
     const normalizedPayments = normalizeCollectionRequestPayments(dto);
-    const hashPayments = sortPaymentsForHash(
-      normalizedPayments.map((payment) => ({
-        method: payment.method,
-        amountCents: payment.amountCents,
-        reference: payment.reference,
-      })),
-    );
+        const hashPayments = sortPaymentsForHash(normalizedPayments);
 
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
@@ -3057,16 +3178,51 @@ export class SalesService {
           'SALE_NOT_CONFIRMABLE_FOR_PAYMENT',
         );
       }
-      const paymentsToPersist =
-        authMode === 'reviewer'
-          ? normalizedPayments.map((payment) => ({
-              ...payment,
-              method: 'transfer' as const,
-              metadataJson: {
-                origin: { kind: 'bot', channel: sale.channel },
-              },
-            }))
-          : normalizedPayments;
+      // Custom Payment Methods (custom-payment-methods / WU2 — D5):
+      // owner mode resolves each non-credit entry with `paymentMethodId`
+      // via the resolver and snapshots it under `metadataJson.catalog`.
+      // Reviewer mode stays unchanged (origin key only).
+      let paymentsToPersist: Array<{
+        method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
+        amountCents: number;
+        reference?: string;
+        metadataJson?: unknown;
+        paymentMethodId?: string;
+      }>;
+      if (authMode === 'reviewer') {
+        paymentsToPersist = normalizedPayments.map((payment) => ({
+          ...payment,
+          method: 'transfer' as const,
+          metadataJson: {
+            origin: { kind: 'bot', channel: sale.channel },
+          },
+        }));
+      } else {
+        const ownerPayments: typeof normalizedPayments = [];
+        for (const payment of normalizedPayments) {
+          if (!payment.paymentMethodId) {
+            ownerPayments.push(payment);
+            continue;
+          }
+          const resolved = await this.paymentMethodResolver.resolveActive({
+            paymentMethodId: payment.paymentMethodId,
+            tenantId,
+            expectedCategory: payment.method,
+          });
+          const snapshot: { paymentMethodId: string; name: string; subtitle?: string } = {
+            paymentMethodId: payment.paymentMethodId,
+            name: resolved.name,
+          };
+          if (resolved.subtitle !== null) {
+            snapshot.subtitle = resolved.subtitle;
+          }
+          ownerPayments.push({
+            ...payment,
+            metadataJson: { catalog: snapshot },
+          });
+        }
+        paymentsToPersist = ownerPayments;
+      }
 
       const updated = await this.saleRepo.persistCollectedPayments({
         saleId,

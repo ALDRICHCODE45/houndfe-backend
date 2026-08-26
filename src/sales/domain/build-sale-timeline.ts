@@ -13,6 +13,11 @@ export function buildSaleTimeline(input: {
     createdAt: Date;
     userId: string | null;
     user: { id: string; name: string } | null;
+    // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+    // optional branded identity surfaced from `metadataJson.catalog`.
+    // Falls back to the base-category label when absent (legacy rows).
+    paymentMethodName?: string;
+    paymentMethodSubtitle?: string;
   }>;
   comments?: Array<{
     id: string;
@@ -32,6 +37,12 @@ export function buildSaleTimeline(input: {
       reference: payment.reference,
       actor: payment.user ?? input.cashier,
       register: input.register,
+      // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+      // only include the branded fields when present so legacy rows
+      // stay absent on the wire (the base-category label remains the
+      // fallback via the DTO mapper).
+      paymentMethodName: payment.paymentMethodName,
+      paymentMethodSubtitle: payment.paymentMethodSubtitle,
     }));
   const timeline: SaleDetailTimelineEventDto[] = [
     {

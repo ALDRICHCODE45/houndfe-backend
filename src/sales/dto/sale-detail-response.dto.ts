@@ -21,6 +21,11 @@ export type SaleDetailTimelineEventDto =
       reference: string | null;
       actor: TimelineActor;
       register: string;
+      // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+      // optional branded name/subtitle from `metadataJson.catalog`.
+      // Falls back to the base-category label when absent.
+      paymentMethodName?: string;
+      paymentMethodSubtitle?: string;
     }
   | {
       type: 'PRODUCTS_DELIVERED';
@@ -91,6 +96,15 @@ export interface SaleDetailPaymentDto {
   changeCents: number;
   reference: string | null;
   paidAt: string;
+  // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+  // optional branded identity from `metadataJson.catalog`. Absent on
+  // legacy rows (no `catalog` key) — the base `method` field remains the
+  // fallback. Surface only when non-null so legacy rows stay absent on
+  // the wire (matches the spec scenario "Legacy rows fall back to
+  // base-category label").
+  paymentMethodId?: string;
+  paymentMethodName?: string;
+  paymentMethodSubtitle?: string;
 }
 
 export interface SaleDetailResponseDto {

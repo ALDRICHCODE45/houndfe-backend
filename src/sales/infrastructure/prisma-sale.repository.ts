@@ -37,6 +37,41 @@ function extractLegacyReference(metadataJson: unknown): string | null {
     : null;
 }
 
+/**
+ * Custom Payment Methods (custom-payment-methods / WU2 — D5/D10):
+ * sibling to `extractLegacyReference` that reads the dedicated
+ * `metadataJson.catalog` snapshot. Returns `null` for legacy rows that
+ * lack the `catalog` key (the persistence layer writes the snapshot
+ * under a dedicated top-level key precisely so it cannot collide with
+ * `.reference` (legacy) or `.origin` (bot reviewer path)). The
+ * `subtitle` field is OPTIONAL — omitted when null on the write side
+ * (D5) and tolerant of undefined / null on the read side. The
+ * `paymentMethodId` is an opaque reference (no live FK, no backfill).
+ */
+function extractCatalogSnapshot(
+  metadataJson: unknown,
+): { paymentMethodId: string; name: string; subtitle: string | null } | null {
+  if (!metadataJson || typeof metadataJson !== 'object') {
+    return null;
+  }
+  const catalog = (metadataJson as { catalog?: unknown }).catalog;
+  if (!catalog || typeof catalog !== 'object') {
+    return null;
+  }
+  const paymentMethodId = (catalog as { paymentMethodId?: unknown })
+    .paymentMethodId;
+  const name = (catalog as { name?: unknown }).name;
+  if (typeof paymentMethodId !== 'string' || typeof name !== 'string') {
+    return null;
+  }
+  const rawSubtitle = (catalog as { subtitle?: unknown }).subtitle;
+  const subtitle =
+    typeof rawSubtitle === 'string' && rawSubtitle.length > 0
+      ? rawSubtitle
+      : null;
+  return { paymentMethodId, name, subtitle };
+}
+
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
@@ -995,6 +1030,15 @@ export class PrismaSaleRepository implements ISaleRepository {
               | 'TRANSFER',
             amountCents: payment.amountCents,
             reference: payment.reference ?? null,
+            // Custom Payment Methods (custom-payment-methods / WU2 — D7):
+            // mirror `persistCollectedPayments` serialization:
+            // `undefined → Prisma.JsonNull`. The sales service attaches
+            // the catalog snapshot ONLY for entries with `paymentMethodId`,
+            // so legacy charge rows continue to store `null`.
+            metadataJson:
+              payment.metadataJson === undefined
+                ? Prisma.JsonNull
+                : (payment.metadataJson as Prisma.InputJsonValue),
             userId: input.userId,
             tenantId,
           },
@@ -1628,19 +1672,36 @@ export class PrismaSaleRepository implements ISaleRepository {
           promotionId: item.promotionId ?? null,
         };
       }),
-      payments: sale.payments.map((payment) => ({
-        paymentId: payment.id,
-        method: payment.method,
-        amountCents: payment.amountCents,
-        tenderedCents: payment.amountCents,
-        changeCents: 0,
-        reference:
-          payment.reference ?? extractLegacyReference(payment.metadataJson),
-        paidAt: payment.createdAt,
-        createdAt: payment.createdAt,
-        userId: payment.userId,
-        user: payment.user,
-      })),
+      payments: sale.payments.map((payment) => {
+        // Custom Payment Methods (custom-payment-methods / WU2 — D10):
+        // surface the catalog snapshot under the dedicated
+        // `metadataJson.catalog` key. Legacy rows have NO `catalog`
+        // key — `extractCatalogSnapshot` returns null and all three
+        // wire fields stay null so `getSaleDetail` can omit them on
+        // the wire (matches the spec scenario "Legacy rows fall back
+        // to base-category label"). The bot reviewer path's `origin`
+        // key is untouched.
+        const catalogSnapshot = extractCatalogSnapshot(
+          payment.metadataJson,
+        );
+        return {
+          paymentId: payment.id,
+          method: payment.method,
+          amountCents: payment.amountCents,
+          tenderedCents: payment.amountCents,
+          changeCents: 0,
+          reference:
+            payment.reference ??
+            extractLegacyReference(payment.metadataJson),
+          paidAt: payment.createdAt,
+          createdAt: payment.createdAt,
+          userId: payment.userId,
+          user: payment.user,
+          paymentMethodId: catalogSnapshot?.paymentMethodId ?? null,
+          paymentMethodName: catalogSnapshot?.name ?? null,
+          paymentMethodSubtitle: catalogSnapshot?.subtitle ?? null,
+        };
+      }),
     };
   }
 

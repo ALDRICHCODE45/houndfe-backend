@@ -30,6 +30,12 @@ import { PrismaReceiptReviewRepository } from './review/infrastructure/prisma-re
 // draft mutation. Hexagonal: we import the module to resolve the symbol,
 // but we depend on the I/O contract, not on the engine internals.
 import { PromotionsModule } from '../promotions/promotions.module';
+// Custom Payment Methods (custom-payment-methods / WU2 / D3) —
+// SalesModule imports the catalog module to resolve the
+// `PAYMENT_METHOD_RESOLVER` symbol. Mirrors the PromotionsModule
+// Symbol-port seam; sales never depends on the catalog repository
+// port directly.
+import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment-method.module';
 
 @Module({
   imports: [
@@ -38,6 +44,7 @@ import { PromotionsModule } from '../promotions/promotions.module';
     OutboxModule,
     SaleCommentsModule,
     PromotionsModule,
+    AdminPaymentMethodModule,
   ],
   controllers: [
     SalesController,

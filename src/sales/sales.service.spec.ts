@@ -100,6 +100,19 @@ function makeMockProductsService() {
  * signal: opted-in MANUAL promos whose target is gone. Default is
  * empty (no opt-ins at all = nothing to prune).
  */
+function makeMockPaymentMethodResolver() {
+  return {
+    // Custom Payment Methods (custom-payment-methods / WU2 — D3):
+    // narrow resolver port; tests override per-case.
+    resolveActive: jest.fn().mockResolvedValue({
+      category: 'cash',
+      name: 'Test Method',
+      subtitle: null,
+    }),
+    listActive: jest.fn().mockResolvedValue([]),
+  } as any;
+}
+
 function makeMockPosEvaluateUseCase() {
   return {
     evaluate: jest.fn().mockResolvedValue({
@@ -137,6 +150,10 @@ function createService(
   tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>,
   saleCommentRepo: Pick<ISaleCommentRepository, 'findActiveBySale'>,
   posEvaluateUseCase: { evaluate: jest.Mock } = makeMockPosEvaluateUseCase(),
+  // Custom Payment Methods (custom-payment-methods / WU2): the
+  // resolver is a Symbol-injected port; tests pass a mock by default.
+  // Tests that exercise charge/collection threading override this.
+  paymentMethodResolver: { resolveActive: jest.Mock; listActive: jest.Mock } = makeMockPaymentMethodResolver(),
 ) {
   return new SalesService(
     saleRepo,
@@ -146,6 +163,7 @@ function createService(
     tenantPrisma as TenantPrismaService,
     saleCommentRepo,
     posEvaluateUseCase as any,
+    paymentMethodResolver as any,
   );
 }
 
@@ -159,6 +177,11 @@ describe('SalesService', () => {
   let saleCommentRepo: ReturnType<typeof makeMockSaleCommentRepo>;
   let posEvaluateUseCase: ReturnType<typeof makeMockPosEvaluateUseCase>;
   let tenantPrisma: Pick<TenantPrismaService, 'getTenantId' | 'getClient'>;
+  // Custom Payment Methods (custom-payment-methods / WU2 — D3): the
+  // Symbol-injected `IPaymentMethodResolver` mock. Stored at the
+  // top level so new WU2 tests can assert calls / override behavior
+  // without rebuilding the service.
+  let paymentMethodResolver: ReturnType<typeof makeMockPaymentMethodResolver>;
   let service: SalesService;
 
   beforeEach(() => {
@@ -168,6 +191,7 @@ describe('SalesService', () => {
     outboxWriter = makeMockOutboxWriter();
     saleCommentRepo = makeMockSaleCommentRepo();
     posEvaluateUseCase = makeMockPosEvaluateUseCase();
+    paymentMethodResolver = makeMockPaymentMethodResolver();
     tenantPrisma = {
       getTenantId: jest.fn(() => 'tenant-1'),
       getClient: jest.fn(
@@ -187,6 +211,7 @@ describe('SalesService', () => {
       tenantPrisma,
       saleCommentRepo,
       posEvaluateUseCase,
+      paymentMethodResolver,
     );
     saleRepo.acquireChargeIdempotency.mockResolvedValue({
       kind: 'acquired',
@@ -692,6 +717,426 @@ describe('SalesService', () => {
 
       expect(paymentEvents).toHaveLength(2);
       expect(fullyPaidEvents).toHaveLength(1);
+    });
+  });
+
+  // ── WU2 — Custom Payment Methods (D5): addPayment owner-mode
+  //    resolves `paymentMethodId` through the resolver and snapshots
+  //    the row under `metadataJson.catalog`. Reviewer mode keeps the
+  //    bot `origin` key unchanged. The collection idempotency hash
+  //    also includes `paymentMethodId` (see the WU2 idempotency
+  //    describe block further down for the byte-equality tests).
+  describe('WU2 — addPayment custom payment method collection threading', () => {
+    const buildConfirmedSaleForWU2 = (
+      id: string,
+      userId = 'user-1',
+      totalCents = 5000,
+    ) =>
+      Sale.fromPersistence({
+        id,
+        userId,
+        status: 'CONFIRMED',
+        customerId: 'customer-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: totalCents,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+    it('owner mode resolves paymentMethodId and snapshots catalog under metadataJson.catalog', async () => {
+      const sale = buildConfirmedSaleForWU2(
+        'sale-pay-owner-custom',
+        'cashier-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      paymentMethodResolver.resolveActive.mockResolvedValueOnce({
+        category: 'transfer',
+        name: 'Mercado Pago',
+        subtitle: 'Link',
+      });
+
+      await service.addPayment(
+        sale.id,
+        'cashier-1',
+        {
+          method: 'transfer',
+          amountCents: 1000,
+          paymentMethodId: 'pm-custom-1',
+        },
+        'idem-pay-owner-custom',
+      );
+
+      // Resolver hit with the expected payload (D3 + D5).
+      expect(paymentMethodResolver.resolveActive).toHaveBeenCalledWith({
+        paymentMethodId: 'pm-custom-1',
+        tenantId: 'tenant-1',
+        expectedCategory: 'transfer',
+      });
+
+      // Catalog snapshot is attached under the dedicated `catalog`
+      // key. The subtitle key is present because the resolver
+      // returned a non-null subtitle; `origin` is NOT written by
+      // the owner path.
+      expect(saleRepo.persistCollectedPayments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId: sale.id,
+          userId: 'cashier-1',
+          payments: [
+            expect.objectContaining({
+              method: 'transfer',
+              amountCents: 1000,
+              paymentMethodId: 'pm-custom-1',
+              metadataJson: {
+                catalog: {
+                  paymentMethodId: 'pm-custom-1',
+                  name: 'Mercado Pago',
+                  subtitle: 'Link',
+                },
+              },
+            }),
+          ],
+        }),
+      );
+    });
+
+    it('owner mode omits the subtitle key when the resolver returns null subtitle', async () => {
+      const sale = buildConfirmedSaleForWU2(
+        'sale-pay-owner-custom-no-subtitle',
+        'cashier-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      paymentMethodResolver.resolveActive.mockResolvedValueOnce({
+        category: 'cash',
+        name: 'Cash USD',
+        subtitle: null,
+      });
+
+      await service.addPayment(
+        sale.id,
+        'cashier-1',
+        {
+          method: 'cash',
+          amountCents: 500,
+          paymentMethodId: 'pm-custom-2',
+        },
+        'idem-pay-owner-no-subtitle',
+      );
+
+      expect(saleRepo.persistCollectedPayments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payments: [
+            expect.objectContaining({
+              method: 'cash',
+              paymentMethodId: 'pm-custom-2',
+              metadataJson: {
+                catalog: {
+                  paymentMethodId: 'pm-custom-2',
+                  name: 'Cash USD',
+                  // subtitle intentionally absent (null on the
+                  // row, omitted on the wire to keep the snapshot
+                  // minimal).
+                },
+              },
+            }),
+          ],
+        }),
+      );
+    });
+
+    it('owner mode passes through a legacy entry (no paymentMethodId) with no catalog key', async () => {
+      const sale = buildConfirmedSaleForWU2(
+        'sale-pay-owner-legacy-mixed',
+        'cashier-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      paymentMethodResolver.resolveActive.mockResolvedValueOnce({
+        category: 'transfer',
+        name: 'Mercado Pago',
+        subtitle: 'Link',
+      });
+
+      await service.addPayment(
+        sale.id,
+        'cashier-1',
+        {
+          payments: [
+            {
+              method: 'cash',
+              amountCents: 500,
+              // No paymentMethodId → legacy path; no resolver call,
+              // no catalog snapshot.
+            },
+            {
+              method: 'transfer',
+              amountCents: 1000,
+              paymentMethodId: 'pm-custom-1',
+            },
+          ],
+        } as never,
+        'idem-pay-owner-mixed',
+      );
+
+      // Resolver called exactly once — only for the entry with
+      // `paymentMethodId`.
+      expect(paymentMethodResolver.resolveActive).toHaveBeenCalledTimes(1);
+      expect(paymentMethodResolver.resolveActive).toHaveBeenCalledWith({
+        paymentMethodId: 'pm-custom-1',
+        tenantId: 'tenant-1',
+        expectedCategory: 'transfer',
+      });
+
+      const call = saleRepo.persistCollectedPayments.mock
+        .calls[0]?.[0] as {
+        payments: Array<{ metadataJson?: unknown }>;
+      };
+      // First entry: legacy path → metadataJson is undefined.
+      expect(call.payments[0].metadataJson).toBeUndefined();
+      // Second entry: catalog snapshot.
+      expect(call.payments[1].metadataJson).toEqual({
+        catalog: {
+          paymentMethodId: 'pm-custom-1',
+          name: 'Mercado Pago',
+          subtitle: 'Link',
+        },
+      });
+    });
+
+    it('reviewer mode is unaffected: stamps origin only, no catalog key, no resolver call', async () => {
+      const sale = buildConfirmedSaleForWU2(
+        'sale-pay-reviewer-unaffected',
+        'cashier-1',
+        5000,
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+      await service.addPayment(
+        sale.id,
+        'reviewer-1',
+        {
+          method: 'cash',
+          amountCents: 500,
+          reference: 'BANK-1',
+          // paymentMethodId supplied by the reviewer is ignored on
+          // the reviewer path — the bot `origin` key is the only
+          // metadataJson writer.
+          paymentMethodId: 'pm-custom-1',
+        } as never,
+        'idem-pay-reviewer-unaffected',
+        'reviewer',
+      );
+
+      // Resolver MUST NOT be called on the reviewer path.
+      expect(paymentMethodResolver.resolveActive).not.toHaveBeenCalled();
+
+      expect(saleRepo.persistCollectedPayments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saleId: sale.id,
+          userId: null,
+          payments: [
+            expect.objectContaining({
+              method: 'transfer', // reviewer path hard-codes TRANSFER
+              amountCents: 500,
+              reference: 'BANK-1',
+              // No `catalog` key — the reviewer path is byte-identical
+              // to the pre-WU2 implementation, including how it
+              // ignores a supplied `paymentMethodId`.
+              metadataJson: {
+                origin: { kind: 'bot', channel: 'POS' },
+              },
+            }),
+          ],
+        }),
+      );
+    });
+  });
+
+  // ── WU2 — REQUIRED idempotency spec (sale-payments/spec.md
+  //    Requirement: Idempotency Hashes Include paymentMethodId).
+  //    Asserts the byte-level contract on the collection path. The
+  //    equivalent charge-path tests live in the `chargeDraft`
+  //    describe block.
+  describe('WU2 — addPayment idempotency hashes include paymentMethodId (REQUIRED)', () => {
+    const buildConfirmedSaleForWU2 = (
+      id: string,
+      userId = 'user-1',
+      totalCents = 5000,
+    ) =>
+      Sale.fromPersistence({
+        id,
+        userId,
+        status: 'CONFIRMED',
+        customerId: 'customer-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: totalCents,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+    const captureHash = async (
+      dto: Parameters<typeof service.addPayment>[2],
+      idempotencyKey: string,
+      saleId: string,
+    ): Promise<string> => {
+      let capturedHash: string | undefined;
+      saleRepo.acquirePaymentIdempotency.mockImplementationOnce(
+        async (_s: string, _k: string, requestHash: string) => {
+          capturedHash = requestHash;
+          return { kind: 'acquired', token: 'tok' };
+        },
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(
+        buildConfirmedSaleForWU2(saleId, 'cashier-1', 5000),
+      );
+      await service.addPayment(saleId, 'cashier-1', dto, idempotencyKey);
+      if (capturedHash === undefined) {
+        throw new Error('hash was not captured');
+      }
+      return capturedHash;
+    };
+
+    it('identical {method, amountCents, paymentMethodId} payloads produce the same hash and replay', async () => {
+      const replayPayload = {
+        saleId: 'sale-pay-replay-custom',
+        paidCents: 1000,
+        debtCents: 4000,
+        paymentStatus: 'PARTIAL' as const,
+        paymentIds: ['payment-replay'],
+      };
+
+      const hashes = new Set<string>();
+      saleRepo.acquirePaymentIdempotency.mockImplementation(
+        async (_s: string, _k: string, requestHash: string) => {
+          if (hashes.has(requestHash)) {
+            return { kind: 'replay', payload: replayPayload };
+          }
+          hashes.add(requestHash);
+          return { kind: 'acquired', token: 'tok' };
+        },
+      );
+
+      saleRepo.findByIdForUpdate.mockResolvedValue(
+        buildConfirmedSaleForWU2('sale-pay-replay-custom', 'cashier-1', 5000),
+      );
+
+      const dto = {
+        method: 'transfer' as const,
+        amountCents: 1000,
+        paymentMethodId: 'pm-custom-1',
+      };
+
+      // First call → acquired.
+      await service.addPayment(
+        'sale-pay-replay-custom',
+        'cashier-1',
+        dto,
+        'idem-replay-custom',
+      );
+
+      // Second identical call → replay.
+      const replayResult = await service.addPayment(
+        'sale-pay-replay-custom',
+        'cashier-1',
+        dto,
+        'idem-replay-custom',
+      );
+
+      expect(replayResult).toEqual(replayPayload);
+      // Hash deduped to a single value.
+      expect(hashes.size).toBe(1);
+    });
+
+    it('same category + amount + DIFFERENT paymentMethodId produce DISTINCT hashes (collision regression)', async () => {
+      // PM-A and PM-B share the `transfer` category. The byte-level
+      // contract requires their hashes to diverge so the
+      // idempotency row cannot accidentally serve B's request from
+      // A's prior success.
+      const hashA = await captureHash(
+        {
+          method: 'transfer',
+          amountCents: 1000,
+          paymentMethodId: 'pm-A',
+        } as never,
+        'idem-distinct-A',
+        'sale-pay-distinct-A',
+      );
+
+      const hashB = await captureHash(
+        {
+          method: 'transfer',
+          amountCents: 1000,
+          paymentMethodId: 'pm-B',
+        } as never,
+        'idem-distinct-B',
+        'sale-pay-distinct-B',
+      );
+
+      expect(hashA).not.toEqual(hashB);
+    });
+
+    it('legacy payload (no paymentMethodId) hashes byte-identically to the pre-change implementation', async () => {
+      // Pre-change shape: key = `${method}|${amountCents}|${reference ?? ''}`
+      // (no `|${paymentMethodId}` suffix because the field is
+      // absent). JSON.stringify drops `undefined` keys, so the
+      // hashed object is byte-identical.
+      const hashLegacy = await captureHash(
+        {
+          method: 'cash',
+          amountCents: 1000,
+        } as never,
+        'idem-legacy-shape',
+        'sale-pay-legacy-shape',
+      );
+
+      // Compute the legacy hash independently so the assertion is
+      // not tautological.
+      const createHash = require('crypto').createHash as (
+        algorithm: string,
+      ) => {
+        update: (data: string) => {
+          digest: (encoding: string) => string;
+        };
+      };
+      const expectedHash = createHash('sha256')
+        .update(
+          JSON.stringify({
+            saleId: 'sale-pay-legacy-shape',
+            actorId: 'cashier-1',
+            payments: [
+              { method: 'cash', amountCents: 1000 },
+            ],
+          }),
+        )
+        .digest('hex');
+
+      expect(hashLegacy).toBe(expectedHash);
     });
   });
 
@@ -2471,6 +2916,602 @@ describe('SalesService', () => {
         customerId?: string | null;
       };
       expect(call.customerId).toBeNull();
+    });
+  });
+
+  // ── WU2 — Custom Payment Methods (D5): chargeDraft threading.
+  //    Tests the new `paymentMethodId` field through the resolver,
+  //    the snapshot under `metadataJson.catalog`, and the four
+  //    rejection codes. Legacy entries (no `paymentMethodId`)
+  //    continue to produce no `metadataJson.catalog` key.
+  describe('WU2 — chargeDraft custom payment method threading (D5)', () => {
+    const buildDraftSaleForWU2 = (
+      id: string,
+      userId = 'user-1',
+      customerId: string | null = 'customer-1',
+    ) =>
+      Sale.fromPersistence({
+        id,
+        userId,
+        customerId,
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+    const setupHappyPathDraftForWU2 = (sale: Sale) => {
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+    };
+
+    it('normalizeChargeRequestPayments copies paymentMethodId on the legacy single-payment shape', async () => {
+      const sale = buildDraftSaleForWU2(
+        'sale-charge-legacy-custom',
+        'user-1',
+        'customer-1',
+      );
+      setupHappyPathDraftForWU2(sale);
+
+      paymentMethodResolver.resolveActive.mockResolvedValueOnce({
+        category: 'transfer',
+        name: 'Mercado Pago',
+        subtitle: 'Link',
+      });
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          method: 'transfer',
+          amountCents: 2000,
+          paymentMethodId: 'pm-custom-1',
+        } as never,
+        'idem-charge-legacy-custom',
+      );
+
+      // Resolver hit with the legacy-shape payload (D3 + D5).
+      expect(paymentMethodResolver.resolveActive).toHaveBeenCalledWith({
+        paymentMethodId: 'pm-custom-1',
+        tenantId: 'tenant-1',
+        expectedCategory: 'transfer',
+      });
+
+      // The catalog snapshot is attached to the canonical payment
+      // passed to `persistChargeConfirmation`.
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payments: [
+            expect.objectContaining({
+              method: 'transfer',
+              amountCents: 2000,
+              metadataJson: {
+                catalog: {
+                  paymentMethodId: 'pm-custom-1',
+                  name: 'Mercado Pago',
+                  subtitle: 'Link',
+                },
+              },
+            }),
+          ],
+        }),
+      );
+    });
+
+    it('normalizeChargeRequestPayments copies paymentMethodId on the array payments[] shape', async () => {
+      const sale = buildDraftSaleForWU2(
+        'sale-charge-array-custom',
+        'user-1',
+        'customer-1',
+      );
+      setupHappyPathDraftForWU2(sale);
+
+      paymentMethodResolver.resolveActive
+        .mockResolvedValueOnce({
+          category: 'transfer',
+          name: 'Mercado Pago',
+          subtitle: 'Link',
+        })
+        .mockResolvedValueOnce({
+          category: 'cash',
+          name: 'Cash USD',
+          subtitle: null,
+        });
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          payments: [
+            {
+              method: 'transfer',
+              amountCents: 1000,
+              paymentMethodId: 'pm-A',
+            },
+            {
+              method: 'cash',
+              amountCents: 1000,
+              paymentMethodId: 'pm-B',
+            },
+          ],
+        } as never,
+        'idem-charge-array-custom',
+      );
+
+      // Resolver hit twice — once per entry with `paymentMethodId`.
+      expect(paymentMethodResolver.resolveActive).toHaveBeenCalledTimes(2);
+      expect(paymentMethodResolver.resolveActive).toHaveBeenNthCalledWith(
+        1,
+        {
+          paymentMethodId: 'pm-A',
+          tenantId: 'tenant-1',
+          expectedCategory: 'transfer',
+        },
+      );
+      expect(paymentMethodResolver.resolveActive).toHaveBeenNthCalledWith(
+        2,
+        {
+          paymentMethodId: 'pm-B',
+          tenantId: 'tenant-1',
+          expectedCategory: 'cash',
+        },
+      );
+
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payments: [
+            expect.objectContaining({
+              method: 'transfer',
+              amountCents: 1000,
+              metadataJson: {
+                catalog: {
+                  paymentMethodId: 'pm-A',
+                  name: 'Mercado Pago',
+                  subtitle: 'Link',
+                },
+              },
+            }),
+            expect.objectContaining({
+              method: 'cash',
+              amountCents: 1000,
+              metadataJson: {
+                catalog: {
+                  paymentMethodId: 'pm-B',
+                  name: 'Cash USD',
+                  // subtitle intentionally absent.
+                },
+              },
+            }),
+          ],
+        }),
+      );
+    });
+
+    it('legacy entry (no paymentMethodId) keeps no catalog key on the canonical payment', async () => {
+      const sale = buildDraftSaleForWU2(
+        'sale-charge-legacy-mixed',
+        'user-1',
+        'customer-1',
+      );
+      setupHappyPathDraftForWU2(sale);
+
+      paymentMethodResolver.resolveActive.mockResolvedValueOnce({
+        category: 'transfer',
+        name: 'Mercado Pago',
+        subtitle: 'Link',
+      });
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        {
+          payments: [
+            {
+              method: 'cash',
+              amountCents: 1000,
+              // No paymentMethodId → legacy path; no catalog key.
+            },
+            {
+              method: 'transfer',
+              amountCents: 1000,
+              paymentMethodId: 'pm-custom-1',
+            },
+          ],
+        } as never,
+        'idem-charge-legacy-mixed',
+      );
+
+      expect(paymentMethodResolver.resolveActive).toHaveBeenCalledTimes(1);
+
+      const call = saleRepo.persistChargeConfirmation.mock
+        .calls[0]?.[0] as {
+        payments: Array<{ metadataJson?: unknown }>;
+      };
+      // First entry: legacy → metadataJson is undefined on the
+      // canonical payment. The repo's `persistChargeConfirmation`
+      // maps undefined → Prisma.JsonNull (D7).
+      expect(call.payments[0].metadataJson).toBeUndefined();
+      // Second entry: catalog snapshot.
+      expect(call.payments[1].metadataJson).toEqual({
+        catalog: {
+          paymentMethodId: 'pm-custom-1',
+          name: 'Mercado Pago',
+          subtitle: 'Link',
+        },
+      });
+    });
+
+    it('rejects mismatched method with PAYMENT_METHOD_CATEGORY_MISMATCH (no SalePayment written)', async () => {
+      const sale = buildDraftSaleForWU2(
+        'sale-charge-mismatch',
+        'user-1',
+        'customer-1',
+      );
+      setupHappyPathDraftForWU2(sale);
+
+      // Resolver throws on a category mismatch — maps to the
+      // PAYMENT_METHOD_CATEGORY_MISMATCH error code.
+      paymentMethodResolver.resolveActive.mockRejectedValueOnce(
+        new BusinessRuleViolationError(
+          'PAYMENT_METHOD_CATEGORY_MISMATCH',
+          'PAYMENT_METHOD_CATEGORY_MISMATCH',
+        ),
+      );
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            method: 'cash',
+            amountCents: 1000,
+            paymentMethodId: 'pm-transfer',
+          } as never,
+          'idem-charge-mismatch',
+        ),
+      ).rejects.toThrow('PAYMENT_METHOD_CATEGORY_MISMATCH');
+
+      // The tx block rejected → `persistChargeConfirmation` MUST
+      // not be called (all-or-nothing).
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+    });
+
+    it('rejects inactive paymentMethodId with INACTIVE_PAYMENT_METHOD (no SalePayment written)', async () => {
+      // Total = 1000 (single 1000-cent item); payment of 1000 in
+      // `transfer` so the test reaches the resolver call inside the
+      // tx block (the underpayment guard does not fire for a
+      // full-payment transfer).
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-inactive',
+        userId: 'user-1',
+        customerId: 'customer-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'sale-charge-inactive-item-1',
+            saleId: 'sale-charge-inactive',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+      setupHappyPathDraftForWU2(sale);
+
+      paymentMethodResolver.resolveActive.mockRejectedValueOnce(
+        new BusinessRuleViolationError(
+          'INACTIVE_PAYMENT_METHOD',
+          'INACTIVE_PAYMENT_METHOD',
+        ),
+      );
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            method: 'transfer',
+            amountCents: 1000,
+            paymentMethodId: 'pm-inactive',
+          } as never,
+          'idem-charge-inactive',
+        ),
+      ).rejects.toThrow('INACTIVE_PAYMENT_METHOD');
+
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+    });
+
+    it('rejects unknown/foreign-tenant paymentMethodId with PAYMENT_METHOD_NOT_FOUND (no SalePayment written)', async () => {
+      // Single 1000-cent item so the transfer payment hits the
+      // resolver call inside the tx block.
+      const sale = Sale.fromPersistence({
+        id: 'sale-charge-not-found',
+        userId: 'user-1',
+        customerId: 'customer-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: 'sale-charge-not-found-item-1',
+            saleId: 'sale-charge-not-found',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+      setupHappyPathDraftForWU2(sale);
+
+      paymentMethodResolver.resolveActive.mockRejectedValueOnce(
+        new BusinessRuleViolationError(
+          'PAYMENT_METHOD_NOT_FOUND',
+          'PAYMENT_METHOD_NOT_FOUND',
+        ),
+      );
+
+      await expect(
+        service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            method: 'transfer',
+            amountCents: 1000,
+            paymentMethodId: 'pm-unknown',
+          } as never,
+          'idem-charge-not-found',
+        ),
+      ).rejects.toThrow('PAYMENT_METHOD_NOT_FOUND');
+
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── WU2 — REQUIRED idempotency spec (sale-payments/spec.md
+  //    Requirement: Idempotency Hashes Include paymentMethodId).
+  //    Asserts the byte-level contract on the charge path. The
+  //    equivalent collection-path tests live in the `addPayment`
+  //    describe block.
+  describe('WU2 — chargeDraft idempotency hashes include paymentMethodId (REQUIRED)', () => {
+    const buildDraftSaleForWU2 = (
+      id: string,
+      userId = 'user-1',
+      customerId: string | null = 'customer-1',
+    ) =>
+      Sale.fromPersistence({
+        id,
+        userId,
+        customerId,
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${id}-item-1`,
+            saleId: id,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+    const setupHappyPathDraftForWU2 = (sale: Sale) => {
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+    };
+
+    // Build a draft with a single item totaling `totalCents` so the
+    // idempotency tests can issue a single `cash` payment that exactly
+    // matches the total (avoids `PAYMENT_AMOUNT_INSUFFICIENT` while
+    // keeping the hash surface minimal).
+    const buildSingleItemDraft = (saleId: string, totalCents: number) =>
+      Sale.fromPersistence({
+        id: saleId,
+        userId: 'user-1',
+        customerId: 'customer-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [
+          {
+            id: `${saleId}-item-1`,
+            saleId,
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Prod 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: totalCents,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+
+    const captureHash = async (
+      dto: Parameters<typeof service.chargeDraft>[2],
+      idempotencyKey: string,
+      saleId: string,
+      totalCents: number,
+    ): Promise<string> => {
+      let capturedHash: string | undefined;
+      saleRepo.acquireChargeIdempotency.mockImplementationOnce(
+        async (_s: string, _k: string, requestHash: string) => {
+          capturedHash = requestHash;
+          return { kind: 'acquired', token: 'tok' };
+        },
+      );
+      const sale = buildSingleItemDraft(saleId, totalCents);
+      setupHappyPathDraftForWU2(sale);
+      await service.chargeDraft(saleId, 'user-1', dto, idempotencyKey);
+      if (capturedHash === undefined) {
+        throw new Error('hash was not captured');
+      }
+      return capturedHash;
+    };
+
+    it('identical {method, amountCents, paymentMethodId} payloads produce the same hash and replay', async () => {
+      const replayPayload = {
+        saleId: 'sale-charge-replay-custom',
+        folio: 'A-2605-000099',
+        subtotalCents: 1000,
+        discountCents: 0,
+        totalCents: 1000,
+        paidCents: 1000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID' as const,
+        confirmedAt: new Date().toISOString(),
+      };
+
+      const hashes = new Set<string>();
+      saleRepo.acquireChargeIdempotency.mockImplementation(
+        async (_s: string, _k: string, requestHash: string) => {
+          if (hashes.has(requestHash)) {
+            return { kind: 'replay', payload: replayPayload };
+          }
+          hashes.add(requestHash);
+          return { kind: 'acquired', token: 'tok' };
+        },
+      );
+
+      const sale = buildSingleItemDraft('sale-charge-replay-custom', 1000);
+      setupHappyPathDraftForWU2(sale);
+
+      const dto = {
+        method: 'cash' as const,
+        amountCents: 1000,
+        paymentMethodId: 'pm-custom-1',
+      };
+
+      // First call → acquired.
+      await service.chargeDraft(
+        'sale-charge-replay-custom',
+        'user-1',
+        dto,
+        'idem-charge-replay-custom',
+      );
+
+      // Second identical call → replay.
+      const replayResult = await service.chargeDraft(
+        'sale-charge-replay-custom',
+        'user-1',
+        dto,
+        'idem-charge-replay-custom',
+      );
+
+      expect(replayResult).toEqual(replayPayload);
+      // Hash deduped to a single value.
+      expect(hashes.size).toBe(1);
+    });
+
+    it('same category + amount + DIFFERENT paymentMethodId produce DISTINCT hashes (collision regression)', async () => {
+      // PM-A and PM-B share the `transfer` category. The byte-level
+      // contract requires their hashes to diverge so the
+      // idempotency row cannot accidentally serve B's request from
+      // A's prior success. Each request charges a single 1000-cent
+      // item with a `cash` payment so the charge path completes
+      // without `PAYMENT_AMOUNT_INSUFFICIENT` (cash is exempt from
+      // the underpayment guard).
+      const hashA = await captureHash(
+        {
+          method: 'cash',
+          amountCents: 1000,
+          paymentMethodId: 'pm-A',
+        } as never,
+        'idem-charge-distinct-A',
+        'sale-charge-distinct-A',
+        1000,
+      );
+
+      const hashB = await captureHash(
+        {
+          method: 'cash',
+          amountCents: 1000,
+          paymentMethodId: 'pm-B',
+        } as never,
+        'idem-charge-distinct-B',
+        'sale-charge-distinct-B',
+        1000,
+      );
+
+      expect(hashA).not.toEqual(hashB);
+    });
+
+    it('legacy payload (no paymentMethodId) hashes byte-identically to the pre-change implementation', async () => {
+      // Pre-change shape: key = `${method}|${amountCents}|${reference ?? ''}`
+      // (no `|${paymentMethodId}` suffix because the field is
+      // absent). JSON.stringify drops `undefined` keys, so the
+      // hashed object is byte-identical.
+      const hashLegacy = await captureHash(
+        {
+          method: 'cash',
+          amountCents: 1000,
+        } as never,
+        'idem-charge-legacy-shape',
+        'sale-charge-legacy-shape',
+        1000,
+      );
+
+      // Compute the legacy hash independently so the assertion is
+      // not tautological.
+      const createHash = require('crypto').createHash as (
+        algorithm: string,
+      ) => {
+        update: (data: string) => {
+          digest: (encoding: string) => string;
+        };
+      };
+      const expectedHash = createHash('sha256')
+        .update(
+          JSON.stringify({
+            saleId: 'sale-charge-legacy-shape',
+            actorId: 'user-1',
+            payments: [
+              { method: 'cash', amountCents: 1000 },
+            ],
+            dueDate: null,
+          }),
+        )
+        .digest('hex');
+
+      expect(hashLegacy).toBe(expectedHash);
     });
   });
 
@@ -4786,6 +5827,128 @@ describe('SalesService', () => {
       await expect(
         service.getSaleDetail('b5e2b8fd-bdfd-471f-b687-ec340d578885'),
       ).rejects.toThrow('Sale not found');
+    });
+  });
+
+  // ── WU2 — Custom Payment Methods (D10): getSaleDetail surfaces
+  //    the catalog snapshot under `paymentMethodId / paymentMethodName
+  //    / paymentMethodSubtitle` when present, omits them when absent
+  //    (legacy rows), and threads the same fields through the
+  //    `PAYMENT_RECEIVED` timeline event.
+  describe('WU2 — getSaleDetail catalog snapshot (D10)', () => {
+    const saleId = 'b5e2b8fd-bdfd-471f-b687-ec340d578885';
+
+    const baseDetailShape = () => ({
+      id: saleId,
+      folio: 'V-0042',
+      status: 'CONFIRMED',
+      channel: 'POS',
+      register: 'Principal',
+      confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+      createdAt: new Date('2026-05-08T10:00:00.000Z'),
+      subtotalCents: 1000,
+      discountCents: 0,
+      totalCents: 1000,
+      paidCents: 1000,
+      debtCents: 0,
+      changeDueCents: 0,
+      paymentStatus: 'PAID',
+      deliveryStatus: 'DELIVERED',
+      customer: null,
+      cashier: { id: 'u1', name: 'Cajero' },
+      seller: null,
+      items: [],
+    });
+
+    it('surfaces paymentMethodId / paymentMethodName / paymentMethodSubtitle when the catalog snapshot is present', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        ...baseDetailShape(),
+        payments: [
+          {
+            paymentId: 'pmt-catalog',
+            method: 'TRANSFER',
+            amountCents: 1000,
+            tenderedCents: 1000,
+            changeCents: 0,
+            reference: null,
+            paidAt: new Date('2026-05-08T10:30:00.000Z'),
+            createdAt: new Date('2026-05-08T10:30:00.000Z'),
+            userId: 'u1',
+            user: { id: 'u1', name: 'Cajero' },
+            paymentMethodId: 'pm-custom-1',
+            paymentMethodName: 'Mercado Pago',
+            paymentMethodSubtitle: 'Link',
+          },
+        ],
+      } as any);
+
+      const result = await service.getSaleDetail(saleId);
+
+      expect(result.payments[0]).toEqual(
+        expect.objectContaining({
+          paymentId: 'pmt-catalog',
+          method: 'TRANSFER',
+          amountCents: 1000,
+          paymentMethodId: 'pm-custom-1',
+          paymentMethodName: 'Mercado Pago',
+          paymentMethodSubtitle: 'Link',
+        }),
+      );
+
+      // Timeline event carries the catalog snapshot.
+      const paymentEvent = result.timeline.find(
+        (event) => event.type === 'PAYMENT_RECEIVED',
+      );
+      expect(paymentEvent).toBeDefined();
+      if (paymentEvent?.type === 'PAYMENT_RECEIVED') {
+        expect(paymentEvent.paymentMethodName).toBe('Mercado Pago');
+        expect(paymentEvent.paymentMethodSubtitle).toBe('Link');
+      }
+    });
+
+    it('omits paymentMethodId / paymentMethodName / paymentMethodSubtitle on the wire when the snapshot is absent (legacy row)', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        ...baseDetailShape(),
+        payments: [
+          {
+            paymentId: 'pmt-legacy',
+            method: 'CASH',
+            amountCents: 1000,
+            tenderedCents: 1000,
+            changeCents: 0,
+            reference: 'TX-1',
+            paidAt: new Date('2026-05-08T10:30:00.000Z'),
+            createdAt: new Date('2026-05-08T10:30:00.000Z'),
+            userId: 'u1',
+            user: { id: 'u1', name: 'Cajero' },
+            // No paymentMethodId/paymentMethodName/paymentMethodSubtitle
+            // → legacy row. Base-category label is the fallback.
+            paymentMethodId: null,
+            paymentMethodName: null,
+            paymentMethodSubtitle: null,
+          },
+        ],
+      } as any);
+
+      const result = await service.getSaleDetail(saleId);
+
+      // The mapper uses `?? undefined` so the wire surface carries the
+      // key but resolves to `undefined` (serialized as absent). The
+      // legacy-row contract is: "absent or null on the wire".
+      expect(result.payments[0].paymentMethodId).toBeUndefined();
+      expect(result.payments[0].paymentMethodName).toBeUndefined();
+      expect(result.payments[0].paymentMethodSubtitle).toBeUndefined();
+      // Base method label remains the fallback.
+      expect(result.payments[0].method).toBe('CASH');
+
+      const paymentEvent = result.timeline.find(
+        (event) => event.type === 'PAYMENT_RECEIVED',
+      );
+      expect(paymentEvent).toBeDefined();
+      if (paymentEvent?.type === 'PAYMENT_RECEIVED') {
+        expect(paymentEvent.paymentMethodName).toBeUndefined();
+        expect(paymentEvent.paymentMethodSubtitle).toBeUndefined();
+      }
     });
   });
 

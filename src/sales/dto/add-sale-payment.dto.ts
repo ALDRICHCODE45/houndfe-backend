@@ -6,6 +6,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Min,
   Validate,
   ValidateNested,
@@ -52,6 +53,15 @@ export class AddSalePaymentEntryDto {
   @IsOptional()
   @IsString()
   reference?: string;
+
+  // Custom Payment Methods (custom-payment-methods / WU2) — optional
+  // catalog reference. Mirrors `ChargePaymentEntryDto.paymentMethodId`;
+  // resolution semantics are identical (the sales service looks the
+  // row up via `IPaymentMethodResolver.resolveActive()` and snapshots
+  // it under `metadataJson.catalog`).
+  @IsOptional()
+  @IsUUID('all', { message: 'INVALID_PAYMENT_METHOD_ID' })
+  paymentMethodId?: string;
 }
 
 export class AddSalePaymentDto {
@@ -70,6 +80,12 @@ export class AddSalePaymentDto {
   @IsOptional()
   @IsString()
   reference?: string;
+
+  // Optional single-payment catalog reference — mirrors the per-entry
+  // `paymentMethodId` on the `payments[]` branch.
+  @IsOptional()
+  @IsUUID('all', { message: 'INVALID_PAYMENT_METHOD_ID' })
+  paymentMethodId?: string;
 
   @IsOptional()
   @IsArray()

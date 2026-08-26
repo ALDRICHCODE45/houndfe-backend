@@ -7,6 +7,7 @@ import {
   IsISO8601,
   IsOptional,
   IsString,
+  IsUUID,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -22,6 +23,16 @@ export class ChargePaymentEntryDto {
   @IsOptional()
   @IsString()
   reference?: string;
+
+  // Custom Payment Methods (custom-payment-methods / WU2) — optional
+  // catalog reference. When present, the sales service resolves the
+  // row via `IPaymentMethodResolver.resolveActive()` and snapshots
+  // `{ paymentMethodId, name, subtitle? }` under `metadataJson.catalog`.
+  // When absent, the row carries no `catalog` key and the legacy path
+  // (D5) is byte-identical to pre-change behavior.
+  @IsOptional()
+  @IsUUID('all', { message: 'INVALID_PAYMENT_METHOD_ID' })
+  paymentMethodId?: string;
 }
 
 export class ChargeSaleDto {
@@ -33,6 +44,13 @@ export class ChargeSaleDto {
   @IsInt()
   @Min(0)
   amountCents?: number;
+
+  // Optional single-payment catalog reference — mirrors the per-entry
+  // `paymentMethodId` on the `payments[]` branch. The legacy
+  // `method + amountCents` shape continues to work without it.
+  @IsOptional()
+  @IsUUID('all', { message: 'INVALID_PAYMENT_METHOD_ID' })
+  paymentMethodId?: string;
 
   @IsOptional()
   @IsArray()
