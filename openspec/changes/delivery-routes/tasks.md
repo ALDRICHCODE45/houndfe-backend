@@ -40,8 +40,8 @@ Each WU is a single chained PR (stacked to `main`) once `chain_strategy` is deci
 
 ## Phase 0 — Pre-flight
 
-- [ ] Confirm review-mode switch state and, if off, ask the user explicitly whether to enable receipt-driven development before applying WU1. <!-- sdd-owner: parent -->
-- [ ] Resolve `chain_strategy` (`stacked-to-main` recommended) and confirm with the parent/orchestrator before opening the WU1 PR. <!-- sdd-owner: parent -->
+- [x] Confirm review-mode switch state and, if off, ask the user explicitly whether to enable receipt-driven development before applying WU1. <!-- sdd-owner: parent -->
+- [x] Resolve `chain_strategy` (`stacked-to-main` recommended) and confirm with the parent/orchestrator before opening the WU1 PR. <!-- sdd-owner: parent -->
 
 ---
 

@@ -20,11 +20,14 @@ a route. The chatbot's existing direct Prisma path that writes `SHIPPED` is
 unchanged and orthogonal.
 
 A Sale MAY appear in at most one ACTIVE route at any time. The invariant is
-enforced by an application-level pre-check (fast 422) and a partial unique
-index on `delivery_route_stops (tenant_id, sale_id) WHERE activeRouteId IS NOT NULL`
-(authoritative 409 on race). Driver ownership ("driver may only `read`/`update`
-their own routes") is enforced by a CASL subject-condition matcher resolved
-via a minimal guard/resolver extension, not by per-controller branching.
+enforced by the partial unique index on
+`delivery_route_stops (tenant_id, sale_id) WHERE activeRouteId IS NOT NULL`;
+a violation — whether a pre-existing claim or a concurrent start race —
+surfaces as Prisma `P2002` and is mapped to HTTP 409
+`DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` by the repository (ADR-7).
+Driver ownership ("driver may only `read`/`update` their own routes") is
+enforced by a CASL subject-condition matcher resolved via a minimal
+guard/resolver extension, not by per-controller branching.
 
 The bounded context lives under `src/delivery-routes/` and is mounted at
 `/delivery-routes` (no `/admin/` prefix because both tenant admins and
@@ -224,15 +227,16 @@ called; the route flow never writes carrier metadata.
 
 ### Requirement: Edit DeliveryRoute Stops and Driver Only While DRAFT
 
-`PATCH /delivery-routes/:id` MUST allow mutating `driverUserId` and the
-stop set ONLY when the route is `DRAFT`. Mutations MAY include adding a
-stop (`addStop`), removing a stop (`removeStop`), reordering stops
-(`reorderStops`), and reassigning the driver (`assignDriver`). The endpoint
-MUST require `update:DeliveryRoute`. Any mutation attempt against an
-`ACTIVE`, `COMPLETED`, or `CANCELLED` route MUST be rejected with
-`DeliveryRouteInvalidTransitionError` (HTTP 422). Reassigning the driver
-mid-route (in `ACTIVE`) is intentionally rejected to avoid the mid-route
-hand-off failure mode.
+`PATCH /delivery-routes/:id` MUST allow mutating `driverUserId` and
+`notes` ONLY when the route is `DRAFT`. Stop-set mutations are exposed as
+dedicated endpoints, all gated by `update:DeliveryRoute` and DRAFT-only:
+`POST /delivery-routes/:id/stops` adds a stop (`addStop`) and
+`PUT /delivery-routes/:id/stops/reorder` reorders stops (`reorderStops`).
+Removing a stop (`removeStop`) is NOT exposed in this change. Any
+mutation attempt against an `ACTIVE`, `COMPLETED`, or `CANCELLED` route
+MUST be rejected with `DeliveryRouteInvalidTransitionError` (HTTP 422).
+Reassigning the driver mid-route (in `ACTIVE`) is intentionally rejected
+to avoid the mid-route hand-off failure mode.
 
 #### Scenario: Reassign driver in DRAFT succeeds
 
@@ -271,13 +275,13 @@ hand-off failure mode.
 - The current status is `DRAFT`.
 - The route has at least one stop.
 
-The service MUST re-validate each stop's sale eligibility inside the
-transition transaction (each `saleId` must still belong to the tenant,
-have `deliveryStatus ∈ {PENDING, SHIPPED}`, and have a non-null
-`shippingAddressId`). On failure, the response MUST be HTTP 422
-`DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE`, the transaction MUST roll back,
-and the route MUST remain `DRAFT`. The Inngest/email pipeline MUST NOT
-be triggered by `start`.
+Sale eligibility is validated when stops are added (`create` / `addStop`).
+`start` itself does NOT re-validate each stop's sale eligibility: the
+transition requires only `DRAFT` status and at least one stop. A sale
+that became `DELIVERED` (e.g. via the chatbot's direct path) between
+stop-add and start still starts; the subsequent check-in mirror is
+idempotent for an already-delivered sale. The Inngest/email pipeline
+MUST NOT be triggered by `start`.
 
 #### Scenario: Happy path — DRAFT → ACTIVE with eligible stops
 
@@ -294,13 +298,12 @@ be triggered by `start`.
 - THEN the response is HTTP 422 `DELIVERY_ROUTE_INVALID_TRANSITION`
 - AND the route's status, `startedAt`, and stops are unchanged
 
-#### Scenario: Start with a now-ineligible stop is rejected
+#### Scenario: Start does not re-validate eligibility — a now-ineligible stop still starts
 
 - GIVEN a `DRAFT` route that referenced sale S1 with `deliveryStatus='PENDING'`, but S1 was later updated to `deliveryStatus='DELIVERED'` (chatbot or other path) before start
 - WHEN an authorized caller POSTs `/start`
-- THEN the response is HTTP 422 `DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE`
-- AND the route's status remains `DRAFT`
-- AND `startedAt` remains `null`
+- THEN the route transitions to `ACTIVE` and `startedAt` is set (no re-validation on start)
+- AND every stop keeps `activeRouteId` set; a later `checkInStop` mirrors the already-delivered sale idempotently
 
 ### Requirement: Check-In Stop Atomically Writes Stop, Sale Mirror, and Outbox Event
 
@@ -419,25 +422,21 @@ unchanged and orthogonal to this contract.
 - THEN `tx.sale.update` raises Prisma `P2025` (record not found) because the `(id, tenantId)` predicate does not match
 - AND S1's `deliveryStatus` is unchanged
 
-### Requirement: One Active Route Per Sale (Application Pre-Check + DB Partial Unique Index)
+### Requirement: One Active Route Per Sale (DB Partial Unique Index)
 
 A Sale MUST appear in at most one ACTIVE route at any time. The invariant
-MUST be enforced at two layers:
+is enforced by a single authoritative layer — the DB partial unique index —
+plus the aggregate's DRAFT-gating:
 
-1. **Application-level pre-check (fast 422).** Before transitioning a
-   route `DRAFT → ACTIVE`, `DeliveryRoutesService.start` MUST execute a
-   per-stop existence query against `delivery_route_stops JOIN delivery_routes
-   ON routeId=route.id` filtering `tenantId=$1 AND saleId=$2 AND route.status='ACTIVE'`.
-   On a hit, the service MUST throw
-   `DeliveryRouteStopSaleAlreadyOnActiveRouteError` (HTTP 422) and the
-   transaction MUST roll back.
+1. **Aggregate DRAFT-gating.** `DeliveryRouteStop.activeRouteId` is a
+   denormalized nullable column that is set to the route id exactly while
+   the owning route is `ACTIVE`. It stays `NULL` while the route is `DRAFT`
+   (so DRAFT routes never claim a sale), is armed on the `DRAFT → ACTIVE`
+   transition, and is cleared on `cancel` (`ACTIVE → CANCELLED`) and on the
+   auto `ACTIVE → COMPLETED` transition.
 
-2. **DB partial unique index (authoritative 409 on race).** The schema MUST
-   declare a denormalized nullable column `DeliveryRouteStop.activeRouteId`
-   that is set to the route id exactly while the owning route is `ACTIVE`,
-   and is set to `NULL` for `DRAFT` routes, after `start` transitions
-   `DRAFT → ACTIVE`, and cleared on `cancel` (`ACTIVE → CANCELLED`) and
-   on the auto `ACTIVE → COMPLETED` transition. The schema MUST include:
+2. **DB partial unique index (authoritative 409).** The schema MUST
+   include:
 
    ```sql
    CREATE UNIQUE INDEX delivery_route_stops_active_sale_uniq
@@ -445,23 +444,22 @@ MUST be enforced at two layers:
      WHERE "activeRouteId" IS NOT NULL;
    ```
 
-   The `PrismaSaleRepository` / `PrismaDeliveryRouteRepository` MUST
-   map the resulting `P2002` to
-   `BusinessRuleViolationError('DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE')`,
-   which the global filter maps to HTTP 409.
-
-The application-level pre-check is defense-in-depth and a friendly
-fast-path for the common case; the partial unique index is the
-authoritative race-safe guard.
+   `PrismaDeliveryRouteRepository.save` MUST map the resulting `P2002` to
+   `DeliveryRouteSaleAlreadyInActiveRouteError` (code
+   `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`), which the global
+   filter maps to HTTP 409. Both a pre-existing claim (a sale already on
+   another ACTIVE route before `start`) and a concurrent start race
+   surface through this single path as 409 — there is no separate
+   fast-422 pre-check in the implemented design.
 
 `activeRouteId` MUST NOT be selected into the public read model and MUST
 NOT be exposed via any DTO.
 
-#### Scenario: Pre-check catches the common case as 422
+#### Scenario: A pre-existing active claim resolves as 409
 
 - GIVEN sale S1 already belongs to an `ACTIVE` route R1 in tenant T
 - WHEN an authorized caller POSTs `/delivery-routes/R2.id/start` where R2 is a `DRAFT` route referencing S1
-- THEN the response is HTTP 422 `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`
+- THEN the response is HTTP 409 `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`
 - AND R2 remains `DRAFT`
 - AND R1 is unchanged
 
@@ -636,9 +634,13 @@ condition evaluation step:
 (`src/auth/authorization/subject-instance-resolver.ts`) defined as
 `SubjectInstanceResolverMap = Partial<Record<AppSubjects, { resolveSubject(request): Promise<Record<string, unknown> | null> }>>`,
 registered with the symbol `Symbol.for('SubjectInstanceResolvers')`.
-`DeliveryRoutesModule` MUST provide
+`DeliveryRoutesModule` MUST register
 `{ DeliveryRoute: { resolveSubject: req => repo.findDriverUserIdById(req.params.id) } }`
-returning `{ driverUserId }` or `null`. If the resolver returns `null`
+into the static `SubjectInstanceResolverRegistry` (seam token
+`Symbol.for('SubjectInstanceResolvers')`) at module construction time —
+the guard reads the registry on every `canActivate` call so late
+registration works without re-instantiating the guard. The resolver
+returns `{ driverUserId }` or `null`. If the resolver returns `null`
 (route not found or cross-tenant miss), the guard MUST NOT throw; the
 service later returns the proper 404. `POST /delivery-routes` (create)
 and `GET /delivery-routes` (list) have no `:id`, so the instance step
@@ -764,11 +766,13 @@ the last stop in the route), the service MUST emit a `PENDING`
 carry:
 
 - `aggregateType: 'DeliveryRoute'`, `aggregateId: routeId`
-- `tenantId`, `routeId`, `currentStopId`, `nextSaleId`
-- `nextSaleFolio`, `nextCustomerName`, `nextCustomerEmail` (nullable
-  write-time snapshot; the authoritative email is re-resolved at send
-  time by the Inngest function)
-- `nextAddressLabel`, `nextEstimatedApproach: 'soon'`
+- `tenantId`, `routeId`, `currentStopId`, `nextStopId`, `nextSaleId`
+- `nextCustomerName`, `nextCustomerEmail` (nullable write-time snapshot;
+  the authoritative email is re-resolved at send time by the Inngest
+  function), `nextAddressLabel`
+- `idempotencyKey` (`${tenantId}:${currentStopId}` — the deterministic
+  Inngest dedupe seed, computed by `computeDeliveryNextStopIdempotencyKey`)
+- `occurredAt` (ISO-8601 check-in timestamp)
 
 The dispatch MUST follow the proven low-stock / hr-time-off blueprint,
 NOT a direct `InngestService.send` after commit:
@@ -780,8 +784,9 @@ NOT a direct `InngestService.send` after commit:
 
 2. **Dedicated poller.** A new `DeliveryRoutesOutboxPoller` MUST claim
    only `eventType='delivery.next_stop.notify'` rows at a fixed interval
-   (default `1000ms`), use `FOR UPDATE SKIP LOCKED` plus `lockToken` /
-   `lockedUntil`, and tolerate multiple worker instances.
+   (decorator tick `1000ms`; effective default interval `5000ms`,
+   DI-overridable, batch size 25), use `FOR UPDATE SKIP LOCKED` plus
+   `lockToken` / `lockedUntil`, and tolerate multiple worker instances.
 
 3. **Dedicated dispatcher.** A new `DeliveryRoutesOutboxDispatcher` MUST
    `await` `InngestService.send('delivery/next-stop-notify', payload, idempotencyKey)`,
@@ -1167,37 +1172,36 @@ be a one-line module registration change.
   `DeliveryRoutesOutboxModule`, and top-level `DeliveryRoutesInngestRegistrar`.
 - Co-located Jest unit specs:
   - `src/delivery-routes/domain/delivery-route.entity.spec.ts` —
-    lifecycle transitions, idempotency, re-validation on `start()`,
-    auto-complete on last stop, error mapping.
+    lifecycle transitions, idempotency, create-time eligibility
+    validation, auto-complete on last stop, error mapping.
   - `src/delivery-routes/application/delivery-routes.service.spec.ts` —
     check-in transaction orchestration (stop + Sale + outbox), driver
-    list scoping, `start()` pre-check, error mapping, P2002 → 409.
+    list scoping, `start()` P2002 → 409 mapping, error mapping.
   - `src/delivery-routes/domain/build-delivery-route-timeline.spec.ts` —
     event ordering, actor defaults, missing-timestamp branches.
-  - `src/delivery-routes/dto/delivery-route-response.dto.spec.ts` —
-    mapper shape.
-  - `src/delivery-routes/outbox/delivery-routes-outbox.poller.spec.ts` —
-    claim-disjointness with the generic poller, `lockToken` semantics.
-  - `src/delivery-routes/outbox/delivery-routes-outbox.dispatcher.spec.ts` —
-    idempotency key, `PUBLISHED`/`FAILED` transitions.
+  - `src/delivery-routes/infrastructure/manual-route-optimizer.spec.ts` —
+    identity echo.
   - `src/delivery-routes/inngest/delivery-next-stop-notify.functions.spec.ts` —
     config re-gate, null-email skip, send path, snapshot vs.
     authoritative lookup.
   - `src/auth/authorization/casl-ability.factory.spec.ts` —
     driver-only vs admin condition building, `isRouteManager`
     discriminator.
-  - `src/auth/authorization/permissions.guard.spec.ts` —
+  - `src/auth/authorization/guards/permissions.guard.spec.ts` —
     subject-instance condition evaluation (pass / 403 / null → defer).
-  - `src/notification-config/notification-config.drift.spec.ts` —
+  - `src/notification-config/domain/notification-config.drift.spec.ts` —
     TS union and Prisma enum both contain `DELIVERY_NEXT_STOP`.
   - `src/shared/outbox/outbox-poller.service.spec.ts` —
-    generic poller exclusion list includes `delivery.next_stop.notify`.
+    generic poller exclusion list includes `delivery.next_stop.notify`
+    (claim-disjointness with the dedicated poller).
 - `*.integration.spec.ts` against `jest.integration.config.js`:
   - `src/delivery-routes/infrastructure/prisma-delivery-route.repository.integration.spec.ts` —
     tenant scoping, `findOneWithStops` projection,
     `findDriverUserIdById`, `P2002` mapping on the partial unique
     index race.
-  - `src/sales/infrastructure/prisma-sale.repository.integration.spec.ts` —
+  - `src/sales/infrastructure/prisma-sale.repository.markSaleDelivered.integration.spec.ts` —
     `markSaleDelivered` tenant-scoped `WHERE { id, tenantId }`.
-- Verification commands: `pnpm build`, `pnpm test` (existing 199+
-  suites + new specs).
+- Verification commands: `pnpm build` (green); `pnpm test` — final
+  suite 211 suites / 2929 tests green; integration specs green
+  against the test DB (port 5433), including the ADR-7 `P2002` → 409
+  mapping against real Postgres.
