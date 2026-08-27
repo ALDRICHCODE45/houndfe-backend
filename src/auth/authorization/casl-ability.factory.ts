@@ -65,6 +65,36 @@ export class CaslAbilityFactory {
       can(permission.action, permission.subject);
     }
 
+    // delivery-routes / WU2 — driver-ownership condition matcher
+    // (design ADR-5). The route-manager vs driver-only discriminator
+    // is permission-derived: a caller is a route manager when ANY of
+    // their granted `DeliveryRoute` permissions include `create` or
+    // `delete`. For driver-only callers we emit
+    //   can('read',   'DeliveryRoute', { driverUserId: userId })
+    //   can('update', 'DeliveryRoute', { driverUserId: userId })
+    // so the `PermissionsGuard` can re-check with `subject(...)` and
+    // CASL evaluates the condition against the typed subject (string
+    // subjects ignore conditions — that's the bug ADR-5 fixes).
+    const isRouteManager = permissions.some(
+      (p) =>
+        p.subject === 'DeliveryRoute' &&
+        (p.action === 'create' || p.action === 'delete'),
+    );
+    if (!isRouteManager) {
+      // Only emit the read/update condition when the caller actually
+      // holds the base permission. A caller with neither read nor
+      // update on DeliveryRoute skips the condition entirely (no
+      // need to attach a condition they can't satisfy).
+      const canRead = permissions.some(
+        (p) => p.subject === 'DeliveryRoute' && p.action === 'read',
+      );
+      const canUpdate = permissions.some(
+        (p) => p.subject === 'DeliveryRoute' && p.action === 'update',
+      );
+      if (canRead) can('read', 'DeliveryRoute', { driverUserId: userId });
+      if (canUpdate) can('update', 'DeliveryRoute', { driverUserId: userId });
+    }
+
     return build();
   }
 

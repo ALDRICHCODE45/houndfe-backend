@@ -182,7 +182,14 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'DUPLICATE_NAME')
       return HttpStatus.CONFLICT;
 
-    // ── Q2 / WU3 — promotion re-quote ──
+            // ── delivery-routes / WU2 — ADR-7 partial unique index race ──
+        // The service pre-check and the DB partial unique index both encode
+        // the "one sale per ACTIVE route" invariant; map to 409 (conflict),
+        // not the generic 422.
+        if (exception.code === 'DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE')
+          return HttpStatus.CONFLICT;
+
+// ── Q2 / WU3 — promotion re-quote ──
     // The `details` payload `{ recomputedTotalCents, expectedTotalCents,
     // discountCents }` is spread into the response body by the
     // BusinessRuleViolationError branch above (D7).

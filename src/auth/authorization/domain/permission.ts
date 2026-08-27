@@ -52,8 +52,21 @@ export type AppSubjects =
   | 'DeliveryRoute'
   | 'all';
 
-/** CASL ability type for the application. */
-export type AppAbility = MongoAbility<[AppActions, AppSubjects]>;
+/**
+ * CASL ability type for the application.
+ *
+ * The second generic is left open (`any`) because CASL types the
+ * `AbilityBuilder.can(action, subject, conditions)` parameter through its
+ * HKT (`ProduceGeneric`): for a plain-string subject union like
+ * `AppSubjects` the derived instance type is `never`, so the builder's
+ * conditions parameter resolves to `MongoQuery<never>` regardless of the
+ * declared `MongoQuery<X>` — rejecting any condition shape. WU2's
+ * conditional rule (`{ driverUserId: string }`, ADR-5) therefore needs an
+ * open conditions type. Runtime condition evaluation is unaffected: the
+ * guard re-checks against tagged subject instances and CASL evaluates the
+ * mongo query against the instance object.
+ */
+export type AppAbility = MongoAbility<[AppActions, AppSubjects], any>;
 
 /** Permission definition structure. */
 export interface PermissionDefinition {

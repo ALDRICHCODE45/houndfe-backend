@@ -12,6 +12,7 @@ import {
   InvalidDueDateError,
   SaleNotCancellableError,
   SaleDeliveredCannotCancelError,
+  SaleNotDeliverableError,
 } from './sale.errors';
 
 export type SaleStatus = 'DRAFT' | 'CONFIRMED' | 'CANCELED';
@@ -153,6 +154,7 @@ export class Sale {
   // WU1 — sale-level price list binding.
   private _globalPriceListId: string | null;
   private _priceListExplicitlySet: boolean;
+  private _deliveryStatus: SaleDeliveryStatus;
 
   private constructor(
     public readonly id: string,
@@ -160,7 +162,7 @@ export class Sale {
     public readonly status: SaleStatus,
     public readonly channel: SaleChannel,
     public readonly register: string,
-    public readonly deliveryStatus: SaleDeliveryStatus,
+    deliveryStatus: SaleDeliveryStatus,
     customerId: string | null,
     shippingAddressId: string | null,
     sellerUserId: string | null,
@@ -202,6 +204,7 @@ export class Sale {
     this._optedInManualPromotionIds = [...optedInManualPromotionIds];
     this._globalPriceListId = globalPriceListId;
     this._priceListExplicitlySet = priceListExplicitlySet;
+    this._deliveryStatus = deliveryStatus;
   }
 
   static create(props: CreateSaleProps): Sale {
@@ -398,6 +401,10 @@ export class Sale {
 
   get dueDate(): Date | null {
     return this._dueDate;
+  }
+
+  get deliveryStatus(): SaleDeliveryStatus {
+    return this._deliveryStatus;
   }
 
   get sellerUserId(): string | null {
@@ -639,6 +646,46 @@ export class Sale {
     }
 
     this._dueDate = date;
+  }
+
+  /**
+   * delivery-routes / WU2 — narrow aggregate mutation that flips the
+   * Sale's `deliveryStatus` to `DELIVERED` (status-only mirror; design
+   * ADR-2 + ADR-3). Called by the route check-in flow inside the same
+   * `runInTransaction` as the stop write; the Sale aggregate carries
+   * the status flip so the domain guard runs BEFORE the repository
+   * write and the chatbot's `SHIPPED` path remains orthogonal.
+   *
+   * Semantics:
+   *   - Idempotent: a second call when already `DELIVERED` is a no-op
+   *     (returns `this` without throwing). The check-in pipeline
+   *     relies on this so a replayed transaction does not surface as
+   *     a 422.
+   *   - Guard: throws `SaleNotDeliverableError` (HTTP 422) when the
+   *     sale is not in the `CONFIRMED` lifecycle status. This is the
+   *     only transition guard for the route flow — the route service
+   *     never opens a sale from DRAFT or re-checks delivery after
+   *     CANCELLED.
+   *   - No timestamp: canonical "when delivered" lives on
+   *     `DeliveryRouteStop.checkedInAt` / `completedAt` and
+   *     `DeliveryRoute.completedAt`. The Sale mirror carries status
+   *     only.
+   *   - No carrier metadata: `Sale.setDeliveryMetadata` is the
+   *     chatbot's SHIPPED-side writer; this method does not touch it.
+   */
+  markDelivered(): Sale {
+    // Idempotency first: a second invocation on an already-DELIVERED
+    // sale is a no-op (no throw, no state mutation). The route check-in
+    // replays inside the same Prisma transaction can call this twice
+    // without surfacing a 422 to the caller.
+    if (this.deliveryStatus === 'DELIVERED') {
+      return this;
+    }
+    if (this.status !== 'CONFIRMED') {
+      throw new SaleNotDeliverableError();
+    }
+    this._deliveryStatus = 'DELIVERED';
+    return this;
   }
 
   assignSeller(userId: string): void {

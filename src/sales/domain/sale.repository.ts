@@ -5,6 +5,7 @@ import type {
   SalesListBaseFilter,
   SalesListExtendedFilter,
 } from '../dto/sales-list-filter.types';
+import type { Prisma } from '@prisma/client';
 
 export type PersistedChargePayment = {
   method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
@@ -173,6 +174,28 @@ export interface ISaleRepository {
   ): Promise<void>;
 
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
+
+  /**
+   * delivery-routes / WU2 — Narrow persistence method for the route flow's
+   * `Sale.deliveryStatus='DELIVERED'` mirror write (design ADR-3).
+   *
+   * Performs `tx.sale.update({ where: { id: saleId, tenantId }, data: {
+   * deliveryStatus: 'DELIVERED' } })`. The `tx` argument is the Prisma
+   * transaction client so the write joins the caller's
+   * `runInTransaction(...)` — the route check-in passes the same `tx` to
+   * both the stop update and this mirror so they commit (or roll back)
+   * atomically.
+   *
+   * `tenantId` is required in the `where` clause as defense in depth on
+   * top of the `TenantPrismaService` CLS-injection. A cross-tenant sale
+   * is filtered out and Prisma raises `P2025` (record not found); the
+   * caller (`DeliveryRoutesService.checkInStop`) maps that to a domain
+   * 422 so the existing global filter surfaces the right HTTP code.
+   */
+  markSaleDelivered(
+    tx: Prisma.TransactionClient,
+    input: { tenantId: string; saleId: string },
+  ): Promise<void>;
 
   allocateNextFolio(now?: Date): Promise<string>;
 

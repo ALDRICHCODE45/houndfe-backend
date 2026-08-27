@@ -837,6 +837,33 @@ export class PrismaSaleRepository implements ISaleRepository {
     return this.tenantPrisma.runInTransaction(work);
   }
 
+  /**
+   * delivery-routes / WU2 — Narrows the route check-in's `DELIVERED` mirror
+   * write to a single status column flip (design ADR-3). The caller
+   * (`DeliveryRoutesService.checkInStop`) supplies the active Prisma
+   * transaction client so this write joins the stop + outbox commit.
+   *
+   * `where: { id: saleId, tenantId }` is the explicit defense-in-depth
+   * guard: `TenantPrismaService` already auto-injects `tenantId` at the
+   * top-level `where`, but the WHERE clause here ALSO names `tenantId`
+   * so a cross-tenant sale cannot be mutated even if a future
+   * tenant-scoping regression sneaks past the allowlist.
+   *
+   * Errors:
+   *   - `P2025` (record not found) — the sale id does not exist in the
+   *     caller's tenant (or the sale is already cancelled/hard-deleted).
+   *     The caller MUST catch this and translate to a domain error.
+   */
+  async markSaleDelivered(
+    tx: Prisma.TransactionClient,
+    input: { tenantId: string; saleId: string },
+  ): Promise<void> {
+    await tx.sale.update({
+      where: { id: input.saleId, tenantId: input.tenantId },
+      data: { deliveryStatus: 'DELIVERED' },
+    });
+  }
+
   async allocateNextFolio(now = new Date()): Promise<string> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();

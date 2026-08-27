@@ -184,6 +184,33 @@ boundary kept WU1 small; chained-PR shape respected — WU1 is PR #1 of
 the three-work-unit stack).
 
 ---
+## WU2 — Bounded context + CASL/guard + Sale mirror (complete)
+
+Status: **implemented + verified** (not yet committed by parent).
+
+### Summary
+- New bounded context `src/delivery-routes/**`: domain aggregates (`DeliveryRoute`, `DeliveryRouteStop`), repository port `IDeliveryRouteRepository` + tx-aware Prisma adapter, application service (`create/addStop/reorderStops/update/start/cancel/checkInStop/list/getById/delete`), DTOs, controller, module wiring.
+- `IRouteOptimizer` port + `ManualRouteOptimizer` identity adapter (Symbol.for tokens).
+- Sale narrow integration: `Sale.markDelivered()` + `ISaleRepository.markSaleDelivered` + adapter impl (status-only mirror).
+- RBAC: `DeliveryRoute` subject + 4 permissions, CASL subject-instance condition (factory 3-arg builder form), `SUBJECT_INSTANCE_RESOLVERS` seam + guard `request.ability` re-check (ADR-5).
+- Tenant scoping: both models in TENANT_SCOPED_MODELS.
+- 409 mapping added to `DomainExceptionFilter` for `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`.
+
+### Bugs found + fixed during spec writing
+1. `checkInStop` threw on already-COMPLETED stop instead of idempotent no-op (contradicted its own docstring + tasks 3.11).
+2. `assignDriver` wrote to a dangling `_driverUserId` property; converted to getter + backing field so reassignment reaches `toPersistence()`.
+
+### Verification
+- `pnpm build` exit 0 (green, 3 runs).
+- Unit specs: `delivery-route.entity.spec.ts` + `delivery-routes.service.spec.ts` — 2 suites / 35 tests pass.
+- Regression: `src/sales` + `src/auth` — 35 suites / 803 tests pass.
+- CASL runtime semantics validated against installed @casl/ability 6.8.0 (string-subject short-circuits conditions; tagged-instance re-check evaluates `{ driverUserId }`).
+
+### Notes for WU3
+- Outbox emission currently stubbed via `console.info` seam in `checkInStop`; WU3 wires the real outbox table insert.
+- `DeliveryRouteResponseDto` timeline (`buildDeliveryRouteTimeline`) is WU3.
+
+---
 
 ## Structured status (consumed / produced)
 

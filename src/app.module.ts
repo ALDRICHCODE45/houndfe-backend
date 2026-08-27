@@ -51,6 +51,11 @@ import { HrTimeOffInngestRegistrar } from './hr-time-off/inngest/hr-time-off-inn
 // the sales bounded context (future invoice/report/quote templates land here).
 import { PdfGenerationModule } from './pdf-generation/pdf-generation.module';
 import { QuotationsModule } from './quotations/quotations.module';
+// WU2 — delivery-routes bounded context (bounded-context skeleton +
+// CASL/guard extension + Sale mirror). Outbox/Inngest/email wiring +
+// the dedicated poller/dispatcher + React Email template + DTO timeline
+// + read model land in WU3 (own module + registrar in app.module.ts).
+import { DeliveryRoutesModule } from './delivery-routes/delivery-routes.module';
 
 @Module({
   imports: [
@@ -121,6 +126,12 @@ import { QuotationsModule } from './quotations/quotations.module';
     // customer + price list). WU3 widens the engine dependency,
     // WU4 adds the PDF/email wiring through PdfGenerationModule.
     QuotationsModule,
+    // delivery-routes / WU2 — bounded-context skeleton + CASL/guard
+    // extension + Sale mirror. Self-contained: imports AuthModule +
+    // SalesModule, exports DeliveryRoutesService for future read-
+    // model consumers (WU3). WU3 adds the outbox/Inngest/email
+    // module + the top-level Inngest registrar alongside this line.
+    DeliveryRoutesModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
