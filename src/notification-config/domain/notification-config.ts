@@ -6,12 +6,18 @@
  * (3 tables: settings + recipients + actions). Pure type — no framework
  * or Prisma deps. v1 ships `LOW_STOCK` only; the adapter rejects anything
  * outside `NOTIFICATION_ACTION_KEYS` with `UNKNOWN_ACTION_KEY` (HTTP 400).
+ * delivery-routes / WU1 adds `DELIVERY_NEXT_STOP` (next-stop arriving-soon
+ * email from the route check-in pipeline).
  */
-export type NotificationActionKey = 'LOW_STOCK' | 'TIME_OFF_REQUESTED';
+export type NotificationActionKey =
+  | 'LOW_STOCK'
+  | 'TIME_OFF_REQUESTED'
+  | 'DELIVERY_NEXT_STOP';
 
 export const NOTIFICATION_ACTION_KEYS: readonly NotificationActionKey[] = [
   'LOW_STOCK',
   'TIME_OFF_REQUESTED',
+  'DELIVERY_NEXT_STOP',
 ] as const;
 
 export interface NotificationConfigView {

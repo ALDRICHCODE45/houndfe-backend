@@ -49,6 +49,7 @@ export type AppSubjects =
   | 'Quotation'
   | 'PaymentDetail'
   | 'PaymentMethod'
+  | 'DeliveryRoute'
   | 'all';
 
 /** CASL ability type for the application. */
@@ -522,5 +523,34 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'PaymentMethod',
     action: 'delete',
     description: 'Delete (logical) payment methods',
+  },
+
+  // DeliveryRoute permissions (delivery-routes / WU1).
+  // Per spec *RBAC Permissions for DeliveryRoute*: four CRUD-style
+  // permissions. `update` covers `start`, `checkInStop`, and `cancel` --
+  // there is no separate `'check-in'` permission. The `create`/`delete`
+  // presence on a role is the route-manager discriminator (design ADR-5;
+  // CASL subject-condition matcher wires it in WU2).
+  {
+    subject: 'DeliveryRoute',
+    action: 'read',
+    description: 'View delivery routes',
+  },
+  {
+    subject: 'DeliveryRoute',
+    action: 'create',
+    description: 'Create delivery routes (DRAFT)',
+  },
+  {
+    subject: 'DeliveryRoute',
+    action: 'update',
+    description:
+      'Edit routes in DRAFT; check-in / cancel routes in ACTIVE',
+  },
+  {
+    subject: 'DeliveryRoute',
+    action: 'delete',
+    description:
+      'Hard-delete a route that is still in DRAFT and has no stops',
   },
 ];

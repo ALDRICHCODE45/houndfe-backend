@@ -264,6 +264,35 @@ enum OutboxEventStatus {
 enum NotificationActionKey {
   LOW_STOCK
   TIME_OFF_REQUESTED
+  DELIVERY_NEXT_STOP
+}
+
+// ============================================================================
+// DELIVERY ROUTES ENUMS — delivery-routes / WU1
+// ============================================================================
+// `DeliveryRoute.status` four-state lifecycle:
+//   DRAFT     → ACTIVE       (admin/driver via POST /delivery-routes/:id/start)
+//   DRAFT     → CANCELLED    (admin/driver via POST /delivery-routes/:id/cancel)
+//   ACTIVE    → CANCELLED    (admin/driver via POST /delivery-routes/:id/cancel)
+//   ACTIVE    → COMPLETED    (auto when last stop check-in completes the route)
+// Per design.md §4.1 and §8.2. `COMPLETED` and `CANCELLED` are terminal.
+enum DeliveryRouteStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+// `DeliveryRouteStop.status` per-stop lifecycle:
+//   PENDING     → COMPLETED   (POST /delivery-routes/:id/stops/:stopId/check-in)
+//   PENDING     → IN_PROGRESS (reserved; not emitted by this change)
+// `SKIPPED` is reserved for forward-compatibility and NOT emitted by any
+// path in this change (design ADR Q3 / spec *Route Stop Model and Ordering*).
+enum DeliveryRouteStopStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
 }
 
 // ============================================================================
@@ -360,8 +389,15 @@ model Tenant {
   stockAlertStates          StockAlertState[]
   paymentDetails            PaymentDetail[]
   paymentMethods            PaymentMethod[]
+      // delivery-routes / WU1 — tenant-scoped delivery routes + per-route stops.
+      // Cascade delete from Tenant propagates to both tables (allowlist entry
+      // in src/shared/tenant/tenant-scoped-models.constant.ts is the runtime
+      // gate; the explicit relation array here keeps the schema-level relation
+      // graph complete and Prisma's reverse-relation inference happy).
+      deliveryRoutes            DeliveryRoute[]
+      deliveryRouteStops        DeliveryRouteStop[]
 
-  @@map("tenants")
+      @@map("tenants")
 }
 
 model ServiceCredential {
@@ -792,8 +828,12 @@ model Sale {
   appliedPromotion   SalePromotionApplied?
   promotionVetoes    SalePromotionVeto[]
   promotionOptIns    SalePromotionOptIn[]
+      // delivery-routes / WU1 — back-relation for DeliveryRouteStop.sale.
+      // onDelete: Restrict on the FK side (design ADR-2) so a Sale cannot be
+      // hard-deleted while referenced by any route stop.
+      deliveryRouteStops    DeliveryRouteStop[]
 
-  @@index([tenantId])
+      @@index([tenantId])
   @@index([tenantId, createdAt])
   @@index([tenantId, status, confirmedAt(sort: Desc)], map: "idx_sales_tenant_status_confirmedAt_desc")
   @@index([userId, status])
@@ -1099,6 +1139,11 @@ model User {
   saleComments           SaleComment[]           @relation("SaleCommentAuthor")
   reviewedReceipts       ReceiptEvidence[]       @relation("ReceiptReviewer")
   notificationRecipients NotificationRecipient[]
+  // delivery-routes / WU1 — named relation back-reference for the driver's
+  // assigned DeliveryRoute rows. A driver is a User with the `Driver` role;
+  // the DeliveryRoute.driverUserId FK uses onDelete: Restrict (design ADR-1)
+  // so a route cannot outlive its driver.
+  deliveryRoutes         DeliveryRoute[]              @relation("DeliveryRouteDriver")
 
   @@map("users")
 }
@@ -1911,4 +1956,69 @@ model StockAlertState {
   @@unique([tenantId, productId, variantKey])
   @@index([tenantId])
   @@map("stock_alert_states")
+}
+
+// ============================================================================
+// DELIVERY ROUTES — delivery-routes / WU1 (ADR-7 + design §4.2)
+// ============================================================================
+// Tenant-scoped bounded context that groups eligible Sale rows into an ordered
+// DeliveryRoute assigned to a driver User. Driver ownership is enforced by the
+// CASL subject-condition matcher (design ADR-5 — WU2 wiring).
+//
+// Schema-only additions in WU1; no runtime code reads/writes these tables yet.
+// Back-relations on Tenant, User and Sale are added in WU1 to keep the schema
+// relation graph complete (Prisma's reverse-relation inference).
+//
+// `DeliveryRouteStop.activeRouteId` is the denormalized ADR-7 marker column:
+// non-null exactly while the owning route is ACTIVE. It is referenced by the
+// partial unique index on (tenantId, saleId) WHERE activeRouteId IS NOT NULL,
+// which makes "one Sale in at most one ACTIVE route" enforceable by the DB.
+
+model DeliveryRoute {
+  id           String              @id @default(uuid())
+  tenantId     String
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  driverUserId String
+  driver       User                @relation("DeliveryRouteDriver", fields: [driverUserId], references: [id], onDelete: Restrict)
+  status       DeliveryRouteStatus @default(DRAFT)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  cancelledAt  DateTime?
+  notes        String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  stops DeliveryRouteStop[]
+
+  @@index([tenantId])
+  @@index([tenantId, driverUserId, status])
+  @@index([tenantId, status])
+  @@map("delivery_routes")
+}
+
+model DeliveryRouteStop {
+  id            String                  @id @default(uuid())
+  tenantId      String
+  tenant        Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  routeId       String
+  route         DeliveryRoute           @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  saleId        String
+  sale          Sale                    @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  sortOrder     Int
+  status        DeliveryRouteStopStatus @default(PENDING)
+  checkedInAt   DateTime?
+  completedAt   DateTime?
+  skippedReason String?
+  // ADR-7: non-null exactly while the owning route is ACTIVE. Feeds the
+  // partial unique index `delivery_route_stops_active_sale_uniq`. Never
+  // surfaced on the read model (see design §7.2).
+  activeRouteId String?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+
+  @@unique([routeId, sortOrder])
+  @@index([tenantId])
+  @@index([tenantId, saleId])
+  @@index([saleId])
+  @@map("delivery_route_stops")
 }
