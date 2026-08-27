@@ -62,7 +62,7 @@ export class OutboxPollerService {
           WHERE status = 'PENDING'
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
-            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested')
+            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify')
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED

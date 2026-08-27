@@ -61,30 +61,55 @@ export class CaslAbilityFactory {
       return build();
     }
 
-    for (const permission of permissions) {
-      can(permission.action, permission.subject);
-    }
-
-    // delivery-routes / WU2 — driver-ownership condition matcher
+    // delivery-routes / WU3 — driver-ownership condition matcher
     // (design ADR-5). The route-manager vs driver-only discriminator
     // is permission-derived: a caller is a route manager when ANY of
     // their granted `DeliveryRoute` permissions include `create` or
-    // `delete`. For driver-only callers we emit
+    // `delete`. For driver-only callers we emit ONLY the conditional
+    // rules:
     //   can('read',   'DeliveryRoute', { driverUserId: userId })
     //   can('update', 'DeliveryRoute', { driverUserId: userId })
     // so the `PermissionsGuard` can re-check with `subject(...)` and
     // CASL evaluates the condition against the typed subject (string
     // subjects ignore conditions — that's the bug ADR-5 fixes).
+    //
+    // CRITICAL: we MUST NOT also emit `can('read', 'DeliveryRoute')`
+    // for driver-only callers. CASL's `can(action, subject)` short-
+    // circuits as soon as ANY matching rule passes; an unconditional
+    // rule would leak through every tagged-subject instance check
+    // (a foreign driverUserId would still match because the
+    // unconditional rule grants the permission broadly). For route-
+    // managers we emit the unconditional rules in the loop below
+    // (their existence IS the explicit permission grant).
     const isRouteManager = permissions.some(
       (p) =>
         p.subject === 'DeliveryRoute' &&
         (p.action === 'create' || p.action === 'delete'),
     );
-    if (!isRouteManager) {
+    const isDriverOnly =
+      !isRouteManager &&
+      permissions.some((p) => p.subject === 'DeliveryRoute');
+
+    for (const permission of permissions) {
+      // Driver-only callers on DeliveryRoute read/update get the
+      // conditional rules emitted further down; skip the
+      // unconditional emit here so the condition is the ONLY
+      // matching rule on the ability for that subject+action.
+      if (
+        isDriverOnly &&
+        permission.subject === 'DeliveryRoute' &&
+        (permission.action === 'read' || permission.action === 'update')
+      ) {
+        continue;
+      }
+      can(permission.action, permission.subject);
+    }
+
+    if (isDriverOnly) {
       // Only emit the read/update condition when the caller actually
       // holds the base permission. A caller with neither read nor
-      // update on DeliveryRoute skips the condition entirely (no
-      // need to attach a condition they can't satisfy).
+      // update on DeliveryRoute gets no DeliveryRoute rules at all
+      // (no need to attach a condition they can't satisfy).
       const canRead = permissions.some(
         (p) => p.subject === 'DeliveryRoute' && p.action === 'read',
       );

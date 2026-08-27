@@ -43,6 +43,14 @@ import {
   SALE_REPOSITORY,
   type ISaleRepository,
 } from '../../sales/domain/sale.repository';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
+import {
+  DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
+  DELIVERY_ROUTE_OUTBOX_AGGREGATE_TYPE,
+  computeDeliveryNextStopIdempotencyKey,
+  type DeliveryNextStopNotifyPayload,
+} from '../outbox/delivery-route-outbox.types';
+import { buildDeliveryRouteTimeline } from '../domain/build-delivery-route-timeline';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type {
   IRouteOptimizer,
@@ -75,6 +83,7 @@ export class DeliveryRoutesService {
     private readonly optimizer: IRouteOptimizer,
     private readonly tenantPrisma: TenantPrismaService,
     private readonly cls: ClsService<TenantClsStore>,
+    private readonly outboxWriter: OutboxWriterService,
   ) {}
 
   // ── Use cases ────────────────────────────────────────────────────────
@@ -223,15 +232,18 @@ export class DeliveryRoutesService {
    *      { id, tenantId }` raises `P2025` on a missing sale; we map
    *      that to `DeliveryRouteNotFoundError` (404) so a tampered
    *      saleId surfaces uniformly.
-   *   4. When a `nextStop` exists, the service STUBS the next-stop
-   *      outbox payload (carried on the result for WU3 wiring). WU2
-   *      does NOT emit the outbox row — that lands in WU3 with the
-   *      dedicated poller/dispatcher + `OutboxWriterService.publish`.
+   *   4. When a `nextStop` exists, the service emits EXACTLY ONE
+   *      `delivery.next_stop.notify` outbox row inside the same
+   *      transaction via `OutboxWriterService.publish(tx, …)`. The row
+   *      carries the next-sale snapshot (name, address label, write-
+   *      time email). The Inngest function re-resolves the
+   *      authoritative email at send-time so a tenant edit between
+   *      check-in and dispatch does not lose the recipient.
    *   5. Persist the aggregate inside the same transaction.
    *
    * Idempotency: the aggregate's `checkInStop` is a no-op on an
    * already-COMPLETED stop, so a replayed transaction surfaces the
-   * same response without a second write.
+   * same response without a second outbox row.
    */
   async checkInStop(
     ctx: DeliveryRouteRequestContext,
@@ -239,11 +251,17 @@ export class DeliveryRoutesService {
     stopId: string,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
-    const result = await this.repo.runInTransaction(async (tx) => {
+    await this.repo.runInTransaction(async (tx) => {
       const existing = await this.findByIdInTx(tx, tenantId, routeId);
       if (!existing) {
         throw new DeliveryRouteNotFoundError(routeId);
       }
+      // Capture the pre-call stop status so a replay (already-COMPLETED
+      // stop) can be detected — the aggregate's `checkInStop` is
+      // idempotent and would otherwise return the existing nextStop,
+      // causing a duplicate outbox row on a retried check-in.
+      const preStop = existing.stops.find((s) => s.id === stopId);
+      const wasPending = preStop?.status === 'PENDING';
       const checkIn = existing.checkInStop({ stopId });
 
       // Sale mirror flip — uses the same tx so it joins the route save.
@@ -264,42 +282,41 @@ export class DeliveryRoutesService {
         throw error;
       }
 
-      const saved = await this.saveInTx(tx, existing);
+      // Persist the aggregate FIRST so the outbox row references the
+      // post-check-in state of the route. The write is inside the same
+      // tx as the outbox insert, so a rollback on either write drops
+      // both — the contract the dedicated poller/dispatcher relies on.
+      await this.saveInTx(tx, existing);
 
-      // WU3 will use `checkIn.nextStop` to emit the next-stop outbox
-      // row. For WU2 we keep the payload structure on the result so the
-      // spec's "exactly one outbox row when a next stop exists" assertion
-      // is satisfiable from the entity spec without depending on the
-      // outbox table writes.
-      return {
-        routeId: saved.id,
-        completedStopId: checkIn.completedStop.id,
-        completedSaleId: checkIn.completedStop.saleId,
-        nextStop: checkIn.nextStop
-          ? {
-              stopId: checkIn.nextStop.id,
-              saleId: checkIn.nextStop.saleId,
-            }
-          : null,
-      };
+      // Emit the next-stop outbox row ONLY when:
+      //   (a) a next stop exists (route is still ACTIVE), AND
+      //   (b) the stop was PENDING before this call (idempotency —
+      //       a replayed COMPLETED stop is a no-op, so no second row).
+      // The aggregate's `checkInStop` returns `nextStop: null` when the
+      // route just auto-completed, satisfying (a). The `wasPending`
+      // snapshot satisfies (b).
+      if (checkIn.nextStop && wasPending) {
+        const payload = await this.composeNextStopPayload(
+          tx,
+          tenantId,
+          existing,
+          checkIn.completedStop.id,
+          checkIn.nextStop.id,
+          checkIn.nextStop.saleId,
+        );
+        await this.outboxWriter.publish(
+          tx,
+          tenantId,
+          DELIVERY_ROUTE_OUTBOX_AGGREGATE_TYPE,
+          existing.id,
+          DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
+          payload as unknown as Prisma.InputJsonValue,
+        );
+      }
     });
 
-    // The next-stop payload above is the WU3 seam; not surfaced on the
-    // DTO yet. Logging keeps it observable while the WU2 gate is in
-    // effect so integration specs in WU3 can prove the choreography
-    // even before the outbox write lands.
-    if (result.nextStop) {
-      // eslint-disable-next-line no-console
-      console.info('[DeliveryRoutesService.checkInStop] next-stop payload', {
-        routeId: result.routeId,
-        completedStopId: result.completedStopId,
-        nextStopId: result.nextStop.stopId,
-        nextSaleId: result.nextStop.saleId,
-      });
-    }
-
     return this.toResponseDto(
-      await this.requireReadModel({ tenantId, id: result.routeId }),
+      await this.requireReadModel({ tenantId, id: routeId }),
     );
   }
 
@@ -329,8 +346,8 @@ export class DeliveryRoutesService {
   }
 
   /**
-   * `GET /delivery-routes/:id` — read model. Cross-tenant miss → 404
-   * (`DeliveryRouteNotFoundError`).
+   * `GET /delivery-routes/:id` — read model + timeline. Cross-tenant
+   * miss → 404 (`DeliveryRouteNotFoundError`).
    */
   async getById(
     ctx: DeliveryRouteRequestContext,
@@ -461,8 +478,8 @@ export class DeliveryRoutesService {
     return tenantId;
   }
 
-  /** Map a read model into the wire DTO. ISO-string the dates; empty
-   *  timeline for WU2 (filled in WU3 by `buildDeliveryRouteTimeline`). */
+  /** Map a read model into the wire DTO. ISO-string the dates; attach the
+   *  timeline from `buildDeliveryRouteTimeline` (WU3). */
   private toResponseDto(row: DeliveryRouteReadModel): DeliveryRouteResponseDto {
     return {
       id: row.id,
@@ -487,9 +504,146 @@ export class DeliveryRoutesService {
         customer: stop.customer,
         shippingAddress: stop.shippingAddress,
       })),
-      // WU3 — empty array. The field is reserved on the wire so the
-      // FE contract is stable across the chained-PR boundary.
-      timeline: [],
+      timeline: buildDeliveryRouteTimeline({
+        createdAt: row.createdAt,
+        startedAt: row.startedAt,
+        completedAt: row.completedAt,
+        cancelledAt: row.cancelledAt,
+        driver: row.driver ? { id: row.driver.id, name: row.driver.name } : null,
+        stops: row.stops.map((stop) => ({
+          id: stop.id,
+          sortOrder: stop.sortOrder,
+          checkedInAt: stop.checkedInAt,
+        })),
+      }),
     };
   }
+
+  /**
+   * Compose the next-stop outbox payload from the supplied tx client.
+   *
+   * Reads the next sale's `folio`, `customer.firstName`/`lastName`/
+   * `email`, and `shippingAddress` so the Inngest function can render
+   * the email body without re-querying. The email is a write-time
+   * SNAPSHOT — the Inngest function re-resolves the authoritative
+   * email at send-time via `ISaleCustomerEmailLookup`. The customer
+   * name and address are pre-formatted (whitespace-cleaned) so the
+   * template renders identically regardless of the DB state.
+   *
+   * Tenant scoping is enforced at the `where` clause; a vanished /
+   * cross-tenant sale returns `null` projections and the payload
+   * gracefully degrades (name/email/label all null → template still
+   * renders with a generic greeting).
+   */
+  private async composeNextStopPayload(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    route: DeliveryRoute,
+    currentStopId: string,
+    nextStopId: string,
+    nextSaleId: string,
+  ): Promise<DeliveryNextStopNotifyPayload> {
+    const prisma = tx as unknown as ReturnType<TenantPrismaService['getClient']>;
+    const sale = await prisma.sale.findFirst({
+      where: { id: nextSaleId, tenantId },
+      select: {
+        folio: true,
+        customer: {
+          select: { firstName: true, lastName: true, email: true },
+        },
+        shippingAddress: {
+          select: {
+            label: true,
+            street: true,
+            exteriorNumber: true,
+            interiorNumber: true,
+            zipCode: true,
+            neighborhood: true,
+            municipality: true,
+            city: true,
+            state: true,
+          },
+        },
+      },
+    });
+
+    const customer = sale?.customer ?? null;
+    const address = sale?.shippingAddress ?? null;
+    const fullName = customer
+      ? `${customer.firstName ?? ''}${
+          customer.lastName ? ' ' + customer.lastName : ''
+        }`.trim() || null
+      : null;
+    const email =
+      customer?.email && customer.email.trim().length > 0
+        ? customer.email.trim()
+        : null;
+    const addressLabel = address ? formatShippingAddress(address) : null;
+    const occurredAt = new Date().toISOString();
+
+    void route;
+    void nextStopId;
+
+    return {
+      tenantId,
+      routeId: route.id,
+      currentStopId,
+      nextStopId,
+      nextSaleId,
+      nextCustomerName: fullName,
+      nextAddressLabel: addressLabel,
+      nextCustomerEmail: email,
+      idempotencyKey: computeDeliveryNextStopIdempotencyKey({
+        tenantId,
+        currentStopId,
+      }),
+      occurredAt,
+    };
+  }
+}
+
+/**
+ * Format a `CustomerAddress` row into a multi-line label suitable for
+ * the email body. Returns `null` when every line would be empty
+ * (defensive — the template's `nextAddressLabel` block is conditionally
+ * rendered, so an all-empty label degrades gracefully).
+ */
+function formatShippingAddress(addr: {
+  label: string | null;
+  street: string | null;
+  exteriorNumber: string | null;
+  interiorNumber: string | null;
+  neighborhood: string | null;
+  zipCode: string | null;
+  municipality: string | null;
+  city: string | null;
+  state: string | null;
+}): string | null {
+  const lines: string[] = [];
+  if (addr.label && addr.label.trim().length > 0) {
+    lines.push(addr.label.trim());
+  }
+  const streetLine = [
+    addr.street,
+    addr.exteriorNumber,
+    addr.interiorNumber ? `Int. ${addr.interiorNumber}` : null,
+  ]
+    .filter((part): part is string => Boolean(part && part.trim().length > 0))
+    .join(' ')
+    .trim();
+  if (streetLine.length > 0) lines.push(streetLine);
+  const localityLine = [
+    addr.neighborhood,
+    addr.municipality,
+    addr.city,
+    addr.state,
+  ]
+    .filter((part): part is string => Boolean(part && part.trim().length > 0))
+    .join(', ')
+    .trim();
+  if (localityLine.length > 0) lines.push(localityLine);
+  if (addr.zipCode && addr.zipCode.trim().length > 0) {
+    lines.push(`CP ${addr.zipCode.trim()}`);
+  }
+  return lines.length > 0 ? lines.join('\n') : null;
 }

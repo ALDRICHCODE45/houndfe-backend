@@ -26,9 +26,44 @@ export type DeliveryRouteStopStatusDto =
   | 'COMPLETED'
   | 'SKIPPED';
 
-/** WU3 — `buildDeliveryRouteTimeline` will fill this with the
- *  discriminated union from design §7.1. WU2 returns an empty array. */
-export type DeliveryRouteTimelineEventDto = unknown;
+/**
+ * WU3 — `buildDeliveryRouteTimeline` fills this with the discriminated
+ * union from design §7.1. WU2 returned an empty array; WU3 narrows the
+ * shape so the FE has a stable contract.
+ */
+export type DeliveryRouteTimelineActorDto = {
+  id: string;
+  name: string;
+};
+
+export type DeliveryRouteTimelineEventDto =
+  | {
+      type: 'ROUTE_CREATED';
+      at: string;
+      actor: DeliveryRouteTimelineActorDto | null;
+    }
+  | {
+      type: 'ROUTE_STARTED';
+      at: string;
+      actor: DeliveryRouteTimelineActorDto | null;
+    }
+  | {
+      type: 'STOP_CHECKED_IN';
+      at: string;
+      stopId: string;
+      sortOrder: number;
+      actor: DeliveryRouteTimelineActorDto | null;
+    }
+  | {
+      type: 'ROUTE_COMPLETED';
+      at: string;
+      actor: DeliveryRouteTimelineActorDto | null;
+    }
+  | {
+      type: 'ROUTE_CANCELLED';
+      at: string;
+      actor: DeliveryRouteTimelineActorDto | null;
+    };
 
 export interface DeliveryRouteDriverDto {
   id: string;

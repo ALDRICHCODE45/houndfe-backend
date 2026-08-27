@@ -119,12 +119,14 @@ describe('OutboxPollerService', () => {
         capturedCalls.find((c) =>
           /SELECT\s+id\s+FROM\s+outbox_events/i.test(c),
         ) ?? '';
-      // Slice 4: exclusion now covers BOTH dedicated event types —
-      // the low-stock poller claims `stock.low.detected`, the
-      // hr-time-off poller claims `hr.timeoff.requested`. The generic
-      // poller must skip both.
+      // Slice 4 + WU3 (delivery-routes): exclusion covers ALL three
+      // dedicated event types — low-stock (`stock.low.detected`),
+      // hr-time-off (`hr.timeoff.requested`), and delivery-routes
+      // (`delivery.next_stop.notify`). The generic poller must skip
+      // every dedicated-type row so the dedicated pollers own them
+      // exclusively.
       expect(claimSql).toContain(
-        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested')`,
+        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify')`,
       );
     });
 

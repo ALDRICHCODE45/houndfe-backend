@@ -56,6 +56,12 @@ import { QuotationsModule } from './quotations/quotations.module';
 // the dedicated poller/dispatcher + React Email template + DTO timeline
 // + read model land in WU3 (own module + registrar in app.module.ts).
 import { DeliveryRoutesModule } from './delivery-routes/delivery-routes.module';
+// WU3 - dedicated delivery-routes outbox poller + dispatcher. Own
+// module so the Inngest dep graph doesn't pollute transitive chains.
+import { DeliveryRoutesOutboxModule } from './delivery-routes/outbox/delivery-routes-outbox.module';
+// WU3 - registers the delivery-next-stop-notify Inngest function.
+// Top-level provider so the dep graph resolves through AppModule.
+import { DeliveryRoutesInngestRegistrar } from './delivery-routes/inngest/delivery-routes-inngest-registrar';
 
 @Module({
   imports: [
@@ -132,12 +138,23 @@ import { DeliveryRoutesModule } from './delivery-routes/delivery-routes.module';
     // model consumers (WU3). WU3 adds the outbox/Inngest/email
     // module + the top-level Inngest registrar alongside this line.
     DeliveryRoutesModule,
-  ],
+  // delivery-routes / WU3 — dedicated poller/dispatcher for the
+  // delivery.next_stop.notify outbox rows. Mirrors
+  // LowStockOutboxModule / HrTimeOffOutboxModule placement.
+  DeliveryRoutesOutboxModule,
+],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
   // NotificationConfigRepo + UserEmailLookup + TenantRunner) resolves
   // through AppModule's imports WITHOUT forcing those deps into every
   // transitive chain (e.g. ChatbotApiModule's tests).
-  providers: [LowStockInngestRegistrar, HrTimeOffInngestRegistrar],
+  providers: [
+    LowStockInngestRegistrar,
+    HrTimeOffInngestRegistrar,
+    // delivery-routes / WU3 — Inngest function registrar for the
+    // delivery-next-stop-notify event. Same registration pattern as
+    // the low-stock / hr-time-off registrars.
+    DeliveryRoutesInngestRegistrar,
+  ],
 })
 export class AppModule {}

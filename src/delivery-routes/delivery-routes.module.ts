@@ -32,8 +32,12 @@ import { DeliveryRoutesController } from './presentation/delivery-routes.control
 import { DeliveryRoutesService } from './application/delivery-routes.service';
 import { PrismaDeliveryRouteRepository } from './infrastructure/prisma-delivery-route.repository';
 import { ManualRouteOptimizer } from './infrastructure/manual-route-optimizer';
+import { PrismaSaleCustomerEmailRepository } from './infrastructure/prisma-sale-customer-email.repository';
 import { DELIVERY_ROUTE_REPOSITORY } from './domain/delivery-route.repository';
 import { ROUTE_OPTIMIZER } from './domain/ports/route-optimizer.port';
+import {
+  SALE_CUSTOMER_EMAIL_LOOKUP,
+} from './domain/ports/sale-customer-email.port';
 import {
   SubjectInstanceResolver,
   SubjectInstanceResolverRegistry,
@@ -90,6 +94,15 @@ class DeliveryRouteSubjectResolverRegistrar implements OnApplicationBootstrap {
       provide: ROUTE_OPTIMIZER,
       useClass: ManualRouteOptimizer,
     },
+    // WU3 — expose the SALE_CUSTOMER_EMAIL_LOOKUP port so the
+    // DeliveryRoutesInngestRegistrar (AppModule scope) can inject it.
+    // The adapter uses PrismaService directly (not TenantPrismaService)
+    // because the Inngest handler opens its own CLS scope inside the
+    // step body.
+    {
+      provide: SALE_CUSTOMER_EMAIL_LOOKUP,
+      useClass: PrismaSaleCustomerEmailRepository,
+    },
     {
       // Side-effect provider: registers the DeliveryRoute subject-
       // instance resolver into the static registry at
@@ -99,6 +112,9 @@ class DeliveryRouteSubjectResolverRegistrar implements OnApplicationBootstrap {
       useClass: DeliveryRouteSubjectResolverRegistrar,
     },
   ],
-  exports: [DeliveryRoutesService],
+  exports: [
+    DeliveryRoutesService,
+    SALE_CUSTOMER_EMAIL_LOOKUP,
+  ],
 })
 export class DeliveryRoutesModule {}
