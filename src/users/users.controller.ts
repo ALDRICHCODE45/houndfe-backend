@@ -16,4 +16,16 @@ export class UsersController {
   findAssignable(): Promise<AssignableUserDto[]> {
     return this.usersService.findAssignable();
   }
+
+  /**
+   * Users assignable as `driverUserId` on a delivery route. Route-manager
+   * only (`create:DeliveryRoute`) — the manager is the one who creates
+   * routes and assigns the driver. Returns users whose tenant role is a
+   * pure driver (read + update on DeliveryRoute, no create/delete).
+   */
+  @Get('assignable-drivers')
+  @RequirePermissions(['create', 'DeliveryRoute'])
+  findAssignableDrivers(): Promise<AssignableUserDto[]> {
+    return this.usersService.findAssignableDrivers();
+  }
 }
