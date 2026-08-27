@@ -211,6 +211,24 @@ Status: **implemented + verified** (not yet committed by parent).
 - `DeliveryRouteResponseDto` timeline (`buildDeliveryRouteTimeline`) is WU3.
 
 ---
+## WU3 — Durable pipeline + read model + tests + docs (complete)
+
+Status: **implemented + verified** (not yet committed by parent).
+
+### Summary
+- Outbox: event type `delivery.next_stop.notify` + real insert inside `checkInStop` transaction (replaced WU2 console.info seam); dedicated poller + dispatcher; generic poller exclusion extended.
+- Inngest: `delivery/next-stop.notify` function (config re-gate → authoritative email lookup → null-skip → render+MAILER) + registrar.
+- Email: React Email template `delivery-next-stop.email.tsx` (Spanish, "Tu paquete está por llegar").
+- Read model: `build-delivery-route-timeline.ts` + `DeliveryRouteResponseDto` timeline wiring.
+- Sale customer email lookup port (`sale-customer-email.port.ts` + prisma adapter).
+- Tests: unit suite 211 suites / 2929 tests green; integration specs (markSaleDelivered 4/4, delivery-route repository 9/9) against test DB 5433 (ADR-7 P2002 → 409 verified against real Postgres).
+- Docs: `docs/delivery-routes-frontend.md`.
+
+### Notes
+- Cross-tenant `markSaleDelivered` is a hard P2025 (verified) → maps to DeliveryRouteNotFoundError.
+- Tenant-scoped Prisma factory injects CLS tenantId overriding explicit where; integration cross-tenant tests switch CLS tenant.
+
+---
 
 ## Structured status (consumed / produced)
 
