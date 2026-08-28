@@ -112,9 +112,7 @@ Para mostrar "ventas por entregar", filtrar el listado existente:
 GET /sales?deliveryStatus=PENDING
 ```
 
-El filtro `deliveryStatus` ya existe (CSV, acepta múltiples valores separados por coma, p. ej. `PENDING,SHIPPED`). Valores válidos hoy: `PENDING`, `DELIVERED`, `NOT_APPLICABLE`.
-
-> Nota: `SHIPPED` todavía no es un valor filtrable en el listado (gap preexistente, fuera de alcance de este cambio). Para POS alcanza con filtrar `PENDING`.
+El filtro `deliveryStatus` ya existe (CSV, acepta múltiples valores separados por coma, p. ej. `PENDING,SHIPPED`). Valores válidos: `PENDING`, `SHIPPED`, `DELIVERED`, `NOT_APPLICABLE`.
 
 ## 7) Notas de UX sugeridas (frontend)
 

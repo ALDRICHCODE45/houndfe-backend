@@ -743,7 +743,7 @@ Authorization: Bearer <jwt>
 | `q` | `string` | No | — | búsqueda libre | — |
 | `status` | `csv enum[]` | No | — | `DRAFT` \| `CONFIRMED` \| `CANCELED` | max 50 |
 | `paymentStatus` | `csv enum[]` | No | — | `PAID` \| `PARTIAL` \| `CREDIT` | max 50 |
-| `deliveryStatus` | `csv enum[]` | No | — | `PENDING` \| `DELIVERED` \| `NOT_APPLICABLE` | max 50 |
+| `deliveryStatus` | `csv enum[]` | No | — | `PENDING` \| `SHIPPED` \| `DELIVERED` \| `NOT_APPLICABLE` | max 50 |
 | `paymentMethod` | `csv enum[]` | No | — | `CASH` \| `CARD_CREDIT` \| `CARD_DEBIT` \| `TRANSFER` | max 50 |
 | `folio` | `csv string[]` | No | — | valores string trim/dedupe | max 200 |
 | `cashierUserId` | `csv uuid[]` | No | — | UUID | max 200 |
@@ -860,7 +860,7 @@ El parámetro `q` busca en:
 | `folio` | `string` | Sí (`null` para DRAFT) | Formato `A-YYYYMM-NNNNNN` |
 | `status` | `string` | No | `'DRAFT'` / `'CONFIRMED'` |
 | `paymentStatus` | `string` | Sí (`null` para DRAFT) | `'PAID'` / `'PARTIAL'` / `'CREDIT'` |
-| `deliveryStatus` | `string` | No | `'PENDING'` / `'DELIVERED'` / `'NOT_APPLICABLE'` |
+| `deliveryStatus` | `string` | No | `'PENDING'` / `'SHIPPED'` / `'DELIVERED'` / `'NOT_APPLICABLE'` |
 | `totalCents` | `number` | No | En centavos |
 | `debtCents` | `number` | No | `totalCents - paidCents` |
 | `confirmedAt` | `string` (ISO) | Sí (`null` para DRAFT) | |
@@ -1129,7 +1129,7 @@ Venta no encontrada o de otro tenant → `404`.
 | | `debtCents` | `number` | No | `totalCents - paidCents` |
 | | `changeDueCents` | `number` | No | Solo > 0 si hay cash y PAID |
 | **Estados** | `paymentStatus` | `string` | Sí | `'PAID'` / `'PARTIAL'` / `'CREDIT'` |
-| | `deliveryStatus` | `string` | No | `'PENDING'` / `'DELIVERED'` / `'NOT_APPLICABLE'` |
+| | `deliveryStatus` | `string` | No | `'PENDING'` / `'SHIPPED'` / `'DELIVERED'` / `'NOT_APPLICABLE'` |
 | **Actores** | `customer` | `{ id, name }` | Sí | `null` = "Público en General" |
 | | `cashier` | `{ id, name }` | No | |
 | | `seller` | `{ id, name }` | Sí | `null` = sin vendedor |

@@ -43,6 +43,7 @@ export enum ListSalesPaymentStatus {
 
 export enum ListSalesDeliveryStatus {
   PENDING = 'PENDING',
+  SHIPPED = 'SHIPPED',
   DELIVERED = 'DELIVERED',
   NOT_APPLICABLE = 'NOT_APPLICABLE',
 }

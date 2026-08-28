@@ -237,6 +237,27 @@ describe('ListSalesQueryDto', () => {
       ]);
     });
 
+    it('accepts deliveryStatus SHIPPED single value csv', async () => {
+      const dto = makeDto({ deliveryStatus: 'SHIPPED' });
+      const errors = await validate(dto);
+
+      expect(errors).toHaveLength(0);
+      expect(dto.deliveryStatus).toEqual([
+        ListSalesDeliveryStatus.SHIPPED,
+      ]);
+    });
+
+    it('accepts deliveryStatus multi-value csv including SHIPPED (route picker case)', async () => {
+      const dto = makeDto({ deliveryStatus: 'PENDING,SHIPPED' });
+      const errors = await validate(dto);
+
+      expect(errors).toHaveLength(0);
+      expect(dto.deliveryStatus).toEqual([
+        ListSalesDeliveryStatus.PENDING,
+        ListSalesDeliveryStatus.SHIPPED,
+      ]);
+    });
+
     it('accepts customerId csv with two uuids', async () => {
       const dto = makeDto({
         customerId:

@@ -893,7 +893,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
     channel?: 'POS' | 'ONLINE';
     register?: string;
-    deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE';
+    deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
     customerId?: string | null;
     sellerUserId?: string | null;
     dueDate?: Date | null;
