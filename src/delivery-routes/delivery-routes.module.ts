@@ -28,6 +28,7 @@
 import { Inject, Injectable, Module, OnApplicationBootstrap } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { SalesModule } from '../sales/sales.module';
+import { OutboxModule } from '../shared/outbox/outbox.module';
 import { DeliveryRoutesController } from './presentation/delivery-routes.controller';
 import { DeliveryRoutesService } from './application/delivery-routes.service';
 import { PrismaDeliveryRouteRepository } from './infrastructure/prisma-delivery-route.repository';
@@ -82,7 +83,7 @@ class DeliveryRouteSubjectResolverRegistrar implements OnApplicationBootstrap {
 }
 
 @Module({
-  imports: [AuthModule, SalesModule],
+  imports: [AuthModule, SalesModule, OutboxModule],
   controllers: [DeliveryRoutesController],
   providers: [
     DeliveryRoutesService,
