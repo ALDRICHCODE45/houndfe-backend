@@ -429,6 +429,28 @@ Ambos formatos aceptan opcionalmente `dueDate` (ISO-8601) en el body. Aplica sol
 }
 ```
 
+#### Campo opcional compartido: `delivery` (venta para entrega)
+
+`delivery?: boolean` (opcional). Marca la venta como **"para entrega a domicilio"** al cobrar. Si es `true`, la venta confirmada queda con `deliveryStatus: 'PENDING'` (en lugar del `DELIVERED` por defecto) y se vuelve elegible para agregarse a una `DeliveryRoute`.
+
+**Requisito**: la venta DEBE tener una dirección de envío asignada (`shippingAddressId != null`). Asignala antes de cobrar con `PUT /sales/drafts/:id/shipping-address` (ver §2.5.4). Si `delivery: true` y no hay dirección → `422 SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY`.
+
+- `delivery` omitido o `false` → comportamiento idéntico al actual (venta `DELIVERED`).
+- El flag entra en el hash de idempotencia: un retry con el mismo `Idempotency-Key` pero distinto valor de `delivery` → `409 IDEMPOTENCY_KEY_CONFLICT`.
+
+```json
+{
+  "payments": [
+    { "method": "cash", "amountCents": 55000 }
+  ],
+  "delivery": true
+}
+```
+
+| Campo | Tipo | Requerido | Reglas |
+|---|---|---|---|
+| `delivery` | `boolean` | No | Solo `true` activa el flujo de entrega. Requiere dirección asignada. |
+
 ### 3.3) Reglas de validación de pago (en orden de evaluación)
 
 | Regla | Error | HTTP |
@@ -449,6 +471,7 @@ Ambos formatos aceptan opcionalmente `dueDate` (ISO-8601) en el body. Aplica sol
 | Stock insuficiente al cobrar | `STOCK_INSUFFICIENT_AT_CONFIRM` | 409 |
 | Idempotency-Key con payload distinto | `IDEMPOTENCY_KEY_CONFLICT` | 409 |
 | Idempotency-Key en ejecución concurrente | `IDEMPOTENCY_KEY_IN_FLIGHT` | 409 |
+| `delivery: true` sin dirección de envío asignada | `SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY` | 422 |
 
 ### 3.4) Respuesta `200 OK`
 
