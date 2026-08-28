@@ -2413,6 +2413,12 @@ export class SalesService {
     const normalizedPayments = normalizeChargeRequestPayments(dto);
         const hashPayments = sortPaymentsForHash(normalizedPayments);
 
+    // pos-sale-delivery -- include the `delivery` flag in the
+    // idempotency requestHash (ADR-4). `?? false` makes omitted /
+    // `undefined` hash identically to explicit `false`; without the
+    // normalization `JSON.stringify` would drop the `undefined` key
+    // and a same-key retry with a flipped flag would silently
+    // replay the stale non-delivery payload.
     const requestHash = createHash('sha256')
       .update(
         JSON.stringify({
@@ -2420,6 +2426,7 @@ export class SalesService {
           actorId,
           payments: hashPayments,
           dueDate: dto.dueDate ?? null,
+          delivery: dto.delivery ?? false,
         }),
       )
       .digest('hex');
@@ -2476,6 +2483,18 @@ export class SalesService {
           'SALE_ALREADY_CONFIRMED',
           'SALE_ALREADY_CONFIRMED',
         );
+      }
+
+      // pos-sale-delivery -- POS cashier delivery flag. Placed
+      // immediately after the DRAFT lifecycle guard and BEFORE
+      // any recompute / pricing / stock / folio side effect so
+      // a guarded failure (missing `shippingAddressId`) cannot
+      // leave partial state in those tables. `markForDelivery()`
+      // itself throws `SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY`
+      // (HTTP 422) when the address is null; when omitted /
+      // `false` the aggregate's seeded `'DELIVERED'` is unchanged.
+      if (dto.delivery === true) {
+        sale.markForDelivery();
       }
 
       for (const item of sale.items) {
@@ -2621,6 +2640,16 @@ export class SalesService {
         dueDate: sale.dueDate,
         confirmedAt,
         folio,
+        // pos-sale-delivery -- ADR-2 explicit pass-through so the
+        // persisted `deliveryStatus` reaches `PENDING` when the
+        // cashier flagged the draft, and so today's `'DELIVERED'`
+        // default survives when the flag is omitted / `false`.
+        // Read from the aggregate (not re-derived from `dto.delivery`)
+        // so the aggregate is the single source of truth and the
+        // conditional-write rule of the prisma repo (`only write
+        // explicitly-provided fields`) never silently inherits a
+        // stale `'DELIVERED'` on a flagged charge.
+        deliveryStatus: sale.deliveryStatus,
         // Work Unit 5 — W1 fix: the charge-time recompute may have changed
         // per-line state (promotionId / discountAmountCents / unitPriceCents)
         // since the last `save`. Persist the recomputed SaleItem rows in the

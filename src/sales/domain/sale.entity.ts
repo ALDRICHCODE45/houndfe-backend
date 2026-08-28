@@ -726,6 +726,39 @@ export class Sale {
     this._shippingAddressId = addressId;
   }
 
+  /**
+   * pos-sale-delivery -- draft-only POS delivery marker. Called by
+   * SalesService.chargeDraft when the cashier sets delivery: true at
+   * charge time. Mirrors the setShippingAddress / markDelivered
+   * precedent: ensureDraft() is the lifecycle guard, the address
+   * invariant throws a dedicated BusinessRuleViolationError
+   * (SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY) that
+   * DomainExceptionFilter maps to HTTP 422 via its default branch
+   * (no per-code override exists), and the state mutation
+   * (_deliveryStatus = 'PENDING') is the last step so a guarded
+   * failure cannot leave the aggregate in a partial state.
+   *
+   * Centralized here so the conditional-write rule of
+   * PrismaSaleRepository.save and any future charge-like writer
+   * inherit the same invariant, keeping chargeDraft policy-free.
+   *
+   * No 'SHIPPED' write: the route check-in path owns the
+   * PENDING -> DELIVERED flip via markDelivered, and any SHIPPED
+   * writer stays ONLINE/bot-only.
+   */
+  markForDelivery(): void {
+    this.ensureDraft();
+
+    if (this._shippingAddressId === null) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY',
+        'SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY',
+      );
+    }
+
+    this._deliveryStatus = 'PENDING';
+  }
+
   private ensureDraft(): void {
     if (this.status !== 'DRAFT') {
       throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');

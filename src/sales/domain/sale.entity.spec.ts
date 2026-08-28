@@ -707,6 +707,71 @@ describe('Sale Entity', () => {
     });
   });
 
+  // pos-sale-delivery -- domain guard for the POS cashier's "flag for
+  // delivery" action at charge time. Mirrors the setShippingAddress /
+  // markDelivered pair: draft-only, throws BusinessRuleViolationError on
+  // guard violations, sets _deliveryStatus = 'PENDING' on success.
+  describe('markForDelivery', () => {
+    it('sets deliveryStatus to PENDING when DRAFT and shippingAddressId is non-null', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(sale.deliveryStatus).toBe('DELIVERED');
+
+      sale.markForDelivery();
+
+      expect(sale.deliveryStatus).toBe('PENDING');
+      expect(sale.shippingAddressId).toBe('addr-1');
+    });
+
+    it('throws SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY when DRAFT and shippingAddressId is null', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'DRAFT',
+        customerId: 'cust-1',
+        shippingAddressId: null,
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(() => sale.markForDelivery()).toThrow(
+        new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY',
+          'SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY',
+        ),
+      );
+      expect(sale.deliveryStatus).toBe('DELIVERED');
+    });
+
+    it('throws SALE_NOT_DRAFT on non-DRAFT sale (ensureDraft guard)', () => {
+      const sale = Sale.fromPersistence({
+        id: BASE_SALE_ID,
+        userId: USER_ID,
+        status: 'CONFIRMED',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(() => sale.markForDelivery()).toThrow(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+      expect(sale.deliveryStatus).toBe('DELIVERED');
+    });
+  });
+
   describe('addItem - add new item to sale', () => {
     it('should add new item when product not yet in sale', () => {
       const sale = Sale.create({

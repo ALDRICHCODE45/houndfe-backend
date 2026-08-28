@@ -2917,8 +2917,213 @@ describe('SalesService', () => {
       };
       expect(call.customerId).toBeNull();
     });
+    describe('pos-sale-delivery — delivery flag at charge time', () => {
+      const buildDraftWithAddress = (
+        id: string,
+        shippingAddressId: string | null = 'addr-1',
+      ) =>
+        Sale.fromPersistence({
+          id,
+          userId: 'user-1',
+          customerId: 'customer-1',
+          shippingAddressId,
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: `${id}-item-1`,
+              saleId: id,
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'Prod 1',
+              variantName: null,
+              quantity: 2,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+            },
+          ],
+        });
+
+      it('persists deliveryStatus PENDING when delivery=true and address is non-null', async () => {
+        const sale = buildDraftWithAddress('sale-charge-delivery-true');
+        setupHappyPathDraft(sale);
+
+        await service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            method: 'cash',
+            amountCents: 2000,
+            delivery: true,
+          } as never,
+          'idem-delivery-true',
+        );
+
+        expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+          expect.objectContaining({
+            deliveryStatus: 'PENDING',
+          }),
+        );
+        expect(saleRepo.allocateNextFolio).toHaveBeenCalledTimes(1);
+      });
+
+      it('throws SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY and skips every side effect when delivery=true and address is null', async () => {
+        const sale = buildDraftWithAddress(
+          'sale-charge-delivery-no-address',
+          null,
+        );
+        saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+        // We intentionally do NOT call setupHappyPathDraft() so any
+        // folio / stock / persist call would be visible.
+
+        await expect(
+          service.chargeDraft(
+            sale.id,
+            'user-1',
+            {
+              method: 'cash',
+              amountCents: 2000,
+              delivery: true,
+            } as never,
+            'idem-delivery-no-address',
+          ),
+        ).rejects.toMatchObject({
+          code: 'SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY',
+        });
+
+        expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+        expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+        expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+        const eventTypes = outboxWriter.publish.mock.calls.map(
+          (args) => args[4],
+        );
+        expect(eventTypes).not.toContain('sale.confirmed');
+      });
+
+      it('preserves today DELIVERED outcome when delivery field is omitted', async () => {
+        const sale = buildDraftWithAddress('sale-charge-delivery-omitted');
+        setupHappyPathDraft(sale);
+
+        await service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 2000 } as never,
+          'idem-delivery-omitted',
+        );
+
+        expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+          expect.objectContaining({
+            deliveryStatus: 'DELIVERED',
+          }),
+        );
+      });
+
+      it('preserves today DELIVERED outcome when delivery=false', async () => {
+        const sale = buildDraftWithAddress('sale-charge-delivery-false');
+        setupHappyPathDraft(sale);
+
+        await service.chargeDraft(
+          sale.id,
+          'user-1',
+          { method: 'cash', amountCents: 2000, delivery: false } as never,
+          'idem-delivery-false',
+        );
+
+        expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+          expect.objectContaining({
+            deliveryStatus: 'DELIVERED',
+          }),
+        );
+      });
+
+      it('includes delivery in the charge requestHash so flipped flag returns IDEMPOTENCY_KEY_CONFLICT', async () => {
+        const acquireChargeIdempotency =
+          saleRepo.acquireChargeIdempotency as unknown as jest.Mock;
+        const callHashes: string[] = [];
+        acquireChargeIdempotency.mockImplementation(
+          async (_saleId: string, _key: string, requestHash: string) => {
+            callHashes.push(requestHash);
+            if (callHashes.length === 1) {
+              return { kind: 'acquired', token: 'idem-row-1' };
+            }
+            return { kind: 'conflict' };
+          },
+        );
+
+        const saleTrue = buildDraftWithAddress(
+          'sale-charge-delivery-hash-flip',
+        );
+        saleRepo.findByIdForUpdate.mockResolvedValue(saleTrue);
+        productsService.getProductInfoForSale.mockResolvedValue({
+          unitPriceCents: 1000,
+        });
+        productsService.decrementStockForCharge.mockResolvedValue([]);
+        saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000099');
+        saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+        (saleRepo as any).markChargeIdempotencySucceeded = jest
+          .fn()
+          .mockResolvedValue(undefined);
+
+        await service.chargeDraft(
+          saleTrue.id,
+          'user-1',
+          { method: 'cash', amountCents: 2000, delivery: true } as never,
+          'idem-delivery-hash-flip',
+        );
+        const firstHash = callHashes[0];
+        expect(typeof firstHash).toBe('string');
+        expect(firstHash).toHaveLength(64);
+
+        await expect(
+          service.chargeDraft(
+            'sale-charge-delivery-hash-flip',
+            'user-1',
+            { method: 'cash', amountCents: 2000, delivery: false } as never,
+            'idem-delivery-hash-flip',
+          ),
+        ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+
+        const secondHash = callHashes[1];
+        expect(secondHash).not.toBe(firstHash);
+
+        // Sanity: omitted delivery and explicit false hash identically.
+        acquireChargeIdempotency.mockClear();
+        const ids: string[] = [];
+        (saleRepo.acquireChargeIdempotency as unknown as jest.Mock).mockImplementation(
+          async (_saleId: string, _key: string, requestHash: string) => {
+            ids.push(requestHash);
+            return { kind: 'acquired', token: 'idem-row-2' };
+          },
+        );
+        saleRepo.findByIdForUpdate.mockResolvedValue(saleTrue);
+        await service.chargeDraft(
+          'sale-charge-delivery-hash-flip',
+          'user-1',
+          { method: 'cash', amountCents: 2000 } as never,
+          'idem-hash-omitted',
+        );
+        await service.chargeDraft(
+          'sale-charge-delivery-hash-flip',
+          'user-1',
+          { method: 'cash', amountCents: 2000, delivery: false } as never,
+          'idem-hash-false',
+        );
+        expect(ids[0]).toBe(ids[1]);
+      });
+    });
   });
 
+  // ── pos-sale-delivery — chargeDraft honors the optional
+  //    `delivery` boolean on the DTO: passes `PENDING` to
+  //    persistChargeConfirmation when the flag is true and the
+  //    address is present, refuses with 422
+  //    SHIPPING_ADDRESS_REQUIRED_FOR_DELIVERY when the flag is true
+  //    and the address is absent (no persist, no folio, no stock,
+  //    no outbox), and keeps today's `DELIVERED` (read from the
+  //    aggregate) when the flag is omitted/false. The idem
+  //    requestHash MUST include the flag so a same-key retry with
+  //    a flipped flag is treated as `IDEMPOTENCY_KEY_CONFLICT`.
   // ── WU2 — Custom Payment Methods (D5): chargeDraft threading.
   //    Tests the new `paymentMethodId` field through the resolver,
   //    the snapshot under `metadataJson.catalog`, and the four
@@ -3491,6 +3696,15 @@ describe('SalesService', () => {
 
       // Compute the legacy hash independently so the assertion is
       // not tautological.
+      //
+      // pos-sale-delivery (ADR-4): the requestHash now also
+      // hashes `delivery: dto.delivery ?? false`. A legacy
+      // payload that omits `delivery` still hashes with
+      // `delivery: false`, which adds the new field to the JSON
+      // literal but keeps the byte representation stable for
+      // any caller without the new flag -- `JSON.stringify`
+      // collapses absent + explicit false into the same hash
+      // via the `?? false` normalization in `chargeDraft`.
       const createHash = require('crypto').createHash as (
         algorithm: string,
       ) => {
@@ -3507,6 +3721,7 @@ describe('SalesService', () => {
               { method: 'cash', amountCents: 1000 },
             ],
             dueDate: null,
+            delivery: false,
           }),
         )
         .digest('hex');

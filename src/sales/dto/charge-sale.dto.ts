@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsIn,
   IsInt,
   IsISO8601,
@@ -62,4 +63,14 @@ export class ChargeSaleDto {
   @IsOptional()
   @IsISO8601()
   dueDate?: string;
+
+  // pos-sale-delivery — POS cashier flag to confirm the sale as
+  // `deliveryStatus: 'PENDING'` (route-eligible) instead of inheriting the
+  // draft's `'DELIVERED'`. Omitted / `undefined` / `false` reproduce today's
+  // behavior; a non-boolean is rejected at the DTO layer with a 400
+  // class-validator error. Non-null `shippingAddressId` is required for
+  // `true` and is enforced by `Sale.markForDelivery()` (`sale.entity.ts`).
+  @IsOptional()
+  @IsBoolean()
+  delivery?: boolean;
 }
