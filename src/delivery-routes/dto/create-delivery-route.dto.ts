@@ -11,18 +11,18 @@
  * shape-only.
  */
 import {
+  ArrayMinSize,
   IsArray,
   IsOptional,
   IsString,
   IsUUID,
   MaxLength,
-  MinLength,
 } from 'class-validator';
 
 export class CreateDeliveryRouteDto {
   @IsArray()
   @IsUUID('4', { each: true })
-  @MinLength(1, { message: 'saleIds must contain at least one sale id' })
+  @ArrayMinSize(1, { message: 'saleIds must contain at least one sale id' })
   saleIds!: string[];
 
   @IsUUID('4')
