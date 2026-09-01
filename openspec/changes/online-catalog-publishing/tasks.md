@@ -1,0 +1,146 @@
+# Tasks — Online Catalog Publishing
+
+**Delivery:** backend-only; frontend remains paused. **Chain strategy:** stacked-to-main; merge strictly in listed order, with each work unit (WU) rebased so its diff contains only that slice.
+
+## Review Workload Forecast
+
+| Field                   | Value                                                                      |
+| ----------------------- | -------------------------------------------------------------------------- |
+| Estimated changed lines | **3,977–4,527** additions + deletions across 12 WUs (includes WU1a/WU1b/WU2a actuals: 362 + 396 + 399) |
+| 400-line budget risk    | High                                                                       |
+| Chained PRs recommended | Yes                                                                        |
+| Suggested split         | WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10 |
+| Delivery strategy       | auto-chain                                                                 |
+| Chain strategy          | stacked-to-main                                                            |
+| Overall range           | **3,977–4,527** (single source of truth)                                   |
+
+Decision needed before apply: No
+Chained PRs recommended: Yes
+Chain strategy: stacked-to-main
+400-line budget risk: High
+
+## F1 — Publication Foundation and Authenticated Round Trips
+
+### F1.WU1a — Additive persistence foundation (actual 362 lines; completed/passed; starts the chain)
+
+**Boundary:** started with the current Prisma schema and finished with generated client plus an additive, deployable M1–M5 migration. **Depends on:** none. **Follow-up:** WU1b adds bounded migration/seed evidence; WU2a consumes the verified persistence foundation; WU4/WU5 enforce M2/M6/M7 in code. **Rollback:** revert readers first; use a new forward migration for data/schema removal, never edit this migration. **Diagram:** `📍 WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [x] **[Pure schema | M1–M5]** Update `prisma/schema.prisma` with `CatalogPublishMode`, `CatalogStockPresentation`, `Tenant.catalogPublished`, tenant stock-default fields, Product/Variant catalog fields, `TenantCatalogPriceList`, `ProductCatalogPriceList`, relations, and the approved public-query indexes; register both new join models in `src/shared/tenant/tenant-scoped-models.constant.ts`. **Evidence:** `pnpm prisma validate`, `pnpm prisma generate`, and `pnpm build` passed; an independent schema/SQL drift audit passed. <!-- sdd-owner: implementation -->
+- [x] **[Pure schema | M1/M3/M4/M5]** Create `prisma/migrations/<UTC timestamp>_online_catalog_publishing/migration.sql` without changing prior migrations: add enums/tables/FKs/checks/indexes, the one-default partial unique index, M1 false default, M3 nullable-to-`INHERIT` backfill then non-null/default, M4 fail-closed sole-default preflight plus `WHERE NOT EXISTS`/`ON CONFLICT` idempotent binding insert, and M5 `SYSTEM_STATUS` product backfill with null variant overrides. Keep M2 and M6 explicitly data-neutral and document M7 as a reader policy comment. **Evidence:** `git diff --check` passed and the independent schema/SQL drift audit passed; `pnpm prisma migrate deploy` was intentionally not run without a disposable database. <!-- sdd-owner: implementation -->
+
+### F1.WU1b — Migration and clean-seed evidence (actual 396 lines; completed/passed)
+
+**Boundary:** started from WU1a's committed schema and migration and finished with compact no-PostgreSQL drift coverage, disposable-PostgreSQL migration evidence, and idempotent clean-seed catalog-default initialization. **Depends on:** WU1a. **Follow-up:** WU2a consumes the fully evidenced persistence foundation. **Rollback:** revert only the new evidence and seed initialization; retain the deployed additive migration, and use a new forward migration for any data/schema removal. **Diagram:** `WU1a → 📍 WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [x] **[Tests | T11]** Added `prisma/online-catalog-publishing-migration-drift.spec.ts`, covering M1/M3/M4/M5 SQL contracts, clean-preseed behavior, M4 guards/idempotency, constraints, tenant scoping, and the production seed helper. **Evidence:** focused Jest suite passed 32/32 without PostgreSQL. <!-- sdd-owner: implementation -->
+- [x] **[Tests | T11, T10]** Added `prisma/online-catalog-publishing-migration.integration.spec.ts`, which applies the real WU1a migration in isolated temporary schemas and proves existing-data M1/M3/M4/M5 outcomes, M4 insert idempotency, the one-default partial unique constraint, non-negative checks, and clean-preseed migration behavior. **Evidence:** dedicated disposable-PostgreSQL suite passed 7/7 with zero skips. <!-- sdd-owner: implementation -->
+- [x] **[Seed + tests | T11]** Added production helper `prisma/online-catalog-seed.ts` and invoked it from `prisma/seed.ts` after PUBLICO and seed tenants exist; tenants with any existing binding are preserved. **Evidence:** direct helper unit coverage is part of the 32/32 drift/helper pass. <!-- sdd-owner: implementation -->
+- [x] **[Test configuration]** Added isolated `prisma/jest.online-catalog-migration.config.js` with explicit disposable-DB opt-in and no shared global setup, plus local `prisma/tsconfig.json`; normal/integration discovery remains separated. **Evidence:** LSP clean, Prisma validate/generate and build passed, diff check passed. <!-- sdd-owner: implementation -->
+
+### F1.WU2a — Catalog-settings domain, port, and internal GET use case (estimated 250–330 lines)
+
+**Boundary:** start after WU1b; finish with an unreferenced `src/catalog-settings/**` domain, repository port, and injectable internal read use case, but no Prisma adapter, transaction replacement, HTTP route, DTO, permission, module registration, audit logging, or public/product behavior yet. **Depends on:** WU1b. **Follow-up:** WU2b adds Prisma persistence and real-DB evidence. **Rollback:** remove this unreferenced module before rolling back additive tables. **Diagram:** `WU1a → WU1b → 📍 WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [x] **[Pure backend code]** Create `src/catalog-settings/domain/tenant-catalog-settings.aggregate.ts`, `tenant-catalog-price-list.entity.ts`, and `catalog-settings.repository.ts` with `ICatalogSettingsRepository` plus `CATALOG_SETTINGS_REPOSITORY`; enforce unique IDs, unique global price-list IDs, child tenant consistency, one default for non-empty sets, publish-requires-default, explicit `CUSTOM_QUANTITY` integer `>= 0`, rejection of non-custom custom quantities, and `effectivePublication = isActive && catalogPublished`. **Accept:** `tenant-catalog-settings.aggregate.spec.ts` covers valid reconstruction and every rejected invariant. **Evidence:** focused WU2a Jest passed; 399-line diff and primary LSP clean. <!-- sdd-owner: implementation -->
+- [x] **[Pure backend code]** Implement injectable `src/catalog-settings/application/get-catalog-settings.use-case.ts` against the repository port only; return an internal application/aggregate-shaped result for WU2a, leaving final HTTP DTO shape to WU3. **Accept:** `get-catalog-settings.use-case.spec.ts` covers found/missing settings, no cross-tenant lookup, and port-level behavior without HTTP/RBAC concerns. **Evidence:** focused WU2a Jest passed 2 suites/17 tests; no catalog-settings TypeScript diagnostics. <!-- sdd-owner: implementation -->
+
+### F1.WU2b — Catalog-settings Prisma adapter and real persistence evidence (estimated 250–360 lines)
+
+**Boundary:** start after WU2a; finish with the transaction-safe Prisma adapter and integration evidence, still with no HTTP route, DTO, permission, module registration, audit logging, product/public behavior, or WU1a/WU1b schema/migration edits. **Depends on:** WU2a. **Follow-up:** WU3 adds RBAC/controller/module and final response DTO mapping. **Rollback:** remove `src/catalog-settings/**` before rolling back additive tables. **Diagram:** `WU1a → WU1b → WU2a → 📍 WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [ ] **[Pure backend code]** Implement `src/catalog-settings/infrastructure/prisma-catalog-settings.repository.ts`; use explicit `tenantId` predicates, `TenantPrismaService.runInTransaction()`, `tenantPrisma.getClient()` inside the transaction callback, tenant-row `FOR UPDATE`, in-transaction GlobalPriceList validation, ordered binding replacement, default assignment, reload, and default-coverage lookup. `actorUserId` remains accepted by the port but intentionally unused until WU3 audit logging; P2002-to-HTTP-409 mapping remains WU3/filter scope. **Accept:** mocked repository unit coverage proves scoped predicates/transaction sequencing and the port compiles against Prisma types. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T2, T11]** Add `src/catalog-settings/infrastructure/prisma-catalog-settings.repository.integration.spec.ts` for tenant isolation, atomic replacement, idempotent reads, rollback, cleanup of random `GlobalPriceList` fixtures, and partial-unique/default conflict behavior. **Accept:** `pnpm test:integration -- prisma-catalog-settings.repository.integration.spec.ts` passes against the migration. <!-- sdd-owner: implementation -->
+
+### F1.WU3 — Catalog-settings HTTP contract and dedicated authorization (estimated 330–390 lines)
+
+**Boundary:** add the independently testable authenticated API and bootstrap registration around WU2a/WU2b. **Depends on:** WU2b. **Follow-up:** WU4 product changes remain authorized by `update:Product`. **Rollback:** revert controller/module/permission references; seeded rows remain inert. **Diagram:** `WU1a → WU1b → WU2a → WU2b → 📍 WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [ ] **[Pure backend code]** Add `src/catalog-settings/dto/update-catalog-settings.dto.ts`, `catalog-settings-response.dto.ts`, `application/update-catalog-settings.use-case.ts`, `presentation/catalog-settings.controller.ts`, and `catalog-settings.module.ts`; wire `CatalogSettingsModule` in `src/app.module.ts`, use `ParseUUIDPipe`, caller/path scope rules, actor audit logging, `no-store` PATCH, and the approved GET/PATCH admin route. **Accept:** valid PATCH uses one atomic `replace`, invalid/default-not-public input has no write, and GET returns coverage warnings. <!-- sdd-owner: implementation -->
+- [ ] **[Pure backend code]** Add `TenantCatalogSettings` and exactly `read`/`update` entries in `src/auth/authorization/domain/permission.ts`; retain the existing idempotent bootstrap seeder algorithm and do not assign the new permission to product-editor roles. **Accept:** application bootstrap type-checks and `manage:all` remains the only implicit authorization path. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T2, T12]** Add the listed co-located `get-catalog-settings.use-case.spec.ts`, `update-catalog-settings.use-case.spec.ts`, `presentation/catalog-settings.controller.spec.ts`, `src/auth/authorization/domain/permission-registry-catalog-settings.spec.ts`, and `src/auth/authorization/infrastructure/permission.seeder.spec.ts`. Cover path/JWT tenant mismatch, UUID/enum/quantity rejection, product-editor denial, explicit grant, `manage:all`, and repeated seed upserts. **Accept:** `pnpm test -- catalog-settings permission` passes with no repository call on denied access. <!-- sdd-owner: implementation -->
+
+### F1.WU4 — Product and variant authenticated catalog fields (estimated 360–400 lines)
+
+**Boundary:** make product/variant writes and reads round-trip approved fields; do not modify public queries yet. **Depends on:** WU1b and WU3. **Follow-up:** WU5 consumes these fields publicly. **Rollback:** code revert leaves additive columns and joins inert. **Diagram:** `WU1a → WU1b → WU2a → WU2b → WU3 → 📍 WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [ ] **[Pure backend code | M6]** Extend `src/products/dto/create-product.dto.ts`, `update-product.dto.ts`, and `variant.dto.ts` with strict UUID/array uniqueness, enum, nullable-mode, and cross-field custom-quantity validation; preserve inline/new variant `INHERIT` and null stock override defaults. **Accept:** malformed UUIDs/enums/unknown properties/negative or inconsistent quantities are rejected by the existing validation pipe. <!-- sdd-owner: implementation -->
+- [ ] **[Pure backend code]** Extend `src/products/domain/product.entity.ts`, `domain/product.repository.ts`, `infrastructure/prisma-product.repository.ts`, and `products.service.ts` to persist/read hidden price, presentation fields, publication mode, and `ProductCatalogPriceList`; atomically replace non-empty allowlists only after validating IDs against current tenant public bindings, and use `tenantPrisma.getClient()` plus explicit tenant/product predicates for all variant paths. **Accept:** empty/omitted allowlist means all public lists, stale rows remain after a binding is removed, and responses expose the documented all-public flag/IDs. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T4, T14]** Extend `src/products/dto/create-product.dto.spec.ts`, `domain/product.entity.spec.ts`, `infrastructure/prisma-product.repository.spec.ts`, and `products.service.spec.ts` (or focused co-located successors) for create/update/read round trips, INHERIT/ON/OFF persistence, tenant-bound allowlist validation, and `update:Product` continuity. **Accept:** `pnpm test -- products` passes and proves no catalog-settings permission is required. <!-- sdd-owner: implementation -->
+
+### F1.WU5 — Public publication gate and default-context compatibility (estimated 320–385 lines)
+
+**Boundary:** gate every public entrypoint and branch discovery before adding explicit context selection. **Depends on:** WU1b and WU4. **Follow-up:** WU6 replaces default-specific public repository calls. **Rollback:** revert public guard/query changes; headers expire naturally. **Diagram:** `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → 📍 WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [ ] **[Pure backend code | M2/M7]** Update `src/public-catalog/http/guards/public-tenant.guard.ts`, `infrastructure/prisma-public-catalog.repository.ts`, `application/ports/public-catalog.repository.ts`, public list/detail/cart use cases, and `http/public-catalog.controller.ts` so active + `catalogPublished`, PRODUCT, product inclusion, and variant INHERIT/ON/OFF gates are derived on every read; filter `GET /public/catalog/branches` to active published tenants and resolve the tenant catalog default for omitted context without changing F1 payload fields. **Accept:** unpublished/inactive tenants take the existing generic miss path and `ON` never widens a false parent gate. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T1, T3, T4, T13]** Extend `src/public-catalog/http/guards/public-tenant.guard.spec.ts`, `http/public-catalog.controller.branches.spec.ts`, `application/mappers/public-product.mapper.spec.ts`, `http/public-catalog.controller.cart.spec.ts`, and `infrastructure/prisma-public-catalog.repository.integration.spec.ts` for unpublished absence, SERVICE/product/variant matrix, inherited publication, branch filtering, and preserved 300s/60s/no-store headers plus named throttlers. **Accept:** `pnpm test` and focused `pnpm test:integration` pass. <!-- sdd-owner: implementation -->
+
+## F2 — Explicit Public Price Context and Server-Authoritative Cart
+
+### F2.WU6 — Context resolver, error contract, and list/detail exact-context reads (estimated 370–400 lines)
+
+**Boundary:** replace default-list browse resolution with one validated public context and context-aware list/detail responses; cart binding is WU7. **Depends on:** WU5. **Follow-up:** WU7 uses this same resolver/port. **Rollback:** revert resolver and adapter contract together. **Diagram:** `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → 📍 WU6 → WU7 → WU8 → WU9 → WU10`.
+
+- [ ] **[Pure backend code]** Add `src/public-catalog/application/services/public-price-context-resolver.ts`, `domain/errors/price-context-not-available.error.ts`, and the context-explicit port contracts in `application/ports/public-catalog.repository.ts`; map the request error in `src/shared/filters/domain-exception.filter.ts` to one generic 404 `PRICE_CONTEXT_NOT_AVAILABLE` miss path. **Accept:** private, nonexistent, cross-tenant, unbound, and absent-default IDs execute the same miss contract with no secondary disclosure lookup. <!-- sdd-owner: implementation -->
+- [ ] **[Pure backend code]** Extend `src/public-catalog/http/request-dto/list-products-query.dto.ts` and add `public-price-context-query.dto.ts`; update `http/public-catalog.controller.ts`, list/detail use cases, `application/dto/` response types, `application/mappers/public-product.mapper.ts`, and `infrastructure/prisma-public-catalog.repository.ts` for optional UUID `priceListId`, `priceContext`, exact selected-list positive-price filters, product allowlist semantics, pre-pagination eligible totals/facets, and aggregate `excludedCount`. **Accept:** no F2 browse query uses `isDefault=true` as a price fallback and full query URI remains the cache key at max-age 60. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T5, T6, T7, T8, T13]** Add focused resolver/list/detail/mapper unit tests and extend `prisma-public-catalog.repository.integration.spec.ts` for two-context consistency, missing/zero selected price with another positive price, private-ID indistinguishability, hidden-price precedence, and pre-pagination count/facet correctness. **Accept:** `pnpm test` and `pnpm test:integration -- prisma-public-catalog.repository.integration.spec.ts` pass. <!-- sdd-owner: implementation -->
+
+### F2.WU7 — Context-bound cart validation (estimated 350–395 lines)
+
+**Boundary:** use WU6's resolver and port for stateless cart reconciliation; do not add stock-presentation mapping yet. **Depends on:** WU6. **Follow-up:** WU8 delivers contract guide; WU9 adds presentation while retaining cart stock authority. **Rollback:** revert DTO/use-case/adapter call sites as one slice. **Diagram:** `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → 📍 WU7 → WU8 → WU9 → WU10`.
+
+- [ ] **[Pure backend code]** Update `src/public-catalog/http/request-dto/validate-cart-body.dto.ts`, `application/use-cases/validate-public-cart.use-case.ts`, `application/dto/` cart contracts, `application/ports/public-catalog.repository.ts`, `infrastructure/prisma-public-catalog.repository.ts`, `http/public-catalog.controller.ts`, and `public-catalog.module.ts` so cart accepts only top-level optional UUID `priceListId`, resolves exactly one context, bulk-loads current candidates, and calculates server prices/totals in the approved decision order. **Accept:** client prices are absent/ignored, blocked items do not total, cart remains idempotent and `Cache-Control: no-store` under `public-validate` 20/min. <!-- sdd-owner: implementation -->
+- [ ] **[Pure backend code]** Return stable per-item `PRICE_NOT_AVAILABLE_IN_CONTEXT` and `VARIANT_NOT_IN_CATALOG`, request-level `PRICE_CONTEXT_NOT_AVAILABLE`, null numeric fields/totals for hidden price or prescription precedence, and current `OUT_OF_STOCK` behavior independent of price context. **Accept:** no alternate/default list query is attempted after a missing selected-list price. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T5, T6, T7, T8, T13, T14]** Extend `src/public-catalog/http/public-catalog.controller.cart.spec.ts`, `http/public-catalog.snapshots.spec.ts`, `http/public-catalog.http-policies.spec.ts`, `http/public-catalog.throttler-scope.spec.ts`, and the Prisma integration spec for exact-context recalculation, identical invalid-context errors, no fallback, hidden null totals, variant publication blocks, no-store, and rate scope retention. **Accept:** `pnpm test` and focused integration command pass. <!-- sdd-owner: implementation -->
+
+### F2.WU8 — Backend response-guide and cross-surface evidence (estimated 220–300 lines)
+
+**Boundary:** document the already implemented backend contract and close contract-level evidence; no frontend code or activation. **Depends on:** WU7. **Follow-up:** WU9 extends guide stock examples. **Rollback:** revert documentation independently; implementation behavior is unchanged. **Diagram:** `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → 📍 WU8 → WU9 → WU10`.
+
+- [ ] **[Pure backend documentation | T14]** Create `docs/backend-responses/public-online-catalog-frontend-guide.md` with admin settings/product/variant and public branches/list/detail/cart DTO shapes, examples, `priceContext`, omission/default behavior, error/status table, hidden-price/null-total rules, cache query-key/TTL semantics, and 60/20 rate limits; state that it is a backend response guide and does not reactivate frontend work. **Accept:** every public/admin field introduced through WU7 is represented without private-list metadata or frontend implementation instructions. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T14]** Add or extend `src/public-catalog/http/public-catalog.snapshots.spec.ts` and `src/catalog-settings/presentation/catalog-settings.controller.spec.ts` to compare documented representative response shapes against controller DTO output. **Accept:** `pnpm test -- public-catalog catalog-settings` passes and guide examples match snapshot field names/codes. <!-- sdd-owner: implementation -->
+
+## F3 — Stock Presentation, Inheritance, and Operational Safety
+
+### F3.WU9 — Effective stock-presentation projection (estimated 360–400 lines)
+
+**Boundary:** add pure mode resolution and public mapping, including variant aggregation; retain cart's operational check for WU10. **Depends on:** WU8. **Follow-up:** WU10 closes zero-stock safety and final documentation/evidence. **Rollback:** revert mapper/VO readers; M5 data remains neutral. **Diagram:** `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → 📍 WU9 → WU10`.
+
+- [ ] **[Pure backend code]** Add `src/public-catalog/domain/value-objects/stock-presentation.vo.ts`; extend `application/mappers/public-product.mapper.ts`, `application/dto/` public response types, list/detail use cases, and Prisma projections for tenant→product→variant mode/value inheritance, nullable `HIDDEN` availability, and no raw operational quantity/minimum leakage. **Accept:** existing M5 products render `SYSTEM_STATUS` equivalently and null overrides inherit at read time. <!-- sdd-owner: implementation -->
+- [ ] **[Pure backend code]** Implement published-variant-only aggregate availability (`available > low_stock > out_of_stock`), product-HIDDEN precedence, product CUSTOM aggregate-without-summed-quantity, and variant-only custom quantities in the same mapper/VO boundary. **Accept:** presentation writes/reads never mutate inventory. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T9, T10]** Add `src/public-catalog/domain/value-objects/stock-presentation.vo.spec.ts` and extend `application/mappers/public-product.mapper.spec.ts` for every mode across positive/low/zero/useStock=false, inheritance/overrides, aggregation, hidden output, and raw-stock redaction. **Accept:** `pnpm test -- stock-presentation public-product.mapper` passes. <!-- sdd-owner: implementation -->
+
+### F3.WU10 — Cart safety regression and final F3 contract evidence (estimated 260–340 lines; ends the chain)
+
+**Boundary:** prove presentation cannot alter fulfillment decisions and update the guide with F3 fields. **Depends on:** WU9. **Follow-up:** none. **Rollback:** revert F3 mapper/validation/doc changes; cart retains pre-F3 operational behavior. **Diagram:** `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → 📍 WU10`.
+
+- [ ] **[Pure backend code]** Keep `src/public-catalog/application/use-cases/validate-public-cart.use-case.ts` explicitly independent of `stock-presentation.vo.ts`: enforce operational `OUT_OF_STOCK` after publication/context checks for every display mode, retain `useStock=false` availability, and emit only presentation-compatible availability data. **Accept:** a positive custom quantity or hidden status cannot make operational zero stock valid. <!-- sdd-owner: implementation -->
+- [ ] **[Tests | T9, T10, T11, T14]** Extend `validate-public-cart.use-case` co-located spec (create `src/public-catalog/application/use-cases/validate-public-cart.use-case.spec.ts` if absent), `http/public-catalog.controller.cart.spec.ts`, and `prisma-public-catalog.repository.integration.spec.ts` for mode × zero-stock blocks, positive custom quantity safety, no inventory writes, and M5 compatibility. **Accept:** `pnpm test`, `pnpm test:integration`, and `pnpm build` pass. <!-- sdd-owner: implementation -->
+- [ ] **[Pure backend documentation | T14]** Update `docs/backend-responses/public-online-catalog-frontend-guide.md` with `stockPresentation`, nullable availability, custom-quantity and variant-aggregation examples, and the invariant that display state never changes cart stock validation; preserve the frontend-paused statement. **Accept:** guide has no frontend implementation task and all T1–T14 evidence links point to the listed unit/integration suites. <!-- sdd-owner: implementation -->
+
+## Parent lifecycle actions (after implementation)
+
+- [ ] Start or reuse bounded review for each clean stacked WU diff (≤400 additions + deletions), verifying the diagram, dependency target, test evidence, rollback boundary, and absence of unrelated changes before it merges. <!-- sdd-owner: parent -->
+- [ ] At the F3 completion gate, collect the T1–T14 evidence from the named suites, confirm `pnpm prisma generate`, `pnpm test`, `pnpm test:integration`, and `pnpm build` results, and keep frontend work paused. <!-- sdd-owner: parent -->
+
+## Review Workload Forecast (detailed)
+
+| Phase / WU                             | Estimated changed lines | Review boundary                                                             |
+| -------------------------------------- | ----------------------: | --------------------------------------------------------------------------- |
+| F1.WU1a schema + migration             |          **362 actual** | Completed persistence foundation; migration evidence covered by WU1b        |
+| F1.WU1b migration + seed evidence      |          **396 actual** | Drift, disposable-PostgreSQL, and clean-seed evidence                       |
+| F1.WU2a settings domain + internal GET |          **399 actual** | Domain, port, and internal application read contract                        |
+| F1.WU2b settings Prisma adapter        |                 250–360 | Transaction persistence and real-DB evidence                                |
+| F1.WU3 settings API + RBAC             |                 330–390 | Authenticated admin contract                                                |
+| F1.WU4 product/variant round trips     |                 360–400 | Existing aggregate extensions                                               |
+| F1.WU5 publication gate                |                 320–385 | Public gate/default compatibility                                           |
+| **F1 total**                           |       **2,417–2,692** | Seven stacked PRs                                                           |
+| F2.WU6 resolver + list/detail          |                 370–400 | Browse context contract                                                     |
+| F2.WU7 cart binding                    |                 350–395 | Stateless cart contract                                                     |
+| F2.WU8 guide + contract evidence       |                 220–300 | Documentation/snapshots                                                     |
+| **F2 total**                           |           **940–1,095** | Three stacked PRs                                                           |
+| F3.WU9 stock projection                |                 360–400 | Presentation-only mapping                                                   |
+| F3.WU10 safety + evidence              |                 260–340 | Cart safety/final guide                                                     |
+| **F3 total**                           |             **620–740** | Two stacked PRs                                                             |
+| **Overall**                            |         **3,977–4,527** | Twelve stacked PRs; re-split before apply if a diff exceeds 400             |
+
+Chained PRs are recommended: **Yes**; expected implementation is materially over 400 changed lines. The chain boundary is `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`, using `stacked-to-main` under the approved `auto-chain` delivery strategy. Decision needed before apply: **No**.
