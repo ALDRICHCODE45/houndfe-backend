@@ -14,6 +14,7 @@ import bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import { PERMISSION_REGISTRY } from '../src/auth/authorization/domain/permission';
 import { ingestSatCatalog } from './seed-sat';
+import { seedOnlineCatalogDefaults } from './online-catalog-seed';
 
 const prisma = new PrismaClient();
 
@@ -1468,6 +1469,12 @@ async function main() {
         isDefault: true,
       },
     });
+
+    await seedOnlineCatalogDefaults(
+      tx,
+      [...tenants.values()].map((t) => t.id),
+      publicoList.id,
+    );
 
     const paracetamol = await upsertProductByTenantAndName(tx, {
       tenantId: centroTenant.id,
