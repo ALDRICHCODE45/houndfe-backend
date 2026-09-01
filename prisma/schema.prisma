@@ -268,6 +268,30 @@ enum NotificationActionKey {
 }
 
 // ============================================================================
+// ONLINE CATALOG PUBLISHING ENUMS — online-catalog-publishing / F1.WU1
+// ============================================================================
+// Variant publication tri-state. M3 backfills all null rows to INHERIT.
+// Resolution happens at read time (ADR-2); nothing is copied at creation.
+// Product gate is evaluated before variant mode.
+enum CatalogPublishMode {
+  INHERIT
+  ON
+  OFF
+}
+
+// Stock-presentation modes (F3). Nullable on Product/Variant (null = inherit).
+// System_Status: mirrors operational availability directly (M5 default).
+// Abstract_Status: collapses low_stock → available, keeps zero out.
+// Custom_Quantity: configurable non-negative integer; forced out at zero.
+// Hidden: always null indicator regardless of stock.
+enum CatalogStockPresentation {
+  SYSTEM_STATUS
+  ABSTRACT_STATUS
+  CUSTOM_QUANTITY
+  HIDDEN
+}
+
+// ============================================================================
 // DELIVERY ROUTES ENUMS — delivery-routes / WU1
 // ============================================================================
 // `DeliveryRoute.status` four-state lifecycle:
@@ -339,6 +363,13 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // M1: explicit opt-in; all existing tenants remain invisible until activated.
+  catalogPublished Boolean @default(false)
+
+  // F1.WU1 — tenant stock-presentation default. Product null inherits this.
+  catalogStockPresentationDefault          CatalogStockPresentation @default(SYSTEM_STATUS)
+  catalogStockPresentationDefaultCustomQty Int?
+
   memberships               TenantMembership[]
   roles                     Role[]
   products                  Product[]
@@ -397,6 +428,11 @@ model Tenant {
       deliveryRoutes            DeliveryRoute[]
       deliveryRouteStops        DeliveryRouteStop[]
 
+  // F1.WU1 — online catalog price-list binding back-relations.
+  tenantCatalogPriceLists  TenantCatalogPriceList[]
+  productCatalogPriceLists ProductCatalogPriceList[]
+
+  @@index([isActive, catalogPublished, name])
       @@map("tenants")
 }
 
@@ -486,6 +522,11 @@ model Product {
   // Price hidden in public catalog
   hidePriceInOnlineCatalog Boolean @default(false)
 
+  // F1.WU1 — online catalog stock presentation. null = inherit Tenant default.
+  // M5 backfills all existing products to SYSTEM_STATUS explicitly.
+  onlineStockPresentation          CatalogStockPresentation?
+  onlineStockPresentationCustomQty Int?
+
   // Has variants flag
   hasVariants Boolean @default(false)
 
@@ -502,6 +543,9 @@ model Product {
   lots           Lot[]
   priceLists     PriceList[]
   serviceDetail  ServiceDetail?
+
+  // F1.WU1 back-relation — declared here so it references ProductCatalogPriceList declared later.
+  catalogPriceLists ProductCatalogPriceList[]
 
   @@index([tenantId])
   @@index([tenantId, includeInOnlineCatalog, categoryId])
@@ -589,6 +633,14 @@ model Variant {
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
+  // M3: tri-state publication. INHERIT reads from product gate at read time;
+  // ON/OFF are explicit overrides (cannot widen past a false product gate).
+  catalogPublishMode CatalogPublishMode @default(INHERIT)
+
+  // F1.WU1 — variant stock presentation override. null = inherit product mode.
+  onlineStockPresentation          CatalogStockPresentation?
+  onlineStockPresentationCustomQty Int?
+
   tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product        Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
   images         ProductImage[]
@@ -597,6 +649,7 @@ model Variant {
   quotationItems QuotationItem[]
 
   @@index([tenantId])
+  @@index([productId, catalogPublishMode])
   @@map("variants")
 }
 
@@ -618,6 +671,7 @@ model VariantPrice {
 
   @@unique([tenantId, variantId, priceListId])
   @@index([tenantId])
+  @@index([tenantId, priceListId, priceCents])
   @@map("variant_prices")
 }
 
@@ -678,6 +732,10 @@ model GlobalPriceList {
   sales               Sale[]
   quotations          Quotation[]
 
+  // F1.WU1 back-relations — declared here so they reference models declared later.
+  tenantCatalogBindings  TenantCatalogPriceList[]
+  productCatalogBindings ProductCatalogPriceList[]
+
   @@map("global_price_lists")
 }
 
@@ -703,6 +761,7 @@ model PriceList {
 
   @@unique([tenantId, productId, globalPriceListId])
   @@index([tenantId])
+  @@index([tenantId, globalPriceListId, priceCents])
   @@map("price_lists")
 }
 
@@ -2021,4 +2080,55 @@ model DeliveryRouteStop {
   @@index([tenantId, saleId])
   @@index([saleId])
   @@map("delivery_route_stops")
+}
+
+// ============================================================================
+// ONLINE CATALOG PRICE-LIST BINDINGS — online-catalog-publishing / F1.WU1
+// ============================================================================
+// F1.WU1 (ADR-3): per-tenant catalog public-list bindings. A tenant's catalog
+// can contain multiple global price lists, exactly one of which is the default.
+// The partial unique index "tenant_catalog_price_lists_one_default_per_tenant"
+// enforces one default per tenant in the database (Prisma DSL cannot express
+// partial unique indexes — the migration is authoritative).
+//
+// Semantics (design §3.4): zero rows for a tenant means the tenant has no
+// catalog; empty product allowlist for a product means the product supports
+// ALL tenant-public lists.
+
+model TenantCatalogPriceList {
+  id                String   @id @default(uuid())
+  tenantId          String
+  globalPriceListId String
+  isCatalogDefault  Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  globalPriceList GlobalPriceList @relation(fields: [globalPriceListId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, globalPriceListId])
+  @@index([tenantId])
+  @@map("tenant_catalog_price_lists")
+}
+
+// F1.WU1 (ADR-3): per-product support allowlist for the selected price context.
+// Zero rows for a product means "supports all tenant-public lists". Rows present
+// means "supports ONLY the listed global lists". Stale rows (after a list becomes
+// private) are retained conservatively and cannot expose a private list because
+// tenant context resolution runs first.
+model ProductCatalogPriceList {
+  id                String   @id @default(uuid())
+  tenantId          String
+  productId         String
+  globalPriceListId String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product         Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  globalPriceList GlobalPriceList @relation(fields: [globalPriceListId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, productId, globalPriceListId])
+  @@index([tenantId])
+  @@map("product_catalog_price_lists")
 }
