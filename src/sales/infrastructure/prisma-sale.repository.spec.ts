@@ -22,6 +22,7 @@ function makeMockPrisma() {
       findMany: jest.fn(),
       groupBy: jest.fn(),
       count: jest.fn(),
+      aggregate: jest.fn(),
       delete: jest.fn(),
     },
     saleItem: {
@@ -726,6 +727,109 @@ describe('PrismaSaleRepository', () => {
 
       const firstWhere = prisma.sale.count.mock.calls[0][0].where;
       const secondWhere = prisma.sale.count.mock.calls[1][0].where;
+
+      expect(secondWhere).toEqual(firstWhere);
+      expect(secondWhere.paymentStatus).toBeUndefined();
+      expect(secondWhere.totalCents).toBeUndefined();
+    });
+  });
+
+  // ── Customer sales history — WU backend summary block ────────
+  // Single Prisma `aggregate` call replaces the dedicated
+  // `countConfirmed` query for the GET /sales summary block:
+  //   - `_count._all` → salesCount
+  //   - `_sum.totalCents` → totalSoldCents
+  //   - `_sum.debtCents` → outstandingDebtCents
+  // Null Prisma sums (empty match) MUST be normalized to 0 before
+  // reaching the wire so the frontend never sees `null` cents.
+  describe('aggregateSummaryConfirmed', () => {
+    it('returns count + totalCents sum + debtCents sum from a single aggregate call', async () => {
+      prisma.sale.aggregate.mockResolvedValue({
+        _count: { _all: 7 },
+        _sum: { totalCents: 12345, debtCents: 678 },
+      });
+
+      const result = await repo.aggregateSummaryConfirmed({} as any);
+
+      expect(result).toEqual({
+        salesCount: 7,
+        totalSoldCents: 12345,
+        outstandingDebtCents: 678,
+      });
+      expect(prisma.sale.aggregate).toHaveBeenCalledTimes(1);
+      expect(prisma.sale.aggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: 'CONFIRMED' }),
+          _count: { _all: true },
+          _sum: { totalCents: true, debtCents: true },
+        }),
+      );
+    });
+
+    it('normalizes null Prisma sums to zero on empty aggregations', async () => {
+      // Prisma sends `_sum: { totalCents: null, debtCents: null }`
+      // (NOT zero) when zero rows match the WHERE. The adapter MUST
+      // // normalize to 0 before returning so the frontend never sees
+      // `null` cents.
+      prisma.sale.aggregate.mockResolvedValue({
+        _count: { _all: 0 },
+        _sum: { totalCents: null, debtCents: null },
+      });
+
+      const result = await repo.aggregateSummaryConfirmed({
+        customerId: ['00000000-0000-4000-8000-000000000000'],
+      } as any);
+
+      expect(result).toEqual({
+        salesCount: 0,
+        totalSoldCents: 0,
+        outstandingDebtCents: 0,
+      });
+    });
+
+    it('propagates customerId base filter into the aggregate WHERE', async () => {
+      prisma.sale.aggregate.mockResolvedValue({
+        _count: { _all: 5 },
+        _sum: { totalCents: 9000, debtCents: 1200 },
+      });
+
+      const customerId = 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26';
+      await repo.aggregateSummaryConfirmed({
+        customerId: [customerId],
+      } as any);
+
+      expect(prisma.sale.aggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: 'CONFIRMED',
+            customerId: { in: [customerId] },
+          }),
+        }),
+      );
+    });
+
+    it('ignores extended filters the same way countConfirmed does', async () => {
+      prisma.sale.aggregate.mockResolvedValue({
+        _count: { _all: 3 },
+        _sum: { totalCents: 4500, debtCents: 0 },
+      });
+
+      // The aggregate MUST only see base filters (confirmed +
+      // cashier + customer + date range). Extended filters like
+      // paymentStatus / totalMin leak into the count otherwise and
+      // the KPI total diverges from the list count.
+      const baseInput = { q: 'ana' } as any;
+      const extendedInput = {
+        q: 'ana',
+        paymentStatus: ['PAID'],
+        totalMin: 5000,
+      } as any;
+
+      await repo.aggregateSummaryConfirmed(baseInput);
+      await repo.aggregateSummaryConfirmed(extendedInput);
+
+      const firstWhere = prisma.sale.aggregate.mock.calls[0][0].where;
+      const secondWhere = prisma.sale.aggregate.mock.calls[1][0].where;
 
       expect(secondWhere).toEqual(firstWhere);
       expect(secondWhere.paymentStatus).toBeUndefined();
@@ -4381,263 +4485,262 @@ describe('PrismaSaleRepository', () => {
     });
   });
 
-      // ── WU2 — Custom Payment Methods (D7 + D10): persistChargeConfirmation
-      //    writes `metadataJson` (undefined → Prisma.JsonNull), and the
-      //    findOneWithRelations mapper surfaces the catalog snapshot
-      //    (D10) onto the wire shape. Legacy rows stay absent.
-      describe('persistChargeConfirmation — WU2 metadataJson catalog snapshot (D7)', () => {
-        it('writes Prisma.JsonNull when payment has no metadataJson (undefined → legacy charge)', async () => {
-          prisma.sale.updateMany.mockResolvedValue({ count: 1 });
-          prisma.salePayment.create.mockResolvedValue({
-            id: 'pay-no-meta',
+  // ── WU2 — Custom Payment Methods (D7 + D10): persistChargeConfirmation
+  //    writes `metadataJson` (undefined → Prisma.JsonNull), and the
+  //    findOneWithRelations mapper surfaces the catalog snapshot
+  //    (D10) onto the wire shape. Legacy rows stay absent.
+  describe('persistChargeConfirmation — WU2 metadataJson catalog snapshot (D7)', () => {
+    it('writes Prisma.JsonNull when payment has no metadataJson (undefined → legacy charge)', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-no-meta',
+        method: 'CASH',
+        amountCents: 1000,
+        reference: null,
+      });
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-charge-no-meta',
+        userId: 'cashier-1',
+        payments: [
+          { method: 'cash', amountCents: 1000 }, // no metadataJson → legacy
+        ],
+        subtotalCents: 1000,
+        discountCents: 0,
+        totalCents: 1000,
+        paidCents: 1000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000301',
+      } as never);
+
+      // D7: undefined metadataJson maps to Prisma.JsonNull on the
+      // charge path — mirrors the collection-path serialization so
+      // the wire is byte-identical and the legacy `null` shape is
+      // preserved.
+      expect(prisma.salePayment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            saleId: 'sale-charge-no-meta',
             method: 'CASH',
             amountCents: 1000,
-            reference: null,
-          });
-
-          await repo.persistChargeConfirmation({
-            saleId: 'sale-charge-no-meta',
+            metadataJson: Prisma.JsonNull,
             userId: 'cashier-1',
-            payments: [
-              { method: 'cash', amountCents: 1000 }, // no metadataJson → legacy
-            ],
-            subtotalCents: 1000,
-            discountCents: 0,
-            totalCents: 1000,
-            paidCents: 1000,
-            debtCents: 0,
-            changeDueCents: 0,
-            paymentStatus: 'PAID',
-            confirmedAt: new Date(),
-            folio: 'A-2605-000301',
-          } as never);
+            tenantId: 'tenant-1',
+          }),
+        }),
+      );
+    });
 
-          // D7: undefined metadataJson maps to Prisma.JsonNull on the
-          // charge path — mirrors the collection-path serialization so
-          // the wire is byte-identical and the legacy `null` shape is
-          // preserved.
-          expect(prisma.salePayment.create).toHaveBeenCalledWith(
-            expect.objectContaining({
-              data: expect.objectContaining({
-                saleId: 'sale-charge-no-meta',
-                method: 'CASH',
-                amountCents: 1000,
-                metadataJson: Prisma.JsonNull,
-                userId: 'cashier-1',
-                tenantId: 'tenant-1',
-              }),
-            }),
-          );
-        });
+    it('writes the catalog snapshot verbatim when payment carries metadataJson.catalog', async () => {
+      prisma.sale.updateMany.mockResolvedValue({ count: 1 });
+      prisma.salePayment.create.mockResolvedValue({
+        id: 'pay-catalog',
+        method: 'TRANSFER',
+        amountCents: 1000,
+        reference: null,
+      });
 
-        it('writes the catalog snapshot verbatim when payment carries metadataJson.catalog', async () => {
-          prisma.sale.updateMany.mockResolvedValue({ count: 1 });
-          prisma.salePayment.create.mockResolvedValue({
-            id: 'pay-catalog',
+      const catalogSnapshot = {
+        catalog: {
+          paymentMethodId: 'pm-custom-1',
+          name: 'Mercado Pago',
+          subtitle: 'Link',
+        },
+      };
+
+      await repo.persistChargeConfirmation({
+        saleId: 'sale-charge-catalog',
+        userId: 'cashier-1',
+        payments: [
+          {
+            method: 'transfer',
+            amountCents: 1000,
+            metadataJson: catalogSnapshot,
+          },
+        ],
+        subtotalCents: 1000,
+        discountCents: 0,
+        totalCents: 1000,
+        paidCents: 1000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        confirmedAt: new Date(),
+        folio: 'A-2605-000302',
+      } as never);
+
+      // D5/D7: the catalog snapshot is persisted verbatim (no key
+      // rewrites, no field coercion) so the read-side mapper can
+      // round-trip it.
+      expect(prisma.salePayment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            saleId: 'sale-charge-catalog',
+            method: 'TRANSFER',
+            metadataJson: catalogSnapshot,
+          }),
+        }),
+      );
+    });
+  });
+
+  describe('findOneWithRelations — WU2 catalog snapshot mapper (D10)', () => {
+    const baseSaleRow = {
+      id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      folio: 'V-0042',
+      status: 'CONFIRMED',
+      channel: 'POS',
+      register: 'Principal',
+      confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+      createdAt: new Date('2026-05-08T10:00:00.000Z'),
+      subtotalCents: 1000,
+      discountCents: 0,
+      totalCents: 1000,
+      paidCents: 1000,
+      debtCents: 0,
+      changeDueCents: 0,
+      paymentStatus: 'PAID',
+      deliveryStatus: 'DELIVERED',
+      customer: null,
+      cashier: { id: 'u1', name: 'Cajero' },
+      seller: null,
+      items: [],
+    };
+
+    it('surfaces paymentMethodId/paymentMethodName/paymentMethodSubtitle from metadataJson.catalog', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        ...baseSaleRow,
+        payments: [
+          {
+            id: 'pmt-catalog',
             method: 'TRANSFER',
             amountCents: 1000,
             reference: null,
-          });
-
-          const catalogSnapshot = {
-            catalog: {
-              paymentMethodId: 'pm-custom-1',
-              name: 'Mercado Pago',
-              subtitle: 'Link',
+            createdAt: new Date('2026-05-08T10:30:00.000Z'),
+            userId: 'u1',
+            user: { id: 'u1', name: 'Cajero' },
+            metadataJson: {
+              catalog: {
+                paymentMethodId: 'pm-custom-1',
+                name: 'Mercado Pago',
+                subtitle: 'Link',
+              },
             },
-          };
-
-          await repo.persistChargeConfirmation({
-            saleId: 'sale-charge-catalog',
-            userId: 'cashier-1',
-            payments: [
-              {
-                method: 'transfer',
-                amountCents: 1000,
-                metadataJson: catalogSnapshot,
-              },
-            ],
-            subtotalCents: 1000,
-            discountCents: 0,
-            totalCents: 1000,
-            paidCents: 1000,
-            debtCents: 0,
-            changeDueCents: 0,
-            paymentStatus: 'PAID',
-            confirmedAt: new Date(),
-            folio: 'A-2605-000302',
-          } as never);
-
-          // D5/D7: the catalog snapshot is persisted verbatim (no key
-          // rewrites, no field coercion) so the read-side mapper can
-          // round-trip it.
-          expect(prisma.salePayment.create).toHaveBeenCalledWith(
-            expect.objectContaining({
-              data: expect.objectContaining({
-                saleId: 'sale-charge-catalog',
-                method: 'TRANSFER',
-                metadataJson: catalogSnapshot,
-              }),
-            }),
-          );
-        });
+          },
+        ],
       });
 
-      describe('findOneWithRelations — WU2 catalog snapshot mapper (D10)', () => {
-        const baseSaleRow = {
-          id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
-          folio: 'V-0042',
-          status: 'CONFIRMED',
-          channel: 'POS',
-          register: 'Principal',
-          confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
-          createdAt: new Date('2026-05-08T10:00:00.000Z'),
-          subtotalCents: 1000,
-          discountCents: 0,
-          totalCents: 1000,
-          paidCents: 1000,
-          debtCents: 0,
-          changeDueCents: 0,
-          paymentStatus: 'PAID',
-          deliveryStatus: 'DELIVERED',
-          customer: null,
-          cashier: { id: 'u1', name: 'Cajero' },
-          seller: null,
-          items: [],
-        };
+      const result = await repo.findOneWithRelations(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
 
-        it('surfaces paymentMethodId/paymentMethodName/paymentMethodSubtitle from metadataJson.catalog', async () => {
-          prisma.sale.findFirst.mockResolvedValue({
-            ...baseSaleRow,
-            payments: [
-              {
-                id: 'pmt-catalog',
-                method: 'TRANSFER',
-                amountCents: 1000,
-                reference: null,
-                createdAt: new Date('2026-05-08T10:30:00.000Z'),
-                userId: 'u1',
-                user: { id: 'u1', name: 'Cajero' },
-                metadataJson: {
-                  catalog: {
-                    paymentMethodId: 'pm-custom-1',
-                    name: 'Mercado Pago',
-                    subtitle: 'Link',
-                  },
-                },
-              },
-            ],
-          });
+      expect(result).not.toBeNull();
+      expect(result!.payments).toHaveLength(1);
+      expect(result!.payments[0]).toEqual(
+        expect.objectContaining({
+          paymentId: 'pmt-catalog',
+          method: 'TRANSFER',
+          amountCents: 1000,
+          paymentMethodId: 'pm-custom-1',
+          paymentMethodName: 'Mercado Pago',
+          paymentMethodSubtitle: 'Link',
+        }),
+      );
+    });
 
-          const result = await repo.findOneWithRelations(
-            'b5e2b8fd-bdfd-471f-b687-ec340d578885',
-          );
-
-          expect(result).not.toBeNull();
-          expect(result!.payments).toHaveLength(1);
-          expect(result!.payments[0]).toEqual(
-            expect.objectContaining({
-              paymentId: 'pmt-catalog',
-              method: 'TRANSFER',
-              amountCents: 1000,
-              paymentMethodId: 'pm-custom-1',
-              paymentMethodName: 'Mercado Pago',
-              paymentMethodSubtitle: 'Link',
-            }),
-          );
-        });
-
-        it('returns null for all three fields when metadataJson has no catalog key (legacy row)', async () => {
-          prisma.sale.findFirst.mockResolvedValue({
-            ...baseSaleRow,
-            payments: [
-              {
-                id: 'pmt-legacy-ref',
-                method: 'CASH',
-                amountCents: 1000,
-                reference: 'TX-1',
-                createdAt: new Date('2026-05-08T10:30:00.000Z'),
-                userId: 'u1',
-                user: { id: 'u1', name: 'Cajero' },
-                // Legacy shape: `metadataJson.reference` only.
-                metadataJson: { reference: 'TX-1' },
-              },
-            ],
-          });
-
-          const result = await repo.findOneWithRelations(
-            'b5e2b8fd-bdfd-471f-b687-ec340d578885',
-          );
-
-          expect(result).not.toBeNull();
-          expect(result!.payments).toHaveLength(1);
-          expect(result!.payments[0].paymentMethodId).toBeNull();
-          expect(result!.payments[0].paymentMethodName).toBeNull();
-          expect(result!.payments[0].paymentMethodSubtitle).toBeNull();
-          // `extractLegacyReference` continues to surface the legacy
-          // `.reference` value on the wire (regression guard for D5).
-          expect(result!.payments[0].reference).toBe('TX-1');
-        });
-
-        it('returns null for all three fields when metadataJson is null entirely (pure legacy)', async () => {
-          prisma.sale.findFirst.mockResolvedValue({
-            ...baseSaleRow,
-            payments: [
-              {
-                id: 'pmt-null-meta',
-                method: 'CASH',
-                amountCents: 500,
-                reference: null,
-                createdAt: new Date('2026-05-08T10:31:00.000Z'),
-                userId: 'u1',
-                user: { id: 'u1', name: 'Cajero' },
-                metadataJson: null,
-              },
-            ],
-          });
-
-          const result = await repo.findOneWithRelations(
-            'b5e2b8fd-bdfd-471f-b687-ec340d578885',
-          );
-
-          expect(result!.payments[0].paymentMethodId).toBeNull();
-          expect(result!.payments[0].paymentMethodName).toBeNull();
-          expect(result!.payments[0].paymentMethodSubtitle).toBeNull();
-        });
-
-        it('coerces a non-string subtitle to null (tolerant read on malformed snapshot)', async () => {
-          prisma.sale.findFirst.mockResolvedValue({
-            ...baseSaleRow,
-            payments: [
-              {
-                id: 'pmt-malformed',
-                method: 'TRANSFER',
-                amountCents: 1000,
-                reference: null,
-                createdAt: new Date('2026-05-08T10:32:00.000Z'),
-                userId: 'u1',
-                user: { id: 'u1', name: 'Cajero' },
-                metadataJson: {
-                  catalog: {
-                    paymentMethodId: 'pm-custom-2',
-                    name: 'Mercado Pago',
-                    subtitle: 42, // not a string
-                  },
-                },
-              },
-            ],
-          });
-
-          const result = await repo.findOneWithRelations(
-            'b5e2b8fd-bdfd-471f-b687-ec340d578885',
-          );
-
-          expect(result!.payments[0].paymentMethodId).toBe('pm-custom-2');
-          expect(result!.payments[0].paymentMethodName).toBe('Mercado Pago');
-          // Malformed subtitle → null, not the raw number, so the wire
-          // contract stays `string | null`.
-          expect(result!.payments[0].paymentMethodSubtitle).toBeNull();
-        });
+    it('returns null for all three fields when metadataJson has no catalog key (legacy row)', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        ...baseSaleRow,
+        payments: [
+          {
+            id: 'pmt-legacy-ref',
+            method: 'CASH',
+            amountCents: 1000,
+            reference: 'TX-1',
+            createdAt: new Date('2026-05-08T10:30:00.000Z'),
+            userId: 'u1',
+            user: { id: 'u1', name: 'Cajero' },
+            // Legacy shape: `metadataJson.reference` only.
+            metadataJson: { reference: 'TX-1' },
+          },
+        ],
       });
+
+      const result = await repo.findOneWithRelations(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.payments).toHaveLength(1);
+      expect(result!.payments[0].paymentMethodId).toBeNull();
+      expect(result!.payments[0].paymentMethodName).toBeNull();
+      expect(result!.payments[0].paymentMethodSubtitle).toBeNull();
+      // `extractLegacyReference` continues to surface the legacy
+      // `.reference` value on the wire (regression guard for D5).
+      expect(result!.payments[0].reference).toBe('TX-1');
+    });
+
+    it('returns null for all three fields when metadataJson is null entirely (pure legacy)', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        ...baseSaleRow,
+        payments: [
+          {
+            id: 'pmt-null-meta',
+            method: 'CASH',
+            amountCents: 500,
+            reference: null,
+            createdAt: new Date('2026-05-08T10:31:00.000Z'),
+            userId: 'u1',
+            user: { id: 'u1', name: 'Cajero' },
+            metadataJson: null,
+          },
+        ],
+      });
+
+      const result = await repo.findOneWithRelations(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result!.payments[0].paymentMethodId).toBeNull();
+      expect(result!.payments[0].paymentMethodName).toBeNull();
+      expect(result!.payments[0].paymentMethodSubtitle).toBeNull();
+    });
+
+    it('coerces a non-string subtitle to null (tolerant read on malformed snapshot)', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        ...baseSaleRow,
+        payments: [
+          {
+            id: 'pmt-malformed',
+            method: 'TRANSFER',
+            amountCents: 1000,
+            reference: null,
+            createdAt: new Date('2026-05-08T10:32:00.000Z'),
+            userId: 'u1',
+            user: { id: 'u1', name: 'Cajero' },
+            metadataJson: {
+              catalog: {
+                paymentMethodId: 'pm-custom-2',
+                name: 'Mercado Pago',
+                subtitle: 42, // not a string
+              },
+            },
+          },
+        ],
+      });
+
+      const result = await repo.findOneWithRelations(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result!.payments[0].paymentMethodId).toBe('pm-custom-2');
+      expect(result!.payments[0].paymentMethodName).toBe('Mercado Pago');
+      // Malformed subtitle → null, not the raw number, so the wire
+      // contract stays `string | null`.
+      expect(result!.payments[0].paymentMethodSubtitle).toBeNull();
+    });
+  });
 });
-

@@ -1493,6 +1493,46 @@ export class PrismaSaleRepository implements ISaleRepository {
     return prisma.sale.count({ where: this.buildBaseWhere(input) });
   }
 
+  /**
+   * Customer sales history — WU backend summary block. Single Prisma
+   * `aggregate` call replaces the dedicated `countConfirmed` query in
+   * the `listSales` parallel block: returns the sales count PLUS the
+   * `totalCents` and `debtCents` sums so the GET /sales `summary`
+   * block can ship with no extra DB roundtrip.
+   *
+   * Same base filters as `countConfirmed` (`buildBaseWhere` — confirmed
+   * only, customerId + cashier + date range honored). Extended filters
+   * are intentionally NOT included so `summary.salesCount ===
+   * counts.all === pagination.total` continues to hold (the existing
+   * KPI-count semantics — see the "ignores extended filters for KPI
+   * count methods" regression guard below).
+   *
+   * Null normalization: Prisma returns `_sum: { totalCents: null,
+   * debtCents: null }` (NOT zero) when zero rows match the WHERE.
+   * The wire contract is `number` (never null), so the adapter maps
+   * both to 0 before returning.
+   */
+  async aggregateSummaryConfirmed(input: SalesListBaseFilter): Promise<{
+    salesCount: number;
+    totalSoldCents: number;
+    outstandingDebtCents: number;
+  }> {
+    const prisma = this.tenantPrisma.getClient();
+    const result = await prisma.sale.aggregate({
+      where: this.buildBaseWhere(input),
+      _count: { _all: true },
+      _sum: { totalCents: true, debtCents: true },
+    });
+
+    return {
+      salesCount: result._count._all,
+      // Prisma sends `null`, not `0`, when zero rows match. Normalize
+      // both sums so the wire contract is `number` (never null).
+      totalSoldCents: result._sum.totalCents ?? 0,
+      outstandingDebtCents: result._sum.debtCents ?? 0,
+    };
+  }
+
   async groupByPaymentStatusConfirmed(input: SalesListBaseFilter): Promise<
     Array<{
       paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null;
@@ -1708,9 +1748,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         // the wire (matches the spec scenario "Legacy rows fall back
         // to base-category label"). The bot reviewer path's `origin`
         // key is untouched.
-        const catalogSnapshot = extractCatalogSnapshot(
-          payment.metadataJson,
-        );
+        const catalogSnapshot = extractCatalogSnapshot(payment.metadataJson);
         return {
           paymentId: payment.id,
           method: payment.method,
@@ -1718,8 +1756,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           tenderedCents: payment.amountCents,
           changeCents: 0,
           reference:
-            payment.reference ??
-            extractLegacyReference(payment.metadataJson),
+            payment.reference ?? extractLegacyReference(payment.metadataJson),
           paidAt: payment.createdAt,
           createdAt: payment.createdAt,
           userId: payment.userId,
@@ -1870,12 +1907,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     | { kind: 'conflict' }
     | { kind: 'in_flight' }
   > {
-    return this.acquireIdempotency(
-      'bot_sale_register',
-      null,
-      key,
-      requestHash,
-    );
+    return this.acquireIdempotency('bot_sale_register', null, key, requestHash);
   }
 
   /**

@@ -311,6 +311,26 @@ export interface ISaleRepository {
 
   countConfirmed(input: SalesListBaseFilter): Promise<number>;
 
+  /**
+   * Customer sales history — WU backend summary block. Single Prisma
+   * `aggregate` call replaces the dedicated `countConfirmed` query for
+   * the GET /sales summary block: returns `salesCount` (`_count._all`)
+   * + `totalSoldCents` (`_sum.totalCents`) + `outstandingDebtCents`
+   * (`_sum.debtCents`) in one DB roundtrip — no extra DB query added.
+   *
+   * Same base filters as `countConfirmed` (confirmed-only, customerId
+   * honored, etc.) so `summary.salesCount === counts.all ===
+   * pagination.total` holds by construction.
+   *
+   * The adapter MUST normalize Prisma's null sums (empty match) to 0
+   * before returning so the wire shape is `number` (never null).
+   */
+  aggregateSummaryConfirmed(input: SalesListBaseFilter): Promise<{
+    salesCount: number;
+    totalSoldCents: number;
+    outstandingDebtCents: number;
+  }>;
+
   groupByPaymentStatusConfirmed(input: SalesListBaseFilter): Promise<
     Array<{
       paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' | null;

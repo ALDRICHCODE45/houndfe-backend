@@ -1383,8 +1383,16 @@ export class SalesService {
       confirmedTo: extendedFilters.confirmedTo,
     };
 
-    const [data, total, groupedPaymentStatus, notDelivered] = await Promise.all(
-      [
+    // Customer sales history — WU backend summary block. The
+    // `aggregateSummaryConfirmed` call replaces the dedicated
+    // `countConfirmed` query for the same base filters; one Prisma
+    // `aggregate` returns `salesCount` + `totalSoldCents` +
+    // `outstandingDebtCents` so we do NOT add a 5th DB query to the
+    // parallel block. `summary.salesCount` is then assigned to
+    // `pagination.total` and `counts.all` so all three stay in sync
+    // by construction.
+    const [data, summary, groupedPaymentStatus, notDelivered] =
+      await Promise.all([
         this.saleRepo.findManyConfirmed({
           page,
           limit,
@@ -1392,12 +1400,12 @@ export class SalesService {
           sortOrder: query.sortOrder ?? 'desc',
           ...extendedFilters,
         }),
-        this.saleRepo.countConfirmed(baseFilters),
+        this.saleRepo.aggregateSummaryConfirmed(baseFilters),
         this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
         this.saleRepo.countNotDeliveredConfirmed(baseFilters),
-      ],
-    );
+      ]);
 
+    const total = summary.salesCount;
     const paidCount = groupedPaymentStatus
       .filter((item) => item.paymentStatus === 'PAID')
       .reduce((acc, item) => acc + item._count._all, 0);
@@ -1411,6 +1419,11 @@ export class SalesService {
         all: total,
         pendingPayments,
         notDelivered,
+      },
+      summary: {
+        salesCount: summary.salesCount,
+        totalSoldCents: summary.totalSoldCents,
+        outstandingDebtCents: summary.outstandingDebtCents,
       },
     };
   }
@@ -2052,7 +2065,6 @@ export class SalesService {
     // discount, per-item override) are NOT touched — the upstream
     // `repriceNonStickyLines` step inside recompute picks them up
     // via the existing precedence rules.
-    const saleListBefore = sale.globalPriceListId;
     const explicitBefore = sale.priceListExplicitlySet;
     const customerList =
       (customer as { globalPriceListId?: string | null }).globalPriceListId ??
@@ -2411,7 +2423,7 @@ export class SalesService {
     idempotencyKey: string,
   ) {
     const normalizedPayments = normalizeChargeRequestPayments(dto);
-        const hashPayments = sortPaymentsForHash(normalizedPayments);
+    const hashPayments = sortPaymentsForHash(normalizedPayments);
 
     // pos-sale-delivery -- include the `delivery` flag in the
     // idempotency requestHash (ADR-4). `?? false` makes omitted /
@@ -2922,8 +2934,8 @@ export class SalesService {
         );
       }
       const customerList =
-        (customer as { globalPriceListId?: string | null })
-          .globalPriceListId ?? null;
+        (customer as { globalPriceListId?: string | null }).globalPriceListId ??
+        null;
       sale.setGlobalPriceList(customerList, false);
 
       // D4 — re-evaluate the bot cart with the FULL POS promotions
@@ -3165,7 +3177,7 @@ export class SalesService {
     authMode: AddPaymentAuthMode = 'owner',
   ) {
     const normalizedPayments = normalizeCollectionRequestPayments(dto);
-        const hashPayments = sortPaymentsForHash(normalizedPayments);
+    const hashPayments = sortPaymentsForHash(normalizedPayments);
 
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
@@ -3238,7 +3250,11 @@ export class SalesService {
             tenantId,
             expectedCategory: payment.method,
           });
-          const snapshot: { paymentMethodId: string; name: string; subtitle?: string } = {
+          const snapshot: {
+            paymentMethodId: string;
+            name: string;
+            subtitle?: string;
+          } = {
             paymentMethodId: payment.paymentMethodId,
             name: resolved.name,
           };

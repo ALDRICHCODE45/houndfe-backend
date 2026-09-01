@@ -48,6 +48,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     updatePaymentReference: jest.fn(),
     findManyConfirmed: jest.fn(),
     countConfirmed: jest.fn(),
+    aggregateSummaryConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
     countNotDeliveredConfirmed: jest.fn(),
     findDraftResponseById: jest.fn(),
@@ -153,7 +154,10 @@ function createService(
   // Custom Payment Methods (custom-payment-methods / WU2): the
   // resolver is a Symbol-injected port; tests pass a mock by default.
   // Tests that exercise charge/collection threading override this.
-  paymentMethodResolver: { resolveActive: jest.Mock; listActive: jest.Mock } = makeMockPaymentMethodResolver(),
+  paymentMethodResolver: {
+    resolveActive: jest.Mock;
+    listActive: jest.Mock;
+  } = makeMockPaymentMethodResolver(),
 ) {
   return new SalesService(
     saleRepo,
@@ -902,8 +906,7 @@ describe('SalesService', () => {
         expectedCategory: 'transfer',
       });
 
-      const call = saleRepo.persistCollectedPayments.mock
-        .calls[0]?.[0] as {
+      const call = saleRepo.persistCollectedPayments.mock.calls[0]?.[0] as {
         payments: Array<{ metadataJson?: unknown }>;
       };
       // First entry: legacy path → metadataJson is undefined.
@@ -1129,9 +1132,7 @@ describe('SalesService', () => {
           JSON.stringify({
             saleId: 'sale-pay-legacy-shape',
             actorId: 'cashier-1',
-            payments: [
-              { method: 'cash', amountCents: 1000 },
-            ],
+            payments: [{ method: 'cash', amountCents: 1000 }],
           }),
         )
         .digest('hex');
@@ -3090,7 +3091,9 @@ describe('SalesService', () => {
         // Sanity: omitted delivery and explicit false hash identically.
         acquireChargeIdempotency.mockClear();
         const ids: string[] = [];
-        (saleRepo.acquireChargeIdempotency as unknown as jest.Mock).mockImplementation(
+        (
+          saleRepo.acquireChargeIdempotency as unknown as jest.Mock
+        ).mockImplementation(
           async (_saleId: string, _key: string, requestHash: string) => {
             ids.push(requestHash);
             return { kind: 'acquired', token: 'idem-row-2' };
@@ -3262,22 +3265,16 @@ describe('SalesService', () => {
 
       // Resolver hit twice — once per entry with `paymentMethodId`.
       expect(paymentMethodResolver.resolveActive).toHaveBeenCalledTimes(2);
-      expect(paymentMethodResolver.resolveActive).toHaveBeenNthCalledWith(
-        1,
-        {
-          paymentMethodId: 'pm-A',
-          tenantId: 'tenant-1',
-          expectedCategory: 'transfer',
-        },
-      );
-      expect(paymentMethodResolver.resolveActive).toHaveBeenNthCalledWith(
-        2,
-        {
-          paymentMethodId: 'pm-B',
-          tenantId: 'tenant-1',
-          expectedCategory: 'cash',
-        },
-      );
+      expect(paymentMethodResolver.resolveActive).toHaveBeenNthCalledWith(1, {
+        paymentMethodId: 'pm-A',
+        tenantId: 'tenant-1',
+        expectedCategory: 'transfer',
+      });
+      expect(paymentMethodResolver.resolveActive).toHaveBeenNthCalledWith(2, {
+        paymentMethodId: 'pm-B',
+        tenantId: 'tenant-1',
+        expectedCategory: 'cash',
+      });
 
       expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -3345,8 +3342,7 @@ describe('SalesService', () => {
 
       expect(paymentMethodResolver.resolveActive).toHaveBeenCalledTimes(1);
 
-      const call = saleRepo.persistChargeConfirmation.mock
-        .calls[0]?.[0] as {
+      const call = saleRepo.persistChargeConfirmation.mock.calls[0]?.[0] as {
         payments: Array<{ metadataJson?: unknown }>;
       };
       // First entry: legacy → metadataJson is undefined on the
@@ -3717,9 +3713,7 @@ describe('SalesService', () => {
           JSON.stringify({
             saleId: 'sale-charge-legacy-shape',
             actorId: 'user-1',
-            payments: [
-              { method: 'cash', amountCents: 1000 },
-            ],
+            payments: [{ method: 'cash', amountCents: 1000 }],
             dueDate: null,
             delivery: false,
           }),
@@ -4417,7 +4411,7 @@ describe('SalesService', () => {
       expect(publishedEventTypes).toEqual(['sale.confirmed']);
       expect(publishedEventTypes).not.toContain('sale.payment.received');
       expect(publishedEventTypes).not.toContain('sale.fully.paid');
-    })
+    });
     // ── Q2 / WU3: server-side engine re-evaluation (spec: sales delta) ──
 
     it('persists engine-recomputed discountCents=200 for a 10% AUTOMATIC PRODUCT_DISCOUNT (per-line)', async () => {
@@ -5754,7 +5748,11 @@ describe('SalesService', () => {
           paymentMethods: ['CASH', 'CARD_DEBIT'],
         },
       ] as any);
-      saleRepo.countConfirmed.mockResolvedValue(7);
+      saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
+        salesCount: 7,
+        totalSoldCents: 10500,
+        outstandingDebtCents: 0,
+      });
       saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([
         { paymentStatus: 'PAID', _count: { _all: 4 } },
         { paymentStatus: 'PARTIAL', _count: { _all: 2 } },
@@ -5780,10 +5778,15 @@ describe('SalesService', () => {
         pendingPayments: 3,
         notDelivered: 3,
       });
+      expect(result.summary).toEqual({
+        salesCount: 7,
+        totalSoldCents: 10500,
+        outstandingDebtCents: 0,
+      });
       expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
         expect.objectContaining({ paymentStatus: 'PAID', page: 2, limit: 1 }),
       );
-      expect(saleRepo.countConfirmed).toHaveBeenCalledWith(
+      expect(saleRepo.aggregateSummaryConfirmed).toHaveBeenCalledWith(
         expect.objectContaining({}),
       );
       expect(saleRepo.groupByPaymentStatusConfirmed).toHaveBeenCalledWith(
@@ -5796,7 +5799,11 @@ describe('SalesService', () => {
 
     it('keeps counts independent from tab filters', async () => {
       saleRepo.findManyConfirmed.mockResolvedValue([] as any);
-      saleRepo.countConfirmed.mockResolvedValue(3);
+      saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
+        salesCount: 3,
+        totalSoldCents: 4500,
+        outstandingDebtCents: 0,
+      });
       saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([
         { paymentStatus: 'PAID', _count: { _all: 1 } },
         { paymentStatus: 'PARTIAL', _count: { _all: 2 } },
@@ -5814,7 +5821,7 @@ describe('SalesService', () => {
           deliveryStatus: 'DELIVERED',
         }),
       );
-      expect(saleRepo.countConfirmed).toHaveBeenCalledWith(
+      expect(saleRepo.aggregateSummaryConfirmed).toHaveBeenCalledWith(
         expect.not.objectContaining({
           paymentStatus: expect.anything(),
           deliveryStatus: expect.anything(),
@@ -5832,6 +5839,103 @@ describe('SalesService', () => {
           deliveryStatus: expect.anything(),
         }),
       );
+    });
+
+    // ── Customer sales history — WU backend summary block ─────────
+    // The additive `summary` block on GET /sales must:
+    //   (a) match `pagination.total` and `counts.all` (same base
+    //       filters as the count query — confirmed-only),
+    //   (b) carry totalSoldCents + outstandingDebtCents from the
+    //       same aggregate so we don't add a 5th DB query,
+    //   (c) propagate the customerId filter (UI sends it to scope
+    //       the history to a single customer),
+    //   (d) normalize null Prisma sums to zero when no rows match.
+    it('returns summary block with salesCount matching counts.all and pagination.total', async () => {
+      saleRepo.findManyConfirmed.mockResolvedValue([] as any);
+      saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
+        salesCount: 7,
+        totalSoldCents: 12345,
+        outstandingDebtCents: 678,
+      });
+      saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([
+        { paymentStatus: 'PAID', _count: { _all: 4 } },
+        { paymentStatus: 'PARTIAL', _count: { _all: 2 } },
+        { paymentStatus: 'CREDIT', _count: { _all: 1 } },
+      ] as any);
+      saleRepo.countNotDeliveredConfirmed.mockResolvedValue(3);
+
+      const result = await service.listSales({} as any);
+
+      expect(result.summary).toEqual({
+        salesCount: 7,
+        totalSoldCents: 12345,
+        outstandingDebtCents: 678,
+      });
+      expect(result.summary.salesCount).toBe(result.pagination.total);
+      expect(result.summary.salesCount).toBe(result.counts.all);
+      expect(result.pagination.totalPages).toBe(1);
+    });
+
+    it('propagates customerId base filter into the summary aggregate', async () => {
+      saleRepo.findManyConfirmed.mockResolvedValue([] as any);
+      saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
+        salesCount: 5,
+        totalSoldCents: 9000,
+        outstandingDebtCents: 1200,
+      });
+      saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([] as any);
+      saleRepo.countNotDeliveredConfirmed.mockResolvedValue(2);
+
+      const customerId = 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26';
+      await service.listSales({
+        customerId: [customerId],
+        page: 1,
+        limit: 10,
+      } as any);
+
+      // The summary aggregate MUST see the customerId filter so the
+      // counts/sums are scoped to the same customer the list shows.
+      expect(saleRepo.aggregateSummaryConfirmed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          customerId: [customerId],
+        }),
+      );
+      // findMany stays on the extended filter (sortable tabs) and
+      // also sees customerId; the count/groupBy are on the base
+      // filter only — confirmed + cashier + customer + date range.
+      expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          customerId: [customerId],
+        }),
+      );
+    });
+
+    it('returns summary with zero sums when no rows match (empty result)', async () => {
+      saleRepo.findManyConfirmed.mockResolvedValue([] as any);
+      // Simulate Prisma returning null sums + 0 count when the
+      // base WHERE matches zero rows. The adapter MUST normalize
+      // both to zero before the service passes the block to the
+      // wire — Prisma sends null, not 0, on empty aggregations.
+      saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
+        salesCount: 0,
+        totalSoldCents: 0,
+        outstandingDebtCents: 0,
+      });
+      saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([] as any);
+      saleRepo.countNotDeliveredConfirmed.mockResolvedValue(0);
+
+      const result = await service.listSales({
+        customerId: ['00000000-0000-4000-8000-000000000000'],
+      } as any);
+
+      expect(result.summary).toEqual({
+        salesCount: 0,
+        totalSoldCents: 0,
+        outstandingDebtCents: 0,
+      });
+      expect(result.pagination.total).toBe(0);
+      expect(result.pagination.totalPages).toBe(0);
+      expect(result.counts.all).toBe(0);
     });
   });
 

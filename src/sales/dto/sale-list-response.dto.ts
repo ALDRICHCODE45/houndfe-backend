@@ -27,4 +27,23 @@ export interface SaleListResponseDto {
     pendingPayments: number;
     notDelivered: number;
   };
+  /**
+   * Customer sales history — WU backend summary block. Confirmed-only
+   * aggregates over the SAME base filters that drove `pagination.total`
+   * and `counts.all` — so `summary.salesCount === counts.all ===
+   * pagination.total` holds by construction.
+   *
+   * `totalSoldCents` is the sum of `totalCents` over every confirmed
+   * sale in the matched set (NOT paginated rows — see the doc warning).
+   * `outstandingDebtCents` is the sum of `debtCents` (rows with no
+   * debt contribute zero).
+   *
+   * Zeroed (not null) when no rows match — Prisma null sums are
+   * normalized on the adapter path.
+   */
+  summary: {
+    salesCount: number;
+    totalSoldCents: number;
+    outstandingDebtCents: number;
+  };
 }
