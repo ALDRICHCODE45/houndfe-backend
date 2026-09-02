@@ -9,8 +9,11 @@
  *   - Imports `AuthModule` for `JwtAuthGuard`, `TenantContextGuard`, and
  *     `PermissionsGuard` referenced by the controller's `@UseGuards(...)`
  *     metadata (`CaslAbilityFactory` is injected by `PermissionsGuard`).
- *   - Providers expose `GetCatalogSettingsUseCase` and bind the
- *     `CATALOG_SETTINGS_REPOSITORY` port to `PrismaCatalogSettingsRepository`.
+ *   - Providers expose `GetCatalogSettingsUseCase` and
+ *     `UpdateCatalogSettingsUseCase`, the WU3B3 audit listener
+ *     (`CatalogSettingsEventListener`, global `EventEmitterModule`), and bind
+ *     the `CATALOG_SETTINGS_REPOSITORY` port to
+ *     `PrismaCatalogSettingsRepository`.
  *
  * Registered exactly once in `src/app.module.ts` like every other feature
  * module.
@@ -20,6 +23,8 @@ import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
 import { CatalogSettingsController } from './presentation/catalog-settings.controller';
 import { GetCatalogSettingsUseCase } from './application/get-catalog-settings.use-case';
+import { UpdateCatalogSettingsUseCase } from './application/update-catalog-settings.use-case';
+import { CatalogSettingsEventListener } from './listeners/catalog-settings-event.listener';
 import { PrismaCatalogSettingsRepository } from './infrastructure/prisma-catalog-settings.repository';
 import { CATALOG_SETTINGS_REPOSITORY } from './domain/catalog-settings.repository';
 
@@ -28,6 +33,8 @@ import { CATALOG_SETTINGS_REPOSITORY } from './domain/catalog-settings.repositor
   controllers: [CatalogSettingsController],
   providers: [
     GetCatalogSettingsUseCase,
+    UpdateCatalogSettingsUseCase,
+    CatalogSettingsEventListener,
     {
       provide: CATALOG_SETTINGS_REPOSITORY,
       useClass: PrismaCatalogSettingsRepository,

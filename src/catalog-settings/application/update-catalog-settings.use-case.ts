@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   CATALOG_SETTINGS_REPOSITORY,
   ICatalogSettingsRepository,
@@ -15,10 +16,15 @@ import {
   type CatalogSettingsResponseDto,
 } from '../dto/catalog-settings-response.dto';
 import type { UpdateCatalogSettingsDto } from '../dto/update-catalog-settings.dto';
+import {
+  CATALOG_SETTINGS_UPDATED,
+  CatalogSettingsUpdatedEvent,
+  deriveCatalogSettingsChangedFields,
+} from './events/catalog-settings.events';
 
 /**
- * WU3B2 — PATCH write input (design.md §5.4). `actorUserId` is forwarded
- * to `replace` for the later audit slice — no audit event is emitted here.
+ * PATCH write input (design.md §5.4). `actorUserId` is forwarded to
+ * `replace` and, since WU3B3, into the post-commit audit payload.
  */
 export interface UpdateCatalogSettingsInput {
   tenantId: string;
@@ -31,6 +37,7 @@ export class UpdateCatalogSettingsUseCase {
   constructor(
     @Inject(CATALOG_SETTINGS_REPOSITORY)
     private readonly repository: ICatalogSettingsRepository,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -101,9 +108,38 @@ export class UpdateCatalogSettingsUseCase {
         )
       : null;
     const saved = await this.repository.replace(updated, actorUserId);
+    this.emitUpdatedAudit(tenantId, actorUserId, data);
     return toCatalogSettingsResponseDto(saved.toInternalResult(), {
       defaultContextProductCount,
     });
+  }
+
+  /**
+   * Best-effort audit (WU3B3): emitted only AFTER `replace` resolves, so a
+   * failed validation, coverage lookup, or write never produces an event.
+   * Any emission failure is swallowed here — an already-committed PATCH
+   * must never reject because auditing could not run. The payload is the
+   * allowlisted `CatalogSettingsUpdatedEvent`; values never ride along.
+   */
+  private emitUpdatedAudit(
+    tenantId: string,
+    actorUserId: string,
+    data: UpdateCatalogSettingsDto,
+  ): void {
+    try {
+      this.eventEmitter.emit(
+        CATALOG_SETTINGS_UPDATED,
+        new CatalogSettingsUpdatedEvent(
+          tenantId,
+          actorUserId,
+          CATALOG_SETTINGS_UPDATED,
+          new Date().toISOString(),
+          deriveCatalogSettingsChangedFields(data),
+        ),
+      );
+    } catch {
+      // Intentionally ignored: audit/event failures are non-fatal.
+    }
   }
 
   /** Rebuilds the aggregate; `fromPersistence` validates all invariants. */

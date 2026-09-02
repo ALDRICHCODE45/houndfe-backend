@@ -1,6 +1,11 @@
 import { UpdateCatalogSettingsUseCase } from './update-catalog-settings.use-case';
 import { CatalogSettingsNotFoundError } from './get-catalog-settings.use-case';
 import {
+  CATALOG_SETTINGS_UPDATED,
+  CatalogSettingsUpdatedEvent,
+} from './events/catalog-settings.events';
+import type { EventEmitter2 } from '@nestjs/event-emitter';
+import {
   CatalogSettingsInvariantError,
   TenantCatalogSettings,
   type TenantBaseProps,
@@ -71,7 +76,15 @@ const run = (
     r.countDefaultContextCoverage.mockRejectedValue(opts.coverageError);
   else r.countDefaultContextCoverage.mockResolvedValue(opts.coverage ?? 0);
   const input = { tenantId: 't1', actorUserId: 'actor-1', data };
-  return { r, promise: new UpdateCatalogSettingsUseCase(r).execute(input) };
+  const emit = jest.fn();
+  return {
+    r,
+    emit,
+    emitter: { emit } as unknown as EventEmitter2,
+    promise: new UpdateCatalogSettingsUseCase(r, {
+      emit,
+    } as unknown as EventEmitter2).execute(input),
+  };
 };
 
 const persisted = (r: ReturnType<typeof repo>) =>
@@ -83,15 +96,19 @@ const rejects = (promise: Promise<unknown>, code: string) =>
 const backstop = (code: string) => new CatalogSettingsInvariantError(code, 'x');
 
 describe('UpdateCatalogSettingsUseCase', () => {
-  it('throws the GET-consistent not-found error and never writes', async () => {
+  it('throws the GET-consistent not-found error and never writes or emits', async () => {
     const r = repo();
     r.findByTenantId.mockResolvedValue(null);
-    const error = await new UpdateCatalogSettingsUseCase(r)
+    const emit = jest.fn();
+    const error = await new UpdateCatalogSettingsUseCase(r, {
+      emit,
+    } as unknown as EventEmitter2)
       .execute({ tenantId: 't1', actorUserId: 'actor-1', data: {} })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(CatalogSettingsNotFoundError);
     expect(error).toMatchObject({ tenantId: 't1' });
     expect(r.replace).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it('omitted fields keep current values; replace is atomic with actor', async () => {
@@ -227,5 +244,106 @@ describe('UpdateCatalogSettingsUseCase', () => {
       },
     );
     await rejects(promise, 'UNKNOWN_GLOBAL_PRICE_LIST');
+  });
+
+  it('emits catalog-settings.updated after a successful replace with the exact allowlisted payload', async () => {
+    const { r, emit, promise } = run(
+      settings([binding('gpl-1', true), binding('gpl-2', false)]),
+      {
+        catalogPublished: true,
+        publicPriceListIds: ['gpl-1', 'gpl-3'],
+        catalogDefaultPriceListId: 'gpl-3',
+        stockPresentationDefault: { mode: 'HIDDEN' },
+      },
+      { found: [list('gpl-1'), list('gpl-3')] },
+    );
+    await promise;
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(r.replace).toHaveBeenCalledTimes(1);
+    // Emission strictly follows the successful write.
+    expect(r.replace.mock.invocationCallOrder[0]).toBeLessThan(
+      emit.mock.invocationCallOrder[0],
+    );
+    const [name, event] = emit.mock.calls[0] as [
+      string,
+      CatalogSettingsUpdatedEvent,
+    ];
+    expect(name).toBe(CATALOG_SETTINGS_UPDATED);
+    expect(event).toBeInstanceOf(CatalogSettingsUpdatedEvent);
+    // Exactly five top-level properties — no values, snapshots or ids.
+    expect(Object.keys(event).sort()).toEqual(
+      [
+        'action',
+        'actorUserId',
+        'changedFields',
+        'occurredAt',
+        'tenantId',
+      ].sort(),
+    );
+    expect(event.action).toBe('catalog-settings.updated');
+    expect(event.tenantId).toBe('t1');
+    expect(event.actorUserId).toBe('actor-1');
+    expect(event.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(event.changedFields).toEqual([
+      'catalogPublished',
+      'publicPriceListIds',
+      'catalogDefaultPriceListId',
+      'stockPresentationDefault',
+    ]);
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain('gpl-');
+    expect(serialized).not.toContain('HIDDEN');
+  });
+
+  it('derives changedFields only from keys actually supplied on the PATCH', async () => {
+    const omitted = run(settings([binding('gpl-1', true)]), {});
+    await omitted.promise;
+    const omittedEvent = omitted.emit.mock.calls[0] as [
+      string,
+      CatalogSettingsUpdatedEvent,
+    ];
+    expect(omittedEvent[1]).toMatchObject({ changedFields: [] });
+    const partial = run(settings([binding('gpl-1', true)]), {
+      catalogDefaultPriceListId: 'gpl-1',
+      stockPresentationDefault: { mode: 'CUSTOM_QUANTITY', customQuantity: 2 },
+    });
+    await partial.promise;
+    const partialEvent = partial.emit.mock.calls[0] as [
+      string,
+      CatalogSettingsUpdatedEvent,
+    ];
+    expect(partialEvent[1]).toMatchObject({
+      changedFields: ['catalogDefaultPriceListId', 'stockPresentationDefault'],
+    });
+  });
+
+  it('never emits when validation, coverage lookup, or replace fails', async () => {
+    const invalid = run(
+      settings([binding('gpl-1', true), binding('gpl-2', false)]),
+      { publicPriceListIds: ['gpl-2'] },
+      { found: [list('gpl-2')] },
+    );
+    await rejects(invalid.promise, 'DEFAULT_NOT_PUBLIC');
+    expect(invalid.emit).not.toHaveBeenCalled();
+
+    const failedReplace = run(
+      settings([binding('gpl-1', true)]),
+      { catalogPublished: true },
+      { replaceError: backstop('UNKNOWN_GLOBAL_PRICE_LIST') },
+    );
+    await rejects(failedReplace.promise, 'UNKNOWN_GLOBAL_PRICE_LIST');
+    expect(failedReplace.emit).not.toHaveBeenCalled();
+  });
+
+  it('an emitter failure never rejects an already successful update', async () => {
+    const { emit, promise } = run(settings([binding('gpl-1', true)]), {
+      catalogPublished: true,
+    });
+    emit.mockImplementation(() => {
+      throw new Error('event bus down');
+    });
+    const response = await promise;
+    expect(response.effectivePublication).toBe(true);
+    expect(emit).toHaveBeenCalledTimes(1);
   });
 });
