@@ -50,6 +50,7 @@ export type AppSubjects =
   | 'PaymentDetail'
   | 'PaymentMethod'
   | 'DeliveryRoute'
+  | 'TenantCatalogSettings'
   | 'all';
 
 /**
@@ -565,5 +566,22 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     action: 'delete',
     description:
       'Hard-delete a route that is still in DRAFT and has no stops',
+  },
+
+  // TenantCatalogSettings permissions (online-catalog-publishing / WU3).
+  // Publishing a tenant and exposing price contexts are go-live controls,
+  // not content editing: exactly `read` + `update`, and never implied by
+  // `update:Product` (design ADR-5). No role receives these rows
+  // automatically — access requires an explicit role-permission grant or
+  // global `manage:all`. PermissionSeeder auto-upserts on boot.
+  {
+    subject: 'TenantCatalogSettings',
+    action: 'read',
+    description: 'View tenant online catalog publication settings',
+  },
+  {
+    subject: 'TenantCatalogSettings',
+    action: 'update',
+    description: 'Publish or update tenant online catalog settings',
   },
 ];

@@ -178,4 +178,58 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
     ).length;
     expect(count).toBe(4);
   });
+
+  // ── online-catalog-publishing / WU3 — TenantCatalogSettings ───────────────
+
+  it('upserts exactly (TenantCatalogSettings, read/update) from the registry', async () => {
+    const { prisma, permissionUpsertCalls } = makePrismaStub();
+
+    const seeder = new PermissionSeeder(prisma);
+    await seeder.onApplicationBootstrap();
+
+    const settingsCalls = permissionUpsertCalls
+      .filter((c) => c.where.subject_action.subject === 'TenantCatalogSettings')
+      .map((c) => c.where.subject_action.action)
+      .sort();
+
+    expect(settingsCalls).toEqual(['read', 'update']);
+  });
+
+  it('re-running the seeder re-upserts the same 2 settings keys (no duplicates)', async () => {
+    // Idempotency is by construction: the unchanged algorithm keys every
+    // write on `subject_action`, so a second boot repeats the same upserts
+    // instead of inserting new rows.
+    const { prisma, permissionUpsertCalls } = makePrismaStub();
+    const seeder = new PermissionSeeder(prisma);
+
+    await seeder.onApplicationBootstrap();
+    await seeder.onApplicationBootstrap();
+
+    const settingsKeys = permissionUpsertCalls
+      .filter((c) => c.where.subject_action.subject === 'TenantCatalogSettings')
+      .map((c) => c.where.subject_action.action)
+      .sort();
+
+    expect(settingsKeys).toEqual(['read', 'read', 'update', 'update']);
+    expect(new Set(settingsKeys).size).toBe(2);
+  });
+
+  it('assigns no role to the settings permissions (only manage:all is linked)', async () => {
+    const { prisma } = makePrismaStub();
+    const seeder = new PermissionSeeder(prisma);
+    await seeder.onApplicationBootstrap();
+
+    const rolePermissionApi = prisma.rolePermission as unknown as {
+      upsert: jest.Mock;
+    };
+
+    // The stub mints ids as `perm-<subject>-<action>`, so a settings grant
+    // would surface as `perm-TenantCatalogSettings-*` here.
+    expect(rolePermissionApi.upsert).toHaveBeenCalledTimes(1);
+    const linkedIds = rolePermissionApi.upsert.mock.calls.map(
+      (call: [RolePermissionUpsertCall]) =>
+        call[0].where.roleId_permissionId.permissionId,
+    );
+    expect(linkedIds).toEqual(['perm-all-manage']);
+  });
 });
