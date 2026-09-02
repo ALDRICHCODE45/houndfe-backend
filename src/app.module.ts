@@ -62,6 +62,10 @@ import { DeliveryRoutesOutboxModule } from './delivery-routes/outbox/delivery-ro
 // WU3 - registers the delivery-next-stop-notify Inngest function.
 // Top-level provider so the dep graph resolves through AppModule.
 import { DeliveryRoutesInngestRegistrar } from './delivery-routes/inngest/delivery-routes-inngest-registrar';
+// online-catalog-publishing / WU3A3 - catalog-settings bounded context
+// (GET /tenants/:tenantId/catalog-settings). Hexagonal wiring mirrors
+// SatCatalogModule / NotificationConfigModule.
+import { CatalogSettingsModule } from './catalog-settings/catalog-settings.module';
 
 @Module({
   imports: [
@@ -138,11 +142,14 @@ import { DeliveryRoutesInngestRegistrar } from './delivery-routes/inngest/delive
     // model consumers (WU3). WU3 adds the outbox/Inngest/email
     // module + the top-level Inngest registrar alongside this line.
     DeliveryRoutesModule,
-  // delivery-routes / WU3 — dedicated poller/dispatcher for the
-  // delivery.next_stop.notify outbox rows. Mirrors
-  // LowStockOutboxModule / HrTimeOffOutboxModule placement.
-  DeliveryRoutesOutboxModule,
-],
+    // delivery-routes / WU3 — dedicated poller/dispatcher for the
+    // delivery.next_stop.notify outbox rows. Mirrors
+    // LowStockOutboxModule / HrTimeOffOutboxModule placement.
+    DeliveryRoutesOutboxModule,
+    // online-catalog-publishing / WU3A3 — catalog-settings bounded
+    // context. Self-contained: imports DatabaseModule + AuthModule only.
+    CatalogSettingsModule,
+  ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
   // NotificationConfigRepo + UserEmailLookup + TenantRunner) resolves
