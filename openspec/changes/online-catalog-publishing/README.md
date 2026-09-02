@@ -170,12 +170,13 @@ Reference: `openspec/project-context.md` and `openspec/config.yaml`.
 
 - Change packet exists at `openspec/changes/online-catalog-publishing/` with
   `proposal.md`, `design.md`, `tasks.md`, `specs/`, and `review-ledger.md`.
-- **Completed work units:** F1.WU1a (additive persistence foundation) and
-  F1.WU1b (migration and clean-seed evidence) have shipped; F1.WU2a (catalog-settings
-  domain, port, and internal GET use case) is approved and acknowledged in
-  `review-ledger.md`.
-- **Next slice:** F1.WU2b (catalog-settings Prisma adapter and real persistence
-  evidence).
+- **Completed work units:** F1.WU1a (additive persistence foundation),
+  F1.WU1b (migration and clean-seed evidence), F1.WU2a (catalog-settings domain,
+  port, and internal GET use case), and F1.WU2b (catalog-settings Prisma adapter
+  and real persistence evidence — 10 commits / 11 files / 3,648 A+D / completed,
+  passed, and published) are recorded in `review-ledger.md`, `apply-progress.md`,
+  and `verify-report.md`.
+- **Next slice:** F1.WU3 (catalog-settings HTTP contract and dedicated authorization).
 - **Frontend:** paused by product decision; this change delivers backend contracts
   and evidence only and does not reactivate frontend work.
 

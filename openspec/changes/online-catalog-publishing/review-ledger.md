@@ -47,3 +47,27 @@ Evidence summary:
 - Primary LSP clean for the six changed files.
 - Full TypeScript check has unrelated pre-existing diagnostics outside `src/catalog-settings`; no catalog-settings diagnostics.
 - Whitespace checks passed, including no-index checks for untracked files.
+
+## WU2b — Catalog-settings Prisma adapter and real persistence evidence
+
+- Boundary: transaction-safe Prisma adapter + real-DB evidence; no HTTP/DTO/permission/module/audit/public-product work; no WU1a/WU1b schema/migration edits. Depends on WU2a.
+- Delivery: 10 bounded commits, 11 files, 3,648 insertions (no deletions), every slice ≤400 A+D. Direct-main integration at 46957ae after bounded reviews; no PR was used for WU2b.
+- Rollback: revert the 10 commits in reverse chronological order (13e8f4d → ee28509); additive M1–M5 schema/migration stays deployable.
+- Partial-slice scope: each commit is a partial slice of WU2b; the chain stays ≤400 at every step.
+
+| Commit  | A+D | RDD lineage              | Findings                                                                  |
+| ------- | --: | ------------------------ | ------------------------------------------------------------------------- |
+| ee28509 | 286 | review-3d92947581407f5c  | informational R3-001 (adapter line 45)                                    |
+| e31b92e | 312 | review-700f959ddcb656ca  | informational (mock-order line 181)                                       |
+| 60ca227 | 353 | review-6289298aa9de73d6  | informational R3-001 (lines 232-235)                                      |
+| 2db63af | 375 | review-85e81f366ce1435a  | none                                                                      |
+| ae25107 | 392 | review-c18fa48a796a8866  | informational readability (lines 258-274); nested actor values (line 369) |
+| d670a15 | 343 | review-527f97cda1fa5987  | informational R3-001 (lines 266-287)                                      |
+| faff9d8 | 400 | review-3c06265f58a051f6  | informational R3-001 (lines 40-42)                                        |
+| 0cffe47 | 399 | review-44207c2be9af5b4b  | informational R3-cls-transaction-shim (line 71)                           |
+| 842b5b7 | 391 | review-eb632c5605500111  | informational R3-TenantASuccessUnproved (line 329)                        |
+| 13e8f4d | 397 | review-68d8452f28cf7624  | none                                                                      |
+
+- Outcome: all 10 commits approved and acknowledged; findings informational/non-blocking; no correction opened.
+- Consolidated verification (captured per slice, replayed at the 46957ae candidate): focused Jest (catalog-settings) PASS 7 suites / 62 tests / 0 skips; integration (catalog-settings) PASS 4 suites / 16 tests / 0 skips against 44 migrations (none pending); ESLint over the 11 WU2b files PASS; `pnpm build` PASS; `pnpm prisma validate && pnpm prisma generate` with `.env.test` PASS; full `pnpm test` PASS 220 suites / 3,047 tests / 0 failures or skips; `git diff --check` and untracked-file whitespace checks PASS; max slice = 400.
+- Known caveat: full `tsc --noEmit` reported 193 diagnostics — 191 outside WU2b and 2 in byte-identical untouched `get-catalog-settings.use-case.spec.ts` (WU2a). No WU2b-owned diagnostics; pre-existing/non-regression.

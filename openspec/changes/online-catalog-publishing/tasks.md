@@ -6,13 +6,13 @@
 
 | Field                   | Value                                                                      |
 | ----------------------- | -------------------------------------------------------------------------- |
-| Estimated changed lines | **3,977–4,527** additions + deletions across 12 WUs (includes WU1a/WU1b/WU2a actuals: 362 + 396 + 399) |
+| Estimated changed lines | **7,375–7,815** additions + deletions across 12 WUs (includes WU1a/WU1b/WU2a/WU2b actuals: 362 + 396 + 399 + 3,648) |
 | 400-line budget risk    | High                                                                       |
 | Chained PRs recommended | Yes                                                                        |
 | Suggested split         | WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10 |
 | Delivery strategy       | auto-chain                                                                 |
 | Chain strategy          | stacked-to-main                                                            |
-| Overall range           | **3,977–4,527** (single source of truth)                                   |
+| Overall range           | **7,375–7,815** (single source of truth)                                   |
 
 Decision needed before apply: No
 Chained PRs recommended: Yes
@@ -44,12 +44,12 @@ Chain strategy: stacked-to-main
 - [x] **[Pure backend code]** Create `src/catalog-settings/domain/tenant-catalog-settings.aggregate.ts`, `tenant-catalog-price-list.entity.ts`, and `catalog-settings.repository.ts` with `ICatalogSettingsRepository` plus `CATALOG_SETTINGS_REPOSITORY`; enforce unique IDs, unique global price-list IDs, child tenant consistency, one default for non-empty sets, publish-requires-default, explicit `CUSTOM_QUANTITY` integer `>= 0`, rejection of non-custom custom quantities, and `effectivePublication = isActive && catalogPublished`. **Accept:** `tenant-catalog-settings.aggregate.spec.ts` covers valid reconstruction and every rejected invariant. **Evidence:** focused WU2a Jest passed; 399-line diff and primary LSP clean. <!-- sdd-owner: implementation -->
 - [x] **[Pure backend code]** Implement injectable `src/catalog-settings/application/get-catalog-settings.use-case.ts` against the repository port only; return an internal application/aggregate-shaped result for WU2a, leaving final HTTP DTO shape to WU3. **Accept:** `get-catalog-settings.use-case.spec.ts` covers found/missing settings, no cross-tenant lookup, and port-level behavior without HTTP/RBAC concerns. **Evidence:** focused WU2a Jest passed 2 suites/17 tests; no catalog-settings TypeScript diagnostics. <!-- sdd-owner: implementation -->
 
-### F1.WU2b — Catalog-settings Prisma adapter and real persistence evidence (estimated 250–360 lines)
+### F1.WU2b — Catalog-settings Prisma adapter and real persistence evidence (actual 3,648 / 10 commits / 11 files / every slice ≤400 / completed, passed, and published)
 
 **Boundary:** start after WU2a; finish with the transaction-safe Prisma adapter and integration evidence, still with no HTTP route, DTO, permission, module registration, audit logging, product/public behavior, or WU1a/WU1b schema/migration edits. **Depends on:** WU2a. **Follow-up:** WU3 adds RBAC/controller/module and final response DTO mapping. **Rollback:** remove `src/catalog-settings/**` before rolling back additive tables. **Diagram:** `WU1a → WU1b → WU2a → 📍 WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`.
 
-- [ ] **[Pure backend code]** Implement `src/catalog-settings/infrastructure/prisma-catalog-settings.repository.ts`; use explicit `tenantId` predicates, `TenantPrismaService.runInTransaction()`, `tenantPrisma.getClient()` inside the transaction callback, tenant-row `FOR UPDATE`, in-transaction GlobalPriceList validation, ordered binding replacement, default assignment, reload, and default-coverage lookup. `actorUserId` remains accepted by the port but intentionally unused until WU3 audit logging; P2002-to-HTTP-409 mapping remains WU3/filter scope. **Accept:** mocked repository unit coverage proves scoped predicates/transaction sequencing and the port compiles against Prisma types. <!-- sdd-owner: implementation -->
-- [ ] **[Tests | T2, T11]** Add `src/catalog-settings/infrastructure/prisma-catalog-settings.repository.integration.spec.ts` for tenant isolation, atomic replacement, idempotent reads, rollback, cleanup of random `GlobalPriceList` fixtures, and partial-unique/default conflict behavior. **Accept:** `pnpm test:integration -- prisma-catalog-settings.repository.integration.spec.ts` passes against the migration. <!-- sdd-owner: implementation -->
+- [x] **[Pure backend code]** Implement `src/catalog-settings/infrastructure/prisma-catalog-settings.repository.ts`; use explicit `tenantId` predicates, `TenantPrismaService.runInTransaction()`, `tenantPrisma.getClient()` inside the transaction callback, tenant-row `FOR UPDATE`, in-transaction GlobalPriceList validation, ordered binding replacement, default assignment, reload, and default-coverage lookup. `actorUserId` remains accepted by the port but intentionally unused until WU3 audit logging; P2002-to-HTTP-409 mapping remains WU3/filter scope. **Accept:** mocked repository unit coverage proves scoped predicates/transaction sequencing and the port compiles against Prisma types. **Evidence:** focused Jest `pnpm exec jest --config jest.config.js --runInBand --testPathPatterns='catalog-settings'` PASS (7 suites / 62 tests / 0 skips); exact ESLint over the 11 WU2b files PASS (0 errors/warnings); `pnpm build` PASS; `pnpm prisma validate && pnpm prisma generate` PASS; per-slice bounded reviews approved/acknowledged (10 commits, max 400 A+D). <!-- sdd-owner: implementation -->
+- [x] **[Tests | T2, T11]** Add `src/catalog-settings/infrastructure/prisma-catalog-settings.repository.integration.spec.ts` for tenant isolation, atomic replacement, idempotent reads, rollback, cleanup of random `GlobalPriceList` fixtures, and partial-unique/default conflict behavior. **Accept:** `pnpm test:integration -- prisma-catalog-settings.repository.integration.spec.ts` passes against the migration. **Evidence:** disposable-PostgreSQL `pnpm exec jest --config jest.integration.config.js --runInBand --testPathPatterns='catalog-settings'` with `.env.test` PASS (4 suites / 16 tests / 0 skips) against 44 migrations (none pending); full `pnpm test` PASS (220 suites / 3,047 tests / 0 failures or skips); per-slice bounded reviews approved/acknowledged. <!-- sdd-owner: implementation -->
 
 ### F1.WU3 — Catalog-settings HTTP contract and dedicated authorization (estimated 330–390 lines)
 
@@ -129,11 +129,11 @@ Chain strategy: stacked-to-main
 | F1.WU1a schema + migration             |          **362 actual** | Completed persistence foundation; migration evidence covered by WU1b        |
 | F1.WU1b migration + seed evidence      |          **396 actual** | Drift, disposable-PostgreSQL, and clean-seed evidence                       |
 | F1.WU2a settings domain + internal GET |          **399 actual** | Domain, port, and internal application read contract                        |
-| F1.WU2b settings Prisma adapter        |                 250–360 | Transaction persistence and real-DB evidence                                |
+| F1.WU2b settings Prisma adapter        |         **3,648 actual** (10 commits / 11 files / max slice 400) | Prisma adapter + real-DB evidence; completed, passed, and published |
 | F1.WU3 settings API + RBAC             |                 330–390 | Authenticated admin contract                                                |
 | F1.WU4 product/variant round trips     |                 360–400 | Existing aggregate extensions                                               |
 | F1.WU5 publication gate                |                 320–385 | Public gate/default compatibility                                           |
-| **F1 total**                           |       **2,417–2,692** | Seven stacked PRs                                                           |
+| **F1 total**                           |       **5,815–5,980** | Seven stacked PRs                                                           |
 | F2.WU6 resolver + list/detail          |                 370–400 | Browse context contract                                                     |
 | F2.WU7 cart binding                    |                 350–395 | Stateless cart contract                                                     |
 | F2.WU8 guide + contract evidence       |                 220–300 | Documentation/snapshots                                                     |
@@ -141,6 +141,6 @@ Chain strategy: stacked-to-main
 | F3.WU9 stock projection                |                 360–400 | Presentation-only mapping                                                   |
 | F3.WU10 safety + evidence              |                 260–340 | Cart safety/final guide                                                     |
 | **F3 total**                           |             **620–740** | Two stacked PRs                                                             |
-| **Overall**                            |         **3,977–4,527** | Twelve stacked PRs; re-split before apply if a diff exceeds 400             |
+| **Overall**                            |         **7,375–7,815** | Twelve stacked PRs; re-split before apply if a diff exceeds 400             |
 
 Chained PRs are recommended: **Yes**; expected implementation is materially over 400 changed lines. The chain boundary is `WU1a → WU1b → WU2a → WU2b → WU3 → WU4 → WU5 → WU6 → WU7 → WU8 → WU9 → WU10`, using `stacked-to-main` under the approved `auto-chain` delivery strategy. Decision needed before apply: **No**.
