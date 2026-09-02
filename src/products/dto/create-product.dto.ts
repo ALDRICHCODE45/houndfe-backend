@@ -11,9 +11,16 @@ import {
   Min,
   MaxLength,
   MinLength,
+  Validate,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+import { CatalogStockPresentation } from '@prisma/client';
+import {
+  coerceCatalogCustomQuantity,
+  OnlineStockCustomQuantityConstraint,
+  OnlineStockCustomQtyRequiredConstraint,
+} from './catalog-stock-custom-quantity.validator';
 
 class PurchaseCostDto {
   @IsEnum(['NET', 'GROSS'])
@@ -212,6 +219,36 @@ export class CreateProductDto {
   @IsOptional()
   @IsBoolean()
   includeInOnlineCatalog?: boolean;
+
+  /**
+   * Online-catalog price display (design.md §6): hides sell prices on
+   * the public catalog even when the product is included.
+   */
+  @IsOptional()
+  @IsBoolean()
+  hidePriceInOnlineCatalog?: boolean;
+
+  /**
+   * Online-catalog stock presentation (design.md §6). Explicit `null`
+   * is valid (clears the override); omission on PATCH keeps the stored
+   * value. Cross-field rules with the custom quantity live in
+   * `catalog-stock-custom-quantity.validator.ts`; the service
+   * re-validates the omitted-mode case against merged state on PATCH.
+   */
+  @IsOptional()
+  @IsEnum(CatalogStockPresentation)
+  @Validate(OnlineStockCustomQtyRequiredConstraint)
+  onlineStockPresentation?: CatalogStockPresentation | null;
+
+  /**
+   * Custom display quantity — integer >= 0, only meaningful with
+   * `CUSTOM_QUANTITY`. No `@IsOptional` on purpose: the cross-field
+   * constraint owns null/omitted handling (the mode-side guard
+   * re-checks the PATCH skipped-null case).
+   */
+  @Transform(coerceCatalogCustomQuantity)
+  @Validate(OnlineStockCustomQuantityConstraint)
+  onlineStockPresentationCustomQty?: number | null;
 
   @IsOptional()
   @IsBoolean()
