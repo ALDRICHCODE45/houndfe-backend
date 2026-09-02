@@ -16,9 +16,11 @@ import {
   type Type,
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import type { Server } from 'http';
 import request from 'supertest';
 import { ProductsController } from './products.controller';
 import { ProductsService } from './products.service';
+import { UpdateProductDto } from './dto/update-product.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
@@ -522,5 +524,79 @@ describe('ProductsController sub-resource auth integration', () => {
       .get('/products?someUnknownParam=1')
       .set('Authorization', 'Bearer product-read-only')
       .expect(400);
+  });
+});
+
+// F1.WU4b2 — the catalog-field PATCH path keeps update:Product and the
+// WU4b1-admitted scalars survive validation and reach the service.
+
+describe('ProductsController — online catalog scalar fields (WU4b2)', () => {
+  let app: INestApplication;
+  let service: jest.Mocked<ProductsService>;
+
+  let update: jest.Mock<Promise<{ id: string }>, [string, UpdateProductDto]>;
+
+  beforeEach(async () => {
+    update = jest
+      .fn<Promise<{ id: string }>, [string, UpdateProductDto]>()
+      .mockResolvedValue({ id: UUID });
+    service = Object.assign(
+      makeMockProductsService() as unknown as jest.Mocked<ProductsService>,
+      { update },
+    );
+
+    const moduleRef = await Test.createTestingModule({
+      controllers: [ProductsController],
+      providers: [{ provide: ProductsService, useValue: service }],
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useClass(TestJwtAuthGuard as Type<CanActivate>)
+      .overrideGuard(TenantContextGuard)
+      .useClass(TestTenantContextGuard as Type<CanActivate>)
+      .overrideGuard(PermissionsGuard)
+      .useClass(TestPermissionsGuard as Type<CanActivate>)
+      .compile();
+
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+    await app.init();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('PATCH /products/:id with catalog scalars returns 200 with update:Product and forwards the fields', async () => {
+    await request(app.getHttpServer() as Server)
+      .patch(`/products/${UUID}`)
+      .set('Authorization', 'Bearer product-full-crud')
+      .send({
+        hidePriceInOnlineCatalog: true,
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 5,
+      })
+      .expect(200);
+
+    expect(update).toHaveBeenCalledTimes(1);
+    const dto = update.mock.calls[0][1];
+    expect(dto.hidePriceInOnlineCatalog).toBe(true);
+    expect(dto.onlineStockPresentation).toBe('CUSTOM_QUANTITY');
+    expect(dto.onlineStockPresentationCustomQty).toBe(5);
+  });
+
+  it('PATCH /products/:id with catalog scalars returns 403 for a user without update:Product', async () => {
+    await request(app.getHttpServer() as Server)
+      .patch(`/products/${UUID}`)
+      .set('Authorization', 'Bearer product-read-only')
+      .send({ hidePriceInOnlineCatalog: true })
+      .expect(403);
+
+    expect(update).not.toHaveBeenCalled();
   });
 });

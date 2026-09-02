@@ -40,6 +40,7 @@ import {
   IvaRate as PrismaIvaRate,
   IepsRate as PrismaIepsRate,
   PurchaseCostMode as PrismaPurchaseCostMode,
+  CatalogStockPresentation,
 } from '@prisma/client';
 
 const POS_CATALOG_INCLUDE = Prisma.validator<Prisma.ProductInclude>()({
@@ -354,6 +355,9 @@ export class ProductsService {
       quantity: dto.quantity,
       minQuantity: dto.minQuantity,
       hasVariants: dto.hasVariants,
+      hidePriceInOnlineCatalog: dto.hidePriceInOnlineCatalog,
+      onlineStockPresentation: dto.onlineStockPresentation,
+      onlineStockPresentationCustomQty: dto.onlineStockPresentationCustomQty,
     });
 
     // ── Atomic transaction: create product + all sub-resources ──
@@ -390,6 +394,9 @@ export class ProductsService {
           quantity: p.quantity,
           minQuantity: p.minQuantity,
           hasVariants: p.hasVariants,
+          hidePriceInOnlineCatalog: p.hidePriceInOnlineCatalog,
+          onlineStockPresentation: p.onlineStockPresentation,
+          onlineStockPresentationCustomQty: p.onlineStockPresentationCustomQty,
           tenantId,
         } as Prisma.ProductUncheckedCreateInput,
       });
@@ -660,6 +667,10 @@ export class ProductsService {
         quantity: product.quantity,
         minQuantity: product.minQuantity,
         hasVariants: product.hasVariants,
+        hidePriceInOnlineCatalog: product.hidePriceInOnlineCatalog,
+        onlineStockPresentation: product.onlineStockPresentation,
+        onlineStockPresentationCustomQty:
+          product.onlineStockPresentationCustomQty,
         serviceDetail: product.serviceDetail
           ? {
               id: product.serviceDetail.id,
@@ -705,6 +716,51 @@ export class ProductsService {
   async update(id: string, dto: UpdateProductDto) {
     const product = await this.productRepo.findById(id);
     if (!product) throw new EntityNotFoundError('Product', id);
+
+    // F1.WU4b2 — merged-state online stock-presentation validation. The
+    // DTO validates explicit pairs; an omitted mode defers to this
+    // service-level check on the MERGED (stored + incoming) state. It
+    // runs here, immediately after loading the product and BEFORE any
+    // aggregate mutation, so a rejected PATCH leaves the in-memory
+    // aggregate untouched and never reaches the durable
+    // productRepo.save write.
+    const incomingMode = dto.onlineStockPresentation;
+    const incomingQty = dto.onlineStockPresentationCustomQty;
+    const effectiveMode =
+      incomingMode !== undefined
+        ? incomingMode
+        : product.onlineStockPresentation;
+    let effectiveQty: number | null;
+    if (incomingQty !== undefined) {
+      effectiveQty = incomingQty;
+    } else if (
+      incomingMode !== undefined &&
+      incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
+    ) {
+      // Switching away from CUSTOM_QUANTITY without naming a quantity
+      // deterministically clears the stale stored value (design §6
+      // cross-field rules) so the valid DTO request succeeds instead of
+      // leaking the old quantity into the new mode.
+      effectiveQty = null;
+    } else {
+      effectiveQty = product.onlineStockPresentationCustomQty;
+    }
+    if (effectiveMode === CatalogStockPresentation.CUSTOM_QUANTITY) {
+      if (
+        effectiveQty === null ||
+        !Number.isInteger(effectiveQty) ||
+        effectiveQty < 0
+      ) {
+        throw new InvalidArgumentError(
+          'onlineStockPresentationCustomQty: the merged state is CUSTOM_QUANTITY and requires a non-null integer >= 0',
+        );
+      }
+    } else if (effectiveQty !== null) {
+      throw new InvalidArgumentError(
+        'onlineStockPresentationCustomQty: the merged state is not CUSTOM_QUANTITY and cannot carry a custom quantity',
+      );
+    }
+
     const previousUseStock = product.useStock;
     const previousType = product.type;
 
@@ -808,6 +864,21 @@ export class ProductsService {
     if (dto.quantity !== undefined) product.quantity = dto.quantity;
     if (dto.minQuantity !== undefined) product.minQuantity = dto.minQuantity;
     if (dto.hasVariants !== undefined) product.hasVariants = dto.hasVariants;
+
+    // Scalar catalog fields — omitted fields preserve stored state.
+    // Merged-state validation above already ran before any mutation.
+    if (dto.hidePriceInOnlineCatalog !== undefined)
+      product.hidePriceInOnlineCatalog = dto.hidePriceInOnlineCatalog;
+    if (dto.onlineStockPresentation !== undefined)
+      product.onlineStockPresentation = dto.onlineStockPresentation;
+    if (dto.onlineStockPresentationCustomQty !== undefined)
+      product.onlineStockPresentationCustomQty =
+        dto.onlineStockPresentationCustomQty;
+    else if (
+      incomingMode !== undefined &&
+      incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
+    )
+      product.onlineStockPresentationCustomQty = null;
 
     product.normalizeStockConfiguration();
 

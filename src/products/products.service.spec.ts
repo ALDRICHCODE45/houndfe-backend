@@ -9,7 +9,9 @@ import type { IProductRepository } from './domain/product.repository';
 import {
   EntityAlreadyExistsError,
   BusinessRuleViolationError,
+  InvalidArgumentError,
 } from '../shared/domain/domain-error';
+import { CatalogStockPresentation } from '@prisma/client';
 import { Product } from './domain/product.entity';
 import { BadRequestException } from '@nestjs/common';
 import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
@@ -2399,5 +2401,249 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     expect(calls('repo.rearmAlertAfterEdit').every((c) => c.insideTx)).toBe(
       true,
     );
+  });
+});
+
+// ── F1.WU4b2 — authenticated product scalar catalog round trip ──────────
+
+describe('ProductsService — online catalog scalar fields (WU4b2)', () => {
+  function catalogRow(
+    fields: Partial<{
+      hidePriceInOnlineCatalog: boolean;
+      onlineStockPresentation: CatalogStockPresentation | null;
+      onlineStockPresentationCustomQty: number | null;
+    }> = {},
+  ) {
+    return {
+      ...makePersistenceProduct({ id: PRODUCT_ID }),
+      hidePriceInOnlineCatalog: fields.hidePriceInOnlineCatalog ?? false,
+      onlineStockPresentation: fields.onlineStockPresentation ?? null,
+      onlineStockPresentationCustomQty:
+        fields.onlineStockPresentationCustomQty ?? null,
+    };
+  }
+
+  function makeUpdatePrisma() {
+    const productFindUnique = jest
+      .fn()
+      .mockResolvedValue({ category: null, brand: null });
+    return {
+      productFindUnique,
+      product: { findUnique: productFindUnique },
+      priceList: { findMany: jest.fn().mockResolvedValue([]) },
+      productImage: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+  }
+
+  function makeUpdateSetup(stored: Parameters<typeof catalogRow>[0]) {
+    const product = Product.fromPersistence(catalogRow(stored));
+    const save = jest.fn((p: Product) => Promise.resolve(p));
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(product),
+      save,
+    });
+    const prisma = makeUpdatePrisma();
+    const service = createService(repo, prisma);
+    return { repo, prisma, service, product, save };
+  }
+
+  it('create persists admitted catalog scalars (defaults false/null/null when omitted)', async () => {
+    const txProductCreate = jest.fn().mockResolvedValue({ id: PRODUCT_ID });
+    const txClient = {
+      product: { create: txProductCreate },
+      variant: { create: jest.fn() },
+      lot: { create: jest.fn() },
+      globalPriceList: { findMany: jest.fn().mockResolvedValue([]) },
+      priceList: { createMany: jest.fn(), create: jest.fn() },
+      variantPrice: { create: jest.fn() },
+      productImage: { create: jest.fn() },
+    };
+    const prisma = {
+      $transaction: jest.fn((cb: (tx: typeof txClient) => Promise<unknown>) =>
+        cb(txClient),
+      ),
+      ...makeUpdatePrisma(),
+    };
+    const service = createService(
+      makeMockRepo({
+        findById: jest.fn().mockResolvedValue(makeProduct('prod-created')),
+      }),
+      prisma,
+    );
+
+    await service.create({
+      name: 'Catalog Product',
+      hidePriceInOnlineCatalog: true,
+      onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+      onlineStockPresentationCustomQty: 7,
+    });
+    await service.create({ name: 'Plain Product' });
+
+    const [provided, defaults] = (
+      txProductCreate.mock.calls as Array<[{ data: Record<string, unknown> }]>
+    ).map((c) => c[0].data);
+    expect(provided.hidePriceInOnlineCatalog).toBe(true);
+    expect(provided.onlineStockPresentation).toBe(
+      CatalogStockPresentation.CUSTOM_QUANTITY,
+    );
+    expect(provided.onlineStockPresentationCustomQty).toBe(7);
+    expect(defaults.hidePriceInOnlineCatalog).toBe(false);
+    expect(defaults.onlineStockPresentation).toBeNull();
+    expect(defaults.onlineStockPresentationCustomQty).toBeNull();
+  });
+
+  it('PATCH omitting mode re-validates the merged CUSTOM_QUANTITY state and persists the new quantity', async () => {
+    const { save, service } = makeUpdateSetup({
+      hidePriceInOnlineCatalog: false,
+      onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+      onlineStockPresentationCustomQty: 5,
+    });
+
+    const result = await service.update(PRODUCT_ID, {
+      hidePriceInOnlineCatalog: true,
+      onlineStockPresentationCustomQty: 8,
+    });
+
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(result.hidePriceInOnlineCatalog).toBe(true);
+    expect(result.onlineStockPresentation).toBe(
+      CatalogStockPresentation.CUSTOM_QUANTITY,
+    );
+    expect(result.onlineStockPresentationCustomQty).toBe(8);
+  });
+
+  it('PATCH omitting mode with a quantity over stored non-custom mode rejects before any durable write', async () => {
+    const { prisma, save, service } = makeUpdateSetup({
+      onlineStockPresentation: null,
+      onlineStockPresentationCustomQty: null,
+    });
+
+    await expect(
+      service.update(PRODUCT_ID, {
+        onlineStockPresentationCustomQty: 5,
+      }),
+    ).rejects.toThrow(InvalidArgumentError);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(prisma.productFindUnique).not.toHaveBeenCalled();
+  });
+
+  it('rejected mixed PATCH leaves unrelated fields unchanged and performs no durable write', async () => {
+    const { save, service, product } = makeUpdateSetup({
+      onlineStockPresentation: null,
+      onlineStockPresentationCustomQty: null,
+    });
+    const nameBefore = product.name;
+
+    await expect(
+      service.update(PRODUCT_ID, {
+        name: 'Renamed',
+        onlineStockPresentationCustomQty: 5,
+      }),
+    ).rejects.toThrow(InvalidArgumentError);
+
+    // Merged validation runs before any aggregate mutation, so the loaded
+    // instance (the same object the mock repo returned) keeps its stored
+    // name value object untouched and the rejected write never reaches
+    // persistence.
+    expect(product.name).toBe(nameBefore);
+    expect(product.name.name).toBe('Producto');
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('PATCH switching from stored CUSTOM_QUANTITY to a non-custom mode clears the stale quantity instead of rejecting', async () => {
+    const { save, service } = makeUpdateSetup({
+      onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+      onlineStockPresentationCustomQty: 5,
+    });
+
+    const result = await service.update(PRODUCT_ID, {
+      onlineStockPresentation: CatalogStockPresentation.HIDDEN,
+    });
+
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(result.onlineStockPresentation).toBe(
+      CatalogStockPresentation.HIDDEN,
+    );
+    expect(result.onlineStockPresentationCustomQty).toBeNull();
+  });
+
+  it('PATCH with an explicit non-custom mode and an explicit quantity rejects before any durable write', async () => {
+    const { save, service } = makeUpdateSetup({
+      onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+      onlineStockPresentationCustomQty: 5,
+    });
+
+    await expect(
+      service.update(PRODUCT_ID, {
+        onlineStockPresentation: CatalogStockPresentation.HIDDEN,
+        onlineStockPresentationCustomQty: 5,
+      }),
+    ).rejects.toThrow(InvalidArgumentError);
+
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('PATCH omitted catalog fields preserve the stored scalar state', async () => {
+    const { service, product } = makeUpdateSetup({
+      hidePriceInOnlineCatalog: true,
+      onlineStockPresentation: CatalogStockPresentation.SYSTEM_STATUS,
+      onlineStockPresentationCustomQty: null,
+    });
+
+    await service.update(PRODUCT_ID, { name: 'Renamed' });
+
+    expect(product.name.productName).toBe('Renamed');
+    expect(product.hidePriceInOnlineCatalog).toBe(true);
+    expect(product.onlineStockPresentation).toBe(
+      CatalogStockPresentation.SYSTEM_STATUS,
+    );
+    expect(product.onlineStockPresentationCustomQty).toBeNull();
+  });
+
+  it('findAll reconstructs the catalog scalars from persisted rows', async () => {
+    const prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          catalogRow({
+            hidePriceInOnlineCatalog: true,
+            onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+            onlineStockPresentationCustomQty: 9,
+          }),
+        ]),
+      },
+    };
+    const service = createService(makeMockRepo(), prisma);
+
+    const [item] = await service.findAll();
+
+    expect(item.hidePriceInOnlineCatalog).toBe(true);
+    expect(item.onlineStockPresentation).toBe(
+      CatalogStockPresentation.CUSTOM_QUANTITY,
+    );
+    expect(item.onlineStockPresentationCustomQty).toBe(9);
+  });
+
+  it('findOne (buildFullResponse) exposes the stored catalog scalars', async () => {
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(
+        Product.fromPersistence(
+          catalogRow({
+            hidePriceInOnlineCatalog: true,
+            onlineStockPresentation: CatalogStockPresentation.HIDDEN,
+            onlineStockPresentationCustomQty: null,
+          }),
+        ),
+      ),
+    });
+    const service = createService(repo, makeUpdatePrisma());
+
+    const result = await service.findOne(PRODUCT_ID);
+
+    expect(result.hidePriceInOnlineCatalog).toBe(true);
+    expect(result.onlineStockPresentation).toBe(
+      CatalogStockPresentation.HIDDEN,
+    );
+    expect(result.onlineStockPresentationCustomQty).toBeNull();
   });
 });
