@@ -13,7 +13,8 @@
  *
  * Routes (canonical literal path — the `/admin/...` wording in the OpenSpec
  * design snapshot is superseded):
- *   GET /tenants/:tenantId/catalog-settings → read:TenantCatalogSettings
+ *   GET   /tenants/:tenantId/catalog-settings → read:TenantCatalogSettings
+ *   PATCH /tenants/:tenantId/catalog-settings → update:TenantCatalogSettings
  *
  * Tenant scoping (design §5.3, ADR-5):
  *   - Ordinary users may only read their own JWT tenant's settings. A JWT/path
@@ -24,11 +25,14 @@
  *     inferred here.
  */
 import {
+  Body,
   Controller,
   Get,
+  Header,
   NotFoundException,
   Param,
   ParseUUIDPipe,
+  Patch,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -41,6 +45,8 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import { GetCatalogSettingsUseCase } from '../application/get-catalog-settings.use-case';
+import { UpdateCatalogSettingsUseCase } from '../application/update-catalog-settings.use-case';
+import type { UpdateCatalogSettingsDto } from '../dto/update-catalog-settings.dto';
 import {
   toCatalogSettingsResponseDto,
   type CatalogSettingsResponseDto,
@@ -61,6 +67,7 @@ type RequestWithAbility = Request & {
 export class CatalogSettingsController {
   constructor(
     private readonly getCatalogSettingsUseCase: GetCatalogSettingsUseCase,
+    private readonly updateCatalogSettingsUseCase: UpdateCatalogSettingsUseCase,
   ) {}
 
   @Get()
@@ -85,6 +92,38 @@ export class CatalogSettingsController {
       await this.getCatalogSettingsUseCase.executeWithCoverage({ tenantId });
     return toCatalogSettingsResponseDto(settings, {
       defaultContextProductCount,
+    });
+  }
+
+  /**
+   * PATCH mirrors the GET tenant-scope gate exactly (same non-oracle 404
+   * before any use-case invocation, `manage:all` cross-tenant exception),
+   * then delegates the validated body plus the authenticated actor's ID to
+   * the update use case, which already returns the committed response DTO —
+   * no domain/Prisma entity ever reaches the HTTP boundary. `no-store` is set
+   * with Nest's direct `@Header` response-header metadata so an already-
+   * committed settings write is never cached — no interceptor/provider
+   * registration is required for the header to be wired at runtime.
+   */
+  @Patch()
+  @RequirePermissions(['update', 'TenantCatalogSettings'])
+  @Header('Cache-Control', 'no-store')
+  async updateSettings(
+    @Param('tenantId', new ParseUUIDPipe()) tenantId: string,
+    @Body() data: UpdateCatalogSettingsDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: RequestWithAbility,
+  ): Promise<CatalogSettingsResponseDto> {
+    const crossTenantAllowed = req.ability?.can('manage', 'all') === true;
+    if (user.tenantId !== tenantId && !crossTenantAllowed) {
+      throw new NotFoundException(
+        `Catalog settings not found for tenant ${tenantId}`,
+      );
+    }
+    return this.updateCatalogSettingsUseCase.execute({
+      tenantId,
+      actorUserId: user.userId,
+      data,
     });
   }
 }
