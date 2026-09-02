@@ -34,7 +34,7 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
     const permissionUpsertCalls: PermissionUpsertCall[] = [];
 
     const create = {
-      upsert: jest.fn(async (args: PermissionUpsertCall) => {
+      upsert: jest.fn((args: PermissionUpsertCall) => {
         permissionUpsertCalls.push(args);
         // Mimic Prisma: returns the record.
         return {
@@ -48,18 +48,18 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
     };
 
     const role = {
-      findFirst: jest.fn(async () =>
+      findFirst: jest.fn(() =>
         overrides.existingSuperAdmin === undefined
           ? null
           : overrides.existingSuperAdmin,
       ),
-      create: jest.fn(async () => ({ id: 'role-super-admin' })),
-      update: jest.fn(async () => ({ id: 'role-super-admin' })),
+      create: jest.fn(() => ({ id: 'role-super-admin' })),
+      update: jest.fn(() => ({ id: 'role-super-admin' })),
     };
 
     const rolePermission = {
       upsert: jest.fn(
-        async (args: RolePermissionUpsertCall) =>
+        (args: RolePermissionUpsertCall) =>
           overrides.rolePermissionUpsertResolved ?? args,
       ),
     };
@@ -128,12 +128,7 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
       .map((c) => c.where.subject_action.action)
       .sort();
 
-    expect(paymentDetailCalls).toEqual([
-      'create',
-      'delete',
-      'read',
-      'update',
-    ]);
+    expect(paymentDetailCalls).toEqual(['create', 'delete', 'read', 'update']);
   });
 
   it('writes 4 PaymentDetail rows on a single seeder run', async () => {
@@ -160,12 +155,7 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
       .map((c) => c.where.subject_action.action)
       .sort();
 
-    expect(paymentMethodCalls).toEqual([
-      'create',
-      'delete',
-      'read',
-      'update',
-    ]);
+    expect(paymentMethodCalls).toEqual(['create', 'delete', 'read', 'update']);
   });
 
   it('writes 4 PaymentMethod rows on a single seeder run', async () => {

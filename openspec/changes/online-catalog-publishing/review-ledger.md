@@ -71,3 +71,26 @@ Evidence summary:
 - Outcome: all 10 commits approved and acknowledged; findings informational/non-blocking; no correction opened.
 - Consolidated verification (captured per slice, replayed at the 46957ae candidate): focused Jest (catalog-settings) PASS 7 suites / 62 tests / 0 skips; integration (catalog-settings) PASS 4 suites / 16 tests / 0 skips against 44 migrations (none pending); ESLint over the 11 WU2b files PASS; `pnpm build` PASS; `pnpm prisma validate && pnpm prisma generate` with `.env.test` PASS; full `pnpm test` PASS 220 suites / 3,047 tests / 0 failures or skips; `git diff --check` and untracked-file whitespace checks PASS; max slice = 400.
 - Known caveat: full `tsc --noEmit` reported 193 diagnostics — 191 outside WU2b and 2 in byte-identical untouched `get-catalog-settings.use-case.spec.ts` (WU2a). No WU2b-owned diagnostics; pre-existing/non-regression.
+
+## WU3 — Catalog-settings HTTP contract and dedicated authorization (LOCAL)
+
+- Boundary: authenticated catalog-settings HTTP contract + dedicated authorization around WU2a/WU2b (DTOs, update use case, controller, module registration, actor audit logging, `TenantCatalogSettings` `read`/`update` permissions, idempotent bootstrap seeding, co-located tests). No product/variant, public-catalog, WU1a/WU1b schema/migration, or frontend work. Depends on WU2b.
+- Local branch state: `feat/online-catalog-publishing-wu3` @ `95dc022` in the dedicated worktree `houndfe-backend-online-catalog-wu3`. **Local-only: no upstream, no push, no merge, no PR, and no main/planning-worktree mutation for WU3.**
+- Delivery: 8 bounded commits `50d5539` → `95dc022`; 2,147 A+D total; max slice 381; every slice ≤400 (no size exception required).
+- Rollback: revert the 8 commits in reverse order `95dc022` → `50d5539`; WU2b/WU2a/WU1 work remains intact; no schema/migration edits belong to WU3.
+- Route supersession note: the canonical route is `/tenants/:tenantId/catalog-settings`; stale `/admin/...` design wording in proposal/design/specs is superseded but those artifacts remain untouched.
+
+| Commit   | A+D | RDD lineage                | Findings                                          |
+| -------- | --: | -------------------------- | ------------------------------------------------- |
+| `50d5539` | 335 | `review-c0d5a3c6d10aa2b2` | informational readability                          |
+| `39996d8` | 112 | `review-67d0bf12e8f79b94` | none recorded                                      |
+| `81917a9` | 245 | `review-7b5f310c3a46eb7e` | informational controller warning                   |
+| `653b1e4` | 141 | `review-a2e3611f5ae69dfb` | none recorded                                      |
+| `a9ede51` | 376 | `review-fa2bd9bbd9c1a359` | numeric-string strictness advisory                 |
+| `aff28aa` | 381 | `review-175f373f5b7578b9` | pre-write coverage lookup advisory                 |
+| `9c3bf74` | 325 | `review-5e19ef00ba8b99c4` | silent audit-drop / test-wording informational advisories |
+| `95dc022` | 232 | `review-01d0244648a14c7b` | none recorded                                      |
+
+- Outcome: all 8 commits reviewed with per-slice RDD lineages; findings informational/advisory/non-blocking; no correction opened.
+- Consolidated final evidence (captured locally on the WU3 branch): focused catalog-settings Jest PASS (13 suites / 148 tests); narrow ESLint/Prettier over WU3-touched files PASS; `pnpm build` PASS; no WU3 candidate TypeScript diagnostics (project-wide `tsc` retains unrelated pre-existing failures, non-regression).
+- Publication state: WU3 is NOT pushed, NOT merged, NOT published, and there was NO main mutation. Next phase is `sdd-verify`.

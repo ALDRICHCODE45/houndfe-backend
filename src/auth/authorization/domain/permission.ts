@@ -558,14 +558,12 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   {
     subject: 'DeliveryRoute',
     action: 'update',
-    description:
-      'Edit routes in DRAFT; check-in / cancel routes in ACTIVE',
+    description: 'Edit routes in DRAFT; check-in / cancel routes in ACTIVE',
   },
   {
     subject: 'DeliveryRoute',
     action: 'delete',
-    description:
-      'Hard-delete a route that is still in DRAFT and has no stops',
+    description: 'Hard-delete a route that is still in DRAFT and has no stops',
   },
 
   // TenantCatalogSettings permissions (online-catalog-publishing / WU3).
