@@ -1,5 +1,20 @@
 # Apply Progress — online-catalog-publishing
 
+## F1.WU4a — Product persistence foundation (corrected candidate; in progress)
+
+**Status:** corrected in place on `feat/online-catalog-publishing-wu4` (base `b65c3be`); not committed — parent owns commits/reviews. Corrects failed evidence `sha256:5635061206d2d420d354bb62e2ee99ecef563a93abf24e886a55e37be06290f9` (authored-line Prettier errors, placeholder progress); earlier failed evidence `sha256:331f191dcb85cd7725b9becce1d0a709d75f805aaf1d90ccfaaf7cc4d47f57ae` (398 A+D) also carried unrelated whitespace churn. Frontend paused; `src/public-catalog/**` untouched; authorization unchanged.
+
+### Delivered and verified (WU4a only)
+
+- `product.entity.ts` (+44/−0): catalog fields, `supportsAllCatalogPriceLists` derivation (empty allowlist = all-public), defensive ID copies; the file differs from base only in functional additions (0 deletions).
+- `prisma-product.repository.ts` (+55/−7): every `save()` runs the scalar upsert, tenant/product-scoped allowlist replacement (zero IDs = zero rows), and reload inside exactly one `TenantPrismaService.runInTransaction` boundary that reuses an ambient transaction without nesting; join-delegate feature-detect retained only for legacy `products.service.spec` doubles.
+- Tests: `product.entity.spec.ts` (+46) and new `prisma-product.repository.catalog.spec.ts` (221 lines / 5 tests): replacement/zero-rows/read reconstruction, single-boundary entry + ambient reuse + delegates on the boundary client, in-boundary `createMany` failure propagation. Mocks prove propagation into `runInTransaction` (real `$transaction` would reject → rollback), not a physical PostgreSQL rollback; rollback eligibility is structural — reverting these files removes the behavior, with no DB migration involved.
+- Fresh independent verification, unchanged semantically by this wording/whitespace-only correction: focused 2 suites / 29 tests PASS (re-run after correction: 29/29 PASS); `pnpm test -- products` 19 suites / 329 tests PASS; `pnpm build` PASS. No runtime harness (no HTTP route, service, or real-DB boundary in this slice — N/A).
+- This correction's checks: ESLint on the 4 candidate source/test files — entity spec and catalog spec clean, repository has only the 2 pre-existing `b65c3be` unused-var errors (byte-identical base lines), `product.entity.ts` shows 18 Prettier errors all machine-verified to sit on pre-existing lines byte-identical to base (0 authored lines implicated). Prettier: entity spec, repository, catalog spec PASS; `product.entity.ts`/`tasks.md`/`apply-progress.md` fail the full-file check solely via base-inherited formatting (`b65c3be` versions fail identically). `git diff --check`: clean.
+- Candidate budget vs `b65c3be`: 390 A+D (382 additions + 8 deletions) incl. the untracked catalog spec and the parent-owned tasks.md route-wording correction (2 A+D); WU4a code+tests only = 373 A+D; no size exception.
+
+**Remaining WU4:** DTO fields/validation, `products.service` orchestration + tenant-binding validation, variant INHERIT paths, `update:Product` continuity. F1.WU4 rows stay unchecked.
+
 **Latest checkpoint — WU3: COMPLETE / PASSED LOCALLY on `feat/online-catalog-publishing-wu3` @ `95dc022` (dedicated WU3 worktree). Local-only: not pushed, not merged, not published; no main mutation.** Next phase: `sdd-verify`.
 
 ---

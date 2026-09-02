@@ -276,5 +276,51 @@ describe('Product Entity', () => {
         notes: 'Bring leash',
       });
     });
+
+    it('reconstructs catalog fields and preserves relation IDs (F1.WU4a)', () => {
+      const sourceIds = ['pl-a', 'pl-b'];
+      const reconstructed = Product.fromPersistence({
+        ...Product.create(validParams).toPersistence(),
+        hidePriceInOnlineCatalog: true,
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 12,
+        supportedCatalogPriceListIds: sourceIds,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      // Defensive copy: caller-side array mutation must not leak in.
+      sourceIds.push('pl-z');
+      expect(reconstructed.hidePriceInOnlineCatalog).toBe(true);
+      expect(reconstructed.onlineStockPresentation).toBe('CUSTOM_QUANTITY');
+      expect(reconstructed.onlineStockPresentationCustomQty).toBe(12);
+      expect(reconstructed.supportedCatalogPriceListIds).toEqual([
+        'pl-a',
+        'pl-b',
+      ]);
+    });
+  });
+
+  describe('online catalog fields (F1.WU4a)', () => {
+    it('defaults to all-public with inherited presentation', () => {
+      const product = Product.create(validParams);
+      expect(product.hidePriceInOnlineCatalog).toBe(false);
+      expect(product.onlineStockPresentation).toBeNull();
+      expect(product.onlineStockPresentationCustomQty).toBeNull();
+      expect(product.supportedCatalogPriceListIds).toEqual([]);
+      expect(product.toResponse().supportsAllCatalogPriceLists).toBe(true);
+    });
+
+    it('derives supportsAllCatalogPriceLists from the allowlist', () => {
+      const narrowed = Product.create({
+        ...validParams,
+        supportedCatalogPriceListIds: ['pl-1'],
+      });
+      const response = narrowed.toResponse();
+      expect(response.supportsAllCatalogPriceLists).toBe(false);
+      expect(response.supportedCatalogPriceListIds).toEqual(['pl-1']);
+      expect(narrowed.toPersistence().supportedCatalogPriceListIds).toEqual([
+        'pl-1',
+      ]);
+    });
   });
 });

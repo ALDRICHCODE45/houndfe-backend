@@ -12,6 +12,7 @@
  * - brand optional (same pattern as category)
  * - quantity/minQuantity only relevant when no variants and useStock
  */
+import type { CatalogStockPresentation } from '@prisma/client';
 import { ProductName } from './value-objects/productName.value-object';
 import { IvaRate, IvaRateValue } from './value-objects/iva-rate.value-object';
 import {
@@ -107,6 +108,10 @@ export interface ProductProps {
   minQuantity: number;
   hasVariants: boolean;
   serviceDetail: ProductServiceDetail | null;
+  hidePriceInOnlineCatalog: boolean;
+  onlineStockPresentation: CatalogStockPresentation | null;
+  onlineStockPresentationCustomQty: number | null;
+  supportedCatalogPriceListIds: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -136,6 +141,10 @@ export class Product {
   public minQuantity: number;
   public hasVariants: boolean;
   public serviceDetail: ProductServiceDetail | null;
+  public hidePriceInOnlineCatalog: boolean;
+  public onlineStockPresentation: CatalogStockPresentation | null;
+  public onlineStockPresentationCustomQty: number | null;
+  public supportedCatalogPriceListIds: string[];
   public readonly createdAt: Date;
   public updatedAt: Date;
 
@@ -164,6 +173,11 @@ export class Product {
     this.minQuantity = props.minQuantity;
     this.hasVariants = props.hasVariants;
     this.serviceDetail = props.serviceDetail;
+    this.hidePriceInOnlineCatalog = props.hidePriceInOnlineCatalog;
+    this.onlineStockPresentation = props.onlineStockPresentation;
+    this.onlineStockPresentationCustomQty =
+      props.onlineStockPresentationCustomQty;
+    this.supportedCatalogPriceListIds = [...props.supportedCatalogPriceListIds];
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
     this.normalizeStockConfiguration();
@@ -195,6 +209,10 @@ export class Product {
     quantity?: number;
     minQuantity?: number;
     hasVariants?: boolean;
+    hidePriceInOnlineCatalog?: boolean;
+    onlineStockPresentation?: CatalogStockPresentation | null;
+    onlineStockPresentationCustomQty?: number | null;
+    supportedCatalogPriceListIds?: string[];
   }): Product {
     const productName = ProductName.create(params.name);
     const type = params.type ?? 'PRODUCT';
@@ -274,6 +292,11 @@ export class Product {
       minQuantity,
       hasVariants: params.hasVariants ?? false,
       serviceDetail: null,
+      hidePriceInOnlineCatalog: params.hidePriceInOnlineCatalog ?? false,
+      onlineStockPresentation: params.onlineStockPresentation ?? null,
+      onlineStockPresentationCustomQty:
+        params.onlineStockPresentationCustomQty ?? null,
+      supportedCatalogPriceListIds: params.supportedCatalogPriceListIds ?? [],
       createdAt: now,
       updatedAt: now,
     });
@@ -307,6 +330,10 @@ export class Product {
      minQuantity: number;
      hasVariants: boolean;
      serviceDetail?: ProductServiceDetail | null;
+    hidePriceInOnlineCatalog?: boolean;
+    onlineStockPresentation?: CatalogStockPresentation | null;
+    onlineStockPresentationCustomQty?: number | null;
+    supportedCatalogPriceListIds?: string[];
      createdAt: Date;
     updatedAt: Date;
   }): Product {
@@ -339,6 +366,13 @@ export class Product {
        minQuantity: data.minQuantity,
        hasVariants: data.hasVariants,
        serviceDetail: data.serviceDetail ?? null,
+      hidePriceInOnlineCatalog: data.hidePriceInOnlineCatalog ?? false,
+      onlineStockPresentation: data.onlineStockPresentation ?? null,
+      onlineStockPresentationCustomQty:
+        data.onlineStockPresentationCustomQty ?? null,
+      supportedCatalogPriceListIds: [
+        ...(data.supportedCatalogPriceListIds ?? []),
+      ],
        createdAt: new Date(data.createdAt),
       updatedAt: new Date(data.updatedAt),
     });
@@ -457,6 +491,10 @@ export class Product {
       quantity: this.quantity,
       minQuantity: this.minQuantity,
       hasVariants: this.hasVariants,
+      hidePriceInOnlineCatalog: this.hidePriceInOnlineCatalog,
+      onlineStockPresentation: this.onlineStockPresentation,
+      onlineStockPresentationCustomQty: this.onlineStockPresentationCustomQty,
+      supportedCatalogPriceListIds: [...this.supportedCatalogPriceListIds],
     };
   }
 
@@ -491,6 +529,12 @@ export class Product {
       quantity: this.quantity,
        minQuantity: this.minQuantity,
        hasVariants: this.hasVariants,
+      hidePriceInOnlineCatalog: this.hidePriceInOnlineCatalog,
+      onlineStockPresentation: this.onlineStockPresentation,
+      onlineStockPresentationCustomQty: this.onlineStockPresentationCustomQty,
+      supportedCatalogPriceListIds: [...this.supportedCatalogPriceListIds],
+      supportsAllCatalogPriceLists:
+        this.supportedCatalogPriceListIds.length === 0,
        serviceDetail: this.serviceDetail
          ? {
              capacity: this.serviceDetail.capacity,

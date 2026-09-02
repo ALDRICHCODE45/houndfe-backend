@@ -38,20 +38,19 @@ type TxClient = {
 };
 
 /**
- * ServiceDetail relation payload — included on every product read so
- * `Product.fromPersistence` always has the optional 1:1 row at hand.
- * SERVICE rows always have a serviceDetail; PRODUCT rows always have
- * `serviceDetail: null`. The shape is consumed by `toDomain` and by the
- * service layer's `buildFullResponse`.
+ * Relation payload — included on every product read so
+ * `Product.fromPersistence` always has the optional 1:1 row and the
+ * per-product catalog allowlist at hand. SERVICE rows always have a
+ * serviceDetail; PRODUCT rows always have `serviceDetail: null`.
  */
 const PRODUCT_WITH_SERVICE_DETAIL_INCLUDE = {
   serviceDetail: true,
+  catalogPriceLists: { select: { globalPriceListId: true } },
 } as const satisfies Prisma.ProductInclude;
 
 type PrismaProductWithServiceDetail = Prisma.ProductGetPayload<{
   include: typeof PRODUCT_WITH_SERVICE_DETAIL_INCLUDE;
 }>;
-
 
 @Injectable()
 export class PrismaProductRepository implements IProductRepository {
@@ -99,6 +98,15 @@ export class PrismaProductRepository implements IProductRepository {
   }
 
   async save(product: Product): Promise<Product> {
+    // One transaction per save(): runInTransaction reuses the ambient
+    // service-owned transaction instead of nesting, so the upsert,
+    // allowlist replacement, and reload commit or roll back together.
+    return this.tenantPrisma.runInTransaction(() =>
+      this.saveInsideTransaction(product),
+    );
+  }
+
+  private async saveInsideTransaction(product: Product): Promise<Product> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
     const p = product.toPersistence();
@@ -129,6 +137,9 @@ export class PrismaProductRepository implements IProductRepository {
         quantity: p.quantity,
         minQuantity: p.minQuantity,
         hasVariants: p.hasVariants,
+        hidePriceInOnlineCatalog: p.hidePriceInOnlineCatalog,
+        onlineStockPresentation: p.onlineStockPresentation,
+        onlineStockPresentationCustomQty: p.onlineStockPresentationCustomQty,
         updatedAt: new Date(),
       },
       create: {
@@ -157,11 +168,42 @@ export class PrismaProductRepository implements IProductRepository {
         quantity: p.quantity,
         minQuantity: p.minQuantity,
         hasVariants: p.hasVariants,
+        hidePriceInOnlineCatalog: p.hidePriceInOnlineCatalog,
+        onlineStockPresentation: p.onlineStockPresentation,
+        onlineStockPresentationCustomQty: p.onlineStockPresentationCustomQty,
         tenantId,
       } as Prisma.ProductUncheckedCreateInput,
       include: PRODUCT_WITH_SERVICE_DETAIL_INCLUDE,
     });
-    return this.toDomain(saved);
+
+    // Replace the per-product catalog allowlist on the same transaction
+    // client as the upsert (zero IDs = zero rows; explicit tenantId +
+    // productId predicates); a failure here escapes the boundary so the
+    // transaction rolls back. The feature-detect tolerates only legacy
+    // test doubles predating the join model.
+    const joins = prisma.productCatalogPriceList;
+    if (joins) {
+      await joins.deleteMany({
+        where: { tenantId, productId: p.id },
+      });
+      if (p.supportedCatalogPriceListIds.length > 0) {
+        await joins.createMany({
+          data: p.supportedCatalogPriceListIds.map((globalPriceListId) => ({
+            tenantId,
+            productId: p.id,
+            globalPriceListId,
+          })),
+        });
+      }
+    }
+
+    // The upsert snapshot predates the join replacement — reload so the
+    // reconstructed aggregate reflects the persisted allowlist.
+    const reloaded = await prisma.product.findUnique({
+      where: { id: p.id },
+      include: PRODUCT_WITH_SERVICE_DETAIL_INCLUDE,
+    });
+    return this.toDomain(reloaded ?? saved);
   }
 
   async delete(id: string): Promise<void> {
@@ -651,6 +693,12 @@ export class PrismaProductRepository implements IProductRepository {
       quantity: data.quantity,
       minQuantity: data.minQuantity,
       hasVariants: data.hasVariants,
+      hidePriceInOnlineCatalog: data.hidePriceInOnlineCatalog,
+      onlineStockPresentation: data.onlineStockPresentation,
+      onlineStockPresentationCustomQty: data.onlineStockPresentationCustomQty,
+      supportedCatalogPriceListIds: (data.catalogPriceLists ?? []).map(
+        (binding) => binding.globalPriceListId,
+      ),
       serviceDetail: data.serviceDetail
         ? {
             id: data.serviceDetail.id,
