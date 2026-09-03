@@ -130,6 +130,16 @@ export class ProductsService {
 
   async create(dto: CreateProductDto) {
     const tenantId = this.tenantPrisma.getTenantId();
+    const supportedCatalogPriceListIds = (
+      dto.supportedCatalogPriceListIds ?? []
+    ).map((id) => id.toLowerCase());
+    if (
+      new Set(supportedCatalogPriceListIds).size !==
+      supportedCatalogPriceListIds.length
+    ) {
+      throw new InvalidArgumentError('Catalog price list selection is invalid');
+    }
+
     // ── Pre-validation: context checks before touching DB ──
 
     const hasVariants = dto.hasVariants ?? false;
@@ -358,6 +368,7 @@ export class ProductsService {
       hidePriceInOnlineCatalog: dto.hidePriceInOnlineCatalog,
       onlineStockPresentation: dto.onlineStockPresentation,
       onlineStockPresentationCustomQty: dto.onlineStockPresentationCustomQty,
+      supportedCatalogPriceListIds,
     });
 
     // ── Atomic transaction: create product + all sub-resources ──
@@ -366,6 +377,26 @@ export class ProductsService {
     const p = product.toPersistence();
 
     await this.tenantPrisma.getClient().$transaction(async (tx) => {
+      if (supportedCatalogPriceListIds.length) {
+        const bindings = await tx.tenantCatalogPriceList.findMany({
+          where: {
+            tenantId,
+            globalPriceListId: { in: supportedCatalogPriceListIds },
+          },
+          select: { globalPriceListId: true },
+        });
+        const boundIds = new Set(
+          bindings.map(({ globalPriceListId }) =>
+            globalPriceListId.toLowerCase(),
+          ),
+        );
+        if (supportedCatalogPriceListIds.some((id) => !boundIds.has(id))) {
+          throw new InvalidArgumentError(
+            'Catalog price list selection is invalid',
+          );
+        }
+      }
+
       // 1. Create product
       await tx.product.create({
         data: {
@@ -558,6 +589,16 @@ export class ProductsService {
             capacity: dto.serviceDetail?.capacity ?? null,
             notes: dto.serviceDetail?.notes ?? null,
           },
+        });
+      }
+
+      if (supportedCatalogPriceListIds.length) {
+        await tx.productCatalogPriceList.createMany({
+          data: supportedCatalogPriceListIds.map((globalPriceListId) => ({
+            tenantId,
+            productId,
+            globalPriceListId,
+          })),
         });
       }
     });
