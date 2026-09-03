@@ -1363,16 +1363,22 @@ export class ProductsService {
   }
 
   async removeVariant(productId: string, variantId: string) {
-    const variant = await this.prisma.variant.findFirst({
-      where: { id: variantId, productId },
+    // F1.WU4d2b — tenant-scoped pre-read with explicit predicates.
+    const tenantId = this.tenantPrisma.getTenantId();
+    const tenantClient = this.tenantPrisma.getClient();
+    const variant = await tenantClient.variant.findFirst({
+      where: { id: variantId, productId, tenantId },
     });
     if (!variant) throw new EntityNotFoundError('Variant', variantId);
 
-    await this.prisma.variant.delete({ where: { id: variantId } });
+    // F1.WU4d2b — tenant client, still a single-row delete (not deleteMany).
+    await tenantClient.variant.delete({
+      where: { id: variantId, tenantId },
+    });
 
     // Check if product still has variants
-    const remaining = await this.prisma.variant.count({
-      where: { productId },
+    const remaining = await tenantClient.variant.count({
+      where: { productId, tenantId },
     });
     if (remaining === 0) {
       await this.prisma.product.update({
@@ -1783,8 +1789,13 @@ export class ProductsService {
     if (!product) throw new EntityNotFoundError('Product', productId);
 
     if (dto.variantId) {
-      const variant = await this.prisma.variant.findFirst({
-        where: { id: dto.variantId, productId },
+      // F1.WU4d2b — tenant-scoped variant ownership check.
+      const variant = await this.tenantPrisma.getClient().variant.findFirst({
+        where: {
+          id: dto.variantId,
+          productId,
+          tenantId: this.tenantPrisma.getTenantId(),
+        },
         select: { id: true },
       });
 
@@ -1948,9 +1959,13 @@ export class ProductsService {
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
-    // Verify variant exists and belongs to product
-    const variant = await this.prisma.variant.findFirst({
-      where: { id: variantId, productId },
+    // Verify variant exists and belongs to product (tenant-scoped, F1.WU4d2b)
+    const variant = await this.tenantPrisma.getClient().variant.findFirst({
+      where: {
+        id: variantId,
+        productId,
+        tenantId: this.tenantPrisma.getTenantId(),
+      },
     });
     if (!variant) {
       throw new EntityNotFoundError('Variant', variantId);
@@ -2043,8 +2058,15 @@ export class ProductsService {
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
-    const variant = await this.prisma.variant.findUnique({
-      where: { id: variantId },
+    // F1.WU4d2b — tenant-scoped read; the productId check is kept
+    // outside the predicate so cross-product ids keep the existing
+    // VARIANT_PRODUCT_MISMATCH contract (only cross-tenant collapses
+    // into the not-found path).
+    const variant = await this.tenantPrisma.getClient().variant.findFirst({
+      where: {
+        id: variantId,
+        tenantId: this.tenantPrisma.getTenantId(),
+      },
       select: { id: true, productId: true, purchaseNetCostCents: true },
     });
     if (!variant) throw new EntityNotFoundError('Variant', variantId);

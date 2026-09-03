@@ -9,6 +9,7 @@ import type { IProductRepository } from './domain/product.repository';
 import {
   EntityAlreadyExistsError,
   BusinessRuleViolationError,
+  EntityNotFoundError,
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
 import { CatalogPublishMode, CatalogStockPresentation } from '@prisma/client';
@@ -1241,7 +1242,8 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
 
     const prisma = {
       variant: {
-        findUnique: jest
+        // F1.WU4d2b — ensureProductAndVariant reads via the tenant client.
+        findFirst: jest
           .fn()
           .mockResolvedValue({ id: VARIANT_A_ID, productId: PRODUCT_ID }),
       },
@@ -1334,7 +1336,8 @@ describe('ProductsService — variant price delete protection', () => {
 
     const prisma = {
       variant: {
-        findUnique: jest
+        // F1.WU4d2b — ensureProductAndVariant reads via the tenant client.
+        findFirst: jest
           .fn()
           .mockResolvedValue({ id: VARIANT_A_ID, productId: PRODUCT_ID }),
       },
@@ -3031,4 +3034,234 @@ describe('ProductsService — variant catalog round-trips (F1.WU4d2a)', () => {
       expect(data.onlineStockPresentationCustomQty).toBeNull();
     },
   );
+});
+
+// ── F1.WU4d2b — remaining variant tenant-scope hardening ────────────────────
+describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2b)', () => {
+  const TENANT_ID = 'tenant-1';
+
+  function d2bVariantRow(
+    overrides: Partial<{ id: string; productId: string }> = {},
+  ) {
+    return {
+      id: overrides.id ?? VARIANT_A_ID,
+      productId: overrides.productId ?? PRODUCT_ID,
+      tenantId: TENANT_ID,
+      name: 'Red',
+      purchaseNetCostCents: null,
+    };
+  }
+
+  // Distinct raw vs tenant clients prove the remaining variant
+  // existence/read/write paths stopped using the raw prisma delegate.
+  function makeD2bService({
+    tenantVariantRow = d2bVariantRow(),
+    remainingCount = 0,
+  }: {
+    tenantVariantRow?: ReturnType<typeof d2bVariantRow> | null;
+    remainingCount?: number;
+  } = {}) {
+    const tenantClient = {
+      variant: {
+        findFirst: jest.fn().mockResolvedValue(tenantVariantRow),
+        delete: jest.fn().mockResolvedValue(tenantVariantRow),
+        count: jest.fn().mockResolvedValue(remainingCount),
+      },
+    };
+    const rawPrisma = {
+      variant: {
+        findFirst: jest.fn(),
+        update: jest.fn(),
+        delete: jest.fn(),
+        count: jest.fn(),
+        findUnique: jest.fn(),
+      },
+      product: { update: jest.fn() },
+      productImage: {
+        create: jest.fn().mockResolvedValue({ id: 'img-1' }),
+      },
+      variantPrice: { findMany: jest.fn().mockResolvedValue([]) },
+      lot: { count: jest.fn().mockResolvedValue(0) },
+      serviceDetail: {
+        upsert: jest.fn().mockResolvedValue(undefined),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+    };
+    const filesService = {
+      uploadAndRegister: jest.fn(),
+      delete: jest.fn(),
+      findById: jest.fn(),
+      findByIds: jest.fn(),
+    };
+    const repo = makeMockRepo({
+      findById: jest.fn().mockResolvedValue(makeProduct()),
+    });
+    const service = createService(repo, rawPrisma, filesService);
+    const tenantPrisma = (
+      service as unknown as {
+        tenantPrisma: {
+          getClient: {
+            mockReturnValue(value: typeof tenantClient): void;
+          };
+        };
+      }
+    ).tenantPrisma;
+    tenantPrisma.getClient.mockReturnValue(tenantClient);
+    return { service, repo, rawPrisma, tenantClient, filesService };
+  }
+
+  it('removeVariant pre-reads tenant-scoped, deletes single-row on the tenant client, and maintains hasVariants', async () => {
+    const { service, rawPrisma, tenantClient } = makeD2bService({
+      remainingCount: 0,
+    });
+
+    await service.removeVariant(PRODUCT_ID, VARIANT_A_ID);
+
+    expect(tenantClient.variant.findFirst).toHaveBeenCalledWith({
+      where: { id: VARIANT_A_ID, productId: PRODUCT_ID, tenantId: TENANT_ID },
+    });
+    expect(tenantClient.variant.delete).toHaveBeenCalledTimes(1);
+    expect(tenantClient.variant.delete).toHaveBeenCalledWith({
+      where: { id: VARIANT_A_ID, tenantId: TENANT_ID },
+    });
+    expect(tenantClient.variant.count).toHaveBeenCalledWith({
+      where: { productId: PRODUCT_ID, tenantId: TENANT_ID },
+    });
+    expect(rawPrisma.product.update).toHaveBeenCalledWith({
+      where: { id: PRODUCT_ID },
+      data: { hasVariants: false },
+    });
+    expect(rawPrisma.variant.findFirst).not.toHaveBeenCalled();
+    expect(rawPrisma.variant.delete).not.toHaveBeenCalled();
+    expect(rawPrisma.variant.count).not.toHaveBeenCalled();
+  });
+
+  it('removeVariant keeps hasVariants true when sibling variants remain', async () => {
+    const { service, rawPrisma, tenantClient } = makeD2bService({
+      remainingCount: 2,
+    });
+
+    await service.removeVariant(PRODUCT_ID, VARIANT_A_ID);
+
+    expect(tenantClient.variant.delete).toHaveBeenCalledTimes(1);
+    expect(rawPrisma.product.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a variant missing from this product', null],
+    ['a cross-product/cross-tenant variant id', null],
+  ])('removeVariant rejects %s without deleting', async (_label, row) => {
+    const { service, rawPrisma, tenantClient } = makeD2bService({
+      tenantVariantRow: row,
+    });
+
+    await expect(
+      service.removeVariant(PRODUCT_ID, VARIANT_A_ID),
+    ).rejects.toThrow(EntityNotFoundError);
+
+    expect(tenantClient.variant.delete).not.toHaveBeenCalled();
+    expect(tenantClient.variant.count).not.toHaveBeenCalled();
+    expect(rawPrisma.product.update).not.toHaveBeenCalled();
+  });
+
+  it('addImage checks variant ownership through the tenant client with explicit predicates and still creates the image', async () => {
+    const { service, rawPrisma, tenantClient } = makeD2bService();
+
+    const image = await service.addImage(PRODUCT_ID, {
+      url: 'https://cdn.test/image.jpg',
+      variantId: VARIANT_A_ID,
+    });
+
+    expect(tenantClient.variant.findFirst).toHaveBeenCalledWith({
+      where: { id: VARIANT_A_ID, productId: PRODUCT_ID, tenantId: TENANT_ID },
+      select: { id: true },
+    });
+    expect(image).toMatchObject({ id: 'img-1' });
+    expect(rawPrisma.variant.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('addImage rejects a variant not belonging to the product/tenant before any image write', async () => {
+    const { service, rawPrisma } = makeD2bService({
+      tenantVariantRow: null,
+    });
+
+    await expect(
+      service.addImage(PRODUCT_ID, {
+        url: 'https://cdn.test/image.jpg',
+        variantId: VARIANT_B_ID,
+      }),
+    ).rejects.toMatchObject({ code: 'VARIANT_PRODUCT_MISMATCH' });
+
+    expect(rawPrisma.productImage.create).not.toHaveBeenCalled();
+    expect(rawPrisma.variant.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('uploadVariantImage rejects a variant not belonging to the product/tenant before any file upload', async () => {
+    const { service, rawPrisma, tenantClient, filesService } = makeD2bService({
+      tenantVariantRow: null,
+    });
+
+    await expect(
+      service.uploadVariantImage(
+        PRODUCT_ID,
+        VARIANT_A_ID,
+        {
+          buffer: Buffer.from('x'),
+          mimetype: 'image/png',
+          originalname: 'a.png',
+        } as Express.Multer.File,
+        'user-1',
+      ),
+    ).rejects.toThrow(EntityNotFoundError);
+
+    expect(tenantClient.variant.findFirst).toHaveBeenCalledWith({
+      where: { id: VARIANT_A_ID, productId: PRODUCT_ID, tenantId: TENANT_ID },
+    });
+    expect(filesService.uploadAndRegister).not.toHaveBeenCalled();
+    expect(rawPrisma.productImage.create).not.toHaveBeenCalled();
+    expect(rawPrisma.variant.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('getVariantPrices resolves the variant through the tenant client with explicit tenant predicate', async () => {
+    const { service, rawPrisma, tenantClient } = makeD2bService();
+
+    await expect(
+      service.getVariantPrices(PRODUCT_ID, VARIANT_A_ID),
+    ).resolves.toEqual([]);
+
+    expect(tenantClient.variant.findFirst).toHaveBeenCalledWith({
+      where: { id: VARIANT_A_ID, tenantId: TENANT_ID },
+      select: { id: true, productId: true, purchaseNetCostCents: true },
+    });
+    expect(rawPrisma.variant.findUnique).not.toHaveBeenCalled();
+    expect(rawPrisma.variantPrice.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { variantId: VARIANT_A_ID } }),
+    );
+  });
+
+  it('getVariantPrices rejects a cross-tenant variant as not found before reading prices', async () => {
+    const { service, rawPrisma } = makeD2bService({
+      tenantVariantRow: null,
+    });
+
+    await expect(
+      service.getVariantPrices(PRODUCT_ID, VARIANT_A_ID),
+    ).rejects.toThrow(EntityNotFoundError);
+
+    expect(rawPrisma.variantPrice.findMany).not.toHaveBeenCalled();
+    expect(rawPrisma.variant.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('getVariantPrices preserves the VARIANT_PRODUCT_MISMATCH contract for cross-product variant ids', async () => {
+    const { service, rawPrisma } = makeD2bService({
+      tenantVariantRow: d2bVariantRow({ productId: 'prod-other' }),
+    });
+
+    await expect(
+      service.getVariantPrices(PRODUCT_ID, VARIANT_A_ID),
+    ).rejects.toMatchObject({ code: 'VARIANT_PRODUCT_MISMATCH' });
+
+    expect(rawPrisma.variantPrice.findMany).not.toHaveBeenCalled();
+    expect(rawPrisma.variant.findUnique).not.toHaveBeenCalled();
+  });
 });
