@@ -69,8 +69,19 @@ function makeMockProductsService() {
 
 class TestJwtAuthGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
-    const req = context.switchToHttp().getRequest();
-    const auth = req.headers.authorization as string | undefined;
+    // Typed request keeps the token assignments free of unsafe-any
+    // member access (F1.WU4c4 added the update-only token below).
+    const req = context.switchToHttp().getRequest<{
+      headers: { authorization?: string };
+      user?: {
+        userId: string;
+        tenantId: string | null;
+        tenantSlug: string | null;
+        isSuperAdmin: boolean;
+        permissions: string[];
+      };
+    }>();
+    const auth = req.headers.authorization;
     if (!auth) throw new UnauthorizedException('Unauthorized');
 
     const token = auth.replace('Bearer ', '');
@@ -109,6 +120,17 @@ class TestJwtAuthGuard implements CanActivate {
         tenantSlug: 'centro',
         isSuperAdmin: false,
         permissions: ['read:Product'],
+      };
+      return true;
+    }
+
+    if (token === 'product-update-only') {
+      req.user = {
+        userId: 'user-editor',
+        tenantId: 'tenant-1',
+        tenantSlug: 'centro',
+        isSuperAdmin: false,
+        permissions: ['read:Product', 'update:Product'],
       };
       return true;
     }
@@ -253,7 +275,6 @@ describe('ProductsController sub-resource auth integration', () => {
       .expect(200);
   });
 
-  // DELETE /products/:id/variants/:variantId → ['delete', 'Product']
   it('DELETE /products/:id/variants/:variantId returns 403 for read-only user', async () => {
     await request(app.getHttpServer())
       .delete(`/products/${UUID}/variants/${UUID2}`)
@@ -261,11 +282,14 @@ describe('ProductsController sub-resource auth integration', () => {
       .expect(403);
   });
 
-  it('DELETE /products/:id/variants/:variantId returns 204 with Product:delete', async () => {
+  it.each<[string, number]>([
+    ['product-update-only', 403],
+    ['product-full-crud', 204],
+  ])('DELETE variant for %s returns %i', async (token, status) => {
     await request(app.getHttpServer())
       .delete(`/products/${UUID}/variants/${UUID2}`)
-      .set('Authorization', 'Bearer product-full-crud')
-      .expect(204);
+      .set('Authorization', `Bearer ${token}`)
+      .expect(status);
   });
 
   // ==================== Variant Prices ====================
@@ -524,6 +548,32 @@ describe('ProductsController sub-resource auth integration', () => {
       .get('/products?someUnknownParam=1')
       .set('Authorization', 'Bearer product-read-only')
       .expect(400);
+  });
+});
+
+// F1.WU4c4 — exact permission metadata table. Exact array equality proves
+// create stays create:Product, product PATCH and non-delete variant mutations
+// require exactly update:Product, and no TenantCatalogSettings entry leaks
+// into product/variant authorization.
+
+describe('ProductsController — permission metadata (F1.WU4c4)', () => {
+  const table: Array<[keyof ProductsController, string[][]]> = [
+    ['create', [['create', 'Product']]],
+    ['update', [['update', 'Product']]],
+    ['addVariant', [['update', 'Product']]],
+    ['updateVariant', [['update', 'Product']]],
+    ['removeVariant', [['delete', 'Product']]],
+    ['upsertVariantPrice', [['update', 'Product']]],
+    ['removeVariantPrice', [['update', 'Product']]],
+    ['bulkUpsertVariantPrices', [['update', 'Product']]],
+    ['uploadVariantImage', [['update', 'Product']]],
+  ];
+
+  it.each(table)('%s requires exactly %j', (method, expected) => {
+    const handler = ProductsController.prototype[method];
+    expect(Reflect.getMetadata('required_permissions', handler)).toEqual(
+      expected,
+    );
   });
 });
 

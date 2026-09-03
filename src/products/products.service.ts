@@ -676,6 +676,9 @@ export class ProductsService {
           take: 1,
         },
         serviceDetail: true,
+        // F1.WU4c4 — unfiltered allowlist load so the list response can
+        // report exact supported IDs and the narrowed all-public flag.
+        catalogPriceLists: { select: { globalPriceListId: true } },
       },
       ...(skip !== undefined ? { skip } : {}),
       ...(take !== undefined ? { take } : {}),
@@ -712,6 +715,11 @@ export class ProductsService {
         onlineStockPresentation: product.onlineStockPresentation,
         onlineStockPresentationCustomQty:
           product.onlineStockPresentationCustomQty,
+        // F1.WU4c4 — `?? []` keeps legacy fixtures without the relation
+        // compiling to the all-public (empty IDs) response shape.
+        supportedCatalogPriceListIds: (product.catalogPriceLists ?? []).map(
+          (entry) => entry.globalPriceListId,
+        ),
         serviceDetail: product.serviceDetail
           ? {
               id: product.serviceDetail.id,

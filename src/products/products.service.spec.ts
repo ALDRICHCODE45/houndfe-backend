@@ -2647,3 +2647,137 @@ describe('ProductsService — online catalog scalar fields (WU4b2)', () => {
     expect(result.onlineStockPresentationCustomQty).toBeNull();
   });
 });
+
+// F1.WU4c4 — authenticated product allowlist READ closure. findAll()
+// must load the unfiltered ProductCatalogPriceList relation so a narrowed
+// product reports its exact IDs with supportsAllCatalogPriceLists=false;
+// an empty relation reports all-public=true; a stale-only relation is
+// retained and stays false. findOne/buildFullResponse must keep exposing
+// the aggregate-loaded IDs through the same response contract.
+describe('ProductsService — catalog allowlist read (F1.WU4c4)', () => {
+  const LIST_A = '550e8400-e29b-41d4-a716-446655440000';
+  const LIST_B = '660e8400-e29b-41d4-a716-446655440001';
+  const STALE = '770e8400-e29b-41d4-a716-446655440002';
+
+  function allowlistRow(
+    catalogPriceLists: Array<{ globalPriceListId: string }>,
+  ) {
+    return {
+      ...makePersistenceProduct({ id: PRODUCT_ID }),
+      catalogPriceLists,
+    };
+  }
+
+  function makeListPrisma(rows: unknown[] = []) {
+    const calls: Array<{ include: Record<string, unknown> }> = [];
+    const findMany = jest
+      .fn<Promise<unknown[]>, [{ include: Record<string, unknown> }]>()
+      .mockImplementation((args) => {
+        calls.push(args);
+        return Promise.resolve(rows);
+      });
+    return { findMany, product: { findMany }, calls };
+  }
+
+  function makeDetailService(supportedCatalogPriceListIds: string[]) {
+    const findById = jest.fn<Promise<Product>, [string]>().mockResolvedValue(
+      Product.fromPersistence({
+        ...makePersistenceProduct({ id: PRODUCT_ID }),
+        supportedCatalogPriceListIds,
+      }),
+    );
+    const repo = makeMockRepo({ findById });
+    const findUnique = jest
+      .fn<Promise<{ category: unknown; brand: unknown }>, []>()
+      .mockResolvedValue({ category: null, brand: null });
+    const prisma = {
+      product: { findUnique },
+      priceList: {
+        findMany: jest.fn<Promise<unknown[]>, []>().mockResolvedValue([]),
+      },
+      productImage: {
+        findMany: jest.fn<Promise<unknown[]>, []>().mockResolvedValue([]),
+      },
+    };
+    return createService(repo, prisma);
+  }
+
+  it('findAll reports narrowed [A,B] membership with supportsAllCatalogPriceLists=false', async () => {
+    const prisma = makeListPrisma([
+      allowlistRow([
+        { globalPriceListId: LIST_B },
+        { globalPriceListId: LIST_A },
+      ]),
+    ]);
+    const service = createService(makeMockRepo(), prisma);
+
+    const [item] = await service.findAll();
+
+    expect(item.supportedCatalogPriceListIds).toEqual(
+      expect.arrayContaining([LIST_A, LIST_B]),
+    );
+    expect(item.supportedCatalogPriceListIds).toHaveLength(2);
+    expect(item.supportsAllCatalogPriceLists).toBe(false);
+  });
+
+  it('findAll requests the exact unfiltered catalogPriceLists include shape', async () => {
+    const prisma = makeListPrisma();
+    const service = createService(makeMockRepo(), prisma);
+
+    await service.findAll();
+
+    expect(prisma.calls).toHaveLength(1);
+    expect(prisma.calls[0].include.catalogPriceLists).toEqual({
+      select: { globalPriceListId: true },
+    });
+  });
+
+  it('findAll reports an empty allowlist as supportsAllCatalogPriceLists=true', async () => {
+    const prisma = makeListPrisma([allowlistRow([])]);
+    const service = createService(makeMockRepo(), prisma);
+
+    const [item] = await service.findAll();
+
+    expect(item.supportedCatalogPriceListIds).toEqual([]);
+    expect(item.supportsAllCatalogPriceLists).toBe(true);
+  });
+
+  it('findAll retains a stale-only allowlist row with supportsAllCatalogPriceLists=false', async () => {
+    const prisma = makeListPrisma([
+      allowlistRow([{ globalPriceListId: STALE }]),
+    ]);
+    const service = createService(makeMockRepo(), prisma);
+
+    const [item] = await service.findAll();
+
+    expect(item.supportedCatalogPriceListIds).toEqual([STALE]);
+    expect(item.supportsAllCatalogPriceLists).toBe(false);
+  });
+
+  it('findOne returns the exact narrowed allowlist IDs with supportsAllCatalogPriceLists=false', async () => {
+    const service = makeDetailService([LIST_A, LIST_B]);
+
+    const result = await service.findOne(PRODUCT_ID);
+
+    expect(result.supportedCatalogPriceListIds).toEqual([LIST_A, LIST_B]);
+    expect(result.supportsAllCatalogPriceLists).toBe(false);
+  });
+
+  it('findOne retains a stale-only relation with supportsAllCatalogPriceLists=false', async () => {
+    const service = makeDetailService([STALE]);
+
+    const result = await service.findOne(PRODUCT_ID);
+
+    expect(result.supportedCatalogPriceListIds).toEqual([STALE]);
+    expect(result.supportsAllCatalogPriceLists).toBe(false);
+  });
+
+  it('findOne returns an empty allowlist as [] with supportsAllCatalogPriceLists=true', async () => {
+    const service = makeDetailService([]);
+
+    const result = await service.findOne(PRODUCT_ID);
+
+    expect(result.supportedCatalogPriceListIds).toEqual([]);
+    expect(result.supportsAllCatalogPriceLists).toBe(true);
+  });
+});

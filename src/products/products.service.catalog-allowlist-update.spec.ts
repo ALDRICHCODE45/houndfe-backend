@@ -219,6 +219,8 @@ describe('ProductsService PATCH catalog allowlist (F1.WU4c3)', () => {
         expect.arrayContaining([STALE]),
       );
       expect(response.supportedCatalogPriceListIds).toHaveLength(1);
+      // F1.WU4c4 — retained (non-empty) rows must keep the narrowed flag.
+      expect(response.supportsAllCatalogPriceLists).toBe(false);
     },
   );
 

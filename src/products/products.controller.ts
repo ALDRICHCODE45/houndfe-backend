@@ -113,6 +113,7 @@ export class ProductsController {
 
   @Delete(':id/variants/:variantId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  // R1 correction — removing a variant permanently deletes variant data.
   @RequirePermissions(['delete', 'Product'])
   removeVariant(
     @Param('id', ParseUUIDPipe) id: string,
