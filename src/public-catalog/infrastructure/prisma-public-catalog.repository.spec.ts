@@ -31,10 +31,12 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
   let repo: PrismaPublicCatalogRepository;
   let mockFindMany: jest.Mock;
   let mockCount: jest.Mock;
+  let mockTenantFindMany: jest.Mock;
 
   beforeEach(() => {
     mockFindMany = jest.fn();
     mockCount = jest.fn();
+    mockTenantFindMany = jest.fn().mockResolvedValue([]);
 
     const mockTenantPrisma = {
       getClient: () => ({
@@ -48,6 +50,7 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
 
     const mockPrisma = {
       category: { findMany: jest.fn().mockResolvedValue([]) },
+      tenant: { findMany: mockTenantFindMany },
     } as unknown as PrismaService;
 
     repo = new PrismaPublicCatalogRepository(mockPrisma, mockTenantPrisma);
@@ -150,5 +153,46 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
         },
       ]),
     );
+  });
+
+  describe('findActiveBranches publication gate', () => {
+    it('should only list tenants that are both active and catalog-published', async () => {
+      await repo.findActiveBranches();
+
+      expect(mockTenantFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { isActive: true, catalogPublished: true },
+        }),
+      );
+    });
+
+    it('should preserve branch mapping and name ordering', async () => {
+      mockTenantFindMany.mockResolvedValue([
+        {
+          id: 'b1',
+          name: 'Centro',
+          slug: 'centro',
+          address: 'Av. Juárez 123',
+          phone: '+525512345678',
+        },
+        { id: 'b2', name: 'Norte', slug: 'norte', address: null, phone: null },
+      ]);
+
+      const branches = await repo.findActiveBranches();
+
+      expect(mockTenantFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { name: 'asc' } }),
+      );
+      expect(branches).toEqual([
+        {
+          id: 'b1',
+          name: 'Centro',
+          slug: 'centro',
+          address: 'Av. Juárez 123',
+          phone: '+525512345678',
+        },
+        { id: 'b2', name: 'Norte', slug: 'norte', address: null, phone: null },
+      ]);
+    });
   });
 });

@@ -25,7 +25,7 @@ export class PublicTenantGuard implements CanActivate {
     }
 
     const tenant = await this.prisma.tenant.findFirst({
-      where: { slug, isActive: true },
+      where: { slug, isActive: true, catalogPublished: true },
     });
 
     if (!tenant) {

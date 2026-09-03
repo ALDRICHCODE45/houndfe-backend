@@ -23,7 +23,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
   async findActiveBranches(): Promise<PublicBranchDto[]> {
     // Uses raw PrismaService (NOT tenant-scoped) — global query
     const tenants = await this.prisma.tenant.findMany({
-      where: { isActive: true },
+      where: { isActive: true, catalogPublished: true },
       select: { id: true, name: true, slug: true, address: true, phone: true },
       orderBy: { name: 'asc' },
     });
