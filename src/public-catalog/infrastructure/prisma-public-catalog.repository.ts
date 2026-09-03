@@ -159,6 +159,9 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
             value: true,
             quantity: true,
             minQuantity: true,
+            // F1.WU5c2 — carried so the mapper can defensively filter OFF
+            // variants for alternate/legacy callers.
+            catalogPublishMode: true,
             variantPrices: {
               where: variantPriceWhere,
               select: { priceCents: true },
@@ -272,6 +275,9 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         },
         variants: {
           where: { catalogPublishMode: { not: 'OFF' } },
+          // include carries every variant scalar — catalogPublishMode
+          // included — so the mapper's defensive OFF filter (F1.WU5c2)
+          // always sees the mode.
           include: {
             images: {
               orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],

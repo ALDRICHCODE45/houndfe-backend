@@ -31,6 +31,8 @@ export interface ProductWithIncludes {
     value: string | null;
     quantity: number;
     minQuantity: number;
+    /** F1.WU5c2 — carried from the repository projection for the defensive OFF filter. */
+    catalogPublishMode?: string | null;
     variantPrices: Array<{ priceCents: number }>;
   }>;
 }
@@ -56,9 +58,24 @@ export interface ProductDetailWithIncludes {
     value: string | null;
     quantity: number;
     minQuantity: number;
+    /** F1.WU5c2 — carried from the repository projection for the defensive OFF filter. */
+    catalogPublishMode?: string | null;
     images: Array<{ url: string }>;
     variantPrices: Array<{ priceCents: number }>;
   }>;
+}
+
+/**
+ * F1.WU5c2 — defensive mapper boundary. An OFF variant is absent before
+ * every public derivation, regardless of what reaches the mapper (the SQL
+ * gates in WU5c1 remain the first line of defense). Missing/undefined mode
+ * in legacy typed fixtures is treated as inherited (included); only an
+ * explicit OFF is suppressed.
+ */
+function visibleVariants<V extends { catalogPublishMode?: string | null }>(
+  variants: V[],
+): V[] {
+  return variants.filter((v) => v.catalogPublishMode !== 'OFF');
 }
 
 function computeAggregateAvailability(
@@ -66,11 +83,14 @@ function computeAggregateAvailability(
 ): PublicStockStatus {
   if (!product.useStock) return 'available';
 
-  if (!product.hasVariants || product.variants.length === 0) {
+  // F1.WU5c2 — OFF variants are absent before the aggregate is derived.
+  const publicVariants = visibleVariants(product.variants);
+
+  if (!product.hasVariants || publicVariants.length === 0) {
     return mapStockStatus(product.quantity, product.minQuantity);
   }
 
-  const statuses = product.variants.map((v) =>
+  const statuses = publicVariants.map((v) =>
     mapStockStatus(v.quantity, v.minQuantity),
   );
   if (statuses.includes('available')) return 'available';
@@ -81,11 +101,14 @@ function computeAggregateAvailability(
 function computeFromPrice(product: ProductWithIncludes): number | null {
   const productPrice = product.priceLists[0]?.priceCents ?? null;
 
-  if (!product.hasVariants || product.variants.length === 0) {
+  // F1.WU5c2 — OFF variants are absent before the price is derived.
+  const publicVariants = visibleVariants(product.variants);
+
+  if (!product.hasVariants || publicVariants.length === 0) {
     return productPrice;
   }
 
-  const variantPrices = product.variants
+  const variantPrices = publicVariants
     .map((v) => v.variantPrices[0]?.priceCents)
     .filter((p): p is number => p != null);
 
@@ -128,7 +151,9 @@ export function toPublicProductDetail(
 ): PublicCatalogProductDetail {
   const priceHidden = isEffectivelyPriceHidden(product);
 
-  const variants: PublicVariantDto[] = product.variants.map((v) => ({
+  const publicVariants = visibleVariants(product.variants);
+
+  const variants: PublicVariantDto[] = publicVariants.map((v) => ({
     id: v.id,
     name: v.name,
     option: v.option,

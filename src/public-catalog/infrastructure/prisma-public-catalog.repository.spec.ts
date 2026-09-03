@@ -535,3 +535,80 @@ describe('F1.WU5c1 repository publication gates', () => {
     expect(where).not.toHaveProperty('OR');
   });
 });
+
+/**
+ * F1.WU5c2 — the repository must carry catalogPublishMode through both
+ * variant projections so the mapper can defensively enforce publication
+ * for alternate/legacy callers that bypass the SQL gates.
+ */
+describe('F1.WU5c2 repository variant-mode projection', () => {
+  let repo: PrismaPublicCatalogRepository;
+  let findManyArgs: unknown;
+  let findFirstArgs: unknown;
+
+  beforeEach(() => {
+    findManyArgs = undefined;
+    findFirstArgs = undefined;
+
+    const mockTenantPrisma = {
+      getClient: () => ({
+        product: {
+          findMany: jest.fn().mockImplementation((args: unknown) => {
+            findManyArgs = args;
+            return Promise.resolve([]);
+          }),
+          count: jest.fn().mockResolvedValue(0),
+          groupBy: jest.fn().mockResolvedValue([]),
+          findFirst: jest.fn().mockImplementation((args: unknown) => {
+            findFirstArgs = args;
+            return Promise.resolve(null);
+          }),
+        },
+      }),
+      getTenantId: () => 'tenant-1',
+    } as unknown as TenantPrismaService;
+
+    const mockPrisma = {
+      category: { findMany: jest.fn().mockResolvedValue([]) },
+      tenant: { findMany: jest.fn().mockResolvedValue([]) },
+    } as unknown as PrismaService;
+
+    repo = new PrismaPublicCatalogRepository(mockPrisma, mockTenantPrisma);
+  });
+
+  it('list variant projection carries catalogPublishMode to the mapper (F1.WU5c2)', async () => {
+    await repo.findProducts({ sort: 'relevance', page: 1, limit: 20 });
+
+    const variants = (
+      findManyArgs as {
+        include: { variants: { select?: Record<string, unknown> } };
+      }
+    ).include.variants;
+
+    expect(variants.select?.catalogPublishMode).toBe(true);
+  });
+
+  it('detail variant projection carries catalogPublishMode to the mapper (F1.WU5c2)', async () => {
+    await repo.findProductById('prod-1');
+
+    const variants = (
+      findFirstArgs as {
+        include: {
+          variants: {
+            where?: unknown;
+            select?: unknown;
+            include?: unknown;
+          };
+        };
+      }
+    ).include.variants;
+
+    // The detail projection is include-based: every variant scalar —
+    // catalogPublishMode included — reaches the mapper for its defensive
+    // OFF filter. If this ever becomes a restrictive select, the mode must
+    // be added explicitly.
+    expect(variants.where).toEqual({ catalogPublishMode: { not: 'OFF' } });
+    expect(variants.select).toBeUndefined();
+    expect(variants.include).toBeDefined();
+  });
+});
