@@ -37,6 +37,25 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     }));
   }
 
+  /**
+   * F1.WU5b — resolves the current tenant's catalog-default binding to its
+   * global price-list ID. Returns null (never a fallback list) when the
+   * tenant has no `isCatalogDefault=true` binding.
+   */
+  async findTenantCatalogDefaultPriceListId(): Promise<string | null> {
+    const client = this.tenantPrisma.getClient();
+
+    const binding = await client.tenantCatalogPriceList.findFirst({
+      where: {
+        tenantId: this.tenantPrisma.getTenantId(),
+        isCatalogDefault: true,
+      },
+      select: { globalPriceListId: true },
+    });
+
+    return binding?.globalPriceListId ?? null;
+  }
+
   async findProducts(
     params: ListProductsParams,
   ): Promise<{ items: ProductWithIncludes[]; total: number }> {
@@ -91,6 +110,14 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
     const orderBy = this.resolveOrderBy(params.sort);
 
+    // F1.WU5b — tenant catalog-default compatibility: when a resolved ID is
+    // threaded, ONLY that global price list is queried (no fallback to the
+    // global default). The legacy isDefault filter remains exclusively for
+    // callers that predate tenant price contexts (e.g. chatbot-api).
+    const { priceListWhere, variantPriceWhere } = this.resolvePriceFilters(
+      params.globalPriceListId,
+    );
+
     const productQuery = client.product.findMany({
       where,
       orderBy,
@@ -105,7 +132,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           select: { url: true },
         },
         priceLists: {
-          where: { globalPriceList: { isDefault: true } },
+          where: priceListWhere,
           select: { priceCents: true },
           take: 1,
         },
@@ -118,9 +145,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
             quantity: true,
             minQuantity: true,
             variantPrices: {
-              where: {
-                priceList: { globalPriceList: { isDefault: true } },
-              },
+              where: variantPriceWhere,
               select: { priceCents: true },
               take: 1,
             },
@@ -199,8 +224,12 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
   async findProductById(
     productId: string,
+    globalPriceListId?: string,
   ): Promise<ProductDetailWithIncludes | null> {
     const client = this.tenantPrisma.getClient();
+
+    const { priceListWhere, variantPriceWhere } =
+      this.resolvePriceFilters(globalPriceListId);
 
     const product = await client.product.findFirst({
       where: { id: productId, includeInOnlineCatalog: true },
@@ -213,7 +242,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           select: { id: true, url: true, isMain: true },
         },
         priceLists: {
-          where: { globalPriceList: { isDefault: true } },
+          where: priceListWhere,
           select: { priceCents: true },
           take: 1,
         },
@@ -225,9 +254,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
               select: { url: true },
             },
             variantPrices: {
-              where: {
-                priceList: { globalPriceList: { isDefault: true } },
-              },
+              where: variantPriceWhere,
               select: { priceCents: true },
               take: 1,
             },
@@ -239,6 +266,30 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     if (!product) return null;
 
     return product as unknown as ProductDetailWithIncludes;
+  }
+
+  /**
+   * F1.WU5b — price filters for one execution. With a threaded resolved
+   * tenant catalog-default ID only that list is selected; without one the
+   * legacy global-default filter is preserved for pre-context callers.
+   */
+  private resolvePriceFilters(globalPriceListId?: string): {
+    priceListWhere: Prisma.PriceListWhereInput;
+    variantPriceWhere: Prisma.VariantPriceWhereInput;
+  } {
+    if (globalPriceListId) {
+      return {
+        priceListWhere: { globalPriceListId },
+        variantPriceWhere: { priceList: { globalPriceListId } },
+      };
+    }
+
+    return {
+      priceListWhere: { globalPriceList: { isDefault: true } },
+      variantPriceWhere: {
+        priceList: { globalPriceList: { isDefault: true } },
+      },
+    };
   }
 
   private resolveOrderBy(

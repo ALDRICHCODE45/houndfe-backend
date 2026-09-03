@@ -196,3 +196,144 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
     });
   });
 });
+
+/** Shape of the Prisma query args captured from the mocked client (F1.WU5b). */
+interface CapturedProductsQuery {
+  include?: {
+    priceLists?: { where?: { globalPriceListId?: string } };
+    variants?: {
+      select?: {
+        variantPrices?: {
+          where?: { priceList?: { globalPriceListId?: string } };
+        };
+      };
+      include?: {
+        variantPrices?: {
+          where?: { priceList?: { globalPriceListId?: string } };
+        };
+      };
+    };
+  };
+}
+
+describe('F1.WU5b tenant catalog-default price context', () => {
+  let repo: PrismaPublicCatalogRepository;
+  let mockFindMany: jest.Mock;
+  let mockCount: jest.Mock;
+  let mockProductFindFirst: jest.Mock;
+  let mockBindingFindFirst: jest.Mock;
+
+  beforeEach(() => {
+    mockFindMany = jest.fn().mockResolvedValue([]);
+    mockCount = jest.fn().mockResolvedValue(0);
+    mockProductFindFirst = jest.fn().mockResolvedValue(null);
+    mockBindingFindFirst = jest.fn().mockResolvedValue(null);
+
+    const mockTenantPrisma = {
+      getClient: () => ({
+        product: {
+          findMany: mockFindMany,
+          count: mockCount,
+          findFirst: mockProductFindFirst,
+          groupBy: jest.fn().mockResolvedValue([]),
+        },
+        tenantCatalogPriceList: { findFirst: mockBindingFindFirst },
+      }),
+      getTenantId: () => 'tenant-1',
+    } as unknown as TenantPrismaService;
+
+    const mockPrisma = {
+      category: { findMany: jest.fn().mockResolvedValue([]) },
+      tenant: { findMany: jest.fn().mockResolvedValue([]) },
+    } as unknown as PrismaService;
+
+    repo = new PrismaPublicCatalogRepository(mockPrisma, mockTenantPrisma);
+  });
+
+  it('resolves the tenant catalog-default global price list ID', async () => {
+    mockBindingFindFirst.mockResolvedValue({ globalPriceListId: 'gpl-A' });
+
+    const id = await repo.findTenantCatalogDefaultPriceListId();
+
+    expect(id).toBe('gpl-A');
+    expect(mockBindingFindFirst).toHaveBeenCalledWith({
+      where: { tenantId: 'tenant-1', isCatalogDefault: true },
+      select: { globalPriceListId: true },
+    });
+  });
+
+  it('returns null when the tenant has no catalog-default binding', async () => {
+    mockBindingFindFirst.mockResolvedValue(null);
+
+    expect(await repo.findTenantCatalogDefaultPriceListId()).toBeNull();
+  });
+
+  it('findProducts filters product and variant prices by the threaded ID only', async () => {
+    let capturedArgs: unknown;
+    mockFindMany.mockImplementation((args: unknown) => {
+      capturedArgs = args;
+      return Promise.resolve([]);
+    });
+
+    await repo.findProducts({
+      sort: 'relevance',
+      page: 1,
+      limit: 20,
+      globalPriceListId: 'gpl-A',
+    });
+
+    const args = capturedArgs as CapturedProductsQuery;
+
+    expect(args.include?.priceLists?.where).toEqual({
+      globalPriceListId: 'gpl-A',
+    });
+    expect(args.include?.variants?.select?.variantPrices?.where).toEqual({
+      priceList: { globalPriceListId: 'gpl-A' },
+    });
+    expect(JSON.stringify(capturedArgs)).not.toContain('isDefault');
+  });
+
+  it('findProducts threads a different resolved ID unchanged', async () => {
+    let capturedArgs: unknown;
+    mockFindMany.mockImplementation((args: unknown) => {
+      capturedArgs = args;
+      return Promise.resolve([]);
+    });
+
+    await repo.findProducts({
+      sort: 'relevance',
+      page: 1,
+      limit: 20,
+      globalPriceListId: 'gpl-B',
+    });
+
+    const args = capturedArgs as CapturedProductsQuery;
+
+    expect(args.include?.priceLists?.where).toEqual({
+      globalPriceListId: 'gpl-B',
+    });
+    expect(args.include?.variants?.select?.variantPrices?.where).toEqual({
+      priceList: { globalPriceListId: 'gpl-B' },
+    });
+  });
+
+  it('findProductById filters product and variant prices by the threaded ID only', async () => {
+    let capturedArgs: unknown;
+    mockProductFindFirst.mockImplementation((args: unknown) => {
+      capturedArgs = args;
+      return Promise.resolve(null);
+    });
+
+    await repo.findProductById('prod-1', 'gpl-A');
+
+    const args = capturedArgs as CapturedProductsQuery;
+
+    expect(args.include?.priceLists?.where).toEqual({
+      globalPriceListId: 'gpl-A',
+    });
+    expect(args.include?.variants?.include?.variantPrices?.where).toEqual({
+      priceList: { globalPriceListId: 'gpl-A' },
+    });
+    expect(JSON.stringify(capturedArgs)).not.toContain('isDefault');
+  });
+});
