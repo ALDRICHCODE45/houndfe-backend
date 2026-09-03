@@ -3,12 +3,15 @@
  * (design.md §6.1). Options mirror the global ValidationPipe in
  * `src/main.ts`: `transform: true`, `whitelist: true`,
  * `forbidNonWhitelisted: true`, no implicit conversion.
- * `supportedCatalogPriceListIds` is intentionally NOT whitelisted yet (a
- * later work unit adds it), so sending it must be rejected.
+ * `supportedCatalogPriceListIds` carries the strict WU4c1 request contract:
+ * omitted/`[]` accepted, otherwise a UUID v4 array unique case-insensitively
+ * (textual case variants of the same UUID are duplicates) — an explicit `null`
+ * is rejected on create AND PATCH (undefined-only optionality via
+ * `ValidateIf`, never null-skipping `@IsOptional`).
  */
 import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
-import { validate, ValidationError } from 'class-validator';
+import { isUUID, validate, ValidationError } from 'class-validator';
 import { CreateProductDto } from './create-product.dto';
 import { UpdateProductDto } from './update-product.dto';
 
@@ -110,11 +113,6 @@ describe('Product DTOs — online-catalog scalar fields (create)', () => {
       'onlineStockPresentationCustomQty',
     ],
     ['an unknown property', { bogus: 1 }, 'bogus'],
-    [
-      'the not-yet-supported price-list allowlist',
-      { supportedCatalogPriceListIds: ['x'] },
-      'supportedCatalogPriceListIds',
-    ],
     ...[-1, 1.5, 'abc'].map(
       (qty) =>
         [
@@ -221,3 +219,63 @@ describe('Product DTOs — online-catalog scalar fields (PATCH)', () => {
     await expectRejected(UpdateProductDto, fields, property);
   });
 });
+
+const UUID_V4_A = '0d5c1f4e-8a2b-4c3d-9e1f-2a3b4c5d6e7f';
+const UUID_V4_B = '6f2a9b3c-1d4e-4f5a-b7c8-9d0e1f2a3b4c';
+const UUID_V1 = 'c232ab00-9414-1f4c-a1c2-4f5d6e7f8a9b';
+
+describe.each([
+  ['create', CreateProductDto, CREATE_BASE],
+  ['PATCH', UpdateProductDto, {}],
+])(
+  'supportedCatalogPriceListIds strict contract on %s',
+  (_name, dtoClass, base) => {
+    it('uses real version-tagged UUID fixtures', () => {
+      expect(isUUID(UUID_V4_A, '4')).toBe(true);
+      expect(isUUID(UUID_V4_B, '4')).toBe(true);
+      expect(isUUID(UUID_V1, '4')).toBe(false);
+      expect(isUUID(UUID_V1, '1')).toBe(true);
+    });
+
+    const validCases: [string, unknown][] = [
+      [
+        'omitted (all-public semantics live in the service, not the DTO)',
+        undefined,
+      ],
+      ['an empty array', []],
+      ['a single UUID v4', [UUID_V4_A]],
+      ['unique UUID v4 values', [UUID_V4_A, UUID_V4_B]],
+    ];
+
+    const invalidCases: [string, unknown][] = [
+      ['an explicit null', null],
+      ['a scalar UUID string', UUID_V4_A],
+      ['a scalar number', 5],
+      ['an object in place of the array', { 0: UUID_V4_A }],
+      ['a malformed UUID element', [UUID_V4_A, 'not-a-uuid']],
+      ['a null element', [UUID_V4_A, null]],
+      ['a UUID v1 element', [UUID_V1]],
+      ['duplicate elements', [UUID_V4_A, UUID_V4_A]],
+      [
+        'case-variant duplicates of the same UUID',
+        [UUID_V4_A, UUID_V4_A.toUpperCase()],
+      ],
+    ];
+
+    it.each(validCases)('accepts %s', async (_label, value) => {
+      const payload: Record<string, unknown> = { ...base };
+      if (value !== undefined) {
+        payload.supportedCatalogPriceListIds = value;
+      }
+      await expectValid(dtoClass, payload);
+    });
+
+    it.each(invalidCases)('rejects %s', async (_label, value) => {
+      await expectRejected(
+        dtoClass,
+        { ...base, supportedCatalogPriceListIds: value },
+        'supportedCatalogPriceListIds',
+      );
+    });
+  },
+);

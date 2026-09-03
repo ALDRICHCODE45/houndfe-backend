@@ -5,6 +5,9 @@ import {
   IsBoolean,
   IsEnum,
   IsArray,
+  ArrayUnique,
+  IsUUID,
+  ValidateIf,
   IsInt,
   IsUrl,
   IsDateString,
@@ -154,6 +157,18 @@ export class ServiceDetailDto {
   notes?: string;
 }
 
+/**
+ * Case-normalizing uniqueness key for `supportedCatalogPriceListIds`.
+ * PostgreSQL UUID identity treats textual case variants of the same UUID
+ * as the same value, so string elements are lowercased before the
+ * `@ArrayUnique` comparison. Non-string elements pass through untouched:
+ * decorator execution order is not guaranteed, so this must never throw —
+ * `@IsUUID` owns element typing.
+ */
+export function catalogPriceListIdUniquenessKey(value: unknown): unknown {
+  return typeof value === 'string' ? value.toLowerCase() : value;
+}
+
 export class CreateProductDto {
   @IsString()
   @MaxLength(100)
@@ -227,6 +242,26 @@ export class CreateProductDto {
   @IsOptional()
   @IsBoolean()
   hidePriceInOnlineCatalog?: boolean;
+  /**
+   * Online-catalog price-list allowlist (design.md §6.1). Omitted or
+   * `[]` means all tenant-public price lists. Optionality is
+   * undefined-only on purpose (`ValidateIf`, not `@IsOptional`): an
+   * explicit `null` must be validated — and rejected — rather than
+   * silently skipped by the null-tolerant optional check, so create and
+   * PATCH share the identical contract. Elements must be UUID v4 strings
+   * that are unique case-insensitively (two textual case variants of the
+   * same UUID are one duplicate value); tenant binding of a non-empty
+   * array is service-level validation owned by a later work unit, not
+   * the DTO.
+   */
+  @ValidateIf(
+    (o: { supportedCatalogPriceListIds?: unknown }) =>
+      o.supportedCatalogPriceListIds !== undefined,
+  )
+  @IsArray()
+  @ArrayUnique(catalogPriceListIdUniquenessKey)
+  @IsUUID('4', { each: true })
+  supportedCatalogPriceListIds?: string[];
 
   /**
    * Online-catalog stock presentation (design.md §6). Explicit `null`
