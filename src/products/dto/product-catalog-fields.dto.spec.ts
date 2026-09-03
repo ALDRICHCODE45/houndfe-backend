@@ -14,6 +14,7 @@ import { plainToInstance } from 'class-transformer';
 import { isUUID, validate, ValidationError } from 'class-validator';
 import { CreateProductDto } from './create-product.dto';
 import { UpdateProductDto } from './update-product.dto';
+import { CreateVariantDto, UpdateVariantDto } from './variant.dto';
 
 async function validateWith(
   dtoClass: new () => object,
@@ -217,6 +218,136 @@ describe('Product DTOs — online-catalog scalar fields (PATCH)', () => {
 
   it.each(invalidCases)('rejects %s', async (_label, fields, property) => {
     await expectRejected(UpdateProductDto, fields, property);
+  });
+});
+
+/**
+ * Variant online-catalog fields — DTO validation contract tests (design.md
+ * §6.2). Same pipe-equivalent options as the product contract above. Only
+ * `UpdateVariantDto` carries the catalog fields: variant create and
+ * inline-create must not accept them (create by reference, not copy).
+ * `catalogPublishMode` uses undefined-only optionality — an explicit `null`
+ * is validated and rejected, never silently skipped.
+ */
+describe('Variant DTOs — online-catalog fields (variant PATCH)', () => {
+  const PUBLISH_MODES = ['INHERIT', 'ON', 'OFF'] as const;
+
+  const validCases: [string, Record<string, unknown>][] = [
+    ...PUBLISH_MODES.map(
+      (mode) =>
+        [`catalogPublishMode ${mode}`, { catalogPublishMode: mode }] as [
+          string,
+          Record<string, unknown>,
+        ],
+    ),
+    [
+      'a full presentation update',
+      {
+        catalogPublishMode: 'ON',
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 3,
+      },
+    ],
+    [
+      'CUSTOM_QUANTITY with custom quantity 0',
+      {
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 0,
+      },
+    ],
+    [
+      'explicit null mode with null quantity',
+      { onlineStockPresentation: null, onlineStockPresentationCustomQty: null },
+    ],
+    [
+      'explicit null mode with omitted quantity',
+      { onlineStockPresentation: null },
+    ],
+    [
+      'an omitted mode with a quantity (deferred to merged-state service validation)',
+      { onlineStockPresentationCustomQty: 5 },
+    ],
+    ['a partial update without catalog fields', { name: 'Nuevo nombre' }],
+  ];
+
+  it.each(validCases)('accepts %s', async (_label, fields) => {
+    await expectValid(UpdateVariantDto, fields);
+  });
+
+  const invalidCases: [string, Record<string, unknown>, string][] = [
+    [
+      'an explicit null catalogPublishMode',
+      { catalogPublishMode: null },
+      'catalogPublishMode',
+    ],
+    [
+      'an unknown catalogPublishMode',
+      { catalogPublishMode: 'VISIBLE' },
+      'catalogPublishMode',
+    ],
+    [
+      'an unknown presentation mode',
+      { onlineStockPresentation: 'VISIBLE' },
+      'onlineStockPresentation',
+    ],
+    [
+      'a non-custom mode with a non-null quantity',
+      {
+        onlineStockPresentation: 'SYSTEM_STATUS',
+        onlineStockPresentationCustomQty: 5,
+      },
+      'onlineStockPresentationCustomQty',
+    ],
+    [
+      'CUSTOM_QUANTITY with an omitted quantity',
+      { onlineStockPresentation: 'CUSTOM_QUANTITY' },
+      'onlineStockPresentation',
+    ],
+    [
+      'CUSTOM_QUANTITY with an explicit null quantity',
+      {
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: null,
+      },
+      'onlineStockPresentation',
+    ],
+    ...[-1, 1.5, 'abc', ''].map(
+      (qty) =>
+        [
+          `a malformed custom quantity ${JSON.stringify(qty)}`,
+          {
+            onlineStockPresentation: 'CUSTOM_QUANTITY',
+            onlineStockPresentationCustomQty: qty,
+          },
+          'onlineStockPresentationCustomQty',
+        ] as [string, Record<string, unknown>, string],
+    ),
+    ['an unknown property', { bogus: true }, 'bogus'],
+  ];
+
+  it.each(invalidCases)('rejects %s', async (_label, fields, property) => {
+    await expectRejected(UpdateVariantDto, fields, property);
+  });
+});
+
+describe('Variant DTOs — create stays free of catalog fields', () => {
+  it.each(['INHERIT', 'ON', 'OFF'] as const)(
+    'rejects catalogPublishMode %s on create-variant',
+    async (mode) => {
+      await expectRejected(
+        CreateVariantDto,
+        { catalogPublishMode: mode },
+        'catalogPublishMode',
+      );
+    },
+  );
+
+  it('rejects onlineStockPresentation on create-variant', async () => {
+    await expectRejected(
+      CreateVariantDto,
+      { onlineStockPresentation: 'HIDDEN' },
+      'onlineStockPresentation',
+    );
   });
 });
 
