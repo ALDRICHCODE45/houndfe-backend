@@ -13,6 +13,19 @@ import type {
 } from '../application/mappers/public-product.mapper';
 import type { Prisma } from '@prisma/client';
 
+/**
+ * F1.WU5c1 — single publication-survivorship predicate. A product survives
+ * when it has no variants, or when at least one variant is not OFF
+ * (INHERIT or ON). Always combined with the parent gates, so an ON variant
+ * can never widen a false `includeInOnlineCatalog` gate.
+ */
+const PUBLICATION_SURVIVORSHIP: Prisma.ProductWhereInput = {
+  OR: [
+    { hasVariants: false },
+    { variants: { some: { catalogPublishMode: { not: 'OFF' } } } },
+  ],
+};
+
 @Injectable()
 export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
   constructor(
@@ -64,49 +77,50 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     const where: Prisma.ProductWhereInput = {
       includeInOnlineCatalog: true,
       type: 'PRODUCT',
-      ...(params.categoryId ? { categoryId: params.categoryId } : {}),
-      ...(params.q
-        ? {
-            OR: [
-              { name: { contains: params.q, mode: 'insensitive' as const } },
-              {
-                brand: {
+      AND: [PUBLICATION_SURVIVORSHIP],
+    };
+
+    if (params.categoryId) where.categoryId = params.categoryId;
+    if (params.q) {
+      where.OR = [
+        { name: { contains: params.q, mode: 'insensitive' as const } },
+        {
+          brand: {
+            name: {
+              contains: params.q,
+              mode: 'insensitive' as const,
+            },
+          },
+        },
+        {
+          variants: {
+            some: {
+              catalogPublishMode: { not: 'OFF' },
+              OR: [
+                {
                   name: {
                     contains: params.q,
                     mode: 'insensitive' as const,
                   },
                 },
-              },
-              {
-                variants: {
-                  some: {
-                    OR: [
-                      {
-                        name: {
-                          contains: params.q,
-                          mode: 'insensitive' as const,
-                        },
-                      },
-                      {
-                        option: {
-                          contains: params.q,
-                          mode: 'insensitive' as const,
-                        },
-                      },
-                      {
-                        value: {
-                          contains: params.q,
-                          mode: 'insensitive' as const,
-                        },
-                      },
-                    ],
+                {
+                  option: {
+                    contains: params.q,
+                    mode: 'insensitive' as const,
                   },
                 },
-              },
-            ],
-          }
-        : {}),
-    };
+                {
+                  value: {
+                    contains: params.q,
+                    mode: 'insensitive' as const,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ];
+    }
 
     const orderBy = this.resolveOrderBy(params.sort);
 
@@ -137,6 +151,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           take: 1,
         },
         variants: {
+          where: { catalogPublishMode: { not: 'OFF' } },
           select: {
             id: true,
             name: true,
@@ -161,6 +176,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
     return {
       items: this.sortByPriceIfNeeded(
+        // SAFETY: The include shape above matches ProductWithIncludes; this bridges Prisma's conditional query inference.
         items as unknown as ProductWithIncludes[],
         params.sort,
       ),
@@ -176,22 +192,22 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     const where: Prisma.ProductWhereInput = {
       includeInOnlineCatalog: true,
       type: 'PRODUCT',
-      ...(params.q
-        ? {
-            OR: [
-              { name: { contains: params.q, mode: 'insensitive' as const } },
-              {
-                brand: {
-                  name: {
-                    contains: params.q,
-                    mode: 'insensitive' as const,
-                  },
-                },
-              },
-            ],
-          }
-        : {}),
+      AND: [PUBLICATION_SURVIVORSHIP],
     };
+
+    if (params.q) {
+      where.OR = [
+        { name: { contains: params.q, mode: 'insensitive' as const } },
+        {
+          brand: {
+            name: {
+              contains: params.q,
+              mode: 'insensitive' as const,
+            },
+          },
+        },
+      ];
+    }
 
     const facets = await client.product.groupBy({
       by: ['categoryId'],
@@ -213,12 +229,15 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     const categoryMap = new Map(categories.map((c) => [c.id, c.name]));
 
     return facets
-      .filter((f) => f.categoryId != null && categoryMap.has(f.categoryId))
-      .map((f) => ({
-        id: f.categoryId!,
-        name: categoryMap.get(f.categoryId!)!,
-        count: f._count.id,
-      }))
+      .flatMap((facet) => {
+        const categoryId = facet.categoryId;
+        if (categoryId == null) return [];
+
+        const name = categoryMap.get(categoryId);
+        if (name == null) return [];
+
+        return [{ id: categoryId, name, count: facet._count.id }];
+      })
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -232,7 +251,12 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       this.resolvePriceFilters(globalPriceListId);
 
     const product = await client.product.findFirst({
-      where: { id: productId, includeInOnlineCatalog: true },
+      where: {
+        id: productId,
+        includeInOnlineCatalog: true,
+        type: 'PRODUCT',
+        AND: [PUBLICATION_SURVIVORSHIP],
+      },
       include: {
         category: { select: { id: true, name: true } },
         brand: { select: { name: true } },
@@ -247,6 +271,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           take: 1,
         },
         variants: {
+          where: { catalogPublishMode: { not: 'OFF' } },
           include: {
             images: {
               orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
@@ -265,6 +290,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
     if (!product) return null;
 
+    // SAFETY: The include shape above matches ProductDetailWithIncludes; this bridges Prisma's conditional query inference.
     return product as unknown as ProductDetailWithIncludes;
   }
 

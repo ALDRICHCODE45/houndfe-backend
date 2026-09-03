@@ -143,6 +143,7 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
         {
           variants: {
             some: {
+              catalogPublishMode: { not: 'OFF' },
               OR: [
                 { name: { contains: '8 kg', mode: 'insensitive' } },
                 { option: { contains: '8 kg', mode: 'insensitive' } },
@@ -335,5 +336,202 @@ describe('F1.WU5b tenant catalog-default price context', () => {
       priceList: { globalPriceListId: 'gpl-A' },
     });
     expect(JSON.stringify(capturedArgs)).not.toContain('isDefault');
+  });
+});
+
+/**
+ * F1.WU5c1 — the single publication-survivorship predicate every catalog
+ * query must reuse. A product survives when it has no variants, or when
+ * at least one variant is not OFF (INHERIT/ON). ON can never widen a
+ * false parent gate because this is always ANDed with the parent gates.
+ */
+const PUBLICATION_SURVIVORSHIP = {
+  OR: [
+    { hasVariants: false },
+    { variants: { some: { catalogPublishMode: { not: 'OFF' } } } },
+  ],
+};
+
+describe('F1.WU5c1 repository publication gates', () => {
+  let repo: PrismaPublicCatalogRepository;
+  let findManyArgs: unknown;
+  let countArgs: unknown;
+  let groupByArgs: unknown;
+  let findFirstArgs: unknown;
+
+  beforeEach(() => {
+    findManyArgs = undefined;
+    countArgs = undefined;
+    groupByArgs = undefined;
+    findFirstArgs = undefined;
+
+    const mockTenantPrisma = {
+      getClient: () => ({
+        product: {
+          findMany: jest.fn().mockImplementation((args: unknown) => {
+            findManyArgs = args;
+            return Promise.resolve([]);
+          }),
+          count: jest.fn().mockImplementation((args: unknown) => {
+            countArgs = args;
+            return Promise.resolve(0);
+          }),
+          groupBy: jest.fn().mockImplementation((args: unknown) => {
+            groupByArgs = args;
+            return Promise.resolve([]);
+          }),
+          findFirst: jest.fn().mockImplementation((args: unknown) => {
+            findFirstArgs = args;
+            return Promise.resolve(null);
+          }),
+        },
+      }),
+      getTenantId: () => 'tenant-1',
+    } as unknown as TenantPrismaService;
+
+    const mockPrisma = {
+      category: { findMany: jest.fn().mockResolvedValue([]) },
+      tenant: { findMany: jest.fn().mockResolvedValue([]) },
+    } as unknown as PrismaService;
+
+    repo = new PrismaPublicCatalogRepository(mockPrisma, mockTenantPrisma);
+  });
+
+  it('list findMany keeps parent gates and adds the survivorship predicate', async () => {
+    await repo.findProducts({ sort: 'relevance', page: 1, limit: 20 });
+
+    const where = (findManyArgs as { where: Record<string, unknown> }).where;
+
+    expect(where['includeInOnlineCatalog']).toBe(true);
+    expect(where['type']).toBe('PRODUCT');
+    expect(where['AND']).toEqual([PUBLICATION_SURVIVORSHIP]);
+  });
+
+  it('count reuses the exact survivorship where as findMany', async () => {
+    await repo.findProducts({
+      sort: 'relevance',
+      page: 1,
+      limit: 20,
+      q: 'bottle',
+    });
+
+    const listWhere = (findManyArgs as { where: unknown }).where;
+    const countWhere = (countArgs as { where: unknown }).where;
+
+    expect(countWhere).toEqual(listWhere);
+    expect(countWhere).toHaveProperty('AND', [PUBLICATION_SURVIVORSHIP]);
+  });
+
+  it('category facets group by the same survivorship predicate', async () => {
+    await repo.findCategoryFacets({});
+
+    const where = (groupByArgs as { where: Record<string, unknown> }).where;
+
+    expect(where['includeInOnlineCatalog']).toBe(true);
+    expect(where['type']).toBe('PRODUCT');
+    expect(where['AND']).toEqual([PUBLICATION_SURVIVORSHIP]);
+  });
+
+  it('detail adds the missing type PRODUCT gate plus survivorship', async () => {
+    await repo.findProductById('prod-1');
+
+    const args = findFirstArgs as { where: unknown; include: unknown };
+
+    expect(args.where).toEqual({
+      id: 'prod-1',
+      includeInOnlineCatalog: true,
+      type: 'PRODUCT',
+      AND: [PUBLICATION_SURVIVORSHIP],
+    });
+    expect(args.include).toBeDefined();
+  });
+
+  it('list variant projection filters out OFF variants', async () => {
+    await repo.findProducts({ sort: 'relevance', page: 1, limit: 20 });
+
+    const variants = (
+      findManyArgs as {
+        include: {
+          variants: {
+            where?: unknown;
+            select?: unknown;
+          };
+        };
+      }
+    ).include.variants;
+
+    expect(variants.where).toEqual({
+      catalogPublishMode: { not: 'OFF' },
+    });
+    expect(variants.select).toBeDefined();
+  });
+
+  it('detail variant projection filters out OFF variants', async () => {
+    await repo.findProductById('prod-1');
+
+    const variants = (
+      findFirstArgs as {
+        include: { variants: { where?: unknown; include?: unknown } };
+      }
+    ).include.variants;
+
+    expect(variants.where).toEqual({
+      catalogPublishMode: { not: 'OFF' },
+    });
+    expect(variants.include).toBeDefined();
+  });
+
+  it('variant text search cannot be revealed by an OFF variant', async () => {
+    await repo.findProducts({
+      q: '8 kg',
+      sort: 'relevance',
+      page: 1,
+      limit: 20,
+    });
+
+    const or = (
+      findManyArgs as {
+        where: { OR: Array<{ variants?: { some?: unknown } }> };
+      }
+    ).where.OR;
+
+    const variantClause = or.find((c) => 'variants' in c);
+
+    expect(variantClause?.variants?.some).toEqual({
+      catalogPublishMode: { not: 'OFF' },
+      OR: [
+        { name: { contains: '8 kg', mode: 'insensitive' } },
+        { option: { contains: '8 kg', mode: 'insensitive' } },
+        { value: { contains: '8 kg', mode: 'insensitive' } },
+      ],
+    });
+  });
+
+  it('survivorship admits non-variant and INHERIT/ON products but not all-OFF', async () => {
+    await repo.findProducts({ sort: 'relevance', page: 1, limit: 20 });
+
+    const predicate = ((
+      findManyArgs as {
+        where: { AND: Record<string, unknown>[] };
+      }
+    ).where.AND ?? [])[0];
+
+    expect(predicate).toEqual({
+      OR: [
+        { hasVariants: false },
+        { variants: { some: { catalogPublishMode: { not: 'OFF' } } } },
+      ],
+    });
+  });
+
+  it('survivorship never widens a false parent gate (ANDed, not ORed)', async () => {
+    await repo.findProducts({ sort: 'relevance', page: 1, limit: 20 });
+
+    const where = (findManyArgs as { where: Record<string, unknown> }).where;
+
+    // Parent gate stays a sibling requirement: only the AND conjunction
+    // carries survivorship, so includeInOnlineCatalog=false still excludes.
+    expect(where['includeInOnlineCatalog']).toBe(true);
+    expect(where).not.toHaveProperty('OR');
   });
 });
