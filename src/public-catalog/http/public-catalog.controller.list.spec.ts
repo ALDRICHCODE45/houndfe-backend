@@ -31,12 +31,16 @@ function makeProduct(
 describe('ListPublicProductsUseCase', () => {
   let useCase: ListPublicProductsUseCase;
   let repo: {
+    findTenantCatalogDefaultPriceListId: jest.Mock;
     findProducts: jest.Mock;
     findCategoryFacets: jest.Mock;
   };
 
   beforeEach(() => {
     repo = {
+      findTenantCatalogDefaultPriceListId: jest
+        .fn()
+        .mockResolvedValue('gpl-default-1'),
       findProducts: jest.fn(),
       findCategoryFacets: jest.fn(),
     };
@@ -90,6 +94,7 @@ describe('ListPublicProductsUseCase', () => {
       sort: 'price_asc',
       page: 2,
       limit: 10,
+      globalPriceListId: 'gpl-default-1',
     });
   });
 

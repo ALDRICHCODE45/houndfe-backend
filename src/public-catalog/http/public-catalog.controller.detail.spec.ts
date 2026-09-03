@@ -40,11 +40,19 @@ function makeDetailProduct(
 
 describe('GetPublicProductDetailUseCase', () => {
   let useCase: GetPublicProductDetailUseCase;
-  let repo: { findProductById: jest.Mock };
+  let repo: {
+    findProductById: jest.Mock;
+    findTenantCatalogDefaultPriceListId: jest.Mock;
+  };
   const tenant = { id: 'tenant-1', slug: 'centro', name: 'Sucursal Centro' };
 
   beforeEach(() => {
-    repo = { findProductById: jest.fn() };
+    repo = {
+      findProductById: jest.fn(),
+      findTenantCatalogDefaultPriceListId: jest
+        .fn()
+        .mockResolvedValue('gpl-default-1'),
+    };
     useCase = new GetPublicProductDetailUseCase(
       repo as unknown as IPublicCatalogRepository,
     );

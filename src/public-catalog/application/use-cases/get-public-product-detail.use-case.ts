@@ -17,7 +17,19 @@ export class GetPublicProductDetailUseCase {
     productId: string,
     tenant: { id: string; slug: string; name: string },
   ): Promise<PublicCatalogProductDetail> {
-    const product = await this.repo.findProductById(productId);
+    // F1.WU5b — fail closed: without a resolved tenant catalog-default
+    // global price list, no product read happens and the existing
+    // NotFoundException('Not Found') path is taken.
+    const defaultPriceListId =
+      (await this.repo.findTenantCatalogDefaultPriceListId?.()) ?? null;
+    if (defaultPriceListId === null) {
+      throw new NotFoundException('Not Found');
+    }
+
+    const product = await this.repo.findProductById(
+      productId,
+      defaultPriceListId,
+    );
 
     if (!product) {
       throw new NotFoundException('Not Found');

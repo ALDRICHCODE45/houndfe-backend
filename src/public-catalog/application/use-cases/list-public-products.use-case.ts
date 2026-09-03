@@ -36,6 +36,24 @@ export class ListPublicProductsUseCase {
   ) {}
 
   async execute(input: ListProductsInput): Promise<ListProductsOutput> {
+    // F1.WU5b — fail closed: without a resolved tenant catalog-default
+    // global price list, no product read happens and the existing empty
+    // paginated shape is returned with the requested pagination values.
+    const defaultPriceListId =
+      (await this.repo.findTenantCatalogDefaultPriceListId?.()) ?? null;
+    if (defaultPriceListId === null) {
+      return {
+        items: [],
+        meta: {
+          page: input.page,
+          limit: input.limit,
+          total: 0,
+          totalPages: 0,
+        },
+        facets: { categories: [] },
+      };
+    }
+
     const [{ items, total }, categories] = await Promise.all([
       this.repo.findProducts({
         q: input.q,
@@ -43,6 +61,7 @@ export class ListPublicProductsUseCase {
         sort: input.sort,
         page: input.page,
         limit: input.limit,
+        globalPriceListId: defaultPriceListId,
       }),
       this.repo.findCategoryFacets({ q: input.q }),
     ]);
