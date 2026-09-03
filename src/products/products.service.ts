@@ -755,8 +755,59 @@ export class ProductsService {
   }
 
   async update(id: string, dto: UpdateProductDto) {
+    const replacesCatalogAllowlist =
+      dto.supportedCatalogPriceListIds !== undefined;
+    let supportedCatalogPriceListIds: string[] | undefined;
+    if (replacesCatalogAllowlist) {
+      const requested = (dto as { supportedCatalogPriceListIds?: unknown })
+        .supportedCatalogPriceListIds;
+      const requestedValues = Array.isArray(requested)
+        ? (requested as unknown[])
+        : null;
+      if (
+        !requestedValues ||
+        requestedValues.some((value) => typeof value !== 'string')
+      ) {
+        throw new InvalidArgumentError(
+          'Catalog price list selection is invalid',
+        );
+      }
+      supportedCatalogPriceListIds = requestedValues.map((value) =>
+        (value as string).toLowerCase(),
+      );
+      if (
+        new Set(supportedCatalogPriceListIds).size !==
+        supportedCatalogPriceListIds.length
+      ) {
+        throw new InvalidArgumentError(
+          'Catalog price list selection is invalid',
+        );
+      }
+    }
+
     const product = await this.productRepo.findById(id);
     if (!product) throw new EntityNotFoundError('Product', id);
+
+    if (supportedCatalogPriceListIds?.length) {
+      const tenantId = this.tenantPrisma.getTenantId();
+      const bindings = await this.tenantPrisma
+        .getClient()
+        .tenantCatalogPriceList.findMany({
+          where: {
+            tenantId,
+            globalPriceListId: { in: supportedCatalogPriceListIds },
+          },
+          select: { globalPriceListId: true },
+        });
+      const boundIds = new Set(
+        bindings.map(({ globalPriceListId }) => globalPriceListId),
+      );
+      if (supportedCatalogPriceListIds.some((value) => !boundIds.has(value))) {
+        throw new InvalidArgumentError(
+          'Catalog price list selection is invalid',
+        );
+      }
+    }
 
     // F1.WU4b2 — merged-state online stock-presentation validation. The
     // DTO validates explicit pairs; an omitted mode defers to this
@@ -920,6 +971,9 @@ export class ProductsService {
       incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
     )
       product.onlineStockPresentationCustomQty = null;
+    if (replacesCatalogAllowlist) {
+      product.supportedCatalogPriceListIds = supportedCatalogPriceListIds ?? [];
+    }
 
     product.normalizeStockConfiguration();
 

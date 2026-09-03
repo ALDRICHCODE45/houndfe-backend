@@ -167,6 +167,35 @@ describe('PrismaProductRepository catalog fields (F1.WU4a)', () => {
     expect(found?.toResponse().supportsAllCatalogPriceLists).toBe(false);
   });
 
+  it('preserves loaded stale IDs through an unrelated save in replacement order', async () => {
+    const h = makeHarness({
+      catalogPriceLists: [
+        { globalPriceListId: 'stale-a' },
+        { globalPriceListId: 'stale-b' },
+      ],
+    });
+    const product = await h.repo.findById('prod-1');
+    product?.updateName('Renamed only');
+    await h.repo.save(product!);
+
+    expect(h.captured.createMany?.data).toEqual(
+      expect.arrayContaining([
+        { tenantId: TENANT, productId: 'prod-1', globalPriceListId: 'stale-a' },
+        { tenantId: TENANT, productId: 'prod-1', globalPriceListId: 'stale-b' },
+      ]),
+    );
+    expect(h.captured.createMany?.data).toHaveLength(2);
+    expect(h.timeline).toEqual([
+      'findUnique',
+      'tx:enter',
+      'upsert',
+      'deleteMany',
+      'createMany',
+      'findUnique',
+      'tx:exit',
+    ]);
+  });
+
   it('enters the boundary once and reuses an ambient transaction', async () => {
     // First save: exactly one boundary opens; all delegates run inside it,
     // in order, on the boundary's transaction/tenant client (structural
