@@ -40,6 +40,7 @@ import {
   IvaRate as PrismaIvaRate,
   IepsRate as PrismaIepsRate,
   PurchaseCostMode as PrismaPurchaseCostMode,
+  CatalogPublishMode,
   CatalogStockPresentation,
 } from '@prisma/client';
 
@@ -476,6 +477,10 @@ export class ProductsService {
                 variantDto.minQuantity,
               ),
               purchaseNetCostCents: variantDto.purchaseNetCostCents ?? null,
+              // F1.WU4d2 — inline variants start in full inheritance.
+              catalogPublishMode: CatalogPublishMode.INHERIT,
+              onlineStockPresentation: null,
+              onlineStockPresentationCustomQty: null,
               tenantId,
             } as Prisma.VariantUncheckedCreateInput,
           });
@@ -875,13 +880,7 @@ export class ProductsService {
         const activeLotCount = await this.tenantPrisma
           .getClient()
           .lot.count({ where: { productId: id, quantity: { gt: 0 } } });
-        try {
-          Product.assertTypeChangeAllowed(product, dto.type, activeLotCount);
-        } catch (e) {
-          // Re-throw InvalidArgumentError as-is for NestJS to surface
-          // as 400. BusinessRuleViolationError also maps to 400.
-          throw e;
-        }
+        Product.assertTypeChangeAllowed(product, dto.type, activeLotCount);
         // R1: SERVICE normalization also applies on the update path.
         // Force-clear inventory fields the moment we commit the change.
         product.sku = null;
@@ -1152,6 +1151,10 @@ export class ProductsService {
               dto.minQuantity,
             ),
             purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
+            // F1.WU4d2 — variants always start in full inheritance.
+            catalogPublishMode: CatalogPublishMode.INHERIT,
+            onlineStockPresentation: null,
+            onlineStockPresentationCustomQty: null,
             tenantId,
           } as Prisma.VariantUncheckedCreateInput,
         });
@@ -1194,8 +1197,9 @@ export class ProductsService {
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
-    const variants = await this.prisma.variant.findMany({
-      where: { productId },
+    // F1.WU4d2 — tenant-scoped read (design §6.1).
+    const variants = await this.tenantPrisma.getClient().variant.findMany({
+      where: { productId, tenantId: this.tenantPrisma.getTenantId() },
       include: {
         images: true,
         variantPrices: {
@@ -1221,13 +1225,38 @@ export class ProductsService {
     variantId: string,
     dto: UpdateVariantDto,
   ) {
-    const variant = await this.prisma.variant.findFirst({
-      where: { id: variantId, productId },
+    // F1.WU4d2 — tenant-scoped pre-read with explicit predicates.
+    const variant = await this.tenantPrisma.getClient().variant.findFirst({
+      where: {
+        id: variantId,
+        productId,
+        tenantId: this.tenantPrisma.getTenantId(),
+      },
       include: {
         product: { select: { useStock: true } },
       },
     });
     if (!variant) throw new EntityNotFoundError('Variant', variantId);
+
+    // F1.WU4d2 — merged-state gate runs BEFORE any mutation/write.
+    const incomingMode = dto.onlineStockPresentation;
+    const incomingQty = dto.onlineStockPresentationCustomQty;
+    const effectiveMode =
+      incomingMode !== undefined
+        ? incomingMode
+        : (variant.onlineStockPresentation ?? null);
+    let effectiveQty: number | null;
+    if (incomingQty !== undefined) {
+      effectiveQty = incomingQty;
+    } else if (
+      incomingMode !== undefined &&
+      incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
+    ) {
+      effectiveQty = null;
+    } else {
+      effectiveQty = variant.onlineStockPresentationCustomQty ?? null;
+    }
+    this.assertMergedOnlineStockState(effectiveMode, effectiveQty);
 
     // Exclude only THIS variant — must still reject sibling variants and parent product
     if (dto.sku !== undefined && dto.sku !== null) {
@@ -1263,7 +1292,11 @@ export class ProductsService {
         const updatedVariant = await this.tenantPrisma
           .getClient()
           .variant.update({
-            where: { id: variantId },
+            where: {
+              id: variantId,
+              productId,
+              tenantId: this.tenantPrisma.getTenantId(),
+            },
             data: {
               ...(dto.name !== undefined ||
               dto.option !== undefined ||
@@ -1297,6 +1330,23 @@ export class ProductsService {
               ...(dto.purchaseNetCostCents !== undefined
                 ? { purchaseNetCostCents: dto.purchaseNetCostCents }
                 : {}),
+              // F1.WU4d2 — persist the catalog DTO fields; a switch away
+              // from CUSTOM_QUANTITY clears the stale stored quantity.
+              ...(dto.catalogPublishMode !== undefined
+                ? { catalogPublishMode: dto.catalogPublishMode }
+                : {}),
+              ...(dto.onlineStockPresentation !== undefined
+                ? { onlineStockPresentation: dto.onlineStockPresentation }
+                : {}),
+              ...(dto.onlineStockPresentationCustomQty !== undefined
+                ? {
+                    onlineStockPresentationCustomQty:
+                      dto.onlineStockPresentationCustomQty,
+                  }
+                : incomingMode !== undefined &&
+                    incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
+                  ? { onlineStockPresentationCustomQty: null }
+                  : {}),
             },
           });
 
@@ -2115,12 +2165,22 @@ export class ProductsService {
       }>;
       option?: string | null;
       value?: string | null;
+      catalogPublishMode?: CatalogPublishMode;
+      onlineStockPresentation?: CatalogStockPresentation | null;
+      onlineStockPresentationCustomQty?: number | null;
     },
     product: Product,
   ) {
     return {
       ...this.enrichVariantCostResponse(variant),
       minQuantity: variant.minQuantity ?? 0,
+      // F1.WU4d2 — authenticated reads carry the persisted catalog
+      // scalars; the defaults only normalize rows predating the columns.
+      catalogPublishMode:
+        variant.catalogPublishMode ?? CatalogPublishMode.INHERIT,
+      onlineStockPresentation: variant.onlineStockPresentation ?? null,
+      onlineStockPresentationCustomQty:
+        variant.onlineStockPresentationCustomQty ?? null,
       variantPrices: variant.variantPrices.map((vp) =>
         this.enrichVariantPriceResponse(
           vp,
@@ -2137,6 +2197,28 @@ export class ProductsService {
   ): number {
     if (!useStock) return 0;
     return minQuantity ?? 0;
+  }
+
+  /**
+   * F1.WU4d2 — merged-state cross-field rule (design §6.2):
+   * CUSTOM_QUANTITY requires a non-null integer >= 0 (0 valid);
+   * any other mode — including null inheritance — cannot carry a qty.
+   */
+  private assertMergedOnlineStockState(
+    mode: CatalogStockPresentation | null,
+    qty: number | null,
+  ): void {
+    if (mode === CatalogStockPresentation.CUSTOM_QUANTITY) {
+      if (qty === null || !Number.isInteger(qty) || qty < 0) {
+        throw new InvalidArgumentError(
+          'onlineStockPresentationCustomQty: the merged state is CUSTOM_QUANTITY and requires a non-null integer >= 0',
+        );
+      }
+    } else if (qty !== null) {
+      throw new InvalidArgumentError(
+        'onlineStockPresentationCustomQty: the merged state is not CUSTOM_QUANTITY and cannot carry a custom quantity',
+      );
+    }
   }
 
   private enrichVariantCostResponse<T extends object>(
@@ -2358,7 +2440,6 @@ export class ProductsService {
 
     // Search query: across product name, SKU, barcode + variant fields
     if (dto.q) {
-      const searchTerm = `%${dto.q}%`;
       where.OR = [
         { name: { contains: dto.q, mode: 'insensitive' } },
         { sku: { contains: dto.q, mode: 'insensitive' } },

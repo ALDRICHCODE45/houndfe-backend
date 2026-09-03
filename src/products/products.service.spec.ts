@@ -11,7 +11,7 @@ import {
   BusinessRuleViolationError,
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
-import { CatalogStockPresentation } from '@prisma/client';
+import { CatalogPublishMode, CatalogStockPresentation } from '@prisma/client';
 import { Product } from './domain/product.entity';
 import { BadRequestException } from '@nestjs/common';
 import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
@@ -100,9 +100,7 @@ function createService(
     getClient: jest.fn().mockReturnValue(prisma),
     isInTransaction: jest.fn().mockReturnValue(false),
     runInTransaction: jest.fn(
-      async (
-        work: (client: ReturnType<typeof getClient>) => Promise<unknown>,
-      ) => work(prisma),
+      async (work: (client: unknown) => Promise<unknown>) => work(prisma),
     ),
   } as any;
   // ServiceDetail mock — the service calls
@@ -2231,6 +2229,8 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
 
     const txClient = {
       variant: {
+        // F1.WU4d2 — the pre-read is routed through the tenant client.
+        findFirst: jest.fn().mockResolvedValue(variantRow),
         update: jest.fn().mockImplementation((args: any) => {
           recordCall('txClient.variant.update');
           return Promise.resolve({
@@ -2291,7 +2291,11 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     // variant.update was routed through the tx client.
     expect(txClient.variant.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: VARIANT_A_ID },
+        where: {
+          id: VARIANT_A_ID,
+          productId: PRODUCT_ID,
+          tenantId: 'tenant-1',
+        },
         data: expect.objectContaining({ quantity: 10 }),
       }),
     );
@@ -2449,12 +2453,17 @@ describe('ProductsService — online catalog scalar fields (WU4b2)', () => {
 
   it('create persists admitted catalog scalars (defaults false/null/null when omitted)', async () => {
     const txProductCreate = jest.fn().mockResolvedValue({ id: PRODUCT_ID });
+    const txVariantCreate = jest.fn().mockResolvedValue({ id: VARIANT_A_ID });
     const txClient = {
       product: { create: txProductCreate },
-      variant: { create: jest.fn() },
+      variant: { create: txVariantCreate },
       lot: { create: jest.fn() },
       globalPriceList: { findMany: jest.fn().mockResolvedValue([]) },
-      priceList: { createMany: jest.fn(), create: jest.fn() },
+      priceList: {
+        findMany: jest.fn().mockResolvedValue([]),
+        createMany: jest.fn(),
+        create: jest.fn(),
+      },
       variantPrice: { create: jest.fn() },
       productImage: { create: jest.fn() },
     };
@@ -2477,7 +2486,11 @@ describe('ProductsService — online catalog scalar fields (WU4b2)', () => {
       onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
       onlineStockPresentationCustomQty: 7,
     });
-    await service.create({ name: 'Plain Product' });
+    await service.create({
+      name: 'Plain Product',
+      hasVariants: true,
+      variants: [{ name: 'Inline Red' }],
+    });
 
     const [provided, defaults] = (
       txProductCreate.mock.calls as Array<[{ data: Record<string, unknown> }]>
@@ -2490,6 +2503,15 @@ describe('ProductsService — online catalog scalar fields (WU4b2)', () => {
     expect(defaults.hidePriceInOnlineCatalog).toBe(false);
     expect(defaults.onlineStockPresentation).toBeNull();
     expect(defaults.onlineStockPresentationCustomQty).toBeNull();
+
+    // F1.WU4d2 — inline product-create variants start in full inheritance.
+    expect(txVariantCreate).toHaveBeenCalledTimes(1);
+    const [inlineVariant] = (
+      txVariantCreate.mock.calls as Array<[{ data: Record<string, unknown> }]>
+    ).map((c) => c[0].data);
+    expect(inlineVariant.catalogPublishMode).toBe(CatalogPublishMode.INHERIT);
+    expect(inlineVariant.onlineStockPresentation).toBeNull();
+    expect(inlineVariant.onlineStockPresentationCustomQty).toBeNull();
   });
 
   it('PATCH omitting mode re-validates the merged CUSTOM_QUANTITY state and persists the new quantity', async () => {
@@ -2547,7 +2569,7 @@ describe('ProductsService — online catalog scalar fields (WU4b2)', () => {
     // name value object untouched and the rejected write never reaches
     // persistence.
     expect(product.name).toBe(nameBefore);
-    expect(product.name.name).toBe('Producto');
+    expect(product.name.productName).toBe('Producto');
     expect(save).not.toHaveBeenCalled();
   });
 
@@ -2780,4 +2802,233 @@ describe('ProductsService — catalog allowlist read (F1.WU4c4)', () => {
     expect(result.supportedCatalogPriceListIds).toEqual([]);
     expect(result.supportsAllCatalogPriceLists).toBe(true);
   });
+});
+
+// ── F1.WU4d2a — variant catalog round-trips + merged-state PATCH gate ────────
+describe('ProductsService — variant catalog round-trips (F1.WU4d2a)', () => {
+  function catalogVariantRow(
+    fields: Partial<{
+      catalogPublishMode: CatalogPublishMode;
+      onlineStockPresentation: CatalogStockPresentation | null;
+      onlineStockPresentationCustomQty: number | null;
+    }> = {},
+  ) {
+    return {
+      id: VARIANT_A_ID,
+      productId: PRODUCT_ID,
+      name: 'Red',
+      option: null,
+      value: null,
+      sku: 'SKU-RED',
+      barcode: null,
+      quantity: 3,
+      minQuantity: 1,
+      purchaseNetCostCents: null,
+      product: { useStock: true },
+      images: [],
+      variantPrices: [],
+      catalogPublishMode:
+        fields.catalogPublishMode ?? CatalogPublishMode.INHERIT,
+      onlineStockPresentation: fields.onlineStockPresentation ?? null,
+      onlineStockPresentationCustomQty:
+        fields.onlineStockPresentationCustomQty ?? null,
+    };
+  }
+
+  function makeVariantPrisma(row = catalogVariantRow()) {
+    return {
+      variant: {
+        findFirst: jest.fn().mockResolvedValue(row),
+        findMany: jest.fn().mockResolvedValue([row]),
+        update: jest.fn(
+          ({
+            data,
+          }: {
+            where: { id: string; productId: string; tenantId: string };
+            data: Record<string, unknown>;
+          }) => Promise.resolve({ ...row, ...data }),
+        ),
+      },
+    };
+  }
+
+  it('addVariant persists explicit catalog defaults (INHERIT / null / null)', async () => {
+    const txVariantCreate = jest.fn().mockResolvedValue({ id: VARIANT_A_ID });
+    const tx = {
+      variant: { create: txVariantCreate },
+      priceList: { findMany: jest.fn().mockResolvedValue([]) },
+      variantPrice: { createMany: jest.fn() },
+      product: { update: jest.fn() },
+    };
+    const transaction = jest.fn((cb: (client: typeof tx) => Promise<unknown>) =>
+      cb(tx),
+    );
+    const prisma = { $transaction: transaction };
+    const service = createService(
+      makeMockRepo({ findById: jest.fn().mockResolvedValue(makeProduct()) }),
+      prisma,
+    );
+
+    await service.addVariant(PRODUCT_ID, { name: 'Red' });
+
+    const [data] = (
+      txVariantCreate.mock.calls as Array<[{ data: Record<string, unknown> }]>
+    ).map((c) => c[0].data);
+    expect(data.catalogPublishMode).toBe(CatalogPublishMode.INHERIT);
+    expect(data.onlineStockPresentation).toBeNull();
+    expect(data.onlineStockPresentationCustomQty).toBeNull();
+  });
+
+  it('getVariants reads tenant-scoped and returns persisted catalog scalars', async () => {
+    const prisma = makeVariantPrisma(
+      catalogVariantRow({
+        catalogPublishMode: CatalogPublishMode.OFF,
+        onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+        onlineStockPresentationCustomQty: 4,
+      }),
+    );
+    const service = createService(
+      makeMockRepo({ findById: jest.fn().mockResolvedValue(makeProduct()) }),
+      prisma,
+    );
+
+    const [variant] = await service.getVariants(PRODUCT_ID);
+
+    expect(prisma.variant.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { productId: PRODUCT_ID, tenantId: 'tenant-1' },
+      }),
+    );
+    expect(variant.catalogPublishMode).toBe(CatalogPublishMode.OFF);
+    expect(variant.onlineStockPresentation).toBe(
+      CatalogStockPresentation.CUSTOM_QUANTITY,
+    );
+    expect(variant.onlineStockPresentationCustomQty).toBe(4);
+  });
+
+  it('findOne (buildFullResponse) exposes embedded variant catalog scalars', async () => {
+    const prisma = {
+      product: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ category: null, brand: null }),
+      },
+      priceList: { findMany: jest.fn().mockResolvedValue([]) },
+      variant: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            catalogVariantRow({ catalogPublishMode: CatalogPublishMode.ON }),
+          ]),
+      },
+      productImage: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const service = createService(
+      makeMockRepo({
+        findById: jest
+          .fn()
+          .mockResolvedValue(
+            Product.fromPersistence(
+              makePersistenceProduct({ id: PRODUCT_ID, hasVariants: true }),
+            ),
+          ),
+      }),
+      prisma,
+    );
+
+    const result = await service.findOne(PRODUCT_ID);
+
+    expect(result.variants[0].catalogPublishMode).toBe(CatalogPublishMode.ON);
+    expect(result.variants[0].onlineStockPresentation).toBeNull();
+    expect(result.variants[0].onlineStockPresentationCustomQty).toBeNull();
+  });
+
+  it('PATCH with explicit CUSTOM_QUANTITY and qty 0 persists the merged state', async () => {
+    const prisma = makeVariantPrisma();
+    const service = createService(makeMockRepo(), prisma);
+
+    await expect(
+      service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+        catalogPublishMode: CatalogPublishMode.ON,
+        onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+        onlineStockPresentationCustomQty: 0,
+      }),
+    ).resolves.toMatchObject({ onlineStockPresentationCustomQty: 0 });
+
+    expect(prisma.variant.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: VARIANT_A_ID,
+          productId: PRODUCT_ID,
+          tenantId: 'tenant-1',
+        },
+      }),
+    );
+    const updateCall = prisma.variant.update.mock.calls[0]?.[0];
+    expect(updateCall?.where).toEqual({
+      id: VARIANT_A_ID,
+      productId: PRODUCT_ID,
+      tenantId: 'tenant-1',
+    });
+    expect(updateCall?.data).toMatchObject({
+      catalogPublishMode: CatalogPublishMode.ON,
+      onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+      onlineStockPresentationCustomQty: 0,
+    });
+  });
+
+  it('PATCH omitting presentation resolves against the stored presentation', async () => {
+    const prisma = makeVariantPrisma(
+      catalogVariantRow({
+        onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+        onlineStockPresentationCustomQty: 5,
+      }),
+    );
+    const service = createService(makeMockRepo(), prisma);
+
+    await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+      onlineStockPresentationCustomQty: 8,
+    });
+
+    const { data } = prisma.variant.update.mock.calls[0][0];
+    expect(data.onlineStockPresentationCustomQty).toBe(8);
+    expect(data.catalogPublishMode).toBeUndefined();
+    expect(data.onlineStockPresentation).toBeUndefined();
+  });
+
+  it('PATCH with a quantity over a stored non-custom state rejects before any write', async () => {
+    const prisma = makeVariantPrisma();
+    const service = createService(makeMockRepo(), prisma);
+
+    await expect(
+      service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+        onlineStockPresentationCustomQty: 5,
+      }),
+    ).rejects.toThrow(InvalidArgumentError);
+    expect(prisma.variant.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['HIDDEN', CatalogStockPresentation.HIDDEN],
+    ['null', null],
+  ])(
+    'PATCH switching the stored presentation to %s clears the stale quantity',
+    async (_label, presentation) => {
+      const prisma = makeVariantPrisma(
+        catalogVariantRow({
+          onlineStockPresentation: CatalogStockPresentation.CUSTOM_QUANTITY,
+          onlineStockPresentationCustomQty: 5,
+        }),
+      );
+      const service = createService(makeMockRepo(), prisma);
+
+      await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
+        onlineStockPresentation: presentation,
+      });
+
+      const { data } = prisma.variant.update.mock.calls[0][0];
+      expect(data.onlineStockPresentation).toBe(presentation);
+      expect(data.onlineStockPresentationCustomQty).toBeNull();
+    },
+  );
 });
