@@ -48,6 +48,8 @@ import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { PrismaPublicCatalogRepository } from './prisma-public-catalog.repository';
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
+import type { ResolvedPublicCatalogContext } from '../application/ports/public-catalog.repository';
+import type { ProductDetailWithIncludes } from '../application/mappers/public-product.mapper';
 
 const SKIP_INTEGRATION =
   process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL;
@@ -1564,6 +1566,231 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       expect(result.items.map((p) => p.id).sort()).toEqual(
         expected.slice().sort(),
       );
+    });
+  });
+  // ── F2.WU6 (slice 4a) — typed detail seam; throws loudly if absent.
+  const detailSeam = (p: {
+    tenantId: string;
+    productId: string;
+    context: ResolvedPublicCatalogContext;
+  }): Promise<ProductDetailWithIncludes | null> => {
+    const seam = repo as unknown as {
+      getPublicProductDetail?: typeof detailSeam;
+    };
+    if (!seam.getPublicProductDetail)
+      throw new Error('getPublicProductDetail seam is not implemented');
+    return seam.getPublicProductDetail(p);
+  };
+
+  describe('F2.WU6 getPublicProductDetail — exact-context detail seam', () => {
+    /** Tenant + selected/other lists + the full polarity matrix. */
+    async function seedDetailMatrix() {
+      const tenant = (
+        await seedTenant('pd', { isActive: true, catalogPublished: true })
+      ).id;
+      const other = (
+        await seedTenant('pd-x', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = tenant;
+      const gSel = await seedGlobalPriceList('pd-sel');
+      const gOther = await seedGlobalPriceList('pd-other');
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gSel,
+        isCatalogDefault: true,
+      });
+      const context: ResolvedPublicCatalogContext = {
+        tenantId: tenant,
+        tenantSlug: tenantSlug(tenant),
+        globalPriceListId: gSel,
+        name: 'pd-sel',
+        isCatalogDefault: true,
+      };
+      const call = (productId: string, o?: { tid?: string; cid?: string }) =>
+        detailSeam({
+          tenantId: o?.tid ?? tenant,
+          productId,
+          context: o?.cid ? { ...context, tenantId: o.cid } : context,
+        });
+      const withVariant = async (
+        label: string,
+        popts: Parameters<typeof seedProduct>[2],
+      ) => {
+        const id = await seedProduct(tenant, label, popts);
+        const variant = await seedVariant(id, tenant, `v-${label}`, 'INHERIT');
+        return { id, variant };
+      };
+
+      const simple = await seedProduct(tenant, 'simple');
+      await seedProductPrice(tenant, simple, gSel, 1500);
+      await seedProductPrice(tenant, simple, gOther, 9999);
+      // Wrong-tenant allowlist row only → zero same-tenant rows.
+      const supportAll = await seedProduct(tenant, 'support-all');
+      await seedProductPrice(tenant, supportAll, gSel, 1800);
+      await seedAllowlistRow(other, supportAll, gOther);
+      // Same-tenant allowlist rows miss the selected list; a wrong-tenant
+      // selected-list row must never rescue the mismatch.
+      const mismatch = await seedProduct(tenant, 'mismatch');
+      await seedProductPrice(tenant, mismatch, gSel, 1600);
+      await seedAllowlistRow(tenant, mismatch, gOther);
+      await seedAllowlistRow(other, mismatch, gSel);
+      // Only an alternate positive price row.
+      const noSel = await seedProduct(tenant, 'no-sel');
+      await seedProductPrice(tenant, noSel, gOther, 8888);
+      // Zero selected price; alternate positive never rescues.
+      const zeroSel = await seedProduct(tenant, 'zero-sel');
+      await seedProductPrice(tenant, zeroSel, gSel, 0);
+      await seedProductPrice(tenant, zeroSel, gOther, 7777);
+      // Variant BOTH positive; sibling variants priced zero/alt-only/unpriced
+      // and wrong-tenant rows must be omitted, never rescue or leak.
+      const variantOk = await withVariant('variant-ok', { variants: true });
+      const okRow = await seedProductPrice(tenant, variantOk.id, gSel, 2500);
+      const okAlt = await seedProductPrice(tenant, variantOk.id, gOther, 2700);
+      await seedVariantPrice(tenant, variantOk.variant, okRow, 2600);
+      const okZero = await seedVariant(variantOk.id, tenant, 'v-zero', 'ON');
+      await seedVariantPrice(tenant, okZero, okRow, 0);
+      const okAltV = await seedVariant(variantOk.id, tenant, 'v-alt', 'ON');
+      await seedVariantPrice(tenant, okAltV, okAlt, 2800);
+      await seedVariant(variantOk.id, tenant, 'v-un', 'ON');
+      const vX = await seedVariant(variantOk.id, other, 'v-x', 'ON');
+      await seedVariantPrice(tenant, vX, okRow, 2950);
+      await seedVariantPrice(other, okZero, okRow, 2900);
+      // BOTH product-side fail: zero selected product, positive variant.
+      const prodZero = await withVariant('prod-zero', { variants: true });
+      const pzRow = await seedProductPrice(tenant, prodZero.id, gSel, 0);
+      await seedProductPrice(tenant, prodZero.id, gOther, 6666);
+      await seedVariantPrice(tenant, prodZero.variant, pzRow, 5000);
+      // BOTH variant-side fail: positive product, zero selected variant.
+      const varZero = await withVariant('var-zero', { variants: true });
+      const vzRow = await seedProductPrice(tenant, varZero.id, gSel, 3000);
+      const vzAlt = await seedProductPrice(tenant, varZero.id, gOther, 5555);
+      await seedVariantPrice(tenant, varZero.variant, vzRow, 0);
+      await seedVariantPrice(tenant, varZero.variant, vzAlt, 5100);
+      // Wrong-tenant variant prices (selected + nested cross-tenant list row)
+      // must never rescue the failed variant BOTH gate.
+      await seedVariantPrice(other, varZero.variant, vzRow, 5101);
+      const vw = await seedVariant(varZero.id, other, 'v-w', 'ON');
+      await seedVariantPrice(tenant, vw, vzRow, 5103);
+      // Hidden: selected positive rows exist but must stay redacted.
+      const hidden = await withVariant('hidden', {
+        variants: true,
+        hidePrice: true,
+      });
+      const hRow = await seedProductPrice(tenant, hidden.id, gSel, 4100);
+      await seedVariantPrice(tenant, hidden.variant, hRow, 4200);
+      await seedAllowlistRow(tenant, hidden.id, gOther);
+      // Prescription: selected positive rows exist but must stay redacted.
+      const rx = await withVariant('rx', {
+        variants: true,
+        requiresPrescription: true,
+      });
+      const rxRow = await seedProductPrice(tenant, rx.id, gSel, 4300);
+      await seedVariantPrice(tenant, rx.variant, rxRow, 4400);
+      await seedAllowlistRow(tenant, rx.id, gOther);
+      // All-OFF hidden: survivorship is never bypassed.
+      const hiddenAllOff = await seedProduct(tenant, 'hidden-off', {
+        variants: true,
+        hidePrice: true,
+      });
+      await seedVariant(hiddenAllOff, tenant, 'voff1', 'OFF');
+      await seedVariant(hiddenAllOff, tenant, 'voff2', 'OFF');
+      // Generic-miss fixtures: excluded, SERVICE, cross-tenant eligible.
+      const excluded = await seedProduct(tenant, 'excluded', {
+        include: false,
+      });
+      await seedProductPrice(tenant, excluded, gSel, 1900);
+      const service = await seedProduct(tenant, 'service', {
+        type: 'SERVICE',
+      });
+      await seedProductPrice(tenant, service, gSel, 1100);
+      const otherEligible = await seedProduct(other, 'other-elig');
+      const oeRow = await seedProductPrice(other, otherEligible, gSel, 1200);
+      // Nested cross-tenant price-list row: tenant-owned variant price whose
+      // list belongs to another tenant must not rescue either.
+      await seedVariantPrice(tenant, varZero.variant, oeRow, 5102);
+      return {
+        other,
+        call,
+        simple,
+        supportAll,
+        mismatch,
+        noSel,
+        zeroSel,
+        variantOk: variantOk.id,
+        okV: variantOk.variant,
+        prodZero: prodZero.id,
+        varZero: varZero.id,
+        hidden: hidden.id,
+        hV: hidden.variant,
+        rx: rx.id,
+        hiddenAllOff,
+        excluded,
+        service,
+        otherEligible,
+      };
+    }
+
+    it('returns exact-context detail for eligible products and projects only selected positive prices', async () => {
+      const m = await seedDetailMatrix();
+
+      const simpleDetail = await m.call(m.simple);
+      expect(simpleDetail).not.toBeNull();
+      expect(simpleDetail!.id).toBe(m.simple);
+      expect(simpleDetail!.priceLists).toEqual([{ priceCents: 1500 }]);
+
+      const supportAllDetail = await m.call(m.supportAll);
+      expect(supportAllDetail).not.toBeNull();
+      expect(supportAllDetail!.priceLists).toEqual([{ priceCents: 1800 }]);
+
+      const variantDetail = await m.call(m.variantOk);
+      expect(variantDetail).not.toBeNull();
+      expect(variantDetail!.variants).toHaveLength(1);
+      expect(variantDetail!.variants[0].id).toBe(m.okV);
+      expect(variantDetail!.variants[0].variantPrices).toEqual([
+        { priceCents: 2600 },
+      ]);
+
+      // Exact shape: the alternate 2700 product row never projects.
+      expect(variantDetail!.priceLists).toEqual([{ priceCents: 2500 }]);
+    });
+
+    it('returns the generic null for every excluded detail reason', async () => {
+      const m = await seedDetailMatrix();
+      // Allowlist mismatch; missing/zero selected price; failed variant
+      // BOTH (either side); all-OFF hidden; excluded; SERVICE.
+      for (const dead of [
+        m.mismatch,
+        m.noSel,
+        m.zeroSel,
+        m.prodZero,
+        m.varZero,
+        m.hiddenAllOff,
+        m.excluded,
+        m.service,
+      ]) {
+        await expect(m.call(dead)).resolves.toBeNull();
+      }
+      // Missing id; cross-tenant product under the correct context;
+      // param/context tenant mismatch (even for an eligible product).
+      await expect(m.call(randomUUID())).resolves.toBeNull();
+      await expect(m.call(m.otherEligible)).resolves.toBeNull();
+      await expect(m.call(m.simple, { cid: m.other })).resolves.toBeNull();
+    });
+
+    it('hidden/prescription bypass allowlist and price eligibility but expose no numeric rows', async () => {
+      const m = await seedDetailMatrix();
+
+      const hiddenDetail = await m.call(m.hidden);
+      expect(hiddenDetail).not.toBeNull();
+      expect(hiddenDetail!.priceLists).toEqual([]);
+      expect(hiddenDetail!.variants).toHaveLength(1);
+      expect(hiddenDetail!.variants[0].id).toBe(m.hV);
+      expect(hiddenDetail!.variants[0].variantPrices).toEqual([]);
+
+      const rxDetail = await m.call(m.rx);
+      expect(rxDetail).not.toBeNull();
+      expect(rxDetail!.priceLists).toEqual([]);
+      expect(rxDetail!.variants[0].variantPrices).toEqual([]);
     });
   });
 });

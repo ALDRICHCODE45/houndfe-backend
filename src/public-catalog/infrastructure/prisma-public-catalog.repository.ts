@@ -439,6 +439,160 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     };
   }
 
+  /**
+   * F2.WU6 slice 4a — optional, unactivated exact-context public detail.
+   * Independent of the active `findProductById`: one `findFirst` collapses
+   * every miss into the same null — param/context tenant mismatch, wrong
+   * tenant, unpublished, excluded, SERVICE, all-OFF, allowlist mismatch,
+   * missing/zero selected price, failed variant BOTH. Hidden/prescription
+   * precedence bypasses allowlist and positive-price eligibility only;
+   * same-tenant survivorship still applies. Only exact selected-context
+   * positive prices project — no fallback; no production caller.
+   */
+  async getPublicProductDetail(params: {
+    tenantId: string;
+    productId: string;
+    context: ResolvedPublicCatalogContext;
+  }): Promise<ProductDetailWithIncludes | null> {
+    if (params.tenantId !== params.context.tenantId) return null;
+
+    const client = this.tenantPrisma.getClient();
+    const { tenantId, productId } = params;
+    const { globalPriceListId } = params.context;
+
+    // F2 exact-context only: selected global list, positive prices, no
+    // default/alternate-list fallback.
+    const priceListWhere: Prisma.PriceListWhereInput = {
+      tenantId,
+      globalPriceListId,
+      priceCents: { gt: 0 },
+    };
+    const variantPriceWhere: Prisma.VariantPriceWhereInput = {
+      tenantId,
+      priceList: { tenantId, globalPriceListId },
+      priceCents: { gt: 0 },
+    };
+
+    const product = await client.product.findFirst({
+      where: {
+        id: productId,
+        tenantId,
+        includeInOnlineCatalog: true,
+        type: 'PRODUCT',
+        AND: [
+          // Same-tenant publication survivorship (never bypassed).
+          {
+            OR: [
+              { hasVariants: false },
+              {
+                variants: {
+                  some: { tenantId, catalogPublishMode: { not: 'OFF' } },
+                },
+              },
+            ],
+          },
+          {
+            OR: [
+              // Hidden-price precedence: bypass allowlist and price gates;
+              // the projection never exposes alternate numeric rows.
+              {
+                OR: [
+                  { hidePriceInOnlineCatalog: true },
+                  { requiresPrescription: true },
+                ],
+              },
+              {
+                AND: [
+                  { hidePriceInOnlineCatalog: false },
+                  { requiresPrescription: false },
+                  // Allowlist support: zero same-tenant rows = all
+                  // contexts; non-empty requires the selected list.
+                  {
+                    OR: [
+                      { catalogPriceLists: { none: { tenantId } } },
+                      {
+                        catalogPriceLists: {
+                          some: { tenantId, globalPriceListId },
+                        },
+                      },
+                    ],
+                  },
+                  // Positive-price eligibility per product shape —
+                  // variants require BOTH positive selected prices.
+                  {
+                    OR: [
+                      {
+                        hasVariants: false,
+                        priceLists: { some: priceListWhere },
+                      },
+                      {
+                        hasVariants: true,
+                        priceLists: { some: priceListWhere },
+                        variants: {
+                          some: {
+                            tenantId,
+                            catalogPublishMode: { not: 'OFF' },
+                            variantPrices: { some: variantPriceWhere },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      include: {
+        category: { select: { id: true, name: true } },
+        brand: { select: { name: true } },
+        images: {
+          where: { variantId: null },
+          orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+          select: { id: true, url: true, isMain: true },
+        },
+        priceLists: {
+          where: priceListWhere,
+          select: { priceCents: true },
+          take: 1,
+        },
+        variants: {
+          where: { tenantId, catalogPublishMode: { not: 'OFF' } },
+          include: {
+            images: {
+              orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+              take: 1,
+              select: { url: true },
+            },
+            variantPrices: {
+              where: variantPriceWhere,
+              select: { priceCents: true },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    if (!product) return null;
+    // Hidden/prescription precedence: zero numeric rows; visible
+    // products project only variants priced in the selected context.
+    if (product.hidePriceInOnlineCatalog || product.requiresPrescription) {
+      product.priceLists = [];
+      product.variants.forEach((v) => {
+        v.variantPrices = [];
+      });
+    } else {
+      product.variants = product.variants.filter(
+        (v) => v.variantPrices.length > 0,
+      );
+    }
+
+    // SAFETY: The include shape above matches ProductDetailWithIncludes; this bridges Prisma's conditional query inference.
+    return product as unknown as ProductDetailWithIncludes;
+  }
+
   async findCategoryFacets(params: {
     q?: string;
   }): Promise<PublicCatalogCategoryFacet[]> {

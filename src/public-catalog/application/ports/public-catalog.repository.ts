@@ -91,6 +91,20 @@ export interface IPublicCatalogRepository {
     excludedCount: number;
     categories: PublicCatalogCategoryFacet[];
   }>;
+
+  /**
+   * F2.WU6 slice 4a — optional, unactivated exact-context public detail
+   * contract: the detail projection for one product under the selected
+   * price context, or a generic null for every miss (tenant mismatch,
+   * wrong tenant, unpublished, excluded, SERVICE, all-OFF, allowlist
+   * mismatch, missing/zero selected price, failed variant BOTH). No
+   * production caller; HTTP miss mapping stays in dormant Slice 4b.
+   */
+  getPublicProductDetail?(params: {
+    tenantId: string;
+    productId: string;
+    context: ResolvedPublicCatalogContext;
+  }): Promise<ProductDetailWithIncludes | null>;
 }
 
 export const PUBLIC_CATALOG_REPOSITORY = Symbol('PUBLIC_CATALOG_REPOSITORY');
