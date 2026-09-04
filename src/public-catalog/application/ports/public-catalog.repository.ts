@@ -70,18 +70,27 @@ export interface IPublicCatalogRepository {
   ): Promise<ResolvedPublicCatalogContext | null>;
 
   /**
-   * F2.WU6 slice 2 — items-only, unactivated seam for exact-context
-   * public listing. Optional: no production caller yet; slice 3 adds
-   * `total`, `excludedCount`, categories, and full filter support
-   * before activation. Eligibility must be applied in the adapter's
-   * Prisma `where` before pagination; no in-memory eligibility
-   * filtering is permitted.
+   * F2.WU6 slice 3 — completed optional, unactivated exact-context
+   * public listing contract: context-eligible items, `total` and
+   * aggregate `excludedCount` computed before pagination, and
+   * context-eligible category facets. No production caller yet;
+   * activation (use-case/controller/DTO wiring) stays out of this
+   * slice. Eligibility must be applied in the adapter's Prisma
+   * `where` before pagination; no in-memory eligibility filtering
+   * is permitted.
    */
   listPublicProducts?(params: {
     tenantId: string;
     context: ResolvedPublicCatalogContext;
     filters: ListProductsParams;
-  }): Promise<{ items: ProductWithIncludes[] }>;
+  }): Promise<{
+    items: ProductWithIncludes[];
+    /** Context-eligible, filter-matching count — before pagination. */
+    total: number;
+    /** Base published/filter-matching count minus eligible count. */
+    excludedCount: number;
+    categories: PublicCatalogCategoryFacet[];
+  }>;
 }
 
 export const PUBLIC_CATALOG_REPOSITORY = Symbol('PUBLIC_CATALOG_REPOSITORY');

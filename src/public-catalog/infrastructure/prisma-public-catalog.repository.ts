@@ -234,24 +234,29 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
   }
 
   /**
-   * F2.WU6 slice 2 — items-only, unactivated seam for exact-context public
-   * listing. Eligibility is applied entirely in the Prisma `where` before
-   * `skip`/`take`; the projection carries only exact selected-context
-   * positive prices, with no fallback. Independent of the active
-   * `findProducts` (byte-for-byte unchanged); count, eligible total,
-   * excludedCount, categories, and q/categoryId filters arrive with slice 3
-   * activation — this slice honors page/limit/sort only.
-   *
-   * A priced variant product is eligible only when BOTH a positive selected
-   * product price row AND a published variant with a positive selected
-   * variant price exist; nested tenant-owned predicates and projections
-   * repeat the explicit `tenantId` (defense in depth).
+   * F2.WU6 slice 3 — optional, unactivated exact-context public listing.
+   * Eligibility is applied entirely in the Prisma `where` before
+   * `skip`/`take`; no production caller activates the seam yet. `total`
+   * (context-eligible, filter-matching) and the aggregate `excludedCount`
+   * (base published/filter-matching minus eligible) are computed before
+   * pagination; category facets count only context-eligible products
+   * under the same q/category filters. The projection carries only exact
+   * selected-context positive prices, with no fallback; independent of
+   * the active `findProducts`. A priced variant product is eligible only
+   * when BOTH a positive selected product price row AND a published
+   * variant with a positive selected variant price exist; nested
+   * tenant-owned predicates repeat the explicit `tenantId`.
    */
   async listPublicProducts(params: {
     tenantId: string;
     context: ResolvedPublicCatalogContext;
     filters: ListProductsParams;
-  }): Promise<{ items: ProductWithIncludes[] }> {
+  }): Promise<{
+    items: ProductWithIncludes[];
+    total: number;
+    excludedCount: number;
+    categories: PublicCatalogCategoryFacet[];
+  }> {
     const client = this.tenantPrisma.getClient();
     const { tenantId } = params;
 
@@ -269,23 +274,56 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       priceCents: { gt: 0 },
     };
 
-    const where: Prisma.ProductWhereInput = {
+    // F2.WU6 slice 3 — published base scope shared by total/facet/excluded
+    // counting; q/category filters apply to base, eligible, and facet
+    // scopes alike so the three aggregates always agree.
+    const gatesAnd: Prisma.ProductWhereInput[] = [
+      PUBLICATION_SURVIVORSHIP,
+      // Same-tenant survivorship: variant must be tenant-owned non-OFF.
+      {
+        OR: [
+          { hasVariants: false },
+          {
+            variants: {
+              some: { tenantId, catalogPublishMode: { not: 'OFF' } },
+            },
+          },
+        ],
+      },
+    ];
+    if (params.filters.categoryId) {
+      gatesAnd.push({ categoryId: params.filters.categoryId });
+    }
+    if (params.filters.q) {
+      const ci = {
+        contains: params.filters.q,
+        mode: 'insensitive' as const,
+      };
+      gatesAnd.push({
+        OR: [
+          { name: ci },
+          { brand: { name: ci } },
+          {
+            variants: {
+              some: {
+                tenantId,
+                catalogPublishMode: { not: 'OFF' },
+                OR: [{ name: ci }, { option: ci }, { value: ci }],
+              },
+            },
+          },
+        ],
+      });
+    }
+    const baseWhere: Prisma.ProductWhereInput = {
       tenantId,
       includeInOnlineCatalog: true,
       type: 'PRODUCT',
+      AND: gatesAnd,
+    };
+    const eligibleWhere: Prisma.ProductWhereInput = {
       AND: [
-        PUBLICATION_SURVIVORSHIP,
-        // Same-tenant survivorship: variant must be tenant-owned non-OFF.
-        {
-          OR: [
-            { hasVariants: false },
-            {
-              variants: {
-                some: { tenantId, catalogPublishMode: { not: 'OFF' } },
-              },
-            },
-          ],
-        },
+        baseWhere,
         {
           OR: [
             // Hidden-price precedence: bypass allowlist and positive-price
@@ -341,8 +379,18 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       ],
     };
 
+    const [eligibleTotal, baseTotal, facetGroups] = await Promise.all([
+      client.product.count({ where: eligibleWhere }),
+      client.product.count({ where: baseWhere }),
+      client.product.groupBy({
+        by: ['categoryId'],
+        where: eligibleWhere,
+        _count: { id: true },
+      }),
+    ]);
+
     const items = await client.product.findMany({
-      where,
+      where: eligibleWhere,
       orderBy: this.resolveOrderBy(params.filters.sort),
       skip: (params.filters.page - 1) * params.filters.limit,
       take: params.filters.limit,
@@ -385,6 +433,9 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         items as unknown as ProductWithIncludes[],
         params.filters.sort,
       ),
+      total: eligibleTotal,
+      excludedCount: baseTotal - eligibleTotal,
+      categories: await this.toCategoryFacets(facetGroups),
     };
   }
 
@@ -419,28 +470,37 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       _count: { id: true },
     });
 
-    const categoryIds = facets
+    return this.toCategoryFacets(facets);
+  }
+
+  /**
+   * F2.WU6 slice 3 — maps grouped category rows to public facets with
+   * names resolved from the global category table, name-ordered. Shared
+   * by the legacy `findCategoryFacets` and the exact-context seam so
+   * facet shapes never drift.
+   */
+  private async toCategoryFacets(
+    groups: { categoryId: string | null; _count: { id: number } }[],
+  ): Promise<PublicCatalogCategoryFacet[]> {
+    const ids = groups
       .map((f) => f.categoryId)
       .filter((id): id is string => id != null);
 
-    if (categoryIds.length === 0) return [];
+    if (ids.length === 0) return [];
 
     const categories = await this.prisma.category.findMany({
-      where: { id: { in: categoryIds } },
+      where: { id: { in: ids } },
       select: { id: true, name: true },
     });
 
-    const categoryMap = new Map(categories.map((c) => [c.id, c.name]));
+    const names = new Map(categories.map((c) => [c.id, c.name]));
 
-    return facets
-      .flatMap((facet) => {
-        const categoryId = facet.categoryId;
-        if (categoryId == null) return [];
-
-        const name = categoryMap.get(categoryId);
-        if (name == null) return [];
-
-        return [{ id: categoryId, name, count: facet._count.id }];
+    return groups
+      .flatMap((g) => {
+        const name = g.categoryId == null ? undefined : names.get(g.categoryId);
+        return g.categoryId != null && name != null
+          ? [{ id: g.categoryId, name, count: g._count.id }]
+          : [];
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }

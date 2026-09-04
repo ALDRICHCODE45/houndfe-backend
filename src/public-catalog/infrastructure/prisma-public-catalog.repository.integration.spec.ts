@@ -71,6 +71,8 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
   const trackedVariantIds: string[] = [];
   const trackedProductPriceRowIds: string[] = [];
   const trackedVariantPriceRowIds: string[] = [];
+  // F2.WU6 slice 3 — categories are global; delete after products.
+  const trackedCategoryIds: string[] = [];
 
   beforeAll(async () => {
     prisma = new PrismaClient();
@@ -130,6 +132,11 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
           where: { id: { in: trackedProductIds } },
         });
       }
+      if (trackedCategoryIds.length > 0) {
+        await prisma.category.deleteMany({
+          where: { id: { in: trackedCategoryIds } },
+        });
+      }
       if (trackedTenantIds.length > 0) {
         await prisma.tenantCatalogPriceList.deleteMany({
           where: { tenantId: { in: trackedTenantIds } },
@@ -150,6 +157,7 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       trackedVariantIds.length = 0;
       trackedProductPriceRowIds.length = 0;
       trackedVariantPriceRowIds.length = 0;
+      trackedCategoryIds.length = 0;
     }
   });
 
@@ -231,6 +239,7 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       nameTag?: string;
       hidePrice?: boolean;
       requiresPrescription?: boolean;
+      categoryId?: string;
     },
   ): Promise<string> {
     const id = randomUUID();
@@ -245,6 +254,7 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         hidePriceInOnlineCatalog: opts?.hidePrice ?? false,
         requiresPrescription: opts?.requiresPrescription ?? false,
         hasVariants: opts?.variants ?? false,
+        categoryId: opts?.categoryId,
         sku: `pc-int-${id.slice(0, 8)}`,
       },
     });
@@ -311,6 +321,17 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
     return id;
   }
 
+  // Allowlist rows cascade with their product — no extra tracking.
+  async function seedAllowlistRow(
+    tenantId: string,
+    productId: string,
+    globalPriceListId: string,
+  ): Promise<void> {
+    await prisma.productCatalogPriceList.create({
+      data: { id: randomUUID(), tenantId, productId, globalPriceListId },
+    });
+  }
+
   // F1.WU5e3 fixture helpers (cart evidence). Images cascade with the
   // product, so no separate tracking is needed.
   async function seedImage(
@@ -341,6 +362,16 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
   }
 
   const listParams = { sort: 'newest' as const, page: 1, limit: 20 };
+
+  // ── F2.WU6 slice 3 fixture helper (category facets) ─────────────────
+  async function seedCategory(label: string): Promise<string> {
+    const id = randomUUID();
+    await prisma.category.create({
+      data: { id, name: `pc-int-cat-${label}-${id.slice(0, 8)}` },
+    });
+    trackedCategoryIds.push(id);
+    return id;
+  }
 
   // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -1137,17 +1168,6 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
 
   // ── F2.WU6 (slice 2) — listPublicProducts items-only seam ────────────
   describe('F2.WU6 listPublicProducts — exact-context eligibility', () => {
-    // Allowlist rows cascade with their product — no extra tracking.
-    async function seedAllowlistRow(
-      tenantId: string,
-      productId: string,
-      globalPriceListId: string,
-    ): Promise<void> {
-      await prisma.productCatalogPriceList.create({
-        data: { id: randomUUID(), tenantId, productId, globalPriceListId },
-      });
-    }
-
     it('returns only eligible items for the selected context and paginates after DB filtering', async () => {
       const tenant = (
         await seedTenant('lp', { isActive: true, catalogPublished: true })
@@ -1354,6 +1374,196 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
 
       expect(result.items.map((p) => p.id)).toEqual([aProduct]);
       expect(result.items.map((p) => p.id)).not.toContain(bProduct);
+    });
+  });
+
+  // ── F2.WU6 (slice 3) — filters, totals, excludedCount, facets ──────
+  describe('F2.WU6 listPublicProducts — filters, totals, excludedCount, facets', () => {
+    const ctx = (tenantId: string, globalPriceListId: string) => ({
+      tenantId,
+      tenantSlug: tenantSlug(tenantId),
+      globalPriceListId,
+      name: 'lp3',
+      isCatalogDefault: true,
+    });
+
+    /** 4 eligible + 2 context-ineligible but base-matching products in two categories. */
+    async function seedSlice3Matrix() {
+      const tenant = (
+        await seedTenant('lp3', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = tenant;
+      const gSel = await seedGlobalPriceList('lp3-sel');
+      const gOther = await seedGlobalPriceList('lp3-other');
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gSel,
+        isCatalogDefault: true,
+      });
+      const catA = await seedCategory('a');
+      const catB = await seedCategory('b');
+      const mk = async (
+        nameTag: string,
+        categoryId?: string,
+        hidePrice?: boolean,
+      ) => {
+        const id = await seedProduct(tenant, nameTag, {
+          nameTag,
+          categoryId,
+          hidePrice,
+        });
+        await seedProductPrice(tenant, id, gSel, 1000);
+        return id;
+      };
+      // Eligible: alpha/catA, alpha/catB, beta/catA, hidden-price alpha/catB.
+      const matchA1 = await mk('alpha', catA);
+      const matchB1 = await mk('alpha', catB);
+      const otherA = await mk('beta', catA);
+      const hiddenAlpha = await mk('alpha', catB, true);
+      // Ineligible but base-matching: allowlist miss (alpha/catA) and zero price (omega).
+      const matchA2Excluded = await mk('alpha', catA);
+      await seedAllowlistRow(tenant, matchA2Excluded, gOther);
+      const omegaExcluded = await seedProduct(tenant, 'omega', {
+        nameTag: 'omega',
+      });
+      await seedProductPrice(tenant, omegaExcluded, gSel, 0);
+
+      return {
+        tenant,
+        gSel,
+        catA,
+        catB,
+        matchA1,
+        matchB1,
+        otherA,
+        hiddenAlpha,
+        matchA2Excluded,
+      };
+    }
+
+    it('computes q/category totals, aggregate excludedCount, and eligible-only facets before pagination', async () => {
+      const { tenant, gSel, catA, catB, matchA1, otherA, matchA2Excluded } =
+        await seedSlice3Matrix();
+      const context = ctx(tenant, gSel);
+      const call = (filters: {
+        sort: 'newest';
+        page: number;
+        limit: number;
+        q?: string;
+        categoryId?: string;
+      }) => repo.listPublicProducts({ tenantId: tenant, context, filters });
+
+      // Unfiltered: eligible total 4 despite limit 2 (computed before
+      // pagination); excludedCount = base(6) - eligible(4) = 2.
+      const unfiltered = await call({ sort: 'newest', page: 1, limit: 2 });
+      expect(unfiltered.total).toBe(4);
+      expect(unfiltered.items).toHaveLength(2);
+      expect(unfiltered.excludedCount).toBe(2);
+      expect(unfiltered.items.map((p) => p.id)).not.toContain(matchA2Excluded);
+      // Facets count ONLY context-eligible products under the same
+      // filters; assert the exact {id,name,count} shape and name order
+      // (the '-a-' label prefix sorts before '-b-' regardless of ids).
+      expect(unfiltered.categories).toEqual([
+        { id: catA, name: `pc-int-cat-a-${catA.slice(0, 8)}`, count: 2 },
+        { id: catB, name: `pc-int-cat-b-${catB.slice(0, 8)}`, count: 2 },
+      ]);
+
+      // q 'alpha': base(4) - eligible(3) = 1. The zero-priced omega product
+      // does not match q, proving the excludedCount base is filter-matching
+      // (an unfiltered base would wrongly report 2 here).
+      const byQ = await call({
+        sort: 'newest',
+        page: 1,
+        limit: 20,
+        q: 'alpha',
+      });
+      expect(byQ.total).toBe(3);
+      expect(byQ.excludedCount).toBe(1);
+      expect(byQ.items.map((p) => p.id)).toContain(matchA1);
+      expect(byQ.items.map((p) => p.id)).not.toContain(otherA);
+      expect(byQ.categories.find((f) => f.id === catA)!.count).toBe(1);
+
+      // Category filter: catA base(3) - eligible(2) = 1.
+      const byCat = await call({
+        sort: 'newest',
+        page: 1,
+        limit: 20,
+        categoryId: catA,
+      });
+      expect(byCat.total).toBe(2);
+      expect(byCat.excludedCount).toBe(1);
+      expect(byCat.items.map((p) => p.id).sort()).toEqual(
+        [matchA1, otherA].sort(),
+      );
+
+      // Combined q + category.
+      const combined = await call({
+        sort: 'newest',
+        page: 1,
+        limit: 20,
+        q: 'alpha',
+        categoryId: catA,
+      });
+      expect(combined.total).toBe(1);
+      expect(combined.excludedCount).toBe(1);
+      expect(combined.items.map((p) => p.id)).toEqual([matchA1]);
+      expect(combined.categories.map((f) => f.id)).toEqual([catA]);
+      expect(combined.categories[0].count).toBe(1);
+    });
+
+    // Isolated q polarities: 'qx77' is injected into exactly one field
+    // per fixture; OFF and wrong-tenant matching variants are rejected.
+    it('isolates q field matching and rejects OFF/wrong-tenant matches', async () => {
+      const [{ id: tenant }, { id: other }] = await Promise.all([
+        seedTenant('lp3q', { isActive: true, catalogPublished: true }),
+        seedTenant('lp3qo', { isActive: true, catalogPublished: true }),
+      ]);
+      currentTenantId = tenant;
+      const gSel = await seedGlobalPriceList('lp3q-sel');
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gSel,
+        isCatalogDefault: true,
+      });
+      const token = 'qx77';
+      const brand = await prisma.brand.create({
+        data: { name: `pc-int-brand-${token}-${randomUUID().slice(0, 8)}` },
+      });
+      const brandMatch = await seedProduct(tenant, 'zbrand');
+      await seedProductPrice(tenant, brandMatch, gSel, 2500);
+      await prisma.product.update({
+        where: { id: brandMatch },
+        data: { brandId: brand.id },
+      });
+      const expected = [brandMatch];
+      const specs = [
+        ['zvalue', true, tenant, 'INHERIT', { value: token }],
+        ['zname', true, tenant, 'INHERIT', { name: `PC INT Variant ${token}` }],
+        ['zoption', true, tenant, 'INHERIT', { option: token }],
+        ['zcase', true, tenant, 'INHERIT', { value: 'QX77' }],
+        ['zoff', false, tenant, 'OFF', { value: token }],
+        ['zcross', false, other, 'INHERIT', { value: token }],
+      ] as const;
+      for (const [label, matches, owner, mode, fields] of specs) {
+        const id = await seedProduct(tenant, label, { variants: true });
+        const row = await seedProductPrice(tenant, id, gSel, 2500);
+        const plain = await seedVariant(id, tenant, 'plain', 'INHERIT');
+        await seedVariantPrice(tenant, plain, row, 2600);
+        const probe = await seedVariant(id, owner, 'plain', mode);
+        await prisma.variant.update({ where: { id: probe }, data: fields });
+        if (matches) expected.push(id);
+      }
+      const result = await repo.listPublicProducts({
+        tenantId: tenant,
+        context: ctx(tenant, gSel),
+        filters: { sort: 'newest', page: 1, limit: 20, q: token },
+      });
+      await prisma.brand.delete({ where: { id: brand.id } });
+      expect(result.total).toBe(expected.length);
+      expect(result.excludedCount).toBe(0);
+      expect(result.items.map((p) => p.id).sort()).toEqual(
+        expected.slice().sort(),
+      );
     });
   });
 });
