@@ -24,6 +24,12 @@
  *
  * Unit coverage remains authoritative for `PublicTenantGuard`; this
  * slice intentionally does not duplicate it (WU5e1 scope).
+ *
+ * F1.WU5e2 adds product/variant publication-gate evidence: list/detail
+ * survivorship (excluded, SERVICE, all-OFF, false-parent+ON non-widening,
+ * mixed INHERIT/ON/OFF), tenant isolation, and exact-global-price-list
+ * projection with no name/default-flag fallback. Cart/use-case integration
+ * is deliberately out of scope (WU5e3).
  */
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
@@ -52,6 +58,11 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
   // Per-test tracked ids for explicit-delete cleanup (no TRUNCATE).
   const trackedTenantIds: string[] = [];
   const trackedGlobalPriceListIds: string[] = [];
+  // F1.WU5e2 tracked rows — deleted FK-safe before tenants/globals.
+  const trackedProductIds: string[] = [];
+  const trackedVariantIds: string[] = [];
+  const trackedProductPriceRowIds: string[] = [];
+  const trackedVariantPriceRowIds: string[] = [];
 
   beforeAll(async () => {
     prisma = new PrismaClient();
@@ -86,6 +97,28 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
   afterEach(async () => {
     currentTenantId = baselineTenantId;
     try {
+      // F1.WU5e2 FK-safe order: variant prices → variants → product
+      // prices (PriceList rows) → products → tenants/globals.
+      if (trackedVariantPriceRowIds.length > 0) {
+        await prisma.variantPrice.deleteMany({
+          where: { id: { in: trackedVariantPriceRowIds } },
+        });
+      }
+      if (trackedVariantIds.length > 0) {
+        await prisma.variant.deleteMany({
+          where: { id: { in: trackedVariantIds } },
+        });
+      }
+      if (trackedProductPriceRowIds.length > 0) {
+        await prisma.priceList.deleteMany({
+          where: { id: { in: trackedProductPriceRowIds } },
+        });
+      }
+      if (trackedProductIds.length > 0) {
+        await prisma.product.deleteMany({
+          where: { id: { in: trackedProductIds } },
+        });
+      }
       if (trackedTenantIds.length > 0) {
         await prisma.tenantCatalogPriceList.deleteMany({
           where: { tenantId: { in: trackedTenantIds } },
@@ -102,6 +135,10 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
     } finally {
       trackedTenantIds.length = 0;
       trackedGlobalPriceListIds.length = 0;
+      trackedProductIds.length = 0;
+      trackedVariantIds.length = 0;
+      trackedProductPriceRowIds.length = 0;
+      trackedVariantPriceRowIds.length = 0;
     }
   });
 
@@ -156,6 +193,91 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       },
     });
   }
+
+  // ── F1.WU5e2 fixture helpers (products/variants/prices) ─────────────
+  async function seedProduct(
+    tenantId: string,
+    label: string,
+    opts?: {
+      include?: boolean;
+      type?: 'PRODUCT' | 'SERVICE';
+      variants?: boolean;
+    },
+  ): Promise<string> {
+    const id = randomUUID();
+    await prisma.product.create({
+      data: {
+        id,
+        name: `PC INT Product ${label} ${id.slice(0, 8)}`,
+        type: opts?.type ?? 'PRODUCT',
+        tenantId,
+        includeInOnlineCatalog: opts?.include ?? true,
+        hasVariants: opts?.variants ?? false,
+        sku: `pc-int-${id.slice(0, 8)}`,
+      },
+    });
+    trackedProductIds.push(id);
+    return id;
+  }
+
+  async function seedVariant(
+    productId: string,
+    tenantId: string,
+    label: string,
+    mode: 'INHERIT' | 'ON' | 'OFF',
+  ): Promise<string> {
+    const id = randomUUID();
+    await prisma.variant.create({
+      data: {
+        id,
+        productId,
+        tenantId,
+        name: `PC INT Variant ${label} ${id.slice(0, 8)}`,
+        option: 'color',
+        value: label,
+        catalogPublishMode: mode,
+        sku: `pc-int-v-${id.slice(0, 8)}`,
+      },
+    });
+    trackedVariantIds.push(id);
+    return id;
+  }
+
+  async function seedProductPrice(
+    tenantId: string,
+    productId: string,
+    globalPriceListId: string,
+    priceCents: number,
+  ): Promise<string> {
+    const id = randomUUID();
+    await prisma.priceList.create({
+      data: { id, productId, tenantId, globalPriceListId, priceCents },
+    });
+    trackedProductPriceRowIds.push(id);
+    return id;
+  }
+
+  async function seedVariantPrice(
+    tenantId: string,
+    variantId: string,
+    productPriceRowId: string,
+    priceCents: number,
+  ): Promise<string> {
+    const id = randomUUID();
+    await prisma.variantPrice.create({
+      data: {
+        id,
+        variantId,
+        tenantId,
+        priceListId: productPriceRowId,
+        priceCents,
+      },
+    });
+    trackedVariantPriceRowIds.push(id);
+    return id;
+  }
+
+  const listParams = { sort: 'newest' as const, page: 1, limit: 20 };
 
   // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -311,6 +433,206 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       expect(beforeBindings).toBe(1);
       expect(first).toBe(gA1);
       expect(second).toBe(first);
+    });
+  });
+
+  // ── F1.WU5e2 — product/variant publication evidence (real DB) ────────
+  describe('F1.WU5e2 — product/variant publication gates', () => {
+    it('list + count return only effective published parents, in deterministic API order', async () => {
+      const a = (
+        await seedTenant('A', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = a;
+
+      const plain = await seedProduct(a, 'plain');
+      const excluded = await seedProduct(a, 'excluded', { include: false });
+      const service = await seedProduct(a, 'service', { type: 'SERVICE' });
+      const allOff = await seedProduct(a, 'all-off', { variants: true });
+      await seedVariant(allOff, a, 'off-a', 'OFF');
+      await seedVariant(allOff, a, 'off-b', 'OFF');
+      const mixed = await seedProduct(a, 'mixed', { variants: true });
+      await seedVariant(mixed, a, 'inherit', 'INHERIT');
+      await seedVariant(mixed, a, 'on', 'ON');
+      await seedVariant(mixed, a, 'off', 'OFF');
+      const fParent = await seedProduct(a, 'f-parent', {
+        include: false,
+        variants: true,
+      });
+      await seedVariant(fParent, a, 'on', 'ON');
+
+      const result = await repo.findProducts(listParams);
+
+      // Fresh tenant — the scoped client guarantees no baseline rows, so
+      // the total is exactly the two effective published parents.
+      expect(result.total).toBe(2);
+
+      // Deterministic API order (createdAt desc) read back from the DB.
+      const expectedOrder = await prisma.product.findMany({
+        where: { id: { in: [plain, mixed] } },
+        select: { id: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(result.items.map((p) => p.id)).toEqual(
+        expectedOrder.map((p) => p.id),
+      );
+
+      const returnedIds = result.items.map((p) => p.id);
+      for (const dead of [excluded, service, allOff, fParent]) {
+        expect(returnedIds).not.toContain(dead);
+      }
+    });
+
+    it('detail returns null for excluded/SERVICE/all-OFF/false-parent+ON and prunes OFF from the mixed product', async () => {
+      const a = (
+        await seedTenant('A', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = a;
+
+      const excluded = await seedProduct(a, 'excluded', { include: false });
+      const service = await seedProduct(a, 'service', { type: 'SERVICE' });
+      const allOff = await seedProduct(a, 'all-off', { variants: true });
+      await seedVariant(allOff, a, 'off', 'OFF');
+      const fParent = await seedProduct(a, 'f-parent', {
+        include: false,
+        variants: true,
+      });
+      const onChild = await seedVariant(fParent, a, 'on', 'ON');
+      const mixed = await seedProduct(a, 'mixed', { variants: true });
+      const inheritV = await seedVariant(mixed, a, 'inherit', 'INHERIT');
+      const onV = await seedVariant(mixed, a, 'on', 'ON');
+      const offV = await seedVariant(mixed, a, 'off', 'OFF');
+
+      for (const dead of [excluded, service, allOff, fParent]) {
+        expect(await repo.findProductById(dead)).toBeNull();
+      }
+
+      const detail = await repo.findProductById(mixed);
+      expect(detail).not.toBeNull();
+      const variantIds = detail!.variants.map((v) => v.id);
+      expect(variantIds).toEqual(expect.arrayContaining([inheritV, onV]));
+      expect(variantIds).not.toContain(offV);
+      expect(variantIds).not.toContain(onChild); // non-widening sanity
+      expect(variantIds).toHaveLength(2);
+    });
+
+    it('tenant B products/variants never appear in tenant A list or detail', async () => {
+      const a = (
+        await seedTenant('A', { isActive: true, catalogPublished: true })
+      ).id;
+      const b = (
+        await seedTenant('B', { isActive: true, catalogPublished: true })
+      ).id;
+      const aProduct = await seedProduct(a, 'a-only');
+      const bProduct = await seedProduct(b, 'b-only', { variants: true });
+      await seedVariant(bProduct, b, 'on', 'ON');
+
+      currentTenantId = a;
+      const aList = await repo.findProducts(listParams);
+      expect(aList.total).toBe(1);
+      expect(aList.items.map((p) => p.id)).toEqual([aProduct]);
+      expect(await repo.findProductById(bProduct)).toBeNull();
+
+      currentTenantId = b;
+      expect(await repo.findProductById(bProduct)).not.toBeNull();
+      expect(await repo.findProductById(aProduct)).toBeNull();
+    });
+
+    it('list/detail price projections use only the exact requested global ID — no name/default-flag fallback', async () => {
+      const a = (
+        await seedTenant('A', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = a;
+
+      // Polarity (corrected per independent review): the EXACT list is
+      // deliberately isDefault=false with an obscure name; the SHADOW
+      // list is the SOLE isDefault=true row of the pair and carries an
+      // explicit default-like name. A faulty legacy isDefault or name
+      // fallback therefore lures onto the shadow list and its wrong
+      // prices (9999/2999) — never onto the exact list (1111/2111).
+      // The tenant binding still points at the non-default exact list,
+      // so resolution must come from the binding, not any global flag.
+      const gExact = await seedGlobalPriceList('obscure-xq7n');
+      const gShadow = randomUUID();
+      await prisma.globalPriceList.create({
+        data: {
+          id: gShadow,
+          name: `pc-int-legacy-global-default-${gShadow.slice(0, 8)}`,
+          isDefault: true,
+        },
+      });
+      trackedGlobalPriceListIds.push(gShadow);
+
+      // Assert fixture polarity directly by ID/name/default flag BEFORE
+      // any repository read, scoped to these two IDs only: only the
+      // shadow is a valid global-default/name lure.
+      const fixtureRows = await prisma.globalPriceList.findMany({
+        where: { id: { in: [gExact, gShadow] } },
+      });
+      expect(fixtureRows).toHaveLength(2);
+      const exactListRow = fixtureRows.find((r) => r.id === gExact);
+      const shadowListRow = fixtureRows.find((r) => r.id === gShadow);
+      expect(exactListRow).toBeDefined();
+      expect(shadowListRow).toBeDefined();
+      expect(exactListRow!.isDefault).toBe(false);
+      expect(exactListRow!.name).not.toContain('default');
+      expect(shadowListRow!.isDefault).toBe(true);
+      expect(shadowListRow!.name).toContain('default');
+
+      // A legacy take-one isDefault fallback scoped to the two IDs
+      // selects the shadow lure, never the exact list.
+      const fallbackLure = await prisma.globalPriceList.findFirst({
+        where: { id: { in: [gExact, gShadow] }, isDefault: true },
+      });
+      expect(fallbackLure!.id).toBe(gShadow);
+
+      await seedBinding({
+        tenantId: a,
+        globalPriceListId: gExact,
+        isCatalogDefault: true,
+      });
+
+      const mixed = await seedProduct(a, 'mixed', { variants: true });
+      const inheritV = await seedVariant(mixed, a, 'inherit', 'INHERIT');
+      const onV = await seedVariant(mixed, a, 'on', 'ON');
+      await seedVariant(mixed, a, 'off', 'OFF');
+
+      const exactRow = await seedProductPrice(a, mixed, gExact, 1111);
+      const shadowRow = await seedProductPrice(a, mixed, gShadow, 9999);
+      await seedVariantPrice(a, inheritV, exactRow, 2111);
+      await seedVariantPrice(a, inheritV, shadowRow, 2999);
+      await seedVariantPrice(a, onV, exactRow, 2211);
+
+      const resolved = await repo.findTenantCatalogDefaultPriceListId();
+      expect(resolved).toBe(gExact);
+
+      const listed = await repo.findProducts({
+        ...listParams,
+        globalPriceListId: resolved!,
+      });
+      const listedMixed = listed.items.find((p) => p.id === mixed);
+      expect(listedMixed).toBeDefined();
+      expect(listedMixed!.priceLists).toEqual([{ priceCents: 1111 }]);
+      expect(
+        listedMixed!.variants.find((v) => v.id === inheritV)!.variantPrices,
+      ).toEqual([{ priceCents: 2111 }]);
+      expect(
+        listedMixed!.variants.find((v) => v.id === onV)!.variantPrices,
+      ).toEqual([{ priceCents: 2211 }]);
+
+      const detail = await repo.findProductById(mixed, resolved!);
+      expect(detail).not.toBeNull();
+      expect(detail!.priceLists).toEqual([{ priceCents: 1111 }]);
+      expect(
+        detail!.variants.find((v) => v.id === inheritV)!.variantPrices,
+      ).toEqual([{ priceCents: 2111 }]);
+      expect(detail!.variants.find((v) => v.id === onV)!.variantPrices).toEqual(
+        [{ priceCents: 2211 }],
+      );
+
+      // Shadow-list cents (9999/2999) must appear nowhere.
+      const blob = JSON.stringify([listed, detail]);
+      expect(blob).not.toContain('9999');
+      expect(blob).not.toContain('2999');
     });
   });
 });
