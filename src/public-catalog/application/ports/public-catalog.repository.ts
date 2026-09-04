@@ -68,6 +68,20 @@ export interface IPublicCatalogRepository {
     tenantSlug: string,
     requestedGlobalPriceListId?: string,
   ): Promise<ResolvedPublicCatalogContext | null>;
+
+  /**
+   * F2.WU6 slice 2 — items-only, unactivated seam for exact-context
+   * public listing. Optional: no production caller yet; slice 3 adds
+   * `total`, `excludedCount`, categories, and full filter support
+   * before activation. Eligibility must be applied in the adapter's
+   * Prisma `where` before pagination; no in-memory eligibility
+   * filtering is permitted.
+   */
+  listPublicProducts?(params: {
+    tenantId: string;
+    context: ResolvedPublicCatalogContext;
+    filters: ListProductsParams;
+  }): Promise<{ items: ProductWithIncludes[] }>;
 }
 
 export const PUBLIC_CATALOG_REPOSITORY = Symbol('PUBLIC_CATALOG_REPOSITORY');

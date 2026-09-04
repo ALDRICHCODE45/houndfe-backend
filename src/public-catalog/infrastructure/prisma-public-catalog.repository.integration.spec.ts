@@ -229,6 +229,8 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       variants?: boolean;
       quantity?: number;
       nameTag?: string;
+      hidePrice?: boolean;
+      requiresPrescription?: boolean;
     },
   ): Promise<string> {
     const id = randomUUID();
@@ -240,6 +242,8 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         quantity: opts?.quantity,
         tenantId,
         includeInOnlineCatalog: opts?.include ?? true,
+        hidePriceInOnlineCatalog: opts?.hidePrice ?? false,
+        requiresPrescription: opts?.requiresPrescription ?? false,
         hasVariants: opts?.variants ?? false,
         sku: `pc-int-${id.slice(0, 8)}`,
       },
@@ -1128,6 +1132,228 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       await expect(
         repo.resolveTenantCatalogContext?.(tenantSlug(tenantD.id)),
       ).resolves.toBeNull();
+    });
+  });
+
+  // ── F2.WU6 (slice 2) — listPublicProducts items-only seam ────────────
+  describe('F2.WU6 listPublicProducts — exact-context eligibility', () => {
+    // Allowlist rows cascade with their product — no extra tracking.
+    async function seedAllowlistRow(
+      tenantId: string,
+      productId: string,
+      globalPriceListId: string,
+    ): Promise<void> {
+      await prisma.productCatalogPriceList.create({
+        data: { id: randomUUID(), tenantId, productId, globalPriceListId },
+      });
+    }
+
+    it('returns only eligible items for the selected context and paginates after DB filtering', async () => {
+      const tenant = (
+        await seedTenant('lp', { isActive: true, catalogPublished: true })
+      ).id;
+      // Second tenant owns ONLY the cross-tenant relation rows below.
+      const other = (
+        await seedTenant('lp-x', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = tenant;
+
+      const gSel = await seedGlobalPriceList('lp-sel');
+      const gOther = await seedGlobalPriceList('lp-other');
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gSel,
+        isCatalogDefault: true,
+      });
+
+      // Eligible: positive price; non-empty allowlist MATCHING the list.
+      const supported = await seedProduct(tenant, 'supported');
+      await seedProductPrice(tenant, supported, gSel, 1500);
+      await seedAllowlistRow(tenant, supported, gSel);
+      // Excluded: non-empty allowlist that misses the selected list.
+      const unsupported = await seedProduct(tenant, 'unsupported');
+      await seedProductPrice(tenant, unsupported, gSel, 1600);
+      await seedAllowlistRow(tenant, unsupported, gOther);
+      // Excluded: same-tenant allowlist miss — a wrong-tenant allowlist row matching the selected list must not rescue.
+      const crossRescue = await seedProduct(tenant, 'cross-rescue');
+      await seedProductPrice(tenant, crossRescue, gSel, 1200);
+      await seedAllowlistRow(tenant, crossRescue, gOther);
+      await seedAllowlistRow(other, crossRescue, gSel);
+      // Excluded: zero selected price; alternate-list positive never rescues.
+      const zeroSel = await seedProduct(tenant, 'zero-sel');
+      await seedProductPrice(tenant, zeroSel, gSel, 0);
+      await seedProductPrice(tenant, zeroSel, gOther, 9999);
+
+      // Eligible (hidden-price precedence): variant-backed with ONLY alternate-list variant price — none may surface.
+      const hidden = await seedProduct(tenant, 'hidden', {
+        variants: true,
+        hidePrice: true,
+      });
+      const hPriceRow = await seedProductPrice(tenant, hidden, gOther, 8888);
+      const hiddenV = await seedVariant(hidden, tenant, 'vh', 'INHERIT');
+      await seedVariantPrice(tenant, hiddenV, hPriceRow, 9500);
+      await seedAllowlistRow(tenant, hidden, gOther);
+
+      // Eligible (prescription precedence): variant-backed; the zero-cents selected variant price must not surface.
+      const rx = await seedProduct(tenant, 'rx', {
+        variants: true,
+        requiresPrescription: true,
+      });
+      const rxPriceRow = await seedProductPrice(tenant, rx, gSel, 0);
+      const rxV = await seedVariant(rx, tenant, 'vr', 'INHERIT');
+      await seedVariantPrice(tenant, rxV, rxPriceRow, 0);
+      await seedAllowlistRow(tenant, rx, gOther);
+
+      // Eligible: BOTH a positive selected product price row AND a positive selected variant price.
+      const variantOk = await seedProduct(tenant, 'variant-ok', {
+        variants: true,
+      });
+      const okPriceRow = await seedProductPrice(tenant, variantOk, gSel, 2500);
+      const okV = await seedVariant(variantOk, tenant, 'vok', 'INHERIT');
+      await seedVariantPrice(tenant, okV, okPriceRow, 2600);
+
+      // Excluded (BOTH, product side): positive selected VARIANT price, no positive PRODUCT price row.
+      const noProdPrice = await seedProduct(tenant, 'variant-npp', {
+        variants: true,
+      });
+      const nppRow = await seedProductPrice(tenant, noProdPrice, gSel, 0);
+      await seedProductPrice(tenant, noProdPrice, gOther, 6600);
+      const nppV = await seedVariant(noProdPrice, tenant, 'vnpp', 'INHERIT');
+      await seedVariantPrice(tenant, nppV, nppRow, 5000);
+
+      // Excluded (C2): positive product price, nonpositive variant price.
+      const nvp = await seedProduct(tenant, 'variant-nvp', {
+        variants: true,
+      });
+      const nvpRow = await seedProductPrice(tenant, nvp, gSel, 3000);
+      const nvpV = await seedVariant(nvp, tenant, 'vnvp', 'INHERIT');
+      await seedVariantPrice(tenant, nvpV, nvpRow, 0);
+
+      // Excluded (C2): bypass still needs a same-tenant published variant.
+      const crossOnly = await seedProduct(tenant, 'cross-only', {
+        variants: true,
+        hidePrice: true,
+        requiresPrescription: true,
+      });
+      const crossRow = await seedProductPrice(other, crossOnly, gSel, 7000);
+      const crossV = await seedVariant(crossOnly, other, 'vcross', 'INHERIT');
+      await seedVariantPrice(other, crossV, crossRow, 7100);
+
+      // Eligible: own rows qualify despite a cross-tenant allowlist row — tenant B rows neither qualify nor disqualify.
+      const crossAllowed = await seedProduct(tenant, 'cross-ok');
+      await seedProductPrice(tenant, crossAllowed, gSel, 1800);
+      await seedAllowlistRow(other, crossAllowed, gOther);
+
+      const context = {
+        tenantId: tenant,
+        tenantSlug: tenantSlug(tenant),
+        globalPriceListId: gSel,
+        name: 'lp-sel',
+        isCatalogDefault: true,
+      };
+
+      const eligibleIds = [supported, hidden, rx, variantOk, crossAllowed];
+      const excludedIds = [unsupported, zeroSel, noProdPrice, crossOnly, nvp];
+
+      // Expected deterministic order (createdAt desc), read from the DB.
+      const expectedOrder = await prisma.product.findMany({
+        where: { id: { in: eligibleIds } },
+        select: { id: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(expectedOrder.map((p) => p.id)).toHaveLength(eligibleIds.length);
+
+      const page1 = await repo.listPublicProducts({
+        tenantId: tenant,
+        context,
+        filters: { sort: 'newest', page: 1, limit: 3 },
+      });
+      const page2 = await repo.listPublicProducts({
+        tenantId: tenant,
+        context,
+        filters: { sort: 'newest', page: 2, limit: 3 },
+      });
+
+      // Disjoint pages covering exactly the eligible set in DB order — eligibility applied before skip/take, never after.
+      expect(page1.items.map((p) => p.id)).toEqual(
+        expectedOrder.slice(0, 3).map((p) => p.id),
+      );
+      expect(page2.items.map((p) => p.id)).toEqual(
+        expectedOrder.slice(3).map((p) => p.id),
+      );
+      const returned = [...page1.items, ...page2.items].map((p) => p.id);
+      for (const dead of excludedIds) {
+        expect(returned).not.toContain(dead);
+      }
+      expect(returned).not.toContain(crossRescue);
+
+      // Hidden/prescription variant-backed rows stay visible while their
+      // alternate/invalid numeric arrays stay empty — direct assertions on
+      // the specific variant (never a vacuous `.every()`).
+      const allItems = [...page1.items, ...page2.items];
+      for (const id of [hidden, rx]) {
+        const row = allItems.find((p) => p.id === id)!;
+        expect(row.priceLists).toEqual([]);
+        expect(row.variants).toHaveLength(1);
+        expect(row.variants[0].variantPrices).toEqual([]);
+      }
+
+      // Projection carries exactly the eligible selected-context cents —
+      // no alternate-list or cross-tenant value leaks into any array.
+      const projectedCents = allItems
+        .flatMap((p) => [
+          ...p.priceLists.map((pl) => pl.priceCents),
+          ...p.variants.flatMap((v) =>
+            v.variantPrices.map((vp) => vp.priceCents),
+          ),
+        ])
+        .sort((a, b) => a - b);
+      expect(projectedCents).toEqual([1500, 1800, 2500, 2600]);
+    });
+
+    it('honors the explicit tenantId predicate — other tenants\u2019 eligible products never leak', async () => {
+      const a = (
+        await seedTenant('lp-a', { isActive: true, catalogPublished: true })
+      ).id;
+      const b = (
+        await seedTenant('lp-b', { isActive: true, catalogPublished: true })
+      ).id;
+      // The SAME selected list is bound to both tenants.
+      const gSel = await seedGlobalPriceList('lp-both');
+      await seedBinding({
+        tenantId: a,
+        globalPriceListId: gSel,
+        isCatalogDefault: true,
+      });
+      await seedBinding({
+        tenantId: b,
+        globalPriceListId: gSel,
+        isCatalogDefault: true,
+      });
+
+      currentTenantId = a;
+      const aProduct = await seedProduct(a, 'a-item');
+      await seedProductPrice(a, aProduct, gSel, 1000);
+
+      currentTenantId = b;
+      const bProduct = await seedProduct(b, 'b-item');
+      await seedProductPrice(b, bProduct, gSel, 2000);
+
+      currentTenantId = a;
+      const result = await repo.listPublicProducts({
+        tenantId: a,
+        context: {
+          tenantId: a,
+          tenantSlug: tenantSlug(a),
+          globalPriceListId: gSel,
+          name: 'lp-both',
+          isCatalogDefault: true,
+        },
+        filters: { sort: 'newest', page: 1, limit: 20 },
+      });
+
+      expect(result.items.map((p) => p.id)).toEqual([aProduct]);
+      expect(result.items.map((p) => p.id)).not.toContain(bProduct);
     });
   });
 });
