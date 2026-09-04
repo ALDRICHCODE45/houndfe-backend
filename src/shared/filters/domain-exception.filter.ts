@@ -150,6 +150,11 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'DISCOUNT_AMOUNT_INVALID')
       return HttpStatus.BAD_REQUEST;
 
+    // ── online-catalog-publishing / F2.WU6 — one generic public miss for
+    // private/nonexistent/cross-tenant/unbound/absent-default price contexts.
+    if (exception.code === 'PRICE_CONTEXT_NOT_AVAILABLE')
+      return HttpStatus.NOT_FOUND;
+
     // ── batch-delete ──
     if (exception.code === 'BATCH_DELETE_NOT_FOUND')
       return HttpStatus.NOT_FOUND;

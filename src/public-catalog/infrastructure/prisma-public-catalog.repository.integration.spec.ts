@@ -1016,4 +1016,118 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       expect(blob).not.toContain('svc-secret-c');
     });
   });
+
+  // ── F2.WU6 (slice 1) — resolveTenantCatalogContext real-DB evidence ────
+  describe('F2.WU6 resolveTenantCatalogContext', () => {
+    it('resolves an explicit public binding with exact tenant/list identity', async () => {
+      const tenant = await seedTenant('ctx-explicit', {
+        isActive: true,
+        catalogPublished: true,
+      });
+      const listId = await seedGlobalPriceList('ctx-explicit');
+      await seedBinding({
+        tenantId: tenant.id,
+        globalPriceListId: listId,
+        isCatalogDefault: false,
+      });
+      currentTenantId = tenant.id;
+
+      await expect(
+        repo.resolveTenantCatalogContext?.(tenantSlug(tenant.id), listId),
+      ).resolves.toEqual({
+        tenantId: tenant.id,
+        tenantSlug: tenantSlug(tenant.id),
+        globalPriceListId: listId,
+        name: `pc-int-list-${listId.slice(0, 8)}-ctx-explicit`,
+        isCatalogDefault: false,
+      });
+    });
+
+    it('resolves the omitted ID to the catalog-default binding', async () => {
+      const tenant = await seedTenant('ctx-default', {
+        isActive: true,
+        catalogPublished: true,
+      });
+      const listId = await seedGlobalPriceList('ctx-default');
+      await seedBinding({
+        tenantId: tenant.id,
+        globalPriceListId: listId,
+        isCatalogDefault: true,
+      });
+      currentTenantId = tenant.id;
+
+      await expect(
+        repo.resolveTenantCatalogContext?.(tenantSlug(tenant.id)),
+      ).resolves.toMatchObject({
+        tenantId: tenant.id,
+        globalPriceListId: listId,
+        isCatalogDefault: true,
+      });
+    });
+
+    it('misses generically for nonexistent/unbound/cross-tenant/absent-default/unpublished', async () => {
+      const tenantA = await seedTenant('ctx-miss-a', {
+        isActive: true,
+        catalogPublished: true,
+      });
+      await seedBinding({
+        tenantId: tenantA.id,
+        globalPriceListId: await seedGlobalPriceList('ctx-a'),
+        isCatalogDefault: true,
+      });
+      const tenantB = await seedTenant('ctx-miss-b', {
+        isActive: true,
+        catalogPublished: true,
+      });
+      const listB = await seedGlobalPriceList('ctx-b');
+      await seedBinding({
+        tenantId: tenantB.id,
+        globalPriceListId: listB,
+        isCatalogDefault: true,
+      });
+      currentTenantId = tenantA.id;
+
+      await expect(
+        repo.resolveTenantCatalogContext?.(
+          tenantSlug(tenantA.id),
+          randomUUID(),
+        ),
+      ).resolves.toBeNull();
+      const privateList = await seedGlobalPriceList('ctx-private');
+      await expect(
+        repo.resolveTenantCatalogContext?.(tenantSlug(tenantA.id), privateList),
+      ).resolves.toBeNull();
+      await expect(
+        repo.resolveTenantCatalogContext?.(tenantSlug(tenantA.id), listB),
+      ).resolves.toBeNull();
+
+      const tenantC = await seedTenant('ctx-nodefault', {
+        isActive: true,
+        catalogPublished: true,
+      });
+      await seedBinding({
+        tenantId: tenantC.id,
+        globalPriceListId: await seedGlobalPriceList('ctx-c'),
+        isCatalogDefault: false,
+      });
+      currentTenantId = tenantC.id;
+      await expect(
+        repo.resolveTenantCatalogContext?.(tenantSlug(tenantC.id)),
+      ).resolves.toBeNull();
+
+      const tenantD = await seedTenant('ctx-unpub', {
+        isActive: false,
+        catalogPublished: false,
+      });
+      await seedBinding({
+        tenantId: tenantD.id,
+        globalPriceListId: await seedGlobalPriceList('ctx-d'),
+        isCatalogDefault: true,
+      });
+      currentTenantId = tenantD.id;
+      await expect(
+        repo.resolveTenantCatalogContext?.(tenantSlug(tenantD.id)),
+      ).resolves.toBeNull();
+    });
+  });
 });

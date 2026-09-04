@@ -6,6 +6,7 @@ import type { PublicCatalogCategoryFacet } from '../application/dto/public-categ
 import type {
   IPublicCatalogRepository,
   ListProductsParams,
+  ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
 import type {
   ProductWithIncludes,
@@ -67,6 +68,51 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     });
 
     return binding?.globalPriceListId ?? null;
+  }
+
+  /**
+   * F2.WU6 — one query resolves the request price context. The tenant-scoped
+   * client injects the CLS tenantId (defense in depth); gates and slug checks
+   * are explicit so every miss collapses into the same null.
+   */
+  async resolveTenantCatalogContext(
+    tenantSlug: string,
+    requestedGlobalPriceListId?: string,
+  ): Promise<ResolvedPublicCatalogContext | null> {
+    const client = this.tenantPrisma.getClient();
+
+    const binding = await client.tenantCatalogPriceList.findFirst({
+      where: requestedGlobalPriceListId
+        ? { globalPriceListId: requestedGlobalPriceListId }
+        : { isCatalogDefault: true },
+      select: {
+        globalPriceListId: true,
+        isCatalogDefault: true,
+        globalPriceList: { select: { name: true } },
+        tenant: {
+          select: {
+            id: true,
+            slug: true,
+            isActive: true,
+            catalogPublished: true,
+          },
+        },
+      },
+    });
+
+    if (!binding) return null;
+    if (!binding.tenant.isActive || !binding.tenant.catalogPublished) {
+      return null;
+    }
+    if (binding.tenant.slug !== tenantSlug) return null;
+
+    return {
+      tenantId: binding.tenant.id,
+      tenantSlug: binding.tenant.slug,
+      globalPriceListId: binding.globalPriceListId,
+      name: binding.globalPriceList.name,
+      isCatalogDefault: binding.isCatalogDefault,
+    };
   }
 
   async findProducts(

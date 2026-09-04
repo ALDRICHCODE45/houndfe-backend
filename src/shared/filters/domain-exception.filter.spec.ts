@@ -1,10 +1,11 @@
-import { HttpStatus } from '@nestjs/common';
+import { ArgumentsHost, HttpStatus } from '@nestjs/common';
 import { DomainExceptionFilter } from './domain-exception.filter';
 import {
   BusinessRuleViolationError,
   EntityNotFoundError,
   BatchDeleteValidationError,
 } from '../domain/domain-error';
+import { PriceContextNotAvailableError } from '../../public-catalog/domain/errors/price-context-not-available.error';
 import { TimeOffInvalidDateRangeError } from '../../employees/domain/errors/time-off-invalid-date-range.error';
 import { TimeOffInvalidTransitionError } from '../../employees/domain/errors/time-off-invalid-transition.error';
 
@@ -354,6 +355,25 @@ describe('DomainExceptionFilter', () => {
         recomputedTotalCents: 900,
         expectedTotalCents: 1000,
         discountCents: 100,
+      }),
+    );
+  });
+
+  it('maps PRICE_CONTEXT_NOT_AVAILABLE to one generic 404 (F2.WU6)', () => {
+    const filter = new DomainExceptionFilter();
+    const mock = makeHost();
+
+    filter.catch(
+      new PriceContextNotAvailableError(),
+      mock.host as ArgumentsHost,
+    );
+
+    expect(mock.status).toHaveBeenCalledWith(HttpStatus.NOT_FOUND);
+    expect(mock.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.NOT_FOUND,
+        error: 'PRICE_CONTEXT_NOT_AVAILABLE',
+        message: 'Price context is not available',
       }),
     );
   });

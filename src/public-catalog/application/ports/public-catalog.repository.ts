@@ -19,6 +19,15 @@ export interface ListProductsParams {
   globalPriceListId?: string;
 }
 
+// F2.WU6 — the one public price context resolved per request.
+export interface ResolvedPublicCatalogContext {
+  tenantId: string;
+  tenantSlug: string;
+  globalPriceListId: string;
+  name: string;
+  isCatalogDefault: boolean;
+}
+
 export interface IPublicCatalogRepository {
   findActiveBranches(): Promise<PublicBranchDto[]>;
 
@@ -48,6 +57,17 @@ export interface IPublicCatalogRepository {
    * predate it and fail closed when the implementation is absent.
    */
   findTenantCatalogDefaultPriceListId?(): Promise<string | null>;
+
+  /**
+   * F2.WU6 — one-query context resolution for `tenantSlug`: exact supplied
+   * ID or the catalog default; null (never a fallback) on every miss.
+   * Mandatory on the port: the F2 price context is a required repository
+   * capability and callers must not silently tolerate its absence.
+   */
+  resolveTenantCatalogContext(
+    tenantSlug: string,
+    requestedGlobalPriceListId?: string,
+  ): Promise<ResolvedPublicCatalogContext | null>;
 }
 
 export const PUBLIC_CATALOG_REPOSITORY = Symbol('PUBLIC_CATALOG_REPOSITORY');

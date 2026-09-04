@@ -6,6 +6,7 @@ import { ListPublicBranchesUseCase } from './application/use-cases/list-public-b
 import { ListPublicProductsUseCase } from './application/use-cases/list-public-products.use-case';
 import { GetPublicProductDetailUseCase } from './application/use-cases/get-public-product-detail.use-case';
 import { ValidatePublicCartUseCase } from './application/use-cases/validate-public-cart.use-case';
+import { PublicPriceContextResolver } from './application/services/public-price-context-resolver';
 import { PrismaPublicCatalogRepository } from './infrastructure/prisma-public-catalog.repository';
 import { PUBLIC_CATALOG_REPOSITORY } from './application/ports/public-catalog.repository';
 
@@ -23,6 +24,7 @@ import { PUBLIC_CATALOG_REPOSITORY } from './application/ports/public-catalog.re
     ListPublicProductsUseCase,
     GetPublicProductDetailUseCase,
     ValidatePublicCartUseCase,
+    PublicPriceContextResolver,
     {
       provide: PUBLIC_CATALOG_REPOSITORY,
       useClass: PrismaPublicCatalogRepository,

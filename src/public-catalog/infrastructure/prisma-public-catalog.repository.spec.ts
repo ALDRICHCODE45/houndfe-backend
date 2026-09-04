@@ -612,3 +612,77 @@ describe('F1.WU5c2 repository variant-mode projection', () => {
     expect(variants.include).toBeDefined();
   });
 });
+
+describe('F2.WU6 resolveTenantCatalogContext', () => {
+  const OK = {
+    globalPriceListId: 'gpl-1',
+    isCatalogDefault: false,
+    globalPriceList: { name: 'Lista Mayoreo' },
+    tenant: {
+      id: 'tenant-1',
+      slug: 'ctx-tenant',
+      isActive: true,
+      catalogPublished: true,
+    },
+  };
+  const setup = (binding: unknown) => {
+    const findFirst = jest.fn().mockResolvedValue(binding);
+    const repo = new PrismaPublicCatalogRepository(
+      {} as unknown as PrismaService,
+      {
+        getClient: () => ({ tenantCatalogPriceList: { findFirst } }),
+      } as unknown as TenantPrismaService,
+    );
+    return { findFirst, repo };
+  };
+
+  it('resolves omitted (default) and supplied IDs through one exact predicate', async () => {
+    const { findFirst, repo } = setup({ ...OK, isCatalogDefault: true });
+
+    await expect(
+      repo.resolveTenantCatalogContext?.('ctx-tenant'),
+    ).resolves.toEqual({
+      tenantId: 'tenant-1',
+      tenantSlug: 'ctx-tenant',
+      globalPriceListId: 'gpl-1',
+      name: 'Lista Mayoreo',
+      isCatalogDefault: true,
+    });
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { isCatalogDefault: true } }),
+    );
+
+    findFirst.mockResolvedValue(OK);
+    await expect(
+      repo.resolveTenantCatalogContext?.('ctx-tenant', 'gpl-9'),
+    ).resolves.toMatchObject({ globalPriceListId: 'gpl-1' });
+    expect(findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: { globalPriceListId: 'gpl-9' } }),
+    );
+  });
+
+  it('collapses every miss into one null with exactly one lookup each', async () => {
+    const { findFirst, repo } = setup(null);
+    await expect(
+      repo.resolveTenantCatalogContext?.('ctx-tenant', 'gpl-404'),
+    ).resolves.toBeNull();
+
+    // Slug mismatch and inactive/unpublished tenant rows fail closed too.
+    findFirst
+      .mockResolvedValueOnce({ ...OK, tenant: { ...OK.tenant, slug: 'other' } })
+      .mockResolvedValueOnce({
+        ...OK,
+        tenant: { ...OK.tenant, isActive: false },
+      })
+      .mockResolvedValueOnce({
+        ...OK,
+        tenant: { ...OK.tenant, catalogPublished: false },
+      });
+    for (let i = 0; i < 3; i++) {
+      await expect(
+        repo.resolveTenantCatalogContext?.('ctx-tenant'),
+      ).resolves.toBeNull();
+    }
+    expect(findFirst).toHaveBeenCalledTimes(4);
+  });
+});
