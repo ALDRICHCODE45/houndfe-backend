@@ -65,9 +65,7 @@ export class ValidatePublicCartUseCase {
       },
     });
 
-    const productMap = new Map(
-      (products as Array<Record<string, unknown>>).map((p: any) => [p.id, p]),
-    );
+    const productMap = new Map(products.map((p) => [p.id, p]));
 
     let hasHiddenPrice = false;
     const validatedItems: CartValidatedItem[] = [];
@@ -88,28 +86,28 @@ export class ValidatePublicCartUseCase {
         continue;
       }
 
-      if (!product.includeInOnlineCatalog) {
-        validatedItems.push({
-          productId: item.productId,
-          variantId: item.variantId ?? null,
-          productName: product.name,
-          variantName: null,
-          image: product.images[0] ? { url: product.images[0].url } : null,
-          quantity: item.quantity,
-          unitPriceCents: null,
-          lineTotalCents: null,
-          availability: 'out_of_stock',
-          priceHidden: false,
-          warnings: ['NOT_IN_CATALOG'],
-        });
+      // F1.WU5d1 — parent publication gate: the row must be a real
+      // PRODUCT and included in the online catalog. Evaluated before any
+      // variant, stock, or price decision, so an ON variant can never
+      // widen a false parent gate. Blocked rows never disclose metadata.
+      if (product.type !== 'PRODUCT' || !product.includeInOnlineCatalog) {
+        validatedItems.push(
+          this.excludedItem(
+            'NOT_IN_CATALOG',
+            item.productId,
+            item.variantId ?? null,
+            item.quantity,
+          ),
+        );
         globalWarnings.add('NOT_IN_CATALOG');
         continue;
       }
 
       // Resolve variant if requested
-      let variant: any = null;
+      let variant: (typeof products)[number]['variants'][number] | null = null;
       if (item.variantId) {
-        variant = product.variants?.find((v: any) => v.id === item.variantId);
+        variant =
+          product.variants?.find((v) => v.id === item.variantId) ?? null;
         if (!variant) {
           validatedItems.push({
             productId: item.productId,
@@ -124,6 +122,21 @@ export class ValidatePublicCartUseCase {
             priceHidden: false,
             warnings: ['VARIANT_NOT_FOUND'],
           });
+          globalWarnings.add('VARIANT_NOT_FOUND');
+          continue;
+        }
+        // F1.WU5d1 — an OFF variant is excluded from the public cart via
+        // the existing F1 VARIANT_NOT_FOUND path (never WU7 codes), with
+        // no name/image disclosure for the excluded row.
+        if (variant.catalogPublishMode === 'OFF') {
+          validatedItems.push(
+            this.excludedItem(
+              'VARIANT_NOT_FOUND',
+              item.productId,
+              item.variantId,
+              item.quantity,
+            ),
+          );
           globalWarnings.add('VARIANT_NOT_FOUND');
           continue;
         }
@@ -198,6 +211,28 @@ export class ValidatePublicCartUseCase {
       items: validatedItems,
       totalCents,
       warnings: [...globalWarnings],
+    };
+  }
+
+  /** F1.WU5d1 — sanitized blocked-row shape (same fields as not-found). */
+  private excludedItem(
+    warning: 'NOT_IN_CATALOG' | 'VARIANT_NOT_FOUND',
+    productId: string,
+    variantId: string | null,
+    quantity: number,
+  ): CartValidatedItem {
+    return {
+      productId,
+      variantId,
+      productName: '',
+      variantName: null,
+      image: null,
+      quantity,
+      unitPriceCents: null,
+      lineTotalCents: null,
+      availability: 'out_of_stock',
+      priceHidden: false,
+      warnings: [warning],
     };
   }
 

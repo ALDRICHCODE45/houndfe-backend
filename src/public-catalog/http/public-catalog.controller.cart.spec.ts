@@ -15,6 +15,7 @@ describe('ValidatePublicCartUseCase', () => {
     return {
       id: 'prod-1',
       name: 'Royal Canin 13.6kg',
+      type: 'PRODUCT',
       includeInOnlineCatalog: true,
       useStock: true,
       quantity: 50,
@@ -90,6 +91,62 @@ describe('ValidatePublicCartUseCase', () => {
     expect(result.items[0].warnings).toContain('NOT_IN_CATALOG');
   });
 
+  it('should reject SERVICE product with NOT_IN_CATALOG and no metadata disclosure', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({ id: 'prod-1', type: 'SERVICE' }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [{ productId: 'prod-1', quantity: 2 }],
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.items[0].warnings).toEqual(['NOT_IN_CATALOG']);
+    expect(result.items[0].productName).toBe('');
+    expect(result.items[0].variantName).toBeNull();
+    expect(result.items[0].image).toBeNull();
+    expect(result.items[0].unitPriceCents).toBeNull();
+    expect(result.items[0].lineTotalCents).toBeNull();
+    expect(result.items[0].availability).toBe('out_of_stock');
+    expect(result.items[0].priceHidden).toBe(false);
+  });
+
+  it('should not disclose metadata for unpublished product even when requested variant is ON', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({
+        id: 'prod-1',
+        includeInOnlineCatalog: false,
+        hasVariants: true,
+        variants: [
+          {
+            id: 'var-1',
+            name: '1kg',
+            quantity: 10,
+            minQuantity: 1,
+            catalogPublishMode: 'ON',
+            variantPrices: [{ priceCents: 90000 }],
+          },
+        ],
+      }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [{ productId: 'prod-1', variantId: 'var-1', quantity: 1 }],
+    });
+
+    // Parent gate wins over an ON variant — ON never widens a false parent
+    expect(result.valid).toBe(false);
+    expect(result.items[0].warnings).toEqual(['NOT_IN_CATALOG']);
+    expect(result.items[0].productName).toBe('');
+    expect(result.items[0].variantName).toBeNull();
+    expect(result.items[0].image).toBeNull();
+    // No downstream stock/price acceptance for the blocked row
+    expect(result.items[0].unitPriceCents).toBeNull();
+    expect(result.items[0].lineTotalCents).toBeNull();
+    expect(result.items[0].availability).toBe('out_of_stock');
+    expect(result.totalCents).toBe(0);
+  });
+
   it('should return OUT_OF_STOCK warning and valid=false', async () => {
     mockClient.product.findMany.mockResolvedValue([
       makeDbProduct({ id: 'prod-1', quantity: 0 }),
@@ -152,6 +209,167 @@ describe('ValidatePublicCartUseCase', () => {
 
     expect(result.valid).toBe(false);
     expect(result.items[0].warnings).toContain('VARIANT_NOT_FOUND');
+  });
+
+  it('should allow INHERIT variant through stock and price decisions', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({
+        id: 'prod-1',
+        hasVariants: true,
+        variants: [
+          {
+            id: 'var-1',
+            name: '1kg',
+            quantity: 10,
+            minQuantity: 1,
+            catalogPublishMode: 'INHERIT',
+            variantPrices: [{ priceCents: 90000 }],
+          },
+        ],
+      }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [{ productId: 'prod-1', variantId: 'var-1', quantity: 2 }],
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.items[0].warnings).toEqual([]);
+    expect(result.items[0].variantName).toBe('1kg');
+    expect(result.items[0].unitPriceCents).toBe(90000);
+    expect(result.items[0].lineTotalCents).toBe(180000);
+    expect(result.totalCents).toBe(180000);
+  });
+
+  it('should allow ON variant through stock and price decisions', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({
+        id: 'prod-1',
+        hasVariants: true,
+        variants: [
+          {
+            id: 'var-1',
+            name: '1kg',
+            quantity: 10,
+            minQuantity: 1,
+            catalogPublishMode: 'ON',
+            variantPrices: [{ priceCents: 90000 }],
+          },
+        ],
+      }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [{ productId: 'prod-1', variantId: 'var-1', quantity: 2 }],
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.items[0].warnings).toEqual([]);
+    expect(result.items[0].variantName).toBe('1kg');
+    expect(result.items[0].unitPriceCents).toBe(90000);
+    expect(result.items[0].lineTotalCents).toBe(180000);
+    expect(result.totalCents).toBe(180000);
+  });
+
+  it('should treat OFF variant as VARIANT_NOT_FOUND without metadata disclosure', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({
+        id: 'prod-1',
+        hasVariants: true,
+        variants: [
+          {
+            id: 'var-off',
+            name: '2kg',
+            quantity: 10,
+            minQuantity: 1,
+            catalogPublishMode: 'OFF',
+            variantPrices: [{ priceCents: 80000 }],
+          },
+        ],
+      }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [{ productId: 'prod-1', variantId: 'var-off', quantity: 1 }],
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.items[0].warnings).toEqual(['VARIANT_NOT_FOUND']);
+    expect(result.items[0].productName).toBe('');
+    expect(result.items[0].variantName).toBeNull();
+    expect(result.items[0].image).toBeNull();
+    expect(result.items[0].unitPriceCents).toBeNull();
+    expect(result.items[0].lineTotalCents).toBeNull();
+    expect(result.items[0].availability).toBe('out_of_stock');
+    expect(result.totalCents).toBe(0);
+  });
+
+  it('should keep ordering and sanitize blocked rows in a mixed cart', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({ id: 'prod-1', priceLists: [{ priceCents: 100000 }] }),
+      makeDbProduct({ id: 'prod-2', name: 'Grooming', type: 'SERVICE' }),
+      makeDbProduct({ id: 'prod-3', includeInOnlineCatalog: false }),
+    ]);
+
+    const result = await useCase.execute({
+      items: [
+        { productId: 'prod-1', quantity: 1 },
+        { productId: 'prod-2', quantity: 2 },
+        { productId: 'prod-3', quantity: 3 },
+      ],
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.items.map((i) => i.productId)).toEqual([
+      'prod-1',
+      'prod-2',
+      'prod-3',
+    ]);
+    expect(result.items[1].warnings).toEqual(['NOT_IN_CATALOG']);
+    expect(result.items[1].productName).toBe('');
+    expect(result.items[1].image).toBeNull();
+    expect(result.items[2].warnings).toEqual(['NOT_IN_CATALOG']);
+    expect(result.items[2].productName).toBe('');
+    expect(result.items[2].image).toBeNull();
+    // Only the passing published product contributes to the total
+    expect(result.totalCents).toBe(100000);
+    expect(result.warnings).toEqual(['NOT_IN_CATALOG']);
+  });
+
+  it('should be idempotent for gated carts (same result on repeated validation)', async () => {
+    mockClient.product.findMany.mockResolvedValue([
+      makeDbProduct({
+        id: 'prod-1',
+        hasVariants: true,
+        variants: [
+          {
+            id: 'var-1',
+            name: '1kg',
+            quantity: 0,
+            minQuantity: 1,
+            catalogPublishMode: 'INHERIT',
+            variantPrices: [{ priceCents: 90000 }],
+          },
+        ],
+      }),
+      makeDbProduct({ id: 'prod-2', name: 'Grooming', type: 'SERVICE' }),
+    ]);
+
+    const input = {
+      items: [
+        { productId: 'prod-1', variantId: 'var-1', quantity: 1 },
+        { productId: 'prod-2', quantity: 1 },
+      ],
+    };
+
+    const first = await useCase.execute(input);
+    const second = await useCase.execute(input);
+
+    expect(second).toEqual(first);
+    // Existing stock behavior is preserved for passing INHERIT variants
+    expect(first.items[0].warnings).toContain('OUT_OF_STOCK');
+    expect(first.items[0].unitPriceCents).toBe(90000);
+    expect(first.valid).toBe(false);
   });
 
   it('should set totalCents to null when any item has hidden price', async () => {
