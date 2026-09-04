@@ -1,10 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../../shared/prisma/tenant-prisma.service';
 import type {
   CartValidationResponseDto,
   CartValidatedItem,
   CartWarningCode,
 } from '../dto/cart-validation.dto';
+import type { IPublicCatalogRepository } from '../ports/public-catalog.repository';
+import { PUBLIC_CATALOG_REPOSITORY } from '../ports/public-catalog.repository';
 import { mapStockStatus } from '../../domain/value-objects/stock-status.vo';
 import { isEffectivelyPriceHidden } from '../../domain/value-objects/effective-price-hidden.vo';
 
@@ -25,10 +28,30 @@ const BLOCKING_WARNINGS: CartWarningCode[] = [
 
 @Injectable()
 export class ValidatePublicCartUseCase {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaService,
+    @Inject(PUBLIC_CATALOG_REPOSITORY)
+    private readonly repo?: IPublicCatalogRepository,
+  ) {}
 
   async execute(input: CartInput): Promise<CartValidationResponseDto> {
     const client = this.tenantPrisma.getClient();
+
+    // F1.WU5d2 — tenant catalog-default compatibility: resolve the
+    // tenant's catalog-default global price-list ID exactly once per
+    // cart validation request and reuse that exact ID for every item
+    // and duplicate. Price acceptance is by exact returned ID only — a
+    // tenant-local or same-named shadow price list can never match.
+    // A missing resolver, absent method, or empty result fails closed
+    // through the existing price-missing (PRICE_HIDDEN) shape below.
+    const defaultPriceListId =
+      (await this.repo?.findTenantCatalogDefaultPriceListId?.()) ?? null;
+    const priceListFilter: Prisma.PriceListWhereInput = defaultPriceListId
+      ? { globalPriceListId: defaultPriceListId }
+      : { id: { in: [] } };
+    const variantPriceFilter: Prisma.VariantPriceWhereInput = defaultPriceListId
+      ? { priceList: { globalPriceListId: defaultPriceListId } }
+      : { id: { in: [] } };
 
     const productIds = [...new Set(input.items.map((i) => i.productId))];
     const variantIds = input.items
@@ -39,7 +62,7 @@ export class ValidatePublicCartUseCase {
       where: { id: { in: productIds } },
       include: {
         priceLists: {
-          where: { globalPriceList: { isDefault: true } },
+          where: priceListFilter,
           select: { priceCents: true },
           take: 1,
         },
@@ -49,9 +72,7 @@ export class ValidatePublicCartUseCase {
             : {}),
           include: {
             variantPrices: {
-              where: {
-                priceList: { globalPriceList: { isDefault: true } },
-              },
+              where: variantPriceFilter,
               select: { priceCents: true },
               take: 1,
             },
@@ -164,7 +185,14 @@ export class ValidatePublicCartUseCase {
       let unitPriceCents: number | null = null;
       let lineTotalCents: number | null = null;
 
-      if (priceHidden) {
+      // F1.WU5d2 — fail closed: without an exactly-resolved tenant
+      // catalog-default global price list, no price is accepted and the
+      // existing price-missing shape (PRICE_HIDDEN warning, null price
+      // fields, null total) is reused. No error is invented or thrown,
+      // and WU5d1 publication gates above remain fully in force.
+      const effectivePriceHidden = priceHidden || defaultPriceListId == null;
+
+      if (effectivePriceHidden) {
         warnings.push('PRICE_HIDDEN');
         globalWarnings.add('PRICE_HIDDEN');
         hasHiddenPrice = true;
@@ -186,7 +214,7 @@ export class ValidatePublicCartUseCase {
         unitPriceCents,
         lineTotalCents,
         availability,
-        priceHidden,
+        priceHidden: effectivePriceHidden,
         warnings,
       });
     }
