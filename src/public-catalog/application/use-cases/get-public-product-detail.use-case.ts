@@ -5,6 +5,19 @@ import {
 } from '../ports/public-catalog.repository';
 import { toPublicProductDetail } from '../mappers/public-product.mapper';
 import type { PublicCatalogProductDetail } from '../dto/public-product-detail.dto';
+import type {
+  PublicCatalogProductDetailWithContextDto,
+  PublicPriceContextDto,
+} from '../dto/public-price-context.dto';
+import type { ResolvedPublicCatalogContext } from '../ports/public-catalog.repository';
+
+/** F2.WU6 slice 4b — input for the dormant context-explicit detail seam. */
+export interface GetPublicProductDetailForContextInput {
+  productId: string;
+  tenant: { id: string; slug: string; name: string };
+  /** Already resolved by the upstream price-context resolver. */
+  context: ResolvedPublicCatalogContext;
+}
 
 @Injectable()
 export class GetPublicProductDetailUseCase {
@@ -36,5 +49,58 @@ export class GetPublicProductDetailUseCase {
     }
 
     return toPublicProductDetail(product, tenant);
+  }
+
+  /**
+   * F2.WU6 slice 4b — dormant, uncalled context-explicit detail seam. The
+   * price context arrives already resolved by the upstream resolver; this
+   * method only maps the exact repository projection into the public
+   * detail shape and appends exact public metadata. It fails closed with
+   * the generic `NotFoundException('Not Found')` on tenant ID or slug
+   * mismatch (before any repository access), on an absent optional
+   * `getPublicProductDetail` seam (no optional-chain into undefined, no
+   * fallback), and on a null projection. It never touches the active
+   * default-list path (`findTenantCatalogDefaultPriceListId`,
+   * `findProductById`) and never resolves a context itself.
+   */
+  async executeForContext(
+    input: GetPublicProductDetailForContextInput,
+  ): Promise<PublicCatalogProductDetailWithContextDto> {
+    const { productId, tenant, context } = input;
+
+    // Fail closed before any repository access when the request tenant
+    // does not match the resolved public price context.
+    if (tenant.id !== context.tenantId || tenant.slug !== context.tenantSlug) {
+      throw new NotFoundException('Not Found');
+    }
+
+    // Optional seam: absent implementation is a generic miss — never an
+    // optional-chain into undefined and never a legacy fallback.
+    if (!this.repo.getPublicProductDetail) {
+      throw new NotFoundException('Not Found');
+    }
+
+    const product = await this.repo.getPublicProductDetail({
+      tenantId: tenant.id,
+      productId,
+      context,
+    });
+
+    if (!product) {
+      throw new NotFoundException('Not Found');
+    }
+
+    // Exact projection mapping only — alternate/default/global prices are
+    // never inspected or recovered here; the mapper redacts hidden and
+    // prescription prices defensively.
+    const detail = toPublicProductDetail(product, tenant);
+
+    const priceContext: PublicPriceContextDto = {
+      priceListId: context.globalPriceListId,
+      name: context.name,
+      isCatalogDefault: context.isCatalogDefault,
+    };
+
+    return { ...detail, priceContext, excludedCount: 0 };
   }
 }
