@@ -22,6 +22,14 @@ export class ListProductsQueryDto {
   @IsUUID()
   branchId?: string;
 
+  /**
+   * F2.WU6 slice 5b — optional explicit public price-context selection
+   * (`GlobalPriceList.id`). Omission means the tenant catalog default.
+   */
+  @IsOptional()
+  @IsUUID()
+  priceListId?: string;
+
   @IsOptional()
   @IsIn(['relevance', 'price_asc', 'price_desc', 'newest', 'rating_desc'])
   sort?: string = 'newest';

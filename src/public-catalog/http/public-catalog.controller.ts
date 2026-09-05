@@ -25,6 +25,7 @@ import { GetPublicProductDetailUseCase } from '../application/use-cases/get-publ
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
 import { ListProductsQueryDto } from './request-dto/list-products-query.dto';
 import { ValidateCartBodyDto } from './request-dto/validate-cart-body.dto';
+import { PublicPriceContextResolver } from '../application/services/public-price-context-resolver';
 
 @Controller('public/catalog')
 @UseGuards(PublicTenantGuard, ThrottlerGuard)
@@ -35,6 +36,7 @@ export class PublicCatalogController {
     private readonly listProducts: ListPublicProductsUseCase,
     private readonly getProductDetail: GetPublicProductDetailUseCase,
     private readonly validateCart: ValidatePublicCartUseCase,
+    private readonly priceContext: PublicPriceContextResolver,
   ) {}
 
   @Get('branches')
@@ -45,19 +47,37 @@ export class PublicCatalogController {
 
   @Get(':tenantSlug/products')
   @CacheControl('public, max-age=60')
-  async getProducts(@Query() query: ListProductsQueryDto) {
-    return this.listProducts.execute({
-      q: query.q,
-      categoryId: query.categoryId,
-      sort:
-        (query.sort as
-          | 'relevance'
-          | 'price_asc'
-          | 'price_desc'
-          | 'newest'
-          | 'rating_desc') ?? 'newest',
-      page: query.page ?? 1,
-      limit: query.limit ?? 20,
+  async getProducts(
+    @Param('tenantSlug') tenantSlug: string,
+    @PublicTenant() tenant: PublicTenantInfo,
+    @Query() query: ListProductsQueryDto,
+  ) {
+    // F2.WU6 slice 5b — one guarded-tenant context resolution per
+    // request; every miss maps to the single generic 404 via the
+    // DomainExceptionFilter. No legacy execute() call, retry, catch,
+    // or default-list fallback. `branchId` stays accepted as a
+    // compatibility-only no-op and is never passed downstream.
+    const context = await this.priceContext.resolve(
+      tenantSlug,
+      query.priceListId,
+    );
+
+    return this.listProducts.executeForContext({
+      tenant,
+      context,
+      filters: {
+        q: query.q,
+        categoryId: query.categoryId,
+        sort:
+          (query.sort as
+            | 'relevance'
+            | 'price_asc'
+            | 'price_desc'
+            | 'newest'
+            | 'rating_desc') ?? 'newest',
+        page: query.page ?? 1,
+        limit: query.limit ?? 20,
+      },
     });
   }
 
