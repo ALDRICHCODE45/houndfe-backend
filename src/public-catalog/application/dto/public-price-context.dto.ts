@@ -1,4 +1,6 @@
 import type { PublicCatalogProductDetail } from './public-product-detail.dto';
+import type { PublicCatalogProductCard } from './public-product-card.dto';
+import type { PublicCatalogCategoryFacet } from './public-category-facet.dto';
 
 /**
  * F2.WU6 slice 4b — exact public price-context metadata attached to a
@@ -26,4 +28,29 @@ export interface PublicPriceContextDto {
 export interface PublicCatalogProductDetailWithContextDto extends PublicCatalogProductDetail {
   priceContext: PublicPriceContextDto;
   excludedCount: 0;
+}
+
+/**
+ * F2.WU6 slice 5a — dormant context-explicit public product list response.
+ * Extends the existing paginated list shape (canonical design: the list
+ * response adds `excludedCount` and `priceContext` to the existing shape)
+ * with context-eligible pagination metadata, aggregate `excludedCount`, and
+ * exact public price-context metadata. No production caller yet; HTTP
+ * activation stays in Slice 5b.
+ */
+export interface PublicCatalogProductListWithContextDto {
+  items: PublicCatalogProductCard[];
+  meta: {
+    page: number;
+    limit: number;
+    /** Context-eligible, filter-matching aggregate total — before pagination. */
+    total: number;
+    totalPages: number;
+  };
+  facets: {
+    categories: PublicCatalogCategoryFacet[];
+  };
+  /** Base published/filter-matching count minus eligible count. */
+  excludedCount: number;
+  priceContext: PublicPriceContextDto;
 }
