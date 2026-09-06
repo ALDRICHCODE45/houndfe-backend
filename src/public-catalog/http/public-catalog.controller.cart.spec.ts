@@ -1,5 +1,9 @@
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
-import type { IPublicCatalogRepository } from '../application/ports/public-catalog.repository';
+import type {
+  IPublicCatalogRepository,
+  PublicCartCandidate,
+  ResolvedPublicCatalogContext,
+} from '../application/ports/public-catalog.repository';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 
 describe('ValidatePublicCartUseCase', () => {
@@ -761,5 +765,119 @@ describe('ValidatePublicCartUseCase', () => {
       expect(result.valid).toBe(false);
       expect(repo.findTenantCatalogDefaultPriceListId).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+// F2.WU7 slice 2 — dormant seam: basic happy path + blocked paths.
+describe('executeForContext (F2.WU7 slice 2 — dormant seam)', () => {
+  const context: ResolvedPublicCatalogContext = {
+    tenantId: 'tenant-1',
+    tenantSlug: 'petshop',
+    globalPriceListId: 'gpl-sel-1',
+    name: 'Spring Catalog',
+    isCatalogDefault: false,
+  };
+  const tenant = { id: 'tenant-1', slug: 'petshop' };
+
+  const makeCandidate = (
+    overrides: Partial<PublicCartCandidate> = {},
+  ): PublicCartCandidate => ({
+    id: 'prod-1',
+    name: 'Royal Canin',
+    type: 'PRODUCT',
+    includeInOnlineCatalog: true,
+    hasVariants: false,
+    useStock: true,
+    quantity: 50,
+    minQuantity: 5,
+    hidePriceInOnlineCatalog: false,
+    requiresPrescription: false,
+    images: [{ url: 'https://cdn.example.com/img.jpg' }],
+    catalogPriceLists: [],
+    priceLists: [{ priceCents: 100000 }],
+    variants: [],
+    ...overrides,
+  });
+
+  let seam: jest.Mock;
+  let useCase: ValidatePublicCartUseCase;
+
+  beforeEach(() => {
+    seam = jest.fn().mockResolvedValue([]);
+    const repo = { findPublicCartCandidates: seam };
+    useCase = new ValidatePublicCartUseCase(
+      {} as unknown as TenantPrismaService,
+      repo as unknown as IPublicCatalogRepository,
+    );
+  });
+
+  it('happy path: dedup load, order, prices, exact context', async () => {
+    seam.mockResolvedValue([
+      makeCandidate({ id: 'prod-1', priceLists: [{ priceCents: 100000 }] }),
+    ]);
+
+    const result = await useCase.executeForContext({
+      tenant,
+      context,
+      items: [
+        // Client-supplied prices are structurally ignored (never read)
+        { productId: 'prod-1', quantity: 2, clientPriceCents: 1 } as never,
+        { productId: 'prod-1', quantity: 1 },
+      ],
+    });
+
+    expect(seam).toHaveBeenCalledTimes(1);
+    expect(seam).toHaveBeenCalledWith({
+      tenantId: 'tenant-1',
+      context,
+      productIds: ['prod-1'],
+      variantIds: [],
+    });
+    expect(result.items.map((i) => i.productId)).toEqual(['prod-1', 'prod-1']);
+    expect(result.items[0].unitPriceCents).toBe(100000);
+    expect(result.items[0].lineTotalCents).toBe(200000);
+    expect(result.valid).toBe(true);
+    expect(result.totalCents).toBe(300000);
+    expect(result.priceContext).toEqual({
+      priceListId: 'gpl-sel-1',
+      name: 'Spring Catalog',
+      isCatalogDefault: false,
+    });
+    // PRICE_CHANGED stays dormant: client prices are never accepted
+    expect(result.warnings).not.toContain('PRICE_CHANGED');
+  });
+
+  it('blocked paths: uniform redaction and variant distinction', async () => {
+    seam.mockResolvedValue([
+      makeCandidate({ id: 'prod-1', type: 'SERVICE' }),
+      makeCandidate({ id: 'prod-2', hasVariants: true }),
+    ]);
+
+    const result = await useCase.executeForContext({
+      tenant,
+      context,
+      items: [
+        { productId: 'prod-missing', quantity: 1 },
+        { productId: 'prod-1', quantity: 2 },
+        { productId: 'prod-2', variantId: 'var-elsewhere', quantity: 1 },
+      ],
+    });
+
+    expect(result.items.map((i) => i.blockingCodes)).toEqual([
+      ['NOT_IN_CATALOG'],
+      ['NOT_IN_CATALOG'],
+      ['VARIANT_NOT_FOUND'],
+    ]);
+    for (const item of result.items) {
+      expect(item.status).toBe('BLOCKED');
+      expect(item.warnings).toEqual(item.blockingCodes);
+      expect(item.productName).toBeNull();
+      expect(item.variantName).toBeNull();
+      expect(item.image).toBeNull();
+      expect(item.unitPriceCents).toBeNull();
+      expect(item.lineTotalCents).toBeNull();
+    }
+    expect(result.valid).toBe(false);
+    expect(result.totalCents).toBe(0);
   });
 });
