@@ -1793,4 +1793,161 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       expect(rxDetail!.variants[0].variantPrices).toEqual([]);
     });
   });
+
+  // ── F2.WU6 (evidence correction) — two independent tenant contexts ────
+  // One tenant bound to TWO distinct public global lists (default +
+  // explicit non-default); each list is resolved and selected
+  // independently as a tenant context, and each list/detail seam must
+  // project ONLY its own distinct positive prices with no cross-list
+  // substitution, default fallback, or leakage between contexts.
+  describe('F2.WU6 two-context consistency — default + explicit non-default per tenant', () => {
+    it('resolves two distinct tenant contexts and each list/detail seam projects only its own distinct prices', async () => {
+      const tenant = (
+        await seedTenant('two-ctx', {
+          isActive: true,
+          catalogPublished: true,
+        })
+      ).id;
+      currentTenantId = tenant;
+
+      // One tenant, two DISTINCT public global lists: catalog default
+      // plus an explicit non-default binding.
+      const gDefault = await seedGlobalPriceList('two-ctx-default');
+      const gExplicit = await seedGlobalPriceList('two-ctx-explicit');
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gDefault,
+        isCatalogDefault: true,
+      });
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gExplicit,
+        isCatalogDefault: false,
+      });
+
+      // Resolve each context independently as a real tenant context —
+      // the explicit list is a tenant-bound selection, not an unbound
+      // fallback/allowlist lure.
+      const ctxDefault = await repo.resolveTenantCatalogContext?.(
+        tenantSlug(tenant),
+      );
+      const ctxExplicit = await repo.resolveTenantCatalogContext?.(
+        tenantSlug(tenant),
+        gExplicit,
+      );
+      expect(ctxDefault).toMatchObject({
+        tenantId: tenant,
+        tenantSlug: tenantSlug(tenant),
+        globalPriceListId: gDefault,
+        isCatalogDefault: true,
+      });
+      expect(ctxExplicit).toMatchObject({
+        tenantId: tenant,
+        tenantSlug: tenantSlug(tenant),
+        globalPriceListId: gExplicit,
+        isCatalogDefault: false,
+      });
+      expect(ctxDefault!.globalPriceListId).not.toBe(
+        ctxExplicit!.globalPriceListId,
+      );
+
+      // One eligible visible-price product priced in BOTH lists with
+      // distinct amounts, plus a variant-backed sibling with distinct
+      // selected-list prices per list as well.
+      const plain = await seedProduct(tenant, 'two-ctx-plain');
+      await seedProductPrice(tenant, plain, gDefault, 1100);
+      await seedProductPrice(tenant, plain, gExplicit, 2200);
+
+      const withVariant = await seedProduct(tenant, 'two-ctx-variant', {
+        variants: true,
+      });
+      const defRow = await seedProductPrice(
+        tenant,
+        withVariant,
+        gDefault,
+        1200,
+      );
+      const expRow = await seedProductPrice(
+        tenant,
+        withVariant,
+        gExplicit,
+        2300,
+      );
+      const variant = await seedVariant(withVariant, tenant, 'v2c', 'INHERIT');
+      await seedVariantPrice(tenant, variant, defRow, 1300);
+      await seedVariantPrice(tenant, variant, expRow, 2400);
+
+      const expectedIds = [plain, withVariant];
+      const listFor = async (ctx: ResolvedPublicCatalogContext) => {
+        const result = await repo.listPublicProducts({
+          tenantId: tenant,
+          context: ctx,
+          filters: { sort: 'newest', page: 1, limit: 20 },
+        });
+        expect(result.total).toBe(2);
+        expect(result.excludedCount).toBe(0);
+        expect(result.items.map((p) => p.id).sort()).toEqual(
+          expectedIds.slice().sort(),
+        );
+        return result;
+      };
+
+      // Context A (default): only default-list amounts project.
+      const listA = await listFor(ctxDefault!);
+      expect(listA.items.find((p) => p.id === plain)!.priceLists).toEqual([
+        { priceCents: 1100 },
+      ]);
+      const varA = listA.items.find((p) => p.id === withVariant)!;
+      expect(varA.variants).toHaveLength(1);
+      expect(varA.variants[0].variantPrices).toEqual([{ priceCents: 1300 }]);
+
+      // Context B (explicit non-default): only explicit-list amounts
+      // project — no default-list substitution anywhere.
+      const listB = await listFor(ctxExplicit!);
+      expect(listB.items.find((p) => p.id === plain)!.priceLists).toEqual([
+        { priceCents: 2200 },
+      ]);
+      const varB = listB.items.find((p) => p.id === withVariant)!;
+      expect(varB.variants).toHaveLength(1);
+      expect(varB.variants[0].variantPrices).toEqual([{ priceCents: 2400 }]);
+
+      // Detail seams stay independent too: each context resolves the
+      // same products at its own distinct amounts.
+      const detailAPlain = await detailSeam({
+        tenantId: tenant,
+        productId: plain,
+        context: ctxDefault!,
+      });
+      expect(detailAPlain).not.toBeNull();
+      expect(detailAPlain!.priceLists).toEqual([{ priceCents: 1100 }]);
+      const detailAVar = await detailSeam({
+        tenantId: tenant,
+        productId: withVariant,
+        context: ctxDefault!,
+      });
+      expect(detailAVar).not.toBeNull();
+      expect(detailAVar!.priceLists).toEqual([{ priceCents: 1200 }]);
+      expect(detailAVar!.variants[0].variantPrices).toEqual([
+        { priceCents: 1300 },
+      ]);
+
+      const detailBPlain = await detailSeam({
+        tenantId: tenant,
+        productId: plain,
+        context: ctxExplicit!,
+      });
+      expect(detailBPlain).not.toBeNull();
+      expect(detailBPlain!.priceLists).toEqual([{ priceCents: 2200 }]);
+      const detailBVar = await detailSeam({
+        tenantId: tenant,
+        productId: withVariant,
+        context: ctxExplicit!,
+      });
+      expect(detailBVar).not.toBeNull();
+      expect(detailBVar!.priceLists).toEqual([{ priceCents: 2300 }]);
+      expect(detailBVar!.variants[0].variantPrices).toEqual([
+        { priceCents: 2400 },
+      ]);
+    });
+  });
 });
