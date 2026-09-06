@@ -373,7 +373,7 @@ export class ValidatePublicCartUseCase {
         const priceCents = variant
           ? (variant.variantPrices[0]?.priceCents ?? null)
           : (candidate.priceLists[0]?.priceCents ?? null);
-        if (!allowlisted || priceCents == null) {
+        if (!allowlisted || priceCents == null || priceCents <= 0) {
           blockingCodes.push('PRICE_NOT_AVAILABLE_IN_CONTEXT');
           globalWarnings.add('PRICE_NOT_AVAILABLE_IN_CONTEXT');
         } else {

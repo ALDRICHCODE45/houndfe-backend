@@ -1950,4 +1950,214 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       ]);
     });
   });
+
+  // ── F2.WU7 slice 3 — cart projection + reconciliation: real-DB proof via the retained bulk-load seam.
+  describe('F2.WU7 slice 3 — findPublicCartCandidates + executeForContext', () => {
+    async function seedCartMatrix() {
+      const pub = (label: string) =>
+        seedTenant(label, { isActive: true, catalogPublished: true });
+      const tenant = (await pub('cart')).id;
+      const other = (await pub('cart-x')).id;
+      currentTenantId = tenant;
+      const gSel = await seedGlobalPriceList('cart-sel');
+      const gDefault = await seedGlobalPriceList('cart-def');
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gDefault,
+        isCatalogDefault: true,
+      });
+      const context: ResolvedPublicCatalogContext = {
+        tenantId: tenant,
+        tenantSlug: tenantSlug(tenant),
+        globalPriceListId: gSel,
+        name: 'cart-sel',
+        isCatalogDefault: false,
+      };
+
+      const eligible = await seedProduct(tenant, 'eligible', {
+        variants: true,
+        quantity: 50,
+      });
+      const elRow = await seedProductPrice(tenant, eligible, gSel, 1500);
+      const elVar = await seedVariant(eligible, tenant, 'on', 'ON', {
+        quantity: 50,
+      });
+      await seedVariantPrice(tenant, elVar, elRow, 1600);
+      const elOff = await seedVariant(eligible, tenant, 'off', 'OFF');
+      const allowMiss = await seedProduct(tenant, 'allow-miss', {
+        quantity: 50,
+      });
+      await seedProductPrice(tenant, allowMiss, gSel, 1700);
+      await seedAllowlistRow(tenant, allowMiss, gDefault);
+      // Priced only in the catalog-default list: the default binding must never rescue a non-default selected context.
+      const defOnly = await seedProduct(tenant, 'default-only', {
+        quantity: 50,
+      });
+      await seedProductPrice(tenant, defOnly, gDefault, 1800);
+      const zeroSel = await seedProduct(tenant, 'zero-sel', { quantity: 50 });
+      await seedProductPrice(tenant, zeroSel, gSel, 0);
+      await seedProductPrice(tenant, zeroSel, gDefault, 5555);
+      const excluded = await seedProduct(tenant, 'excluded', {
+        include: false,
+      });
+      await seedProductPrice(tenant, excluded, gSel, 1900);
+      const service = await seedProduct(tenant, 'service', { type: 'SERVICE' });
+      const hidden = await seedProduct(tenant, 'hidden', {
+        hidePrice: true,
+        quantity: 50,
+      });
+      await seedProductPrice(tenant, hidden, gSel, 2000);
+      const oos = await seedProduct(tenant, 'oos', { quantity: 0 });
+      await seedProductPrice(tenant, oos, gSel, 2100);
+      // Cross-tenant eligible product sharing the selected list ID.
+      const foreign = await seedProduct(other, 'foreign');
+      await seedProductPrice(other, foreign, gSel, 2200);
+
+      return {
+        tenant,
+        other,
+        gSel,
+        gDefault,
+        context,
+        eligible,
+        elVar,
+        elOff,
+        allowMiss,
+        defOnly,
+        zeroSel,
+        excluded,
+        service,
+        hidden,
+        oos,
+        foreign,
+      };
+    }
+
+    it('projects retained-for-classification candidates with exact-context prices, requested variants, and tenant isolation', async () => {
+      const m = await seedCartMatrix();
+      if (!repo.findPublicCartCandidates)
+        throw new Error('findPublicCartCandidates seam is not implemented');
+
+      // Duplicate requested IDs arrive de-duplicated in the projection.
+      const candidates = await repo.findPublicCartCandidates({
+        tenantId: m.tenant,
+        context: m.context,
+        productIds: [
+          m.eligible,
+          m.eligible,
+          m.allowMiss,
+          m.defOnly,
+          m.zeroSel,
+          m.excluded,
+          m.service,
+          m.hidden,
+          m.oos,
+          m.foreign,
+        ],
+        variantIds: [m.elVar, m.elVar, m.elOff],
+      });
+      const byId = new Map(candidates.map((c) => [c.id, c]));
+
+      // One row per unique tenant product; the cross-tenant product never projects even though requested and priced on the selected list.
+      expect(candidates).toHaveLength(8);
+
+      // Excluded/SERVICE parents and requested OFF variants are retained for application classification (never filtered in the adapter).
+      expect(byId.get(m.excluded)!.includeInOnlineCatalog).toBe(false);
+      expect(byId.get(m.service)!.type).toBe('SERVICE');
+      const eligible = byId.get(m.eligible)!;
+      expect(eligible.variants.map((v) => v.id)).toEqual([m.elVar, m.elOff]);
+      expect(eligible.variants[0].variantPrices).toEqual([
+        { priceCents: 1600 },
+      ]);
+      expect(eligible.variants[1].variantPrices).toEqual([]);
+      expect(eligible.priceLists).toEqual([{ priceCents: 1500 }]);
+
+      // Same-tenant allowlist rows project; prices are exact selected-context positive only (default-only/zero rows never project).
+      expect(byId.get(m.allowMiss)!.catalogPriceLists).toEqual([
+        { globalPriceListId: m.gDefault },
+      ]);
+      expect(byId.get(m.allowMiss)!.priceLists).toEqual([{ priceCents: 1700 }]);
+      expect(byId.get(m.defOnly)!.priceLists).toEqual([]);
+      expect(byId.get(m.zeroSel)!.priceLists).toEqual([]);
+
+      // Tenant/context param mismatch: no candidates, no query error.
+      await expect(
+        repo.findPublicCartCandidates({
+          tenantId: m.other,
+          context: m.context,
+          productIds: [m.eligible],
+          variantIds: [],
+        }),
+      ).resolves.toEqual([]);
+    });
+
+    it('reconciles a mixed real-DB cart with no default fallback, uniform redaction, OOS total retention, and idempotence', async () => {
+      const m = await seedCartMatrix();
+      const items = [
+        { productId: m.eligible, quantity: 2 },
+        { productId: m.eligible, variantId: m.elVar, quantity: 1 },
+        { productId: m.eligible, variantId: m.elOff, quantity: 1 },
+        { productId: m.defOnly, quantity: 1 },
+        { productId: m.zeroSel, quantity: 1 },
+        { productId: m.excluded, quantity: 1 },
+        { productId: m.service, quantity: 1 },
+        { productId: m.eligible, variantId: randomUUID(), quantity: 1 },
+        { productId: m.hidden, quantity: 1 },
+        { productId: m.oos, quantity: 2 },
+        { productId: m.foreign, quantity: 1 },
+      ];
+      const reconcile = (its: typeof items) =>
+        useCase.executeForContext({
+          tenant: { id: m.tenant, slug: tenantSlug(m.tenant) },
+          context: m.context,
+          items: its,
+        });
+      const result = await reconcile(items);
+
+      expect(result.priceContext).toEqual({
+        priceListId: m.gSel,
+        name: 'cart-sel',
+        isCatalogDefault: false,
+      });
+      expect(result.items.map((i) => i.blockingCodes)).toEqual([
+        [],
+        [],
+        ['VARIANT_NOT_IN_CATALOG'],
+        ['PRICE_NOT_AVAILABLE_IN_CONTEXT'],
+        ['PRICE_NOT_AVAILABLE_IN_CONTEXT'],
+        ['NOT_IN_CATALOG'],
+        ['NOT_IN_CATALOG'],
+        ['VARIANT_NOT_FOUND'],
+        [],
+        ['OUT_OF_STOCK'],
+        ['NOT_IN_CATALOG'],
+      ]);
+
+      const rows = result.items; // [0] plain, [1] ON variant, [2] OFF, [7] missing variant, [8] hidden, [9] OOS, [10] foreign
+      expect(rows[0].unitPriceCents).toBe(1500);
+      expect(rows[0].lineTotalCents).toBe(3000);
+      expect(rows[1].unitPriceCents).toBe(1600);
+      // Redacted misses disclose nothing.
+      for (const row of [rows[2], rows[7], rows[10]]) {
+        expect(row.productName).toBeNull();
+        expect(row.variantName).toBeNull();
+        expect(row.image).toBeNull();
+      }
+      // Hidden/prescription precedence: no blocking, null numerics.
+      expect(rows[8].warnings).toEqual(['PRICE_HIDDEN']);
+      expect(rows[8].unitPriceCents).toBeNull();
+      // Visible OOS keeps its authoritative line total but is excluded from the aggregate (3000 + 1600 only).
+      expect(rows[9].lineTotalCents).toBe(4200);
+      // Any hidden line nulls the aggregate entirely.
+      expect(result.totalCents).toBeNull();
+
+      // No hidden line: numeric aggregate, still excluding the OOS row.
+      const noHidden = await reconcile(
+        items.filter((it) => it.productId !== m.hidden),
+      );
+      expect(noHidden.totalCents).toBe(4600);
+      // Repeat reconciliation is byte-identical: no persistence side effects.
+      expect(await reconcile(items)).toEqual(result);
+    });
+  });
 });

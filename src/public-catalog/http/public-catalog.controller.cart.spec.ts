@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
 import type {
   IPublicCatalogRepository,
@@ -879,5 +880,177 @@ describe('executeForContext (F2.WU7 slice 2 — dormant seam)', () => {
     }
     expect(result.valid).toBe(false);
     expect(result.totalCents).toBe(0);
+  });
+
+  // R3-PositivePriceCheck: strictly positive exact-context prices, allowlist exactness, no fallback, independent stock.
+  it('accepts only strictly positive exact-context prices, with allowlist exactness, no fallback, and independent stock', async () => {
+    const priced = (
+      id: string,
+      quantity: number,
+      priceCents: number,
+      extra: Partial<PublicCartCandidate> = {},
+    ) =>
+      makeCandidate({ id, quantity, ...extra, priceLists: [{ priceCents }] });
+    seam.mockResolvedValue([
+      makeCandidate({ id: 'p-zero', priceLists: [{ priceCents: 0 }] }),
+      makeCandidate({ id: 'p-neg', priceLists: [{ priceCents: -100 }] }),
+      makeCandidate({
+        id: 'p-mismatch',
+        catalogPriceLists: [{ globalPriceListId: 'gpl-other' }],
+        priceLists: [{ priceCents: 100000 }],
+      }),
+      makeCandidate({
+        id: 'p-ok',
+        catalogPriceLists: [{ globalPriceListId: 'gpl-sel-1' }],
+        priceLists: [{ priceCents: 500 }],
+      }),
+      priced('p-oos', 0, 1000),
+      priced('p-low', 5, 2000),
+      priced('p-nostock', 0, 3000, { useStock: false }),
+    ]);
+
+    const result = await useCase.executeForContext({
+      tenant,
+      context,
+      items: [
+        { productId: 'p-zero', quantity: 2 },
+        { productId: 'p-neg', quantity: 1 },
+        { productId: 'p-mismatch', quantity: 1 },
+        { productId: 'p-ok', quantity: 3 },
+        { productId: 'p-oos', quantity: 2 },
+        { productId: 'p-low', quantity: 1 },
+        { productId: 'p-nostock', quantity: 1 },
+      ],
+    });
+
+    expect(
+      result.items.map((i) => [i.blockingCodes, i.status, i.availability]),
+    ).toEqual([
+      [['PRICE_NOT_AVAILABLE_IN_CONTEXT'], 'BLOCKED', 'available'],
+      [['PRICE_NOT_AVAILABLE_IN_CONTEXT'], 'BLOCKED', 'available'],
+      [['PRICE_NOT_AVAILABLE_IN_CONTEXT'], 'BLOCKED', 'available'],
+      [[], 'VALID', 'available'],
+      [['OUT_OF_STOCK'], 'BLOCKED', 'out_of_stock'],
+      [[], 'VALID', 'low_stock'],
+      [[], 'VALID', 'available'],
+    ]);
+    // No default/alternate rescue; blocked rows disclose no prices while the visible OOS row keeps its line total.
+    expect(result.items.map((i) => i.lineTotalCents)).toEqual([
+      null,
+      null,
+      null,
+      1500,
+      2000,
+      2000,
+      3000,
+    ]);
+    // Aggregate excludes OOS but includes low-stock and non-stock.
+    expect(result.totalCents).toBe(6500);
+    expect(result.valid).toBe(false);
+    expect(result.warnings).toEqual([
+      'PRICE_NOT_AVAILABLE_IN_CONTEXT',
+      'OUT_OF_STOCK',
+      'LOW_STOCK',
+    ]);
+  });
+
+  it('hidden/prescription precedence bypasses allowlist and price checks, nulls numerics and the aggregate', async () => {
+    seam.mockResolvedValue([
+      makeCandidate({
+        id: 'p-hidden',
+        hidePriceInOnlineCatalog: true,
+        catalogPriceLists: [{ globalPriceListId: 'gpl-other' }],
+      }),
+      makeCandidate({ id: 'p-rx', requiresPrescription: true }),
+    ]);
+
+    const result = await useCase.executeForContext({
+      tenant,
+      context,
+      items: [
+        { productId: 'p-hidden', quantity: 1 },
+        { productId: 'p-rx', quantity: 2 },
+      ],
+    });
+
+    for (const item of result.items) {
+      expect(item).toMatchObject({
+        status: 'VALID',
+        blockingCodes: [],
+        warnings: ['PRICE_HIDDEN'],
+        priceHidden: true,
+        unitPriceCents: null,
+        lineTotalCents: null,
+      });
+    }
+    expect(result.totalCents).toBeNull();
+    expect(result.valid).toBe(true);
+  });
+
+  it('fails closed with a generic miss before any repository access on tenant/context mismatch or absent seam', async () => {
+    const items = [{ productId: 'prod-1', quantity: 1 }];
+    const miss = (t: { id: string; slug: string }) =>
+      useCase.executeForContext({ tenant: t, context, items });
+    await expect(miss({ id: 'tenant-2', slug: 'petshop' })).rejects.toThrow(
+      NotFoundException,
+    );
+    await expect(miss({ id: 'tenant-1', slug: 'other-shop' })).rejects.toThrow(
+      new NotFoundException('Not Found'),
+    );
+    await expect(
+      new ValidatePublicCartUseCase(
+        {} as unknown as TenantPrismaService,
+        {} as unknown as IPublicCatalogRepository,
+      ).executeForContext({ tenant, context, items }),
+    ).rejects.toThrow(NotFoundException);
+    expect(seam).not.toHaveBeenCalled();
+  });
+
+  it('preserves order and duplicates, de-duplicates repository inputs, and omits unrequested variant ids', async () => {
+    seam.mockResolvedValue([
+      makeCandidate({
+        id: 'p-a',
+        hasVariants: true,
+        priceLists: [{ priceCents: 1000 }],
+        variants: [
+          {
+            id: 'v-a1',
+            name: 'A1',
+            catalogPublishMode: 'ON',
+            quantity: 10,
+            minQuantity: 5,
+            variantPrices: [{ priceCents: 1100 }],
+          },
+        ],
+      }),
+      makeCandidate({ id: 'p-b', priceLists: [{ priceCents: 2000 }] }),
+    ]);
+
+    const result = await useCase.executeForContext({
+      tenant,
+      context,
+      items: [
+        { productId: 'p-b', quantity: 1 },
+        { productId: 'p-a', variantId: 'v-a1', quantity: 2 },
+        { productId: 'p-a', quantity: 1 }, // omitted-variant compatibility
+        { productId: 'p-b', quantity: 4 }, // duplicate product
+      ],
+    });
+
+    expect(seam).toHaveBeenCalledTimes(1);
+    expect(seam).toHaveBeenCalledWith({
+      tenantId: 'tenant-1',
+      context,
+      productIds: ['p-b', 'p-a'], // de-duplicated, first-request order
+      variantIds: ['v-a1'],
+    });
+    expect(result.items.map((i) => [i.productId, i.unitPriceCents])).toEqual([
+      ['p-b', 2000],
+      ['p-a', 1100],
+      ['p-a', 1000],
+      ['p-b', 2000],
+    ]);
+    expect(result.totalCents).toBe(13200);
+    expect(result.valid).toBe(true);
   });
 });
