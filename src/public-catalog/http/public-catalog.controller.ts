@@ -110,7 +110,20 @@ export class PublicCatalogController {
   @Post(':tenantSlug/cart/validate')
   @CacheControl('no-store')
   @Throttle({ 'public-validate': { ttl: 60_000, limit: 20 } })
-  async validateCartEndpoint(@Body() body: ValidateCartBodyDto) {
-    return this.validateCart.execute(body);
+  async validateCartEndpoint(
+    @Param('tenantSlug') tenantSlug: string,
+    @PublicTenant() tenant: PublicTenantInfo,
+    @Body() body: ValidateCartBodyDto,
+  ) {
+    const context = await this.priceContext.resolve(
+      tenantSlug,
+      body.priceListId,
+    );
+
+    return this.validateCart.executeForContext({
+      tenant,
+      context,
+      items: body.items,
+    });
   }
 }

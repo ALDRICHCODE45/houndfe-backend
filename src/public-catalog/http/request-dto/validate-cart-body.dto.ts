@@ -22,12 +22,6 @@ export class CartItemDto {
   quantity: number;
 }
 
-export class CartCustomerDto {
-  @IsOptional()
-  @IsUUID()
-  globalPriceListId?: string;
-}
-
 export class ValidateCartBodyDto {
   @IsArray()
   @ValidateNested({ each: true })
@@ -35,8 +29,12 @@ export class ValidateCartBodyDto {
   @ArrayMinSize(1)
   items: CartItemDto[];
 
+  /**
+   * F2.WU7 slice 4 — optional explicit `GlobalPriceList.id`; omission means
+   * the tenant catalog default. Legacy `customer`/client pricing fields are
+   * rejected by the global whitelist + forbidNonWhitelisted pipe.
+   */
   @IsOptional()
-  @ValidateNested()
-  @Type(() => CartCustomerDto)
-  customer?: CartCustomerDto;
+  @IsUUID()
+  priceListId?: string;
 }

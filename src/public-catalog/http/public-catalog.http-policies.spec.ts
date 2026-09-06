@@ -1,7 +1,7 @@
 import { CacheControlInterceptor } from './interceptors/cache-control.interceptor';
 import { ExecutionContext, CallHandler } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { of } from 'rxjs';
+import { Observable, of } from 'rxjs';
 
 describe('CacheControlInterceptor', () => {
   let interceptor: CacheControlInterceptor;
@@ -66,5 +66,26 @@ describe('CacheControlInterceptor', () => {
         done();
       },
     });
+  });
+
+  // F2.WU7 Slice 4 — the header must be assigned before downstream
+  // handling so validation/resolver/use-case errors after the guards
+  // still retain `no-store` (guard/throttler errors are not covered).
+  it('assigns the header before downstream handling so downstream errors retain it', () => {
+    reflector.get.mockReturnValue('no-store');
+    const { ctx, setHeader } = mockContext();
+    const downstream: CallHandler = {
+      // Header must already be set when the downstream handler executes.
+      handle: () =>
+        new Observable((subscriber) => {
+          expect(setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
+          subscriber.error(new Error('downstream'));
+        }),
+    };
+
+    interceptor
+      .intercept(ctx, downstream)
+      .subscribe({ error: () => undefined });
+    expect(setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
   });
 });

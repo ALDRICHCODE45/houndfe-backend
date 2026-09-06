@@ -6,6 +6,23 @@ import type {
   ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import request, { type Response } from 'supertest';
+import type { Server } from 'http';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { ClsService } from 'nestjs-cls';
+import { PublicCatalogController } from './public-catalog.controller';
+import { PublicTenantGuard } from './guards/public-tenant.guard';
+import { ListPublicBranchesUseCase } from '../application/use-cases/list-public-branches.use-case';
+import { ListPublicProductsUseCase } from '../application/use-cases/list-public-products.use-case';
+import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
+import { PublicPriceContextResolver } from '../application/services/public-price-context-resolver';
+import { PUBLIC_CATALOG_REPOSITORY } from '../application/ports/public-catalog.repository';
+import { PriceContextNotAvailableError } from '../domain/errors/price-context-not-available.error';
+import { DomainExceptionFilter } from '../../shared/filters/domain-exception.filter';
+import { PrismaService } from '../../shared/prisma/prisma.service';
+import { createListingValidationExceptionFactory } from '../../shared/listing/listing-validation-exception.factory';
 
 describe('ValidatePublicCartUseCase', () => {
   let useCase: ValidatePublicCartUseCase;
@@ -1053,4 +1070,192 @@ describe('executeForContext (F2.WU7 slice 2 — dormant seam)', () => {
     expect(result.totalCents).toBe(13200);
     expect(result.valid).toBe(true);
   });
+});
+
+describe('POST /public/catalog/:tenantSlug/cart/validate (F2.WU7 Slice 4)', () => {
+  const TENANT = { id: 'tenant-1', slug: 'centro', name: 'Sucursal Centro' };
+  const GPL_ID = '0e2b7c1a-9f3d-4a5b-8c6e-7d1f2a3b4c5d';
+  const PROD_ID = '3f1a2b4c-5d6e-4f70-8a9b-1c2d3e4f5a6b';
+  const URL = '/public/catalog/centro/cart/validate';
+  const ITEMS = [
+    { productId: PROD_ID, quantity: 2 },
+    { productId: PROD_ID, quantity: 1 },
+  ];
+  const DEFAULT_CONTEXT: ResolvedPublicCatalogContext = {
+    tenantId: 'tenant-1',
+    tenantSlug: 'centro',
+    globalPriceListId: 'gpl-default-1',
+    name: 'Publico',
+    isCatalogDefault: true,
+  };
+  const EXPLICIT_CONTEXT: ResolvedPublicCatalogContext = {
+    ...DEFAULT_CONTEXT,
+    globalPriceListId: GPL_ID,
+    name: 'Mayoreo',
+    isCatalogDefault: false,
+  };
+
+  const markerFor = (context: ResolvedPublicCatalogContext) => ({
+    valid: true,
+    priceContext: {
+      priceListId: context.globalPriceListId,
+      name: context.name,
+      isCatalogDefault: context.isCatalogDefault,
+    },
+    items: ITEMS.map((item, index) => ({
+      productId: item.productId,
+      quantity: item.quantity,
+      status: 'VALID',
+      blockingCodes: index === 0 ? ['STOCK_LOW'] : [],
+      unitPriceCents: 100000 - index,
+      lineTotalCents: item.quantity * (100000 - index),
+    })),
+    warnings: [],
+    totalCents: 300000,
+  });
+
+  const bodyOf = (res: Response): Record<string, unknown> =>
+    res.body as Record<string, unknown>;
+
+  let app: INestApplication;
+  let validateCart: { execute: jest.Mock; executeForContext: jest.Mock };
+  let repo: { resolveTenantCatalogContext: jest.Mock };
+
+  const postCart = (body: Record<string, unknown>) =>
+    request(app.getHttpServer() as Server)
+      .post(URL)
+      .send(body);
+
+  beforeEach(async () => {
+    const prisma = {
+      tenant: { findFirst: jest.fn().mockResolvedValue(TENANT) },
+    };
+    repo = {
+      resolveTenantCatalogContext: jest.fn(
+        (slug: string, requestedId?: string) =>
+          Promise.resolve(requestedId ? EXPLICIT_CONTEXT : DEFAULT_CONTEXT),
+      ),
+    };
+    validateCart = {
+      execute: jest.fn(),
+      executeForContext: jest.fn(
+        (input: { context: ResolvedPublicCatalogContext }) =>
+          markerFor(input.context),
+      ),
+    };
+
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        ThrottlerModule.forRoot([
+          { name: 'public-validate', ttl: 60_000, limit: 20 },
+        ]),
+      ],
+      controllers: [PublicCatalogController],
+      providers: [
+        PublicPriceContextResolver,
+        PublicTenantGuard,
+        { provide: PUBLIC_CATALOG_REPOSITORY, useValue: repo },
+        { provide: ListPublicBranchesUseCase, useValue: {} },
+        { provide: ListPublicProductsUseCase, useValue: {} },
+        { provide: GetPublicProductDetailUseCase, useValue: {} },
+        { provide: ValidatePublicCartUseCase, useValue: validateCart },
+        { provide: PrismaService, useValue: prisma },
+        { provide: ClsService, useValue: { set: jest.fn() } },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+        exceptionFactory: createListingValidationExceptionFactory(),
+      }),
+    );
+    app.useGlobalFilters(new DomainExceptionFilter());
+    await app.init();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it.each([
+    ['an explicit priceListId', { priceListId: GPL_ID }, EXPLICIT_CONTEXT],
+    ['the tenant default (omitted)', {}, DEFAULT_CONTEXT],
+  ] as const)(
+    'resolves once and delegates once for %s with exact passthrough',
+    async (
+      _name: string,
+      priceList: { priceListId?: string },
+      context: ResolvedPublicCatalogContext,
+    ) => {
+      const res = await postCart({ ...priceList, items: ITEMS }).expect(201);
+
+      expect(repo.resolveTenantCatalogContext).toHaveBeenCalledTimes(1);
+      expect(repo.resolveTenantCatalogContext).toHaveBeenCalledWith(
+        'centro',
+        priceList.priceListId,
+      );
+      expect(validateCart.executeForContext).toHaveBeenCalledTimes(1);
+      expect(validateCart.executeForContext).toHaveBeenCalledWith({
+        tenant: TENANT,
+        context,
+        items: ITEMS,
+      });
+      expect(validateCart.execute).not.toHaveBeenCalled();
+      expect(bodyOf(res)).toEqual(markerFor(context));
+      expect(res.headers['cache-control']).toBe('no-store');
+    },
+  );
+
+  it.each([
+    ['an unavailable explicit priceListId', { priceListId: GPL_ID }, null],
+    ['an unavailable tenant default', {}, null],
+    [
+      'a thrown PriceContextNotAvailableError',
+      {},
+      new PriceContextNotAvailableError(),
+    ],
+  ] as const)(
+    'maps %s to the single generic 404',
+    async (
+      _name: string,
+      priceList: { priceListId?: string },
+      outcome: null | PriceContextNotAvailableError,
+    ) => {
+      repo.resolveTenantCatalogContext.mockImplementation(() =>
+        outcome instanceof Error
+          ? Promise.reject(outcome)
+          : Promise.resolve(outcome),
+      );
+
+      const res = await postCart({ ...priceList, items: ITEMS }).expect(404);
+
+      expect(bodyOf(res).statusCode).toBe(404);
+      expect(bodyOf(res).error).toBe('PRICE_CONTEXT_NOT_AVAILABLE');
+      expect(validateCart.executeForContext).not.toHaveBeenCalled();
+      expect(res.headers['cache-control']).toBe('no-store');
+    },
+  );
+
+  it.each([
+    [
+      'the old nested customer contract',
+      { items: ITEMS, customer: { globalPriceListId: GPL_ID } },
+    ],
+    [
+      'client pricing fields on an item',
+      { items: [{ productId: PROD_ID, quantity: 1, clientPriceCents: 100 }] },
+    ],
+    ['a non-UUID priceListId', { items: ITEMS, priceListId: 'not-a-uuid' }],
+  ] as const)(
+    'rejects %s with 400 and zero cart calls',
+    async (_name: string, payload: Record<string, unknown>) => {
+      await postCart(payload).expect(400);
+
+      expect(validateCart.executeForContext).not.toHaveBeenCalled();
+    },
+  );
 });

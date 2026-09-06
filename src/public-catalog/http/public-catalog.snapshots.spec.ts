@@ -4,6 +4,11 @@ import {
   type ProductWithIncludes,
   type ProductDetailWithIncludes,
 } from '../application/mappers/public-product.mapper';
+import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
+import type {
+  IPublicCatalogRepository,
+  PublicCartCandidate,
+} from '../application/ports/public-catalog.repository';
 
 describe('Public catalog response snapshot tests', () => {
   function makeProduct(): ProductWithIncludes {
@@ -126,5 +131,77 @@ describe('Public catalog response snapshot tests', () => {
       priceCents: 99900,
       hidden: false,
     });
+  });
+
+  // F2.WU7 Slice 4 — the activated contextual cart response must expose
+  // ONLY whitelisted public fields (no raw stock/cost fields, no client
+  // pricing), with the authoritative context and values passing through.
+  it('contextual cart responses expose ONLY whitelisted public fields', async () => {
+    const candidate: PublicCartCandidate = {
+      id: 'prod-1',
+      name: 'Royal Canin',
+      type: 'PRODUCT',
+      includeInOnlineCatalog: true,
+      hasVariants: false,
+      useStock: true,
+      quantity: 50,
+      minQuantity: 5,
+      hidePriceInOnlineCatalog: false,
+      requiresPrescription: false,
+      images: [{ url: 'https://cdn.example.com/img.jpg' }],
+      catalogPriceLists: [],
+      priceLists: [{ priceCents: 100000 }],
+      variants: [],
+    };
+    const useCase = new ValidatePublicCartUseCase(
+      {} as never,
+      {
+        findPublicCartCandidates: () => Promise.resolve([candidate]),
+      } as unknown as IPublicCatalogRepository,
+    );
+
+    const context = {
+      tenantId: 'tenant-1',
+      tenantSlug: 'centro',
+      globalPriceListId: 'gpl-1',
+      name: 'Publico',
+      isCatalogDefault: true,
+    };
+    const result = await useCase.executeForContext({
+      tenant: { id: 'tenant-1', slug: 'centro' },
+      context,
+      items: [{ productId: 'prod-1', quantity: 2 }],
+    });
+
+    expect(Object.keys(result).sort()).toEqual([
+      'items',
+      'priceContext',
+      'totalCents',
+      'valid',
+      'warnings',
+    ]);
+    // prettier-ignore — compact key layout for the whitelisted item shape.
+    expect(Object.keys(result.items[0]).sort()).toEqual([
+      'availability',
+      'blockingCodes',
+      'image',
+      'lineTotalCents',
+      'priceHidden',
+      'productId',
+      'productName',
+      'quantity',
+      'status',
+      'unitPriceCents',
+      'variantId',
+      'variantName',
+      'warnings',
+    ]);
+    expect(result.priceContext).toEqual({
+      priceListId: context.globalPriceListId,
+      name: context.name,
+      isCatalogDefault: context.isCatalogDefault,
+    });
+    expect(result.items[0].unitPriceCents).toBe(100000);
+    expect(result.items[0].lineTotalCents).toBe(200000);
   });
 });

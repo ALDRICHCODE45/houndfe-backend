@@ -6,7 +6,8 @@ import {
   SetMetadata,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Observable, tap } from 'rxjs';
+import { Response } from 'express';
+import { Observable } from 'rxjs';
 
 export const CACHE_CONTROL_KEY = 'cache-control-header';
 export const CacheControl = (value: string) =>
@@ -22,13 +23,11 @@ export class CacheControlInterceptor implements NestInterceptor {
       context.getHandler(),
     );
 
-    return next.handle().pipe(
-      tap(() => {
-        if (cacheControlValue) {
-          const response = context.switchToHttp().getResponse();
-          response.setHeader('Cache-Control', cacheControlValue);
-        }
-      }),
-    );
+    if (cacheControlValue) {
+      const response = context.switchToHttp().getResponse<Response>();
+      response.setHeader('Cache-Control', cacheControlValue);
+    }
+
+    return next.handle();
   }
 }
