@@ -25,6 +25,7 @@ import { GetPublicProductDetailUseCase } from '../application/use-cases/get-publ
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
 import { ListProductsQueryDto } from './request-dto/list-products-query.dto';
 import { ValidateCartBodyDto } from './request-dto/validate-cart-body.dto';
+import { PublicPriceContextQueryDto } from './request-dto/public-price-context-query.dto';
 import { PublicPriceContextResolver } from '../application/services/public-price-context-resolver';
 
 @Controller('public/catalog')
@@ -85,9 +86,25 @@ export class PublicCatalogController {
   @CacheControl('public, max-age=60')
   async getProduct(
     @Param('productId', ParseUUIDPipe) productId: string,
+    @Param('tenantSlug') tenantSlug: string,
     @PublicTenant() tenant: PublicTenantInfo,
+    @Query() query: PublicPriceContextQueryDto,
   ) {
-    return this.getProductDetail.execute(productId, tenant);
+    // F2.WU6 slice 5c — one guarded-tenant context resolution per detail
+    // request; every miss maps to the single generic 404 via the
+    // DomainExceptionFilter. No legacy execute() call, retry, catch, or
+    // default-list fallback; the flat contextual response passes
+    // through unchanged.
+    const context = await this.priceContext.resolve(
+      tenantSlug,
+      query.priceListId,
+    );
+
+    return this.getProductDetail.executeForContext({
+      productId,
+      tenant,
+      context,
+    });
   }
 
   @Post(':tenantSlug/cart/validate')
