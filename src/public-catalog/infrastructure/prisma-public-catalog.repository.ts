@@ -6,6 +6,7 @@ import type { PublicCatalogCategoryFacet } from '../application/dto/public-categ
 import type {
   IPublicCatalogRepository,
   ListProductsParams,
+  PublicCartCandidate,
   ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
 import type {
@@ -591,6 +592,89 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
     // SAFETY: The include shape above matches ProductDetailWithIncludes; this bridges Prisma's conditional query inference.
     return product as unknown as ProductDetailWithIncludes;
+  }
+
+  /**
+   * F2.WU7 slice 1 — optional, unactivated exact-context cart bulk-load.
+   * One `product.findMany` projects the requested products, their requested
+   * variants, same-tenant allowlist rows, and exact selected-context
+   * positive price projections, with no publication/stock/price decision
+   * applied here: excluded/SERVICE products and requested OFF variants are
+   * retained so later application reconciliation classifies them.
+   * Tenant/context mismatch returns no candidates without issuing the
+   * database query. No write delegate and no default-list fallback exists.
+   */
+  async findPublicCartCandidates(params: {
+    tenantId: string;
+    context: ResolvedPublicCatalogContext;
+    productIds: string[];
+    variantIds: string[];
+  }): Promise<PublicCartCandidate[]> {
+    if (params.tenantId !== params.context.tenantId) return [];
+
+    const client = this.tenantPrisma.getClient();
+    const { tenantId } = params;
+    const { globalPriceListId } = params.context;
+
+    // F2 exact-context only: selected global list, positive prices, no
+    // default/alternate-list fallback anywhere in the query. Every nested
+    // predicate repeats same-tenant ownership so a mutation cannot widen
+    // disclosure.
+    const rows = await client.product.findMany({
+      where: { tenantId, id: { in: params.productIds } },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        includeInOnlineCatalog: true,
+        hasVariants: true,
+        useStock: true,
+        quantity: true,
+        minQuantity: true,
+        hidePriceInOnlineCatalog: true,
+        requiresPrescription: true,
+        images: {
+          where: { isMain: true, variantId: null },
+          take: 1,
+          select: { url: true },
+        },
+        // Allowlist rows: zero rows = all contexts; non-empty is classified
+        // by the application against the selected context.
+        catalogPriceLists: {
+          where: { tenantId },
+          select: { globalPriceListId: true },
+        },
+        priceLists: {
+          where: { tenantId, globalPriceListId, priceCents: { gt: 0 } },
+          select: { priceCents: true },
+          take: 1,
+        },
+        // Requested variants only: an empty variantIds list loads nothing.
+        // OFF modes are retained for later application classification.
+        variants: {
+          where: { tenantId, id: { in: params.variantIds } },
+          select: {
+            id: true,
+            name: true,
+            catalogPublishMode: true,
+            quantity: true,
+            minQuantity: true,
+            variantPrices: {
+              where: {
+                tenantId,
+                priceList: { tenantId, globalPriceListId },
+                priceCents: { gt: 0 },
+              },
+              select: { priceCents: true },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    // SAFETY: The select shape above matches PublicCartCandidate; this bridges Prisma's conditional query inference.
+    return rows as unknown as PublicCartCandidate[];
   }
 
   async findCategoryFacets(params: {

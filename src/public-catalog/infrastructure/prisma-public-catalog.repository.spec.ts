@@ -686,3 +686,254 @@ describe('F2.WU6 resolveTenantCatalogContext', () => {
     expect(findFirst).toHaveBeenCalledTimes(4);
   });
 });
+
+interface CartCandidatesQuery {
+  where?: Record<string, unknown>;
+  select?: {
+    priceLists?: { where?: Record<string, unknown> };
+    variants?: {
+      where?: Record<string, unknown>;
+      select?: { variantPrices?: { where?: Record<string, unknown> } };
+    };
+    images?: { where?: Record<string, unknown> };
+    catalogPriceLists?: { where?: Record<string, unknown> };
+    [field: string]: unknown;
+  };
+}
+
+/**
+ * F2.WU7 slice 1 — dormant `findPublicCartCandidates` seam. Pure bulk-load:
+ * tenant/context mismatch never reaches the database, nested predicates
+ * repeat same-tenant ownership so a mutation cannot widen disclosure, and
+ * no publication/stock/price decision is applied (OFF/excluded retained).
+ */
+describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
+  const context = (globalPriceListId: string) => ({
+    tenantId: 'tenant-1',
+    tenantSlug: 'ctx-tenant',
+    globalPriceListId,
+    name: 'Lista',
+    isCatalogDefault: false,
+  });
+  const baseInput = {
+    tenantId: 'tenant-1',
+    context: context('gpl-A'),
+    productIds: ['p-1', 'p-2'],
+    variantIds: ['v-1'],
+  };
+  const WRITE_DELEGATES =
+    'create update upsert delete createMany updateMany deleteMany'.split(' ');
+
+  let findMany: jest.Mock<Promise<unknown[]>, [CartCandidatesQuery]>;
+  let writeDelegates: jest.Mock<Promise<unknown>, []>[];
+
+  const buildRepo = () =>
+    new PrismaPublicCatalogRepository(
+      {} as unknown as PrismaService,
+      {
+        getClient: () => ({
+          product: {
+            findMany,
+            ...Object.fromEntries(
+              WRITE_DELEGATES.map((name, i) => [name, writeDelegates[i]]),
+            ),
+          },
+        }),
+        getTenantId: () => 'tenant-1',
+      } as unknown as TenantPrismaService,
+    );
+
+  beforeEach(() => {
+    findMany = jest
+      .fn<Promise<unknown[]>, [CartCandidatesQuery]>()
+      .mockResolvedValue([]);
+    writeDelegates = WRITE_DELEGATES.map((name) =>
+      jest.fn<Promise<unknown>, []>().mockName(name),
+    );
+  });
+
+  it('returns no candidates on tenant/context mismatch without any database call', async () => {
+    const repo = buildRepo();
+
+    const result = await repo.findPublicCartCandidates?.({
+      ...baseInput,
+      tenantId: 'tenant-2',
+    });
+
+    expect(result).toEqual([]);
+    expect(findMany).not.toHaveBeenCalled();
+    writeDelegates.forEach((d) => expect(d).not.toHaveBeenCalled());
+  });
+
+  it('issues exactly one tenant-scoped product.findMany limited to requested IDs', async () => {
+    const repo = buildRepo();
+
+    await repo.findPublicCartCandidates?.(baseInput);
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    const args = findMany.mock.calls[0][0];
+    expect(args.where).toEqual({
+      tenantId: 'tenant-1',
+      id: { in: ['p-1', 'p-2'] },
+    });
+    expect(args.select).toBeDefined();
+    writeDelegates.forEach((d) => expect(d).not.toHaveBeenCalled());
+  });
+
+  it('projects exact selected-context positive prices; different lists differ', async () => {
+    const repo = buildRepo();
+
+    await repo.findPublicCartCandidates?.(baseInput);
+    await repo.findPublicCartCandidates?.({
+      ...baseInput,
+      context: context('gpl-B'),
+    });
+
+    const [a, b] = findMany.mock.calls.map((c) => c[0]);
+    expect(a.select?.priceLists?.where).toEqual({
+      tenantId: 'tenant-1',
+      globalPriceListId: 'gpl-A',
+      priceCents: { gt: 0 },
+    });
+    expect(a.select?.variants?.select?.variantPrices?.where).toEqual({
+      tenantId: 'tenant-1',
+      priceList: { tenantId: 'tenant-1', globalPriceListId: 'gpl-A' },
+      priceCents: { gt: 0 },
+    });
+    expect(b.select?.priceLists?.where).toEqual({
+      tenantId: 'tenant-1',
+      globalPriceListId: 'gpl-B',
+      priceCents: { gt: 0 },
+    });
+    expect(a.select?.priceLists?.where).not.toEqual(
+      b.select?.priceLists?.where,
+    );
+    expect(a.select?.variants?.select?.variantPrices?.where).not.toEqual(
+      b.select?.variants?.select?.variantPrices?.where,
+    );
+  });
+
+  it('empty variantIds loads no variants; requested variants stay tenant-scoped', async () => {
+    const repo = buildRepo();
+
+    await repo.findPublicCartCandidates?.({ ...baseInput, variantIds: [] });
+    expect(findMany.mock.calls[0][0].select?.variants?.where).toEqual({
+      tenantId: 'tenant-1',
+      id: { in: [] },
+    });
+
+    await repo.findPublicCartCandidates?.({
+      ...baseInput,
+      variantIds: ['v-1', 'v-2'],
+    });
+    expect(findMany.mock.calls[1][0].select?.variants?.where).toEqual({
+      tenantId: 'tenant-1',
+      id: { in: ['v-1', 'v-2'] },
+    });
+  });
+
+  it('projects main image, allowlist rows, and stock fields without default/fallback/write queries', async () => {
+    const repo = buildRepo();
+
+    await repo.findPublicCartCandidates?.(baseInput);
+
+    const args = findMany.mock.calls[0][0];
+    expect(args.select?.images?.where).toEqual({
+      isMain: true,
+      variantId: null,
+    });
+    expect(args.select?.catalogPriceLists?.where).toEqual({
+      tenantId: 'tenant-1',
+    });
+    for (const field of [
+      'type',
+      'includeInOnlineCatalog',
+      'hasVariants',
+      'useStock',
+      'quantity',
+      'minQuantity',
+      'hidePriceInOnlineCatalog',
+      'requiresPrescription',
+    ]) {
+      expect(args.select?.[field]).toBe(true);
+    }
+    const serialized = JSON.stringify(args);
+    expect(serialized).not.toContain('isDefault');
+    expect(serialized).not.toContain('OFF');
+    writeDelegates.forEach((d) => expect(d).not.toHaveBeenCalled());
+  });
+
+  it('retains excluded/SERVICE products and OFF variants with empty exact prices for later reconciliation', async () => {
+    findMany.mockResolvedValue([
+      {
+        id: 'p-svc',
+        name: 'Servicio',
+        type: 'SERVICE',
+        includeInOnlineCatalog: true,
+        hasVariants: false,
+        useStock: true,
+        quantity: 0,
+        minQuantity: 1,
+        hidePriceInOnlineCatalog: false,
+        requiresPrescription: false,
+        images: [{ url: 'https://cdn.example.com/main.jpg' }],
+        catalogPriceLists: [{ globalPriceListId: 'gpl-A' }],
+        priceLists: [],
+        variants: [],
+      },
+      {
+        id: 'p-off',
+        name: 'Con OFF',
+        type: 'PRODUCT',
+        includeInOnlineCatalog: false,
+        hasVariants: true,
+        useStock: false,
+        quantity: 9,
+        minQuantity: 2,
+        hidePriceInOnlineCatalog: true,
+        requiresPrescription: false,
+        images: [],
+        catalogPriceLists: [],
+        priceLists: [{ priceCents: 1200 }],
+        variants: [
+          {
+            id: 'v-1',
+            name: 'V1',
+            catalogPublishMode: 'OFF',
+            quantity: 4,
+            minQuantity: 1,
+            variantPrices: [],
+          },
+        ],
+      },
+    ]);
+    const repo = buildRepo();
+
+    const candidates = await repo.findPublicCartCandidates?.(baseInput);
+
+    expect(candidates).toHaveLength(2);
+    expect(candidates?.[0]).toMatchObject({
+      type: 'SERVICE',
+      includeInOnlineCatalog: true,
+      priceLists: [],
+      images: [{ url: 'https://cdn.example.com/main.jpg' }],
+      catalogPriceLists: [{ globalPriceListId: 'gpl-A' }],
+    });
+    expect(candidates?.[1]).toMatchObject({
+      includeInOnlineCatalog: false,
+      useStock: false,
+      quantity: 9,
+      minQuantity: 2,
+      priceLists: [{ priceCents: 1200 }],
+      variants: [
+        {
+          id: 'v-1',
+          catalogPublishMode: 'OFF',
+          quantity: 4,
+          minQuantity: 1,
+          variantPrices: [],
+        },
+      ],
+    });
+  });
+});

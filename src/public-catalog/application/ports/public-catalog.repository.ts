@@ -28,6 +28,42 @@ export interface ResolvedPublicCatalogContext {
   isCatalogDefault: boolean;
 }
 
+/**
+ * F2.WU7 slice 1 — the repository projection later cart reconciliation
+ * classifies. Excluded/SERVICE products and requested OFF variants are
+ * deliberately retained: publication classification is an application
+ * decision, never an adapter one. Price projections carry only exact
+ * selected-context positive rows — empty arrays mean no price in context,
+ * never a fallback.
+ */
+export interface PublicCartCandidate {
+  id: string;
+  name: string;
+  type: string;
+  includeInOnlineCatalog: boolean;
+  hasVariants: boolean;
+  useStock: boolean;
+  quantity: number;
+  minQuantity: number;
+  hidePriceInOnlineCatalog: boolean;
+  requiresPrescription: boolean;
+  /** Main product image (isMain, variantId null), if any. */
+  images: Array<{ url: string }>;
+  /** Same-tenant allowlist rows; zero rows = every context is allowed. */
+  catalogPriceLists: Array<{ globalPriceListId: string }>;
+  /** Exact selected-context positive price; empty = no price in context. */
+  priceLists: Array<{ priceCents: number }>;
+  /** Requested variants only; requested OFF variants are retained. */
+  variants: Array<{
+    id: string;
+    name: string;
+    catalogPublishMode: string;
+    quantity: number;
+    minQuantity: number;
+    variantPrices: Array<{ priceCents: number }>;
+  }>;
+}
+
 export interface IPublicCatalogRepository {
   findActiveBranches(): Promise<PublicBranchDto[]>;
 
@@ -105,6 +141,22 @@ export interface IPublicCatalogRepository {
     productId: string;
     context: ResolvedPublicCatalogContext;
   }): Promise<ProductDetailWithIncludes | null>;
+
+  /**
+   * F2.WU7 slice 1 — optional, dormant bulk-load seam for stateless cart
+   * reconciliation: one tenant-scoped `product.findMany` projecting the
+   * requested products, their requested variants, same-tenant allowlist
+   * rows, and exact selected-context positive price projections, with no
+   * publication/stock/price decision applied here. Tenant/context mismatch
+   * returns no candidates without a database call. No production caller
+   * yet; activating the cart use case/controller stays out of this slice.
+   */
+  findPublicCartCandidates?(params: {
+    tenantId: string;
+    context: ResolvedPublicCatalogContext;
+    productIds: string[];
+    variantIds: string[];
+  }): Promise<PublicCartCandidate[]>;
 }
 
 export const PUBLIC_CATALOG_REPOSITORY = Symbol('PUBLIC_CATALOG_REPOSITORY');
