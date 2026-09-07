@@ -92,9 +92,9 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       >[0],
       tenantPrisma,
     );
-    // F1.WU5e3 — real use case over the real tenant-scoped client and
-    // the real repository above (no read is ever replaced).
-    useCase = new ValidatePublicCartUseCase(tenantPrisma, repo);
+    // F2.WU7 — real use case over the real repository above (no read is
+    // ever replaced).
+    useCase = new ValidatePublicCartUseCase(repo);
   });
 
   beforeEach(() => {
@@ -1678,8 +1678,6 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
 
     it('projects retained-for-classification candidates with exact-context prices, requested variants, and tenant isolation', async () => {
       const m = await seedCartMatrix();
-      if (!repo.findPublicCartCandidates)
-        throw new Error('findPublicCartCandidates seam is not implemented');
 
       // Duplicate requested IDs arrive de-duplicated in the projection.
       const candidates = await repo.findPublicCartCandidates({

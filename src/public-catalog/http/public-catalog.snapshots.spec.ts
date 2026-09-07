@@ -153,12 +153,9 @@ describe('Public catalog response snapshot tests', () => {
       priceLists: [{ priceCents: 100000 }],
       variants: [],
     };
-    const useCase = new ValidatePublicCartUseCase(
-      {} as never,
-      {
-        findPublicCartCandidates: () => Promise.resolve([candidate]),
-      } as unknown as IPublicCatalogRepository,
-    );
+    const useCase = new ValidatePublicCartUseCase({
+      findPublicCartCandidates: () => Promise.resolve([candidate]),
+    } as unknown as IPublicCatalogRepository);
 
     const context = {
       tenantId: 'tenant-1',

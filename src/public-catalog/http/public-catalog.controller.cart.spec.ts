@@ -5,7 +5,6 @@ import type {
   PublicCartCandidate,
   ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
-import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request, { type Response } from 'supertest';
@@ -62,7 +61,6 @@ describe('executeForContext (F2.WU7 slice 2 — dormant seam)', () => {
     seam = jest.fn().mockResolvedValue([]);
     const repo = { findPublicCartCandidates: seam };
     useCase = new ValidatePublicCartUseCase(
-      {} as unknown as TenantPrismaService,
       repo as unknown as IPublicCatalogRepository,
     );
   });
@@ -254,7 +252,6 @@ describe('executeForContext (F2.WU7 slice 2 — dormant seam)', () => {
     );
     await expect(
       new ValidatePublicCartUseCase(
-        {} as unknown as TenantPrismaService,
         {} as unknown as IPublicCatalogRepository,
       ).executeForContext({ tenant, context, items }),
     ).rejects.toThrow(NotFoundException);
@@ -356,7 +353,7 @@ describe('POST /public/catalog/:tenantSlug/cart/validate (F2.WU7 Slice 4)', () =
     res.body as Record<string, unknown>;
 
   let app: INestApplication;
-  let validateCart: { execute: jest.Mock; executeForContext: jest.Mock };
+  let validateCart: { executeForContext: jest.Mock };
   let repo: { resolveTenantCatalogContext: jest.Mock };
 
   const postCart = (body: Record<string, unknown>) =>
@@ -375,7 +372,6 @@ describe('POST /public/catalog/:tenantSlug/cart/validate (F2.WU7 Slice 4)', () =
       ),
     };
     validateCart = {
-      execute: jest.fn(),
       executeForContext: jest.fn(
         (input: { context: ResolvedPublicCatalogContext }) =>
           markerFor(input.context),
@@ -442,7 +438,6 @@ describe('POST /public/catalog/:tenantSlug/cart/validate (F2.WU7 Slice 4)', () =
         context,
         items: ITEMS,
       });
-      expect(validateCart.execute).not.toHaveBeenCalled();
       expect(bodyOf(res)).toEqual(markerFor(context));
       expect(res.headers['cache-control']).toBe('no-store');
     },

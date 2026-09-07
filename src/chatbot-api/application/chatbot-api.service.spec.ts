@@ -221,6 +221,7 @@ describe('ChatbotApiService', () => {
       findCategoryFacets: jest.fn(),
       findProductById: jest.fn(),
       resolveTenantCatalogContext: jest.fn(),
+      findPublicCartCandidates: jest.fn(),
     };
     customerRepository = {
       findById: jest.fn(),

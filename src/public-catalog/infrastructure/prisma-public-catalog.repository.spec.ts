@@ -755,7 +755,7 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
   it('returns no candidates on tenant/context mismatch without any database call', async () => {
     const repo = buildRepo();
 
-    const result = await repo.findPublicCartCandidates?.({
+    const result = await repo.findPublicCartCandidates({
       ...baseInput,
       tenantId: 'tenant-2',
     });
@@ -768,7 +768,7 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
   it('issues exactly one tenant-scoped product.findMany limited to requested IDs', async () => {
     const repo = buildRepo();
 
-    await repo.findPublicCartCandidates?.(baseInput);
+    await repo.findPublicCartCandidates(baseInput);
 
     expect(findMany).toHaveBeenCalledTimes(1);
     const args = findMany.mock.calls[0][0];
@@ -783,8 +783,8 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
   it('projects exact selected-context positive prices; different lists differ', async () => {
     const repo = buildRepo();
 
-    await repo.findPublicCartCandidates?.(baseInput);
-    await repo.findPublicCartCandidates?.({
+    await repo.findPublicCartCandidates(baseInput);
+    await repo.findPublicCartCandidates({
       ...baseInput,
       context: context('gpl-B'),
     });
@@ -816,13 +816,13 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
   it('empty variantIds loads no variants; requested variants stay tenant-scoped', async () => {
     const repo = buildRepo();
 
-    await repo.findPublicCartCandidates?.({ ...baseInput, variantIds: [] });
+    await repo.findPublicCartCandidates({ ...baseInput, variantIds: [] });
     expect(findMany.mock.calls[0][0].select?.variants?.where).toEqual({
       tenantId: 'tenant-1',
       id: { in: [] },
     });
 
-    await repo.findPublicCartCandidates?.({
+    await repo.findPublicCartCandidates({
       ...baseInput,
       variantIds: ['v-1', 'v-2'],
     });
@@ -835,7 +835,7 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
   it('projects main image, allowlist rows, and stock fields without default/fallback/write queries', async () => {
     const repo = buildRepo();
 
-    await repo.findPublicCartCandidates?.(baseInput);
+    await repo.findPublicCartCandidates(baseInput);
 
     const args = findMany.mock.calls[0][0];
     expect(args.select?.images?.where).toEqual({
@@ -909,17 +909,17 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
     ]);
     const repo = buildRepo();
 
-    const candidates = await repo.findPublicCartCandidates?.(baseInput);
+    const candidates = await repo.findPublicCartCandidates(baseInput);
 
     expect(candidates).toHaveLength(2);
-    expect(candidates?.[0]).toMatchObject({
+    expect(candidates[0]).toMatchObject({
       type: 'SERVICE',
       includeInOnlineCatalog: true,
       priceLists: [],
       images: [{ url: 'https://cdn.example.com/main.jpg' }],
       catalogPriceLists: [{ globalPriceListId: 'gpl-A' }],
     });
-    expect(candidates?.[1]).toMatchObject({
+    expect(candidates[1]).toMatchObject({
       includeInOnlineCatalog: false,
       useStock: false,
       quantity: 9,

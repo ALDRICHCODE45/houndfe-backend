@@ -143,15 +143,16 @@ export interface IPublicCatalogRepository {
   }): Promise<ProductDetailWithIncludes | null>;
 
   /**
-   * F2.WU7 slice 1 — optional, dormant bulk-load seam for stateless cart
-   * reconciliation: one tenant-scoped `product.findMany` projecting the
-   * requested products, their requested variants, same-tenant allowlist
-   * rows, and exact selected-context positive price projections, with no
+   * F2.WU7 — required bulk-load seam for stateless cart reconciliation:
+   * one tenant-scoped `product.findMany` projecting the requested
+   * products, their requested variants, same-tenant allowlist rows, and
+   * exact selected-context positive price projections, with no
    * publication/stock/price decision applied here. Tenant/context mismatch
-   * returns no candidates without a database call. No production caller
-   * yet; activating the cart use case/controller stays out of this slice.
+   * returns no candidates without a database call. Mandatory on the port:
+   * cart reconciliation fails closed with a generic miss when a malformed
+   * or absent implementation is injected.
    */
-  findPublicCartCandidates?(params: {
+  findPublicCartCandidates(params: {
     tenantId: string;
     context: ResolvedPublicCatalogContext;
     productIds: string[];
