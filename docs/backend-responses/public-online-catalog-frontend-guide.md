@@ -1,8 +1,6 @@
-# Public Online Catalog — Frontend Implementation Guide
+# Public Online Catalog — Backend Response Guide
 
-**Backend status**: implemented, tested, merged to `main`.
-**Test suite**: 1069/1069 passing.
-**Target audience**: HoundFe frontend team.
+**Canonical backend-only response evidence through F2.WU7; frontend implementation and activation remain paused.**
 
 ---
 
@@ -11,62 +9,56 @@
 Public storefront for end customers to browse products by branch, see availability and prices, build a local cart, validate it, and (in a future SDD) send the order via WhatsApp.
 
 **In scope (v1, available now):**
+
 - List active branches.
 - Browse products with filters, search, sort, pagination, and category facets.
 - View product detail with variants and per-branch availability.
 - Validate a local cart against current backend state (prices, stock).
 
 **Out of scope (deferred to future SDDs):**
+
 - WhatsApp order endpoint (`POST /public/catalog/:slug/orders/whatsapp`).
 - Real order creation in POS from the public catalog.
 - Product ratings (no reviews infrastructure yet).
 - `featuredLabel` ("Más vendido", "Premium", etc. — no sales analytics yet).
-- Admin endpoints to toggle `hidePriceInOnlineCatalog`.
 - Category slugs (filter uses UUIDs).
 
-**UX flow:**
-
-```
-pick branch  →  browse products  →  product detail  →  build cart  →  validate cart  →  (future: WhatsApp)
-```
-
 ---
 
-## 2. What changed vs your original wishlist
+## 2. Authentication and base URL
 
-Backend reviewed your contract document and made 8 decisions with technical criterion. Below is what changed and what you need to adjust in the UI.
-
-| # | Decision | What you need to do |
-|---|---|---|
-| 1 | **Tenant in URL path**: every endpoint is `/public/catalog/:tenantSlug/...`. We rejected the `branchId`-only approach because it leaked cross-tenant data. | Build URLs using the slug returned by `/branches`. Persist the selected slug in route state. |
-| 2 | **`kind` field DROPPED**. Categories already classify products. Adding a parallel taxonomy creates semantic drift. | Map icons/placeholders by `category.id` (or category name) client-side. Maintain a small icon map in your design system. |
-| 3 | **`rating` and `featuredLabel` always `null` in v1**. No reviews system, no analytics. Fields exist in the contract reserved for v2. | Render conditionally. If `null`, skip the badge/star row entirely. |
-| 4 | **Cart validation endpoint IN scope** (minimal). `POST /:slug/cart/validate` revalidates prices and stock, returns warnings and totals. NO order creation. NO `whatsappUrl`. NO persistence. | Call it before showing the WhatsApp/checkout button so the user sees up-to-date prices and warnings. |
-| 5 | **`hidePriceInOnlineCatalog` flag on Product**. Effective rule: `priceHidden = hidePriceInOnlineCatalog OR requiresPrescription`. | When `price.hidden === true`, show "Consultar precio" or equivalent. Numeric price fields will be `null`. |
-| 6 | **⚠️ CRITICAL: 1 sucursal = 1 tenant in v1.** The current HoundFe data model has NO separate `Branch` entity. Each tenant IS a branch. `GET /branches` returns exactly 1 entry (the current tenant). `availabilityByBranch[]` always has 1 entry. | The original UX idea of "3 sucursales lado a lado, marcar la seleccionada como TÚ" is **NOT implementable in v1**. Use a top-level branch selector: each "branch" the user picks switches `:tenantSlug` in the URL and reloads the catalog context. The contract keeps `availabilityByBranch[]` as an array so future multi-branch support requires zero contract changes. |
-| 7 | **`sort: 'price_asc'` uses product-level default price**, not min-of-variants. MVP limitation. | Show `fromPriceCents` on each card. The sort is "good enough" for HoundFe's current scale (<10K products/tenant). If you see weird ordering on products with widely-priced variants, that's why. |
-| 8 | **Category filter uses `categoryId` (UUID)**, not slug. | Use `facets.categories[].id` for the active category filter. URL can look like `?categoryId=<uuid>` or you can map UUIDs to nicer paths client-side. |
-
----
-
-## 3. Authentication and base URL
-
-- **All endpoints are PUBLIC**. No JWT, no Authorization header.
+- Only `/public/catalog/...` routes are public. `/tenants/:tenantId/catalog-settings` and authenticated product/variant management require authentication and their documented permissions.
 - **Base URL pattern**: `${API_BASE}/public/catalog/:tenantSlug/...`
-- **Branch discovery**: `GET /public/catalog/branches` (no tenant slug — global discovery). Use this to populate the branch selector.
+- **Branch discovery**: `GET /public/catalog/branches` (no tenant slug — global discovery).
 - **Rate limiting**: per-IP, two tiers.
   - `public-browse`: 60 req/min — all GET endpoints.
   - `public-validate`: 20 req/min — cart validate.
-  - On 429: show "Demasiadas solicitudes, esperá un momento" and back off.
-- **HTTP cache**: GET endpoints return `Cache-Control` headers. Browser cache handles them automatically. Cart validate is `no-store` — always fresh.
+  - Excess requests receive `429`.
+- **HTTP cache**: response guidance is header-only; there is no application cache to purge.
 
 ---
+
+## 3. Publication and catalog settings
+
+Authenticated settings source of truth: `GET`/`PATCH /tenants/:tenantId/catalog-settings`; `catalogPublished` is the opt-in, `effectivePublication` is active-tenant AND `catalogPublished`, `priceContexts` supplies catalog-public `{ priceListId, name, isCatalogDefault }` values (omission uses its default), and `DEFAULT_CONTEXT_HAS_NO_VALID_PRICES` is a warning, never a price or fallback.
+
+### Authenticated settings PATCH
+
+`PATCH /tenants/:tenantId/catalog-settings` accepts these optional settings fields:
+
+- `publicPriceListIds: string[]` — unique catalog-public price-list UUIDs.
+- `catalogDefaultPriceListId: string | null` — the default UUID, which must belong to `publicPriceListIds`.
+- `stockPresentationDefault: { mode, customQuantity?: number | null }` — the tenant default; `CUSTOM_QUANTITY` requires a non-negative integer quantity, while other modes use `null`.
+
+The authenticated settings PATCH response has `Cache-Control: no-store`.
+
+Authenticated product writes/reads include `includeInOnlineCatalog`, `hidePriceInOnlineCatalog`, `supportedCatalogPriceListIds`, `supportsAllCatalogPriceLists`, `onlineStockPresentation`, and `onlineStockPresentationCustomQty`; variant writes/reads include `catalogPublishMode` (`INHERIT`/`ON`/`OFF`) and stock configuration. Omitted/empty allowlists support all tenant-public contexts; new/inline variants use `INHERIT` and null overrides inherit. No F3 public stock-presentation response is documented.
 
 ## 4. Endpoints
 
 ### 4.1 `GET /public/catalog/branches`
 
-Lists all active branches (tenants). No tenant context required.
+Lists every active, catalog-published branch (tenant). No tenant context is required. The response can contain zero, one, or many branches; use only the documented fields below.
 
 **Request**
 
@@ -125,7 +117,7 @@ curl https://api.houndfe.com/public/catalog/branches
 
 **Edge cases**
 
-- Empty array if no branch is active (rare; show "No hay sucursales disponibles").
+- Empty array when no active catalog-published branch is available.
 
 ---
 
@@ -149,7 +141,7 @@ GET /public/catalog/:tenantSlug/products?q=&categoryId=&sort=&page=&limit=
 
 ```ts
 type ListProductsQueryDto = {
-  branchId?: string;       // UUID. Ignored in v1 (tenant=branch). Reserved.
+  priceListId?: string;    // optional UUID; omitted => tenant catalog default
   q?: string;              // Search term. Matches product name + brand name (case-insensitive).
   categoryId?: string;     // UUID category filter.
   sort?: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
@@ -187,6 +179,12 @@ type PublicCatalogCategoryFacet = {
   count: number;
 };
 
+type PublicPriceContext = {
+  priceListId: string;
+  name: string;
+  isCatalogDefault: boolean;
+};
+
 type PublicProductListResponse = {
   items: PublicCatalogProductCard[];
   meta: {
@@ -195,20 +193,21 @@ type PublicProductListResponse = {
     total: number;
     totalPages: number;
   };
-  facets: {
-    categories: PublicCatalogCategoryFacet[];
-  };
+  facets: { categories: PublicCatalogCategoryFacet[] };
+  excludedCount: number; // context-ineligible products, aggregate only
+  priceContext: PublicPriceContext;
 };
 ```
 
 **Headers**
 
 - `Cache-Control: public, max-age=60`
+- The full path and query string, including optional `priceListId`, is the cache key. An omitted `priceListId` is a distinct default-context request.
 
 **Errors**
 
 - `400` — invalid query (bad UUID, sort outside enum, limit > 100, etc.).
-- `404` — tenant slug not found or inactive (generic message; no enumeration).
+- `404` — tenant unavailable, or the generic request-level `PRICE_CONTEXT_NOT_AVAILABLE` for a private, nonexistent, cross-tenant, unbound, or missing-default context. Those context cases are intentionally indistinguishable.
 - `429` — rate limited.
 
 **Example**
@@ -241,27 +240,30 @@ curl "https://api.houndfe.com/public/catalog/centro/products?categoryId=cat-uuid
       { "id": "cat-uuid", "name": "Alimento Seco", "count": 45 },
       { "id": "cat-uuid-2", "name": "Juguetes", "count": 23 }
     ]
-  }
+  },
+  "excludedCount": 3,
+  "priceContext": { "priceListId": "price-list-uuid", "name": "Lista pública", "isCatalogDefault": true }
 }
 ```
 
 **Edge cases**
 
-- `items: []` with valid `meta` if page is beyond `totalPages` (don't error — show "Sin resultados").
-- Hidden-price products still appear; just show "Consultar precio".
-- Out-of-stock products still appear; disable add-to-cart.
+- `items: []` with valid `meta` is returned when the page is beyond `totalPages`.
+- Hidden-price products remain in the response with null numeric price fields.
+- Out-of-stock products remain in the response with `availability: 'out_of_stock'`; cart validation reports the operational `OUT_OF_STOCK` block.
 - Facets only include categories WITH visible products in the current scope (no zero-count entries).
+- Facets/`meta.total` use selected-`priceContext` eligible products; aggregate-only `excludedCount` is pre-pagination. A selected list is exact: missing/non-positive visible prices are excluded with no default/alternate fallback, while hidden-price and prescription products retain null numeric prices.
 
 ---
 
 ### 4.3 `GET /public/catalog/:tenantSlug/products/:productId`
 
-Product detail with variants and per-branch availability.
+Product detail with variants under one resolved price context.
 
 **Request**
 
 ```http
-GET /public/catalog/:tenantSlug/products/:productId?branchId=
+GET /public/catalog/:tenantSlug/products/:productId?priceListId=
 ```
 
 **Path params**
@@ -275,17 +277,17 @@ GET /public/catalog/:tenantSlug/products/:productId?branchId=
 
 | Param | Type | Notes |
 |---|---|---|
-| `branchId` | string (UUID) | Ignored in v1. Reserved for multi-branch. |
+| `priceListId` | UUID | Optional catalog-public global price-list context; omission resolves the tenant catalog default. |
 
 **Response 200**
 
 ```ts
 type PublicVariantAvailability = {
-  branchId: string;      // tenantId (tenant=branch in v1)
+  branchId: string;
   branchName: string;
   branchSlug: string;
   availability: 'available' | 'low_stock' | 'out_of_stock';
-  isSelected: boolean;   // always true in v1 (single entry)
+  isSelected: boolean;
 };
 
 type PublicVariantDto = {
@@ -298,7 +300,7 @@ type PublicVariantDto = {
     priceCents: number | null;   // null if hidden
     hidden: boolean;
   };
-  availabilityByBranch: PublicVariantAvailability[];   // exactly 1 entry in v1
+  availabilityByBranch: PublicVariantAvailability[];
 };
 
 type PublicCatalogProductDetail = {
@@ -318,6 +320,8 @@ type PublicCatalogProductDetail = {
   variants: PublicVariantDto[];
   rating: null;
   featuredLabel: null;
+  excludedCount: 0;
+  priceContext: PublicPriceContext;
 };
 ```
 
@@ -327,7 +331,7 @@ type PublicCatalogProductDetail = {
 
 **Errors**
 
-- `404` — tenant or product not found; product not in this tenant; `includeInOnlineCatalog = false`.
+- `404` — generic tenant/product miss, or the same generic request-level `PRICE_CONTEXT_NOT_AVAILABLE` used for private, nonexistent, cross-tenant, unbound, and missing-default contexts. A selected context never falls back.
 - `429` — rate limited.
 
 **Example**
@@ -371,7 +375,9 @@ curl "https://api.houndfe.com/public/catalog/centro/products/prod-uuid-1"
     }
   ],
   "rating": null,
-  "featuredLabel": null
+  "featuredLabel": null,
+  "excludedCount": 0,
+  "priceContext": { "priceListId": "price-list-uuid", "name": "Lista pública", "isCatalogDefault": true }
 }
 ```
 
@@ -379,7 +385,7 @@ curl "https://api.houndfe.com/public/catalog/centro/products/prod-uuid-1"
 
 - `hasVariants = false` → `variants` may be an empty array. Use the top-level `price` and `availability`.
 - `images` is sorted: main first, then by sort order.
-- Variant images fall back to the product main image if `variant.image === null`.
+- `variants[].image` uses only the variant's own first image and is `null` if the variant has no images; it does not fall back to the product image. Cart item `image` uses the product main image.
 
 ---
 
@@ -404,14 +410,12 @@ Content-Type: application/json
 
 ```ts
 type ValidateCartBodyDto = {
+  priceListId?: string; // optional UUID catalog-public context; omitted => default
   items: Array<{
     productId: string;    // UUID
     variantId?: string;   // UUID, optional
     quantity: number;     // integer, min 1
   }>;
-  customer?: {
-    globalPriceListId?: string;  // UUID, for customer-specific pricing (v2)
-  };
 };
 ```
 
@@ -421,38 +425,45 @@ type ValidateCartBodyDto = {
 - Each `productId` and `variantId` (if present) must be valid UUIDs.
 - `quantity` must be an integer `>= 1`.
 
-**Response 200**
+**Response 201**
+
+The successful validation returns the default POST status `201 Created` with the documented body — do not expect `200`.
 
 ```ts
+type CartBlockingCode =
+  | 'NOT_IN_CATALOG'
+  | 'VARIANT_NOT_FOUND'
+  | 'VARIANT_NOT_IN_CATALOG'
+  | 'PRICE_NOT_AVAILABLE_IN_CONTEXT'
+  | 'OUT_OF_STOCK';
 type CartWarningCode =
-  | 'PRICE_CHANGED'
-  | 'OUT_OF_STOCK'
+  | CartBlockingCode
   | 'LOW_STOCK'
   | 'PRICE_HIDDEN'
-  | 'NOT_FOUND'
-  | 'NOT_IN_CATALOG'
-  | 'VARIANT_NOT_FOUND';
+  | 'PRICE_CHANGED';
 
 type CartValidatedItem = {
   productId: string;
   variantId: string | null;
-  productName: string;
+  productName: string | null;
   variantName: string | null;
   image: { url: string } | null;
   quantity: number;
-  unitPriceCents: number | null;    // null if price hidden
-  lineTotalCents: number | null;    // null if price hidden
+  status: 'VALID' | 'BLOCKED';
+  blockingCodes: CartBlockingCode[];
+  warnings: CartWarningCode[];
+  unitPriceCents: number | null;
+  lineTotalCents: number | null;
   availability: 'available' | 'low_stock' | 'out_of_stock';
   priceHidden: boolean;
-  warnings: CartWarningCode[];
 };
 
 type CartValidationResponseDto = {
-  valid: boolean;                    // false if any item has blocking warnings
+  valid: boolean;
+  priceContext: { priceListId: string; name: string; isCatalogDefault: boolean };
   items: CartValidatedItem[];
-  totalCents: number | null;         // sum of lineTotalCents excluding OOS + hidden-price items
-                                     // null if any item has hidden price
-  warnings: CartWarningCode[];       // deduplicated global warnings
+  totalCents: number | null;
+  warnings: CartWarningCode[];
 };
 ```
 
@@ -462,12 +473,12 @@ type CartValidationResponseDto = {
 - Excludes items where `unitPriceCents === null` (hidden price).
 - Includes `low_stock` items (still fulfillable).
 - Includes `available` items.
-- If ANY item has `priceHidden === true`, the global `totalCents` is `null` (you can't show a meaningful total).
+- If ANY item has `priceHidden === true`, the global `totalCents` is `null`.
+- Blocked items never contribute; hidden-price/prescription items have null numeric fields and make `totalCents` null. `OUT_OF_STOCK` is operational and independent of context/presentation.
 
 **`valid` semantics**
 
-- `false` if any item has blocking warnings: `NOT_FOUND`, `NOT_IN_CATALOG`, `VARIANT_NOT_FOUND`, or `OUT_OF_STOCK`.
-- `true` otherwise (even with `PRICE_CHANGED`, `LOW_STOCK`, or `PRICE_HIDDEN` warnings).
+- `valid` is false for non-empty `blockingCodes`; `PRICE_CHANGED`, `LOW_STOCK`, and `PRICE_HIDDEN` are non-blocking.
 
 **Headers**
 
@@ -476,12 +487,12 @@ type CartValidationResponseDto = {
 **Errors**
 
 - `400` — validation errors (bad UUID, empty items, invalid quantity).
-- `404` — tenant not found.
+- `404` — tenant unavailable, or generic request-level `PRICE_CONTEXT_NOT_AVAILABLE`; private/nonexistent/cross-tenant/unbound/missing-default contexts are indistinguishable.
 - `429` — rate limited (stricter: 20 req/min).
 
-**Note on warnings enum**
+**Item error semantics**
 
-The backend implementation returns a slightly richer enum than the original spec (`NOT_FOUND`, `NOT_IN_CATALOG`, `VARIANT_NOT_FOUND` instead of a single `PRODUCT_UNAVAILABLE`). This is intentional — more granular signals for the UI. If you need to map them to a single user-facing message, treat all three as "Producto ya no disponible".
+`PRICE_CONTEXT_NOT_AVAILABLE` is request-level only. Item-level `status` and `blockingCodes` explain reconciliation against the already resolved context: `NOT_IN_CATALOG`, `VARIANT_NOT_FOUND`, `VARIANT_NOT_IN_CATALOG`, `PRICE_NOT_AVAILABLE_IN_CONTEXT`, or `OUT_OF_STOCK`. No item code causes a fallback to another price list.
 
 **Example**
 
@@ -489,6 +500,7 @@ The backend implementation returns a slightly richer enum than the original spec
 curl -X POST "https://api.houndfe.com/public/catalog/centro/cart/validate" \
   -H "Content-Type: application/json" \
   -d '{
+    "priceListId": "price-list-uuid",
     "items": [
       { "productId": "prod-uuid-1", "variantId": "var-1", "quantity": 2 },
       { "productId": "prod-uuid-2", "quantity": 1 }
@@ -499,6 +511,7 @@ curl -X POST "https://api.houndfe.com/public/catalog/centro/cart/validate" \
 ```json
 {
   "valid": true,
+  "priceContext": { "priceListId": "price-list-uuid", "name": "Lista pública", "isCatalogDefault": true },
   "items": [
     {
       "productId": "prod-uuid-1",
@@ -507,116 +520,56 @@ curl -X POST "https://api.houndfe.com/public/catalog/centro/cart/validate" \
       "variantName": "13.6 kg",
       "image": { "url": "https://cdn.example.com/img1.jpg" },
       "quantity": 2,
+      "status": "VALID",
+      "blockingCodes": [],
+      "warnings": [],
       "unitPriceCents": 125000,
       "lineTotalCents": 250000,
       "availability": "available",
-      "priceHidden": false,
-      "warnings": []
-    },
-    {
-      "productId": "prod-uuid-2",
-      "variantId": null,
-      "productName": "Pelota de Goma",
-      "variantName": null,
-      "image": null,
-      "quantity": 1,
-      "unitPriceCents": 8500,
-      "lineTotalCents": 8500,
-      "availability": "low_stock",
-      "priceHidden": false,
-      "warnings": ["LOW_STOCK"]
+      "priceHidden": false
     }
   ],
-  "totalCents": 258500,
-  "warnings": ["LOW_STOCK"]
+  "totalCents": 250000,
+  "warnings": []
 }
 ```
 
 ---
 
-## 5. Stock semantics — never trust quantities
+## 5. Operational stock and hidden-price response rules
 
-The backend NEVER returns raw `quantity` or `minQuantity`. Do not ask for them; do not assume they exist. You get only semantic status:
+The public response exposes semantic `availability`, never raw `quantity` or `minQuantity`. `OUT_OF_STOCK` remains an operational cart block even when a context is valid; it is not a price-context result and is not affected by F3 presentation work.
 
-| Status | Label | UI guidance |
-|---|---|---|
-| `available` | Disponible | Normal state. Add to cart enabled. |
-| `low_stock` | Pocas piezas | Subtle warning badge. Add to cart enabled. |
-| `out_of_stock` | Agotado | Disable add-to-cart. Show "Agotado" badge. |
-
-For products with `useStock = false` (services, etc.), the backend always returns `available`. You don't need to handle this differently.
-
----
-
-## 6. Price hidden behavior
+When `hidePriceInOnlineCatalog` or `requiresPrescription` applies, list/detail numeric price fields are `null`; cart `unitPriceCents`, `lineTotalCents`, and response `totalCents` are `null` under the rules above. The item remains context-valid without a numeric-price fallback.
 
 When `price.hidden === true`:
 
 - `priceCents` is `null`.
 - `fromPriceCents` is `null` (in list view).
-- In cart validate: `unitPriceCents` and `lineTotalCents` are `null`, item gets `PRICE_HIDDEN` warning, contributes 0 to `totalCents`.
-
-**UI guidance**: show "Consultar precio" instead of a number. The user can still add it to the cart and ask the price via WhatsApp.
 
 **When does this happen?**
 
 - Product has `requiresPrescription = true` (auto-hidden — medicines).
-- An admin explicitly set `hidePriceInOnlineCatalog = true` (admin UI doesn't exist yet).
+- Product has `hidePriceInOnlineCatalog = true` (admin UI for `hidePriceInOnlineCatalog` is not yet available; the flag already applies through authenticated product writes).
+
+Request-level `PRICE_CONTEXT_NOT_AVAILABLE` is generic 404; item `blockingCodes` are `NOT_IN_CATALOG`, `VARIANT_NOT_FOUND`, `VARIANT_NOT_IN_CATALOG`, `PRICE_NOT_AVAILABLE_IN_CONTEXT`, or operational `OUT_OF_STOCK`.
 
 ---
 
-## 7. Cart validation flow (recommended client integration)
-
-When the user opens the cart drawer or the "checkout" screen:
-
-1. Call `POST /:slug/cart/validate` with the local cart contents.
-2. Use the response to:
-   - Update displayed prices (if `PRICE_CHANGED`, server price wins).
-   - Show warnings per item.
-   - Disable the "Enviar por WhatsApp" button if `valid === false`.
-   - Show `totalCents` if not `null`; otherwise show "Total a consultar" because at least one item has hidden price.
-
-**Warning handling cheat sheet**
-
-| Warning | Item meaning | UI |
-|---|---|---|
-| `PRICE_CHANGED` | Price differs from what you had locally | Soft yellow alert. Update price. Let user decide. |
-| `LOW_STOCK` | Quantity is low but still available | Small "Pocas piezas" badge. Allow purchase. |
-| `OUT_OF_STOCK` | Cannot fulfill | Red. Block from WhatsApp send. Suggest remove. |
-| `PRICE_HIDDEN` | Price not public | Show "Consultar precio". Don't include in numeric total. |
-| `NOT_FOUND` | Product no longer exists | Remove item with notice. |
-| `NOT_IN_CATALOG` | Product removed from online catalog | Same as NOT_FOUND. |
-| `VARIANT_NOT_FOUND` | Variant no longer exists | Suggest re-select variant. |
-
-**Future WhatsApp flow (next SDD)**: a follow-up endpoint will accept the same cart shape and return a `whatsappUrl` ready to open. For v1, build the WhatsApp text locally using the validated cart response:
-
-```ts
-const text = `Hola, quiero hacer este pedido para ${branchName}:\n\n` +
-  items.filter(i => i.availability !== 'out_of_stock')
-       .map(i => `${i.quantity}x ${i.productName}${i.variantName ? ` — ${i.variantName}` : ''}` +
-                  (i.unitPriceCents !== null ? ` — $${(i.lineTotalCents! / 100).toFixed(2)}` : ' — consultar precio'))
-       .join('\n') +
-  (totalCents !== null ? `\n\nTotal estimado: $${(totalCents / 100).toFixed(2)}` : '');
-
-const url = `https://wa.me/${OFFICIAL_PHONE}?text=${encodeURIComponent(text)}`;
-```
-
----
-
-## 8. Errors
+## 6. Errors
 
 All errors follow standard NestJS shapes.
 
-| Status | When | UI message suggestion |
-|---|---|---|
-| `400` | Validation failure (bad UUID, empty items, quantity < 1, sort outside enum, limit > 100). | Show inline field errors if you can. |
-| `404` | Tenant/product/branch not found, inactive entity. Generic — never enumerates. | "Producto no disponible" / "Sucursal no encontrada". |
-| `429` | Rate limited. | "Demasiadas solicitudes, esperá un momento". Implement client-side backoff. |
-| `5xx` | Backend error. | "Hubo un problema. Intentá de nuevo en unos segundos". |
+| Status | Backend response / contract fact |
+|---|---|
+| `400` | Validation failed (bad UUID, empty items, quantity < 1, sort outside enum, or limit > 100). |
+| `404` | Tenant/product/branch is unavailable; the generic response does not enumerate inactive or missing entities. |
+| `429` | The applicable per-IP rate limit was exceeded. |
+| `5xx` | The backend returned a server error. |
 
 ---
 
-## 9. Pagination and sorting
+## 7. Pagination and sorting
 
 | Param | Default | Min | Max |
 |---|---|---|---|
@@ -635,14 +588,9 @@ All errors follow standard NestJS shapes.
 
 ---
 
-## 10. Recommended TypeScript types
-
-Copy this file into your frontend project:
+## 8. Recommended TypeScript types
 
 ```ts
-// public-catalog.types.ts
-// Generated from backend SDD public-online-catalog (v1).
-
 export type PublicStockStatus = 'available' | 'low_stock' | 'out_of_stock';
 
 export type PublicSortOption =
@@ -652,14 +600,22 @@ export type PublicSortOption =
   | 'newest'
   | 'rating_desc';
 
+export type PublicPriceContext = {
+  priceListId: string;
+  name: string;
+  isCatalogDefault: boolean;
+};
+export type CartBlockingCode =
+  | 'NOT_IN_CATALOG'
+  | 'VARIANT_NOT_FOUND'
+  | 'VARIANT_NOT_IN_CATALOG'
+  | 'PRICE_NOT_AVAILABLE_IN_CONTEXT'
+  | 'OUT_OF_STOCK';
 export type CartWarningCode =
-  | 'PRICE_CHANGED'
-  | 'OUT_OF_STOCK'
+  | CartBlockingCode
   | 'LOW_STOCK'
   | 'PRICE_HIDDEN'
-  | 'NOT_FOUND'
-  | 'NOT_IN_CATALOG'
-  | 'VARIANT_NOT_FOUND';
+  | 'PRICE_CHANGED';
 
 /** GET /public/catalog/branches */
 export type PublicBranchDto = {
@@ -672,7 +628,7 @@ export type PublicBranchDto = {
 
 /** GET /public/catalog/:tenantSlug/products — query */
 export type ListProductsQuery = {
-  branchId?: string;
+  priceListId?: string; // optional UUID; omission selects the catalog default
   q?: string;
   categoryId?: string;
   sort?: PublicSortOption;
@@ -708,15 +664,10 @@ export type PublicCatalogCategoryFacet = {
 
 export type PublicProductListResponse = {
   items: PublicCatalogProductCard[];
-  meta: {
-    page: number;
-    limit: number;
-    total: number;
-    totalPages: number;
-  };
-  facets: {
-    categories: PublicCatalogCategoryFacet[];
-  };
+  meta: { page: number; limit: number; total: number; totalPages: number };
+  facets: { categories: PublicCatalogCategoryFacet[] };
+  excludedCount: number;
+  priceContext: PublicPriceContext;
 };
 
 /** GET /public/catalog/:tenantSlug/products/:productId */
@@ -758,6 +709,8 @@ export type PublicCatalogProductDetail = {
   variants: PublicVariantDto[];
   rating: null;
   featuredLabel: null;
+  excludedCount: 0;
+  priceContext: PublicPriceContext;
 };
 
 /** POST /public/catalog/:tenantSlug/cart/validate — request */
@@ -767,32 +720,31 @@ export type ValidateCartItem = {
   quantity: number;
 };
 
-export type ValidateCartCustomer = {
-  globalPriceListId?: string;
-};
-
 export type ValidateCartBody = {
+  priceListId?: string;
   items: ValidateCartItem[];
-  customer?: ValidateCartCustomer;
 };
 
 /** POST /public/catalog/:tenantSlug/cart/validate — response */
 export type CartValidatedItem = {
   productId: string;
   variantId: string | null;
-  productName: string;
+  productName: string | null;
   variantName: string | null;
   image: { url: string } | null;
   quantity: number;
+  status: 'VALID' | 'BLOCKED';
+  blockingCodes: CartBlockingCode[];
+  warnings: CartWarningCode[];
   unitPriceCents: number | null;
   lineTotalCents: number | null;
   availability: PublicStockStatus;
   priceHidden: boolean;
-  warnings: CartWarningCode[];
 };
 
 export type CartValidationResponse = {
   valid: boolean;
+  priceContext: PublicPriceContext;
   items: CartValidatedItem[];
   totalCents: number | null;
   warnings: CartWarningCode[];
@@ -801,35 +753,32 @@ export type CartValidationResponse = {
 
 ---
 
-## 11. Open follow-ups (next SDDs)
+## 9. Deferred backend scope
 
-These are NOT available yet. Plan UI accordingly with feature flags or empty states.
-
-- **WhatsApp order endpoint** — `POST /public/catalog/:slug/orders/whatsapp` will accept the validated cart and return a `whatsappUrl`. For v1, build the URL client-side.
+- Order creation and WhatsApp order routes are not part of cart validation.
 - **Real `rating`** — requires reviews infrastructure. v1 returns `null`.
 - **Real `featuredLabel`** — requires sales analytics ("Más vendido", "Premium", etc.). v1 returns `null`.
-- **Multi-branch per tenant** — if HoundFe ever introduces real multi-branch chains, `availabilityByBranch[]` will start returning multiple entries. The contract is ready.
-- **Admin endpoints** — to toggle `hidePriceInOnlineCatalog` from an admin UI. v1 only the data layer supports it.
 - **Category slugs** — pretty URLs by category. v1 uses UUIDs.
+- F3 public stock-presentation output is intentionally not documented in this slice.
 
 ---
 
-## 12. Quick reference card
+## 10. Quick reference card
 
 **Base URL**: `${API_BASE}/public/catalog/:tenantSlug/...`
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /public/catalog/branches` | List active branches (tenants). |
-| `GET /:slug/products` | Paginated product list with filters and facets. |
-| `GET /:slug/products/:id` | Product detail with variants. |
-| `POST /:slug/cart/validate` | Revalidate cart prices and stock. |
+| `GET /public/catalog/branches` | List active catalog-published branches. |
+| `GET /:slug/products?priceListId=` | Context-aware list; omit the optional UUID for the catalog default. |
+| `GET /:slug/products/:id?priceListId=` | Context-aware detail; no selected-list fallback. |
+| `POST /:slug/cart/validate` | Server-authoritative context-bound reconciliation. |
 
 **Stock statuses**: `available` · `low_stock` · `out_of_stock`
 
 **Sort options**: `newest` · `relevance` · `price_asc` · `price_desc` · `rating_desc` (falls back to relevance)
 
-**Cart warning codes**: `PRICE_CHANGED` · `OUT_OF_STOCK` · `LOW_STOCK` · `PRICE_HIDDEN` · `NOT_FOUND` · `NOT_IN_CATALOG` · `VARIANT_NOT_FOUND`
+**Cart blocks**: `NOT_IN_CATALOG` · `VARIANT_NOT_FOUND` · `VARIANT_NOT_IN_CATALOG` · `PRICE_NOT_AVAILABLE_IN_CONTEXT` · `OUT_OF_STOCK`
 
 **Rate limits (per IP)**: browse 60/min · validate 20/min
 
@@ -837,30 +786,6 @@ These are NOT available yet. Plan UI accordingly with feature flags or empty sta
 
 ---
 
-## Backend references
+## Evidence boundary
 
-- SDD proposal: engram observation `#2238`
-- SDD spec: engram observation `#2239` (31 requirements, 37 scenarios)
-- SDD design: engram observation `#2240`
-- SDD apply-progress: engram observation `#2242` (13 commits)
-- SDD verify report: engram observation `#2243` (verdict PASS)
-
-**Commits on `main`** (oldest first):
-
-```
-a33d9eb chore(public-catalog): scaffold module and throttler wiring
-19a88e5 chore(prisma): add hidePriceInOnlineCatalog field and catalog indexes
-735f6de feat(public-catalog): add tenant guard with CLS context
-3dd0190 feat(public-catalog): add stock and price-hidden mappers
-9825310 feat(public-catalog): expose public branches endpoint
-c497ffc feat(public-catalog): implement products listing and facets
-af8a4c2 feat(public-catalog): implement product detail endpoint
-c43cb79 feat(public-catalog): implement cart validation endpoint
-aa08504 test(public-catalog): harden isolation snapshots and http policies
-9e711c5 fix(public-catalog): scope throttler to public-catalog controller
-f8e36aa fix(public-catalog): accept rating_desc sort with relevance fallback
-216d890 fix(public-catalog): exclude out-of-stock and hidden-price items from cart total
-0f7a19b fix(public-catalog): sort price_asc by product priceCents instead of price-list count
-```
-
-If you find a contract discrepancy, ping backend with the request/response and we sync.
+This is backend response guidance through F2.WU7. It deliberately excludes frontend activation, historical suite totals, merge status, and F3 public stock-presentation output. Report a contract discrepancy with its request and response to the backend maintainers.
