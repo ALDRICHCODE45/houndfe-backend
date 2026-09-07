@@ -46,13 +46,72 @@ Authenticated settings source of truth: `GET`/`PATCH /tenants/:tenantId/catalog-
 
 `PATCH /tenants/:tenantId/catalog-settings` accepts these optional settings fields:
 
+- `catalogPublished?: boolean` — the catalog opt-in switch.
 - `publicPriceListIds: string[]` — unique catalog-public price-list UUIDs.
 - `catalogDefaultPriceListId: string | null` — the default UUID, which must belong to `publicPriceListIds`.
 - `stockPresentationDefault: { mode, customQuantity?: number | null }` — the tenant default; `CUSTOM_QUANTITY` requires a non-negative integer quantity, while other modes use `null`.
 
 The authenticated settings PATCH response has `Cache-Control: no-store`.
 
-Authenticated product writes/reads include `includeInOnlineCatalog`, `hidePriceInOnlineCatalog`, `supportedCatalogPriceListIds`, `supportsAllCatalogPriceLists`, `onlineStockPresentation`, and `onlineStockPresentationCustomQty`; variant writes/reads include `catalogPublishMode` (`INHERIT`/`ON`/`OFF`) and stock configuration. Omitted/empty allowlists support all tenant-public contexts; new/inline variants use `INHERIT` and null overrides inherit. No F3 public stock-presentation response is documented.
+### Authenticated settings response
+
+Both `GET` and `PATCH /tenants/:tenantId/catalog-settings` return the same shape:
+
+```ts
+type CatalogSettingsResponseDto = {
+  tenantId: string;
+  catalogPublished: boolean;
+  effectivePublication: boolean; // active tenant AND catalogPublished
+  priceContexts: Array<{
+    priceListId: string;
+    name: string;
+    isCatalogDefault: boolean;
+  }>;
+  stockPresentationDefault: {
+    mode: 'SYSTEM_STATUS' | 'ABSTRACT_STATUS' | 'CUSTOM_QUANTITY' | 'HIDDEN';
+    customQuantity: number | null;
+  };
+  warnings: Array<'DEFAULT_CONTEXT_HAS_NO_VALID_PRICES'>;
+  updatedAt: string; // ISO timestamp
+};
+```
+
+### Authenticated product and variant catalog fields
+
+Product create/PATCH accept every field here as optional except `supportsAllCatalogPriceLists` (computed read-only); every authenticated product read returns:
+
+```ts
+type ProductCatalogFields = {
+  includeInOnlineCatalog: boolean;
+  hidePriceInOnlineCatalog: boolean;
+  supportedCatalogPriceListIds: string[]; // unique UUID v4; [] = all tenant-public lists
+  supportsAllCatalogPriceLists: boolean; // read-only: true when supportedCatalogPriceListIds is []
+  onlineStockPresentation:
+    | 'SYSTEM_STATUS'
+    | 'ABSTRACT_STATUS'
+    | 'CUSTOM_QUANTITY'
+    | 'HIDDEN'
+    | null;
+  onlineStockPresentationCustomQty: number | null;
+};
+```
+
+Variant reads carry the publication tri-state plus the stock override pair:
+
+```ts
+type VariantCatalogFields = {
+  catalogPublishMode: 'INHERIT' | 'ON' | 'OFF';
+  onlineStockPresentation:
+    | 'SYSTEM_STATUS'
+    | 'ABSTRACT_STATUS'
+    | 'CUSTOM_QUANTITY'
+    | 'HIDDEN'
+    | null;
+  onlineStockPresentationCustomQty: number | null;
+};
+```
+
+`catalogPublishMode` and variant stock fields are PATCH-only: new/inline variants persist `INHERIT` with null overrides, and `INHERIT` (never `null`) expresses inheritance. An explicit `null` allowlist is rejected on product writes, while `onlineStockPresentation`/`onlineStockPresentationCustomQty` accept explicit `null` to clear overrides. Omitted/empty allowlists support all tenant-public contexts. No F3 public stock-presentation response is documented.
 
 ## 4. Endpoints
 
@@ -439,8 +498,7 @@ type CartBlockingCode =
 type CartWarningCode =
   | CartBlockingCode
   | 'LOW_STOCK'
-  | 'PRICE_HIDDEN'
-  | 'PRICE_CHANGED';
+  | 'PRICE_HIDDEN';
 
 type CartValidatedItem = {
   productId: string;
@@ -478,7 +536,7 @@ type CartValidationResponseDto = {
 
 **`valid` semantics**
 
-- `valid` is false for non-empty `blockingCodes`; `PRICE_CHANGED`, `LOW_STOCK`, and `PRICE_HIDDEN` are non-blocking.
+- `valid` is false for non-empty `blockingCodes`; `LOW_STOCK` and `PRICE_HIDDEN` are non-blocking.
 
 **Headers**
 
@@ -614,8 +672,7 @@ export type CartBlockingCode =
 export type CartWarningCode =
   | CartBlockingCode
   | 'LOW_STOCK'
-  | 'PRICE_HIDDEN'
-  | 'PRICE_CHANGED';
+  | 'PRICE_HIDDEN';
 
 /** GET /public/catalog/branches */
 export type PublicBranchDto = {
