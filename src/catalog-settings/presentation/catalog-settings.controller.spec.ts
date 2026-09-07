@@ -37,6 +37,8 @@ import {
 } from '@nestjs/common/constants';
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { RequestMethod } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
@@ -46,7 +48,7 @@ import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type { CatalogSettingsInternalResult } from '../domain/tenant-catalog-settings.aggregate';
 import { GetCatalogSettingsUseCase } from '../application/get-catalog-settings.use-case';
 import { UpdateCatalogSettingsUseCase } from '../application/update-catalog-settings.use-case';
-import type { UpdateCatalogSettingsDto } from '../dto/update-catalog-settings.dto';
+import { UpdateCatalogSettingsDto } from '../dto/update-catalog-settings.dto';
 import { toCatalogSettingsResponseDto } from '../dto/catalog-settings-response.dto';
 import { CatalogSettingsController } from './catalog-settings.controller';
 
@@ -311,6 +313,31 @@ describe('CatalogSettingsController', () => {
       expect(updateExecute).toHaveBeenCalledWith(
         expect.objectContaining({ tenantId: TENANT_B }),
       );
+    });
+
+    // F2.WU8 Slice 2 — guide §3 PATCH: DTO validation + delegation.
+    it('validates the documented optional PATCH fields with valid UUIDs', async () => {
+      const guidePatch = plainToInstance(UpdateCatalogSettingsDto, {
+        catalogPublished: true,
+        publicPriceListIds: [TENANT_A, TENANT_B],
+        catalogDefaultPriceListId: TENANT_A,
+        stockPresentationDefault: {
+          mode: 'CUSTOM_QUANTITY',
+          customQuantity: 5,
+        },
+      });
+      expect(await validate(guidePatch)).toEqual([]);
+      await controller.updateSettings(
+        TENANT_A,
+        guidePatch,
+        user(TENANT_A),
+        {} as never,
+      );
+      expect(updateExecute).toHaveBeenCalledWith({
+        tenantId: TENANT_A,
+        actorUserId: 'user-1',
+        data: guidePatch,
+      });
     });
   });
 });
