@@ -9,7 +9,7 @@ import {
   UseInterceptors,
   ParseUUIDPipe,
 } from '@nestjs/common';
-import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+import { SkipThrottle, Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { PublicTenantGuard } from './guards/public-tenant.guard';
 import {
   PublicTenant,
@@ -29,6 +29,7 @@ import { PublicPriceContextQueryDto } from './request-dto/public-price-context-q
 import { PublicPriceContextResolver } from '../application/services/public-price-context-resolver';
 
 @Controller('public/catalog')
+@SkipThrottle({ 'public-validate': true })
 @UseGuards(PublicTenantGuard, ThrottlerGuard)
 @UseInterceptors(CacheControlInterceptor)
 export class PublicCatalogController {
@@ -109,6 +110,7 @@ export class PublicCatalogController {
 
   @Post(':tenantSlug/cart/validate')
   @CacheControl('no-store')
+  @SkipThrottle({ 'public-browse': true, 'public-validate': false })
   @Throttle({ 'public-validate': { ttl: 60_000, limit: 20 } })
   async validateCartEndpoint(
     @Param('tenantSlug') tenantSlug: string,

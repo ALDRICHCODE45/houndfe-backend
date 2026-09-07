@@ -1,13 +1,80 @@
-import { APP_GUARD } from '@nestjs/core';
-import { RequestMethod } from '@nestjs/common';
+import { RequestMethod, type ExecutionContext } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD, Reflector } from '@nestjs/core';
+import { ThrottlerGuard, type ThrottlerStorage } from '@nestjs/throttler';
 import {
   THROTTLER_LIMIT,
   THROTTLER_TTL,
 } from '@nestjs/throttler/dist/throttler.constants';
 import { PublicCatalogController } from './public-catalog.controller';
 import { PublicCatalogModule } from '../public-catalog.module';
+
+type ControllerHandler = (...args: never[]) => unknown;
+
+// @nestjs/throttler v6 does not re-export ThrottlerStorageRecord from its
+// package index, so the fake storage returns a structurally identical record.
+type StorageRecord = {
+  totalHits: number;
+  timeToExpire: number;
+  isBlocked: boolean;
+  timeToBlockExpire: number;
+};
+
+class RecordingThrottlerStorage implements ThrottlerStorage {
+  readonly calls: Array<{ ttl: number; limit: number; name: string }> = [];
+
+  increment(
+    _key: string,
+    ttl: number,
+    limit: number,
+    _blockDuration: number,
+    name: string,
+  ): Promise<StorageRecord> {
+    this.calls.push({ ttl, limit, name });
+    return Promise.resolve({
+      totalHits: 1,
+      timeToExpire: ttl,
+      isBlocked: false,
+      timeToBlockExpire: 0,
+    });
+  }
+}
+
+const getControllerHandler = (name: string): ControllerHandler => {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    PublicCatalogController.prototype,
+    name,
+  );
+
+  if (!descriptor || typeof descriptor.value !== 'function') {
+    throw new Error(`Missing PublicCatalogController handler: ${name}`);
+  }
+
+  return descriptor.value as ControllerHandler;
+};
+
+const createContext = (handler: ControllerHandler): ExecutionContext =>
+  ({
+    getHandler: () => handler,
+    getClass: () => PublicCatalogController,
+    switchToHttp: () => ({
+      getRequest: () => ({ ip: '203.0.113.8', headers: {} }),
+      getResponse: () => ({ header: jest.fn() }),
+    }),
+  }) as unknown as ExecutionContext;
+
+const createGuard = (storage: RecordingThrottlerStorage) => {
+  const guard = new ThrottlerGuard(
+    [
+      { name: 'public-browse', ttl: 60_000, limit: 60 },
+      { name: 'public-validate', ttl: 60_000, limit: 20 },
+    ],
+    storage,
+    new Reflector(),
+  );
+
+  return guard;
+};
 
 describe('Throttler scope (CRITICAL-01 regression)', () => {
   it('should NOT register ThrottlerGuard as APP_GUARD in module providers', () => {
@@ -40,6 +107,33 @@ describe('Throttler scope (CRITICAL-01 regression)', () => {
 
     expect(guards).toContain(ThrottlerGuard);
   });
+
+  it.each([
+    ['getBranches', getControllerHandler('getBranches'), 'public-browse', 60],
+    ['getProducts', getControllerHandler('getProducts'), 'public-browse', 60],
+    ['getProduct', getControllerHandler('getProduct'), 'public-browse', 60],
+    [
+      'validateCartEndpoint',
+      getControllerHandler('validateCartEndpoint'),
+      'public-validate',
+      20,
+    ],
+  ])(
+    '%s executes only its named throttler',
+    async (_name, handler, expectedName, expectedLimit) => {
+      const storage = new RecordingThrottlerStorage();
+      const guard = createGuard(storage);
+      await guard.onModuleInit();
+
+      await expect(guard.canActivate(createContext(handler))).resolves.toBe(
+        true,
+      );
+
+      expect(storage.calls).toEqual([
+        { name: expectedName, ttl: 60_000, limit: expectedLimit },
+      ]);
+    },
+  );
 
   it('keeps exact public-validate policy metadata on the cart handler', () => {
     // eslint-disable-next-line @typescript-eslint/unbound-method
