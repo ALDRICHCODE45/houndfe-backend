@@ -568,7 +568,7 @@ curl -X POST "https://api.houndfe.com/public/catalog/centro/cart/validate" \
 
 ```json
 {
-  "valid": true,
+  "valid": false,
   "priceContext": { "priceListId": "price-list-uuid", "name": "Lista pública", "isCatalogDefault": true },
   "items": [
     {
@@ -585,10 +585,25 @@ curl -X POST "https://api.houndfe.com/public/catalog/centro/cart/validate" \
       "lineTotalCents": 250000,
       "availability": "available",
       "priceHidden": false
+    },
+    {
+      "productId": "prod-uuid-2",
+      "variantId": null,
+      "productName": null,
+      "variantName": null,
+      "image": null,
+      "quantity": 1,
+      "status": "BLOCKED",
+      "blockingCodes": ["NOT_IN_CATALOG"],
+      "warnings": ["NOT_IN_CATALOG"],
+      "unitPriceCents": null,
+      "lineTotalCents": null,
+      "availability": "out_of_stock",
+      "priceHidden": false
     }
   ],
   "totalCents": 250000,
-  "warnings": []
+  "warnings": ["NOT_IN_CATALOG"]
 }
 ```
 
