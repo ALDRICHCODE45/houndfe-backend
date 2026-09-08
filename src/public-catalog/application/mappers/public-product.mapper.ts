@@ -14,7 +14,20 @@ import {
   type PublicStockStatus,
 } from '../../domain/value-objects/stock-status.vo';
 import { isEffectivelyPriceHidden } from '../../domain/value-objects/effective-price-hidden.vo';
-import type { StockPresentationDefaults } from '../../domain/value-objects/stock-presentation.vo';
+import type {
+  StockPresentationDefaults,
+  StockPresentationSource,
+} from '../../domain/value-objects/stock-presentation.vo';
+
+/**
+ * F3.WU9 correction — persisted stock-presentation override scalars as they
+ * reach the mapper from the runtime Prisma projection (nullable per product
+ * and per variant; absent in legacy typed fixtures means "not persisted").
+ */
+type PersistedStockPresentationOverrides = {
+  onlineStockPresentation?: StockPresentationSource['onlineStockPresentation'];
+  onlineStockPresentationCustomQty?: StockPresentationSource['onlineStockPresentationCustomQty'];
+};
 import {
   mapPublicAggregateVariantStockPresentation,
   mapPublicProductStockPresentation,
@@ -50,7 +63,7 @@ export interface ProductWithIncludes {
   }>;
 }
 
-export interface ProductDetailWithIncludes {
+export interface ProductDetailWithIncludes extends PersistedStockPresentationOverrides {
   id: string;
   name: string;
   description: string | null;
@@ -73,6 +86,9 @@ export interface ProductDetailWithIncludes {
     minQuantity: number;
     /** F1.WU5c2 — carried from the repository projection for the defensive OFF filter. */
     catalogPublishMode?: string | null;
+    /** F3.WU9 correction — persisted per-variant presentation override. */
+    onlineStockPresentation?: StockPresentationSource['onlineStockPresentation'];
+    onlineStockPresentationCustomQty?: StockPresentationSource['onlineStockPresentationCustomQty'];
     images: Array<{ url: string }>;
     variantPrices: Array<{ priceCents: number }>;
   }>;
@@ -251,16 +267,20 @@ function mappedStockOrThrow(
 }
 
 /**
- * F3.WU9 slice 7 — activated contextual-only stock-presentation mapping
+ * F3.WU9 slice 7 (corrected) — contextual-only stock-presentation mapping
  * (design §9.2/§9.3). Tenant defaults arrive unchanged from the resolved
- * `ResolvedPublicCatalogContext.stockPresentationDefaults`; the contextual
- * projection carries no per-product presentation override, so resolution is
- * defaults-pure. Simple products map their own operational stock; variant
- * products aggregate exclusively over the preserved
- * `stockPresentationParticipants` rows — product `quantity`/`minQuantity`
- * are never revived as an aggregate fallback — and every visible variant row
- * renders its own presentation. The legacy `toPublicProductDetail` behavior
- * above is untouched.
+ * `ResolvedPublicCatalogContext.stockPresentationDefaults`; persisted
+ * product/variant presentation overrides participate in the canonical
+ * resolution: product override → tenant default → SYSTEM_STATUS, with a
+ * null-mode variant inheriting the resolved product configuration and an
+ * explicit-mode variant using its own mode and custom quantity only. An
+ * explicit custom quantity of `0` is preserved. Simple products map their
+ * own operational stock; variant products aggregate exclusively over the
+ * preserved `stockPresentationParticipants` rows using the product
+ * effective configuration only — product `quantity`/`minQuantity` are
+ * never revived as an aggregate fallback, and participant variant
+ * presentation overrides never affect the aggregate configuration. The
+ * legacy `toPublicProductDetail` behavior above is untouched.
  */
 export function toPublicProductDetailForContext(
   product: PublicContextualDetailProjection,
@@ -270,24 +290,24 @@ export function toPublicProductDetailForContext(
   const priceHidden = isEffectivelyPriceHidden(product);
   const publicVariants = visibleVariants(product.variants);
 
-  // Defaults-pure presentation source: the contextual projection projects no
-  // per-product/variant presentation override, so the effective mode comes
-  // only from the tenant defaults (with the documented SYSTEM_STATUS floor).
-  const presentationSource = {
-    onlineStockPresentation: null,
-    onlineStockPresentationCustomQty: null,
-  } as const;
+  // F3.WU9 correction — the persisted product override participates in the
+  // canonical resolution (`?? null` preserves an explicit custom qty of 0).
+  const productPresentationSource = {
+    onlineStockPresentation: product.onlineStockPresentation ?? null,
+    onlineStockPresentationCustomQty:
+      product.onlineStockPresentationCustomQty ?? null,
+  };
 
   const productStock = mappedStockOrThrow(
     product.hasVariants
       ? mapPublicAggregateVariantStockPresentation({
-          product: { ...presentationSource, useStock: product.useStock },
+          product: { ...productPresentationSource, useStock: product.useStock },
           tenant: stockDefaults,
           variantParticipants: product.stockPresentationParticipants,
         })
       : mapPublicProductStockPresentation({
           product: {
-            ...presentationSource,
+            ...productPresentationSource,
             useStock: product.useStock,
             quantity: product.quantity,
             minQuantity: product.minQuantity,
@@ -299,9 +319,13 @@ export function toPublicProductDetailForContext(
   const variants: PublicContextualVariantDto[] = publicVariants.map((v) => {
     const stock = mappedStockOrThrow(
       mapPublicVariantStockPresentation({
-        product: { ...presentationSource, useStock: product.useStock },
+        // A null-mode variant inherits the resolved product configuration
+        // (including product/tenant custom quantity) inside the domain VO.
+        product: { ...productPresentationSource, useStock: product.useStock },
         variant: {
-          ...presentationSource,
+          onlineStockPresentation: v.onlineStockPresentation ?? null,
+          onlineStockPresentationCustomQty:
+            v.onlineStockPresentationCustomQty ?? null,
           quantity: v.quantity,
           minQuantity: v.minQuantity,
         },

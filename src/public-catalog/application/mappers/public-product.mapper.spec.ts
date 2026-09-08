@@ -596,6 +596,167 @@ describe('toPublicProductDetailForContext', () => {
     ]);
   });
 
+  it('resolves a simple product from its persisted stock-presentation override over the tenant defaults (F3.WU9 correction)', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        quantity: 0,
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 3,
+      }),
+      tenant,
+      systemDefaults,
+    );
+
+    expect(result.stockPresentation).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: 'out_of_stock',
+      customQuantity: 3,
+    });
+  });
+
+  it('inherits the resolved product configuration for variants whose persisted mode is null (F3.WU9 correction)', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        hasVariants: true,
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 3,
+        variants: [variantOf('v-a', 5)],
+        stockPresentationParticipants: [{ quantity: 5, minQuantity: 2 }],
+      }),
+      tenant,
+      systemDefaults,
+    );
+
+    // Null variant mode inherits the product override, including its
+    // custom quantity; rendering with stock yields status null (qty 5).
+    expect(result.variants[0].stockPresentation).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: null,
+      customQuantity: 3,
+    });
+  });
+
+  it('preserves an explicit custom quantity of 0 instead of falling back to the tenant default (F3.WU9 correction)', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 0,
+      }),
+      tenant,
+      {
+        catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
+        catalogStockPresentationDefaultCustomQty: 4,
+      },
+    );
+
+    // Dropping the persisted 0 would revive the tenant default 4.
+    expect(result.stockPresentation).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: null,
+      customQuantity: 0,
+    });
+  });
+
+  it('uses an explicit variant mode with its own custom quantity while the aggregate keeps the product configuration only (F3.WU9 correction)', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        hasVariants: true,
+        onlineStockPresentation: 'HIDDEN',
+        variants: [
+          variantOf('v-a', 0, {
+            onlineStockPresentation: 'CUSTOM_QUANTITY',
+            onlineStockPresentationCustomQty: 7,
+          }),
+        ],
+        stockPresentationParticipants: [{ quantity: 0, minQuantity: 2 }],
+      }),
+      tenant,
+      systemDefaults,
+    );
+
+    // Product aggregate: product effective configuration only — the
+    // participant/variant presentation override never leaks into it.
+    expect(result.stockPresentation).toEqual({
+      mode: 'HIDDEN',
+      status: null,
+      customQuantity: null,
+    });
+    expect(result.availability).toBeNull();
+    // Variant row: its own explicit mode and custom quantity only.
+    expect(result.variants[0].stockPresentation).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: 'out_of_stock',
+      customQuantity: 7,
+    });
+  });
+
+  it('keeps an explicit SYSTEM_STATUS product override over a CUSTOM_QUANTITY tenant default (F3.WU9 correction)', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({ onlineStockPresentation: 'SYSTEM_STATUS' }),
+      tenant,
+      {
+        catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
+        catalogStockPresentationDefaultCustomQty: 4,
+      },
+    );
+
+    expect(result.stockPresentation).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+  });
+
+  it('aggregates over every preserved participant row regardless of variant presentation overrides (F3.WU9 correction)', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        hasVariants: true,
+        variants: [
+          variantOf('v-a', 10, { onlineStockPresentation: 'HIDDEN' }),
+          variantOf('v-b', 0, { onlineStockPresentation: 'HIDDEN' }),
+        ],
+        stockPresentationParticipants: [
+          { quantity: 10, minQuantity: 2 },
+          { quantity: 0, minQuantity: 2 },
+        ],
+      }),
+      tenant,
+      systemDefaults,
+    );
+
+    // The aggregate follows the product/tenant configuration and the
+    // participant quantities — not the variants' own HIDDEN overrides.
+    expect(result.stockPresentation).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+    expect(result.variants[0].stockPresentation.mode).toBe('HIDDEN');
+  });
+
+  it('exposes no persisted override fields and nulls an explicit HIDDEN variant row (F3.WU9 correction)', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 3,
+        hasVariants: true,
+        variants: [
+          variantOf('v-a', 5, { onlineStockPresentation: 'HIDDEN' }),
+        ],
+        stockPresentationParticipants: [{ quantity: 5, minQuantity: 2 }],
+      }),
+      tenant,
+      systemDefaults,
+    );
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('onlineStockPresentation');
+    expect(serialized).not.toContain('onlineStockPresentationCustomQty');
+    expect(serialized).not.toContain('"quantity"');
+    expect(serialized).not.toContain('"minQuantity"');
+    expect(result.variants[0].availabilityByBranch[0].availability).toBeNull();
+  });
+
   it('leaks no operational stock keys in the serialized contextual output', () => {
     const result = toPublicProductDetailForContext(
       makeProjection({

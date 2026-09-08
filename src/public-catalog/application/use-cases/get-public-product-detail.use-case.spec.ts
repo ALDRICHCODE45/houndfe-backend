@@ -526,6 +526,43 @@ describe('GetPublicProductDetailUseCase.executeForContext (F2.WU6 slice 4b — d
           expect(result.variants[0].availabilityByBranch[0].availability).toBeNull();
         });
 
+        it('threads persisted product and variant stock-presentation overrides from the repository projection into the response (F3.WU9 correction)', async () => {
+          seam.mockResolvedValue(
+            priced(
+              {
+                hasVariants: true,
+                onlineStockPresentation: 'CUSTOM_QUANTITY',
+                onlineStockPresentationCustomQty: 3,
+                variants: [
+                  {
+                    ...makeDetail().variants[0],
+                    quantity: 0,
+                    onlineStockPresentation: 'HIDDEN',
+                  },
+                ],
+              },
+              [{ quantity: 0, minQuantity: 2 }],
+            ),
+          );
+
+          const result = await useCase.executeForContext(detailInput);
+
+          // Aggregate: product override mode; aggregate render never
+          // exposes a custom quantity.
+          expect(result.stockPresentation).toEqual({
+            mode: 'CUSTOM_QUANTITY',
+            status: 'out_of_stock',
+            customQuantity: null,
+          });
+          // Variant row: its own explicit HIDDEN override.
+          expect(result.variants[0].stockPresentation).toEqual({
+            mode: 'HIDDEN',
+            status: null,
+            customQuantity: null,
+          });
+          expect(result.variants[0].availabilityByBranch[0].availability).toBeNull();
+        });
+
         it('responds as a generic miss with one safe warning on invalid participants', async () => {
           const warn = jest
             .spyOn(Logger.prototype, 'warn')
