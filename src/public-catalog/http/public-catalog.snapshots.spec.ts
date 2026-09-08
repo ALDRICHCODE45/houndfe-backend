@@ -177,6 +177,10 @@ describe('Public catalog response snapshot tests', () => {
       globalPriceListId: 'gpl-1',
       name: 'Publico',
       isCatalogDefault: true,
+      stockPresentationDefaults: {
+        catalogStockPresentationDefault: 'SYSTEM_STATUS',
+        catalogStockPresentationDefaultCustomQty: null,
+      },
     };
     const result = await useCase.executeForContext({
       tenant: { id: 'tenant-1', slug: 'centro' },
@@ -228,6 +232,10 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
     globalPriceListId: 'gpl-1',
     name: 'Lista pública',
     isCatalogDefault,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS',
+      catalogStockPresentationDefaultCustomQty: null,
+    },
   });
   const priceCtx = (isCatalogDefault: boolean) => ({
     priceListId: 'gpl-1',
@@ -426,6 +434,10 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
           globalPriceListId: requested ?? 'gpl-default',
           name: 'Contexto',
           isCatalogDefault: !requested,
+          stockPresentationDefaults: {
+            catalogStockPresentationDefault: 'SYSTEM_STATUS',
+            catalogStockPresentationDefaultCustomQty: null,
+          },
         }),
     );
     const listProducts = { executeForContext: jest.fn() };

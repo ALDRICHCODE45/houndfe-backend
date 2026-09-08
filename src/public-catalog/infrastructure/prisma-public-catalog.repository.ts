@@ -97,6 +97,10 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
             slug: true,
             isActive: true,
             catalogPublished: true,
+            // F3.WU9 slice 5 — tenant stock-presentation defaults ride the
+            // same one-query lookup; no second query, no fallback.
+            catalogStockPresentationDefault: true,
+            catalogStockPresentationDefaultCustomQty: true,
           },
         },
       },
@@ -114,6 +118,12 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       globalPriceListId: binding.globalPriceListId,
       name: binding.globalPriceList.name,
       isCatalogDefault: binding.isCatalogDefault,
+      stockPresentationDefaults: {
+        catalogStockPresentationDefault:
+          binding.tenant.catalogStockPresentationDefault,
+        catalogStockPresentationDefaultCustomQty:
+          binding.tenant.catalogStockPresentationDefaultCustomQty,
+      },
     };
   }
 

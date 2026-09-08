@@ -1248,6 +1248,10 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         globalPriceListId: gSel,
         name: 'pd-sel',
         isCatalogDefault: true,
+        stockPresentationDefaults: {
+          catalogStockPresentationDefault: 'SYSTEM_STATUS',
+          catalogStockPresentationDefaultCustomQty: null,
+        },
       };
       const call = (productId: string, o?: { tid?: string; cid?: string }) =>
         detailSeam({
@@ -1466,6 +1470,10 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         globalPriceListId: gSel,
         name: 'spp-sel',
         isCatalogDefault: true,
+        stockPresentationDefaults: {
+          catalogStockPresentationDefault: 'SYSTEM_STATUS',
+          catalogStockPresentationDefaultCustomQty: null,
+        },
       };
       const call = (productId: string) =>
         repo.getPublicProductDetail({
@@ -1801,6 +1809,10 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         globalPriceListId: gSel,
         name: 'cart-sel',
         isCatalogDefault: false,
+        stockPresentationDefaults: {
+          catalogStockPresentationDefault: 'SYSTEM_STATUS',
+          catalogStockPresentationDefaultCustomQty: null,
+        },
       };
 
       const eligible = await seedProduct(tenant, 'eligible', {

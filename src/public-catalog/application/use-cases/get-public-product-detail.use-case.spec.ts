@@ -143,6 +143,10 @@ describe('GetPublicProductDetailUseCase.executeForContext (F2.WU6 slice 4b — d
     globalPriceListId: 'gpl-sel-1',
     name: 'Spring Catalog',
     isCatalogDefault: false,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS',
+      catalogStockPresentationDefaultCustomQty: null,
+    },
   };
 
   const detailInput = { productId: 'prod-1', tenant, context };

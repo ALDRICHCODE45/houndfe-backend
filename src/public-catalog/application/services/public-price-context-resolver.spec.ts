@@ -10,6 +10,10 @@ const CONTEXT: ResolvedPublicCatalogContext = {
   globalPriceListId: 'gpl-1',
   name: 'Lista Publico',
   isCatalogDefault: true,
+  stockPresentationDefaults: {
+    catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
+    catalogStockPresentationDefaultCustomQty: 25,
+  },
 };
 
 describe('PublicPriceContextResolver (F2.WU6)', () => {
@@ -41,6 +45,25 @@ describe('PublicPriceContextResolver (F2.WU6)', () => {
       'tenant-a',
       'gpl-9',
     );
+  });
+
+  it('threads tenant stock-presentation defaults unchanged (F3.WU9 slice 5)', async () => {
+    const { resolveTenantCatalogContext, resolver } = setup();
+    resolveTenantCatalogContext.mockResolvedValue(CONTEXT);
+
+    const expected = {
+      stockPresentationDefaults: {
+        catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
+        catalogStockPresentationDefaultCustomQty: 25,
+      },
+    };
+    await expect(resolver.resolve('tenant-a')).resolves.toMatchObject(
+      expected,
+    );
+    await expect(
+      resolver.resolve('tenant-a', 'gpl-9'),
+    ).resolves.toMatchObject(expected);
+    expect(resolveTenantCatalogContext).toHaveBeenCalledTimes(2);
   });
 
   it('throws the one generic miss error on null and never looks up twice', async () => {

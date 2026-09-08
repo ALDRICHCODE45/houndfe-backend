@@ -179,6 +179,10 @@ describe(
       globalPriceListId: 'gpl-default-1',
       name: 'Publico',
       isCatalogDefault: true,
+      stockPresentationDefaults: {
+        catalogStockPresentationDefault: 'SYSTEM_STATUS',
+        catalogStockPresentationDefaultCustomQty: null,
+      },
     };
     const EXPLICIT_CONTEXT: ResolvedPublicCatalogContext = {
       ...DEFAULT_CONTEXT,

@@ -31,6 +31,10 @@ describe('executeForContext (F2.WU7 slice 2 — dormant seam)', () => {
     globalPriceListId: 'gpl-sel-1',
     name: 'Spring Catalog',
     isCatalogDefault: false,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS',
+      catalogStockPresentationDefaultCustomQty: null,
+    },
   };
   const tenant = { id: 'tenant-1', slug: 'petshop' };
 
@@ -322,6 +326,10 @@ describe('POST /public/catalog/:tenantSlug/cart/validate (F2.WU7 Slice 4)', () =
     globalPriceListId: 'gpl-default-1',
     name: 'Publico',
     isCatalogDefault: true,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS',
+      catalogStockPresentationDefaultCustomQty: null,
+    },
   };
   const EXPLICIT_CONTEXT: ResolvedPublicCatalogContext = {
     ...DEFAULT_CONTEXT,

@@ -4,6 +4,7 @@ import type {
   ProductWithIncludes,
   ProductDetailWithIncludes,
 } from '../mappers/public-product.mapper';
+import type { CatalogStockPresentationValue } from '../../../catalog-settings/domain/tenant-catalog-settings.aggregate';
 
 export interface ListProductsParams {
   q?: string;
@@ -26,6 +27,16 @@ export interface ResolvedPublicCatalogContext {
   globalPriceListId: string;
   name: string;
   isCatalogDefault: boolean;
+  /**
+   * F3.WU9 slice 5 — tenant stock-presentation defaults snapshot, resolved
+   * by the same one-query context lookup and threaded unchanged. Internal
+   * only: no mapper/controller/DTO consumption yet, no `SYSTEM_STATUS`
+   * fallback, and no reinterpretation of Slice 4 participant snapshots.
+   */
+  stockPresentationDefaults: {
+    catalogStockPresentationDefault: CatalogStockPresentationValue;
+    catalogStockPresentationDefaultCustomQty: number | null;
+  };
 }
 
 /**

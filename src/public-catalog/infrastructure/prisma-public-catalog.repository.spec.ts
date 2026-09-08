@@ -623,7 +623,13 @@ describe('F2.WU6 resolveTenantCatalogContext', () => {
       slug: 'ctx-tenant',
       isActive: true,
       catalogPublished: true,
+      catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
+      catalogStockPresentationDefaultCustomQty: 25,
     },
+  };
+  const STOCK_DEFAULTS = {
+    catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
+    catalogStockPresentationDefaultCustomQty: 25,
   };
   const setup = (binding: unknown) => {
     const findFirst = jest.fn().mockResolvedValue(binding);
@@ -647,6 +653,7 @@ describe('F2.WU6 resolveTenantCatalogContext', () => {
       globalPriceListId: 'gpl-1',
       name: 'Lista Mayoreo',
       isCatalogDefault: true,
+      stockPresentationDefaults: STOCK_DEFAULTS,
     });
     expect(findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { isCatalogDefault: true } }),
@@ -659,6 +666,36 @@ describe('F2.WU6 resolveTenantCatalogContext', () => {
     expect(findFirst).toHaveBeenLastCalledWith(
       expect.objectContaining({ where: { globalPriceListId: 'gpl-9' } }),
     );
+  });
+
+  it('carries tenant stock-presentation defaults from the same one-query lookup (F3.WU9 slice 5)', async () => {
+    const { findFirst, repo } = setup({ ...OK, isCatalogDefault: true });
+
+    // Omitted resolution: one query, defaults projected from the tenant.
+    await expect(
+      repo.resolveTenantCatalogContext?.('ctx-tenant'),
+    ).resolves.toMatchObject({ stockPresentationDefaults: STOCK_DEFAULTS });
+    expect(findFirst).toHaveBeenCalledTimes(1);
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          tenant: {
+            select: expect.objectContaining({
+              catalogStockPresentationDefault: true,
+              catalogStockPresentationDefaultCustomQty: true,
+            }),
+          },
+        }),
+      }),
+    );
+
+    // Explicit resolution: same single lookup, same tenant defaults.
+    findFirst.mockClear();
+    findFirst.mockResolvedValue(OK);
+    await expect(
+      repo.resolveTenantCatalogContext?.('ctx-tenant', 'gpl-9'),
+    ).resolves.toMatchObject({ stockPresentationDefaults: STOCK_DEFAULTS });
+    expect(findFirst).toHaveBeenCalledTimes(1);
   });
 
   it('collapses every miss into one null with exactly one lookup each', async () => {
@@ -714,6 +751,10 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
     globalPriceListId,
     name: 'Lista',
     isCatalogDefault: false,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS',
+      catalogStockPresentationDefaultCustomQty: null,
+    },
   });
   const baseInput = {
     tenantId: 'tenant-1',
