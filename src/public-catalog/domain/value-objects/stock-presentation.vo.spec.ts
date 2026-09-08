@@ -1,8 +1,10 @@
 import {
+  renderAggregateVariantStockPresentation,
   renderStockPresentation,
   resolveProductStockPresentation,
   resolveVariantStockPresentation,
   type EffectiveStockPresentationConfig,
+  type VariantOperationalStock,
 } from './stock-presentation.vo';
 
 describe('resolveProductStockPresentation', () => {
@@ -472,5 +474,188 @@ describe('renderStockPresentation', () => {
     });
     expect(config.customQuantity).toBe(6);
     expect(operational.quantity).toBe(0);
+  });
+});
+
+describe('renderAggregateVariantStockPresentation', () => {
+  const tracked = (
+    quantity: number,
+    minQuantity = 3,
+  ): VariantOperationalStock => ({ quantity, minQuantity });
+
+  it('aggregates a singleton collection through the operational status', () => {
+    expect(
+      renderAggregateVariantStockPresentation(
+        { mode: 'SYSTEM_STATUS', customQuantity: null },
+        true,
+        [tracked(10)],
+      ),
+    ).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+  });
+
+  it('aggregates SYSTEM_STATUS with available-first precedence regardless of order', () => {
+    const config = { mode: 'SYSTEM_STATUS' as const, customQuantity: null };
+    expect(
+      renderAggregateVariantStockPresentation(
+        config,
+        true,
+        [tracked(1), tracked(0), tracked(10)],
+      ).status,
+    ).toBe('available');
+    expect(
+      renderAggregateVariantStockPresentation(
+        config,
+        true,
+        [tracked(0), tracked(10), tracked(1)],
+      ).status,
+    ).toBe('available');
+  });
+
+  it('aggregates SYSTEM_STATUS low_stock when no variant is available', () => {
+    const config = { mode: 'SYSTEM_STATUS' as const, customQuantity: null };
+    expect(
+      renderAggregateVariantStockPresentation(
+        config,
+        true,
+        [tracked(0), tracked(2), tracked(3)],
+      ).status,
+    ).toBe('low_stock');
+    expect(
+      renderAggregateVariantStockPresentation(
+        config,
+        true,
+        [tracked(3), tracked(0)],
+      ).status,
+    ).toBe('low_stock');
+  });
+
+  it('aggregates SYSTEM_STATUS out_of_stock when every variant is exhausted, including negatives and zero', () => {
+    expect(
+      renderAggregateVariantStockPresentation(
+        { mode: 'SYSTEM_STATUS', customQuantity: null },
+        true,
+        [tracked(0), tracked(-2)],
+      ),
+    ).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'out_of_stock',
+      customQuantity: null,
+    });
+  });
+
+  it('collapses ABSTRACT_STATUS low_stock into available and stays out_of_stock only when all variants are out', () => {
+    const config = { mode: 'ABSTRACT_STATUS' as const, customQuantity: null };
+    expect(
+      renderAggregateVariantStockPresentation(
+        config,
+        true,
+        [tracked(0), tracked(1)],
+      ).status,
+    ).toBe('available');
+    expect(
+      renderAggregateVariantStockPresentation(
+        config,
+        true,
+        [tracked(-1), tracked(0)],
+      ).status,
+    ).toBe('out_of_stock');
+  });
+
+  it('renders CUSTOM_QUANTITY with the aggregate operational status and no custom quantity', () => {
+    expect(
+      renderAggregateVariantStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: 42 },
+        true,
+        [tracked(0), tracked(2)],
+      ),
+    ).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: 'low_stock',
+      customQuantity: null,
+    });
+  });
+
+  it('renders CUSTOM_QUANTITY as out_of_stock when every variant is exhausted, including negatives and zero', () => {
+    expect(
+      renderAggregateVariantStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: 42 },
+        true,
+        [tracked(0), tracked(-1)],
+      ),
+    ).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: 'out_of_stock',
+      customQuantity: null,
+    });
+  });
+
+  it('renders HIDDEN with no indicator for tracked and untracked products', () => {
+    expect(
+      renderAggregateVariantStockPresentation(
+        { mode: 'HIDDEN', customQuantity: 42 },
+        true,
+        [tracked(10)],
+      ),
+    ).toEqual({ mode: 'HIDDEN', status: null, customQuantity: null });
+    expect(
+      renderAggregateVariantStockPresentation(
+        { mode: 'HIDDEN', customQuantity: 42 },
+        false,
+        [tracked(0)],
+      ).status,
+    ).toBeNull();
+  });
+
+  it('renders available for every non-hidden mode when the product does not track stock', () => {
+    for (const mode of [
+      'SYSTEM_STATUS',
+      'ABSTRACT_STATUS',
+      'CUSTOM_QUANTITY',
+    ] as const) {
+      expect(
+        renderAggregateVariantStockPresentation(
+          { mode, customQuantity: 9 },
+          false,
+          [tracked(0)],
+        ),
+      ).toEqual({ mode, status: 'available', customQuantity: null });
+    }
+  });
+
+  it('never sums or exposes a product-level custom quantity', () => {
+    const result = renderAggregateVariantStockPresentation(
+      { mode: 'CUSTOM_QUANTITY', customQuantity: 7 },
+      true,
+      [tracked(10), tracked(5)],
+    );
+    expect(result.customQuantity).toBeNull();
+    expect(result.status).toBe('available');
+  });
+
+  it('does not mutate frozen aggregate inputs', () => {
+    const config = Object.freeze({
+      mode: 'SYSTEM_STATUS' as const,
+      customQuantity: null,
+    });
+    const variants = Object.freeze([
+      Object.freeze(tracked(0)),
+      Object.freeze(tracked(10)),
+    ] as const);
+    const result = renderAggregateVariantStockPresentation(
+      config,
+      true,
+      variants,
+    );
+    expect(result).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+    expect(variants[0].quantity).toBe(0);
+    expect(variants[1].quantity).toBe(10);
   });
 });

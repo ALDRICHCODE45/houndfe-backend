@@ -50,6 +50,16 @@ export interface StockPresentationOperationalInput {
   minQuantity: number;
 }
 
+export interface VariantOperationalStock {
+  quantity: number;
+  minQuantity: number;
+}
+
+export type NonEmptyVariantOperationalStocks = readonly [
+  VariantOperationalStock,
+  ...VariantOperationalStock[],
+];
+
 export interface RenderedStockPresentation {
   mode: CatalogStockPresentationValue;
   status: PublicStockStatus | null;
@@ -91,4 +101,38 @@ export function renderStockPresentation(
         customQuantity: null,
       };
   }
+}
+
+export function renderAggregateVariantStockPresentation(
+  config: EffectiveStockPresentationConfig,
+  productUseStock: boolean,
+  variants: NonEmptyVariantOperationalStocks,
+): RenderedStockPresentation {
+  if (config.mode === 'HIDDEN') {
+    return { mode: config.mode, status: null, customQuantity: null };
+  }
+  if (!productUseStock) {
+    return { mode: config.mode, status: 'available', customQuantity: null };
+  }
+  let anyAvailable = false;
+  let anyLow = false;
+  for (const variant of variants) {
+    const status = mapStockStatus(variant.quantity, variant.minQuantity);
+    if (status === 'available') {
+      anyAvailable = true;
+    } else if (status === 'low_stock') {
+      anyLow = true;
+    }
+  }
+  const status: PublicStockStatus =
+    config.mode === 'ABSTRACT_STATUS'
+      ? anyAvailable || anyLow
+        ? 'available'
+        : 'out_of_stock'
+      : anyAvailable
+        ? 'available'
+        : anyLow
+          ? 'low_stock'
+          : 'out_of_stock';
+  return { mode: config.mode, status, customQuantity: null };
 }
