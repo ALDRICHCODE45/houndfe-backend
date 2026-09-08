@@ -1,4 +1,5 @@
 import {
+  renderStockPresentation,
   resolveProductStockPresentation,
   resolveVariantStockPresentation,
   type EffectiveStockPresentationConfig,
@@ -207,5 +208,269 @@ describe('resolveVariantStockPresentation', () => {
     expect(result).toEqual({ mode: 'CUSTOM_QUANTITY', customQuantity: 7 });
     expect(variant.onlineStockPresentation).toBeNull();
     expect(variant.onlineStockPresentationCustomQty).toBeNull();
+  });
+});
+
+describe('renderStockPresentation', () => {
+  it('renders SYSTEM_STATUS available for positive tracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'SYSTEM_STATUS', customQuantity: null },
+        { useStock: true, quantity: 10, minQuantity: 3 },
+      ),
+    ).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+  });
+
+  it('renders SYSTEM_STATUS out_of_stock for zero tracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'SYSTEM_STATUS', customQuantity: null },
+        { useStock: true, quantity: 0, minQuantity: 3 },
+      ).status,
+    ).toBe('out_of_stock');
+  });
+
+  it('renders HIDDEN with no status and no custom quantity', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'HIDDEN', customQuantity: 5 },
+        { useStock: true, quantity: 0, minQuantity: 3 },
+      ),
+    ).toEqual({ mode: 'HIDDEN', status: null, customQuantity: null });
+  });
+
+  it('renders CUSTOM_QUANTITY with null status and the configured quantity for positive stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: 8 },
+        { useStock: true, quantity: 10, minQuantity: 3 },
+      ),
+    ).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: null,
+      customQuantity: 8,
+    });
+  });
+
+  it('renders SYSTEM_STATUS low_stock at/below the operational threshold', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'SYSTEM_STATUS', customQuantity: null },
+        { useStock: true, quantity: 3, minQuantity: 3 },
+      ).status,
+    ).toBe('low_stock');
+    expect(
+      renderStockPresentation(
+        { mode: 'SYSTEM_STATUS', customQuantity: null },
+        { useStock: true, quantity: 2, minQuantity: 3 },
+      ).status,
+    ).toBe('low_stock');
+  });
+
+  it('renders SYSTEM_STATUS as available for untracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'SYSTEM_STATUS', customQuantity: null },
+        { useStock: false, quantity: 0, minQuantity: 0 },
+      ),
+    ).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+  });
+
+  it('renders ABSTRACT_STATUS as available for positive tracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'ABSTRACT_STATUS', customQuantity: null },
+        { useStock: true, quantity: 10, minQuantity: 3 },
+      ),
+    ).toEqual({
+      mode: 'ABSTRACT_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+  });
+
+  it('renders ABSTRACT_STATUS as available for low tracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'ABSTRACT_STATUS', customQuantity: null },
+        { useStock: true, quantity: 1, minQuantity: 3 },
+      ),
+    ).toEqual({
+      mode: 'ABSTRACT_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+  });
+
+  it('renders ABSTRACT_STATUS as exhausted for zero tracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'ABSTRACT_STATUS', customQuantity: null },
+        { useStock: true, quantity: 0, minQuantity: 3 },
+      ).status,
+    ).toBe('out_of_stock');
+  });
+
+  it('renders ABSTRACT_STATUS as available for untracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'ABSTRACT_STATUS', customQuantity: null },
+        { useStock: false, quantity: 0, minQuantity: 0 },
+      ).status,
+    ).toBe('available');
+  });
+
+  it('renders CUSTOM_QUANTITY as out_of_stock for zero tracked stock while preserving the configured quantity', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: 8 },
+        { useStock: true, quantity: 0, minQuantity: 3 },
+      ),
+    ).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: 'out_of_stock',
+      customQuantity: 8,
+    });
+  });
+
+  it('renders CUSTOM_QUANTITY with null status for low tracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: 8 },
+        { useStock: true, quantity: 3, minQuantity: 3 },
+      ).status,
+    ).toBeNull();
+  });
+
+  it('renders CUSTOM_QUANTITY with null status for untracked stock and keeps the configured quantity', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: 4 },
+        { useStock: false, quantity: 0, minQuantity: 0 },
+      ),
+    ).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: null,
+      customQuantity: 4,
+    });
+  });
+
+  it('renders CUSTOM_QUANTITY preserving a configured quantity of 0 unchanged', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: 0 },
+        { useStock: true, quantity: 10, minQuantity: 3 },
+      ),
+    ).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: null,
+      customQuantity: 0,
+    });
+  });
+
+  it('renders CUSTOM_QUANTITY preserving a null configured quantity unchanged', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'CUSTOM_QUANTITY', customQuantity: null },
+        { useStock: true, quantity: 10, minQuantity: 3 },
+      ),
+    ).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: null,
+      customQuantity: null,
+    });
+  });
+
+  it.each([
+    ['SYSTEM_STATUS', 'out_of_stock', null],
+    ['ABSTRACT_STATUS', 'out_of_stock', null],
+    ['CUSTOM_QUANTITY', 'out_of_stock', 5],
+  ] as const)(
+    'renders %s as out_of_stock for negative tracked stock',
+    (mode, status, customQuantity) => {
+      expect(
+        renderStockPresentation(
+          { mode, customQuantity },
+          { useStock: true, quantity: -2, minQuantity: 3 },
+        ),
+      ).toEqual({ mode, status, customQuantity });
+    },
+  );
+
+  it('renders HIDDEN with no indicator for untracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'HIDDEN', customQuantity: 5 },
+        { useStock: false, quantity: 0, minQuantity: 0 },
+      ),
+    ).toEqual({ mode: 'HIDDEN', status: null, customQuantity: null });
+  });
+
+  it('suppresses the configured custom quantity for non-CUSTOM modes', () => {
+    for (const mode of [
+      'SYSTEM_STATUS',
+      'ABSTRACT_STATUS',
+      'HIDDEN',
+    ] as const) {
+      expect(
+        renderStockPresentation(
+          { mode, customQuantity: 8 },
+          { useStock: true, quantity: 10, minQuantity: 3 },
+        ).customQuantity,
+      ).toBeNull();
+    }
+  });
+
+  it('renders HIDDEN with no indicator even for zero tracked stock', () => {
+    expect(
+      renderStockPresentation(
+        { mode: 'HIDDEN', customQuantity: null },
+        { useStock: true, quantity: 0, minQuantity: 3 },
+      ),
+    ).toEqual({ mode: 'HIDDEN', status: null, customQuantity: null });
+  });
+
+  it('echoes the effective mode for every presentation mode', () => {
+    for (const mode of [
+      'SYSTEM_STATUS',
+      'ABSTRACT_STATUS',
+      'CUSTOM_QUANTITY',
+      'HIDDEN',
+    ] as const) {
+      expect(
+        renderStockPresentation(
+          { mode, customQuantity: null },
+          { useStock: true, quantity: 10, minQuantity: 3 },
+        ).mode,
+      ).toBe(mode);
+    }
+  });
+
+  it('does not mutate frozen render inputs', () => {
+    const config = Object.freeze({
+      mode: 'CUSTOM_QUANTITY' as const,
+      customQuantity: 6,
+    });
+    const operational = Object.freeze({
+      useStock: true,
+      quantity: 0,
+      minQuantity: 3,
+    });
+    const result = renderStockPresentation(config, operational);
+    expect(result).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: 'out_of_stock',
+      customQuantity: 6,
+    });
+    expect(config.customQuantity).toBe(6);
+    expect(operational.quantity).toBe(0);
   });
 });
