@@ -1,4 +1,8 @@
-import { NotFoundException } from '@nestjs/common';
+import {
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ListPublicProductsUseCase } from './list-public-products.use-case';
 import type { IPublicCatalogRepository } from '../ports/public-catalog.repository';
 import type { ResolvedPublicCatalogContext } from '../ports/public-catalog.repository';
@@ -390,8 +394,45 @@ describe('ListPublicProductsUseCase.executeForContext (F2.WU6 slice 5a — dorma
     },
   );
 
-  it('keeps the active execute path on the default-list resolver + findProducts/findCategoryFacets even when the contextual seam exists', async () => {
-    const result = await useCase.execute(legacyInput);
+      it('fails the entire contextual page with a generic 500 — never a 404 or a partial page — when a variant card aggregates invalid participants (F3.WU9 slice 9)', async () => {
+        const error = jest
+          .spyOn(Logger.prototype, 'error')
+          .mockImplementation(() => undefined);
+        seam.mockResolvedValue({
+          items: [
+            { ...makeProduct({ hasVariants: true }), stockPresentationParticipants: [] },
+            { ...makeProduct({ id: 'prod-2' }), stockPresentationParticipants: [] },
+          ],
+          total: 2,
+          excludedCount: 0,
+          categories: [],
+        });
+
+        let thrown: unknown;
+        try {
+          await useCase.executeForContext(listInput);
+        } catch (e) {
+          thrown = e;
+        }
+
+        expect(thrown).toBeInstanceOf(InternalServerErrorException);
+        expect((thrown as InternalServerErrorException).getStatus()).toBe(500);
+        expect(thrown).not.toBeInstanceOf(NotFoundException);
+        // One structured internal invariant log, safe for operations: no
+        // operational quantities, thresholds, configuration, or payloads.
+        expect(error).toHaveBeenCalledTimes(1);
+        const logged = JSON.stringify(error.mock.calls);
+        expect(logged).toContain(
+          'public_catalog_list_invalid_stock_presentation_participants',
+        );
+        expect(logged).not.toContain('quantity');
+        expect(logged).not.toContain('minQuantity');
+        expect(logged).not.toContain('prod-1');
+        error.mockRestore();
+      });
+
+      it('keeps the active execute path on the default-list resolver + findProducts/findCategoryFacets even when the contextual seam exists, with no stockPresentation on legacy cards', async () => {
+        const result = await useCase.execute(legacyInput);
 
     expect(resolveDefault).toHaveBeenCalledTimes(1);
     expect(legacyFindProducts).toHaveBeenCalledTimes(1);
@@ -400,6 +441,7 @@ describe('ListPublicProductsUseCase.executeForContext (F2.WU6 slice 5a — dorma
     expect(resolveContext).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty('priceContext');
     expect(result).not.toHaveProperty('excludedCount');
+    expect(result.items[0]).not.toHaveProperty('stockPresentation');
   });
 });
 

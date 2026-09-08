@@ -3,7 +3,10 @@ import {
   type IPublicCatalogRepository,
   PUBLIC_CATALOG_REPOSITORY,
 } from '../ports/public-catalog.repository';
-import { toPublicProductCard } from '../mappers/public-product.mapper';
+import {
+  toPublicProductCard,
+  toPublicProductCardForContext,
+} from '../mappers/public-product.mapper';
 import type { PublicCatalogProductCard } from '../dto/public-product-card.dto';
 import type { PublicCatalogCategoryFacet } from '../dto/public-category-facet.dto';
 import type { ResolvedPublicCatalogContext } from '../ports/public-catalog.repository';
@@ -137,7 +140,15 @@ export class ListPublicProductsUseCase {
     };
 
     return {
-      items: items.map((p) => toPublicProductCard(p)),
+      // F3.WU9 slice 9 — the contextual list is the only path that maps
+      // cards with the product/card-level stock presentation (plus its
+      // mirrored nullable `availability`). The legacy `execute()` output
+      // is unchanged. An `invalid-participants` card aggregation fails
+      // the whole page with the generic server error thrown by the
+      // contextual card mapper.
+      items: items.map((p) =>
+        toPublicProductCardForContext(p, context.stockPresentationDefaults),
+      ),
       meta: {
         page: filters.page,
         limit: filters.limit,

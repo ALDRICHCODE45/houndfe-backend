@@ -70,15 +70,28 @@ export interface PublicCatalogProductDetailWithContextDto
 }
 
 /**
- * F2.WU6 slice 5a — dormant context-explicit public product list response.
+ * F3.WU9 slice 9 — contextual public product card: the legacy card shape with
+ * a compatibility `availability` mirroring `stockPresentation.status` (null
+ * when hidden) and the product/card-level stock presentation. A distinct
+ * shape — the legacy `PublicCatalogProductCard` output is never widened, and
+ * no variant rows or operational quantities are embedded.
+ */
+export interface PublicCatalogContextualProductCard
+  extends Omit<PublicCatalogProductCard, 'availability'> {
+  availability: PublicStockStatus | null;
+  stockPresentation: PublicStockPresentationDto;
+}
+
+/**
+ * F2.WU6 slice 5a — context-explicit public product list response.
  * Extends the existing paginated list shape (canonical design: the list
  * response adds `excludedCount` and `priceContext` to the existing shape)
  * with context-eligible pagination metadata, aggregate `excludedCount`, and
- * exact public price-context metadata. No production caller yet; HTTP
- * activation stays in Slice 5b.
+ * exact public price-context metadata. F3.WU9 slice 9 activates the product/
+ * card-level stock presentation on the contextual card items only.
  */
 export interface PublicCatalogProductListWithContextDto {
-  items: PublicCatalogProductCard[];
+  items: PublicCatalogContextualProductCard[];
   meta: {
     page: number;
     limit: number;

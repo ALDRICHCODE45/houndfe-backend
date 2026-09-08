@@ -1,11 +1,17 @@
-import { Logger, NotFoundException } from '@nestjs/common';
+import {
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   toPublicProductCard,
+  toPublicProductCardForContext,
   toPublicProductDetail,
   toPublicProductDetailForContext,
   type ProductWithIncludes,
   type ProductDetailWithIncludes,
   type PublicContextualDetailProjection,
+  type PublicContextualListProjection,
 } from './public-product.mapper';
 
 function makeProduct(
@@ -827,4 +833,144 @@ describe('toPublicProductDetailForContext', () => {
       warn.mockRestore();
     },
   );
+});
+
+// F3.WU9 slice 9 — contextual product/card mapping for the contextual list
+// (`executeForContext` only): key shape, override → defaults resolution,
+// HIDDEN mirroring, participant-only aggregation, and the approved
+// invalid-participants page failure. Deep rules are pinned by the detail tests.
+describe('toPublicProductCardForContext', () => {
+  const systemDefaults = { catalogStockPresentationDefault: 'SYSTEM_STATUS' as const, catalogStockPresentationDefaultCustomQty: null };
+  const customDefaults = { catalogStockPresentationDefault: 'CUSTOM_QUANTITY' as const, catalogStockPresentationDefaultCustomQty: 4 };
+  const hiddenDefaults = { catalogStockPresentationDefault: 'HIDDEN' as const, catalogStockPresentationDefaultCustomQty: null };
+
+  function makeListProjection(
+    overrides: Partial<PublicContextualListProjection> = {},
+  ): PublicContextualListProjection {
+    return { ...makeProduct(), stockPresentationParticipants: [], ...overrides };
+  }
+
+  it('exposes the exact contextual card key set over the legacy card shape', () => {
+    const result = toPublicProductCardForContext(makeListProjection(), systemDefaults);
+    expect(Object.keys(result)).toEqual([
+      'id', 'name', 'slug', 'description', 'category', 'brand', 'image',
+      'price', 'availability', 'stockPresentation', 'hasVariants',
+      'rating', 'featuredLabel',
+    ]);
+  });
+
+  it.each(
+    [
+      {
+        label: 'maps a simple product from the context defaults (SYSTEM_STATUS)',
+        product: {},
+        defaults: systemDefaults,
+        expected: { mode: 'SYSTEM_STATUS', status: 'available', customQuantity: null },
+        availability: 'available',
+      },
+      {
+        label: 'resolves the persisted product override over the context defaults',
+        product: { onlineStockPresentation: 'CUSTOM_QUANTITY', onlineStockPresentationCustomQty: 3 },
+        defaults: customDefaults,
+        expected: { mode: 'CUSTOM_QUANTITY', status: null, customQuantity: 3 },
+        availability: null,
+      },
+      {
+        label: 'inherits the context defaults when the persisted override is null',
+        product: {},
+        defaults: customDefaults,
+        expected: { mode: 'CUSTOM_QUANTITY', status: null, customQuantity: 4 },
+        availability: null,
+      },
+      {
+        label: 'preserves an explicit custom quantity of 0 over the context default',
+        product: { onlineStockPresentation: 'CUSTOM_QUANTITY', onlineStockPresentationCustomQty: 0 },
+        defaults: customDefaults,
+        expected: { mode: 'CUSTOM_QUANTITY', status: null, customQuantity: 0 },
+        availability: null,
+      },
+      {
+        label: 'mirrors HIDDEN as a null availability with a null status',
+        product: {},
+        defaults: hiddenDefaults,
+        expected: { mode: 'HIDDEN', status: null, customQuantity: null },
+        availability: null,
+      },
+    ] as const,
+  )('$label', ({ product, defaults, expected, availability }) => {
+    const result = toPublicProductCardForContext(makeListProjection(product), defaults);
+    expect(result.stockPresentation).toEqual(expected);
+    expect(result.availability).toBe(availability);
+  });
+
+  it('aggregates over participants only — including unpriced rows — and never product quantities', () => {
+    const result = toPublicProductCardForContext(
+      makeListProjection({
+        hasVariants: true,
+        quantity: 999,
+        minQuantity: 0,
+        variants: [makeVariant('v-a', 130000)],
+        // The only participant is unpriced (absent from the priced rows) and
+        // out of stock — it alone decides the aggregate.
+        stockPresentationParticipants: [{ quantity: 0, minQuantity: 2 }],
+      }),
+      systemDefaults,
+    );
+    expect(result.stockPresentation).toEqual({ mode: 'SYSTEM_STATUS', status: 'out_of_stock', customQuantity: null });
+    expect(result.availability).toBe('out_of_stock');
+  });
+
+  it('keeps the canonical aggregate status for card-level CUSTOM_QUANTITY with no fabricated aggregate quantity, and leaks no operational keys', () => {
+    const result = toPublicProductCardForContext(
+      makeListProjection({
+        hasVariants: true,
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 3,
+        variants: [makeVariant('v-a', 130000, { quantity: 0 }), makeVariant('v-b', 140000)],
+        stockPresentationParticipants: [{ quantity: 0, minQuantity: 2 }, { quantity: 10, minQuantity: 2 }],
+      }),
+      systemDefaults,
+    );
+    // Canonical aggregate status (one available participant → available) and
+    // no fabricated operational aggregate quantity (customQuantity null).
+    expect(result.stockPresentation).toEqual({ mode: 'CUSTOM_QUANTITY', status: 'available', customQuantity: null });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('"quantity"');
+    expect(serialized).not.toContain('"minQuantity"');
+    expect(serialized).not.toContain('stockPresentationParticipants');
+    expect(serialized).not.toContain('"variants"');
+    expect(serialized).not.toContain('onlineStockPresentation');
+  });
+
+  it.each([
+    ['missing participants', undefined],
+    ['malformed participant rows', [{ quantity: '0', minQuantity: 2 }]],
+  ])('fails with a generic 500 and one safe structured invariant log on %s', (_label, participants) => {
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    let thrown: unknown;
+    try {
+      toPublicProductCardForContext(
+        makeListProjection({
+          hasVariants: true,
+          quantity: 999,
+          variants: [makeVariant('v-a', 130000, { quantity: 0 })],
+          stockPresentationParticipants: participants as unknown as PublicContextualListProjection['stockPresentationParticipants'],
+        }),
+        systemDefaults,
+      );
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(InternalServerErrorException);
+    expect((thrown as InternalServerErrorException).getStatus()).toBe(500);
+    expect(thrown).not.toBeInstanceOf(NotFoundException);
+    expect(error).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(error.mock.calls);
+    expect(logged).toContain('public_catalog_list_invalid_stock_presentation_participants');
+    expect(logged).not.toContain('quantity');
+    expect(logged).not.toContain('minQuantity');
+    expect(logged).not.toContain('999');
+    expect(logged).not.toContain('onlineStockPresentation');
+    error.mockRestore();
+  });
 });

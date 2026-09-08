@@ -1,4 +1,8 @@
-import { Logger, NotFoundException } from '@nestjs/common';
+import {
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import type { PublicCatalogProductCard } from '../dto/public-product-card.dto';
 import type {
   PublicCatalogProductDetail,
@@ -6,6 +10,7 @@ import type {
 } from '../dto/public-product-detail.dto';
 import type {
   PublicCatalogContextualProductBody,
+  PublicCatalogContextualProductCard,
   PublicContextualVariantDto,
 } from '../dto/public-price-context.dto';
 import type { PublicStockPresentationDto } from '../dto/public-stock-presentation.dto';
@@ -249,6 +254,20 @@ export interface PublicContextualDetailProjection extends ProductDetailWithInclu
   }>;
 }
 
+/**
+ * F3.WU9 slice 9 — internal contextual list input: the exact-context list
+ * projection (`PublicProductListProjection`, structurally compatible) plus
+ * its preserved participant snapshot.
+ */
+export interface PublicContextualListProjection
+  extends ProductWithIncludes,
+    PersistedStockPresentationOverrides {
+  stockPresentationParticipants: ReadonlyArray<{
+    quantity: number;
+    minQuantity: number;
+  }>;
+}
+
 const contextualLogger = new Logger('PublicProductMapper');
 
 /**
@@ -264,6 +283,25 @@ function mappedStockOrThrow(
       'Public detail context rejected invalid stock-presentation participants; responding as a generic miss.',
     );
     throw new NotFoundException('Not Found');
+  }
+  return result.value;
+}
+
+/**
+ * F3.WU9 slice 9 — approved list `invalid-participants` policy: one
+ * structured internal invariant error log (no operational values or
+ * payloads) and a generic server error failing the entire contextual page.
+ */
+function mappedCardStockOrThrow(
+  result: StockPresentationMappingResult,
+): PublicStockPresentationDto {
+  if (result.kind === 'invalid-participants') {
+    contextualLogger.error(
+      JSON.stringify({
+        invariant: 'public_catalog_list_invalid_stock_presentation_participants',
+      }),
+    );
+    throw new InternalServerErrorException('Internal Server Error');
   }
   return result.value;
 }
@@ -385,6 +423,74 @@ export function toPublicProductDetailForContext(
     stockPresentation: productStock,
     hasVariants: product.hasVariants,
     variants,
+    rating: null,
+    featuredLabel: null,
+  };
+}
+
+/**
+ * F3.WU9 slice 9 — contextual-only card mapping (design §9.2/§9.3), reusing
+ * the detail path's stock-presentation mapper and effective product
+ * configuration logic: persisted product override → context
+ * `stockPresentationDefaults`, preserving an explicit custom quantity of `0`.
+ * Simple products map their own operational stock; variant products
+ * aggregate exclusively over the preserved `stockPresentationParticipants`
+ * rows (product `quantity`/`minQuantity` are never a fallback). Public
+ * `availability` mirrors the rendered status and is `null` for `HIDDEN`.
+ * The legacy `toPublicProductCard` behavior above is untouched.
+ */
+export function toPublicProductCardForContext(
+  product: PublicContextualListProjection,
+  stockDefaults: StockPresentationDefaults,
+): PublicCatalogContextualProductCard {
+  const priceHidden = isEffectivelyPriceHidden(product);
+
+  // Persisted product override participates in the canonical resolution
+  // (`?? null` preserves an explicit custom qty of 0).
+  const productPresentationSource = {
+    onlineStockPresentation: product.onlineStockPresentation ?? null,
+    onlineStockPresentationCustomQty:
+      product.onlineStockPresentationCustomQty ?? null,
+  };
+
+  const stock = mappedCardStockOrThrow(
+    product.hasVariants
+      ? mapPublicAggregateVariantStockPresentation({
+          product: { ...productPresentationSource, useStock: product.useStock },
+          tenant: stockDefaults,
+          variantParticipants: product.stockPresentationParticipants,
+        })
+      : mapPublicProductStockPresentation({
+          product: {
+            ...productPresentationSource,
+            useStock: product.useStock,
+            quantity: product.quantity,
+            minQuantity: product.minQuantity,
+          },
+          tenant: stockDefaults,
+        }),
+  );
+
+  return {
+    id: product.id,
+    name: product.name,
+    slug: null,
+    description: product.description,
+    category: product.category
+      ? { id: product.category.id, name: product.category.name }
+      : null,
+    brand: product.brand ? { name: product.brand.name } : null,
+    image: product.images[0] ? { url: product.images[0].url } : null,
+    price: priceHidden
+      ? { fromPriceCents: null, priceCents: null, hidden: true }
+      : {
+          fromPriceCents: computeFromPrice(product),
+          priceCents: product.priceLists[0]?.priceCents ?? null,
+          hidden: false,
+        },
+    availability: stock.status,
+    stockPresentation: stock,
+    hasVariants: product.hasVariants,
     rating: null,
     featuredLabel: null,
   };

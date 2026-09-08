@@ -304,6 +304,51 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
     expect(result.priceContext).toEqual(priceCtx(false));
     expect(result.excludedCount).toBe(3);
   });
+  // F3.WU9 slice 9 — contextual list cards expose ONLY the legacy card keys
+  // plus `stockPresentation` (with mirrored nullable `availability`); no
+  // operational stock or persisted-override keys.
+  it('contextual list cards expose stockPresentation with no operational or override leakage', async () => {
+    const result = await new ListPublicProductsUseCase({
+      listPublicProducts: () =>
+        Promise.resolve({
+          items: [
+            {
+              ...guideProduct(),
+              onlineStockPresentation: 'CUSTOM_QUANTITY',
+              onlineStockPresentationCustomQty: 3,
+              stockPresentationParticipants: [],
+            },
+          ],
+          total: 1,
+          excludedCount: 0,
+          categories: [],
+        }),
+    } as unknown as IPublicCatalogRepository).executeForContext({
+      tenant: guideTenant,
+      context: {
+        ...guideContext(false),
+        stockPresentationDefaults: {
+          catalogStockPresentationDefault: 'CUSTOM_QUANTITY' as const,
+          catalogStockPresentationDefaultCustomQty: null,
+        },
+      },
+      filters: { sort: 'newest', page: 1, limit: 20 },
+    });
+    expect(Object.keys(result.items[0]).sort().join()).toBe(
+      'availability,brand,category,description,featuredLabel,hasVariants,id,image,name,price,rating,slug,stockPresentation',
+    );
+    expect(result.items[0].stockPresentation).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: null,
+      customQuantity: 3,
+    });
+    expect(result.items[0].availability).toBeNull();
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('"quantity"');
+    expect(serialized).not.toContain('"minQuantity"');
+    expect(serialized).not.toContain('stockPresentationParticipants');
+    expect(serialized).not.toContain('onlineStockPresentation');
+  });
 
   it('detail carries excludedCount, priceContext, contextual stock presentation, and no variant image fallback', async () => {
     const projection: ProductDetailWithIncludes & {
