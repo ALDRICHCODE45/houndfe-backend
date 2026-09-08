@@ -1,8 +1,11 @@
+import { Logger, NotFoundException } from '@nestjs/common';
 import {
   toPublicProductCard,
   toPublicProductDetail,
+  toPublicProductDetailForContext,
   type ProductWithIncludes,
   type ProductDetailWithIncludes,
+  type PublicContextualDetailProjection,
 } from './public-product.mapper';
 
 function makeProduct(
@@ -428,4 +431,239 @@ describe('toPublicProductDetail', () => {
       'featuredLabel',
     ]);
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// F3.WU9 slice 7 — contextual-only stock-presentation activation. The
+// legacy `toPublicProductDetail` above stays untouched; this contextual
+// mapper reads the resolved context defaults only, aggregates variant
+// products over the preserved participants, and never revives product
+// quantities as an aggregate fallback.
+// ─────────────────────────────────────────────────────────────────────────
+describe('toPublicProductDetailForContext', () => {
+  const tenant = { id: 'tenant-1', slug: 'centro', name: 'Sucursal Centro' };
+  const systemDefaults = {
+    catalogStockPresentationDefault: 'SYSTEM_STATUS' as const,
+    catalogStockPresentationDefaultCustomQty: null,
+  };
+
+  function makeProjection(
+    overrides: Partial<PublicContextualDetailProjection> = {},
+  ): PublicContextualDetailProjection {
+    return {
+      id: 'prod-1',
+      name: 'Royal Canin 13.6kg',
+      description: 'Dog food',
+      hasVariants: false,
+      useStock: true,
+      quantity: 50,
+      minQuantity: 5,
+      hidePriceInOnlineCatalog: false,
+      requiresPrescription: false,
+      category: { id: 'cat-1', name: 'Alimento Seco' },
+      brand: { name: 'Royal Canin' },
+      images: [
+        { id: 'img-1', url: 'https://cdn.example.com/img1.jpg', isMain: true },
+      ],
+      priceLists: [{ priceCents: 125000 }],
+      variants: [],
+      stockPresentationParticipants: [],
+      ...overrides,
+    };
+  }
+
+  const variantOf = (
+    id: string,
+    quantity: number,
+    overrides: Partial<PublicContextualDetailProjection['variants'][number]> = {},
+  ) => ({
+    id,
+    name: `Variant ${id}`,
+    option: 'Talla',
+    value: id,
+    quantity,
+    minQuantity: 2,
+    images: [],
+    variantPrices: [{ priceCents: 130000 }],
+    ...overrides,
+  });
+
+  it('maps a simple product from the tenant defaults and exposes the exact contextual key set', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection(),
+      tenant,
+      systemDefaults,
+    );
+
+    expect(result.stockPresentation).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+    expect(result.availability).toBe('available');
+    expect(Object.keys(result)).toEqual([
+      'id',
+      'name',
+      'slug',
+      'description',
+      'category',
+      'brand',
+      'images',
+      'price',
+      'availability',
+      'stockPresentation',
+      'hasVariants',
+      'variants',
+      'rating',
+      'featuredLabel',
+    ]);
+  });
+
+  it('passes the context stock defaults unchanged to the presentation resolution', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({ quantity: 0 }),
+      tenant,
+      {
+        catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
+        catalogStockPresentationDefaultCustomQty: 4,
+      },
+    );
+
+    expect(result.stockPresentation).toEqual({
+      mode: 'CUSTOM_QUANTITY',
+      status: 'out_of_stock',
+      customQuantity: 4,
+    });
+  });
+
+  it('aggregates variant products over participants only and never revives product quantities', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        hasVariants: true,
+        quantity: 999,
+        variants: [variantOf('v-a', 0)],
+        stockPresentationParticipants: [{ quantity: 0, minQuantity: 0 }],
+      }),
+      tenant,
+      systemDefaults,
+    );
+
+    expect(result.stockPresentation).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'out_of_stock',
+      customQuantity: null,
+    });
+    expect(result.availability).toBe('out_of_stock');
+  });
+
+  it('maps each visible variant row with its own presentation and mirrors branch availability', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        hasVariants: true,
+        variants: [
+          variantOf('v-a', 10),
+          variantOf('v-b', 0),
+          variantOf('v-off', 99, { catalogPublishMode: 'OFF' }),
+        ],
+        stockPresentationParticipants: [
+          { quantity: 10, minQuantity: 2 },
+          { quantity: 0, minQuantity: 2 },
+        ],
+      }),
+      tenant,
+      systemDefaults,
+    );
+
+    expect(result.variants.map((v) => v.id)).toEqual(['v-a', 'v-b']);
+    expect(result.variants[0].stockPresentation).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+    expect(result.variants[1].stockPresentation.status).toBe('out_of_stock');
+    expect(result.variants[1].availabilityByBranch[0].availability).toBe(
+      'out_of_stock',
+    );
+    expect(Object.keys(result.variants[0])).toEqual([
+      'id',
+      'name',
+      'option',
+      'value',
+      'image',
+      'price',
+      'availabilityByBranch',
+      'stockPresentation',
+    ]);
+  });
+
+  it('leaks no operational stock keys in the serialized contextual output', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        hasVariants: true,
+        variants: [variantOf('v-a', 10)],
+        stockPresentationParticipants: [{ quantity: 10, minQuantity: 2 }],
+      }),
+      tenant,
+      systemDefaults,
+    );
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).not.toContain('"quantity"');
+    expect(serialized).not.toContain('"minQuantity"');
+    expect(serialized).not.toContain('stockPresentationParticipants');
+    expect(serialized).not.toContain('"tenantId"');
+    expect(serialized).not.toContain('catalogPublishMode');
+  });
+
+  it('mirrors HIDDEN as null availability on the product and every branch row', () => {
+    const result = toPublicProductDetailForContext(
+      makeProjection({
+        hasVariants: true,
+        variants: [variantOf('v-a', 10)],
+        stockPresentationParticipants: [{ quantity: 10, minQuantity: 2 }],
+      }),
+      tenant,
+      {
+        catalogStockPresentationDefault: 'HIDDEN',
+        catalogStockPresentationDefaultCustomQty: null,
+      },
+    );
+
+    expect(result.availability).toBeNull();
+    expect(result.stockPresentation).toEqual({
+      mode: 'HIDDEN',
+      status: null,
+      customQuantity: null,
+    });
+    expect(result.variants[0].availabilityByBranch[0].availability).toBeNull();
+  });
+
+  it.each([
+    ['missing participants', undefined],
+    ['malformed participant rows', [{ quantity: '10', minQuantity: 0 }]],
+  ])(
+    'responds as a generic miss with one safe warning on %s',
+    (_label, participants) => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      expect(() =>
+        toPublicProductDetailForContext(
+          makeProjection({
+            hasVariants: true,
+            variants: [variantOf('v-a', 0)],
+            stockPresentationParticipants:
+              participants as unknown as PublicContextualDetailProjection['stockPresentationParticipants'],
+          }),
+          tenant,
+          systemDefaults,
+        ),
+      ).toThrow(new NotFoundException('Not Found'));
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('quantity');
+      warn.mockRestore();
+    },
+  );
 });

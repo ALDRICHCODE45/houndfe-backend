@@ -3,7 +3,7 @@ import {
   type IPublicCatalogRepository,
   PUBLIC_CATALOG_REPOSITORY,
 } from '../ports/public-catalog.repository';
-import { toPublicProductDetail } from '../mappers/public-product.mapper';
+import { toPublicProductDetail, toPublicProductDetailForContext } from '../mappers/public-product.mapper';
 import type { PublicCatalogProductDetail } from '../dto/public-product-detail.dto';
 import type {
   PublicCatalogProductDetailWithContextDto,
@@ -52,16 +52,18 @@ export class GetPublicProductDetailUseCase {
   }
 
   /**
-   * F2.WU6 slice 4b — dormant, uncalled context-explicit detail seam. The
-   * price context arrives already resolved by the upstream resolver; this
-   * method only maps the exact repository projection into the public
-   * detail shape and appends exact public metadata. It fails closed with
-   * the generic `NotFoundException('Not Found')` on tenant ID or slug
-   * mismatch (before any repository access), on an absent optional
+   * F2.WU6 slice 4b — context-explicit detail seam. The price context
+   * arrives already resolved by the upstream resolver; this method only
+   * maps the exact repository projection into the public detail shape
+   * and appends exact public metadata. It fails closed with the generic
+   * `NotFoundException('Not Found')` on tenant ID or slug mismatch
+   * (before any repository access), on an absent optional
    * `getPublicProductDetail` seam (no optional-chain into undefined, no
-   * fallback), and on a null projection. It never touches the active
-   * default-list path (`findTenantCatalogDefaultPriceListId`,
-   * `findProductById`) and never resolves a context itself.
+   * fallback), on a null projection, and — F3.WU9 slice 7 — on invalid
+   * stock-presentation participants (one safe internal warning first).
+   * It never touches the active default-list path
+   * (`findTenantCatalogDefaultPriceListId`, `findProductById`) and never
+   * resolves a context itself.
    */
   async executeForContext(
     input: GetPublicProductDetailForContextInput,
@@ -92,8 +94,13 @@ export class GetPublicProductDetailUseCase {
 
     // Exact projection mapping only — alternate/default/global prices are
     // never inspected or recovered here; the mapper redacts hidden and
-    // prescription prices defensively.
-    const detail = toPublicProductDetail(product, tenant);
+    // prescription prices defensively. F3.WU9 slice 7 — stock
+    // presentation maps from the context defaults only.
+    const detail = toPublicProductDetailForContext(
+      product,
+      tenant,
+      context.stockPresentationDefaults,
+    );
 
     const priceContext: PublicPriceContextDto = {
       priceListId: context.globalPriceListId,

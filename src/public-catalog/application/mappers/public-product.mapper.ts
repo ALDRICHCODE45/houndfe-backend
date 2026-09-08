@@ -1,13 +1,26 @@
+import { Logger, NotFoundException } from '@nestjs/common';
 import type { PublicCatalogProductCard } from '../dto/public-product-card.dto';
 import type {
   PublicCatalogProductDetail,
   PublicVariantDto,
 } from '../dto/public-product-detail.dto';
+import type {
+  PublicCatalogContextualProductBody,
+  PublicContextualVariantDto,
+} from '../dto/public-price-context.dto';
+import type { PublicStockPresentationDto } from '../dto/public-stock-presentation.dto';
 import {
   mapStockStatus,
   type PublicStockStatus,
 } from '../../domain/value-objects/stock-status.vo';
 import { isEffectivelyPriceHidden } from '../../domain/value-objects/effective-price-hidden.vo';
+import type { StockPresentationDefaults } from '../../domain/value-objects/stock-presentation.vo';
+import {
+  mapPublicAggregateVariantStockPresentation,
+  mapPublicProductStockPresentation,
+  mapPublicVariantStockPresentation,
+  type StockPresentationMappingResult,
+} from './public-stock-presentation.mapper';
 
 // Input types — what we expect from Prisma includes
 export interface ProductWithIncludes {
@@ -199,6 +212,151 @@ export function toPublicProductDetail(
           hidden: false,
         },
     availability: computeAggregateAvailability(product as ProductWithIncludes),
+    hasVariants: product.hasVariants,
+    variants,
+    rating: null,
+    featuredLabel: null,
+  };
+}
+
+/**
+ * F3.WU9 slice 7 — internal contextual detail input: the exact-context
+ * repository projection plus its preserved participant snapshot
+ * (`PublicStockPresentationParticipant` rows, structurally compatible).
+ */
+export interface PublicContextualDetailProjection extends ProductDetailWithIncludes {
+  stockPresentationParticipants: ReadonlyArray<{
+    quantity: number;
+    minQuantity: number;
+  }>;
+}
+
+const contextualLogger = new Logger('PublicProductMapper');
+
+/**
+ * F3.WU9 slice 7 — approved `invalid-participants` policy: one safe internal
+ * warning (no operational participant values, IDs, or configuration) and the
+ * public response stays indistinguishable from a missing/unpublished product.
+ */
+function mappedStockOrThrow(
+  result: StockPresentationMappingResult,
+): PublicStockPresentationDto {
+  if (result.kind === 'invalid-participants') {
+    contextualLogger.warn(
+      'Public detail context rejected invalid stock-presentation participants; responding as a generic miss.',
+    );
+    throw new NotFoundException('Not Found');
+  }
+  return result.value;
+}
+
+/**
+ * F3.WU9 slice 7 — activated contextual-only stock-presentation mapping
+ * (design §9.2/§9.3). Tenant defaults arrive unchanged from the resolved
+ * `ResolvedPublicCatalogContext.stockPresentationDefaults`; the contextual
+ * projection carries no per-product presentation override, so resolution is
+ * defaults-pure. Simple products map their own operational stock; variant
+ * products aggregate exclusively over the preserved
+ * `stockPresentationParticipants` rows — product `quantity`/`minQuantity`
+ * are never revived as an aggregate fallback — and every visible variant row
+ * renders its own presentation. The legacy `toPublicProductDetail` behavior
+ * above is untouched.
+ */
+export function toPublicProductDetailForContext(
+  product: PublicContextualDetailProjection,
+  tenant: { id: string; slug: string; name: string },
+  stockDefaults: StockPresentationDefaults,
+): PublicCatalogContextualProductBody {
+  const priceHidden = isEffectivelyPriceHidden(product);
+  const publicVariants = visibleVariants(product.variants);
+
+  // Defaults-pure presentation source: the contextual projection projects no
+  // per-product/variant presentation override, so the effective mode comes
+  // only from the tenant defaults (with the documented SYSTEM_STATUS floor).
+  const presentationSource = {
+    onlineStockPresentation: null,
+    onlineStockPresentationCustomQty: null,
+  } as const;
+
+  const productStock = mappedStockOrThrow(
+    product.hasVariants
+      ? mapPublicAggregateVariantStockPresentation({
+          product: { ...presentationSource, useStock: product.useStock },
+          tenant: stockDefaults,
+          variantParticipants: product.stockPresentationParticipants,
+        })
+      : mapPublicProductStockPresentation({
+          product: {
+            ...presentationSource,
+            useStock: product.useStock,
+            quantity: product.quantity,
+            minQuantity: product.minQuantity,
+          },
+          tenant: stockDefaults,
+        }),
+  );
+
+  const variants: PublicContextualVariantDto[] = publicVariants.map((v) => {
+    const stock = mappedStockOrThrow(
+      mapPublicVariantStockPresentation({
+        product: { ...presentationSource, useStock: product.useStock },
+        variant: {
+          ...presentationSource,
+          quantity: v.quantity,
+          minQuantity: v.minQuantity,
+        },
+        tenant: stockDefaults,
+      }),
+    );
+
+    return {
+      id: v.id,
+      name: v.name,
+      option: v.option,
+      value: v.value,
+      image: v.images[0] ? { url: v.images[0].url } : null,
+      price: priceHidden
+        ? { priceCents: null, hidden: true }
+        : {
+            priceCents: v.variantPrices[0]?.priceCents ?? null,
+            hidden: false,
+          },
+      availabilityByBranch: [
+        {
+          branchId: tenant.id,
+          branchName: tenant.name,
+          branchSlug: tenant.slug,
+          // Compatibility mirror of the variant's own presentation status.
+          availability: stock.status,
+          isSelected: true,
+        },
+      ],
+      stockPresentation: stock,
+    };
+  });
+
+  return {
+    id: product.id,
+    name: product.name,
+    slug: null,
+    description: product.description,
+    category: product.category
+      ? { id: product.category.id, name: product.category.name }
+      : null,
+    brand: product.brand ? { name: product.brand.name } : null,
+    images: product.images.map((img) => ({
+      id: img.id,
+      url: img.url,
+      isMain: img.isMain,
+    })),
+    price: priceHidden
+      ? { priceCents: null, hidden: true }
+      : {
+          priceCents: product.priceLists[0]?.priceCents ?? null,
+          hidden: false,
+        },
+    availability: productStock.status,
+    stockPresentation: productStock,
     hasVariants: product.hasVariants,
     variants,
     rating: null,

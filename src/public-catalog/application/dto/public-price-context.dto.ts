@@ -1,6 +1,8 @@
-import type { PublicCatalogProductDetail } from './public-product-detail.dto';
+import type { PublicCatalogProductDetail, PublicVariantDto } from './public-product-detail.dto';
 import type { PublicCatalogProductCard } from './public-product-card.dto';
 import type { PublicCatalogCategoryFacet } from './public-category-facet.dto';
+import type { PublicStockPresentationDto } from './public-stock-presentation.dto';
+import type { PublicStockStatus } from '../../domain/types';
 
 /**
  * F2.WU6 slice 4b — exact public price-context metadata attached to a
@@ -17,15 +19,52 @@ export interface PublicPriceContextDto {
 }
 
 /**
- * F2.WU6 slice 4b — dormant context-explicit public product detail
- * response. Flatly extends the existing product body (canonical design:
- * "Detail extends the existing product body with") with exact public
- * price-context metadata and a literal `excludedCount: 0` — the mapping
- * is exact-selected-only and never rewrites prices, so nothing is
- * excluded at this layer. No production caller yet; HTTP activation
- * stays in Slice 5.
+ * F3.WU9 slice 7 — contextual variant branch availability: the legacy shape
+ * with a compatibility `availability` that mirrors the row's
+ * `stockPresentation.status` and is `null` when the mode hides the indicator.
  */
-export interface PublicCatalogProductDetailWithContextDto extends PublicCatalogProductDetail {
+export interface PublicContextualVariantAvailabilityDto {
+  branchId: string;
+  branchName: string;
+  branchSlug: string;
+  availability: PublicStockStatus | null;
+  isSelected: boolean;
+}
+
+/**
+ * F3.WU9 slice 7 — contextual variant row: the legacy public variant shape
+ * plus its own presentation projection. Operational quantities stay absent.
+ */
+export interface PublicContextualVariantDto
+  extends Omit<PublicVariantDto, 'availabilityByBranch'> {
+  availabilityByBranch: PublicContextualVariantAvailabilityDto[];
+  stockPresentation: PublicStockPresentationDto;
+}
+
+/**
+ * F3.WU9 slice 7 — contextual public product body: the legacy product body
+ * with compatibility `availability` mirroring `stockPresentation.status`
+ * (null when hidden) and the product-level stock presentation. A distinct
+ * shape — the legacy `PublicCatalogProductDetail` output is never widened.
+ */
+export interface PublicCatalogContextualProductBody
+  extends Omit<PublicCatalogProductDetail, 'availability' | 'variants'> {
+  availability: PublicStockStatus | null;
+  stockPresentation: PublicStockPresentationDto;
+  variants: PublicContextualVariantDto[];
+}
+
+/**
+ * F2.WU6 slice 4b — context-explicit public product detail response.
+ * Flatly extends the existing product body (canonical design: "Detail
+ * extends the existing product body with") with exact public price-context
+ * metadata and a literal `excludedCount: 0` — the mapping is
+ * exact-selected-only and never rewrites prices, so nothing is excluded at
+ * this layer. F3.WU9 slice 7 activates the stock presentation on this
+ * contextual shape only.
+ */
+export interface PublicCatalogProductDetailWithContextDto
+  extends PublicCatalogContextualProductBody {
   priceContext: PublicPriceContextDto;
   excludedCount: 0;
 }

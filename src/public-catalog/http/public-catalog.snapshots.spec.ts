@@ -305,13 +305,19 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
     expect(result.excludedCount).toBe(3);
   });
 
-  it('detail carries excludedCount, priceContext, and no variant image fallback', async () => {
-    const projection: ProductDetailWithIncludes = {
+  it('detail carries excludedCount, priceContext, contextual stock presentation, and no variant image fallback', async () => {
+    const projection: ProductDetailWithIncludes & {
+      stockPresentationParticipants: Array<{
+        quantity: number;
+        minQuantity: number;
+      }>;
+    } = {
       ...guideProduct(),
       hasVariants: true,
       images: [
         { id: 'img-1', url: 'https://cdn.example.com/main.jpg', isMain: true },
       ],
+      stockPresentationParticipants: [{ quantity: 5, minQuantity: 1 }],
       variants: [
         {
           id: 'var-1',
@@ -333,12 +339,22 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
       context: guideContext(),
     });
     expect(Object.keys(result).sort().join()).toBe(
-      'availability,brand,category,description,excludedCount,featuredLabel,hasVariants,id,images,name,price,priceContext,rating,slug,variants',
+      'availability,brand,category,description,excludedCount,featuredLabel,hasVariants,id,images,name,price,priceContext,rating,slug,stockPresentation,variants',
     );
     expect(result.excludedCount).toBe(0);
     expect(result.priceContext).toEqual(priceCtx(true));
     expect(result.images).toEqual(projection.images);
     expect(result.variants[0].image).toBeNull();
+    expect(result.stockPresentation).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
+    expect(result.variants[0].stockPresentation).toEqual({
+      mode: 'SYSTEM_STATUS',
+      status: 'available',
+      customQuantity: null,
+    });
   });
   it('cart validate maps POST (default 201) with no HttpCode override', () => {
     const cart = handlerOf('validateCartEndpoint');

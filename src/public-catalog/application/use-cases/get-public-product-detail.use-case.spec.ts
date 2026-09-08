@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { GetPublicProductDetailUseCase } from './get-public-product-detail.use-case';
 import type { IPublicCatalogRepository } from '../ports/public-catalog.repository';
 import type { ResolvedPublicCatalogContext } from '../ports/public-catalog.repository';
@@ -154,8 +154,11 @@ describe('GetPublicProductDetailUseCase.executeForContext (F2.WU6 slice 4b — d
   /** Visible projection with exact selected prices (2500 product / 2600 variant). */
   const priced = (
     overrides: Partial<ProductDetailWithIncludes> = {},
-  ): ProductDetailWithIncludes =>
-    makeDetail({
+    participants: Array<{ quantity: number; minQuantity: number }> = [],
+  ): ProductDetailWithIncludes & {
+    stockPresentationParticipants: Array<{ quantity: number; minQuantity: number }>;
+  } => ({
+    ...makeDetail({
       priceLists: [{ priceCents: 2500 }],
       variants: [
         {
@@ -164,7 +167,9 @@ describe('GetPublicProductDetailUseCase.executeForContext (F2.WU6 slice 4b — d
         },
       ],
       ...overrides,
-    });
+    }),
+    stockPresentationParticipants: participants,
+  });
 
   let seam: jest.Mock;
   let legacyRead: jest.Mock;
@@ -217,6 +222,7 @@ describe('GetPublicProductDetailUseCase.executeForContext (F2.WU6 slice 4b — d
       'images',
       'price',
       'availability',
+      'stockPresentation',
       'hasVariants',
       'variants',
       'rating',
@@ -317,19 +323,25 @@ describe('GetPublicProductDetailUseCase.executeForContext (F2.WU6 slice 4b — d
       catalogPublishMode: mode,
       variantPrices: [{ priceCents }],
     });
-    seam.mockResolvedValue(
-      priced({
-        hasVariants: true,
-        variants: [
-          variant('var-inherit', 'INHERIT', 2600),
-          variant('var-on', 'ON', 2700),
-          {
-            ...variant('var-off', 'OFF', 9999),
-            images: [{ url: 'https://cdn.example.com/off-image.jpg' }],
-          },
-        ],
-      }),
-    );
+        seam.mockResolvedValue(
+          priced(
+            {
+              hasVariants: true,
+              variants: [
+                variant('var-inherit', 'INHERIT', 2600),
+                variant('var-on', 'ON', 2700),
+                {
+                  ...variant('var-off', 'OFF', 9999),
+                  images: [{ url: 'https://cdn.example.com/off-image.jpg' }],
+                },
+              ],
+            },
+            [
+              { quantity: 10, minQuantity: 2 },
+              { quantity: 10, minQuantity: 2 },
+            ],
+          ),
+        );
 
     const result = await useCase.executeForContext(detailInput);
 
@@ -372,49 +384,219 @@ describe('GetPublicProductDetailUseCase.executeForContext (F2.WU6 slice 4b — d
 
     expect(resolveDefault).toHaveBeenCalledTimes(1);
     expect(legacyRead).toHaveBeenCalledTimes(1);
-    expect(seam).not.toHaveBeenCalled();
-    expect(resolveContext).not.toHaveBeenCalled();
-    expect(Object.keys(result)).toEqual([
-      'id',
-      'name',
-      'slug',
-      'description',
-      'category',
-      'brand',
-      'images',
-      'price',
-      'availability',
-      'hasVariants',
-      'variants',
-      'rating',
-      'featuredLabel',
-    ]);
-    expect(result).not.toHaveProperty('priceContext');
-    expect(result).not.toHaveProperty('excludedCount');
-  });
-});
+        expect(seam).not.toHaveBeenCalled();
+        expect(resolveContext).not.toHaveBeenCalled();
+        expect(Object.keys(result)).toEqual([
+          'id',
+          'name',
+          'slug',
+          'description',
+          'category',
+          'brand',
+          'images',
+          'price',
+          'availability',
+          'hasVariants',
+          'variants',
+          'rating',
+          'featuredLabel',
+        ]);
+        expect(result).not.toHaveProperty('priceContext');
+        expect(result).not.toHaveProperty('excludedCount');
+      });
+
+      // ─────────────────────────────────────────────────────────────────
+      // F3.WU9 slice 7 — contextual-only stock-presentation activation.
+      // ─────────────────────────────────────────────────────────────────
+      describe('F3.WU9 slice 7 — contextual stock presentation', () => {
+        const hiddenContext = {
+          ...context,
+          stockPresentationDefaults: {
+            catalogStockPresentationDefault: 'HIDDEN' as const,
+            catalogStockPresentationDefaultCustomQty: null,
+          },
+        };
+
+        it('exposes product-level stockPresentation derived from the context defaults only', async () => {
+          seam.mockResolvedValue(priced());
+
+          const result = await useCase.executeForContext(detailInput);
+
+          expect(result.stockPresentation).toEqual({
+            mode: 'SYSTEM_STATUS',
+            status: 'available',
+            customQuantity: null,
+          });
+          expect(result.availability).toBe('available');
+        });
+
+        it('passes HIDDEN context defaults through and nulls the product availability', async () => {
+          seam.mockResolvedValue(priced());
+
+          const result = await useCase.executeForContext({
+            ...detailInput,
+            context: hiddenContext,
+          });
+
+          expect(result.stockPresentation).toEqual({
+            mode: 'HIDDEN',
+            status: null,
+            customQuantity: null,
+          });
+          expect(result.availability).toBeNull();
+        });
+
+        it('aggregates variant products over every preserved participant row and never revives product quantities', async () => {
+          const variantProduct = priced(
+            {
+              hasVariants: true,
+              quantity: 999,
+              minQuantity: 999,
+              variants: [
+                {
+                  ...makeDetail().variants[0],
+                  quantity: 0,
+                  variantPrices: [{ priceCents: 2600 }],
+                },
+              ],
+            },
+            [{ quantity: 0, minQuantity: 0 }, { quantity: 10, minQuantity: 1 }],
+          );
+          seam.mockResolvedValue(variantProduct);
+          const withStock = await useCase.executeForContext(detailInput);
+          expect(withStock.stockPresentation.status).toBe('available');
+
+          seam.mockResolvedValue(
+            priced(
+              { hasVariants: true, quantity: 999, minQuantity: 999 },
+              [{ quantity: 0, minQuantity: 0 }],
+            ),
+          );
+          const withoutStock = await useCase.executeForContext(detailInput);
+          // Product quantity 999 is never an aggregate fallback.
+          expect(withoutStock.stockPresentation.status).toBe('out_of_stock');
+          expect(withoutStock.availability).toBe('out_of_stock');
+        });
+
+        it('maps each visible variant row with its own presentation and mirrors branch availability', async () => {
+          const row = (id: string, quantity: number) => ({
+            ...makeDetail().variants[0],
+            id,
+            quantity,
+          });
+          seam.mockResolvedValue(
+            priced(
+              { hasVariants: true, variants: [row('var-a', 10), row('var-b', 0)] },
+              [
+                { quantity: 10, minQuantity: 2 },
+                { quantity: 0, minQuantity: 2 },
+              ],
+            ),
+          );
+
+          const result = await useCase.executeForContext(detailInput);
+
+          expect(result.variants[0].stockPresentation).toEqual({
+            mode: 'SYSTEM_STATUS',
+            status: 'available',
+            customQuantity: null,
+          });
+          expect(result.variants[1].stockPresentation.status).toBe(
+            'out_of_stock',
+          );
+          expect(result.variants[1].availabilityByBranch[0].availability).toBe(
+            'out_of_stock',
+          );
+        });
+
+        it('HIDDEN defaults null the availability of every variant branch row', async () => {
+          seam.mockResolvedValue(
+            priced(
+              { hasVariants: true, variants: [makeDetail().variants[0]] },
+              [{ quantity: 10, minQuantity: 2 }],
+            ),
+          );
+
+          const result = await useCase.executeForContext({
+            ...detailInput,
+            context: hiddenContext,
+          });
+
+          expect(result.availability).toBeNull();
+          expect(result.variants[0].availabilityByBranch[0].availability).toBeNull();
+        });
+
+        it('responds as a generic miss with one safe warning on invalid participants', async () => {
+          const warn = jest
+            .spyOn(Logger.prototype, 'warn')
+            .mockImplementation(() => undefined);
+          seam.mockResolvedValue(
+            priced(
+              { hasVariants: true, variants: [makeDetail().variants[0]] },
+              [{ quantity: '10' } as never],
+            ),
+          );
+
+          await expect(useCase.executeForContext(detailInput)).rejects.toThrow(
+            new NotFoundException('Not Found'),
+          );
+
+          expect(warn).toHaveBeenCalledTimes(1);
+          expect(JSON.stringify(warn.mock.calls)).not.toContain('10');
+          // No retry and no legacy fallback after the rejection.
+          expect(seam).toHaveBeenCalledTimes(1);
+          expect(legacyRead).not.toHaveBeenCalled();
+          warn.mockRestore();
+        });
+
+        it('leaks no operational stock keys in the serialized contextual response', async () => {
+          seam.mockResolvedValue(
+            priced(
+              { hasVariants: true, variants: [makeDetail().variants[0]] },
+              [{ quantity: 10, minQuantity: 2 }],
+            ),
+          );
+
+          const serialized = JSON.stringify(
+            await useCase.executeForContext(detailInput),
+          );
+
+          expect(serialized).not.toContain('"quantity"');
+          expect(serialized).not.toContain('"minQuantity"');
+          expect(serialized).not.toContain('stockPresentationParticipants');
+          expect(serialized).not.toContain('"tenantId"');
+          expect(serialized).not.toContain('catalogPublishMode');
+        });
+      });
+    });
 
 /**
- * Compile-time contract probe (type-level only): the dormant seam must
- * return a FLAT extension of the existing product body — assignable to
- * `PublicCatalogProductDetail & { priceContext; excludedCount: 0 }` — and
- * must reject both a nested envelope and a broad `number` excludedCount.
+ * Compile-time contract probe (type-level only): the contextual seam must
+ * return a FLAT response carrying the Slice 7 stock refinements — nullable
+ * `availability`, `stockPresentation` — while never widening back to the
+ * legacy detail shape, never enveloping, and never broadening `excludedCount`.
  */
-type FlatDetailResponse = PublicCatalogProductDetail & {
-  priceContext: PublicPriceContextDto;
-  excludedCount: 0;
-};
-
 type ReturnedForContext = Awaited<
   ReturnType<GetPublicProductDetailUseCase['executeForContext']>
 >;
 
-// Positive: the seam's returned type satisfies the canonical flat contract.
-type ReturnedIsFlat = ReturnedForContext extends FlatDetailResponse
+// Positive: the contextual response stays flat — literal excludedCount and
+// contextual-only refinements are present.
+const _excludedIsLiteralZero: ReturnedForContext['excludedCount'] = 0;
+void _excludedIsLiteralZero;
+const _availabilityIsNullable: ReturnedForContext['availability'] = null;
+void _availabilityIsNullable;
+const _presentationIsPublic: ReturnedForContext['stockPresentation']['mode'] =
+  'SYSTEM_STATUS';
+void _presentationIsPublic;
+
+// Negative: the contextual DTO must NOT widen into the legacy detail shape
+// (contextual branch availability is nullable; legacy is not).
+type ContextualWidensLegacy = PublicCatalogProductDetailWithContextDto extends PublicCatalogProductDetail
   ? true
   : false;
-const _returnedIsFlat: ReturnedIsFlat = true;
-void _returnedIsFlat;
+const _doesNotWidenLegacy: ContextualWidensLegacy = false;
+void _doesNotWidenLegacy;
 
 // Negative: a nested `{ detail, ... }` envelope must not typecheck.
 const _rejectsNestedEnvelope: PublicCatalogProductDetailWithContextDto = {

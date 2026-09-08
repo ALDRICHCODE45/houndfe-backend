@@ -210,6 +210,12 @@ describe(
         ? HIDDEN_PRICE
         : { priceCents: 125000, hidden: false },
       availability: 'available',
+      // F3.WU9 slice 7 — contextual stock presentation passthrough.
+      stockPresentation: {
+        mode: 'SYSTEM_STATUS',
+        status: 'available',
+        customQuantity: null,
+      },
       hasVariants: true,
       variants: [
         {
@@ -230,6 +236,11 @@ describe(
               isSelected: true,
             },
           ],
+          stockPresentation: {
+            mode: 'SYSTEM_STATUS',
+            status: 'available',
+            customQuantity: null,
+          },
         },
       ],
       rating: null,
