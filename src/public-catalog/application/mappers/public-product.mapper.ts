@@ -23,8 +23,10 @@ import type {
  * F3.WU9 correction — persisted stock-presentation override scalars as they
  * reach the mapper from the runtime Prisma projection (nullable per product
  * and per variant; absent in legacy typed fixtures means "not persisted").
+ * F3.WU9 slice 8 — exported so the internal contextual list projection
+ * (port `PublicProductListProjection`) can reuse the exact same contract.
  */
-type PersistedStockPresentationOverrides = {
+export type PersistedStockPresentationOverrides = {
   onlineStockPresentation?: StockPresentationSource['onlineStockPresentation'];
   onlineStockPresentationCustomQty?: StockPresentationSource['onlineStockPresentationCustomQty'];
 };

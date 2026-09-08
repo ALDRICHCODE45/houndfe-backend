@@ -3,6 +3,7 @@ import type { PublicCatalogCategoryFacet } from '../dto/public-category-facet.dt
 import type {
   ProductWithIncludes,
   ProductDetailWithIncludes,
+  PersistedStockPresentationOverrides,
 } from '../mappers/public-product.mapper';
 import type { CatalogStockPresentationValue } from '../../../catalog-settings/domain/tenant-catalog-settings.aggregate';
 
@@ -99,6 +100,26 @@ export interface PublicProductDetailProjection extends ProductDetailWithIncludes
   stockPresentationParticipants: PublicStockPresentationParticipant[];
 }
 
+/**
+ * F3.WU9 slice 8 — internal exact-context list projection. Extends
+ * `ProductWithIncludes` with the persisted product-level stock-presentation
+ * override scalars — the list query keeps its deliberate Prisma root
+ * `include` (no restrictive root `select`), so every persisted product
+ * scalar, including an explicit custom quantity of `0`, is transported —
+ * plus the required `stockPresentationParticipants` collection: an
+ * independent snapshot from every same-tenant non-OFF variant returned by
+ * the publication-gated list query, captured before selected-price display
+ * eligibility can remove rows. Internal only: no public
+ * `stockPresentation` activation, no mapper/controller/use-case/DTO
+ * consumption, no variant presentation overrides, and no aggregate
+ * fallback from participants to product `quantity`/`minQuantity`.
+ */
+export interface PublicProductListProjection
+  extends ProductWithIncludes,
+    PersistedStockPresentationOverrides {
+  stockPresentationParticipants: PublicStockPresentationParticipant[];
+}
+
 export interface IPublicCatalogRepository {
   findActiveBranches(): Promise<PublicBranchDto[]>;
 
@@ -149,13 +170,19 @@ export interface IPublicCatalogRepository {
    * slice. Eligibility must be applied in the adapter's Prisma
    * `where` before pagination; no in-memory eligibility filtering
    * is permitted.
+   *
+   * F3.WU9 slice 8 — items are narrowed to the internal
+   * `PublicProductListProjection`, which adds the persisted product-level
+   * override scalars and the internal `stockPresentationParticipants`
+   * snapshot on top of the unchanged `ProductWithIncludes` shape. The
+   * public list response, DTOs, and card mapping stay untouched.
    */
   listPublicProducts?(params: {
     tenantId: string;
     context: ResolvedPublicCatalogContext;
     filters: ListProductsParams;
   }): Promise<{
-    items: ProductWithIncludes[];
+    items: PublicProductListProjection[];
     /** Context-eligible, filter-matching count — before pagination. */
     total: number;
     /** Base published/filter-matching count minus eligible count. */

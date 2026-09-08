@@ -8,6 +8,7 @@ import type {
   ListProductsParams,
   PublicCartCandidate,
   PublicProductDetailProjection,
+  PublicProductListProjection,
   ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
 import type {
@@ -258,13 +259,20 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
    * when BOTH a positive selected product price row AND a published
    * variant with a positive selected variant price exist; nested
    * tenant-owned predicates repeat the explicit `tenantId`.
+   *
+   * F3.WU9 slice 8 — items additionally carry the internal
+   * `stockPresentationParticipants` snapshot (every same-tenant non-OFF
+   * variant returned by the publication-gated query, captured before any
+   * selected-price display eligibility can remove rows) and the persisted
+   * product-level override scalars already transported by the root
+   * `include`. No public list/card presentation behavior changes.
    */
   async listPublicProducts(params: {
     tenantId: string;
     context: ResolvedPublicCatalogContext;
     filters: ListProductsParams;
   }): Promise<{
-    items: ProductWithIncludes[];
+    items: PublicProductListProjection[];
     total: number;
     excludedCount: number;
     categories: PublicCatalogCategoryFacet[];
@@ -439,16 +447,44 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       },
     });
 
+    const sorted = this.sortByPriceIfNeeded(
+      // SAFETY: The include shape above matches ProductWithIncludes; this bridges Prisma's conditional query inference.
+      items as unknown as ProductWithIncludes[],
+      params.filters.sort,
+    );
+
     return {
-      items: this.sortByPriceIfNeeded(
-        // SAFETY: The include shape above matches ProductWithIncludes; this bridges Prisma's conditional query inference.
-        items as unknown as ProductWithIncludes[],
-        params.filters.sort,
-      ),
+      items: this.withStockPresentationParticipants(sorted),
       total: eligibleTotal,
       excludedCount: baseTotal - eligibleTotal,
       categories: await this.toCategoryFacets(facetGroups),
     };
+  }
+
+  /**
+   * F3.WU9 slice 8 — attaches the internal
+   * `stockPresentationParticipants` snapshot to each list item: one row
+   * per same-tenant non-OFF variant returned by the publication-gated
+   * query, captured BEFORE selected-price display eligibility can remove
+   * rows — unpriced, zero-priced, and context-less variants all
+   * participate. Each participant carries only `quantity` and
+   * `minQuantity`; non-variant products carry an empty collection.
+   * Internal only: never consumed by the public mapper/controller/use
+   * case/DTO, never a fallback to product `quantity`/`minQuantity`, and
+   * never a public `stockPresentation` activation.
+   */
+  private withStockPresentationParticipants(
+    items: ProductWithIncludes[],
+  ): PublicProductListProjection[] {
+    return items.map((product) => ({
+      ...product,
+      stockPresentationParticipants: product.hasVariants
+        ? product.variants.map((v) => ({
+            quantity: v.quantity,
+            minQuantity: v.minQuantity,
+          }))
+        : [],
+    }));
   }
 
   /**

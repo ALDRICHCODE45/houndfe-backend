@@ -978,3 +978,247 @@ describe('F2.WU7 slice 1 findPublicCartCandidates', () => {
     });
   });
 });
+
+/**
+ * F3.WU9 slice 8 — transport-only contextual list projection: the
+ * publication-gated `listPublicProducts` seam additionally carries the
+ * persisted product-level stock-presentation override scalars and the
+ * internal `stockPresentationParticipants` snapshot. No public list/card
+ * presentation behavior, response shape, or count metadata changes.
+ */
+describe('F3.WU9 slice 8 listPublicProducts transport-only projection', () => {
+  const CONTEXT = {
+    tenantId: 'tenant-1',
+    tenantSlug: 'ctx-tenant',
+    globalPriceListId: 'gpl-A',
+    name: 'Lista',
+    isCatalogDefault: false,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS',
+      catalogStockPresentationDefaultCustomQty: null,
+    },
+  };
+  const FILTERS = { sort: 'relevance' as const, page: 1, limit: 20 };
+
+  let findMany: jest.Mock;
+  let count: jest.Mock;
+  let groupBy: jest.Mock;
+  let categoryFindMany: jest.Mock;
+
+  const buildRepo = () =>
+    new PrismaPublicCatalogRepository(
+      {
+        category: { findMany: categoryFindMany },
+      } as unknown as PrismaService,
+      {
+        getClient: () => ({
+          product: { findMany, count, groupBy },
+        }),
+      } as unknown as TenantPrismaService,
+    );
+
+  beforeEach(() => {
+    findMany = jest.fn().mockResolvedValue([]);
+    count = jest.fn().mockResolvedValue(1);
+    groupBy = jest.fn().mockResolvedValue([]);
+    categoryFindMany = jest.fn().mockResolvedValue([]);
+  });
+
+  const list = () =>
+    buildRepo().listPublicProducts({
+      tenantId: 'tenant-1',
+      context: CONTEXT,
+      filters: FILTERS,
+    });
+
+  it('transports persisted product overrides through the deliberate root include and preserves custom quantity 0', async () => {
+    findMany.mockResolvedValue([
+      {
+        id: 'p-simple',
+        name: 'Simple',
+        description: null,
+        hasVariants: false,
+        useStock: true,
+        quantity: 7,
+        minQuantity: 2,
+        hidePriceInOnlineCatalog: false,
+        requiresPrescription: false,
+        category: { id: 'cat-1', name: 'Alimento' },
+        brand: { name: 'Brand' },
+        images: [{ url: 'https://cdn.example.com/p.jpg' }],
+        priceLists: [{ priceCents: 1500 }],
+        variants: [],
+        onlineStockPresentation: 'CUSTOM_QUANTITY',
+        onlineStockPresentationCustomQty: 0,
+      },
+    ]);
+
+    const result = await list();
+
+    // The list query keeps its root `include` (no restrictive root
+    // `select`), so every persisted product scalar — the stock-presentation
+    // overrides included — reaches the projection contract.
+    const args = findMany.mock.calls[0][0];
+    expect(args.include).toBeDefined();
+    expect(args.select).toBeUndefined();
+
+    expect(result.items[0].onlineStockPresentation).toBe('CUSTOM_QUANTITY');
+    // Explicit custom quantity `0` survives — it is not collapsed to null.
+    expect(result.items[0].onlineStockPresentationCustomQty).toBe(0);
+  });
+
+  it('snapshots every same-tenant non-OFF variant before display eligibility, including unpriced, zero-priced, and context-less rows', async () => {
+    findMany.mockResolvedValue([
+      {
+        id: 'p-var',
+        name: 'Con variantes',
+        description: null,
+        hasVariants: true,
+        useStock: true,
+        quantity: 0,
+        minQuantity: 1,
+        hidePriceInOnlineCatalog: false,
+        requiresPrescription: false,
+        category: { id: 'cat-1', name: 'Alimento' },
+        brand: { name: 'Brand' },
+        images: [],
+        priceLists: [{ priceCents: 1500 }],
+        variants: [
+          // Unpriced in the selected context (empty variantPrices).
+          {
+            id: 'v-1',
+            name: 'A',
+            option: 'x',
+            value: 'a',
+            quantity: 3,
+            minQuantity: 1,
+            catalogPublishMode: 'ON',
+            variantPrices: [],
+          },
+          // Zero-priced: excluded from variantPrices (gt: 0), never from participants.
+          {
+            id: 'v-2',
+            name: 'B',
+            option: 'x',
+            value: 'b',
+            quantity: 0,
+            minQuantity: 0,
+            catalogPublishMode: 'INHERIT',
+            variantPrices: [],
+          },
+          // Priced in the selected context.
+          {
+            id: 'v-3',
+            name: 'C',
+            option: 'x',
+            value: 'c',
+            quantity: 12,
+            minQuantity: 4,
+            catalogPublishMode: 'INHERIT',
+            variantPrices: [{ priceCents: 900 }],
+          },
+        ],
+        onlineStockPresentation: null,
+        onlineStockPresentationCustomQty: null,
+      },
+      {
+        id: 'p-plain',
+        name: 'Simple',
+        description: null,
+        hasVariants: false,
+        useStock: true,
+        quantity: 7,
+        minQuantity: 2,
+        hidePriceInOnlineCatalog: false,
+        requiresPrescription: false,
+        category: { id: 'cat-1', name: 'Alimento' },
+        brand: { name: 'Brand' },
+        images: [],
+        priceLists: [{ priceCents: 1500 }],
+        variants: [],
+        onlineStockPresentation: null,
+        onlineStockPresentationCustomQty: null,
+      },
+    ]);
+
+    const result = await list();
+
+    // Exact-shape equality proves each participant carries ONLY
+    // quantity/minQuantity — no IDs, publish modes, or other operational
+    // values — and that unpriced/zero-priced variants still participate.
+    expect(result.items[0].stockPresentationParticipants).toEqual([
+      { quantity: 3, minQuantity: 1 },
+      { quantity: 0, minQuantity: 0 },
+      { quantity: 12, minQuantity: 4 },
+    ]);
+    expect(result.items[1].stockPresentationParticipants).toEqual([]);
+  });
+
+  it('keeps the existing same-tenant non-OFF variant gates so OFF/cross-tenant variants never participate', async () => {
+    await list();
+
+    const args = findMany.mock.calls[0][0];
+    expect(args.include?.variants?.where).toEqual({
+      tenantId: 'tenant-1',
+      catalogPublishMode: { not: 'OFF' },
+    });
+  });
+
+  it('keeps the public list response shape, pagination inputs, and count metadata unchanged', async () => {
+    const rows = [
+      {
+        id: 'p-simple',
+        name: 'Simple',
+        description: null,
+        hasVariants: false,
+        useStock: true,
+        quantity: 7,
+        minQuantity: 2,
+        hidePriceInOnlineCatalog: false,
+        requiresPrescription: false,
+        category: { id: 'cat-1', name: 'Alimento' },
+        brand: { name: 'Brand' },
+        images: [{ url: 'https://cdn.example.com/p.jpg' }],
+        priceLists: [{ priceCents: 1500 }],
+        variants: [],
+        onlineStockPresentation: null,
+        onlineStockPresentationCustomQty: null,
+      },
+    ];
+    let capturedArgs: unknown;
+    findMany.mockImplementation((args: unknown) => {
+      capturedArgs = args;
+      return Promise.resolve(rows);
+    });
+    // First count = eligible, second count = base (both before pagination).
+    count.mockReset().mockResolvedValueOnce(2).mockResolvedValueOnce(5);
+    groupBy.mockResolvedValue([{ categoryId: 'cat-1', _count: { id: 2 } }]);
+    categoryFindMany.mockResolvedValue([
+      { id: 'cat-1', name: 'Alimento' },
+    ]);
+
+    const result = await list();
+
+    expect(Object.keys(result).sort()).toEqual([
+      'categories',
+      'excludedCount',
+      'items',
+      'total',
+    ]);
+    expect(result.total).toBe(2);
+    expect(result.excludedCount).toBe(3);
+    // Facets still resolve names through the global category table.
+    expect(result.categories).toEqual([
+      { id: 'cat-1', name: 'Alimento', count: 2 },
+    ]);
+    // Pagination inputs are untouched by the transport-only projection.
+    expect(capturedArgs).toMatchObject({ skip: 0, take: 20 });
+    // Transport-only: items gain participants but no public presentation surface.
+    expect(result.items[0]).toMatchObject({
+      id: 'p-simple',
+      priceLists: [{ priceCents: 1500 }],
+      stockPresentationParticipants: [],
+    });
+    expect(result.items[0]).not.toHaveProperty('stockPresentation');
+  });
+});
