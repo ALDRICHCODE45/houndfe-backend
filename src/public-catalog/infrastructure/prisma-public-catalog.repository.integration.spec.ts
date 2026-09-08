@@ -1437,6 +1437,192 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
     });
   });
 
+  // ── F3.WU9 slice 4 — stockPresentationParticipants on the exact- ────
+  // context detail seam. The collection is internal-only: captured
+  // from every same-tenant non-OFF variant the publication-gated query
+  // returns, BEFORE the selected-price display filtering. Displayed
+  // variants stay byte-semantically unchanged (selected-context
+  // positive-price-only; hidden/prescription redaction preserved).
+  describe('F3.WU9 stockPresentationParticipants — exact-context detail projection', () => {
+    /** Tenant + selected/alternate lists + participant polarity matrix. */
+    async function seedParticipantMatrix() {
+      const tenant = (
+        await seedTenant('spp', { isActive: true, catalogPublished: true })
+      ).id;
+      const other = (
+        await seedTenant('spp-x', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = tenant;
+      const gSel = await seedGlobalPriceList('spp-sel');
+      const gAlt = await seedGlobalPriceList('spp-alt');
+      await seedBinding({
+        tenantId: tenant,
+        globalPriceListId: gSel,
+        isCatalogDefault: true,
+      });
+      const context: ResolvedPublicCatalogContext = {
+        tenantId: tenant,
+        tenantSlug: tenantSlug(tenant),
+        globalPriceListId: gSel,
+        name: 'spp-sel',
+        isCatalogDefault: true,
+      };
+      const call = (productId: string) =>
+        repo.getPublicProductDetail({
+          tenantId: tenant,
+          productId,
+          context,
+        });
+
+      // Visible variant product: four same-tenant non-OFF variants
+      // cover positive / zero / alternate-only / unpriced participant
+      // price polarities; OFF and cross-tenant variants must never
+      // become participants.
+      const id = await seedProduct(tenant, 'spp-p', { variants: true });
+      const okRow = await seedProductPrice(tenant, id, gSel, 2500);
+      const altRow = await seedProductPrice(tenant, id, gAlt, 2700);
+
+      const vPos = await seedVariant(id, tenant, 'spp-pos', 'ON', {
+        quantity: 7,
+      });
+      await seedVariantPrice(tenant, vPos, okRow, 2600);
+      const vZero = await seedVariant(id, tenant, 'spp-zero', 'ON', {
+        quantity: 0,
+      });
+      await seedVariantPrice(tenant, vZero, okRow, 0);
+      const vAlt = await seedVariant(id, tenant, 'spp-alt', 'ON', {
+        quantity: 9,
+      });
+      await seedVariantPrice(tenant, vAlt, altRow, 2800);
+      const vUn = await seedVariant(id, tenant, 'spp-un', 'ON', {
+        quantity: 5,
+      });
+      await prisma.variant.update({
+        where: { id: vUn },
+        data: { minQuantity: 4 },
+      });
+      const vOff = await seedVariant(id, tenant, 'spp-off', 'OFF', {
+        quantity: 3,
+      });
+      await prisma.variant.update({
+        where: { id: vOff },
+        data: { minQuantity: 9 },
+      });
+      const vX = await seedVariant(id, other, 'spp-x', 'ON', {
+        quantity: 4,
+      });
+      await seedVariantPrice(tenant, vX, okRow, 2900);
+      await prisma.variant.update({
+        where: { id: vX },
+        data: { minQuantity: 8 },
+      });
+
+      // Distinct minQuantity per participant proves both fields project.
+      await prisma.variant.update({
+        where: { id: vPos },
+        data: { minQuantity: 2 },
+      });
+      await prisma.variant.update({
+        where: { id: vZero },
+        data: { minQuantity: 1 },
+      });
+      await prisma.variant.update({
+        where: { id: vAlt },
+        data: { minQuantity: 3 },
+      });
+
+      // Hidden-price variant product: rows exist but stay redacted;
+      // the participant snapshot is captured before that filtering.
+      const hid = await seedProduct(tenant, 'spp-hid', {
+        variants: true,
+        hidePrice: true,
+      });
+      const hRow = await seedProductPrice(tenant, hid, gSel, 4100);
+      const hV = await seedVariant(hid, tenant, 'spp-hv', 'ON', {
+        quantity: 6,
+      });
+      await seedVariantPrice(tenant, hV, hRow, 4200);
+
+      // Prescription variant product: same redaction semantics.
+      const rx = await seedProduct(tenant, 'spp-rx', {
+        variants: true,
+        requiresPrescription: true,
+      });
+      const rRow = await seedProductPrice(tenant, rx, gSel, 4300);
+      const rV = await seedVariant(rx, tenant, 'spp-rv', 'ON', {
+        quantity: 8,
+      });
+      await seedVariantPrice(tenant, rV, rRow, 4400);
+
+      // Non-variant product: empty participant collection.
+      const simple = await seedProduct(tenant, 'spp-simple');
+      await seedProductPrice(tenant, simple, gSel, 1500);
+
+      return { call, id, hid, rx, simple };
+    }
+
+    it('stockPresentationParticipants preserve every same-tenant non-OFF variant across positive, zero, alternate-only, and unpriced prices while displayed variants stay selected-positive-only', async () => {
+      const m = await seedParticipantMatrix();
+
+      const detail = await m.call(m.id);
+      expect(detail).not.toBeNull();
+
+      // Displayed variants: unchanged — only the variant priced in the
+      // selected context projects; zero/alternate-only/unpriced and
+      // cross-tenant variants never display.
+      expect(detail!.variants).toHaveLength(1);
+      expect(detail!.variants[0].variantPrices).toEqual([{ priceCents: 2600 }]);
+      expect(detail!.priceLists).toEqual([{ priceCents: 2500 }]);
+
+      // Participants: every same-tenant non-OFF variant regardless of
+      // price. OFF and cross-tenant variants are excluded by the exact
+      // query boundary.
+      const participants = detail!.stockPresentationParticipants;
+      expect(participants).toHaveLength(4);
+      expect([...participants].sort((a, b) => a.quantity - b.quantity)).toEqual(
+        [
+          { quantity: 0, minQuantity: 1 },
+          { quantity: 5, minQuantity: 4 },
+          { quantity: 7, minQuantity: 2 },
+          { quantity: 9, minQuantity: 3 },
+        ],
+      );
+
+      // Exact participant shape: quantity and minQuantity only.
+      for (const p of participants) {
+        expect(Object.keys(p).sort()).toEqual(['minQuantity', 'quantity']);
+      }
+    });
+
+    it('stockPresentationParticipants are captured before hidden-price and prescription redaction, which stays unchanged for displayed rows', async () => {
+      const m = await seedParticipantMatrix();
+
+      const hid = await m.call(m.hid);
+      expect(hid).not.toBeNull();
+      expect(hid!.priceLists).toEqual([]);
+      expect(hid!.variants).toHaveLength(1);
+      expect(hid!.variants[0].variantPrices).toEqual([]);
+      expect(hid!.stockPresentationParticipants).toEqual([
+        { quantity: 6, minQuantity: 0 },
+      ]);
+
+      const rx = await m.call(m.rx);
+      expect(rx).not.toBeNull();
+      expect(rx!.priceLists).toEqual([]);
+      expect(rx!.variants[0].variantPrices).toEqual([]);
+      expect(rx!.stockPresentationParticipants).toEqual([
+        { quantity: 8, minQuantity: 0 },
+      ]);
+    });
+
+    it('stockPresentationParticipants are empty for non-variant products', async () => {
+      const m = await seedParticipantMatrix();
+      const simple = await m.call(m.simple);
+      expect(simple).not.toBeNull();
+      expect(simple!.stockPresentationParticipants).toEqual([]);
+    });
+  });
+
   // ── F2.WU6 (evidence correction) — two independent tenant contexts ────
   // One tenant bound to TWO distinct public global lists (default +
   // explicit non-default); each list is resolved and selected

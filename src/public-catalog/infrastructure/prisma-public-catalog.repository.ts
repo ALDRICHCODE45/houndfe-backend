@@ -7,6 +7,7 @@ import type {
   IPublicCatalogRepository,
   ListProductsParams,
   PublicCartCandidate,
+  PublicProductDetailProjection,
   ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
 import type {
@@ -454,7 +455,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     tenantId: string;
     productId: string;
     context: ResolvedPublicCatalogContext;
-  }): Promise<ProductDetailWithIncludes | null> {
+  }): Promise<PublicProductDetailProjection | null> {
     if (params.tenantId !== params.context.tenantId) return null;
 
     const client = this.tenantPrisma.getClient();
@@ -577,6 +578,20 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     });
 
     if (!product) return null;
+
+    // F3.WU9 slice 4 — independent participant snapshot from every
+    // same-tenant non-OFF variant returned by the publication-gated
+    // query above, captured BEFORE the selected-price display filtering
+    // below. Only quantity/minQuantity project; non-variant products
+    // carry an empty collection. Internal only — never consumed by the
+    // public mapper/controller/use case/DTO.
+    const stockPresentationParticipants = product.hasVariants
+      ? product.variants.map((v) => ({
+          quantity: v.quantity,
+          minQuantity: v.minQuantity,
+        }))
+      : [];
+
     // Hidden/prescription precedence: zero numeric rows; visible
     // products project only variants priced in the selected context.
     if (product.hidePriceInOnlineCatalog || product.requiresPrescription) {
@@ -591,7 +606,10 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     }
 
     // SAFETY: The include shape above matches ProductDetailWithIncludes; this bridges Prisma's conditional query inference.
-    return product as unknown as ProductDetailWithIncludes;
+    return {
+      ...product,
+      stockPresentationParticipants,
+    } as unknown as PublicProductDetailProjection;
   }
 
   /**

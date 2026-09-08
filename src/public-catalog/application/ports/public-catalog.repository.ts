@@ -64,6 +64,30 @@ export interface PublicCartCandidate {
   }>;
 }
 
+/**
+ * F3.WU9 slice 4 — one stock-presentation participant snapshot. Exactly
+ * `quantity` and `minQuantity`: no IDs, tenant IDs, publish modes, custom
+ * quantities, useStock, resolved, or other operational values beyond these
+ * two fields.
+ */
+export interface PublicStockPresentationParticipant {
+  quantity: number;
+  minQuantity: number;
+}
+
+/**
+ * F3.WU9 slice 4 — internal exact-context detail projection. Extends
+ * `ProductDetailWithIncludes` with the required
+ * `stockPresentationParticipants` collection (an independent snapshot from
+ * every same-tenant non-OFF variant returned by the publication-gated
+ * detail query, captured before the selected-price display filtering).
+ * Scoped to `getPublicProductDetail` only so the legacy detail shape is
+ * never widened. Non-variant products carry an empty collection.
+ */
+export interface PublicProductDetailProjection extends ProductDetailWithIncludes {
+  stockPresentationParticipants: PublicStockPresentationParticipant[];
+}
+
 export interface IPublicCatalogRepository {
   findActiveBranches(): Promise<PublicBranchDto[]>;
 
@@ -135,12 +159,19 @@ export interface IPublicCatalogRepository {
    * wrong tenant, unpublished, excluded, SERVICE, all-OFF, allowlist
    * mismatch, missing/zero selected price, failed variant BOTH). No
    * production caller; HTTP miss mapping stays in dormant Slice 4b.
+   *
+   * F3.WU9 slice 4 — the return type is narrowed to the internal
+   * `PublicProductDetailProjection`, which adds the required
+   * `stockPresentationParticipants` collection on top of the unchanged
+   * `ProductDetailWithIncludes` shape. Legacy `findProductById` and
+   * unrelated fixtures are NOT widened; the collection stays internal
+   * (no mapper/controller/use-case/DTO consumption).
    */
   getPublicProductDetail?(params: {
     tenantId: string;
     productId: string;
     context: ResolvedPublicCatalogContext;
-  }): Promise<ProductDetailWithIncludes | null>;
+  }): Promise<PublicProductDetailProjection | null>;
 
   /**
    * F2.WU7 — required bulk-load seam for stateless cart reconciliation:
