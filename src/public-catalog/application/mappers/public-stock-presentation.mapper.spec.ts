@@ -173,13 +173,23 @@ describe('mapPublicAggregateVariantStockPresentation', () => {
     ['empty array', []],
     ['null participant', [null]],
     ['primitive participant', [42]],
+    [
+      'valid participant then missing quantity',
+      [{ quantity: 1, minQuantity: 0 }, { quantity: 2 }],
+    ],
     ['missing quantity', [{ minQuantity: 0 }]],
     ['non-number quantity', [{ quantity: '10', minQuantity: 0 }]],
     ['NaN quantity', [{ quantity: Number.NaN, minQuantity: 0 }]],
-    ['Infinity quantity', [{ quantity: Number.POSITIVE_INFINITY, minQuantity: 0 }]],
+    [
+      'Infinity quantity',
+      [{ quantity: Number.POSITIVE_INFINITY, minQuantity: 0 }],
+    ],
     ['missing minQuantity', [{ quantity: 1 }]],
     ['NaN minQuantity', [{ quantity: 1, minQuantity: Number.NaN }]],
-    ['Infinity minQuantity', [{ quantity: 1, minQuantity: Number.NEGATIVE_INFINITY }]],
+    [
+      'Infinity minQuantity',
+      [{ quantity: 1, minQuantity: Number.NEGATIVE_INFINITY }],
+    ],
   ])('rejects %s participants', (_label, candidate) => {
     expect(
       mapPublicAggregateVariantStockPresentation({

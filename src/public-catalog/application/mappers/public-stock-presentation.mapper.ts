@@ -94,15 +94,27 @@ function isVariantOperationalStock(
   return isFiniteNumber(record['quantity']) && isFiniteNumber(record['minQuantity']);
 }
 
+/**
+ * Sound predicate narrowing a validated participant array to the domain
+ * non-empty tuple contract: TypeScript cannot infer tuple cardinality from a
+ * separate length check plus `.every`, so the runtime gate doubles as the
+ * type-level narrowing step (no array→tuple assertion needed).
+ */
+function isNonEmptyVariantOperationalStocks(
+  value: readonly unknown[],
+): value is NonEmptyVariantOperationalStocks {
+  return value.length > 0 && value.every(isVariantOperationalStock);
+}
+
 /** Aggregate variant product: product resolution plus participant aggregation. */
 export function mapPublicAggregateVariantStockPresentation(
   input: PublicAggregateVariantStockMappingInput,
 ): StockPresentationMappingResult {
   const participants = input.variantParticipants;
-  if (!Array.isArray(participants) || participants.length === 0) {
-    return { kind: 'invalid-participants' };
-  }
-  if (!participants.every(isVariantOperationalStock)) {
+  if (
+    !Array.isArray(participants) ||
+    !isNonEmptyVariantOperationalStocks(participants)
+  ) {
     return { kind: 'invalid-participants' };
   }
   const config = resolveProductStockPresentation(input.product, input.tenant);
@@ -112,7 +124,7 @@ export function mapPublicAggregateVariantStockPresentation(
       renderAggregateVariantStockPresentation(
         config,
         input.product.useStock,
-        participants as NonEmptyVariantOperationalStocks,
+        participants,
       ),
     ),
   };
