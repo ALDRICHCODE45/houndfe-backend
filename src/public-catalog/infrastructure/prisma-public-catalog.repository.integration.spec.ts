@@ -50,6 +50,10 @@ const SKIP_INTEGRATION =
 const describeIfDb = SKIP_INTEGRATION ? describe.skip : describe;
 
 const tenantSlug = (id: string): string => `pc-int-${id.slice(0, 8)}`;
+const defaultStockPresentation = {
+  catalogStockPresentationDefault: 'SYSTEM_STATUS',
+  catalogStockPresentationDefaultCustomQty: null,
+} as const;
 
 describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
   let prisma: PrismaClient;
@@ -720,6 +724,7 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         globalPriceListId: listId,
         name: `pc-int-list-${listId.slice(0, 8)}-ctx-explicit`,
         isCatalogDefault: false,
+        stockPresentationDefaults: defaultStockPresentation,
       });
     });
 
@@ -915,6 +920,7 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         globalPriceListId: gSel,
         name: 'lp-sel',
         isCatalogDefault: true,
+        stockPresentationDefaults: defaultStockPresentation,
       };
 
       const eligibleIds = [supported, hidden, rx, variantOk, crossAllowed];
@@ -1013,6 +1019,7 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
           globalPriceListId: gSel,
           name: 'lp-both',
           isCatalogDefault: true,
+          stockPresentationDefaults: defaultStockPresentation,
         },
         filters: { sort: 'newest', page: 1, limit: 20 },
       });
@@ -1030,6 +1037,7 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       globalPriceListId,
       name: 'lp3',
       isCatalogDefault: true,
+      stockPresentationDefaults: defaultStockPresentation,
     });
 
     /** 4 eligible + 2 context-ineligible but base-matching products in two categories. */
