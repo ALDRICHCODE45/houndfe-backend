@@ -1,21 +1,31 @@
 # Apply Progress — online-catalog-publishing
 
-## F1.WU4a — Product persistence foundation (corrected candidate; in progress)
+## F1.WU4 → F3.WU10 — committed implementation reconciliation (final slice)
 
-**Status:** corrected in place on `feat/online-catalog-publishing-wu4` (base `b65c3be`); not committed — parent owns commits/reviews. Corrects failed evidence `sha256:5635061206d2d420d354bb62e2ee99ecef563a93abf24e886a55e37be06290f9` (authored-line Prettier errors, placeholder progress); earlier failed evidence `sha256:331f191dcb85cd7725b9becce1d0a709d75f805aaf1d90ccfaaf7cc4d47f57ae` (398 A+D) also carried unrelated whitespace churn. Frontend paused; `src/public-catalog/**` untouched; authorization unchanged.
+**Status:** reconciled at HEAD `9ca0237` (tree `4090ceb`) on `feat/online-catalog-publishing-wu6`. All 19 WU4–WU10 implementation rows in `tasks.md` are marked complete (progress parses 32/34); the two parent lifecycle rows remain intentionally pending. **Final verification is explicitly incomplete:** no fresh test, integration, build, or Prisma receipt exists at this HEAD. This section replaces the stale WU4a/WU3 top snapshot; the WU3 and WU2b sections below are preserved as historical records.
 
-### Delivered and verified (WU4a only)
+### Provenance distinctions
 
-- `product.entity.ts` (+44/−0): catalog fields, `supportsAllCatalogPriceLists` derivation (empty allowlist = all-public), defensive ID copies; the file differs from base only in functional additions (0 deletions).
-- `prisma-product.repository.ts` (+55/−7): every `save()` runs the scalar upsert, tenant/product-scoped allowlist replacement (zero IDs = zero rows), and reload inside exactly one `TenantPrismaService.runInTransaction` boundary that reuses an ambient transaction without nesting; join-delegate feature-detect retained only for legacy `products.service.spec` doubles.
-- Tests: `product.entity.spec.ts` (+46) and new `prisma-product.repository.catalog.spec.ts` (221 lines / 5 tests): replacement/zero-rows/read reconstruction, single-boundary entry + ambient reuse + delegates on the boundary client, in-boundary `createMany` failure propagation. Mocks prove propagation into `runInTransaction` (real `$transaction` would reject → rollback), not a physical PostgreSQL rollback; rollback eligibility is structural — reverting these files removes the behavior, with no DB migration involved.
-- Fresh independent verification, unchanged semantically by this wording/whitespace-only correction: focused 2 suites / 29 tests PASS (re-run after correction: 29/29 PASS); `pnpm test -- products` 19 suites / 329 tests PASS; `pnpm build` PASS. No runtime harness (no HTTP route, service, or real-DB boundary in this slice — N/A).
-- This correction's checks: ESLint on the 4 candidate source/test files — entity spec and catalog spec clean, repository has only the 2 pre-existing `b65c3be` unused-var errors (byte-identical base lines), `product.entity.ts` shows 18 Prettier errors all machine-verified to sit on pre-existing lines byte-identical to base (0 authored lines implicated). Prettier: entity spec, repository, catalog spec PASS; `product.entity.ts`/`tasks.md`/`apply-progress.md` fail the full-file check solely via base-inherited formatting (`b65c3be` versions fail identically). `git diff --check`: clean.
-- Candidate budget vs `b65c3be`: 390 A+D (382 additions + 8 deletions) incl. the untracked catalog spec and the parent-owned tasks.md route-wording correction (2 A+D); WU4a code+tests only = 373 A+D; no size exception.
+- **Committed implementation (source inspection):** a final read-only audit at HEAD `9ca0237` mapped every previously unchecked WU4–WU10 row to committed source, tests, or docs; this reconciliation adds no execution claims.
+- **Committed test coverage:** the suites named in the WU4–WU10 rows exist in the committed tree at HEAD `9ca0237`; their presence does not prove they were executed at this HEAD.
+- **Historical test executions:** WU1b/WU2b (and WU3-local) suite runs recorded below are historical only and cannot prove final-HEAD behavior.
+- **Missing final-HEAD execution:** no post-WU10 execution receipt exists; final verification remains blocked pending fresh safe verification.
 
-**Remaining WU4:** DTO fields/validation, `products.service` orchestration + tenant-binding validation, variant INHERIT paths, `update:Product` continuity. F1.WU4 rows stay unchecked.
+### Committed WU ranges
 
-**Latest checkpoint — WU3: COMPLETE / PASSED LOCALLY on `feat/online-catalog-publishing-wu3` @ `95dc022` (dedicated WU3 worktree). Local-only: not pushed, not merged, not published; no main mutation.** Next phase: `sdd-verify`.
+| WU      | Commits               | Scope (committed)                                                                                                  |
+| ------- | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| F1.WU4  | `27df7f4` → `292a365` | Product/variant catalog fields, validation, atomic allowlists, variant tenant scoping                              |
+| F1.WU5  | `aeab44a` → `ac5e324` | Publication gates, catalog-default resolution, PostgreSQL gate coverage                                            |
+| F2.WU6  | `fb02c3d` → `cf4400d` | Price-context resolver, error contract, context-explicit list/detail reads, two-context proof                      |
+| F2.WU7  | `6cba5d5` → `4c01845` | Context-bound cart validation through legacy-cart retirement (adjacent throttle-bucket fix `3f9ff1b` precedes WU8) |
+| F2.WU8  | `f6f00aa` → `452715b` | Frontend response guide, guide corrections, published response contract tests                                      |
+| F3.WU9  | `9d91dfc` → `6251adb` | Stock-presentation inheritance/mapper/aggregates through contextual card exposure (includes repo chore `f4604e7`)  |
+| F3.WU10 | `637552f` + `9ca0237` | Cart stock-safety regression lock and final contract documentation                                                 |
+
+### Deferred
+
+- Route drift `/admin/...` versus `/tenants/...` in proposal/design/spec wording remains deferred and untouched.
 
 ---
 
@@ -33,8 +43,8 @@ Authenticated catalog-settings HTTP contract and dedicated authorization around 
 - No upstream tracking, no push, no merge, no PR, and no main/planning-worktree mutation for WU3.
 - 8 bounded commits `50d5539` → `95dc022`; **2,147 A+D total; max slice 381; every slice ≤400.** No size exception was required.
 
-| Commit   | A+D | RDD lineage                |
-| -------- | --: | -------------------------- |
+| Commit    | A+D | RDD lineage               |
+| --------- | --: | ------------------------- |
 | `50d5539` | 335 | `review-c0d5a3c6d10aa2b2` |
 | `39996d8` | 112 | `review-67d0bf12e8f79b94` |
 | `81917a9` | 245 | `review-7b5f310c3a46eb7e` |
@@ -48,7 +58,7 @@ Authenticated catalog-settings HTTP contract and dedicated authorization around 
 
 - `tasks.md`: WU3 heading + forecast row updated to truthful actuals (2,147 / 8 commits / max 381); all three WU3 implementation rows marked `[x]` with concise evidence; ambiguous "admin route" wording replaced with canonical `/tenants/:tenantId/catalog-settings`; aggregates reconciled (overall **9,192–9,572**; F1 **7,632–7,737**).
 - `review-ledger.md`: WU3 section appended with the 8-commit lineage table, findings summary, consolidated evidence, rollback, and route supersession note.
-- `verify-report.md`: intentionally **not** updated for WU3 (still WU2b-only); verification is the next phase (`sdd-verify`).
+- `verify-report.md`: not updated for WU3 at the time (still WU2b-only); it was later updated for WU3-era verification and then reconciled at the final HEAD `9ca0237` — this bullet is historical. Historical WU3 provenance conflict, preserved not normalized: this section records the focused run as **13 suites / 148 tests**, while the WU3-era verify report records **15 suites / 162 tests** for the same era.
 
 ### Final evidence (captured locally on the WU3 branch)
 
