@@ -31,7 +31,7 @@ The persistence change is additive. Existing tenants remain unpublished, existin
 
 ```text
 HTTP
-├── /admin/tenants/:tenantId/catalog-settings
+├── /tenants/:tenantId/catalog-settings
 │   └── CatalogSettingsController
 │       ├── GetCatalogSettingsUseCase
 │       └── UpdateCatalogSettingsUseCase
@@ -414,7 +414,7 @@ src/catalog-settings/
     └── catalog-settings.controller.spec.ts
 ```
 
-`CatalogSettingsModule` imports `AuthModule`, binds `CATALOG_SETTINGS_REPOSITORY` to the Prisma adapter, and is imported by `AppModule`. A direct root-module import keeps the root bounded context independent of the implementation layout under `src/admin/`, while its routes still follow the established admin prefix.
+`CatalogSettingsModule` imports `AuthModule`, binds `CATALOG_SETTINGS_REPOSITORY` to the Prisma adapter, and is imported by `AppModule`. A direct root-module import keeps the root bounded context independent of the implementation layout under `src/admin/`, while the dedicated `catalog-settings` module owns its routes.
 
 ### 5.2 Domain model and repository port
 
@@ -463,14 +463,14 @@ The row lock serializes concurrent settings replacements. Each PATCH is atomic; 
 ### 5.3 Routes and authorization
 
 ```text
-GET   /admin/tenants/:tenantId/catalog-settings
-PATCH /admin/tenants/:tenantId/catalog-settings
+GET   /tenants/:tenantId/catalog-settings
+PATCH /tenants/:tenantId/catalog-settings
 ```
 
 Controller policy:
 
 ```ts
-@Controller('admin/tenants/:tenantId/catalog-settings')
+@Controller('tenants/:tenantId/catalog-settings')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class CatalogSettingsController {
   @Get()
@@ -985,7 +985,7 @@ sequenceDiagram
   participant DB as PostgreSQL
   participant X as Browser/CDN cache
 
-  A->>G: PATCH /admin/tenants/T/catalog-settings
+  A->>G: PATCH /tenants/T/catalog-settings
   G->>G: require update:TenantCatalogSettings
   G->>C: authorized request
   C->>U: DTO + path tenantId + actorUserId

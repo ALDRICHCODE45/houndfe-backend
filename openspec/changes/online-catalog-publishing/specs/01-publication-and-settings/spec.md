@@ -63,7 +63,7 @@ The system MUST evaluate effective publication on every public read and cart val
 
 ### Requirement: Tenant Catalog Settings API and Authorization
 
-The system MUST expose authenticated `GET` and `PATCH /admin/tenants/:tenantId/catalog-settings`. The settings MUST include `catalogPublished`, tenant public price-list bindings, exactly one catalog default when bindings exist, and the catalog stock presentation default when applicable. PATCH publication/list changes MUST be atomic; a default price list MUST be public for that tenant. The system MUST use dedicated CASL `TenantCatalogSettings` `read` and `update` permissions, granted only explicitly or by `manage:all`; product editors MUST NOT receive this permission implicitly. Product and variant fields MUST continue to use `update:Product`.
+The system MUST expose authenticated `GET` and `PATCH /tenants/:tenantId/catalog-settings`. The settings MUST include `catalogPublished`, tenant public price-list bindings, exactly one catalog default when bindings exist, and the catalog stock presentation default when applicable. PATCH publication/list changes MUST be atomic; a default price list MUST be public for that tenant. The system MUST use dedicated CASL `TenantCatalogSettings` `read` and `update` permissions, granted only explicitly or by `manage:all`; product editors MUST NOT receive this permission implicitly. Product and variant fields MUST continue to use `update:Product`.
 
 #### Scenario: Settings round trip and validation
 
