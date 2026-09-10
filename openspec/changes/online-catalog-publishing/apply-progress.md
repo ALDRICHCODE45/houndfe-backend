@@ -2,7 +2,7 @@
 
 ## F1.WU4 → F3.WU10 — final evidence reconciliation
 
-**Status:** reconciled to current HEAD `582056a26ef381bcca18e5555e84a216d243fe31` (tree `0f79e930d521244324fc1b3805072b4ec8598f7c`) on `feat/online-catalog-publishing-wu6`. All 19 WU4–WU10 implementation rows are complete; task 123 is now complete and task 122 remains pending. This section supersedes stale final-candidate claims; the WU3 and WU2b sections below remain explicitly historical.
+**Status:** reconciled to current HEAD `baa39bea0a950d34422e1cfcc32d69d9260efaab` (tree `7671b1ff7a682d91eb38890d4cc209063baef69b`) on `feat/online-catalog-publishing-wu6`. All 19 WU4–WU10 implementation rows are complete; task 123 is complete; task 122 is `[x]` with a **WAIVED** maintainer-authorized historical governance disposition for managed objective `F3.WU10-task122-historical-exception`. This disposition resolves the parent action as a waiver only and does not claim that the original bounded-review procedure occurred. This section supersedes stale final-candidate claims; the WU3 and WU2b sections below remain explicitly historical.
 
 ### Canonical receipts
 
@@ -18,8 +18,23 @@ These are canonical historical receipts; no unit, integration, build, Prisma, li
 ### Provenance and review boundary
 
 - WU4–WU10 source/test/doc coverage is present in current HEAD; older commit ranges in `tasks.md` are implementation provenance, not fresh execution claims.
-- Repository review evidence ends at WU3. WU4–WU10 lack complete per-slice lineages; WU9 includes `c57bfe6` at **801 A+D** and unrelated `.gitignore` commit `f4604e7`. Task 122 therefore remains pending and archive-blocking; review history is not fabricated or repaired.
+- Repository review evidence ends at WU3. WU4–WU10 lack complete per-slice lineages; WU9 includes `c57bfe6` at **801 A+D** and unrelated `.gitignore` commit `f4604e7`. These deficits are explicitly retained as the accepted historical deviation; review history is not fabricated or repaired.
+- `review-ledger.md` is read-only and unchanged. No historical reviews were rerun, recreated, or fabricated.
 - WU10 current commit reference is `582056a`; older WU2b/WU3 evidence below remains historical.
+
+### Parent task 122 governance disposition
+
+```yaml
+task_122:
+  status: complete
+  disposition: WAIVED
+  objective: F3.WU10-task122-historical-exception
+  authority: maintainer-authorized historical governance exception
+  claim_boundary: waiver/disposition only; original bounded-review procedure is not claimed
+```
+
+Task 123 remains `[x]`. Full integration remains explicitly non-green: promotions, buy-x-get-y, PDF, and employees are four proven base-only failures, out of scope and unfixed.
+
 - Route drift `/admin/...` versus `/tenants/...` in proposal/design/spec wording remains deferred and untouched.
 
 ---
