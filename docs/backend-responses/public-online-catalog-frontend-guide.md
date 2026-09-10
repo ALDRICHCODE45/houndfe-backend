@@ -1,27 +1,72 @@
-# Public Online Catalog — Backend Response Guide
+# Public Online Catalog — Frontend Integration Guide
 
-**Canonical backend-only response evidence through F3.WU10 (stock presentation and cart safety); frontend implementation and activation remain paused.**
+**Implementation-ready HTTP contract for the catalog backoffice and public storefront through F3: publication, exact price context, stock presentation, and server-authoritative cart validation.**
+
+> Runtime availability depends on the target environment deploying this backend version and an authorized operator publishing each tenant. Do not treat this repository document as deployment confirmation.
 
 ---
 
 ## 1. Overview
 
-Public storefront for end customers to browse products by branch, see availability and prices, build a local cart, validate it, and (in a future SDD) send the order via WhatsApp.
+The feature lets operators publish a tenant catalog and lets end customers discover a branch, browse products, select an allowed price context, view presentation-safe stock, build a local cart, and validate that cart against current backend state.
 
-**In scope (v1, available now):**
+**Implemented backend contract:**
 
-- List active branches.
+- Configure tenant publication, public price contexts, and the default stock presentation.
+- Configure product inclusion, hidden prices, price-context support, and product/variant stock presentation.
+- List active, catalog-published branches.
 - Browse products with filters, search, sort, pagination, and category facets.
-- View product detail with variants and per-branch availability.
-- Validate a local cart against current backend state (prices, stock).
+- View product detail with variants and presentation-safe availability.
+- Validate a local cart against current prices, publication, and operational stock.
 
-**Out of scope (deferred to future SDDs):**
+**Out of scope (deferred to future backend changes):**
 
 - WhatsApp order endpoint (`POST /public/catalog/:slug/orders/whatsapp`).
 - Real order creation in POS from the public catalog.
 - Product ratings (no reviews infrastructure yet).
 - `featuredLabel` ("Más vendido", "Premium", etc. — no sales analytics yet).
 - Category slugs (filter uses UUIDs).
+
+### Frontend implementation path
+
+Implement the feature in this order so each step has one authoritative input:
+
+1. **Backoffice setup (when that surface is in scope).** Load and update `/tenants/:tenantId/catalog-settings`; expose publication, public price contexts, the catalog default, and tenant stock-presentation defaults only to users with the documented permissions.
+2. **Product and variant setup.** Extend authenticated product/variant forms with the fields in Section 3. Treat omitted values, explicit `null`, and inheritance exactly as documented.
+3. **Storefront bootstrap.** Call `GET /public/catalog/branches`. Route with the returned `slug`; never construct a catalog URL from a tenant UUID alone.
+4. **Price-context selection.** An omitted `priceListId` selects the tenant default. After the first response, use its `priceContext.priceListId` consistently for list, detail, and cart validation. Never fall back locally to another list.
+5. **Browse and detail.** Render prices as nullable and use `stockPresentation` for display. A null browse `availability` means the effective mode is `HIDDEN`; it is not an out-of-stock claim.
+6. **Local cart.** Persist only `productId`, optional `variantId`, and quantity, plus the selected `priceListId` at cart scope. Product names, prices, totals, and availability are server-derived display data.
+7. **Reconcile before the next action.** Call `POST /cart/validate`, replace stale display values with the returned values, block items with `blockingCodes`, and show non-blocking `warnings`. This endpoint validates only; it does not create an order.
+
+### Minimum client state
+
+| State                  | Source of truth                | Required behavior                                                                                      |
+| ---------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Selected tenant        | `GET /public/catalog/branches` | Persist the returned `slug`; reset catalog-specific state when it changes.                             |
+| Selected price context | Response `priceContext`        | Include the same `priceListId` in list, detail, and cart requests.                                     |
+| Browse query           | URL or client router           | Keep `q`, `categoryId`, `sort`, `page`, and `limit` serializable and reset `page` when filters change. |
+| Cart identity          | Client storage                 | Store product/variant IDs and quantities; do not trust persisted prices or stock.                      |
+| Server reconciliation  | `POST /cart/validate`          | Treat returned item decisions and totals as authoritative for the current context.                     |
+
+### Non-negotiable frontend invariants
+
+- Include `tenantSlug` and the resolved `priceListId` in query/cache keys; responses from different tenants or price contexts are never interchangeable.
+- Do not infer why a request returned generic `404`; private, unavailable, and nonexistent contexts are intentionally indistinguishable.
+- Do not expose raw inventory quantities. `CUSTOM_QUANTITY` is presentation data, not operational stock.
+- Do not convert `availability: null` into `out_of_stock`; render an intentionally hidden/neutral stock state.
+- Do not calculate an authoritative checkout total locally. Use `totalCents`, including its documented `null` semantics.
+- Handle `429` as a recoverable rate-limit state and avoid automatic retry loops that amplify throttling.
+
+### Frontend definition of done
+
+- [ ] Unpublished/inactive tenants never produce a storefront route from branch discovery.
+- [ ] Tenant and price-context changes invalidate list, detail, and cart-derived display state.
+- [ ] Hidden prices and nullable totals have an intentional UI state without fabricated numeric fallbacks.
+- [ ] All four stock-presentation modes render without leaking or inventing operational quantity.
+- [ ] Cart blocks and warnings have distinct UI treatment; blocked lines cannot proceed as valid.
+- [ ] Empty results, generic `404`, validation `400`, throttling `429`, and server failures have explicit states.
+- [ ] The frontend does not present cart validation as order creation or WhatsApp submission.
 
 ---
 
@@ -717,7 +762,7 @@ type PublicStockPresentation = {
 - `useStock=false` is mode-specific in presentation: with `useStock=false`, `SYSTEM_STATUS` and `ABSTRACT_STATUS` render `available` on simple/individual rows, `CUSTOM_QUANTITY` keeps `status: null` while preserving its configured display quantity, and `HIDDEN` keeps both `status` and `customQuantity` `null`. Operational cart validation independently treats `useStock=false` as available in every mode. Variant-product aggregates use published non-`OFF` participant statuses without summing quantities; a non-`HIDDEN` aggregate with `useStock=false` is `available`, and the aggregate `customQuantity` is always `null`.
 - Cart validation inspects operational stock independently of presentation: `HIDDEN` or a positive `CUSTOM_QUANTITY` display can never make tracked zero operational stock valid (`OUT_OF_STOCK` still blocks).
 
-**Contract anchors (T9–T14)** — mode/inheritance/aggregation matrix (T9), custom-quantity safety (T10), M5 `SYSTEM_STATUS` backfill compatibility (T11), settings permissions for the tenant default (T12), cache/rate-limit guarantees (T13), and full-surface DTO contract coverage including this guide and `public-catalog.snapshots.spec.ts` (T14). These are task/contract references from `openspec/changes/online-catalog-publishing`; this guide claims no new test executions or a clean compile.
+**Contract anchors (T9–T14)** — mode/inheritance/aggregation matrix (T9), custom-quantity safety (T10), M5 `SYSTEM_STATUS` backfill compatibility (T11), settings permissions for the tenant default (T12), cache/rate-limit guarantees (T13), and full-surface DTO contract coverage including this guide and `public-catalog.snapshots.spec.ts` (T14). The canonical contract is `openspec/specs/public-catalog/spec.md`, and its historical task/evidence trail is preserved under `openspec/changes/archive/2026-09-10-online-catalog-publishing/`; this guide claims no new test executions or a clean compile.
 
 ---
 
@@ -826,7 +871,8 @@ export type PublicCatalogProductCard = {
     priceCents: number | null;
     hidden: boolean;
   };
-  availability: PublicStockStatus;
+  availability: PublicStockStatus | null;
+  stockPresentation: PublicStockPresentation;
   hasVariants: boolean;
   rating: null;
   featuredLabel: null;
@@ -851,7 +897,7 @@ export type PublicVariantAvailability = {
   branchId: string;
   branchName: string;
   branchSlug: string;
-  availability: PublicStockStatus;
+  availability: PublicStockStatus | null;
   isSelected: boolean;
 };
 
@@ -865,6 +911,7 @@ export type PublicVariantDto = {
     priceCents: number | null;
     hidden: boolean;
   };
+  stockPresentation: PublicStockPresentation;
   availabilityByBranch: PublicVariantAvailability[];
 };
 
@@ -880,7 +927,8 @@ export type PublicCatalogProductDetail = {
     priceCents: number | null;
     hidden: boolean;
   };
-  availability: PublicStockStatus;
+  availability: PublicStockStatus | null;
+  stockPresentation: PublicStockPresentation;
   hasVariants: boolean;
   variants: PublicVariantDto[];
   rating: null;
@@ -950,7 +998,9 @@ export type CartValidationResponse = {
 | `GET /:slug/products/:id?priceListId=` | Context-aware detail; no selected-list fallback.                    |
 | `POST /:slug/cart/validate`            | Server-authoritative context-bound reconciliation.                  |
 
-**Stock statuses**: `available` · `low_stock` · `out_of_stock`
+**Browse stock statuses**: `available` · `low_stock` · `out_of_stock` · `null` when presentation is `HIDDEN`
+
+**Cart stock statuses**: `available` · `low_stock` · `out_of_stock` (always operational and non-null)
 
 **Sort options**: `newest` · `relevance` · `price_asc` · `price_desc` · `rating_desc` (falls back to relevance)
 
@@ -964,4 +1014,6 @@ export type CartValidationResponse = {
 
 ## Evidence boundary
 
-This is backend response guidance through F3.WU10. It deliberately excludes frontend activation, historical suite totals, and merge status; frontend work remains paused. Provenance is limited: contract statements here are validated against the committed source (`stock-presentation.vo.ts`, the contextual mappers/DTOs, and the cart validation use case) and the T9–T14 task anchors in `openspec/changes/online-catalog-publishing` — this guide makes no new test-execution or clean-compile claim. Any historical `baseline.sol` capture is auxiliary provenance only: the file is absent from this repository, it was not read for this guide, and it cannot establish current compile cleanliness or current execution; committed source plus the named T9–T14 contract anchors remain the operative evidence. Report a contract discrepancy with its request and response to the backend maintainers.
+The backend capability is complete and archived. This consumer guide documents the implemented HTTP contract but does not modify, execute, or deploy frontend code. The canonical capability specification is `openspec/specs/public-catalog/spec.md`; historical design, task, verification, and review evidence is preserved under `openspec/changes/archive/2026-09-10-online-catalog-publishing/`.
+
+Contract statements are grounded in the committed source (`stock-presentation.vo.ts`, contextual mappers/DTOs, and the cart validation use case) plus the archived T9–T14 evidence. This documentation update makes no new test-execution, deployment, or clean-compile claim. Report a contract discrepancy with its exact request, response, tenant slug, and selected `priceListId` to the backend maintainers.
