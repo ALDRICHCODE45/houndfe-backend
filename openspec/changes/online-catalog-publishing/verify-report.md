@@ -1,118 +1,113 @@
 ```yaml
 schema: gentle-ai.verify-result/v1
 verdict: blocked
-blockers: 2
+blockers: 1
 critical_findings: 0
-test_command: 'not executed at final HEAD 9ca0237; historical WU3-era focused Jest retained below'
-test_exit_code: 0
-build_command: 'historical WU3-era pnpm build; not re-executed at final HEAD 9ca0237'
-build_exit_code: 0
+current_head: 582056a26ef381bcca18e5555e84a216d243fe31
+current_tree: 0f79e930d521244324fc1b3805072b4ec8598f7c
+test_execution_this_phase: none
+build_execution_this_phase: none
 ```
 
 # Verify Report — online-catalog-publishing
 
-**Final-HEAD verification status: INCOMPLETE / BLOCKED.** At HEAD `9ca0237` (tree `4090ceb`) on `feat/online-catalog-publishing-wu6`, all 19 WU4–WU10 implementation rows are committed and checked in `tasks.md` (progress parses 32/34), but no fresh safe verification (unit, integration, build, Prisma) has been executed at this HEAD. The prior WU3-only PASS framing is retired: it described a historical partial checkpoint, not the final change state. Historical executions below do not prove final-HEAD behavior. Final verification remains blocked pending fresh safe verification. Frontend remains paused; the two parent lifecycle rows (bounded review; F3 completion-gate evidence collection) remain pending.
+## Executive result
 
-## Historical WU3-era acceptance mapping (branch `feat/online-catalog-publishing-wu3` @ `95dc022`; superseded as current status by the final-HEAD framing above)
+Evidence is reconciled to the current WU6 candidate at HEAD `582056a` / tree
+`0f79e930`. Task 123 is complete. Task 122 remains an unresolved parent-lifecycle
+blocker, so verification is **BLOCKED for archive readiness**, not because the
+implementation task set is incomplete. Frontend work remains paused. No unit,
+integration, build, Prisma, lint, Docker, sync, or unrelated command was run in
+this phase.
 
-| Acceptance area                      | Final finding                                                                                                                                                                                                                                                             |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| T2 HTTP authorization / UUID / cache | PASS. Both canonical route parameters use `ParseUUIDPipe`; JWT/path mismatch and missing ability fail closed before use-case/repository work; `manage:all` permits the intentional cross-tenant path. PATCH is `Cache-Control: no-store`; GET has no forced cache header. |
-| Canonical HTTP contract              | PASS. `GET/PATCH /tenants/:tenantId/catalog-settings` is the delivered route. Stale `/admin/...` proposal/design/spec wording is superseded by tasks/apply-progress and was intentionally not edited.                                                                     |
-| T12 dedicated authorization / seeder | PASS. `TenantCatalogSettings` has exactly `read` and `update`; no Product/editor grant exists; `manage:all` is the only implicit path; repeated permission seeding remains idempotent.                                                                                    |
-| Strict DTOs                          | PASS. Focused tests cover UUID v4, enum, boolean, unique arrays, nested unknown properties, explicit null rules, and integer/custom-quantity cross-field validation.                                                                                                      |
-| Atomic replace / coverage            | PASS. Valid PATCH performs one atomic `replace`; invalid/default-not-public and coverage-read failures perform no write; GET/PATCH map default-context coverage warnings.                                                                                                 |
-| Post-commit audit/listener           | PASS. Actor, tenant, timestamp, action, and allowlisted changed-field names are emitted only after successful replace. Values and list IDs are excluded; emitter/listener logging failures are non-fatal after commit.                                                    |
-| Module/bootstrap                     | PASS. Repository binding, use cases, listener, controller, Auth/Database imports, and one `AppModule` registration are covered.                                                                                                                                           |
-| Scoped quality gate                  | PASS. ESLint and Prettier `--check` pass on all 19 WU3-owned TypeScript files, including both remediation files.                                                                                                                                                          |
-| Branch/publication boundary          | PASS as a boundary fact. `feat/online-catalog-publishing-wu3` at `95dc022`; local branch only—no push, merge, publication, PR, upstream, or main mutation.                                                                                                                |
+## Corrective objective rerun
 
-## Historical WU3-era commands and exact results (not re-executed at final HEAD `9ca0237`)
+`F3.WU10-final-openspec-evidence-reconciliation`: **PASS**. The two WU10 implementation
+evidence references in `tasks.md` now point to `637552f`+`582056a`, replacing the stale
+prior-candidate reference. Task 123 remains `[x]`; task 122 remains `[ ]`. All
+canonical evidence and wording were preserved; `review-ledger.md` remained unchanged.
+Only structural checks ran in this corrective rerun; no unit, integration, build, Prisma,
+lint, Docker, review, sync, archive, or delivery command was run.
 
-### Focused Jest
+## Canonical evidence reconciliation
 
-```bash
-mapfile -t tests < <(find src/catalog-settings -type f -name '*.spec.ts' -print | sort)
-tests+=(src/auth/authorization/domain/permission-registry-catalog-settings.spec.ts src/auth/authorization/infrastructure/permission.seeder.spec.ts)
-pnpm exec jest --config jest.config.js --runInBand --runTestsByPath "${tests[@]}"
-```
+All receipts below are canonical prior evidence and were not re-executed here:
 
-**PASS — exit 0; 15 suites, 162 tests, 0 skips, 0 snapshots.** The command supplied 19 paths; four integration-only paths are excluded by `jest.config.js`, and every selected unit-config suite passed.
+- Safe final run `sha256:3a844852fb3b41cc64e2633164a6fdcc01566307b074be06a0681b9b3db262d9`:
+  `pnpm prisma validate` and `pnpm prisma generate` passed; full unit evidence
+  passed with **237 suites / 3,539 tests**.
+- Full isolated integration `sha256:19f69bd62876354945b1a3fbb2a8ec2811a2e0c4eb541ff01e1f53e56b63c901`:
+  **5 failing suites / 42 tests**. This result is explicitly **non-green**.
+  Only the public-catalog shape mismatch was candidate-caused. Promotions,
+  buy-x-get-y, PDF, and employees are four proven base-only failures; they are
+  reported and were not fixed.
+- Post-correction focused integration `sha256:a06fddc0209d0f0bca4252c211103fd78b4d3bdda458f345c0e762c0b3b7a13b`:
+  **24/24 passed**.
+- Canonical TS2352 correction `sha256:6d4b4f0412af0fb7141790a752e4efe46d4db28617238b22f8b69ac5547deb26`:
+  LSP clean; focused Jest **3 suites / 119 tests**; `pnpm build` ran once and
+  exited 0; exact correction size **36 A+D**; committed as `582056a`.
+- Native review `review-7733873461481cab` approved and was acknowledged/burned
+  for target `sha256:6b5298cc307e30111e3349e1f38d004a3be7b425170c7110a07cd2b44afe0010`.
+- Stale formatter-contaminated receipts `sha256:78b785...`, `sha256:bce444...`,
+  and target `sha256:96c1...` are intentionally not evidence.
 
-### ESLint and Prettier (no fix/write)
+The build and test exit statuses above describe their canonical historical
+receipts; they are not newly-run commands in this phase.
 
-```bash
-mapfile -t wu3_files < <({ git diff --name-only 50d5539^..95dc022 -- '*.ts'; printf '%s\n' src/auth/authorization/domain/permission.ts src/auth/authorization/infrastructure/permission.seeder.spec.ts; } | sort -u)
-pnpm exec eslint "${wu3_files[@]}"
-pnpm exec prettier --check "${wu3_files[@]}"
-```
+## Spec and design coverage
 
-**PASS — both exit 0 over 19 unique files.** ESLint emitted no errors/warnings. Prettier reported: `All matched files use Prettier code style!`
+The four delta specs cover publication/settings, price context, stock
+presentation, and contracts/evidence. The implementation and canonical receipts
+map to T1–T14, including publication gates, tenant isolation, exact/no-fallback
+price context, private-list indistinguishability, hidden-price behavior, cart
+server authority, stock-presentation aggregation, zero-stock safety, migration
+backfills, permissions, cache/rate contracts, and the backend response guide.
+The design boundaries and rollback decisions remain coherent with the backend-only
+scope. Frontend remains explicitly paused.
 
-### Build and Prisma
+## Task completion
 
-```bash
-pnpm build
-```
-
-**PASS — exit 0** (`nest build`).
-
-```bash
-DATABASE_URL='postgresql://admin:secreto@localhost:5433/nest-practice-test' pnpm prisma validate && \
-DATABASE_URL='postgresql://admin:secreto@localhost:5433/nest-practice-test' pnpm prisma generate
-```
-
-**PASS — exit 0.** `prisma/schema.prisma` is valid and Prisma Client 6.19.2 generated. The package.json Prisma-config deprecation warning is informational.
-
-### TypeScript ownership check
-
-```bash
-pnpm exec tsc --noEmit --pretty false
-```
-
-**NONZERO — exit 2; 191 diagnostics in unrelated project test files; 0 diagnostics in the 19 WU3-owned files.** Diagnostics are distributed outside WU3 across existing admin, auth, chatbot, customers, delivery-routes, employees, HR, PDF, products, promotions, public-catalog, quotations, sales, and shared batch-delete tests. This remains an explicit project-wide caveat, not a WU3 regression or a false claim that full-project `tsc` passed.
-
-### Hygiene, status, and review workload
-
-```bash
-git diff --check
-```
-
-**PASS — exit 0.** Final status contains exactly these six expected modified paths: `apply-progress.md`, `review-ledger.md`, `tasks.md`, `verify-report.md`, `permission.ts`, and `permission.seeder.spec.ts`.
-
-WU3 follows the required `stacked-to-main` chain and stays within its assigned settings HTTP/RBAC slice. Its 8 commit A+D sizes are **335, 112, 245, 141, 376, 381, 325, 232**; maximum **381 ≤ 400**, cumulative authored commit churn **2,147 A+D**, and no `size:exception` was used or required. This local verification does not push, merge, publish, or mutate main.
+- Implementation tasks: **32/32 complete**; no unchecked implementation task
+  remains.
+- Task 123: **complete `[x]`**, with the canonical evidence and the explicitly
+  non-green full-integration caveat recorded in `tasks.md`.
+- Task 122: **pending `[ ]`** and an archive blocker. Repository review evidence
+  ends at WU3; WU4–WU10 lack complete per-slice lineages. WU9 includes `c57bfe6`
+  at **801 A+D** and unrelated `.gitignore` commit `f4604e7`. Review history was
+  not fabricated or repaired.
 
 ## Structured status and action context
 
-> Historical WU3-era context below; the current evidence reconciliation ran in the `wu6` worktree at HEAD `9ca0237`.
+- Change: `online-catalog-publishing`; artifact store: `openspec`.
+- Parent status before reconciliation: verify `ready`, apply `all_done`, sync
+  and archive blocked.
+- Action context: repo-local worktree
+  `/home/aldrich_coder45/Desktop/workspace/houndfe/houndfe-backend-online-catalog-wu6`.
+- Authorized writes in this phase were limited to `verify-report.md`, `tasks.md`,
+  and `apply-progress.md`; `review-ledger.md` was read-only.
+- Strict TDD is inactive (`openspec/config.yaml`: `apply.tdd: false`); no TDD
+  table or strict assertion-quality gate applies.
 
-- Consumed authoritative parent status without re-resolution: change `online-catalog-publishing`, store `openspec`, verify dependency `ready`, next action `verify`.
-- `actionContext.mode`: `repo-local`.
-- Authoritative root: `/home/aldrich_coder45/Desktop/workspace/houndfe/houndfe-backend-online-catalog-wu3`.
-- Sole writable path: this `verify-report.md`; the other five modified candidate files remained byte-identical during verification.
-- Strict TDD is inactive (`openspec/config.yaml` has `apply.tdd: false`); no TDD-cycle table or strict assertion-quality gate is required.
+## Review workload / boundary
 
-## Task completion and remaining scope
+The approved chain is `stacked-to-main` with a 400 A+D review budget. The current
+36-A+D correction is within budget, but the required bounded review lifecycle for
+WU4–WU10 is not evidenced. Task 122 therefore remains pending; no size exception
+was inferred, and no ordinary native review was started.
 
-Reconciled at final HEAD `9ca0237`: the 19 previously unchecked WU4–WU10 implementation rows are now marked complete in `tasks.md`, each bound to its committed range (WU4 `27df7f4`–`292a365`, WU5 `aeab44a`–`ac5e324`, WU6 `fb02c3d`–`cf4400d`, WU7 `6cba5d5`–`4c01845`, WU8 `f6f00aa`–`452715b`, WU9 `9d91dfc`–`6251adb`, WU10 `637552f`+`9ca0237`). Their full texts are not duplicated here; `tasks.md` is the single source of truth. Progress parses **32/34**.
+## Validation gates
 
-Remaining unchecked rows (intentionally pending, non-implementation):
+- Clean baseline before edits: **PASS**; HEAD/tree matched the supplied identity.
+- Current HEAD/tree reconciliation: **PASS**; `582056a` / `0f79e930`.
+- Task checkbox gate: **PASS** for task 123 checked and task 122 unchecked.
+- Full integration green gate: **NOT CLAIMED**; canonical full integration is
+  explicitly non-green as recorded above.
+- `review-ledger.md` immutability: **PASS**; unchanged.
+- `git diff --check`: **PASS** after the authorized edits.
 
-- [ ] Start or reuse bounded review for each clean stacked WU diff (≤400 additions + deletions), verifying the diagram, dependency target, test evidence, rollback boundary, and absence of unrelated changes before it merges. <!-- sdd-owner: parent -->
-- [ ] At the F3 completion gate, collect the T1–T14 evidence from the named suites, confirm `pnpm prisma generate`, `pnpm test`, `pnpm test:integration`, and `pnpm build` results, and keep frontend work paused. <!-- sdd-owner: parent -->
+## Exact blocker
 
-These two parent lifecycle rows — not the WU4–WU10 implementation rows — are the remaining full-change/archive blockers (count: **2**).
-
-## Exact blockers and next step
-
-- **WU3-era blocker:** none (historical).
-- **Final-HEAD verification blocker:** no fresh safe verification has been executed at HEAD `9ca0237`; historical WU1b/WU2b/WU3 executions cannot prove final-HEAD behavior.
-- **Archive blockers:** the two parent lifecycle rows above (bounded stacked-WU review; F3 completion-gate evidence collection).
-- **Preserved provenance conflict (not normalized):** the WU3-era focused catalog-settings Jest run is recorded as **13 suites / 148 tests** in `tasks.md`/`apply-progress.md` and as **15 suites / 162 tests** in this report's historical WU3-era section. Both records are retained verbatim; this reconciliation does not adjudicate the discrepancy.
-- **Deferred:** `/admin/...` versus `/tenants/...` route drift remains deferred and untouched.
-- **Project caveat (historical):** full-project `tsc` was nonzero with 191 unrelated diagnostics at the WU3-era checkpoint.
-- **Next:** fresh safe verification at final HEAD `9ca0237`, then the two parent lifecycle rows; archive stays blocked until both complete.
-
-## Historical WU2b verification — preserved
-
-WU2b remains **COMPLETE / PUBLISHED / PASS** at its historical checkpoint: 10 commits (`ee28509` → `13e8f4d`), 3,648 insertions, max slice 400, no size exception; focused catalog-settings Jest 7 suites/62 tests, real-PostgreSQL integration 4 suites/16 tests, full unit suite 220 suites/3,047 tests, ESLint/build/Prisma/diff checks passed. Its known full-TypeScript caveat was 193 unrelated/non-WU2b diagnostics. WU3 does not alter or republish that history.
+1. **Task 122 / parent lifecycle:** complete bounded per-slice review evidence for
+   WU4–WU10 is absent and cannot be reconstructed from the repository history.
+   Archive remains blocked. The four base-only integration failures are not
+   implementation blockers and must not be fixed as part of this reconciliation.

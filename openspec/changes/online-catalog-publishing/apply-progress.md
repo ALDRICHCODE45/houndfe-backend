@@ -1,30 +1,25 @@
 # Apply Progress — online-catalog-publishing
 
-## F1.WU4 → F3.WU10 — committed implementation reconciliation (final slice)
+## F1.WU4 → F3.WU10 — final evidence reconciliation
 
-**Status:** reconciled at HEAD `9ca0237` (tree `4090ceb`) on `feat/online-catalog-publishing-wu6`. All 19 WU4–WU10 implementation rows in `tasks.md` are marked complete (progress parses 32/34); the two parent lifecycle rows remain intentionally pending. **Final verification is explicitly incomplete:** no fresh test, integration, build, or Prisma receipt exists at this HEAD. This section replaces the stale WU4a/WU3 top snapshot; the WU3 and WU2b sections below are preserved as historical records.
+**Status:** reconciled to current HEAD `582056a26ef381bcca18e5555e84a216d243fe31` (tree `0f79e930d521244324fc1b3805072b4ec8598f7c`) on `feat/online-catalog-publishing-wu6`. All 19 WU4–WU10 implementation rows are complete; task 123 is now complete and task 122 remains pending. This section supersedes stale final-candidate claims; the WU3 and WU2b sections below remain explicitly historical.
 
-### Provenance distinctions
+### Canonical receipts
 
-- **Committed implementation (source inspection):** a final read-only audit at HEAD `9ca0237` mapped every previously unchecked WU4–WU10 row to committed source, tests, or docs; this reconciliation adds no execution claims.
-- **Committed test coverage:** the suites named in the WU4–WU10 rows exist in the committed tree at HEAD `9ca0237`; their presence does not prove they were executed at this HEAD.
-- **Historical test executions:** WU1b/WU2b (and WU3-local) suite runs recorded below are historical only and cannot prove final-HEAD behavior.
-- **Missing final-HEAD execution:** no post-WU10 execution receipt exists; final verification remains blocked pending fresh safe verification.
+- Safe final run `sha256:3a844852fb3b41cc64e2633164a6fdcc01566307b074be06a0681b9b3db262d9`: Prisma validate/generate passed; full unit passed **237 suites / 3,539 tests**.
+- Full isolated integration `sha256:19f69bd62876354945b1a3fbb2a8ec2811a2e0c4eb541ff01e1f53e56b63c901`: **5 failing suites / 42 tests**, explicitly non-green. Only public-catalog shape mismatch was candidate-caused; promotions, buy-x-get-y, PDF, and employees are four proven base-only failures and remain unfixed.
+- Post-correction focused integration `sha256:a06fddc0209d0f0bca4252c211103fd78b4d3bdda458f345c0e762c0b3b7a13b`: **24/24 passed**.
+- TS2352 correction `sha256:6d4b4f0412af0fb7141790a752e4efe46d4db28617238b22f8b69ac5547deb26`: LSP clean, focused Jest **3 suites / 119 tests**, `pnpm build` once exit 0, exact **36 A+D**, committed as `582056a`.
+- Native review `review-7733873461481cab` approved and acknowledged/burned for target `sha256:6b5298cc307e30111e3349e1f38d004a3be7b425170c7110a07cd2b44afe0010`.
+- Formatter-contaminated receipts `sha256:78b785...`, `sha256:bce444...`, and target `sha256:96c1...` are stale and excluded.
 
-### Committed WU ranges
+These are canonical historical receipts; no unit, integration, build, Prisma, lint, Docker, or unrelated command ran in this reconciliation.
 
-| WU      | Commits               | Scope (committed)                                                                                                  |
-| ------- | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| F1.WU4  | `27df7f4` → `292a365` | Product/variant catalog fields, validation, atomic allowlists, variant tenant scoping                              |
-| F1.WU5  | `aeab44a` → `ac5e324` | Publication gates, catalog-default resolution, PostgreSQL gate coverage                                            |
-| F2.WU6  | `fb02c3d` → `cf4400d` | Price-context resolver, error contract, context-explicit list/detail reads, two-context proof                      |
-| F2.WU7  | `6cba5d5` → `4c01845` | Context-bound cart validation through legacy-cart retirement (adjacent throttle-bucket fix `3f9ff1b` precedes WU8) |
-| F2.WU8  | `f6f00aa` → `452715b` | Frontend response guide, guide corrections, published response contract tests                                      |
-| F3.WU9  | `9d91dfc` → `6251adb` | Stock-presentation inheritance/mapper/aggregates through contextual card exposure (includes repo chore `f4604e7`)  |
-| F3.WU10 | `637552f` + `9ca0237` | Cart stock-safety regression lock and final contract documentation                                                 |
+### Provenance and review boundary
 
-### Deferred
-
+- WU4–WU10 source/test/doc coverage is present in current HEAD; older commit ranges in `tasks.md` are implementation provenance, not fresh execution claims.
+- Repository review evidence ends at WU3. WU4–WU10 lack complete per-slice lineages; WU9 includes `c57bfe6` at **801 A+D** and unrelated `.gitignore` commit `f4604e7`. Task 122 therefore remains pending and archive-blocking; review history is not fabricated or repaired.
+- WU10 current commit reference is `582056a`; older WU2b/WU3 evidence below remains historical.
 - Route drift `/admin/...` versus `/tenants/...` in proposal/design/spec wording remains deferred and untouched.
 
 ---
@@ -58,7 +53,7 @@ Authenticated catalog-settings HTTP contract and dedicated authorization around 
 
 - `tasks.md`: WU3 heading + forecast row updated to truthful actuals (2,147 / 8 commits / max 381); all three WU3 implementation rows marked `[x]` with concise evidence; ambiguous "admin route" wording replaced with canonical `/tenants/:tenantId/catalog-settings`; aggregates reconciled (overall **9,192–9,572**; F1 **7,632–7,737**).
 - `review-ledger.md`: WU3 section appended with the 8-commit lineage table, findings summary, consolidated evidence, rollback, and route supersession note.
-- `verify-report.md`: not updated for WU3 at the time (still WU2b-only); it was later updated for WU3-era verification and then reconciled at the final HEAD `9ca0237` — this bullet is historical. Historical WU3 provenance conflict, preserved not normalized: this section records the focused run as **13 suites / 148 tests**, while the WU3-era verify report records **15 suites / 162 tests** for the same era.
+- `verify-report.md`: not updated for WU3 at the time (still WU2b-only); it was later updated for WU3-era verification and a superseded candidate snapshot at `9ca0237` / tree `4090ceb` — this bullet is historical. Historical WU3 provenance conflict, preserved not normalized: this section records the focused run as **13 suites / 148 tests**, while the WU3-era verify report records **15 suites / 162 tests** for the same era.
 
 ### Final evidence (captured locally on the WU3 branch)
 
