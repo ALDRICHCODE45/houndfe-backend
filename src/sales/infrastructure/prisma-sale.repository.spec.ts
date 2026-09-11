@@ -6,6 +6,10 @@
 import { PrismaSaleRepository } from './prisma-sale.repository';
 import { Sale } from '../domain/sale.entity';
 import { Prisma } from '@prisma/client';
+import {
+  BusinessRuleViolationError,
+  EntityNotFoundError,
+} from '../../shared/domain/domain-error';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -2065,6 +2069,210 @@ describe('PrismaSaleRepository', () => {
       )?.[0];
       expect(createManyArgs).toBeDefined();
       expect(createManyArgs.data[0].rewardDiscountPercent).toBe(50);
+    });
+  });
+
+  describe('protect-confirmed-sales — repository intent gates', () => {
+    const makeSale = (status: 'DRAFT' | 'CONFIRMED' | 'CANCELED') =>
+      Sale.fromPersistence({
+        id: `sale-${status.toLowerCase()}`,
+        userId: 'user-1',
+        status,
+        items: [
+          {
+            id: 'item-1',
+            saleId: `sale-${status.toLowerCase()}`,
+            productId: 'product-1',
+            variantId: null,
+            productName: 'Product',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+    const expectSaleNotDraft = async (operation: Promise<unknown>) => {
+      await expect(operation).rejects.toEqual(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+    };
+
+    it.each([
+      ['DRAFT', 'CONFIRMED'],
+      ['DRAFT', 'CANCELED'],
+      ['CONFIRMED', 'DRAFT'],
+      ['CANCELED', 'DRAFT'],
+    ] as const)(
+      'rejects DRAFT intent when persisted status is %s and incoming status is %s',
+      async (persistedStatus, incomingStatus) => {
+        const sale = makeSale(incomingStatus);
+        prisma.sale.findUnique.mockResolvedValue({
+          id: sale.id,
+          status: persistedStatus,
+        });
+
+        await expectSaleNotDraft(repo.saveDraftItems(sale));
+
+        expect(prisma.saleItem.deleteMany).not.toHaveBeenCalled();
+        expect(prisma.sale.create).not.toHaveBeenCalled();
+        expect(prisma.sale.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects missing DRAFT-intent sales without creating them', async () => {
+      const sale = makeSale('DRAFT');
+      prisma.sale.findUnique.mockResolvedValue(null);
+
+      await expect(repo.saveDraftItems(sale)).rejects.toEqual(
+        new EntityNotFoundError('Sale', sale.id),
+      );
+
+      expect(prisma.sale.create).not.toHaveBeenCalled();
+      expect(prisma.saleItem.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('allows matching DRAFT intent to proceed', async () => {
+      const sale = makeSale('DRAFT');
+      prisma.sale.findUnique.mockResolvedValue({
+        id: sale.id,
+        status: 'DRAFT',
+      });
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+      await repo.saveDraftItems(sale);
+
+      expect(prisma.sale.update).toHaveBeenCalled();
+      expect(prisma.saleItem.deleteMany).toHaveBeenCalled();
+      expect(prisma.saleItem.createMany).toHaveBeenCalled();
+    });
+
+    it.each(['CONFIRMED', 'CANCELED'] as const)(
+      'rejects forged GENERIC DRAFT save against persisted %s sale before writes',
+      async (persistedStatus) => {
+        const sale = makeSale('DRAFT');
+        prisma.sale.findUnique.mockResolvedValue({
+          id: sale.id,
+          status: persistedStatus,
+        });
+
+        await expectSaleNotDraft(repo.save(sale));
+
+        expect(prisma.saleItem.createMany).not.toHaveBeenCalled();
+        expect(prisma.saleItem.deleteMany).not.toHaveBeenCalled();
+        expect(prisma.sale.update).not.toHaveBeenCalled();
+        expect(prisma.sale.updateMany).not.toHaveBeenCalled();
+      },
+    );
+
+    it('allows GENERIC non-DRAFT persistence against an existing non-DRAFT sale', async () => {
+      const sale = makeSale('CONFIRMED');
+      prisma.sale.findUnique.mockResolvedValue({
+        id: sale.id,
+        status: 'CONFIRMED',
+      });
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+      await repo.save(sale);
+
+      expect(prisma.sale.update).toHaveBeenCalled();
+      expect(prisma.saleItem.createMany).toHaveBeenCalled();
+    });
+
+    it('preserves GENERIC creation when the persisted sale is missing', async () => {
+      const sale = makeSale('CANCELED');
+      prisma.sale.findUnique.mockResolvedValue(null);
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+      await repo.save(sale);
+
+      expect(prisma.sale.create).toHaveBeenCalled();
+    });
+
+    it('reconciles promotion junctions for both permitted intents', async () => {
+      for (const intent of ['GENERIC', 'DRAFT'] as const) {
+        const sale = makeSale('DRAFT');
+        sale.addVetoedPromotion(`veto-${intent}`);
+        sale.optInManualPromotion(`opt-in-${intent}`);
+        sale.setAppliedOrderPromotion({
+          promotionId: `applied-${intent}`,
+          discountType: 'amount',
+          discountValue: 100,
+          discountAmountCents: 100,
+          discountTitle: 'Promotion',
+        });
+        prisma.sale.findUnique.mockResolvedValue({
+          id: sale.id,
+          status: 'DRAFT',
+        });
+        jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+        if (intent === 'DRAFT') {
+          await repo.saveDraftItems(sale);
+        } else {
+          await repo.save(sale);
+        }
+      }
+
+      expect(prisma.salePromotionVeto.deleteMany).toHaveBeenCalledTimes(2);
+      expect(prisma.salePromotionVeto.createMany).toHaveBeenCalledTimes(2);
+      expect(prisma.salePromotionOptIn.deleteMany).toHaveBeenCalledTimes(2);
+      expect(prisma.salePromotionOptIn.createMany).toHaveBeenCalledTimes(2);
+      expect(prisma.salePromotionApplied.upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('treats a persisted cross-tenant DRAFT sale as missing before writes', async () => {
+      const sale = makeSale('DRAFT');
+      const persistedOtherTenantSale = {
+        id: sale.id,
+        status: 'DRAFT' as const,
+        tenantId: 'tenant-2',
+      };
+      const getTenantId = jest.fn().mockReturnValue('tenant-1');
+      const create = jest.fn();
+      const update = jest.fn();
+      const deleteMany = jest.fn();
+      const createMany = jest.fn();
+      const findUnique = jest.fn(async (args: { where: { id: string } }) => {
+        const scopedWhere = {
+          ...args.where,
+          tenantId: getTenantId(),
+        };
+        return scopedWhere.tenantId === persistedOtherTenantSale.tenantId
+          ? persistedOtherTenantSale
+          : null;
+      });
+      const tenantScopedClient = {
+        sale: { create, update, findUnique },
+        saleItem: { deleteMany, createMany },
+      };
+      const scopedTenantPrisma = {
+        getClient: jest.fn().mockReturnValue(tenantScopedClient),
+        getTenantId,
+      };
+      const scopedRepo = new PrismaSaleRepository(
+        scopedTenantPrisma as unknown as ConstructorParameters<
+          typeof PrismaSaleRepository
+        >[0],
+      );
+
+      await expect(scopedRepo.saveDraftItems(sale)).rejects.toEqual(
+        new EntityNotFoundError('Sale', sale.id),
+      );
+
+      expect(findUnique).toHaveBeenCalledWith({
+        where: { id: sale.id },
+        select: { id: true, status: true },
+      });
+      expect(scopedTenantPrisma.getClient).toHaveBeenCalled();
+      expect(getTenantId).toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(deleteMany).not.toHaveBeenCalled();
+      expect(createMany).not.toHaveBeenCalled();
     });
   });
 

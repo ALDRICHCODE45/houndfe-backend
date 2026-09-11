@@ -20,7 +20,10 @@ import {
 import { SaleItem } from '../domain/sale-item.entity';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import {
+  BusinessRuleViolationError,
+  EntityNotFoundError,
+} from '../../shared/domain/domain-error';
 import type {
   SalesListBaseFilter,
   SalesListExtendedFilter,
@@ -130,13 +133,34 @@ export class PrismaSaleRepository implements ISaleRepository {
     };
   }
 
-  async save(sale: Sale): Promise<Sale> {
+  private async writeImpl(
+    sale: Sale,
+    intent: 'DRAFT' | 'GENERIC',
+  ): Promise<Sale> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
-    // Check if sale exists
     const existing = await prisma.sale.findUnique({
       where: { id: sale.id },
+      select: { id: true, status: true },
     });
+
+    if (intent === 'DRAFT') {
+      if (!existing) {
+        throw new EntityNotFoundError('Sale', sale.id);
+      }
+      if (existing.status !== 'DRAFT' || sale.status !== 'DRAFT') {
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_DRAFT',
+          'SALE_NOT_DRAFT',
+        );
+      }
+    } else if (
+      existing &&
+      existing.status !== 'DRAFT' &&
+      sale.status === 'DRAFT'
+    ) {
+      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
+    }
 
     // Delete existing items (we'll recreate them from domain state)
     await prisma.saleItem.deleteMany({
@@ -255,8 +279,12 @@ export class PrismaSaleRepository implements ISaleRepository {
     return (await this.findById(sale.id))!;
   }
 
+  async save(sale: Sale): Promise<Sale> {
+    return this.writeImpl(sale, 'GENERIC');
+  }
+
   async saveDraftItems(sale: Sale): Promise<Sale> {
-    return this.save(sale);
+    return this.writeImpl(sale, 'DRAFT');
   }
 
   async findById(id: string): Promise<Sale | null> {

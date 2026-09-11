@@ -144,3 +144,26 @@
 - **Rollback boundary:** remove `toWriteRow`, restore the former inline `save` mapper, and remove the characterization test plus WU4 task/progress entries; WU1–WU3 remain intact.
 - **Workload / action context:** WU4 is the authorized feature-branch-chain slice and remains below the 400 A+D cap. Every edit is within the repo-local allowed root. No commit, push, PR, review, attempt, or WU5+ work occurred.
 - **Remaining:** WU5–WU8 remain pending; see their exact unchecked task lines in the persisted task ledger above.
+
+## WU5 — Repository intent gates (completed)
+
+- **Status:** completed; the overall change remains **not ready for final verify** until WU6–WU8 are complete.
+- **Completed persisted tasks:** all six WU5 task lines (RED, GREEN, TRIANGULATE, REFACTOR) are marked `[x]` in `tasks.md`; WU6–WU8 remain unchecked.
+- **Implementation:** added private `writeImpl(sale, intent)` and routed `save` through `GENERIC` and `saveDraftItems` through `DRAFT`. Its first operation is a tenant-scoped `findUnique` selecting only `{ id, status }`; it rejects missing DRAFT intent with `EntityNotFoundError`, requires both persisted and incoming DRAFT for DRAFT intent, and rejects forged incoming DRAFT against existing non-DRAFT GENERIC rows before every write. Existing generic creation and non-DRAFT-to-non-DRAFT writes retain the prior inline create/update, item replacement through `toWriteRow`, and promotion-junction reconciliation. Persisted items remain unloaded; WU7 owns snapshot comparison.
+- **RED evidence:** baseline `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts` passed **152/152**; after RED tests it failed as expected: **8 failed, 156 passed, 164 total**.
+- **GREEN / TRIANGULATE / REFACTOR evidence:** the focused command passed **164/164** after `writeImpl`. The passing matrix covers both directions of the DRAFT status gate, missing DRAFT intent with no create, forged GENERIC DRAFT with zero writes, legitimate GENERIC create/update, and promotion veto/opt-in/applied reconciliation for both intents. Corrective rerun: a typed test-only tenant-scoped client holds a persisted `{ id, status: 'DRAFT', tenantId: 'tenant-2' }` row, injects the current `tenant-1` into the lookup, returns `null` on the tenant mismatch, then proves DRAFT intent throws `EntityNotFoundError` with zero `create`/`update`/item writes. The create/update branch remains inline in `writeImpl`; no helper or persisted-item load was added.
+- **Verification:** corrective rerun `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts` passed **164/164**; `pnpm build` passed; `git diff --check` passed. Final `git diff --stat` / `--numstat`: **269 additions, 10 deletions = 279 A+D**, below the 400-line WU5 budget.
+- **Resolved diagnostic authorization:** maintainer explicitly classified the reported 708 Pi Lens diagnostics as pre-existing and out of scope for WU5. The only new formatter warning introduced during GREEN was corrected immediately. No new focused-test, build, or type failure remains.
+- **Files changed:** `src/sales/infrastructure/prisma-sale.repository.ts`, `src/sales/infrastructure/prisma-sale.repository.spec.ts`, `openspec/changes/protect-confirmed-sales/tasks.md`, `openspec/changes/protect-confirmed-sales/apply-progress.md`.
+- **Rollback boundary:** remove `writeImpl`, restore the WU2 `saveDraftItems → save` delegation, and remove the WU5 test block/import and WU5 artifact updates; WU1–WU4 remain intact.
+- **Action context / workload:** consumed `applyState: ready`, repo-local allowed root, the parent-approved resumed attempt, and the `feature-branch-chain` WU5 boundary. No acquire, settle, reset, rescope, commit, push, PR, schema, dependency, API contract, or WU6–WU8 work occurred. Runtime harness: N/A — this repository unit has no server/background boundary.
+
+### TDD Cycle Evidence
+
+| Stage        | Command                                                                | Result                                                                      |
+| ------------ | ---------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| RED baseline | `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts` | passed: 152/152                                                             |
+| RED          | same command                                                           | expected failure: 8 failed, 156 passed, 164 total                           |
+| GREEN        | same command                                                           | passed: 164/164 after `writeImpl`                                           |
+| TRIANGULATE  | same passing focused run                                               | promotion junctions for both intents and tenant-isolation missing path pass |
+| REFACTOR     | same passing focused run                                               | inline create/update retained; no new helper or persisted-item load         |
