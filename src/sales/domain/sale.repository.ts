@@ -69,6 +69,8 @@ export interface ISaleRepository {
    */
   save(sale: Sale): Promise<Sale>;
 
+  saveDraftItems(sale: Sale): Promise<Sale>;
+
   /**
    * Find sale by ID
    */

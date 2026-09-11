@@ -568,6 +568,8 @@ export class SalesService {
    * price, never an add-time frozen base.
    */
   private async recomputePricingAndPromotions(sale: Sale): Promise<void> {
+    sale.ensureDraft();
+
     // (1) Clear prior PROMO-sourced discounts. Manual free-form
     //     discounts are skipped (no `promotionId`).
     for (const item of sale.items) {
@@ -1113,6 +1115,7 @@ export class SalesService {
         `User ${userId} does not own this sale`,
       );
     }
+    sale.ensureDraft();
 
     // Fetch product info and freeze price
     const productInfo = await this.productsService.getProductInfoForSale(
@@ -1203,6 +1206,7 @@ export class SalesService {
         `User ${userId} does not own this sale`,
       );
     }
+    sale.ensureDraft();
 
     // Find the item to get product/variant info
     const item = sale.items.find((i) => i.id === itemId);
@@ -1263,6 +1267,7 @@ export class SalesService {
         `User ${userId} does not own this sale`,
       );
     }
+    sale.ensureDraft();
 
     const clearedItemCount = sale.items.length;
     sale.clearItems();
@@ -1281,14 +1286,13 @@ export class SalesService {
     const sale = await this.saleRepo.findById(saleId);
     if (!sale)
       throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
-    if (sale.status !== 'DRAFT')
-      throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     if (sale.userId !== actorId) {
       throw new BusinessRuleViolationError(
         'SALE_UPDATE_FORBIDDEN',
         'SALE_UPDATE_FORBIDDEN',
       );
     }
+    sale.ensureDraft();
 
     sale.removeItem(itemId);
     // Work Unit 4 — recompute so any ORDER_DISCOUNT no longer references the
@@ -1319,6 +1323,7 @@ export class SalesService {
         `User ${userId} does not own this sale`,
       );
     }
+    sale.ensureDraft();
 
     await this.saleRepo.delete(saleId);
 

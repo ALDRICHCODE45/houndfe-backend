@@ -252,6 +252,10 @@ export class PrismaSaleRepository implements ISaleRepository {
     return (await this.findById(sale.id))!;
   }
 
+  async saveDraftItems(sale: Sale): Promise<Sale> {
+    return this.save(sale);
+  }
+
   async findById(id: string): Promise<Sale | null> {
     const prisma = this.tenantPrisma.getClient();
     // Explicit tenantId on the nested promotion-junction includes.

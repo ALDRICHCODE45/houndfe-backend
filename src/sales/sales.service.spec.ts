@@ -24,11 +24,16 @@ import {
 } from './domain/events/sale.events';
 import { InvalidDueDateError } from './domain/sale.errors';
 
+interface RecomputeProbe {
+  recomputePricingAndPromotions(sale: Sale): Promise<void>;
+}
+
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
 function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
   return {
     save: jest.fn(),
+    saveDraftItems: jest.fn(),
     findById: jest.fn(),
     findDraftsByUserId: jest.fn(),
     delete: jest.fn(),
@@ -10242,6 +10247,287 @@ describe('SalesService', () => {
   //   - Sticky lines survive seeding.
   //   - Customer with null globalPriceListId → no change.
   // ==========================================================================
+  describe('protect-confirmed-sales — service guards', () => {
+    const statuses = ['CONFIRMED', 'CANCELED'] as const;
+
+    const lifecycleSale = (
+      status: (typeof statuses)[number],
+      withItem = false,
+      userId = 'user-1',
+    ) =>
+      Sale.fromPersistence({
+        id: `sale-${status.toLowerCase()}-${withItem ? 'item' : 'empty'}`,
+        userId,
+        status,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: withItem
+          ? [
+              {
+                id: 'item-1',
+                saleId: `sale-${status.toLowerCase()}-item`,
+                productId: 'prod-1',
+                variantId: null,
+                productName: 'Product',
+                variantName: null,
+                quantity: 2,
+                unitPriceCents: 1000,
+                unitPriceCurrency: 'MXN',
+              },
+            ]
+          : [],
+      });
+
+    it.each(statuses)(
+      'rejects addItem before product lookup for %s',
+      async (status) => {
+        const sale = lifecycleSale(status);
+        const items = sale.items;
+        saleRepo.findById.mockResolvedValue(sale);
+        productsService.getProductInfoForSale.mockRejectedValue(
+          new Error('product lookup must not run'),
+        );
+
+        await expect(
+          service.addItem(sale.id, 'user-1', {
+            productId: 'prod-1',
+            quantity: 1,
+          }),
+        ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+        expect(sale.items).toBe(items);
+        expect(sale.items).toHaveLength(0);
+      },
+    );
+
+    it.each(statuses)(
+      'rejects updateItemQuantity before stock lookup for %s',
+      async (status) => {
+        const sale = lifecycleSale(status, true);
+        const items = sale.items;
+        saleRepo.findById.mockResolvedValue(sale);
+        productsService.checkStockAvailability.mockRejectedValue(
+          new Error('stock lookup must not run'),
+        );
+
+        await expect(
+          service.updateItemQuantity(sale.id, 'user-1', 'item-1', {
+            quantity: 3,
+          }),
+        ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+        expect(sale.items).toBe(items);
+        expect(sale.items[0].quantity).toBe(2);
+      },
+    );
+
+    it.each(statuses)('rejects clearItems for %s', async (status) => {
+      const sale = lifecycleSale(status, true);
+      const items = sale.items;
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(service.clearItems(sale.id, 'user-1')).rejects.toMatchObject(
+        { code: 'SALE_NOT_DRAFT' },
+      );
+      expect(sale.items).toBe(items);
+      expect(sale.items).toHaveLength(1);
+    });
+
+    it.each(statuses)('rejects removeItem for %s', async (status) => {
+      const sale = lifecycleSale(status, true);
+      const items = sale.items;
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.removeItem(sale.id, 'user-1', 'item-1'),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_DRAFT' });
+      expect(sale.items).toBe(items);
+      expect(sale.items).toHaveLength(1);
+    });
+
+    it.each(statuses)('rejects deleteDraft for %s', async (status) => {
+      const sale = lifecycleSale(status);
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(service.deleteDraft(sale.id, 'user-1')).rejects.toThrow(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+      expect(saleRepo.delete).not.toHaveBeenCalled();
+    });
+
+    it.each(statuses)('rejects empty clearItems for %s', async (status) => {
+      const sale = lifecycleSale(status);
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(service.clearItems(sale.id, 'user-1')).rejects.toMatchObject(
+        { code: 'SALE_NOT_DRAFT' },
+      );
+      expect(sale.items).toHaveLength(0);
+    });
+
+    it.each(['missing', 'cross-tenant'])(
+      'keeps clearItems %s sales undisclosed',
+      async (kind) => {
+        const saleId = `${kind}-clear`;
+        saleRepo.findById.mockResolvedValue(null);
+        await expect(service.clearItems(saleId, 'user-1')).rejects.toThrow(
+          new EntityNotFoundError('Sale', saleId),
+        );
+        expect(saleRepo.save).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      [
+        'clearItems',
+        (sale: Sale) => service.clearItems(sale.id, 'user-1'),
+        new BusinessRuleViolationError('User user-1 does not own this sale'),
+      ],
+      [
+        'removeItem',
+        (sale: Sale) => service.removeItem(sale.id, 'user-1', 'item-1'),
+        new BusinessRuleViolationError(
+          'SALE_UPDATE_FORBIDDEN',
+          'SALE_UPDATE_FORBIDDEN',
+        ),
+      ],
+    ])('%s keeps ownership before lifecycle', async (_, invoke, error) => {
+      const sale = lifecycleSale('CONFIRMED', true, 'owner-2');
+      saleRepo.findById.mockResolvedValue(sale);
+      await expect(invoke(sale)).rejects.toThrow(error);
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('preserves draft deletion, invalid-quantity, ownership, and missing contracts', async () => {
+      const draft = Sale.create({ id: 'draft-delete', userId: 'user-1' });
+      saleRepo.findById.mockResolvedValue(draft);
+      await service.deleteDraft(draft.id, 'user-1');
+      expect(saleRepo.delete).toHaveBeenCalledWith(draft.id);
+
+      const invalidQuantity = Sale.create({
+        id: 'draft-invalid-quantity',
+        userId: 'user-1',
+      });
+      invalidQuantity.addItem({
+        id: 'item-1',
+        saleId: invalidQuantity.id,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(invalidQuantity);
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 1,
+      });
+      await expect(
+        service.updateItemQuantity(invalidQuantity.id, 'user-1', 'item-1', {
+          quantity: 0,
+        }),
+      ).rejects.toThrow();
+      expect(saleRepo.save).not.toHaveBeenCalled();
+
+      saleRepo.findById.mockResolvedValue(
+        Sale.create({ id: 'other-owner', userId: 'owner-2' }),
+      );
+      await expect(
+        service.addItem('other-owner', 'user-1', {
+          productId: 'prod-1',
+          quantity: 1,
+        }),
+      ).rejects.toThrow(/does not own this sale/);
+      expect(saleRepo.save).not.toHaveBeenCalled();
+
+      saleRepo.findById.mockResolvedValue(null);
+      await expect(
+        service.addItem('cross-tenant', 'user-1', {
+          productId: 'prod-1',
+          quantity: 1,
+        }),
+      ).rejects.toThrow(EntityNotFoundError);
+      await expect(
+        service.removeItem('cross-tenant', 'user-1', 'item-1'),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_FOUND' });
+    });
+
+    it('keeps charge, cancellation, and payment persistence flows unblocked', async () => {
+      const draft = Sale.create({ id: 'draft-charge', userId: 'user-1' });
+      draft.addItem({
+        id: 'charge-item',
+        saleId: draft.id,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(draft);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      productsService.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('F-1');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      await service.chargeDraft(
+        draft.id,
+        'user-1',
+        { method: 'cash', amountCents: 1000 },
+        'charge-key',
+      );
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalled();
+
+      const confirmed = Sale.fromPersistence({
+        id: 'confirmed-cancel',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        deliveryStatus: 'PENDING',
+        totalCents: 1000,
+        debtCents: 1000,
+        paymentStatus: 'CREDIT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items: [],
+      });
+      saleRepo.findByIdForUpdate.mockResolvedValue(confirmed);
+      await service.cancelSale(confirmed.id, 'user-1', { reason: 'OTHER' });
+      expect(saleRepo.persistCancellation).toHaveBeenCalled();
+
+      const paymentSale = lifecycleSale('CONFIRMED', true);
+      saleRepo.findByIdForUpdate.mockResolvedValue(paymentSale);
+      await service.addPayment(
+        paymentSale.id,
+        'user-1',
+        { method: 'cash', amountCents: 100 },
+        'payment-key',
+      );
+      expect(saleRepo.persistCollectedPayments).toHaveBeenCalled();
+    });
+
+    it('rejects direct recompute before clearing discounts or evaluating', async () => {
+      const sale = lifecycleSale('CONFIRMED', true);
+      sale.items[0].applyDiscount({
+        type: 'amount',
+        amountCents: 100,
+        discountTitle: 'Promotion',
+        promotionId: 'promotion-1',
+      });
+      const discountAmountCents = sale.items[0].discountAmountCents;
+      const recomputeProbe = service as unknown as RecomputeProbe;
+
+      await expect(
+        recomputeProbe.recomputePricingAndPromotions(sale),
+      ).rejects.toThrow(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+      expect(posEvaluateUseCase.evaluate).not.toHaveBeenCalled();
+      expect(sale.items[0].discountAmountCents).toBe(discountAmountCents);
+    });
+  });
+
   describe('WU3 Task 3.3 — assignCustomer seeds Sale price list', () => {
     function assignPrismaMock(
       customerRow: { id: string; globalPriceListId?: string | null } | null,
