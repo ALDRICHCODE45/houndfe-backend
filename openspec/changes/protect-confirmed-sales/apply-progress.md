@@ -48,15 +48,44 @@
 - **Deviation from design:** none. The adapter remains a delegation stub as designed; persistence validation is reserved for WU5+.
 - **Rollback boundary:** remove only WU2 port/stub, service guards, and service-guard test block; keep WU1 entity guards unchanged.
 
+## WU3 — Draft-item persistence routing
+
+- **Status:** completed; the change remains **not ready for final verify** until WU4–WU8 are complete.
+- **Completed persisted tasks:** WU3 RED, GREEN, and REFACTOR are marked `[x]` in `tasks.md`.
+- **Implementation:** `addItem`, `updateItemQuantity`, `clearItems` (including empty clears), and `removeItem` now call `saleRepo.saveDraftItems(sale)`. `deleteDraft` remains on `saleRepo.delete`.
+- **Coverage:** R5.1/R5.2/R5.3/R5.4/R5.6 valid-DRAFT assertions require `saveDraftItems` and reject generic `save`. Existing draft-mutation regression tests that inspect persisted aggregates now observe `saveDraftItems`; Part B assertions for R5.5/R5.7/R5.8/R5.9/R5.10 remain unchanged.
+- **Files changed:** `src/sales/sales.service.ts`, `src/sales/sales.service.spec.ts`, and these OpenSpec artifacts.
+- **Deviation from design:** none. The adapter remains the WU2 delegation stub; repository persistence gating is reserved for WU5+.
+- **Rollback boundary:** revert the four service routing calls and their matching `saveDraftItems` test assertions/observations; retain WU1/WU2 guards and port wiring.
+
+### TDD Cycle Evidence
+
+| Task     | Command                                                    | Result                                                                                                                          |
+| -------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| RED      | `pnpm test -- src/sales/sales.service.spec.ts --runInBand` | expected failure: 6 routing assertions failed; 252 passed (258 total) because callers still used `save`.                        |
+| GREEN    | `pnpm test -- src/sales/sales.service.spec.ts --runInBand` | passed: 258/258 after all four callers moved to `saveDraftItems`.                                                               |
+| REFACTOR | same focused command                                       | Part A routing checks and dependent valid-draft persistence observations use `saveDraftItems`; Part B assertions are unchanged. |
+
+### Verification
+
+| Command                                                            | Result                                            |
+| ------------------------------------------------------------------ | ------------------------------------------------- |
+| `pnpm test -- src/sales/sales.service.spec.ts --runInBand` (RED)   | expected failure: 6 failed, 252 passed, 258 total |
+| `pnpm test -- src/sales/sales.service.spec.ts --runInBand` (GREEN) | passed: 258/258                                   |
+| `pnpm build`                                                       | passed                                            |
+| `git diff --check`                                                 | passed                                            |
+
+- Runtime harness: N/A — no server or background process was launched; the parent owns the already-acquired WU3 attempt and settlement.
+
 ## Workload / action context
 
 - Consumed authoritative status: `applyState: ready`, repo-local workspace, allowed root `/home/aldrich_coder45/Desktop/workspace/houndfe/houndfe-backend`.
-- Parent resolved the delivery path as `feature-branch-chain`; WU2 is the current uncommitted child-branch boundary (`feat/protect-confirmed-sales-02-service`) and depends on WU1 commit `0b2ad0c`. No commit, push, PR, native acquire/settle/review, or WU3 routing change occurred.
+- Parent resolved the delivery path as `feature-branch-chain`; WU3 is the current uncommitted child-branch boundary (`feat/protect-confirmed-sales-03-save-routing`) based on clean commit `a470dc6`. No commit, push, PR, native acquire/settle/review, or WU4+ work occurred.
 - The supplied authoritative status was `applyState: ready`, repo-local workspace, and the allowed root matched every edited file. No action-context warning applies.
 - Parent owns the active attempt and settlement; no token or counter is recorded here.
 - **Remediation correction:** the prior claim that 285 unsafe-`any` diagnostics blocked WU2 is withdrawn: no explicitly authorized diagnostic reproduced it. This remediation adds focused, behavior-pinning service evidence only; it does not authorize WU3.
 
-## Task ledger (WU2 completed; remaining exact unchecked lines follow)
+## Task ledger (WU2 + WU3 completed; remaining exact unchecked lines follow)
 
 - [x] RED — in `src/sales/sales.service.spec.ts` add `saveDraftItems: jest.fn()` to `makeMockSaleRepo`. Write failing tests under `describe('protect-confirmed-sales — service guards', …)` for R1.1–R1.8. For addItem (R1.1/R1.2) and updateItemQuantity (R1.3/R1.4), additionally assert the service guard fires before the dependent call: monkey-patch `productsService.getProductInfoForSale` (addItem) or `productsService.checkStockAvailability` (updateItemQuantity) to throw on call and assert `SALE_NOT_DRAFT` rejection surfaces before the throw. For clearItems (R1.5/R1.6) and removeItem (R1.7/R1.8) assert only the rejection code plus zero item mutation (those two methods have no product-service dependent call to test against; removeItem's existing inline guard already throws before the engine call). Lifecycle assertions pass after WU1 entity guards (regression baseline); before-dependent-call assertions for addItem/updateItemQuantity are new failing evidence. <!-- sdd-owner: implementation -->
 - [x] RED — write failing tests for R2.1/R2.2 (`deleteDraft` against CONFIRMED/CANCELED returns `BusinessRuleViolationError`; `expect(saleRepo.delete).not.toHaveBeenCalled()`). New failing evidence. <!-- sdd-owner: implementation -->
@@ -67,9 +96,9 @@
 - [x] RED — write a failing test for the shared recompute guard: build a non-DRAFT sale (CONFIRMED or CANCELED) with one item carrying a discount, invoke `recomputePricingAndPromotions` via a typed test-only probe (declare a narrow local interface `RecomputeProbe` in the test file exposing the private method by signature, then narrow-cast the service instance to it — NOT `as any`); assert `BusinessRuleViolationError('SALE_NOT_DRAFT','SALE_NOT_DRAFT')`, `expect(posEvaluateUseCase.evaluate).not.toHaveBeenCalled()`, and the item's `discountAmountCents` is unchanged. New failing evidence. Place the test BEFORE the GREEN guard implementation. <!-- sdd-owner: implementation -->
 - [x] GREEN — insert `sale.ensureDraft();` as the first statement of `recomputePricingAndPromotions` in `src/sales/sales.service.ts` (before the discount-clear loop and before `evaluatePromotionsForSale`). Future verification covers the recompute RED test turning green; the existing public-method paths (addItem/updateItemQuantity/removeItem) call recompute after the service guard fires, so the guard is also exercised by those tests as defense-in-depth. <!-- sdd-owner: implementation -->
 - [x] REFACTOR — service guard insertions stay inline `sale.ensureDraft();`; the recompute guard is also inline. No helper. Pre-existing service tests remain green. <!-- sdd-owner: implementation -->
-- [ ] RED — in `src/sales/sales.service.spec.ts` write R5.1/R5.2/R5.3/R5.4/R5.6 valid-item-mutation tests asserting `expect(saleRepo.saveDraftItems).toHaveBeenCalled()` AND `expect(saleRepo.save).not.toHaveBeenCalled()`. These fail until the routing switch lands. Do NOT extend this expectation to R5.5 (`deleteDraft` uses `saleRepo.delete`), R5.7 (invalid quantity throws before persistence), R5.8/R5.9/R5.10 (rejected before persistence). This RED runs BEFORE the GREEN switch. <!-- sdd-owner: implementation -->
-- [ ] GREEN — switch the four item callers from `await this.saleRepo.save(sale);` to `await this.saleRepo.saveDraftItems(sale);` in `addItem`, `updateItemQuantity`, `clearItems`, `removeItem` (`deleteDraft` continues with `saleRepo.delete`). R5.1/R5.2/R5.3/R5.4/R5.6 RED tests turn green. <!-- sdd-owner: implementation -->
-- [ ] REFACTOR — confirm the Part A baseline tests (R5.1/R5.2/R5.3/R5.4/R5.6) align with the new routing; Part B tests (R5.5/R5.7/R5.8/R5.9/R5.10) keep their existing assertions unchanged. <!-- sdd-owner: implementation -->
+- [x] RED — in `src/sales/sales.service.spec.ts` write R5.1/R5.2/R5.3/R5.4/R5.6 valid-item-mutation tests asserting `expect(saleRepo.saveDraftItems).toHaveBeenCalled()` AND `expect(saleRepo.save).not.toHaveBeenCalled()`. These fail until the routing switch lands. Do NOT extend this expectation to R5.5 (`deleteDraft` uses `saleRepo.delete`), R5.7 (invalid quantity throws before persistence), R5.8/R5.9/R5.10 (rejected before persistence). This RED runs BEFORE the GREEN switch. <!-- sdd-owner: implementation -->
+- [x] GREEN — switch the four item callers from `await this.saleRepo.save(sale);` to `await this.saleRepo.saveDraftItems(sale);` in `addItem`, `updateItemQuantity`, `clearItems`, `removeItem` (`deleteDraft` continues with `saleRepo.delete`). R5.1/R5.2/R5.3/R5.4/R5.6 RED tests turn green. <!-- sdd-owner: implementation -->
+- [x] REFACTOR — confirm the Part A baseline tests (R5.1/R5.2/R5.3/R5.4/R5.6) align with the new routing; Part B tests (R5.5/R5.7/R5.8/R5.9/R5.10) keep their existing assertions unchanged. <!-- sdd-owner: implementation -->
 - [ ] RED — in `prisma-sale.repository.spec.ts` add a characterization test asserting the current `save` payload: configure `makeMockPrisma` to capture the `createMany` call; assert the captured payload's first row matches every column currently emitted by the inline `createMany` (including `tenantId`, id/parent, pricing, discount/reward fields, timestamps). Regression baseline before refactor. <!-- sdd-owner: implementation -->
 - [ ] GREEN — extract `private toWriteRow(item: SaleItem, saleId: string, tenantId: string): Prisma.SaleItemCreateManyInput` returning the exact payload the inline `createMany` builds. Required behavior: normalize enum case (`priceSource`, `rewardKind`, `discountType`) to uppercase Prisma form; use `saleId` from the outer aggregate parameter, not from the entity. Replace the inline literal in `save` with `sale.items.map((i) => this.toWriteRow(i, sale.id, tenantId))`. Do NOT introduce a hand-maintained column list. <!-- sdd-owner: implementation -->
 - [ ] REFACTOR — keep the existing `prisma.sale.update` / `prisma.sale.create` branching inline inside `save`; no extra helper. Characterization test passes; pre-existing `save` tests stay green. <!-- sdd-owner: implementation -->
@@ -93,4 +122,4 @@
 - [ ] TRIANGULATE — add a cross-tenant delete test: configure `makeTenantPrismaMock` so `prisma.sale.findFirst` returns `null` for the given id under the current tenant; `delete('sale-id')` falls through to `prisma.sale.delete` which throws `P2025`. Cross-tenant no-disclosure contract preserved. <!-- sdd-owner: implementation -->
 - [ ] REFACTOR — lifecycle read stays inline inside `delete`; no extra helper. Pre-existing tests stay green. <!-- sdd-owner: implementation -->
 
-- Remaining: the 25 unchecked WU3–WU8 task lines above; do not start them in this work unit.
+- Remaining: the 22 unchecked WU4–WU8 task lines above; do not start them in this work unit.

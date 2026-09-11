@@ -137,9 +137,9 @@ Tasks:
 
 Tasks:
 
-- [ ] RED — in `src/sales/sales.service.spec.ts` write R5.1/R5.2/R5.3/R5.4/R5.6 valid-item-mutation tests asserting `expect(saleRepo.saveDraftItems).toHaveBeenCalled()` AND `expect(saleRepo.save).not.toHaveBeenCalled()`. These fail until the routing switch lands. Do NOT extend this expectation to R5.5 (`deleteDraft` uses `saleRepo.delete`), R5.7 (invalid quantity throws before persistence), R5.8/R5.9/R5.10 (rejected before persistence). This RED runs BEFORE the GREEN switch. <!-- sdd-owner: implementation -->
-- [ ] GREEN — switch the four item callers from `await this.saleRepo.save(sale);` to `await this.saleRepo.saveDraftItems(sale);` in `addItem`, `updateItemQuantity`, `clearItems`, `removeItem` (`deleteDraft` continues with `saleRepo.delete`). R5.1/R5.2/R5.3/R5.4/R5.6 RED tests turn green. <!-- sdd-owner: implementation -->
-- [ ] REFACTOR — confirm the Part A baseline tests (R5.1/R5.2/R5.3/R5.4/R5.6) align with the new routing; Part B tests (R5.5/R5.7/R5.8/R5.9/R5.10) keep their existing assertions unchanged. <!-- sdd-owner: implementation -->
+- [x] RED — in `src/sales/sales.service.spec.ts` write R5.1/R5.2/R5.3/R5.4/R5.6 valid-item-mutation tests asserting `expect(saleRepo.saveDraftItems).toHaveBeenCalled()` AND `expect(saleRepo.save).not.toHaveBeenCalled()`. These fail until the routing switch lands. Do NOT extend this expectation to R5.5 (`deleteDraft` uses `saleRepo.delete`), R5.7 (invalid quantity throws before persistence), R5.8/R5.9/R5.10 (rejected before persistence). This RED runs BEFORE the GREEN switch. <!-- sdd-owner: implementation -->
+- [x] GREEN — switch the four item callers from `await this.saleRepo.save(sale);` to `await this.saleRepo.saveDraftItems(sale);` in `addItem`, `updateItemQuantity`, `clearItems`, `removeItem` (`deleteDraft` continues with `saleRepo.delete`). R5.1/R5.2/R5.3/R5.4/R5.6 RED tests turn green. <!-- sdd-owner: implementation -->
+- [x] REFACTOR — confirm the Part A baseline tests (R5.1/R5.2/R5.3/R5.4/R5.6) align with the new routing; Part B tests (R5.5/R5.7/R5.8/R5.9/R5.10) keep their existing assertions unchanged. <!-- sdd-owner: implementation -->
 
 ---
 

@@ -1167,7 +1167,7 @@ export class SalesService {
     // draft preview once Unit 5 wires charge).
     await this.recomputePricingAndPromotions(sale);
 
-    await this.saleRepo.save(sale);
+    await this.saleRepo.saveDraftItems(sale);
 
     this.eventEmitter.emit(
       'sale.item.added',
@@ -1236,7 +1236,7 @@ export class SalesService {
     // Work Unit 4 — recompute (qty change can flip eligibility / re-apply).
     await this.recomputePricingAndPromotions(sale);
 
-    await this.saleRepo.save(sale);
+    await this.saleRepo.saveDraftItems(sale);
 
     this.eventEmitter.emit(
       'sale.item.quantity.changed',
@@ -1272,7 +1272,7 @@ export class SalesService {
     const clearedItemCount = sale.items.length;
     sale.clearItems();
 
-    await this.saleRepo.save(sale);
+    await this.saleRepo.saveDraftItems(sale);
 
     this.eventEmitter.emit(
       'sale.cleared',
@@ -1298,7 +1298,7 @@ export class SalesService {
     // Work Unit 4 — recompute so any ORDER_DISCOUNT no longer references the
     // removed item, and remaining items re-evaluate against the new state.
     await this.recomputePricingAndPromotions(sale);
-    await this.saleRepo.save(sale);
+    await this.saleRepo.saveDraftItems(sale);
     this.eventEmitter.emit(
       'sale.item.removed',
       new SaleItemRemovedEvent(saleId, itemId, actorId, new Date()),

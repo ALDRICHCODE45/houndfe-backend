@@ -5022,7 +5022,10 @@ describe('SalesService', () => {
         quantity: 2,
         unitPriceCents: 5000,
       });
-      expect(saleRepo.save).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.save).not.toHaveBeenCalled();
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.item.added',
         expect.objectContaining({
@@ -5196,6 +5199,10 @@ describe('SalesService', () => {
         null,
         5,
       );
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.save).not.toHaveBeenCalled();
     });
 
     it('should not check cumulative stock for different product+variant combinations', async () => {
@@ -5310,7 +5317,10 @@ describe('SalesService', () => {
       );
 
       expect(result.items[0].quantity).toBe(10);
-      expect(saleRepo.save).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.save).not.toHaveBeenCalled();
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.item.quantity.changed',
         expect.objectContaining({
@@ -5402,7 +5412,10 @@ describe('SalesService', () => {
       const result = await service.clearItems('sale-7', 'user-1');
 
       expect(result.items).toHaveLength(0);
-      expect(saleRepo.save).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.save).not.toHaveBeenCalled();
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.cleared',
         expect.objectContaining({
@@ -5419,7 +5432,10 @@ describe('SalesService', () => {
       const result = await service.clearItems('sale-8', 'user-1');
 
       expect(result.items).toHaveLength(0);
-      expect(saleRepo.save).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.save).not.toHaveBeenCalled();
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.cleared',
         expect.objectContaining({
@@ -5465,7 +5481,10 @@ describe('SalesService', () => {
       expect(result.id).toBe('sale-remove-1');
       expect(result.items).toHaveLength(1);
       expect(result.items[0].id).toBe('item-keep');
-      expect(saleRepo.save).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(expect.any(Sale));
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(saleRepo.save).not.toHaveBeenCalled();
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.item.removed',
         expect.objectContaining({
@@ -6481,7 +6500,7 @@ describe('SalesService', () => {
       });
 
       // Capture the actual itemId from the saved sale (addItem uses randomUUID).
-      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const savedSale = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const actualItemId = savedSale.items[0].id;
 
       // The engine WAS called after the in-memory mutation.
@@ -6553,8 +6572,9 @@ describe('SalesService', () => {
         variantId: null,
         quantity: 1,
       });
-      const afterFirst = (saleRepo.save.mock.calls.at(-1)?.[0] as Sale)
-        .items[0];
+      const afterFirst = (
+        saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale
+      ).items[0];
       const actualItemId = afterFirst.id;
       expect(afterFirst.unitPriceCents).toBe(900);
       expect(afterFirst.prePriceCentsBeforeDiscount).toBe(1000);
@@ -6604,8 +6624,9 @@ describe('SalesService', () => {
       expect(secondInput.lines[0].effectiveUnitPriceCents).toBe(1000);
       expect(secondInput.lines[0].quantity).toBe(2);
 
-      const afterSecond = (saleRepo.save.mock.calls.at(-1)?.[0] as Sale)
-        .items[0];
+      const afterSecond = (
+        saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale
+      ).items[0];
       // Discount still 10% of 1000 = 100 → unitPriceCents stays at 900.
       expect(afterSecond.unitPriceCents).toBe(900);
       expect(afterSecond.discountAmountCents).toBe(100);
@@ -6660,7 +6681,7 @@ describe('SalesService', () => {
       });
 
       expect(posEvaluateUseCase.evaluate).toHaveBeenCalledTimes(1);
-      const saved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const saved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       expect(saved.items[0].quantity).toBe(5);
       // The promo is re-applied to the new qty.
       expect(saved.items[0].promotionId).toBe('promo-auto-1');
@@ -8334,7 +8355,7 @@ describe('SalesService', () => {
       });
 
       // The orphan must have been pruned from the opted-in set.
-      const saved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const saved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       expect(saved.optedInManualPromotionIds).not.toContain('promo-m-orphan');
     });
 
@@ -8406,7 +8427,7 @@ describe('SalesService', () => {
       // is targetable. The seller removing the manual free-form
       // discount would re-enable the MANUAL promo on the same line
       // without needing to re-opt-in.
-      const saved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const saved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       expect(saved.optedInManualPromotionIds).toContain('promo-m-1');
     });
   });
@@ -8502,7 +8523,7 @@ describe('SalesService', () => {
         quantity: 6,
       });
 
-      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const savedSale = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const item = savedSale.items[0];
       const actualItemId = item.id;
 
@@ -8593,7 +8614,7 @@ describe('SalesService', () => {
         quantity: 6,
       });
 
-      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const savedSale = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const item = savedSale.items[0];
 
       // Clear/re-apply must produce the FRESH state, not stack the
@@ -8660,7 +8681,8 @@ describe('SalesService', () => {
         quantity: 6,
       });
 
-      const item = (saleRepo.save.mock.calls.at(-1)?.[0] as Sale).items[0];
+      const item = (saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale)
+        .items[0];
       // 10% of 1000 = 100 → unitPrice drops to 900 (per-unit path).
       // This is the UNCHANGED per-unit behavior; BXGY would keep
       // unitPrice at 1000.
@@ -8726,7 +8748,7 @@ describe('SalesService', () => {
         variantId: null,
         quantity: 6,
       });
-      const afterFirst = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const afterFirst = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const itemId_5x = afterFirst.items[0].id;
       const firstTotals = afterFirst.previewTotals();
       const firstSnapshot = {
@@ -8746,7 +8768,7 @@ describe('SalesService', () => {
       // Each one re-runs the engine, clears the prior reward, re-applies
       // the same result. The fifth save MUST be byte-equal to the first.
       for (let i = 0; i < 4; i++) {
-        const previous = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+        const previous = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
         const prevItem = previous.items[0];
         saleRepo.findById.mockResolvedValue(
           Sale.fromPersistence({
@@ -8786,7 +8808,7 @@ describe('SalesService', () => {
         });
       }
 
-      const afterFifth = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const afterFifth = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const fifthTotals = afterFifth.previewTotals();
       const fifthSnapshot = {
         unitPriceCents: afterFifth.items[0].unitPriceCents,
@@ -8912,7 +8934,7 @@ describe('SalesService', () => {
         quantity: 3,
       });
 
-      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const savedSale = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const item = savedSale.items[0];
 
       // WU6 — the entity surfaces rewardKind='advanced' on the wire.
@@ -8994,7 +9016,7 @@ describe('SalesService', () => {
         quantity: 6,
       });
 
-      const savedSale = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const savedSale = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const item = savedSale.items[0];
 
       expect(item.rewardKind).toBe('advanced');
@@ -9075,7 +9097,7 @@ describe('SalesService', () => {
       });
 
       // Capture the first save's SaleItem row shape.
-      const firstSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const firstSaved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const firstItem = firstSaved.items[0];
       const firstSnapshot = {
         rewardKind: firstItem.rewardKind,
@@ -9098,7 +9120,7 @@ describe('SalesService', () => {
       }
 
       // The 5th save's SaleItem row shape MUST equal the 1st.
-      const fifthSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const fifthSaved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const fifthItem = fifthSaved.items[0];
       const fifthSnapshot = {
         rewardKind: fifthItem.rewardKind,
@@ -9177,7 +9199,7 @@ describe('SalesService', () => {
       await service.updateItemQuantity(saleId, 'user-1', itemId, {
         quantity: 3,
       });
-      const firstSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const firstSaved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const firstTotals = firstSaved.previewTotals();
 
       for (let i = 0; i < 4; i++) {
@@ -9186,7 +9208,7 @@ describe('SalesService', () => {
         });
       }
 
-      const fifthSaved = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const fifthSaved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const fifthTotals = fifthSaved.previewTotals();
       expect(fifthTotals).toEqual(firstTotals);
       // And the S2 100% ADVANCED math: subtotal=3000, discount=1000, total=2000.
@@ -9345,7 +9367,7 @@ describe('SalesService', () => {
         quantity: 3,
       });
 
-      const afterFirst = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const afterFirst = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       const firstItem = afterFirst.items[0];
       const firstItemId = firstItem.id;
 
@@ -9398,7 +9420,9 @@ describe('SalesService', () => {
         quantity: 3,
       });
 
-      const afterSecond = saleRepo.save.mock.calls.at(-1)?.[0] as Sale;
+      const afterSecond = saleRepo.saveDraftItems.mock.calls.at(
+        -1,
+      )?.[0] as Sale;
       const secondItem = afterSecond.items[0];
 
       // The MANUAL BXGY MUST survive the second recompute.
