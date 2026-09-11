@@ -156,9 +156,9 @@ Tasks:
 
 Tasks:
 
-- [ ] RED — in `prisma-sale.repository.spec.ts` add a characterization test asserting the current `save` payload: configure `makeMockPrisma` to capture the `createMany` call; assert the captured payload's first row matches every column currently emitted by the inline `createMany` (including `tenantId`, id/parent, pricing, discount/reward fields, timestamps). Regression baseline before refactor. <!-- sdd-owner: implementation -->
-- [ ] GREEN — extract `private toWriteRow(item: SaleItem, saleId: string, tenantId: string): Prisma.SaleItemCreateManyInput` returning the exact payload the inline `createMany` builds. Required behavior: normalize enum case (`priceSource`, `rewardKind`, `discountType`) to uppercase Prisma form; use `saleId` from the outer aggregate parameter, not from the entity. Replace the inline literal in `save` with `sale.items.map((i) => this.toWriteRow(i, sale.id, tenantId))`. Do NOT introduce a hand-maintained column list. <!-- sdd-owner: implementation -->
-- [ ] REFACTOR — keep the existing `prisma.sale.update` / `prisma.sale.create` branching inline inside `save`; no extra helper. Characterization test passes; pre-existing `save` tests stay green. <!-- sdd-owner: implementation -->
+- [x] RED — in `prisma-sale.repository.spec.ts` add a characterization test asserting the current `save` payload: configure `makeMockPrisma` to capture the `createMany` call; assert the captured payload's first row matches every column currently emitted by the inline `createMany` (including `tenantId`, id/parent, pricing, discount/reward fields, timestamps). Regression baseline before refactor. <!-- sdd-owner: implementation -->
+- [x] GREEN — extract `private toWriteRow(item: SaleItem, saleId: string, tenantId: string): Prisma.SaleItemCreateManyInput` returning the exact payload the inline `createMany` builds. Required behavior: normalize `priceSource` and `rewardKind` to their uppercase Prisma forms; preserve `discountType` in its existing lowercase Prisma form (`amount` | `percentage`); use `saleId` from the outer aggregate parameter, not from the entity. Replace the inline literal in `save` with `sale.items.map((i) => this.toWriteRow(i, sale.id, tenantId))`. Do NOT introduce a hand-maintained column list. <!-- sdd-owner: implementation -->
+- [x] REFACTOR — keep the existing `prisma.sale.update` / `prisma.sale.create` branching inline inside `save`; no extra helper. Characterization test passes; pre-existing `save` tests stay green. <!-- sdd-owner: implementation -->
 
 ---
 

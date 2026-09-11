@@ -1565,6 +1565,101 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('save', () => {
+    it('characterizes the full item createMany payload', async () => {
+      const discountedAt = new Date('2026-06-15T12:34:56.000Z');
+      const sale = Sale.fromPersistence({
+        id: 'aggregate-sale-id',
+        userId: 'user-1',
+        status: 'DRAFT',
+        items: [
+          {
+            id: 'item-projection-id',
+            saleId: 'stale-entity-parent-id',
+            productId: 'product-1',
+            variantId: 'variant-1',
+            productName: 'Projection Product',
+            variantName: 'Projection Variant',
+            imageUrl: 'https://example.test/item.png',
+            quantity: 3,
+            unitPriceCents: 1250,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: 1500,
+            priceSource: 'price_list',
+            appliedPriceListId: 'price-list-1',
+            customPriceCents: 1100,
+            discountType: 'percentage',
+            discountValue: 15,
+            discountAmountCents: 563,
+            rewardDiscountPercent: 50,
+            rewardKind: 'advanced',
+            prePriceCentsBeforeDiscount: 1500,
+            discountTitle: 'Projection promotion',
+            discountedAt,
+            promotionId: 'promotion-1',
+          },
+        ],
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      });
+      const reloadedSale = {
+        id: sale.id,
+        userId: sale.userId,
+        status: sale.status,
+        channel: sale.channel,
+        register: sale.register,
+        deliveryStatus: sale.deliveryStatus,
+        customerId: sale.customerId,
+        shippingAddressId: sale.shippingAddressId,
+        sellerUserId: sale.sellerUserId,
+        dueDate: sale.dueDate,
+        confirmedAt: sale.confirmedAt,
+        folio: sale.folio,
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+        items: [],
+        promotionVetoes: [],
+        promotionOptIns: [],
+        appliedPromotion: null,
+      };
+
+      prisma.sale.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(reloadedSale);
+      await repo.save(sale);
+
+      expect(prisma.saleItem.createMany).toHaveBeenCalledTimes(1);
+      expect(prisma.saleItem.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            id: 'item-projection-id',
+            saleId: 'aggregate-sale-id',
+            productId: 'product-1',
+            variantId: 'variant-1',
+            productName: 'Projection Product',
+            variantName: 'Projection Variant',
+            imageUrl: 'https://example.test/item.png',
+            quantity: 3,
+            unitPriceCents: 1250,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: 1500,
+            priceSource: 'PRICE_LIST',
+            appliedPriceListId: 'price-list-1',
+            customPriceCents: 1100,
+            discountType: 'percentage',
+            discountValue: 15,
+            discountAmountCents: 563,
+            rewardDiscountPercent: 50,
+            rewardKind: 'ADVANCED',
+            prePriceCentsBeforeDiscount: 1500,
+            discountTitle: 'Projection promotion',
+            discountedAt,
+            promotionId: 'promotion-1',
+            tenantId: 'tenant-1',
+          },
+        ],
+      });
+    });
+
     it('persists shippingAddressId when creating and updating sale', async () => {
       const sale = Sale.fromPersistence({
         id: 'sale-with-shipping',

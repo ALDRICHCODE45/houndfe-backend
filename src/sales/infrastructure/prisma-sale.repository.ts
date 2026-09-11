@@ -87,6 +87,49 @@ export class PrismaSaleRepository implements ISaleRepository {
     return tenantId;
   }
 
+  private toWriteRow(
+    item: SaleItem,
+    saleId: string,
+    tenantId: string,
+  ): Prisma.SaleItemCreateManyInput {
+    return {
+      id: item.id,
+      saleId,
+      productId: item.productId,
+      variantId: item.variantId,
+      productName: item.productName,
+      variantName: item.variantName,
+      imageUrl: item.imageUrl,
+      quantity: item.quantity,
+      unitPriceCents: item.unitPriceCents,
+      unitPriceCurrency: item.unitPriceCurrency,
+      originalPriceCents: item.originalPriceCents,
+      priceSource:
+        item.priceSource === 'default'
+          ? 'DEFAULT'
+          : item.priceSource === 'price_list'
+            ? 'PRICE_LIST'
+            : 'CUSTOM',
+      appliedPriceListId: item.appliedPriceListId,
+      customPriceCents: item.customPriceCents,
+      discountType: item.discountType,
+      discountValue: item.discountValue,
+      discountAmountCents: item.discountAmountCents,
+      rewardDiscountPercent: item.rewardDiscountPercent,
+      rewardKind:
+        item.rewardKind === 'buy_x_get_y'
+          ? 'BUY_X_GET_Y'
+          : item.rewardKind === 'advanced'
+            ? 'ADVANCED'
+            : null,
+      prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
+      discountTitle: item.discountTitle,
+      discountedAt: item.discountedAt,
+      promotionId: item.promotionId,
+      tenantId,
+    };
+  }
+
   async save(sale: Sale): Promise<Sale> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
@@ -138,47 +181,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     // Create items
     if (sale.items.length > 0) {
       await prisma.saleItem.createMany({
-        data: sale.items.map((item) => ({
-          id: item.id,
-          saleId: sale.id,
-          productId: item.productId,
-          variantId: item.variantId,
-          productName: item.productName,
-          variantName: item.variantName,
-          imageUrl: item.imageUrl,
-          quantity: item.quantity,
-          unitPriceCents: item.unitPriceCents,
-          unitPriceCurrency: item.unitPriceCurrency,
-          originalPriceCents: item.originalPriceCents,
-          priceSource:
-            item.priceSource === 'default'
-              ? 'DEFAULT'
-              : item.priceSource === 'price_list'
-                ? 'PRICE_LIST'
-                : 'CUSTOM',
-          appliedPriceListId: item.appliedPriceListId,
-          customPriceCents: item.customPriceCents,
-          discountType: item.discountType,
-          discountValue: item.discountValue,
-          discountAmountCents: item.discountAmountCents,
-          // WU3 — persist the exact BXGY reward percent from the entity.
-          rewardDiscountPercent: item.rewardDiscountPercent,
-          // WU7 — persist the D4 wire discriminator (SaleItemRewardKind
-          // enum). `rewardKind` is the entity's lowercase wire value; we
-          // coerce to the uppercase Prisma enum for the column. Null on
-          // non-reward lines — same null semantics as `rewardDiscountPercent`.
-          rewardKind:
-            item.rewardKind === 'buy_x_get_y'
-              ? 'BUY_X_GET_Y'
-              : item.rewardKind === 'advanced'
-                ? 'ADVANCED'
-                : null,
-          prePriceCentsBeforeDiscount: item.prePriceCentsBeforeDiscount,
-          discountTitle: item.discountTitle,
-          discountedAt: item.discountedAt,
-          promotionId: item.promotionId,
-          tenantId,
-        })) as Prisma.SaleItemCreateManyInput[],
+        data: sale.items.map((i) => this.toWriteRow(i, sale.id, tenantId)),
       });
     } else {
       // Explicitly handle empty items (for clearItems case)
