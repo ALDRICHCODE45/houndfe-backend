@@ -2193,6 +2193,88 @@ describe('Sale Entity', () => {
       });
     });
 
+    describe('protect-confirmed-sales — domain guards', () => {
+      const ITEM_ID = '550e8400-e29b-41d4-a716-446655440100';
+      const item = {
+        id: ITEM_ID,
+        saleId: BASE_SALE_ID,
+        productId: 'protected-product',
+        variantId: null,
+        productName: 'Protected product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+      };
+
+      function saleWithStatus(
+        status: 'CONFIRMED' | 'CANCELED',
+        hasItem = true,
+      ) {
+        return Sale.fromPersistence({
+          id: BASE_SALE_ID,
+          userId: USER_ID,
+          status,
+          items: hasItem ? [item] : [],
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+        });
+      }
+
+      it.each([
+        ['addItem', 'CONFIRMED'],
+        ['addItem', 'CANCELED'],
+        ['updateItemQuantity', 'CONFIRMED'],
+        ['updateItemQuantity', 'CANCELED'],
+        ['clearItems', 'CONFIRMED'],
+        ['clearItems', 'CANCELED'],
+        ['removeItem', 'CONFIRMED'],
+        ['removeItem', 'CANCELED'],
+      ] as const)(
+        'rejects %s for a %s sale without mutating its items',
+        (operation, status) => {
+          const sale = saleWithStatus(status);
+          const itemsBefore = sale.items;
+          const itemBefore = sale.items[0];
+          const quantityBefore = itemBefore.quantity;
+
+          const operationByName = {
+            addItem: () =>
+              sale.addItem({
+                ...item,
+                id: '550e8400-e29b-41d4-a716-446655440101',
+                productId: 'new-product',
+              }),
+            updateItemQuantity: () => sale.updateItemQuantity(ITEM_ID, 5),
+            clearItems: () => sale.clearItems(),
+            removeItem: () => sale.removeItem(ITEM_ID),
+          };
+
+          expect(operationByName[operation]).toThrow(
+            new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+          );
+          expect(sale.items).toBe(itemsBefore);
+          expect(sale.items).toHaveLength(1);
+          expect(sale.items[0]).toBe(itemBefore);
+          expect(sale.items[0].quantity).toBe(quantityBefore);
+        },
+      );
+
+      it.each(['CONFIRMED', 'CANCELED'] as const)(
+        'rejects clearing an empty %s sale without replacing its items array',
+        (status) => {
+          const sale = saleWithStatus(status, false);
+          const itemsBefore = sale.items;
+
+          expect(() => sale.clearItems()).toThrow(
+            new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+          );
+          expect(sale.items).toBe(itemsBefore);
+          expect(sale.items).toHaveLength(0);
+        },
+      );
+    });
+
     it('fromPersistence maps appliedOrderPromotion + vetoedPromotionIds + optedInManualPromotionIds', () => {
       const sale = Sale.fromPersistence({
         id: BASE_SALE_ID,

@@ -759,7 +759,7 @@ export class Sale {
     this._deliveryStatus = 'PENDING';
   }
 
-  private ensureDraft(): void {
+  ensureDraft(): void {
     if (this.status !== 'DRAFT') {
       throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
@@ -769,6 +769,8 @@ export class Sale {
    * Add item to sale, stacking if same product+variant already exists
    */
   addItem(itemProps: SaleItemProps): void {
+    this.ensureDraft();
+
     // Validate item data
     const newItem = SaleItem.create(itemProps);
 
@@ -790,6 +792,8 @@ export class Sale {
    * Update quantity of an existing item by ID
    */
   updateItemQuantity(itemId: string, newQuantity: number): void {
+    this.ensureDraft();
+
     if (newQuantity < 1) {
       throw new InvalidArgumentError('Quantity must be at least 1');
     }
@@ -808,10 +812,14 @@ export class Sale {
    * Remove all items from the sale (idempotent)
    */
   clearItems(): void {
+    this.ensureDraft();
+
     this._items = [];
   }
 
   removeItem(itemId: string): void {
+    this.ensureDraft();
+
     const itemIndex = this._items.findIndex((item) => item.id === itemId);
     if (itemIndex === -1) {
       throw new BusinessRuleViolationError(
