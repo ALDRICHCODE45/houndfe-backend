@@ -75,9 +75,49 @@ function extractCatalogSnapshot(
   return { paymentMethodId, name, subtitle };
 }
 
+/** WU6 — raw persisted SaleItem row: exactly the save-projection columns
+ * (audit-only `createdAt`/`updatedAt` excluded), from the Prisma payload. */
+type PrismaSaleItemRow = Prisma.SaleItemGetPayload<{
+  select: {
+    id: true;
+    saleId: true;
+    productId: true;
+    variantId: true;
+    productName: true;
+    variantName: true;
+    imageUrl: true;
+    quantity: true;
+    unitPriceCents: true;
+    unitPriceCurrency: true;
+    originalPriceCents: true;
+    priceSource: true;
+    appliedPriceListId: true;
+    customPriceCents: true;
+    discountType: true;
+    discountValue: true;
+    discountAmountCents: true;
+    rewardDiscountPercent: true;
+    rewardKind: true;
+    prePriceCentsBeforeDiscount: true;
+    discountTitle: true;
+    discountedAt: true;
+    promotionId: true;
+    tenantId: true;
+  };
+}>;
+
+/** WU6 — normalized persisted snapshot: the incoming projection's column
+ * schema with dates canonicalized to ISO strings on both sides. */
+type PersistedItemSnapshot = Omit<PrismaSaleItemRow, 'discountedAt'> & {
+  discountedAt: string | null;
+};
+
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(private readonly tenantPrisma: TenantPrismaService) {
+    // WU6 — behavior-neutral anchor until WU7 wires the helper (then removed).
+    void this.snapshotItemsEqual;
+  }
 
   private requireTenantId(): string {
     const tenantId = this.tenantPrisma.getTenantId();
@@ -131,6 +171,71 @@ export class PrismaSaleRepository implements ISaleRepository {
       promotionId: item.promotionId,
       tenantId,
     };
+  }
+
+  private toPersistedRow(row: PrismaSaleItemRow): PersistedItemSnapshot {
+    return {
+      ...row,
+      discountedAt:
+        row.discountedAt instanceof Date
+          ? row.discountedAt.toISOString()
+          : row.discountedAt,
+    };
+  }
+
+  // WU6 — pure helper; WU7 wires it (and removes the anchor above).
+  private snapshotItemsEqual(
+    incoming: readonly SaleItem[],
+    persisted: readonly PrismaSaleItemRow[],
+    saleId: string,
+    tenantId: string,
+  ): boolean {
+    const persistedRows = persisted.map((row) => this.toPersistedRow(row));
+
+    if (incoming.length !== persistedRows.length) {
+      return false;
+    }
+
+    const incomingIds = new Set(incoming.map((item) => item.id));
+    if (incomingIds.size !== incoming.length) {
+      return false;
+    }
+
+    const persistedById = new Map(
+      persistedRows.map((row) => [row.id, row] as const),
+    );
+    if (persistedById.size !== persistedRows.length) {
+      return false;
+    }
+
+    // Every mapped column, derived from the normalized row itself (no
+    // duplicated projection field list).
+    const columns = Object.keys(
+      persistedRows[0] ?? {},
+    ) as (keyof PersistedItemSnapshot)[];
+
+    const canonicalValue = (
+      value: string | number | boolean | Date | null | undefined,
+    ): string | number | boolean | null =>
+      value instanceof Date ? value.toISOString() : (value ?? null);
+
+    for (const item of incoming) {
+      const incomingRow = this.toWriteRow(item, saleId, tenantId);
+      const persistedRow = persistedById.get(item.id);
+      if (!persistedRow) {
+        return false;
+      }
+      for (const column of columns) {
+        if (
+          canonicalValue(incomingRow[column]) !==
+          canonicalValue(persistedRow[column])
+        ) {
+          return false;
+        }
+      }
+    }
+
+    return true;
   }
 
   private async writeImpl(

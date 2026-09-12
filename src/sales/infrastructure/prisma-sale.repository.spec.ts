@@ -5,6 +5,7 @@
  */
 import { PrismaSaleRepository } from './prisma-sale.repository';
 import { Sale } from '../domain/sale.entity';
+import { SaleItem, type SaleItemProps } from '../domain/sale-item.entity';
 import { Prisma } from '@prisma/client';
 import {
   BusinessRuleViolationError,
@@ -76,6 +77,150 @@ function makeTenantPrismaMock() {
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
     client,
   };
+}
+
+interface RawPersistedSaleItemRow {
+  id: string;
+  saleId: string;
+  productId: string;
+  variantId: string | null;
+  productName: string;
+  variantName: string | null;
+  imageUrl: string | null;
+  quantity: number;
+  unitPriceCents: number;
+  unitPriceCurrency: string;
+  originalPriceCents: number | null;
+  priceSource: 'DEFAULT' | 'PRICE_LIST' | 'CUSTOM' | null;
+  appliedPriceListId: string | null;
+  customPriceCents: number | null;
+  discountType: 'amount' | 'percentage' | null;
+  discountValue: number | null;
+  discountAmountCents: number | null;
+  rewardDiscountPercent: number | null;
+  rewardKind: 'BUY_X_GET_Y' | 'ADVANCED' | null;
+  prePriceCentsBeforeDiscount: number | null;
+  discountTitle: string | null;
+  discountedAt: Date | string | null;
+  promotionId: string | null;
+  tenantId: string;
+}
+
+interface SnapshotCompareProbe {
+  snapshotItemsEqual(
+    incoming: readonly SaleItem[],
+    persisted: readonly RawPersistedSaleItemRow[],
+    saleId: string,
+    tenantId: string,
+  ): boolean;
+}
+
+function makeSnapshotItemPair(
+  overrides: {
+    shared?: Partial<
+      Pick<RawPersistedSaleItemRow, 'id' | 'quantity' | 'productId'>
+    >;
+    domain?: Partial<SaleItemProps>;
+    persisted?: Partial<RawPersistedSaleItemRow>;
+  } = {},
+): { incoming: SaleItem; persisted: RawPersistedSaleItemRow } {
+  const persisted: RawPersistedSaleItemRow = {
+    id: 'item-eq-1',
+    saleId: 'aggregate-sale-id',
+    productId: 'product-1',
+    variantId: 'variant-1',
+    productName: 'Snapshot Product',
+    variantName: 'Snapshot Variant',
+    imageUrl: 'https://example.test/snapshot.png',
+    quantity: 3,
+    unitPriceCents: 1250,
+    unitPriceCurrency: 'MXN',
+    originalPriceCents: 1500,
+    priceSource: 'PRICE_LIST',
+    appliedPriceListId: 'price-list-1',
+    customPriceCents: 1100,
+    discountType: 'percentage',
+    discountValue: 15,
+    discountAmountCents: 563,
+    rewardDiscountPercent: 50,
+    rewardKind: 'ADVANCED',
+    prePriceCentsBeforeDiscount: 1500,
+    discountTitle: 'Snapshot promotion',
+    discountedAt: '2026-06-15T12:34:56.000Z',
+    promotionId: 'promotion-1',
+    tenantId: 'tenant-1',
+    ...overrides.shared,
+    ...overrides.persisted,
+  };
+  const domain: SaleItemProps = {
+    ...persisted,
+    ...overrides.shared,
+    priceSource: 'price_list',
+    rewardKind: 'advanced',
+    discountedAt: new Date('2026-06-15T12:34:56.000Z'),
+    ...overrides.domain,
+  };
+  return { incoming: SaleItem.fromPersistence(domain), persisted };
+}
+
+const SNAPSHOT_DIFFERING_VALUES: Record<
+  Exclude<keyof RawPersistedSaleItemRow, 'id'>,
+  unknown
+> = {
+  saleId: 'other-sale-id',
+  productId: 'product-other',
+  variantId: 'variant-other',
+  productName: 'Other Product',
+  variantName: 'Other Variant',
+  imageUrl: null,
+  quantity: 4,
+  unitPriceCents: 999,
+  unitPriceCurrency: 'USD',
+  originalPriceCents: 2000,
+  priceSource: 'CUSTOM',
+  appliedPriceListId: null,
+  customPriceCents: 500,
+  discountType: 'amount',
+  discountValue: 7,
+  discountAmountCents: 9,
+  rewardDiscountPercent: 10,
+  rewardKind: 'BUY_X_GET_Y',
+  prePriceCentsBeforeDiscount: 2000,
+  discountTitle: 'Other title',
+  discountedAt: '2026-07-01T00:00:00.000Z',
+  promotionId: null,
+  tenantId: 'tenant-2',
+};
+
+const nullOverrides = {
+  variantId: null,
+  variantName: null,
+  imageUrl: null,
+  originalPriceCents: null,
+  appliedPriceListId: null,
+  customPriceCents: null,
+  discountType: null,
+  discountValue: null,
+  discountAmountCents: null,
+  prePriceCentsBeforeDiscount: null,
+  discountTitle: null,
+  discountedAt: null,
+  promotionId: null,
+  rewardKind: null,
+  rewardDiscountPercent: null,
+} as const;
+
+function snapshotCompare(
+  repo: PrismaSaleRepository,
+  incoming: readonly SaleItem[],
+  persisted: readonly RawPersistedSaleItemRow[],
+): boolean {
+  return (repo as unknown as SnapshotCompareProbe).snapshotItemsEqual(
+    incoming,
+    persisted,
+    'aggregate-sale-id',
+    'tenant-1',
+  );
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -5044,6 +5189,127 @@ describe('PrismaSaleRepository', () => {
       // Malformed subtitle → null, not the raw number, so the wire
       // contract stays `string | null`.
       expect(result!.payments[0].paymentMethodSubtitle).toBeNull();
+    });
+  });
+
+  describe('snapshotItemsEqual — pure comparison', () => {
+    it('compares independent equivalent snapshots (no reference shortcut) with domain-lowercase vs persisted-uppercase enums', () => {
+      const { incoming, persisted } = makeSnapshotItemPair();
+      expect(persisted).not.toBe(incoming);
+      expect(snapshotCompare(repo, [incoming], [persisted])).toBe(true);
+
+      const { incoming: bxgyIn, persisted: bxgyRow } = makeSnapshotItemPair({
+        domain: { rewardKind: 'buy_x_get_y' },
+        persisted: { rewardKind: 'BUY_X_GET_Y' },
+      });
+      expect(snapshotCompare(repo, [bxgyIn], [bxgyRow])).toBe(true);
+    });
+
+    it('rejects genuinely different priceSource values (PRICE_LIST vs CUSTOM)', () => {
+      const { incoming, persisted } = makeSnapshotItemPair({
+        persisted: { priceSource: 'CUSTOM' },
+      });
+      expect(snapshotCompare(repo, [incoming], [persisted])).toBe(false);
+    });
+
+    it('rejects genuinely different rewardKind values (BUY_X_GET_Y vs ADVANCED)', () => {
+      const { incoming, persisted } = makeSnapshotItemPair({
+        domain: { rewardKind: 'buy_x_get_y' },
+        persisted: { rewardKind: 'ADVANCED' },
+      });
+      expect(snapshotCompare(repo, [incoming], [persisted])).toBe(false);
+    });
+
+    it('treats null-vs-null as equal across every nullable column', () => {
+      const { incoming, persisted } = makeSnapshotItemPair({
+        domain: { priceSource: 'default', ...nullOverrides },
+        persisted: { priceSource: 'DEFAULT', ...nullOverrides },
+      });
+      expect(snapshotCompare(repo, [incoming], [persisted])).toBe(true);
+    });
+
+    it('treats domain Date, persisted ISO string, and persisted Date of the same instant as equal', () => {
+      const iso = makeSnapshotItemPair();
+      expect(iso.persisted.discountedAt).toBe('2026-06-15T12:34:56.000Z');
+      expect(snapshotCompare(repo, [iso.incoming], [iso.persisted])).toBe(true);
+
+      const { incoming: datedIn, persisted: datedRow } = makeSnapshotItemPair({
+        persisted: { discountedAt: new Date('2026-06-15T12:34:56.000Z') },
+      });
+      expect(snapshotCompare(repo, [datedIn], [datedRow])).toBe(true);
+    });
+
+    it('is identity-keyed and order-independent with shuffled persisted rows', () => {
+      const a = makeSnapshotItemPair();
+      const b = makeSnapshotItemPair({
+        shared: { id: 'item-eq-2', quantity: 1, productId: 'product-2' },
+      });
+      const shuffledIn = [a.incoming, b.incoming];
+      const shuffledRows = [b.persisted, a.persisted];
+      expect(snapshotCompare(repo, shuffledIn, shuffledRows)).toBe(true);
+    });
+
+    it('rejects missing or extra ids on either side, including same-cardinality disjoint ids', () => {
+      const a = makeSnapshotItemPair();
+      const extraPersisted = makeSnapshotItemPair({
+        persisted: { id: 'item-eq-extra' },
+      });
+      const withExtra = [a.persisted, extraPersisted.persisted];
+      expect(snapshotCompare(repo, [a.incoming], withExtra)).toBe(false);
+
+      const extraIncoming = makeSnapshotItemPair({
+        domain: { id: 'item-eq-extra' },
+      });
+      const extraIn = [a.incoming, extraIncoming.incoming];
+      expect(snapshotCompare(repo, extraIn, [a.persisted])).toBe(false);
+
+      const disjoint = makeSnapshotItemPair({
+        shared: { id: 'item-eq-other' },
+      });
+      expect(snapshotCompare(repo, [a.incoming], [disjoint.persisted])).toBe(
+        false,
+      );
+
+      const b = makeSnapshotItemPair({
+        shared: { id: 'item-eq-2' },
+      });
+      expect(
+        snapshotCompare(
+          repo,
+          [a.incoming, a.incoming],
+          [a.persisted, b.persisted],
+        ),
+      ).toBe(false);
+    });
+
+    it.each(
+      Object.entries(SNAPSHOT_DIFFERING_VALUES) as [
+        keyof RawPersistedSaleItemRow,
+        unknown,
+      ][],
+    )(
+      'rejects when persisted column %s differs from the projection',
+      (column, value) => {
+        const { incoming, persisted } = makeSnapshotItemPair();
+        const differing = { ...persisted, [column]: value };
+        expect(snapshotCompare(repo, [incoming], [differing])).toBe(false);
+      },
+    );
+  });
+
+  describe('snapshotItemsEqual — independent-snapshot mutable-bypass', () => {
+    it('re-projects the mutable incoming aggregate instead of memoizing a match', () => {
+      const { incoming, persisted } = makeSnapshotItemPair();
+      const persistedSnapshot = { ...persisted };
+
+      expect(snapshotCompare(repo, [incoming], [persisted])).toBe(true);
+
+      incoming.changeQuantity(9);
+      expect(snapshotCompare(repo, [incoming], [persisted])).toBe(false);
+      expect(persisted).toEqual(persistedSnapshot);
+
+      incoming.changeQuantity(3);
+      expect(snapshotCompare(repo, [incoming], [persisted])).toBe(true);
     });
   });
 });
