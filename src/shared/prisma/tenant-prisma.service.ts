@@ -61,7 +61,8 @@ export class TenantPrismaService {
       return work();
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const extendedRoot = createTenantScopedPrisma(this.prisma, this.cls);
+    return extendedRoot.$transaction(async (tx) => {
       this.cls.set(TX_CLIENT_KEY, tx);
       try {
         return await work();
