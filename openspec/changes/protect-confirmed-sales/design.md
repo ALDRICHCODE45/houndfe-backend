@@ -35,6 +35,21 @@ Before **any** write, reuse `TenantPrismaService.runInTransaction()`; its ambien
 
 `delete` remains the separate WU8 lifecycle guard. The parent lock serializes only repository writers that honor this lock; it is not a global stale-write or optimistic-locking guarantee.
 
+### WU8 delete — atomic sequence
+
+`delete(id)` follows the same transaction-and-lock pattern as the WU7 `save` gate:
+
+1. Enter `TenantPrismaService.runInTransaction()` with the ambient tenant-scoped CLS client.
+2. Acquire the parameterized tenant-qualified `Sale … FOR UPDATE` parent-row lock (the same lock taken by `save`/`saveDraftItems`).
+3. After the lock is held, reread persisted status and the persisted item set inside the same transaction via a tenant-scoped read. The post-lock reread satisfies the normative atomic observation/preservation contract for lock-honoring writers.
+4. If the row exists and `status !== 'DRAFT'` → `BusinessRuleViolationError('SALE_NOT_DRAFT','SALE_NOT_DRAFT')`, zero writes.
+5. If the row is DRAFT → call the existing `prisma.sale.delete({ where: { id } })` inside the same transaction. The eligible delete is atomic with the lock and reread.
+6. If the row is missing (not found) or cross-tenant (tenant-scoped read returns `null`) → fall through to the existing `prisma.sale.delete({ where: { id } })` so `PrismaKnownRequestError(P2025)` surfaces as the observable contract. No cross-tenant row is disclosed by the tenant-scoped read; the delete call raises P2025 for any missing or unauthorized row.
+
+PostgreSQL race and cascade evidence: the parent-row `FOR UPDATE` lock blocks all concurrent lock-honoring writers on that row's key until the transaction commits or rolls back, preventing interleaving of the reread and the delete. `prisma.sale.delete` cascades `SaleItem` rows through the database's foreign-key `ON DELETE CASCADE`; the cascade executes atomically inside the transaction — P2025 is preserved as the missing/cross-tenant delete contract only; any other database failure rolls back the transaction atomically without prescribing a Prisma error code. The tenant-scoped post-lock reread ensures the status and item set observed inside the delete transaction are the committed state at the moment the lock was acquired; no in-flight uncommitted change from a lock-honoring writer can be observed.
+
+Concurrency claim: the atomic sequence holds only for repository operations that acquire and release the parent-row lock. It does not constrain writers that bypass the lock, does not prevent stale reads from non-transactional queries, and does not replace optimistic concurrency tokens. The six specialized contracts (`persistChargeConfirmation`, `persistCancellation`, `persistCollectedPayments`, `persistCollectedPayment`, `updatePaymentReference`, `markSaleDelivered`) retain their existing code paths and valid preconditions; none routes through the draft-delete guard.
+
 ## Data flow
 
 ```mermaid
