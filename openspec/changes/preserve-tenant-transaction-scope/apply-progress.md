@@ -68,3 +68,32 @@ Revert the `runInTransaction` extended-root switch in `src/shared/prisma/tenant-
 ## Structured status consumed
 
 - `gentle-ai.sdd-status` v2 consumed from parent: change `preserve-tenant-transaction-scope`, `applyState: ready`, `mode: repo-local`, `allowedEditRoots: [workspace root]`. No `actionContext` warnings. Verify remains `blocked` until WU2 completes.
+
+## WU2 — Real PostgreSQL service-bound integration evidence (COMPLETE; compacted)
+
+New untracked `src/shared/prisma/tenant-prisma.service.integration.spec.ts` (**230 lines** after remediation compaction; originally 298). Production, factory, allowlist, schema, migrations, sales consumers, WU7/WU8 untouched. No commits/pushes/PRs; no settle (active attempt tokens `sha256:7c86d6…`, then `sha256:710694…` continued via acquire — parent owns settle).
+
+- **RED (historical; detached worktree at `e44e49e`, WU1 parent, symlinked node_modules + copied `.env.test`):** `pnpm test:integration -- src/shared/prisma/tenant-prisma.service.integration.spec.ts` → 6 failed / 2 passed / 8 — proposal success criteria 1–6 fail on raw provenance exactly as predicted (R-PG-READ-OUTER, R-PG-UPDATE-P2025, R-PG-DELETE-P2025, R-PG-CREATE-OVERRIDE-OUTER, R-PG-NESTED-READ, R-PG-CREATE-OVERRIDE-NESTED); allowlist gate + own-tenant read are both-states baselines.
+- **GREEN (b5bee5c):** 8/8 (~1.3 s), no code change needed — acceptance evidence for the WU1 switch, covering R-PG-READ-OUTER, the own-read baseline, R-PG-UPDATE-P2025/-UNCHANGED + R-PG-RELOAD-ROLLBACK, R-PG-DELETE-P2025/-UNCHANGED, R-PG-CREATE-OVERRIDE-OUTER/-NESTED + R-PG-RELOAD-COMMIT, R-PG-NESTED-READ, and the allowlist gate.
+- **Harness:** `.env.test` (gitignored, `nest-practice-test:5433`), container reused, migrations 44/44; real service + factory + PostgreSQL per scenario; unscoped assertions via `integrationPrisma()`; harness `PrismaClient` grafted onto `PrismaService.prototype` (no behavior mocked); Map-backed CLS shim with `isSuperAdmin: false` pinned. At-WU2-time TRIANGULATE: tenant-isolation 7/7; `SKIP_DB_INTEGRATION=1 npx jest --config jest.config.js src/shared/prisma/` 16/16; unit config structurally excludes `*.integration.spec.ts`. Transaction cardinality is owned by WU1 U2's root call-count test — no row-count inference here.
+
+## Bounded remediation — failed evidence sha256:2ad47c2a226ddc6afed4f49b46b4eacc24e06c523bfd951290f08b86cb142216 (supersedes the earlier remaining-task/status notes)
+
+Parent-authorized; five prior blockers addressed; no service/factory/schema/migrations/sales/WU7/WU8/test-config/`.env.test` edits; no settle (parent verifies and settles with `--remediates-evidence-revision` on PASS only).
+
+- **Spec:** raw-SQL and direct-consumer/background-poller clauses de-normativized (27 → 22 scenarios); retained as static non-goals forbidding runtime coverage for them.
+- **WU7 gate:** `protect-confirmed-sales/tasks.md` WU7 `Depends on:` now names the prerequisite (WU1+WU2 verified AND locally committed before implementation) and states it is NOT yet satisfied.
+- **P7:** nested scenario proves foreign read `null` + callback-client identity (nested `getClient()` === outer callback client) + unchanged A-owned reload; the Product row-count cardinality claim is removed; eight tests and all security assertions preserved.
+- **Gates:** focused WU2 (8/8) + adjacent tenant-isolation (7/7) are the required gates; full integration is attribution only — known baseline failures are warnings, not candidate regressions; `.env.test` dotenv `override: true` defeats shell-only `SKIP_DB_INTEGRATION=1`, so skip proof must use effective config.
+- **Commands:** focused WU2 0/**8 passed**; tenant-isolation 0/**7 passed**; WU1 unit 0/**11 passed**; `pnpm build` 0; `git diff --check` clean; full `pnpm test:integration` 1 (35–48 failed / 2 skipped, varying suites — attribution only); WU1-equivalent baseline 1 (5 failed suites, 45 failed / 2 skipped / 124 passed); one `P1001` transient (same class as prior C1) cleared on retry — diagnosed only, no Docker/`.env.test` change.
+- **Attribution:** `git diff b5bee5c -- src prisma test package.json pnpm-lock.yaml jest.config.js jest.integration.config.js` is empty; `employees.batch-status`, `pdf-generation`, `category-brand-promo-targeting`, `promotions.batch-delete` (+ `variant-level-promo-targeting`) reproduce on the baseline; `buy-x-get-y` and `catalog-settings replace.rollback` fail only intermittently in serial candidate runs while the baseline spec differs — warnings, not candidate regressions.
+- **Remediation A+D:** **316** complete candidate ≤ 330 before the final report, ≤ 400 report-inclusive; no `size:exception` — integration spec 230 A (untracked); this change's tasks 9 A / 9 D; apply-progress 21 A / 0 D (HEAD byte-identical + this appended section); `specs/shared-prisma/spec.md` 5 A / 40 D; downstream WU7 line 1 A / 1 D. Verify-report is excluded from the pre-report candidate and counted report-inclusive.
+- **Pending:** fresh independent verification (parent-owned) over this candidate; WU2 local commit still required before `protect-confirmed-sales` WU7 unblocks.
+
+## WU2 remediation continuation — candidate validation
+
+- **Preservation / RED lineage:** re-read all selected artifacts and authorized candidate files; retained the inherited correction and stale FAIL report unchanged. Evidence remains bound to `sha256:2ad47c2a226ddc6afed4f49b46b4eacc24e06c523bfd951290f08b86cb142216` and its historical 6-failed/2-passed PostgreSQL RED.
+- **GREEN:** exact focused unit command passed 11/11; exact focused PostgreSQL command passed 8/8. The separately executed runtime-harness slot also passed 8/8 against PostgreSQL with 44/44 migrations applied.
+- **TRIANGULATE:** adjacent tenant-isolation passed 7/7; `pnpm build` exited 0; `git diff --check` was clean. `git status --short` preserved the four inherited tracked modifications plus the untracked stale report and WU2 integration spec.
+- **REFACTOR / rollback:** no remaining gap or gratuitous correction was proven. The exact rollback inspection `git diff --check && git status --short` passed before this log append; rollback remains limited to any newly authorized correction, of which there was none.
+- **Budget / authority:** `git diff --numstat` reported tracked 36 A / 50 D; with the 230-line untracked integration spec, the pre-log candidate was 316 A+D and report-inclusive 345 A+D. No production behavior, report, sales implementation, attempt state, delivery, or archive operation was changed.

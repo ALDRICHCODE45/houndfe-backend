@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the tenant-scoping contract enforced by `TenantPrismaService` at the shared Prisma boundary, and the observable invariants that hold for any client obtained through `TenantPrismaService.getClient()` while a CLS (Continuation Local Storage) interactive transaction is active. This specification covers the outer transaction, nested transaction reuse, the CLS lifecycle, and the explicit non-protection of raw SQL and direct transaction consumers. It is the shared-Prisma security prerequisite that `protect-confirmed-sales` WU7 depends on.
+Define the tenant-scoping contract enforced by `TenantPrismaService` at the shared Prisma boundary, and the observable invariants that hold for any client obtained through `TenantPrismaService.getClient()` while a CLS (Continuation Local Storage) interactive transaction is active. This specification covers the outer transaction, nested transaction reuse, and the CLS lifecycle. Raw SQL handling and direct/CLS-external transaction consumers are static design boundaries, not runtime requirements; they are recorded as non-goals below and carry no runtime coverage obligation. It is the shared-Prisma security prerequisite that `protect-confirmed-sales` WU7 depends on.
 
 ## Requirements
 
@@ -168,47 +168,12 @@ Real PostgreSQL evidence for this specification MUST include a post-commit reloa
 - THEN the unscoped fixture Prisma client shows the A-owned record unchanged
 - AND no record was created or deleted by the failed operation
 
-### Requirement: Raw SQL Remains Explicitly Tenant-Qualified
+## Static Design Boundaries (Non-Goals — Not Runtime Requirements)
 
-This change MUST NOT introduce tenant protection for raw SQL executed inside or outside `runInTransaction()`. Raw SQL executed through `$queryRaw`, `$queryRawUnsafe`, `$executeRaw`, or `$executeRawUnsafe` MUST remain the caller's responsibility. Any tenant qualification MUST come from the SQL itself, expressed through parameter-bound statements against the current CLS tenant.
+The following boundaries are design decisions recorded for reviewers and downstream work. They intentionally impose no runtime requirement and carry no scenario, so verification neither tests them nor counts their absence as a coverage gap. The implementation and tests MUST NOT add runtime coverage for these out-of-scope behaviors in this change.
 
-#### Scenario: Raw SQL inside a CLS transaction is not implicitly tenant-scoped
-
-- GIVEN a CLS transaction is active under tenant B
-- WHEN raw SQL `SELECT * FROM <tenant_scoped_table> WHERE id = $1` is executed with a parameter bound to an A-owned identifier
-- THEN the query is executed as written
-- AND the result is determined solely by the SQL, not by any tenant extension
-
-#### Scenario: Raw SQL outside any transaction is not implicitly tenant-scoped
-
-- GIVEN no CLS transaction is active
-- WHEN raw SQL is executed through any of `$queryRaw`, `$queryRawUnsafe`, `$executeRaw`, or `$executeRawUnsafe`
-- THEN the query is executed as written
-- AND tenant qualification (if any) MUST come from the SQL itself
-
-### Requirement: No Protection Claim For Direct Transaction Consumers
-
-This specification MUST NOT represent direct `getClient().$transaction(...)` consumers, raw `PrismaService.$transaction(...)` consumers, or any other CLS-external transaction pattern as protected by the CLS transaction invariants above. Such consumers do not populate the CLS transaction slot; characterizing them as protected by this work is a misrepresentation.
-
-#### Scenario: Direct getClient().$transaction consumers are out of scope
-
-- GIVEN a caller invokes `tenantPrisma.getClient().$transaction(work)` outside `runInTransaction`
-- WHEN `work` runs
-- THEN the CLS transaction slot is NOT populated by that direct invocation
-- AND no CLS-bound tenant transaction invariant applies to that work
-
-#### Scenario: Raw PrismaService.$transaction consumers are out of scope
-
-- GIVEN a caller invokes `prismaService.$transaction(work)` directly on the raw `PrismaService`
-- WHEN `work` runs
-- THEN the CLS transaction slot is NOT populated
-- AND no CLS-bound tenant transaction invariant applies to that work
-
-#### Scenario: Background pollers and other CLS-external patterns are out of scope
-
-- GIVEN any code path that does not invoke `TenantPrismaService.runInTransaction(work)`
-- WHEN that code path starts its own interactive transaction
-- THEN this specification imposes no CLS-bound tenant invariant on that work
+- **Raw SQL remains the caller's responsibility.** Statements executed through `$queryRaw`, `$queryRawUnsafe`, `$executeRaw`, or `$executeRawUnsafe`, inside or outside `runInTransaction()`, bypass the tenant query extension by design. Any tenant qualification comes from the SQL itself through parameter-bound statements; this work does not make raw SQL tenant-safe and does not claim otherwise.
+- **Direct and CLS-external transaction consumers carry no protection claim.** Direct `getClient().$transaction(...)` consumers, raw `PrismaService.$transaction(...)` consumers, background pollers, and other CLS-external transaction patterns do not populate the CLS transaction slot. This specification does not represent them as protected by the CLS transaction invariants above.
 
 ### Requirement: Prisma 6.19 Source Compatibility
 

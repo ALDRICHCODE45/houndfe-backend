@@ -214,7 +214,7 @@ Tasks:
 
 - **Start:** WU5 + WU6 complete. `writeImpl('GENERIC')` performs create-or-update + item recreate; the WU5 forged gate runs; `snapshotItemsEqual` exists but is not wired.
 - **Finish:** `writeImpl('GENERIC')` explicitly bypasses the snapshot compare in two cases: (a) existing row missing (creation preserved — `prisma.sale.create` runs); (b) existing row status is DRAFT (the WU5 intent gate already accepted). Only the existing-non-DRAFT branch invokes `snapshotItemsEqual`. On mismatch in that branch, reject `SALE_NOT_DRAFT`. The wire runs AFTER the WU5 forged gate, BEFORE any `deleteMany`/`createMany`/`update`/`updateMany` and BEFORE any promotion-junction reconciliation. On rejection: zero writes (no `deleteMany`, no `createMany`, no `update`, no `updateMany`, no promotion-junction reconciliation).
-- **Depends on:** WU5, WU6.
+- **Depends on:** WU5, WU6, and the shared-Prisma prerequisite `preserve-tenant-transaction-scope` (its WU1 service change + WU2 PostgreSQL integration evidence) being verified AND locally committed before any WU7 implementation starts. This dependency is NOT yet satisfied: WU2 is uncommitted and no fresh verification has passed, so WU7 destructive persistence steps remain blocked.
 - **Files:** `src/sales/infrastructure/prisma-sale.repository.ts`, `src/sales/infrastructure/prisma-sale.repository.spec.ts`.
 - **Forecast:** Prod A 8–15, Prod D 0, Test A 80–150, Test D 0. **Subtotal 88–165.**
 - **Verify:** `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts`; `pnpm build`.
