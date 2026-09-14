@@ -12,7 +12,7 @@ Implement the approved five requirements/27 scenarios in [sales/spec.md](specs/s
 | Readonly items alone                                      | `ReadonlyArray<SaleItem>` exposes mutable elements; status readonly is compile-time only | Reject as enforcement                                    |
 | Reject every non-DRAFT save                               | Breaks due-date/seller persistence                                                       | Reject                                                   |
 | Explicit draft-write entry plus persisted item comparison | Adds a port method and comparison, preserves other signatures                            | Choose: separates operation intent from aggregate status |
-| Locks/versioning                                          | Addresses concurrent races, not this scope                                               | Exclude                                                  |
+| Parent-row lock + transaction                             | Serializes repository writers while preserving legitimate lifecycle workflows            | Choose: lock, reread, compare, and write atomically      |
 
 ### Service and domain
 
@@ -26,14 +26,14 @@ Preserve product+variant stacking, existing identity, summed quantities, stock c
 
 Add `ISaleRepository.saveDraftItems(sale: Sale): Promise<Sale>` for the four item-service callers; retain `save(sale)` and `delete(id)` signatures. Both save methods enter one private implementation with explicit draft intent; generic save is not an unchecked escape hatch.
 
-Before **any** write, use the existing tenant-scoped client to load persisted sale plus items:
+Before **any** write, reuse `TenantPrismaService.runInTransaction()`; its ambient CLS client is the only client used by the operation. Take a parameterized tenant-qualified `Sale ... FOR UPDATE` parent-row lock, then reread persisted status and items inside that same transaction:
 
 - Draft intent requires both incoming and existing status DRAFT; missing existing sale raises `EntityNotFoundError('Sale', sale.id)`, never creates.
 - Generic save against existing non-DRAFT rejects incoming DRAFT or changed item snapshots with `SALE_NOT_DRAFT`.
 - Compare identity-keyed, order-independent snapshots using every item column currently mapped by `save`, including quantity, product/variant, names/image, price source/list, discount/promotion/reward fields and timestamps. Normalize enum case, nulls and Date values consistently with persistence; exclude database-only audit fields. Reuse the write projection rather than duplicate field lists.
 - Unchanged-item legitimate generic saves retain their current write behavior. Generic creation and DRAFT persistence remain unchanged. This is not a new transition validator.
 
-`delete` reads persisted lifecycle before deletion and rejects non-DRAFT. Missing rows continue through the existing Prisma deletion failure; service missing contracts stay unchanged. No write, timestamp update, promotion-junction change, or success emission precedes rejection. No new concurrency guarantee is claimed.
+`delete` remains the separate WU8 lifecycle guard. The parent lock serializes only repository writers that honor this lock; it is not a global stale-write or optimistic-locking guarantee.
 
 ## Data flow
 
@@ -78,7 +78,7 @@ Cover all 27 scenarios: ten operation/status rejections, empty clears, DRAFT beh
 
 ## Rollout and boundaries
 
-No migrations, refunds changes, reports, history repair, or concurrency work. Deploy code-only after authorized verification. Prefer narrow correction; rollback reopens the vulnerability and requires operational approval/restricted draft access. Forecast implementation against 400 added/deleted lines per work unit; ask-on-risk grants neither chaining nor exceptions.
+No migrations, refunds changes, reports, or history repair. The atomic lock is scoped to repository writers honoring the parent lock; unrelated writers and generic stale-write prevention remain out of scope. Deploy code-only after authorized verification. Prefer narrow correction; rollback reopens the vulnerability and requires operational approval/restricted draft access. Forecast implementation against 400 added/deleted lines per work unit; ask-on-risk grants neither chaining nor exceptions.
 
 Threat matrix: N/A—no routing, shell, subprocess, VCS, executable classification, or process integration changes.
 

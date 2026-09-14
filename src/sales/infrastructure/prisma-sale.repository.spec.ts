@@ -33,6 +33,7 @@ function makeMockPrisma() {
     saleItem: {
       deleteMany: jest.fn(),
       createMany: jest.fn(),
+      findMany: jest.fn(),
     },
     saleFolioCounter: {
       upsert: jest.fn(),
@@ -75,6 +76,7 @@ function makeTenantPrismaMock() {
   return {
     getClient: jest.fn().mockReturnValue(client),
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
+    runInTransaction: jest.fn(async (work: () => Promise<unknown>) => work()),
     client,
   };
 }
@@ -2391,12 +2393,16 @@ describe('PrismaSaleRepository', () => {
           : null;
       });
       const tenantScopedClient = {
+        $queryRaw: jest.fn().mockResolvedValue([]),
         sale: { create, update, findUnique },
         saleItem: { deleteMany, createMany },
       };
       const scopedTenantPrisma = {
         getClient: jest.fn().mockReturnValue(tenantScopedClient),
         getTenantId,
+        runInTransaction: jest.fn(async (work: () => Promise<unknown>) =>
+          work(),
+        ),
       };
       const scopedRepo = new PrismaSaleRepository(
         scopedTenantPrisma as unknown as ConstructorParameters<
@@ -2408,10 +2414,7 @@ describe('PrismaSaleRepository', () => {
         new EntityNotFoundError('Sale', sale.id),
       );
 
-      expect(findUnique).toHaveBeenCalledWith({
-        where: { id: sale.id },
-        select: { id: true, status: true },
-      });
+      expect(tenantScopedClient.$queryRaw).toHaveBeenCalled();
       expect(scopedTenantPrisma.getClient).toHaveBeenCalled();
       expect(getTenantId).toHaveBeenCalled();
       expect(create).not.toHaveBeenCalled();

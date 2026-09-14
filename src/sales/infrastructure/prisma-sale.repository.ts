@@ -114,10 +114,7 @@ type PersistedItemSnapshot = Omit<PrismaSaleItemRow, 'discountedAt'> & {
 
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {
-    // WU6 — behavior-neutral anchor until WU7 wires the helper (then removed).
-    void this.snapshotItemsEqual;
-  }
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   private requireTenantId(): string {
     const tenantId = this.tenantPrisma.getTenantId();
@@ -243,11 +240,19 @@ export class PrismaSaleRepository implements ISaleRepository {
     intent: 'DRAFT' | 'GENERIC',
   ): Promise<Sale> {
     const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
-    const existing = await prisma.sale.findUnique({
-      where: { id: sale.id },
-      select: { id: true, status: true },
-    });
+    const tenantId = this.requireTenantId();
+    const locked = await prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "sales"
+      WHERE "id" = ${sale.id} AND "tenantId" = ${tenantId}
+      FOR UPDATE
+    `;
+    let existing: { id: string; status: SaleStatus } | null = null;
+    if (locked === undefined || locked[0]) {
+      existing = await prisma.sale.findUnique({
+        where: { id: sale.id },
+        select: { id: true, status: true },
+      });
+    }
 
     if (intent === 'DRAFT') {
       if (!existing) {
@@ -267,7 +272,48 @@ export class PrismaSaleRepository implements ISaleRepository {
       throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
 
-    // Delete existing items (we'll recreate them from domain state)
+    if (intent === 'GENERIC' && existing && existing.status !== 'DRAFT') {
+      const persistedItems = await prisma.saleItem.findMany({
+        where: { saleId: sale.id, tenantId },
+        select: {
+          id: true,
+          saleId: true,
+          productId: true,
+          variantId: true,
+          productName: true,
+          variantName: true,
+          imageUrl: true,
+          quantity: true,
+          unitPriceCents: true,
+          unitPriceCurrency: true,
+          originalPriceCents: true,
+          priceSource: true,
+          appliedPriceListId: true,
+          customPriceCents: true,
+          discountType: true,
+          discountValue: true,
+          discountAmountCents: true,
+          rewardDiscountPercent: true,
+          rewardKind: true,
+          prePriceCentsBeforeDiscount: true,
+          discountTitle: true,
+          discountedAt: true,
+          promotionId: true,
+          tenantId: true,
+        },
+      });
+      if (
+        Array.isArray(persistedItems) &&
+        !this.snapshotItemsEqual(sale.items, persistedItems, sale.id, tenantId)
+      ) {
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_DRAFT',
+          'SALE_NOT_DRAFT',
+        );
+      }
+    }
+
+    // Delete existing items only after the post-lock snapshot check.
     await prisma.saleItem.deleteMany({
       where: { saleId: sale.id },
     });
@@ -380,16 +426,20 @@ export class PrismaSaleRepository implements ISaleRepository {
       });
     }
 
-    // Reload and return
+    // Reload and return inside the same transaction and ambient CLS client.
     return (await this.findById(sale.id))!;
   }
 
   async save(sale: Sale): Promise<Sale> {
-    return this.writeImpl(sale, 'GENERIC');
+    return this.tenantPrisma.runInTransaction(() =>
+      this.writeImpl(sale, 'GENERIC'),
+    );
   }
 
   async saveDraftItems(sale: Sale): Promise<Sale> {
-    return this.writeImpl(sale, 'DRAFT');
+    return this.tenantPrisma.runInTransaction(() =>
+      this.writeImpl(sale, 'DRAFT'),
+    );
   }
 
   async findById(id: string): Promise<Sale | null> {

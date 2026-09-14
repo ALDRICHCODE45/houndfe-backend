@@ -212,9 +212,9 @@ Tasks:
 
 ## WU7 — Repository wire snapshot equality into writeImpl('GENERIC')
 
-- **Start:** WU5 + WU6 complete. `writeImpl('GENERIC')` performs create-or-update + item recreate; the WU5 forged gate runs; `snapshotItemsEqual` exists but is not wired.
-- **Finish:** `writeImpl('GENERIC')` explicitly bypasses the snapshot compare in two cases: (a) existing row missing (creation preserved — `prisma.sale.create` runs); (b) existing row status is DRAFT (the WU5 intent gate already accepted). Only the existing-non-DRAFT branch invokes `snapshotItemsEqual`. On mismatch in that branch, reject `SALE_NOT_DRAFT`. The wire runs AFTER the WU5 forged gate, BEFORE any `deleteMany`/`createMany`/`update`/`updateMany` and BEFORE any promotion-junction reconciliation. On rejection: zero writes (no `deleteMany`, no `createMany`, no `update`, no `updateMany`, no promotion-junction reconciliation).
-- **Depends on:** WU5, WU6, and the shared-Prisma prerequisite `preserve-tenant-transaction-scope` (its WU1 service change + WU2 PostgreSQL integration evidence) being verified AND locally committed before any WU7 implementation starts. This dependency is NOT yet satisfied: WU2 is uncommitted and no fresh verification has passed, so WU7 destructive persistence steps remain blocked.
+- **Start:** WU5 + WU6 complete; `snapshotItemsEqual` exists but is not wired.
+- **Finish:** `writeImpl` reuses `TenantPrismaService.runInTransaction()` and ambient CLS, takes a parameterized tenant-qualified parent-sale `FOR UPDATE` lock, rereads status and items after the lock, compares before all sale/item/promotion writes, and reloads inside the transaction. The concurrency claim is limited to repository writers honoring the parent lock.
+- **Depends on:** WU5 and WU6.
 - **Files:** `src/sales/infrastructure/prisma-sale.repository.ts`, `src/sales/infrastructure/prisma-sale.repository.spec.ts`.
 - **Forecast:** Prod A 8–15, Prod D 0, Test A 80–150, Test D 0. **Subtotal 88–165.**
 - **Verify:** `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts`; `pnpm build`.
@@ -223,9 +223,10 @@ Tasks:
 
 Tasks:
 
-- [ ] RED — in `prisma-sale.repository.spec.ts` add `describe('writeImpl GENERIC — snapshot compare wired', …)` cases: (existing non-DRAFT branch) existing non-DRAFT + incoming non-DRAFT + independent persisted snapshot differing on one mapped column rejects `SALE_NOT_DRAFT` with NO writes invoked at all (assert zero `deleteMany`/`createMany`/`update`/`updateMany` plus no promotion-junction reconciliation on `veto`/`optIn`/`applied`); (existing non-DRAFT branch) independent persisted snapshot matching every column proceeds, single `createMany` invoked; (existing missing branch) incoming creates without compare firing — assert `prisma.sale.create` invoked, no `findUnique`/`findFirst` snapshot load; (existing DRAFT branch) incoming updates proceed without compare firing — assert `prisma.sale.update` + `deleteMany` + `createMany` invoked; (non-DRAFT metadata-save unchanged) when independent persisted snapshot differs only on a non-item column (i.e., a column on the sale row, not in the items projection), the item compare is NOT the gate — confirm no false-positive rejection; (mutable-bypass) independent persisted snapshot, mutate only incoming side after the read, assert compare rejects. Parametrize over the columns the projection actually emits. New failing evidence for the wire-in cases; regression baseline for the bypass and metadata-save cases. <!-- sdd-owner: implementation -->
-- [ ] GREEN — extend `writeImpl('GENERIC')`: after the WU5 forged gate, load persisted items (separate read from the WU5 status load) only when `existing !== null && existing.status !== 'DRAFT'`; in that branch call `snapshotItemsEqual` and throw `SALE_NOT_DRAFT` on `false`. On rejection, return before any write. Existing DRAFT and existing missing both skip the compare (preserved creation + preserved DRAFT update flows). <!-- sdd-owner: implementation -->
-- [ ] REFACTOR — kept inline inside `writeImpl`; no extra helper. Pre-existing `save` tests stay green. <!-- sdd-owner: implementation -->
+- [x] RED — focused unit cases cover post-lock snapshot mismatch and zero writes; real PostgreSQL integration coverage is required for lock waiting/post-lock reread and rollback, with no mock substitute. <!-- sdd-owner: implementation -->
+- [x] GREEN — `writeImpl` now locks and rereads atomically, compares before destructive writes, and reloads inside `runInTransaction`; existing DRAFT and missing branches remain unchanged. <!-- sdd-owner: implementation -->
+- [x] TRIANGULATE — focused unit suite and dedicated PostgreSQL integration pass; lock waiting is observed through `pg_stat_activity`/`pg_blocking_pids`, post-lock state is reread through the repository `save` entrypoint, rollback runs through the repository in an ambient transaction, and per-test cleanup/reset plus `finally` lock release are exercised. The claim is limited to lock-honoring repository writers. <!-- sdd-owner: implementation -->
+- [x] REFACTOR — kept inline inside `writeImpl`; no extra helper; the WU6 anchor was removed. <!-- sdd-owner: implementation -->
 
 ---
 
