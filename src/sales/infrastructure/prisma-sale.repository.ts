@@ -2207,9 +2207,34 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async delete(id: string): Promise<void> {
-    const prisma = this.tenantPrisma.getClient();
-    await prisma.sale.delete({
-      where: { id },
+    await this.tenantPrisma.runInTransaction(async () => {
+      const prisma = this.tenantPrisma.getClient();
+      const tenantId = this.requireTenantId();
+
+      await prisma.$queryRaw`
+        SELECT "id" FROM "sales"
+        WHERE "id" = ${id} AND "tenantId" = ${tenantId}
+        FOR UPDATE
+      `;
+
+      const sale = await prisma.sale.findUniqueOrThrow({
+        where: { id },
+        select: {
+          id: true,
+          tenantId: true,
+          status: true,
+          items: { select: { id: true } },
+        },
+      });
+
+      if (sale.status !== 'DRAFT') {
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_DRAFT',
+          'SALE_NOT_DRAFT',
+        );
+      }
+
+      await prisma.sale.delete({ where: { id } });
     });
   }
 }

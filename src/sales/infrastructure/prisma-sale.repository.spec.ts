@@ -23,6 +23,7 @@ function makeMockPrisma() {
       update: jest.fn(),
       updateMany: jest.fn(),
       findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
       findFirst: jest.fn(),
       findMany: jest.fn(),
       groupBy: jest.fn(),
@@ -3056,77 +3057,70 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('delete', () => {
-    it('should delete a sale', async () => {
+    const draft = { id: 'sale-7', status: 'DRAFT', items: [] };
+
+    it('runs one transaction, locks the tenant row, rereads status and items, then deletes', async () => {
+      prisma.$queryRaw.mockResolvedValue([]);
+      prisma.sale.findUniqueOrThrow.mockResolvedValue(draft);
+
       await repo.delete('sale-7');
 
+      expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+      const [strings, ...values] = prisma.$queryRaw.mock.calls[0];
+      expect(strings.join(' ')).toContain('FOR UPDATE');
+      expect(values).toEqual(['sale-7', 'tenant-1']);
+      expect(prisma.sale.findUniqueOrThrow).toHaveBeenCalledWith({
+        where: { id: 'sale-7' },
+        select: {
+          id: true,
+          tenantId: true,
+          status: true,
+          items: { select: { id: true } },
+        },
+      });
       expect(prisma.sale.delete).toHaveBeenCalledWith({
         where: { id: 'sale-7' },
       });
+      expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+        prisma.sale.findUniqueOrThrow.mock.invocationCallOrder[0],
+      );
+      expect(
+        prisma.sale.findUniqueOrThrow.mock.invocationCallOrder[0],
+      ).toBeLessThan(prisma.sale.delete.mock.invocationCallOrder[0]);
     });
 
-    // S13: Hard Delete Draft with Cascade
-    it('should cascade-delete all SaleItems when deleting a Sale (DB-backed)', async () => {
-      const saleId = 'sale-cascade-test';
-
-      // Setup: Create sale with items in mock DB state
-      const saleWithItems = {
-        id: saleId,
-        userId: 'user-cascade',
-        status: 'DRAFT' as const,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        items: [
-          {
-            id: 'item-cascade-1',
-            saleId,
-            productId: 'prod-1',
-            variantId: null,
-            productName: 'Product 1',
-            variantName: null,
-            quantity: 2,
-            unitPriceCents: 1000,
-            unitPriceCurrency: 'MXN',
-          },
-          {
-            id: 'item-cascade-2',
-            saleId,
-            productId: 'prod-2',
-            variantId: 'variant-1',
-            productName: 'Product 2',
-            variantName: 'Variant 1',
-            quantity: 5,
-            unitPriceCents: 2000,
-            unitPriceCurrency: 'MXN',
-          },
-        ],
-      };
-
-      // Simulate DB state: Sale exists with 2 items
-      prisma.sale.findUnique.mockResolvedValue(saleWithItems);
-
-      // ACT: Delete the sale
-      await repo.delete(saleId);
-
-      // ASSERT: prisma.sale.delete was called (Prisma cascade deletes items automatically)
-      expect(prisma.sale.delete).toHaveBeenCalledWith({
-        where: { id: saleId },
+    it('rejects a persisted non-DRAFT sale before delete', async () => {
+      prisma.sale.findUniqueOrThrow.mockResolvedValue({
+        id: 'sale-confirmed',
+        status: 'CONFIRMED',
+        items: [{ id: 'item-1' }],
       });
 
-      // VERIFY: After delete, both Sale and SaleItems would be gone from DB
-      // (Prisma's onDelete: Cascade in schema ensures this at DB level)
-      prisma.sale.findUnique.mockResolvedValue(null);
-      prisma.saleItem.findMany = jest.fn().mockResolvedValue([]);
+      await expect(repo.delete('sale-confirmed')).rejects.toEqual(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+      expect(prisma.sale.delete).not.toHaveBeenCalled();
+    });
 
-      const deletedSale = await prisma.sale.findUnique({
-        where: { id: saleId },
-        include: { items: true },
-      });
-      const orphanedItems = await prisma.saleItem.findMany({
-        where: { saleId },
-      });
+    it('preserves Prisma P2025 for missing or cross-tenant reads', async () => {
+      const p2025 = new Prisma.PrismaClientKnownRequestError(
+        'No record found',
+        { code: 'P2025', clientVersion: '6.19.2' },
+      );
+      prisma.$queryRaw.mockResolvedValue([]);
+      prisma.sale.findUniqueOrThrow.mockRejectedValue(p2025);
 
-      expect(deletedSale).toBeNull();
-      expect(orphanedItems).toHaveLength(0);
+      await expect(repo.delete('hidden-sale')).rejects.toBe(p2025);
+      expect(prisma.sale.delete).not.toHaveBeenCalled();
+    });
+
+    it('delegates delete failures to the transaction for rollback', async () => {
+      const failure = new Error('delete failed');
+      prisma.sale.findUniqueOrThrow.mockResolvedValue(draft);
+      prisma.sale.delete.mockRejectedValue(failure);
+
+      await expect(repo.delete('sale-7')).rejects.toBe(failure);
+      expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
     });
   });
 
