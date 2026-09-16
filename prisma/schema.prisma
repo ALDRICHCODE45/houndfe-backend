@@ -1615,6 +1615,13 @@ model QuotationItem {
   // Promotion back-reference (audit). SetNull preserves the item row if
   // the Promotion is later deleted.
   promotionId         String?
+  // WU1 — parent-product IVA snapshot. All three nullable: legacy rows
+  // created before the migration stay NULL (no backfill). NOT_TAXABLE
+  // is never stored — `chargeProductTaxesSnapshot=false` carries that
+  // intent while the column keeps the parent product's raw ivaRate.
+  taxableBaseCents    Int?
+  ivaRateClassification IvaRate?
+  chargeProductTaxesSnapshot Boolean?
   tenantId            String
   createdAt           DateTime                   @default(now())
   updatedAt           DateTime                   @updatedAt
