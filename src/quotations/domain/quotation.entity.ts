@@ -11,6 +11,11 @@ import {
   QuotationItemNotFoundError,
   QuotationNotDraftError,
 } from './quotation.errors';
+import {
+  IVA_CLASSIFICATION_BUCKET_ORDER,
+  type QuotationIvaBreakdownEntry,
+  type QuotationIvaClassification,
+} from './quotation-tax.types';
 
 /**
  * Quotation lifecycle states. Distinct from Sale (CONFIRMED/CANCELED)
@@ -637,11 +642,56 @@ export class Quotation {
       vetoedPromotionIds: [...this._vetoedPromotionIds],
       optedInManualPromotionIds: [...this._optedInManualPromotionIds],
       customerNotes: this._customerNotes,
+      // WU1 correction — the legacy wire contract is retained: the
+      // per-line snapshot producer pipeline ships in WU2, so the wire
+      // keeps `taxRate` / informational `taxCents` until then.
+      // `computeIvaBreakdown()` stays as an internal domain capability
+      // (covered by co-located tests) and reaches the wire in WU2's
+      // T2.3 together with the legacy-field removal.
       taxRate: this._taxRate,
       taxCents: Math.round(totals.totalCents * this._taxRate / (1 + this._taxRate)),
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };
+  }
+
+  /**
+   * WU1 — All-or-nothing `ivaBreakdown[]` aggregation:
+   *
+   *   1. No items → `[]`.
+   *   2. Any line missing ANY snapshot field → `[]` (never a partial
+   *      breakdown, never a fabricated aggregate zero).
+   *   3. Otherwise visit every line once, map
+   *      `chargeProductTaxesSnapshot=false` to `NOT_TAXABLE`, and add
+   *      `includedIvaCents` to that represented bucket.
+   *   4. Return only represented buckets in deterministic order
+   *      (`IVA_16`, `IVA_8`, `IVA_0`, `IVA_EXENTO`, `NOT_TAXABLE`).
+   *
+   * Buckets are created on first representation, NOT pre-seeded, so
+   * zero-valued entries survive for represented zero-tax lines while
+   * absent classifications are never fabricated. Aggregation is exact
+   * integer addition — rounding happened once per line at snapshot time.
+   */
+  computeIvaBreakdown(): QuotationIvaBreakdownEntry[] {
+    if (this._items.length === 0) return [];
+    if (this._items.some((item) => !item.hasCompleteTaxSnapshot)) {
+      return [];
+    }
+
+    const buckets = new Map<QuotationIvaClassification, number>();
+    for (const item of this._items) {
+      const classification = item.effectiveIvaClassification!;
+      const included = item.includedIvaCents!;
+      const existing = buckets.get(classification);
+      buckets.set(classification, (existing ?? 0) + included);
+    }
+
+    return IVA_CLASSIFICATION_BUCKET_ORDER.filter((classification) =>
+      buckets.has(classification),
+    ).map((classification) => ({
+      classification,
+      amountCents: buckets.get(classification)!,
+    }));
   }
 
   /**

@@ -825,4 +825,222 @@ describe('Quotation Entity', () => {
       );
     });
   });
+
+  // ── WU1 — IVA breakdown + snapshot aggregate behavior ─────────────
+
+  /**
+   * Build a snapshot-complete line with the given classification pair.
+   * `includedIvaCents` for each line = lineTotal − taxableBase, derived
+   * once at snapshot time (half-up integer division per the design).
+   */
+  const addTaxedLine = (
+    q: Quotation,
+    id: string,
+    rate: 'IVA_16' | 'IVA_8' | 'IVA_0' | 'IVA_EXENTO',
+    chargeProductTaxes: boolean,
+    unitPriceCents: number,
+    quantity = 1,
+  ) => {
+    q.addItem(
+      validItemProps(id, {
+        productId: `prod-${id}`,
+        quantity,
+        unitPriceCents,
+      }),
+    );
+    const item = q.items[q.items.length - 1];
+    item.snapshotTaxClassification(rate, chargeProductTaxes);
+    item.recomputeTaxableBase();
+    return item;
+  };
+
+  describe('WU1 — computeIvaBreakdown (represented-only deterministic buckets)', () => {
+    it('returns [] for an empty quotation', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      expect(q.computeIvaBreakdown()).toEqual([]);
+    });
+
+    it('returns [] when a single line misses any one of the three snapshot fields', () => {
+      for (const missing of [
+        '_taxableBaseCents',
+        '_ivaRateClassification',
+        '_chargeProductTaxesSnapshot',
+      ] as const) {
+        const q = Quotation.create({
+          id: newQuotationId(),
+          sellerUserId: SELLER,
+        });
+        addTaxedLine(q, 'item-complete', 'IVA_16', true, 11600);
+        // Inject exactly one null field on a second line.
+        q.addItem(
+          validItemProps('item-null', {
+            productId: 'prod-null',
+            unitPriceCents: 5000,
+          }),
+        );
+        const broken = q.items[q.items.length - 1];
+        broken.snapshotTaxClassification('IVA_8', true);
+        broken.recomputeTaxableBase();
+        // The private snapshot fields are constructor-parameter data
+        // properties — direct writes reach the entity's storage.
+        (broken as unknown as Record<string, unknown>)[missing] = null;
+
+        expect(q.computeIvaBreakdown()).toEqual([]);
+      }
+    });
+
+    it('emits only the represented classifications in deterministic order', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      // Insert in scrambled order; the breakdown must come out in
+      // IVA_16 → IVA_8 → IVA_0 → IVA_EXENTO → NOT_TAXABLE order.
+      addTaxedLine(q, 'item-nt', 'IVA_16', false, 900);
+      addTaxedLine(q, 'item-exe', 'IVA_EXENTO', true, 900);
+      addTaxedLine(q, 'item-0', 'IVA_0', true, 900);
+      addTaxedLine(q, 'item-8', 'IVA_8', true, 10800);
+      addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
+
+      expect(q.computeIvaBreakdown()).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 },
+        { classification: 'IVA_8', amountCents: 800 },
+        { classification: 'IVA_0', amountCents: 0 },
+        { classification: 'IVA_EXENTO', amountCents: 0 },
+        { classification: 'NOT_TAXABLE', amountCents: 0 },
+      ]);
+    });
+
+    it('emits exactly the three represented buckets for a mixed IVA_16/IVA_8/IVA_0 quote', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
+      addTaxedLine(q, 'item-8', 'IVA_8', true, 10800);
+      addTaxedLine(q, 'item-0', 'IVA_0', true, 900);
+
+      const breakdown = q.computeIvaBreakdown();
+      expect(breakdown.map((b) => b.classification)).toEqual([
+        'IVA_16',
+        'IVA_8',
+        'IVA_0',
+      ]);
+      expect(
+        breakdown.find((b) => b.classification === 'IVA_EXENTO'),
+      ).toBeUndefined();
+      expect(
+        breakdown.find((b) => b.classification === 'NOT_TAXABLE'),
+      ).toBeUndefined();
+    });
+
+    it('keeps IVA_0 and IVA_EXENTO as separate zero-amount buckets when both represented', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-0', 'IVA_0', true, 900);
+      addTaxedLine(q, 'item-exe', 'IVA_EXENTO', true, 900);
+
+      expect(q.computeIvaBreakdown()).toEqual([
+        { classification: 'IVA_0', amountCents: 0 },
+        { classification: 'IVA_EXENTO', amountCents: 0 },
+      ]);
+    });
+
+    it('groups chargeProductTaxes=false under NOT_TAXABLE, not the stored IVA rate bucket', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-16-nt', 'IVA_16', false, 11600);
+      addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
+
+      expect(q.computeIvaBreakdown()).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 },
+        { classification: 'NOT_TAXABLE', amountCents: 0 },
+      ]);
+    });
+
+    it('returns a single IVA_16 bucket for an all-IVA_16 quote', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-a', 'IVA_16', true, 11600);
+      addTaxedLine(q, 'item-b', 'IVA_16', true, 5800, 2);
+
+      expect(q.computeIvaBreakdown()).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 + 1600 },
+      ]);
+    });
+  });
+
+  describe('WU1 — breakdown invariant + response contract', () => {
+    it('Σ breakdown.amountCents = totalCents − Σ taxableBaseCents', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
+      addTaxedLine(q, 'item-8', 'IVA_8', true, 10800, 2);
+      addTaxedLine(q, 'item-nt', 'IVA_16', false, 900);
+
+      const breakdown = q.computeIvaBreakdown();
+      const sumIva = breakdown.reduce((s, b) => s + b.amountCents, 0);
+      const sumBases = q.items.reduce(
+        (s, item) => s + (item.taxableBaseCents ?? 0),
+        0,
+      );
+      expect(sumIva).toBe(q.recomputeTotals().totalCents - sumBases);
+    });
+
+    it('inclusive totals are unchanged by the snapshot machinery', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      q.addItem(validItemProps('item-1', { unitPriceCents: 11600 }));
+      q.addItem(
+        validItemProps('item-2', {
+          productId: 'prod-2',
+          unitPriceCents: 10800,
+          quantity: 2,
+        }),
+      );
+      const before = q.recomputeTotals();
+
+      addTaxedLine(q, 'item-3', 'IVA_16', true, 900);
+      const after = q.recomputeTotals();
+      // Only the new line adds money — the previously priced lines do not move.
+      expect(after.totalCents).toBe(before.totalCents + 900);
+      expect(after.subtotalCents).toBe(before.subtotalCents + 900);
+      expect(after.discountCents).toBe(before.discountCents);
+    });
+
+    it('WU1 correction: toResponse keeps the legacy wire (taxRate/taxCents, no ivaBreakdown)', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
+
+      const response = q.toResponse() as unknown as Record<string, unknown>;
+      // Legacy root rate stays on the wire until WU2 (T2.3) activates
+      // `ivaBreakdown` and removes the legacy fields together.
+      expect(response.taxRate).toBe(0.16);
+      // Informational included IVA: totalCents=11600 → 11600×0.16/1.16.
+      expect(response.taxCents).toBe(1600);
+      expect(response).not.toHaveProperty('ivaBreakdown');
+      // The snapshot capability itself stays internally available —
+      // only its wire activation is deferred to WU2.
+      expect(q.computeIvaBreakdown()).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 },
+      ]);
+    });
+  });
+
 });

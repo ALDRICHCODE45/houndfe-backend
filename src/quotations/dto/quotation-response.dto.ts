@@ -76,6 +76,12 @@ export interface QuotationResponseDto {
   /** Promotions currently applied to items, deduplicated by promotionId. */
   appliedPromotions: AppliedPromotionDto[];
   customerNotes: string | null;
+  /**
+   * WU1 correction — legacy wire contract retained. The per-line snapshot
+   * producer pipeline ships in WU2; `ivaBreakdown` activation and the
+   * `taxRate` / `taxCents` removal are owned by WU2's T2.3 together with
+   * the runtime DTO validation.
+   */
   taxRate: number;
   taxCents: number;
   vetoedPromotionIds: string[];
