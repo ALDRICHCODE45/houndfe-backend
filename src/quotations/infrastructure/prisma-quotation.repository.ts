@@ -25,6 +25,7 @@ import type {
   QuotationFindAllQuery,
   QuotationFindAllResult,
 } from '../domain/quotation.repository';
+import type { QuotationIvaRateClassification } from '../domain/quotation-tax.types';
 
 const QUOTATION_INCLUDE = {
   items: true,
@@ -123,6 +124,12 @@ export class PrismaQuotationRepository implements IQuotationRepository {
           discountValue: item.discountValue,
           discountAmountCents: item.discountAmountCents,
           promotionId: item.promotionId,
+          // WU1 — round-trip the parent-product IVA snapshot verbatim.
+          // Nulls stay nulls: historic (pre-migration) rows must never
+          // gain a fabricated snapshot.
+          taxableBaseCents: item.taxableBaseCents,
+          ivaRateClassification: item.ivaRateClassification,
+          chargeProductTaxesSnapshot: item.chargeProductTaxesSnapshot,
           tenantId,
         })) as Prisma.QuotationItemCreateManyInput[],
       });
@@ -335,6 +342,13 @@ export class PrismaQuotationRepository implements IQuotationRepository {
         discountValue: item.discountValue,
         discountAmountCents: item.discountAmountCents ?? 0,
         promotionId: item.promotionId,
+        // WU1 — map the persisted IVA snapshot verbatim. Prisma
+        // `IvaRate | null` → domain rate union, nulls preserved
+        // exactly (historic rows stay incomplete by design).
+        taxableBaseCents: item.taxableBaseCents,
+        ivaRateClassification:
+          item.ivaRateClassification as QuotationIvaRateClassification | null,
+        chargeProductTaxesSnapshot: item.chargeProductTaxesSnapshot,
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,
       })),
