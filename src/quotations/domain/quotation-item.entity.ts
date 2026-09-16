@@ -1,4 +1,10 @@
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
+import {
+  IVA_RATE_PERCENT,
+  isQuotationIvaRateClassification,
+  type QuotationIvaClassification,
+  type QuotationIvaRateClassification,
+} from './quotation-tax.types';
 
 export type QuotationItemPriceSource = 'PRICE_LIST' | 'CUSTOM';
 
@@ -35,6 +41,23 @@ export interface QuotationItemProps {
    * a MANUAL or AUTOMATIC promotion was applied via recompute.
    */
   promotionId?: string | null;
+  /**
+   * WU1 — parent-product IVA snapshot. All three fields are nullable
+   * ONLY to permit legacy rows created before the migration; a new
+   * line must always be created with a complete snapshot via
+   * `snapshotTaxClassification` + `recomputeTaxableBase`.
+   *
+   * - `taxableBaseCents` — the IVA-exclusive base derived from the
+   *   line's final post-discount inclusive amount.
+   * - `ivaRateClassification` — the parent product's raw `ivaRate`
+   *   enum (never `NOT_TAXABLE` — that is derived from the flag).
+   * - `chargeProductTaxesSnapshot` — the parent product's
+   *   `chargeProductTaxes` flag; `false` forces the `NOT_TAXABLE`
+   *   classification regardless of the stored rate.
+   */
+  taxableBaseCents?: number | null;
+  ivaRateClassification?: QuotationIvaRateClassification | null;
+  chargeProductTaxesSnapshot?: boolean | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -78,6 +101,9 @@ export class QuotationItem {
     private _discountValue: number | null,
     private _discountAmountCents: number,
     private _promotionId: string | null,
+    private _taxableBaseCents: number | null,
+    private _ivaRateClassification: QuotationIvaRateClassification | null,
+    private _chargeProductTaxesSnapshot: boolean | null,
     public readonly createdAt?: Date,
     public readonly updatedAt?: Date,
   ) {}
@@ -116,6 +142,9 @@ export class QuotationItem {
       props.discountValue ?? null,
       props.discountAmountCents ?? 0,
       props.promotionId ?? null,
+      props.taxableBaseCents ?? null,
+      props.ivaRateClassification ?? null,
+      props.chargeProductTaxesSnapshot ?? null,
       props.createdAt,
       props.updatedAt,
     );
@@ -139,6 +168,9 @@ export class QuotationItem {
       props.discountValue ?? null,
       props.discountAmountCents ?? 0,
       props.promotionId ?? null,
+      props.taxableBaseCents ?? null,
+      props.ivaRateClassification ?? null,
+      props.chargeProductTaxesSnapshot ?? null,
       props.createdAt,
       props.updatedAt,
     );
@@ -189,6 +221,68 @@ export class QuotationItem {
 
   get promotionId(): string | null {
     return this._promotionId;
+  }
+
+  // ── WU1 — tax snapshot surface ──────────────────────────────────────
+
+  /** Persisted IVA-exclusive base. Null on legacy (pre-migration) rows. */
+  get taxableBaseCents(): number | null {
+    return this._taxableBaseCents;
+  }
+
+  /**
+   * Persisted parent-product rate classification. Null on legacy rows.
+   * Never `NOT_TAXABLE` — that classification is derived from the
+   * `chargeProductTaxesSnapshot` flag at aggregation time.
+   */
+  get ivaRateClassification(): QuotationIvaRateClassification | null {
+    return this._ivaRateClassification;
+  }
+
+  /** Persisted parent-product charge flag. Null on legacy rows. */
+  get chargeProductTaxesSnapshot(): boolean | null {
+    return this._chargeProductTaxesSnapshot;
+  }
+
+  /**
+   * WU1 — the snapshot is complete only when ALL THREE fields are
+   * non-null. `false` is a valid non-null boolean (the `NOT_TAXABLE`
+   * intent), so completeness uses explicit `!== null` checks.
+   */
+  get hasCompleteTaxSnapshot(): boolean {
+    return (
+      this._taxableBaseCents !== null &&
+      this._ivaRateClassification !== null &&
+      this._chargeProductTaxesSnapshot !== null
+    );
+  }
+
+  /**
+   * WU1 — effective response classification. `NOT_TAXABLE` precedence:
+   * when the charge flag is `false` the stored rate is ignored. Null
+   * while the snapshot is incomplete (the aggregate's all-or-nothing
+   * rule never classifies an incomplete line).
+   */
+  get effectiveIvaClassification(): QuotationIvaClassification | null {
+    if (
+      this._ivaRateClassification === null ||
+      this._chargeProductTaxesSnapshot === null
+    ) {
+      return null;
+    }
+    return this._chargeProductTaxesSnapshot
+      ? this._ivaRateClassification
+      : 'NOT_TAXABLE';
+  }
+
+  /**
+   * WU1 — per-line included IVA. `lineTotalCents − taxableBaseCents`
+   * for a complete line (IVA is always the exact remainder of the
+   * inclusive total), or `null` when the snapshot is incomplete.
+   */
+  get includedIvaCents(): number | null {
+    if (!this.hasCompleteTaxSnapshot) return null;
+    return this.unitPriceCents * this._quantity - this._taxableBaseCents!;
   }
 
   // ── Mutators ─────────────────────────────────────────────────────────
@@ -338,6 +432,60 @@ export class QuotationItem {
     const raw = input.percent ?? 0;
     const safePercent = Math.min(Math.max(Math.trunc(raw), 1), 99);
     return Math.round((baseline * safePercent) / 100);
+  }
+
+  // ── WU1 — tax snapshot mutators ──────────────────────────────────────
+
+  /**
+   * WU1 — store the parent product's tax pair as it stands right now.
+   * Called by the application service at line creation and on every
+   * DRAFT reprice of a resolved PRICE_LIST line. Does NOT touch the
+   * taxable base — call `recomputeTaxableBase()` after the line's
+   * final post-discount amount is settled.
+   */
+  snapshotTaxClassification(
+    rate: QuotationIvaRateClassification,
+    chargeProductTaxes: boolean,
+  ): void {
+    if (!isQuotationIvaRateClassification(rate)) {
+      throw new InvalidArgumentError('INVALID_IVA_RATE_CLASSIFICATION');
+    }
+    if (typeof chargeProductTaxes !== 'boolean') {
+      throw new InvalidArgumentError('INVALID_CHARGE_PRODUCT_TAXES');
+    }
+    this._ivaRateClassification = rate;
+    this._chargeProductTaxesSnapshot = chargeProductTaxes;
+  }
+
+  /**
+   * WU1 — derive and store the IVA-exclusive base from the line's
+   * final post-discount inclusive amount. Integer half-up division:
+   *
+   *   divisor = 100 + effectiveRatePercent
+   *   base = floor((inclusiveLineCents × 100 + floor(divisor / 2)) / divisor)
+   *
+   * Equivalent to rounding `inclusiveLineCents / (1 + rate)` without
+   * ever touching a float rate multiplier. Throws on an incomplete
+   * snapshot so a legacy row can never silently produce a fake base.
+   */
+  recomputeTaxableBase(): void {
+    if (
+      this._ivaRateClassification === null ||
+      this._chargeProductTaxesSnapshot === null
+    ) {
+      throw new InvalidArgumentError('TAX_SNAPSHOT_INCOMPLETE');
+    }
+    const inclusiveLineCents = this.unitPriceCents * this._quantity;
+    if (!Number.isInteger(inclusiveLineCents) || inclusiveLineCents < 0) {
+      throw new InvalidArgumentError('INVALID_INCLUSIVE_LINE_CENTS');
+    }
+    const effectiveRatePercent = this._chargeProductTaxesSnapshot
+      ? IVA_RATE_PERCENT[this._ivaRateClassification]
+      : 0;
+    const divisor = 100 + effectiveRatePercent;
+    this._taxableBaseCents = Math.floor(
+      (inclusiveLineCents * 100 + Math.floor(divisor / 2)) / divisor,
+    );
   }
 
   toResponse() {
