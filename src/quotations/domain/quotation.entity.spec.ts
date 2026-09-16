@@ -1043,4 +1043,52 @@ describe('Quotation Entity', () => {
     });
   });
 
+  describe('WU1 — legacy deprecated tax-rate + snapshot preservation across send/cancel', () => {
+    it('setDeprecatedTaxRate keeps the 0..1 invariant and DRAFT guard', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      q.setDeprecatedTaxRate(0.08);
+      expect(q.taxRate).toBe(0.08);
+      expect(() => q.setDeprecatedTaxRate(1.5)).toThrow(InvalidArgumentError);
+      expect(() => q.setDeprecatedTaxRate(-0.1)).toThrow(InvalidArgumentError);
+    });
+
+    it('send preserves line snapshots AND the legacy root _taxRate', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
+      q.setDeprecatedTaxRate(0.08);
+
+      const sent = q.send();
+      expect(sent.taxRate).toBe(0.08);
+      expect(sent.items[0]?.ivaRateClassification).toBe('IVA_16');
+      expect(sent.items[0]?.chargeProductTaxesSnapshot).toBe(true);
+      expect(sent.items[0]?.taxableBaseCents).toBe(10000);
+      expect(sent.computeIvaBreakdown()).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 },
+      ]);
+    });
+
+    it('cancel preserves line snapshots AND the legacy root _taxRate', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-8', 'IVA_8', false, 10800);
+      q.setDeprecatedTaxRate(0.16);
+
+      const cancelled = q.cancel('PRICE_OBJECTION');
+      expect(cancelled.taxRate).toBe(0.16);
+      expect(cancelled.items[0]?.ivaRateClassification).toBe('IVA_8');
+      expect(cancelled.items[0]?.chargeProductTaxesSnapshot).toBe(false);
+      // chargeProductTaxes=false → the base equals the full inclusive
+      // amount (no IVA carve-out) and includedIvaCents stays 0.
+      expect(cancelled.items[0]?.taxableBaseCents).toBe(10800);
+      expect(cancelled.items[0]?.includedIvaCents).toBe(0);
+    });
+  });
 });

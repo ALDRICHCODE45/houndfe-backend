@@ -455,6 +455,25 @@ export class Quotation {
   }
 
   setTaxRate(rate: number): void {
+    // WU1 — compatibility alias: `QuotationsService.setTaxRate` (the
+    // deprecated PATCH adapter) still calls the legacy name; it is not
+    // part of WU1's edit surface. WU2 must switch that call site to
+    // `setDeprecatedTaxRate` and drop this alias.
+    this.setDeprecatedTaxRate(rate);
+  }
+
+  /**
+   * WU1 — explicit compatibility name for the legacy root-rate write.
+   * Retains the exact `0..1` invariant and the `ensureDraft()` guard.
+   * The stored `_taxRate` value is carried by every aggregate copy
+   * constructor (`send` / `cancel`) so a status transition can never
+   * silently reset it to the `0.16` column default.
+   *
+   * The deprecated PATCH endpoint persists ONLY this root column — it
+   * MUST NOT touch the per-line snapshot pipeline, `ivaBreakdown[]`,
+   * or the PDF aggregate.
+   */
+  setDeprecatedTaxRate(rate: number): void {
     this.ensureDraft();
     if (rate < 0 || rate > 1) {
       throw new InvalidArgumentError(
@@ -539,6 +558,10 @@ export class Quotation {
       [...this._items],
       [...this._vetoedPromotionIds],
       [...this._optedInManualPromotionIds],
+      this._customerNotes,
+      // WU1 — carry the legacy root rate through the status copy so a
+      // transition can never silently reset it to the 0.16 default.
+      this._taxRate,
     );
   }
 
@@ -578,6 +601,9 @@ export class Quotation {
       [...this._items],
       [...this._vetoedPromotionIds],
       [...this._optedInManualPromotionIds],
+      this._customerNotes,
+      // WU1 — carry the legacy root rate through the status copy.
+      this._taxRate,
     );
   }
 
