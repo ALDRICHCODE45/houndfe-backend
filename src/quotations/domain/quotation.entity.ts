@@ -668,14 +668,14 @@ export class Quotation {
       vetoedPromotionIds: [...this._vetoedPromotionIds],
       optedInManualPromotionIds: [...this._optedInManualPromotionIds],
       customerNotes: this._customerNotes,
-      // WU1 correction — the legacy wire contract is retained: the
-      // per-line snapshot producer pipeline ships in WU2, so the wire
-      // keeps `taxRate` / informational `taxCents` until then.
-      // `computeIvaBreakdown()` stays as an internal domain capability
-      // (covered by co-located tests) and reaches the wire in WU2's
-      // T2.3 together with the legacy-field removal.
-      taxRate: this._taxRate,
-      taxCents: Math.round(totals.totalCents * this._taxRate / (1 + this._taxRate)),
+      // WU2 (T2.3) — activated wire contract: `ivaBreakdown[]` from
+      // the all-or-nothing aggregation. Ships in the SAME deployable
+      // unit as the T2.2 snapshot producer pipeline; the legacy
+      // `taxRate` / informational `taxCents` fields are removed with
+      // it (they never participated in line, subtotal, discount, or
+      // grand totals — only the removed informational field was
+      // derived from the root column).
+      ivaBreakdown: this.computeIvaBreakdown(),
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };

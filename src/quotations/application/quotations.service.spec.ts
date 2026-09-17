@@ -36,6 +36,7 @@ import {
 } from '../../shared/domain/domain-error';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ProductsService } from '../../products/products.service';
+import type { QuotationIvaRateClassification } from '../domain/quotation-tax.types';
 import type { IPosEvaluatePromotionsUseCase } from '../../promotions/application/ports/pos-evaluate-promotions.port';
 import type {
   IMailer,
@@ -704,6 +705,9 @@ describe('QuotationsService — WU2', () => {
         variantName: null,
         unitPriceCents: 1000,
         imageUrl: null,
+        // WU2 (T2.1) — widened parent-product tax pair.
+        ivaRate: 'IVA_16',
+        chargeProductTaxes: true,
       });
       const engine = makeEngine();
       const service = buildService(repo, prisma, productsService, engine);
@@ -746,6 +750,9 @@ describe('QuotationsService — WU2', () => {
         variantName: null,
         unitPriceCents: 1000,
         imageUrl: null,
+        // WU2 (T2.1) — widened parent-product tax pair.
+        ivaRate: 'IVA_16',
+        chargeProductTaxes: true,
       });
       const engine = makeEngine();
       const service = buildService(repo, prisma, productsService, engine);
@@ -1705,6 +1712,466 @@ describe('QuotationsService — WU2', () => {
         service.assignSeller(draft.id, { sellerUserId: 'ghost-user' }),
       ).rejects.toBeInstanceOf(QuotationSellerNotFoundError);
       expect(repo.save).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── WU2 — T2.2 snapshot orchestration (addItem + DRAFT reprice) ─────
+
+  describe('WU2 T2.2 — product tax snapshot orchestration', () => {
+    /** Full `getProductInfoForSale` payload including the T2.1 tax pair. */
+    const productInfoPayload = (overrides: Record<string, unknown> = {}) => ({
+      productId: 'prod-1',
+      productName: 'Product 1',
+      variantId: null,
+      variantName: null,
+      unitPriceCents: 1000,
+      imageUrl: null,
+      ivaRate: 'IVA_16' as QuotationIvaRateClassification,
+      chargeProductTaxes: true,
+      ...overrides,
+    });
+
+    /** A persisted PRICE_LIST line fixture for recompute tests. */
+    const priceListItem = (overrides: Record<string, unknown> = {}) => ({
+      id: 'item-1',
+      quotationId: 'q-x',
+      productId: 'prod-1',
+      variantId: null,
+      productName: 'Product 1',
+      variantName: null,
+      quantity: 1,
+      unitPriceCents: 1000,
+      unitPriceCurrency: 'MXN',
+      priceSource: 'PRICE_LIST',
+      appliedPriceListId: 'pl-1',
+      customPriceCents: null,
+      discountType: null,
+      discountValue: null,
+      discountAmountCents: 0,
+      promotionId: null,
+      taxableBaseCents: null,
+      ivaRateClassification: null,
+      chargeProductTaxesSnapshot: null,
+      ...overrides,
+    });
+
+    /** Resolver stub: resolves `(productId, variantId) → priceMap@qty`. */
+    const resolvePriceFor = (
+      productsService: ReturnType<typeof makeProductsService>,
+      key: string,
+      quantity: number,
+      priceCents: number,
+    ) => {
+      const inner = new Map<number, number>([[quantity, priceCents]]);
+      const outer = new Map<string, Map<number, number>>([[key, inner]]);
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        outer,
+      );
+    };
+
+    it('addItem snapshots all three tax fields from the parent product', async () => {
+      const draft = makeQuotation();
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload(),
+      );
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      await service.addItem(draft.id, { productId: 'prod-1', quantity: 2 });
+
+      const line = draft.items[0];
+      expect(line.ivaRateClassification).toBe('IVA_16');
+      expect(line.chargeProductTaxesSnapshot).toBe(true);
+      // 1000c × 2 @ IVA_16 → base = floor((200000 + 50) / 116) = 1724c.
+      expect(line.taxableBaseCents).toBe(1724);
+      expect(line.hasCompleteTaxSnapshot).toBe(true);
+    });
+
+    it('variant line inherits the parent product tax pair', async () => {
+      const draft = makeQuotation();
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload({
+          variantId: 'var-1',
+          variantName: 'Roja M',
+          // The product-service widening guarantees the parent's pair
+          // even on the variant branch (T2.1).
+          ivaRate: 'IVA_8',
+          chargeProductTaxes: true,
+        }),
+      );
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      await service.addItem(draft.id, {
+        productId: 'prod-1',
+        variantId: 'var-1',
+        quantity: 1,
+      });
+
+      const line = draft.items[0];
+      expect(line.ivaRateClassification).toBe('IVA_8');
+      expect(line.chargeProductTaxesSnapshot).toBe(true);
+    });
+
+    it('rejects a non-DRAFT add before any product lookup or persistence', async () => {
+      const sent = makeQuotation({ status: 'SENT', id: 'q-sent' });
+      // Named local mock handle: asserting on this jest.fn (not on
+      // `repo.save`'s method reference) keeps the unbound-method
+      // diagnostic out of the NEW test surface.
+      const save = jest.fn();
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === sent.id ? sent : null),
+        ),
+        save,
+      });
+      const productsService = makeProductsService();
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      await expect(
+        service.addItem(sent.id, { productId: 'prod-1', quantity: 1 }),
+      ).rejects.toBeInstanceOf(BusinessRuleViolationError);
+      expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('a successful PRICE_LIST reprice re-snapshots the classification from the CURRENT product and re-derives the base', async () => {
+      // Historic line was snapshotted at IVA_16; the admin has since
+      // re-classified the product to IVA_0. A DRAFT reprice re-reads
+      // the CURRENT metadata (the line is being repriced, not just
+      // re-taxed).
+      const draft = makeQuotation({
+        id: 'q-x',
+        items: [
+          priceListItem({
+            quantity: 1,
+            unitPriceCents: 1000,
+            ivaRateClassification: 'IVA_16',
+            chargeProductTaxesSnapshot: true,
+            taxableBaseCents: 862,
+          }),
+        ],
+      });
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      // The product's CURRENT tax state (post-edit).
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload({ ivaRate: 'IVA_0' }),
+      );
+      resolvePriceFor(productsService, 'prod-1::::pl-1', 2, 2000);
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      await service.updateItemQuantity(draft.id, 'item-1', { quantity: 2 });
+
+      const line = draft.items[0];
+      expect(line.ivaRateClassification).toBe('IVA_0');
+      expect(line.chargeProductTaxesSnapshot).toBe(true);
+      // Repriced to 2000c/unit × qty 2 = 4000c inclusive @ IVA_0 →
+      // base = floor((400000 + 50) / 100) = 4000c.
+      expect(line.taxableBaseCents).toBe(4000);
+    });
+
+    it('seeds the request-local metadata cache from addItem so a repriced new line is not looked up twice', async () => {
+      const draft = makeQuotation();
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload(),
+      );
+      // The fresh line resolves its price in the SAME recompute.
+      resolvePriceFor(productsService, 'prod-1::::pl-1', 2, 1000);
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      await service.addItem(draft.id, { productId: 'prod-1', quantity: 2 });
+
+      expect(productsService.getProductInfoForSale).toHaveBeenCalledTimes(1);
+      expect(draft.items[0].ivaRateClassification).toBe('IVA_16');
+    });
+
+    it('dedupes one metadata lookup per recompute and starts a FRESH cache on the next mutation', async () => {
+      // Two duplicate PRICE_LIST lines sharing (productId, variantId);
+      // historic rows carry null snapshots so the recompute must
+      // complete both from the CURRENT product metadata.
+      const draft = makeQuotation({
+        id: 'q-x',
+        items: [
+          priceListItem({ id: 'item-1', quantity: 1, unitPriceCents: 1000 }),
+          priceListItem({ id: 'item-2', quantity: 1, unitPriceCents: 1000 }),
+        ],
+      });
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload(),
+      );
+      // Both lines resolve a price in both mutations (qty 1 and 2).
+      const tierMap = new Map([
+        [
+          'prod-1::::pl-1',
+          new Map([
+            [1, 1000],
+            [2, 1000],
+          ]),
+        ],
+      ]);
+      (productsService.batchResolvePriceMap as jest.Mock).mockResolvedValue(
+        tierMap,
+      );
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      const first = await service.updateItemQuantity(draft.id, 'item-1', {
+        quantity: 2,
+      });
+
+      // Exactly ONE deduplicated metadata lookup across both duplicate
+      // lines within the single recompute.
+      expect(productsService.getProductInfoForSale).toHaveBeenCalledTimes(1);
+      // Both lines persist complete snapshots + re-derived bases.
+      for (const line of draft.items) {
+        expect(line.ivaRateClassification).toBe('IVA_16');
+        expect(line.chargeProductTaxesSnapshot).toBe(true);
+        expect(line.hasCompleteTaxSnapshot).toBe(true);
+      }
+      // 2000c @ IVA_16 → base 1724c (IVA 276c); 1000c @ IVA_16 → base
+      // 862c (IVA 138c).
+      expect(draft.items[0].taxableBaseCents).toBe(1724);
+      expect(draft.items[1].taxableBaseCents).toBe(862);
+      expect(
+        (first as unknown as Record<string, unknown>).ivaBreakdown,
+      ).toEqual([{ classification: 'IVA_16', amountCents: 414 }]);
+
+      // SECOND public mutation — the admin re-classified the product to
+      // IVA_8 since the first recompute. The per-invocation cache must
+      // NOT leak: exactly one NEW lookup, and the classification
+      // refreshes to the CURRENT metadata.
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload({ ivaRate: 'IVA_8' }),
+      );
+
+      const second = await service.updateItemQuantity(draft.id, 'item-2', {
+        quantity: 2,
+      });
+
+      expect(productsService.getProductInfoForSale).toHaveBeenCalledTimes(2);
+      for (const line of draft.items) {
+        expect(line.ivaRateClassification).toBe('IVA_8');
+        expect(line.chargeProductTaxesSnapshot).toBe(true);
+      }
+      // 2000c @ IVA_8 → base = floor(200050 / 108) = 1852c (IVA 148c).
+      expect(draft.items[0].taxableBaseCents).toBe(1852);
+      expect(draft.items[1].taxableBaseCents).toBe(1852);
+      expect(
+        (second as unknown as Record<string, unknown>).ivaBreakdown,
+      ).toEqual([{ classification: 'IVA_8', amountCents: 296 }]);
+    });
+
+    it('a CUSTOM line keeps its classification but re-derives the base from the final post-discount amount, with no product lookup', async () => {
+      const draft = makeQuotation({
+        id: 'q-x',
+        items: [
+          priceListItem({
+            priceSource: 'CUSTOM',
+            customPriceCents: 1000,
+            ivaRateClassification: 'IVA_16',
+            chargeProductTaxesSnapshot: true,
+            taxableBaseCents: 862,
+          }),
+        ],
+      });
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload({ ivaRate: 'IVA_0' }),
+      );
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      await service.updateItemQuantity(draft.id, 'item-1', { quantity: 2 });
+
+      // Sticky line: never re-classified (the admin's IVA_0 edit does
+      // NOT leak onto the CUSTOM line).
+      expect(draft.items[0].ivaRateClassification).toBe('IVA_16');
+      // Base re-derived from 1000c × 2 @ IVA_16 → 1724c.
+      expect(draft.items[0].taxableBaseCents).toBe(1724);
+      expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
+    });
+
+    it('an incomplete historic row stays incomplete when its line is not repriced', async () => {
+      const draft = makeQuotation({
+        id: 'q-x',
+        items: [priceListItem({ quantity: 1, unitPriceCents: 1000 })],
+      });
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      // No resolvable price → the line is NOT repriced → no resnapshot.
+      productsService.batchResolvePriceMap.mockResolvedValue(
+        new Map() as never,
+      );
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      await service.updateItemQuantity(draft.id, 'item-1', { quantity: 2 });
+
+      expect(draft.items[0].ivaRateClassification).toBeNull();
+      expect(draft.items[0].taxableBaseCents).toBeNull();
+    });
+
+    it.each(['SENT', 'EXPIRED'] as const)(
+      'a %s quotation read performs no product lookup and uses the stored snapshots',
+      async (status) => {
+        const frozen = makeQuotation({
+          status,
+          id: 'q-frozen',
+          items: [
+            priceListItem({
+              ivaRateClassification: 'IVA_16',
+              chargeProductTaxesSnapshot: true,
+              taxableBaseCents: 862,
+            }),
+          ],
+        });
+        const repo = makeRepo({
+          findById: jest.fn((id) =>
+            Promise.resolve(id === frozen.id ? frozen : null),
+          ),
+        });
+        const productsService = makeProductsService();
+        // Even though the admin edited the product since send time.
+        productsService.getProductInfoForSale.mockResolvedValue(
+          productInfoPayload({ ivaRate: 'IVA_8' }),
+        );
+        const service = buildService(repo, makeTenantPrisma(), productsService);
+
+        const result = await service.findOne(frozen.id);
+
+        // No product metadata lookup and no price re-resolution on any
+        // read path.
+        expect(productsService.getProductInfoForSale).not.toHaveBeenCalled();
+        expect(productsService.batchResolvePriceMap).not.toHaveBeenCalled();
+        // Stored snapshots survive the read untouched.
+        expect(frozen.items[0].ivaRateClassification).toBe('IVA_16');
+        expect(frozen.items[0].chargeProductTaxesSnapshot).toBe(true);
+        expect(frozen.items[0].taxableBaseCents).toBe(862);
+        expect(result.items).toHaveLength(1);
+        // The wire response reflects the STORED snapshot
+        // (1000c − 862c = 138c @ IVA_16), not the admin's current IVA_8
+        // state.
+        expect(
+          (result as unknown as Record<string, unknown>).ivaBreakdown,
+        ).toEqual([{ classification: 'IVA_16', amountCents: 138 }]);
+      },
+    );
+  });
+
+  // ── WU2 — T2.3 activated wire contract (service-level) ─────────────
+
+  describe('WU2 T2.3 — externally observable wire activation', () => {
+    const productInfoPayload = (overrides: Record<string, unknown> = {}) => ({
+      productId: 'prod-1',
+      productName: 'Product 1',
+      variantId: null,
+      variantName: null,
+      unitPriceCents: 1000,
+      imageUrl: null,
+      ivaRate: 'IVA_16' as QuotationIvaRateClassification,
+      chargeProductTaxes: true,
+      ...overrides,
+    });
+
+    it('addItem read paths expose ivaBreakdown and no longer carry taxRate/taxCents', async () => {
+      const draft = makeQuotation();
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload(),
+      );
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+
+      // Produce the snapshot via the addItem pipeline, then READ the
+      // quotation through the public service surface.
+      await service.addItem(draft.id, { productId: 'prod-1', quantity: 2 });
+      const result = await service.findOne(draft.id);
+
+      const wire = result as unknown as Record<string, unknown>;
+      // The legacy root rate + informational taxCents are GONE from
+      // every read path (they never participated in the totals).
+      expect(wire).not.toHaveProperty('taxRate');
+      expect(wire).not.toHaveProperty('taxCents');
+      // Line total = 1000c × 2 = 2000c; base =
+      // floor((200000 + 50) / 116) = 1724c → included IVA = 276c.
+      expect(wire.ivaBreakdown).toEqual([
+        { classification: 'IVA_16', amountCents: 276 },
+      ]);
+    });
+
+    it('an incomplete line keeps the breakdown empty on the wire (no fabricated zero)', async () => {
+      const legacy = makeQuotation({
+        items: [
+          {
+            id: 'item-1',
+            quotationId: 'q-x',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Product 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 1000,
+            unitPriceCurrency: 'MXN',
+          },
+        ],
+      });
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === legacy.id ? legacy : null),
+        ),
+      });
+      const service = buildService(repo, makeTenantPrisma());
+
+      const result = await service.findOne(legacy.id);
+
+      expect(
+        (result as unknown as Record<string, unknown>).ivaBreakdown,
+      ).toEqual([]);
     });
   });
 });

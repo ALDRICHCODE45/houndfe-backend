@@ -1021,7 +1021,7 @@ describe('Quotation Entity', () => {
       expect(after.discountCents).toBe(before.discountCents);
     });
 
-    it('WU1 correction: toResponse keeps the legacy wire (taxRate/taxCents, no ivaBreakdown)', () => {
+    it('WU2 T2.3: toResponse carries the activated wire (ivaBreakdown; no taxRate/taxCents)', () => {
       const q = Quotation.create({
         id: newQuotationId(),
         sellerUserId: SELLER,
@@ -1029,14 +1029,18 @@ describe('Quotation Entity', () => {
       addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
 
       const response = q.toResponse() as unknown as Record<string, unknown>;
-      // Legacy root rate stays on the wire until WU2 (T2.3) activates
-      // `ivaBreakdown` and removes the legacy fields together.
-      expect(response.taxRate).toBe(0.16);
-      // Informational included IVA: totalCents=11600 → 11600×0.16/1.16.
-      expect(response.taxCents).toBe(1600);
-      expect(response).not.toHaveProperty('ivaBreakdown');
-      // The snapshot capability itself stays internally available —
-      // only its wire activation is deferred to WU2.
+      // WU2 (T2.3) — the legacy root rate and the informational
+      // taxCents are gone from the wire (they never participated in
+      // line, subtotal, discount, or grand totals).
+      expect(response).not.toHaveProperty('taxRate');
+      expect(response).not.toHaveProperty('taxCents');
+      // The breakdown is live on the wire, populated by the T2.2
+      // producer pipeline (same deployable unit).
+      expect(response.ivaBreakdown).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 },
+      ]);
+      // The internal capability remains available for the PDF/PDF
+      // aggregate consumers.
       expect(q.computeIvaBreakdown()).toEqual([
         { classification: 'IVA_16', amountCents: 1600 },
       ]);
