@@ -18,6 +18,9 @@
  *                            transition.
  */
 import type { QuotationStatus } from '../domain/quotation.entity';
+import { IsArray, IsEnum, IsInt, Min, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+import { QUOTATION_IVA_CLASSIFICATIONS } from '../domain/quotation-tax.types';
 
 export interface AppliedPromotionDto {
   /** ID of the promotion entity. */
@@ -57,7 +60,25 @@ export interface QuotationItemResponseDto {
   updatedAt?: Date;
 }
 
-export interface QuotationResponseDto {
+/**
+ * WU2 (T2.3) — one entry of the quotation-level `ivaBreakdown[]`
+ * wire contract. The classification enum is CLOSED over exactly the
+ * five public values (`NOT_TAXABLE` included — it is a response-only
+ * classification derived from `chargeProductTaxesSnapshot=false`).
+ * `amountCents` is exact integer addition over every snapshot-
+ * complete line mapped to the classification: integer (no fractions)
+ * and non-negative by construction.
+ */
+export class QuotationIvaBreakdownEntryDto {
+  @IsEnum(QUOTATION_IVA_CLASSIFICATIONS)
+  classification!: (typeof QUOTATION_IVA_CLASSIFICATIONS)[number];
+
+  @IsInt()
+  @Min(0)
+  amountCents!: number;
+}
+
+export class QuotationResponseDto {
   id: string;
   sellerUserId: string;
   status: QuotationStatus;
@@ -77,13 +98,21 @@ export interface QuotationResponseDto {
   appliedPromotions: AppliedPromotionDto[];
   customerNotes: string | null;
   /**
-   * WU1 correction — legacy wire contract retained. The per-line snapshot
-   * producer pipeline ships in WU2; `ivaBreakdown` activation and the
-   * `taxRate` / `taxCents` removal are owned by WU2's T2.3 together with
-   * the runtime DTO validation.
+   * WU2 (T2.3) — activated wire contract. `ivaBreakdown[]` contains
+   * ONLY the classifications actually represented by snapshot-
+   * complete lines (zero-amount buckets included when zero-tax
+   * lines are present; the array does NOT always return all five
+   * buckets). It is `[]` whenever any line lacks a complete tax
+   * snapshot — never a fabricated aggregate zero, never a partial
+   * breakdown. Ships in the SAME deployable unit as the T2.2
+   * snapshot producer pipeline; the legacy `taxRate` / informational
+   * `taxCents` response fields are removed with it (they never
+   * participated in line, subtotal, discount, or grand totals).
    */
-  taxRate: number;
-  taxCents: number;
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => QuotationIvaBreakdownEntryDto)
+  ivaBreakdown!: QuotationIvaBreakdownEntryDto[];
   vetoedPromotionIds: string[];
   optedInManualPromotionIds: string[];
   /**

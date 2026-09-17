@@ -1021,7 +1021,7 @@ describe('Quotation Entity', () => {
       expect(after.discountCents).toBe(before.discountCents);
     });
 
-    it('WU1 correction: toResponse keeps the legacy wire (taxRate/taxCents, no ivaBreakdown)', () => {
+    it('WU2 T2.3: toResponse carries the activated wire (ivaBreakdown; no taxRate/taxCents)', () => {
       const q = Quotation.create({
         id: newQuotationId(),
         sellerUserId: SELLER,
@@ -1029,14 +1029,18 @@ describe('Quotation Entity', () => {
       addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
 
       const response = q.toResponse() as unknown as Record<string, unknown>;
-      // Legacy root rate stays on the wire until WU2 (T2.3) activates
-      // `ivaBreakdown` and removes the legacy fields together.
-      expect(response.taxRate).toBe(0.16);
-      // Informational included IVA: totalCents=11600 → 11600×0.16/1.16.
-      expect(response.taxCents).toBe(1600);
-      expect(response).not.toHaveProperty('ivaBreakdown');
-      // The snapshot capability itself stays internally available —
-      // only its wire activation is deferred to WU2.
+      // WU2 (T2.3) — the legacy root rate and the informational
+      // taxCents are gone from the wire (they never participated in
+      // line, subtotal, discount, or grand totals).
+      expect(response).not.toHaveProperty('taxRate');
+      expect(response).not.toHaveProperty('taxCents');
+      // The breakdown is live on the wire, populated by the T2.2
+      // producer pipeline (same deployable unit).
+      expect(response.ivaBreakdown).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 },
+      ]);
+      // The internal capability remains available for the PDF/PDF
+      // aggregate consumers.
       expect(q.computeIvaBreakdown()).toEqual([
         { classification: 'IVA_16', amountCents: 1600 },
       ]);
@@ -1089,6 +1093,106 @@ describe('Quotation Entity', () => {
       // amount (no IVA carve-out) and includedIvaCents stays 0.
       expect(cancelled.items[0]?.taxableBaseCents).toBe(10800);
       expect(cancelled.items[0]?.includedIvaCents).toBe(0);
+    });
+  });
+  // ── WU2 — T2.4 triangulation: aggregate invariant + legacy isolation ──
+
+  describe('WU2 T2.4 — mixed-discount invariant + root-rate isolation', () => {
+    /**
+     * Line with a promotion discount applied BEFORE the snapshot is
+     * taken — mirroring the service recompute order (discounts settle
+     * first, then the base is derived from the final post-discount
+     * inclusive amount).
+     */
+    const addDiscountedTaxedLine = (
+      q: Quotation,
+      id: string,
+      rate: 'IVA_16' | 'IVA_8' | 'IVA_0' | 'IVA_EXENTO',
+      chargeProductTaxes: boolean,
+      unitPriceCents: number,
+      discount: {
+        type: 'amount' | 'percentage';
+        amountCents?: number;
+        percent?: number;
+      },
+    ) => {
+      q.addItem(
+        validItemProps(id, {
+          productId: `prod-${id}`,
+          quantity: 1,
+          unitPriceCents,
+        }),
+      );
+      const item = q.items[q.items.length - 1];
+      item.applyDiscount({ ...discount, promotionId: 'promo-t24' });
+      item.snapshotTaxClassification(rate, chargeProductTaxes);
+      item.recomputeTaxableBase();
+      return item;
+    };
+
+    it('mixed-discount fixture: Σ breakdown = totalCents − Σ taxableBaseCents post-discount', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      // IVA_16 @ 10% promo: 11600 → unitPrice 10440, base
+      // floor((1044050) / 116) = 9000, included IVA 1440.
+      addDiscountedTaxedLine(q, 'item-d16', 'IVA_16', true, 11600, {
+        type: 'percentage',
+        percent: 10,
+      });
+      // IVA_8 @ 800c amount promo: 10800 → unitPrice 10000, base
+      // floor((1000050) / 108) = 9259, included IVA 741.
+      addDiscountedTaxedLine(q, 'item-d8', 'IVA_8', true, 10800, {
+        type: 'amount',
+        amountCents: 800,
+      });
+      // NOT_TAXABLE line: base = full 900, included IVA 0.
+      addDiscountedTaxedLine(q, 'item-nt', 'IVA_16', false, 900, {
+        type: 'amount',
+        amountCents: 0,
+      });
+
+      const breakdown = q.computeIvaBreakdown();
+      const sumIva = breakdown.reduce((s, b) => s + b.amountCents, 0);
+      const sumBases = q.items.reduce(
+        (s, item) => s + (item.taxableBaseCents ?? 0),
+        0,
+      );
+      const totals = q.recomputeTotals();
+
+      // Σ 1440 + 741 + 0 = 2181 = 21340 − 19159.
+      expect(sumIva).toBe(2181);
+      expect(totals.totalCents).toBe(21340);
+      expect(sumBases).toBe(19159);
+      expect(sumIva).toBe(totals.totalCents - sumBases);
+    });
+
+    it('a root taxRate differing from every line snapshot does not move any total', () => {
+      const q = Quotation.create({
+        id: newQuotationId(),
+        sellerUserId: SELLER,
+      });
+      addTaxedLine(q, 'item-16', 'IVA_16', true, 11600);
+      addTaxedLine(q, 'item-8', 'IVA_8', true, 10800);
+
+      const before = q.recomputeTotals();
+      // Root rate 0.42 differs from BOTH snapshotted rates (16% / 8%).
+      q.setDeprecatedTaxRate(0.42);
+      const after = q.recomputeTotals();
+
+      expect(after).toEqual(before);
+      // The breakdown is equally untouched.
+      expect(q.computeIvaBreakdown()).toEqual([
+        { classification: 'IVA_16', amountCents: 1600 },
+        { classification: 'IVA_8', amountCents: 800 },
+      ]);
+      // And the wire carries no root rate at all (T2.3 activation).
+      const response = q.toResponse() as unknown as Record<string, unknown>;
+      expect(response).not.toHaveProperty('taxRate');
+      expect(response.subtotalCents).toBe(before.subtotalCents);
+      expect(response.discountCents).toBe(before.discountCents);
+      expect(response.totalCents).toBe(before.totalCents);
     });
   });
 });

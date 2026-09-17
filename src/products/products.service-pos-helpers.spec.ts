@@ -133,6 +133,9 @@ describe('ProductsService — POS Helpers', () => {
         hasVariants: false,
         sellInPos: true,
         useStock: false,
+        // WU2 (T2.1) — widened parent-product tax pair on the response.
+        ivaRate: 'IVA_16',
+        chargeProductTaxes: true,
       };
 
       const mockPriceList = {
@@ -154,6 +157,8 @@ describe('ProductsService — POS Helpers', () => {
         variantName: null,
         unitPriceCents: 5000,
         imageUrl: null,
+        ivaRate: 'IVA_16',
+        chargeProductTaxes: true,
       });
     });
 
@@ -165,6 +170,9 @@ describe('ProductsService — POS Helpers', () => {
         hasVariants: true,
         sellInPos: true,
         useStock: false,
+        // WU2 (T2.1) — variant lines inherit the parent-product tax pair.
+        ivaRate: 'IVA_0',
+        chargeProductTaxes: true,
       };
 
       const mockVariant = {
@@ -198,6 +206,8 @@ describe('ProductsService — POS Helpers', () => {
         variantName: 'Roja M',
         unitPriceCents: 15000,
         imageUrl: null,
+        ivaRate: 'IVA_0',
+        chargeProductTaxes: true,
       });
     });
 
@@ -330,6 +340,93 @@ describe('ProductsService — POS Helpers', () => {
       await expect(
         service.getProductInfoForSale('prod-6', null),
       ).rejects.toThrow(/not enabled for POS/);
+    });
+  });
+
+  describe('getProductInfoForSale — WU2 product tax metadata (T2.1)', () => {
+    // The quotation snapshot pipeline consumes `{ ivaRate,
+    // chargeProductTaxes }` sourced from the PARENT product row. Variant
+    // rows carry no tax fields and are never queried for them — the
+    // variant mock below deliberately omits both fields to prove the
+    // inheritance.
+    // Narrow explicit typing for THIS block's mock calls only. The shared
+    // `makeMockPrisma` harness stays untouched (it spreads an `any`
+    // overrides object, so `prisma` is `any` — the pre-existing debt every
+    // other test in this file inherits).
+    const typedPrisma = () =>
+      prisma as {
+        product: { findUnique: jest.Mock };
+        variant: { findFirst: jest.Mock };
+        priceList: { findFirst: jest.Mock };
+        variantPrice: { findFirst: jest.Mock };
+      };
+    it('returns parent-product ivaRate and chargeProductTaxes for a product branch', async () => {
+      const db = typedPrisma();
+      db.product.findUnique.mockResolvedValue({
+        id: 'prod-tax-1',
+        name: 'Cerveza',
+        hasVariants: false,
+        sellInPos: true,
+        useStock: false,
+        ivaRate: 'IVA_16',
+        chargeProductTaxes: true,
+      });
+      db.priceList.findFirst.mockResolvedValue({ priceCents: 1000 });
+
+      const result = await service.getProductInfoForSale('prod-tax-1', null);
+
+      expect(result.ivaRate).toBe('IVA_16');
+      expect(result.chargeProductTaxes).toBe(true);
+    });
+
+    it('variant branch inherits the parent product tax pair, never the variant row', async () => {
+      const db = typedPrisma();
+      db.product.findUnique.mockResolvedValue({
+        id: 'prod-tax-2',
+        name: 'Camisa',
+        hasVariants: true,
+        sellInPos: true,
+        useStock: false,
+        ivaRate: 'IVA_8',
+        chargeProductTaxes: true,
+      });
+      // Variant row carries NO tax fields — inheritance comes from the
+      // already-loaded parent product.
+      db.variant.findFirst.mockResolvedValue({
+        id: 'var-tax-1',
+        productId: 'prod-tax-2',
+        name: 'Roja M',
+      });
+      db.variantPrice = {
+        findFirst: jest.fn().mockResolvedValue({ priceCents: 15000 }),
+      };
+
+      const result = await service.getProductInfoForSale(
+        'prod-tax-2',
+        'var-tax-1',
+      );
+
+      expect(result.ivaRate).toBe('IVA_8');
+      expect(result.chargeProductTaxes).toBe(true);
+    });
+
+    it('returns chargeProductTaxes=false regardless of the stored ivaRate', async () => {
+      const db = typedPrisma();
+      db.product.findUnique.mockResolvedValue({
+        id: 'prod-tax-3',
+        name: 'Medicamento',
+        hasVariants: false,
+        sellInPos: true,
+        useStock: false,
+        ivaRate: 'IVA_16',
+        chargeProductTaxes: false,
+      });
+      db.priceList.findFirst.mockResolvedValue({ priceCents: 5000 });
+
+      const result = await service.getProductInfoForSale('prod-tax-3', null);
+
+      expect(result.ivaRate).toBe('IVA_16');
+      expect(result.chargeProductTaxes).toBe(false);
     });
   });
 
