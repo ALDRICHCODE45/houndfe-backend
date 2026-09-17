@@ -601,7 +601,11 @@ export class QuotationsService {
       );
     }
 
-    draft.setTaxRate(rate);
+    // WU2 (T2.4) — the deprecated PATCH adapter persists ONLY the legacy
+    // root column through the explicit compatibility mutation; it does
+    // NOT touch the per-line snapshot pipeline, `ivaBreakdown[]`, or the
+    // PDF aggregate input.
+    draft.setDeprecatedTaxRate(rate);
     const persisted = await this.quotationRepo.save(draft);
     return this.toResponse(persisted);
   }
@@ -665,8 +669,8 @@ export class QuotationsService {
 
     await this.recomputePricingAndPromotions(draft);
     const persisted = await this.quotationRepo.save(draft);
-    return this.toResponse(persisted);
 
+    return this.toResponse(persisted);
   }
 
   /**

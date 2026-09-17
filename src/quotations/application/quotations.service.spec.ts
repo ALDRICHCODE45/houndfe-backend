@@ -2174,4 +2174,160 @@ describe('QuotationsService — WU2', () => {
       ).toEqual([]);
     });
   });
+
+  // ── WU2 — T2.4 triangulation: legacy PATCH isolation (service) ─────
+
+  describe('WU2 T2.4 — deprecated setTaxRate persists only the root rate', () => {
+    const productInfoPayload = (overrides: Record<string, unknown> = {}) => ({
+      productId: 'prod-1',
+      productName: 'Product 1',
+      variantId: null,
+      variantName: null,
+      unitPriceCents: 1000,
+      imageUrl: null,
+      ivaRate: 'IVA_16' as QuotationIvaRateClassification,
+      chargeProductTaxes: true,
+      ...overrides,
+    });
+
+    it('persists only the root taxRate and leaves the next breakdown/PDF input byte-identical', async () => {
+      // Snapshot-complete draft produced through the real addItem
+      // pipeline so the breakdown is populated by the producer.
+      const draft = makeQuotation();
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const productsService = makeProductsService();
+      productsService.getProductInfoForSale.mockResolvedValue(
+        productInfoPayload(),
+      );
+      const service = buildService(repo, makeTenantPrisma(), productsService);
+      await service.addItem(draft.id, { productId: 'prod-1', quantity: 2 });
+
+      // The state that drives `ivaBreakdown[]` AND the PDF aggregate
+      // input (Σ breakdown via toResponse) — captured BEFORE the
+      // deprecated PATCH.
+      const breakdownBefore = draft.computeIvaBreakdown();
+      const wireBefore = draft.toResponse();
+      const snapshotsBefore = draft.items.map((i) => ({
+        ivaRateClassification: i.ivaRateClassification,
+        chargeProductTaxesSnapshot: i.chargeProductTaxesSnapshot,
+        taxableBaseCents: i.taxableBaseCents,
+      }));
+
+      const result = await service.setTaxRate(draft.id, 0.08);
+
+      // Only the legacy root column moved.
+      expect(draft.taxRate).toBe(0.08);
+      expect(
+        (result as unknown as Record<string, unknown>).taxRate,
+      ).toBeUndefined(); // wire removed in T2.3
+      // Byte-identical breakdown and wire (the PDF aggregate input).
+      expect(draft.computeIvaBreakdown()).toEqual(breakdownBefore);
+      expect(JSON.stringify(draft.toResponse())).toBe(
+        JSON.stringify(wireBefore),
+      );
+      // No line snapshot was touched.
+      expect(
+        draft.items.map((i) => ({
+          ivaRateClassification: i.ivaRateClassification,
+          chargeProductTaxesSnapshot: i.chargeProductTaxesSnapshot,
+          taxableBaseCents: i.taxableBaseCents,
+        })),
+      ).toEqual(snapshotsBefore);
+    });
+
+    it('a root taxRate differing from every line snapshot does not move any service-read total', async () => {
+      const draft = makeQuotation({
+        items: [
+          {
+            id: 'item-1',
+            quotationId: 'q-x',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Product 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 11600,
+            unitPriceCurrency: 'MXN',
+            ivaRateClassification: 'IVA_16',
+            chargeProductTaxesSnapshot: true,
+            taxableBaseCents: 10000,
+          },
+        ],
+      });
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+        save: jest.fn((q) => Promise.resolve(q)),
+      });
+      const service = buildService(repo, makeTenantPrisma());
+
+      const before = await service.findOne(draft.id);
+      const after = await service.setTaxRate(draft.id, 0.42);
+
+      expect(before.totalCents).toBe(11600);
+      expect(after.totalCents).toBe(before.totalCents);
+      expect(after.subtotalCents).toBe(before.subtotalCents);
+      expect(after.discountCents).toBe(before.discountCents);
+      expect(after.ivaBreakdown).toEqual(before.ivaBreakdown);
+    });
+
+    it('keeps Σ ivaBreakdown = totalCents − Σ taxableBaseCents on a mixed-discount service read', async () => {
+      const draft = makeQuotation({
+        items: [
+          {
+            id: 'item-d16',
+            quotationId: 'q-x',
+            productId: 'prod-1',
+            variantId: null,
+            productName: 'Product 1',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 10440, // post 10% promo
+            unitPriceCurrency: 'MXN',
+            ivaRateClassification: 'IVA_16',
+            chargeProductTaxesSnapshot: true,
+            taxableBaseCents: 9000,
+          },
+          {
+            id: 'item-nt',
+            quotationId: 'q-x',
+            productId: 'prod-2',
+            variantId: null,
+            productName: 'Product 2',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 900,
+            unitPriceCurrency: 'MXN',
+            ivaRateClassification: 'IVA_16',
+            chargeProductTaxesSnapshot: false,
+            taxableBaseCents: 900,
+          },
+        ],
+      });
+      const repo = makeRepo({
+        findById: jest.fn((id) =>
+          Promise.resolve(id === draft.id ? draft : null),
+        ),
+      });
+      const service = buildService(repo, makeTenantPrisma());
+
+      const result = await service.findOne(draft.id);
+
+      const sumIva = result.ivaBreakdown.reduce((s, b) => s + b.amountCents, 0);
+      const sumBases = draft.items.reduce(
+        (s, item) => s + (item.taxableBaseCents ?? 0),
+        0,
+      );
+      // 1440 (IVA_16 post-discount) + 0 (NOT_TAXABLE) = 11340 − 9900.
+      expect(sumIva).toBe(1440);
+      expect(sumBases).toBe(9900);
+      expect(sumIva).toBe(result.totalCents - sumBases);
+    });
+  });
 });
