@@ -7,6 +7,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Product } from './domain/product.entity';
 import type { IProductRepository } from './domain/product.repository';
+import type { QuotationIvaRateClassification } from '../quotations/domain/quotation-tax.types';
 import { PRODUCT_REPOSITORY } from './domain/product.repository';
 import { FilesService } from '../files/files.service';
 import { SatCatalogService } from '../sat-catalog/sat-catalog.service';
@@ -2954,6 +2955,15 @@ export class ProductsService {
     variantName: string | null;
     unitPriceCents: number;
     imageUrl: string | null;
+    /**
+     * WU2 (T2.1) — parent-product IVA classification pair for the
+     * quotation line snapshot pipeline. Variants inherit BOTH fields
+     * from the already-loaded parent `product` row; the variant row is
+     * never queried for tax metadata. `chargeProductTaxes=false`
+     * forces the `NOT_TAXABLE` bucket regardless of `ivaRate`.
+     */
+    ivaRate: QuotationIvaRateClassification;
+    chargeProductTaxes: boolean;
   }> {
     // Fetch product
     const tenantClient = this.tenantPrisma.getClient();
@@ -3019,6 +3029,10 @@ export class ProductsService {
         variantName: variant.name,
         unitPriceCents: variantPrice?.priceCents ?? 0,
         imageUrl: image?.url ?? null,
+        // WU2 (T2.1) — the variant row is never queried for tax:
+        // both fields come from the already-loaded parent product.
+        ivaRate: product.ivaRate as QuotationIvaRateClassification,
+        chargeProductTaxes: product.chargeProductTaxes,
       };
     }
 
@@ -3043,6 +3057,9 @@ export class ProductsService {
       variantName: null,
       unitPriceCents: priceList?.priceCents ?? 0,
       imageUrl: image?.url ?? null,
+      // WU2 (T2.1) — parent-product tax pair for the snapshot pipeline.
+      ivaRate: product.ivaRate as QuotationIvaRateClassification,
+      chargeProductTaxes: product.chargeProductTaxes,
     };
   }
 
