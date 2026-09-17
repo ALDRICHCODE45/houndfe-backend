@@ -461,6 +461,21 @@ export class PdfGenerationService implements OnModuleInit {
         subtotalCents: quotation.subtotalCents,
         discountCents: quotation.discountCents,
         totalCents: quotation.totalCents,
+        /**
+         * WU3 (T3.1) — aggregate IVA amount included in the grand total.
+         * Summed from `ivaBreakdown[].amountCents` only when items and
+         * breakdown are both non-empty (snapshot-complete); `null` when
+         * either is empty (API guarantees empty breakdown for incomplete
+         * snapshots — do not re-derive from product metadata or the legacy
+         * root `taxRate`).
+         */
+        includedIvaCents:
+          quotation.items.length > 0 && quotation.ivaBreakdown.length > 0
+            ? quotation.ivaBreakdown.reduce(
+                (sum, entry) => sum + entry.amountCents,
+                0,
+              )
+            : null,
       },
     };
   }
