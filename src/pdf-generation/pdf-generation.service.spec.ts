@@ -23,6 +23,8 @@
  *     `yoga-layout` to a CJS stub — see `jest.config.js`).
  */
 import { Readable } from 'node:stream';
+import { isValidElement } from 'react';
+import { renderToStream } from '@react-pdf/renderer';
 import { Test } from '@nestjs/testing';
 import {
   BadRequestException,
@@ -30,6 +32,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { SaleDetailResponseDto } from '../sales/dto/sale-detail-response.dto';
+import type { QuotationDocumentProps } from './templates/quotation/quotation-a4.document';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesService } from '../sales/sales.service';
 import {
@@ -430,6 +433,7 @@ describe('PdfGenerationService', () => {
         subtotalCents: number;
         discountCents: number;
         totalCents: number;
+        ivaBreakdown: Array<{ classification: string; amountCents: number }>;
       }> = {},
     ) {
       return {
@@ -470,6 +474,7 @@ describe('PdfGenerationService', () => {
         ],
         vetoedPromotionIds: [],
         optedInManualPromotionIds: [],
+        ivaBreakdown: [],
         customer: {
           id: 'cust-1',
           firstName: 'Maria',
@@ -580,6 +585,69 @@ describe('PdfGenerationService', () => {
         quantity: 2,
         unitPriceCents: 5000,
         subtotalCents: 10000,
+      });
+    });
+
+    // ── WU3 — T3.1: includedIvaCents ─────────────────────────────────
+
+    describe('includedIvaCents mapping (WU3 / T3.1)', () => {
+      const mockedRenderToStream = jest.mocked(renderToStream);
+
+      function capturedQuotationProps(): QuotationDocumentProps {
+        const renderedElement: unknown =
+          mockedRenderToStream.mock.calls.at(-1)?.[0];
+
+        if (!isValidElement<QuotationDocumentProps>(renderedElement)) {
+          throw new Error('Expected a quotation React element');
+        }
+
+        return renderedElement.props;
+      }
+
+      it('maps includedIvaCents to the sum of non-empty breakdown amounts', async () => {
+        const quotation = makeQuotationResponse({
+          ivaBreakdown: [
+            { classification: 'IVA_16', amountCents: 1600 },
+            { classification: 'IVA_0', amountCents: 0 },
+          ],
+        });
+        mockedRenderToStream.mockResolvedValue(Readable.from(['pdf']));
+
+        await service.renderQuotationPdf(quotation as never, 'quotation-a4');
+
+        expect(capturedQuotationProps().totals.includedIvaCents).toBe(1600);
+      });
+
+      it('maps a known zero breakdown to includedIvaCents 0', async () => {
+        const quotation = makeQuotationResponse({
+          ivaBreakdown: [{ classification: 'IVA_0', amountCents: 0 }],
+        });
+        mockedRenderToStream.mockResolvedValue(Readable.from(['pdf']));
+
+        await service.renderQuotationPdf(quotation as never, 'quotation-a4');
+
+        expect(capturedQuotationProps().totals.includedIvaCents).toBe(0);
+      });
+
+      it('sets includedIvaCents to null when ivaBreakdown is empty', async () => {
+        const quotation = makeQuotationResponse({ ivaBreakdown: [] });
+        mockedRenderToStream.mockResolvedValue(Readable.from(['pdf']));
+
+        await service.renderQuotationPdf(quotation as never, 'quotation-a4');
+
+        expect(capturedQuotationProps().totals.includedIvaCents).toBeNull();
+      });
+
+      it('sets includedIvaCents to null when items is empty', async () => {
+        const quotation = makeQuotationResponse({
+          items: [],
+          ivaBreakdown: [{ classification: 'IVA_16', amountCents: 1600 }],
+        });
+        mockedRenderToStream.mockResolvedValue(Readable.from(['pdf']));
+
+        await service.renderQuotationPdf(quotation as never, 'quotation-a4');
+
+        expect(capturedQuotationProps().totals.includedIvaCents).toBeNull();
       });
     });
 

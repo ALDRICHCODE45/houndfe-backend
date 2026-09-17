@@ -64,6 +64,15 @@ export interface QuotationDocumentProps {
     subtotalCents: number;
     discountCents: number;
     totalCents: number;
+    /**
+     * WU3 (T3.1) — aggregate IVA amount included in the grand total.
+     * Derived from the sum of `ivaBreakdown[].amountCents` only when
+     * `items.length > 0` AND `ivaBreakdown.length > 0`; `null` when
+     * the snapshot is incomplete (empty items or empty breakdown).
+     * Known zero (e.g. all ZERO_RATED_0 lines) renders as monetary
+     * zero — the row IS shown. `null` means no row at all.
+     */
+    includedIvaCents: number | null;
   };
 }
 
@@ -239,16 +248,23 @@ function ItemsList({ items }: { items: LineItem[] }) {
 /**
  * Totals — Subtotal / Descuentos as plain rows, a subtle divider, then the
  * grand TOTAL on a highlighted card (the document's focal point, 24pt 800).
- * No IVA row: IVA is informational and already included in the total.
+ *
+ * WU3 (T3.1): one `IVA incluido` aggregate row appears before the divider
+ * when `includedIvaCents` is not `null`. The row displays the monetary zero
+ * when the aggregate is exactly 0 (e.g. all ZERO_RATED_0 lines). The
+ * condition uses strict `!== null` — a naive truthy check would incorrectly
+ * suppress the zero-value row. No per-line or per-classification IVA rows.
  */
 function Totals({
   subtotalCents,
   discountCents,
   totalCents,
+  includedIvaCents,
 }: {
   subtotalCents: number;
   discountCents: number;
   totalCents: number;
+  includedIvaCents: number | null;
 }) {
   return (
     <View style={SHARED_STYLES.modern.totals.block}>
@@ -266,6 +282,15 @@ function Totals({
             : formatCurrency(discountCents)}
         </Text>
       </View>
+
+      {includedIvaCents !== null && (
+        <View style={SHARED_STYLES.modern.totals.row}>
+          <Text style={SHARED_STYLES.modern.totals.label}>IVA incluido</Text>
+          <Text style={SHARED_STYLES.modern.totals.value}>
+            {formatCurrency(includedIvaCents)}
+          </Text>
+        </View>
+      )}
 
       <View style={SHARED_STYLES.modern.totals.divider} />
 

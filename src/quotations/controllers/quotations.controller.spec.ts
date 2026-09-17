@@ -9,6 +9,7 @@
 import { QuotationsController } from './quotations.controller';
 import type { QuotationsService } from '../application/quotations.service';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
+import { HEADERS_METADATA } from '@nestjs/common/constants';
 
 function makeMockService() {
   return {
@@ -25,6 +26,7 @@ function makeMockService() {
     vetoPromotion: jest.fn(),
     optInPromotion: jest.fn(),
     setExpiry: jest.fn(),
+    setTaxRate: jest.fn(),
     cancel: jest.fn(),
     send: jest.fn(),
     findOne: jest.fn(),
@@ -288,6 +290,56 @@ describe('QuotationsController', () => {
 
       expect(service.cancel).toHaveBeenCalledWith('q-1', dto);
       expect(result).toEqual({ id: 'q-1', status: 'CANCELLED' });
+    });
+  });
+
+  // ── WU3 — T3.2: setTaxRate deprecation ─────────────────────────────
+
+  describe('PATCH /quotations/drafts/:id/tax-rate (WU3 / T3.2)', () => {
+    type SetTaxRateMock = jest.MockedFunction<
+      (id: string, taxRate: number) => Promise<{ id: string }>
+    >;
+
+    function setTaxRateMock(): SetTaxRateMock {
+      const candidate: unknown = Reflect.get(service as object, 'setTaxRate');
+      if (typeof candidate !== 'function' || !('mock' in candidate)) {
+        throw new Error('Expected setTaxRate to be a Jest mock');
+      }
+      return candidate as SetTaxRateMock;
+    }
+
+    it('adds exactly the Deprecation: true header without Sunset', () => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        QuotationsController.prototype,
+        'setTaxRate',
+      );
+      const handler: unknown = descriptor?.value;
+      if (typeof handler !== 'function') {
+        throw new Error('Expected setTaxRate handler');
+      }
+
+      const headers: unknown = Reflect.getMetadata(HEADERS_METADATA, handler);
+      expect(headers).toEqual([{ name: 'Deprecation', value: 'true' }]);
+    });
+
+    it('delegates to service.setTaxRate with (id, dto.taxRate)', async () => {
+      const mock = setTaxRateMock();
+      mock.mockResolvedValue({ id: 'q-1' });
+      const dto = { taxRate: 0.16 };
+
+      const result = await controller.setTaxRate('q-1', dto);
+
+      expect(mock).toHaveBeenCalledWith('q-1', dto.taxRate);
+      expect(result).toEqual({ id: 'q-1' });
+    });
+
+    it('lets service errors propagate', async () => {
+      const mock = setTaxRateMock();
+      mock.mockRejectedValue(new Error('boom'));
+
+      await expect(
+        controller.setTaxRate('q-1', { taxRate: 0.16 }),
+      ).rejects.toThrow('boom');
     });
   });
 
