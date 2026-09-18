@@ -397,34 +397,33 @@ export class ChatbotApiService {
   /**
    * Record delivery carrier metadata on a sale.
    * Also marks the delivery status as SHIPPED.
+   *
+   * ODD O1 — the write is a single tenant-qualified CONDITIONAL update whose
+   * predicate re-checks the sale lifecycle AT WRITE TIME:
+   * `{ id, tenantId, status: 'CONFIRMED', paymentStatus: 'PAID',
+   * channel: 'ONLINE', deliveryStatus: { not: 'DELIVERED' } }`.
+   *
+   * The previous stale readiness read (`findUnique`) followed by an
+   * unconditional `update` is gone: a cancellation or a route delivery that
+   * commits between the two statements can no longer be overwritten (no
+   * CANCELED→SHIPPED and no DELIVERED→SHIPPED). Because the metadata lives
+   * in the same conditional write, a `count === 0` result means NO metadata
+   * was written, and the existing `SALE_DELIVERY_NOT_READY` contract is
+   * preserved unchanged.
    */
   async setDeliveryMetadata(input: SetDeliveryMetadataInput): Promise<void> {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
 
-    const sale = await prisma.sale.findUnique({
-      where: { id: input.saleId },
-      include: {
-        items: true,
-        payments: true,
-        shippingAddress: true,
+    const written = await prisma.sale.updateMany({
+      where: {
+        id: input.saleId,
+        tenantId,
+        status: 'CONFIRMED',
+        paymentStatus: 'PAID',
+        channel: 'ONLINE',
+        deliveryStatus: { not: 'DELIVERED' },
       },
-    });
-
-    if (
-      !sale ||
-      sale.status !== 'CONFIRMED' ||
-      sale.paymentStatus !== 'PAID' ||
-      sale.channel !== 'ONLINE' ||
-      sale.deliveryStatus === 'DELIVERED'
-    ) {
-      throw new BusinessRuleViolationError(
-        'Delivery metadata can only be set on paid confirmed ONLINE sales before delivery',
-        'SALE_DELIVERY_NOT_READY',
-      );
-    }
-
-    await prisma.sale.update({
-      where: { id: input.saleId },
       data: {
         carrierName: input.carrierName,
         trackingRef: input.trackingRef,
@@ -432,6 +431,13 @@ export class ChatbotApiService {
         deliveryStatus: 'SHIPPED',
       },
     });
+
+    if (written.count === 0) {
+      throw new BusinessRuleViolationError(
+        'Delivery metadata can only be set on paid confirmed ONLINE sales before delivery',
+        'SALE_DELIVERY_NOT_READY',
+      );
+    }
   }
 
   /**

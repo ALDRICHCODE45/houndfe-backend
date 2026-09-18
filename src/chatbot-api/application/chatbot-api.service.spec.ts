@@ -89,6 +89,7 @@ type MockTenantClient = {
     create: jest.Mock<Promise<MockSaleRecord>, [unknown?]>;
     findUnique: jest.Mock<Promise<MockSaleRecord | null>, [unknown?]>;
     update: jest.Mock<Promise<MockSaleRecord>, [unknown?]>;
+    updateMany: jest.Mock<Promise<{ count: number }>, [unknown?]>;
     findMany: jest.Mock<Promise<MockSaleRecord[]>, [unknown?]>;
   };
   receiptEvidence: {
@@ -120,6 +121,47 @@ type UpdateAddressCall = {
   where: { id: string };
   data: { label: string | null; visualReferences: string | null };
 };
+
+/**
+ * ODD O1 — in-memory stand-in for `sale.updateMany`. Evaluates the service's
+ * conditional predicate against a single row fixture and applies `data` ONLY
+ * when the predicate matches, so the spec observes the write predicate's real
+ * semantics (tenant + lifecycle/payment/channel guards) instead of stubbing
+ * `count` blindly.
+ *
+ * This is NOT a PostgreSQL proof: no isolation level, contention, lock
+ * ordering, or rollback behavior is exercised.
+ */
+function conditionalSaleUpdate(row: Record<string, unknown> | null): jest.Mock {
+  return jest.fn(
+    (args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }) => {
+      const matches = row !== null && matchesSaleWhere(row, args.where);
+      if (matches) {
+        Object.assign(row, args.data);
+      }
+      return Promise.resolve({ count: matches ? 1 : 0 });
+    },
+  );
+}
+
+function matchesSaleWhere(
+  row: Record<string, unknown>,
+  where: Record<string, unknown>,
+): boolean {
+  return Object.entries(where).every(([field, expected]) => {
+    const actual = row[field];
+    if (expected === null || typeof expected !== 'object') {
+      return actual === expected;
+    }
+    const filter = expected as { not?: unknown; in?: unknown[] };
+    if (filter.not !== undefined) return actual !== filter.not;
+    if (filter.in !== undefined) return filter.in.includes(actual);
+    return false;
+  });
+}
 
 function makeCatalogProduct(
   overrides: Partial<ProductWithIncludes> = {},
@@ -260,6 +302,7 @@ describe('ChatbotApiService', () => {
         create: jest.fn<Promise<MockSaleRecord>, [unknown?]>(),
         findUnique: jest.fn<Promise<MockSaleRecord | null>, [unknown?]>(),
         update: jest.fn<Promise<MockSaleRecord>, [unknown?]>(),
+        updateMany: jest.fn<Promise<{ count: number }>, [unknown?]>(),
         findMany: jest.fn<Promise<MockSaleRecord[]>, [unknown?]>(),
       },
       receiptEvidence: {
@@ -1273,89 +1316,121 @@ describe('ChatbotApiService', () => {
   });
 
   describe('setDeliveryMetadata', () => {
-    it('rejects pending-payment sales before writing delivery metadata', async () => {
+    const deliveryInput = {
+      saleId: 'sale-bot-1',
+      carrierName: 'DHL',
+      trackingRef: 'DHL-1234567890',
+      estimatedDeliveryAt: new Date('2026-06-20T00:00:00.000Z'),
+    };
+
+    const saleRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'sale-bot-1',
+      tenantId: 'tenant-1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PAID',
+      deliveryStatus: 'PENDING',
+      channel: 'ONLINE',
+      ...overrides,
+    });
+
+    it('rejects pending-payment sales at write time and writes no delivery metadata', async () => {
       const client = tenantPrisma.getClient();
-      client.sale.findUnique.mockResolvedValue({
-        id: 'sale-bot-1',
-        folio: 'BOT-0001',
-        status: 'CONFIRMED',
-        paymentStatus: 'CREDIT',
-        deliveryStatus: 'PENDING',
-        channel: 'ONLINE',
-        totalCents: 519800,
-        paidCents: 0,
-        debtCents: 519800,
-        confirmedAt: new Date(),
-        customerId: 'cust-1',
-        items: [],
-        payments: [],
-        shippingAddress: null,
-      });
+      const row = saleRow({ paymentStatus: 'CREDIT' });
+      client.sale.updateMany.mockImplementation(conditionalSaleUpdate(row));
 
       await expect(
-        service.setDeliveryMetadata({
-          saleId: 'sale-bot-1',
-          carrierName: 'DHL',
-          trackingRef: 'DHL-1234567890',
-          estimatedDeliveryAt: new Date('2026-06-20T00:00:00.000Z'),
-        }),
+        service.setDeliveryMetadata(deliveryInput),
       ).rejects.toMatchObject({
         code: 'SALE_DELIVERY_NOT_READY',
         message:
           'Delivery metadata can only be set on paid confirmed ONLINE sales before delivery',
       });
 
+      expect(client.sale.updateMany).toHaveBeenCalledTimes(1);
+      // No metadata written on the losing row.
+      expect(row).not.toHaveProperty('carrierName');
+      expect(row).not.toHaveProperty('trackingRef');
+      expect(row.deliveryStatus).toBe('PENDING');
+      // The stale readiness read is gone — the conditional write is the gate.
+      expect(client.sale.findUnique).not.toHaveBeenCalled();
       expect(client.sale.update).not.toHaveBeenCalled();
     });
 
     it('updates sale with carrier name, tracking ref, and estimated delivery date', async () => {
       const client = tenantPrisma.getClient();
-      client.sale.findUnique.mockResolvedValue({
-        id: 'sale-bot-1',
-        folio: 'BOT-0001',
-        status: 'CONFIRMED',
-        paymentStatus: 'PAID',
-        deliveryStatus: 'PENDING',
-        channel: 'ONLINE',
-        totalCents: 519800,
-        paidCents: 519800,
-        debtCents: 0,
-        confirmedAt: new Date(),
-        customerId: 'cust-1',
-        items: [],
-        payments: [],
-        shippingAddress: null,
+      const row = saleRow();
+      client.sale.updateMany.mockImplementation(conditionalSaleUpdate(row));
+
+      await service.setDeliveryMetadata(deliveryInput);
+
+      expect(client.sale.updateMany).toHaveBeenCalledTimes(1);
+      expect(client.sale.updateMany.mock.calls[0]?.[0]).toEqual({
+        where: {
+          id: 'sale-bot-1',
+          tenantId: 'tenant-1',
+          status: 'CONFIRMED',
+          paymentStatus: 'PAID',
+          channel: 'ONLINE',
+          deliveryStatus: { not: 'DELIVERED' },
+        },
+        data: {
+          carrierName: 'DHL',
+          trackingRef: 'DHL-1234567890',
+          estimatedDeliveryAt: new Date('2026-06-20T00:00:00.000Z'),
+          deliveryStatus: 'SHIPPED',
+        },
       });
-      client.sale.update.mockResolvedValue({
-        id: 'sale-bot-1',
-        folio: 'BOT-0001',
-        status: 'CONFIRMED',
-        paymentStatus: 'CREDIT',
-        deliveryStatus: 'SHIPPED',
-        channel: 'ONLINE',
-        totalCents: 519800,
-        paidCents: 0,
-        debtCents: 519800,
-        confirmedAt: new Date(),
-        customerId: 'cust-1',
-        items: [],
-        payments: [],
-        shippingAddress: null,
+      expect(row.deliveryStatus).toBe('SHIPPED');
+      expect(row['carrierName']).toBe('DHL');
+      expect(client.sale.findUnique).not.toHaveBeenCalled();
+      expect(client.sale.update).not.toHaveBeenCalled();
+    });
+
+    it('Given a cancellation committed first, when delivery metadata is set, then SALE_DELIVERY_NOT_READY is preserved and no metadata is written', async () => {
+      const client = tenantPrisma.getClient();
+      const row = saleRow({ status: 'CANCELED' });
+      client.sale.updateMany.mockImplementation(conditionalSaleUpdate(row));
+
+      await expect(
+        service.setDeliveryMetadata(deliveryInput),
+      ).rejects.toMatchObject({
+        code: 'SALE_DELIVERY_NOT_READY',
       });
 
-      await service.setDeliveryMetadata({
-        saleId: 'sale-bot-1',
-        carrierName: 'DHL',
-        trackingRef: 'DHL-1234567890',
-        estimatedDeliveryAt: new Date('2026-06-20T00:00:00.000Z'),
+      expect(row.status).toBe('CANCELED');
+      expect(row.deliveryStatus).toBe('PENDING');
+      expect(row).not.toHaveProperty('carrierName');
+      expect(client.sale.update).not.toHaveBeenCalled();
+    });
+
+    it('Given a route delivery committed first, when delivery metadata is set, then the DELIVERED → SHIPPED downgrade is rejected and the sale stays DELIVERED', async () => {
+      const client = tenantPrisma.getClient();
+      const row = saleRow({ deliveryStatus: 'DELIVERED' });
+      client.sale.updateMany.mockImplementation(conditionalSaleUpdate(row));
+
+      await expect(
+        service.setDeliveryMetadata(deliveryInput),
+      ).rejects.toMatchObject({
+        code: 'SALE_DELIVERY_NOT_READY',
       });
 
-      expect(client.sale.update).toHaveBeenCalledTimes(1);
-      expect(client.sale.findUnique).toHaveBeenCalledTimes(1);
-      expect(client.sale.update.mock.calls[0]?.[0]).toMatchObject({
-        where: { id: 'sale-bot-1' },
-        data: { carrierName: 'DHL', trackingRef: 'DHL-1234567890' },
+      expect(row.deliveryStatus).toBe('DELIVERED');
+      expect(row).not.toHaveProperty('trackingRef');
+    });
+
+    it('Given a sale from another tenant, when delivery metadata is set, then zero rows match and no metadata is written', async () => {
+      const client = tenantPrisma.getClient();
+      const row = saleRow({ tenantId: 'tenant-2' });
+      client.sale.updateMany.mockImplementation(conditionalSaleUpdate(row));
+
+      await expect(
+        service.setDeliveryMetadata(deliveryInput),
+      ).rejects.toMatchObject({
+        code: 'SALE_DELIVERY_NOT_READY',
       });
+
+      expect(row).not.toHaveProperty('carrierName');
+      expect(row.deliveryStatus).toBe('PENDING');
     });
   });
 
@@ -1369,6 +1444,7 @@ describe('ChatbotApiService', () => {
         phoneCountryCode: '52',
         phone: '5512345678',
         email: null,
+        globalPriceListId: null,
         preferredPaymentMethod: 'transfer',
         comments: null,
         businessName: null,
