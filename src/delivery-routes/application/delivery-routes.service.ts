@@ -32,10 +32,15 @@ import {
   DeliveryRoute,
   type SaleEligibilitySnapshot,
 } from '../domain/delivery-route.entity';
-import { DeliveryRouteNotFoundError } from '../domain/delivery-route.errors';
+import {
+  DeliveryRouteInvalidTransitionError,
+  DeliveryRouteNotFoundError,
+} from '../domain/delivery-route.errors';
 import {
   DELIVERY_ROUTE_REPOSITORY,
   type DeliveryRouteReadModel,
+  type DeliveryRouteStateExpectation,
+  type DeliveryRouteTransitionOutcome,
   type IDeliveryRouteRepository,
   type ListDeliveryRoutesInput,
 } from '../domain/delivery-route.repository';
@@ -43,6 +48,7 @@ import {
   SALE_REPOSITORY,
   type ISaleRepository,
 } from '../../sales/domain/sale.repository';
+import { SaleNotDeliverableError } from '../../sales/domain/sale.errors';
 import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import {
   DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
@@ -71,6 +77,53 @@ export type DeliveryRouteRequestContext = {
   userId: string;
   ability: AppAbility;
 };
+
+/**
+ * Abort signal for ONE optimistic attempt of a route transition. It is
+ * thrown inside the attempt's transaction so the persisted writes of that
+ * attempt roll back before the driver re-reads fresh state; it never
+ * escapes the driver and never reaches the HTTP layer.
+ */
+class StaleDeliveryRouteSnapshotError extends Error {
+  constructor() {
+    super('delivery route snapshot is stale');
+    this.name = 'StaleDeliveryRouteSnapshotError';
+  }
+}
+
+/**
+ * Bounded optimistic retries for the check-in / cancel transitions. Each
+ * attempt runs in its own transaction, so a lost race is re-evaluated from
+ * freshly persisted state without leaking a partial write into the retry.
+ * Exhausting the budget is surfaced as the existing
+ * `DELIVERY_ROUTE_INVALID_TRANSITION` (422) contract rather than a silent
+ * success or a new wire code.
+ */
+const MAX_ROUTE_TRANSITION_ATTEMPTS = 4;
+
+/**
+ * Capture the state identity of a loaded route BEFORE it is mutated. The
+ * conditional commit compares exactly these fields at write time; exporting
+ * the builder keeps the application and its specs building one shape.
+ */
+export function captureRouteTransitionExpectation(
+  route: DeliveryRoute,
+): DeliveryRouteStateExpectation {
+  return {
+    status: route.status,
+    startedAt: route.startedAt,
+    completedAt: route.completedAt,
+    cancelledAt: route.cancelledAt,
+    updatedAt: route.updatedAt,
+    stops: route.stops.map((stop) => ({
+      id: stop.id,
+      status: stop.status,
+      checkedInAt: stop.checkedInAt,
+      completedAt: stop.completedAt,
+      activeRouteId: stop.activeRouteId,
+    })),
+  };
+}
 
 @Injectable()
 export class DeliveryRoutesService {
@@ -202,118 +255,172 @@ export class DeliveryRoutesService {
 
   /**
    * `POST /delivery-routes/:id/cancel` — DRAFT | ACTIVE → CANCELLED.
-   * Clears the ADR-7 active marker on every stop when transitioning
-   * out of ACTIVE.
+   * Clears the ADR-7 active marker on every stop when transitioning out of
+   * ACTIVE. Committed through the tenant-qualified conditional seam (ODD
+   * O1) inside a transaction, so a cancellation built from a stale snapshot
+   * cannot revert a stop a concurrent check-in just completed: the stale
+   * attempt is detected and re-evaluated against freshly persisted state.
    */
   async cancel(
     ctx: DeliveryRouteRequestContext,
     routeId: string,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
-    const existing = await this.requireRoute({ tenantId, id: routeId });
-    existing.cancel({});
-    const saved = await this.repo.save(existing);
+    await this.runTransitionWithStaleRetry(
+      tenantId,
+      routeId,
+      async (tx, before) => {
+        const expected = captureRouteTransitionExpectation(before);
+        before.cancel({});
+        const outcome = await this.repo.commitTransition({
+          tx,
+          tenantId,
+          routeId,
+          expected,
+          next: before,
+        });
+        this.assertTransitionCommitted(outcome, routeId);
+      },
+    );
     return this.toResponseDto(
-      await this.requireReadModel({ tenantId, id: saved.id }),
+      await this.requireReadModel({ tenantId, id: routeId }),
     );
   }
 
   /**
    * `POST /delivery-routes/:id/stops/:stopId/check-in` — atomic check-in.
    *
-   * Choreography inside `runInTransaction`:
-   *   1. Load the route (tenant-scoped) — must be ACTIVE.
-   *   2. Aggregate `checkInStop(stopId)` flips the stop to COMPLETED,
-   *      sets `activeRouteId` per ADR-7, auto-completes the route when
-   *      the last stop is checked in.
-   *   3. The Sale mirror flip is delegated to `saleRepo.markSaleDelivered`
+   * The transition is committed through the tenant-qualified CONDITIONAL
+   * seam (ODD O1) instead of an unconditional aggregate replacement, inside
+   * the existing transaction choreography. Per attempt, inside ONE
+   * transaction:
+   *   1. Load the route (tenant-scoped, inside the tx). Miss → 404.
+   *   2. Aggregate `checkInStop(stopId)` flips the stop to COMPLETED, sets
+   *      `activeRouteId` per ADR-7 and reports the next pending stop. A
+   *      route that is not ACTIVE (e.g. a cancellation that already won)
+   *      throws `DeliveryRouteInvalidTransitionError` (422) here — before
+   *      any sale, route, stop or outbox write.
+   *   3. `commitTransition` compare-and-sets the row against the snapshot
+   *      loaded in (1) BEFORE the sale mirror write, so a route state that
+   *      changed under this request (a cancellation that won, say) is
+   *      detected and re-evaluated without a sale, stop or outbox write
+   *      having been issued for the losing snapshot. A miss means another
+   *      writer committed first: this attempt rolls back and the driver
+   *      re-evaluates from freshly persisted state (bounded retries).
+   *      Route auto-completion is re-derived by the seam from the
+   *      PERSISTED stop set, so two concurrent final pending stops cannot
+   *      leave an ACTIVE route with no pending stops.
+   *   4. The Sale mirror flip is delegated to `saleRepo.markSaleDelivered`
    *      inside the SAME transaction so the stop + sale writes commit
-   *      atomically. `markSaleDelivered` defense-in-depth `where:
-   *      { id, tenantId }` raises `P2025` on a missing sale; we map
-   *      that to `DeliveryRouteNotFoundError` (404) so a tampered
-   *      saleId surfaces uniformly.
-   *   4. When a `nextStop` exists, the service emits EXACTLY ONE
+   *      atomically. That write is CONDITIONAL on the persisted sale
+   *      lifecycle (`{ id, tenantId, status: 'CONFIRMED', deliveryStatus:
+   *      IN (PENDING|SHIPPED|DELIVERED) }`), so a cancellation that
+   *      committed first cannot be overwritten. The typed outcome maps to
+   *      the wire contract without disclosing tenant existence:
+   *      `not_deliverable` → `SaleNotDeliverableError` (422); `missing`
+   *      → `DeliveryRouteNotFoundError` (404). Both abort the whole
+   *      transaction — including the route/stop write of step 3 — before
+   *      the outbox publish.
+   *   5. When a `nextStop` exists, the service emits EXACTLY ONE
    *      `delivery.next_stop.notify` outbox row inside the same
    *      transaction via `OutboxWriterService.publish(tx, …)`. The row
    *      carries the next-sale snapshot (name, address label, write-
    *      time email). The Inngest function re-resolves the
    *      authoritative email at send-time so a tenant edit between
    *      check-in and dispatch does not lose the recipient.
-   *   5. Persist the aggregate inside the same transaction.
    *
    * Idempotency: the aggregate's `checkInStop` is a no-op on an
-   * already-COMPLETED stop, so a replayed transaction surfaces the
-   * same response without a second outbox row.
+   * already-COMPLETED stop, and the row is only published by the request
+   * that observed PENDING on its winning attempt — so a duplicate
+   * concurrent check-in reclassifies as a successful replay and produces
+   * no second outbox row.
    */
   async checkInStop(
-    ctx: DeliveryRouteRequestContext,
+    _ctx: DeliveryRouteRequestContext,
     routeId: string,
     stopId: string,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
-    await this.repo.runInTransaction(async (tx) => {
-      const existing = await this.findByIdInTx(tx, tenantId, routeId);
-      if (!existing) {
-        throw new DeliveryRouteNotFoundError(routeId);
-      }
-      // Capture the pre-call stop status so a replay (already-COMPLETED
-      // stop) can be detected — the aggregate's `checkInStop` is
-      // idempotent and would otherwise return the existing nextStop,
-      // causing a duplicate outbox row on a retried check-in.
-      const preStop = existing.stops.find((s) => s.id === stopId);
-      const wasPending = preStop?.status === 'PENDING';
-      const checkIn = existing.checkInStop({ stopId });
+    await this.runTransitionWithStaleRetry(
+      tenantId,
+      routeId,
+      async (tx, before) => {
+        // Capture the snapshot identity BEFORE mutating the aggregate —
+        // the conditional commit compares exactly this expected state.
+        const expected = captureRouteTransitionExpectation(before);
+        // The pre-call stop status drives the duplicate-replay decision:
+        // only the request that found the stop PENDING may publish a
+        // next-stop row (a replayed COMPLETED stop must not).
+        const wasPending =
+          before.stops.find((stop) => stop.id === stopId)?.status ===
+          'PENDING';
+        const checkIn = before.checkInStop({ stopId });
 
-      // Sale mirror flip — uses the same tx so it joins the route save.
-      // `markSaleDelivered` is tenant-scoped at the WHERE clause; if the
-      // sale vanished (P2025), we surface 404.
-      try {
-        await this.saleRepo.markSaleDelivered(tx, {
+        // Conditional, tenant-qualified commit of the transition. On a
+        // stale snapshot this attempt rolls back and the driver
+        // re-evaluates from freshly persisted state; a cancellation that
+        // already won is detected HERE (either the aggregate throws 422 on
+        // the re-read, or the compare-and-set misses) so it can never be
+        // followed by a sale, stop or outbox write.
+        const outcome = await this.repo.commitTransition({
+          tx,
+          tenantId,
+          routeId,
+          expected,
+          next: before,
+        });
+        this.assertTransitionCommitted(outcome, routeId);
+
+        // Sale mirror flip — conditional, tenant-qualified, same tx. The
+        // typed outcome distinguishes a lifecycle loss (existing but not
+        // deliverable) from a missing/foreign sale; neither path commits
+        // the route write above or the outbox row below (the enclosing
+        // transaction rolls all of them back together).
+        const delivered = await this.saleRepo.markSaleDelivered(tx, {
           tenantId,
           saleId: checkIn.completedStop.saleId,
         });
-      } catch (error) {
-        if (
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2025'
-        ) {
+
+        if (delivered.kind === 'missing') {
           throw new DeliveryRouteNotFoundError(routeId);
         }
-        throw error;
-      }
+        if (delivered.kind === 'not_deliverable') {
+          // Cancellation (or any other non-deliverable lifecycle state) won
+          // the race: 422 with the existing contract, stop not completed.
+          throw new SaleNotDeliverableError();
+        }
 
-      // Persist the aggregate FIRST so the outbox row references the
-      // post-check-in state of the route. The write is inside the same
-      // tx as the outbox insert, so a rollback on either write drops
-      // both — the contract the dedicated poller/dispatcher relies on.
-      await this.saveInTx(tx, existing);
-
-      // Emit the next-stop outbox row ONLY when:
-      //   (a) a next stop exists (route is still ACTIVE), AND
-      //   (b) the stop was PENDING before this call (idempotency —
-      //       a replayed COMPLETED stop is a no-op, so no second row).
-      // The aggregate's `checkInStop` returns `nextStop: null` when the
-      // route just auto-completed, satisfying (a). The `wasPending`
-      // snapshot satisfies (b).
-      if (checkIn.nextStop && wasPending) {
-        const payload = await this.composeNextStopPayload(
-          tx,
-          tenantId,
-          existing,
-          checkIn.completedStop.id,
-          checkIn.nextStop.id,
-          checkIn.nextStop.saleId,
-        );
-        await this.outboxWriter.publish(
-          tx,
-          tenantId,
-          DELIVERY_ROUTE_OUTBOX_AGGREGATE_TYPE,
-          existing.id,
-          DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
-          payload as unknown as Prisma.InputJsonValue,
-        );
-      }
-    });
+        // Emit the next-stop outbox row ONLY when:
+        //   (a) a next stop exists (route is still ACTIVE), AND
+        //   (b) this attempt observed the stop as PENDING (idempotency —
+        //       a duplicate/replayed check-in writes no second row).
+        // The aggregate's `checkInStop` returns `nextStop: null` when the
+        // route just auto-completed, satisfying (a).
+        if (checkIn.nextStop && wasPending) {
+          const payload = await this.composeNextStopPayload(
+            tx,
+            tenantId,
+            before,
+            checkIn.completedStop.id,
+            checkIn.nextStop.id,
+            checkIn.nextStop.saleId,
+          );
+          await this.outboxWriter.publish(
+            tx,
+            tenantId,
+            DELIVERY_ROUTE_OUTBOX_AGGREGATE_TYPE,
+            before.id,
+            DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
+            // SAFETY: `composeNextStopPayload` returns a plain object built
+            // exclusively from `string | null` fields (see
+            // `DeliveryNextStopNotifyPayload`), which is JSON-serializable at
+            // runtime; Prisma's `InputJsonValue` type cannot express that
+            // structurally, so this assertion only narrows the static type.
+            payload as unknown as Prisma.InputJsonValue,
+          );
+        }
+      },
+    );
 
     return this.toResponseDto(
       await this.requireReadModel({ tenantId, id: routeId }),
@@ -350,7 +457,7 @@ export class DeliveryRoutesService {
    * miss → 404 (`DeliveryRouteNotFoundError`).
    */
   async getById(
-    ctx: DeliveryRouteRequestContext,
+    _ctx: DeliveryRouteRequestContext,
     routeId: string,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
@@ -367,7 +474,7 @@ export class DeliveryRoutesService {
    * precondition re-check.
    */
   async delete(
-    ctx: DeliveryRouteRequestContext,
+    _ctx: DeliveryRouteRequestContext,
     routeId: string,
   ): Promise<void> {
     const tenantId = this.requireTenantId();
@@ -431,13 +538,59 @@ export class DeliveryRoutesService {
     return this.repo.findById({ tenantId, id });
   }
 
-  /** Persist the aggregate inside an ambient transaction. */
-  private async saveInTx(
-    tx: Prisma.TransactionClient,
-    route: DeliveryRoute,
-  ): Promise<DeliveryRoute> {
-    void tx;
-    return this.repo.save(route);
+  /**
+   * Run a route transition with bounded optimistic retries, one
+   * transaction per attempt (ODD O1).
+   *
+   * Each attempt loads fresh state, evaluates the transition and commits it
+   * through the conditional seam. A predicate miss aborts the attempt's
+   * transaction through `StaleDeliveryRouteSnapshotError` — so no write of
+   * the losing attempt survives — and the driver re-evaluates from the
+   * winner's committed state. The budget is bounded; exhausting it surfaces
+   * the existing `DELIVERY_ROUTE_INVALID_TRANSITION` (422) contract instead
+   * of reporting a false success.
+   */
+  private async runTransitionWithStaleRetry(
+    tenantId: string,
+    routeId: string,
+    attempt: (
+      tx: Prisma.TransactionClient,
+      before: DeliveryRoute,
+    ) => Promise<void>,
+  ): Promise<void> {
+    for (let index = 0; index < MAX_ROUTE_TRANSITION_ATTEMPTS; index++) {
+      try {
+        await this.repo.runInTransaction(async (tx) => {
+          const before = await this.findByIdInTx(tx, tenantId, routeId);
+          if (!before) {
+            throw new DeliveryRouteNotFoundError(routeId);
+          }
+          await attempt(tx, before);
+        });
+        return;
+      } catch (error) {
+        if (error instanceof StaleDeliveryRouteSnapshotError) continue;
+        throw error;
+      }
+    }
+    throw new DeliveryRouteInvalidTransitionError(
+      'DeliveryRoute was updated concurrently; the transition could not be applied',
+      { reason: 'CONCURRENT_UPDATE_CONFLICT', routeId },
+    );
+  }
+
+  /** Map the conditional-commit outcome onto the existing wire contract:
+   *  `missing` → 404, `stale` → abort this attempt for re-evaluation. */
+  private assertTransitionCommitted(
+    outcome: DeliveryRouteTransitionOutcome,
+    routeId: string,
+  ): void {
+    if (outcome.kind === 'missing') {
+      throw new DeliveryRouteNotFoundError(routeId);
+    }
+    if (outcome.kind === 'stale') {
+      throw new StaleDeliveryRouteSnapshotError();
+    }
   }
 
   /** Re-load the read model by id (throws 404 on miss). */
@@ -534,6 +687,14 @@ export class DeliveryRoutesService {
    * cross-tenant sale returns `null` projections and the payload
    * gracefully degrades (name/email/label all null → template still
    * renders with a generic greeting).
+   *
+   * The nested `customer` / `shippingAddress` relations cannot carry a
+   * tenant predicate of their own (single-column relations, and the CLS
+   * extension only rewrites top-level models), so both children are
+   * re-checked against `tenantId` after the read. A foreign-tenant child
+   * is treated exactly like a missing one — and each child is filtered
+   * independently, so one foreign relation never suppresses a valid
+   * sibling.
    */
   private async composeNextStopPayload(
     tx: Prisma.TransactionClient,
@@ -543,16 +704,26 @@ export class DeliveryRoutesService {
     nextStopId: string,
     nextSaleId: string,
   ): Promise<DeliveryNextStopNotifyPayload> {
+    // SAFETY: `Prisma.TransactionClient` and the tenant-scoped client expose
+    // the same model delegates; the transaction client only omits the
+    // client-level lifecycle methods this read never calls. The assertion
+    // makes that shared delegate surface statically visible.
     const prisma = tx as unknown as ReturnType<TenantPrismaService['getClient']>;
     const sale = await prisma.sale.findFirst({
       where: { id: nextSaleId, tenantId },
       select: {
         folio: true,
         customer: {
-          select: { firstName: true, lastName: true, email: true },
+          select: {
+            tenantId: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
         },
         shippingAddress: {
           select: {
+            tenantId: true,
             label: true,
             street: true,
             exteriorNumber: true,
@@ -567,8 +738,19 @@ export class DeliveryRoutesService {
       },
     });
 
-    const customer = sale?.customer ?? null;
-    const address = sale?.shippingAddress ?? null;
+    // Post-read tenant filter: Prisma cannot attach the tenant predicate to
+    // these to-one selections, so a foreign-tenant child must be dropped
+    // here instead of being snapshotted into the outbox payload.
+    const projectedCustomer = sale?.customer ?? null;
+    const customer =
+      projectedCustomer && projectedCustomer.tenantId === tenantId
+        ? projectedCustomer
+        : null;
+    const projectedAddress = sale?.shippingAddress ?? null;
+    const address =
+      projectedAddress && projectedAddress.tenantId === tenantId
+        ? projectedAddress
+        : null;
     const fullName = customer
       ? `${customer.firstName ?? ''}${
           customer.lastName ? ' ' + customer.lastName : ''

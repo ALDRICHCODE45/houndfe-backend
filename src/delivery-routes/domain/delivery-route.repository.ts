@@ -19,9 +19,49 @@
  * the global Prisma client. WU2 ships the signatures; the WU3 poller
  * wires them up.
  */
-import type { DeliveryRoute } from './delivery-route.entity';
+import type {
+  DeliveryRoute,
+  DeliveryRouteStatusValue,
+} from './delivery-route.entity';
+import type { DeliveryRouteStopStatusValue } from './delivery-route-stop.entity';
 
 export const DELIVERY_ROUTE_REPOSITORY = Symbol.for('IDeliveryRouteRepository');
+
+/**
+ * The state identity of a route snapshot a caller loaded and evaluated
+ * (ODD O1). `commitTransition` compares exactly these fields —
+ * tenant-qualified — at write time, so a transition built from a stale
+ * snapshot is detected and the caller can re-evaluate against freshly
+ * persisted state instead of overwriting a concurrent winner. This is
+ * the seam that replaces the unconditional full aggregate replacement
+ * for check-in / cancel.
+ */
+export interface DeliveryRouteStateExpectation {
+  status: DeliveryRouteStatusValue;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  cancelledAt: Date | null;
+  updatedAt: Date;
+  stops: Array<{
+    id: string;
+    status: DeliveryRouteStopStatusValue;
+    checkedInAt: Date | null;
+    completedAt: Date | null;
+    activeRouteId: string | null;
+  }>;
+}
+
+/**
+ * Outcome of the conditional aggregate commit. `stale` means at least one
+ * predicate no longer matched the persisted row: nothing of that attempt
+ * may be treated as applied — the caller re-evaluates from fresh state.
+ * `missing` means the route is gone (or belongs to another tenant); the
+ * two are deliberately indistinguishable to the HTTP layer (404).
+ */
+export type DeliveryRouteTransitionOutcome =
+  | { kind: 'committed' }
+  | { kind: 'stale' }
+  | { kind: 'missing' };
 
 export type DeliveryRouteStatusFilter =
   | 'DRAFT'
@@ -85,6 +125,36 @@ export interface IDeliveryRouteRepository {
   /** Persist a route (insert or update). The implementation handles the
    *  parent row + child stop set (createMany / deleteMany) atomically. */
   save(route: DeliveryRoute): Promise<DeliveryRoute>;
+
+  /**
+   * Tenant-qualified CONDITIONAL transition commit for the concurrent
+   * check-in / cancel paths (ODD O1).
+   *
+   * Runs inside the supplied transaction and:
+   *   1. compare-and-sets the parent row against `expected` (status +
+   *      timestamps + `updatedAt`), so a route-level write that committed
+   *      after the caller loaded its snapshot is detected;
+   *   2. compare-and-sets ONLY the stops this transition changed, against
+   *      their expected prior state (status / timestamps / activeRouteId),
+   *      so another writer's stop completion is never overwritten or
+   *      resurrected (no delete-then-recreate of the stop set);
+   *   3. re-derives route auto-completion from the PERSISTED stop set: an
+   *      ACTIVE route left with zero pending stops becomes COMPLETED and
+   *      its ADR-7 markers are cleared.
+   *
+   * Every predicate carries `tenantId` explicitly (no tenant extension may
+   * be assumed inside a transaction). Returns `stale` without applying the
+   * caller's desired state whenever a predicate misses; the caller owns
+   * re-evaluation and the retry policy. */
+  commitTransition(input: {
+    tx: import('@prisma/client').Prisma.TransactionClient;
+    tenantId: string;
+    routeId: string;
+    /** Snapshot the caller loaded before mutating. */
+    expected: DeliveryRouteStateExpectation;
+    /** The mutated aggregate to persist when `expected` is current. */
+    next: DeliveryRoute;
+  }): Promise<DeliveryRouteTransitionOutcome>;
 
   /** Tenant-scoped find by id. Returns null on cross-tenant or missing. */
   findById(input: { tenantId: string; id: string }): Promise<DeliveryRoute | null>;

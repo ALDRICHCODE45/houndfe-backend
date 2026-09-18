@@ -8,6 +8,7 @@ import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type {
   DraftSaleResponse,
   ISaleRepository,
+  MarkSaleDeliveredOutcome,
   PersistedChargePayment,
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
@@ -1020,30 +1021,42 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   /**
-   * delivery-routes / WU2 — Narrows the route check-in's `DELIVERED` mirror
-   * write to a single status column flip (design ADR-3). The caller
-   * (`DeliveryRoutesService.checkInStop`) supplies the active Prisma
-   * transaction client so this write joins the stop + outbox commit.
+   * delivery-routes / WU2 + ODD O1 — tenant-qualified CONDITIONAL flip of
+   * the route check-in's `DELIVERED` mirror write.
    *
-   * `where: { id: saleId, tenantId }` is the explicit defense-in-depth
-   * guard: `TenantPrismaService` already auto-injects `tenantId` at the
-   * top-level `where`, but the WHERE clause here ALSO names `tenantId`
-   * so a cross-tenant sale cannot be mutated even if a future
-   * tenant-scoping regression sneaks past the allowlist.
-   *
-   * Errors:
-   *   - `P2025` (record not found) — the sale id does not exist in the
-   *     caller's tenant (or the sale is already cancelled/hard-deleted).
-   *     The caller MUST catch this and translate to a domain error.
+   * The predicate (see the port doc) pins the persisted lifecycle at WRITE
+   * time — `{ id, tenantId, status: 'CONFIRMED', deliveryStatus: { in:
+   * ['PENDING','SHIPPED','DELIVERED'] } }` — so a cancellation that
+   * committed first cannot be overwritten, while a completed-stop replay on
+   * an already-`DELIVERED` sale still matches (idempotent). A `count === 0`
+   * miss is classified with one explicit `{ id, tenantId }` read on the
+   * SAME transaction client: a live row means the sale exists but is not
+   * deliverable, `null` means missing/foreign (never disclosed).
    */
   async markSaleDelivered(
     tx: Prisma.TransactionClient,
     input: { tenantId: string; saleId: string },
-  ): Promise<void> {
-    await tx.sale.update({
-      where: { id: input.saleId, tenantId: input.tenantId },
+  ): Promise<MarkSaleDeliveredOutcome> {
+    const written = await tx.sale.updateMany({
+      where: {
+        id: input.saleId,
+        tenantId: input.tenantId,
+        status: 'CONFIRMED',
+        deliveryStatus: { in: ['PENDING', 'SHIPPED', 'DELIVERED'] },
+      },
       data: { deliveryStatus: 'DELIVERED' },
     });
+
+    if (written.count > 0) {
+      return { kind: 'delivered' };
+    }
+
+    const persisted = await tx.sale.findFirst({
+      where: { id: input.saleId, tenantId: input.tenantId },
+      select: { id: true },
+    });
+
+    return persisted ? { kind: 'not_deliverable' } : { kind: 'missing' };
   }
 
   async allocateNextFolio(now = new Date()): Promise<string> {

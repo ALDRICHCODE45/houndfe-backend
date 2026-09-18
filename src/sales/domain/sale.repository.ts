@@ -58,6 +58,16 @@ export type DraftSaleResponse = ReturnType<Sale['toResponse']> & {
 };
 
 /**
+ * delivery-routes / WU2 + ODD O1 — outcome of the tenant-qualified
+ * CONDITIONAL `markSaleDelivered` transition. See the port method doc for
+ * the semantics carried by each variant.
+ */
+export type MarkSaleDeliveredOutcome =
+  | { kind: 'delivered' }
+  | { kind: 'not_deliverable' }
+  | { kind: 'missing' };
+
+/**
  * Sale Repository Port - defines persistence operations for Sales
  *
  * This is a port (interface) in hexagonal architecture.
@@ -178,26 +188,51 @@ export interface ISaleRepository {
   runInTransaction<T>(work: () => Promise<T>): Promise<T>;
 
   /**
-   * delivery-routes / WU2 — Narrow persistence method for the route flow's
-   * `Sale.deliveryStatus='DELIVERED'` mirror write (design ADR-3).
+   * delivery-routes / WU2 + ODD O1 — Narrow, tenant-qualified CONDITIONAL
+   * transition for the route flow's `Sale.deliveryStatus='DELIVERED'` mirror
+   * write (design ADR-3).
    *
-   * Performs `tx.sale.update({ where: { id: saleId, tenantId }, data: {
-   * deliveryStatus: 'DELIVERED' } })`. The `tx` argument is the Prisma
-   * transaction client so the write joins the caller's
-   * `runInTransaction(...)` — the route check-in passes the same `tx` to
-   * both the stop update and this mirror so they commit (or roll back)
-   * atomically.
+   * Runs inside the caller-supplied `tx` (the route check-in passes the same
+   * client it uses for the stop update, so both commit — or roll back —
+   * atomically) and re-evaluates the persisted sale lifecycle IN THE
+   * PREDICATE instead of trusting a caller-side pre-read:
    *
-   * `tenantId` is required in the `where` clause as defense in depth on
-   * top of the `TenantPrismaService` CLS-injection. A cross-tenant sale
-   * is filtered out and Prisma raises `P2025` (record not found); the
-   * caller (`DeliveryRoutesService.checkInStop`) maps that to a domain
-   * 422 so the existing global filter surfaces the right HTTP code.
+   * ```
+   * tx.sale.updateMany({
+   *   where: { id, tenantId, status: 'CONFIRMED',
+   *            deliveryStatus: { in: ['PENDING', 'SHIPPED', 'DELIVERED'] } },
+   *   data: { deliveryStatus: 'DELIVERED' },
+   * })
+   * ```
+   *
+   * A concurrent cancellation that committed first therefore loses: the
+   * predicate no longer matches and NO row is written. `tenantId` is
+   * required in the `where` clause as defense in depth on top of the
+   * `TenantPrismaService` CLS-injection, so a cross-tenant sale can never be
+   * mutated even if a future tenant-scoping regression sneaks past the
+   * allowlist.
+   *
+   * Already-`DELIVERED` sales stay inside the predicate so a completed-stop
+   * replay remains a successful, idempotent write. `NOT_APPLICABLE` is
+   * deliberately EXCLUDED: that state means the delivery-routes flow does
+   * not own the sale's delivery lifecycle.
+   *
+   * A conditional miss is classified with one explicit `{ id, tenantId }`
+   * read on the SAME `tx`, so a missing sale and another tenant's sale are
+   * indistinguishable to the caller (no tenant-existence disclosure):
+   *   - `{ kind: 'delivered' }` — the conditional write matched (fresh flip
+   *     or already-delivered replay).
+   *   - `{ kind: 'not_deliverable' }` — the sale exists in the caller's
+   *     tenant but its persisted lifecycle forbids the flip (e.g. CANCELED,
+   *     or `deliveryStatus='NOT_APPLICABLE'`). The caller maps this to
+   *     `SaleNotDeliverableError` (HTTP 422).
+   *   - `{ kind: 'missing' }` — no `{ id, tenantId }` match (missing or
+   *     foreign). The caller maps this to its own 404 contract.
    */
   markSaleDelivered(
     tx: Prisma.TransactionClient,
     input: { tenantId: string; saleId: string },
-  ): Promise<void>;
+  ): Promise<MarkSaleDeliveredOutcome>;
 
   allocateNextFolio(now?: Date): Promise<string>;
 

@@ -5835,4 +5835,115 @@ describe('PrismaSaleRepository', () => {
       expect(snapshotCompare(repo, [incoming], [persisted])).toBe(true);
     });
   });
+
+  // ---------------------------------------------------------------
+  // ODD O1 — `markSaleDelivered` is a tenant-qualified CONDITIONAL write.
+  // The unit-level proof is the exact predicate handed to `updateMany`
+  // (tenant + CONFIRMED + deliverable deliveryStatus) plus the
+  // classification read on a conditional miss. No PostgreSQL isolation,
+  // contention, locking or rollback behavior is proven here.
+  // ---------------------------------------------------------------
+  describe('markSaleDelivered — tenant-qualified conditional DELIVERED transition (ODD O1)', () => {
+    type MarkSaleDeliveredTx = {
+      sale: {
+        updateMany: jest.Mock<Promise<{ count: number }>, [unknown?]>;
+        findFirst: jest.Mock<Promise<{ id: string } | null>, [unknown?]>;
+      };
+    };
+
+    const makeTx = (): MarkSaleDeliveredTx => ({
+      sale: {
+        updateMany: jest.fn<Promise<{ count: number }>, [unknown?]>(),
+        findFirst: jest.fn<Promise<{ id: string } | null>, [unknown?]>(),
+      },
+    });
+
+    const callMarkSaleDelivered = (
+      tx: MarkSaleDeliveredTx,
+      saleId = 'sale-1',
+    ) =>
+      // SAFETY: `tx` is a purpose-built stand-in exposing exactly the two
+      // delegates `markSaleDelivered` touches (`sale.updateMany`,
+      // `sale.findFirst`); the assertion narrows it to the port's client type
+      // so the unit test exercises the real adapter code path.
+      repo.markSaleDelivered(tx as unknown as Prisma.TransactionClient, {
+        tenantId: 'tenant-1',
+        saleId,
+      });
+
+    const updateManyArgs = (tx: MarkSaleDeliveredTx) => {
+      const [args] = tx.sale.updateMany.mock.calls[0] ?? [];
+      return args as {
+        where: {
+          id: string;
+          tenantId: string;
+          status: string;
+          deliveryStatus: { in: string[] };
+        };
+        data: { deliveryStatus: string };
+      };
+    };
+
+    it('writes with the tenant-qualified lifecycle predicate and reports `delivered` on a fresh flip', async () => {
+      const tx = makeTx();
+      tx.sale.updateMany.mockResolvedValue({ count: 1 });
+
+      const outcome = await callMarkSaleDelivered(tx);
+
+      expect(tx.sale.updateMany).toHaveBeenCalledTimes(1);
+      expect(tx.sale.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'sale-1',
+          tenantId: 'tenant-1',
+          status: 'CONFIRMED',
+          deliveryStatus: { in: ['PENDING', 'SHIPPED', 'DELIVERED'] },
+        },
+        data: { deliveryStatus: 'DELIVERED' },
+      });
+      expect(outcome).toEqual({ kind: 'delivered' });
+      // No classification read is issued when the conditional write matched.
+      expect(tx.sale.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('keeps an already-DELIVERED sale inside the predicate so completed-stop replay stays successful', async () => {
+      const tx = makeTx();
+      tx.sale.updateMany.mockResolvedValue({ count: 1 });
+
+      const outcome = await callMarkSaleDelivered(tx);
+
+      const { where } = updateManyArgs(tx);
+      expect(where.deliveryStatus.in).toContain('DELIVERED');
+      // `NOT_APPLICABLE` is NOT deliverable and must stay out of the set.
+      expect(where.deliveryStatus.in).not.toContain('NOT_APPLICABLE');
+      expect(outcome).toEqual({ kind: 'delivered' });
+    });
+
+    it('classifies an existing-but-non-deliverable sale as `not_deliverable` via an explicit tenant-qualified read', async () => {
+      const tx = makeTx();
+      tx.sale.updateMany.mockResolvedValue({ count: 0 });
+      tx.sale.findFirst.mockResolvedValue({ id: 'sale-1' });
+
+      const outcome = await callMarkSaleDelivered(tx);
+
+      expect(tx.sale.findFirst).toHaveBeenCalledWith({
+        where: { id: 'sale-1', tenantId: 'tenant-1' },
+        select: { id: true },
+      });
+      expect(outcome).toEqual({ kind: 'not_deliverable' });
+    });
+
+    it('classifies a missing/foreign sale as `missing` without disclosing the other tenant', async () => {
+      const tx = makeTx();
+      tx.sale.updateMany.mockResolvedValue({ count: 0 });
+      tx.sale.findFirst.mockResolvedValue(null);
+
+      const outcome = await callMarkSaleDelivered(tx, 'sale-of-tenant-2');
+
+      expect(tx.sale.findFirst).toHaveBeenCalledWith({
+        where: { id: 'sale-of-tenant-2', tenantId: 'tenant-1' },
+        select: { id: true },
+      });
+      expect(outcome).toEqual({ kind: 'missing' });
+    });
+  });
 });

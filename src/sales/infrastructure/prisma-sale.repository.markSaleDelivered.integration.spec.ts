@@ -5,11 +5,12 @@
  * database (port 5433 — NEVER the dev DB):
  *
  *   1. Own tenant → the sale's `deliveryStatus` flips `PENDING → DELIVERED`
- *      and the method resolves `void`.
- *   2. Cross-tenant → the explicit `where: { id, tenantId }` guard in the
- *      adapter raises `P2025` (record not found) and the foreign sale is
- *      NOT modified. The caller (`DeliveryRoutesService.checkInStop`) maps
- *      that P2025 to `DeliveryRouteNotFoundError` (404 semantics).
+ *      and the method returns `{ kind: 'delivered' }`.
+ *   2. Cross-tenant → the explicit `where: { id, tenantId }` guards in the
+ *      conditional write and classification read return `{ kind: 'missing' }`
+ *      and the foreign sale is NOT modified. The caller
+ *      (`DeliveryRoutesService.checkInStop`) maps that outcome to
+ *      `DeliveryRouteNotFoundError` (404 semantics).
  *
  * Mirrors the `prisma-quotation.repository.integration.spec.ts` /
  * `prisma-promotion.repository.integration.spec.ts` setup: shared Prisma
@@ -20,7 +21,7 @@
  * or unset `DATABASE_URL`).
  */
 import { randomUUID } from 'node:crypto';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import {
   BASELINE_TENANT_ID,
   disconnectIntegrationPrisma,
@@ -111,13 +112,15 @@ describeIfDb('PrismaSaleRepository.markSaleDelivered (Integration - Real DB)', (
   }
 
   describe('own-tenant mirror flip', () => {
-    it('resolves void and flips the sale deliveryStatus PENDING → DELIVERED inside the supplied tx', async () => {
+    it('returns delivered and flips the sale deliveryStatus PENDING → DELIVERED inside the supplied tx', async () => {
       const { saleId } = await seedPendingSale(tenantId);
 
       // The adapter receives the raw Prisma transaction client (same shape
       // `DeliveryRoutesService.checkInStop` passes via repo.runInTransaction).
       await prisma.$transaction(async (tx) => {
-        await expect(repo.markSaleDelivered(tx, { tenantId, saleId })).resolves.toBeUndefined();
+        await expect(
+          repo.markSaleDelivered(tx, { tenantId, saleId }),
+        ).resolves.toEqual({ kind: 'delivered' });
       });
 
       const after = await prisma.sale.findUnique({ where: { id: saleId } });
@@ -132,7 +135,9 @@ describeIfDb('PrismaSaleRepository.markSaleDelivered (Integration - Real DB)', (
       });
 
       await prisma.$transaction(async (tx) => {
-        await expect(repo.markSaleDelivered(tx, { tenantId, saleId })).resolves.toBeUndefined();
+        await expect(
+          repo.markSaleDelivered(tx, { tenantId, saleId }),
+        ).resolves.toEqual({ kind: 'delivered' });
       });
 
       const after = await prisma.sale.findUnique({ where: { id: saleId } });
@@ -141,44 +146,42 @@ describeIfDb('PrismaSaleRepository.markSaleDelivered (Integration - Real DB)', (
   });
 
   describe('cross-tenant isolation', () => {
-    it('raises P2025 for a sale that belongs to another tenant and does NOT modify it', async () => {
+    it('returns missing for a sale that belongs to another tenant and does NOT modify it', async () => {
       // Second tenant with its own cashier + PENDING sale.
       const foreignTenantId = randomUUID();
       await prisma.tenant.create({
-        data: { id: foreignTenantId, name: 'Foreign Tenant', slug: `foreign-${randomUUID()}`, isActive: true },
+        data: {
+          id: foreignTenantId,
+          name: 'Foreign Tenant',
+          slug: `foreign-${randomUUID()}`,
+          isActive: true,
+        },
       });
       const { saleId } = await seedPendingSale(foreignTenantId);
 
-      // Call with the CURRENT (baseline) tenant — the sale id belongs to
-      // the foreign tenant, so `where: { id, tenantId }` matches nothing
-      // and Prisma raises P2025. The caller (DeliveryRoutesService) maps
-      // this to DeliveryRouteNotFoundError → 404.
-      const error = await prisma
-        .$transaction(async (tx) => {
-          await repo.markSaleDelivered(tx, { tenantId, saleId });
-        })
-        .catch((e: unknown) => e);
+      // Call with the CURRENT (baseline) tenant — both the conditional write
+      // and classification read exclude the foreign row. The caller maps the
+      // typed missing outcome to DeliveryRouteNotFoundError → 404.
+      const outcome = await prisma.$transaction((tx) =>
+        repo.markSaleDelivered(tx, { tenantId, saleId }),
+      );
 
-      expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
-      expect((error as Prisma.PrismaClientKnownRequestError).code).toBe('P2025');
+      expect(outcome).toEqual({ kind: 'missing' });
 
       // Foreign sale untouched.
       const after = await prisma.sale.findUnique({ where: { id: saleId } });
       expect(after?.deliveryStatus).toBe('PENDING');
     });
 
-    it('raises P2025 for a missing sale id (no-op semantics for the caller)', async () => {
-      const error = await prisma
-        .$transaction(async (tx) => {
-          await repo.markSaleDelivered(tx, {
-            tenantId,
-            saleId: randomUUID(),
-          });
-        })
-        .catch((e: unknown) => e);
+    it('returns missing for a missing sale id', async () => {
+      const outcome = await prisma.$transaction((tx) =>
+        repo.markSaleDelivered(tx, {
+          tenantId,
+          saleId: randomUUID(),
+        }),
+      );
 
-      expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
-      expect((error as Prisma.PrismaClientKnownRequestError).code).toBe('P2025');
+      expect(outcome).toEqual({ kind: 'missing' });
     });
   });
 });
