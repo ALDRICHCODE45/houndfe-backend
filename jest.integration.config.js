@@ -55,6 +55,13 @@ module.exports = {
     '^.+\\.(t|j)sx?$': 'ts-jest',
   },
   testEnvironment: 'node',
+  // Real-PostgreSQL specs and their hooks drive multi-roundtrip Prisma
+  // work (transactions, migrations, isolation probes) that legitimately
+  // exceeds Jest's 5-second default. That default cut tests off mid-flight;
+  // the abandoned async Prisma work then raced teardown and surfaced as
+  // secondary reachability errors. 30 seconds matches the existing
+  // `e4-concurrent-stock-alert.spec.ts` per-test precedent.
+  testTimeout: 30_000,
   // Load .env.test BEFORE Prisma is constructed (some specs eager-init
   // PrismaClient at module top level).
   setupFiles: ['<rootDir>/test/integration/setup/load-env.ts'],

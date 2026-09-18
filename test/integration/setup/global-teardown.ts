@@ -6,15 +6,13 @@
  * deploy` is a no-op). We don't drop the schema between runs — that
  * is the explicit tradeoff documented in docker-compose.yml.
  *
- * What we DO do: log a one-liner so an operator tailing the test
- * output knows the run boundary happened. `process.env.DATABASE_URL`
- * may already be undefined here — Jest clears injected env between
- * globalSetup and globalTeardown in some CI shapes — so we read it
- * defensively.
+ * What we DO do: log a static one-liner so an operator tailing the
+ * test output knows the run boundary happened. The message carries no
+ * connection details — the test DATABASE_URL can embed credentials, so
+ * we neither read nor print it here. Jest also clears injected env
+ * between globalSetup and globalTeardown in some CI shapes, which is
+ * another reason this log stays env-independent.
  */
-export default async function globalTeardown(): Promise<void> {
-  const url = process.env.DATABASE_URL;
-  console.log(
-    `[global-teardown] Integration run finished. Targeted DB: ${url ?? '(unresolved)'}.`,
-  );
+export default function globalTeardown(): void {
+  console.log('[global-teardown] Integration run finished.');
 }

@@ -13,17 +13,22 @@
  *      integration run would attempt to migrate the dev DB —
  *      exactly the bug this PR is fixing. The `setupFiles`
  *      `load-env.ts` does the same for per-test-file resolution.
- *   2. Run `prisma migrate deploy` against the test DATABASE_URL so
+ *   2. Normalize the resolved URL through `normalizeTestDatabaseUrl`,
+ *      which pins an ambiguous `localhost` host to `127.0.0.1` so the
+ *      migrate/seed steps do not depend on the host's dual-stack
+ *      preference. Every other URL component is preserved.
+ *   3. Run `prisma migrate deploy` against the test DATABASE_URL so
  *      every spec finds the schema they expect. The named volume on
  *      the postgres-test container makes this idempotent and cheap
  *      after the first bring-up.
- *   3. Seed a baseline tenant so specs that assume "some tenant
+ *   4. Seed a baseline tenant so specs that assume "some tenant
  *      exists" (prisma-promotion.repository.integration.spec uses
  *      `tenant.findFirst()`) get a non-empty DB. The seed uses
  *      upsert so it is safe to re-run.
- *   4. Safety check: refuse to run if the resolved URL still looks
- *      like the dev DB. Defense-in-depth at the boundary that
- *      shells out to `prisma` matters more than anywhere else.
+ *   5. Safety check: the shared helper refuses to run if the resolved
+ *      URL still looks like the dev DB, and never echoes the URL.
+ *      Defense-in-depth at the boundary that shells out to `prisma`
+ *      matters more than anywhere else.
  *
  * The seeded tenant IDs are exported as constants so specs can
  * reference them by ID rather than re-querying. Imported from
@@ -39,6 +44,7 @@ import {
   BASELINE_TENANT_NAME,
   BASELINE_TENANT_SLUG,
 } from '../reset-db';
+import { normalizeTestDatabaseUrl } from './test-database-url';
 
 const envTestPath = path.resolve(process.cwd(), '.env.test');
 
@@ -49,29 +55,18 @@ export default async function globalSetup(): Promise<void> {
   // step below would touch the dev database.
   dotenv.config({ path: envTestPath, override: true });
 
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    throw new Error(
-      `[global-setup] DATABASE_URL is unset. Copy .env.test.example to .env.test.`,
-    );
-  }
+  // 2. Normalize the resolved URL through the shared helper (which
+  // also aborts on a missing/malformed/dev-targeted value). Pinning
+  // `localhost` to `127.0.0.1` removes the dual-stack ambiguity for
+  // both the migrate child below and the seed Prisma client. Assigning
+  // it back keeps the child and any later reader on the same value.
+  const databaseUrl = normalizeTestDatabaseUrl(
+    process.env.DATABASE_URL,
+    '[global-setup]',
+  );
+  process.env.DATABASE_URL = databaseUrl;
 
-  // Refuse if the resolved URL STILL looks like the dev DB. Both
-  // checks are loose regex/string-based: an integration run that
-  // resolves to port 5432 / database 'nest-practice' is going to
-  // touch developer data and must abort loudly.
-  if (
-    databaseUrl.includes(':5432/') &&
-    !databaseUrl.includes('nest-practice-test')
-  ) {
-    throw new Error(
-      `[global-setup] DATABASE_URL=${databaseUrl} looks like the dev DB (port 5432 / nest-practice). ` +
-        `Refusing to run. Verify .env.test was loaded and that you're not running \`pnpm exec prisma migrate deploy\` ` +
-        `with the dev shell env.`,
-    );
-  }
-
-  console.log(`[global-setup] DATABASE_URL=${databaseUrl}`);
+  console.log('[global-setup] Test database target validated and normalized.');
   console.log('[global-setup] Applying Prisma migrations to test DB…');
 
   // Run prisma migrate deploy. Force the env on the child so a stale

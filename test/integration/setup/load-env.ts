@@ -7,26 +7,24 @@
  * at module-eval-time, which means `DATABASE_URL` must already be on
  * `process.env` before the import graph resolves.
  *
- * `dotenv` does NOT overwrite existing env vars by default. That is
- * the right default here: the test DB URL must NEVER be overridden by
- * a stray shell-exported `DATABASE_URL=...:5432/nest-practice` left
- * over from a previous dev session. Order-of-resolution:
- *   1. Real env (already-set vars in the shell / CI).
- *   2. `.env.test` values, which only fill in the gaps.
+ * `.env.test` is authoritative and MUST override the `.env` that
+ * `@prisma/client` auto-loads. Prisma bundles dotenv v17 internally
+ * and reads `.env` from `process.cwd()` the moment it is required,
+ * regardless of any `.env.test`. We therefore load `.env.test` with
+ * `override: true` so the test DB URL wins over that auto-loaded dev
+ * URL. Without override, `.env`'s dev-DB value would silently survive
+ * and an integration run would touch the dev DB.
  *
- * The reverse case — `.env.test` silently overwriting a real
- * `DATABASE_URL=localhost:5432/nest-practice` — is the exact bug we
- * are fixing. So if a caller has `DATABASE_URL` set externally, we
- * trust it; otherwise we fall back to `.env.test`.
- *
- * Hard guard: if `DATABASE_URL` is still unset after load, throw. We
- * would rather a loud crash than a `pnpm test:integration` that
- * silently writes to the dev DB because the .env.test file went
- * missing.
+ * After load, the resolved value is normalized through
+ * `normalizeTestDatabaseUrl` BEFORE any spec import graph constructs
+ * Prisma. The helper pins an ambiguous `localhost` host to `127.0.0.1`,
+ * enforces the test-DB safety guard, and throws loudly (without ever
+ * echoing the URL) if the value is missing or malformed.
  */
 import * as dotenv from 'dotenv';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { normalizeTestDatabaseUrl } from './test-database-url';
 
 const envTestPath = path.resolve(process.cwd(), '.env.test');
 
@@ -45,21 +43,10 @@ if (!fs.existsSync(envTestPath)) {
 // silently win and an integration run would touch the dev DB.
 dotenv.config({ path: envTestPath, override: true });
 
-if (!process.env.DATABASE_URL) {
-  throw new Error(
-    `[test:integration setupFile] DATABASE_URL is unset after loading ${envTestPath}. ` +
-      `Aborting to avoid touching the dev DB. Check .env.test.example and copy it verbatim.`,
-  );
-}
-
-// Safety net — confirm the resolved URL points at the test DB host:port.
-// This is a last-resort guard for the case where an operator hand-edits
-// `.env.test` and somehow pastes the dev URL back in.
-const url = process.env.DATABASE_URL;
-if (url.includes(':5432/') && !url.includes('nest-practice-test')) {
-  throw new Error(
-    `[test:integration setupFile] DATABASE_URL=${url} does not look like the test DB. ` +
-      `Expected port 5433 and database name 'nest-practice-test'. ` +
-      `Refusing to run integration tests against what appears to be the dev DB.`,
-  );
-}
+// Resolve + normalize the test URL before any spec import graph can
+// construct a Prisma client. The helper rejects a missing, malformed,
+// or dev-targeted URL and never includes the URL in its error text.
+process.env.DATABASE_URL = normalizeTestDatabaseUrl(
+  process.env.DATABASE_URL,
+  '[test:integration setupFile]',
+);
