@@ -8,6 +8,7 @@
  */
 import { QuotationsController } from './quotations.controller';
 import type { QuotationsService } from '../application/quotations.service';
+import type { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import { HEADERS_METADATA } from '@nestjs/common/constants';
 
@@ -31,7 +32,13 @@ function makeMockService() {
     send: jest.fn(),
     findOne: jest.fn(),
     findAll: jest.fn(),
-  } as any;
+  };
+}
+
+function makeMockPdfService() {
+  return {
+    renderQuotationPdf: jest.fn(),
+  };
 }
 
 function makeMockUser(userId: string): AuthenticatedUser {
@@ -50,7 +57,18 @@ describe('QuotationsController', () => {
 
   beforeEach(() => {
     service = makeMockService();
-    controller = new QuotationsController(service);
+    // SAFETY: this mock is a complete controller-facing stand-in — it provides
+    // every `QuotationsService` method that the controller routes exercised by
+    // this suite delegate to (`openDraft`, `findAll`, `findOne`, `assignCustomer`,
+    // `assignSeller`, `setPriceList`, the item/promotion/expiry/cancel routes and
+    // `send`), each as a `jest.fn()` so assertions can inspect the calls. The mock
+    // intentionally omits service methods and constructor dependencies the tests
+    // never reach, so these narrow casts are safe at the construction boundary.
+    const pdfService = makeMockPdfService();
+    controller = new QuotationsController(
+      service as unknown as QuotationsService,
+      pdfService as unknown as PdfGenerationService,
+    );
   });
 
   describe('POST /quotations/drafts', () => {
