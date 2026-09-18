@@ -114,10 +114,7 @@ type PersistedItemSnapshot = Omit<PrismaSaleItemRow, 'discountedAt'> & {
 
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {
-    // WU6 — behavior-neutral anchor until WU7 wires the helper (then removed).
-    void this.snapshotItemsEqual;
-  }
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   private requireTenantId(): string {
     const tenantId = this.tenantPrisma.getTenantId();
@@ -183,7 +180,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     };
   }
 
-  // WU6 — pure helper; WU7 wires it (and removes the anchor above).
+  // WU6 — pure normalized comparison; WU7 wires it into writeImpl.
   private snapshotItemsEqual(
     incoming: readonly SaleItem[],
     persisted: readonly PrismaSaleItemRow[],
@@ -244,8 +241,9 @@ export class PrismaSaleRepository implements ISaleRepository {
   ): Promise<Sale> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
+    // R3-tenant-scope — name the tenant explicitly (raw tx client).
     const existing = await prisma.sale.findUnique({
-      where: { id: sale.id },
+      where: { id: sale.id, tenantId },
       select: { id: true, status: true },
     });
 
@@ -267,9 +265,29 @@ export class PrismaSaleRepository implements ISaleRepository {
       throw new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT');
     }
 
-    // Delete existing items (we'll recreate them from domain state)
+    // WU7 — snapshot compare for a GENERIC overwrite of an existing
+    // non-DRAFT sale. Separate read from the WU5 status load; skipped
+    // for a missing row (creation preserved) and a DRAFT row (the
+    // intent gate already accepted). On mismatch, reject before any
+    // write or promotion-junction reconciliation.
+    if (intent === 'GENERIC' && existing && existing.status !== 'DRAFT') {
+      const persistedItems = await prisma.saleItem.findMany({
+        where: { saleId: sale.id, tenantId },
+      });
+      if (
+        !this.snapshotItemsEqual(sale.items, persistedItems, sale.id, tenantId)
+      ) {
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_DRAFT',
+          'SALE_NOT_DRAFT',
+        );
+      }
+    }
+
+    // Delete existing items (we'll recreate them from domain state);
+    // tenantId keeps this destructive write inside the tenant.
     await prisma.saleItem.deleteMany({
-      where: { saleId: sale.id },
+      where: { saleId: sale.id, tenantId },
     });
 
     // Create or update sale
@@ -302,7 +320,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     } else {
       // Update existing sale
       await prisma.sale.update({
-        where: { id: sale.id },
+        where: { id: sale.id, tenantId },
         data: saleData,
       });
     }
@@ -385,7 +403,31 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async save(sale: Sale): Promise<Sale> {
-    return this.writeImpl(sale, 'GENERIC');
+    // R3-TOCTOU correction — the GENERIC write path reads-then-writes
+    // (status gate, snapshot compare, delete-then-recreate), so it must
+    // run inside the CLS-propagated transaction facility with the parent
+    // sale row locked FIRST. Without the tenant-qualified `FOR UPDATE`, a
+    // concurrent save could pass the status/snapshot gates and interleave
+    // destructive writes (lost update). `saveDraftItems` (DRAFT intent)
+    // keeps its lock-free path by design — do not wrap it.
+    //
+    // R3-tenant-scope — a persisted aggregate (carries createdAt) whose row
+    // was not locked for this tenant is foreign/gone: fail as not found
+    // BEFORE writeImpl. New Sale.create() aggregates (no createdAt) create.
+    return this.tenantPrisma.runInTransaction(async () => {
+      const prisma = this.tenantPrisma.getClient();
+      const tenantId = this.requireTenantId();
+      const lockedRows = await prisma.$queryRaw<Array<{ id: string }>>`
+        SELECT id
+        FROM sales
+        WHERE id = ${sale.id} AND "tenantId" = ${tenantId}
+        FOR UPDATE
+      `;
+      if (sale.createdAt !== undefined && lockedRows.length === 0) {
+        throw new EntityNotFoundError('Sale', sale.id);
+      }
+      return this.writeImpl(sale, 'GENERIC');
+    });
   }
 
   async saveDraftItems(sale: Sale): Promise<Sale> {
@@ -2157,9 +2199,28 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async delete(id: string): Promise<void> {
-    const prisma = this.tenantPrisma.getClient();
-    await prisma.sale.delete({
-      where: { id },
+    return this.tenantPrisma.runInTransaction(async () => {
+      const prisma = this.tenantPrisma.getClient();
+      const tenantId = this.requireTenantId();
+      await prisma.$queryRaw`
+        SELECT id
+        FROM sales
+        WHERE id = ${id} AND "tenantId" = ${tenantId}
+        FOR UPDATE
+      `;
+      const row = await prisma.sale.findFirst({
+        where: { id, tenantId },
+        select: { id: true, status: true },
+      });
+      if (row && row.status !== 'DRAFT') {
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_DRAFT',
+          'SALE_NOT_DRAFT',
+        );
+      }
+      await prisma.sale.delete({
+        where: { id, tenantId },
+      });
     });
   }
 }

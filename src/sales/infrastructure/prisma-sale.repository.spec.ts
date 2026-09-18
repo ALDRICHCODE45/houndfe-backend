@@ -33,6 +33,7 @@ function makeMockPrisma() {
     saleItem: {
       deleteMany: jest.fn(),
       createMany: jest.fn(),
+      findMany: jest.fn(),
     },
     saleFolioCounter: {
       upsert: jest.fn(),
@@ -75,8 +76,39 @@ function makeTenantPrismaMock() {
   return {
     getClient: jest.fn().mockReturnValue(client),
     getTenantId: jest.fn().mockReturnValue('tenant-1'),
+    // R3-TOCTOU correction — save() runs inside the CLS-propagated
+    // transaction facility. Unit scope passes the callback straight
+    // through (mirrors the real service's already-in-tx branch); the
+    // lock/sequencing tests below assert entry and invocation order.
+    runInTransaction: jest.fn(async (work: () => Promise<unknown>) => work()),
     client,
   };
+}
+
+interface WritePathMocks {
+  sale: {
+    create: jest.Mock;
+    update: jest.Mock;
+    updateMany: jest.Mock;
+    findUnique: jest.Mock;
+    findFirst: jest.Mock;
+  };
+  saleItem: {
+    deleteMany: jest.Mock;
+    createMany: jest.Mock;
+    findMany: jest.Mock;
+  };
+  salePromotionVeto: { deleteMany: jest.Mock; createMany: jest.Mock };
+  salePromotionOptIn: { deleteMany: jest.Mock; createMany: jest.Mock };
+  salePromotionApplied: { deleteMany: jest.Mock; upsert: jest.Mock };
+}
+
+// Typed view over the any-cast prisma mock; keeps write-path tests free of
+// new no-unsafe-* diagnostics without touching the shared fixtures.
+function writePathMocks(
+  prisma: ReturnType<typeof makeMockPrisma>,
+): WritePathMocks {
+  return prisma as unknown as WritePathMocks;
 }
 
 interface RawPersistedSaleItemRow {
@@ -123,7 +155,11 @@ function makeSnapshotItemPair(
     domain?: Partial<SaleItemProps>;
     persisted?: Partial<RawPersistedSaleItemRow>;
   } = {},
-): { incoming: SaleItem; persisted: RawPersistedSaleItemRow } {
+): {
+  incoming: SaleItem;
+  persisted: RawPersistedSaleItemRow;
+  domain: SaleItemProps;
+} {
   const persisted: RawPersistedSaleItemRow = {
     id: 'item-eq-1',
     saleId: 'aggregate-sale-id',
@@ -160,7 +196,7 @@ function makeSnapshotItemPair(
     discountedAt: new Date('2026-06-15T12:34:56.000Z'),
     ...overrides.domain,
   };
-  return { incoming: SaleItem.fromPersistence(domain), persisted };
+  return { incoming: SaleItem.fromPersistence(domain), persisted, domain };
 }
 
 const SNAPSHOT_DIFFERING_VALUES: Record<
@@ -233,6 +269,10 @@ describe('PrismaSaleRepository', () => {
   beforeEach(() => {
     tenantPrisma = makeTenantPrismaMock();
     prisma = tenantPrisma.client;
+    // R3-tenant-scope — default lock result: a tenant-visible row was
+    // locked. Tests that exercise the empty-lock (foreign/missing) path
+    // override this with `mockResolvedValue([])`.
+    prisma.$queryRaw.mockResolvedValue([{ id: 'tenant-visible-row' }]);
     repo = new PrismaSaleRepository(tenantPrisma as any);
   });
 
@@ -1928,7 +1968,7 @@ describe('PrismaSaleRepository', () => {
       const result = await repo.save(sale);
 
       expect(prisma.saleItem.deleteMany).toHaveBeenCalledWith({
-        where: { saleId: 'sale-1' },
+        where: { saleId: 'sale-1', tenantId: 'tenant-1' },
       });
       expect(prisma.sale.create).toHaveBeenCalledWith({
         data: {
@@ -2043,10 +2083,10 @@ describe('PrismaSaleRepository', () => {
       const result = await repo.save(sale);
 
       expect(prisma.saleItem.deleteMany).toHaveBeenCalledWith({
-        where: { saleId: 'sale-2' },
+        where: { saleId: 'sale-2', tenantId: 'tenant-1' },
       });
       expect(prisma.sale.update).toHaveBeenCalledWith({
-        where: { id: 'sale-2' },
+        where: { id: 'sale-2', tenantId: 'tenant-1' },
         data: {
           status: 'DRAFT',
           channel: 'POS',
@@ -2117,7 +2157,7 @@ describe('PrismaSaleRepository', () => {
       const result = await repo.save(sale);
 
       expect(prisma.saleItem.deleteMany).toHaveBeenCalledWith({
-        where: { saleId: 'sale-3' },
+        where: { saleId: 'sale-3', tenantId: 'tenant-1' },
       });
       expect(prisma.saleItem.createMany).toHaveBeenCalledWith({
         data: [],
@@ -2321,6 +2361,38 @@ describe('PrismaSaleRepository', () => {
       });
       jest.spyOn(repo, 'findById').mockResolvedValue(sale);
 
+      // WU7 — the wired snapshot compare reads the persisted items; the
+      // row must match the incoming item projection for the legitimate
+      // non-DRAFT overwrite to stay open.
+      writePathMocks(prisma).saleItem.findMany.mockResolvedValue([
+        {
+          id: 'item-1',
+          saleId: 'sale-confirmed',
+          productId: 'product-1',
+          variantId: null,
+          productName: 'Product',
+          variantName: null,
+          imageUrl: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+          originalPriceCents: null,
+          priceSource: 'DEFAULT',
+          appliedPriceListId: null,
+          customPriceCents: null,
+          discountType: null,
+          discountValue: null,
+          discountAmountCents: null,
+          rewardDiscountPercent: null,
+          rewardKind: null,
+          prePriceCentsBeforeDiscount: null,
+          discountTitle: null,
+          discountedAt: null,
+          promotionId: null,
+          tenantId: 'tenant-1',
+        },
+      ]);
+
       await repo.save(sale);
 
       expect(prisma.sale.update).toHaveBeenCalled();
@@ -2409,7 +2481,7 @@ describe('PrismaSaleRepository', () => {
       );
 
       expect(findUnique).toHaveBeenCalledWith({
-        where: { id: sale.id },
+        where: { id: sale.id, tenantId: 'tenant-1' },
         select: { id: true, status: true },
       });
       expect(scopedTenantPrisma.getClient).toHaveBeenCalled();
@@ -2418,6 +2490,318 @@ describe('PrismaSaleRepository', () => {
       expect(update).not.toHaveBeenCalled();
       expect(deleteMany).not.toHaveBeenCalled();
       expect(createMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // ---------------------------------------------------------------
+  // WU7 — writeImpl('GENERIC') wires the WU6 snapshot compare: an
+  // overwrite of an existing non-DRAFT sale must reject SALE_NOT_DRAFT
+  // BEFORE any write (items, sale row, promotion junctions) when the
+  // independent persisted item snapshot differs on ANY mapped column;
+  // creation (missing) and DRAFT updates bypass the compare entirely.
+  // ---------------------------------------------------------------
+  describe('writeImpl GENERIC — snapshot compare wired', () => {
+    const writeMocks = (): WritePathMocks => writePathMocks(prisma);
+
+    const expectSaleNotDraft = async (operation: Promise<unknown>) => {
+      await expect(operation).rejects.toEqual(
+        new BusinessRuleViolationError('SALE_NOT_DRAFT', 'SALE_NOT_DRAFT'),
+      );
+    };
+
+    const expectNoWrites = () => {
+      const {
+        sale,
+        saleItem,
+        salePromotionVeto: veto,
+        salePromotionOptIn: optIn,
+        salePromotionApplied: applied,
+      } = writeMocks();
+      expect(saleItem.deleteMany).not.toHaveBeenCalled();
+      expect(saleItem.createMany).not.toHaveBeenCalled();
+      expect(sale.update).not.toHaveBeenCalled();
+      expect(sale.updateMany).not.toHaveBeenCalled();
+      expect(sale.create).not.toHaveBeenCalled();
+      expect(veto.deleteMany).not.toHaveBeenCalled();
+      expect(veto.createMany).not.toHaveBeenCalled();
+      expect(optIn.deleteMany).not.toHaveBeenCalled();
+      expect(optIn.createMany).not.toHaveBeenCalled();
+      expect(applied.upsert).not.toHaveBeenCalled();
+      expect(applied.deleteMany).not.toHaveBeenCalled();
+    };
+
+    const makeNonDraftScenario = (
+      saleOverrides: Partial<Parameters<typeof Sale.fromPersistence>[0]> = {},
+    ) => {
+      const pair = makeSnapshotItemPair();
+      const sale = Sale.fromPersistence({
+        id: 'aggregate-sale-id',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        items: [pair.domain],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+        ...saleOverrides,
+      });
+      return { sale, persisted: pair.persisted };
+    };
+
+    const stubExistingNonDraft = (sale: Sale) => {
+      writeMocks().sale.findUnique.mockResolvedValue({
+        id: sale.id,
+        status: 'CONFIRMED',
+      });
+    };
+
+    const stubPersistedItems = (rows: RawPersistedSaleItemRow[]) => {
+      writeMocks().saleItem.findMany.mockResolvedValue(rows);
+    };
+
+    it.each(
+      Object.entries(SNAPSHOT_DIFFERING_VALUES) as [
+        keyof RawPersistedSaleItemRow,
+        unknown,
+      ][],
+    )(
+      'rejects SALE_NOT_DRAFT with zero writes when only the %s item column differs',
+      async (column, differingValue) => {
+        const { sale, persisted } = makeNonDraftScenario();
+        const persistedRows = [
+          {
+            ...persisted,
+            [column]: differingValue,
+          } as RawPersistedSaleItemRow,
+        ];
+        stubExistingNonDraft(sale);
+        stubPersistedItems(persistedRows);
+
+        await expectSaleNotDraft(repo.save(sale));
+        expectNoWrites();
+      },
+    );
+
+    it('proceeds with a single createMany when the independent persisted snapshot matches every column', async () => {
+      const { sale, persisted } = makeNonDraftScenario();
+      const { sale: saleMock, saleItem } = writeMocks();
+      stubExistingNonDraft(sale);
+      stubPersistedItems([persisted]);
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+      await repo.save(sale);
+
+      expect(saleMock.update).toHaveBeenCalledTimes(1);
+      expect(saleItem.createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('creates a missing sale without any persisted-snapshot load', async () => {
+      const { sale } = makeNonDraftScenario();
+      const { sale: saleMock, saleItem } = writeMocks();
+      saleMock.findUnique.mockResolvedValue(null);
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+      await repo.save(sale);
+
+      expect(saleMock.create).toHaveBeenCalledTimes(1);
+      expect(saleItem.findMany).not.toHaveBeenCalled();
+      expect(saleMock.findUnique).toHaveBeenCalledTimes(1);
+      expect(saleMock.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('updates an existing DRAFT sale without firing the snapshot compare', async () => {
+      const { sale } = makeNonDraftScenario();
+      const { sale: saleMock, saleItem } = writeMocks();
+      saleMock.findUnique.mockResolvedValue({
+        id: sale.id,
+        status: 'DRAFT',
+      });
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+      await repo.save(sale);
+
+      expect(saleMock.update).toHaveBeenCalledTimes(1);
+      expect(saleItem.deleteMany).toHaveBeenCalledTimes(1);
+      expect(saleItem.createMany).toHaveBeenCalledTimes(1);
+      expect(saleItem.findMany).not.toHaveBeenCalled();
+    });
+
+    it('does not false-positive on a sale-row metadata-only change (item snapshot untouched)', async () => {
+      const { sale, persisted } = makeNonDraftScenario({
+        folio: 'F-METADATA-CHANGED',
+      });
+      const { sale: saleMock, saleItem } = writeMocks();
+      stubExistingNonDraft(sale);
+      stubPersistedItems([persisted]);
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+
+      await repo.save(sale);
+
+      expect(saleMock.update).toHaveBeenCalledTimes(1);
+      expect(saleItem.createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects when only the incoming side is mutated after the persisted snapshot read', async () => {
+      const { sale, persisted } = makeNonDraftScenario();
+      const { saleItem } = writeMocks();
+      stubExistingNonDraft(sale);
+      saleItem.findMany.mockImplementation(() => {
+        // Mutate only the incoming aggregate AFTER the persisted snapshot
+        // was loaded; the persisted rows object stays unchanged.
+        (sale.items as SaleItem[]).push(sale.items[0]);
+        return [persisted];
+      });
+
+      await expectSaleNotDraft(repo.save(sale));
+      expectNoWrites();
+    });
+  });
+
+  // R3-TOCTOU correction — save() now runs inside the CLS-propagated
+  // runInTransaction facility and locks the parent sale row BEFORE
+  // writeImpl's reads and writes (tenant-qualified `FOR UPDATE`).
+  describe('save — transactional sale-row lock (R3-TOCTOU)', () => {
+    const makeLockScenario = () => {
+      const pair = makeSnapshotItemPair();
+      const sale = Sale.fromPersistence({
+        id: 'aggregate-sale-id',
+        userId: 'user-1',
+        status: 'CONFIRMED',
+        items: [pair.domain],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      return { sale, persisted: pair.persisted };
+    };
+
+    const stubMatchingScenario = async (
+      sale: Sale,
+      persisted: RawPersistedSaleItemRow[],
+    ) => {
+      writePathMocks(prisma).sale.findUnique.mockResolvedValue({
+        id: sale.id,
+        status: 'CONFIRMED',
+      });
+      writePathMocks(prisma).saleItem.findMany.mockResolvedValue(persisted);
+      jest.spyOn(repo, 'findById').mockResolvedValue(sale);
+    };
+
+    it('enters runInTransaction exactly once for save()', async () => {
+      const { sale, persisted } = makeLockScenario();
+      await stubMatchingScenario(sale, [persisted]);
+
+      await repo.save(sale);
+
+      expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('locks the sale row tenant-qualified: FOR UPDATE binds sale id + tenant id', async () => {
+      const { sale, persisted } = makeLockScenario();
+      await stubMatchingScenario(sale, [persisted]);
+
+      await repo.save(sale);
+
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      const [strings, ...values] = prisma.$queryRaw.mock.calls[0] as [
+        string[],
+        ...unknown[],
+      ];
+      const sql = strings.join('?');
+      expect(sql).toContain('FROM sales');
+      expect(sql).toContain('"tenantId"');
+      expect(sql).toContain('FOR UPDATE');
+      expect(values).toEqual([sale.id, 'tenant-1']);
+    });
+
+    it('orders tx entry -> row lock -> status read -> snapshot read -> first destructive write', async () => {
+      const { sale, persisted } = makeLockScenario();
+      await stubMatchingScenario(sale, [persisted]);
+
+      // Event log: each observed step labels itself before executing its
+      // stubbed behavior (the stored mockResolvedValue impl is preserved).
+      const events: string[] = [];
+      const tag = (mock: jest.Mock, label: string) => {
+        const impl = mock.getMockImplementation();
+        mock.mockImplementation((...args: unknown[]) => {
+          events.push(label);
+          return impl?.(...args);
+        });
+      };
+      tag(tenantPrisma.runInTransaction as jest.Mock, 'tx-entry');
+      tag(prisma.$queryRaw, 'row-lock');
+      tag(prisma.sale.findUnique, 'status-read');
+      tag(prisma.saleItem.findMany, 'snapshot-read');
+      tag(prisma.saleItem.deleteMany, 'first-destructive-write');
+
+      await repo.save(sale);
+
+      expect(events).toEqual([
+        'tx-entry',
+        'row-lock',
+        'status-read',
+        'snapshot-read',
+        'first-destructive-write',
+      ]);
+    });
+
+    // R3-tenant-scope — raw transaction client (no Prisma tenant extension).
+    it('fails a persisted foreign aggregate without touching foreign rows', async () => {
+      const { sale } = makeLockScenario();
+      const foreign = { id: sale.id, tenantId: 'tenant-2', status: 'CONFIRMED' };
+      prisma.$queryRaw.mockResolvedValue([]);
+      prisma.sale.findUnique.mockImplementation(
+        async ({ where }) =>
+          foreign.id === where.id &&
+          (where.tenantId === undefined || foreign.tenantId === where.tenantId)
+            ? foreign
+            : null,
+      );
+
+      await expect(repo.save(sale)).rejects.toEqual(
+        new EntityNotFoundError('Sale', sale.id),
+      );
+
+      expect(prisma.sale.findUnique).not.toHaveBeenCalled();
+      expect(prisma.saleItem.findMany).not.toHaveBeenCalled();
+      expect(prisma.saleItem.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.sale.update).not.toHaveBeenCalled();
+      expect(prisma.sale.create).not.toHaveBeenCalled();
+      expect(foreign.tenantId).toBe('tenant-2');
+    });
+
+    it('still creates a fresh Sale.create aggregate when no row is locked', async () => {
+      prisma.$queryRaw.mockResolvedValue([]);
+      prisma.sale.findUnique.mockResolvedValue(null);
+      prisma.sale.create.mockResolvedValue({ id: 'fresh-sale' });
+      jest
+        .spyOn(repo, 'findById')
+        .mockResolvedValue(Sale.create({ id: 'fresh-sale', userId: 'user-1' }));
+
+      await repo.save(Sale.create({ id: 'fresh-sale', userId: 'user-1' }));
+
+      expect(prisma.sale.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('tenant-qualifies each writeImpl read/write on the raw tx client', async () => {
+      const { sale, persisted } = makeLockScenario();
+      await stubMatchingScenario(sale, [persisted]);
+
+      await repo.save(sale);
+
+      expect(prisma.sale.findUnique).toHaveBeenCalledWith({
+        where: { id: sale.id, tenantId: 'tenant-1' },
+        select: { id: true, status: true },
+      });
+      expect(prisma.saleItem.findMany).toHaveBeenCalledWith({
+        where: { saleId: sale.id, tenantId: 'tenant-1' },
+      });
+      expect(prisma.saleItem.deleteMany).toHaveBeenCalledWith({
+        where: { saleId: sale.id, tenantId: 'tenant-1' },
+      });
+      expect(prisma.sale.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: sale.id, tenantId: 'tenant-1' },
+        }),
+      );
     });
   });
 
@@ -3053,12 +3437,151 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('delete', () => {
-    it('should delete a sale', async () => {
-      await repo.delete('sale-7');
+    it('deletes a DRAFT sale once after the transactional tenant-qualified row lock and status read', async () => {
+      const saleId = 'sale-7';
+      prisma.sale.findFirst.mockResolvedValue({ id: saleId, status: 'DRAFT' });
 
-      expect(prisma.sale.delete).toHaveBeenCalledWith({
-        where: { id: 'sale-7' },
+      const events: string[] = [];
+      const tag = (mock: jest.Mock, label: string) => {
+        const impl = mock.getMockImplementation();
+        mock.mockImplementation((...args: unknown[]) => {
+          events.push(label);
+          return impl?.(...args);
+        });
+      };
+      tag(tenantPrisma.runInTransaction as jest.Mock, 'tx-entry');
+      tag(prisma.$queryRaw, 'row-lock');
+      tag(prisma.sale.findFirst, 'status-read');
+      tag(prisma.sale.delete, 'delete');
+
+      await repo.delete(saleId);
+
+      expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      const [strings, ...values] = prisma.$queryRaw.mock.calls[0] as [
+        string[],
+        ...unknown[],
+      ];
+      const sql = strings.join('?');
+      expect(sql).toContain('FROM sales');
+      expect(sql).toContain('"tenantId"');
+      expect(sql).toContain('FOR UPDATE');
+      expect(values).toEqual([saleId, 'tenant-1']);
+      expect(prisma.sale.findFirst).toHaveBeenCalledWith({
+        where: { id: saleId, tenantId: 'tenant-1' },
+        select: { id: true, status: true },
       });
+      expect(prisma.sale.delete).toHaveBeenCalledTimes(1);
+      expect(prisma.sale.delete).toHaveBeenCalledWith({
+        where: { id: saleId, tenantId: 'tenant-1' },
+      });
+      expect(events).toEqual(['tx-entry', 'row-lock', 'status-read', 'delete']);
+    });
+
+    it.each(['CONFIRMED', 'CANCELED'] as const)(
+      'rejects a %s sale before deletion',
+      async (status) => {
+        prisma.sale.findFirst.mockResolvedValue({ id: 'sale-guarded', status });
+
+        let caught: unknown;
+        try {
+          await repo.delete('sale-guarded');
+        } catch (error) {
+          caught = error;
+        }
+
+        expect(caught).toBeInstanceOf(BusinessRuleViolationError);
+        expect(caught).toMatchObject({
+          message: 'SALE_NOT_DRAFT',
+          code: 'SALE_NOT_DRAFT',
+        });
+        expect(prisma.sale.delete).not.toHaveBeenCalled();
+      },
+    );
+
+    it('requires tenant context before the lock, status read, or delete', async () => {
+      tenantPrisma.getTenantId.mockReturnValue('');
+
+      await expect(repo.delete('sale-without-tenant')).rejects.toThrow(
+        'TENANT_CONTEXT_REQUIRED',
+      );
+
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+      expect(prisma.sale.findFirst).not.toHaveBeenCalled();
+      expect(prisma.sale.delete).not.toHaveBeenCalled();
+    });
+
+    it('propagates a row-lock failure before the status read or delete', async () => {
+      const lockFailure = new Error('row lock failed');
+      prisma.$queryRaw.mockRejectedValue(lockFailure);
+
+      await expect(repo.delete('sale-lock-failure')).rejects.toBe(lockFailure);
+
+      expect(prisma.sale.findFirst).not.toHaveBeenCalled();
+      expect(prisma.sale.delete).not.toHaveBeenCalled();
+    });
+
+    it('propagates a status-read failure without deleting', async () => {
+      const readFailure = new Error('status read failed');
+      prisma.sale.findFirst.mockRejectedValue(readFailure);
+
+      await expect(repo.delete('sale-read-failure')).rejects.toBe(readFailure);
+
+      expect(prisma.sale.delete).not.toHaveBeenCalled();
+    });
+
+    it.each(['missing', 'foreign-tenant'])(
+      'rethrows P2025 without lifecycle disclosure when the row is %s',
+      async () => {
+        const notFound = new Prisma.PrismaClientKnownRequestError(
+          'Record not found',
+          { code: 'P2025', clientVersion: '6.19.2' },
+        );
+        prisma.sale.findFirst.mockResolvedValue(null);
+        prisma.sale.delete.mockRejectedValue(notFound);
+
+        await expect(repo.delete('sale-not-visible')).rejects.toBe(notFound);
+
+        expect(prisma.sale.delete).toHaveBeenCalledWith({
+          where: { id: 'sale-not-visible', tenantId: 'tenant-1' },
+        });
+      },
+    );
+
+    it('leaves a foreign row intact when the raw transaction client does not inject tenant filters', async () => {
+      const saleId = 'foreign-sale';
+      const rows = [{ id: saleId, tenantId: 'tenant-2', status: 'DRAFT' }];
+      const p2025 = () =>
+        new Prisma.PrismaClientKnownRequestError('Record not found', {
+          code: 'P2025',
+          clientVersion: '6.19.2',
+        });
+
+      tenantPrisma.runInTransaction.mockImplementation(
+        async (work: () => Promise<unknown>) => work(),
+      );
+      tenantPrisma.getClient.mockReturnValue(prisma);
+      prisma.$queryRaw.mockResolvedValue([]);
+      prisma.sale.findFirst.mockImplementation(async ({ where }) =>
+        rows.find(
+          (row) => row.id === where.id && row.tenantId === where.tenantId,
+        ) ?? null,
+      );
+      prisma.sale.delete.mockImplementation(async ({ where }) => {
+        const index = rows.findIndex(
+          (row) =>
+            row.id === where.id &&
+            (where.tenantId === undefined || row.tenantId === where.tenantId),
+        );
+        if (index === -1) throw p2025();
+        rows.splice(index, 1);
+      });
+
+      await expect(repo.delete(saleId)).rejects.toMatchObject({ code: 'P2025' });
+
+      expect(rows).toEqual([
+        { id: saleId, tenantId: 'tenant-2', status: 'DRAFT' },
+      ]);
     });
 
     // S13: Hard Delete Draft with Cascade
@@ -3106,7 +3629,7 @@ describe('PrismaSaleRepository', () => {
 
       // ASSERT: prisma.sale.delete was called (Prisma cascade deletes items automatically)
       expect(prisma.sale.delete).toHaveBeenCalledWith({
-        where: { id: saleId },
+        where: { id: saleId, tenantId: 'tenant-1' },
       });
 
       // VERIFY: After delete, both Sale and SaleItems would be gone from DB
