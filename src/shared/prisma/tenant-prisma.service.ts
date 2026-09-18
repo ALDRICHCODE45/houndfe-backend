@@ -26,6 +26,8 @@ export class TenantPrismaService {
         return createTenantScopedPrisma(txClient, this.cls);
       }
 
+      // SAFETY: Prisma transaction clients expose the same model delegates as
+      // TenantPrismaClient but intentionally omit top-level lifecycle methods.
       return txClient as unknown as TenantPrismaClient;
     }
 
@@ -61,7 +63,8 @@ export class TenantPrismaService {
       return work();
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const extendedRoot = createTenantScopedPrisma(this.prisma, this.cls);
+    return extendedRoot.$transaction(async (tx) => {
       this.cls.set(TX_CLIENT_KEY, tx);
       try {
         return await work();

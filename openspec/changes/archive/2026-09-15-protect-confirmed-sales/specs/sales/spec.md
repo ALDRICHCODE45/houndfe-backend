@@ -2,7 +2,7 @@
 
 ## Scope Boundary
 
-This delta covers only draft item mutation operations and draft sale deletion protection for non-DRAFT lifecycles (including `CONFIRMED` and `CANCELED`). Concurrency control and stale-write prevention, refunds and refund-settlement semantics, analytics and reports, schema migrations, and historical-data repair are explicitly out of scope.
+This delta covers draft item mutation operations and draft sale deletion protection for non-DRAFT lifecycles (including `CONFIRMED` and `CANCELED`). Repository writers for these operations MUST use one transaction, a tenant-qualified parent-sale `FOR UPDATE` lock, and post-lock status/item rereads before writes. This concurrency claim applies only to repository writers honoring that parent lock; generic stale-write prevention, refunds and refund-settlement semantics, analytics and reports, schema migrations, and historical-data repair remain out of scope.
 
 ## ADDED Requirements
 

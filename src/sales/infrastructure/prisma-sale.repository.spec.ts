@@ -23,6 +23,7 @@ function makeMockPrisma() {
       update: jest.fn(),
       updateMany: jest.fn(),
       findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
       findFirst: jest.fn(),
       findMany: jest.fn(),
       groupBy: jest.fn(),
@@ -2463,12 +2464,16 @@ describe('PrismaSaleRepository', () => {
           : null;
       });
       const tenantScopedClient = {
+        $queryRaw: jest.fn().mockResolvedValue([]),
         sale: { create, update, findUnique },
         saleItem: { deleteMany, createMany },
       };
       const scopedTenantPrisma = {
         getClient: jest.fn().mockReturnValue(tenantScopedClient),
         getTenantId,
+        runInTransaction: jest.fn(async (work: () => Promise<unknown>) =>
+          work(),
+        ),
       };
       const scopedRepo = new PrismaSaleRepository(
         scopedTenantPrisma as unknown as ConstructorParameters<
@@ -2791,9 +2796,11 @@ describe('PrismaSaleRepository', () => {
         where: { id: sale.id, tenantId: 'tenant-1' },
         select: { id: true, status: true },
       });
-      expect(prisma.saleItem.findMany).toHaveBeenCalledWith({
-        where: { saleId: sale.id, tenantId: 'tenant-1' },
-      });
+      expect(prisma.saleItem.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { saleId: sale.id, tenantId: 'tenant-1' },
+        }),
+      );
       expect(prisma.saleItem.deleteMany).toHaveBeenCalledWith({
         where: { saleId: sale.id, tenantId: 'tenant-1' },
       });
@@ -3647,6 +3654,17 @@ describe('PrismaSaleRepository', () => {
 
       expect(deletedSale).toBeNull();
       expect(orphanedItems).toHaveLength(0);
+    });
+
+    const draft = { id: 'sale-7', status: 'DRAFT', items: [] };
+
+    it('delegates delete failures to the transaction for rollback', async () => {
+      const failure = new Error('delete failed');
+      prisma.sale.findUniqueOrThrow.mockResolvedValue(draft);
+      prisma.sale.delete.mockRejectedValue(failure);
+
+      await expect(repo.delete('sale-7')).rejects.toBe(failure);
+      expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
     });
   });
 

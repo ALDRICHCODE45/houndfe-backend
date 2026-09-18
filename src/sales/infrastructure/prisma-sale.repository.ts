@@ -270,12 +270,40 @@ export class PrismaSaleRepository implements ISaleRepository {
     // non-DRAFT sale. Separate read from the WU5 status load; skipped
     // for a missing row (creation preserved) and a DRAFT row (the
     // intent gate already accepted). On mismatch, reject before any
-    // write or promotion-junction reconciliation.
+    // write or promotion-junction reconciliation. The explicit `select`
+    // keeps the projected row to the compared columns only.
     if (intent === 'GENERIC' && existing && existing.status !== 'DRAFT') {
       const persistedItems = await prisma.saleItem.findMany({
         where: { saleId: sale.id, tenantId },
+        select: {
+          id: true,
+          saleId: true,
+          productId: true,
+          variantId: true,
+          productName: true,
+          variantName: true,
+          imageUrl: true,
+          quantity: true,
+          unitPriceCents: true,
+          unitPriceCurrency: true,
+          originalPriceCents: true,
+          priceSource: true,
+          appliedPriceListId: true,
+          customPriceCents: true,
+          discountType: true,
+          discountValue: true,
+          discountAmountCents: true,
+          rewardDiscountPercent: true,
+          rewardKind: true,
+          prePriceCentsBeforeDiscount: true,
+          discountTitle: true,
+          discountedAt: true,
+          promotionId: true,
+          tenantId: true,
+        },
       });
       if (
+        Array.isArray(persistedItems) &&
         !this.snapshotItemsEqual(sale.items, persistedItems, sale.id, tenantId)
       ) {
         throw new BusinessRuleViolationError(
@@ -285,8 +313,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       }
     }
 
-    // Delete existing items (we'll recreate them from domain state);
-    // tenantId keeps this destructive write inside the tenant.
+    // Delete existing items only after the snapshot compare (we recreate
+    // them from domain state); tenantId keeps this destructive write
+    // inside the tenant.
     await prisma.saleItem.deleteMany({
       where: { saleId: sale.id, tenantId },
     });
@@ -399,7 +428,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       });
     }
 
-    // Reload and return
+    // Reload and return inside the same transaction and ambient CLS client.
     return (await this.findById(sale.id))!;
   }
 
@@ -410,7 +439,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     // sale row locked FIRST. Without the tenant-qualified `FOR UPDATE`, a
     // concurrent save could pass the status/snapshot gates and interleave
     // destructive writes (lost update). `saveDraftItems` (DRAFT intent)
-    // keeps its lock-free path by design — do not wrap it.
+    // joins the ambient transaction but stays lock-free by design.
     //
     // R3-tenant-scope — a persisted aggregate (carries createdAt) whose row
     // was not locked for this tenant is foreign/gone: fail as not found
@@ -432,7 +461,9 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async saveDraftItems(sale: Sale): Promise<Sale> {
-    return this.writeImpl(sale, 'DRAFT');
+    return this.tenantPrisma.runInTransaction(() =>
+      this.writeImpl(sale, 'DRAFT'),
+    );
   }
 
   async findById(id: string): Promise<Sale | null> {

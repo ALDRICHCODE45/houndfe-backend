@@ -6,15 +6,15 @@ Eight focused units implement the five requirements/27 scenarios in `specs/sales
 
 | Field                                                  | Value                                                                                                                                                                                                                  |
 | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Estimated changed lines (A+D)                          | **~1,112–1,868** future implementation A+D (production movement counted both ends; tests movement counted where expectations switch). Document lines ~310, not included. Total equals sum of per-unit subtotals below. |
+| Estimated changed lines (A+D)                          | **~1,182–1,965** future implementation A+D (production movement counted both ends; tests movement counted where expectations switch). Document lines ~310, not included. Total equals sum of per-unit subtotals below. |
 | 400-line budget risk                                   | High                                                                                                                                                                                                                   |
 | Chained PRs recommended                                | Yes                                                                                                                                                                                                                    |
-| Proposed review slices (1:1 with units, chain pending) | PR 1 = WU1; PR 2 = WU2; PR 3 = WU3; PR 4 = WU4; PR 5 = WU5; PR 6 = WU6; PR 7 = WU7; PR 8 = WU8                                                                                                                         |
-| Delivery strategy                                      | feature-branch-chain (resolved for WU1 only)                                                                                                                                                                           |
+| Proposed review slices                                 | PR 1 = WU1; PR 2 = WU2; PR 3 = WU3; PR 4 = WU4; PR 5 = WU5; PR 6 = WU6; PR 7 = WU7; PR 8 = WU8 planning reconciliation; PR 9 = WU8 implementation/tests                                                                  |
+| Delivery strategy                                      | feature-branch-chain; WU8 ask-on-risk resolved as a separate planning slice followed by the 210–335 A+D implementation/test slice                                                                                       |
 | Chain strategy                                         | feature-branch-chain                                                                                                                                                                                                   |
 
 ```text
-Decision needed before apply: No (resolved strategy: feature-branch-chain for WU1)
+Decision needed before apply: No — WU8 ask-on-risk resolved as a separate planning slice; preserve that slice before acquiring the implementation/test slice
 Chained PRs recommended: Yes
 Chain strategy: feature-branch-chain
 400-line budget risk: High
@@ -22,17 +22,17 @@ Chain strategy: feature-branch-chain
 
 Per-unit ranges (A+D, both ends counted for movement and replaced lines; every unit ≤ 400):
 
-| Unit    | Prod A      | Prod D    | Test A       | Test D   | Subtotal        | Upper ≤ 400? |
-| ------- | ----------- | --------- | ------------ | -------- | --------------- | ------------ |
-| WU1     | 5–8         | 1         | 100–180      | 0        | 106–189         | Yes          |
-| WU2     | 12–20       | 3–5       | 220–340      | 0        | 235–365         | Yes          |
-| WU3     | 4–8         | 4–8       | 50–80        | 5–10     | 63–106          | Yes          |
-| WU4     | 70–100      | 55–75     | 80–150       | 0        | 205–325         | Yes          |
-| WU5     | 30–50       | 5–10      | 120–200      | 0        | 155–260         | Yes          |
-| WU6     | 40–70       | 0         | 80–150       | 0        | 120–220         | Yes          |
-| WU7     | 8–15        | 0         | 80–150       | 0        | 88–165          | Yes          |
-| WU8     | 10–18       | 0         | 130–220      | 0        | 140–238         | Yes          |
-| **Sum** | **179–289** | **68–99** | **860–1470** | **5–10** | **1,112–1,868** |              |
+| Unit    | Prod A      | Prod D    | Test A       | Test D   | Subtotal        | Upper ≤ 400?                                              |
+| ------- | ----------- | --------- | ------------ | -------- | --------------- | --------------------------------------------------------- |
+| WU1     | 5–8         | 1         | 100–180      | 0        | 106–189         | Yes                                                       |
+| WU2     | 12–20       | 3–5       | 220–340      | 0        | 235–365         | Yes                                                       |
+| WU3     | 4–8         | 4–8       | 50–80        | 5–10     | 63–106          | Yes                                                       |
+| WU4     | 70–100      | 55–75     | 80–150       | 0        | 205–325         | Yes                                                       |
+| WU5     | 30–50       | 5–10      | 120–200      | 0        | 155–260         | Yes                                                       |
+| WU6     | 40–70       | 0         | 80–150       | 0        | 120–220         | Yes                                                       |
+| WU7     | 8–15        | 0         | 80–150       | 0        | 88–165          | Yes                                                       |
+| WU8     | 20–35       | 0         | 190–300      | 0        | 210–335         | Yes after separate planning slice; combined was ~340–465 |
+| **Sum** | **189–306** | **68–99** | **920–1550** | **5–10** | **1,182–1,965** |                                                           |
 
 ## Scenario / Requirement Traceability (27 scenarios, 5 requirements)
 
@@ -212,9 +212,9 @@ Tasks:
 
 ## WU7 — Repository wire snapshot equality into writeImpl('GENERIC')
 
-- **Start:** WU5 + WU6 complete. `writeImpl('GENERIC')` performs create-or-update + item recreate; the WU5 forged gate runs; `snapshotItemsEqual` exists but is not wired.
-- **Finish:** `writeImpl('GENERIC')` explicitly bypasses the snapshot compare in two cases: (a) existing row missing (creation preserved — `prisma.sale.create` runs); (b) existing row status is DRAFT (the WU5 intent gate already accepted). Only the existing-non-DRAFT branch invokes `snapshotItemsEqual`. On mismatch in that branch, reject `SALE_NOT_DRAFT`. The wire runs AFTER the WU5 forged gate, BEFORE any `deleteMany`/`createMany`/`update`/`updateMany` and BEFORE any promotion-junction reconciliation. On rejection: zero writes (no `deleteMany`, no `createMany`, no `update`, no `updateMany`, no promotion-junction reconciliation).
-- **Depends on:** WU5, WU6.
+- **Start:** WU5 + WU6 complete; `snapshotItemsEqual` exists but is not wired.
+- **Finish:** `writeImpl` reuses `TenantPrismaService.runInTransaction()` and ambient CLS, takes a parameterized tenant-qualified parent-sale `FOR UPDATE` lock, rereads status and items after the lock, compares before all sale/item/promotion writes, and reloads inside the transaction. The concurrency claim is limited to repository writers honoring the parent lock.
+- **Depends on:** WU5 and WU6.
 - **Files:** `src/sales/infrastructure/prisma-sale.repository.ts`, `src/sales/infrastructure/prisma-sale.repository.spec.ts`.
 - **Forecast:** Prod A 8–15, Prod D 0, Test A 80–150, Test D 0. **Subtotal 88–165.**
 - **Verify:** `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts`; `pnpm build`.
@@ -223,31 +223,33 @@ Tasks:
 
 Tasks:
 
-- [x] RED — in `prisma-sale.repository.spec.ts` add `describe('writeImpl GENERIC — snapshot compare wired', …)` cases: (existing non-DRAFT branch) existing non-DRAFT + incoming non-DRAFT + independent persisted snapshot differing on one mapped column rejects `SALE_NOT_DRAFT` with NO writes invoked at all (assert zero `deleteMany`/`createMany`/`update`/`updateMany` plus no promotion-junction reconciliation on `veto`/`optIn`/`applied`); (existing non-DRAFT branch) independent persisted snapshot matching every column proceeds, single `createMany` invoked; (existing missing branch) incoming creates without compare firing — assert `prisma.sale.create` invoked, no `findUnique`/`findFirst` snapshot load; (existing DRAFT branch) incoming updates proceed without compare firing — assert `prisma.sale.update` + `deleteMany` + `createMany` invoked; (non-DRAFT metadata-save unchanged) when independent persisted snapshot differs only on a non-item column (i.e., a column on the sale row, not in the items projection), the item compare is NOT the gate — confirm no false-positive rejection; (mutable-bypass) independent persisted snapshot, mutate only incoming side after the read, assert compare rejects. Parametrize over the columns the projection actually emits. New failing evidence for the wire-in cases; regression baseline for the bypass and metadata-save cases. <!-- sdd-owner: implementation -->
-- [x] GREEN — extend `writeImpl('GENERIC')`: after the WU5 forged gate, load persisted items (separate read from the WU5 status load) only when `existing !== null && existing.status !== 'DRAFT'`; in that branch call `snapshotItemsEqual` and throw `SALE_NOT_DRAFT` on `false`. On rejection, return before any write. Existing DRAFT and existing missing both skip the compare (preserved creation + preserved DRAFT update flows). <!-- sdd-owner: implementation -->
-- [x] REFACTOR — kept inline inside `writeImpl`; no extra helper. Pre-existing `save` tests stay green. <!-- sdd-owner: implementation -->
+- [x] RED — focused unit cases cover post-lock snapshot mismatch and zero writes; real PostgreSQL integration coverage is required for lock waiting/post-lock reread and rollback, with no mock substitute. <!-- sdd-owner: implementation -->
+- [x] GREEN — `writeImpl` now locks and rereads atomically, compares before destructive writes, and reloads inside `runInTransaction`; existing DRAFT and missing branches remain unchanged. <!-- sdd-owner: implementation -->
+- [x] TRIANGULATE — focused unit suite and dedicated PostgreSQL integration pass; lock waiting is observed through `pg_stat_activity`/`pg_blocking_pids`, post-lock state is reread through the repository `save` entrypoint, rollback runs through the repository in an ambient transaction, and per-test cleanup/reset plus `finally` lock release are exercised. The claim is limited to lock-honoring repository writers. <!-- sdd-owner: implementation -->
+- [x] REFACTOR — kept inline inside `writeImpl`; no extra helper; the WU6 anchor was removed. <!-- sdd-owner: implementation -->
 
 ---
 
-## WU8 — Repository delete lifecycle pre-check + specialized-contract regression
+## WU8 — Atomic repository delete lifecycle guard + specialized-contract regression
 
-- **Start:** WU7 complete. `PrismaSaleRepository.delete(id)` calls `prisma.sale.delete({ where: { id } })` with no lifecycle pre-check.
-- **Finish:** `delete(id)` reads persisted status via the tenant-scoped client before deletion; non-DRAFT rejects `SALE_NOT_DRAFT` with no `prisma.sale.delete` call; missing row still surfaces Prisma `P2025` from the existing `prisma.sale.delete`. The six specialized contracts keep their existing code paths; tests reuse existing valid fixtures and verify outcomes/side effects unchanged on their existing valid preconditions (charge from a valid DRAFT; cancellation and payment collection from a CONFIRMED; payment reference update on an existing payment; delivery flip from a CONFIRMED). Cross-tenant returns `null` from the lookup and surfaces `P2025` from the existing `prisma.sale.delete` (no disclosure).
+- **Start:** WU7 complete. `PrismaSaleRepository.delete(id)` calls `prisma.sale.delete({ where: { id } })` with no lifecycle guard, transaction, parent-row lock, or post-lock reread.
+- **Finish:** `delete(id)` runs through `TenantPrismaService.runInTransaction()` and the ambient tenant-scoped client, takes the same parameterized tenant-qualified parent-sale `FOR UPDATE` lock used by repository writers, rereads persisted status and the persisted item set after the lock via a tenant-scoped `findUniqueOrThrow`, and deletes inside that transaction only when the row is DRAFT. Existing non-DRAFT rejects `SALE_NOT_DRAFT` with no delete call. Missing and cross-tenant rows surface Prisma `P2025` from the tenant-scoped `findUniqueOrThrow` before any delete call — the delete is never attempted for those cases, and no cross-tenant row is disclosed. The six specialized contracts keep their existing code paths and valid preconditions unchanged. (Completed under commit `3d8701a`; see the reconciled task rows below.)
 - **Depends on:** WU7.
-- **Files:** `src/sales/infrastructure/prisma-sale.repository.ts`, `src/sales/infrastructure/prisma-sale.repository.spec.ts`.
-- **Forecast:** Prod A 10–18, Prod D 0, Test A 130–220, Test D 0. **Subtotal 140–238.**
-- **Verify:** `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts`; full `pnpm test`; `pnpm build`.
-- **Rollback:** revert `delete` lifecycle read + specialized-contract regression tests. Service guards + WU5/WU7 gates remain.
-- **Verification-eligible:** this unit completes the work-unit chain. After all units land, run final verification (see Final verification section). No deploy readiness until verification confirms the full suite and TS compile pass.
+- **Files:** `src/sales/infrastructure/prisma-sale.repository.ts`, `src/sales/infrastructure/prisma-sale.repository.spec.ts`, `src/sales/infrastructure/prisma-sale.repository.protect-confirmed-sales.integration.spec.ts`.
+- **Forecast (implementation-only):** Prod A 20–35, Prod D 0, Test A 190–300, Test D 0. **Subtotal 210–335 A+D.**
+- **Delivery boundary:** the user resolved ask-on-risk by separating the current 130 A+D planning reconciliation from the WU8 implementation/test slice. Preserve the planning slice first; only then may a fresh WU8 acquire baseline the 210–335 A+D implementation/test slice. The unsplit candidate would be ~340–465 A+D. Do not weaken atomic evidence to stay under 400.
+- **Verify:** `pnpm test -- src/sales/infrastructure/prisma-sale.repository.spec.ts`; the dedicated `prisma-sale.repository.protect-confirmed-sales.integration.spec.ts` PostgreSQL command; full `pnpm test`; `pnpm build`.
+- **Rollback:** revert only the atomic `delete` guard and WU8 unit/integration evidence. Service guards and WU5–WU7 gates remain.
+- **Verification-eligible:** this unit completes the work-unit chain. After all units land, run final verification (see Final verification section). No deploy readiness until verification confirms the full suite, PostgreSQL lock/reread/rollback behavior, and TS compile pass.
 
 Tasks:
 
-- [ ] RED — in `prisma-sale.repository.spec.ts` add `describe('delete — lifecycle protection', …)`: `delete('CONFIRMED-sale-id')` and `delete('CANCELED-sale-id')` reject `BusinessRuleViolationError('SALE_NOT_DRAFT','SALE_NOT_DRAFT')` with `prisma.sale.delete` not called; `delete('DRAFT-sale-id')` calls `prisma.sale.delete` once. Configure `makeMockPrisma` so `prisma.sale.findFirst` returns the desired `{ id, status }`. New failing evidence. <!-- sdd-owner: implementation -->
-- [ ] RED — add `describe('delete — missing row surfaces P2025', …)` regression baseline: `findFirst` returns `null`, `prisma.sale.delete` is called and throws `P2025`, repo re-throws. <!-- sdd-owner: implementation -->
-- [ ] GREEN — modify `async delete(id: string)` in `PrismaSaleRepository` (`src/sales/infrastructure/prisma-sale.repository.ts`, line ≈2019): before `prisma.sale.delete`, call `prisma.sale.findFirst({ where: { id, tenantId: this.requireTenantId() }, select: { id: true, status: true } })`. If row exists AND `status !== 'DRAFT'` → `throw new BusinessRuleViolationError('SALE_NOT_DRAFT','SALE_NOT_DRAFT')`. If row missing, fall through to the existing `prisma.sale.delete({ where: { id } })` so `P2025` still surfaces. <!-- sdd-owner: implementation -->
-- [ ] TRIANGULATE — reuse existing valid fixtures and existing describe blocks in `prisma-sale.repository.spec.ts` for the six specialized contracts (`persistChargeConfirmation`, `persistCancellation`, `persistCollectedPayments`, `persistCollectedPayment`, `updatePaymentReference`, `markSaleDelivered`). Verify existing outcomes/side effects are unchanged when invoked with their existing valid inputs (charge from a valid DRAFT; cancellation and payment collection from a CONFIRMED; payment reference update on an existing payment; delivery flip from a CONFIRMED). Reuse existing fixtures; do not invent new Prisma calls or scenarios. None of these tests assert `SALE_NOT_DRAFT` thrown by the gate — the specialized contracts remain unblocked on their existing valid preconditions. <!-- sdd-owner: implementation -->
-- [ ] TRIANGULATE — add a cross-tenant delete test: configure `makeTenantPrismaMock` so `prisma.sale.findFirst` returns `null` for the given id under the current tenant; `delete('sale-id')` falls through to `prisma.sale.delete` which throws `P2025`. Cross-tenant no-disclosure contract preserved. <!-- sdd-owner: implementation -->
-- [ ] REFACTOR — lifecycle read stays inline inside `delete`; no extra helper. Pre-existing tests stay green. <!-- sdd-owner: implementation -->
+- [x] RED — in `prisma-sale.repository.spec.ts` add `describe('delete', …)` asserting the full lock → tenant-scoped reread → delete/reject ordering: existing CONFIRMED and CANCELED rows reject `BusinessRuleViolationError('SALE_NOT_DRAFT','SALE_NOT_DRAFT')` with `prisma.sale.delete` not called; an existing DRAFT row calls `prisma.sale.delete` exactly once inside the transaction. Configure the tenant-scoped mock for the parameterized tenant-qualified `FOR UPDATE` lock (`$queryRaw` with `[id, tenantId]`) and the post-lock `findUniqueOrThrow({ where: { id }, select: { id, tenantId, status, items } })` plus item reread, and assert the reread precedes delete. Also cover delegation of delete failures to the ambient transaction for rollback. No cascade or Prisma error-code assertion is made at the unit level — cascade is proved only by the PostgreSQL integration task. New failing evidence. <!-- sdd-owner: implementation -->
+- [x] RED — add compact regression cases for missing and cross-tenant rows: the tenant-scoped `findUniqueOrThrow` preserves Prisma `P2025` **before any delete call** (`prisma.sale.delete` is never attempted for these cases) and no row from another tenant is disclosed. Reuse `makeTenantPrismaMock`; do not add a new mock framework. <!-- sdd-owner: implementation -->
+- [x] RED — extend `prisma-sale.repository.protect-confirmed-sales.integration.spec.ts` with real PostgreSQL evidence recorded as separate tests: (1) lock-wait evidence — hold the tenant-qualified parent lock, start `repository.delete`, and observe the bounded wait through `pg_stat_activity`/`pg_blocking_pids`; (2) post-lock transition — commit a transition away from DRAFT before releasing and assert `SALE_NOT_DRAFT` plus the preserved parent row and items; (3) DRAFT cascade evidence — hold the parent lock while the row stays DRAFT, invoke `repository.delete`, observe the bounded wait, and assert the DRAFT row and its items are deleted atomically via `ON DELETE CASCADE` (FK cascade executes inside the transaction; no Prisma code other than P2025 is prescribed for cascade failures); (4) rollback — delete inside an ambient transaction forced to roll back and assert the DRAFT row remains. Lock-wait and cascade evidence are distinct tests; neither implies the other. Release held locks in `finally` and reuse the existing per-test reset/cleanup. No mock substitute. <!-- sdd-owner: implementation -->
+- [x] GREEN — implement `delete(id)` with `TenantPrismaService.runInTransaction()` and the ambient tenant-scoped client: require the tenant id, take the parameterized tenant-qualified parent-sale `FOR UPDATE` lock, then tenant-scoped `findUniqueOrThrow` rereads persisted `{ id, tenantId, status, items }` inside the same transaction (same lock-and-reread pattern as WU7 `save`/`saveDraftItems`; the post-lock reread satisfies the normative atomic observation/preservation contract for lock-honoring writers); reject a non-DRAFT row with `SALE_NOT_DRAFT` and no delete; otherwise call `prisma.sale.delete({ where: { id } })` inside the same transaction. Missing and cross-tenant cases surface Prisma `P2025` from the tenant-scoped `findUniqueOrThrow` before any delete call — the delete is not attempted and no cross-tenant row is disclosed. `ON DELETE CASCADE` on `SaleItem` executes atomically inside the transaction. The concurrency claim is limited to lock-honoring repository writers. <!-- sdd-owner: implementation -->
+- [x] TRIANGULATE — reuse existing repository fixtures/assertions for `persistChargeConfirmation`, `persistCancellation`, `persistCollectedPayments`, `persistCollectedPayment`, and `updatePaymentReference`, plus the existing `markSaleDelivered` integration coverage. Run them on their existing valid preconditions and record that their outcomes/side effects remain unchanged; do not route any specialized contract through the draft-delete guard and do not duplicate their fixture suites. <!-- sdd-owner: implementation -->
+- [x] REFACTOR — keep the delete transaction/lock/reread sequence local to `delete`, reusing the established WU7 lock pattern without introducing a generic lifecycle helper. Complete Git-visible WU8 A+D stays below the 400 cap: commit `3d8701a` moves 291 additions + 80 deletions = 371 A+D across the three WU8 files; no atomic evidence was dropped. <!-- sdd-owner: implementation -->
 
 ---
 
