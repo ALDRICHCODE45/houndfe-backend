@@ -81,8 +81,8 @@ export class ReceiptReviewService {
    * Confirms a pending receipt and applies its real transfer amount.
    * The controller enforces `ReceiptEvidence:update` and supplies the reviewer
    * id plus idempotency key. The method guards receipt and sale state before a
-   * transaction that records the shared sale payment, marks the receipt as
-   * confirmed, and emits the receipt confirmation outbox event.
+   * transaction that claims the receipt, records the shared sale payment,
+   * and emits the receipt confirmation outbox event.
    */
   async confirm(
     saleId: string,
@@ -100,6 +100,15 @@ export class ReceiptReviewService {
     this.ensureSaleReviewable(receipt);
 
     return this.saleRepository.runInTransaction(async () => {
+      const confirmedAt = new Date();
+      const claimed = await this.receiptReviewRepository.markConfirmed(
+        receiptId,
+        tenantId,
+        reviewerUserId,
+        confirmedAt,
+      );
+      if (!claimed) throw new ReceiptNotActionableError();
+
       const paymentResult = (await this.salesService.addPayment(
         saleId,
         reviewerUserId,
@@ -112,13 +121,6 @@ export class ReceiptReviewService {
         'reviewer',
       )) as ConfirmReceiptResult;
 
-      const confirmedAt = new Date();
-      await this.receiptReviewRepository.markConfirmed(
-        receiptId,
-        tenantId,
-        reviewerUserId,
-        confirmedAt,
-      );
       await this.publishReceiptConfirmedEventSeam({
         receipt,
         reviewerUserId,
@@ -151,11 +153,13 @@ export class ReceiptReviewService {
     );
 
     await this.saleRepository.runInTransaction(async () => {
-      await this.receiptReviewRepository.markRejected(
+      const claimed = await this.receiptReviewRepository.markRejected(
         receiptId,
         tenantId,
         dto.reason,
       );
+      if (!claimed) throw new ReceiptNotActionableError();
+
       await this.publishReceiptRejectedEventSeam({
         receipt,
         reviewerUserId,

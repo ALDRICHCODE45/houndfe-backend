@@ -45,8 +45,8 @@ function makeRepository() {
   return {
     findPendingForSale: jest.fn(),
     findById: jest.fn(),
-    markConfirmed: jest.fn(),
-    markRejected: jest.fn(),
+    markConfirmed: jest.fn().mockResolvedValue(true),
+    markRejected: jest.fn().mockResolvedValue(true),
   } as jest.Mocked<ReceiptReviewRepository>;
 }
 
@@ -201,6 +201,25 @@ describe('ReceiptReviewService', () => {
       expect(result.debtCents).toBe(800);
     });
 
+    it('blocks a lost confirmation claim before payment creation or outbox publication', async () => {
+      const { service, repository, salesService, outboxWriter } = makeService();
+      repository.findById.mockResolvedValue(makeReceipt());
+      (repository.markConfirmed as jest.Mock).mockResolvedValue(false);
+
+      await expect(
+        service.confirm(
+          'sale-1',
+          'receipt-1',
+          'reviewer-1',
+          { amountCents: 2000 },
+          'idem-claim-lost',
+        ),
+      ).rejects.toBeInstanceOf(ReceiptNotActionableError);
+
+      expect(salesService.addPayment).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
     it('blocks confirmation for non-pending receipts before payment creation', async () => {
       const { service, repository, salesService, saleRepository } =
         makeService();
@@ -330,6 +349,20 @@ describe('ReceiptReviewService', () => {
       expect(salesService.addPayment.mock.calls).toHaveLength(0);
     });
 
+    it('blocks a lost rejection claim before outbox publication', async () => {
+      const { service, repository, outboxWriter } = makeService();
+      repository.findById.mockResolvedValue(makeReceipt());
+      (repository.markRejected as jest.Mock).mockResolvedValue(false);
+
+      await expect(
+        service.reject('sale-1', 'receipt-1', 'reviewer-1', {
+          reason: 'Duplicate receipt',
+        }),
+      ).rejects.toBeInstanceOf(ReceiptNotActionableError);
+
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
     it('blocks rejection for non-pending receipts', async () => {
       const { service, repository, salesService, saleRepository } =
         makeService();
@@ -369,6 +402,65 @@ describe('ReceiptReviewService', () => {
           reason: 'Unreadable receipt',
           occurredAt: '2026-06-13T12:00:00.000Z',
         },
+      );
+    });
+  });
+
+  describe('deterministic competing review orchestration', () => {
+    it('admits the rejection winner when an interleaved confirmation claim loses', async () => {
+      const { service, repository, salesService, outboxWriter } = makeService();
+      repository.findById.mockResolvedValue(makeReceipt());
+      salesService.addPayment.mockResolvedValue({
+        saleId: 'sale-1',
+        paidCents: 2000,
+        debtCents: 0,
+        totalCents: 2000,
+        paymentStatus: 'PAID',
+        paymentIds: ['payment-1'],
+      });
+
+      let signalConfirmationClaim!: () => void;
+      const confirmationClaimStarted = new Promise<void>((resolve) => {
+        signalConfirmationClaim = resolve;
+      });
+      let releaseConfirmationClaim!: () => void;
+      const confirmationClaimCanFinish = new Promise<void>((resolve) => {
+        releaseConfirmationClaim = resolve;
+      });
+
+      (repository.markConfirmed as jest.Mock).mockImplementation(async () => {
+        signalConfirmationClaim();
+        await confirmationClaimCanFinish;
+        return false;
+      });
+      (repository.markRejected as jest.Mock).mockResolvedValue(true);
+
+      const confirmation = service.confirm(
+        'sale-1',
+        'receipt-1',
+        'reviewer-1',
+        { amountCents: 2000 },
+        'idem-interleaved-confirm',
+      );
+      await confirmationClaimStarted;
+
+      await service.reject('sale-1', 'receipt-1', 'reviewer-2', {
+        reason: 'Duplicate receipt',
+      });
+      releaseConfirmationClaim();
+
+      await expect(confirmation).rejects.toBeInstanceOf(
+        ReceiptNotActionableError,
+      );
+      expect(salesService.addPayment).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(outboxWriter.publish).toHaveBeenLastCalledWith(
+        expect.anything(),
+        'tenant-1',
+        'ReceiptEvidence',
+        'receipt-1',
+        'receipt.rejected',
+        expect.anything(),
       );
     });
   });

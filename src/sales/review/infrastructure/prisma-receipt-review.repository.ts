@@ -81,29 +81,37 @@ export class PrismaReceiptReviewRepository implements ReceiptReviewRepository {
     tenantId: string,
     userId: string,
     timestamp: Date,
-  ): Promise<void> {
-    await this.tenantPrisma.getClient().receiptEvidence.updateMany({
-      where: { id: receiptId, tenantId, status: 'PENDING' },
-      data: {
-        status: 'CONFIRMED',
-        confirmedByUserId: userId,
-        confirmedAt: timestamp,
-      },
-    });
+  ): Promise<boolean> {
+    const result = await this.tenantPrisma
+      .getClient()
+      .receiptEvidence.updateMany({
+        where: { id: receiptId, tenantId, status: 'PENDING' },
+        data: {
+          status: 'CONFIRMED',
+          confirmedByUserId: userId,
+          confirmedAt: timestamp,
+        },
+      });
+
+    return result.count > 0;
   }
 
   async markRejected(
     receiptId: string,
     tenantId: string,
     reason: string,
-  ): Promise<void> {
-    await this.tenantPrisma.getClient().receiptEvidence.updateMany({
-      where: { id: receiptId, tenantId, status: 'PENDING' },
-      data: {
-        status: 'REJECTED',
-        rejectionReason: reason,
-      },
-    });
+  ): Promise<boolean> {
+    const result = await this.tenantPrisma
+      .getClient()
+      .receiptEvidence.updateMany({
+        where: { id: receiptId, tenantId, status: 'PENDING' },
+        data: {
+          status: 'REJECTED',
+          rejectionReason: reason,
+        },
+      });
+
+    return result.count > 0;
   }
 }
 

@@ -238,25 +238,27 @@ class InMemoryReceiptReviewRepository implements ReceiptReviewRepository {
     tenantId: string,
     userId: string,
     timestamp: Date,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const receipt = await this.findById(receiptId, tenantId);
-    if (!receipt) return;
+    if (!receipt || receipt.status !== 'PENDING') return false;
 
     receipt.status = 'CONFIRMED';
     receipt.confirmedByUserId = userId;
     receipt.confirmedAt = timestamp;
+    return true;
   }
 
   async markRejected(
     receiptId: string,
     tenantId: string,
     reason: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const receipt = await this.findById(receiptId, tenantId);
-    if (!receipt) return;
+    if (!receipt || receipt.status !== 'PENDING') return false;
 
     receipt.status = 'REJECTED';
     receipt.rejectionReason = reason;
+    return true;
   }
 }
 
@@ -269,14 +271,14 @@ class CapturingOutboxWriter implements Pick<OutboxWriterService, 'publish'> {
     aggregateType: string,
     aggregateId: string,
     eventType: string,
-    payload: Record<string, unknown>,
+    payload: Parameters<OutboxWriterService['publish']>[5],
   ): Promise<void> {
     this.events.push({
       tenantId,
       aggregateType,
       aggregateId,
       eventType,
-      payload,
+      payload: payload as Record<string, unknown>,
     });
 
     return Promise.resolve();
@@ -405,6 +407,9 @@ function makeHarness(saleOverrides: Partial<MutableSaleState> = {}) {
     new EventEmitter2(),
     outboxWriter as unknown as OutboxWriterService,
     tenantPrisma,
+    {} as never,
+    {} as never,
+    {} as never,
   );
   const receiptReviewService = new ReceiptReviewService(
     receiptRepository,
@@ -660,6 +665,9 @@ describe('Receipt review integration flow', () => {
       new EventEmitter2(),
       outboxWriter as unknown as OutboxWriterService,
       tenantPrisma,
+      {} as never,
+      {} as never,
+      {} as never,
     );
     const receiptReviewService = new ReceiptReviewService(
       receiptRepository,

@@ -131,7 +131,7 @@ describe('PrismaReceiptReviewRepository', () => {
     expect(result?.sale.status).toBe('CONFIRMED');
   });
 
-  it('marks a receipt confirmed with reviewer attribution', async () => {
+  it('returns whether the tenant-scoped confirmation claim updated a pending receipt', async () => {
     const client = makeMockPrisma();
     const tenantPrisma = {
       getClient: jest.fn().mockReturnValue(client),
@@ -139,13 +139,15 @@ describe('PrismaReceiptReviewRepository', () => {
     const repository = new PrismaReceiptReviewRepository(tenantPrisma);
     const confirmedAt = new Date('2026-06-13T12:00:00.000Z');
 
-    await repository.markConfirmed(
+    client.receiptEvidence.updateMany.mockResolvedValue({ count: 1 });
+    const claimed = await repository.markConfirmed(
       'receipt-1',
       'tenant-1',
       'reviewer-1',
       confirmedAt,
     );
 
+    expect(claimed).toBe(true);
     expect(client.receiptEvidence.updateMany).toHaveBeenCalledWith({
       where: { id: 'receipt-1', tenantId: 'tenant-1', status: 'PENDING' },
       data: {
@@ -156,20 +158,28 @@ describe('PrismaReceiptReviewRepository', () => {
     });
   });
 
-  it('marks a receipt rejected with a reason', async () => {
+  it('returns false when a confirmation or rejection conditional write loses', async () => {
     const client = makeMockPrisma();
     const tenantPrisma = {
       getClient: jest.fn().mockReturnValue(client),
     } as unknown as TenantPrismaService;
     const repository = new PrismaReceiptReviewRepository(tenantPrisma);
 
-    await repository.markRejected(
-      'receipt-1',
-      'tenant-1',
-      'Unreadable receipt',
-    );
+    client.receiptEvidence.updateMany.mockResolvedValue({ count: 0 });
 
-    expect(client.receiptEvidence.updateMany).toHaveBeenCalledWith({
+    await expect(
+      repository.markConfirmed(
+        'receipt-1',
+        'tenant-1',
+        'reviewer-1',
+        new Date('2026-06-13T12:00:00.000Z'),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      repository.markRejected('receipt-1', 'tenant-1', 'Unreadable receipt'),
+    ).resolves.toBe(false);
+
+    expect(client.receiptEvidence.updateMany).toHaveBeenLastCalledWith({
       where: { id: 'receipt-1', tenantId: 'tenant-1', status: 'PENDING' },
       data: {
         status: 'REJECTED',

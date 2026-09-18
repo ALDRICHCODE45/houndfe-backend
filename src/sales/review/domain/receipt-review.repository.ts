@@ -40,12 +40,12 @@ export interface ReceiptReviewRepository {
     tenantId: string,
     userId: string,
     timestamp: Date,
-  ): Promise<void>;
+  ): Promise<boolean>;
   markRejected(
     receiptId: string,
     tenantId: string,
     reason: string,
-  ): Promise<void>;
+  ): Promise<boolean>;
 }
 
 export const RECEIPT_REVIEW_REPOSITORY = Symbol.for('ReceiptReviewRepository');
