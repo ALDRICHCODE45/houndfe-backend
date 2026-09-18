@@ -15,17 +15,21 @@
  * Inngest function then logs `skipped: no-email` rather than
  * dispatching to a foreign address. Both `id` AND `tenantId` go into
  * the `where` clause so a tampered saleId can't slip past.
+ *
+ * The nested relation is a separate hazard: `Sale.customerId` keys on a
+ * bare customer id, so a tenant-owned sale can carry a foreign customer
+ * id, and Prisma cannot attach a tenant `where` to that to-one
+ * projection. The nested select therefore asks for `customer.tenantId`
+ * alongside `customer.email`, and ownership is re-checked after the
+ * read. A mismatched customer resolves to `null` — the existing
+ * no-email behavior — instead of leaking a foreign address.
  */
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../shared/prisma/prisma.service';
-import type {
-  ISaleCustomerEmailLookup,
-} from '../domain/ports/sale-customer-email.port';
+import type { ISaleCustomerEmailLookup } from '../domain/ports/sale-customer-email.port';
 
 @Injectable()
-export class PrismaSaleCustomerEmailRepository
-  implements ISaleCustomerEmailLookup
-{
+export class PrismaSaleCustomerEmailRepository implements ISaleCustomerEmailLookup {
   constructor(private readonly prisma: PrismaService) {}
 
   async findEmailBySaleId(input: {
@@ -39,11 +43,14 @@ export class PrismaSaleCustomerEmailRepository
       where: { id: input.saleId, tenantId: input.tenantId },
       select: {
         customer: {
-          select: { email: true },
+          select: { tenantId: true, email: true },
         },
       },
     });
     if (!row || !row.customer) {
+      return null;
+    }
+    if (row.customer.tenantId !== input.tenantId) {
       return null;
     }
     const email = row.customer.email;
