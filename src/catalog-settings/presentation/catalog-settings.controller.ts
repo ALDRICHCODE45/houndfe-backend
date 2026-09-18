@@ -46,7 +46,7 @@ import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interf
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import { GetCatalogSettingsUseCase } from '../application/get-catalog-settings.use-case';
 import { UpdateCatalogSettingsUseCase } from '../application/update-catalog-settings.use-case';
-import type { UpdateCatalogSettingsDto } from '../dto/update-catalog-settings.dto';
+import { UpdateCatalogSettingsDto } from '../dto/update-catalog-settings.dto';
 import {
   toCatalogSettingsResponseDto,
   type CatalogSettingsResponseDto,

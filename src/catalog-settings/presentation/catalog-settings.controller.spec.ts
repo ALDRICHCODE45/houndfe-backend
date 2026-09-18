@@ -21,17 +21,23 @@
  *     with an actual `ParseUUIDPipe` instance via `ROUTE_ARGS_METADATA`.
  *
  * Pipe-level notes: this harness instantiates the controller directly (no
- * Nest application), so `ParseUUIDPipe`/`ValidationPipe` execution is not
- * exercised here; malformed-UUID and strict-DTO rejection are covered at
- * pipe/DTO level by `update-catalog-settings.dto.spec.ts` and by the global
- * bootstrap pipes (`whitelist` + `forbidNonWhitelisted`). Route/method
- * metadata is asserted instead so the PATCH wiring is still pinned.
+ * Nest application), so malformed UUIDs remain covered at DTO/pipe level.
+ * The PATCH body metatype is exercised here through the real Nest
+ * `ValidationPipe` to pin the runtime reflection contract used by the global
+ * bootstrap pipes (`whitelist` + `forbidNonWhitelisted`).
  */
-import { NotFoundException, ParseUUIDPipe } from '@nestjs/common';
+import {
+  ArgumentMetadata,
+  BadRequestException,
+  NotFoundException,
+  ParseUUIDPipe,
+  ValidationPipe,
+} from '@nestjs/common';
 import {
   GUARDS_METADATA,
   HEADERS_METADATA,
   METHOD_METADATA,
+  PARAMTYPES_METADATA,
   PATH_METADATA,
   ROUTE_ARGS_METADATA,
 } from '@nestjs/common/constants';
@@ -56,6 +62,7 @@ import { CatalogSettingsController } from './catalog-settings.controller';
 type RouteArgMetadata = {
   index: number;
   data?: string;
+  metatype?: ArgumentMetadata['metatype'];
   pipes?: unknown[];
 };
 
@@ -198,6 +205,60 @@ describe('CatalogSettingsController', () => {
       // An actual pipe instance is wired, not a class or name reference.
       expect(tenantIdArg?.pipes).toHaveLength(1);
       expect(tenantIdArg?.pipes?.[0]).toBeInstanceOf(ParseUUIDPipe);
+    });
+
+    it('reflects UpdateCatalogSettingsDto as PATCH body parameter 1 and validates it through Nest ValidationPipe', async () => {
+      const routeArgs = Reflect.getMetadata(
+        ROUTE_ARGS_METADATA,
+        CatalogSettingsController,
+        'updateSettings',
+      ) as Record<string, RouteArgMetadata> | undefined;
+      const bodyArg = routeArgs?.[`${RouteParamtypes.BODY}:1`];
+      const parameterTypes = Reflect.getMetadata(
+        PARAMTYPES_METADATA,
+        CatalogSettingsController.prototype,
+        'updateSettings',
+      ) as ArgumentMetadata['metatype'][] | undefined;
+      const metadata: ArgumentMetadata = {
+        type: 'body',
+        data: bodyArg?.data,
+        metatype: parameterTypes?.[bodyArg?.index ?? 1],
+      };
+      const validationPipe = new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      });
+
+      expect(metadata.metatype).toBe(UpdateCatalogSettingsDto);
+
+      for (const catalogPublished of [true, false]) {
+        const transformed = (await validationPipe.transform(
+          { catalogPublished },
+          metadata,
+        )) as unknown;
+        expect(transformed).toBeInstanceOf(UpdateCatalogSettingsDto);
+        if (!(transformed instanceof UpdateCatalogSettingsDto)) {
+          throw new Error(
+            'ValidationPipe did not return UpdateCatalogSettingsDto',
+          );
+        }
+        expect(transformed.catalogPublished).toBe(catalogPublished);
+      }
+
+      for (const payload of [
+        { catalogPublished: true, unexpected: true },
+        { catalogPublished: 'true' },
+      ]) {
+        let error: unknown;
+        try {
+          await validationPipe.transform(payload, metadata);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).getStatus()).toBe(400);
+      }
     });
   });
 
