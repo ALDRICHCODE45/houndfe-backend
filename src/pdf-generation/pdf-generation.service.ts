@@ -228,6 +228,11 @@ export class PdfGenerationService implements OnModuleInit {
 
     let stream: Readable;
     try {
+      // SAFETY: `createElement(Template, props)` builds a React element at
+      // runtime that `renderToStream` accepts, but the renderer's public
+      // signature names its own element type. The template components and
+      // the renderer share the same React runtime, so only the nominal
+      // static type differs; this assertion changes no runtime behavior.
       stream = (await renderToStream(
         createElement(Template, props) as unknown as Parameters<
           typeof renderToStream
@@ -341,6 +346,11 @@ export class PdfGenerationService implements OnModuleInit {
 
     let stream: Readable;
     try {
+      // SAFETY: `createElement(Template, props)` builds a React element at
+      // runtime that `renderToStream` accepts, but the renderer's public
+      // signature names its own element type. The template components and
+      // the renderer share the same React runtime, so only the nominal
+      // static type differs; this assertion changes no runtime behavior.
       stream = (await renderToStream(
         createElement(Template, props) as unknown as Parameters<
           typeof renderToStream
@@ -392,6 +402,11 @@ export class PdfGenerationService implements OnModuleInit {
       // share the same Yoga WASM instance — keeping them co-located
       // here matches the receipt pipeline.
       const { renderToBuffer } = await import('@react-pdf/renderer');
+      // SAFETY: `createElement(Template, props)` builds a React element at
+      // runtime that `renderToBuffer` accepts, but the renderer's public
+      // signature names its own element type. The template components and
+      // the renderer share the same React runtime, so only the nominal
+      // static type differs; this assertion changes no runtime behavior.
       return await renderToBuffer(
         createElement(Template, props) as unknown as Parameters<
           typeof renderToBuffer

@@ -89,6 +89,7 @@ function makeConfirmedSale(
     ],
     payments: [
       {
+        paymentId: '00000000-0000-4000-8000-0000000000a1',
         method: 'CASH',
         amountCents: 10000,
         tenderedCents: 10000,
