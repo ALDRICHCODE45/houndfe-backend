@@ -76,6 +76,10 @@ import { POS_EVALUATE_PROMOTIONS_USE_CASE } from '../../promotions/application/p
 import type { QuotationItem } from '../domain/quotation-item.entity';
 import type { QuotationCancelReason } from '../domain/quotation.entity';
 import {
+  isQuotationIvaRateClassification,
+  type QuotationIvaRateClassification,
+} from '../domain/quotation-tax.types';
+import {
   MAILER,
   type IMailer,
   type SendMailInput,
@@ -90,6 +94,15 @@ export interface AddQuotationItemInput {
   productId: string;
   variantId?: string | null;
   quantity: number;
+}
+
+/**
+ * WU2 (T2.2) — parent-product tax pair resolved through
+ * `getProductInfoForSale`, consumed by the line snapshot pipeline.
+ */
+interface ProductTaxMetadata {
+  ivaRate: QuotationIvaRateClassification;
+  chargeProductTaxes: boolean;
 }
 
 export interface UpdateQuotationItemQuantityInput {
@@ -252,6 +265,19 @@ export class QuotationsService {
       input.variantId ?? null,
     );
 
+    // WU2 (T2.2) — seed the request-local metadata cache with the
+    // addItem lookup so the recompute's resnapshot step reuses THIS
+    // result for the freshly added line instead of querying the
+    // catalog a second time.
+    const taxMetadataCache = new Map<string, ProductTaxMetadata>();
+    taxMetadataCache.set(
+      this.taxMetadataKey(productInfo.productId, productInfo.variantId),
+      {
+        ivaRate: productInfo.ivaRate,
+        chargeProductTaxes: productInfo.chargeProductTaxes,
+      },
+    );
+
     draft.addItem({
       id: randomUUID(),
       quotationId: draft.id,
@@ -263,9 +289,16 @@ export class QuotationsService {
       unitPriceCents: productInfo.unitPriceCents,
       unitPriceCurrency: 'MXN',
       priceSource: 'PRICE_LIST',
+      // WU2 (T2.2) — the newly created line carries the parent
+      // product's classification pair BEFORE it enters recompute (the
+      // recompute then re-derives the taxable base after promotions).
+      // Stacks onto an existing line keep that line's identity; its
+      // snapshot is refreshed by the repricing flow.
+      ivaRateClassification: productInfo.ivaRate,
+      chargeProductTaxesSnapshot: productInfo.chargeProductTaxes,
     });
 
-    await this.recomputePricingAndPromotions(draft);
+    await this.recomputePricingAndPromotions(draft, taxMetadataCache);
     const persisted = await this.quotationRepo.save(draft);
     return this.toResponse(persisted);
   }
@@ -568,7 +601,11 @@ export class QuotationsService {
       );
     }
 
-    draft.setTaxRate(rate);
+    // WU2 (T2.4) — the deprecated PATCH adapter persists ONLY the legacy
+    // root column through the explicit compatibility mutation; it does
+    // NOT touch the per-line snapshot pipeline, `ivaBreakdown[]`, or the
+    // PDF aggregate input.
+    draft.setDeprecatedTaxRate(rate);
     const persisted = await this.quotationRepo.save(draft);
     return this.toResponse(persisted);
   }
@@ -632,8 +669,8 @@ export class QuotationsService {
 
     await this.recomputePricingAndPromotions(draft);
     const persisted = await this.quotationRepo.save(draft);
-    return this.toResponse(persisted);
 
+    return this.toResponse(persisted);
   }
 
   /**
@@ -1055,7 +1092,16 @@ export class QuotationsService {
    * AND the entity's discount fields are CLEARED before the engine
    * reads them.
    */
-  private async recomputePricingAndPromotions(draft: Quotation): Promise<void> {
+  private async recomputePricingAndPromotions(
+    draft: Quotation,
+    // WU2 correction — a FRESH dedup cache per recompute invocation:
+    // mutations without an addItem-seeded map still deduplicate their
+    // own lookups, and nothing is shared across separate mutations.
+    taxMetadataCache: Map<string, ProductTaxMetadata> = new Map<
+      string,
+      ProductTaxMetadata
+    >(),
+  ): Promise<void> {
     // (1) Clear prior PROMO-sourced discounts. Manual free-form
     //     discounts (promotionId === null) are skipped.
     for (const item of draft.items) {
@@ -1067,7 +1113,25 @@ export class QuotationsService {
     // (2) Reprice non-sticky lines (PRICE_LIST source) via the
     //     ProductsService batch resolver. CUSTOM lines are sticky and
     //     are SKIPPED — the cashier's override wins.
-    await this.repriceNonStickyLines(draft);
+    const repricedItems = await this.repriceNonStickyLines(draft);
+
+    // (2b) WU2 (T2.2) — re-snapshot the classification pair of every
+    //      line that actually received a resolved price. The line is
+    //      being repriced, not just re-taxed, so the pair is read from
+    //      the CURRENT parent product (request-local dedup cache makes
+    //      this one lookup per distinct (productId, variantId)).
+    for (const item of repricedItems) {
+      const metadata = await this.getProductTaxMetadata(
+        item.productId,
+        item.variantId,
+        taxMetadataCache,
+      );
+      if (!metadata) continue;
+      item.snapshotTaxClassification(
+        metadata.ivaRate,
+        metadata.chargeProductTaxes,
+      );
+    }
 
     // (3) Build the engine input + (4) call the engine.
     const result = await this.evaluatePromotions(draft);
@@ -1093,6 +1157,21 @@ export class QuotationsService {
         draft.optOutManualPromotion(promotionId);
       }
     }
+
+    // (7) WU2 (T2.2) — after promotions settle, re-derive the taxable
+    //     base for EVERY line carrying a non-null classification pair
+    //     (PRICE_LIST and sticky CUSTOM alike) from its final
+    //     post-discount inclusive amount. Legacy rows with a null pair
+    //     are left untouched (no fabricated base).
+    for (const item of draft.items) {
+      if (
+        item.ivaRateClassification === null ||
+        item.chargeProductTaxesSnapshot === null
+      ) {
+        continue;
+      }
+      item.recomputeTaxableBase();
+    }
   }
 
   /**
@@ -1107,7 +1186,9 @@ export class QuotationsService {
    * — quotations don't carry manual free-form discounts in this slice,
    * so the gate is omitted).
    */
-  private async repriceNonStickyLines(draft: Quotation): Promise<void> {
+  private async repriceNonStickyLines(
+    draft: Quotation,
+  ): Promise<QuotationItem[]> {
     const nonStickyInputs: Array<{
       productId: string;
       variantId: string | null;
@@ -1136,11 +1217,15 @@ export class QuotationsService {
       });
     }
 
-    if (nonStickyInputs.length === 0) return;
+    if (nonStickyInputs.length === 0) return [];
 
     const tierMap =
       await this.productsService.batchResolvePriceMap(nonStickyInputs);
 
+    // WU2 (T2.2) — lines that actually received a resolved price; the
+    // resnapshot step (recompute 2b) runs the metadata refresh only
+    // for these.
+    const repricedItems: QuotationItem[] = [];
     for (const item of draft.items) {
       if (item.priceSource === 'CUSTOM') continue;
       const effectiveListId = item.appliedPriceListId ?? effectiveGlobalListId;
@@ -1157,7 +1242,51 @@ export class QuotationsService {
         priceSource: 'PRICE_LIST',
         appliedPriceListId: item.appliedPriceListId,
       });
+      repricedItems.push(item);
     }
+    return repricedItems;
+  }
+
+  /**
+   * WU2 (T2.2) — resolve the parent-product tax pair, deduplicated by
+   * `(productId, variantId)` within one recompute via the per-invocation
+   * request-local cache. `addItem` seeds the cache with its own lookup
+   * so the freshly added line is never queried twice. Returns `null`
+   * when the catalog payload is unusable (defensive against mock/stale
+   * callers) so the line keeps its previous snapshot state instead of
+   * being reset to garbage.
+   */
+  private async getProductTaxMetadata(
+    productId: string,
+    variantId: string | null,
+    cache: Map<string, ProductTaxMetadata>,
+  ): Promise<ProductTaxMetadata | null> {
+    const key = this.taxMetadataKey(productId, variantId);
+    const cached = cache.get(key);
+    if (cached) return cached;
+
+    const info = await this.productsService.getProductInfoForSale(
+      productId,
+      variantId,
+    );
+    if (
+      !info ||
+      !isQuotationIvaRateClassification(info.ivaRate) ||
+      typeof info.chargeProductTaxes !== 'boolean'
+    ) {
+      return null;
+    }
+    const metadata: ProductTaxMetadata = {
+      ivaRate: info.ivaRate,
+      chargeProductTaxes: info.chargeProductTaxes,
+    };
+    cache.set(key, metadata);
+    return metadata;
+  }
+
+  /** Cache key for the request-local product-tax metadata map (WU2). */
+  private taxMetadataKey(productId: string, variantId: string | null): string {
+    return `${productId}::${variantId ?? ''}`;
   }
 
   /**

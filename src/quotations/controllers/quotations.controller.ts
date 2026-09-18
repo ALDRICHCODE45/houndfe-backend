@@ -24,6 +24,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   NotFoundException,
@@ -315,8 +316,14 @@ export class QuotationsController {
    * `PATCH /quotations/drafts/:id/tax-rate` — override the IVA tax rate
    * for a DRAFT quotation. Rate is a decimal between 0 (exento) and 1.
    * taxCents is recomputed automatically from the new rate.
+   *
+   * WU3 (T3.2) — deprecation signal: the per-line product-tax approach
+   * is the intended path. This endpoint is retained for backwards
+   * compatibility (quotations created before the WU2 snapshot pipeline)
+   * but will be removed in a future release.
    */
   @Patch('drafts/:id/tax-rate')
+  @Header('Deprecation', 'true')
   @HttpCode(HttpStatus.OK)
   @RequirePermissions(['update', 'Quotation'])
   setTaxRate(

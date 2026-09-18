@@ -565,4 +565,200 @@ describeIfDb('PrismaQuotationRepository (Integration - Real DB)', () => {
       ).resolves.toBeUndefined();
     });
   });
+
+  // ── WU1 — product IVA snapshot round-trip ────────────────────────
+
+  /**
+   * Snapshot helper: creates a line, snapshots the parent-product tax
+   * pair, and derives the IVA-exclusive base from the final
+   * post-discount inclusive amount (half-up integer division).
+   *
+   * Each call uses a distinct productId so the aggregate's
+   * product+variant stacking doesn't merge the fixture lines.
+   */
+  let productSeq = 0;
+  const addTaxedLine = async (
+    q: Quotation,
+    rate: 'IVA_16' | 'IVA_8' | 'IVA_0' | 'IVA_EXENTO',
+    chargeProductTaxes: boolean,
+    unitPriceCents: number,
+    quantity = 1,
+  ) => {
+    const productId = `prod-tax-${(productSeq += 1).toString().padStart(3, '0')}`;
+    await prisma.product.create({
+      data: {
+        id: productId,
+        name: `Tax Product ${productSeq}`,
+        tenantId: tenantId,
+        chargeProductTaxes,
+        ivaRate: rate,
+        iepsRate: 'NO_APLICA',
+        purchaseCostMode: 'NET',
+        purchaseNetCostCents: 0,
+        purchaseGrossCostCents: 0,
+        useStock: false,
+        sellInPos: true,
+        includeInOnlineCatalog: true,
+        hasVariants: false,
+        hidePriceInOnlineCatalog: false,
+      },
+    });
+    q.addItem({
+      id: newItemId(),
+      quotationId: q.id,
+      productId,
+      variantId: null,
+      productName: `Tax Product ${productSeq}`,
+      variantName: null,
+      quantity,
+      unitPriceCents,
+      unitPriceCurrency: 'MXN',
+      priceSource: 'PRICE_LIST',
+    });
+    const item = q.items[q.items.length - 1];
+    item.snapshotTaxClassification(rate, chargeProductTaxes);
+    item.recomputeTaxableBase();
+    return item;
+  };
+
+  describe('WU1 — IVA snapshot round-trip', () => {
+    it('round-trips a complete snapshot (IVA_16 charged)', async () => {
+      const id = newQuotationId();
+      const q = Quotation.create({ id, sellerUserId: userId });
+      await addTaxedLine(q, 'IVA_16', true, 11600);
+
+      const saved = await repo.save(q);
+      expect(saved.items[0]?.taxableBaseCents).toBe(10000);
+      expect(saved.items[0]?.ivaRateClassification).toBe('IVA_16');
+      expect(saved.items[0]?.chargeProductTaxesSnapshot).toBe(true);
+
+      const fetched = await repo.findById(id);
+      expect(fetched?.items[0]?.taxableBaseCents).toBe(10000);
+      expect(fetched?.items[0]?.ivaRateClassification).toBe('IVA_16');
+      expect(fetched?.items[0]?.chargeProductTaxesSnapshot).toBe(true);
+      expect(fetched?.items[0]?.hasCompleteTaxSnapshot).toBe(true);
+    });
+
+    it('round-trips the three zero-tax meanings as distinct snapshots', async () => {
+      // IVA_0 (rate is 0%), IVA_EXENTO (exempt), and chargeProductTaxes=false
+      // (NOT_TAXABLE) all keep their stored pair verbatim.
+      const id = newQuotationId();
+      const q = Quotation.create({ id, sellerUserId: userId });
+      await addTaxedLine(q, 'IVA_0', true, 900);
+      await addTaxedLine(q, 'IVA_EXENTO', true, 900);
+      await addTaxedLine(q, 'IVA_16', false, 900);
+
+      await repo.save(q);
+      const fetched = await repo.findById(id);
+
+      const items = fetched?.items ?? [];
+      expect(items).toHaveLength(3);
+      const byRate = (rate: string) =>
+        items.find((i) => i.ivaRateClassification === rate);
+      expect(byRate('IVA_0')?.chargeProductTaxesSnapshot).toBe(true);
+      expect(byRate('IVA_EXENTO')?.chargeProductTaxesSnapshot).toBe(true);
+      expect(byRate('IVA_16')?.chargeProductTaxesSnapshot).toBe(false);
+      expect(byRate('IVA_0')?.taxableBaseCents).toBe(900);
+      expect(byRate('IVA_EXENTO')?.taxableBaseCents).toBe(900);
+      expect(byRate('IVA_16')?.taxableBaseCents).toBe(900);
+    });
+
+    it('preserves all-null historic rows verbatim (no backfill)', async () => {
+      const id = newQuotationId();
+      const q = Quotation.create({ id, sellerUserId: userId });
+      // Legacy line: created WITHOUT the snapshot API — all three
+      // fields stay null exactly like pre-migration rows.
+      const productId = `prod-tax-${randomUUID().slice(0, 8)}`;
+      await prisma.product.create({
+        data: {
+          id: productId,
+          name: 'Tax Product Legacy',
+          tenantId: tenantId,
+          chargeProductTaxes: true,
+          ivaRate: 'IVA_16',
+          iepsRate: 'NO_APLICA',
+          purchaseCostMode: 'NET',
+          purchaseNetCostCents: 0,
+          purchaseGrossCostCents: 0,
+          useStock: false,
+          sellInPos: true,
+          includeInOnlineCatalog: true,
+          hasVariants: false,
+          hidePriceInOnlineCatalog: false,
+        },
+      });
+      q.addItem({
+        id: newItemId(),
+        quotationId: id,
+        productId,
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 5000,
+        unitPriceCurrency: 'MXN',
+      });
+
+      await repo.save(q);
+
+      // Assert the DB row itself carries NULLs.
+      const rawItems = await prisma.quotationItem.findMany({
+        where: { quotationId: id },
+        select: {
+          taxableBaseCents: true,
+          ivaRateClassification: true,
+          chargeProductTaxesSnapshot: true,
+        },
+      });
+      expect(rawItems).toHaveLength(1);
+      expect(rawItems[0]).toEqual({
+        taxableBaseCents: null,
+        ivaRateClassification: null,
+        chargeProductTaxesSnapshot: null,
+      });
+
+      const fetched = await repo.findById(id);
+      expect(fetched?.items[0]?.taxableBaseCents).toBeNull();
+      expect(fetched?.items[0]?.ivaRateClassification).toBeNull();
+      expect(fetched?.items[0]?.chargeProductTaxesSnapshot).toBeNull();
+      expect(fetched?.items[0]?.hasCompleteTaxSnapshot).toBe(false);
+    });
+
+    it('round-trips the legacy root taxRate in both directions', async () => {
+      const id = newQuotationId();
+      const q = Quotation.create({ id, sellerUserId: userId });
+      q.addItem({
+        id: newItemId(),
+        quotationId: id,
+        productId: 'prod-test-001',
+        variantId: null,
+        productName: 'Test Product',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      q.setDeprecatedTaxRate(0.08);
+
+      await repo.save(q);
+
+      const raw = await prisma.quotation.findUnique({
+        where: { id },
+        select: { taxRate: true },
+      });
+      expect(raw?.taxRate).toBeCloseTo(0.08, 8);
+
+      const fetched = await repo.findById(id);
+      expect(fetched?.taxRate).toBeCloseTo(0.08, 8);
+
+      // Status copy must not reset the persisted root rate to 0.16.
+      const sent = (await repo.findById(id))!.send();
+      await repo.save(sent);
+      const rawAfterSend = await prisma.quotation.findUnique({
+        where: { id },
+        select: { taxRate: true },
+      });
+      expect(rawAfterSend?.taxRate).toBeCloseTo(0.08, 8);
+    });
+  });
 });

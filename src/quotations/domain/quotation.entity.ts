@@ -11,6 +11,11 @@ import {
   QuotationItemNotFoundError,
   QuotationNotDraftError,
 } from './quotation.errors';
+import {
+  IVA_CLASSIFICATION_BUCKET_ORDER,
+  type QuotationIvaBreakdownEntry,
+  type QuotationIvaClassification,
+} from './quotation-tax.types';
 
 /**
  * Quotation lifecycle states. Distinct from Sale (CONFIRMED/CANCELED)
@@ -449,7 +454,18 @@ export class Quotation {
     this._customerNotes = notes;
   }
 
-  setTaxRate(rate: number): void {
+  /**
+   * WU1 — explicit compatibility name for the legacy root-rate write.
+   * Retains the exact `0..1` invariant and the `ensureDraft()` guard.
+   * The stored `_taxRate` value is carried by every aggregate copy
+   * constructor (`send` / `cancel`) so a status transition can never
+   * silently reset it to the `0.16` column default.
+   *
+   * The deprecated PATCH endpoint persists ONLY this root column — it
+   * MUST NOT touch the per-line snapshot pipeline, `ivaBreakdown[]`,
+   * or the PDF aggregate.
+   */
+  setDeprecatedTaxRate(rate: number): void {
     this.ensureDraft();
     if (rate < 0 || rate > 1) {
       throw new InvalidArgumentError(
@@ -534,6 +550,10 @@ export class Quotation {
       [...this._items],
       [...this._vetoedPromotionIds],
       [...this._optedInManualPromotionIds],
+      this._customerNotes,
+      // WU1 — carry the legacy root rate through the status copy so a
+      // transition can never silently reset it to the 0.16 default.
+      this._taxRate,
     );
   }
 
@@ -573,6 +593,9 @@ export class Quotation {
       [...this._items],
       [...this._vetoedPromotionIds],
       [...this._optedInManualPromotionIds],
+      this._customerNotes,
+      // WU1 — carry the legacy root rate through the status copy.
+      this._taxRate,
     );
   }
 
@@ -637,11 +660,56 @@ export class Quotation {
       vetoedPromotionIds: [...this._vetoedPromotionIds],
       optedInManualPromotionIds: [...this._optedInManualPromotionIds],
       customerNotes: this._customerNotes,
-      taxRate: this._taxRate,
-      taxCents: Math.round(totals.totalCents * this._taxRate / (1 + this._taxRate)),
+      // WU2 (T2.3) — activated wire contract: `ivaBreakdown[]` from
+      // the all-or-nothing aggregation. Ships in the SAME deployable
+      // unit as the T2.2 snapshot producer pipeline; the legacy
+      // `taxRate` / informational `taxCents` fields are removed with
+      // it (they never participated in line, subtotal, discount, or
+      // grand totals — only the removed informational field was
+      // derived from the root column).
+      ivaBreakdown: this.computeIvaBreakdown(),
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };
+  }
+
+  /**
+   * WU1 — All-or-nothing `ivaBreakdown[]` aggregation:
+   *
+   *   1. No items → `[]`.
+   *   2. Any line missing ANY snapshot field → `[]` (never a partial
+   *      breakdown, never a fabricated aggregate zero).
+   *   3. Otherwise visit every line once, map
+   *      `chargeProductTaxesSnapshot=false` to `NOT_TAXABLE`, and add
+   *      `includedIvaCents` to that represented bucket.
+   *   4. Return only represented buckets in deterministic order
+   *      (`IVA_16`, `IVA_8`, `IVA_0`, `IVA_EXENTO`, `NOT_TAXABLE`).
+   *
+   * Buckets are created on first representation, NOT pre-seeded, so
+   * zero-valued entries survive for represented zero-tax lines while
+   * absent classifications are never fabricated. Aggregation is exact
+   * integer addition — rounding happened once per line at snapshot time.
+   */
+  computeIvaBreakdown(): QuotationIvaBreakdownEntry[] {
+    if (this._items.length === 0) return [];
+    if (this._items.some((item) => !item.hasCompleteTaxSnapshot)) {
+      return [];
+    }
+
+    const buckets = new Map<QuotationIvaClassification, number>();
+    for (const item of this._items) {
+      const classification = item.effectiveIvaClassification!;
+      const included = item.includedIvaCents!;
+      const existing = buckets.get(classification);
+      buckets.set(classification, (existing ?? 0) + included);
+    }
+
+    return IVA_CLASSIFICATION_BUCKET_ORDER.filter((classification) =>
+      buckets.has(classification),
+    ).map((classification) => ({
+      classification,
+      amountCents: buckets.get(classification)!,
+    }));
   }
 
   /**

@@ -18,6 +18,13 @@
  */
 import { renderToBuffer } from '@react-pdf/renderer';
 import {
+  Children,
+  isValidElement,
+  type JSXElementConstructor,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
+import {
   QuotationA4Document,
   type QuotationDocumentProps,
 } from './quotation-a4.document';
@@ -58,8 +65,126 @@ const baseProps: QuotationDocumentProps = {
     subtotalCents: 25_000,
     discountCents: 2_500,
     totalCents: 22_500,
+    includedIvaCents: null,
   },
 };
+
+type TotalsProps = QuotationDocumentProps['totals'];
+type FunctionElement<Props> = ReactElement<Props, (props: Props) => ReactNode>;
+
+function hasTotalsProps(props: unknown): props is TotalsProps {
+  return (
+    typeof props === 'object' &&
+    props !== null &&
+    'subtotalCents' in props &&
+    'discountCents' in props &&
+    'totalCents' in props &&
+    'includedIvaCents' in props
+  );
+}
+
+function isFunctionComponent<Props>(
+  type: string | JSXElementConstructor<Props>,
+): type is (props: Props) => ReactNode {
+  if (typeof type !== 'function') {
+    return false;
+  }
+
+  const prototype: unknown = type.prototype;
+  return !(
+    typeof prototype === 'object' &&
+    prototype !== null &&
+    'isReactComponent' in prototype
+  );
+}
+
+function findTotalsElement(node: ReactNode): FunctionElement<TotalsProps> {
+  const pending = Children.toArray(node);
+
+  while (pending.length > 0) {
+    const candidate = pending.shift();
+    if (!isValidElement(candidate)) {
+      continue;
+    }
+
+    if (
+      hasTotalsProps(candidate.props) &&
+      isFunctionComponent(candidate.type)
+    ) {
+      return candidate as FunctionElement<TotalsProps>;
+    }
+
+    if (isValidElement<{ children?: ReactNode }>(candidate)) {
+      pending.push(...Children.toArray(candidate.props.children));
+    }
+  }
+
+  throw new Error('Expected Totals function element');
+}
+
+function textContent(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') {
+    return String(node);
+  }
+  if (!isValidElement<{ children?: ReactNode }>(node)) {
+    return '';
+  }
+  return Children.toArray(node.props.children).map(textContent).join('');
+}
+
+function totalsChildTexts(includedIvaCents: number | null): string[] {
+  const document = QuotationA4Document({
+    ...baseProps,
+    totals: { ...baseProps.totals, includedIvaCents },
+  });
+  const totalsElement = findTotalsElement(document);
+  const renderedTotals = totalsElement.type(totalsElement.props);
+
+  if (!isValidElement<{ children?: ReactNode }>(renderedTotals)) {
+    throw new Error('Expected Totals to return a React element');
+  }
+
+  return Children.toArray(renderedTotals.props.children).map(textContent);
+}
+
+// ── WU3 — T3.1: IVA incluido aggregate row ──────────────────────────────
+
+describe('QuotationA4Document — IVA incluido row (WU3 / T3.1)', () => {
+  it('renders exactly one positive IVA row before the divider', () => {
+    const rows = totalsChildTexts(1600);
+
+    expect(rows).toEqual([
+      'Subtotal$250.00',
+      'Descuentos-$25.00',
+      'IVA incluido$16.00',
+      '',
+      'TOTAL$225.00',
+    ]);
+    expect(rows.filter((row) => row.startsWith('IVA incluido'))).toHaveLength(
+      1,
+    );
+    expect(rows.join(' ')).not.toMatch(/IVA_16|IVA_0|STANDARD|ZERO_RATED/);
+  });
+
+  it('renders exactly one known-zero IVA row', () => {
+    expect(totalsChildTexts(0)).toEqual([
+      'Subtotal$250.00',
+      'Descuentos-$25.00',
+      'IVA incluido$0.00',
+      '',
+      'TOTAL$225.00',
+    ]);
+  });
+
+  it('omits the IVA row when the aggregate is unavailable', () => {
+    expect(totalsChildTexts(null)).toEqual([
+      'Subtotal$250.00',
+      'Descuentos-$25.00',
+      '',
+      'TOTAL$225.00',
+    ]);
+  });
+});
 
 describe('QuotationA4Document (WU4 / T046)', () => {
   it('renders a non-empty PDF buffer with PDF magic bytes', async () => {
