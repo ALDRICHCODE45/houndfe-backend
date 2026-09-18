@@ -4227,22 +4227,42 @@ describe('SalesService', () => {
       // Q2 / WU3 — confirmBotSale resolves the customer's default price
       // list (D5) before the engine runs; without the mock the
       // `prisma.customer.findUnique` call throws.
+      // O1 — the same tenant-qualified lookup now runs BEFORE the
+      // aggregate is built, and the optional shipping address is resolved
+      // on the same raw transaction client. Both mocks are returned so
+      // tenant-predicate regressions can assert the exact `where` shape.
+      const customerFindUnique = jest
+        .fn()
+        .mockResolvedValue({ id: 'customer-1', globalPriceListId: null });
+      const customerAddressFindUnique = jest
+        .fn()
+        .mockResolvedValue({ id: 'shipping-1', customerId: 'customer-1' });
       (tenantPrisma.getClient as jest.Mock).mockReturnValue({
-        customer: {
-          findUnique: jest
-            .fn()
-            .mockResolvedValue({ id: 'customer-1', globalPriceListId: null }),
-        },
+        customer: { findUnique: customerFindUnique },
+        customerAddress: { findUnique: customerAddressFindUnique },
         globalPriceList: {
           findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
         },
       });
+
+      return { customerFindUnique, customerAddressFindUnique };
     };
 
     it('confirms bot sale in one transaction with stock, folio, seller attribution, and default credit due date', async () => {
-      setupConfirmBotSaleHappyPath();
+      const { customerFindUnique, customerAddressFindUnique } =
+        setupConfirmBotSaleHappyPath();
 
       const result = await service.confirmBotSale(botSaleInput);
+
+      // O1 — the customer and the shipping address are resolved with
+      // EXPLICIT tenant predicates on the raw transaction client (the CLS
+      // tenant extension cannot be assumed inside `runInTransaction`).
+      expect(customerFindUnique).toHaveBeenCalledWith({
+        where: { id: 'customer-1', tenantId: 'tenant-1' },
+      });
+      expect(customerAddressFindUnique).toHaveBeenCalledWith({
+        where: { id: 'shipping-1', tenantId: 'tenant-1' },
+      });
 
       expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
       expect(productsService.getApplicablePrices).toHaveBeenCalledWith(
@@ -4669,6 +4689,115 @@ describe('SalesService', () => {
 
       expect(result.totalCents).toBe(1800);
       expect(result.discountCents).toBe(200);
+    });
+
+    // ── O1: bot-sale customer/address tenant integrity ────────────
+
+    it('rejects a missing or foreign-tenant customer with CUSTOMER_NOT_FOUND and no persistent side effects', async () => {
+      const { customerFindUnique, customerAddressFindUnique } =
+        setupConfirmBotSaleHappyPath();
+      // The tenant-qualified predicate excludes a customer that only
+      // exists in another tenant, so the raw transaction client resolves
+      // `null` exactly like a genuinely missing id.
+      customerFindUnique.mockResolvedValue(null);
+
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject(
+        {
+          code: 'CUSTOMER_NOT_FOUND',
+        },
+      );
+
+      expect(customerFindUnique).toHaveBeenCalledWith({
+        where: { id: 'customer-1', tenantId: 'tenant-1' },
+      });
+      // Relation validation stops at the customer: the address delegate
+      // is never consulted.
+      expect(customerAddressFindUnique).not.toHaveBeenCalled();
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+      expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('rejects a missing or foreign-tenant shipping address with SHIPPING_ADDRESS_NOT_FOUND and no persistent side effects', async () => {
+      const { customerFindUnique, customerAddressFindUnique } =
+        setupConfirmBotSaleHappyPath();
+      // Tenant-qualified lookup: an address that exists only in another
+      // tenant is indistinguishable from a missing id.
+      customerAddressFindUnique.mockResolvedValue(null);
+
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject(
+        {
+          code: 'SHIPPING_ADDRESS_NOT_FOUND',
+        },
+      );
+
+      expect(customerFindUnique).toHaveBeenCalledWith({
+        where: { id: 'customer-1', tenantId: 'tenant-1' },
+      });
+      expect(customerAddressFindUnique).toHaveBeenCalledWith({
+        where: { id: 'shipping-1', tenantId: 'tenant-1' },
+      });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+      expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('rejects a same-tenant shipping address owned by another customer with SHIPPING_ADDRESS_NOT_FOR_CUSTOMER and no persistent side effects', async () => {
+      const { customerAddressFindUnique } = setupConfirmBotSaleHappyPath();
+      customerAddressFindUnique.mockResolvedValue({
+        id: 'shipping-1',
+        customerId: 'customer-other',
+      });
+
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject(
+        {
+          code: 'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+        },
+      );
+
+      expect(customerAddressFindUnique).toHaveBeenCalledWith({
+        where: { id: 'shipping-1', tenantId: 'tenant-1' },
+      });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+      expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('accepts a null shipping address without querying the address delegate', async () => {
+      const { customerAddressFindUnique } = setupConfirmBotSaleHappyPath();
+
+      const result = await service.confirmBotSale({
+        ...botSaleInput,
+        shippingAddressId: null,
+      });
+
+      expect(customerAddressFindUnique).not.toHaveBeenCalled();
+      expect(result.folio).toBe('A-2606-000001');
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+      const persisted = saleRepo.save.mock.calls[0]?.[0] as Sale;
+      expect(persisted.shippingAddressId).toBeNull();
+    });
+
+    it('accepts an omitted shipping address without querying the address delegate', async () => {
+      const { customerAddressFindUnique } = setupConfirmBotSaleHappyPath();
+
+      const result = await service.confirmBotSale({
+        cashierUserId: botSaleInput.cashierUserId,
+        customerId: botSaleInput.customerId,
+        items: botSaleInput.items,
+      });
+
+      expect(customerAddressFindUnique).not.toHaveBeenCalled();
+      expect(result.folio).toBe('A-2606-000001');
+      expect(saleRepo.save).toHaveBeenCalledTimes(1);
+      const persisted = saleRepo.save.mock.calls[0]?.[0] as Sale;
+      expect(persisted.shippingAddressId).toBeNull();
     });
   });
 

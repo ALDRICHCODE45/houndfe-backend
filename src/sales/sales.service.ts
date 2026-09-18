@@ -2896,14 +2896,62 @@ export class SalesService {
         }
       }
 
+      // O1 — resolve the tenant id and the transaction-aware Prisma
+      // client ONCE. Inside `runInTransaction` the client can be the RAW
+      // Prisma transaction client when `$extends` is unavailable (see
+      // `TenantPrismaService.getClient`), so the CLS tenant extension is
+      // NOT guaranteed to be active here. Every relation lookup below
+      // therefore carries an explicit `tenantId` predicate instead of
+      // relying on the extension.
       const tenantId = this.tenantPrisma.getTenantId();
+      const prisma = this.tenantPrisma.getClient();
+
+      // O1 — the customer must exist INSIDE this tenant before any of its
+      // identifiers reach the aggregate. A missing customer and a foreign
+      // (other-tenant) customer are indistinguishable through the
+      // tenant-qualified predicate, so both keep the existing
+      // `CUSTOMER_NOT_FOUND` contract.
+      const customer = await prisma.customer.findUnique({
+        where: { id: input.customerId, tenantId },
+      });
+      if (!customer) {
+        throw new BusinessRuleViolationError(
+          'CUSTOMER_NOT_FOUND',
+          'CUSTOMER_NOT_FOUND',
+        );
+      }
+
+      // O1 — an optional shipping address must exist in this tenant AND
+      // belong to the selected customer. Mirrors the POS contracts in
+      // `assignCustomer` (sales.service.ts:2081) and
+      // `setShippingAddress` (sales.service.ts:2222). A null/omitted
+      // address stays valid and never touches the address delegate.
+      const shippingAddressId = input.shippingAddressId ?? null;
+      if (shippingAddressId !== null) {
+        const address = await prisma.customerAddress.findUnique({
+          where: { id: shippingAddressId, tenantId },
+        });
+        if (!address) {
+          throw new BusinessRuleViolationError(
+            'SHIPPING_ADDRESS_NOT_FOUND',
+            'SHIPPING_ADDRESS_NOT_FOUND',
+          );
+        }
+        if (address.customerId !== input.customerId) {
+          throw new BusinessRuleViolationError(
+            'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+            'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+          );
+        }
+      }
+
       const saleId = randomUUID();
       const sale = Sale.create({
         id: saleId,
         userId: input.cashierUserId,
       });
 
-      sale.assignCustomer(input.customerId, input.shippingAddressId ?? null);
+      sale.assignCustomer(input.customerId, shippingAddressId);
       sale.assignSeller(input.cashierUserId);
 
       for (const item of input.items) {
@@ -2927,17 +2975,8 @@ export class SalesService {
       // list the bot may not have quoted. The same auto-seed pattern
       // lives in `SalesService.assignCustomer` (sales.service.ts:1913).
       // When the customer has no list, `null` lets the engine fall
-      // back to PUBLICO via `resolveDefaultGlobalPriceListId()`.
-      const prisma = this.tenantPrisma.getClient();
-      const customer = await prisma.customer.findUnique({
-        where: { id: input.customerId },
-      });
-      if (!customer) {
-        throw new BusinessRuleViolationError(
-          'CUSTOMER_NOT_FOUND',
-          'CUSTOMER_NOT_FOUND',
-        );
-      }
+      // back to PUBLICO via `resolveDefaultGlobalPriceListId()`. The
+      // customer row was already loaded (and tenant-qualified) above.
       const customerList =
         (customer as { globalPriceListId?: string | null }).globalPriceListId ??
         null;
