@@ -106,6 +106,10 @@ import {
   type IPosEvaluatePromotionsUseCase,
 } from '../promotions/application/ports/pos-evaluate-promotions.port';
 import {
+  PAYMENT_METHOD_RESOLVER,
+  type IPaymentMethodResolver,
+} from '../admin/payment-methods/domain/payment-method.resolver';
+import {
   resetAndSeedBaseline,
   disconnectIntegrationPrisma,
   BASELINE_TENANT_ID,
@@ -431,6 +435,18 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
       inject: [PrismaService, ClsService],
     };
 
+    // Custom Payment Methods (WU2 — D3): SalesService's 8th constructor
+    // param is `@Inject(PAYMENT_METHOD_RESOLVER)` typed as
+    // `IPaymentMethodResolver`, so the test module must bind that Symbol.
+    // This spec exercises `getSaleDetail`, which never calls the
+    // resolver — the stub only has to satisfy the two-method port
+    // contract so Nest can instantiate SalesService. Typed as
+    // `jest.Mocked<IPaymentMethodResolver>` (no `any`, no cast).
+    const paymentMethodResolverStub: jest.Mocked<IPaymentMethodResolver> = {
+      resolveActive: jest.fn(),
+      listActive: jest.fn().mockResolvedValue([]),
+    };
+
     const moduleRef = await Test.createTestingModule({
       imports: [
         // Real ClsModule + middleware so the per-request async context
@@ -477,6 +493,10 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
         {
           provide: POS_EVALUATE_PROMOTIONS_USE_CASE,
           useValue: {} as IPosEvaluatePromotionsUseCase,
+        },
+        {
+          provide: PAYMENT_METHOD_RESOLVER,
+          useValue: paymentMethodResolverStub,
         },
         SalesService,
         PdfGenerationService,
@@ -542,7 +562,9 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
         }
         cls.set('tenantId', tenantId);
         cls.set('isSuperAdmin', isSuperAdmin);
-        cls.set('userId', userId);
+        if (userId !== null) {
+          cls.set('userId', userId);
+        }
         next();
       });
     });

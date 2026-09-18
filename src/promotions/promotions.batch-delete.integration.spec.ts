@@ -18,12 +18,15 @@
 import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import * as request from 'supertest';
-import { ConfigService } from '@nestjs/config';
+import request from 'supertest';
+import { randomUUID } from 'node:crypto';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ClsService } from 'nestjs-cls';
+import { DomainExceptionFilter } from '../shared/filters/domain-exception.filter';
 import {
   resetAndSeedBaseline,
   disconnectIntegrationPrisma,
+  BASELINE_TENANT_ID,
 } from '../../test/integration/reset-db';
 import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
@@ -36,7 +39,10 @@ import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
-import { BatchDeleteModule } from '../shared/batch-delete/batch-delete.module';
+import {
+  BatchDeleteModule,
+  BatchDeleteOrchestrator,
+} from '../shared/batch-delete';
 import { BatchDeleteGuard } from '../shared/batch-delete/guards/batch-delete.guard';
 import { PROMOTION_REPOSITORY } from './domain/promotion.repository';
 import { AppActions, AppSubjects } from '../auth/authorization/domain/permission';
@@ -47,14 +53,13 @@ const SKIP_INTEGRATION =
 const describeIfDb = SKIP_INTEGRATION ? describe.skip : describe;
 
 // UUID helpers — promote / sale IDs are UUIDs in the schema.
+// Tenant scoping uses the shared baseline tenant seeded by
+// `resetAndSeedBaseline()` (`BASELINE_TENANT_ID`); the suite no longer
+// fabricates its own tenant id.
 const promoId = (i: number) =>
   `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
 const productId = (i: number) =>
   `00000000-0000-4000-8001-${String(i).padStart(12, '0')}`;
-const customerId = (i: number) =>
-  `00000000-0000-4000-8002-${String(i).padStart(12, '0')}`;
-const sellerId = () => `00000000-0000-4000-8003-000000000001`;
-const tenantId = () => `00000000-0000-4000-8004-000000000001`;
 const userId = () => `00000000-0000-4000-8005-000000000001`;
 
 describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
@@ -85,9 +90,9 @@ describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
       },
     });
 
-    const cls: Pick<ClsService<TenantClsStore>, 'get' | 'set'> = {
-      get: (key: string) => {
-        if (key === 'tenantId') return tenantId();
+    const cls = {
+      get: (key?: string) => {
+        if (key === 'tenantId') return BASELINE_TENANT_ID;
         if (key === 'userId') return userId();
         if (key === 'isSuperAdmin') return false;
         return undefined;
@@ -97,6 +102,14 @@ describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
 
     const moduleRef = await Test.createTestingModule({
       imports: [
+        // `ConfigModule.forRoot({ isGlobal: true })` provides a
+        // globally-visible `ConfigService` so the
+        // `JwtModule.registerAsync` factory inside `AuthModule` can
+        // resolve its `inject: [ConfigService]` dependency — the same
+        // wiring the two employees batch specs use. We use
+        // `ignoreEnvFile: true` because the integration setupFile has
+        // already loaded `.env.test` into `process.env`.
+        ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
         AuthModule,
         BatchDeleteModule.forFeature(),
       ],
@@ -109,7 +122,7 @@ describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
           useValue: {
             getClient: () => prisma,
             runInTransaction: async <T>(work: () => Promise<T>) => work(),
-            getTenantId: () => tenantId(),
+            getTenantId: () => BASELINE_TENANT_ID,
             isInTransaction: () => false,
           },
         },
@@ -152,6 +165,13 @@ describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
     app.useGlobalPipes(
       new ValidationPipe({ whitelist: true, transform: true }),
     );
+    // The global domain filter is registered in `main.ts` for the real
+    // app; integration tests must wire it explicitly so
+    // `BatchDeleteValidationError` keeps its contract statuses —
+    // PROMOTION_REFERENCED_BY_SALE → 409 and BATCH_DELETE_NOT_FOUND → 404
+    // with `offendingIds` + `reason` in the body — instead of a bare 500.
+    // Same wiring as the employees batch-delete integration spec.
+    app.useGlobalFilters(new DomainExceptionFilter());
     await app.init();
   });
 
@@ -168,6 +188,14 @@ describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
     await prisma.saleItem.deleteMany({});
     await prisma.salePromotionApplied.deleteMany({});
     await prisma.sale.deleteMany({});
+    // The 409 scenario seeds the sale graph the current schema requires
+    // (User for the required `Sale.userId`, Product for the required
+    // `SaleItem.productId`). Remove exactly those two fixture rows —
+    // keyed by the ids this spec creates — AFTER the sale rows so the
+    // `onDelete: Restrict` FKs never block the cleanup and every test
+    // starts from a clean slate.
+    await prisma.product.deleteMany({ where: { id: productId(1) } });
+    await prisma.user.deleteMany({ where: { id: userId() } });
     await prisma.promotion.deleteMany({});
 
     // Sanity-check the registry constant — guards against accidental
@@ -186,7 +214,7 @@ describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
       await prisma.promotion.create({
         data: {
           id,
-          tenantId: tenantId(),
+          tenantId: BASELINE_TENANT_ID,
           title: `seed ${id}`,
           type: 'PRODUCT_DISCOUNT',
           method: 'AUTOMATIC',
@@ -245,27 +273,46 @@ describeIfDb('Promotions POST /promotions/batch-delete (integration)', () => {
     const ids = await seedPromotions(3);
     const referencedId = ids[1];
 
-    // Seed a sale + a SaleItem that references the middle promotion.
-    // SaleItem.promotionId is SetNull on delete — but the pre-flight
-    // guard catches the reference BEFORE the delete runs, so the
-    // whole batch is rejected.
+    // Seed the sale graph the current schema requires: a User (Sale.userId
+    // is required with `onDelete: Restrict`), a Product (SaleItem.productId
+    // is required with `onDelete: Restrict`) and the Sale itself. The
+    // SaleItem — not the Sale — carries the promotion reference that the
+    // pre-flight guard detects, so the whole batch is rejected before any
+    // delete runs.
+    const saleUserId = userId();
+    await prisma.user.create({
+      data: {
+        id: saleUserId,
+        email: `${randomUUID()}@batch-delete.test`,
+        hashedPassword: 'test',
+        name: 'Batch delete sale user',
+      },
+    });
+    const saleProductId = productId(1);
+    await prisma.product.create({
+      data: {
+        id: saleProductId,
+        name: 'Batch delete product',
+        tenantId: BASELINE_TENANT_ID,
+        type: 'PRODUCT',
+      },
+    });
     const sale = await prisma.sale.create({
       data: {
-        tenantId: tenantId(),
-        sellerId: sellerId(),
-        customerId: customerId(1),
+        tenantId: BASELINE_TENANT_ID,
+        userId: saleUserId,
         status: 'CONFIRMED',
-        saleNumber: 1,
+        channel: 'POS',
         subtotalCents: 0,
         totalCents: 0,
       },
     });
     await prisma.saleItem.create({
       data: {
-        tenantId: tenantId(),
+        tenantId: BASELINE_TENANT_ID,
         saleId: sale.id,
-        productId: productId(1),
-        productName: 'P',
+        productId: saleProductId,
+        productName: 'Batch delete product',
         quantity: 1,
         unitPriceCents: 100,
         promotionId: referencedId,

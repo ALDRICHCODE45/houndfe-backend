@@ -56,6 +56,12 @@ const describeIfDb = SKIP_INTEGRATION ? describe.skip : describe;
 // "negative match" cases have a VALID FK target to point at (the
 // Product.categoryId / brandId columns have FK constraints to the
 // global Category/Brand tables).
+//
+// `Category.name` and `Brand.name` are `@unique` AND global (no
+// tenantId), so the display names below use a spec-scoped prefix —
+// same convention as `advanced-promotion-type.integration.spec.ts`
+// (`ADV-int …`) — to avoid colliding with the generic global labels
+// seeded by `buy-x-get-y.integration.spec.ts` under different ids.
 const CAT1_ID = '11111111-1111-1111-1111-111111111111';
 const CAT2_ID = '11111111-1111-1111-1111-111111111112';
 const BR1_ID = '22222222-2222-2222-2222-222222222222';
@@ -85,23 +91,23 @@ describeIfDb(
       // Category/Brand tables).
       await prisma.category.upsert({
         where: { id: CAT1_ID },
-        update: { name: 'Integration CAT1' },
-        create: { id: CAT1_ID, name: 'Integration CAT1' },
+        update: { name: 'CBT-int CAT1' },
+        create: { id: CAT1_ID, name: 'CBT-int CAT1' },
       });
       await prisma.category.upsert({
         where: { id: CAT2_ID },
-        update: { name: 'Integration CAT2' },
-        create: { id: CAT2_ID, name: 'Integration CAT2' },
+        update: { name: 'CBT-int CAT2' },
+        create: { id: CAT2_ID, name: 'CBT-int CAT2' },
       });
       await prisma.brand.upsert({
         where: { id: BR1_ID },
-        update: { name: 'Integration BR1' },
-        create: { id: BR1_ID, name: 'Integration BR1' },
+        update: { name: 'CBT-int BR1' },
+        create: { id: BR1_ID, name: 'CBT-int BR1' },
       });
       await prisma.brand.upsert({
         where: { id: BR2_ID },
-        update: { name: 'Integration BR2' },
-        create: { id: BR2_ID, name: 'Integration BR2' },
+        update: { name: 'CBT-int BR2' },
+        create: { id: BR2_ID, name: 'CBT-int BR2' },
       });
 
       const tenant = await prisma.tenant.findFirst({ select: { id: true } });
@@ -112,8 +118,8 @@ describeIfDb(
       }
       tenantId = tenant.id;
 
-      const cls: Pick<ClsService<TenantClsStore>, 'get'> = {
-        get: (key: string) => {
+      const cls = {
+        get: (key?: string) => {
           if (key === 'tenantId') return tenantId;
           if (key === 'isSuperAdmin') return false;
           return undefined;
@@ -124,7 +130,9 @@ describeIfDb(
         prisma as unknown as ConstructorParameters<
           typeof TenantPrismaService
         >[0],
-        cls as ClsService<TenantClsStore>,
+        // SAFETY: this integration shim implements the only CLS operation
+        // TenantPrismaService uses here and returns the seeded tenant context.
+        cls as unknown as ClsService<TenantClsStore>,
       );
       repository = new PrismaPromotionRepository(tenantPrisma);
 
@@ -294,7 +302,7 @@ describeIfDb(
         expect(result.lines).toHaveLength(1);
         expect(result.lines[0].itemId).toBe('item-CAT1');
         expect(result.lines[0].promotionId).toBe(promoC.id);
-        expect(result.lines[0].discountValue).toBe(100);
+        expect(result.lines[0]).toHaveProperty('discountValue', 100);
       });
     });
 
@@ -579,7 +587,7 @@ describeIfDb(
         // REGARDLESS of discount magnitude — specificity trumps.
         expect(result.lines).toHaveLength(1);
         expect(result.lines[0].promotionId).toBe(promoV.id);
-        expect(result.lines[0].discountValue).toBe(10);
+        expect(result.lines[0]).toHaveProperty('discountValue', 10);
       });
     });
 
@@ -674,7 +682,7 @@ describeIfDb(
         // PRODUCTS (ordinal 2) wins over BRANDS/CATEGORIES (ordinal 1).
         expect(result.lines).toHaveLength(1);
         expect(result.lines[0].promotionId).toBe(promoP.id);
-        expect(result.lines[0].discountValue).toBe(10);
+        expect(result.lines[0]).toHaveProperty('discountValue', 10);
       });
     });
 
@@ -752,7 +760,7 @@ describeIfDb(
         // NOT a BRAND-over-CATEGORY hierarchy.
         expect(result.lines).toHaveLength(1);
         expect(result.lines[0].promotionId).toBe(promoC.id);
-        expect(result.lines[0].discountValue).toBe(500);
+        expect(result.lines[0]).toHaveProperty('discountValue', 500);
       });
     });
 

@@ -35,8 +35,8 @@ import { CaslAbilityFactory } from '../auth/authorization/casl-ability.factory';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
-import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
 import { EMPLOYEE_REPOSITORY } from './domain/employee.repository';
+import { BatchDeleteOrchestrator } from '../shared/batch-delete';
 
 const SKIP_INTEGRATION =
   process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL;
@@ -58,8 +58,8 @@ describeIfDb(
       await prisma.$connect();
       await resetAndSeedBaseline();
 
-      const cls: Pick<ClsService<TenantClsStore>, 'get' | 'set'> = {
-        get: (key: string) => {
+      const cls = {
+        get: (key?: string) => {
           if (key === 'tenantId') return BASELINE_TENANT_ID;
           if (key === 'userId') return userId();
           if (key === 'isSuperAdmin') return false;
@@ -100,15 +100,36 @@ describeIfDb(
             useClass: PrismaEmployeeRepository,
           },
           {
+            // `EmployeesController` takes `BatchDeleteOrchestrator`
+            // as its second constructor param. Same minimal
+            // subclass factory as `EmployeesModule`: it binds the
+            // orchestrator to the test module's `TenantPrismaService`
+            // + `EmployeesService` providers. The batch-terminate /
+            // batch-reactivate paths under test call
+            // `EmployeesService` directly, so the orchestrator is
+            // only needed for DI to resolve.
+            provide: BatchDeleteOrchestrator,
+            useFactory: (
+              tenantPrisma: TenantPrismaService,
+              service: EmployeesService,
+            ): BatchDeleteOrchestrator =>
+              new (class extends BatchDeleteOrchestrator {
+                constructor() {
+                  super(tenantPrisma, service);
+                }
+              })(),
+            inject: [TenantPrismaService, EmployeesService],
+          },
+          {
             // CaslAbilityFactory is required by the PermissionsGuard
             // override wiring at runtime; we keep the guard
             // short-circuited below so this factory is never invoked,
             // but Nest still resolves the token.
             provide: CaslAbilityFactory,
             useValue: {
-              getEffectivePermissions: jest.fn().mockResolvedValue([
-                { action: 'update', subject: 'Employee' },
-              ]),
+              getEffectivePermissions: jest
+                .fn()
+                .mockResolvedValue([{ action: 'update', subject: 'Employee' }]),
             },
           },
         ],
@@ -247,10 +268,14 @@ describeIfDb(
         .send({ ids: [...existingIds, ...missingIds] });
 
       expect(res.status).toBe(404);
-      expect(res.body.error).toBe('BATCH_DELETE_NOT_FOUND');
-      expect([...res.body.offendingIds].sort()).toEqual(
-        [...missingIds].sort(),
-      );
+      // SAFETY: the domain exception filter serializes this documented error
+      // shape, and the assertions below validate both fields at the HTTP edge.
+      const body = res.body as unknown as {
+        error: string;
+        offendingIds: string[];
+      };
+      expect(body.error).toBe('BATCH_DELETE_NOT_FOUND');
+      expect([...body.offendingIds].sort()).toEqual([...missingIds].sort());
 
       // The existing ids are NOT touched because the pre-flight
       // rejected the batch.
