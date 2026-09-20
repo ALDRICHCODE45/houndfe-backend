@@ -9,9 +9,12 @@ import type {
   DraftSaleResponse,
   ISaleRepository,
   MarkSaleDeliveredOutcome,
+  PendingRefundPageInput,
+  PendingSaleRefundRecord,
   PersistedChargePayment,
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
+  SaleRefundMethod,
 } from '../domain/sale.repository';
 import {
   Sale,
@@ -112,6 +115,34 @@ type PrismaSaleItemRow = Prisma.SaleItemGetPayload<{
 type PersistedItemSnapshot = Omit<PrismaSaleItemRow, 'discountedAt'> & {
   discountedAt: string | null;
 };
+
+/**
+ * pending-refund-obligations / prf-2 — Prisma persists the refund tender
+ * method as the uppercase `SalePaymentMethod` enum, while the domain port
+ * speaks the lowercase `SaleRefundMethod` union (see
+ * `PersistedSaleRefundRecord.method`). The switch is exhaustive over the
+ * persisted values and fails loudly on an unmapped enum instead of
+ * leaking an unchecked string onto the wire.
+ */
+function toDomainRefundMethod(method: string): SaleRefundMethod {
+  switch (method) {
+    case 'CASH':
+      return 'cash';
+    case 'CARD_CREDIT':
+      return 'card_credit';
+    case 'CARD_DEBIT':
+      return 'card_debit';
+    case 'TRANSFER':
+      return 'transfer';
+    case 'CREDIT':
+      return 'credit';
+    default:
+      throw new BusinessRuleViolationError(
+        'UNSUPPORTED_SALE_REFUND_METHOD',
+        'UNSUPPORTED_SALE_REFUND_METHOD',
+      );
+  }
+}
 
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
@@ -1787,6 +1818,65 @@ export class PrismaSaleRepository implements ISaleRepository {
         ...this.buildBaseWhere(input),
         NOT: { deliveryStatus: 'DELIVERED' },
       },
+    });
+  }
+
+  /**
+   * pending-refund-obligations / prf-2 — tenant-scoped page of PENDING
+   * refund obligations (see the port method doc).
+   *
+   * Tenant isolation is enforced in two layers: `SaleRefund` is in
+   * `TENANT_SCOPED_MODELS`, so the tenant-scoped client injects `tenantId`
+   * into the read, AND the explicit `tenantId` in the top-level `where`
+   * pins the predicate even if the allowlist entry were ever removed.
+   * `status: 'PENDING'` is a top-level predicate; no nested relation is
+   * included in v1 (a nested relation would need its own tenant filter).
+   */
+  async findManyPendingRefunds(
+    input: PendingRefundPageInput,
+  ): Promise<PendingSaleRefundRecord[]> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+
+    const rows = await prisma.saleRefund.findMany({
+      where: { tenantId, status: 'PENDING' },
+      select: {
+        id: true,
+        saleId: true,
+        method: true,
+        amountCents: true,
+        reason: true,
+        status: true,
+        createdAt: true,
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: (input.page - 1) * input.limit,
+      take: input.limit,
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      saleId: row.saleId,
+      method: toDomainRefundMethod(row.method),
+      amountCents: row.amountCents,
+      reason: row.reason,
+      status: 'PENDING',
+      createdAt: row.createdAt,
+    }));
+  }
+
+  /**
+   * pending-refund-obligations / prf-2 — total PENDING obligations for
+   * the current tenant. Shares the exact `{ tenantId, status: 'PENDING' }`
+   * predicate of `findManyPendingRefunds` so pagination totals cannot
+   * drift from the listed rows.
+   */
+  async countPendingRefunds(): Promise<number> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+
+    return prisma.saleRefund.count({
+      where: { tenantId, status: 'PENDING' },
     });
   }
 

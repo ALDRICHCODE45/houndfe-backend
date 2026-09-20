@@ -47,6 +47,8 @@ function makeMockPrisma() {
     },
     saleRefund: {
       createMany: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
     },
     saleIdempotency: {
       create: jest.fn(),
@@ -1024,6 +1026,119 @@ describe('PrismaSaleRepository', () => {
       expect(secondWhere).toEqual(firstWhere);
       expect(secondWhere.paymentStatus).toBeUndefined();
       expect(secondWhere.totalCents).toBeUndefined();
+    });
+  });
+
+  // ── pending refund obligations (pending-refund-obligations / prf-2) ──
+  // Tenant-scoped read contract for the later GET /sales/refunds/pending
+  // slice. The adapter MUST (a) keep `tenantId` + `status: 'PENDING'` as
+  // TOP-LEVEL predicates, (b) select only the minimal projection with no
+  // nested relation, and (c) paginate with the same 1-based
+  // `page`/`limit` offset math as `findManyConfirmed`.
+  describe('pending refund reads', () => {
+    const pendingRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'refund-1',
+      saleId: 'sale-1',
+      method: 'CASH',
+      amountCents: 1500,
+      reason: 'CUSTOMER_REQUEST',
+      status: 'PENDING',
+      createdAt: new Date('2026-07-01T10:00:00.000Z'),
+      ...overrides,
+    });
+
+    it('queries PENDING refunds with a top-level tenant + status predicate and no nested relation', async () => {
+      prisma.saleRefund.findMany.mockResolvedValue([]);
+
+      await repo.findManyPendingRefunds({ page: 1, limit: 20 });
+
+      expect(tenantPrisma.getClient).toHaveBeenCalled();
+      expect(tenantPrisma.getTenantId).toHaveBeenCalled();
+      expect(prisma.saleRefund.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { tenantId: 'tenant-1', status: 'PENDING' },
+          select: {
+            id: true,
+            saleId: true,
+            method: true,
+            amountCents: true,
+            reason: true,
+            status: true,
+            createdAt: true,
+          },
+        }),
+      );
+      // Nested relations are deliberately omitted from v1 — a nested
+      // relation would need its own tenant predicate.
+      expect(
+        prisma.saleRefund.findMany.mock.calls.at(-1)?.[0]?.include,
+      ).toBeUndefined();
+    });
+
+    it('orders by createdAt desc then id desc so equal timestamps paginate deterministically', async () => {
+      prisma.saleRefund.findMany.mockResolvedValue([]);
+
+      await repo.findManyPendingRefunds({ page: 1, limit: 20 });
+
+      expect(prisma.saleRefund.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        }),
+      );
+    });
+
+    it('applies bounded offset pagination consistent with neighboring sale queries', async () => {
+      prisma.saleRefund.findMany.mockResolvedValue([]);
+
+      await repo.findManyPendingRefunds({ page: 3, limit: 10 });
+
+      expect(prisma.saleRefund.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 20, take: 10 }),
+      );
+    });
+
+    it('maps rows to the minimal domain projection with a lowercase method', async () => {
+      prisma.saleRefund.findMany.mockResolvedValue([
+        pendingRow({ method: 'CARD_DEBIT', amountCents: 4200 }),
+      ]);
+
+      const result = await repo.findManyPendingRefunds({ page: 1, limit: 20 });
+
+      expect(result).toEqual([
+        {
+          id: 'refund-1',
+          saleId: 'sale-1',
+          method: 'card_debit',
+          amountCents: 4200,
+          reason: 'CUSTOMER_REQUEST',
+          status: 'PENDING',
+          createdAt: new Date('2026-07-01T10:00:00.000Z'),
+        },
+      ]);
+    });
+
+    it('counts PENDING refunds with the same tenant + status predicate as the page query', async () => {
+      prisma.saleRefund.count.mockResolvedValue(7);
+
+      const total = await repo.countPendingRefunds();
+
+      expect(total).toBe(7);
+      expect(prisma.saleRefund.count).toHaveBeenCalledWith({
+        where: { tenantId: 'tenant-1', status: 'PENDING' },
+      });
+    });
+
+    it('fails closed without tenant context and never reaches the read', async () => {
+      tenantPrisma.getTenantId.mockReturnValue(undefined);
+
+      await expect(
+        repo.findManyPendingRefunds({ page: 1, limit: 20 }),
+      ).rejects.toMatchObject({ code: 'TENANT_CONTEXT_REQUIRED' });
+      await expect(repo.countPendingRefunds()).rejects.toMatchObject({
+        code: 'TENANT_CONTEXT_REQUIRED',
+      });
+      expect(prisma.saleRefund.findMany).not.toHaveBeenCalled();
+      expect(prisma.saleRefund.count).not.toHaveBeenCalled();
     });
   });
 

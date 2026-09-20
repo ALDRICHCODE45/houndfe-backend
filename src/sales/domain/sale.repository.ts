@@ -1,6 +1,9 @@
 import { Sale } from './sale.entity';
 import { SaleItem } from './sale-item.entity';
-import type { AppliedOrderPromotionSnapshot } from './sale.entity';
+import type {
+  AppliedOrderPromotionSnapshot,
+  SaleCancelReason,
+} from './sale.entity';
 import type {
   SalesListBaseFilter,
   SalesListExtendedFilter,
@@ -32,6 +35,48 @@ export type PersistedSaleRefundRecord = {
   method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
   amountCents: number;
   reason: NonNullable<ReturnType<Sale['toResponse']>['cancelReason']>;
+};
+
+/**
+ * pending-refund-obligations / prf-2 — domain tender-method union for a
+ * refund obligation. Mirrors the lowercase union already carried by
+ * `PersistedSaleRefundRecord.method` so the read path speaks the same
+ * domain language instead of leaking the Prisma `SalePaymentMethod` enum.
+ */
+export type SaleRefundMethod =
+  | 'cash'
+  | 'card_credit'
+  | 'card_debit'
+  | 'transfer'
+  | 'credit';
+
+/**
+ * pending-refund-obligations / prf-2 — minimal read projection for a
+ * PENDING refund obligation.
+ *
+ * Carries ONLY the fields the pending-refund listing needs. Nested
+ * relations (`sale`, `salePayment`, customer) are deliberately absent:
+ * any nested relation would need its own tenant predicate, so v1 omits
+ * them instead of widening the isolation surface.
+ */
+export type PendingSaleRefundRecord = {
+  id: string;
+  saleId: string;
+  method: SaleRefundMethod;
+  amountCents: number;
+  reason: SaleCancelReason;
+  status: 'PENDING';
+  createdAt: Date;
+};
+
+/**
+ * pending-refund-obligations / prf-2 — bounded offset pagination input.
+ * Same 1-based `page` / `limit` contract used by the neighboring sale
+ * list queries (`findManyConfirmed`).
+ */
+export type PendingRefundPageInput = {
+  page: number;
+  limit: number;
 };
 
 export type DraftCustomerSummary = {
@@ -376,6 +421,28 @@ export interface ISaleRepository {
   >;
 
   countNotDeliveredConfirmed(input: SalesListBaseFilter): Promise<number>;
+
+  /**
+   * pending-refund-obligations / prf-2 — tenant-scoped page of PENDING
+   * `SaleRefund` obligations.
+   *
+   * Ordering is deterministic (`createdAt desc`, then `id desc`) so
+   * equal timestamps still paginate without duplicates or gaps; the
+   * adapter applies a top-level `{ tenantId, status: 'PENDING' }`
+   * predicate and selects only the projection fields (no nested
+   * relations).
+   */
+  findManyPendingRefunds(
+    input: PendingRefundPageInput,
+  ): Promise<PendingSaleRefundRecord[]>;
+
+  /**
+   * pending-refund-obligations / prf-2 — total PENDING refund
+   * obligations for the current tenant, feeding the listing's
+   * pagination metadata. MUST share the exact predicate of
+   * `findManyPendingRefunds` so `total` matches the page source.
+   */
+  countPendingRefunds(): Promise<number>;
 
   findOneWithRelations(id: string): Promise<{
     id: string;
