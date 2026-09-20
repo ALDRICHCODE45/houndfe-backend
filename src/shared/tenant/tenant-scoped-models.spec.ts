@@ -57,3 +57,21 @@ describe('TENANT_SCOPED_MODELS — delivery-routes registration (WU1)', () => {
     expect(overlaps).toEqual([...REQUIRED]);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — pending-refund-obligations registration (prf-1)', () => {
+  const REQUIRED = ['SaleRefund'] as const;
+
+  it.each(REQUIRED)(
+    'registers %s so tenant-scoped refund reads inject where.tenantId',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+
+  it('contains SaleRefund exactly once', () => {
+    const occurrences = [...TENANT_SCOPED_MODELS].filter(
+      (model) => model === 'SaleRefund',
+    );
+    expect(occurrences).toEqual([...REQUIRED]);
+  });
+});

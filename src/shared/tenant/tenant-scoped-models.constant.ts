@@ -12,6 +12,11 @@ export const TENANT_SCOPED_MODELS = new Set([
   'OrderItem',
   'Sale',
   'SaleItem',
+  // Pending refund obligations (pending-refund-obligations / prf-1).
+  // Refund reads must be tenant-filtered or the allowlist fails open and a
+  // cross-tenant row leaks; the pending-refund query relies on this entry
+  // to auto-inject `tenantId`.
+  'SaleRefund',
   // Quotations (WU1) — five tables, one bounded context. Without these
   // entries, `findAll` / `findById` / `delete` would not auto-inject
   // tenantId into the WHERE clause and a cross-tenant row could leak.

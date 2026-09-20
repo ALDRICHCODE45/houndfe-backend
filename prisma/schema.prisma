@@ -153,6 +153,15 @@ enum SalePaymentStatus {
   CREDIT
 }
 
+// Pending refund obligations (pending-refund-obligations / prf-1).
+// A SaleRefund is an obligation to return paid money, not evidence that the
+// money was returned. Only PENDING is modelled today; settlement states must
+// be added deliberately, never inferred. The column is additive with a
+// `@default(PENDING)` so rows written before this migration stay valid.
+enum SaleRefundStatus {
+  PENDING
+}
+
 enum SaleChannel {
   POS
   ONLINE
@@ -990,6 +999,7 @@ model SaleRefund {
   method        SalePaymentMethod
   amountCents   Int
   reason        SaleCancelReason
+  status        SaleRefundStatus  @default(PENDING)
   createdAt     DateTime          @default(now())
 
   tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)

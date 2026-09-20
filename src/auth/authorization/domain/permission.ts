@@ -38,6 +38,7 @@ export type AppSubjects =
   | 'Promotion'
   | 'Customer'
   | 'SaleComment'
+  | 'SaleRefund'
   | 'File'
   | 'Employee'
   | 'EmployeeDocument'
@@ -225,6 +226,16 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'SaleComment',
     action: 'manage',
     description: 'Full sale comment management',
+  },
+
+  // SaleRefund permissions (pending-refund-obligations / prf-1).
+  // Refund rows are created by the sale-cancellation flow, so this subject
+  // intentionally exposes `read` only: cancellation keeps ownership of
+  // refund creation and no tenant role receives this grant automatically.
+  {
+    subject: 'SaleRefund',
+    action: 'read',
+    description: 'View pending sale refund obligations',
   },
 
   // Brand permissions
