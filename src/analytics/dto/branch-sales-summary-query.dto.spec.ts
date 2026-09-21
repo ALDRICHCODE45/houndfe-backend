@@ -10,6 +10,7 @@ import {
   ANALYTICS_TIME_ZONE,
   BranchSalesSummaryQueryDto,
   LOCAL_CALENDAR_DATE_PATTERN,
+  MAX_ANALYTICS_RANGE_DAYS,
   isExactLocalCalendarDate,
 } from './branch-sales-summary-query.dto';
 import {
@@ -39,6 +40,32 @@ describe('BranchSalesSummaryQueryDto', () => {
     expect(errors).toHaveLength(0);
     expect(dto.from).toBe(from);
     expect(dto.to).toBe(to);
+  });
+
+  it.each([
+    ['2024-01-01', '2025-01-01'],
+    ['2023-01-01', '2024-01-02'],
+    ['2026-01-01', '2027-01-01'],
+    ['2024-02-28', '2025-02-28'],
+  ])('accepts [%s, %s) as at or below the cap', async (from, to) => {
+    expect(await errorProperties({ from, to })).toEqual([]);
+  });
+
+  it.each([
+    ['2024-01-01', '2025-01-02'],
+    ['2024-02-29', '2025-03-02'],
+    ['2026-01-01', '2027-01-03'],
+  ])('rejects the over-cap 367-day range [%s, %s)', async (from, to) => {
+    expect(await errorProperties({ from, to })).toContain('to');
+  });
+
+  it('rejects year 0000 in either bound', async () => {
+    expect(
+      await errorProperties({ from: '0000-01-01', to: '2026-01-01' }),
+    ).toContain('from');
+    expect(
+      await errorProperties({ from: '2025-01-01', to: '0000-12-31' }),
+    ).toContain('to');
   });
 
   it.each([
@@ -103,12 +130,16 @@ describe('BranchSalesSummaryQueryDto', () => {
     ).toContain('from');
   });
 
-  it('exposes the timezone, pattern, and host-timezone-free guard', () => {
+  it('exposes the timezone, pattern, cap, and host-timezone-free guard', () => {
     expect(ANALYTICS_TIME_ZONE).toBe('America/Mexico_City');
+    expect(MAX_ANALYTICS_RANGE_DAYS).toBe(366);
     expect(LOCAL_CALENDAR_DATE_PATTERN.test('2026-01-01')).toBe(true);
     expect(LOCAL_CALENDAR_DATE_PATTERN.test('2026-1-1')).toBe(false);
     expect(isExactLocalCalendarDate('2024-02-29')).toBe(true);
     expect(isExactLocalCalendarDate('1900-02-29')).toBe(false);
+    expect(isExactLocalCalendarDate('0000-01-01')).toBe(false);
+    expect(isExactLocalCalendarDate('0001-01-01')).toBe(true);
+    expect(isExactLocalCalendarDate('9999-12-31')).toBe(true);
     expect(isExactLocalCalendarDate('2026-04-31')).toBe(false);
     expect(isExactLocalCalendarDate('2026-01-01T00:00:00Z')).toBe(false);
     expect(isExactLocalCalendarDate(undefined)).toBe(false);
