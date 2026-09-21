@@ -5,25 +5,31 @@ import {
   Logger,
   NotFoundException,
   ParseUUIDPipe,
+  RequestMethod,
   UnauthorizedException,
   ValidationPipe,
   type CanActivate,
   type ExecutionContext,
   type Type,
 } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { SalesQueryController } from './sales-query.controller';
 import { SalesService } from './sales.service';
+import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
+import type { PendingRefundListResponseDto } from './dto/pending-refund-response.dto';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
+import { PERMISSIONS_KEY } from '../auth/authorization/decorators/require-permissions.decorator';
 import { createListingValidationExceptionFactory } from '../shared/listing/listing-validation-exception.factory';
 
 function makeMockSalesService() {
   return {
     listSales: jest.fn(),
+    listPendingRefunds: jest.fn(),
     getSaleDetail: jest.fn(),
     setDueDate: jest.fn(),
     assignSeller: jest.fn(),
@@ -234,7 +240,7 @@ describe('SalesQueryController HTTP integration', () => {
           tenantId: 'tenant-a',
           tenantSlug: 'tenant-a',
           isSuperAdmin: false,
-          permissions: ['read:Sale', 'delete:Sale'],
+          permissions: ['read:Sale', 'delete:Sale', 'read:SaleRefund'],
         };
         return true;
       }
@@ -258,6 +264,15 @@ describe('SalesQueryController HTTP integration', () => {
       const req = context.switchToHttp().getRequest();
       const permissions = (req.user?.permissions ?? []) as string[];
       const path = req.path as string;
+
+      // prf-3 — the pending-refund listing is guarded by read:SaleRefund
+      // and must NOT be satisfied by read:Sale alone.
+      if (path.endsWith('/sales/refunds/pending')) {
+        if (!permissions.includes('read:SaleRefund')) {
+          throw new ForbiddenException('Insufficient permissions');
+        }
+        return true;
+      }
 
       // cancel route requires delete:Sale
       if (path.endsWith('/cancel')) {
@@ -563,5 +578,240 @@ describe('SalesQueryController HTTP integration', () => {
       .set('Authorization', 'Bearer tenant-a-delete-sale')
       .send(cancelBody)
       .expect(404);
+  });
+
+  // ── prf-3 pending refund listing HTTP integration tests ─────────────────
+
+  const pendingRefundPage: PendingRefundListResponseDto = {
+    data: [
+      {
+        id: 'refund-1',
+        saleId: 'sale-1',
+        method: 'cash',
+        amountCents: 1500,
+        reason: 'CUSTOMER_REQUEST',
+        status: 'PENDING',
+        createdAt: new Date('2026-07-01T00:00:00.000Z'),
+      },
+    ],
+    pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+  };
+
+  it('GET /sales/refunds/pending returns 200 and forwards the validated query', async () => {
+    pendingRefundsMockOf(service).mockResolvedValue(pendingRefundPage);
+
+    const res = await request(app.getHttpServer())
+      .get('/sales/refunds/pending')
+      .set('Authorization', 'Bearer tenant-a-delete-sale')
+      .expect(200);
+
+    const body: unknown = res.body;
+    // JSON boundary: `createdAt` crosses the wire as an ISO string.
+    expect(body).toEqual({
+      data: [
+        {
+          id: 'refund-1',
+          saleId: 'sale-1',
+          method: 'cash',
+          amountCents: 1500,
+          reason: 'CUSTOMER_REQUEST',
+          status: 'PENDING',
+          createdAt: '2026-07-01T00:00:00.000Z',
+        },
+      ],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+    expect(pendingRefundsMockOf(service)).toHaveBeenCalledWith({
+      page: 1,
+      limit: 20,
+    });
+  });
+
+  it('GET /sales/refunds/pending returns an empty page with 200, never 404', async () => {
+    pendingRefundsMockOf(service).mockResolvedValue({
+      data: [],
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 },
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/sales/refunds/pending')
+      .set('Authorization', 'Bearer tenant-a-delete-sale')
+      .expect(200);
+
+    const body: unknown = res.body;
+    const page = body as PendingRefundListResponseDto;
+    expect(page.data).toEqual([]);
+    expect(page.pagination.totalPages).toBe(0);
+  });
+
+  it('GET /sales/refunds/pending returns 401 when JWT is missing', async () => {
+    await request(app.getHttpServer())
+      .get('/sales/refunds/pending')
+      .expect(401);
+  });
+
+  it('GET /sales/refunds/pending returns 403 for read:Sale without read:SaleRefund', async () => {
+    // `tenant-a-read-sale` holds exactly ['read:Sale'], which is enough for
+    // the other sales query routes but must NOT authorize this one.
+    await request(app.getHttpServer())
+      .get('/sales/refunds/pending')
+      .set('Authorization', 'Bearer tenant-a-read-sale')
+      .expect(403);
+
+    expect(pendingRefundsMockOf(service)).not.toHaveBeenCalled();
+  });
+
+  it('GET /sales/refunds/pending returns 400 for an out-of-bounds limit', async () => {
+    await request(app.getHttpServer())
+      .get('/sales/refunds/pending')
+      .set('Authorization', 'Bearer tenant-a-delete-sale')
+      .query({ limit: '101' })
+      .expect(400);
+
+    expect(pendingRefundsMockOf(service)).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * prf-3 — typed double for the pending-refund listing. The legacy
+ * `makeMockSalesService` above is `any`-typed for the pre-existing
+ * suite; new tests build their own narrow, type-checked double instead
+ * of widening that one.
+ */
+type PendingRefundSalesServiceMock = {
+  listSales: jest.Mock;
+  listPendingRefunds: jest.Mock<
+    Promise<PendingRefundListResponseDto>,
+    [ListPendingRefundsQueryDto]
+  >;
+  getSaleDetail: jest.Mock;
+  setDueDate: jest.Mock;
+  assignSeller: jest.Mock;
+  clearSeller: jest.Mock;
+  cancelSale: jest.Mock;
+};
+
+function makeTypedSalesServiceMock(): PendingRefundSalesServiceMock {
+  return {
+    listSales: jest.fn(),
+    listPendingRefunds: jest.fn<
+      Promise<PendingRefundListResponseDto>,
+      [ListPendingRefundsQueryDto]
+    >(),
+    getSaleDetail: jest.fn(),
+    setDueDate: jest.fn(),
+    assignSeller: jest.fn(),
+    clearSeller: jest.fn(),
+    cancelSale: jest.fn(),
+  };
+}
+
+/**
+ * Narrow, type-checked handle onto the pending-refund mock held by the
+ * `any`-typed app-level double, so assertions stay checked without
+ * rewriting the pre-existing HTTP suite.
+ */
+function pendingRefundsMockOf(
+  service: unknown,
+): PendingRefundSalesServiceMock['listPendingRefunds'] {
+  return (service as PendingRefundSalesServiceMock).listPendingRefunds;
+}
+
+describe('SalesQueryController — GET /sales/refunds/pending wiring (prf-3)', () => {
+  const pendingRefundPage: PendingRefundListResponseDto = {
+    data: [
+      {
+        id: 'refund-1',
+        saleId: 'sale-1',
+        method: 'cash',
+        amountCents: 1500,
+        reason: 'CUSTOMER_REQUEST',
+        status: 'PENDING',
+        createdAt: new Date('2026-07-01T00:00:00.000Z'),
+      },
+    ],
+    pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+  };
+
+  const handlerOf = (method: string): object => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      SalesQueryController.prototype,
+      method,
+    );
+    const handler = descriptor?.value as object | undefined;
+    expect(handler).toBeDefined();
+    return handler as object;
+  };
+
+  const routeIndexOf = (path: string): number =>
+    Object.getOwnPropertyNames(SalesQueryController.prototype).findIndex(
+      (name) => {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          SalesQueryController.prototype,
+          name,
+        );
+        const handler = descriptor?.value as object | undefined;
+        return (
+          handler !== undefined &&
+          Reflect.getMetadata(METHOD_METADATA, handler) === RequestMethod.GET &&
+          Reflect.getMetadata(PATH_METADATA, handler) === path
+        );
+      },
+    );
+
+  it('delegates the validated query to the service', async () => {
+    const service = makeTypedSalesServiceMock();
+    service.listPendingRefunds.mockResolvedValue(pendingRefundPage);
+    const controller = new SalesQueryController(
+      service as unknown as SalesService,
+    );
+    const query = new ListPendingRefundsQueryDto();
+
+    const result = await controller.listPendingRefunds(query);
+
+    expect(result).toEqual(pendingRefundPage);
+    expect(service.listPendingRefunds).toHaveBeenCalledWith(query);
+    expect(service.listSales).not.toHaveBeenCalled();
+  });
+
+  it('forwards service failures without masking', async () => {
+    const service = makeTypedSalesServiceMock();
+    service.listPendingRefunds.mockRejectedValue(
+      new Error('TENANT_CONTEXT_REQUIRED'),
+    );
+    const controller = new SalesQueryController(
+      service as unknown as SalesService,
+    );
+
+    await expect(
+      controller.listPendingRefunds(new ListPendingRefundsQueryDto()),
+    ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
+  });
+
+  it('requires exactly the SaleRefund read permission', () => {
+    const perms = Reflect.getMetadata(
+      PERMISSIONS_KEY,
+      handlerOf('listPendingRefunds'),
+    ) as Array<[string, string]> | undefined;
+
+    expect(perms).toEqual([['read', 'SaleRefund']]);
+  });
+
+  it('is mapped to GET /sales/refunds/pending', () => {
+    const handler = handlerOf('listPendingRefunds');
+
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.GET,
+    );
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe('refunds/pending');
+  });
+
+  it('declares the static refunds/pending route before the parameterized :id route', () => {
+    const staticIndex = routeIndexOf('refunds/pending');
+    const parameterizedIndex = routeIndexOf(':id');
+
+    expect(staticIndex).toBeGreaterThanOrEqual(0);
+    expect(parameterizedIndex).toBeGreaterThanOrEqual(0);
+    expect(staticIndex).toBeLessThan(parameterizedIndex);
   });
 });

@@ -19,6 +19,7 @@ import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard
 import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
 import { SalesService } from './sales.service';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
 import { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
 import { AssignSellerDto } from './dto/assign-seller.dto';
 import { CancelSaleDto } from './dto/cancel-sale.dto';
@@ -35,6 +36,19 @@ export class SalesQueryController {
   list(@Query() query: ListSalesQueryDto) {
     query.resolveLegacyAlias();
     return this.salesService.listSales(query);
+  }
+
+  /**
+   * GET /sales/refunds/pending — pending refund obligations (prf-3).
+   *
+   * Declared BEFORE the `:id` route below: Nest matches routes in
+   * declaration order, and a parameterized route must never get the
+   * chance to read `refunds` as a sale id.
+   */
+  @Get('refunds/pending')
+  @RequirePermissions(['read', 'SaleRefund'])
+  listPendingRefunds(@Query() query: ListPendingRefundsQueryDto) {
+    return this.salesService.listPendingRefunds(query);
   }
 
   @Get(':id')
