@@ -1,6 +1,8 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpStatus,
   INestApplication,
   Logger,
   NotFoundException,
@@ -12,19 +14,27 @@ import {
   type ExecutionContext,
   type Type,
 } from '@nestjs/common';
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import {
+  HTTP_CODE_METADATA,
+  METHOD_METADATA,
+  PATH_METADATA,
+} from '@nestjs/common/constants';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { SalesQueryController } from './sales-query.controller';
 import { SalesService } from './sales.service';
 import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
 import type { PendingRefundListResponseDto } from './dto/pending-refund-response.dto';
+import type { SettleRefundDto } from './dto/settle-refund.dto';
+import type { RefundSettlementResponseDto } from './dto/refund-settlement-response.dto';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { PERMISSIONS_KEY } from '../auth/authorization/decorators/require-permissions.decorator';
 import { createListingValidationExceptionFactory } from '../shared/listing/listing-validation-exception.factory';
+import { DomainExceptionFilter } from '../shared/filters/domain-exception.filter';
+import { BusinessRuleViolationError } from '../shared/domain/domain-error';
 
 function makeMockSalesService() {
   return {
@@ -35,6 +45,7 @@ function makeMockSalesService() {
     assignSeller: jest.fn(),
     clearSeller: jest.fn(),
     cancelSale: jest.fn(),
+    settleRefund: jest.fn(),
   } as any;
 }
 
@@ -245,6 +256,17 @@ describe('SalesQueryController HTTP integration', () => {
         return true;
       }
 
+      if (token === 'tenant-a-update-refund') {
+        req.user = {
+          userId: 'user-a',
+          tenantId: 'tenant-a',
+          tenantSlug: 'tenant-a',
+          isSuperAdmin: false,
+          permissions: ['update:SaleRefund'],
+        };
+        return true;
+      }
+
       throw new UnauthorizedException('Unauthorized');
     }
   }
@@ -282,6 +304,15 @@ describe('SalesQueryController HTTP integration', () => {
         return true;
       }
 
+      // rfs-3b — partial-refund settlement requires update:SaleRefund, which
+      // read:Sale alone must never satisfy.
+      if (path.endsWith('/settlements')) {
+        if (!permissions.includes('update:SaleRefund')) {
+          throw new ForbiddenException('Insufficient permissions');
+        }
+        return true;
+      }
+
       if (!permissions.includes('read:Sale')) {
         throw new ForbiddenException('Insufficient permissions');
       }
@@ -313,6 +344,10 @@ describe('SalesQueryController HTTP integration', () => {
         exceptionFactory: createListingValidationExceptionFactory(),
       }),
     );
+    // rfs-3b — the domain filter is wired in `main.ts` for the real app; HTTP
+    // tests must register it explicitly so settlement domain errors (404/409/
+    // 422) are asserted at their real boundary.
+    app.useGlobalFilters(new DomainExceptionFilter());
     await app.init();
   });
 
@@ -674,6 +709,133 @@ describe('SalesQueryController HTTP integration', () => {
 
     expect(pendingRefundsMockOf(service)).not.toHaveBeenCalled();
   });
+
+  // ── rfs-3b partial-refund settlement HTTP integration tests ─────────────
+
+  const settleRefundId = 'c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f';
+  const settleBody = {
+    amountCents: 500,
+    method: 'cash',
+    reference: 'REF-1',
+    settledAt: '2026-07-01T12:00:00.000Z',
+  };
+  const settleResult: RefundSettlementResponseDto = {
+    settlementId: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a',
+    refundId: settleRefundId,
+    saleId: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+    amountCents: 500,
+    method: 'cash',
+    reference: 'REF-1',
+    settledAt: '2026-07-01T12:00:00.000Z',
+    settledCents: 500,
+    outstandingCents: 500,
+  };
+  const postSettlement = () =>
+    request(app.getHttpServer()).post(
+      `/sales/refunds/${settleRefundId}/settlements`,
+    );
+
+  it('POST /sales/refunds/:refundId/settlements returns 200 and serializes the settlement', async () => {
+    settleRefundMockOf(service).mockResolvedValue(settleResult);
+
+    await postSettlement()
+      .set('Authorization', 'Bearer tenant-a-update-refund')
+      .set('idempotency-key', '  key-1  ')
+      .send(settleBody)
+      .expect(200)
+      .expect(({ body }: { body: unknown }) => {
+        // The trimmed key reaches the service; the ISO string crosses the
+        // wire unchanged (settledAt is already a canonical string).
+        expect(settleRefundMockOf(service)).toHaveBeenCalledWith(
+          settleRefundId,
+          'user-a',
+          settleBody,
+          'key-1',
+        );
+        expect(body).toEqual(settleResult);
+      });
+  });
+
+  it('POST /sales/refunds/:refundId/settlements returns 400 and skips the service when the key is missing', async () => {
+    await postSettlement()
+      .set('Authorization', 'Bearer tenant-a-update-refund')
+      .send(settleBody)
+      .expect(400);
+
+    expect(settleRefundMockOf(service)).not.toHaveBeenCalled();
+  });
+
+  it('POST /sales/refunds/:refundId/settlements returns 400 for a non-UUID refundId', async () => {
+    await request(app.getHttpServer())
+      .post('/sales/refunds/not-a-uuid/settlements')
+      .set('Authorization', 'Bearer tenant-a-update-refund')
+      .set('idempotency-key', 'key-1')
+      .send(settleBody)
+      .expect(400);
+
+    expect(settleRefundMockOf(service)).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['amount below the lower bound', { ...settleBody, amountCents: 0 }],
+    [
+      'amount above the Int ceiling',
+      { ...settleBody, amountCents: 2147483648 },
+    ],
+    ['unknown tender method', { ...settleBody, method: 'bitcoin' }],
+    ['non-string reference', { ...settleBody, reference: 42 }],
+    ['non-ISO settledAt', { ...settleBody, settledAt: 'yesterday' }],
+  ])(
+    'POST /sales/refunds/:refundId/settlements returns 400 for %s',
+    async (_label, body) => {
+      await postSettlement()
+        .set('Authorization', 'Bearer tenant-a-update-refund')
+        .set('idempotency-key', 'key-1')
+        .send(body)
+        .expect(400);
+
+      expect(settleRefundMockOf(service)).not.toHaveBeenCalled();
+    },
+  );
+
+  it('POST /sales/refunds/:refundId/settlements returns 401 when the JWT is missing', async () => {
+    await postSettlement()
+      .set('idempotency-key', 'key-1')
+      .send(settleBody)
+      .expect(401);
+  });
+
+  it('POST /sales/refunds/:refundId/settlements returns 403 for read:Sale without update:SaleRefund', async () => {
+    await postSettlement()
+      .set('Authorization', 'Bearer tenant-a-read-sale')
+      .set('idempotency-key', 'key-1')
+      .send(settleBody)
+      .expect(403);
+
+    expect(settleRefundMockOf(service)).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['REFUND_NOT_FOUND', 404],
+    ['IDEMPOTENCY_KEY_CONFLICT', 409],
+    ['REFUND_ALREADY_SETTLED', 409],
+    ['SETTLEMENT_EXCEEDS_REFUND', 422],
+  ])(
+    'POST /sales/refunds/:refundId/settlements maps %s to %i via DomainExceptionFilter',
+    async (code, status) => {
+      settleRefundMockOf(service).mockRejectedValue(
+        new BusinessRuleViolationError(code, code),
+      );
+
+      const res = await postSettlement()
+        .set('Authorization', 'Bearer tenant-a-update-refund')
+        .set('idempotency-key', 'key-1')
+        .send(settleBody)
+        .expect(status);
+
+      expect((res.body as { error: string }).error).toBe(code);
+    },
+  );
 });
 
 /**
@@ -693,6 +855,10 @@ type PendingRefundSalesServiceMock = {
   assignSeller: jest.Mock;
   clearSeller: jest.Mock;
   cancelSale: jest.Mock;
+  settleRefund: jest.Mock<
+    Promise<RefundSettlementResponseDto>,
+    [string, string, SettleRefundDto, string]
+  >;
 };
 
 function makeTypedSalesServiceMock(): PendingRefundSalesServiceMock {
@@ -707,6 +873,10 @@ function makeTypedSalesServiceMock(): PendingRefundSalesServiceMock {
     assignSeller: jest.fn(),
     clearSeller: jest.fn(),
     cancelSale: jest.fn(),
+    settleRefund: jest.fn<
+      Promise<RefundSettlementResponseDto>,
+      [string, string, SettleRefundDto, string]
+    >(),
   };
 }
 
@@ -719,6 +889,13 @@ function pendingRefundsMockOf(
   service: unknown,
 ): PendingRefundSalesServiceMock['listPendingRefunds'] {
   return (service as PendingRefundSalesServiceMock).listPendingRefunds;
+}
+
+/** rfs-3b — same narrow handle for the settlement mock. */
+function settleRefundMockOf(
+  service: unknown,
+): PendingRefundSalesServiceMock['settleRefund'] {
+  return (service as PendingRefundSalesServiceMock).settleRefund;
 }
 
 describe('SalesQueryController — GET /sales/refunds/pending wiring (prf-3)', () => {
@@ -819,5 +996,143 @@ describe('SalesQueryController — GET /sales/refunds/pending wiring (prf-3)', (
     expect(staticIndex).toBeGreaterThanOrEqual(0);
     expect(parameterizedIndex).toBeGreaterThanOrEqual(0);
     expect(staticIndex).toBeLessThan(parameterizedIndex);
+  });
+});
+
+describe('SalesQueryController — POST /sales/refunds/:refundId/settlements wiring (rfs-3b)', () => {
+  const refundId = 'c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f';
+  const dto: SettleRefundDto = {
+    amountCents: 500,
+    method: 'cash',
+    reference: 'REF-1',
+    settledAt: '2026-07-01T12:00:00.000Z',
+  };
+  const settlementResponse: RefundSettlementResponseDto = {
+    settlementId: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a',
+    refundId,
+    saleId: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+    amountCents: 500,
+    method: 'cash',
+    reference: 'REF-1',
+    settledAt: '2026-07-01T12:00:00.000Z',
+    settledCents: 500,
+    outstandingCents: 500,
+  };
+
+  const handlerOf = (method: string): object => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      SalesQueryController.prototype,
+      method,
+    );
+    const handler = descriptor?.value as object | undefined;
+    expect(handler).toBeDefined();
+    return handler as object;
+  };
+
+  const routeIndexOf = (method: number, path: string): number =>
+    Object.getOwnPropertyNames(SalesQueryController.prototype).findIndex(
+      (name) => {
+        const handler = handlerOf(name);
+        return (
+          Reflect.getMetadata(METHOD_METADATA, handler) === method &&
+          Reflect.getMetadata(PATH_METADATA, handler) === path
+        );
+      },
+    );
+
+  it('delegates to settleRefund with the exact id, actor, dto and trimmed key', async () => {
+    const service = makeTypedSalesServiceMock();
+    service.settleRefund.mockResolvedValue(settlementResponse);
+    const controller = new SalesQueryController(
+      service as unknown as SalesService,
+    );
+    const user = makeMockUser('actor-1');
+
+    const result = await controller.settleRefund(
+      refundId,
+      dto,
+      '  key-1  ',
+      user,
+    );
+
+    expect(result).toEqual(settlementResponse);
+    expect(service.settleRefund).toHaveBeenCalledTimes(1);
+    expect(service.settleRefund).toHaveBeenCalledWith(
+      refundId,
+      'actor-1',
+      dto,
+      'key-1',
+    );
+  });
+
+  it.each([undefined, '', '   '])(
+    'rejects a missing or blank idempotency key with 400 before the service',
+    (idempotencyKey) => {
+      const service = makeTypedSalesServiceMock();
+      const controller = new SalesQueryController(
+        service as unknown as SalesService,
+      );
+
+      const call = () =>
+        controller.settleRefund(
+          refundId,
+          dto,
+          idempotencyKey,
+          makeMockUser('actor-1'),
+        );
+
+      // The guard rejects synchronously, before any promise is created.
+      expect(call).toThrow(BadRequestException);
+      expect(service.settleRefund).not.toHaveBeenCalled();
+    },
+  );
+
+  it('forwards service failures without masking', async () => {
+    const service = makeTypedSalesServiceMock();
+    service.settleRefund.mockRejectedValue(
+      new BusinessRuleViolationError('REFUND_NOT_FOUND', 'REFUND_NOT_FOUND'),
+    );
+    const controller = new SalesQueryController(
+      service as unknown as SalesService,
+    );
+
+    await expect(
+      controller.settleRefund(refundId, dto, 'key-1', makeMockUser('actor-1')),
+    ).rejects.toThrow('REFUND_NOT_FOUND');
+  });
+
+  it('is mapped to POST /sales/refunds/:refundId/settlements with an explicit 200', () => {
+    const handler = handlerOf('settleRefund');
+
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.POST,
+    );
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(
+      'refunds/:refundId/settlements',
+    );
+    expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(
+      HttpStatus.OK,
+    );
+  });
+
+  it('requires exactly the SaleRefund update permission', () => {
+    const perms = Reflect.getMetadata(
+      PERMISSIONS_KEY,
+      handlerOf('settleRefund'),
+    ) as Array<[string, string]> | undefined;
+
+    expect(perms).toEqual([['update', 'SaleRefund']]);
+  });
+
+  it('declares the settlements route before the parameterized :id sale route', () => {
+    const settlementsIndex = routeIndexOf(
+      RequestMethod.POST,
+      'refunds/:refundId/settlements',
+    );
+    const detailIndex = routeIndexOf(RequestMethod.GET, ':id');
+
+    expect(settlementsIndex).toBeGreaterThanOrEqual(0);
+    expect(detailIndex).toBeGreaterThanOrEqual(0);
+    expect(settlementsIndex).toBeLessThan(detailIndex);
   });
 });

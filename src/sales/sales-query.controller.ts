@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -20,6 +22,7 @@ import { RequirePermissions } from '../auth/authorization/decorators/require-per
 import { SalesService } from './sales.service';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
+import { SettleRefundDto } from './dto/settle-refund.dto';
 import { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
 import { AssignSellerDto } from './dto/assign-seller.dto';
 import { CancelSaleDto } from './dto/cancel-sale.dto';
@@ -49,6 +52,41 @@ export class SalesQueryController {
   @RequirePermissions(['read', 'SaleRefund'])
   listPendingRefunds(@Query() query: ListPendingRefundsQueryDto) {
     return this.salesService.listPendingRefunds(query);
+  }
+
+  /**
+   * POST /sales/refunds/:refundId/settlements — rfs-3b settlement entry point.
+   *
+   * Declared BEFORE the parameterized `:id` sale routes: Nest matches in
+   * declaration order and `refunds` must never be read as a sale id. The
+   * idempotency key is normalized here (trimmed; blank rejected) so an
+   * equivalent retry replays the stored settlement instead of appending a
+   * second one, while the service-owned request hash keeps the key
+   * actor-scoped. Domain failures surface through DomainExceptionFilter:
+   * REFUND_NOT_FOUND → 404, IDEMPOTENCY_KEY_CONFLICT / REFUND_ALREADY_SETTLED
+   * → 409, SETTLEMENT_EXCEEDS_REFUND → 422.
+   */
+  @Post('refunds/:refundId/settlements')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'SaleRefund'])
+  settleRefund(
+    @Param('refundId', new ParseUUIDPipe()) refundId: string,
+    @Body() dto: SettleRefundDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    const normalizedIdempotencyKey = idempotencyKey?.trim();
+
+    if (!normalizedIdempotencyKey) {
+      throw new BadRequestException('IDEMPOTENCY_KEY_REQUIRED');
+    }
+
+    return this.salesService.settleRefund(
+      refundId,
+      user.userId,
+      dto,
+      normalizedIdempotencyKey,
+    );
   }
 
   @Get(':id')
