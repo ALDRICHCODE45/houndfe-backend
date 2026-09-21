@@ -378,6 +378,54 @@ describe('DomainExceptionFilter', () => {
     );
   });
 
+  // ── rfs-3a — partial-refund settlement mapping ──
+
+  it('maps REFUND_NOT_FOUND to one generic 404 (rfs-3a)', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status, json } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError('REFUND_NOT_FOUND', 'REFUND_NOT_FOUND'),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.NOT_FOUND);
+    // Tenant non-disclosure: the body carries the code and nothing else that
+    // could reveal whether the obligation exists in another tenant.
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.NOT_FOUND,
+        error: 'REFUND_NOT_FOUND',
+        message: 'REFUND_NOT_FOUND',
+      }),
+    );
+  });
+
+  it('maps REFUND_ALREADY_SETTLED to a 409 state conflict (rfs-3a)', () => {
+    const filter = new DomainExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch(
+      new BusinessRuleViolationError(
+        'REFUND_ALREADY_SETTLED',
+        'REFUND_ALREADY_SETTLED',
+      ),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+  });
+
+  it.each(['SETTLEMENT_EXCEEDS_REFUND', 'INVALID_SETTLEMENT_AMOUNT'])(
+    'keeps %s on the generic 422 fallback (rfs-3a)',
+    (code) => {
+      const filter = new DomainExceptionFilter();
+      const { host, status } = makeHost();
+      filter.catch(new BusinessRuleViolationError(code, code), host);
+      expect(status).toHaveBeenCalledWith(HttpStatus.UNPROCESSABLE_ENTITY);
+    },
+  );
+
   it('omits `details` spread when BusinessRuleViolationError has none', () => {
     const filter = new DomainExceptionFilter();
     const { host, json } = makeHost();

@@ -100,6 +100,12 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'COMMENT_NOT_FOUND') return HttpStatus.NOT_FOUND;
     if (exception.code === 'SHIPPING_ADDRESS_NOT_FOUND')
       return HttpStatus.NOT_FOUND;
+    // ── rfs-3a — partial-refund settlement ──
+    // One generic 404 for a missing or foreign-tenant obligation; the
+    // settlement rule errors (SETTLEMENT_EXCEEDS_REFUND, repository-level
+    // INVALID_SETTLEMENT_AMOUNT) stay on the 422 fallback below.
+    if (exception.code === 'REFUND_NOT_FOUND') return HttpStatus.NOT_FOUND;
+    if (exception.code === 'REFUND_ALREADY_SETTLED') return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_NOT_DRAFT') return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_ALREADY_CONFIRMED') return HttpStatus.CONFLICT;
     if (exception.code === 'PRICE_LIST_NOT_FOUND')
