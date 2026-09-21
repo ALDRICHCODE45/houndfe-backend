@@ -1337,6 +1337,7 @@ describe('PrismaSaleRepository', () => {
 
     it('acquires settlement idempotency and stamps the parent sale id on success', async () => {
       mocks.saleIdempotency.create.mockResolvedValue({ id: 'idem-1' });
+      mocks.saleIdempotency.updateMany.mockResolvedValue({ count: 1 });
 
       const outcome = await repo.acquireSettlementIdempotency(
         'refund-1',
@@ -1360,13 +1361,28 @@ describe('PrismaSaleRepository', () => {
         settlementId: 'st-1',
       });
       expect(mocks.saleIdempotency.updateMany).toHaveBeenCalledWith({
-        where: { id: 'idem-1', tenantId: 'tenant-1' },
+        where: {
+          id: 'idem-1',
+          tenantId: 'tenant-1',
+          operation: 'sale_refund_settlement',
+          status: 'IN_FLIGHT',
+        },
         data: {
           status: 'SUCCEEDED',
           responseJson: { settlementId: 'st-1' },
           saleId: 'sale-1',
         },
       });
+    });
+
+    it('fences a reclaimed former owner whose stale token no longer matches IN_FLIGHT', async () => {
+      mocks.saleIdempotency.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        repo.markSettlementIdempotencySucceeded('idem-stale', 'sale-1', {
+          settlementId: 'st-stale',
+        }),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_IN_FLIGHT' });
     });
 
     it('inherits replay, conflict and in-flight through the settlement path', async () => {

@@ -2401,13 +2401,37 @@ export class PrismaSaleRepository implements ISaleRepository {
     });
   }
 
-  /** rfs-2 — stamp the slot SUCCEEDED with the PARENT SALE id. */
+  /**
+   * rfs-2 (R3/R4) — fencing CAS: token + tenant + operation + IN_FLIGHT MUST
+   * match exactly one row. A reclaimed former owner matches zero and throws,
+   * rolling back its settlement from inside its own transaction.
+   */
   async markSettlementIdempotencySucceeded(
     token: string,
     saleId: string,
     payload: unknown,
   ): Promise<void> {
-    return this.markIdempotencySucceeded(token, saleId, payload);
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+    const fenced = await prisma.saleIdempotency.updateMany({
+      where: {
+        id: token,
+        tenantId,
+        operation: 'sale_refund_settlement',
+        status: 'IN_FLIGHT',
+      },
+      data: {
+        status: 'SUCCEEDED',
+        responseJson: payload as Prisma.InputJsonValue,
+        saleId,
+      },
+    });
+    if (fenced.count !== 1) {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+      );
+    }
   }
 
   private async acquireIdempotency(
