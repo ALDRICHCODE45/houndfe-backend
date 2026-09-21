@@ -85,6 +85,13 @@ describe('SettleRefundDto', () => {
   ])('rejects a %s settledAt', async (_label, settledAt) => {
     expect(await errorProperties({ settledAt })).toContain('settledAt');
   });
+
+  it.each(['2024-01-15T10:00:00.000', '2024-01-15T10:00:00', '2024-01-15'])(
+    'rejects the timezone-less settledAt %s',
+    async (settledAt) => {
+      expect(await errorProperties({ settledAt })).toContain('settledAt');
+    },
+  );
 });
 
 // The response DTO's own spec file is outside this change's edit surface, so

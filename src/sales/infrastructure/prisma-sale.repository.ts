@@ -146,6 +146,10 @@ function toDomainRefundMethod(method: string): SaleRefundMethod {
   }
 }
 
+/** rfs-2 correction — stale-IN_FLIGHT settlement lease: long enough that a
+ * live request keeps its slot, short enough that a crashed acquire self-heals. */
+const SETTLEMENT_LEASE_TTL_MS = 5 * 60 * 1000;
+
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
@@ -2336,18 +2340,65 @@ export class PrismaSaleRepository implements ISaleRepository {
     return this.markIdempotencySucceeded(token, saleId, payload);
   }
 
-  /** rfs-2 — idempotency acquire; `saleId` stays null until success. */
+  /**
+   * rfs-2 — idempotency acquire; `saleId` stays null until success. A
+   * colliding IN_FLIGHT slot is reclaimed ONLY when the full slot identity
+   * (tenant + operation + key + requestHash) matches AND `updatedAt` predates
+   * the lease, then acquisition retries exactly once.
+   */
   async acquireSettlementIdempotency(
     refundId: string,
     key: string,
     requestHash: string,
-  ) {
-    return this.acquireIdempotency(
-      'sale_refund_settlement',
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  > {
+    const operation = 'sale_refund_settlement';
+    const compositeKey = `refund:settle:${refundId}:${key}`;
+    const outcome = await this.acquireIdempotency(
+      operation,
       null,
-      `refund:settle:${refundId}:${key}`,
+      compositeKey,
       requestHash,
     );
+    if (outcome.kind !== 'in_flight') return outcome;
+
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+    const reclaimable = await prisma.saleIdempotency.deleteMany({
+      where: {
+        tenantId,
+        operation,
+        key: compositeKey,
+        requestHash,
+        status: 'IN_FLIGHT',
+        updatedAt: { lt: new Date(Date.now() - SETTLEMENT_LEASE_TTL_MS) },
+      },
+    });
+    if (reclaimable.count === 0) return outcome;
+
+    return this.acquireIdempotency(operation, null, compositeKey, requestHash);
+  }
+
+  /**
+   * rfs-2 — release an acquired settlement token after the guarded transaction
+   * rolled back. Quadruple-qualified (tenant + operation + token + IN_FLIGHT)
+   * so a committed SUCCEEDED stamp is never deleted.
+   */
+  async releaseSettlementIdempotency(token: string): Promise<void> {
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+    await prisma.saleIdempotency.deleteMany({
+      where: {
+        id: token,
+        tenantId,
+        operation: 'sale_refund_settlement',
+        status: 'IN_FLIGHT',
+      },
+    });
   }
 
   /** rfs-2 — stamp the slot SUCCEEDED with the PARENT SALE id. */

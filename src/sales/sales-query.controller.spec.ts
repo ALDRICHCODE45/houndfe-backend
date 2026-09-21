@@ -785,6 +785,10 @@ describe('SalesQueryController HTTP integration', () => {
     ['unknown tender method', { ...settleBody, method: 'bitcoin' }],
     ['non-string reference', { ...settleBody, reference: 42 }],
     ['non-ISO settledAt', { ...settleBody, settledAt: 'yesterday' }],
+    [
+      'timezone-less settledAt',
+      { ...settleBody, settledAt: '2026-07-01T12:00:00.000' },
+    ],
   ])(
     'POST /sales/refunds/:refundId/settlements returns 400 for %s',
     async (_label, body) => {

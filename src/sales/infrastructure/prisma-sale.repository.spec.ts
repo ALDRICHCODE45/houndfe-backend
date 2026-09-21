@@ -61,6 +61,7 @@ function makeMockPrisma() {
       create: jest.fn(),
       findUnique: jest.fn(),
       updateMany: jest.fn(),
+      deleteMany: jest.fn(),
     },
     // Unit 3 — promotion persistence (sale_promotion_applied + sale_promotion_vetoes)
     salePromotionApplied: {
@@ -122,6 +123,7 @@ interface WritePathMocks {
     create: jest.Mock;
     findUnique: jest.Mock;
     updateMany: jest.Mock;
+    deleteMany: jest.Mock;
   };
 }
 
@@ -1381,12 +1383,59 @@ describe('PrismaSaleRepository', () => {
         [{ requestHash: 'hash-1', status: 'IN_FLIGHT' }, { kind: 'in_flight' }],
       ];
 
+      mocks.saleIdempotency.deleteMany.mockResolvedValue({ count: 0 });
+
       for (const [existing, expected] of states) {
         mocks.saleIdempotency.findUnique.mockResolvedValue(existing);
         await expect(
           repo.acquireSettlementIdempotency('refund-1', 'key-1', 'hash-1'),
         ).resolves.toEqual(expected);
       }
+
+      expect(mocks.saleIdempotency.deleteMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases an acquired settlement token under a tenant/operation/token/IN_FLIGHT predicate', async () => {
+      mocks.saleIdempotency.deleteMany.mockResolvedValue({ count: 1 });
+      await repo.releaseSettlementIdempotency('idem-1');
+      expect(mocks.saleIdempotency.deleteMany).toHaveBeenCalledWith({
+        where: {
+          id: 'idem-1',
+          tenantId: 'tenant-1',
+          operation: 'sale_refund_settlement',
+          status: 'IN_FLIGHT',
+        },
+      });
+    });
+
+    it('reclaims a matching stale IN_FLIGHT slot after the lease and retries acquisition once', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-07-01T12:00:00.000Z'));
+      mocks.saleIdempotency.create
+        .mockRejectedValueOnce({ code: 'P2002' })
+        .mockResolvedValueOnce({ id: 'idem-reclaimed' });
+      mocks.saleIdempotency.findUnique.mockResolvedValue({
+        requestHash: 'hash-1',
+        status: 'IN_FLIGHT',
+      });
+      mocks.saleIdempotency.deleteMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        repo.acquireSettlementIdempotency('refund-1', 'key-1', 'hash-1'),
+      ).resolves.toEqual({ kind: 'acquired', token: 'idem-reclaimed' });
+
+      expect(mocks.saleIdempotency.deleteMany).toHaveBeenCalledWith({
+        where: {
+          tenantId: 'tenant-1',
+          operation: 'sale_refund_settlement',
+          key: 'refund:settle:refund-1:key-1',
+          requestHash: 'hash-1',
+          status: 'IN_FLIGHT',
+          updatedAt: { lt: new Date('2026-07-01T11:55:00.000Z') },
+        },
+      });
+      // Exactly one retry after the reclaim, no loop.
+      expect(mocks.saleIdempotency.create).toHaveBeenCalledTimes(2);
+      jest.useRealTimers();
     });
   });
 

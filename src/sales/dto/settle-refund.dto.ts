@@ -3,6 +3,7 @@ import {
   IsInt,
   IsISO8601,
   IsString,
+  Matches,
   Max,
   Min,
   ValidateIf,
@@ -25,6 +26,10 @@ export const SALE_REFUND_METHODS = [
 
 /** PostgreSQL/Prisma `Int` ceiling — cents can never exceed 2147483647. */
 export const MAX_CENTS = 2147483647;
+
+/** rfs-3a — `settledAt` MUST carry an explicit zone (`Z` or `±HH:MM`): a
+ * timezone-less ISO datetime names no instant. */
+export const EXPLICIT_TIMEZONE_SUFFIX = /(?:Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * rfs-3a — request contract for one partial refund settlement.
@@ -50,5 +55,6 @@ export class SettleRefundDto {
   reference?: string;
 
   @IsISO8601()
+  @Matches(EXPLICIT_TIMEZONE_SUFFIX)
   settledAt: string;
 }

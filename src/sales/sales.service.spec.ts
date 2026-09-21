@@ -55,6 +55,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     markCancellationIdempotencySucceeded: jest.fn(),
     // rfs-3 — settlement idempotency slot plus the atomic append it guards.
     acquireSettlementIdempotency: jest.fn(),
+    releaseSettlementIdempotency: jest.fn(),
     markSettlementIdempotencySucceeded: jest.fn(),
     settleRefund: jest.fn(),
     runInTransaction: jest.fn(async (cb: any) => cb()),
@@ -11066,6 +11067,7 @@ describe('SalesService — settleRefund', () => {
     expect(saleRepo.runInTransaction).not.toHaveBeenCalled();
     expect(saleRepo.settleRefund).not.toHaveBeenCalled();
     expect(saleRepo.markSettlementIdempotencySucceeded).not.toHaveBeenCalled();
+    expect(saleRepo.releaseSettlementIdempotency).not.toHaveBeenCalled();
   };
 
   beforeEach(() => {
@@ -11098,6 +11100,7 @@ describe('SalesService — settleRefund', () => {
       kind: 'acquired',
       token: 'token-1',
     });
+    saleRepo.releaseSettlementIdempotency.mockResolvedValue(undefined);
     saleRepo.settleRefund.mockImplementation(async () => {
       noteWrite('settle');
       return {
@@ -11274,5 +11277,47 @@ describe('SalesService — settleRefund', () => {
     expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
     expect(saleRepo.markSettlementIdempotencySucceeded).not.toHaveBeenCalled();
     expect(transactionDepth).toBe(0);
+  });
+
+  it('releases the acquired token after a rolled-back settlement so a same-key retry settles exactly once', async () => {
+    saleRepo.settleRefund
+      .mockRejectedValueOnce(
+        new BusinessRuleViolationError(
+          'SETTLEMENT_EXCEEDS_REFUND',
+          'SETTLEMENT_EXCEEDS_REFUND',
+        ),
+      )
+      .mockResolvedValueOnce({
+        settlementId: SETTLEMENT_ID,
+        saleId: SALE_ID,
+        settledCents: 2500,
+        outstandingCents: 500,
+      });
+
+    await expect(
+      service.settleRefund(REFUND_ID, ACTOR_ID, makeDto(), 'key-retry'),
+    ).rejects.toMatchObject({ code: 'SETTLEMENT_EXCEEDS_REFUND' });
+
+    expect(saleRepo.releaseSettlementIdempotency).toHaveBeenCalledWith(
+      'token-1',
+    );
+    expect(
+      saleRepo.releaseSettlementIdempotency.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(saleRepo.runInTransaction.mock.invocationCallOrder[0]);
+    expect(saleRepo.markSettlementIdempotencySucceeded).not.toHaveBeenCalled();
+
+    const result = await service.settleRefund(
+      REFUND_ID,
+      ACTOR_ID,
+      makeDto(),
+      'key-retry',
+    );
+
+    expect(result).toEqual(expectedResponse());
+    expect(saleRepo.acquireSettlementIdempotency).toHaveBeenCalledTimes(2);
+    expect(saleRepo.settleRefund).toHaveBeenCalledTimes(2);
+    expect(saleRepo.markSettlementIdempotencySucceeded).toHaveBeenCalledTimes(
+      1,
+    );
   });
 });

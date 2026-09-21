@@ -1539,7 +1539,7 @@ export class SalesService {
       );
     }
 
-    return this.saleRepo.runInTransaction(async () => {
+    const transaction = this.saleRepo.runInTransaction(async () => {
       const settlement = await this.saleRepo.settleRefund({
         refundId,
         settledByUserId: actorId,
@@ -1568,6 +1568,16 @@ export class SalesService {
       );
 
       return payload;
+    });
+
+    return transaction.catch(async (error: unknown) => {
+      // Acquire ran OUTSIDE the transaction: release the stranded slot before
+      // rethrowing. Best-effort, so the failure contract survives; the lease
+      // TTL reclaims a slot whose release itself fails.
+      await this.saleRepo
+        .releaseSettlementIdempotency(idempotency.token)
+        .catch(() => undefined);
+      throw error;
     });
   }
 

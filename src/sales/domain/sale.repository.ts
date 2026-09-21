@@ -253,7 +253,7 @@ export interface ISaleRepository {
   ): Promise<void>;
 
   /** rfs-2 — settlement idempotency; same union as the other acquires, keyed
-   * by repository-composed `refund:settle:<refundId>:<key>` with null sale. */
+   * by `refund:settle:<refundId>:<key>`; stale IN_FLIGHT reclaims post-lease. */
   acquireSettlementIdempotency(
     refundId: string,
     key: string,
@@ -264,6 +264,10 @@ export interface ISaleRepository {
     | { kind: 'conflict' }
     | { kind: 'in_flight' }
   >;
+
+  /** rfs-2 — release an acquired settlement token after its guarded
+   * transaction rolled back; tenant + operation + IN_FLIGHT scoped. */
+  releaseSettlementIdempotency(token: string): Promise<void>;
 
   /** rfs-2 — stamp the settlement slot SUCCEEDED with the PARENT sale id. */
   markSettlementIdempotencySucceeded(
