@@ -66,6 +66,9 @@ import { DeliveryRoutesInngestRegistrar } from './delivery-routes/inngest/delive
 // (GET /tenants/:tenantId/catalog-settings). Hexagonal wiring mirrors
 // SatCatalogModule / NotificationConfigModule.
 import { CatalogSettingsModule } from './catalog-settings/catalog-settings.module';
+// branch-analytics-summary / bas-3a — read-only branch sales summary
+// bounded context. Imports DatabaseModule + AuthModule only.
+import { AnalyticsModule } from './analytics/analytics.module';
 
 @Module({
   imports: [
@@ -149,6 +152,9 @@ import { CatalogSettingsModule } from './catalog-settings/catalog-settings.modul
     // online-catalog-publishing / WU3A3 — catalog-settings bounded
     // context. Self-contained: imports DatabaseModule + AuthModule only.
     CatalogSettingsModule,
+    // branch-analytics-summary / bas-3a — read-only branch sales summary
+    // (GET /analytics/sales/summary behind read:Analytics).
+    AnalyticsModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
