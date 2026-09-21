@@ -20,9 +20,11 @@ import {
   ValidatorConstraint,
   ValidatorConstraintInterface,
 } from 'class-validator';
+import { ANALYTICS_TIME_ZONE } from '../domain/analytics.constants';
 
-/** Business timezone for every analytics business-day boundary. */
-export const ANALYTICS_TIME_ZONE = 'America/Mexico_City';
+// Canonical timezone lives in the domain layer; re-exported here so existing
+// DTO consumers and tests keep importing it from this module.
+export { ANALYTICS_TIME_ZONE };
 
 /** Exact local-calendar-date form: four-digit year, zero-padded month/day. */
 export const LOCAL_CALENDAR_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
