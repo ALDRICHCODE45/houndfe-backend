@@ -10878,6 +10878,8 @@ describe('SalesService — listPendingRefunds', () => {
     saleId: 'sale-1',
     method: 'cash',
     amountCents: 1500,
+    settledCents: 0,
+    outstandingCents: 1500,
     reason: 'CUSTOMER_REQUEST',
     status: 'PENDING',
     createdAt: new Date('2026-07-01T00:00:00.000Z'),
@@ -10969,8 +10971,10 @@ describe('SalesService — listPendingRefunds', () => {
       'createdAt',
       'id',
       'method',
+      'outstandingCents',
       'reason',
       'saleId',
+      'settledCents',
       'status',
     ]);
   });

@@ -64,6 +64,8 @@ export type PendingSaleRefundRecord = {
   saleId: string;
   method: SaleRefundMethod;
   amountCents: number;
+  settledCents: number;
+  outstandingCents: number;
   reason: SaleCancelReason;
   status: 'PENDING';
   createdAt: Date;
@@ -426,11 +428,9 @@ export interface ISaleRepository {
    * pending-refund-obligations / prf-2 — tenant-scoped page of PENDING
    * `SaleRefund` obligations.
    *
-   * Ordering is deterministic (`createdAt desc`, then `id desc`) so
-   * equal timestamps still paginate without duplicates or gaps; the
-   * adapter applies a top-level `{ tenantId, status: 'PENDING' }`
-   * predicate and selects only the projection fields (no nested
-   * relations).
+   * Ordering is oldest-first (`createdAt asc`, then `id asc`) and the
+   * adapter applies top-level `tenantId`, `status: 'PENDING'` and
+   * `amountCents > settledCents`, so fully settled rows are excluded.
    */
   findManyPendingRefunds(
     input: PendingRefundPageInput,
@@ -438,7 +438,7 @@ export interface ISaleRepository {
 
   /**
    * pending-refund-obligations / prf-2 — total PENDING refund
-   * obligations for the current tenant, feeding the listing's
+   * obligations with positive outstanding, feeding the listing's
    * pagination metadata. MUST share the exact predicate of
    * `findManyPendingRefunds` so `total` matches the page source.
    */

@@ -11,8 +11,7 @@
  *      the page query and the pagination count.
  *   2. Pending-only filtering — every returned row carries
  *      `status: 'PENDING'`.
- *   3. Deterministic ordering — `createdAt desc`, then `id desc`, so two
- *      rows sharing a timestamp still paginate without duplicates or gaps.
+ *   3. Oldest-first deterministic ordering with an id-ascending tie-break.
  *   4. Bounded offset pagination — `page`/`limit` slices concatenate to
  *      the full ordered set and the count matches the source page.
  *
@@ -43,6 +42,7 @@ interface SeedRefund {
   id: string;
   createdAt: Date;
   amountCents: number;
+  settledCents?: number;
 }
 
 describeIfDb(
@@ -155,6 +155,7 @@ describeIfDb(
           salePaymentId: null,
           method: index % 2 === 0 ? 'CASH' : 'CARD_CREDIT',
           amountCents: refund.amountCents,
+          settledCents: refund.settledCents ?? 0,
           reason: 'CUSTOMER_REQUEST' as const,
           status: 'PENDING' as const,
           createdAt: refund.createdAt,
@@ -163,33 +164,34 @@ describeIfDb(
       return { saleId };
     }
 
-    // Own-tenant refunds (5). Two share a `createdAt` so the
-    // `createdAt desc, id desc` tie-break is exercised for real.
+    // Own-tenant refunds (5); two share a `createdAt` on the id-ascending tie-break.
     const OWN_REFUNDS: SeedRefund[] = [
       {
         id: 'refund-a1',
         createdAt: new Date('2026-07-05T10:00:00.000Z'),
         amountCents: 100,
+        settledCents: 40,
       },
       {
         id: 'refund-a2',
-        createdAt: new Date('2026-07-04T10:00:00.000Z'),
+        createdAt: new Date('2026-07-06T10:00:00.000Z'),
         amountCents: 200,
       },
       {
         id: 'refund-a3',
-        createdAt: new Date('2026-07-04T10:00:00.000Z'),
+        createdAt: new Date('2026-07-05T10:00:00.000Z'),
         amountCents: 300,
       },
       {
         id: 'refund-a4',
-        createdAt: new Date('2026-07-03T10:00:00.000Z'),
+        createdAt: new Date('2026-07-07T10:00:00.000Z'),
         amountCents: 400,
       },
       {
         id: 'refund-a5',
         createdAt: new Date('2026-07-02T10:00:00.000Z'),
         amountCents: 500,
+        settledCents: 500,
       },
     ];
 
@@ -217,8 +219,7 @@ describeIfDb(
       'refund-a1',
       'refund-a3',
       'refund-a2',
-      'refund-a4',
-      'refund-a5',
+      'refund-a4', // oldest-first; `refund-a5` is fully settled and absent.
     ];
 
     it('returns only the caller tenant PENDING refunds in deterministic order', async () => {
@@ -238,6 +239,8 @@ describeIfDb(
         saleId,
         method: 'cash',
         amountCents: 100,
+        settledCents: 40,
+        outstandingCents: 60,
         reason: 'CUSTOMER_REQUEST',
         status: 'PENDING',
         createdAt: new Date('2026-07-05T10:00:00.000Z'),
@@ -266,9 +269,7 @@ describeIfDb(
       const foreignTenantId = await seedForeignTenant();
       await seedPendingRefunds(foreignTenantId, FOREIGN_REFUNDS);
 
-      await expect(repo.countPendingRefunds()).resolves.toBe(
-        OWN_REFUNDS.length,
-      );
+      await expect(repo.countPendingRefunds()).resolves.toBe(OWN_ORDER.length);
     });
 
     it('returns an empty page and a zero count when the tenant has no refunds', async () => {

@@ -49,6 +49,7 @@ function makeMockPrisma() {
       createMany: jest.fn(),
       findMany: jest.fn(),
       count: jest.fn(),
+      fields: { settledCents: 'settledCents' },
     },
     saleIdempotency: {
       create: jest.fn(),
@@ -105,6 +106,10 @@ interface WritePathMocks {
   salePromotionOptIn: { deleteMany: jest.Mock; createMany: jest.Mock };
   salePromotionApplied: { deleteMany: jest.Mock; upsert: jest.Mock };
 }
+
+const pendingRefundFields = (prisma: unknown) =>
+  (prisma as { saleRefund: { fields: { settledCents: string } } }).saleRefund
+    .fields;
 
 // Typed view over the any-cast prisma mock; keeps write-path tests free of
 // new no-unsafe-* diagnostics without touching the shared fixtures.
@@ -1030,24 +1035,21 @@ describe('PrismaSaleRepository', () => {
   });
 
   // ── pending refund obligations (pending-refund-obligations / prf-2) ──
-  // Tenant-scoped read contract for the later GET /sales/refunds/pending
-  // slice. The adapter MUST (a) keep `tenantId` + `status: 'PENDING'` as
-  // TOP-LEVEL predicates, (b) select only the minimal projection with no
-  // nested relation, and (c) paginate with the same 1-based
-  // `page`/`limit` offset math as `findManyConfirmed`.
+  // Tenant-scoped read contract for GET /sales/refunds/pending: top-level tenant, status and positive balance; oldest-first.
   describe('pending refund reads', () => {
     const pendingRow = (overrides: Record<string, unknown> = {}) => ({
       id: 'refund-1',
       saleId: 'sale-1',
       method: 'CASH',
       amountCents: 1500,
+      settledCents: 0,
       reason: 'CUSTOMER_REQUEST',
       status: 'PENDING',
       createdAt: new Date('2026-07-01T10:00:00.000Z'),
       ...overrides,
     });
 
-    it('queries PENDING refunds with a top-level tenant + status predicate and no nested relation', async () => {
+    it('queries positive-outstanding PENDING refunds with top-level tenant + status + balance predicates and no nested relation', async () => {
       prisma.saleRefund.findMany.mockResolvedValue([]);
 
       await repo.findManyPendingRefunds({ page: 1, limit: 20 });
@@ -1056,12 +1058,17 @@ describe('PrismaSaleRepository', () => {
       expect(tenantPrisma.getTenantId).toHaveBeenCalled();
       expect(prisma.saleRefund.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { tenantId: 'tenant-1', status: 'PENDING' },
+          where: {
+            tenantId: 'tenant-1',
+            status: 'PENDING',
+            amountCents: { gt: pendingRefundFields(prisma).settledCents },
+          },
           select: {
             id: true,
             saleId: true,
             method: true,
             amountCents: true,
+            settledCents: true,
             reason: true,
             status: true,
             createdAt: true,
@@ -1075,14 +1082,14 @@ describe('PrismaSaleRepository', () => {
       ).toBeUndefined();
     });
 
-    it('orders by createdAt desc then id desc so equal timestamps paginate deterministically', async () => {
+    it('orders by createdAt asc then id asc so the oldest obligation is served first deterministically', async () => {
       prisma.saleRefund.findMany.mockResolvedValue([]);
 
       await repo.findManyPendingRefunds({ page: 1, limit: 20 });
 
       expect(prisma.saleRefund.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         }),
       );
     });
@@ -1097,9 +1104,9 @@ describe('PrismaSaleRepository', () => {
       );
     });
 
-    it('maps rows to the minimal domain projection with a lowercase method', async () => {
+    it('maps rows to the minimal domain projection with derived balances', async () => {
       prisma.saleRefund.findMany.mockResolvedValue([
-        pendingRow({ method: 'CARD_DEBIT', amountCents: 4200 }),
+        pendingRow({ method: 'CARD_DEBIT', settledCents: 1200 }),
       ]);
 
       const result = await repo.findManyPendingRefunds({ page: 1, limit: 20 });
@@ -1109,7 +1116,9 @@ describe('PrismaSaleRepository', () => {
           id: 'refund-1',
           saleId: 'sale-1',
           method: 'card_debit',
-          amountCents: 4200,
+          amountCents: 1500,
+          settledCents: 1200,
+          outstandingCents: 300,
           reason: 'CUSTOMER_REQUEST',
           status: 'PENDING',
           createdAt: new Date('2026-07-01T10:00:00.000Z'),
@@ -1117,14 +1126,18 @@ describe('PrismaSaleRepository', () => {
       ]);
     });
 
-    it('counts PENDING refunds with the same tenant + status predicate as the page query', async () => {
+    it('counts positive-outstanding PENDING refunds with the same predicate as the page query', async () => {
       prisma.saleRefund.count.mockResolvedValue(7);
 
       const total = await repo.countPendingRefunds();
 
       expect(total).toBe(7);
       expect(prisma.saleRefund.count).toHaveBeenCalledWith({
-        where: { tenantId: 'tenant-1', status: 'PENDING' },
+        where: {
+          tenantId: 'tenant-1',
+          status: 'PENDING',
+          amountCents: { gt: pendingRefundFields(prisma).settledCents },
+        },
       });
     });
 

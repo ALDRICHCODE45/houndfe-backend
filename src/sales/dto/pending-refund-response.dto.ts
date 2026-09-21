@@ -13,13 +13,15 @@ import type { SaleRefundMethod } from '../domain/sale.repository';
  *
  * `status` is pinned to the literal `'PENDING'`: the repository filters
  * on that status, so every returned row carries it by construction and
- * the endpoint exposes no settlement semantics.
+ * `outstandingCents` exposes `amountCents - settledCents`.
  */
 export interface PendingRefundRowDto {
   id: string;
   saleId: string;
   method: SaleRefundMethod;
   amountCents: number;
+  settledCents: number;
+  outstandingCents: number;
   reason: SaleCancelReason;
   status: 'PENDING';
   createdAt: Date;

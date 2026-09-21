@@ -1829,8 +1829,9 @@ export class PrismaSaleRepository implements ISaleRepository {
    * `TENANT_SCOPED_MODELS`, so the tenant-scoped client injects `tenantId`
    * into the read, AND the explicit `tenantId` in the top-level `where`
    * pins the predicate even if the allowlist entry were ever removed.
-   * `status: 'PENDING'` is a top-level predicate; no nested relation is
-   * included in v1 (a nested relation would need its own tenant filter).
+   * `status: 'PENDING'` and the cross-column `amountCents > settledCents`
+   * predicate are top-level, so fully settled obligations leave the
+   * queue; no nested relation is included (it would need its own filter).
    */
   async findManyPendingRefunds(
     input: PendingRefundPageInput,
@@ -1839,17 +1840,22 @@ export class PrismaSaleRepository implements ISaleRepository {
     const tenantId = this.requireTenantId();
 
     const rows = await prisma.saleRefund.findMany({
-      where: { tenantId, status: 'PENDING' },
+      where: {
+        tenantId,
+        status: 'PENDING',
+        amountCents: { gt: prisma.saleRefund.fields.settledCents },
+      },
       select: {
         id: true,
         saleId: true,
         method: true,
         amountCents: true,
+        settledCents: true,
         reason: true,
         status: true,
         createdAt: true,
       },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       skip: (input.page - 1) * input.limit,
       take: input.limit,
     });
@@ -1859,6 +1865,8 @@ export class PrismaSaleRepository implements ISaleRepository {
       saleId: row.saleId,
       method: toDomainRefundMethod(row.method),
       amountCents: row.amountCents,
+      settledCents: row.settledCents,
+      outstandingCents: row.amountCents - row.settledCents,
       reason: row.reason,
       status: 'PENDING',
       createdAt: row.createdAt,
@@ -1866,8 +1874,9 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   /**
-   * pending-refund-obligations / prf-2 — total PENDING obligations for
-   * the current tenant. Shares the exact `{ tenantId, status: 'PENDING' }`
+   * pending-refund-obligations / prf-2 — total PENDING obligations with a
+   * positive outstanding balance for the current tenant. Shares the exact
+   * `{ tenantId, status: 'PENDING', amountCents > settledCents }`
    * predicate of `findManyPendingRefunds` so pagination totals cannot
    * drift from the listed rows.
    */
@@ -1876,7 +1885,11 @@ export class PrismaSaleRepository implements ISaleRepository {
     const tenantId = this.requireTenantId();
 
     return prisma.saleRefund.count({
-      where: { tenantId, status: 'PENDING' },
+      where: {
+        tenantId,
+        status: 'PENDING',
+        amountCents: { gt: prisma.saleRefund.fields.settledCents },
+      },
     });
   }
 
