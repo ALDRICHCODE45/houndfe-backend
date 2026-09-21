@@ -11,6 +11,7 @@ import {
   BusinessRuleViolationError,
   EntityNotFoundError,
 } from '../../shared/domain/domain-error';
+import type { SettleRefundInput } from '../domain/sale.repository';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -47,9 +48,14 @@ function makeMockPrisma() {
     },
     saleRefund: {
       createMany: jest.fn(),
+      update: jest.fn(),
       findMany: jest.fn(),
       count: jest.fn(),
       fields: { settledCents: 'settledCents' },
+    },
+    saleRefundSettlement: {
+      create: jest.fn(),
+      aggregate: jest.fn(),
     },
     saleIdempotency: {
       create: jest.fn(),
@@ -85,6 +91,10 @@ function makeTenantPrismaMock() {
     // through (mirrors the real service's already-in-tx branch); the
     // lock/sequencing tests below assert entry and invocation order.
     runInTransaction: jest.fn(async (work: () => Promise<unknown>) => work()),
+    // rfs-2 — settlement writes REQUIRE an ambient transaction. Default
+    // `true` (the caller is inside runInTransaction); the guard test
+    // flips it to `false` to prove the DB is never reached.
+    isInTransaction: jest.fn().mockReturnValue(true),
     client,
   };
 }
@@ -105,6 +115,14 @@ interface WritePathMocks {
   salePromotionVeto: { deleteMany: jest.Mock; createMany: jest.Mock };
   salePromotionOptIn: { deleteMany: jest.Mock; createMany: jest.Mock };
   salePromotionApplied: { deleteMany: jest.Mock; upsert: jest.Mock };
+  $queryRaw: jest.Mock;
+  saleRefund: { update: jest.Mock };
+  saleRefundSettlement: { create: jest.Mock; aggregate: jest.Mock };
+  saleIdempotency: {
+    create: jest.Mock;
+    findUnique: jest.Mock;
+    updateMany: jest.Mock;
+  };
 }
 
 const pendingRefundFields = (prisma: unknown) =>
@@ -1152,6 +1170,223 @@ describe('PrismaSaleRepository', () => {
       });
       expect(prisma.saleRefund.findMany).not.toHaveBeenCalled();
       expect(prisma.saleRefund.count).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('settleRefund — atomic settlement writes (rfs-2)', () => {
+    const settleInput = (
+      overrides: Partial<SettleRefundInput> = {},
+    ): SettleRefundInput => ({
+      refundId: 'refund-1',
+      settledByUserId: 'user-1',
+      amountCents: 400,
+      method: 'cash',
+      reference: 'AUTH-1',
+      settledAt: new Date('2026-07-02T09:30:00.000Z'),
+      ...overrides,
+    });
+
+    const lockedObligation = (overrides: Record<string, unknown> = {}) => ({
+      id: 'refund-1',
+      saleId: 'sale-1',
+      amountCents: 1000,
+      settledCents: 0,
+      ...overrides,
+    });
+
+    let mocks: WritePathMocks;
+
+    beforeEach(() => {
+      mocks = writePathMocks(prisma);
+      mocks.$queryRaw.mockResolvedValue([lockedObligation()]);
+      mocks.saleRefundSettlement.aggregate.mockResolvedValue({
+        _sum: { amountCents: null },
+      });
+    });
+
+    it('requires an ambient transaction and tenant context before the database', async () => {
+      tenantPrisma.isInTransaction.mockReturnValue(false);
+
+      await expect(repo.settleRefund(settleInput())).rejects.toThrow(
+        /settleRefund.*runInTransaction/,
+      );
+
+      tenantPrisma.isInTransaction.mockReturnValue(true);
+      tenantPrisma.getTenantId.mockReturnValue(undefined);
+
+      await expect(repo.settleRefund(settleInput())).rejects.toMatchObject({
+        code: 'TENANT_CONTEXT_REQUIRED',
+      });
+      expect(mocks.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('rejects the non-positive amount before the lock', async () => {
+      await expect(
+        repo.settleRefund(settleInput({ amountCents: 0 })),
+      ).rejects.toMatchObject({ code: 'INVALID_SETTLEMENT_AMOUNT' });
+      await expect(
+        repo.settleRefund(settleInput({ amountCents: -250 })),
+      ).rejects.toMatchObject({ code: 'INVALID_SETTLEMENT_AMOUNT' });
+      expect(mocks.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('locks exactly one tenant-qualified obligation and re-sums the ledger under it', async () => {
+      mocks.saleRefundSettlement.aggregate.mockResolvedValue({
+        _sum: { amountCents: 300 },
+      });
+      mocks.$queryRaw.mockResolvedValue([
+        lockedObligation({ settledCents: 300 }),
+      ]);
+
+      await repo.settleRefund(settleInput());
+
+      const [strings, ...values] = mocks.$queryRaw.mock.calls[0] as [
+        string[],
+        ...unknown[],
+      ];
+      const sql = strings.join('?');
+      expect(sql).toMatch(
+        /FROM "sale_refunds"[\s\S]*"tenantId"[\s\S]*FOR UPDATE/,
+      );
+      expect(values).toEqual(['refund-1', 'tenant-1']);
+      expect(mocks.saleRefundSettlement.aggregate).toHaveBeenCalledWith({
+        where: { saleRefundId: 'refund-1', tenantId: 'tenant-1' },
+        _sum: { amountCents: true },
+      });
+
+      mocks.$queryRaw.mockResolvedValue([]);
+      await expect(repo.settleRefund(settleInput())).rejects.toMatchObject({
+        code: 'REFUND_NOT_FOUND',
+      });
+      expect(mocks.saleRefundSettlement.create).toHaveBeenCalledTimes(1);
+      expect(mocks.saleRefund.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('appends the settlement and rewrites the counter with explicit tenant predicates', async () => {
+      mocks.saleRefundSettlement.aggregate.mockResolvedValue({
+        _sum: { amountCents: 300 },
+      });
+
+      const result = await repo.settleRefund(
+        settleInput({ method: 'credit', reference: 'CREDIT-REF' }),
+      );
+
+      expect(result.settlementId).toEqual(expect.any(String));
+      expect(result).toMatchObject({
+        saleId: 'sale-1',
+        settledCents: 700,
+        outstandingCents: 300,
+      });
+      expect(mocks.saleRefundSettlement.create).toHaveBeenCalledWith({
+        data: {
+          id: result.settlementId,
+          tenantId: 'tenant-1',
+          saleRefundId: 'refund-1',
+          settledByUserId: 'user-1',
+          amountCents: 400,
+          method: 'CREDIT',
+          reference: 'CREDIT-REF',
+          settledAt: new Date('2026-07-02T09:30:00.000Z'),
+        },
+      });
+      expect(mocks.saleRefund.update).toHaveBeenCalledWith({
+        where: { id: 'refund-1', tenantId: 'tenant-1' },
+        data: { settledCents: 700 },
+      });
+    });
+
+    it('allows exact completion and self-heals a stale counter from the ledger', async () => {
+      const exact = await repo.settleRefund(settleInput({ amountCents: 1000 }));
+      expect(exact).toMatchObject({ settledCents: 1000, outstandingCents: 0 });
+
+      // Cached counter reads 0 while the append-only ledger holds 300.
+      mocks.$queryRaw.mockResolvedValue([
+        lockedObligation({ settledCents: 0 }),
+      ]);
+      mocks.saleRefundSettlement.aggregate.mockResolvedValue({
+        _sum: { amountCents: 300 },
+      });
+
+      const healed = await repo.settleRefund(settleInput({ amountCents: 700 }));
+      expect(healed).toMatchObject({ settledCents: 1000, outstandingCents: 0 });
+      expect(mocks.saleRefund.update).toHaveBeenLastCalledWith({
+        where: { id: 'refund-1', tenantId: 'tenant-1' },
+        data: { settledCents: 1000 },
+      });
+    });
+
+    it.each<[string, number, number]>([
+      ['REFUND_ALREADY_SETTLED', 1000, 100],
+      ['SETTLEMENT_EXCEEDS_REFUND', 900, 200],
+    ])(
+      'rejects %s from the ledger balance without appending or updating',
+      async (code, ledgerCents, amountCents) => {
+        mocks.saleRefundSettlement.aggregate.mockResolvedValue({
+          _sum: { amountCents: ledgerCents },
+        });
+
+        await expect(
+          repo.settleRefund(settleInput({ amountCents })),
+        ).rejects.toMatchObject({ code });
+        expect(mocks.saleRefundSettlement.create).not.toHaveBeenCalled();
+        expect(mocks.saleRefund.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it('acquires settlement idempotency and stamps the parent sale id on success', async () => {
+      mocks.saleIdempotency.create.mockResolvedValue({ id: 'idem-1' });
+
+      const outcome = await repo.acquireSettlementIdempotency(
+        'refund-1',
+        'key-1',
+        'hash-1',
+      );
+
+      expect(outcome).toEqual({ kind: 'acquired', token: 'idem-1' });
+      expect(mocks.saleIdempotency.create).toHaveBeenCalledWith({
+        data: {
+          tenantId: 'tenant-1',
+          operation: 'sale_refund_settlement',
+          key: 'refund:settle:refund-1:key-1',
+          requestHash: 'hash-1',
+          status: 'IN_FLIGHT',
+          saleId: null,
+        },
+      });
+
+      await repo.markSettlementIdempotencySucceeded('idem-1', 'sale-1', {
+        settlementId: 'st-1',
+      });
+      expect(mocks.saleIdempotency.updateMany).toHaveBeenCalledWith({
+        where: { id: 'idem-1', tenantId: 'tenant-1' },
+        data: {
+          status: 'SUCCEEDED',
+          responseJson: { settlementId: 'st-1' },
+          saleId: 'sale-1',
+        },
+      });
+    });
+
+    it('inherits replay, conflict and in-flight through the settlement path', async () => {
+      mocks.saleIdempotency.create.mockRejectedValue({ code: 'P2002' });
+      const states: Array<[Record<string, unknown>, unknown]> = [
+        [
+          { requestHash: 'hash-1', status: 'SUCCEEDED', responseJson: {} },
+          { kind: 'replay', payload: {} },
+        ],
+        [
+          { requestHash: 'other', status: 'SUCCEEDED', responseJson: {} },
+          { kind: 'conflict' },
+        ],
+        [{ requestHash: 'hash-1', status: 'IN_FLIGHT' }, { kind: 'in_flight' }],
+      ];
+
+      for (const [existing, expected] of states) {
+        mocks.saleIdempotency.findUnique.mockResolvedValue(existing);
+        await expect(
+          repo.acquireSettlementIdempotency('refund-1', 'key-1', 'hash-1'),
+        ).resolves.toEqual(expected);
+      }
     });
   });
 

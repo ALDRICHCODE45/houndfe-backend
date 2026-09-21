@@ -14,7 +14,9 @@ import type {
   PersistedChargePayment,
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
+  RefundSettlementResult,
   SaleRefundMethod,
+  SettleRefundInput,
 } from '../domain/sale.repository';
 import {
   Sale,
@@ -157,6 +159,10 @@ export class PrismaSaleRepository implements ISaleRepository {
       );
     }
     return tenantId;
+  }
+
+  private failSettlement(code: string): never {
+    throw new BusinessRuleViolationError(code, code);
   }
 
   private toWriteRow(
@@ -1893,6 +1899,83 @@ export class PrismaSaleRepository implements ISaleRepository {
     });
   }
 
+  /** rfs-2 — atomic append. Ordering: ambient-tx guard → tenant + amount
+   * guards → tenant-qualified `FOR UPDATE` lock → ledger re-sum under that
+   * lock (authoritative over the cached counter) → append → counter rewrite.*/
+  async settleRefund(
+    input: SettleRefundInput,
+  ): Promise<RefundSettlementResult> {
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error('settleRefund requires runInTransaction()');
+    }
+
+    const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
+
+    if (input.amountCents <= 0)
+      this.failSettlement('INVALID_SETTLEMENT_AMOUNT');
+
+    const lockedRows = await prisma.$queryRaw<
+      {
+        id: string;
+        saleId: string;
+        amountCents: number;
+        settledCents: number;
+      }[]
+    >`
+      SELECT "id", "saleId", "amountCents", "settledCents"
+      FROM "sale_refunds"
+      WHERE "id" = ${input.refundId} AND "tenantId" = ${tenantId}
+      FOR UPDATE
+    `;
+    const obligation = lockedRows[0];
+
+    if (!obligation) this.failSettlement('REFUND_NOT_FOUND');
+
+    const ledger = await prisma.saleRefundSettlement.aggregate({
+      where: { saleRefundId: input.refundId, tenantId },
+      _sum: { amountCents: true },
+    });
+    const settledCents = ledger._sum.amountCents ?? 0;
+    const outstandingCents = obligation.amountCents - settledCents;
+
+    if (outstandingCents <= 0) this.failSettlement('REFUND_ALREADY_SETTLED');
+    if (input.amountCents > outstandingCents)
+      this.failSettlement('SETTLEMENT_EXCEEDS_REFUND');
+
+    const settlementId = randomUUID();
+    await prisma.saleRefundSettlement.create({
+      data: {
+        id: settlementId,
+        tenantId,
+        saleRefundId: input.refundId,
+        settledByUserId: input.settledByUserId,
+        amountCents: input.amountCents,
+        method: input.method.toUpperCase() as
+          | 'CASH'
+          | 'CARD_CREDIT'
+          | 'CARD_DEBIT'
+          | 'TRANSFER'
+          | 'CREDIT',
+        reference: input.reference,
+        settledAt: input.settledAt,
+      },
+    });
+
+    const cumulativeSettledCents = settledCents + input.amountCents;
+    await prisma.saleRefund.update({
+      where: { id: input.refundId, tenantId },
+      data: { settledCents: cumulativeSettledCents },
+    });
+
+    return {
+      settlementId,
+      saleId: obligation.saleId,
+      settledCents: cumulativeSettledCents,
+      outstandingCents: obligation.amountCents - cumulativeSettledCents,
+    };
+  }
+
   async findOneWithRelations(id: string) {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
@@ -2253,12 +2336,36 @@ export class PrismaSaleRepository implements ISaleRepository {
     return this.markIdempotencySucceeded(token, saleId, payload);
   }
 
+  /** rfs-2 — idempotency acquire; `saleId` stays null until success. */
+  async acquireSettlementIdempotency(
+    refundId: string,
+    key: string,
+    requestHash: string,
+  ) {
+    return this.acquireIdempotency(
+      'sale_refund_settlement',
+      null,
+      `refund:settle:${refundId}:${key}`,
+      requestHash,
+    );
+  }
+
+  /** rfs-2 — stamp the slot SUCCEEDED with the PARENT SALE id. */
+  async markSettlementIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void> {
+    return this.markIdempotencySucceeded(token, saleId, payload);
+  }
+
   private async acquireIdempotency(
     operation:
       | 'sale_charge'
       | 'sale_payment'
       | 'sale_cancel'
-      | 'bot_sale_register',
+      | 'bot_sale_register'
+      | 'sale_refund_settlement',
     saleId: string | null,
     key: string,
     requestHash: string,

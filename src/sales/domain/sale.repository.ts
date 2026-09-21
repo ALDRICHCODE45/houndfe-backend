@@ -81,6 +81,26 @@ export type PendingRefundPageInput = {
   limit: number;
 };
 
+/** rfs-2 — write input for one real money return; `settledAt` is the required
+ * client cash-event date and method/reference belong to this installment. */
+export type SettleRefundInput = {
+  refundId: string;
+  settledByUserId: string | null;
+  amountCents: number;
+  method: SaleRefundMethod;
+  reference: string | null;
+  settledAt: Date;
+};
+
+/** rfs-2 — one atomic append result: cumulative ledger total plus the
+ * outstanding balance derived from the immutable obligation amount. */
+export type RefundSettlementResult = {
+  settlementId: string;
+  saleId: string;
+  settledCents: number;
+  outstandingCents: number;
+};
+
 export type DraftCustomerSummary = {
   id: string;
   firstName: string;
@@ -227,6 +247,26 @@ export interface ISaleRepository {
   >;
 
   markSaleRegistrationIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void>;
+
+  /** rfs-2 — settlement idempotency; same union as the other acquires, keyed
+   * by repository-composed `refund:settle:<refundId>:<key>` with null sale. */
+  acquireSettlementIdempotency(
+    refundId: string,
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  >;
+
+  /** rfs-2 — stamp the settlement slot SUCCEEDED with the PARENT sale id. */
+  markSettlementIdempotencySucceeded(
     token: string,
     saleId: string,
     payload: unknown,
@@ -443,6 +483,14 @@ export interface ISaleRepository {
    * `findManyPendingRefunds` so `total` matches the page source.
    */
   countPendingRefunds(): Promise<number>;
+
+  /** rfs-2 — atomic append. MUST run inside an ambient `runInTransaction`:
+   * locks the obligation (`FOR UPDATE`), re-sums the append-only ledger under
+   * that lock (authoritative over the cached counter) and rewrites the parent
+   * `settledCents` to `ledgerSum + amountCents`. Missing/foreign →
+   * `REFUND_NOT_FOUND`; non-positive → `INVALID_SETTLEMENT_AMOUNT`; covered or
+   * overpaid → `REFUND_ALREADY_SETTLED` / `SETTLEMENT_EXCEEDS_REFUND`. */
+  settleRefund(input: SettleRefundInput): Promise<RefundSettlementResult>;
 
   findOneWithRelations(id: string): Promise<{
     id: string;
