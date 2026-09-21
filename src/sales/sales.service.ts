@@ -56,6 +56,11 @@ import type {
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
 import type { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
 import type { PendingRefundListResponseDto } from './dto/pending-refund-response.dto';
+import type { SettleRefundDto } from './dto/settle-refund.dto';
+import {
+  isRefundSettlementResponseDto,
+  type RefundSettlementResponseDto,
+} from './dto/refund-settlement-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import type { AssignCustomerDto } from './dto/assign-customer.dto';
 import type { AssignSellerDto } from './dto/assign-seller.dto';
@@ -1468,6 +1473,102 @@ export class SalesService {
       data,
       pagination: { page, limit, total, totalPages },
     };
+  }
+
+  /**
+   * rfs-3 — settle one partial refund obligation.
+   *
+   * `settledAt` is normalized once (a `Date` for the write, the canonical
+   * `toISOString()` for the hash and the response) so an equivalent instant
+   * sent with a non-UTC offset replays the same slot. Acquire MUST stay
+   * OUTSIDE the interactive transaction: the P2002 that signals a retry
+   * aborts the ambient transaction, and its follow-up replay read would fail
+   * on an aborted client (rfs-2 invariant).
+   */
+  async settleRefund(
+    refundId: string,
+    actorId: string,
+    dto: SettleRefundDto,
+    idempotencyKey: string,
+  ): Promise<RefundSettlementResponseDto> {
+    const settledAt = new Date(dto.settledAt);
+    const settledAtIso = settledAt.toISOString();
+    const reference = dto.reference ?? null;
+
+    // Actor participates in the hash: the same key sent by a different
+    // user is a different request (conflict), never a silent replay.
+    const requestHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          refundId,
+          actorId,
+          amountCents: dto.amountCents,
+          method: dto.method,
+          reference,
+          settledAt: settledAtIso,
+        }),
+      )
+      .digest('hex');
+
+    const idempotency = await this.saleRepo.acquireSettlementIdempotency(
+      refundId,
+      idempotencyKey,
+      requestHash,
+    );
+
+    if (idempotency.kind === 'replay') {
+      // Stored payload is untyped JSON: re-validate it instead of casting.
+      if (!isRefundSettlementResponseDto(idempotency.payload)) {
+        throw new Error('INVALID_SETTLEMENT_IDEMPOTENCY_PAYLOAD');
+      }
+
+      return idempotency.payload;
+    }
+
+    if (idempotency.kind === 'conflict') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'IDEMPOTENCY_KEY_CONFLICT',
+      );
+    }
+
+    if (idempotency.kind === 'in_flight') {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+        'IDEMPOTENCY_KEY_IN_FLIGHT',
+      );
+    }
+
+    return this.saleRepo.runInTransaction(async () => {
+      const settlement = await this.saleRepo.settleRefund({
+        refundId,
+        settledByUserId: actorId,
+        amountCents: dto.amountCents,
+        method: dto.method,
+        reference,
+        settledAt,
+      });
+
+      const payload: RefundSettlementResponseDto = {
+        settlementId: settlement.settlementId,
+        refundId,
+        saleId: settlement.saleId,
+        amountCents: dto.amountCents,
+        method: dto.method,
+        reference,
+        settledAt: settledAtIso,
+        settledCents: settlement.settledCents,
+        outstandingCents: settlement.outstandingCents,
+      };
+
+      await this.saleRepo.markSettlementIdempotencySucceeded(
+        idempotency.token,
+        settlement.saleId,
+        payload,
+      );
+
+      return payload;
+    });
   }
 
   private toSalesListExtendedFilter(

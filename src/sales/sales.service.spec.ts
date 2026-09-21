@@ -10,6 +10,11 @@ import type {
   PendingSaleRefundRecord,
 } from './domain/sale.repository';
 import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
+import type { SettleRefundDto } from './dto/settle-refund.dto';
+import {
+  isRefundSettlementResponseDto,
+  type RefundSettlementResponseDto,
+} from './dto/refund-settlement-response.dto';
 import { Sale } from './domain/sale.entity';
 import {
   EntityNotFoundError,
@@ -48,6 +53,10 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     markPaymentIdempotencySucceeded: jest.fn(),
     acquireCancellationIdempotency: jest.fn(),
     markCancellationIdempotencySucceeded: jest.fn(),
+    // rfs-3 — settlement idempotency slot plus the atomic append it guards.
+    acquireSettlementIdempotency: jest.fn(),
+    markSettlementIdempotencySucceeded: jest.fn(),
+    settleRefund: jest.fn(),
     runInTransaction: jest.fn(async (cb: any) => cb()),
     allocateNextFolio: jest.fn(),
     persistChargeConfirmation: jest.fn(),
@@ -10987,5 +10996,283 @@ describe('SalesService — listPendingRefunds', () => {
     await expect(
       service.listPendingRefunds({ page: 1, limit: 20 }),
     ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
+  });
+});
+
+// ── rfs-3 partial refund settlement orchestration ──────────────────────
+
+describe('SalesService — settleRefund', () => {
+  // UUID-shaped fixtures: replayed payloads are re-validated at runtime.
+  const REFUND_ID = '11111111-1111-4111-8111-111111111111';
+  const SALE_ID = '22222222-2222-4222-8222-222222222222';
+  const ACTOR_ID = '33333333-3333-4333-8333-333333333333';
+  const OTHER_ACTOR_ID = '55555555-5555-4555-8555-555555555555';
+  const SETTLEMENT_ID = '44444444-4444-4444-8444-444444444444';
+  const SETTLED_AT = '2026-07-01T10:30:00.000Z';
+  const REFERENCE = 'REC-1';
+  /** Internal error code for an unusable stored idempotency payload. */
+  const INVALID_PAYLOAD_ERROR = 'INVALID_SETTLEMENT_IDEMPOTENCY_PAYLOAD';
+
+  /** sha256 over { refundId, actorId, amountCents, method, reference, settledAt }. */
+  const HAPPY_PATH_HASH =
+    '31970570aeb3567d800ccabf45343d3900d568569ed88567d1b2930936564d48';
+  const NULL_REFERENCE_HASH =
+    '8dfb323954cc0efbdb2c4abdaa0f7335943a645eaa23416233940ec3399708ae';
+  const OTHER_ACTOR_HASH =
+    '5455974d52bbd3869628a30ba9fded9471538600681b0466420fe5e1368298cd';
+
+  let saleRepo: ReturnType<typeof makeMockSaleRepo>;
+  let service: SalesService;
+  let transactionDepth = 0;
+  // Writes made while the tx callback was active, in call order.
+  let txWriteLog: string[] = [];
+
+  const makeDto = (
+    overrides: Partial<SettleRefundDto> = {},
+  ): SettleRefundDto => ({
+    amountCents: 2500,
+    method: 'cash',
+    reference: REFERENCE,
+    settledAt: SETTLED_AT,
+    ...overrides,
+  });
+
+  const expectedResponse = (
+    overrides: Partial<RefundSettlementResponseDto> = {},
+  ): RefundSettlementResponseDto => ({
+    settlementId: SETTLEMENT_ID,
+    refundId: REFUND_ID,
+    saleId: SALE_ID,
+    amountCents: 2500,
+    method: 'cash',
+    reference: REFERENCE,
+    settledAt: SETTLED_AT,
+    settledCents: 2500,
+    outstandingCents: 500,
+    ...overrides,
+  });
+
+  /** Records a write and whether it ran inside the tx callback. */
+  const noteWrite = (name: string): void => {
+    txWriteLog.push(`${name}:${transactionDepth > 0 ? 'in-tx' : 'outside-tx'}`);
+  };
+
+  /** Every hash the service sent to the acquire port, in call order. */
+  const sentHashes = (): Array<string | undefined> =>
+    saleRepo.acquireSettlementIdempotency.mock.calls.map((call) => call[2]);
+
+  /** No settlement ran and no success stamp was written. */
+  const expectNoSettlementWrites = (): void => {
+    expect(saleRepo.runInTransaction).not.toHaveBeenCalled();
+    expect(saleRepo.settleRefund).not.toHaveBeenCalled();
+    expect(saleRepo.markSettlementIdempotencySucceeded).not.toHaveBeenCalled();
+  };
+
+  beforeEach(() => {
+    transactionDepth = 0;
+    txWriteLog = [];
+    saleRepo = makeMockSaleRepo();
+    service = createService(
+      saleRepo,
+      makeMockProductsService(),
+      makeMockEventEmitter(),
+      makeMockOutboxWriter(),
+      {
+        getTenantId: jest.fn(() => 'tenant-1'),
+        getClient: jest.fn(() => ({}) as never),
+      },
+      makeMockSaleCommentRepo(),
+    );
+
+    saleRepo.runInTransaction.mockImplementation(
+      async (work: () => Promise<unknown>) => {
+        transactionDepth += 1;
+        try {
+          return await work();
+        } finally {
+          transactionDepth -= 1;
+        }
+      },
+    );
+    saleRepo.acquireSettlementIdempotency.mockResolvedValue({
+      kind: 'acquired',
+      token: 'token-1',
+    });
+    saleRepo.settleRefund.mockImplementation(async () => {
+      noteWrite('settle');
+      return {
+        settlementId: SETTLEMENT_ID,
+        saleId: SALE_ID,
+        settledCents: 2500,
+        outstandingCents: 500,
+      };
+    });
+    saleRepo.markSettlementIdempotencySucceeded.mockImplementation(async () => {
+      noteWrite('mark');
+    });
+  });
+
+  it('acquires outside the transaction, settles inside it, and marks success with the canonical payload', async () => {
+    const result = await service.settleRefund(
+      REFUND_ID,
+      ACTOR_ID,
+      makeDto(),
+      'key-1',
+    );
+
+    const acquire = saleRepo.acquireSettlementIdempotency;
+    const txOrder = saleRepo.runInTransaction.mock.invocationCallOrder[0];
+
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(acquire).toHaveBeenCalledWith(REFUND_ID, 'key-1', HAPPY_PATH_HASH);
+    expect(acquire.mock.invocationCallOrder[0]).toBeLessThan(txOrder);
+    expect(saleRepo.settleRefund).toHaveBeenCalledTimes(1);
+    expect(saleRepo.settleRefund).toHaveBeenCalledWith({
+      refundId: REFUND_ID,
+      settledByUserId: ACTOR_ID,
+      amountCents: 2500,
+      method: 'cash',
+      reference: REFERENCE,
+      settledAt: new Date(SETTLED_AT),
+    });
+    expect(txWriteLog).toEqual(['settle:in-tx', 'mark:in-tx']);
+
+    expect(saleRepo.markSettlementIdempotencySucceeded).toHaveBeenCalledWith(
+      'token-1',
+      SALE_ID,
+      expectedResponse(),
+    );
+
+    expect(result).toEqual(expectedResponse());
+    expect(isRefundSettlementResponseDto(result)).toBe(true);
+    expect(transactionDepth).toBe(0);
+  });
+
+  it('normalizes an omitted reference to null without altering the hash input', async () => {
+    const dtoWithoutReference: SettleRefundDto = {
+      amountCents: 2500,
+      method: 'cash',
+      settledAt: SETTLED_AT,
+    };
+
+    await service.settleRefund(
+      REFUND_ID,
+      ACTOR_ID,
+      dtoWithoutReference,
+      'key-null-ref',
+    );
+
+    expect(sentHashes()).toEqual([NULL_REFERENCE_HASH]);
+    expect(saleRepo.settleRefund).toHaveBeenCalledWith(
+      expect.objectContaining({ reference: null }),
+    );
+    expect(saleRepo.markSettlementIdempotencySucceeded).toHaveBeenCalledWith(
+      'token-1',
+      SALE_ID,
+      expectedResponse({ reference: null }),
+    );
+  });
+
+  it('hashes equivalent ISO instants identically and stores the canonical timestamp', async () => {
+    await service.settleRefund(REFUND_ID, ACTOR_ID, makeDto(), 'key-utc');
+    await service.settleRefund(
+      REFUND_ID,
+      ACTOR_ID,
+      makeDto({ settledAt: '2026-07-01T04:30:00.000-06:00' }),
+      'key-offset',
+    );
+
+    expect(sentHashes()).toEqual([HAPPY_PATH_HASH, HAPPY_PATH_HASH]);
+    expect(saleRepo.settleRefund).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ settledAt: new Date(SETTLED_AT) }),
+    );
+  });
+
+  it('changes the request hash when the actor changes', async () => {
+    await service.settleRefund(REFUND_ID, ACTOR_ID, makeDto(), 'key-actor');
+    await service.settleRefund(
+      REFUND_ID,
+      OTHER_ACTOR_ID,
+      makeDto(),
+      'key-actor',
+    );
+
+    expect(sentHashes()).toEqual([HAPPY_PATH_HASH, OTHER_ACTOR_HASH]);
+    expect(saleRepo.settleRefund).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ settledByUserId: OTHER_ACTOR_ID }),
+    );
+  });
+
+  it('replays a valid stored payload without settling or marking', async () => {
+    const stored = expectedResponse({ outstandingCents: 0 });
+    saleRepo.acquireSettlementIdempotency.mockResolvedValue({
+      kind: 'replay',
+      payload: stored,
+    });
+
+    const result = await service.settleRefund(
+      REFUND_ID,
+      ACTOR_ID,
+      makeDto(),
+      'key-replay',
+    );
+
+    expect(result).toEqual(stored);
+    expectNoSettlementWrites();
+  });
+
+  it('rejects a malformed stored payload with the internal error and settles nothing', async () => {
+    saleRepo.acquireSettlementIdempotency.mockResolvedValue({
+      kind: 'replay',
+      payload: { ...expectedResponse(), settlementId: 'not-a-uuid' },
+    });
+
+    const attempt = service.settleRefund(
+      REFUND_ID,
+      ACTOR_ID,
+      makeDto(),
+      'key-malformed',
+    );
+    const error: unknown = await attempt.catch((reason: unknown) => reason);
+
+    await expect(attempt).rejects.toThrow(INVALID_PAYLOAD_ERROR);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(BusinessRuleViolationError);
+    expectNoSettlementWrites();
+  });
+
+  it.each([
+    ['conflict', 'IDEMPOTENCY_KEY_CONFLICT'],
+    ['in_flight', 'IDEMPOTENCY_KEY_IN_FLIGHT'],
+  ] as const)(
+    'maps %s to BusinessRuleViolationError %s without entering the transaction',
+    async (kind, code) => {
+      saleRepo.acquireSettlementIdempotency.mockResolvedValue({ kind });
+
+      await expect(
+        service.settleRefund(REFUND_ID, ACTOR_ID, makeDto(), 'key-blocked'),
+      ).rejects.toMatchObject({ code });
+
+      expectNoSettlementWrites();
+    },
+  );
+
+  it('propagates settlement failures unchanged and skips success marking', async () => {
+    saleRepo.settleRefund.mockRejectedValue(
+      new BusinessRuleViolationError(
+        'SETTLEMENT_EXCEEDS_REFUND',
+        'SETTLEMENT_EXCEEDS_REFUND',
+      ),
+    );
+
+    await expect(
+      service.settleRefund(REFUND_ID, ACTOR_ID, makeDto(), 'key-fail'),
+    ).rejects.toMatchObject({ code: 'SETTLEMENT_EXCEEDS_REFUND' });
+
+    expect(saleRepo.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(saleRepo.markSettlementIdempotencySucceeded).not.toHaveBeenCalled();
+    expect(transactionDepth).toBe(0);
   });
 });
