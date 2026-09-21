@@ -52,6 +52,7 @@ export type AppSubjects =
   | 'PaymentMethod'
   | 'DeliveryRoute'
   | 'TenantCatalogSettings'
+  | 'Analytics'
   | 'all';
 
 /**
@@ -600,5 +601,18 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'TenantCatalogSettings',
     action: 'update',
     description: 'Publish or update tenant online catalog settings',
+  },
+
+  // Analytics permissions (branch-analytics-summary / bas-1).
+  // Read-only reporting surface: exactly `read:Analytics`. `create`,
+  // `update`, `delete`, `batch_delete`, and `manage` are intentionally
+  // out — a summary is derived, never mutated through this subject — and
+  // no tenant role receives the row automatically (access requires an
+  // explicit role-permission grant or global `manage:all`).
+  // PermissionSeeder auto-upserts on boot.
+  {
+    subject: 'Analytics',
+    action: 'read',
+    description: 'View tenant sales analytics summaries',
   },
 ];
