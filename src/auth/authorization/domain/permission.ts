@@ -228,14 +228,22 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     description: 'Full sale comment management',
   },
 
-  // SaleRefund permissions (pending-refund-obligations / prf-1).
+  // SaleRefund permissions (pending-refund-obligations / prf-1,
+  // partial-refund-settlements / rfs-1).
   // Refund rows are created by the sale-cancellation flow, so this subject
-  // intentionally exposes `read` only: cancellation keeps ownership of
-  // refund creation and no tenant role receives this grant automatically.
+  // intentionally never exposes `create`, `delete`, `batch_delete`, or
+  // `manage`: cancellation keeps ownership of refund creation. `update` is
+  // the least-privilege action that authorizes recording a settlement, and
+  // no tenant role receives either grant automatically.
   {
     subject: 'SaleRefund',
     action: 'read',
     description: 'View pending sale refund obligations',
+  },
+  {
+    subject: 'SaleRefund',
+    action: 'update',
+    description: 'Record sale refund settlements',
   },
 
   // Brand permissions

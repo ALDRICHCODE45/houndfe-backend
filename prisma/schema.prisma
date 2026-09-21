@@ -396,6 +396,7 @@ model Tenant {
   saleItems                 SaleItem[]
   salePayments              SalePayment[]
   saleRefunds               SaleRefund[]
+  saleRefundSettlements     SaleRefundSettlement[]
   saleComments              SaleComment[]
   saleIdempotencies         SaleIdempotency[]
   saleFolioCounters         SaleFolioCounter[]
@@ -1000,15 +1001,47 @@ model SaleRefund {
   amountCents   Int
   reason        SaleCancelReason
   status        SaleRefundStatus  @default(PENDING)
+  settledCents  Int               @default(0)
   createdAt     DateTime          @default(now())
 
-  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sale        Sale         @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  salePayment SalePayment? @relation(fields: [salePaymentId], references: [id], onDelete: SetNull)
+  tenant      Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale        Sale                   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  salePayment SalePayment?           @relation(fields: [salePaymentId], references: [id], onDelete: SetNull)
+  settlements SaleRefundSettlement[]
 
+  @@unique([tenantId, id])
   @@index([tenantId, saleId])
   @@index([tenantId, createdAt])
   @@map("sale_refunds")
+}
+
+// Partial refund settlements (partial-refund-settlements / rfs-1).
+// Append-only ledger: one SaleRefund obligation may be returned in several
+// dated installments, each with its own method, optional reference, and
+// actor. Rows are immutable after insert, so there is no `updatedAt` and no
+// delete path beyond the tenant/refund cascade. The obligation amount stays
+// immutable; completion is derived at read time from
+// `SaleRefund.amountCents - SaleRefund.settledCents`, which is why no
+// speculative PARTIALLY_SETTLED / SETTLED status values exist. The actor FK
+// is nullable with `SetNull` so removing a user keeps the cash audit trail.
+model SaleRefundSettlement {
+  id              String            @id @default(cuid())
+  tenantId        String
+  saleRefundId    String
+  settledByUserId String?
+  amountCents     Int
+  method          SalePaymentMethod
+  reference       String?
+  settledAt       DateTime
+  createdAt       DateTime          @default(now())
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  saleRefund SaleRefund @relation(fields: [tenantId, saleRefundId], references: [tenantId, id], onDelete: Cascade)
+  settledBy  User?      @relation("SaleRefundSettlementActor", fields: [settledByUserId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([tenantId, saleRefundId])
+  @@index([tenantId, settledAt])
+  @@map("sale_refund_settlements")
 }
 
 model SaleComment {
@@ -1206,6 +1239,7 @@ model User {
   quotationsAsSeller     Quotation[]             @relation("QuotationSeller")
   salePayments           SalePayment[]
   saleComments           SaleComment[]           @relation("SaleCommentAuthor")
+  saleRefundSettlements  SaleRefundSettlement[]  @relation("SaleRefundSettlementActor")
   reviewedReceipts       ReceiptEvidence[]       @relation("ReceiptReviewer")
   notificationRecipients NotificationRecipient[]
   // delivery-routes / WU1 — named relation back-reference for the driver's

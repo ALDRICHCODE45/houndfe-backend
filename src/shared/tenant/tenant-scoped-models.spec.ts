@@ -75,3 +75,21 @@ describe('TENANT_SCOPED_MODELS — pending-refund-obligations registration (prf-
     expect(occurrences).toEqual([...REQUIRED]);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — partial-refund-settlements registration (rfs-1)', () => {
+  const REQUIRED = ['SaleRefundSettlement'] as const;
+
+  it.each(REQUIRED)(
+    'registers %s so tenant-scoped settlement reads inject where.tenantId',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+
+  it('contains SaleRefundSettlement exactly once', () => {
+    const occurrences = [...TENANT_SCOPED_MODELS].filter(
+      (model) => model === 'SaleRefundSettlement',
+    );
+    expect(occurrences).toEqual([...REQUIRED]);
+  });
+});

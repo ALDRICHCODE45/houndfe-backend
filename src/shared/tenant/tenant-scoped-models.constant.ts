@@ -17,6 +17,11 @@ export const TENANT_SCOPED_MODELS = new Set([
   // cross-tenant row leaks; the pending-refund query relies on this entry
   // to auto-inject `tenantId`.
   'SaleRefund',
+  // Partial refund settlements (partial-refund-settlements / rfs-1). Same
+  // fail-open allowlist semantics as `SaleRefund`: without this entry the
+  // settlement ledger would not auto-inject `tenantId` and cross-tenant
+  // settlement rows could leak.
+  'SaleRefundSettlement',
   // Quotations (WU1) — five tables, one bounded context. Without these
   // entries, `findAll` / `findById` / `delete` would not auto-inject
   // tenantId into the WHERE clause and a cross-tenant row could leak.
