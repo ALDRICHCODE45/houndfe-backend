@@ -54,6 +54,8 @@ import type {
   SalesListExtendedFilter,
 } from './dto/sales-list-filter.types';
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
+import type { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
+import type { PendingRefundListResponseDto } from './dto/pending-refund-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import type { AssignCustomerDto } from './dto/assign-customer.dto';
 import type { AssignSellerDto } from './dto/assign-seller.dto';
@@ -1430,6 +1432,41 @@ export class SalesService {
         totalSoldCents: summary.totalSoldCents,
         outstandingDebtCents: summary.outstandingDebtCents,
       },
+    };
+  }
+
+  /**
+   * pending-refund-obligations / prf-3 — tenant-scoped page of PENDING
+   * refund obligations for the current tenant.
+   *
+   * Both repository calls share the adapter's `{ tenantId, status:
+   * 'PENDING' }` predicate, so `pagination.total` cannot drift from the
+   * listed rows. An empty result is a successful empty page (`data: []`,
+   * `total: 0`, `totalPages: 0`) — never a 404, because "this tenant has
+   * no pending refund obligations" is a normal collection state, not a
+   * missing resource. The tenant id itself is resolved by the adapter
+   * from the request-scoped tenant context; the service never reads or
+   * forwards a caller-supplied tenant.
+   */
+  async listPendingRefunds(
+    query: ListPendingRefundsQueryDto,
+  ): Promise<PendingRefundListResponseDto> {
+    // Defensive defaults mirror `listSales`: a DTO that reaches the
+    // service without validation (direct unit call, future internal
+    // caller) must still produce bounded pagination.
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    const [data, total] = await Promise.all([
+      this.saleRepo.findManyPendingRefunds({ page, limit }),
+      this.saleRepo.countPendingRefunds(),
+    ]);
+
+    const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+
+    return {
+      data,
+      pagination: { page, limit, total, totalPages },
     };
   }
 

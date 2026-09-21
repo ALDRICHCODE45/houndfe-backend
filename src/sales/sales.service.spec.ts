@@ -5,7 +5,11 @@
  * clearItems, deleteDraft, getUserDrafts.
  */
 import { SalesService } from './sales.service';
-import type { ISaleRepository } from './domain/sale.repository';
+import type {
+  ISaleRepository,
+  PendingSaleRefundRecord,
+} from './domain/sale.repository';
+import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
 import { Sale } from './domain/sale.entity';
 import {
   EntityNotFoundError,
@@ -56,6 +60,8 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     aggregateSummaryConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
     countNotDeliveredConfirmed: jest.fn(),
+    findManyPendingRefunds: jest.fn(),
+    countPendingRefunds: jest.fn(),
     findDraftResponseById: jest.fn(),
     findOneWithRelations: jest.fn(),
     ...overrides,
@@ -10856,5 +10862,126 @@ describe('SalesService', () => {
       expect(sale.globalPriceListId).toBeNull();
       expect(sale.priceListExplicitlySet).toBe(false);
     });
+  });
+});
+
+// ── prf-3 pending refund listing ────────────────────────────────────────
+
+describe('SalesService — listPendingRefunds', () => {
+  let saleRepo: ReturnType<typeof makeMockSaleRepo>;
+  let service: SalesService;
+
+  const makeRefundRow = (
+    overrides: Partial<PendingSaleRefundRecord> = {},
+  ): PendingSaleRefundRecord => ({
+    id: 'refund-1',
+    saleId: 'sale-1',
+    method: 'cash',
+    amountCents: 1500,
+    reason: 'CUSTOMER_REQUEST',
+    status: 'PENDING',
+    createdAt: new Date('2026-07-01T00:00:00.000Z'),
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    saleRepo = makeMockSaleRepo();
+    service = createService(
+      saleRepo,
+      makeMockProductsService(),
+      makeMockEventEmitter(),
+      makeMockOutboxWriter(),
+      {
+        getTenantId: jest.fn(() => 'tenant-1'),
+        getClient: jest.fn(() => ({}) as never),
+      },
+      makeMockSaleCommentRepo(),
+    );
+    saleRepo.findManyPendingRefunds.mockResolvedValue([]);
+    saleRepo.countPendingRefunds.mockResolvedValue(0);
+  });
+
+  it('requests the page and count from the pending-refund repository methods', async () => {
+    saleRepo.findManyPendingRefunds.mockResolvedValue([makeRefundRow()]);
+    saleRepo.countPendingRefunds.mockResolvedValue(1);
+
+    await service.listPendingRefunds({ page: 2, limit: 10 });
+
+    expect(saleRepo.findManyPendingRefunds).toHaveBeenCalledTimes(1);
+    expect(saleRepo.findManyPendingRefunds).toHaveBeenCalledWith({
+      page: 2,
+      limit: 10,
+    });
+    expect(saleRepo.countPendingRefunds).toHaveBeenCalledTimes(1);
+    // The obligation page must not be built from the confirmed-sale list.
+    expect(saleRepo.findManyConfirmed).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the pagination defaults when bounds are absent', async () => {
+    await service.listPendingRefunds(new ListPendingRefundsQueryDto());
+
+    expect(saleRepo.findManyPendingRefunds).toHaveBeenCalledWith({
+      page: 1,
+      limit: 20,
+    });
+  });
+
+  it('derives pagination metadata from the pending count', async () => {
+    saleRepo.findManyPendingRefunds.mockResolvedValue([makeRefundRow()]);
+    saleRepo.countPendingRefunds.mockResolvedValue(45);
+
+    const result = await service.listPendingRefunds({ page: 2, limit: 20 });
+
+    expect(result.pagination).toEqual({
+      page: 2,
+      limit: 20,
+      total: 45,
+      totalPages: 3,
+    });
+  });
+
+  it('returns a successful empty page instead of a 404 when nothing is pending', async () => {
+    const result = await service.listPendingRefunds({ page: 1, limit: 20 });
+
+    expect(result).toEqual({
+      data: [],
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 },
+    });
+  });
+
+  it('projects every repository row field verbatim', async () => {
+    const row = makeRefundRow({
+      id: 'refund-9',
+      saleId: 'sale-9',
+      method: 'transfer',
+      amountCents: 259900,
+      reason: 'OTHER',
+      createdAt: new Date('2026-06-15T12:30:00.000Z'),
+    });
+    saleRepo.findManyPendingRefunds.mockResolvedValue([row]);
+    saleRepo.countPendingRefunds.mockResolvedValue(1);
+
+    const result = await service.listPendingRefunds({ page: 1, limit: 20 });
+
+    expect(result.data).toEqual([row]);
+    expect(Object.keys(result.data[0]).sort()).toEqual([
+      'amountCents',
+      'createdAt',
+      'id',
+      'method',
+      'reason',
+      'saleId',
+      'status',
+    ]);
+  });
+
+  it('propagates repository failures unchanged', async () => {
+    saleRepo.findManyPendingRefunds.mockRejectedValue(
+      new Error('TENANT_CONTEXT_REQUIRED'),
+    );
+
+    await expect(
+      service.listPendingRefunds({ page: 1, limit: 20 }),
+    ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
   });
 });
