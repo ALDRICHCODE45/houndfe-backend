@@ -9,6 +9,16 @@ import type {
   IEvaluateCartPromotionsUseCase,
 } from './ports/evaluate-cart-promotions.port';
 
+/**
+ * Internal-only evaluation result. `promotionId` is carried privately so the
+ * capacity aggregation can count the units each SELECTED promotion actually
+ * discounts without widening the public `EvaluatedCartItem` contract.
+ */
+interface InternallyEvaluatedCartItem {
+  item: EvaluatedCartItem;
+  promotionId: string | null;
+}
+
 @Injectable()
 export class EvaluateCartPromotionsUseCase implements IEvaluateCartPromotionsUseCase {
   constructor(
@@ -27,22 +37,41 @@ export class EvaluateCartPromotionsUseCase implements IEvaluateCartPromotionsUse
     });
 
     const unsupportedPromotionExists = promotions.some(
-      (promotion) =>
-        promotion.type !== 'PRODUCT_DISCOUNT' ||
-        promotion.appliesTo !== 'PRODUCTS' ||
-        promotion.discountType == null ||
-        promotion.discountValue == null,
+      (promotion) => !isSupportedProductDiscountPromotion(promotion),
     );
 
-    const items = input.items.map((item) =>
-      evaluateItem(
-        item,
-        promotions.filter(isSupportedProductDiscountPromotion),
-      ),
+    // Fix the supported snapshot ONCE. Every retry re-evaluates the whole cart
+    // from clean state against this same snapshot minus the accumulated
+    // capacity-excluded ids; an excluded promotion leaves as a whole and is
+    // never partially applied.
+    const supportedPromotions = promotions.filter(
+      isSupportedProductDiscountPromotion,
     );
+
+    // Termination: an excluded promotion can never be selected again, so any
+    // overrun must belong to a not-yet-excluded promotion. Each iteration
+    // grows the set by at least one id, bounded by the supported count.
+    const capacityExcludedPromotionIds = new Set<string>();
+    let evaluatedItems: InternallyEvaluatedCartItem[];
+    for (;;) {
+      evaluatedItems = evaluatePass(
+        input.items,
+        supportedPromotions,
+        capacityExcludedPromotionIds,
+      );
+      const overrunPromotionIds = findCapacityOverrunIds(
+        evaluatedItems,
+        supportedPromotions,
+      );
+      if (overrunPromotionIds.length === 0) break;
+      for (const id of overrunPromotionIds) {
+        capacityExcludedPromotionIds.add(id);
+      }
+    }
 
     return {
-      items,
+      // Strip the private promotion id; the public shape stays untouched.
+      items: evaluatedItems.map((evaluated) => evaluated.item),
       promotionEvaluationStatus: unsupportedPromotionExists
         ? 'needs_human_review'
         : 'fully_evaluated',
@@ -59,10 +88,21 @@ function isSupportedProductDiscountPromotion(promotion: Promotion): boolean {
   );
 }
 
+function evaluatePass(
+  items: CartItemForEvaluation[],
+  promotions: Promotion[],
+  excludedPromotionIds: ReadonlySet<string>,
+): InternallyEvaluatedCartItem[] {
+  const availablePromotions = promotions.filter(
+    (promotion) => !excludedPromotionIds.has(promotion.id),
+  );
+  return items.map((item) => evaluateItem(item, availablePromotions));
+}
+
 function evaluateItem(
   item: CartItemForEvaluation,
   promotions: Promotion[],
-): EvaluatedCartItem {
+): InternallyEvaluatedCartItem {
   const originalPriceCents = item.unitPriceCents * item.quantity;
   const matchingPromotion = promotions.find((promotion) =>
     promotion.targetItems.some(
@@ -75,11 +115,14 @@ function evaluateItem(
 
   if (!matchingPromotion) {
     return {
-      ...item,
-      originalPriceCents,
-      finalPriceCents: originalPriceCents,
-      appliedPromotionTitle: null,
-      discountAmountCents: 0,
+      item: {
+        ...item,
+        originalPriceCents,
+        finalPriceCents: originalPriceCents,
+        appliedPromotionTitle: null,
+        discountAmountCents: 0,
+      },
+      promotionId: null,
     };
   }
 
@@ -91,12 +134,47 @@ function evaluateItem(
   );
 
   return {
-    ...item,
-    originalPriceCents,
-    finalPriceCents: Math.max(originalPriceCents - discountAmountCents, 0),
-    appliedPromotionTitle: matchingPromotion.title,
-    discountAmountCents,
+    item: {
+      ...item,
+      originalPriceCents,
+      finalPriceCents: Math.max(originalPriceCents - discountAmountCents, 0),
+      appliedPromotionTitle: matchingPromotion.title,
+      discountAmountCents,
+    },
+    promotionId: matchingPromotion.id,
   };
+}
+
+/**
+ * pca-2b2 — benefited-unit demand is the full line `quantity` summed once per
+ * selected promotion across ALL cart items. A promotion overruns only when a
+ * capped remaining capacity is exceeded: an exact fit is allowed and `null`
+ * (unlimited) never overruns.
+ */
+function findCapacityOverrunIds(
+  evaluatedItems: InternallyEvaluatedCartItem[],
+  promotions: Promotion[],
+): string[] {
+  const demandByPromotionId = new Map<string, number>();
+  for (const { item, promotionId } of evaluatedItems) {
+    if (promotionId === null) continue;
+    demandByPromotionId.set(
+      promotionId,
+      (demandByPromotionId.get(promotionId) ?? 0) + item.quantity,
+    );
+  }
+
+  const overrunPromotionIds: string[] = [];
+  for (const promotion of promotions) {
+    const demand = demandByPromotionId.get(promotion.id);
+    if (demand === undefined) continue;
+    const remainingProductUnits = promotion.remainingProductUnits;
+    if (remainingProductUnits === null) continue;
+    if (demand > remainingProductUnits) {
+      overrunPromotionIds.push(promotion.id);
+    }
+  }
+  return overrunPromotionIds;
 }
 
 function resolveDiscountAmount(
