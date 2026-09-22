@@ -106,6 +106,10 @@ import {
   type IPosEvaluatePromotionsUseCase,
 } from '../promotions/application/ports/pos-evaluate-promotions.port';
 import {
+  PROMOTION_USAGE_REPOSITORY,
+  type IPromotionUsageRepository,
+} from '../promotions/domain/promotion-usage.repository';
+import {
   PAYMENT_METHOD_RESOLVER,
   type IPaymentMethodResolver,
 } from '../admin/payment-methods/domain/payment-method.resolver';
@@ -447,6 +451,16 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
       listActive: jest.fn().mockResolvedValue([]),
     };
 
+    // pca-2c2 — SalesService's 10th constructor param is
+    // `@Inject(PROMOTION_USAGE_REPOSITORY)` typed as
+    // `IPromotionUsageRepository`. `getSaleDetail` never touches it, so a
+    // typed stub that satisfies the claim/restore contract is enough to
+    // let Nest instantiate SalesService.
+    const promotionUsageRepoStub: jest.Mocked<IPromotionUsageRepository> = {
+      claimForSale: jest.fn().mockResolvedValue(undefined),
+      restoreForSale: jest.fn().mockResolvedValue(undefined),
+    };
+
     const moduleRef = await Test.createTestingModule({
       imports: [
         // Real ClsModule + middleware so the per-request async context
@@ -493,6 +507,10 @@ describeIfDb('PdfGenerationController HTTP integration (WU5)', () => {
         {
           provide: POS_EVALUATE_PROMOTIONS_USE_CASE,
           useValue: {} as IPosEvaluatePromotionsUseCase,
+        },
+        {
+          provide: PROMOTION_USAGE_REPOSITORY,
+          useValue: promotionUsageRepoStub,
         },
         {
           provide: PAYMENT_METHOD_RESOLVER,

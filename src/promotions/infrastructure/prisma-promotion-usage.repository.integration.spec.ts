@@ -16,6 +16,17 @@
  *      capacity error with ledger rollback
  *   7. tenant-scoped claims cannot consume a foreign promotion
  *
+ * Seven restoration scenarios from pca-2d1b:
+ *   8. same-sale restore retry decrements capacity exactly once and is
+ *      a no-op on repeat
+ *   9. one multi-promotion sale restores every counter and stamps every row
+ *   10. a partial ledger restores only the remaining active row
+ *   11. a forced counter mismatch rolls the whole ambient transaction back,
+ *      and a repaired fixture retry succeeds
+ *   12. concurrent restores settle once without double-decrement
+ *   13. a foreign tenant cannot restore the owning tenant's ledger/counter
+ *   14. a corrupted zero/insufficient counter never goes negative
+ *
  * Loaded by `jest.integration.config.js`. Gated by `DATABASE_URL` and
  * `SKIP_DB_INTEGRATION`. Every fixture and assertion query is tenant
  * qualified on `BASELINE_TENANT_ID`.
@@ -41,8 +52,10 @@ const describeIfDb = unavailable ? describe.skip : describe;
 
 const PG_INT_MAX = 2_147_483_647;
 
-function makeCls(): ClsService<TenantClsStore> {
-  const store = new Map<string, unknown>([['tenantId', BASELINE_TENANT_ID]]);
+function makeCls(
+  tenantId: string = BASELINE_TENANT_ID,
+): ClsService<TenantClsStore> {
+  const store = new Map<string, unknown>([['tenantId', tenantId]]);
   const cls = {
     get: (key: string) => store.get(key),
     set: (key: string, value: unknown) => {
@@ -123,6 +136,53 @@ async function consumedFor(
     select: { consumedProductUnits: true },
   });
   return row.consumedProductUnits;
+}
+
+async function seedUsage(
+  prisma: PrismaClient,
+  saleId: string,
+  promotionId: string,
+  units: number,
+  restoredAt: Date | null,
+): Promise<void> {
+  await prisma.promotionUsage.create({
+    data: {
+      tenantId: BASELINE_TENANT_ID,
+      saleId,
+      promotionId,
+      units,
+      restoredAt,
+    },
+  });
+}
+
+async function restoredAtFor(
+  prisma: PrismaClient,
+  saleId: string,
+  promotionId: string,
+): Promise<Date | null> {
+  const row = await prisma.promotionUsage.findFirstOrThrow({
+    where: { tenantId: BASELINE_TENANT_ID, saleId, promotionId },
+    select: { restoredAt: true },
+  });
+  return row.restoredAt;
+}
+
+function tenantHarness(
+  prisma: PrismaClient,
+  tenantId: string = BASELINE_TENANT_ID,
+): {
+  tenantPrisma: TenantPrismaService;
+  repository: PrismaPromotionUsageRepository;
+} {
+  const tenantPrisma = new TenantPrismaService(
+    prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
+    makeCls(tenantId),
+  );
+  return {
+    tenantPrisma,
+    repository: new PrismaPromotionUsageRepository(tenantPrisma),
+  };
 }
 
 describeIfDb(
@@ -389,6 +449,242 @@ describeIfDb(
           },
         }),
       ).toBe(0);
+    });
+
+    describe('restoration (pca-2d1b)', () => {
+      it('8) same-sale restore decrements exactly once and repeated calls are no-ops', async () => {
+        const { saleId } = await seedSale(prisma);
+        const { promotionId } = await seedPromotion(prisma, {
+          maxProductUnits: 100,
+          consumedProductUnits: 0,
+        });
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleId, [{ promotionId, units: 2 }]);
+        });
+        expect(await consumedFor(prisma, promotionId)).toBe(2);
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.restoreForSale(saleId);
+        });
+        const firstRestore = await restoredAtFor(prisma, saleId, promotionId);
+        expect(firstRestore).not.toBeNull();
+        expect(await consumedFor(prisma, promotionId)).toBe(0);
+
+        // Retry after the row is already stamped must not decrement again.
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.restoreForSale(saleId);
+        });
+        expect(await consumedFor(prisma, promotionId)).toBe(0);
+        expect(await restoredAtFor(prisma, saleId, promotionId)).toEqual(
+          firstRestore,
+        );
+        expect(await usageCount(prisma, saleId, promotionId)).toBe(1);
+      });
+
+      it('9) one multi-promotion sale restores every counter and stamps every ledger row', async () => {
+        const { saleId } = await seedSale(prisma);
+        const { promotionId: promoA } = await seedPromotion(prisma, {
+          maxProductUnits: 50,
+          consumedProductUnits: 0,
+        });
+        const { promotionId: promoB } = await seedPromotion(prisma, {
+          maxProductUnits: 50,
+          consumedProductUnits: 0,
+        });
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleId, [
+            { promotionId: promoA, units: 2 },
+            { promotionId: promoB, units: 3 },
+          ]);
+        });
+        expect(await consumedFor(prisma, promoA)).toBe(2);
+        expect(await consumedFor(prisma, promoB)).toBe(3);
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.restoreForSale(saleId);
+        });
+
+        expect(await consumedFor(prisma, promoA)).toBe(0);
+        expect(await consumedFor(prisma, promoB)).toBe(0);
+        expect(await restoredAtFor(prisma, saleId, promoA)).not.toBeNull();
+        expect(await restoredAtFor(prisma, saleId, promoB)).not.toBeNull();
+      });
+
+      it('10) a partial ledger restores only the remaining active row without double-decrement', async () => {
+        const { saleId } = await seedSale(prisma);
+        const priorRestore = new Date('2020-01-01T00:00:00.000Z');
+        const { promotionId: promoActive } = await seedPromotion(prisma, {
+          maxProductUnits: 50,
+          consumedProductUnits: 3,
+        });
+        const { promotionId: promoRestored } = await seedPromotion(prisma, {
+          maxProductUnits: 50,
+          consumedProductUnits: 0,
+        });
+        await seedUsage(prisma, saleId, promoActive, 3, null);
+        await seedUsage(prisma, saleId, promoRestored, 5, priorRestore);
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.restoreForSale(saleId);
+        });
+
+        expect(await consumedFor(prisma, promoActive)).toBe(0);
+        expect(await restoredAtFor(prisma, saleId, promoActive)).not.toBeNull();
+        // The already-restored row is skipped: counter stays at zero and its
+        // original stamp is preserved rather than overwritten with NOW().
+        expect(await consumedFor(prisma, promoRestored)).toBe(0);
+        expect(await restoredAtFor(prisma, saleId, promoRestored)).toEqual(
+          priorRestore,
+        );
+      });
+
+      it('11) a forced counter mismatch rolls back the whole restore and a repaired retry succeeds', async () => {
+        const { saleId } = await seedSale(prisma);
+        const { promotionId: promoFirst } = await seedPromotion(prisma, {
+          maxProductUnits: 50,
+          consumedProductUnits: 0,
+        });
+        const { promotionId: promoSecond } = await seedPromotion(prisma, {
+          maxProductUnits: 50,
+          consumedProductUnits: 0,
+        });
+        // The repository processes active rows in ascending promotionId order,
+        // so the first id is stamped and decremented before the mismatch hits.
+        const [winnerId, loserId] = [promoFirst, promoSecond].sort();
+        await seedUsage(prisma, saleId, winnerId, 2, null);
+        await seedUsage(prisma, saleId, loserId, 5, null);
+        await prisma.promotion.update({
+          where: { id: winnerId },
+          data: { consumedProductUnits: 2 },
+        });
+        await prisma.promotion.update({
+          where: { id: loserId },
+          data: { consumedProductUnits: 1 },
+        });
+
+        await expect(
+          tenantPrisma.runInTransaction(async () => {
+            await repository.restoreForSale(saleId);
+          }),
+        ).rejects.toMatchObject({
+          code: 'PROMOTION_CAPACITY_RESTORE_COUNTER_MISMATCH',
+          details: { saleId, promotionId: loserId, units: 5 },
+        });
+
+        // Atomic rollback: the winner's earlier stamp and decrement are gone.
+        expect(await consumedFor(prisma, winnerId)).toBe(2);
+        expect(await consumedFor(prisma, loserId)).toBe(1);
+        expect(await restoredAtFor(prisma, saleId, winnerId)).toBeNull();
+        expect(await restoredAtFor(prisma, saleId, loserId)).toBeNull();
+
+        // Repair the fixture and prove a valid retry can still succeed.
+        await prisma.promotion.update({
+          where: { id: loserId },
+          data: { consumedProductUnits: 5 },
+        });
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.restoreForSale(saleId);
+        });
+
+        expect(await consumedFor(prisma, winnerId)).toBe(0);
+        expect(await consumedFor(prisma, loserId)).toBe(0);
+        expect(await restoredAtFor(prisma, saleId, winnerId)).not.toBeNull();
+        expect(await restoredAtFor(prisma, saleId, loserId)).not.toBeNull();
+      });
+
+      it('12) concurrent restores for one sale settle once without double-decrement', async () => {
+        const { saleId } = await seedSale(prisma);
+        const { promotionId } = await seedPromotion(prisma, {
+          maxProductUnits: 100,
+          consumedProductUnits: 0,
+        });
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleId, [{ promotionId, units: 4 }]);
+        });
+        expect(await consumedFor(prisma, promotionId)).toBe(4);
+
+        // Independent CLS stores per transaction so parallel runs cannot
+        // clobber the TX_CLIENT_KEY slot the SUT reads through.
+        const first = tenantHarness(prisma);
+        const second = tenantHarness(prisma);
+        const outcomes = await Promise.allSettled([
+          first.tenantPrisma.runInTransaction(async () => {
+            await first.repository.restoreForSale(saleId);
+          }),
+          second.tenantPrisma.runInTransaction(async () => {
+            await second.repository.restoreForSale(saleId);
+          }),
+        ]);
+
+        // Winner identity is deliberately unasserted: only one caller can win
+        // the stamp race, and both settle without a double-decrement.
+        expect(
+          outcomes.every((outcome) => outcome.status === 'fulfilled'),
+        ).toBe(true);
+        expect(await consumedFor(prisma, promotionId)).toBe(0);
+        expect(await restoredAtFor(prisma, saleId, promotionId)).not.toBeNull();
+        expect(await usageCount(prisma, saleId, promotionId)).toBe(1);
+      });
+
+      it('13) a foreign tenant cannot restore or alter the owning tenant ledger or counter', async () => {
+        const foreignTenantId = randomUUID();
+        await prisma.tenant.create({
+          data: {
+            id: foreignTenantId,
+            name: `Restore tenant ${foreignTenantId.slice(0, 8)}`,
+            slug: `restore-${foreignTenantId}`,
+          },
+        });
+        const { saleId } = await seedSale(prisma);
+        const { promotionId } = await seedPromotion(prisma, {
+          maxProductUnits: 50,
+          consumedProductUnits: 3,
+        });
+        await seedUsage(prisma, saleId, promotionId, 3, null);
+
+        const foreign = tenantHarness(prisma, foreignTenantId);
+        await foreign.tenantPrisma.runInTransaction(async () => {
+          await foreign.repository.restoreForSale(saleId);
+        });
+
+        expect(await consumedFor(prisma, promotionId)).toBe(3);
+        expect(await restoredAtFor(prisma, saleId, promotionId)).toBeNull();
+        expect(
+          await prisma.promotionUsage.count({
+            where: { tenantId: foreignTenantId },
+          }),
+        ).toBe(0);
+      });
+
+      it.each<[number]>([[0], [1]])(
+        '14) a corrupted counter of %i never goes negative, throws the typed mismatch, and leaves restoredAt null',
+        async (corruptedCounter) => {
+          const { saleId } = await seedSale(prisma);
+          const { promotionId } = await seedPromotion(prisma, {
+            maxProductUnits: 50,
+            consumedProductUnits: corruptedCounter,
+          });
+          await seedUsage(prisma, saleId, promotionId, 3, null);
+
+          let failure: unknown;
+          try {
+            await tenantPrisma.runInTransaction(async () => {
+              await repository.restoreForSale(saleId);
+            });
+          } catch (error) {
+            failure = error;
+          }
+          expect(failure).toMatchObject({
+            code: 'PROMOTION_CAPACITY_RESTORE_COUNTER_MISMATCH',
+          });
+
+          expect(await consumedFor(prisma, promotionId)).toBe(corruptedCounter);
+          expect(await restoredAtFor(prisma, saleId, promotionId)).toBeNull();
+        },
+      );
     });
   },
 );
