@@ -162,6 +162,7 @@ function makeMockPosEvaluateUseCase() {
 function makeMockPromotionUsageRepo() {
   return {
     claimForSale: jest.fn().mockResolvedValue(undefined),
+    restoreForSale: jest.fn().mockResolvedValue(undefined),
   } as jest.Mocked<IPromotionUsageRepository>;
 }
 

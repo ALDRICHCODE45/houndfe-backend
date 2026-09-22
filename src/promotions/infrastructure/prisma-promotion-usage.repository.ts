@@ -78,6 +78,61 @@ export class PrismaPromotionUsageRepository implements IPromotionUsageRepository
     }
   }
 
+  async restoreForSale(saleId: string): Promise<void> {
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new BusinessRuleViolationError(
+        'Promotion capacity restore requires an active ambient transaction',
+        'PROMOTION_CAPACITY_RESTORE_OUTSIDE_TRANSACTION',
+      );
+    }
+    if (saleId.length === 0) {
+      throw new InvalidArgumentError(
+        'Promotion capacity restore requires a non-empty saleId',
+        'PROMOTION_CAPACITY_RESTORE_INVALID',
+      );
+    }
+
+    const tenantId = this.tenantPrisma.getTenantId();
+    const prisma = this.tenantPrisma.getClient();
+    // Locale-independent ordering is delegated to the database so the
+    // stamp/decrement sequence is deterministic across environments.
+    const activeRows = await prisma.promotionUsage.findMany({
+      where: { tenantId, saleId, restoredAt: null },
+      select: { promotionId: true, units: true },
+      orderBy: { promotionId: 'asc' },
+    });
+
+    for (const { promotionId, units } of activeRows) {
+      // Stamp-first gate: only the retry that flips `restoredAt` decrements.
+      const stamped = await prisma.$executeRaw(Prisma.sql`
+        UPDATE "promotion_usages"
+           SET "restoredAt" = NOW()
+         WHERE "tenantId" = ${tenantId}
+           AND "saleId" = ${saleId}
+           AND "promotionId" = ${promotionId}
+           AND "restoredAt" IS NULL
+      `);
+      if (stamped === 0) continue;
+
+      // Guarded decrement: a counter below the ledger units means the ledger
+      // and the counter diverged, so the whole ambient transaction must fail.
+      const decremented = await prisma.$executeRaw(Prisma.sql`
+        UPDATE "promotions"
+           SET "consumedProductUnits" = "consumedProductUnits" - ${units}, "updatedAt" = NOW()
+         WHERE "id" = ${promotionId}
+           AND "tenantId" = ${tenantId}
+           AND "consumedProductUnits" >= ${units}
+      `);
+      if (decremented !== 1) {
+        throw new BusinessRuleViolationError(
+          'Promotion counter is smaller than the restored ledger units',
+          'PROMOTION_CAPACITY_RESTORE_COUNTER_MISMATCH',
+          { saleId, promotionId, units },
+        );
+      }
+    }
+  }
+
   private async assertIdempotentRetry(
     saleId: string,
     tenantId: string,
