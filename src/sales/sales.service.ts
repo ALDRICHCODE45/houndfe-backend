@@ -26,6 +26,11 @@ import type {
 } from '../promotions/application/ports/pos-evaluate-promotions.port';
 import { POS_EVALUATE_PROMOTIONS_USE_CASE } from '../promotions/application/ports/pos-evaluate-promotions.port';
 import {
+  type IPromotionUsageRepository,
+  PROMOTION_USAGE_REPOSITORY,
+  type PromotionCapacityClaim,
+} from '../promotions/domain/promotion-usage.repository';
+import {
   SaleDraftOpenedEvent,
   SaleItemAddedEvent,
   SaleItemQuantityChangedEvent,
@@ -247,6 +252,14 @@ function isSupportedChargeMethod(
   return ['cash', 'card_credit', 'card_debit', 'transfer', 'credit'].includes(
     method ?? '',
   );
+}
+
+// pca-2c2 — locale-independent (code-unit) sort + dedupe.
+function sortUniquePromotionIds(ids: string[]): string[] {
+  return Array.from(new Set(ids)).sort((a, b) => {
+    if (a === b) return 0;
+    return a < b ? -1 : 1;
+  });
 }
 
 function chargeValidationError(
@@ -528,6 +541,9 @@ export class SalesService {
     // sales depends only on the I/O contract.
     @Inject(PAYMENT_METHOD_RESOLVER)
     private readonly paymentMethodResolver: IPaymentMethodResolver,
+    // pca-2c2 — capacity claim ledger (ambient-tx port; PromotionsModule).
+    @Inject(PROMOTION_USAGE_REPOSITORY)
+    private readonly promotionUsageRepo: IPromotionUsageRepository,
   ) {}
 
   /**
@@ -573,8 +589,14 @@ export class SalesService {
    * discountAmountCents > 0`) holds because reprice runs BEFORE the
    * engine input is built — `effectiveUnitPriceCents` is the tier-adjusted
    * price, never an add-time frozen base.
+   *
+   * pca-2c2 — also returns the engine capacity demands / exclusions so
+   * confirmation can claim them; draft previews discard the value.
    */
-  private async recomputePricingAndPromotions(sale: Sale): Promise<void> {
+  private async recomputePricingAndPromotions(sale: Sale): Promise<{
+    promotionCapacityDemands: PromotionCapacityClaim[];
+    capacityExcludedPromotionIds: string[];
+  }> {
     sale.ensureDraft();
 
     // (1) Clear prior PROMO-sourced discounts. Manual free-form
@@ -720,6 +742,12 @@ export class SalesService {
         sale.optOutManualPromotion(id);
       }
     }
+
+    // pca-2c2 — preview metadata; draft callers discard it.
+    return {
+      promotionCapacityDemands: result.promotionCapacityDemands,
+      capacityExcludedPromotionIds: result.capacityExcludedPromotionIds,
+    };
   }
 
   /**
@@ -2687,7 +2715,36 @@ export class SalesService {
       // charged totalCents / discountCents reflect the current state, not
       // whatever was last persisted. Reads go through the tenant+tx-scoped
       // prisma client because we are inside `runInTransaction`.
-      await this.recomputePricingAndPromotions(sale);
+      //
+      // pca-2c2 — snapshot pre-recompute applied ids (line + order) BEFORE
+      // the engine runs; the recompute may strip capacity-excluded winners.
+      const preRecomputeAppliedIds = sortUniquePromotionIds([
+        ...sale.items
+          .map((item) => item.promotionId)
+          .filter((id): id is string => id != null && id !== ''),
+        ...(sale.appliedOrderPromotion?.promotionId
+          ? [sale.appliedOrderPromotion.promotionId]
+          : []),
+      ]);
+      const { promotionCapacityDemands, capacityExcludedPromotionIds } =
+        await this.recomputePricingAndPromotions(sale);
+
+      // pca-2c2 — a stale preview must not silently charge: intersect the
+      // excluded ids with the snapshot the cashier committed.
+      const excludedSet = new Set(capacityExcludedPromotionIds);
+      const staleIntersection = preRecomputeAppliedIds.filter((id) =>
+        excludedSet.has(id),
+      );
+      if (staleIntersection.length > 0) {
+        throw new BusinessRuleViolationError(
+          'Promotion capacity changed during charge — re-quote required',
+          'PROMO_CAPACITY_RE_QUOTE',
+          {
+            appliedPromotionIds: preRecomputeAppliedIds,
+            excludedPromotionIds: staleIntersection,
+          },
+        );
+      }
 
       // Work Unit 5 — inline totals use the SAME helper the draft preview
       // uses (`sale.previewTotals()`, Unit 3). This is the single source of
@@ -2763,6 +2820,12 @@ export class SalesService {
         normalizedPayments,
         this.paymentMethodResolver,
         tenantId,
+      );
+
+      // pca-2c2 — claim before stock/persist/outbox; a race rolls back the tx.
+      await this.promotionUsageRepo.claimForSale(
+        sale.id,
+        promotionCapacityDemands,
       );
 
       const stockAdjustments = sale.items.map((item) => ({
@@ -3136,7 +3199,11 @@ export class SalesService {
       // tier-aware reprice, customer scope, date windows, daysOfWeek,
       // and price-list gating. The simplified `evaluate-cart` engine is
       // NOT used here (see exploration.md).
-      await this.recomputePricingAndPromotions(sale);
+      //
+      // pca-2c2 — capture capacity demands. The bot's first commit is this
+      // recompute, so no stale-preview guard applies here.
+      const { promotionCapacityDemands } =
+        await this.recomputePricingAndPromotions(sale);
 
       // D4 — totals are the SINGLE source of truth from
       // `sale.previewTotals()`: the same helper the draft preview and the
@@ -3169,6 +3236,12 @@ export class SalesService {
       }
 
       await this.saleRepo.save(sale);
+
+      // pca-2c2 — claim after `save` (id durable), before stock/outbox.
+      await this.promotionUsageRepo.claimForSale(
+        sale.id,
+        promotionCapacityDemands,
+      );
 
       const paidCents = 0 as const;
       const debtCents = totalCents;

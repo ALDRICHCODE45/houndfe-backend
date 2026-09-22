@@ -328,6 +328,41 @@ describe('DomainExceptionFilter', () => {
     expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
   });
 
+  // ── pca-2c2 — promotion capacity confirmation races ──
+  it.each([
+    'PROMO_CAPACITY_RE_QUOTE',
+    'PROMOTION_CAPACITY_EXCEEDED',
+    'PROMOTION_CAPACITY_CLAIM_MISMATCH',
+  ])('maps %s to 409 (pca-2c2)', (code) => {
+    const filter = new DomainExceptionFilter();
+    const { host, status, json } = makeHost() as {
+      host: ArgumentsHost;
+      status: jest.Mock;
+      json: jest.Mock;
+    };
+
+    filter.catch(
+      new BusinessRuleViolationError(code, code, {
+        appliedPromotionIds: ['promo-a'],
+        excludedPromotionIds: ['promo-b'],
+      }),
+      host,
+    );
+
+    expect(status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+    // The D7 details-spread branch (BusinessRuleViolationError.details)
+    // must surface appliedPromotionIds / excludedPromotionIds so the
+    // caller can re-quote without an extra round-trip.
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: HttpStatus.CONFLICT,
+        error: code,
+        appliedPromotionIds: ['promo-a'],
+        excludedPromotionIds: ['promo-b'],
+      }),
+    );
+  });
+
   it('spreads BusinessRuleViolationError.details into the response body (D7)', () => {
     const filter = new DomainExceptionFilter();
     const { host, status, json } = makeHost();

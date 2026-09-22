@@ -207,6 +207,16 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'PROMO_RE_QUOTE')
       return HttpStatus.CONFLICT;
 
+    // ── pca-2c2 — promotion capacity confirmation races ──
+    // All three surface after the recompute + payment validation pass;
+    // `details` (see D7 above) carries the conflicting promotion ids.
+    if (exception.code === 'PROMO_CAPACITY_RE_QUOTE')
+      return HttpStatus.CONFLICT;
+    if (exception.code === 'PROMOTION_CAPACITY_EXCEEDED')
+      return HttpStatus.CONFLICT;
+    if (exception.code === 'PROMOTION_CAPACITY_CLAIM_MISMATCH')
+      return HttpStatus.CONFLICT;
+
     if (exception instanceof EntityNotFoundError) return HttpStatus.NOT_FOUND;
     if (exception instanceof EntityAlreadyExistsError)
       return HttpStatus.CONFLICT;

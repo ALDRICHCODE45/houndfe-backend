@@ -410,6 +410,7 @@ function makeHarness(saleOverrides: Partial<MutableSaleState> = {}) {
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
   const receiptReviewService = new ReceiptReviewService(
     receiptRepository,
@@ -665,6 +666,7 @@ describe('Receipt review integration flow', () => {
       new EventEmitter2(),
       outboxWriter as unknown as OutboxWriterService,
       tenantPrisma,
+      {} as never,
       {} as never,
       {} as never,
       {} as never,

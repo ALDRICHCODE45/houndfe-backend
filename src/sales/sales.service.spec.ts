@@ -32,10 +32,20 @@ import {
   SaleShippingAddressSetEvent,
 } from './domain/events/sale.events';
 import { InvalidDueDateError } from './domain/sale.errors';
+import type { IPromotionUsageRepository } from '../promotions/domain/promotion-usage.repository';
 
 interface RecomputeProbe {
   recomputePricingAndPromotions(sale: Sale): Promise<void>;
 }
+
+// pca-2c2 — narrow typed views over the `any`-typed shared mocks so the new
+// capacity tests stay lint-clean without widening the shared factory types.
+type ProductsServiceMock = {
+  getProductInfoForSale: jest.Mock;
+  decrementStockForCharge: jest.Mock;
+};
+
+type PosEvaluateUseCaseMock = { evaluate: jest.Mock };
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -142,8 +152,17 @@ function makeMockPosEvaluateUseCase() {
       order: null,
       availableManualPromotions: [],
       targetableManualPromotionIds: [],
+      // pca-2c2 — capacity preview metadata (empty = no claims, no re-quote).
+      promotionCapacityDemands: [],
+      capacityExcludedPromotionIds: [],
     }),
   } as any;
+}
+
+function makeMockPromotionUsageRepo() {
+  return {
+    claimForSale: jest.fn().mockResolvedValue(undefined),
+  } as jest.Mocked<IPromotionUsageRepository>;
 }
 
 function makeMockEventEmitter() {
@@ -179,6 +198,8 @@ function createService(
     resolveActive: jest.Mock;
     listActive: jest.Mock;
   } = makeMockPaymentMethodResolver(),
+  // pca-2c2 — capacity-claim ledger; pca tests override per case.
+  promotionUsageRepo: IPromotionUsageRepository = makeMockPromotionUsageRepo(),
 ) {
   return new SalesService(
     saleRepo,
@@ -189,6 +210,7 @@ function createService(
     saleCommentRepo,
     posEvaluateUseCase as any,
     paymentMethodResolver as any,
+    promotionUsageRepo,
   );
 }
 
@@ -207,6 +229,8 @@ describe('SalesService', () => {
   // top level so new WU2 tests can assert calls / override behavior
   // without rebuilding the service.
   let paymentMethodResolver: ReturnType<typeof makeMockPaymentMethodResolver>;
+  // pca-2c2 — capacity-claim ledger mock (per-case overrides in tests).
+  let promotionUsageRepo: ReturnType<typeof makeMockPromotionUsageRepo>;
   let service: SalesService;
 
   beforeEach(() => {
@@ -217,6 +241,7 @@ describe('SalesService', () => {
     saleCommentRepo = makeMockSaleCommentRepo();
     posEvaluateUseCase = makeMockPosEvaluateUseCase();
     paymentMethodResolver = makeMockPaymentMethodResolver();
+    promotionUsageRepo = makeMockPromotionUsageRepo();
     tenantPrisma = {
       getTenantId: jest.fn(() => 'tenant-1'),
       getClient: jest.fn(
@@ -237,6 +262,7 @@ describe('SalesService', () => {
       saleCommentRepo,
       posEvaluateUseCase,
       paymentMethodResolver,
+      promotionUsageRepo,
     );
     saleRepo.acquireChargeIdempotency.mockResolvedValue({
       kind: 'acquired',
@@ -3883,6 +3909,152 @@ describe('SalesService', () => {
     });
   });
 
+  // pca-2c2 — capacity claims at sale-confirm. chargeDraft snapshots applied
+  // ids, throws PROMO_CAPACITY_RE_QUOTE on intersection with engine-excluded
+  // ids, and forwards demands to claimForSale after payment validation and
+  // before stock/persist/outbox. Bot and draft previews never claim.
+  describe('pca-2c2 — promotion capacity claim boundary', () => {
+    const setupChargePath = (
+      engine: {
+        demands?: Array<{ promotionId: string; units: number }>;
+        excluded?: string[];
+      } = {},
+    ) => {
+      const products = productsService as ProductsServiceMock;
+      const posEvaluate = posEvaluateUseCase as PosEvaluateUseCaseMock;
+      saleRepo.findByIdForUpdate.mockResolvedValue(
+        Sale.fromPersistence({
+          id: 'sale-pca-2c2',
+          userId: 'user-1',
+          customerId: 'customer-1',
+          status: 'DRAFT',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          items: [
+            {
+              id: 'item-1',
+              saleId: 'sale-pca-2c2',
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'P',
+              variantName: null,
+              quantity: 1,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+              discountType: 'percentage',
+              discountValue: 10,
+              discountAmountCents: 100,
+              promotionId: 'promo-line-1',
+            },
+          ],
+          appliedOrderPromotion: {
+            promotionId: 'promo-order-1',
+            discountType: 'amount',
+            discountValue: 200,
+            discountAmountCents: 200,
+            discountTitle: 'Order 200 off',
+          },
+        }),
+      );
+      products.getProductInfoForSale.mockResolvedValue({
+        unitPriceCents: 1000,
+      });
+      products.decrementStockForCharge.mockResolvedValue([]);
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000014');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      posEvaluate.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [],
+        promotionCapacityDemands: engine.demands ?? [],
+        capacityExcludedPromotionIds: engine.excluded ?? [],
+      });
+    };
+
+    const cashCharge = () =>
+      service.chargeDraft(
+        'sale-pca-2c2',
+        'user-1',
+        { method: 'cash', amountCents: 1000 } as never,
+        'idem-pca-2c2',
+      );
+
+    it('chargeDraft forwards the EXACT promotionCapacityDemands to claimForSale', async () => {
+      const demands = [
+        { promotionId: 'promo-line-1', units: 1 },
+        { promotionId: 'promo-order-1', units: 1 },
+      ];
+      setupChargePath({ demands });
+      await cashCharge();
+      expect(promotionUsageRepo.claimForSale.mock.calls).toHaveLength(1);
+      expect(promotionUsageRepo.claimForSale.mock.calls).toContainEqual([
+        'sale-pca-2c2',
+        demands,
+      ]);
+    });
+
+    it('chargeDraft throws PROMO_CAPACITY_RE_QUOTE on stale intersection', async () => {
+      setupChargePath({
+        demands: [{ promotionId: 'promo-order-1', units: 1 }],
+        excluded: ['promo-line-1', 'promo-stranger-99'],
+      });
+      await expect(cashCharge()).rejects.toMatchObject({
+        code: 'PROMO_CAPACITY_RE_QUOTE',
+        // Sorted snapshot ∩ excluded, not the raw excluded list.
+        details: {
+          appliedPromotionIds: ['promo-line-1', 'promo-order-1'],
+          excludedPromotionIds: ['promo-line-1'],
+        },
+      });
+      const products = productsService as ProductsServiceMock;
+      expect(promotionUsageRepo.claimForSale.mock.calls).toHaveLength(0);
+      expect(products.decrementStockForCharge.mock.calls).toHaveLength(0);
+      expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(0);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('chargeDraft does NOT throw when an unrelated id is excluded (zero overlap)', async () => {
+      setupChargePath({
+        demands: [
+          { promotionId: 'promo-line-1', units: 1 },
+          { promotionId: 'promo-order-1', units: 1 },
+        ],
+        excluded: ['promo-stranger-99'],
+      });
+      await cashCharge();
+      const products = productsService as ProductsServiceMock;
+      expect(promotionUsageRepo.claimForSale.mock.calls).toHaveLength(1);
+      expect(products.decrementStockForCharge.mock.calls).toHaveLength(1);
+      expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(1);
+    });
+
+    it('chargeDraft stops downstream effects when claimForSale throws (PROMOTION_CAPACITY_EXCEEDED)', async () => {
+      setupChargePath({
+        demands: [
+          { promotionId: 'promo-line-1', units: 1 },
+          { promotionId: 'promo-order-1', units: 1 },
+        ],
+      });
+      const ledgerRace = new BusinessRuleViolationError(
+        'Insufficient remaining capacity',
+        'PROMOTION_CAPACITY_EXCEEDED',
+      );
+      promotionUsageRepo.claimForSale.mockRejectedValueOnce(ledgerRace);
+      await expect(cashCharge()).rejects.toBe(ledgerRace);
+      const products = productsService as ProductsServiceMock;
+      expect(promotionUsageRepo.claimForSale.mock.calls).toHaveLength(1);
+      expect(products.decrementStockForCharge.mock.calls).toHaveLength(0);
+      expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(0);
+      expect(saleRepo.markChargeIdempotencySucceeded.mock.calls).toHaveLength(
+        0,
+      );
+      const eventTypes = outboxWriter.publish.mock.calls.map((args) => args[4]);
+      expect(eventTypes).not.toContain('sale.confirmed');
+      expect(eventTypes).not.toContain('sale.payment.received');
+    });
+  });
+
   describe('cancelSale', () => {
     const buildConfirmedSaleForCancel = (
       saleId = 'sale-cancel-happy',
@@ -4263,6 +4435,62 @@ describe('SalesService', () => {
 
       return { customerFindUnique, customerAddressFindUnique };
     };
+
+    it('pca-2c2 — claims exact capacity demands after save and before stock', async () => {
+      setupConfirmBotSaleHappyPath();
+      const posEvaluate = posEvaluateUseCase as PosEvaluateUseCaseMock;
+      const products = productsService as ProductsServiceMock;
+      posEvaluate.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [],
+        promotionCapacityDemands: [{ promotionId: 'promo-bot-1', units: 2 }],
+        capacityExcludedPromotionIds: [],
+      });
+
+      await service.confirmBotSale(botSaleInput);
+
+      expect(promotionUsageRepo.claimForSale.mock.calls).toContainEqual([
+        expect.any(String),
+        [{ promotionId: 'promo-bot-1', units: 2 }],
+      ]);
+      const savedAt = saleRepo.save.mock.invocationCallOrder[0];
+      const claimedAt =
+        promotionUsageRepo.claimForSale.mock.invocationCallOrder[0];
+      const stockedAt =
+        products.decrementStockForCharge.mock.invocationCallOrder[0];
+      expect(savedAt).toBeLessThan(claimedAt);
+      expect(claimedAt).toBeLessThan(stockedAt);
+    });
+
+    it('pca-2c2 — claim rejection propagates before stock, folio, persistence, and outbox', async () => {
+      setupConfirmBotSaleHappyPath();
+      const posEvaluate = posEvaluateUseCase as PosEvaluateUseCaseMock;
+      const products = productsService as ProductsServiceMock;
+      posEvaluate.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [],
+        promotionCapacityDemands: [{ promotionId: 'promo-bot-1', units: 2 }],
+        capacityExcludedPromotionIds: [],
+      });
+      const ledgerRace = new BusinessRuleViolationError(
+        'Insufficient remaining capacity',
+        'PROMOTION_CAPACITY_EXCEEDED',
+      );
+      promotionUsageRepo.claimForSale.mockRejectedValueOnce(ledgerRace);
+
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toBe(
+        ledgerRace,
+      );
+
+      expect(products.decrementStockForCharge.mock.calls).toHaveLength(0);
+      expect(saleRepo.allocateNextFolio.mock.calls).toHaveLength(0);
+      expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(0);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
 
     it('confirms bot sale in one transaction with stock, folio, seller attribution, and default credit due date', async () => {
       const { customerFindUnique, customerAddressFindUnique } =
@@ -6673,6 +6901,9 @@ describe('SalesService', () => {
       expect(savedSale.items[0].discountValue).toBe(10);
       // 10% of 1000 = 100 → unitPriceCents drops from 1000 to 900.
       expect(savedSale.items[0].unitPriceCents).toBe(900);
+
+      // pca-2c2 — a draft preview never claims capacity.
+      expect(promotionUsageRepo.claimForSale.mock.calls).toHaveLength(0);
     });
 
     it('addItem recompute is idempotent: running recompute twice yields the same discount (no compounding) (4.1)', async () => {
