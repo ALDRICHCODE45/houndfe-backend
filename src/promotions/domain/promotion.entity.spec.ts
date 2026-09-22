@@ -1091,6 +1091,67 @@ describe('Promotion Entity', () => {
         message: 'consumedProductUnits cannot exceed maxProductUnits',
       });
     });
+
+    describe('updateMaxProductUnits()', () => {
+      const INVALID_RANGE =
+        'maxProductUnits must be an integer between 1 and 2147483647 or null';
+      const BELOW_CONSUMED =
+        'consumedProductUnits cannot exceed maxProductUnits';
+
+      function capped(): Promotion {
+        return Promotion.create({
+          ...validBase,
+          maxProductUnits: 50,
+          consumedProductUnits: 18,
+        });
+      }
+
+      it.each([
+        [30, 30, 12],
+        [null, null, null],
+      ] as const)(
+        'updateMaxProductUnits(%p) keeps consumed at 18',
+        (cap, expectedCap, expectedRemaining) => {
+          const promo = capped();
+
+          promo.updateMaxProductUnits(cap);
+
+          expect(promo.maxProductUnits).toBe(expectedCap);
+          expect(promo.consumedProductUnits).toBe(18);
+          expect(promo.remainingProductUnits).toBe(expectedRemaining);
+        },
+      );
+
+      it.each([
+        [17, 'PRODUCT_UNIT_CAPACITY_EXCEEDED', BELOW_CONSUMED],
+        [0, 'INVALID_MAX_PRODUCT_UNITS', INVALID_RANGE],
+        [1.5, 'INVALID_MAX_PRODUCT_UNITS', INVALID_RANGE],
+        [2_147_483_648, 'INVALID_MAX_PRODUCT_UNITS', INVALID_RANGE],
+      ] as const)(
+        'updateMaxProductUnits(%p) throws %s and leaves the cap unchanged',
+        (cap, code, message) => {
+          const promo = capped();
+
+          expect(
+            captureError(() => promo.updateMaxProductUnits(cap)),
+          ).toMatchObject({ code, message });
+          expect(promo.maxProductUnits).toBe(50);
+        },
+      );
+
+      it('exposes no consumed mutator', () => {
+        const promo = capped();
+
+        expect(Reflect.set(promo, 'consumedProductUnits', 99)).toBe(false);
+        expect(promo.consumedProductUnits).toBe(18);
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            Promotion.prototype,
+            'updateConsumedProductUnits',
+          ),
+        ).toBe(false);
+      });
+    });
   });
 
   // ============================================================

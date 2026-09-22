@@ -167,6 +167,7 @@ type CreatePromotionInput = {
   priceListIds?: string[];
   startDate?: string;
   endDate?: string;
+  maxProductUnits?: number | null;
 };
 
 function createDto(input: CreatePromotionInput): CreatePromotionDto {
@@ -1472,6 +1473,169 @@ describe('PromotionsService', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+  });
+
+  // ── product-unit capacity (pca-1c) ────────────────────────
+
+  describe('product-unit capacity CRUD', () => {
+    const createCases: Array<[PromotionType, Partial<CreatePromotionInput>]> = [
+      [
+        'PRODUCT_DISCOUNT',
+        {
+          discountType: 'PERCENTAGE',
+          discountValue: 15,
+          appliesTo: 'CATEGORIES',
+        },
+      ],
+      ['ORDER_DISCOUNT', { discountType: 'FIXED', discountValue: 500 }],
+      [
+        'BUY_X_GET_Y',
+        {
+          buyQuantity: 2,
+          getQuantity: 1,
+          getDiscountPercent: 100,
+          appliesTo: 'CATEGORIES',
+          targetItems: [{ targetType: 'CATEGORIES', targetId: 'cat-1' }],
+        },
+      ],
+      ['ADVANCED', { buyQuantity: 1, getQuantity: 1, getDiscountPercent: 0 }],
+    ];
+
+    function capacityService(repo: IPromotionRepository): PromotionsService {
+      return makeService(
+        repo,
+        makePrisma({
+          category: {
+            findMany: jest.fn().mockResolvedValue([{ id: 'cat-1' }]),
+          },
+        }),
+      );
+    }
+
+    function savingRepo(): jest.Mocked<IPromotionRepository> {
+      return makeRepo({
+        save: jest.fn().mockImplementation((p: Promotion) => p),
+      });
+    }
+
+    it.each(createCases)(
+      'create() forwards maxProductUnits for %s',
+      async (type, extra) => {
+        const repo = savingRepo();
+
+        await capacityService(repo).create(
+          createDto({
+            title: 'Capacity',
+            type,
+            method: 'AUTOMATIC',
+            maxProductUnits: 25,
+            ...extra,
+          }),
+        );
+
+        const saved = repo.save.mock.calls[0][0];
+        expect(saved.maxProductUnits).toBe(25);
+        expect(saved.consumedProductUnits).toBe(0);
+        expect(saved.remainingProductUnits).toBe(25);
+      },
+    );
+
+    it('create() returns the toResponse() capacity shape with no private keys', async () => {
+      const repo = savingRepo();
+
+      const result = await capacityService(repo).create(
+        createDto({
+          title: 'Serialized',
+          type: 'ORDER_DISCOUNT',
+          method: 'AUTOMATIC',
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+          maxProductUnits: 40,
+        }),
+      );
+
+      expect(result).toMatchObject({
+        maxProductUnits: 40,
+        consumedProductUnits: 0,
+        remainingProductUnits: 40,
+      });
+      expect(result).not.toHaveProperty('_maxProductUnits');
+      expect(result).not.toHaveProperty('_consumedProductUnits');
+    });
+
+    it('update() replaces the cap and preserves the consumed counter', async () => {
+      const promo = makePromotion({
+        maxProductUnits: 30,
+        consumedProductUnits: 5,
+      });
+      const repo = makeRepo({
+        findById: jest.fn().mockResolvedValue(promo),
+        save: jest.fn().mockImplementation((p: Promotion) => p),
+      });
+
+      const result = await capacityService(repo).update(
+        'promo-1',
+        updateDto({ maxProductUnits: 60 }),
+      );
+
+      expect(repo.save.mock.calls[0][0].maxProductUnits).toBe(60);
+      expect(result).toMatchObject({
+        maxProductUnits: 60,
+        consumedProductUnits: 5,
+        remainingProductUnits: 55,
+      });
+    });
+
+    it.each([
+      [undefined, 30, 25],
+      [null, null, null],
+    ] as const)(
+      'update() three-way merges maxProductUnits=%p',
+      async (nextCap, expectedCap, expectedRemaining) => {
+        const promo = makePromotion({
+          maxProductUnits: 30,
+          consumedProductUnits: 5,
+        });
+        const repo = makeRepo({
+          findById: jest.fn().mockResolvedValue(promo),
+          save: jest.fn().mockImplementation((p: Promotion) => p),
+        });
+
+        const result = await capacityService(repo).update('promo-1', {
+          title: 'Renamed',
+          maxProductUnits: nextCap,
+        });
+
+        expect(result).toMatchObject({
+          maxProductUnits: expectedCap,
+          consumedProductUnits: 5,
+          remainingProductUnits: expectedRemaining,
+        });
+      },
+    );
+
+    it('update() rejects a cap below the persisted consumed counter and never saves', async () => {
+      const promo = makePromotion({
+        maxProductUnits: 50,
+        consumedProductUnits: 18,
+      });
+      const repo = makeRepo({
+        findById: jest.fn().mockResolvedValue(promo),
+        save: jest.fn().mockImplementation((p: Promotion) => p),
+      });
+
+      await expect(
+        capacityService(repo).update(
+          'promo-1',
+          updateDto({ maxProductUnits: 17 }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'PRODUCT_UNIT_CAPACITY_EXCEEDED',
+        message: 'consumedProductUnits cannot exceed maxProductUnits',
+      });
+
+      expect(repo.save.mock.calls.length).toBe(0);
     });
   });
 

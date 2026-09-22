@@ -120,6 +120,8 @@ export class PromotionsService extends BatchDeletableService {
       getDiscountPercent: dto.getDiscountPercent ?? null,
       buyTargetType: dto.buyTargetType as PromotionTargetType,
       getTargetType: dto.getTargetType as PromotionTargetType,
+      // Optional capacity: omitted/null = unlimited for every type.
+      maxProductUnits: dto.maxProductUnits ?? null,
     });
 
     // ── Attach relations ──
@@ -141,7 +143,11 @@ export class PromotionsService extends BatchDeletableService {
       day: day as DayOfWeek,
     }));
 
-    return this.repo.save(promotion);
+    // Same public shape as update/find; response sanitizes private keys.
+    const saved = await this.repo.save(promotion);
+    const response = saved.toResponse();
+    await this.enrichVariantTargetItems([response]);
+    return response;
   }
 
   // ==================== FindAll ====================
@@ -230,6 +236,9 @@ export class PromotionsService extends BatchDeletableService {
       mergedForValidation.getDiscountPercent ?? null;
     existing.buyTargetType = mergedForValidation.buyTargetType ?? null;
     existing.getTargetType = mergedForValidation.getTargetType ?? null;
+    // Cap: undefined preserves, null removes, a number replaces; the
+    // mutator re-validates against persisted consumed and never touches it.
+    existing.updateMaxProductUnits(mergedForValidation.maxProductUnits ?? null);
     existing.targetItems = targetItems;
     this.assertAdvancedSideTargets(existing.type, {
       buyTargetType: existing.buyTargetType,
@@ -732,6 +741,13 @@ export class PromotionsService extends BatchDeletableService {
         dto.getTargetType !== undefined
           ? (dto.getTargetType as PromotionTargetType)
           : existing.getTargetType,
+      // Capacity: undefined preserves the current cap, null removes it,
+      // a number replaces it; persisted consumed is always revalidated.
+      maxProductUnits:
+        dto.maxProductUnits !== undefined
+          ? dto.maxProductUnits
+          : existing.maxProductUnits,
+      consumedProductUnits: existing.consumedProductUnits,
     };
   }
 

@@ -11,6 +11,7 @@ import {
   IsDateString,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { MAX_PRODUCT_UNITS } from '../domain/promotion.entity';
 
 // ============================================================
 // Enum definitions (mirror domain types)
@@ -177,6 +178,21 @@ export class CreatePromotionDto {
   @ValidateNested({ each: true })
   @Type(() => GetTargetItemDto)
   getTargetItems?: GetTargetItemDto[];
+
+  // ── Capacity (all promotion types, optional) ──
+
+  /**
+   * Strict product-unit cap. Omit or send `null` for unlimited; when
+   * present as a number it must be an integer in
+   * `1..MAX_PRODUCT_UNITS`. `consumedProductUnits` is intentionally NOT
+   * a request field — the claim ledger owns it, and the global
+   * `forbidNonWhitelisted` pipe rejects any payload that tries to set it.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PRODUCT_UNITS)
+  maxProductUnits?: number | null;
 
   // ── Conditions ──
 

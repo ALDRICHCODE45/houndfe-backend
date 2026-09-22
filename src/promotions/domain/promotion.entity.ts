@@ -223,7 +223,7 @@ function validateDateRange(
 }
 
 /** PostgreSQL `INT` maximum — the largest cap Prisma can persist. */
-const MAX_PRODUCT_UNITS = 2_147_483_647;
+export const MAX_PRODUCT_UNITS = 2_147_483_647;
 
 /**
  * `maxProductUnits`: `null` or an integer in `1..2147483647` (PostgreSQL
@@ -461,6 +461,19 @@ export class Promotion {
   get remainingProductUnits(): number | null {
     if (this._maxProductUnits === null) return null;
     return this._maxProductUnits - this._consumedProductUnits;
+  }
+
+  /**
+   * Narrow CRUD mutator: replaces only the persisted cap. `null` removes
+   * it (unlimited). Re-validates against this entity's persisted
+   * `consumedProductUnits`, so an operator cannot shrink the cap below
+   * what has already been consumed. There is deliberately no consumed
+   * mutator — that counter is owned by the atomic claim ledger, and the
+   * repository's live-counter CAS is the final concurrency guard.
+   */
+  updateMaxProductUnits(maxProductUnits: number | null): void {
+    validateProductUnitCapacity(maxProductUnits, this._consumedProductUnits);
+    this._maxProductUnits = maxProductUnits;
   }
 
   // ============================================================
