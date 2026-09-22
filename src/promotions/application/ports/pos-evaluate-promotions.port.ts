@@ -246,6 +246,16 @@ export interface PosEvalManualCandidate {
   unitsNeeded: number;
 }
 
+/**
+ * pca-2a — deterministic benefited-product-unit demand for one selected
+ * promotion. Preview metadata only: consumers use it to reconcile promotion
+ * capacity counters; the engine never writes or reserves here.
+ */
+export interface PromotionCapacityDemand {
+  promotionId: string;
+  units: number;
+}
+
 export interface PosEvalResult {
   /** Best AUTO PRODUCT promo per eligible line; manual lines and order-level promos do NOT appear here. */
   lines: PosEvalLineResult[];
@@ -286,6 +296,24 @@ export interface PosEvalResult {
    *     `passesPromotionWideGates` upstream).
    */
   targetableManualPromotionIds: string[];
+  /**
+   * pca-2a — deterministic benefited-product-unit demand for every SELECTED
+   * promotion in this result, sorted by `promotionId` ascending. One entry
+   * per selected promotion; an id reached through several results is summed.
+   *
+   * Counting semantics (mirrors the final winners):
+   *   - per-unit PRODUCT_DISCOUNT result → full quantity of that discounted line;
+   *   - BUY_X_GET_Y / ADVANCED result → `discountedUnitCount` (rewarded GET
+   *     units only — never the BUY units);
+   *   - ORDER_DISCOUNT result → every item unit in the benefited order.
+   *
+   * Zero-unit entries are omitted. Preview metadata only: no counter writes
+   * or reservations happen in the engine. Unlimited promotions are NOT
+   * special-cased — they report demand too, so confirmed usage can count them
+   * later. A reward candidate the engine already omits (zero saving) emits no
+   * line result and therefore no demand.
+   */
+  promotionCapacityDemands: PromotionCapacityDemand[];
 }
 
 export interface IPosEvaluatePromotionsUseCase {

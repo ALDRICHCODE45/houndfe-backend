@@ -34,6 +34,7 @@ import type {
   PosEvalOrderResult,
   PosEvalResult,
   PosEvalManualCandidate,
+  PromotionCapacityDemand,
 } from './ports/pos-evaluate-promotions.port';
 
 // ============================================================
@@ -320,6 +321,64 @@ export function matchTargetTier(
     return 'BRAND';
   }
   return null;
+}
+
+/**
+ * pca-2a — pure helper for deterministic benefited-product-unit demand.
+ *
+ * Consumes the FINAL winners (after the PRODUCT_DISCOUNT/BXGY/ADVANCED
+ * per-line replacement passes and the final ORDER_DISCOUNT winner) and
+ * returns one `{ promotionId, units }` per selected promotion, sorted by
+ * `promotionId` ascending with a locale-independent `<`/`>` compare:
+ *
+ *   - per-unit result          → full quantity of the discounted line;
+ *   - BUY_X_GET_Y/ADVANCED     → `discountedUnitCount` (rewarded GET units);
+ *   - ORDER_DISCOUNT           → every item unit in the benefited order.
+ *
+ * All results are aggregated once per `promotionId` (summed when the same id
+ * appears through several results). Zero-unit entries are omitted. Preview
+ * metadata only — no counter writes or reservations.
+ *
+ * Assumption: `itemId` is unique per cart line (the POS engine keys line
+ * results by `itemId`), so a per-unit result resolves to exactly one line.
+ * A result whose `itemId` is not on the cart is defensively skipped.
+ */
+export function computePromotionCapacityDemands(
+  lines: ReadonlyArray<PosEvalLine>,
+  lineResults: ReadonlyArray<PosEvalLineResult>,
+  orderResult: PosEvalOrderResult | null,
+): PromotionCapacityDemand[] {
+  const unitsByPromotionId = new Map<string, number>();
+  const add = (promotionId: string, units: number): void => {
+    unitsByPromotionId.set(
+      promotionId,
+      (unitsByPromotionId.get(promotionId) ?? 0) + units,
+    );
+  };
+
+  for (const result of lineResults) {
+    if (result.kind === 'buy-x-get-y' || result.kind === 'advanced') {
+      // Rewarded GET units only — never the BUY units that unlocked them.
+      add(result.promotionId, result.discountedUnitCount);
+      continue;
+    }
+    // Per-unit PRODUCT_DISCOUNT result: the whole discounted line quantity.
+    const line = lines.find((l) => l.itemId === result.itemId);
+    if (line) add(result.promotionId, line.quantity);
+  }
+
+  if (orderResult !== null) {
+    const orderUnits = lines.reduce((sum, line) => sum + line.quantity, 0);
+    add(orderResult.promotionId, orderUnits);
+  }
+
+  return [...unitsByPromotionId.entries()]
+    .filter(([, units]) => units > 0)
+    .sort(([a], [b]) => {
+      if (a === b) return 0;
+      return a < b ? -1 : 1;
+    })
+    .map(([promotionId, units]) => ({ promotionId, units }));
 }
 
 const JS_DAY_OF_WEEK: ReadonlyArray<DayOfWeek> = [
@@ -642,6 +701,13 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       order: orderResult,
       availableManualPromotions,
       targetableManualPromotionIds,
+      // pca-2a — demand preview derived from the FINAL winners. Pure
+      // computation; no counter write or reservation happens here.
+      promotionCapacityDemands: computePromotionCapacityDemands(
+        input.lines,
+        lineResults,
+        orderResult,
+      ),
     };
   }
 
