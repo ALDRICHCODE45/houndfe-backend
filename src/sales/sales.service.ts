@@ -3053,6 +3053,12 @@ export class SalesService {
 
       await this.saleRepo.persistCancellation(canceledSale, refunds);
 
+      // pca-2d2 — return every capacity unit this sale claimed, in the same
+      // ambient transaction, regardless of the monetary refund amount. A
+      // restore rejection must reject the cancellation before the outbox and
+      // the idempotency-success stamp, so the typed error is not caught here.
+      await this.promotionUsageRepo.restoreForSale(saleId);
+
       const payload = buildResult(canceledSale, refundedCents);
 
       await this.outboxWriter.publish(

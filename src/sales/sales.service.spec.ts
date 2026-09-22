@@ -4213,6 +4213,143 @@ describe('SalesService', () => {
       );
     });
 
+    it('pca-2d2 — restores capacity after persistCancellation and before outbox + idempotency success with the exact sale id', async () => {
+      const sale = buildConfirmedSaleForCancel('sale-cancel-restore-order');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        id: sale.id,
+        folio: sale.folio ?? null,
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: sale.confirmedAt ?? null,
+        dueDate: null,
+        createdAt: new Date('2026-06-23T09:55:00.000Z'),
+        subtotalCents: 5000,
+        discountCents: 0,
+        totalCents: 5000,
+        paidCents: 4500,
+        debtCents: 500,
+        changeDueCents: 300,
+        paymentStatus: 'PARTIAL',
+        deliveryStatus: 'PENDING',
+        customer: { id: 'customer-1', name: 'Ana' },
+        cashier: { id: 'user-1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [
+          {
+            paymentId: 'payment-1',
+            method: 'cash',
+            amountCents: 4500,
+            tenderedCents: 4500,
+            changeCents: 0,
+            reference: null,
+            paidAt: new Date('2026-06-23T10:00:00.000Z'),
+            createdAt: new Date('2026-06-23T10:00:00.000Z'),
+            userId: 'user-1',
+            user: { id: 'user-1', name: 'Caja 1' },
+          },
+        ],
+      });
+
+      await service.cancelSale(sale.id, 'user-1', { reason: 'ORDER_ERROR' });
+
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toContainEqual([
+        sale.id,
+      ]);
+      const persistOrder =
+        saleRepo.persistCancellation.mock.invocationCallOrder[0];
+      const restoreOrder =
+        promotionUsageRepo.restoreForSale.mock.invocationCallOrder[0];
+      const publishOrder = outboxWriter.publish.mock.invocationCallOrder[0];
+      const markOrder =
+        saleRepo.markCancellationIdempotencySucceeded.mock
+          .invocationCallOrder[0];
+      expect(persistOrder).toBeLessThan(restoreOrder);
+      expect(restoreOrder).toBeLessThan(publishOrder);
+      expect(publishOrder).toBeLessThan(markOrder);
+    });
+
+    it('pca-2d2 — a rejected restore rejects the cancel transaction and suppresses outbox + idempotency success', async () => {
+      const sale = buildConfirmedSaleForCancel(
+        'sale-cancel-restore-reject',
+        'CREDIT',
+      );
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      promotionUsageRepo.restoreForSale.mockRejectedValue(
+        new BusinessRuleViolationError(
+          'PROMOTION_CAPACITY_RESTORE_COUNTER_MISMATCH',
+          'PROMOTION_CAPACITY_RESTORE_COUNTER_MISMATCH',
+        ),
+      );
+
+      await expect(
+        service.cancelSale(sale.id, 'user-1', { reason: 'ORDER_ERROR' }),
+      ).rejects.toMatchObject({
+        code: 'PROMOTION_CAPACITY_RESTORE_COUNTER_MISMATCH',
+      });
+
+      expect(saleRepo.persistCancellation.mock.calls).toHaveLength(1);
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toContainEqual([
+        sale.id,
+      ]);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+      expect(saleRepo.markCancellationIdempotencySucceeded.mock.calls).toEqual(
+        [],
+      );
+    });
+
+    it('pca-2d2 — never restores when the refund audit mismatches', async () => {
+      const sale = buildConfirmedSaleForCancel('sale-cancel-audit');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      saleRepo.findOneWithRelations.mockResolvedValue({
+        id: sale.id,
+        folio: sale.folio ?? null,
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: sale.confirmedAt ?? null,
+        dueDate: null,
+        createdAt: new Date('2026-06-23T09:55:00.000Z'),
+        subtotalCents: 5000,
+        discountCents: 0,
+        totalCents: 5000,
+        paidCents: 4500,
+        debtCents: 500,
+        changeDueCents: 300,
+        paymentStatus: 'PARTIAL',
+        deliveryStatus: 'PENDING',
+        customer: { id: 'customer-1', name: 'Ana' },
+        cashier: { id: 'user-1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        // 4000 audited < 4500 refunded -> SALE_REFUND_AUDIT_MISMATCH.
+        payments: [
+          {
+            paymentId: 'payment-1',
+            method: 'cash',
+            amountCents: 4000,
+            tenderedCents: 4000,
+            changeCents: 0,
+            reference: null,
+            paidAt: new Date('2026-06-23T10:00:00.000Z'),
+            createdAt: new Date('2026-06-23T10:00:00.000Z'),
+            userId: 'user-1',
+            user: { id: 'user-1', name: 'Caja 1' },
+          },
+        ],
+      });
+
+      await expect(
+        service.cancelSale(sale.id, 'user-1', { reason: 'ORDER_ERROR' }),
+      ).rejects.toThrow('SALE_REFUND_AUDIT_MISMATCH');
+
+      expect(saleRepo.persistCancellation.mock.calls).toEqual([]);
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
+      expect(outboxWriter.publish.mock.calls).toEqual([]);
+    });
+
     it('replays the stored cancellation result without duplicate side effects', async () => {
       saleRepo.acquireCancellationIdempotency.mockResolvedValueOnce({
         kind: 'replay',
@@ -4243,6 +4380,7 @@ describe('SalesService', () => {
       expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
       expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
 
@@ -4270,6 +4408,7 @@ describe('SalesService', () => {
       });
       expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
       expect(
         saleRepo.markCancellationIdempotencySucceeded,
@@ -4301,6 +4440,9 @@ describe('SalesService', () => {
         }),
         [],
       );
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toContainEqual([
+        sale.id,
+      ]);
       expect(outboxWriter.publish).toHaveBeenCalledWith(
         expect.anything(),
         'tenant-1',
@@ -4328,6 +4470,7 @@ describe('SalesService', () => {
 
       expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
 
@@ -4345,6 +4488,7 @@ describe('SalesService', () => {
 
       expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
 
@@ -4381,6 +4525,7 @@ describe('SalesService', () => {
 
       expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+      expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
     });
   });
 
@@ -11256,6 +11401,8 @@ describe('SalesService — settleRefund', () => {
 
   let saleRepo: ReturnType<typeof makeMockSaleRepo>;
   let service: SalesService;
+  // pca-2d2 — restore must stay out of the separate settlement flow.
+  let promotionUsageRepo: ReturnType<typeof makeMockPromotionUsageRepo>;
   let transactionDepth = 0;
   // Writes made while the tx callback was active, in call order.
   let txWriteLog: string[] = [];
@@ -11300,12 +11447,14 @@ describe('SalesService — settleRefund', () => {
     expect(saleRepo.settleRefund).not.toHaveBeenCalled();
     expect(saleRepo.markSettlementIdempotencySucceeded).not.toHaveBeenCalled();
     expect(saleRepo.releaseSettlementIdempotency).not.toHaveBeenCalled();
+    expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
   };
 
   beforeEach(() => {
     transactionDepth = 0;
     txWriteLog = [];
     saleRepo = makeMockSaleRepo();
+    promotionUsageRepo = makeMockPromotionUsageRepo();
     service = createService(
       saleRepo,
       makeMockProductsService(),
@@ -11316,6 +11465,11 @@ describe('SalesService — settleRefund', () => {
         getClient: jest.fn(() => ({}) as never),
       },
       makeMockSaleCommentRepo(),
+      // settleRefund never evaluates promotions or resolves payment methods;
+      // inline stubs stay contextually typed and avoid the shared `any` mocks.
+      { evaluate: jest.fn() },
+      { resolveActive: jest.fn(), listActive: jest.fn() },
+      promotionUsageRepo,
     );
 
     saleRepo.runInTransaction.mockImplementation(
@@ -11381,6 +11535,7 @@ describe('SalesService — settleRefund', () => {
     expect(result).toEqual(expectedResponse());
     expect(isRefundSettlementResponseDto(result)).toBe(true);
     expect(transactionDepth).toBe(0);
+    expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
   });
 
   it('normalizes an omitted reference to null without altering the hash input', async () => {
