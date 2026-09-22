@@ -467,6 +467,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     input: PosEvalInput,
     loadedCandidates: ReadonlyArray<Promotion>,
     capacityExcludedPromotionIds: ReadonlySet<string>,
+    /**
+     * pca-2b2 — internal mode. `false` makes this a nested availability
+     * simulation: both manual surface loops iterate an empty pool, so no
+     * nested pass can launch another simulation (recursion impossible).
+     */
+    computeManualAvailability = true,
   ): EvaluationPassOutcome {
     // Excluded promotions leave every pass as a whole — never partially applied.
     const candidates = loadedCandidates.filter(
@@ -562,6 +568,17 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       postLineSubtotalCents,
     );
 
+    // pca-2b2 — manual-surface inputs. Nested availability passes receive an
+    // empty pool (they must never compute the manual surface again). The
+    // opt-in retention list reads the FIXED loaded snapshot, not the
+    // capacity-filtered `candidates`, so a capacity-excluded opt-in is not
+    // pruned as "orphaned".
+    const manualCandidates: ReadonlyArray<Promotion> = computeManualAvailability
+      ? candidates
+      : [];
+    const targetableCandidates: ReadonlyArray<Promotion> =
+      computeManualAvailability ? loadedCandidates : [];
+
     // 5. availableManualPromotions — every eligible MANUAL promo the
     //    seller could opt-in to (not opted-in, not vetoed).
     //
@@ -584,7 +601,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     //      eligible    = maxMatchQty >= groupSize
     //      unitsNeeded = eligible ? 0 : (groupSize - maxMatchQty) // >=1
     const availableManualPromotions: PosEvalManualCandidate[] = [];
-    for (const promo of candidates) {
+    for (const promo of manualCandidates) {
       if (promo.method !== 'MANUAL') continue;
       if (!this.passesPromotionWideGates(promo, input)) continue;
       if (!this.isSupportedEngineType(promo)) continue;
@@ -647,6 +664,25 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
         if (!hasMatchingLine) continue;
       }
 
+      // pca-2b2 — capacity-correct manual availability. A capped MANUAL
+      // candidate is hidden ONLY when its EXACT selected-winner demand —
+      // simulated opted-in on this same fixed snapshot / exclusion set —
+      // exceeds its remaining units. The full matching footprint is NOT the
+      // demand: the simulation lets stronger competitors keep the lines they
+      // win, so a candidate that loses some matching lines still reports its
+      // true demand. Zero selected demand preserves prior availability;
+      // exact fit and unlimited candidates stay visible.
+      const remainingProductUnits = promo.remainingProductUnits;
+      if (remainingProductUnits !== null) {
+        const selectedDemand = this.computeManualCandidateSelectedDemand(
+          promo.id,
+          input,
+          loadedCandidates,
+          capacityExcludedPromotionIds,
+        );
+        if (selectedDemand > remainingProductUnits) continue;
+      }
+
       availableManualPromotions.push({
         id: promo.id,
         title: promo.title,
@@ -707,7 +743,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     //     invariant (vetoed ids are dropped by the `vetoedPromotionIds`
     //     branch above) keeps the corrupt-state guard.
     const targetableManualPromotionIds: string[] = [];
-    for (const promo of candidates) {
+    for (const promo of targetableCandidates) {
       if (promo.method !== 'MANUAL') continue;
       if (!input.optedInManualPromotionIds.includes(promo.id)) continue;
       if (input.vetoedPromotionIds.includes(promo.id)) continue;
@@ -778,6 +814,45 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       if (demand.units > remaining) overrunIds.push(demand.promotionId);
     }
     return overrunIds;
+  }
+
+  /**
+   * pca-2b2 — exact SELECTED-winner demand for a not-yet-opted MANUAL
+   * candidate, measured by simulating it as opted-in on the same fixed
+   * snapshot / exclusion set the current pass is using.
+   *
+   * The nested pass disables manual-availability computation
+   * (`computeManualAvailability=false`), so its manual surface loops iterate
+   * an empty pool and can never launch another simulation — recursion is
+   * impossible by construction.
+   *
+   * Returns `0` when the simulated candidate wins no winner (a stronger
+   * competitor takes every matching line); callers treat that as "no demand"
+   * and never hide on it. The full matching footprint is deliberately NOT
+   * used: it over-counts lines a stronger auto promotion actually wins.
+   */
+  private computeManualCandidateSelectedDemand(
+    promotionId: string,
+    input: PosEvalInput,
+    loadedCandidates: ReadonlyArray<Promotion>,
+    capacityExcludedPromotionIds: ReadonlySet<string>,
+  ): number {
+    const nestedPass = this.runEvaluationPass(
+      {
+        ...input,
+        optedInManualPromotionIds: [
+          ...input.optedInManualPromotionIds,
+          promotionId,
+        ],
+      },
+      loadedCandidates,
+      capacityExcludedPromotionIds,
+      false,
+    );
+    const demand = nestedPass.result.promotionCapacityDemands.find(
+      (entry) => entry.promotionId === promotionId,
+    );
+    return demand?.units ?? 0;
   }
 
   // ============================================================
