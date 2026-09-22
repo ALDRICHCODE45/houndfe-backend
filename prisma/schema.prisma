@@ -423,6 +423,8 @@ model Tenant {
   promotionPriceLists       PromotionPriceList[]
   promotionDaysOfWeek       PromotionDayOfWeek[]
   promotionUsages           PromotionUsage[]
+  // promotion-capacity-alerts / pca-3a1 — durable expiry-alert state rows.
+  promotionExpiryAlertStates PromotionExpiryAlertState[]
   employees                 Employee[]
   employeeSalaryHistory     EmployeeSalaryHistory[]
   employeePositionHistory   EmployeePositionHistory[]
@@ -1463,6 +1465,8 @@ model Promotion {
   quotationVetoes       QuotationPromotionVeto[]
   quotationOptIns       QuotationPromotionOptIn[]
   usages                PromotionUsage[]
+  // promotion-capacity-alerts / pca-3a1 — durable expiry-alert state rows.
+  expiryAlertStates     PromotionExpiryAlertState[]
 
   // Composite ownership target so `PromotionUsage` can FK on (tenantId, id)
   // and the database itself rejects a cross-tenant usage row.
@@ -1501,6 +1505,33 @@ model PromotionUsage {
   // Full-cancellation restore path: find the usage rows for a sale.
   @@index([tenantId, saleId])
   @@map("promotion_usages")
+}
+
+// Promotion expiry alert state (promotion-capacity-alerts / pca-3a1).
+// One durable row per (tenant, promotion, effective endDate fingerprint): an
+// A→B→A endDate change reuses the A row instead of inserting a second one, so
+// a given effective endDate can never re-alert after it was already sent. The
+// row owns the composite `(tenantId, promotionId)` FK introduced by pca-1a, so
+// the database rejects a cross-tenant state row. `alertEpoch` counts alert
+// cycles for the fingerprint and is DB-guarded to stay non-negative.
+model PromotionExpiryAlertState {
+  id                 String    @id @default(uuid())
+  tenantId           String
+  promotionId        String
+  endDateFingerprint String
+  alerted            Boolean   @default(false)
+  alertEpoch         Int       @default(0)
+  alertedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  promotion Promotion @relation(fields: [tenantId, promotionId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Fingerprint, not row id, is identity: A→B→A reuses the A row.
+  @@unique([tenantId, promotionId, endDateFingerprint], map: "promotion_expiry_alert_states_fingerprint_key")
+  @@index([tenantId])
+  @@map("promotion_expiry_alert_states")
 }
 
 model PromotionTargetItem {

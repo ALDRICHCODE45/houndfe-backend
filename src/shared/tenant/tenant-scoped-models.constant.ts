@@ -41,6 +41,11 @@ export const TENANT_SCOPED_MODELS = new Set([
   // without this entry the usage ledger would not auto-inject `tenantId` and
   // cross-tenant capacity rows could leak through TenantPrismaService.
   'PromotionUsage',
+  // Durable promotion expiry-alert state (promotion-capacity-alerts / pca-3a1).
+  // Same fail-open allowlist semantics: without this entry the state table
+  // would not auto-inject `tenantId`, so a cross-tenant alert row could be
+  // read or rewritten through TenantPrismaService.
+  'PromotionExpiryAlertState',
   'Role',
   'Employee',
   'EmployeeSalaryHistory',

@@ -111,3 +111,21 @@ describe('TENANT_SCOPED_MODELS — promotion-capacity-alerts registration (pca-1
     expect(occurrences).toEqual([...REQUIRED]);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — promotion-capacity-alerts registration (pca-3a1)', () => {
+  const REQUIRED = ['PromotionExpiryAlertState'];
+
+  it.each(REQUIRED)(
+    'registers %s so tenant-scoped expiry-alert reads inject where.tenantId',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+
+  it('contains PromotionExpiryAlertState exactly once', () => {
+    const occurrences = [...TENANT_SCOPED_MODELS].filter(
+      (model) => model === 'PromotionExpiryAlertState',
+    );
+    expect(occurrences).toEqual([...REQUIRED]);
+  });
+});
