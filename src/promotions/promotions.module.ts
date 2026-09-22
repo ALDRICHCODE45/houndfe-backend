@@ -29,15 +29,18 @@ import { POS_EVALUATE_PROMOTIONS_USE_CASE } from './application/ports/pos-evalua
 import {
   BatchDeleteModule,
   BatchDeleteOrchestrator,
-  BatchDeleteDto,
 } from '../shared/batch-delete';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import { OutboxModule } from '../shared/outbox/outbox.module';
 import type { BatchDeletableService } from '../shared/batch-delete/batch-delete.types';
 
 @Module({
   imports: [
     AuthModule, // Provides JwtAuthGuard, PermissionsGuard, CaslAbilityFactory
     BatchDeleteModule.forFeature(),
+    // Provides OutboxWriterService for the in-transaction near-capacity alert
+    // written by PrismaPromotionUsageRepository.claimForSale.
+    OutboxModule,
   ],
   controllers: [PromotionsController],
   providers: [

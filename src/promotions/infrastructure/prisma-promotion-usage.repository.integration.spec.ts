@@ -36,6 +36,7 @@ import type { ClsService } from 'nestjs-cls';
 import { randomUUID } from 'node:crypto';
 import { PrismaPromotionUsageRepository } from './prisma-promotion-usage.repository';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type { PromotionCapacityClaim } from '../domain/promotion-usage.repository';
@@ -51,6 +52,10 @@ const unavailable =
 const describeIfDb = unavailable ? describe.skip : describe;
 
 const PG_INT_MAX = 2_147_483_647;
+
+// `OutboxWriterService` is stateless (no fields), so one shared instance is
+// safe across every repository constructed by this spec.
+const outboxWriter = new OutboxWriterService();
 
 function makeCls(
   tenantId: string = BASELINE_TENANT_ID,
@@ -181,7 +186,7 @@ function tenantHarness(
   );
   return {
     tenantPrisma,
-    repository: new PrismaPromotionUsageRepository(tenantPrisma),
+    repository: new PrismaPromotionUsageRepository(tenantPrisma, outboxWriter),
   };
 }
 
@@ -204,7 +209,10 @@ describeIfDb(
         >[0],
         cls,
       );
-      repository = new PrismaPromotionUsageRepository(tenantPrisma);
+      repository = new PrismaPromotionUsageRepository(
+        tenantPrisma,
+        outboxWriter,
+      );
     });
 
     beforeEach(async () => {
@@ -323,7 +331,7 @@ describeIfDb(
         >[0],
         clsA as unknown as ClsService<TenantClsStore>,
       );
-      const repoA = new PrismaPromotionUsageRepository(tpA);
+      const repoA = new PrismaPromotionUsageRepository(tpA, outboxWriter);
       const clsB = makeCls();
       const tpB = new TenantPrismaService(
         prisma as unknown as ConstructorParameters<
@@ -331,7 +339,7 @@ describeIfDb(
         >[0],
         clsB as unknown as ClsService<TenantClsStore>,
       );
-      const repoB = new PrismaPromotionUsageRepository(tpB);
+      const repoB = new PrismaPromotionUsageRepository(tpB, outboxWriter);
 
       const [first, second] = await Promise.allSettled([
         tpA.runInTransaction(async () => {

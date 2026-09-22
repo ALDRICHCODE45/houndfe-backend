@@ -6,6 +6,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import {
   BusinessRuleViolationError,
   InvalidArgumentError,
@@ -19,7 +20,10 @@ const PG_INT_MAX = 2_147_483_647;
 
 @Injectable()
 export class PrismaPromotionUsageRepository implements IPromotionUsageRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaService,
+    private readonly outboxWriter: OutboxWriterService,
+  ) {}
 
   async claimForSale(
     saleId: string,
@@ -57,7 +61,9 @@ export class PrismaPromotionUsageRepository implements IPromotionUsageRepository
         );
         continue;
       }
-      const updated = await prisma.$executeRaw(Prisma.sql`
+      const updated = await prisma.$queryRaw<
+        Array<{ consumedProductUnits: number; maxProductUnits: number | null }>
+      >(Prisma.sql`
         UPDATE "promotions"
            SET "consumedProductUnits" = "consumedProductUnits" + ${units}, "updatedAt" = NOW()
          WHERE "id" = ${promotionId}
@@ -67,15 +73,64 @@ export class PrismaPromotionUsageRepository implements IPromotionUsageRepository
                  "maxProductUnits" IS NULL
                  OR "consumedProductUnits" <= "maxProductUnits" - ${units}
                )
+         RETURNING "consumedProductUnits", "maxProductUnits"
       `);
-      if (updated !== 1) {
+      if (updated.length !== 1) {
         throw new BusinessRuleViolationError(
           'Promotion capacity exceeded',
           'PROMOTION_CAPACITY_EXCEEDED',
           { saleId, promotionId, units },
         );
       }
+      await this.publishNearCapacityIfCrossed(
+        saleId,
+        tenantId,
+        promotionId,
+        units,
+        updated[0],
+        prisma,
+      );
     }
+  }
+
+  /**
+   * Emits `promotion.near_capacity.detected` only when the finite-cap counter
+   * crosses upward through 80%: strictly below before the increment and at or
+   * above it after (`previous*5 < max*4 && new*5 >= max*4`). The post-increment
+   * row comes from `UPDATE ... RETURNING`, so there is no second read, no
+   * rounding, and no float comparison. A publish failure propagates so the
+   * ambient transaction rolls back the ledger, counter, and outbox together.
+   */
+  private async publishNearCapacityIfCrossed(
+    saleId: string,
+    tenantId: string,
+    promotionId: string,
+    units: number,
+    row: { consumedProductUnits: number; maxProductUnits: number | null },
+    tx: ReturnType<TenantPrismaService['getClient']>,
+  ): Promise<void> {
+    const { consumedProductUnits: newConsumed, maxProductUnits: max } = row;
+    if (max === null) return;
+
+    const previousConsumed = newConsumed - units;
+    if (!(previousConsumed * 5 < max * 4 && newConsumed * 5 >= max * 4)) return;
+
+    await this.outboxWriter.publish(
+      tx,
+      tenantId,
+      'Promotion',
+      promotionId,
+      'promotion.near_capacity.detected',
+      {
+        tenantId,
+        promotionId,
+        saleId,
+        previousConsumedProductUnits: previousConsumed,
+        consumedProductUnits: newConsumed,
+        maxProductUnits: max,
+        occurredAt: new Date().toISOString(),
+      },
+    );
   }
 
   async restoreForSale(saleId: string): Promise<void> {
