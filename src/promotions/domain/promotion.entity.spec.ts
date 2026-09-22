@@ -615,6 +615,8 @@ describe('Promotion Entity', () => {
         getDiscountPercent: null,
         buyTargetType: null,
         getTargetType: null,
+        maxProductUnits: 25,
+        consumedProductUnits: 9,
         createdAt: now,
         updatedAt: now,
         targetItems: [],
@@ -628,6 +630,9 @@ describe('Promotion Entity', () => {
       expect(promo.type).toBe('PRODUCT_DISCOUNT');
       expect(promo.discountValue).toBe(5000);
       expect(promo.appliesTo).toBe('PRODUCTS');
+      expect(promo.maxProductUnits).toBe(25);
+      expect(promo.consumedProductUnits).toBe(9);
+      expect(promo.remainingProductUnits).toBe(16);
     });
 
     it('should preserve manuallyEnded=true from persistence and force ENDED even when dates are valid', () => {
@@ -700,15 +705,6 @@ describe('Promotion Entity', () => {
   // READ-TIME STATUS DERIVATION (the corrupt-row scenario)
   // ============================================================
   describe('getEffectiveStatus — read-time date derivation', () => {
-    const validBase = {
-      id: BASE_ID,
-      title: 'Window Promo',
-      type: 'ORDER_DISCOUNT' as const,
-      method: 'AUTOMATIC' as const,
-      discountType: 'PERCENTAGE' as const,
-      discountValue: 10,
-    };
-
     it('should return ACTIVE when today is inside [startDate, endDate] even if persisted status is ENDED (corrupt-row regression)', () => {
       const promo = Promotion.fromPersistence({
         id: BASE_ID,
@@ -1002,6 +998,98 @@ describe('Promotion Entity', () => {
       promo.recomputeStatus();
       expect(promo.status).toBe('ENDED');
       expect(promo.manuallyEnded).toBe(true);
+    });
+  });
+
+  describe('product-unit capacity', () => {
+    const validBase = {
+      id: BASE_ID,
+      title: 'Capacity Promo',
+      type: 'ORDER_DISCOUNT' as const,
+      method: 'AUTOMATIC' as const,
+      discountType: 'PERCENTAGE' as const,
+      discountValue: 10,
+    };
+
+    function captureError(fn: () => unknown): InvalidArgumentError {
+      try {
+        fn();
+      } catch (error) {
+        return error as InvalidArgumentError;
+      }
+      throw new Error('Expected the call to throw');
+    }
+
+    it('defaults to unlimited capacity with a zero consumed counter', () => {
+      const promo = Promotion.create(validBase);
+      expect(promo.maxProductUnits).toBeNull();
+      expect(promo.consumedProductUnits).toBe(0);
+      expect(promo.remainingProductUnits).toBeNull();
+    });
+
+    it('derives exact remainingProductUnits from the cap and consumed counter', () => {
+      const promo = Promotion.create({
+        ...validBase,
+        maxProductUnits: 50,
+        consumedProductUnits: 18,
+      });
+      expect(promo.maxProductUnits).toBe(50);
+      expect(promo.consumedProductUnits).toBe(18);
+      expect(promo.remainingProductUnits).toBe(32);
+      expect(promo.toResponse(new Date())).toMatchObject({
+        maxProductUnits: 50,
+        consumedProductUnits: 18,
+        remainingProductUnits: 32,
+      });
+    });
+
+    it.each([0, -5, 1.5, 2_147_483_648])(
+      'throws INVALID_MAX_PRODUCT_UNITS for maxProductUnits=%p',
+      (maxProductUnits) => {
+        expect(
+          captureError(() =>
+            Promotion.create({ ...validBase, maxProductUnits }),
+          ),
+        ).toMatchObject({
+          code: 'INVALID_MAX_PRODUCT_UNITS',
+          message:
+            'maxProductUnits must be an integer between 1 and 2147483647 or null',
+        });
+      },
+    );
+
+    it.each([-1, 0.5, 2_147_483_648])(
+      'throws INVALID_CONSUMED_PRODUCT_UNITS for consumedProductUnits=%p',
+      (consumedProductUnits) => {
+        expect(
+          captureError(() =>
+            Promotion.create({
+              ...validBase,
+              maxProductUnits: 50,
+              consumedProductUnits,
+            }),
+          ),
+        ).toMatchObject({
+          code: 'INVALID_CONSUMED_PRODUCT_UNITS',
+          message:
+            'consumedProductUnits must be an integer between 0 and 2147483647',
+        });
+      },
+    );
+
+    it('throws PRODUCT_UNIT_CAPACITY_EXCEEDED when consumed exceeds the cap', () => {
+      expect(
+        captureError(() =>
+          Promotion.create({
+            ...validBase,
+            maxProductUnits: 10,
+            consumedProductUnits: 11,
+          }),
+        ),
+      ).toMatchObject({
+        code: 'PRODUCT_UNIT_CAPACITY_EXCEEDED',
+        message: 'consumedProductUnits cannot exceed maxProductUnits',
+      });
     });
   });
 

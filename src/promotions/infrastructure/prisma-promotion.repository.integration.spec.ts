@@ -30,7 +30,10 @@ import {
 } from '../../../test/integration/reset-db';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { PrismaPromotionRepository } from './prisma-promotion.repository';
-import { Promotion } from '../domain/promotion.entity';
+import {
+  Promotion,
+  type CreatePromotionParams,
+} from '../domain/promotion.entity';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import type { ClsService } from 'nestjs-cls';
@@ -120,6 +123,63 @@ describeIfDb('PrismaPromotionRepository (Integration - Real DB)', () => {
         where: { id: promotion.id },
       });
       expect(persisted).not.toBeNull();
+    });
+  });
+
+  describe('save() - Product-unit capacity (real DB)', () => {
+    function probe(overrides: Partial<CreatePromotionParams> = {}): Promotion {
+      return Promotion.create({
+        id: crypto.randomUUID(),
+        title: 'Capacity Probe',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        ...overrides,
+      });
+    }
+
+    it('persists a nonzero consumed counter when creating a row that does not exist', async () => {
+      const saved = await repository.save(
+        probe({ maxProductUnits: 20, consumedProductUnits: 7 }),
+      );
+
+      const persisted = await prisma.promotion.findUniqueOrThrow({
+        where: { id: saved.id },
+      });
+      expect(saved.consumedProductUnits).toBe(7);
+      expect(persisted.maxProductUnits).toBe(20);
+      expect(persisted.consumedProductUnits).toBe(7);
+    });
+
+    it('rejects a stale re-cap snapshot and rolls back the whole transaction', async () => {
+      const seeded = probe({ maxProductUnits: 10, consumedProductUnits: 5 });
+      await repository.save(seeded);
+
+      // A concurrent capacity claim commits first (live 5 → 8).
+      await prisma.promotion.update({
+        where: { id: seeded.id },
+        data: { consumedProductUnits: 8 },
+      });
+
+      const stale = probe({
+        id: seeded.id,
+        title: 'Stale Rename',
+        maxProductUnits: 6,
+        consumedProductUnits: 5,
+      });
+
+      await expect(repository.save(stale)).rejects.toMatchObject({
+        code: 'PRODUCT_UNIT_CAPACITY_EXCEEDED',
+        message: 'consumedProductUnits cannot exceed maxProductUnits',
+      });
+
+      const persisted = await prisma.promotion.findUniqueOrThrow({
+        where: { id: seeded.id },
+      });
+      expect(persisted.maxProductUnits).toBe(10);
+      expect(persisted.consumedProductUnits).toBe(8);
+      expect(persisted.title).toBe('Capacity Probe');
     });
   });
 

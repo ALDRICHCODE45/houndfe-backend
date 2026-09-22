@@ -63,6 +63,10 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             getDiscountPercent: promotion.getDiscountPercent,
             buyTargetType: promotion.buyTargetType,
             getTargetType: promotion.getTargetType,
+            // Persist the entity counter (new entities carry 0) so a
+            // hydrated nonzero entity cannot fall back to a DB-default reset.
+            maxProductUnits: promotion.maxProductUnits,
+            consumedProductUnits: promotion.consumedProductUnits,
             tenantId,
           } as Prisma.PromotionUncheckedCreateInput,
           update: {
@@ -85,6 +89,26 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             updatedAt: new Date(),
           },
         });
+
+        // Re-cap after the upsert (same tx) against the LIVE counter.
+        const recapped = await tx.promotion.updateMany({
+          where: {
+            id: promotion.id,
+            ...(promotion.maxProductUnits === null
+              ? {}
+              : {
+                  consumedProductUnits: { lte: promotion.maxProductUnits },
+                }),
+          },
+          data: { maxProductUnits: promotion.maxProductUnits },
+        });
+
+        if (recapped.count !== 1) {
+          throw new InvalidArgumentError(
+            'consumedProductUnits cannot exceed maxProductUnits',
+            'PRODUCT_UNIT_CAPACITY_EXCEEDED',
+          );
+        }
 
         // Delete-then-create all join tables (deterministic replace)
         await tx.promotionTargetItem.deleteMany({
@@ -336,6 +360,10 @@ export class PrismaPromotionRepository implements IPromotionRepository {
       getDiscountPercent: data.getDiscountPercent,
       buyTargetType: data.buyTargetType,
       getTargetType: data.getTargetType,
+      // Map both capacity columns. Hydration is lenient inside
+      // `fromPersistence`, so a legacy/corrupt row stays readable.
+      maxProductUnits: data.maxProductUnits,
+      consumedProductUnits: data.consumedProductUnits,
       createdAt: data.createdAt,
       updatedAt: data.updatedAt,
       targetItems: (data.targetItems ?? []).map((ti) => ({

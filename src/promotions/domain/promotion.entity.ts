@@ -87,6 +87,12 @@ export interface PromotionProps {
   getDiscountPercent: number | null;
   buyTargetType: PromotionTargetType | null;
   getTargetType: PromotionTargetType | null;
+  /** Strict cap on total product units consumed by confirmed sales;
+   * `null` = unlimited. Optional so legacy fixtures keep hydrating. */
+  maxProductUnits?: number | null;
+  /** Durable consumed counter owned by the atomic capacity-claim ledger;
+   * never written through CRUD. Optional so legacy fixtures hydrate. */
+  consumedProductUnits?: number;
   createdAt: Date;
   updatedAt: Date;
   // Relations (populated from persistence)
@@ -117,6 +123,11 @@ export interface CreatePromotionParams {
   getDiscountPercent?: number | null;
   buyTargetType?: PromotionTargetType | null;
   getTargetType?: PromotionTargetType | null;
+  /** Strict cap; `null`/omitted = unlimited. */
+  maxProductUnits?: number | null;
+  /** Internal-only consumed counter (default 0); never sourced from HTTP.
+   * pca-1c uses it to validate updates against the persisted counter. */
+  consumedProductUnits?: number;
 }
 
 // ============================================================
@@ -211,6 +222,49 @@ function validateDateRange(
   }
 }
 
+/** PostgreSQL `INT` maximum — the largest cap Prisma can persist. */
+const MAX_PRODUCT_UNITS = 2_147_483_647;
+
+/**
+ * `maxProductUnits`: `null` or an integer in `1..2147483647` (PostgreSQL
+ * `INT`). `consumedProductUnits`: integer `0..2147483647`, never > cap.
+ * `create()` validates; `fromPersistence()` stays lenient.
+ */
+function validateProductUnitCapacity(
+  maxProductUnits: number | null,
+  consumedProductUnits: number,
+): void {
+  if (
+    maxProductUnits !== null &&
+    (!Number.isInteger(maxProductUnits) ||
+      maxProductUnits < 1 ||
+      maxProductUnits > MAX_PRODUCT_UNITS)
+  ) {
+    throw new InvalidArgumentError(
+      `maxProductUnits must be an integer between 1 and ${MAX_PRODUCT_UNITS} or null`,
+      'INVALID_MAX_PRODUCT_UNITS',
+    );
+  }
+
+  if (
+    !Number.isInteger(consumedProductUnits) ||
+    consumedProductUnits < 0 ||
+    consumedProductUnits > MAX_PRODUCT_UNITS
+  ) {
+    throw new InvalidArgumentError(
+      `consumedProductUnits must be an integer between 0 and ${MAX_PRODUCT_UNITS}`,
+      'INVALID_CONSUMED_PRODUCT_UNITS',
+    );
+  }
+
+  if (maxProductUnits !== null && consumedProductUnits > maxProductUnits) {
+    throw new InvalidArgumentError(
+      'consumedProductUnits cannot exceed maxProductUnits',
+      'PRODUCT_UNIT_CAPACITY_EXCEEDED',
+    );
+  }
+}
+
 /**
  * Derive status from dates alone. Used as a write-through hint for the
  * `status` column and as a building block for `getEffectiveStatus()`.
@@ -256,6 +310,9 @@ export class Promotion {
   public getDiscountPercent: number | null;
   public buyTargetType: PromotionTargetType | null;
   public getTargetType: PromotionTargetType | null;
+  /** Read-only capacity state; only the claim ledger mutates consumed. */
+  private _maxProductUnits: number | null;
+  private _consumedProductUnits: number;
   public readonly createdAt: Date;
   public updatedAt: Date;
   public targetItems: PromotionTargetItemData[];
@@ -282,6 +339,8 @@ export class Promotion {
     this.getDiscountPercent = props.getDiscountPercent;
     this.buyTargetType = props.buyTargetType;
     this.getTargetType = props.getTargetType;
+    this._maxProductUnits = props.maxProductUnits ?? null;
+    this._consumedProductUnits = props.consumedProductUnits ?? 0;
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
     this.targetItems = props.targetItems;
@@ -309,6 +368,12 @@ export class Promotion {
     // Type-specific validation
     validateByType(params);
 
+    // Capacity is orthogonal to the promotion type: every type can opt
+    // into a product-unit cap. `consumedProductUnits` is internal-only.
+    const maxProductUnits = params.maxProductUnits ?? null;
+    const consumedProductUnits = params.consumedProductUnits ?? 0;
+    validateProductUnitCapacity(maxProductUnits, consumedProductUnits);
+
     const now = new Date();
     const manuallyEnded = params.manuallyEnded ?? false;
     return new Promotion({
@@ -333,6 +398,8 @@ export class Promotion {
       getDiscountPercent: params.getDiscountPercent ?? null,
       buyTargetType: params.buyTargetType ?? null,
       getTargetType: params.getTargetType ?? null,
+      maxProductUnits,
+      consumedProductUnits,
       createdAt: now,
       updatedAt: now,
       targetItems: [],
@@ -351,6 +418,11 @@ export class Promotion {
       // Default the manual flag to false so legacy callers / tests that
       // construct PromotionProps without the new field keep working.
       manuallyEnded: data.manuallyEnded ?? false,
+      // Capacity hydration is intentionally lenient (no validation): the
+      // durable row is the source of truth and a corrupt counter must not
+      // make the whole entity unreadable.
+      maxProductUnits: data.maxProductUnits ?? null,
+      consumedProductUnits: data.consumedProductUnits ?? 0,
       createdAt: new Date(data.createdAt),
       updatedAt: new Date(data.updatedAt),
       startDate: data.startDate ? new Date(data.startDate) : null,
@@ -375,6 +447,20 @@ export class Promotion {
     if (this.startDate && this.startDate > now) return 'SCHEDULED';
     if (this.endDate && this.endDate < now) return 'ENDED';
     return 'ACTIVE';
+  }
+
+  // Read-only accessors; remaining is null when unlimited, else max - consumed.
+  get maxProductUnits(): number | null {
+    return this._maxProductUnits;
+  }
+
+  get consumedProductUnits(): number {
+    return this._consumedProductUnits;
+  }
+
+  get remainingProductUnits(): number | null {
+    if (this._maxProductUnits === null) return null;
+    return this._maxProductUnits - this._consumedProductUnits;
   }
 
   // ============================================================
@@ -453,6 +539,9 @@ export class Promotion {
       getDiscountPercent: this.getDiscountPercent,
       buyTargetType: this.buyTargetType,
       getTargetType: this.getTargetType,
+      maxProductUnits: this.maxProductUnits,
+      consumedProductUnits: this.consumedProductUnits,
+      remainingProductUnits: this.remainingProductUnits,
       targetItems: this.targetItems,
       customers: this.customers,
       priceLists: this.priceLists,

@@ -4,6 +4,13 @@ import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.serv
 type PrismaRepoMock = {
   promotion: {
     findMany: jest.Mock<Promise<unknown[]>, [Record<string, unknown>]>;
+    findUnique: jest.Mock<Promise<unknown>, [Record<string, unknown>]>;
+    findUniqueOrThrow: jest.Mock<Promise<unknown>, [Record<string, unknown>]>;
+    upsert: jest.Mock<Promise<unknown>, [Record<string, unknown>]>;
+    updateMany: jest.Mock<
+      Promise<{ count: number }>,
+      [Record<string, unknown>]
+    >;
     count: jest.Mock<Promise<number>, [Record<string, unknown>]>;
     delete: jest.Mock<Promise<void>, [{ where: { id: string } }]>;
     deleteMany: jest.Mock<
@@ -24,6 +31,18 @@ function makePrisma(): PrismaRepoMock {
       findMany: jest
         .fn<Promise<unknown[]>, [Record<string, unknown>]>()
         .mockResolvedValue([]),
+      findUnique: jest
+        .fn<Promise<unknown>, [Record<string, unknown>]>()
+        .mockResolvedValue(null),
+      findUniqueOrThrow: jest
+        .fn<Promise<unknown>, [Record<string, unknown>]>()
+        .mockResolvedValue(undefined),
+      upsert: jest
+        .fn<Promise<unknown>, [Record<string, unknown>]>()
+        .mockResolvedValue(undefined),
+      updateMany: jest
+        .fn<Promise<{ count: number }>, [Record<string, unknown>]>()
+        .mockResolvedValue({ count: 1 }),
       count: jest
         .fn<Promise<number>, [Record<string, unknown>]>()
         .mockResolvedValue(0),
@@ -42,17 +61,53 @@ function makePrisma(): PrismaRepoMock {
   };
 }
 
-describe('PrismaPromotionRepository', () => {
-  function makeTenantPrismaMock() {
-    const client = makePrisma();
-    const tenantPrisma: Pick<TenantPrismaService, 'getClient'> & {
-      client: PrismaRepoMock;
-    } = {
-      getClient: jest.fn().mockReturnValue(client),
-      client,
-    };
+/** Prisma promotion row (with relations); unlimited by default. */
+function makePromotionRow(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const timestamp = new Date('2024-01-01T00:00:00.000Z');
+  return {
+    id: 'promo-1',
+    title: 'Persisted Promo',
+    type: 'ORDER_DISCOUNT',
+    method: 'AUTOMATIC',
+    status: 'ACTIVE',
+    manuallyEnded: false,
+    startDate: null,
+    endDate: null,
+    customerScope: 'ALL',
+    discountType: 'PERCENTAGE',
+    discountValue: 10,
+    minPurchaseAmountCents: null,
+    appliesTo: null,
+    buyQuantity: null,
+    getQuantity: null,
+    getDiscountPercent: null,
+    buyTargetType: null,
+    getTargetType: null,
+    maxProductUnits: null,
+    consumedProductUnits: 0,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    tenantId: 'tenant-1',
+    ...overrides,
+  };
+}
 
-    return tenantPrisma;
+type TenantPrismaMock = TenantPrismaService & {
+  getClient: jest.Mock;
+  getTenantId: jest.Mock;
+  client: PrismaRepoMock;
+};
+
+describe('PrismaPromotionRepository', () => {
+  function makeTenantPrismaMock(): TenantPrismaMock {
+    const client = makePrisma();
+    return {
+      getClient: jest.fn().mockReturnValue(client),
+      getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      client,
+    } as unknown as TenantPrismaMock;
   }
 
   describe('findAll()', () => {
@@ -189,6 +244,48 @@ describe('PrismaPromotionRepository', () => {
       await repo.deleteMany(['x']);
 
       expect(tenantPrisma.getClient).toHaveBeenCalled();
+    });
+  });
+
+  describe('product-unit capacity mapping', () => {
+    function makeRepoWithSave(row: Record<string, unknown>) {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      prisma.$transaction.mockImplementation(
+        (callback: (tx: PrismaRepoMock) => Promise<unknown>) =>
+          callback(prisma),
+      );
+      prisma.promotion.findUnique.mockResolvedValue(row);
+      prisma.promotion.findUniqueOrThrow.mockResolvedValue(row);
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+      return { repo, prisma };
+    }
+
+    it('persists the cap through a guarded updateMany and never overwrites consumed', async () => {
+      const { repo, prisma } = makeRepoWithSave(
+        makePromotionRow({ maxProductUnits: 30, consumedProductUnits: 7 }),
+      );
+      const promotion = (await repo.findById('promo-1'))!;
+
+      await repo.save(promotion);
+
+      const upsertArgs = prisma.promotion.upsert.mock.calls[0][0];
+      expect(upsertArgs.create).toMatchObject({
+        maxProductUnits: 30,
+        consumedProductUnits: 7,
+      });
+      expect(upsertArgs.update).not.toHaveProperty('consumedProductUnits');
+      expect(upsertArgs.update).not.toHaveProperty('maxProductUnits');
+
+      expect(prisma.promotion.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'promo-1',
+          consumedProductUnits: { lte: 30 },
+        },
+        data: { maxProductUnits: 30 },
+      });
     });
   });
 });
