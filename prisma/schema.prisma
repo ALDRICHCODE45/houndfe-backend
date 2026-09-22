@@ -274,6 +274,10 @@ enum NotificationActionKey {
   LOW_STOCK
   TIME_OFF_REQUESTED
   DELIVERY_NEXT_STOP
+  // promotion-capacity-alerts / pca-3a. Frontend groups these under
+  // `Promociones`; both stay disabled until a tenant opts in (no seed rows).
+  PROMOTION_EXPIRING
+  PROMOTION_NEAR_CAPACITY
 }
 
 // ============================================================================

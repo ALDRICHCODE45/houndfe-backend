@@ -55,3 +55,31 @@ describe('NotificationActionKey — TS union vs Prisma enum (delivery-routes / W
     expect(NotificationActionKey.DELIVERY_NEXT_STOP).toBe('DELIVERY_NEXT_STOP');
   });
 });
+
+/**
+ * promotion-capacity-alerts / pca-3a (action registry) — both new flat action
+ * keys must exist in BOTH sources of truth. The subset assertion above already
+ * fails when the domain registry and the Prisma enum drift apart, so these
+ * checks only pin the two new keys.
+ */
+describe('NotificationActionKey — promotion action registry (pca-3a)', () => {
+  const PROMOTION_ALERT_KEYS = [
+    'PROMOTION_EXPIRING',
+    'PROMOTION_NEAR_CAPACITY',
+  ] as const;
+
+  it.each(PROMOTION_ALERT_KEYS)(
+    'Given the domain TS union, when introspected, then it includes %s',
+    (key) => {
+      const domainValues: readonly DomainActionKey[] = NOTIFICATION_ACTION_KEYS;
+      expect(domainValues).toContain(key);
+    },
+  );
+
+  it.each(PROMOTION_ALERT_KEYS)(
+    'Given the Prisma runtime enum, when introspected, then it includes %s',
+    (key) => {
+      expect(Object.values(NotificationActionKey)).toContain(key);
+    },
+  );
+});

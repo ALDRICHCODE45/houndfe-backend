@@ -1,0 +1,15 @@
+-- promotion-capacity-alerts / pca-3a — register PROMOTION_NEAR_CAPACITY in the
+-- NotificationActionKey enum.
+--
+-- Standalone ALTER TYPE ADD VALUE, mirroring
+-- 20260827032835_add_delivery_next_stop_action. ADD VALUE cannot share a
+-- statement batch with other DDL/DML, so this migration MUST stay as a
+-- single, atomic statement — nothing before or after.
+--
+-- Rollback: PostgreSQL cannot remove an enum value in place, so there is no
+-- automatic down-migration for this file. Removing 'PROMOTION_NEAR_CAPACITY'
+-- would require recreating the type and every dependent column. The value is
+-- therefore intentionally left in place if this migration is reverted. No
+-- rows are seeded here, so an unused value stays inert: a tenant only ever
+-- enables the action through PUT /notification-config.
+ALTER TYPE "NotificationActionKey" ADD VALUE IF NOT EXISTS 'PROMOTION_NEAR_CAPACITY';

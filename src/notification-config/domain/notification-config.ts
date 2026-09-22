@@ -8,16 +8,25 @@
  * outside `NOTIFICATION_ACTION_KEYS` with `UNKNOWN_ACTION_KEY` (HTTP 400).
  * delivery-routes / WU1 adds `DELIVERY_NEXT_STOP` (next-stop arriving-soon
  * email from the route check-in pipeline).
+ *
+ * promotion-capacity-alerts / pca-3a (action registry) adds the two flat
+ * promotion alert actions. Both are ordinary enum members — the `Promociones`
+ * grouping is frontend-only — and no rows are seeded, so both stay disabled
+ * until a tenant opts in through `replace()`.
  */
 export type NotificationActionKey =
   | 'LOW_STOCK'
   | 'TIME_OFF_REQUESTED'
-  | 'DELIVERY_NEXT_STOP';
+  | 'DELIVERY_NEXT_STOP'
+  | 'PROMOTION_EXPIRING'
+  | 'PROMOTION_NEAR_CAPACITY';
 
 export const NOTIFICATION_ACTION_KEYS: readonly NotificationActionKey[] = [
   'LOW_STOCK',
   'TIME_OFF_REQUESTED',
   'DELIVERY_NEXT_STOP',
+  'PROMOTION_EXPIRING',
+  'PROMOTION_NEAR_CAPACITY',
 ] as const;
 
 export interface NotificationConfigView {
