@@ -200,7 +200,8 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         category: { select: { id: true, name: true } },
         brand: { select: { name: true } },
         images: {
-          where: { isMain: true, variantId: null },
+          where: { variantId: null },
+          orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
           take: 1,
           select: { url: true },
         },
@@ -418,7 +419,8 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         category: { select: { id: true, name: true } },
         brand: { select: { name: true } },
         images: {
-          where: { isMain: true, variantId: null },
+          where: { variantId: null },
+          orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
           take: 1,
           select: { url: true },
         },

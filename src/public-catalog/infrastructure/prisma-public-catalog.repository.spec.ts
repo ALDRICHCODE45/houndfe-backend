@@ -2,6 +2,7 @@ import { PrismaPublicCatalogRepository } from './prisma-public-catalog.repositor
 import type { PrismaService } from '../../shared/prisma/prisma.service';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ProductWithIncludes } from '../application/mappers/public-product.mapper';
+import type { ResolvedPublicCatalogContext } from '../application/ports/public-catalog.repository';
 
 function makeProduct(
   id: string,
@@ -1220,5 +1221,93 @@ describe('F3.WU9 slice 8 listPublicProducts transport-only projection', () => {
       stockPresentationParticipants: [],
     });
     expect(result.items[0]).not.toHaveProperty('stockPresentation');
+  });
+});
+
+interface CardImageQuery {
+  include?: {
+    images?: {
+      where?: Record<string, unknown>;
+      orderBy?: Record<string, unknown>[];
+      take?: number;
+      select?: Record<string, unknown>;
+    };
+  };
+}
+
+/**
+ * Public-catalog card image fallback — the two list projections must select
+ * the same product-level image the detail projection already selects: a main
+ * product image wins, otherwise the lowest `sortOrder` product-level image,
+ * and a variant image (`variantId != null`) never fills a card.
+ */
+describe('public catalog card image fallback (list projections)', () => {
+  const EXPECTED_IMAGES_SELECTOR = {
+    where: { variantId: null },
+    orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+    take: 1,
+    select: { url: true },
+  };
+
+  const CONTEXT: ResolvedPublicCatalogContext = {
+    tenantId: 'tenant-1',
+    tenantSlug: 'ctx-tenant',
+    globalPriceListId: 'gpl-A',
+    name: 'Lista',
+    isCatalogDefault: false,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS',
+      catalogStockPresentationDefaultCustomQty: null,
+    },
+  };
+
+  let findMany: jest.Mock<Promise<unknown[]>, [CardImageQuery]>;
+
+  const buildRepo = () =>
+    new PrismaPublicCatalogRepository(
+      {
+        category: { findMany: jest.fn().mockResolvedValue([]) },
+      } as unknown as PrismaService,
+      {
+        getClient: () => ({
+          product: {
+            findMany,
+            count: jest.fn().mockResolvedValue(0),
+            groupBy: jest.fn().mockResolvedValue([]),
+          },
+        }),
+      } as unknown as TenantPrismaService,
+    );
+
+  beforeEach(() => {
+    findMany = jest
+      .fn<Promise<unknown[]>, [CardImageQuery]>()
+      .mockResolvedValue([]);
+  });
+
+  it('findProducts projects a main product image first, then the lowest sortOrder, never a variant image', async () => {
+    await buildRepo().findProducts({
+      sort: 'relevance',
+      page: 1,
+      limit: 20,
+    });
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(findMany.mock.calls[0][0].include?.images).toEqual(
+      EXPECTED_IMAGES_SELECTOR,
+    );
+  });
+
+  it('listPublicProducts projects the same product-level card image selector', async () => {
+    await buildRepo().listPublicProducts({
+      tenantId: 'tenant-1',
+      context: CONTEXT,
+      filters: { sort: 'relevance', page: 1, limit: 20 },
+    });
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(findMany.mock.calls[0][0].include?.images).toEqual(
+      EXPECTED_IMAGES_SELECTOR,
+    );
   });
 });
