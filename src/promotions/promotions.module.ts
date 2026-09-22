@@ -20,6 +20,8 @@ import { PromotionsController } from './promotions.controller';
 import { PromotionsService } from './promotions.service';
 import { PrismaPromotionRepository } from './infrastructure/prisma-promotion.repository';
 import { PROMOTION_REPOSITORY } from './domain/promotion.repository';
+import { PrismaPromotionUsageRepository } from './infrastructure/prisma-promotion-usage.repository';
+import { PROMOTION_USAGE_REPOSITORY } from './domain/promotion-usage.repository';
 import { EvaluateCartPromotionsUseCase } from './application/evaluate-cart-promotions.use-case';
 import { EVALUATE_CART_PROMOTIONS_USE_CASE } from './application/ports/evaluate-cart-promotions.port';
 import { PosEvaluatePromotionsUseCase } from './application/pos-evaluate-promotions.use-case';
@@ -45,6 +47,10 @@ import type { BatchDeletableService } from '../shared/batch-delete/batch-delete.
     {
       provide: PROMOTION_REPOSITORY,
       useClass: PrismaPromotionRepository,
+    },
+    {
+      provide: PROMOTION_USAGE_REPOSITORY,
+      useClass: PrismaPromotionUsageRepository,
     },
     {
       // Build the orchestrator subclass that wires TenantPrismaService
@@ -77,6 +83,7 @@ import type { BatchDeletableService } from '../shared/batch-delete/batch-delete.
     PromotionsService,
     EVALUATE_CART_PROMOTIONS_USE_CASE,
     POS_EVALUATE_PROMOTIONS_USE_CASE,
+    PROMOTION_USAGE_REPOSITORY,
   ],
 })
 export class PromotionsModule {}
