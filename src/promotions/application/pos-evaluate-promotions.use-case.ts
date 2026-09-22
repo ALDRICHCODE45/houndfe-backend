@@ -381,6 +381,16 @@ export function computePromotionCapacityDemands(
     .map(([promotionId, units]) => ({ promotionId, units }));
 }
 
+/**
+ * pca-2b1 — locale-independent ascending string compare. Deliberately NOT
+ * `String.prototype.localeCompare`: the emitted exclusion list must order
+ * identically on every host / locale.
+ */
+function comparePromotionIdsAsc(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 const JS_DAY_OF_WEEK: ReadonlyArray<DayOfWeek> = [
   'SUNDAY', // 0
   'MONDAY', // 1
@@ -413,6 +423,12 @@ interface PerLineCandidate {
   tier: 'VARIANT' | 'PRODUCT' | 'CATEGORY' | 'BRAND';
 }
 
+/** pca-2b1 — one pass: the selection plus remaining-capacity lookup (`null` = unlimited). */
+interface EvaluationPassOutcome {
+  result: PosEvalResult;
+  remainingProductUnitsById: Map<string, number | null>;
+}
+
 @Injectable()
 export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCase {
   constructor(
@@ -421,13 +437,45 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
   ) {}
 
   async evaluate(input: PosEvalInput): Promise<PosEvalResult> {
-    // 1. Load candidates once. Do NOT filter by method — MANUAL promos
-    //    must be available for opt-in and for ranking when opted-in.
-    const { data: candidates } = await this.promotionRepository.findAll({
+    // 1. Load the ACTIVE candidate snapshot ONCE. Do NOT filter by method —
+    //    MANUAL promos must be available for opt-in and for ranking when opted-in.
+    const { data: loadedCandidates } = await this.promotionRepository.findAll({
       page: 1,
       limit: 500,
       status: 'ACTIVE',
     });
+
+    // pca-2b1 — deterministic capacity fallback over the fixed snapshot: each
+    // retry re-runs the whole selection pass from clean state with the
+    // accumulated capacity-excluded ids removed. Termination: a pass can only
+    // overrun on a not-yet-excluded promotion, so every iteration adds at least
+    // one id and the loop is bounded by `loadedCandidates.length`.
+    const capacityExcludedPromotionIds = new Set<string>();
+    for (;;) {
+      const pass = this.runEvaluationPass(
+        input,
+        loadedCandidates,
+        capacityExcludedPromotionIds,
+      );
+      const overrunIds = this.findCapacityOverrunIds(pass);
+      if (overrunIds.length === 0) return pass.result;
+      for (const id of overrunIds) capacityExcludedPromotionIds.add(id);
+    }
+  }
+
+  private runEvaluationPass(
+    input: PosEvalInput,
+    loadedCandidates: ReadonlyArray<Promotion>,
+    capacityExcludedPromotionIds: ReadonlySet<string>,
+  ): EvaluationPassOutcome {
+    // Excluded promotions leave every pass as a whole — never partially applied.
+    const candidates = loadedCandidates.filter(
+      (promo) => !capacityExcludedPromotionIds.has(promo.id),
+    );
+    const remainingProductUnitsById = new Map<string, number | null>();
+    for (const promo of candidates) {
+      remainingProductUnitsById.set(promo.id, promo.remainingProductUnits);
+    }
 
     // 2. Pre-promo subtotal (pre-ANY-promo: pre-line-discount AND pre-order).
     //    Used by ORDER_DISCOUNT eligibility (minPurchaseAmountCents).
@@ -697,18 +745,39 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     }
 
     return {
-      lines: lineResults,
-      order: orderResult,
-      availableManualPromotions,
-      targetableManualPromotionIds,
-      // pca-2a — demand preview derived from the FINAL winners. Pure
-      // computation; no counter write or reservation happens here.
-      promotionCapacityDemands: computePromotionCapacityDemands(
-        input.lines,
-        lineResults,
-        orderResult,
-      ),
+      result: {
+        lines: lineResults,
+        order: orderResult,
+        availableManualPromotions,
+        targetableManualPromotionIds,
+        // pca-2a — demand preview derived from the FINAL winners. Pure
+        // computation; no counter write or reservation happens here.
+        promotionCapacityDemands: computePromotionCapacityDemands(
+          input.lines,
+          lineResults,
+          orderResult,
+        ),
+        // pca-2b1 — accumulated excluded ids; empty on the first clean pass.
+        capacityExcludedPromotionIds: [...capacityExcludedPromotionIds].sort(
+          comparePromotionIdsAsc,
+        ),
+      },
+      remainingProductUnitsById,
     };
+  }
+
+  /**
+   * pca-2b1 — selected promotions whose demand exceeds remaining capacity.
+   * Unlimited (`null`) never overruns; an exact fit is allowed.
+   */
+  private findCapacityOverrunIds(pass: EvaluationPassOutcome): string[] {
+    const overrunIds: string[] = [];
+    for (const demand of pass.result.promotionCapacityDemands) {
+      const remaining = pass.remainingProductUnitsById.get(demand.promotionId);
+      if (remaining == null) continue;
+      if (demand.units > remaining) overrunIds.push(demand.promotionId);
+    }
+    return overrunIds;
   }
 
   // ============================================================

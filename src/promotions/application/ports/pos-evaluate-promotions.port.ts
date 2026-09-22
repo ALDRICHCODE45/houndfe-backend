@@ -314,6 +314,16 @@ export interface PosEvalResult {
    * line result and therefore no demand.
    */
   promotionCapacityDemands: PromotionCapacityDemand[];
+  /**
+   * pca-2b1 — unique union of promotion ids that were SELECTED in an
+   * evaluation pass but excluded because that pass's demand exceeded the
+   * promotion's `remainingProductUnits`. The engine re-runs the whole
+   * selection pass from clean state after each exclusion, so the list only
+   * ever names promotions that actually won a pass and were found
+   * insufficient — never every capped candidate. Sorted ascending with a
+   * locale-independent comparison. Empty when no selected promotion overran.
+   */
+  capacityExcludedPromotionIds: string[];
 }
 
 export interface IPosEvaluatePromotionsUseCase {
