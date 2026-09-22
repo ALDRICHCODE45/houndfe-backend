@@ -418,6 +418,7 @@ model Tenant {
   promotionCustomers        PromotionCustomer[]
   promotionPriceLists       PromotionPriceList[]
   promotionDaysOfWeek       PromotionDayOfWeek[]
+  promotionUsages           PromotionUsage[]
   employees                 Employee[]
   employeeSalaryHistory     EmployeeSalaryHistory[]
   employeePositionHistory   EmployeePositionHistory[]
@@ -897,6 +898,7 @@ model Sale {
   appliedPromotion   SalePromotionApplied?
   promotionVetoes    SalePromotionVeto[]
   promotionOptIns    SalePromotionOptIn[]
+  promotionUsages    PromotionUsage[]
       // delivery-routes / WU1 — back-relation for DeliveryRouteStop.sale.
       // onDelete: Restrict on the FK side (design ADR-2) so a Sale cannot be
       // hard-deleted while referenced by any route stop.
@@ -904,6 +906,9 @@ model Sale {
 
       @@index([tenantId])
   @@index([tenantId, createdAt])
+  // Composite ownership target so `PromotionUsage` can FK on (tenantId, id)
+  // and the database itself rejects a cross-tenant usage row.
+  @@unique([tenantId, id])
   @@index([tenantId, status, confirmedAt(sort: Desc)], map: "idx_sales_tenant_status_confirmedAt_desc")
   @@index([userId, status])
   @@index([sellerUserId])
@@ -1428,6 +1433,15 @@ model Promotion {
   getTargetType PromotionTargetType?
   tenantId      String
 
+  // PRODUCT-UNIT CAPACITY (promotion-capacity-alerts / pca-1a)
+  // Optional soft cap on the total product units consumed by confirmed sales.
+  // `null` means unlimited (the opt-in default). `consumedProductUnits` is the
+  // durable counter reconciled by the confirmation/cancellation ledger
+  // (`PromotionUsage`). Existing promotions start at 0; capacity is never
+  // retroactively derived from historical sales.
+  maxProductUnits      Int?
+  consumedProductUnits Int  @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1444,12 +1458,45 @@ model Promotion {
   appliedQuotationItems QuotationItem[]
   quotationVetoes       QuotationPromotionVeto[]
   quotationOptIns       QuotationPromotionOptIn[]
+  usages                PromotionUsage[]
 
+  // Composite ownership target so `PromotionUsage` can FK on (tenantId, id)
+  // and the database itself rejects a cross-tenant usage row.
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([type])
   @@index([method])
   @@index([status, startDate, endDate])
   @@map("promotions")
+}
+
+// Product-unit capacity ledger (promotion-capacity-alerts / pca-1a).
+// One aggregate row per (tenant, sale, promotion): a confirmed sale writes
+// exactly one usage row for the units it consumed, and a full cancellation
+// stamps `restoredAt` instead of deleting, so the counter and the audit trail
+// stay reconcilable. `units` is always positive; the row is tenant-scoped and
+// owns `(tenantId, id)` composite FKs to both `Sale` and `Promotion` so the
+// database rejects any cross-tenant pairing.
+model PromotionUsage {
+  id          String    @id @default(uuid())
+  tenantId    String
+  saleId      String
+  promotionId String
+  units       Int
+  restoredAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sale      Sale      @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  promotion Promotion @relation(fields: [tenantId, promotionId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  // One aggregate usage row per sale/promotion pair.
+  @@unique([tenantId, saleId, promotionId])
+  // Capacity reconciliation: sum active units per promotion.
+  @@index([tenantId, promotionId, restoredAt])
+  // Full-cancellation restore path: find the usage rows for a sale.
+  @@index([tenantId, saleId])
+  @@map("promotion_usages")
 }
 
 model PromotionTargetItem {

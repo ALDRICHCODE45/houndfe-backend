@@ -36,6 +36,11 @@ export const TENANT_SCOPED_MODELS = new Set([
   'PromotionCustomer',
   'PromotionPriceList',
   'PromotionDayOfWeek',
+  // Product-unit capacity ledger (promotion-capacity-alerts / pca-1a).
+  // Same fail-open allowlist semantics as the rest of the promotion family:
+  // without this entry the usage ledger would not auto-inject `tenantId` and
+  // cross-tenant capacity rows could leak through TenantPrismaService.
+  'PromotionUsage',
   'Role',
   'Employee',
   'EmployeeSalaryHistory',

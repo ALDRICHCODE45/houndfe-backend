@@ -93,3 +93,21 @@ describe('TENANT_SCOPED_MODELS — partial-refund-settlements registration (rfs-
     expect(occurrences).toEqual([...REQUIRED]);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — promotion-capacity-alerts registration (pca-1a)', () => {
+  const REQUIRED = ['PromotionUsage'] as const;
+
+  it.each(REQUIRED)(
+    'registers %s so tenant-scoped usage reads inject where.tenantId',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+
+  it('contains PromotionUsage exactly once', () => {
+    const occurrences = [...TENANT_SCOPED_MODELS].filter(
+      (model) => model === 'PromotionUsage',
+    );
+    expect(occurrences).toEqual([...REQUIRED]);
+  });
+});
