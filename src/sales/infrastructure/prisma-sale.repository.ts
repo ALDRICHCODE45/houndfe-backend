@@ -1161,6 +1161,9 @@ export class PrismaSaleRepository implements ISaleRepository {
     channel?: 'POS' | 'ONLINE';
     register?: string;
     deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
+    shippingChargeCents?: number;
+    shippingApprovalId?: string;
+    shippingQuoteId?: string | null;
     customerId?: string | null;
     sellerUserId?: string | null;
     dueDate?: Date | null;
@@ -1212,6 +1215,12 @@ export class PrismaSaleRepository implements ISaleRepository {
     if (input.register !== undefined) data.register = input.register;
     if (input.deliveryStatus !== undefined)
       data.deliveryStatus = input.deliveryStatus;
+    if (input.shippingChargeCents !== undefined)
+      data.shippingChargeCents = input.shippingChargeCents;
+    if (input.shippingApprovalId !== undefined)
+      data.shippingApprovalId = input.shippingApprovalId;
+    if (input.shippingQuoteId !== undefined)
+      data.shippingQuoteId = input.shippingQuoteId;
     if ('customerId' in input) data.customerId = input.customerId ?? null;
     if ('sellerUserId' in input) data.sellerUserId = input.sellerUserId ?? null;
     if ('dueDate' in input) data.dueDate = input.dueDate ?? null;
@@ -1307,10 +1316,31 @@ export class PrismaSaleRepository implements ISaleRepository {
       }
     }
 
-    await prisma.sale.updateMany({
-      where: { id: input.saleId, tenantId },
-      data,
-    });
+    try {
+      await prisma.sale.updateMany({
+        where: { id: input.saleId, tenantId },
+        data,
+      });
+    } catch (error) {
+      const target =
+        error instanceof Prisma.PrismaClientKnownRequestError
+          ? error.meta?.target
+          : undefined;
+      if (
+        input.shippingApprovalId &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002' &&
+        (Array.isArray(target)
+          ? target.includes('shippingApprovalId')
+          : target === 'sales_tenant_shipping_approval_unique')
+      ) {
+        throw new BusinessRuleViolationError(
+          'Shipping approval was already used',
+          'SHIPPING_APPROVAL_ALREADY_USED',
+        );
+      }
+      throw error;
+    }
 
     const createdPayments = await Promise.all(
       input.payments.map((payment) =>

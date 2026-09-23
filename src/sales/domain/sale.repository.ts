@@ -341,6 +341,10 @@ export interface ISaleRepository {
     channel?: 'POS' | 'ONLINE';
     register?: string;
     deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
+    /** Bot-only shipment snapshot; omitted for legacy and POS charges. */
+    shippingChargeCents?: number;
+    shippingApprovalId?: string;
+    shippingQuoteId?: string | null;
     customerId?: string | null;
     sellerUserId?: string | null;
     dueDate?: Date | null;
