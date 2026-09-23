@@ -1,14 +1,17 @@
-# Resumen de Ventas por Sucursal — Guía Frontend
+# Analítica de Ventas por Sucursal — Guía Frontend
 
-> Handoff backend → frontend para implementar el primer resumen analítico de una sucursal.
+> Handoff backend → frontend para el resumen analítico de una sucursal y su serie diaria.
 >
 > **Fuente de verdad**: las secciones de contrato y semántica contable son obligatorias. La propuesta de UI, nombres de componentes y estrategia de cache son recomendaciones adaptables al frontend.
 >
-> **Estado del backend**: implementado y mergeado en el `main` local de `houndfe-backend`. Confirmar publicación y deploy antes de integrar contra un ambiente remoto.
+> **Estado del backend — leer antes de integrar**:
+>
+> - `GET /analytics/sales/summary` — contrato existente y desplegado. Es la autoridad para las líneas del período (ventas, cobrado, deuda, reembolsos liquidados y obligaciones pendientes). Ver secciones 1 a 13.
+> - `GET /analytics/sales/timeseries` — existe **solo** en la rama local `feat/branch-sales-timeseries`, commit `08c9822e…`. **No está mergeado, publicado ni desplegado.** El frontend debe confirmar la entrega de esa rama antes de usarlo contra un ambiente remoto. Ver sección 14.
 
 ## 1. Resultado esperado
 
-El frontend debe consultar un único endpoint y mostrar ocho métricas agregadas de la sucursal autenticada:
+Para el resumen del período, el frontend consulta un único endpoint y muestra ocho métricas agregadas de la sucursal autenticada:
 
 - Ventas brutas.
 - Ventas netas.
@@ -189,8 +192,10 @@ También quedan fuera del contrato:
 - IVA/impuestos desglosados.
 - Moneda en el payload.
 - Comparación con un período anterior.
-- Agrupación diaria, semanal o mensual.
+- Agrupación semanal o mensual.
 - Selección de múltiples sucursales.
+
+El desglose **diario** de ventas no forma parte de este resumen: vive en su propio endpoint y contrato (sección 14), separado para no mezclar la cohorte del período con la serie por día.
 
 Si el producto necesita alguno de esos datos, debe ampliarse el contrato backend; no derivarlos desde esta respuesta.
 
@@ -409,3 +414,224 @@ La integración frontend está lista cuando:
 - Las líneas de ventas, deuda, reembolsos liquidados y obligaciones pendientes permanecen separadas.
 - Los estados de carga, vacío, error y refetch están cubiertos.
 - Los tests frontend prueban autorización, rango y render de métricas.
+
+## 14. Serie diaria de ventas (timeseries)
+
+> **Estado**: existe solo en la rama local `feat/branch-sales-timeseries` (commit `08c9822e…`). **No está mergeado, publicado ni desplegado.** Confirmar la entrega de esa rama antes de apuntar a un ambiente remoto. Las secciones 1 a 13 describen el contrato desplegado del resumen.
+
+`GET /analytics/sales/timeseries` devuelve la misma cohorte de ventas confirmadas que el resumen, pero desglosada en **un punto ordenado por día calendario local**, rellenando con ceros los días sin ventas. Sirve para la gráfica diaria; **no** reemplaza al resumen.
+
+### 14.1 Contrato HTTP
+
+| Propiedad         | Valor                         |
+| ----------------- | ----------------------------- |
+| Método            | `GET`                         |
+| Path              | `/analytics/sales/timeseries` |
+| Respuesta exitosa | `200 OK`                      |
+| Autenticación     | JWT Bearer                    |
+| Tenant            | Derivado del JWT              |
+| Permiso exacto    | `read:Analytics`              |
+
+La cadena de seguridad es idéntica al resumen: `JwtAuthGuard` → `TenantContextGuard` → `PermissionsGuard`. Aplica el mismo comportamiento de `401` (JWT ausente/inválido) y `403` (falta de `read:Analytics`).
+
+### 14.2 Query params
+
+| Param      | Tipo     | Obligatorio | Regla                                               |
+| ---------- | -------- | ----------- | --------------------------------------------------- |
+| `from`     | `string` | Sí          | Fecha local exacta `YYYY-MM-DD`; inclusiva          |
+| `to`       | `string` | Sí          | Fecha local exacta `YYYY-MM-DD`; exclusiva          |
+| `interval` | `string` | No          | Default `day`; **`day` es el único valor aceptado** |
+
+Hereda exactamente las reglas del resumen (secciones 3.2 y 3.3):
+
+- Zona horaria `America/Mexico_City`; rango semiabierto `[from, to)`.
+- `to` estrictamente posterior a `from`; máximo 366 días calendario.
+- Fechas imposibles, timestamps, año `0000`, rangos iguales o invertidos y parámetros desconocidos se rechazan con `400`.
+- No se aceptan `tenantId`, `branchId`, `userId`, `currency`, `paymentMethod` ni ningún otro parámetro.
+- No hay `week` ni `month`: solo `day`. Cualquier otro `interval` da `400`.
+
+### 14.3 Respuesta `200 OK`
+
+```ts
+export type BranchSalesTimeseriesInterval = 'day';
+
+export interface BranchSalesTimeseriesPoint {
+  date: string; // día local YYYY-MM-DD
+  grossSalesCents: number;
+  netSalesCents: number;
+  collectedCents: number;
+  outstandingDebtCents: number;
+  saleCount: number;
+  averageTicketCents: number;
+}
+
+export interface BranchSalesTimeseriesResponse {
+  timeZone: 'America/Mexico_City';
+  from: string;
+  to: string;
+  interval: BranchSalesTimeseriesInterval;
+  points: BranchSalesTimeseriesPoint[];
+}
+
+export interface BranchSalesTimeseriesQuery {
+  from: string;
+  to: string;
+  interval?: BranchSalesTimeseriesInterval;
+}
+```
+
+Claves exactas: el cuerpo trae **solo** `timeZone`, `from`, `to`, `interval` y `points`; cada punto trae **solo** `date`, `grossSalesCents`, `netSalesCents`, `collectedCents`, `outstandingDebtCents`, `saleCount` y `averageTicketCents`.
+
+Ejemplo:
+
+```http
+GET /analytics/sales/timeseries?from=2026-01-01&to=2026-01-04&interval=day
+Authorization: Bearer <jwt>
+```
+
+```json
+{
+  "timeZone": "America/Mexico_City",
+  "from": "2026-01-01",
+  "to": "2026-01-04",
+  "interval": "day",
+  "points": [
+    {
+      "date": "2026-01-01",
+      "grossSalesCents": 125000,
+      "netSalesCents": 110000,
+      "collectedCents": 80000,
+      "outstandingDebtCents": 30000,
+      "saleCount": 4,
+      "averageTicketCents": 27500
+    },
+    {
+      "date": "2026-01-02",
+      "grossSalesCents": 0,
+      "netSalesCents": 0,
+      "collectedCents": 0,
+      "outstandingDebtCents": 0,
+      "saleCount": 0,
+      "averageTicketCents": 0
+    },
+    {
+      "date": "2026-01-03",
+      "grossSalesCents": 90000,
+      "netSalesCents": 88000,
+      "collectedCents": 88000,
+      "outstandingDebtCents": 0,
+      "saleCount": 2,
+      "averageTicketCents": 44000
+    }
+  ]
+}
+```
+
+### 14.4 Semántica de los puntos
+
+| Regla           | Detalle                                                                                                                                                                                           |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Orden           | Ascendente por `date`, desde el inicio local de `from` hasta el último día anterior a `to`                                                                                                        |
+| Cardinalidad    | **Exactamente un punto por día calendario local** en `[from, to)`; nunca se omiten días                                                                                                           |
+| Zero fill       | Los días sin ventas aparecen con todas las métricas en `0`                                                                                                                                        |
+| Promedio diario | `averageTicketCents = 0` si `saleCount = 0`; si no, `Math.round(netSalesCents / saleCount)`                                                                                                       |
+| Cohorte         | Ventas `CONFIRMED` del tenant, agrupadas por `confirmedAt` dentro de cada día local                                                                                                               |
+| Métricas        | `grossSalesCents` = suma de `subtotalCents`; `netSalesCents` = suma de `totalCents`; `collectedCents` = suma de `paidCents`; `outstandingDebtCents` = suma de `debtCents`; `saleCount` = cantidad |
+
+`collectedCents` y `outstandingDebtCents` son el **estado actual** de las ventas confirmadas en ese día; no son flujos agrupados por la fecha del pago.
+
+### 14.5 Qué NO trae la serie
+
+La serie es deliberadamente más chica que el resumen. **No incluye**:
+
+- Reembolsos liquidados ni obligaciones de reembolso pendientes.
+- Moneda ni desglose por método de pago.
+- Comparación con períodos anteriores.
+- Totales de caja ni flujo de cobros por fecha de pago.
+
+Para las líneas de reembolsos del período, **el resumen sigue siendo la autoridad**. La serie solo desglosa la cohorte de ventas por día.
+
+### 14.6 No sintetizar la gráfica en el frontend
+
+El frontend **debe** llamar al endpoint de timeseries para dibujar la serie. No vale:
+
+- Repartir el total del resumen entre los días, ni en partes iguales ni ponderadas.
+- Sumar páginas de ventas, pagos o métodos de pago para reconstruir el día.
+- Derivar puntos desde `summary` o desde cualquier otro endpoint.
+
+Esas reconstrucciones reproducen exactamente los errores de redondeo y de cohorte que el backend ya resolvió.
+
+### 14.7 Fechas y etiquetas
+
+`from` y `to` siguen siendo **strings** `YYYY-MM-DD`; no conviertas los límites con `new Date('YYYY-MM-DD')`, porque se interpreta como medianoche UTC y desplaza el día. Para las etiquetas del eje X usa directamente el campo `date` de cada punto: ya es el día calendario local.
+
+### 14.8 Integración sugerida con TanStack Vue Query
+
+```ts
+import { computed, type Ref } from 'vue';
+import { useQuery } from '@tanstack/vue-query';
+
+export function useBranchSalesTimeseries(from: Ref<string>, to: Ref<string>) {
+  const enabled = computed(
+    () =>
+      /^\d{4}-\d{2}-\d{2}$/.test(from.value) &&
+      /^\d{4}-\d{2}-\d{2}$/.test(to.value) &&
+      from.value < to.value,
+  );
+
+  return useQuery({
+    queryKey: computed(() => [
+      'analytics',
+      'sales-timeseries',
+      { from: from.value, to: to.value, interval: 'day' },
+    ]),
+    enabled,
+    staleTime: 30_000,
+    queryFn: async (): Promise<BranchSalesTimeseriesResponse> => {
+      const response = await api.get('/analytics/sales/timeseries', {
+        params: { from: from.value, to: to.value, interval: 'day' },
+      });
+      return response.data ?? response;
+    },
+  });
+}
+```
+
+La query key incluye rango e `interval`. Invalida o refresca la serie cuando ocurra una mutación que cambie ventas confirmadas del rango (confirmación de venta, cobro, cambio de período). El backend es la autoridad de validación de fechas y del tope de 366 días.
+
+### 14.9 Estados de UI, permisos y errores
+
+| Situación              | Comportamiento                                                                                                          |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Con `read:Analytics`   | Mostrar la gráfica y llamar a la serie                                                                                  |
+| Sin `read:Analytics`   | Ocultar el punto de entrada; `403` si llega por URL                                                                     |
+| JWT ausente o expirado | Flujo global de `401`/re-login                                                                                          |
+| `400`                  | Rango inválido o `interval` no soportado: marcar el formulario                                                          |
+| `500`                  | Estado de error con acción de reintento                                                                                 |
+| Loading inicial        | Skeleton de filtros y gráfica                                                                                           |
+| Refetch                | Conservar puntos previos con indicador discreto                                                                         |
+| Empty                  | Todos los puntos en cero: “Sin ventas en el rango” (la serie siempre trae puntos; el vacío es de datos, no de longitud) |
+| Data                   | Render punto a punto desde `points`                                                                                     |
+
+No decidas el estado vacío por la longitud de `points`: siempre hay un punto por día. El vacío depende de que todas las métricas de todos los puntos sean `0`.
+
+### 14.10 Checklist de integración
+
+- [ ] Definir `BranchSalesTimeseriesResponse`, `BranchSalesTimeseriesPoint` y `BranchSalesTimeseriesQuery`.
+- [ ] Crear el método API para `GET /analytics/sales/timeseries`.
+- [ ] Mantener `from`/`to` como strings; enviar `interval` omitido o `day`.
+- [ ] Crear query key con rango e interval.
+- [ ] Renderizar usando `points[].date` como etiqueta local, sin `Date`.
+- [ ] Dibujar la gráfica llamando al endpoint; sin síntesis desde resumen, ventas o pagos.
+- [ ] Mostrar empty solo cuando todos los puntos están en cero.
+- [ ] Cubrir `read:Analytics`, `401`/`403`, loading/refetch/error.
+- [ ] Leer los reembolsos del período desde el resumen, no desde la serie.
+
+### 14.11 Definition of done (timeseries)
+
+- La serie se consume del endpoint; nunca se sintetiza.
+- La cantidad de `points` equivale a los días locales de `[from, to)`, con los días vacíos en cero.
+- `averageTicketCents` coincide con el backend, incluido el caso `saleCount = 0`.
+- Las fechas no se desplazan por parseo UTC ni por la zona del navegador.
+- Reembolsos y moneda no se mezclan con la serie; el resumen sigue siendo la autoridad de período.
+- Existe cobertura de autorización, rango, `interval` inválido, empty y render.
