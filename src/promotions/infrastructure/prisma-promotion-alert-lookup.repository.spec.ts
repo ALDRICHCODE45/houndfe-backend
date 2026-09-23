@@ -19,6 +19,14 @@
  *      title assertions; a mock returning whole rows would hide that
  *      regression.
  *
+ * pca-3c4a adds a SECOND method to the same port: `findFreshExpiryTitle`.
+ * The expiration email (`pca-3c4b`) must not render a title for a promotion
+ * whose effective end date changed, was manually ended, has not started, or
+ * already expired AFTER the atomic claim hashed `endDateFingerprint`. Both
+ * facts — the title and the freshness evidence — must come from ONE
+ * tenant-qualified row read: a boolean freshness read followed by a second
+ * title lookup would reopen the edit race this method exists to close.
+ *
  * Scope note: this proves source-level, in-memory behavior only. No
  * PostgreSQL row-level filtering, HTTP path, Inngest runtime, or real
  * email delivery is exercised or claimed here.
@@ -40,6 +48,10 @@ type PromotionRow = {
   tenantId: string;
   title: string;
   consumedProductUnits: number;
+  // pca-3c4a freshness evidence for `findFreshExpiryTitle`.
+  endDate: Date | null;
+  startDate: Date | null;
+  manuallyEnded: boolean;
 };
 
 type PromotionFindFirstArgs = {
@@ -84,10 +96,24 @@ function createPrismaDouble(rows: readonly PromotionRow[]) {
     (args: PromotionFindFirstArgs): Promise<unknown> =>
       Promise.resolve(resolveRow(rows, args)),
   );
+  // Present so a boolean/existence "freshness" read cannot hide behind an
+  // untyped partial double: the freshness contract must be satisfied by the
+  // ONE projection-driven `findFirst`, never a `count` plus a second lookup.
+  const count = jest.fn((): Promise<number> => Promise.resolve(rows.length));
 
-  const prisma = { promotion: { findFirst } } as unknown as PrismaService;
+  const prisma = {
+    promotion: { findFirst, count },
+  } as unknown as PrismaService;
 
-  return { prisma, findFirst };
+  return { prisma, findFirst, count };
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Absolute UTC instant `offsetMs` from "now", the way a stored row carries it. */
+function instant(offsetMs: number): Date {
+  return new Date(Date.now() + offsetMs);
 }
 
 function promotionRow(overrides: Partial<PromotionRow> = {}): PromotionRow {
@@ -96,6 +122,9 @@ function promotionRow(overrides: Partial<PromotionRow> = {}): PromotionRow {
     tenantId: TENANT_ID,
     title: TITLE,
     consumedProductUnits: 0,
+    endDate: instant(3 * DAY_MS),
+    startDate: null,
+    manuallyEnded: false,
     ...overrides,
   };
 }
@@ -194,5 +223,301 @@ describe('PromotionsModule — inert lookup registration (pca-3b4a)', () => {
       useClass: PrismaPromotionAlertLookupRepository,
     });
     expect(exports).toContain(PROMOTION_ALERT_LOOKUP);
+  });
+});
+
+/**
+ * pca-3c4a — one-read freshness gate for the expiration email.
+ *
+ * `findFreshExpiryTitle` must resolve the title AND prove the title still
+ * belongs to the alerted end date from the SAME row read. Every case below
+ * pairs a title that WOULD resolve with the single freshness predicate that
+ * must nullify it, so a dropped predicate cannot pass silently.
+ */
+describe('PrismaPromotionAlertLookupRepository.findFreshExpiryTitle', () => {
+  it('reads the row once with an explicitly tenant-qualified where and an exact title+freshness projection', async () => {
+    const endDate = instant(3 * DAY_MS);
+    const { prisma, findFirst, count } = createPrismaDouble([
+      promotionRow({ endDate }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await repository.findFreshExpiryTitle({
+      tenantId: TENANT_ID,
+      promotionId: PROMOTION_ID,
+      endDateFingerprint: endDate.toISOString(),
+    });
+
+    // Structural: exactly ONE tenant-qualified read, and the projection is
+    // exactly the freshness evidence plus the title — no relation hydration.
+    expect(findFirst).toHaveBeenCalledTimes(1);
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { id: PROMOTION_ID, tenantId: TENANT_ID },
+      select: {
+        title: true,
+        endDate: true,
+        startDate: true,
+        manuallyEnded: true,
+      },
+    });
+    // Anti-shape: no boolean/existence read exists anywhere in this method.
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it('resolves the title when the live endDate fingerprint matches and the promotion is started, live, and not manually ended', async () => {
+    const endDate = instant(2 * DAY_MS);
+    const { prisma } = createPrismaDouble([
+      promotionRow({ endDate, startDate: instant(-1 * DAY_MS) }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBe(TITLE);
+  });
+
+  it('resolves the title for a starts-immediately promotion (startDate null)', async () => {
+    const endDate = instant(2 * DAY_MS);
+    const { prisma } = createPrismaDouble([
+      promotionRow({ endDate, startDate: null }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBe(TITLE);
+  });
+
+  it('does NOT apply the claim-time 7-day window: a far-future matching end date still resolves', async () => {
+    // The window belongs to claim time. Send time only cares that the row is
+    // not expired and still carries the alerted end date.
+    const endDate = instant(30 * DAY_MS);
+    const { prisma } = createPrismaDouble([promotionRow({ endDate })]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBe(TITLE);
+  });
+
+  it('returns null when the live end date no longer matches the alerted fingerprint', async () => {
+    // Same promotion, edited end date (A -> B) after the alert was claimed for A.
+    const { prisma } = createPrismaDouble([
+      promotionRow({ endDate: instant(4 * DAY_MS) }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: instant(5 * DAY_MS).toISOString(),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the promotion was manually ended after the alert was claimed', async () => {
+    const endDate = instant(3 * DAY_MS);
+    const { prisma } = createPrismaDouble([
+      promotionRow({ endDate, manuallyEnded: true }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the promotion has not started yet', async () => {
+    const endDate = instant(3 * DAY_MS);
+    const { prisma } = createPrismaDouble([
+      promotionRow({ endDate, startDate: instant(1 * HOUR_MS) }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the promotion already expired', async () => {
+    const endDate = instant(-1 * HOUR_MS);
+    const { prisma } = createPrismaDouble([
+      promotionRow({ endDate, startDate: instant(-2 * DAY_MS) }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the promotion has no end date', async () => {
+    const { prisma } = createPrismaDouble([promotionRow({ endDate: null })]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: instant(3 * DAY_MS).toISOString(),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the promotion id does not exist', async () => {
+    const endDate = instant(3 * DAY_MS);
+    const { prisma } = createPrismaDouble([promotionRow({ endDate })]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: 'promotion-missing',
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null for a promotion owned by another tenant, even with a matching fingerprint', async () => {
+    const endDate = instant(3 * DAY_MS);
+    const { prisma } = createPrismaDouble([
+      promotionRow({ tenantId: OTHER_TENANT_ID, endDate }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("selects the calling tenant's fresh row when the same promotion id exists in two tenants", async () => {
+    const foreignEndDate = instant(6 * DAY_MS);
+    const endDate = instant(3 * DAY_MS);
+    const { prisma } = createPrismaDouble([
+      promotionRow({
+        tenantId: OTHER_TENANT_ID,
+        title: 'Verano 50% off',
+        endDate: foreignEndDate,
+      }),
+      promotionRow({ endDate }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findFreshExpiryTitle({
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: endDate.toISOString(),
+      }),
+    ).resolves.toBe(TITLE);
+  });
+
+  it.each([
+    ['blank', ''],
+    ['whitespace-only', '   '],
+  ])(
+    'returns null for a %s title even when the row is otherwise fresh',
+    async (_label, title) => {
+      const endDate = instant(3 * DAY_MS);
+      const { prisma } = createPrismaDouble([promotionRow({ endDate, title })]);
+      const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+      await expect(
+        repository.findFreshExpiryTitle({
+          tenantId: TENANT_ID,
+          promotionId: PROMOTION_ID,
+          endDateFingerprint: endDate.toISOString(),
+        }),
+      ).resolves.toBeNull();
+    },
+  );
+
+  it.each([
+    [
+      'tenantId',
+      {
+        tenantId: '',
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: '2026-01-01T00:00:00.000Z',
+      },
+    ],
+    [
+      'promotionId',
+      {
+        tenantId: TENANT_ID,
+        promotionId: '',
+        endDateFingerprint: '2026-01-01T00:00:00.000Z',
+      },
+    ],
+    [
+      'endDateFingerprint',
+      {
+        tenantId: TENANT_ID,
+        promotionId: PROMOTION_ID,
+        endDateFingerprint: '',
+      },
+    ],
+  ] as const)(
+    'short-circuits an empty %s without querying Prisma',
+    async (_field, input) => {
+      const { prisma, findFirst } = createPrismaDouble([promotionRow()]);
+      const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+      await expect(repository.findFreshExpiryTitle(input)).resolves.toBeNull();
+      expect(findFirst).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('PrismaPromotionAlertLookupRepository.findTitle — pca-3b4a preservation', () => {
+  it('still uses the title-only projection and resolves a title regardless of freshness', async () => {
+    // The near-capacity email (`pca-3b4b`) is not end-date sensitive: its
+    // contract must survive the pca-3c4a addition untouched.
+    const { prisma, findFirst } = createPrismaDouble([
+      promotionRow({
+        endDate: instant(-2 * DAY_MS),
+        startDate: instant(-3 * DAY_MS),
+        manuallyEnded: true,
+      }),
+    ]);
+    const repository = new PrismaPromotionAlertLookupRepository(prisma);
+
+    await expect(
+      repository.findTitle({ tenantId: TENANT_ID, promotionId: PROMOTION_ID }),
+    ).resolves.toBe(TITLE);
+    expect(findFirst).toHaveBeenCalledTimes(1);
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { id: PROMOTION_ID, tenantId: TENANT_ID },
+      select: { title: true },
+    });
   });
 });
