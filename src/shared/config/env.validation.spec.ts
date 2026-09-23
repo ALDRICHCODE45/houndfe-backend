@@ -57,6 +57,37 @@ const baseValidEnv = {
 };
 
 describe('buildEnvValidationSchema (D.4)', () => {
+  describe('BOT_SHIPPING_CHARGE_MAX_CENTS (owner-configured, no default)', () => {
+    it('is absent by default and accepts a positive signed-32-bit integer', () => {
+      const absent = validate({ ...baseValidEnv, NODE_ENV: 'test' });
+      expect(absent.error).toBeUndefined();
+      expect(absent.value.BOT_SHIPPING_CHARGE_MAX_CENTS).toBeUndefined();
+      const enabled = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'test',
+        BOT_SHIPPING_CHARGE_MAX_CENTS: '7500',
+      });
+      expect(enabled.error).toBeUndefined();
+      expect(enabled.value.BOT_SHIPPING_CHARGE_MAX_CENTS).toBe(7500);
+    });
+
+    it.each(['0', '-1', '1.5', '2147483648', 'not-a-number'])(
+      'rejects an invalid shipping ceiling of %s at boot',
+      (maximum) => {
+        const { error } = validate({
+          ...baseValidEnv,
+          NODE_ENV: 'test',
+          BOT_SHIPPING_CHARGE_MAX_CENTS: maximum,
+        });
+        expect(
+          error?.details.some((detail) =>
+            detail.path.includes('BOT_SHIPPING_CHARGE_MAX_CENTS'),
+          ),
+        ).toBe(true);
+      },
+    );
+  });
+
   describe('NODE_ENV (REQUIRED — no silent default)', () => {
     it('fails when NODE_ENV is missing (fail-closed: an unset env must not degrade to dev)', () => {
       const { error } = validate({ ...baseValidEnv });

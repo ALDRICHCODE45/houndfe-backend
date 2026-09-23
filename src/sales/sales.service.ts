@@ -3103,6 +3103,12 @@ export class SalesService {
   ): Promise<ConfirmBotSaleResult> {
     const shipping = input.shipping;
     if (shipping) {
+      if (!input.shippingAddressId) {
+        throw new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_REQUIRED',
+          'SHIPPING_ADDRESS_REQUIRED',
+        );
+      }
       // Prisma's INTEGER columns are signed 32-bit cents; this is a storage
       // limit, not a commercial shipping cap (that belongs to configuration).
       if (

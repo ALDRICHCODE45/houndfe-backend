@@ -3,10 +3,15 @@ import {
   IsArray,
   IsInt,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  MaxLength,
+  Matches,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -34,6 +39,26 @@ export class BotSaleItemDto {
   @IsInt()
   @Min(0)
   unitPriceCents!: number;
+}
+
+export class BotSaleShippingDto {
+  @IsInt()
+  @Min(1)
+  @Max(2_147_483_647)
+  chargeCents!: number;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  @Matches(/\S/)
+  approvalId!: string;
+
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  @Matches(/\S/)
+  quoteId?: string;
 }
 
 export class RegisterBotSaleRequestDto {
@@ -67,4 +92,12 @@ export class RegisterBotSaleRequestDto {
   @IsInt()
   @Min(0)
   expectedTotalCents?: number;
+
+  // Recognize and validate shipping, but reject it until receipt views
+  // reconcile and an owner-configured charge ceiling enables the feature.
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => BotSaleShippingDto)
+  shipping?: BotSaleShippingDto;
 }

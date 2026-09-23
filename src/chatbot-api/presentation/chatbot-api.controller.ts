@@ -29,6 +29,7 @@ import { AttachReceiptRequestDto } from './dto/attach-receipt.request';
 import { DeliveryMetadataRequestDto } from './dto/delivery-metadata.request';
 import { CancelBotSaleRequestDto } from './dto/cancel-bot-sale.request';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 
 @Controller('chatbot-api')
 @UseGuards(ServiceAuthGuard)
@@ -94,6 +95,13 @@ export class ChatbotApiController {
     @IdempotencyKey()
     idempotencyKey: string,
   ) {
+    if (body.shipping !== undefined) {
+      // Do not accept a charge until the sale detail and receipt can show it.
+      throw new BusinessRuleViolationError(
+        'Shipping charge is not available',
+        'SHIPPING_CHARGE_UNAVAILABLE',
+      );
+    }
     return this.chatbotApiService.registerBotSale({
       cashierUserId: body.cashierUserId,
       customerId: body.customerId,
@@ -106,11 +114,11 @@ export class ChatbotApiController {
         quantity: item.quantity,
         unitPriceCents: item.unitPriceCents,
       })),
-          idempotencyKey,
-          // Q2 / WU3 — pass through the optional re-quote guard so the
-          // server can compare the bot's pre-computed total against the
-          // engine-recomputed total. Undefined when omitted (no comparison).
-          expectedTotalCents: body.expectedTotalCents,
+      idempotencyKey,
+      // Q2 / WU3 — pass through the optional re-quote guard so the
+      // server can compare the bot's pre-computed total against the
+      // engine-recomputed total. Undefined when omitted (no comparison).
+      expectedTotalCents: body.expectedTotalCents,
     });
   }
 

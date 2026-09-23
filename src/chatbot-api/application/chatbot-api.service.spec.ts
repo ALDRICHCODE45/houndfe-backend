@@ -10,7 +10,10 @@ import type {
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { IEvaluateCartPromotionsUseCase } from '../../promotions/application/ports/evaluate-cart-promotions.port';
 import type { SalesService } from '../../sales/sales.service';
-import { ChatbotApiService } from './chatbot-api.service';
+import {
+  ChatbotApiService,
+  computeRegisterBotSaleRequestHash,
+} from './chatbot-api.service';
 
 type MockCustomerAddress = {
   id: string;
@@ -825,6 +828,57 @@ describe('ChatbotApiService', () => {
       ],
       idempotencyKey: 'bot-order-abc-123',
     };
+
+    it('keeps a shipping attempt off before acquiring an idempotency slot', async () => {
+      await expect(
+        service.registerBotSale({
+          ...botSaleInput,
+          shipping: { chargeCents: 2500, approvalId: 'approval-1' },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_CHARGE_UNAVAILABLE' });
+      expect(
+        saleRepository.acquireSaleRegistrationIdempotency,
+      ).not.toHaveBeenCalled();
+      expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+    });
+
+    it('binds shipping charge, approval and optional quote to the canonical request hash', () => {
+      const base = computeRegisterBotSaleRequestHash(botSaleInput);
+      const shipping = {
+        chargeCents: 2500,
+        approvalId: 'approval-1',
+        quoteId: 'quote-1',
+      };
+      const original = computeRegisterBotSaleRequestHash({
+        ...botSaleInput,
+        shipping,
+      });
+      expect(original).not.toBe(base);
+      expect(
+        computeRegisterBotSaleRequestHash({
+          ...botSaleInput,
+          shipping: { ...shipping, chargeCents: 2501 },
+        }),
+      ).not.toBe(original);
+      expect(
+        computeRegisterBotSaleRequestHash({
+          ...botSaleInput,
+          shipping: { ...shipping, approvalId: 'approval-2' },
+        }),
+      ).not.toBe(original);
+      expect(
+        computeRegisterBotSaleRequestHash({
+          ...botSaleInput,
+          shipping: { ...shipping, quoteId: 'quote-2' },
+        }),
+      ).not.toBe(original);
+      expect(
+        computeRegisterBotSaleRequestHash({
+          ...botSaleInput,
+          shipping: { ...shipping, approvalId: ' approval-1 ' },
+        }),
+      ).toBe(original);
+    });
 
     it('delegates bot sale confirmation to SalesService and returns the mapped response', async () => {
       // Q3 / WU2 — first call wins, the repo returns { kind: 'acquired' },

@@ -67,6 +67,7 @@ export type RegisterBotSaleInput = {
   // omitted, the server still runs the engine and persists the
   // recomputed totals; only the comparison is skipped.
   expectedTotalCents?: number;
+  shipping?: { chargeCents: number; approvalId: string; quoteId?: string };
 };
 
 export type AttachReceiptInput = {
@@ -285,6 +286,14 @@ export class ChatbotApiService {
    * hash). Manual cleanup is the accepted mitigation.
    */
   async registerBotSale(input: RegisterBotSaleInput): Promise<BotSaleResponse> {
+    // Defense in depth: direct service callers cannot bypass the HTTP gate.
+    // Replaced by the owner-configured ceiling only after receipt reconciliation.
+    if (input.shipping !== undefined) {
+      throw new BusinessRuleViolationError(
+        'Shipping charge is not available',
+        'SHIPPING_CHARGE_UNAVAILABLE',
+      );
+    }
     const requestHash = computeRegisterBotSaleRequestHash(input);
 
     const idempotency =
@@ -602,13 +611,22 @@ function normalizePhonePart(value: string): string {
  * requests that differ only by shipping address are flagged as a
  * `conflict`, not a silent replay.
  */
-function computeRegisterBotSaleRequestHash(
+export function computeRegisterBotSaleRequestHash(
   input: RegisterBotSaleInput,
 ): string {
   const canonicalPayload = {
     cashierUserId: input.cashierUserId,
     customerId: input.customerId,
     shippingAddressId: input.shippingAddressId ?? null,
+    ...(input.shipping
+      ? {
+          shipping: {
+            chargeCents: input.shipping.chargeCents,
+            approvalId: input.shipping.approvalId.trim(),
+            quoteId: input.shipping.quoteId?.trim() ?? null,
+          },
+        }
+      : {}),
     items: [...input.items]
       .map((item) => ({
         productId: item.productId,

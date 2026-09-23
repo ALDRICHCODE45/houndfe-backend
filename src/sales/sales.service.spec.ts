@@ -4840,6 +4840,22 @@ describe('SalesService', () => {
       },
     );
 
+    it('requires a customer shipping address for an approved charge before writing', async () => {
+      setupConfirmBotSaleHappyPath();
+      await expect(
+        service.confirmBotSale({
+          ...botSaleInput,
+          shippingAddressId: null,
+          shipping: {
+            chargeCents: 250,
+            approvalId: 'approval-without-address',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_ADDRESS_REQUIRED' });
+      expect(saleRepo.runInTransaction).not.toHaveBeenCalled();
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
     it('rejects totals above the signed-32-bit storage limit before writing', async () => {
       setupConfirmBotSaleHappyPath();
       await expect(

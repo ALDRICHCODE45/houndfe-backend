@@ -602,6 +602,51 @@ describe('ChatbotApiController', () => {
       });
   });
 
+  it('POST /chatbot-api/sales rejects a shipping charge without silently selling merchandise', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', 'bot-shipping-dormant')
+      .send({
+        ...validBotSalePayload,
+        shipping: { chargeCents: 2500, approvalId: 'approval-1' },
+      })
+      .expect(422)
+      .expect(({ body }: { body: { error?: string } }) => {
+        expect(body.error).toBe('SHIPPING_CHARGE_UNAVAILABLE');
+      });
+    expect(service.registerBotSale).not.toHaveBeenCalled();
+  });
+
+  it('POST /chatbot-api/sales validates nested shipping fields before the gate', async () => {
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', 'bot-shipping-invalid')
+      .send({
+        ...validBotSalePayload,
+        shipping: { chargeCents: -5, approvalId: '' },
+      })
+      .expect(400);
+    expect(service.registerBotSale).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { chargeCents: 2500, approvalId: '   ' },
+    { chargeCents: 2500, approvalId: 'approval-1', quoteId: null },
+  ])(
+    'POST /chatbot-api/sales rejects malformed shipping identity %j',
+    async (shipping) => {
+      await request(httpServer())
+        .post('/chatbot-api/sales')
+        .set('Authorization', 'Bearer svc_sales-key')
+        .set('X-Idempotency-Key', 'bot-shipping-invalid-identity')
+        .send({ ...validBotSalePayload, shipping })
+        .expect(400);
+      expect(service.registerBotSale).not.toHaveBeenCalled();
+    },
+  );
+
   it('POST /chatbot-api/sales returns 400 for invalid payload', async () => {
     await request(httpServer())
       .post('/chatbot-api/sales')
