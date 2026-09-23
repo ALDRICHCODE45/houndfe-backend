@@ -1,9 +1,10 @@
 /**
  * bas-3b — HTTP contract for GET /analytics/sales/summary.
+ * OI-2 / S4 extends this file with GET /analytics/sales/timeseries.
  *
  * In-memory Nest app + Supertest: the three guards become typed doubles (bearer
- * auth, tenant context, exact `read:Analytics` metadata), the service is mocked
- * with fixtures, and the global ValidationPipe mirrors `main.ts`. No DB.
+ * auth, tenant context, exact `read:Analytics` metadata), the services are
+ * mocked with fixtures, and the global ValidationPipe mirrors `main.ts`. No DB.
  */
 import {
   ForbiddenException,
@@ -17,10 +18,18 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { AnalyticsController } from './analytics.controller';
 import { BranchSalesSummaryService } from '../application/branch-sales-summary.service';
+import { BranchSalesTimeseriesService } from '../application/branch-sales-timeseries.service';
 import {
   ANALYTICS_TIME_ZONE,
   type BranchSalesSummaryQueryDto,
 } from '../dto/branch-sales-summary-query.dto';
+import {
+  BRANCH_SALES_TIMESERIES_RESPONSE_KEYS,
+  BRANCH_SALES_TIMESERIES_POINT_KEYS,
+  type BranchSalesTimeseriesPointDto,
+  type BranchSalesTimeseriesResponseDto,
+} from '../dto/branch-sales-timeseries-response.dto';
+import type { BranchSalesTimeseriesQueryDto } from '../dto/branch-sales-timeseries-query.dto';
 import {
   BRANCH_SALES_SUMMARY_RESPONSE_KEYS,
   type BranchSalesSummaryResponseDto,
@@ -156,10 +165,42 @@ const EMPTY_RESPONSE: BranchSalesSummaryResponseDto = {
   pendingRefundObligationsCents: 0,
 };
 
-describe('GET /analytics/sales/summary HTTP contract (bas-3b)', () => {
+const TIMESERIES_POINTS: BranchSalesTimeseriesPointDto[] = [
+  {
+    date: '2026-01-01',
+    grossSalesCents: 1_000,
+    netSalesCents: 900,
+    collectedCents: 800,
+    outstandingDebtCents: 100,
+    saleCount: 3,
+    averageTicketCents: 300,
+  },
+  {
+    date: '2026-01-02',
+    grossSalesCents: 0,
+    netSalesCents: 0,
+    collectedCents: 0,
+    outstandingDebtCents: 0,
+    saleCount: 0,
+    averageTicketCents: 0,
+  },
+];
+
+const TIMESERIES_RESPONSE: BranchSalesTimeseriesResponseDto = {
+  timeZone: ANALYTICS_TIME_ZONE,
+  from: RANGE.from,
+  to: RANGE.to,
+  interval: 'day',
+  points: TIMESERIES_POINTS,
+};
+
+describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
   const url = '/analytics/sales/summary';
   let app: INestApplication;
   let summarize: jest.MockedFunction<BranchSalesSummaryService['summarize']>;
+  let getTimeseries: jest.MockedFunction<
+    BranchSalesTimeseriesService['getTimeseries']
+  >;
   const http = () => request(app.getHttpServer());
   const asReader = () =>
     http().get(url).set('Authorization', 'Bearer tenant-analytics-reader');
@@ -167,11 +208,14 @@ describe('GET /analytics/sales/summary HTTP contract (bas-3b)', () => {
   beforeEach(async () => {
     summarize = jest.fn();
     summarize.mockResolvedValue(FULL_RESPONSE);
+    getTimeseries = jest.fn();
+    getTimeseries.mockResolvedValue(TIMESERIES_RESPONSE);
 
     const moduleRef = await Test.createTestingModule({
       controllers: [AnalyticsController],
       providers: [
         { provide: BranchSalesSummaryService, useValue: { summarize } },
+        { provide: BranchSalesTimeseriesService, useValue: { getTimeseries } },
       ],
     })
       .overrideGuard(JwtAuthGuard)
@@ -277,5 +321,112 @@ describe('GET /analytics/sales/summary HTTP contract (bas-3b)', () => {
       .query({ ...RANGE, branchId: 'branch-1' })
       .expect(400);
     expect(summarize).not.toHaveBeenCalled();
+  });
+
+  describe('GET /analytics/sales/timeseries (OI-2 S4)', () => {
+    const timeseriesUrl = '/analytics/sales/timeseries';
+    const asTimeseriesReader = () =>
+      http()
+        .get(timeseriesUrl)
+        .set('Authorization', 'Bearer tenant-analytics-reader');
+
+    it('defaults an omitted interval to day and returns the exact response surface', async () => {
+      const res = await asTimeseriesReader()
+        .query({ ...RANGE })
+        .expect(200);
+
+      expect(getTimeseries).toHaveBeenCalledTimes(1);
+      const delegated: BranchSalesTimeseriesQueryDto =
+        getTimeseries.mock.calls[0][0];
+      expect(delegated).toEqual({ ...RANGE, interval: 'day' });
+      expect(Object.keys(delegated).sort()).toEqual(['from', 'interval', 'to']);
+
+      const body = res.body as BranchSalesTimeseriesResponseDto;
+      expect(body).toEqual(TIMESERIES_RESPONSE);
+      expect(Object.keys(body).sort()).toEqual(
+        [...BRANCH_SALES_TIMESERIES_RESPONSE_KEYS].sort(),
+      );
+      expect(BRANCH_SALES_TIMESERIES_RESPONSE_KEYS).toHaveLength(5);
+      expect(Object.keys(body.points[0]).sort()).toEqual(
+        [...BRANCH_SALES_TIMESERIES_POINT_KEYS].sort(),
+      );
+      expect(BRANCH_SALES_TIMESERIES_POINT_KEYS).toHaveLength(7);
+      expect(body).not.toHaveProperty('cashNetCents');
+      expect(body).not.toHaveProperty('paymentMethod');
+      expect(body).not.toHaveProperty('currency');
+    });
+
+    it('accepts an explicit day interval and forwards the DTO unchanged', async () => {
+      await asTimeseriesReader()
+        .query({ ...RANGE, interval: 'day' })
+        .expect(200);
+
+      expect(getTimeseries).toHaveBeenCalledTimes(1);
+      expect(getTimeseries.mock.calls[0][0]).toEqual({
+        ...RANGE,
+        interval: 'day',
+      });
+    });
+
+    it('rejects an unsupported interval with 400 through the global pipe', async () => {
+      await asTimeseriesReader()
+        .query({ ...RANGE, interval: 'week' })
+        .expect(400);
+      expect(getTimeseries).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['missing from', { to: RANGE.to }],
+      ['missing to', { from: RANGE.from }],
+      [
+        'a timestamp instead of a local calendar date',
+        { from: '2026-01-01T00:00:00.000Z', to: RANGE.to },
+      ],
+      [
+        'an impossible local calendar date',
+        { from: '2025-02-29', to: RANGE.to },
+      ],
+      ['reversed bounds', { from: RANGE.to, to: RANGE.from }],
+      ['a 367-day range', { from: '2026-01-01', to: '2027-01-03' }],
+    ])('keeps the inherited summary rule: 400 for %s', async (_case, query) => {
+      await asTimeseriesReader().query(query).expect(400);
+      expect(getTimeseries).not.toHaveBeenCalled();
+    });
+
+    it('rejects tenant scope supplied as query input with 400', async () => {
+      await asTimeseriesReader()
+        .query({ ...RANGE, tenantId: 'tenant-1' })
+        .expect(400);
+      expect(getTimeseries).not.toHaveBeenCalled();
+    });
+
+    it('returns 403 for a tenant user lacking read:Analytics and never delegates', async () => {
+      await http()
+        .get(timeseriesUrl)
+        .set('Authorization', 'Bearer tenant-sale-reader')
+        .query({ ...RANGE })
+        .expect(403);
+      expect(getTimeseries).not.toHaveBeenCalled();
+    });
+
+    it('accepts the exact 366-day leap-boundary range', async () => {
+      await asTimeseriesReader()
+        .query({ from: '2024-01-01', to: '2025-01-01' })
+        .expect(200);
+      expect(getTimeseries).toHaveBeenCalledTimes(1);
+    });
+
+    it('forwards a single local day verbatim without date arithmetic', async () => {
+      await asTimeseriesReader()
+        .query({ from: '2026-03-08', to: '2026-03-09' })
+        .expect(200);
+
+      expect(getTimeseries.mock.calls[0][0]).toEqual({
+        from: '2026-03-08',
+        to: '2026-03-09',
+        interval: 'day',
+      });
+      expect(summarize).not.toHaveBeenCalled();
+    });
   });
 });
