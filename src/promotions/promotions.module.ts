@@ -7,6 +7,10 @@
  * - PromotionsController for HTTP endpoints
  * - EvaluateCartPromotionsUseCase (chatbot-api path)
  * - PosEvaluatePromotionsUseCase (POS sale recompute path, Unit 2 — unwired)
+ * - PROMOTION_ALERT_LOOKUP → PrismaPromotionAlertLookupRepository, an
+ *   inert tenant-qualified promotion-title lookup exported for the
+ *   near-capacity alert email registrar (pca-3b4b/pca-3b4c). Nothing in
+ *   the active delivery path resolves it yet.
  * - BatchDeleteModule.forFeature — wires the `POST /promotions/batch-delete`
  *   endpoint via the shared abstraction
  *
@@ -22,6 +26,8 @@ import { PrismaPromotionRepository } from './infrastructure/prisma-promotion.rep
 import { PROMOTION_REPOSITORY } from './domain/promotion.repository';
 import { PrismaPromotionUsageRepository } from './infrastructure/prisma-promotion-usage.repository';
 import { PROMOTION_USAGE_REPOSITORY } from './domain/promotion-usage.repository';
+import { PrismaPromotionAlertLookupRepository } from './infrastructure/prisma-promotion-alert-lookup.repository';
+import { PROMOTION_ALERT_LOOKUP } from './domain/promotion-alert-lookup.repository';
 import { EvaluateCartPromotionsUseCase } from './application/evaluate-cart-promotions.use-case';
 import { EVALUATE_CART_PROMOTIONS_USE_CASE } from './application/ports/evaluate-cart-promotions.port';
 import { PosEvaluatePromotionsUseCase } from './application/pos-evaluate-promotions.use-case';
@@ -56,6 +62,13 @@ import type { BatchDeletableService } from '../shared/batch-delete/batch-delete.
       useClass: PrismaPromotionUsageRepository,
     },
     {
+      // Inert pca-3b4a seam: exported for the near-capacity alert email
+      // registrar so the notification function can resolve a promotion's
+      // display title without importing the promotions application layer.
+      provide: PROMOTION_ALERT_LOOKUP,
+      useClass: PrismaPromotionAlertLookupRepository,
+    },
+    {
       // Build the orchestrator subclass that wires TenantPrismaService
       // + PromotionsService. The factory returns a new concrete
       // orchestrator instance for each injection request — the
@@ -87,6 +100,7 @@ import type { BatchDeletableService } from '../shared/batch-delete/batch-delete.
     EVALUATE_CART_PROMOTIONS_USE_CASE,
     POS_EVALUATE_PROMOTIONS_USE_CASE,
     PROMOTION_USAGE_REPOSITORY,
+    PROMOTION_ALERT_LOOKUP,
   ],
 })
 export class PromotionsModule {}
