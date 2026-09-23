@@ -130,6 +130,17 @@ export class InngestService {
    * duplicate registration would silently overwrite the handler and
    * create two functions racing for the same trigger.
    *
+   * **Atomicity (pca-5c).** The batch is validated in full BEFORE
+   * `this.functions` is touched, so a duplicate at the end of a batch
+   * cannot leave the earlier entries half-registered.
+   *
+   * **Fail-closed (pca-5c).** An entry whose id cannot be resolved is
+   * rejected rather than accepted as “anonymous”: an unresolvable id is
+   * indistinguishable from a duplicate, and silently skipping it is how
+   * the guard previously became a no-op for every real SDK function
+   * (see `extractInngestId`). Production functions always carry a
+   * required `opts.id`, so this only rejects malformed/fake entries.
+   *
    * The defnsive-copy rule on `getFunctions()` only protects the
    * REGISTRY from external mutation; this method is the SOLE
    * owner of registration and is the only place that mutates
@@ -140,21 +151,37 @@ export class InngestService {
    * paragraph + Module placement.
    */
   registerFunctions(defs: unknown[]): void {
-    const registeredIds = new Set(
-      (this.functions as Array<{ id?: unknown } | undefined | null>)
-        .map((f) => extractInngestId(f))
-        .filter((id): id is string => Boolean(id)),
-    );
-    for (const def of defs) {
+    const registeredIds = new Set<string>();
+    for (const existing of this.functions) {
+      const id = extractInngestId(existing);
+      if (id) registeredIds.add(id);
+    }
+
+    // Pass 1 — resolve every id (no mutation). Pass 2 — reject the whole
+    // batch on the first duplicate, whether it collides with the existing
+    // registry or with an earlier entry of the same batch.
+    const pendingIds = defs.map((def, index) => {
       const id = extractInngestId(def);
-      if (id && registeredIds.has(id)) {
+      if (id === null) {
         throw new Error(
-          `InngestService.registerFunctions: duplicate function id "${id}".`,
+          `InngestService.registerFunctions: could not resolve a function id at index ${index}. ` +
+            'Refusing to register an unidentified function — the duplicate-id guard cannot protect it.',
         );
       }
-      registeredIds.add(id ?? `anonymous-${registeredIds.size}`);
-      this.functions.push(def);
+      return { id, index };
+    });
+
+    const seenInBatch = new Set<string>();
+    for (const { id, index } of pendingIds) {
+      if (registeredIds.has(id) || seenInBatch.has(id)) {
+        throw new Error(
+          `InngestService.registerFunctions: duplicate function id "${id}" (batch index ${index}).`,
+        );
+      }
+      seenInBatch.add(id);
     }
+
+    this.functions.push(...defs);
   }
 
   /**
@@ -178,23 +205,62 @@ export class InngestService {
 
 /**
  * Best-effort extraction of the `id` field from an `InngestFunction`
- * closure. The SDK stores it as a property on the registered object;
- * we tolerate both shapes (top-level `id` and a wrapped `config.id`)
- * because different SDK versions expose different surfaces. A `null`
- * return disables duplicate-id checking for that entry — fine for
- * tests and ad-hoc fakes; production functions MUST supply an id.
+ * closure. Four shapes are tolerated, in priority order:
+ *
+ *   1. A plain string `id` (legacy fakes / older SDK surfaces).
+ *   2. `id()` as a METHOD — the real Inngest **v4** `InngestFunction`
+ *      exposes the id as a prototype method and `serve()` routes on its
+ *      return value. Reading `fn.id` as a string (the pre-pca-5c bug)
+ *      returned `undefined` for every real function, so the duplicate
+ *      guard silently accepted duplicates. `opts.id` is the raw value
+ *      behind it; the method is preferred because that is what the SDK
+ *      itself serializes (`id()` accepts an optional prefix, and calling
+ *      it bare yields the bare id).
+ *   3. `opts.id` — the raw v4 options surface (covers SDK versions that
+ *      drop the method or move it behind a subclass).
+ *   4. `config.id` — a wrapped-config shape some adapters expose.
+ *
+ * A `null` return means “no usable id”. `registerFunctions` treats that
+ * as a fail-closed rejection: an unresolvable id cannot be
+ * duplicate-checked, and silently accepting it is exactly how the guard
+ * stopped protecting production functions.
  */
 function extractInngestId(def: unknown): string | null {
   if (!def || typeof def !== 'object') return null;
   const d = def as Record<string, unknown>;
-  if (typeof d.id === 'string') return d.id;
-  const cfg = d.config;
-  if (
-    cfg &&
-    typeof cfg === 'object' &&
-    typeof (cfg as Record<string, unknown>).id === 'string'
-  ) {
-    return (cfg as Record<string, unknown>).id as string;
+
+  const direct = readFunctionId(d.id);
+  if (direct) return direct;
+
+  if (typeof d.id === 'function') {
+    try {
+      // `id()` is a prototype method on the real v4 `InngestFunction`.
+      const viaMethod = readFunctionId(
+        (d.id as (prefix?: string) => unknown).call(def),
+      );
+      if (viaMethod) return viaMethod;
+    } catch {
+      // A throwing `id()` is not a usable id source — fall through to
+      // `opts.id` / `config.id` instead of crashing the boot.
+    }
   }
+
+  const opts = d.opts;
+  if (opts && typeof opts === 'object') {
+    const viaOpts = readFunctionId((opts as Record<string, unknown>).id);
+    if (viaOpts) return viaOpts;
+  }
+
+  const cfg = d.config;
+  if (cfg && typeof cfg === 'object') {
+    const viaConfig = readFunctionId((cfg as Record<string, unknown>).id);
+    if (viaConfig) return viaConfig;
+  }
+
   return null;
+}
+
+/** Only a non-empty string is a usable function id. */
+function readFunctionId(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }

@@ -15,6 +15,10 @@
  *   3. The `getFunctions()` accessor that the Inngest serve handler
  *      (Slice D.3) hands to `serve({ functions })`. Empty in D; E/F
  *      populate by adding `inngest.createFunction(...)` calls.
+ *   4. The `registerFunctions(...)` duplicate-id guard (pca-5c): it
+ *      resolves ids from the real Inngest v4 surface (`id()` method /
+ *      `opts.id`), rejects duplicates atomically without mutating the
+ *      registry, and fails closed on entries whose id cannot be resolved.
  *
  * We mock the `inngest` module with `jest.mock` so the test exercises only
  * the wrapping code, not the SDK internals.
@@ -56,7 +60,11 @@ jest.mock('inngest', () => {
 // Imported AFTER jest.mock so the mocked module is in place.
 import { InngestService } from './inngest.service';
 
-const inngestMock = require('inngest') as {
+// `jest.requireMock` returns the SAME registered mock object as a bare
+// `require('inngest')` under `jest.mock` above, without the
+// `@typescript-eslint/no-require-imports` violation. The explicit generic
+// keeps the module's own (unmocked) type from narrowing the assertion.
+const inngestMock = jest.requireMock<Record<string, unknown>>('inngest') as {
   Inngest: new (opts: { id: string; eventKey?: string; isDev?: boolean }) => {
     id: string;
     eventKey: string | undefined;
@@ -80,6 +88,36 @@ function makeConfigService(
       return v;
     }),
   } as unknown as ConfigService;
+}
+
+// ─── pca-5c — REAL v4 SDK function shape ──────────────────────────────
+// The duplicate-id guard exists to protect the functions that are ACTUALLY
+// registered at boot. Those come from `InngestService.getClient()` and the
+// real Inngest v4 SDK, whose `InngestFunction` exposes the id as a
+// prototype METHOD `id()` plus a raw `opts.id` — there is no string `id`
+// property and no `config` property. The previous guard only read
+// `id`-as-string / `config.id`, so every real function resolved to `null`
+// and duplicate detection was a no-op.
+//
+// These helpers build the genuine SDK object through `jest.requireActual`
+// (NOT the local test double above), because a hand-rolled fake would let
+// the guard regress to a shape the SDK never produces.
+interface RealV4ClientLike {
+  createFunction: (
+    opts: { id: string; triggers: { event: string }[] },
+    handler: () => Promise<void>,
+  ) => unknown;
+}
+
+function makeRealV4Function(id: string): unknown {
+  const actual = jest.requireActual<{
+    Inngest: new (opts: { id: string }) => RealV4ClientLike;
+  }>('inngest');
+  const client = new actual.Inngest({ id: 'pca-5c-registry-probe' });
+  return client.createFunction(
+    { id, triggers: [{ event: 'pca-5c/probe' }] },
+    () => Promise.resolve(),
+  );
 }
 
 describe('InngestService (D.2)', () => {
@@ -229,6 +267,201 @@ describe('InngestService (D.2)', () => {
 
       const second = svc.getFunctions();
       expect(second).toEqual([]);
+    });
+  });
+
+  // ─── pca-5c — duplicate-id guard against the REAL v4 function shape ──
+  // RED before the fix: every real v4 function resolved to `null`, so both
+  // the same-batch duplicate and the across-call duplicate were accepted
+  // while mutating the registry.
+  describe('registerFunctions() duplicate-id guard (pca-5c)', () => {
+    it('rejects two REAL v4 SDK functions sharing an id in one batch and leaves the registry untouched', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+      const first = makeRealV4Function('promotion-near-capacity-email');
+      const second = makeRealV4Function('promotion-near-capacity-email');
+
+      // Sanity: prove these are the real SDK objects whose id is only
+      // reachable through `id()` / `opts.id` — the exact mismatch pca-5c
+      // closes. If this assertion ever fails, the fixture stopped being
+      // representative and the regression test would be vacuous.
+      expect(typeof (first as { id: unknown }).id).toBe('function');
+      expect((first as { opts: { id: string } }).opts.id).toBe(
+        'promotion-near-capacity-email',
+      );
+      expect((first as { config?: unknown }).config).toBeUndefined();
+
+      expect(() => svc.registerFunctions([first, second])).toThrow(
+        'duplicate function id "promotion-near-capacity-email"',
+      );
+      expect(svc.getFunctions()).toEqual([]);
+    });
+
+    it('rejects a REAL v4 function whose id was registered by an earlier call, without mutating the registry', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+      svc.registerFunctions([makeRealV4Function('promotion-expiring-email')]);
+      const afterFirstCall = svc.getFunctions();
+      expect(afterFirstCall).toHaveLength(1);
+
+      expect(() =>
+        svc.registerFunctions([makeRealV4Function('promotion-expiring-email')]),
+      ).toThrow('duplicate function id "promotion-expiring-email"');
+
+      const afterRejection = svc.getFunctions();
+      expect(afterRejection).toHaveLength(1);
+      expect(afterRejection[0]).toBe(afterFirstCall[0]);
+    });
+
+    it('accepts distinct REAL v4 ids across batches and calls (no false positives)', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+
+      svc.registerFunctions([
+        makeRealV4Function('promotion-near-capacity-email'),
+        makeRealV4Function('promotion-expiring-email'),
+      ]);
+      svc.registerFunctions([makeRealV4Function('stock-low-detected-email')]);
+
+      const registered = svc.getFunctions();
+      expect(registered).toHaveLength(3);
+      expect(
+        registered.map((fn) => (fn as { opts: { id: string } }).opts.id),
+      ).toEqual([
+        'promotion-near-capacity-email',
+        'promotion-expiring-email',
+        'stock-low-detected-email',
+      ]);
+    });
+
+    it('is atomic: a rejected batch registers none of its earlier valid entries', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+      svc.registerFunctions([makeRealV4Function('already-registered')]);
+
+      expect(() =>
+        svc.registerFunctions([
+          makeRealV4Function('brand-new-function'),
+          makeRealV4Function('already-registered'),
+        ]),
+      ).toThrow('duplicate function id "already-registered"');
+
+      const registered = svc.getFunctions();
+      expect(registered).toHaveLength(1);
+      expect((registered[0] as { opts: { id: string } }).opts.id).toBe(
+        'already-registered',
+      );
+    });
+
+    it('keeps supporting the legacy fake shapes (string id / config.id / opts.id) and still detects their duplicates', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+
+      svc.registerFunctions([
+        { id: 'fake-string-id' },
+        { config: { id: 'fake-config-id' } },
+        { opts: { id: 'fake-opts-id' } },
+      ]);
+      expect(svc.getFunctions()).toHaveLength(3);
+
+      expect(() =>
+        svc.registerFunctions([{ opts: { id: 'fake-string-id' } }]),
+      ).toThrow('duplicate function id "fake-string-id"');
+      expect(() => svc.registerFunctions([{ id: 'fake-config-id' }])).toThrow(
+        'duplicate function id "fake-config-id"',
+      );
+      expect(svc.getFunctions()).toHaveLength(3);
+    });
+
+    it('fails closed on malformed/unknown shapes instead of silently skipping the check', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+
+      expect(() => svc.registerFunctions([{}])).toThrow(
+        /could not resolve a function id/i,
+      );
+      expect(() => svc.registerFunctions([null])).toThrow(
+        /could not resolve a function id/i,
+      );
+      expect(() => svc.registerFunctions([{ id: () => undefined }])).toThrow(
+        /could not resolve a function id/i,
+      );
+      expect(() => svc.registerFunctions([{ id: '' }])).toThrow(
+        /could not resolve a function id/i,
+      );
+      expect(svc.getFunctions()).toEqual([]);
+    });
+
+    it('keeps the defensive-copy contract after a successful registration', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+      svc.registerFunctions([makeRealV4Function('defensive-copy-fn')]);
+
+      const first = svc.getFunctions();
+      first.push('mutated-by-caller' as never);
+
+      const second = svc.getFunctions();
+      expect(second).toHaveLength(1);
+      expect((second[0] as { opts: { id: string } }).opts.id).toBe(
+        'defensive-copy-fn',
+      );
+    });
+    it('resolves the bare id() method even without opts, and survives a throwing id() by falling back to opts.id', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+
+      // Method-only shape: no `opts`, no string `id` — the method branch is
+      // the ONLY source of truth here.
+      svc.registerFunctions([{ id: () => 'method-only-id' }]);
+      expect(() =>
+        svc.registerFunctions([
+          {
+            opts: { id: 'method-only-id' },
+            id: (): string => {
+              throw new Error('id() exploded');
+            },
+          },
+        ]),
+      ).toThrow('duplicate function id "method-only-id"');
+
+      // A throwing id() must not crash the guard when `opts.id` resolves.
+      svc.registerFunctions([
+        {
+          opts: { id: 'opts-fallback-id' },
+          id: (): string => {
+            throw new Error('id() exploded');
+          },
+        },
+      ]);
+      expect(svc.getFunctions()).toHaveLength(2);
+    });
+
+    it('keeps the mocked createFunction shape ({ opts, handler }) registrable and duplicate-checked', () => {
+      const config = makeConfigService({ INNGEST_EVENT_KEY: 'evt_test_123' });
+      const svc = new InngestService(config);
+
+      // `beforeEach` calls `mockReset()`, which drops the factory
+      // implementation declared at `jest.mock` time. Re-arm the exact
+      // shape the module mock produces so this test proves THAT shape is
+      // still registrable and duplicate-checked.
+      inngestMock.__mocks.createFunctionMock.mockImplementation(
+        (opts: unknown, handler: unknown) => ({ opts, handler }),
+      );
+
+      const fn: unknown = inngestMock.__mocks.createFunctionMock(
+        { id: 'mocked-create-function-id' },
+        () => undefined,
+      );
+      svc.registerFunctions([fn]);
+
+      const duplicate: unknown = inngestMock.__mocks.createFunctionMock(
+        { id: 'mocked-create-function-id' },
+        () => undefined,
+      );
+      expect(() => svc.registerFunctions([duplicate])).toThrow(
+        'duplicate function id "mocked-create-function-id"',
+      );
+      expect(svc.getFunctions()).toHaveLength(1);
     });
   });
 
