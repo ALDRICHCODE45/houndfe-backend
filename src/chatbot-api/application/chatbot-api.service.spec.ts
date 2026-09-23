@@ -927,8 +927,26 @@ describe('ChatbotApiService', () => {
             chargeCents: 2500,
             approvalId: 'approval-1',
           },
+          expectedTotalCents: 4300,
         }),
       ).rejects.toMatchObject({ code: 'SHIPPING_REPLAY_INCOMPLETE' });
+      expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+    });
+
+    it('requires an approved expected total with shipping before acquiring idempotency', async () => {
+      shippingConfig.get.mockReturnValue(5000);
+      await expect(
+        service.registerBotSale({
+          ...botSaleInput,
+          shipping: {
+            chargeCents: 2500,
+            approvalId: 'approval-without-total',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_EXPECTED_TOTAL_REQUIRED' });
+      expect(
+        saleRepository.acquireSaleRegistrationIdempotency,
+      ).not.toHaveBeenCalled();
       expect(salesService.confirmBotSale).not.toHaveBeenCalled();
     });
 

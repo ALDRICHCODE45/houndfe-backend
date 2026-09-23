@@ -65,8 +65,8 @@ export type RegisterBotSaleInput = {
   // this expected total against the engine-recomputed `totalCents`
   // (D7). Mismatch → `PROMO_RE_QUOTE` 409 with the three relevant
   // fields in the body so the bot can re-quote and re-issue. When
-  // omitted, the server still runs the engine and persists the
-  // recomputed totals; only the comparison is skipped.
+  // omitted on a legacy sale, the server still runs the engine and
+  // persists totals. Required whenever `shipping` is provided.
   expectedTotalCents?: number;
   shipping?: { chargeCents: number; approvalId: string; quoteId?: string };
 };
@@ -273,8 +273,9 @@ export class ChatbotApiService {
    * - `acquired`  → proceed to `confirmBotSale`, then stamp SUCCEEDED.
    *
    * The `requestHash` is `SHA-256(JSON.stringify(canonicalPayload))` (D9)
-   * over `{ cashierUserId, customerId, shippingAddressId, items }` with
-   * items sorted by `(productId, variantId)`. Display names are
+   * over `{ cashierUserId, customerId, shippingAddressId, shipping?, items }`
+   * with items sorted by `(productId, variantId)` and optional shipping
+   * charge/approval/quote normalized. Display names are
    * intentionally excluded so re-labels never break replay.
    *
    * The idempotency key itself is validated upstream by
@@ -339,6 +340,18 @@ export class ChatbotApiService {
         throw new BusinessRuleViolationError(
           'INVALID_SHIPPING_QUOTE',
           'INVALID_SHIPPING_QUOTE',
+        );
+      }
+      if (
+        input.expectedTotalCents === undefined ||
+        !Number.isSafeInteger(input.expectedTotalCents) ||
+        input.expectedTotalCents <= 0
+      ) {
+        // Without the approved final amount the re-quote guard cannot
+        // protect a bot sale whose merchandise price changed after approval.
+        throw new BusinessRuleViolationError(
+          'Approved total is required when shipping is charged',
+          'SHIPPING_EXPECTED_TOTAL_REQUIRED',
         );
       }
       shipping = {

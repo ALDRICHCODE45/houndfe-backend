@@ -623,6 +623,7 @@ describe('ChatbotApiController', () => {
           approvalId: 'approval-1',
           quoteId: 'quote-1',
         },
+        expectedTotalCents: 4300,
       })
       .expect(201)
       .expect(
@@ -643,6 +644,7 @@ describe('ChatbotApiController', () => {
           quoteId: 'quote-1',
         },
         shippingAddressId: 'cf070bfb-ee86-460b-ab8a-7893d324e346',
+        expectedTotalCents: 4300,
       }),
     );
   });
