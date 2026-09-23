@@ -45,22 +45,28 @@ export class OutboxPollerService {
     const lockToken = randomUUID();
 
     return this.prisma.$transaction(async (tx) => {
-      // Slice F.3 + Slice 4 + pca-3b3b — claim disjointness (design.md
-      // "Risk R-E" + "Durable dispatch flow"). The generic dispatcher's
-      // fire-and-forget semantics cannot deliver dedicated-type events
-      // durably (a post-commit `InngestService.send` rejection would be
-      // swallowed with the row already PUBLISHED). Add the `eventType`
-      // exclusion here so the generic poller NEVER claims a
-      // dedicated-type row; the dedicated pollers own those rows
+      // Slice F.3 + Slice 4 + pca-3b3b + pca-3c3b — claim disjointness
+      // (design.md "Risk R-E" + "Durable dispatch flow"). The generic
+      // dispatcher's fire-and-forget semantics cannot deliver
+      // dedicated-type events durably (a post-commit `InngestService.send`
+      // rejection would be swallowed with the row already PUBLISHED). Add
+      // the `eventType` exclusion here so the generic poller NEVER claims
+      // a dedicated-type row; the dedicated pollers own those rows
       // exclusively. Scope is ONE predicate — the generic dispatcher's
       // behavior for every OTHER event type is unchanged.
       //
       // `promotion.near_capacity.detected` is listed here in the same
       // change that registers PromotionCapacityOutboxModule in
-      // app.module.ts, so the row is never claimable by two pollers. The
-      // literals stay literal (not imported from the promotions module)
-      // to avoid a shared→feature dependency; each dedicated poller's own
-      // spec pins the matching `"eventType" = '<literal>'` predicate.
+      // app.module.ts, so the row is never claimable by two pollers.
+      // `promotion.expiring.detected` is listed here in the pca-3c3b slice
+      // that adds the dedicated expiry poller even though its module is
+      // still UNREGISTERED until pca-3c4c: excluding the type NOW keeps
+      // expiry rows safely PENDING (never fire-and-forget published)
+      // during the interim, and activation cannot double-claim them
+      // later. The literals stay literal (not imported from the
+      // promotions module) to avoid a shared→feature dependency; each
+      // dedicated poller's own spec pins the matching
+      // `"eventType" = '<literal>'` predicate.
       const pendingRows = (await tx.$queryRawUnsafe<{ id: string }[]>(
         `
           SELECT id
@@ -68,7 +74,7 @@ export class OutboxPollerService {
           WHERE status = 'PENDING'
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
-            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'promotion.near_capacity.detected')
+            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected')
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED
