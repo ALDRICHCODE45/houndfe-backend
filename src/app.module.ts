@@ -73,6 +73,13 @@ import { PromotionCapacityOutboxModule } from './promotions/outbox/promotion-cap
 // pca-3b4c - registers the promotion-near-capacity-email Inngest function.
 // Top-level provider so the dep graph resolves through AppModule.
 import { PromotionCapacityInngestRegistrar } from './promotions/inngest/promotion-capacity-inngest-registrar';
+// pca-3c4c - activates the complete promotion-expiry delivery path: the
+// bounded scanner publishes `promotion.expiring.detected` rows, the
+// dedicated outbox module owns their durable poller/dispatcher, and the
+// top-level registrar registers the email consumer.
+import { PromotionExpiryModule } from './promotions/expiry/promotion-expiry.module';
+import { PromotionExpiryOutboxModule } from './promotions/outbox/promotion-expiry-outbox.module';
+import { PromotionExpiryInngestRegistrar } from './promotions/inngest/promotion-expiry-inngest-registrar';
 // branch-analytics-summary / bas-3a — read-only branch sales summary
 // bounded context. Imports DatabaseModule + AuthModule only.
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -162,6 +169,14 @@ import { AnalyticsModule } from './analytics/analytics.module';
     // owned by exactly one poller. pca-3b4 registers the Inngest function
     // that consumes the dispatched event.
     PromotionCapacityOutboxModule,
+    // pca-3c4c — activates the promotion-expiry path. The scanner module
+    // is imported here (it is inert until now) so it actually produces
+    // `promotion.expiring.detected` rows, and the dedicated outbox module
+    // is imported so those rows have a durable poller/dispatcher. The
+    // generic poller already excludes this eventType, so exactly one
+    // consumer owns each row.
+    PromotionExpiryModule,
+    PromotionExpiryOutboxModule,
     // online-catalog-publishing / WU3A3 — catalog-settings bounded
     // context. Self-contained: imports DatabaseModule + AuthModule only.
     CatalogSettingsModule,
@@ -185,6 +200,10 @@ import { AnalyticsModule } from './analytics/analytics.module';
     // promotion.near_capacity.detected event. Same registration pattern
     // as the low-stock / hr-time-off / delivery-routes registrars.
     PromotionCapacityInngestRegistrar,
+    // pca-3c4c — Inngest function registrar for the
+    // promotion.expiring.detected event. Same registration pattern as the
+    // low-stock / hr-time-off / delivery-routes / capacity registrars.
+    PromotionExpiryInngestRegistrar,
   ],
 })
 export class AppModule {}
