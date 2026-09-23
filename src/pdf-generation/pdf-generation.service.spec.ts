@@ -411,6 +411,34 @@ describe('PdfGenerationService', () => {
     });
   });
 
+  it.each(['receipt-a4', 'receipt-ticket'] as const)(
+    'passes a separate shipping charge to the %s receipt totals',
+    async (format) => {
+      const sale = makeConfirmedSale({
+        channel: 'ONLINE',
+        shippingChargeCents: 2500,
+        subtotalCents: 10000,
+        discountCents: 1000,
+        totalCents: 11500,
+        paidCents: 0,
+        debtCents: 11500,
+        payments: [],
+      });
+      salesService.getSaleDetail.mockResolvedValue(sale);
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      await service.generateSalePdf(sale.id, 'tenant-1', format);
+      const element = renderer.renderToStream.mock.calls[0][0];
+      expect(element.props.totals).toMatchObject({
+        subtotalCents: 10000,
+        discountCents: 1000,
+        shippingChargeCents: 2500,
+        totalCents: 11500,
+        debtCents: 11500,
+      });
+    },
+  );
+
   // ── WU4 — Quotation rendering ──────────────────────────────────────
 
   describe('renderQuotationPdf (WU4 / T047)', () => {
@@ -673,10 +701,7 @@ describe('PdfGenerationService', () => {
       });
 
       try {
-        await service.renderQuotationPdf(
-          quotation as never,
-          'quotation-a4',
-        );
+        await service.renderQuotationPdf(quotation as never, 'quotation-a4');
         fail('expected InternalServerErrorException');
       } catch (err) {
         expect(err).toBeInstanceOf(InternalServerErrorException);

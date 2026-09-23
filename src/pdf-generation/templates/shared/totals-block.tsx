@@ -4,11 +4,12 @@
  * Rows, in this order:
  *   1. Subtotal  — pre-discount sum of line items.
  *   2. Descuentos — total discounts applied (positive cents).
- *   3. Pagado / Deuda / Cambio — payment settlement rows rendered only
+ *   3. Envío — optional positive shipping charge, never discounted.
+ *   4. Pagado / Deuda / Cambio — payment settlement rows rendered only
  *      when their value is non-zero (a fully-paid cash sale with no
  *      change prints none of them). Kept discrete gray rows so the
  *      credit-sale balance stays visible without stealing focus.
- *   4. TOTAL      — post-discount grand total on a highlighted card:
+ *   5. TOTAL      — post-discount grand total on a highlighted card:
  *      label + 18pt 800 value in the accent blue #2563EB. This is the
  *      document's focal point.
  *
@@ -40,7 +41,9 @@ export interface TotalsBlockProps {
   subtotalCents: number;
   /** Total discounts applied across all lines, in cents (≥ 0). */
   discountCents: number;
-  /** Final grand total after discounts, in cents. */
+  /** Optional positive charge added after merchandise discounts. */
+  shippingChargeCents?: number;
+  /** Final grand total after discounts and shipping, in cents. */
   totalCents: number;
   /** Amount the customer paid across all payment methods, in cents. Rendered only when non-zero. */
   paidCents: number;
@@ -55,6 +58,7 @@ export interface TotalsBlockProps {
 export function TotalsBlock({
   subtotalCents,
   discountCents,
+  shippingChargeCents,
   totalCents,
   paidCents,
   debtCents,
@@ -80,6 +84,15 @@ export function TotalsBlock({
             : formatCurrency(discountCents)}
         </Text>
       </View>
+
+      {shippingChargeCents && shippingChargeCents > 0 ? (
+        <View style={tokens.row}>
+          <Text style={tokens.label}>Envío</Text>
+          <Text style={tokens.value}>
+            {formatCurrency(shippingChargeCents)}
+          </Text>
+        </View>
+      ) : null}
 
       {/* Settlement rows — only when the value matters (≠ 0). A credit
           sale prints Deuda; a cash overpay prints Cambio; a fully paid

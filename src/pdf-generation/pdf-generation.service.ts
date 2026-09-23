@@ -66,9 +66,7 @@ import type {
   ReceiptSale,
   ReceiptCustomer,
 } from './templates/receipt/receipt.types';
-import type {
-  QuotationDocumentProps,
-} from './templates/quotation/quotation-a4.document';
+import type { QuotationDocumentProps } from './templates/quotation/quotation-a4.document';
 import type { QuotationResponseDto } from '../quotations/dto/quotation-response.dto';
 
 const SUPPORTED_FORMATS: readonly FormatKey[] = [
@@ -302,6 +300,9 @@ export class PdfGenerationService implements OnModuleInit {
       totals: {
         subtotalCents: sale.subtotalCents,
         discountCents: sale.discountCents,
+        ...(sale.shippingChargeCents && sale.shippingChargeCents > 0
+          ? { shippingChargeCents: sale.shippingChargeCents }
+          : {}),
         totalCents: sale.totalCents,
         paidCents: sale.paidCents,
         debtCents: sale.debtCents,
