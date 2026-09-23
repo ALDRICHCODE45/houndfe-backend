@@ -5,6 +5,9 @@ export interface BotSaleResponse {
   channel: string;
   deliveryStatus: string;
   totalCents: number;
+  /** Merchandise subtotal and approved shipping charge; present only for charged shipping sales. */
+  subtotalCents?: number;
+  shippingChargeCents?: number;
   // Q2 / WU3 — additive. 0 when no promotion applied; equals
   // engine-recomputed (subtotalCents − totalCents) when a promotion
   // applied. Legacy cached responses that pre-date this field are

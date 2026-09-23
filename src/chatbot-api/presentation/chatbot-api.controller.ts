@@ -29,7 +29,6 @@ import { AttachReceiptRequestDto } from './dto/attach-receipt.request';
 import { DeliveryMetadataRequestDto } from './dto/delivery-metadata.request';
 import { CancelBotSaleRequestDto } from './dto/cancel-bot-sale.request';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
-import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 
 @Controller('chatbot-api')
 @UseGuards(ServiceAuthGuard)
@@ -95,14 +94,9 @@ export class ChatbotApiController {
     @IdempotencyKey()
     idempotencyKey: string,
   ) {
-    if (body.shipping !== undefined) {
-      // Do not accept a charge until the sale detail and receipt can show it.
-      throw new BusinessRuleViolationError(
-        'Shipping charge is not available',
-        'SHIPPING_CHARGE_UNAVAILABLE',
-      );
-    }
+    // The service enforces the optional owner ceiling before idempotency.
     return this.chatbotApiService.registerBotSale({
+      ...(body.shipping ? { shipping: body.shipping } : {}),
       cashierUserId: body.cashierUserId,
       customerId: body.customerId,
       shippingAddressId: body.shippingAddressId ?? null,

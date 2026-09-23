@@ -257,6 +257,7 @@ describe('ChatbotApiService', () => {
     markSaleRegistrationIdempotencySucceeded: jest.Mock;
   };
   let tenantPrisma: MockTenantPrisma;
+  let shippingConfig: { get: jest.Mock };
   let service: ChatbotApiService;
 
   beforeEach(() => {
@@ -320,6 +321,7 @@ describe('ChatbotApiService', () => {
       getClient: jest.fn<MockTenantClient, []>(() => tenantClient),
       getTenantId: jest.fn<string, []>(() => 'tenant-1'),
     };
+    shippingConfig = { get: jest.fn().mockReturnValue(undefined) };
     service = new ChatbotApiService(
       repository,
       customerRepository,
@@ -327,6 +329,7 @@ describe('ChatbotApiService', () => {
       salesService as unknown as SalesService,
       saleRepository as never,
       tenantPrisma as unknown as TenantPrismaService,
+      shippingConfig as never,
     );
   });
 
@@ -840,6 +843,119 @@ describe('ChatbotApiService', () => {
         saleRepository.acquireSaleRegistrationIdempotency,
       ).not.toHaveBeenCalled();
       expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+    });
+
+    it('registers approved shipping only below the owner ceiling, with reconciled response and replay', async () => {
+      shippingConfig.get.mockReturnValue(5000);
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValueOnce({
+        kind: 'acquired',
+        token: 'shipping-token',
+      });
+      salesService.confirmBotSale.mockResolvedValueOnce({
+        saleId: 'sale-shipping-1',
+        folio: 'BOT-1',
+        paymentStatus: 'CREDIT',
+        channel: 'ONLINE',
+        deliveryStatus: 'PENDING',
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 2500,
+        totalCents: 4300,
+        paidCents: 0,
+        debtCents: 4300,
+        confirmedAt: '2026-09-23T00:00:00.000Z',
+      });
+      const input = {
+        ...botSaleInput,
+        shipping: {
+          chargeCents: 2500,
+          approvalId: ' approval-1 ',
+          quoteId: ' quote-1 ',
+        },
+        expectedTotalCents: 4300,
+      };
+      const result = await service.registerBotSale(input);
+      expect(shippingConfig.get).toHaveBeenCalledWith(
+        'BOT_SHIPPING_CHARGE_MAX_CENTS',
+      );
+      expect(salesService.confirmBotSale).toHaveBeenCalledWith(
+        expect.objectContaining({
+          shipping: {
+            chargeCents: 2500,
+            approvalId: 'approval-1',
+            quoteId: 'quote-1',
+          },
+          shippingAddressId: 'addr-1',
+          expectedTotalCents: 4300,
+        }),
+      );
+      expect(result).toMatchObject({
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 2500,
+        totalCents: 4300,
+        debtCents: 4300,
+      });
+      expect(
+        saleRepository.markSaleRegistrationIdempotencySucceeded,
+      ).toHaveBeenCalledWith('shipping-token', 'sale-shipping-1', result);
+
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValueOnce({
+        kind: 'replay',
+        payload: result,
+      });
+      expect(await service.registerBotSale(input)).toEqual(result);
+      expect(salesService.confirmBotSale).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses an incomplete shipping replay rather than returning an irreconcilable total', async () => {
+      shippingConfig.get.mockReturnValue(5000);
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'replay',
+        payload: {
+          saleId: 'sale-1',
+          shippingChargeCents: 2500,
+          discountCents: 200,
+          totalCents: 4300,
+          debtCents: 4300,
+        },
+      });
+      await expect(
+        service.registerBotSale({
+          ...botSaleInput,
+          shipping: {
+            chargeCents: 2500,
+            approvalId: 'approval-1',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_REPLAY_INCOMPLETE' });
+      expect(salesService.confirmBotSale).not.toHaveBeenCalled();
+    });
+
+    it('rejects charges above the ceiling and missing addresses before idempotency', async () => {
+      shippingConfig.get.mockReturnValue(2500);
+      await expect(
+        service.registerBotSale({
+          ...botSaleInput,
+          shipping: {
+            chargeCents: 2501,
+            approvalId: 'approval-2',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_CHARGE_EXCEEDS_MAX' });
+      await expect(
+        service.registerBotSale({
+          ...botSaleInput,
+          shippingAddressId: null,
+          shipping: {
+            chargeCents: 2500,
+            approvalId: 'approval-2',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_ADDRESS_REQUIRED' });
+      expect(
+        saleRepository.acquireSaleRegistrationIdempotency,
+      ).not.toHaveBeenCalled();
     });
 
     it('binds shipping charge, approval and optional quote to the canonical request hash', () => {

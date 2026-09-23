@@ -1,12 +1,14 @@
-# Cargo de envío en ventas del bot (preparación, **no activado**)
+# Cargo de envío en ventas del bot (MVP A)
 
-Este branch prepara un cargo en centavos MXN, pero **POST `/chatbot-api/sales` rechaza cualquier `shipping` con `SHIPPING_CHARGE_UNAVAILABLE` (422)** antes de adquirir la clave de idempotencia o crear una venta. No se debe enviar el cargo todavía. Una venta sin `shipping` conserva su contrato anterior.
+**Estado:** implementado en `feat/bot-sale-shipping-charge`, no publicado. En esta rama permanece **apagado por defecto**: `POST /chatbot-api/sales` rechaza `shipping` con `SHIPPING_CHARGE_UNAVAILABLE` (422) antes de reservar la clave de idempotencia si el propietario no configuró `BOT_SHIPPING_CHARGE_MAX_CENTS`. No inventamos tope comercial. Las ventas sin `shipping` conservan su contrato anterior.
 
-## Contrato previsto al activar
+## Configurar y llamar
+
+El propietario debe definir `BOT_SHIPPING_CHARGE_MAX_CENTS` como entero positivo ≤ 2 147 483 647 (centavos MXN). Valores ausentes desactivan el cargo; valores inválidos impiden el arranque. Con configuración válida, el bot autenticado (`sales:create`) puede enviar:
 
 ```json
 {
-  "shippingAddressId": "<dirección del cliente>",
+  "shippingAddressId": "<UUID de dirección del cliente>",
   "shipping": {
     "chargeCents": 2500,
     "approvalId": "<requestId de aprobación humana>",
@@ -16,8 +18,14 @@ Este branch prepara un cargo en centavos MXN, pero **POST `/chatbot-api/sales` r
 }
 ```
 
-El monto es positivo e íntegro en centavos MXN. El backend comprobará que la dirección exista en el tenant y pertenezca al cliente; `approvalId` no puede reutilizarse para otra venta del mismo tenant. El backend **confía en la afirmación del servicio bot autenticado**: no consulta ni comprueba por sí mismo la decisión humana. Antes de registrar la venta, el bot debe volver a comprobar que su aprobación corresponda al carrito, destino y cotización vigentes.
+Este fragmento se añade al cuerpo existente (`cashierUserId`, `customerId`, `items`); también requiere `X-Idempotency-Key`. El monto es positivo e íntegro en centavos MXN, ≤ tope configurado. El backend comprueba que la dirección exista en el tenant y pertenezca al cliente. `approvalId` no puede reutilizarse en otra venta del **mismo tenant** (409 `SHIPPING_APPROVAL_ALREADY_USED`). El hash de idempotencia incluye cargo, aprobación y cotización, además de los campos de mercancía existentes; una misma clave con distinto contenido da 409 `IDEMPOTENCY_KEY_CONFLICT`.
 
-La promoción descuenta sólo mercancía. La conciliación será `subtotalCents − discountCents + shippingChargeCents = totalCents = debtCents` en ventas a crédito sin pagos. `expectedTotalCents` debe ser el total final, incluido envío. El hash de idempotencia incorpora cargo, aprobación y cotización; la configuración `BOT_SHIPPING_CHARGE_MAX_CENTS` carece de valor predeterminado y deberá establecerla el propietario, sin inventar un tope comercial.
+El backend **confía en la afirmación del servicio bot autenticado** de que hubo aprobación humana: no consulta ni verifica la decisión ni la vigencia de carrito/destino/cotización por sí mismo. Antes de crear la venta, el bot debe vincular la aprobación a esos datos y volver a comprobar su frescura. No enviar monto ni aprobación desde un cliente no confiable.
 
-El detalle de venta ya expone `shippingChargeCents` cuando el snapshot guardado es positivo; en ventas históricas y POS sin cargo la propiedad permanece ausente. Los PDF A4 y ticket muestran una fila «Envío» positiva entre descuentos y deuda; sin cargo no agregan fila. **Pendiente antes de activar:** aplicar el tope del propietario en la frontera de registro; probar respuesta y replay de idempotencia. Ni tests con mocks ni build ejecutan una migración en base de datos real.
+## Conciliación y lectura
+
+La promoción descuenta **sólo mercancía**: `subtotalCents − discountCents + shippingChargeCents = totalCents`. En venta a crédito sin pagos, `debtCents = totalCents`. `expectedTotalCents` compara contra el total **incluido** envío (diferencia: 409 `PROMO_RE_QUOTE`). La respuesta `POST /chatbot-api/sales`, su replay y `sale.confirmed` incluyen `shippingChargeCents`; respuesta y detalle incluyen subtotal, descuento, total y deuda. El detalle de venta muestra cargo positivo por separado; los PDF A4 y ticket agregan una fila «Envío» entre descuento y deuda. Para ventas antiguas/POS sin cargo, se omiten los campos/filas opcionales de envío.
+
+## Evidencia y límite
+
+Pruebas unitarias cubren validación, gate, re-cotización, promociones, stock, idempotencia, persistencia y los dos formatos PDF. Se validó el esquema Prisma y compiló el backend. **No se ejecutó la migración de envío ni una venta real contra DB/proveedor para este trabajo**; eso requiere una verificación controlada aparte antes del despliegue. Ningún commit de este branch se fusionó, empujó o desplegó.

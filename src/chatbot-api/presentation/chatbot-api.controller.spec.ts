@@ -602,7 +602,58 @@ describe('ChatbotApiController', () => {
       });
   });
 
-  it('POST /chatbot-api/sales rejects a shipping charge without silently selling merchandise', async () => {
+  it('POST /chatbot-api/sales forwards validated shipping to the service gate', async () => {
+    service.registerBotSale.mockResolvedValueOnce({
+      saleId: 'sale-shipping-1',
+      subtotalCents: 2000,
+      discountCents: 200,
+      shippingChargeCents: 2500,
+      totalCents: 4300,
+      debtCents: 4300,
+    });
+    await request(httpServer())
+      .post('/chatbot-api/sales')
+      .set('Authorization', 'Bearer svc_sales-key')
+      .set('X-Idempotency-Key', 'bot-shipping-approved')
+      .send({
+        ...validBotSalePayload,
+        shippingAddressId: 'cf070bfb-ee86-460b-ab8a-7893d324e346',
+        shipping: {
+          chargeCents: 2500,
+          approvalId: 'approval-1',
+          quoteId: 'quote-1',
+        },
+      })
+      .expect(201)
+      .expect(
+        ({
+          body,
+        }: {
+          body: { shippingChargeCents?: number; totalCents?: number };
+        }) => {
+          expect(body.shippingChargeCents).toBe(2500);
+          expect(body.totalCents).toBe(4300);
+        },
+      );
+    expect(service.registerBotSale).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shipping: {
+          chargeCents: 2500,
+          approvalId: 'approval-1',
+          quoteId: 'quote-1',
+        },
+        shippingAddressId: 'cf070bfb-ee86-460b-ab8a-7893d324e346',
+      }),
+    );
+  });
+
+  it('POST /chatbot-api/sales propagates a disabled shipping gate without creating a sale', async () => {
+    service.registerBotSale.mockRejectedValueOnce(
+      new BusinessRuleViolationError(
+        'Shipping charge is not available',
+        'SHIPPING_CHARGE_UNAVAILABLE',
+      ),
+    );
     await request(httpServer())
       .post('/chatbot-api/sales')
       .set('Authorization', 'Bearer svc_sales-key')
@@ -615,7 +666,6 @@ describe('ChatbotApiController', () => {
       .expect(({ body }: { body: { error?: string } }) => {
         expect(body.error).toBe('SHIPPING_CHARGE_UNAVAILABLE');
       });
-    expect(service.registerBotSale).not.toHaveBeenCalled();
   });
 
   it('POST /chatbot-api/sales validates nested shipping fields before the gate', async () => {
