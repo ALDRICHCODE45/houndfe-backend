@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { PublicBranchDto } from '../application/dto/public-branch.dto';
+import type { PublicPriceContextDto } from '../application/dto/public-price-context.dto';
 import type { PublicCatalogCategoryFacet } from '../application/dto/public-category-facet.dto';
 import type {
   IPublicCatalogRepository,
@@ -51,6 +52,37 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       slug: t.slug,
       address: t.address,
       phone: t.phone,
+    }));
+  }
+
+  async listTenantPublicPriceContexts(
+    tenantId: string,
+  ): Promise<PublicPriceContextDto[]> {
+    // TenantPrismaService overwrites a supplied tenantId with its CLS value.
+    // Reject a mismatched guarded tenant instead of returning the CLS tenant's
+    // bindings under an unrelated route parameter.
+    if (tenantId !== this.tenantPrisma.getTenantId()) return [];
+
+    const bindings = await this.tenantPrisma
+      .getClient()
+      .tenantCatalogPriceList.findMany({
+        where: { tenantId },
+        select: {
+          globalPriceListId: true,
+          isCatalogDefault: true,
+          globalPriceList: { select: { name: true } },
+        },
+        orderBy: [
+          { isCatalogDefault: 'desc' },
+          { globalPriceList: { name: 'asc' } },
+          { globalPriceListId: 'asc' },
+        ],
+      });
+
+    return bindings.map((binding) => ({
+      priceListId: binding.globalPriceListId,
+      name: binding.globalPriceList.name,
+      isCatalogDefault: binding.isCatalogDefault,
     }));
   }
 

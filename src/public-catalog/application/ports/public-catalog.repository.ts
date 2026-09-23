@@ -1,4 +1,5 @@
 import type { PublicBranchDto } from '../dto/public-branch.dto';
+import type { PublicPriceContextDto } from '../dto/public-price-context.dto';
 import type { PublicCatalogCategoryFacet } from '../dto/public-category-facet.dto';
 import type {
   ProductWithIncludes,
@@ -115,13 +116,17 @@ export interface PublicProductDetailProjection extends ProductDetailWithIncludes
  * fallback from participants to product `quantity`/`minQuantity`.
  */
 export interface PublicProductListProjection
-  extends ProductWithIncludes,
-    PersistedStockPresentationOverrides {
+  extends ProductWithIncludes, PersistedStockPresentationOverrides {
   stockPresentationParticipants: PublicStockPresentationParticipant[];
 }
 
 export interface IPublicCatalogRepository {
   findActiveBranches(): Promise<PublicBranchDto[]>;
+
+  /** Only catalog-bound public lists of the guarded tenant, default first. */
+  listTenantPublicPriceContexts(
+    tenantId: string,
+  ): Promise<PublicPriceContextDto[]>;
 
   findProducts(params: ListProductsParams): Promise<{
     items: ProductWithIncludes[];

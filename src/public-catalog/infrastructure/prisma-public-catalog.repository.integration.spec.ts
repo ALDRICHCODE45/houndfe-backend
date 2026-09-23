@@ -501,6 +501,92 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
     });
   });
 
+  describe('listTenantPublicPriceContexts — tenant/public-only ordering', () => {
+    it('lists only bound contexts, default first then name/id, with no tenant leak', async () => {
+      const a = await seedTenant('context-A', {
+        isActive: true,
+        catalogPublished: true,
+      });
+      const b = await seedTenant('context-B', {
+        isActive: true,
+        catalogPublished: true,
+      });
+      const [defaultId, alphaId, beta1Id, beta2Id, privateId, bId] =
+        await Promise.all([
+          seedGlobalPriceList('default'),
+          seedGlobalPriceList('alpha'),
+          seedGlobalPriceList('beta-1'),
+          seedGlobalPriceList('beta-2'),
+          seedGlobalPriceList('private'),
+          seedGlobalPriceList('other-tenant'),
+        ]);
+      for (const [id, name] of [
+        [defaultId, 'pc-int-Zeta'],
+        [alphaId, 'pc-int-Alfa'],
+        [beta1Id, 'pc-int-Beta-1'],
+        [beta2Id, 'pc-int-Beta-2'],
+      ]) {
+        await prisma.globalPriceList.update({
+          where: { id },
+          data: { name },
+        });
+      }
+      for (const [id, isCatalogDefault] of [
+        [defaultId, true],
+        [alphaId, false],
+        [beta1Id, false],
+        [beta2Id, false],
+      ] as const) {
+        await seedBinding({
+          tenantId: a.id,
+          globalPriceListId: id,
+          isCatalogDefault,
+        });
+      }
+      await seedBinding({
+        tenantId: b.id,
+        globalPriceListId: bId,
+        isCatalogDefault: true,
+      });
+      // privateId has no tenant-public binding; it must never appear.
+      currentTenantId = a.id;
+      const result = await repo.listTenantPublicPriceContexts(a.id);
+      expect(result).toEqual([
+        { priceListId: defaultId, name: 'pc-int-Zeta', isCatalogDefault: true },
+        { priceListId: alphaId, name: 'pc-int-Alfa', isCatalogDefault: false },
+        {
+          priceListId: beta1Id,
+          name: 'pc-int-Beta-1',
+          isCatalogDefault: false,
+        },
+        {
+          priceListId: beta2Id,
+          name: 'pc-int-Beta-2',
+          isCatalogDefault: false,
+        },
+      ]);
+      expect(result.some(({ priceListId }) => priceListId === privateId)).toBe(
+        false,
+      );
+      expect(result.every((entry) => Object.keys(entry).length === 3)).toBe(
+        true,
+      );
+
+      // Even an accidentally wrong tenant argument cannot widen a CLS-bound read.
+      await expect(repo.listTenantPublicPriceContexts(b.id)).resolves.toEqual(
+        [],
+      );
+      currentTenantId = b.id;
+      await expect(repo.listTenantPublicPriceContexts(b.id)).resolves.toEqual([
+        {
+          priceListId: bId,
+          name: `pc-int-list-${bId.slice(0, 8)}-other-tenant`,
+          isCatalogDefault: true,
+        },
+      ]);
+    });
+  });
+
   // ── F1.WU5e2 — product/variant publication evidence (real DB) ────────
   describe('F1.WU5e2 — product/variant publication gates', () => {
     it('list + count return only effective published parents, in deterministic API order', async () => {
