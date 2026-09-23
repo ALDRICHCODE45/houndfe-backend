@@ -27,6 +27,20 @@
  *   13. a foreign tenant cannot restore the owning tenant's ledger/counter
  *   14. a corrupted zero/insufficient counter never goes negative
  *
+ * Six near-capacity outbox scenarios from pca-3b2, proving the just-committed
+ * `promotion.near_capacity.detected` transactional-outbox semantics against a
+ * real database rather than a mocked writer:
+ *   15. a finite exact-boundary claim (79->80 of 100) writes one PENDING row
+ *       whose aggregate, event type, and raw payload values are exact
+ *   16. below-threshold, already-at-threshold, and unlimited claims emit none
+ *   17. a same-sale retry after a crossing stays one ledger row and one event
+ *   18. concurrent different-sale claims from 79 serialize to 81 and emit
+ *       exactly one crossing event, owned by the 79->80 winner
+ *   19. a later over-cap promotion rolls back the earlier crossing counter,
+ *       ledger row, and outbox row with the whole ambient transaction
+ *   20. `restoreForSale` returns the counter to 79 without emitting, and a
+ *       later sale re-crosses with a second event
+ *
  * Loaded by `jest.integration.config.js`. Gated by `DATABASE_URL` and
  * `SKIP_DB_INTEGRATION`. Every fixture and assertion query is tenant
  * qualified on `BASELINE_TENANT_ID`.
@@ -171,6 +185,58 @@ async function restoredAtFor(
     select: { restoredAt: true },
   });
   return row.restoredAt;
+}
+
+const NEAR_CAPACITY_EVENT_TYPE = 'promotion.near_capacity.detected';
+
+interface NearCapacityPayload {
+  tenantId: string;
+  promotionId: string;
+  saleId: string;
+  previousConsumedProductUnits: number;
+  consumedProductUnits: number;
+  maxProductUnits: number;
+  occurredAt: string;
+}
+
+interface NearCapacityEventRow {
+  status: string;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  payload: NearCapacityPayload;
+}
+
+/**
+ * Reads only this spec's event type, tenant qualified and ordered by the
+ * database (creation order, then id as a tie-breaker), so the assertions never
+ * depend on client-side ordering. `payload` is a `Json` column; the captured
+ * value is narrowed to the writer's known shape after retrieval, and callers
+ * still compare the raw stored JSON with `toEqual`.
+ */
+async function nearCapacityEvents(
+  prisma: PrismaClient,
+  promotionId: string,
+): Promise<NearCapacityEventRow[]> {
+  const rows = await prisma.outboxEvent.findMany({
+    where: {
+      tenantId: BASELINE_TENANT_ID,
+      eventType: NEAR_CAPACITY_EVENT_TYPE,
+      aggregateId: promotionId,
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: {
+      status: true,
+      aggregateType: true,
+      aggregateId: true,
+      eventType: true,
+      payload: true,
+    },
+  });
+  return rows.map((row) => ({
+    ...row,
+    payload: row.payload as unknown as NearCapacityPayload,
+  }));
 }
 
 function tenantHarness(
@@ -693,6 +759,264 @@ describeIfDb(
           expect(await restoredAtFor(prisma, saleId, promotionId)).toBeNull();
         },
       );
+    });
+
+    describe('near-capacity outbox emission (pca-3b2)', () => {
+      it('15) an exact 79->80 boundary claim writes one PENDING row with exact payload values', async () => {
+        const { saleId } = await seedSale(prisma);
+        const { promotionId } = await seedPromotion(prisma, {
+          maxProductUnits: 100,
+          consumedProductUnits: 79,
+        });
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleId, [{ promotionId, units: 1 }]);
+        });
+
+        expect(await consumedFor(prisma, promotionId)).toBe(80);
+        const events = await nearCapacityEvents(prisma, promotionId);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+          status: 'PENDING',
+          aggregateType: 'Promotion',
+          aggregateId: promotionId,
+          eventType: NEAR_CAPACITY_EVENT_TYPE,
+        });
+        const { occurredAt } = events[0].payload;
+        expect(new Date(occurredAt).toISOString()).toBe(occurredAt);
+        expect(events[0].payload).toEqual({
+          tenantId: BASELINE_TENANT_ID,
+          promotionId,
+          saleId,
+          previousConsumedProductUnits: 79,
+          consumedProductUnits: 80,
+          maxProductUnits: 100,
+          occurredAt,
+        });
+      });
+
+      it('16) below-threshold, at-threshold, and unlimited claims emit no capacity row', async () => {
+        const { saleId: belowSale } = await seedSale(prisma);
+        const { saleId: atThresholdSale } = await seedSale(prisma);
+        const { saleId: unlimitedSale } = await seedSale(prisma);
+        const { promotionId: belowPromotion } = await seedPromotion(prisma, {
+          maxProductUnits: 100,
+          consumedProductUnits: 70,
+        });
+        const { promotionId: atThresholdPromotion } = await seedPromotion(
+          prisma,
+          { maxProductUnits: 100, consumedProductUnits: 80 },
+        );
+        const { promotionId: unlimitedPromotion } = await seedPromotion(
+          prisma,
+          { maxProductUnits: null, consumedProductUnits: 100 },
+        );
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(belowSale, [
+            { promotionId: belowPromotion, units: 5 },
+          ]);
+        });
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(atThresholdSale, [
+            { promotionId: atThresholdPromotion, units: 5 },
+          ]);
+        });
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(unlimitedSale, [
+            { promotionId: unlimitedPromotion, units: 10 },
+          ]);
+        });
+
+        expect(await consumedFor(prisma, belowPromotion)).toBe(75);
+        expect(await consumedFor(prisma, atThresholdPromotion)).toBe(85);
+        expect(await consumedFor(prisma, unlimitedPromotion)).toBe(110);
+        expect(await nearCapacityEvents(prisma, belowPromotion)).toHaveLength(
+          0,
+        );
+        expect(
+          await nearCapacityEvents(prisma, atThresholdPromotion),
+        ).toHaveLength(0);
+        expect(
+          await nearCapacityEvents(prisma, unlimitedPromotion),
+        ).toHaveLength(0);
+        expect(
+          await prisma.outboxEvent.count({
+            where: {
+              tenantId: BASELINE_TENANT_ID,
+              eventType: NEAR_CAPACITY_EVENT_TYPE,
+            },
+          }),
+        ).toBe(0);
+      });
+
+      it('17) a same-sale retry after a crossing stays one increment and one event', async () => {
+        const { saleId } = await seedSale(prisma);
+        const { promotionId } = await seedPromotion(prisma, {
+          maxProductUnits: 100,
+          consumedProductUnits: 79,
+        });
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleId, [{ promotionId, units: 1 }]);
+        });
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleId, [{ promotionId, units: 1 }]);
+        });
+
+        expect(await consumedFor(prisma, promotionId)).toBe(80);
+        expect(await usageCount(prisma, saleId, promotionId)).toBe(1);
+        const events = await nearCapacityEvents(prisma, promotionId);
+        expect(events).toHaveLength(1);
+        expect(events[0].payload).toMatchObject({
+          saleId,
+          previousConsumedProductUnits: 79,
+          consumedProductUnits: 80,
+        });
+      });
+
+      it('18) concurrent different-sale claims from 79 serialize to 81 with one crossing event', async () => {
+        const { saleId: saleA } = await seedSale(prisma);
+        const { saleId: saleB } = await seedSale(prisma);
+        const { promotionId } = await seedPromotion(prisma, {
+          maxProductUnits: 100,
+          consumedProductUnits: 79,
+        });
+
+        // Independent CLS stores per transaction so parallel runs cannot
+        // clobber the TX_CLIENT_KEY slot the SUT reads through.
+        const first = tenantHarness(prisma);
+        const second = tenantHarness(prisma);
+        const outcomes = await Promise.allSettled([
+          first.tenantPrisma.runInTransaction(async () => {
+            await first.repository.claimForSale(saleA, [
+              { promotionId, units: 1 },
+            ]);
+          }),
+          second.tenantPrisma.runInTransaction(async () => {
+            await second.repository.claimForSale(saleB, [
+              { promotionId, units: 1 },
+            ]);
+          }),
+        ]);
+
+        expect(
+          outcomes.every((outcome) => outcome.status === 'fulfilled'),
+        ).toBe(true);
+        expect(await consumedFor(prisma, promotionId)).toBe(81);
+        const ledger = await prisma.promotionUsage.findMany({
+          where: {
+            tenantId: BASELINE_TENANT_ID,
+            promotionId,
+            restoredAt: null,
+          },
+          select: { saleId: true, units: true },
+        });
+        expect(ledger).toHaveLength(2);
+        expect(ledger.map((row) => row.units)).toEqual([1, 1]);
+
+        // Only the 79->80 winner crosses; the 80->81 follower is already at
+        // the threshold and must not emit a second event.
+        const events = await nearCapacityEvents(prisma, promotionId);
+        expect(events).toHaveLength(1);
+        expect(events[0].payload).toMatchObject({
+          previousConsumedProductUnits: 79,
+          consumedProductUnits: 80,
+        });
+        expect([saleA, saleB]).toContain(events[0].payload.saleId);
+      });
+
+      it('19) a later over-cap promotion rolls back the earlier crossing counter, ledger, and outbox row', async () => {
+        const { saleId } = await seedSale(prisma);
+        const { promotionId: promoA } = await seedPromotion(prisma);
+        const { promotionId: promoB } = await seedPromotion(prisma);
+        // The repository processes ascending promotionId order, so assigning
+        // the crossing fixture to the lexicographically first id makes the
+        // emission deterministic and the rollback assertion meaningful.
+        const [crossingId, failingId] = [promoA, promoB].sort();
+        await prisma.promotion.update({
+          where: { id: crossingId },
+          data: { maxProductUnits: 100, consumedProductUnits: 79 },
+        });
+        await prisma.promotion.update({
+          where: { id: failingId },
+          data: { maxProductUnits: 5, consumedProductUnits: 4 },
+        });
+
+        await expect(
+          tenantPrisma.runInTransaction(async () => {
+            await repository.claimForSale(saleId, [
+              { promotionId: crossingId, units: 1 },
+              { promotionId: failingId, units: 2 },
+            ]);
+          }),
+        ).rejects.toMatchObject({ code: 'PROMOTION_CAPACITY_EXCEEDED' });
+
+        expect(await consumedFor(prisma, crossingId)).toBe(79);
+        expect(await consumedFor(prisma, failingId)).toBe(4);
+        expect(await usageCount(prisma, saleId, crossingId)).toBe(0);
+        expect(await usageCount(prisma, saleId, failingId)).toBe(0);
+        expect(await nearCapacityEvents(prisma, crossingId)).toHaveLength(0);
+        expect(
+          await prisma.outboxEvent.count({
+            where: {
+              tenantId: BASELINE_TENANT_ID,
+              eventType: NEAR_CAPACITY_EVENT_TYPE,
+            },
+          }),
+        ).toBe(0);
+      });
+
+      it('20) restore returns to 79 without emitting and a later sale re-crosses with a second event', async () => {
+        const { saleId: saleA } = await seedSale(prisma);
+        const { saleId: saleB } = await seedSale(prisma);
+        const { promotionId } = await seedPromotion(prisma, {
+          maxProductUnits: 100,
+          consumedProductUnits: 79,
+        });
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleA, [{ promotionId, units: 1 }]);
+        });
+        expect(await consumedFor(prisma, promotionId)).toBe(80);
+        expect(await nearCapacityEvents(prisma, promotionId)).toHaveLength(1);
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.restoreForSale(saleA);
+        });
+        expect(await consumedFor(prisma, promotionId)).toBe(79);
+        expect(await restoredAtFor(prisma, saleA, promotionId)).not.toBeNull();
+        expect(await nearCapacityEvents(prisma, promotionId)).toHaveLength(1);
+
+        await tenantPrisma.runInTransaction(async () => {
+          await repository.claimForSale(saleB, [{ promotionId, units: 1 }]);
+        });
+        expect(await consumedFor(prisma, promotionId)).toBe(80);
+
+        const events = await nearCapacityEvents(prisma, promotionId);
+        expect(events).toHaveLength(2);
+        expect(events.map((event) => event.payload.saleId).sort()).toEqual(
+          [saleA, saleB].sort(),
+        );
+        for (const event of events) {
+          expect(event.payload).toMatchObject({
+            previousConsumedProductUnits: 79,
+            consumedProductUnits: 80,
+            maxProductUnits: 100,
+          });
+        }
+        // Restoration never emits: the only rows written are the two crossings.
+        const allEvents = await prisma.outboxEvent.findMany({
+          where: { tenantId: BASELINE_TENANT_ID },
+          select: { eventType: true },
+        });
+        expect(allEvents).toHaveLength(2);
+        expect(
+          allEvents.every(
+            (event) => event.eventType === NEAR_CAPACITY_EVENT_TYPE,
+          ),
+        ).toBe(true);
+      });
     });
   },
 );
