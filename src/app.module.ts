@@ -70,6 +70,9 @@ import { CatalogSettingsModule } from './catalog-settings/catalog-settings.modul
 // Own module so the Inngest dep graph doesn't pollute transitive chains
 // (mirrors the low-stock / hr-time-off / delivery-routes wiring).
 import { PromotionCapacityOutboxModule } from './promotions/outbox/promotion-capacity-outbox.module';
+// pca-3b4c - registers the promotion-near-capacity-email Inngest function.
+// Top-level provider so the dep graph resolves through AppModule.
+import { PromotionCapacityInngestRegistrar } from './promotions/inngest/promotion-capacity-inngest-registrar';
 // branch-analytics-summary / bas-3a — read-only branch sales summary
 // bounded context. Imports DatabaseModule + AuthModule only.
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -178,6 +181,10 @@ import { AnalyticsModule } from './analytics/analytics.module';
     // delivery-next-stop-notify event. Same registration pattern as
     // the low-stock / hr-time-off registrars.
     DeliveryRoutesInngestRegistrar,
+    // pca-3b4c — Inngest function registrar for the
+    // promotion.near_capacity.detected event. Same registration pattern
+    // as the low-stock / hr-time-off / delivery-routes registrars.
+    PromotionCapacityInngestRegistrar,
   ],
 })
 export class AppModule {}
