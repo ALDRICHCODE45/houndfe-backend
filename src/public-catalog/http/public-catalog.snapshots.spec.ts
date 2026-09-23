@@ -512,6 +512,7 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
       new PublicPriceContextResolver({
         resolveTenantCatalogContext,
       } as unknown as IPublicCatalogRepository),
+      {} as never,
     );
     const contextOf = (mock: jest.Mock, call: number): string =>
       // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access
@@ -545,6 +546,7 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
     ).toContain(cacheControl.CacheControlInterceptor);
     for (const [method, expected] of [
       ['getBranches', 'public, max-age=300'],
+      ['getPriceContexts', 'public, max-age=60'],
       ['getProducts', 'public, max-age=60'],
       ['getProduct', 'public, max-age=60'],
       ['validateCartEndpoint', 'no-store'],

@@ -14,6 +14,7 @@ import { ClsService } from 'nestjs-cls';
 import { PublicCatalogController } from './public-catalog.controller';
 import { PublicTenantGuard } from './guards/public-tenant.guard';
 import { ListPublicBranchesUseCase } from '../application/use-cases/list-public-branches.use-case';
+import { ListPublicPriceContextsUseCase } from '../application/use-cases/list-public-price-contexts.use-case';
 import { ListPublicProductsUseCase } from '../application/use-cases/list-public-products.use-case';
 import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
 import { PublicPriceContextResolver } from '../application/services/public-price-context-resolver';
@@ -398,6 +399,7 @@ describe('POST /public/catalog/:tenantSlug/cart/validate (F2.WU7 Slice 4)', () =
         PublicTenantGuard,
         { provide: PUBLIC_CATALOG_REPOSITORY, useValue: repo },
         { provide: ListPublicBranchesUseCase, useValue: {} },
+        { provide: ListPublicPriceContextsUseCase, useValue: {} },
         { provide: ListPublicProductsUseCase, useValue: {} },
         { provide: GetPublicProductDetailUseCase, useValue: {} },
         { provide: ValidatePublicCartUseCase, useValue: validateCart },

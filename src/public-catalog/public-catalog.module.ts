@@ -3,6 +3,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { PublicCatalogController } from './http/public-catalog.controller';
 import { PublicTenantGuard } from './http/guards/public-tenant.guard';
 import { ListPublicBranchesUseCase } from './application/use-cases/list-public-branches.use-case';
+import { ListPublicPriceContextsUseCase } from './application/use-cases/list-public-price-contexts.use-case';
 import { ListPublicProductsUseCase } from './application/use-cases/list-public-products.use-case';
 import { GetPublicProductDetailUseCase } from './application/use-cases/get-public-product-detail.use-case';
 import { ValidatePublicCartUseCase } from './application/use-cases/validate-public-cart.use-case';
@@ -21,6 +22,7 @@ import { PUBLIC_CATALOG_REPOSITORY } from './application/ports/public-catalog.re
   providers: [
     PublicTenantGuard,
     ListPublicBranchesUseCase,
+    ListPublicPriceContextsUseCase,
     ListPublicProductsUseCase,
     GetPublicProductDetailUseCase,
     ValidatePublicCartUseCase,

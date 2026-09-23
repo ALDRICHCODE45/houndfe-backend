@@ -16,6 +16,7 @@ import { PublicTenantGuard } from './guards/public-tenant.guard';
 import { CACHE_CONTROL_KEY } from './interceptors/cache-control.interceptor';
 import { ListProductsQueryDto } from './request-dto/list-products-query.dto';
 import { ListPublicBranchesUseCase } from '../application/use-cases/list-public-branches.use-case';
+import { ListPublicPriceContextsUseCase } from '../application/use-cases/list-public-price-contexts.use-case';
 import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
 import { PublicPriceContextResolver } from '../application/services/public-price-context-resolver';
@@ -325,6 +326,7 @@ describe(
           { provide: PUBLIC_CATALOG_REPOSITORY, useValue: repo },
           { provide: ListPublicProductsUseCase, useValue: listProducts },
           { provide: ListPublicBranchesUseCase, useValue: {} },
+          { provide: ListPublicPriceContextsUseCase, useValue: {} },
           { provide: GetPublicProductDetailUseCase, useValue: {} },
           { provide: ValidatePublicCartUseCase, useValue: {} },
           { provide: PrismaService, useValue: prisma },

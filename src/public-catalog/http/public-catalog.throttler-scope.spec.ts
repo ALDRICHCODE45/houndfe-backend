@@ -110,6 +110,12 @@ describe('Throttler scope (CRITICAL-01 regression)', () => {
 
   it.each([
     ['getBranches', getControllerHandler('getBranches'), 'public-browse', 60],
+    [
+      'getPriceContexts',
+      getControllerHandler('getPriceContexts'),
+      'public-browse',
+      60,
+    ],
     ['getProducts', getControllerHandler('getProducts'), 'public-browse', 60],
     ['getProduct', getControllerHandler('getProduct'), 'public-browse', 60],
     [

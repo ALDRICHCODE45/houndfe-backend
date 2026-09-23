@@ -20,6 +20,7 @@ import {
   CacheControl,
 } from './interceptors/cache-control.interceptor';
 import { ListPublicBranchesUseCase } from '../application/use-cases/list-public-branches.use-case';
+import { ListPublicPriceContextsUseCase } from '../application/use-cases/list-public-price-contexts.use-case';
 import { ListPublicProductsUseCase } from '../application/use-cases/list-public-products.use-case';
 import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
@@ -39,12 +40,19 @@ export class PublicCatalogController {
     private readonly getProductDetail: GetPublicProductDetailUseCase,
     private readonly validateCart: ValidatePublicCartUseCase,
     private readonly priceContext: PublicPriceContextResolver,
+    private readonly listPriceContexts: ListPublicPriceContextsUseCase,
   ) {}
 
   @Get('branches')
   @CacheControl('public, max-age=300')
   async getBranches() {
     return this.listBranches.execute();
+  }
+
+  @Get(':tenantSlug/price-contexts')
+  @CacheControl('public, max-age=60')
+  async getPriceContexts(@PublicTenant() tenant: PublicTenantInfo) {
+    return this.listPriceContexts.execute(tenant);
   }
 
   @Get(':tenantSlug/products')
