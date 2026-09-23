@@ -6610,6 +6610,50 @@ describe('SalesService', () => {
   });
 
   describe('getSaleDetail', () => {
+    it('surfaces a persisted shipping charge separately so totals reconcile', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'BOT-1',
+        status: 'CONFIRMED',
+        channel: 'ONLINE',
+        register: 'Bot',
+        confirmedAt: new Date('2026-09-23T11:00:00.000Z'),
+        createdAt: new Date('2026-09-23T10:00:00.000Z'),
+        dueDate: null,
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        paidCents: 0,
+        debtCents: 2050,
+        changeDueCents: 0,
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'PENDING',
+        customer: { id: 'customer-1', name: 'Ana' },
+        cashier: { id: 'user-1', name: 'Bot' },
+        seller: null,
+        items: [],
+        payments: [],
+      });
+      saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+
+      const detail = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+      expect(detail).toMatchObject({
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        debtCents: 2050,
+      });
+      expect(
+        detail.subtotalCents -
+          detail.discountCents +
+          (detail.shippingChargeCents ?? 0),
+      ).toBe(detail.totalCents);
+    });
+
     it('interleaves COMMENT events in timeline order [REGISTERED, PAYMENT, COMMENT, DELIVERED]', async () => {
       saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
         id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
@@ -6660,6 +6704,7 @@ describe('SalesService', () => {
         'b5e2b8fd-bdfd-471f-b687-ec340d578885',
       );
 
+      expect(result).not.toHaveProperty('shippingChargeCents');
       expect(result.timeline.map((event) => event.type)).toEqual([
         'SALE_REGISTERED',
         'PAYMENT_RECEIVED',

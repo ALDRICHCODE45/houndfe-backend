@@ -2088,6 +2088,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       createdAt: sale.createdAt,
       subtotalCents: sale.subtotalCents,
       discountCents: sale.discountCents,
+      shippingChargeCents: sale.shippingChargeCents ?? 0,
       totalCents: sale.totalCents,
       paidCents: sale.paidCents,
       debtCents: sale.debtCents,

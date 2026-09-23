@@ -1670,6 +1670,9 @@ export class SalesService {
       dueDate: sale.dueDate ? sale.dueDate.toISOString() : null,
       subtotalCents: sale.subtotalCents,
       discountCents: sale.discountCents,
+      ...(sale.shippingChargeCents && sale.shippingChargeCents > 0
+        ? { shippingChargeCents: sale.shippingChargeCents }
+        : {}),
       totalCents: sale.totalCents,
       paidCents: sale.paidCents,
       debtCents: sale.debtCents,

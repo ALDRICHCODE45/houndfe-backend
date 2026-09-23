@@ -1570,6 +1570,42 @@ describe('PrismaSaleRepository', () => {
       ]);
     });
 
+    it('reads the shipping snapshot separately from merchandise discounts', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        id: 'sale-shipping',
+        folio: 'BOT-1',
+        status: 'CONFIRMED',
+        channel: 'ONLINE',
+        register: 'Principal',
+        confirmedAt: new Date('2026-09-23T11:00:00.000Z'),
+        dueDate: null,
+        createdAt: new Date('2026-09-23T10:00:00.000Z'),
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        paidCents: 0,
+        debtCents: 2050,
+        changeDueCents: 0,
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'PENDING',
+        customer: null,
+        user: { id: 'user-1', name: 'Bot' },
+        seller: null,
+        items: [],
+        payments: [],
+      });
+
+      const result = await repo.findOneWithRelations('sale-shipping');
+      expect(result).toMatchObject({
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        debtCents: 2050,
+      });
+    });
+
     it('maps per-line subtotal as unitPriceCents times quantity without adding discount', async () => {
       prisma.sale.findFirst.mockResolvedValue({
         id: 'sale-subtotal-only-unit-times-qty',
@@ -3179,14 +3215,17 @@ describe('PrismaSaleRepository', () => {
     // R3-tenant-scope — raw transaction client (no Prisma tenant extension).
     it('fails a persisted foreign aggregate without touching foreign rows', async () => {
       const { sale } = makeLockScenario();
-      const foreign = { id: sale.id, tenantId: 'tenant-2', status: 'CONFIRMED' };
+      const foreign = {
+        id: sale.id,
+        tenantId: 'tenant-2',
+        status: 'CONFIRMED',
+      };
       prisma.$queryRaw.mockResolvedValue([]);
-      prisma.sale.findUnique.mockImplementation(
-        async ({ where }) =>
-          foreign.id === where.id &&
-          (where.tenantId === undefined || foreign.tenantId === where.tenantId)
-            ? foreign
-            : null,
+      prisma.sale.findUnique.mockImplementation(async ({ where }) =>
+        foreign.id === where.id &&
+        (where.tenantId === undefined || foreign.tenantId === where.tenantId)
+          ? foreign
+          : null,
       );
 
       await expect(repo.save(sale)).rejects.toEqual(
@@ -3997,10 +4036,11 @@ describe('PrismaSaleRepository', () => {
       );
       tenantPrisma.getClient.mockReturnValue(prisma);
       prisma.$queryRaw.mockResolvedValue([]);
-      prisma.sale.findFirst.mockImplementation(async ({ where }) =>
-        rows.find(
-          (row) => row.id === where.id && row.tenantId === where.tenantId,
-        ) ?? null,
+      prisma.sale.findFirst.mockImplementation(
+        async ({ where }) =>
+          rows.find(
+            (row) => row.id === where.id && row.tenantId === where.tenantId,
+          ) ?? null,
       );
       prisma.sale.delete.mockImplementation(async ({ where }) => {
         const index = rows.findIndex(
@@ -4012,7 +4052,9 @@ describe('PrismaSaleRepository', () => {
         rows.splice(index, 1);
       });
 
-      await expect(repo.delete(saleId)).rejects.toMatchObject({ code: 'P2025' });
+      await expect(repo.delete(saleId)).rejects.toMatchObject({
+        code: 'P2025',
+      });
 
       expect(rows).toEqual([
         { id: saleId, tenantId: 'tenant-2', status: 'DRAFT' },

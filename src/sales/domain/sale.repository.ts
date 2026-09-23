@@ -511,6 +511,8 @@ export interface ISaleRepository {
     createdAt: Date;
     subtotalCents: number;
     discountCents: number;
+    /** Additive confirmed-sale snapshot. Absent on older repository mocks. */
+    shippingChargeCents?: number;
     totalCents: number;
     paidCents: number;
     debtCents: number;
