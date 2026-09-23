@@ -79,14 +79,15 @@ describe('OutboxPollerService', () => {
     expect(dispatcher.dispatch).toHaveBeenCalledWith(claimed[0]);
   });
 
-  // ─── Slice F.3 — dedicated low-stock eventType is excluded
-  // from the generic claim predicate (finding #10 + Risk R-E).
-  // The generic dispatcher CANNOT deliver a `stock.low.detected`
-  // event durably; the dedicated `LowStockOutboxPoller` (Slice F.4)
-  // claims those rows instead. This exclusion is the predicate that
-  // makes the dispatch paths DISJOINT.
-  describe('Slice F.3 + Slice 4 — generic claim excludes stock.low.detected AND hr.timeoff.requested', () => {
-    it("claim SELECT contains a `NOT IN ('stock.low.detected', 'hr.timeoff.requested')` predicate", async () => {
+  // ─── Slice F.3 — every dedicated eventType is excluded from the
+  // generic claim predicate (finding #10 + Risk R-E). The generic
+  // dispatcher CANNOT deliver a dedicated alert event durably; the
+  // dedicated pollers claim those rows instead. This exclusion is the
+  // predicate that makes the dispatch paths DISJOINT. pca-3b3b adds
+  // `promotion.near_capacity.detected` when the dedicated
+  // capacity poller/module is wired into the application.
+  describe('Slice F.3 + Slice 4 + pca-3b3b — generic claim excludes every dedicated eventType', () => {
+    it('claim SELECT contains a NOT IN predicate covering the three alert types AND promotion.near_capacity.detected', async () => {
       const capturedCalls: string[] = [];
       const prisma = {
         $transaction: (work: (tx: unknown) => Promise<unknown>) => {
@@ -119,14 +120,16 @@ describe('OutboxPollerService', () => {
         capturedCalls.find((c) =>
           /SELECT\s+id\s+FROM\s+outbox_events/i.test(c),
         ) ?? '';
-      // Slice 4 + WU3 (delivery-routes): exclusion covers ALL three
-      // dedicated event types — low-stock (`stock.low.detected`),
-      // hr-time-off (`hr.timeoff.requested`), and delivery-routes
-      // (`delivery.next_stop.notify`). The generic poller must skip
-      // every dedicated-type row so the dedicated pollers own them
+      // Slice 4 + WU3 (delivery-routes) + pca-3b3b (promotion-capacity):
+      // the exclusion covers ALL four dedicated event types — low-stock
+      // (`stock.low.detected`), hr-time-off (`hr.timeoff.requested`),
+      // delivery-routes (`delivery.next_stop.notify`), and the
+      // promotion capacity crossing
+      // (`promotion.near_capacity.detected`). The generic poller must
+      // skip every dedicated-type row so the dedicated pollers own them
       // exclusively.
       expect(claimSql).toContain(
-        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify')`,
+        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'promotion.near_capacity.detected')`,
       );
     });
 

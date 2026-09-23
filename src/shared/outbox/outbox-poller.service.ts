@@ -45,16 +45,22 @@ export class OutboxPollerService {
     const lockToken = randomUUID();
 
     return this.prisma.$transaction(async (tx) => {
-      // Slice F.3 + Slice 4 — claim disjointness (design.md "Risk R-E"
-      // + "Durable dispatch flow"). The generic dispatcher's
-      // fire-and-forget semantics cannot deliver dedicated-type
-      // events durably (a post-commit `InngestService.send` rejection
-      // would be swallowed with the row already PUBLISHED). Add the
-      // `eventType` exclusion here so the generic poller NEVER
-      // claims a dedicated-type row; the dedicated pollers own those
-      // rows exclusively. Scope is ONE predicate — the generic
-      // dispatcher's behavior for every OTHER event type is
-      // unchanged.
+      // Slice F.3 + Slice 4 + pca-3b3b — claim disjointness (design.md
+      // "Risk R-E" + "Durable dispatch flow"). The generic dispatcher's
+      // fire-and-forget semantics cannot deliver dedicated-type events
+      // durably (a post-commit `InngestService.send` rejection would be
+      // swallowed with the row already PUBLISHED). Add the `eventType`
+      // exclusion here so the generic poller NEVER claims a
+      // dedicated-type row; the dedicated pollers own those rows
+      // exclusively. Scope is ONE predicate — the generic dispatcher's
+      // behavior for every OTHER event type is unchanged.
+      //
+      // `promotion.near_capacity.detected` is listed here in the same
+      // change that registers PromotionCapacityOutboxModule in
+      // app.module.ts, so the row is never claimable by two pollers. The
+      // literals stay literal (not imported from the promotions module)
+      // to avoid a shared→feature dependency; each dedicated poller's own
+      // spec pins the matching `"eventType" = '<literal>'` predicate.
       const pendingRows = (await tx.$queryRawUnsafe<{ id: string }[]>(
         `
           SELECT id
@@ -62,7 +68,7 @@ export class OutboxPollerService {
           WHERE status = 'PENDING'
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
-            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify')
+            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'promotion.near_capacity.detected')
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED

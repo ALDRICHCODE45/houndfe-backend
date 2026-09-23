@@ -66,6 +66,10 @@ import { DeliveryRoutesInngestRegistrar } from './delivery-routes/inngest/delive
 // (GET /tenants/:tenantId/catalog-settings). Hexagonal wiring mirrors
 // SatCatalogModule / NotificationConfigModule.
 import { CatalogSettingsModule } from './catalog-settings/catalog-settings.module';
+// pca-3b3b - dedicated promotion-capacity outbox poller + dispatcher.
+// Own module so the Inngest dep graph doesn't pollute transitive chains
+// (mirrors the low-stock / hr-time-off / delivery-routes wiring).
+import { PromotionCapacityOutboxModule } from './promotions/outbox/promotion-capacity-outbox.module';
 // branch-analytics-summary / bas-3a — read-only branch sales summary
 // bounded context. Imports DatabaseModule + AuthModule only.
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -149,6 +153,12 @@ import { AnalyticsModule } from './analytics/analytics.module';
     // delivery.next_stop.notify outbox rows. Mirrors
     // LowStockOutboxModule / HrTimeOffOutboxModule placement.
     DeliveryRoutesOutboxModule,
+    // pca-3b3b — dedicated poller/dispatcher for the
+    // promotion.near_capacity.detected outbox rows. The generic poller
+    // excludes this eventType in the same change, so the crossing row is
+    // owned by exactly one poller. pca-3b4 registers the Inngest function
+    // that consumes the dispatched event.
+    PromotionCapacityOutboxModule,
     // online-catalog-publishing / WU3A3 — catalog-settings bounded
     // context. Self-contained: imports DatabaseModule + AuthModule only.
     CatalogSettingsModule,
