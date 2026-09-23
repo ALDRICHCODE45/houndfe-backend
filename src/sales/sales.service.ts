@@ -147,6 +147,9 @@ type ConfirmBotSaleInput = {
   // re-issue. When omitted, the comparison is skipped but the engine
   // still runs and `discountCents` is still surfaced on the response.
   expectedTotalCents?: number;
+  // Internal-only until the public bot request and receipts are reconciled.
+  // The authenticated bot asserts human approval; this service does not verify it.
+  shipping?: { chargeCents: number; approvalId: string; quoteId?: string };
 };
 
 type ConfirmBotSaleResult = {
@@ -156,6 +159,8 @@ type ConfirmBotSaleResult = {
   channel: 'ONLINE';
   deliveryStatus: 'PENDING';
   totalCents: number;
+  subtotalCents?: number;
+  shippingChargeCents?: number;
   // Q2 / WU3 — engine-recomputed discount from
   // `sale.previewTotals()` (subtotalCents − totalCents). 0 when no
   // promotion applied. Additive field for the bot wire shape.
@@ -1012,6 +1017,7 @@ export class SalesService {
     // post-`previewTotals`).
     subtotalCents?: number;
     discountCents?: number;
+    shippingChargeCents?: number;
   }): Promise<void> {
     await this.outboxWriter.publish(
       this.tenantPrisma.getClient(),
@@ -1037,6 +1043,9 @@ export class SalesService {
           : {}),
         ...(input.discountCents !== undefined
           ? { discountCents: input.discountCents }
+          : {}),
+        ...(input.shippingChargeCents !== undefined
+          ? { shippingChargeCents: input.shippingChargeCents }
           : {}),
       },
     );
@@ -3092,6 +3101,39 @@ export class SalesService {
   async confirmBotSale(
     input: ConfirmBotSaleInput,
   ): Promise<ConfirmBotSaleResult> {
+    const shipping = input.shipping;
+    if (shipping) {
+      // Prisma's INTEGER columns are signed 32-bit cents; this is a storage
+      // limit, not a commercial shipping cap (that belongs to configuration).
+      if (
+        !Number.isSafeInteger(shipping.chargeCents) ||
+        shipping.chargeCents <= 0 ||
+        shipping.chargeCents > 2_147_483_647
+      ) {
+        throw new BusinessRuleViolationError(
+          'INVALID_SHIPPING_CHARGE',
+          'INVALID_SHIPPING_CHARGE',
+        );
+      }
+      if (
+        typeof shipping.approvalId !== 'string' ||
+        !shipping.approvalId.trim()
+      ) {
+        throw new BusinessRuleViolationError(
+          'SHIPPING_APPROVAL_REQUIRED',
+          'SHIPPING_APPROVAL_REQUIRED',
+        );
+      }
+      if (
+        shipping.quoteId !== undefined &&
+        (typeof shipping.quoteId !== 'string' || !shipping.quoteId.trim())
+      ) {
+        throw new BusinessRuleViolationError(
+          'INVALID_SHIPPING_QUOTE',
+          'INVALID_SHIPPING_QUOTE',
+        );
+      }
+    }
     return this.saleRepo.runInTransaction(async () => {
       for (const item of input.items) {
         const applicablePrices = await this.productsService.getApplicablePrices(
@@ -3218,7 +3260,18 @@ export class SalesService {
       //   subtotalCents = ∑((prePrice ?? unitPrice) × qty)
       //   totalCents    = post-line − order discount (clamped ≥ 0)
       //   discountCents = subtotalCents − totalCents (always ≥ 0)
-      const { subtotalCents, discountCents, totalCents } = sale.previewTotals();
+      const {
+        subtotalCents,
+        discountCents,
+        totalCents: merchandiseTotalCents,
+      } = sale.previewTotals();
+      const totalCents = merchandiseTotalCents + (shipping?.chargeCents ?? 0);
+      if (!Number.isSafeInteger(totalCents) || totalCents > 2_147_483_647) {
+        throw new BusinessRuleViolationError(
+          'INVALID_SHIPPING_CHARGE',
+          'INVALID_SHIPPING_CHARGE',
+        );
+      }
 
       // D7 — optional re-quote guard. When the bot sent an expected
       // total, compare it against the engine-recomputed total. Drift
@@ -3237,6 +3290,7 @@ export class SalesService {
             recomputedTotalCents: totalCents,
             expectedTotalCents: input.expectedTotalCents,
             discountCents,
+            ...(shipping ? { shippingChargeCents: shipping.chargeCents } : {}),
           },
         );
       }
@@ -3284,6 +3338,13 @@ export class SalesService {
         totalCents,
         paidCents,
         debtCents,
+        ...(shipping
+          ? {
+              shippingChargeCents: shipping.chargeCents,
+              shippingApprovalId: shipping.approvalId.trim(),
+              shippingQuoteId: shipping.quoteId?.trim(),
+            }
+          : {}),
         changeDueCents: 0,
         paymentStatus: 'CREDIT',
         channel: 'ONLINE',
@@ -3304,6 +3365,7 @@ export class SalesService {
         folio,
         subtotalCents,
         discountCents,
+        ...(shipping ? { shippingChargeCents: shipping.chargeCents } : {}),
         totalCents,
         paidCents,
         debtCents,
@@ -3319,6 +3381,9 @@ export class SalesService {
         deliveryStatus: 'PENDING',
         totalCents,
         discountCents,
+        ...(shipping
+          ? { subtotalCents, shippingChargeCents: shipping.chargeCents }
+          : {}),
         paidCents,
         debtCents,
         confirmedAt: confirmedAt.toISOString(),
