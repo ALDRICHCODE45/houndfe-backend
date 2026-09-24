@@ -6,7 +6,7 @@
 **Branch**: `feat/delivery-routes-wu3`
 **Status**: ✅ WU3 implemented (timeline on detail, next-stop email pipeline via outbox + Inngest)
 
-> **TL;DR.** A route-manager groups eligible sales (`deliveryStatus` `PENDING`/`SHIPPED` + a shipping address) into a `DeliveryRoute` assigned to a driver. The route goes `DRAFT → ACTIVE → COMPLETED` (or `CANCELLED`). Drivers check in each stop from the field; every check-in mirrors the sale to `DELIVERED` and — when another stop follows — queues the "next stop arriving soon" email to the next customer (opt-in per tenant via `PUT /notification-config`). The detail endpoint returns a read-only `timeline` so the frontend can render route history without polling extra endpoints.
+> **TL;DR.** A route-manager groups eligible sales (`deliveryStatus` `PENDING`/`SHIPPED` + a shipping address) into a `DeliveryRoute` assigned to a driver. The route goes `DRAFT → ACTIVE → COMPLETED` (or `CANCELLED`). Drivers check in each stop from the field; every check-in mirrors the sale to `DELIVERED` and — when another stop follows — queues the "next stop arriving soon" email to the next customer (opt-in per tenant via `PUT /notification-config`). Every completed stop, **including the last**, also queues an ids-only customer thank-you email gated by its own flat opt-in action (§6.1). The detail endpoint returns a read-only `timeline` so the frontend can render route history without polling extra endpoints.
 
 ---
 
@@ -24,7 +24,7 @@ All routes are under `/delivery-routes` and require a JWT bearer token. The tena
 | `POST` | `/delivery-routes/:id/start` | `update:DeliveryRoute` | DRAFT → ACTIVE |
 | `POST` | `/delivery-routes/:id/cancel` | `update:DeliveryRoute` | DRAFT or ACTIVE → CANCELLED |
 | `POST` | `/delivery-routes/:id/stops` | `update:DeliveryRoute` | Append one eligible sale to a DRAFT route (`201 Created`) |
-| `POST` | `/delivery-routes/:id/stops/:stopId/check-in` | `update:DeliveryRoute` | Check in a stop on an ACTIVE route; mirrors the sale to DELIVERED; emits the next-stop email row when a next stop exists |
+| `POST` | `/delivery-routes/:id/stops/:stopId/check-in` | `update:DeliveryRoute` | Check in a stop on an ACTIVE route; mirrors the sale to DELIVERED; queues the next-stop row when a next stop exists and the ids-only thank-you row for every completed stop (last included) |
 | `PUT` | `/delivery-routes/:id/stops/reorder` | `update:DeliveryRoute` | Replace the stop order of a DRAFT route |
 
 **Route lifecycle** (server-enforced):
@@ -212,7 +212,8 @@ Notes:
 1. Route must be `ACTIVE`; the stop must be `PENDING` → flips to `COMPLETED` and stamps `checkedInAt`/`completedAt`.
 2. The sale is mirrored to `deliveryStatus: "DELIVERED"` in the same transaction.
 3. If a next `PENDING` stop exists, a `delivery.next_stop.notify` outbox event is queued (this is what eventually sends the "next stop arriving soon" email — see §6).
-4. If the checked-in stop was the last one, the route auto-completes (`status: "COMPLETED"`).
+4. For **every** stop completed by this winning attempt — including the last — an ids-only `delivery.thank_you.notify` outbox event is queued in the **same** transaction (the customer thank-you email — see §6.1). The row carries only `{tenantId, saleId, routeId, stopId}`; the recipient is resolved at send time.
+5. If the checked-in stop was the last one, the route auto-completes (`status: "COMPLETED"`).
 
 **Idempotency**: re-checking an already-`COMPLETED` stop is a no-op and does **not** enqueue a second email — safe to retry the request.
 
@@ -300,7 +301,7 @@ When a driver checks in a stop and a next stop exists, the backend emits a `deli
 | ----- | ---- | ---------- |
 | `enabled` | boolean | Master switch; `false` disables every notification |
 | `recipientUserIds` | string[] | **Every id must be a member of the current tenant** (else `400 INVALID_RECIPIENT`). Can be empty — see below |
-| `enabledActions` | string[] | Keys from the locked set: `LOW_STOCK`, `TIME_OFF_REQUESTED`, `DELIVERY_NEXT_STOP`. Anything else → `400 UNKNOWN_ACTION_KEY` |
+| `enabledActions` | string[] | Keys from the locked set: `LOW_STOCK`, `TIME_OFF_REQUESTED`, `DELIVERY_NEXT_STOP`, `PROMOTION_EXPIRING`, `PROMOTION_NEAR_CAPACITY`, `DELIVERY_THANK_YOU`. Anything else → `400 UNKNOWN_ACTION_KEY` |
 
 Behavior notes:
 
@@ -309,7 +310,16 @@ Behavior notes:
 - If the next sale has no customer email, the email is skipped (no error).
 - `GET /notification-config` (permission `read:NotificationConfig`) returns the current `{ enabled, recipients, enabledActions }`.
 
-**Frontend guidance**: in the "Notificaciones" admin screen, add a "Next stop delivery notification" toggle that includes `DELIVERY_NEXT_STOP` in `enabledActions` and sends the whole object (it is a full overwrite — read the current config first, then PUT the merged result). Handle `400 UNKNOWN_ACTION_KEY` (stale client enum) and `400 INVALID_RECIPIENT` (a recipient was removed from the tenant).
+**Frontend guidance**: in the "Notificaciones" admin screen, add a "Next stop delivery notification" toggle that includes `DELIVERY_NEXT_STOP` in `enabledActions` and sends the whole object (it is a full overwrite — read the current config first, then PUT the merged result, re-sending **only the keys currently enabled**). Sending every key would turn on actions the tenant had off, and omitting an enabled key would clear it. Handle `400 UNKNOWN_ACTION_KEY` (stale client enum) and `400 INVALID_RECIPIENT` (a recipient was removed from the tenant).
+
+### 6.1 Thank-you email (`DELIVERY_THANK_YOU`)
+
+When a driver completes a stop — the **last** one included — the backend also queues a customer thank-you email in the same transaction, gated by its own flat action key `DELIVERY_THANK_YOU`.
+
+- **Documented but not live.** The action ships **disabled** for every tenant (no seeded rows). Enabling it can also release **older pending/retrying events**; inspect and resolve that backlog under the owner-approved gate before opting in. There is **no** proven live send (no full AppModule boot, Inngest Cloud, Resend or inbox evidence), so **do not** present a `200` as "email delivered".
+- **Recipient is resolved at send time** from the sale's customer (tenant-scoped) — never from `recipients`/`recipientUserIds`, which stay the staff list.
+- **Delivery is asynchronous** (outbox + Inngest); HTTP success means "accepted", not "delivered". A stable Inngest `event.id` reduces duplicates but is **not** an exactly-once guarantee.
+- **Activation is gated.** Enabling `DELIVERY_THANK_YOU` in a real tenant requires the owner-approved activation/rollback conditions in `docs/delivery-thank-you-activation.md`.
 
 ---
 
@@ -370,4 +380,5 @@ The error body follows the global envelope: `{ statusCode, error, message, times
 - **Check-in atomicity**: stop flip + `Sale.deliveryStatus = DELIVERED` mirror + outbox row commit in one transaction; a replay of an already-`COMPLETED` stop is a no-op and does not duplicate the email.
 - **Timeline**: built by the pure `buildDeliveryRouteTimeline` function — no extra queries, deterministic ascending order, `ROUTE_COMPLETED`/`ROUTE_CANCELLED` mutually exclusive, actor = assigned driver (MVP has no per-action actor ids).
 - **Next-stop email pipeline**: `checkInStop` → outbox `delivery.next_stop.notify` (idempotency key `${tenantId}:${currentStopId}`) → dedicated poller/dispatcher → Inngest `delivery-next-stop-notify` fn → React-email template sent via `MAILER`. The customer email is re-resolved at send time; config re-gated at send time (§6).
+- **Thank-you email pipeline (dormant action)**: the same `checkInStop` transaction writes an ids-only `delivery.thank_you.notify` row for every completed stop (last included) → dedicated claim `IN ('delivery.next_stop.notify', 'delivery.thank_you.notify')` → fail-closed awaited dispatcher → Inngest `delivery-thank-you-notify` fn → `DeliveryThankYouSender`. The generic poller **excludes** `delivery.thank_you.notify`, so an unrouted row stays `PENDING` instead of being mis-dispatched. The sender proves the exact completed stop (both timestamps, tenant-scoped), reads the persisted `CONFIRMED` + `DELIVERED` summary, resolves the customer email at send time, re-gates master/action at send time, and sends only to the customer. Stable Inngest id `${tenantId}:${saleId}:${stopId}`; **no** exactly-once guarantee. The action is disabled by default — see `docs/delivery-thank-you-activation.md`.
 - **Permissions**: the 4 `DeliveryRoute` permissions auto-seed on boot; `create`/`delete` presence is the manager discriminator (ADR-5), and driver-only callers receive CASL conditional rules `{ driverUserId: userId }` for read/update.

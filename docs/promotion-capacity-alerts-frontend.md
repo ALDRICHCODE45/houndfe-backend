@@ -310,18 +310,17 @@ Content-Type: application/json
     "LOW_STOCK",
     "TIME_OFF_REQUESTED",
     "DELIVERY_NEXT_STOP",
-    "PROMOTION_EXPIRING",
-    "DELIVERY_THANK_YOU"
+    "PROMOTION_EXPIRING"
   ]
 }
 ```
 
 - `enabled` es el master toggle del tenant y el primer gate: en `false` ninguna alerta envía.
-- Los destinatarios (`recipients`/`recipientUserIds`) son **una única lista compartida de staff** y aplican **solo a las alertas de staff** (stock, time-off, próximo stop, promociones): los emails se resuelven al enviar y se filtran usuarios inactivos. **No** aplican a `DELIVERY_THANK_YOU`; ese correo al cliente resolverá su dirección con una búsqueda **independiente y con alcance de tenant** del email del cliente en el momento del envío (consumidor aún no implementado en DTE-1). El frontend nunca recibe ni administra direcciones de email.
+- Los destinatarios (`recipients`/`recipientUserIds`) son **una única lista compartida de staff** para alertas internas (stock, time-off, promociones); sus emails se resuelven al enviar y se filtran usuarios inactivos. **No** aplican a `DELIVERY_NEXT_STOP` ni a `DELIVERY_THANK_YOU`: ambos resuelven el correo del cliente con alcance de tenant al momento del envío. El frontend nunca recibe ni administra direcciones de email.
 - El canal es **solo email**. Las seis claves son miembros planos y equivalentes del enum; el grupo visual "Promociones" **no** existe en el backend.
 - El `PUT` es un **reemplazo completo**: destinatarios y acciones se borran y se recrean desde el cuerpo, y responde la misma vista que el `GET`; todo lo omitido se pierde.
-- **Preserva solo lo que estaba habilitado**: al togglear una acción debes reenviar las claves **actualmente habilitadas** (subconjunto de las seis permitidas), incluidas las no relacionadas que ya estaban encendidas (por ejemplo `LOW_STOCK` o `DELIVERY_NEXT_STOP`). Enviar siempre las seis claves **habilitaría** las que el tenant tenía apagadas; omitir una habilitada la borraría.
-- **`DELIVERY_THANK_YOU` (`feat/delivery-thank-you-email`, DTE-1)**: sexta clave plana, registrada para el correo de agradecimiento al cliente tras un check-in de entrega exitoso. Hoy el backend **solo la registra**: no existe todavía productor, evento, poller ni remitente, así que **activarla no envía ningún correo**. Llega **deshabilitada** por defecto (sin filas sembradas) y solo se enciende por `PUT`. Nunca la uses como destinatario: los `recipients`/`recipientUserIds` siguen siendo **staff** (userIds internos) y jamás la dirección del cliente; la clave se envía dentro de `enabledActions`, no en la lista de destinatarios.
+- **Preserva solo lo que estaba habilitado**: al togglear una acción debes reenviar las claves **actualmente habilitadas** (subconjunto de las seis permitidas), incluidas las no relacionadas que ya estaban encendidas (por ejemplo `LOW_STOCK` o `DELIVERY_NEXT_STOP`). Enviar siempre las seis claves **habilitaría** las que el tenant tenía apagadas; omitir una habilitada la borraría. El JSON de ejemplo ilustra la forma del contrato, **no** autoriza a activar esas acciones ni a copiar la lista sin leer antes el `GET`.
+- **`DELIVERY_THANK_YOU`**: sexta clave plana, registro del correo de agradecimiento al cliente tras un check-in de entrega exitoso. El pipeline ya está implementado en código (productor transaccional en el check-in → fila outbox ids-only → claim/dispatcher dedicado → función Inngest → sender), pero llega **deshabilitada** por defecto (sin filas sembradas) y solo se enciende por `PUT`. **No** hay envío real, proveedor, Inngest Cloud ni inbox probados: activarla puede procesar eventos pendientes previos, por lo que exige revisar la cola antes; **no** confirma que se haya enviado nada. Nunca la uses como destinatario: los `recipients`/`recipientUserIds` siguen siendo **staff** (userIds internos) y jamás la dirección del cliente; la clave se envía dentro de `enabledActions`, no en la lista de destinatarios. Antes de activarla en un tenant real rige el gate de activación/rollback de `docs/delivery-thank-you-activation.md`.
 - Tenant sin configuración: `{ "enabled": false, "recipients": [], "enabledActions": [] }`. No hay filas sembradas para las claves nuevas (las dos de promociones y `DELIVERY_THANK_YOU`): quedan **deshabilitadas** hasta que el tenant las active por `PUT`.
 - Errores: `400 UNKNOWN_ACTION_KEY` (clave fuera del set) y `400 INVALID_RECIPIENT` (usuario que no pertenece al tenant).
 
