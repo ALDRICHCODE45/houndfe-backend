@@ -89,11 +89,15 @@ describe('OutboxPollerService', () => {
   // dedicated pollers claim those rows instead. This exclusion is the
   // predicate that makes the dispatch paths DISJOINT. pca-3b3b adds
   // `promotion.near_capacity.detected` when the dedicated
-  // capacity poller/module is wired into the application, and pca-3c3b
+  // capacity poller/module is wired into the application, pca-3c3b
   // adds `promotion.expiring.detected` so the expiry poller owns those
-  // rows exclusively while its module stays inert until pca-3c4c.
-  describe('Slice F.3 + Slice 4 + pca-3b3b + pca-3c3b — generic claim excludes every dedicated eventType', () => {
-    it('claim SELECT contains a NOT IN predicate covering the three alert types, promotion.near_capacity.detected AND promotion.expiring.detected', async () => {
+  // rows exclusively while its module stays inert until pca-3c4c, and
+  // DTE-5a adds `delivery.thank_you.notify` fail-closed: no dedicated
+  // poller claims it yet, and claiming it here would let the shared
+  // dispatcher misroute it as a next-stop send. The row stays PENDING
+  // until DTE-5b lands claim + awaited routing atomically.
+  describe('Slice F.3 + Slice 4 + pca-3b3b + pca-3c3b + DTE-5a — generic claim excludes every dedicated eventType', () => {
+    it('claim SELECT contains a NOT IN predicate covering the three alert types, promotion.near_capacity.detected, promotion.expiring.detected AND delivery.thank_you.notify', async () => {
       const capturedCalls: string[] = [];
       const prisma = {
         $transaction: (work: (tx: unknown) => Promise<unknown>) => {
@@ -127,25 +131,28 @@ describe('OutboxPollerService', () => {
           /SELECT\s+id\s+FROM\s+outbox_events/i.test(c),
         ) ?? '';
       // Slice 4 + WU3 (delivery-routes) + pca-3b3b (promotion-capacity) +
-      // pca-3c3b (promotion-expiry): the exclusion covers ALL five
-      // dedicated event types — low-stock (`stock.low.detected`),
-      // hr-time-off (`hr.timeoff.requested`), delivery-routes
-      // (`delivery.next_stop.notify`), the promotion capacity crossing
-      // (`promotion.near_capacity.detected`), and the promotion expiry
-      // alert (`promotion.expiring.detected`). The generic poller must
-      // skip every dedicated-type row so the dedicated pollers own them
-      // exclusively; while the expiry module stays unregistered
-      // (pca-3c4c), excluded expiry rows simply remain PENDING instead of
-      // being fire-and-forget published.
+      // pca-3c3b (promotion-expiry) + DTE-5a (delivery thank-you): the
+      // exclusion covers ALL six dedicated event types — low-stock
+      // (`stock.low.detected`), hr-time-off (`hr.timeoff.requested`),
+      // delivery-routes (`delivery.next_stop.notify`), delivery-routes
+      // thank-you (`delivery.thank_you.notify`), the promotion capacity
+      // crossing (`promotion.near_capacity.detected`), and the promotion
+      // expiry alert (`promotion.expiring.detected`). The generic poller
+      // must skip every dedicated-type row so no dedicated row is ever
+      // fire-and-forget published or misrouted by the shared dispatcher;
+      // while the expiry module stays unregistered (pca-3c4c) and the
+      // thank-you type has no claiming poller yet (DTE-5b), those rows
+      // simply remain PENDING instead.
       expect(claimSql).toContain(
-        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected')`,
+        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected')`,
       );
       // TRIANGULATE — the exclusion is additive, not a replacement: the
-      // three pre-existing alert types and the capacity crossing stay
-      // excluded alongside the new expiry type.
+      // pre-existing alert types, the delivery types and the promotion
+      // types all stay excluded alongside the new thank-you type.
       expect(claimSql).toContain(`'stock.low.detected'`);
       expect(claimSql).toContain(`'hr.timeoff.requested'`);
       expect(claimSql).toContain(`'delivery.next_stop.notify'`);
+      expect(claimSql).toContain(`'delivery.thank_you.notify'`);
       expect(claimSql).toContain(`'promotion.near_capacity.detected'`);
       expect(claimSql).toContain(`'promotion.expiring.detected'`);
     });
