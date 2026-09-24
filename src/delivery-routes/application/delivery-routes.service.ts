@@ -56,6 +56,10 @@ import {
   computeDeliveryNextStopIdempotencyKey,
   type DeliveryNextStopNotifyPayload,
 } from '../outbox/delivery-route-outbox.types';
+import {
+  DELIVERY_THANK_YOU_OUTBOX_TYPE,
+  type DeliveryThankYouEventPayload,
+} from '../inngest/delivery-thank-you.event';
 import { buildDeliveryRouteTimeline } from '../domain/build-delivery-route-timeline';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type {
@@ -64,9 +68,7 @@ import type {
   OptimizeRouteResult,
 } from '../domain/ports/route-optimizer.port';
 import { ROUTE_OPTIMIZER } from '../domain/ports/route-optimizer.port';
-import type {
-  CreateDeliveryRouteDto,
-} from '../dto/create-delivery-route.dto';
+import type { CreateDeliveryRouteDto } from '../dto/create-delivery-route.dto';
 import type { AddStopDto } from '../dto/add-stop.dto';
 import type { ReorderStopsDto } from '../dto/reorder-stops.dto';
 import type { UpdateDeliveryRouteDto } from '../dto/update-delivery-route.dto';
@@ -162,7 +164,8 @@ export class DeliveryRoutesService {
       driverUserId: dto.driverUserId,
       saleIds: ordered.orderedSaleIds,
       notes: dto.notes ?? null,
-      checkSaleEligibility: (saleId) => this.checkSaleEligibility(saleId, tenantId),
+      checkSaleEligibility: (saleId) =>
+        this.checkSaleEligibility(saleId, tenantId),
     });
 
     const saved = await this.repo.save(route);
@@ -328,9 +331,18 @@ export class DeliveryRoutesService {
    *      time email). The Inngest function re-resolves the
    *      authoritative email at send-time so a tenant edit between
    *      check-in and dispatch does not lose the recipient.
+   *   6. For EVERY stop completed by the winning attempt — including the
+   *      LAST one (`nextStop === null`) — the service emits EXACTLY ONE
+   *      `delivery.thank_you.notify` outbox row in the SAME transaction,
+   *      AFTER the next-stop row. The payload is IDS ONLY
+   *      (`{tenantId, saleId, routeId, stopId}`): the recipient is
+   *      resolved at send time from `tenantId` + `saleId`, so no email,
+   *      name, amount or address travels through the outbox. Because
+   *      both rows share the transaction, a failure of either publish
+   *      aborts and rolls both back.
    *
    * Idempotency: the aggregate's `checkInStop` is a no-op on an
-   * already-COMPLETED stop, and the row is only published by the request
+   * already-COMPLETED stop, and each row is only published by the request
    * that observed PENDING on its winning attempt — so a duplicate
    * concurrent check-in reclassifies as a successful replay and produces
    * no second outbox row.
@@ -352,8 +364,7 @@ export class DeliveryRoutesService {
         // only the request that found the stop PENDING may publish a
         // next-stop row (a replayed COMPLETED stop must not).
         const wasPending =
-          before.stops.find((stop) => stop.id === stopId)?.status ===
-          'PENDING';
+          before.stops.find((stop) => stop.id === stopId)?.status === 'PENDING';
         const checkIn = before.checkInStop({ stopId });
 
         // Conditional, tenant-qualified commit of the transition. On a
@@ -419,6 +430,31 @@ export class DeliveryRoutesService {
             payload as unknown as Prisma.InputJsonValue,
           );
         }
+
+        // Customer thank-you row — SAME transaction, SAME winning attempt
+        // as the stop flip. Emitted for EVERY completed stop, including the
+        // last one (where `nextStop` is null), and ONLY when this attempt
+        // observed the stop PENDING: a duplicate/replayed check-in writes no
+        // second row. The inline literal is checked against the committed
+        // ids-only event contract (`satisfies`) and is directly assignable
+        // to Prisma's `InputJsonValue`, so no unsafe double cast is needed.
+        // Published AFTER the next-stop row: a failure of either write
+        // aborts the transaction and rolls both rows back together.
+        if (wasPending) {
+          await this.outboxWriter.publish(
+            tx,
+            tenantId,
+            DELIVERY_ROUTE_OUTBOX_AGGREGATE_TYPE,
+            before.id,
+            DELIVERY_THANK_YOU_OUTBOX_TYPE,
+            {
+              tenantId,
+              saleId: checkIn.completedStop.saleId,
+              routeId: before.id,
+              stopId: checkIn.completedStop.id,
+            } satisfies DeliveryThankYouEventPayload,
+          );
+        }
       },
     );
 
@@ -437,12 +473,8 @@ export class DeliveryRoutesService {
   ): Promise<DeliveryRouteResponseDto[]> {
     const tenantId = this.requireTenantId();
     const isRouteManager = ctx.ability.can('create', 'DeliveryRoute');
-    const driverUserId = isRouteManager
-      ? undefined
-      : ctx.userId;
-    const status = query.status
-      ? [query.status]
-      : undefined;
+    const driverUserId = isRouteManager ? undefined : ctx.userId;
+    const status = query.status ? [query.status] : undefined;
     const input: ListDeliveryRoutesInput = {
       tenantId,
       driverUserId,
@@ -507,7 +539,8 @@ export class DeliveryRoutesService {
     });
     if (!row) return null;
     return {
-      deliveryStatus: row.deliveryStatus as SaleEligibilitySnapshot['deliveryStatus'],
+      deliveryStatus:
+        row.deliveryStatus as SaleEligibilitySnapshot['deliveryStatus'],
       shippingAddressId: row.shippingAddressId,
     };
   }
@@ -648,12 +681,8 @@ export class DeliveryRoutesService {
         saleFolio: stop.saleFolio,
         sortOrder: stop.sortOrder,
         status: stop.status,
-        checkedInAt: stop.checkedInAt
-          ? stop.checkedInAt.toISOString()
-          : null,
-        completedAt: stop.completedAt
-          ? stop.completedAt.toISOString()
-          : null,
+        checkedInAt: stop.checkedInAt ? stop.checkedInAt.toISOString() : null,
+        completedAt: stop.completedAt ? stop.completedAt.toISOString() : null,
         customer: stop.customer,
         shippingAddress: stop.shippingAddress,
       })),
@@ -662,7 +691,9 @@ export class DeliveryRoutesService {
         startedAt: row.startedAt,
         completedAt: row.completedAt,
         cancelledAt: row.cancelledAt,
-        driver: row.driver ? { id: row.driver.id, name: row.driver.name } : null,
+        driver: row.driver
+          ? { id: row.driver.id, name: row.driver.name }
+          : null,
         stops: row.stops.map((stop) => ({
           id: stop.id,
           sortOrder: stop.sortOrder,
@@ -708,7 +739,9 @@ export class DeliveryRoutesService {
     // the same model delegates; the transaction client only omits the
     // client-level lifecycle methods this read never calls. The assertion
     // makes that shared delegate surface statically visible.
-    const prisma = tx as unknown as ReturnType<TenantPrismaService['getClient']>;
+    const prisma = tx as unknown as ReturnType<
+      TenantPrismaService['getClient']
+    >;
     const sale = await prisma.sale.findFirst({
       where: { id: nextSaleId, tenantId },
       select: {
