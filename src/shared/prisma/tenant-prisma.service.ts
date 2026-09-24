@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../tenant/tenant-cls-store.interface';
 import { createTenantScopedPrisma } from './tenant-prisma.factory';
@@ -10,6 +10,33 @@ type TenantPrismaClient = ReturnType<typeof createTenantScopedPrisma>;
 type PrismaTransactionClient = Parameters<
   Parameters<PrismaClient['$transaction']>[0]
 >[0];
+/**
+ * Callback parameter type of the tenant-extended client's interactive
+ * `$transaction`. The extended client narrows several delegate signatures, so
+ * this is intentionally NOT the raw `PrismaTransactionClient` above.
+ */
+type AmbientTransactionClient = Parameters<
+  Parameters<ReturnType<typeof createTenantScopedPrisma>['$transaction']>[0]
+>[0];
+
+/**
+ * Raised when `runInTransaction` is asked for an EXPLICIT transaction
+ * isolation level while an ambient transaction is already open.
+ *
+ * Prisma does not expose the isolation level an open interactive transaction
+ * was started with, so joining it could silently hand back a WEAKER guarantee
+ * than the caller asked for (e.g. a default ReadCommitted tx reused for a
+ * RepeatableRead snapshot read). Failing closed is the only honest option:
+ * callers must open their own transaction before any ambient one exists.
+ */
+export class AmbientTransactionIsolationConflictError extends Error {
+  constructor() {
+    super(
+      'runInTransaction cannot honour an explicit isolation level inside an ambient transaction: the ambient transaction was started without a verifiable isolation guarantee',
+    );
+    this.name = 'AmbientTransactionIsolationConflictError';
+  }
+}
 
 @Injectable()
 export class TenantPrismaService {
@@ -53,25 +80,51 @@ export class TenantPrismaService {
     return Boolean(this.cls.get(TX_CLIENT_KEY));
   }
 
-  async runInTransaction<T>(work: () => Promise<T>): Promise<T> {
+  /**
+   * Runs `work` inside one tenant-scoped interactive transaction.
+   *
+   * `isolationLevel` is OPTIONAL and forwarded verbatim to Prisma. Callers
+   * that need a stronger guarantee than the driver default (a stable snapshot
+   * read, for example) pass it explicitly; callers that do not pass it keep
+   * the previous, unchanged behavior.
+   *
+   * An explicitly requested level is never silently downgraded: when an
+   * ambient transaction is already open, the requested level cannot be
+   * verified against the open transaction, so this throws
+   * `AmbientTransactionIsolationConflictError` instead of reusing a possibly
+   * weaker ambient transaction.
+   */
+  async runInTransaction<T>(
+    work: () => Promise<T>,
+    isolationLevel?: Prisma.TransactionIsolationLevel,
+  ): Promise<T> {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
     const previousClient = this.cls.get(TX_CLIENT_KEY) as
       | PrismaTransactionClient
       | undefined;
 
     if (previousClient) {
+      if (isolationLevel !== undefined) {
+        throw new AmbientTransactionIsolationConflictError();
+      }
       return work();
     }
 
     const extendedRoot = createTenantScopedPrisma(this.prisma, this.cls);
-    return extendedRoot.$transaction(async (tx) => {
+    const runInsideAmbientTx = async (
+      tx: AmbientTransactionClient,
+    ): Promise<T> => {
       this.cls.set(TX_CLIENT_KEY, tx);
       try {
         return await work();
       } finally {
         this.cls.set(TX_CLIENT_KEY, previousClient);
       }
-    });
+    };
+
+    return isolationLevel === undefined
+      ? extendedRoot.$transaction(runInsideAmbientTx)
+      : extendedRoot.$transaction(runInsideAmbientTx, { isolationLevel });
   }
 
   getTenantId(): string {

@@ -29,16 +29,46 @@ export class EvaluateCartPromotionsUseCase implements IEvaluateCartPromotionsUse
   async execute(input: {
     items: CartItemForEvaluation[];
   }): Promise<CartEvaluationResult> {
-    const { data: promotions } = await this.promotionRepository.findAll({
-      page: 1,
-      limit: 100,
-      method: 'AUTOMATIC',
-      status: 'ACTIVE',
-    });
+    const { promotions, complete } =
+      await this.promotionRepository.findActiveAutomaticSnapshot();
+
+    if (!complete) {
+      // The snapshot is capped, so an incomplete read means the tenant holds
+      // more ACTIVE AUTOMATIC promotions than the approved ceiling. The
+      // unseen rows may belong to this cart, and the adapter gives no way to
+      // tell: refuse to quote a discount built on a partial view. Owner
+      // decision — the whole cart goes back at base price for human review,
+      // even when every VISIBLE promotion is open or unrelated.
+      return {
+        items: input.items.map(toBasePriceItem),
+        promotionEvaluationStatus: 'needs_human_review',
+      };
+    }
 
     const unsupportedPromotionExists = promotions.some(
       (promotion) => !isSupportedProductDiscountPromotion(promotion),
     );
+
+    // The bot preview receives only cart items: it carries no customer,
+    // price-list, or weekday context. When a supported product promotion that
+    // targets this cart is also restricted on one of those axes, its
+    // eligibility cannot be proven here. Fail the WHOLE cart closed — base
+    // prices for every line and a review status — even if an open promotion
+    // could otherwise discount it. A restricted promotion aimed at a product
+    // the cart does not contain must not block an evaluable cart.
+    const unverifiableRestrictionPresent = promotions.some(
+      (promotion) =>
+        isSupportedProductDiscountPromotion(promotion) &&
+        hasUnprovableRestriction(promotion) &&
+        targetsAnyCartItem(promotion, input.items),
+    );
+
+    if (unverifiableRestrictionPresent) {
+      return {
+        items: input.items.map(toBasePriceItem),
+        promotionEvaluationStatus: 'needs_human_review',
+      };
+    }
 
     // Fix the supported snapshot ONCE. Every retry re-evaluates the whole cart
     // from clean state against this same snapshot minus the accumulated
@@ -88,6 +118,52 @@ function isSupportedProductDiscountPromotion(promotion: Promotion): boolean {
   );
 }
 
+/**
+ * Restrictions the bot preview cannot resolve: it never receives the customer,
+ * price list, or weekday needed to decide whether the promotion applies.
+ * `customerScope === 'ALL'` with no attached price lists or weekdays is the
+ * only combination provably evaluable from cart items alone.
+ */
+function hasUnprovableRestriction(promotion: Promotion): boolean {
+  return (
+    promotion.customerScope !== 'ALL' ||
+    promotion.priceLists.length > 0 ||
+    promotion.daysOfWeek.length > 0
+  );
+}
+
+/**
+ * True when the promotion's DEFAULT product target intersects the cart. Keeps
+ * a restriction scoped to the products the customer is actually buying, so an
+ * unrelated restricted promotion cannot block an otherwise evaluable cart.
+ */
+function targetsAnyCartItem(
+  promotion: Promotion,
+  items: CartItemForEvaluation[],
+): boolean {
+  return promotion.targetItems.some(
+    (target) =>
+      target.side === 'DEFAULT' &&
+      target.targetType === 'PRODUCTS' &&
+      items.some((item) => item.productId === target.targetId),
+  );
+}
+
+/**
+ * Base-price evaluation: no promotion selected, no discount, original price
+ * preserved. Shared by the no-match path and the fail-closed whole-cart path.
+ */
+function toBasePriceItem(item: CartItemForEvaluation): EvaluatedCartItem {
+  const originalPriceCents = item.unitPriceCents * item.quantity;
+  return {
+    ...item,
+    originalPriceCents,
+    finalPriceCents: originalPriceCents,
+    appliedPromotionTitle: null,
+    discountAmountCents: 0,
+  };
+}
+
 function evaluatePass(
   items: CartItemForEvaluation[],
   promotions: Promotion[],
@@ -115,13 +191,7 @@ function evaluateItem(
 
   if (!matchingPromotion) {
     return {
-      item: {
-        ...item,
-        originalPriceCents,
-        finalPriceCents: originalPriceCents,
-        appliedPromotionTitle: null,
-        discountAmountCents: 0,
-      },
+      item: toBasePriceItem(item),
       promotionId: null,
     };
   }

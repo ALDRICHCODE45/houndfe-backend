@@ -1,6 +1,9 @@
 import type { PrismaClient } from '@prisma/client';
 import type { ClsService } from 'nestjs-cls';
-import { TenantPrismaService } from './tenant-prisma.service';
+import {
+  AmbientTransactionIsolationConflictError,
+  TenantPrismaService,
+} from './tenant-prisma.service';
 import type { TenantClsStore } from '../tenant/tenant-cls-store.interface';
 import { createTenantScopedPrisma } from './tenant-prisma.factory';
 
@@ -255,6 +258,81 @@ describe('TenantPrismaService.isInTransaction', () => {
 
     // After the tx completes the CLS slot is cleared → back to false.
     expect(observedInside).toBe(true);
+    expect(service.isInTransaction()).toBe(false);
+  });
+});
+
+// ── PCE-02 — explicit isolation level + fail-closed ambient guard ──────
+//
+// The bounded bot-quote snapshot requires a RepeatableRead read. The
+// service must forward that request to Prisma and must never satisfy it by
+// silently joining an ambient transaction whose isolation it cannot verify.
+
+describe('TenantPrismaService.runInTransaction isolation level', () => {
+  beforeEach(() => {
+    createTenantScopedPrismaMock.mockReset();
+  });
+
+  it('forwards an explicitly requested isolation level to the outer $transaction', async () => {
+    const { rawBase, extendedRoot } = makeTransactionMocks();
+    const service = makeService(rawBase, makeCls().cls);
+
+    await service.runInTransaction(() => Promise.resolve(), 'RepeatableRead');
+
+    expect(extendedRoot.$transaction).toHaveBeenCalledTimes(1);
+    expect(extendedRoot.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: 'RepeatableRead' },
+    );
+    expect(rawBase.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('does not add transaction options when no isolation level is requested', async () => {
+    const { rawBase, extendedRoot } = makeTransactionMocks();
+    const service = makeService(rawBase, makeCls().cls);
+
+    await service.runInTransaction(() => Promise.resolve());
+
+    // Exactly one argument: the driver default keeps applying, so every
+    // existing caller keeps its previous behavior.
+    expect(extendedRoot.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+    );
+  });
+
+  it('throws instead of silently reusing a weaker ambient transaction for an explicit isolation request', async () => {
+    const { rawBase, extendedRoot } = makeTransactionMocks();
+    const service = makeService(rawBase, makeCls().cls);
+    const nestedWork = jest.fn(() => Promise.resolve('nested result'));
+
+    await expect(
+      service.runInTransaction(() =>
+        service.runInTransaction(nestedWork, 'RepeatableRead'),
+      ),
+    ).rejects.toThrow(AmbientTransactionIsolationConflictError);
+
+    // The unverifiable guarantee was refused: the nested work never ran and
+    // no second transaction was opened.
+    expect(nestedWork).not.toHaveBeenCalled();
+    expect(extendedRoot.$transaction).toHaveBeenCalledTimes(1);
+
+    // The outer transaction still restores its slot after the refusal.
+    expect(service.isInTransaction()).toBe(false);
+    expect(service.getClient()).toBe(extendedRoot);
+  });
+
+  it('still reuses the ambient transaction when no isolation level is requested', async () => {
+    const { rawBase, extendedRoot } = makeTransactionMocks();
+    const service = makeService(rawBase, makeCls().cls);
+    const nestedWork = jest.fn(() => Promise.resolve('nested result'));
+
+    const result = await service.runInTransaction(() =>
+      service.runInTransaction(nestedWork),
+    );
+
+    expect(result).toBe('nested result');
+    expect(nestedWork).toHaveBeenCalledTimes(1);
+    expect(extendedRoot.$transaction).toHaveBeenCalledTimes(1);
     expect(service.isInTransaction()).toBe(false);
   });
 });
