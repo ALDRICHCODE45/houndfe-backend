@@ -4,15 +4,11 @@
  * Runs ONCE per `pnpm run test:integration` invocation, BEFORE any
  * test file is loaded. Responsibilities:
  *
- *   1. Load .env.test into process.env. We use `override: true`
- *      because `@prisma/client`'s runtime auto-loads `.env` from
- *      `process.cwd()` the moment it is imported (Prisma bundles
- *      dotenv v17 internally and reads `.env` regardless of any
- *      presence of `.env.test`). Without `override: true`, the
- *      dev DB URL from `.env` would leak into process.env and the
- *      integration run would attempt to migrate the dev DB —
- *      exactly the bug this PR is fixing. The `setupFiles`
- *      `load-env.ts` does the same for per-test-file resolution.
+ *   1. Use .env.test when present (`override: true`) or a shell
+ *      DATABASE_URL plus HOUNDFE_TEST_DATABASE_URL_FROM_SHELL=1 when absent.
+ *      Prisma may auto-load `.env` before this module runs, so a URL alone
+ *      does not establish shell provenance. `load-env.ts` applies the same
+ *      precedence before test modules import Prisma.
  *   2. Normalize the resolved URL through `normalizeTestDatabaseUrl`,
  *      which pins an ambiguous `localhost` host to `127.0.0.1` so the
  *      migrate/seed steps do not depend on the host's dual-stack
@@ -36,6 +32,7 @@
  * AND the prisma client + reset helpers.
  */
 import * as dotenv from 'dotenv';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
@@ -49,11 +46,20 @@ import { normalizeTestDatabaseUrl } from './test-database-url';
 const envTestPath = path.resolve(process.cwd(), '.env.test');
 
 export default async function globalSetup(): Promise<void> {
-  // 1. Load env. `override: true` is REQUIRED — Prisma client auto-loads
-  // `.env` into process.env when first imported (see module docstring).
-  // Without override, the dev-DB URL would silently win and the migrate
-  // step below would touch the dev database.
-  dotenv.config({ path: envTestPath, override: true });
+  // 1. A present .env.test overrides Prisma's auto-loaded .env. Without
+  // it, the caller must mark an intentional shell URL; the static Prisma
+  // imports above can otherwise silently supply a value from `.env`.
+  if (fs.existsSync(envTestPath)) {
+    dotenv.config({ path: envTestPath, override: true });
+  } else if (
+    process.env.HOUNDFE_TEST_DATABASE_URL_FROM_SHELL !== '1' ||
+    !process.env.DATABASE_URL
+  ) {
+    throw new Error(
+      '[global-setup] .env.test is absent; set DATABASE_URL and ' +
+        'HOUNDFE_TEST_DATABASE_URL_FROM_SHELL=1 explicitly for a test DB.',
+    );
+  }
 
   // 2. Normalize the resolved URL through the shared helper (which
   // also aborts on a missing/malformed/dev-targeted value). Pinning

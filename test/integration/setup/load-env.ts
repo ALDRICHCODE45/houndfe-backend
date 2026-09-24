@@ -7,13 +7,12 @@
  * at module-eval-time, which means `DATABASE_URL` must already be on
  * `process.env` before the import graph resolves.
  *
- * `.env.test` is authoritative and MUST override the `.env` that
- * `@prisma/client` auto-loads. Prisma bundles dotenv v17 internally
- * and reads `.env` from `process.cwd()` the moment it is required,
- * regardless of any `.env.test`. We therefore load `.env.test` with
- * `override: true` so the test DB URL wins over that auto-loaded dev
- * URL. Without override, `.env`'s dev-DB value would silently survive
- * and an integration run would touch the dev DB.
+ * When present, `.env.test` is authoritative and overrides Prisma's
+ * auto-loaded `.env`. Without `.env.test`, a shell DATABASE_URL is accepted
+ * only with the caller's explicit HOUNDFE_TEST_DATABASE_URL_FROM_SHELL=1
+ * marker. Prisma can import `.env` before this setup file runs, so the marker
+ * distinguishes a deliberate shell test invocation from implicit dotenv.
+ * Both sources pass the same test-target guard before any spec imports Prisma.
  *
  * After load, the resolved value is normalized through
  * `normalizeTestDatabaseUrl` BEFORE any spec import graph constructs
@@ -28,20 +27,21 @@ import { normalizeTestDatabaseUrl } from './test-database-url';
 
 const envTestPath = path.resolve(process.cwd(), '.env.test');
 
-if (!fs.existsSync(envTestPath)) {
+if (fs.existsSync(envTestPath)) {
+  // Override Prisma's auto-loaded `.env`: the explicit test file wins.
+  dotenv.config({ path: envTestPath, override: true });
+} else if (
+  process.env.HOUNDFE_TEST_DATABASE_URL_FROM_SHELL !== '1' ||
+  !process.env.DATABASE_URL
+) {
+  // Prisma may already have auto-loaded `.env`; a URL alone cannot prove
+  // shell provenance. Require the caller's separate explicit test marker.
   throw new Error(
     `[test:integration setupFile] .env.test is missing at ${envTestPath}. ` +
-      `Copy .env.test.example to .env.test (it is gitignored). ` +
-      `Alternatively, set DATABASE_URL in the shell before running \`pnpm run test:integration\`.`,
+      `Provide a guarded .env.test, or set both DATABASE_URL and ` +
+      `HOUNDFE_TEST_DATABASE_URL_FROM_SHELL=1 explicitly in the shell.`,
   );
 }
-
-// `override: true` is REQUIRED — `@prisma/client`'s runtime auto-loads
-// `.env` from `process.cwd()` the moment it is required (Prisma
-// bundles dotenv v17 internally and reads `.env` regardless of any
-// `.env.test`). Without override, the dev-DB URL from `.env` would
-// silently win and an integration run would touch the dev DB.
-dotenv.config({ path: envTestPath, override: true });
 
 // Resolve + normalize the test URL before any spec import graph can
 // construct a Prisma client. The helper rejects a missing, malformed,

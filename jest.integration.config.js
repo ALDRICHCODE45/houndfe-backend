@@ -16,13 +16,13 @@
  *   - `prisma/seed-sat.spec.ts`.
  *
  * Env loading:
- *   - `setupFiles` runs `dotenv.config({ path: '.env.test' })` so the
- *     `DATABASE_URL` (and Joi keys if a spec boots `ConfigModule`)
- *     is set BEFORE Prisma clients are constructed.
- *   - `globalSetup` runs `prisma migrate deploy` against the test
- *     DATABASE_URL and seeds a baseline tenant — see
- *     `test/integration/setup/global-setup.ts`. Without this the
- *     promotion spec's `tenant.findFirst()` throws on an empty DB.
+ *   - `setupFiles` loads `.env.test` when present (overriding `.env`),
+ *     or requires a shell DATABASE_URL plus
+ *     HOUNDFE_TEST_DATABASE_URL_FROM_SHELL=1 when absent. It validates
+ *     the test target BEFORE spec Prisma clients are constructed.
+ *   - `globalSetup` applies the same precedence, runs `prisma migrate
+ *     deploy` against that guarded test DATABASE_URL, and seeds a baseline
+ *     tenant — see `test/integration/setup/global-setup.ts`.
  *
  * `runInBand` is a per-invocation flag (`pnpm run test:integration`
  * passes it). Multiple Jest workers hammering one test DB is a recipe

@@ -21,8 +21,8 @@
 /** Database name that marks the dedicated integration-test target. */
 const TEST_DATABASE_NAME = 'nest-practice-test';
 
-/** Dev-stack host port that an integration run must never target. */
-const DEV_DATABASE_PORT = '5432';
+/** Docker Compose exposes the dedicated test DB on this loopback port. */
+const LOCAL_TEST_DATABASE_PORT = '5433';
 
 /**
  * Resolve `rawUrl` into the normalized integration DATABASE_URL.
@@ -54,6 +54,10 @@ export function normalizeTestDatabaseUrl(
     );
   }
 
+  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
+    throw new Error(`${contextLabel} DATABASE_URL must use PostgreSQL.`);
+  }
+
   // Pathname is `/` or `/dbname`; decode so an encoded name still
   // matches the guard. Fall back to the raw segment if decoding fails.
   const rawPath = parsed.pathname.replace(/^\//, '');
@@ -64,16 +68,21 @@ export function normalizeTestDatabaseUrl(
     databaseName = rawPath;
   }
 
-  // Refuse the known dev target: port 5432 with any database other than
-  // the dedicated test DB. Never include the URL in the error.
+  // Every target, including remote CI databases, must use the dedicated
+  // test database name. On the developer's loopback interface, also require
+  // the Compose test port (5433), never the dev port (5432). This is a
+  // target-shape guard, not proof that a remote host is disposable.
+  if (databaseName !== TEST_DATABASE_NAME) {
+    throw new Error(
+      `${contextLabel} DATABASE_URL must name the dedicated '${TEST_DATABASE_NAME}' test database.`,
+    );
+  }
   if (
-    parsed.port === DEV_DATABASE_PORT &&
-    databaseName !== TEST_DATABASE_NAME
+    ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) &&
+    parsed.port !== LOCAL_TEST_DATABASE_PORT
   ) {
     throw new Error(
-      `${contextLabel} DATABASE_URL targets the dev DB ` +
-        `(port ${DEV_DATABASE_PORT} with a database other than '${TEST_DATABASE_NAME}'). ` +
-        `Refusing to run integration tests against developer data.`,
+      `${contextLabel} loopback test DATABASE_URL must use port ${LOCAL_TEST_DATABASE_PORT}.`,
     );
   }
 
