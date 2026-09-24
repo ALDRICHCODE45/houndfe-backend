@@ -90,6 +90,7 @@ import { MAILER, type IMailer } from '../notifications/email/mailer.port';
 /** Inngest function ids owned by the promotion alert delivery path. */
 const NEAR_CAPACITY_FUNCTION_ID = 'promotion-near-capacity-email';
 const EXPIRING_FUNCTION_ID = 'promotion-expiring-email';
+const DELIVERY_THANK_YOU_FUNCTION_ID = 'delivery-thank-you-notify';
 
 /**
  * A full `AppModule` boot instantiates a few hundred providers through
@@ -284,6 +285,9 @@ const ALLOWED_BOOT_HOOK_OWNERS: ReadonlyMap<string, 'inert-stub' | 'wiring'> =
     ['LowStockInngestRegistrar', 'wiring'],
     ['HrTimeOffInngestRegistrar', 'wiring'],
     ['DeliveryRoutesInngestRegistrar', 'wiring'],
+    // DTE-4e: constructs an inert sender and registers a local SDK function;
+    // it never reads DB, dispatches an event or invokes the injected mailer.
+    ['DeliveryThankYouInngestRegistrar', 'wiring'],
     ['PromotionCapacityInngestRegistrar', 'wiring'],
     ['PromotionExpiryInngestRegistrar', 'wiring'],
     ['DeliveryRouteSubjectResolverRegistrar', 'wiring'],
@@ -557,6 +561,9 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
           ids.filter((id) => id === NEAR_CAPACITY_FUNCTION_ID),
         ).toHaveLength(1);
         expect(ids.filter((id) => id === EXPIRING_FUNCTION_ID)).toHaveLength(1);
+        expect(
+          ids.filter((id) => id === DELIVERY_THANK_YOU_FUNCTION_ID),
+        ).toHaveLength(1);
         expect(new Set(ids).size).toBe(ids.length);
         expect(captured.options.client).toBe(inngestService.getClient());
         expect(typeof captured.middleware).toBe('function');

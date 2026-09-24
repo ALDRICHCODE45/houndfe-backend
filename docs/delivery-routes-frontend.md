@@ -316,7 +316,7 @@ Behavior notes:
 
 When a driver completes a stop — the **last** one included — the backend also queues a customer thank-you email in the same transaction, gated by its own flat action key `DELIVERY_THANK_YOU`.
 
-- **Documented but not live.** The action ships **disabled** for every tenant (no seeded rows). Enabling it can also release **older pending/retrying events**; inspect and resolve that backlog under the owner-approved gate before opting in. There is **no** proven live send (no full AppModule boot, Inngest Cloud, Resend or inbox evidence), so **do not** present a `200` as "email delivered".
+- **Documented but not live.** The action ships **disabled** for every tenant (no seeded rows). Enabling it can also release **older pending/retrying events**; inspect and resolve that backlog under the owner-approved gate before opting in. There is **no** proven live send (only an offline AppModule boot with stubbed ports; no live boot, Inngest Cloud, Resend or inbox evidence), so **do not** present a `200` as "email delivered".
 - **Recipient is resolved at send time** from the sale's customer (tenant-scoped) — never from `recipients`/`recipientUserIds`, which stay the staff list.
 - **Delivery is asynchronous** (outbox + Inngest); HTTP success means "accepted", not "delivered". A stable Inngest `event.id` reduces duplicates but is **not** an exactly-once guarantee.
 - **Activation is gated.** Enabling `DELIVERY_THANK_YOU` in a real tenant requires the owner-approved activation/rollback conditions in `docs/delivery-thank-you-activation.md`.

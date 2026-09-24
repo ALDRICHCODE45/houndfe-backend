@@ -15,13 +15,13 @@
 
 ## 2. Estado actual (resumen)
 
-| Área                              | Estado verificado en esta rama                                                                                 |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Código                            | Productor transaccional, claim dedicado, dispatcher con `await`, handler Inngest, sender y registrar presentes |
-| Acción `DELIVERY_THANK_YOU`       | Registrada, **deshabilitada por defecto**, sin filas sembradas; solo se enciende por `PUT`                     |
-| Migración                         | Aplicada **solo** en PostgreSQL aislado de pruebas; no en desarrollo/producción                                |
-| Envío real                        | **No probado**: ni boot completo de AppModule, ni Inngest Cloud, ni Resend, ni inbox                           |
-| `recipients` / `recipientUserIds` | Lista **staff**; **nunca** el correo del cliente                                                               |
+| Área                              | Estado verificado en esta rama                                                                                     |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Código                            | Productor transaccional, claim dedicado, dispatcher con `await`, handler Inngest, sender y registrar presentes     |
+| Acción `DELIVERY_THANK_YOU`       | Registrada, **deshabilitada por defecto**, sin filas sembradas; solo se enciende por `PUT`                         |
+| Migración                         | Aplicada **solo** en PostgreSQL aislado de pruebas; no en desarrollo/producción                                    |
+| Envío real                        | **No probado**: AppModule arrancó solo offline con puertos simulados; sin boot vivo, Inngest Cloud, Resend o inbox |
+| `recipients` / `recipientUserIds` | Lista **staff**; **nunca** el correo del cliente                                                                   |
 
 ## 3. Disparador y productor
 
@@ -92,9 +92,10 @@ Medido en esta rama (no re-ejecutado en esta unidad de documentación):
 - `12/12` integración real PostgreSQL aislada del check-in (DTE-6b2).
 - `11/11` sender contra base con mailer falso (DTE-6c).
 - `9/9` guardas offline de la base de test (DTE-6b1).
+- `1/1` boot offline de AppModule con Prisma, pollers, Inngest.send y mailer aislados: un único registro `delivery-thank-you-notify`, sin DB/send/mail durante el arranque.
 - `build` limpio.
 
-**No** cubierto: boot completo de AppModule, interleaving concurrente real, Inngest Cloud, Resend ni inbox real. La prueba de boot offline todavía falla cerrada por un hook de registro nuevo pendiente de revisión. Estas pruebas requieren autorización explícita del dueño.
+**No** cubierto: boot vivo con puertos reales, interleaving concurrente real, Inngest Cloud, Resend ni inbox real. El boot offline no autoriza activación. Estas pruebas requieren autorización explícita del dueño.
 
 ## 12. Próximo paso
 
