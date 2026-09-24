@@ -278,6 +278,14 @@ enum NotificationActionKey {
   // `Promociones`; both stay disabled until a tenant opts in (no seed rows).
   PROMOTION_EXPIRING
   PROMOTION_NEAR_CAPACITY
+  // delivery-thank-you-email / DTE-1. Sixth flat registry member for the
+  // customer-facing thank-you email after a successful delivery-route
+  // check-in. Registered here (migration
+  // 20260924162000_delivery_thank_you_action) but ships dormant: no producer,
+  // event, or sender exists yet, no rows are seeded, and
+  // `NotificationConfig.recipients` stays the STAFF list — never the customer
+  // address for this action.
+  DELIVERY_THANK_YOU
 }
 
 // ============================================================================

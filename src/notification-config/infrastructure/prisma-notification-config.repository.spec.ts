@@ -212,3 +212,115 @@ describe('PrismaNotificationConfigRepository.replace (B.2)', () => {
     }
   });
 });
+
+/**
+ * DTE-1 — `DELIVERY_THANK_YOU` action registration.
+ *
+ * Pins the persistence contract for the sixth flat action key: an unconfigured
+ * tenant still reads the safe empty defaults (no accidental opt-in), an explicit
+ * opt-in persists exactly the requested key (migration value exists in the Prisma
+ * enum), a full replace that re-sends unrelated keys keeps them, and the action
+ * never lands in the staff recipient table.
+ */
+describe('PrismaNotificationConfigRepository — DELIVERY_THANK_YOU action (DTE-1)', () => {
+  it('safe default stays disabled: no settings row returns empty enabledActions (no accidental opt-in)', async () => {
+    const tp = makeTenantPrismaMock();
+    tp.client.notificationSettings.findFirst.mockResolvedValue(null);
+
+    expect(await makeRepo(tp).find()).toEqual({
+      enabled: false,
+      recipients: [],
+      enabledActions: [],
+    });
+    expect(tp.client.notificationAction.findMany).not.toHaveBeenCalled();
+  });
+
+  it('accepts and persists exactly the DELIVERY_THANK_YOU opt-in', async () => {
+    const tp = makeTenantPrismaMock();
+    tp.client.notificationSettings.upsert.mockResolvedValue({});
+    tp.client.notificationRecipient.deleteMany.mockResolvedValue(blankRow());
+    tp.client.notificationRecipient.createMany.mockResolvedValue(blankRow());
+    tp.client.notificationAction.deleteMany.mockResolvedValue(blankRow());
+    tp.client.notificationAction.createMany.mockResolvedValue({ count: 1 });
+    tp.client.notificationSettings.findFirst.mockResolvedValue({
+      enabled: true,
+    });
+    tp.client.notificationRecipient.findMany.mockResolvedValue([]);
+    tp.client.notificationAction.findMany.mockResolvedValue([
+      { action: 'DELIVERY_THANK_YOU' },
+    ]);
+
+    const view = await makeRepo(tp).replace({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+
+    expect(tp.client.notificationAction.createMany).toHaveBeenCalledWith({
+      data: [{ action: 'DELIVERY_THANK_YOU' }],
+      skipDuplicates: true,
+    });
+    expect(view).toEqual({
+      enabled: true,
+      recipients: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+  });
+
+  it('full-replace preserves unrelated action keys re-sent with DELIVERY_THANK_YOU', async () => {
+    const tp = makeTenantPrismaMock();
+    tp.client.notificationSettings.upsert.mockResolvedValue({});
+    tp.client.notificationRecipient.deleteMany.mockResolvedValue(blankRow());
+    tp.client.notificationRecipient.createMany.mockResolvedValue(blankRow());
+    tp.client.notificationAction.deleteMany.mockResolvedValue(blankRow());
+    tp.client.notificationAction.createMany.mockResolvedValue({ count: 2 });
+    tp.client.notificationSettings.findFirst.mockResolvedValue({
+      enabled: true,
+    });
+    tp.client.notificationRecipient.findMany.mockResolvedValue([]);
+    tp.client.notificationAction.findMany.mockResolvedValue([
+      { action: 'DELIVERY_THANK_YOU' },
+      { action: 'LOW_STOCK' },
+    ]);
+
+    const view = await makeRepo(tp).replace({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['DELIVERY_THANK_YOU', 'LOW_STOCK'],
+    });
+
+    expect(tp.client.notificationAction.createMany).toHaveBeenCalledWith({
+      data: [{ action: 'DELIVERY_THANK_YOU' }, { action: 'LOW_STOCK' }],
+      skipDuplicates: true,
+    });
+    expect(view.enabledActions).toEqual(['DELIVERY_THANK_YOU', 'LOW_STOCK']);
+  });
+
+  it('never writes the action into the staff recipient table', async () => {
+    const tp = makeTenantPrismaMock();
+    tp.client.notificationSettings.upsert.mockResolvedValue({});
+    tp.client.notificationRecipient.deleteMany.mockResolvedValue(blankRow());
+    tp.client.notificationRecipient.createMany.mockResolvedValue(blankRow());
+    tp.client.notificationAction.deleteMany.mockResolvedValue(blankRow());
+    tp.client.notificationAction.createMany.mockResolvedValue({ count: 1 });
+    tp.client.notificationSettings.findFirst.mockResolvedValue({
+      enabled: true,
+    });
+    tp.client.notificationRecipient.findMany.mockResolvedValue([]);
+    tp.client.notificationAction.findMany.mockResolvedValue([
+      { action: 'DELIVERY_THANK_YOU' },
+    ]);
+
+    const view = await makeRepo(tp).replace({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+
+    expect(tp.client.notificationRecipient.createMany).toHaveBeenCalledWith({
+      data: [],
+      skipDuplicates: true,
+    });
+    expect(view.recipients).toEqual([]);
+  });
+});

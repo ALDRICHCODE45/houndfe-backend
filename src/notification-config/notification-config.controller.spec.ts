@@ -365,4 +365,35 @@ describe('NotificationConfigController — auth integration (C.2)', () => {
 
     expect(service.replace).not.toHaveBeenCalled();
   });
+
+  // ───────── DTE-1: DELIVERY_THANK_YOU opt-in round-trips ─────────
+
+  it('PUT /notification-config returns 200 when enabling DELIVERY_THANK_YOU and forwards it verbatim', async () => {
+    service.replace.mockResolvedValue({
+      enabled: true,
+      recipients: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+
+    const res = await request(app.getHttpServer())
+      .put('/notification-config')
+      .set('Authorization', 'Bearer notif-config-rw')
+      .send({
+        enabled: true,
+        recipientUserIds: [],
+        enabledActions: ['DELIVERY_THANK_YOU'],
+      })
+      .expect(200);
+
+    expect(res.body).toEqual({
+      enabled: true,
+      recipients: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+    expect(service.replace).toHaveBeenCalledWith({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+  });
 });

@@ -26,7 +26,7 @@
 2. En el formulario distingue tres estados del cupo: **omitir**, **`null`** y **número positivo**. Nunca envíes `consumedProductUnits` (§2.3).
 3. Envía `POST /sales/drafts/:id/charge` con el header `idempotency-key` no vacío; responde `201` tanto en el alta como en el replay. Reutiliza la misma clave solo para reintentar el mismo cuerpo (§2.6).
 4. Trata `409 PROMO_CAPACITY_RE_QUOTE` como "re-cotiza": re-lee el borrador y muestra los totales antes de reintentar como operación nueva (§2.7, §3.2).
-5. En notificaciones, haz GET antes del PUT y reenvía **el subconjunto actualmente habilitado de las cinco claves**; así preservas las acciones no relacionadas que ya estaban encendidas sin activar las que el tenant tenía apagadas (§2.10, §3.4).
+5. En notificaciones, haz GET antes del PUT y reenvía **el subconjunto actualmente habilitado de las seis claves**; así preservas las acciones no relacionadas que ya estaban encendidas sin activar las que el tenant tenía apagadas (§2.10, §3.4).
 6. Refresca el detalle y el listado de promociones tras cobrar o cancelar (§3.3).
 
 ---
@@ -278,7 +278,8 @@ type NotificationActionKey =
   | 'TIME_OFF_REQUESTED'
   | 'DELIVERY_NEXT_STOP'
   | 'PROMOTION_EXPIRING'
-  | 'PROMOTION_NEAR_CAPACITY';
+  | 'PROMOTION_NEAR_CAPACITY'
+  | 'DELIVERY_THANK_YOU';
 
 // GET /notification-config — respuesta (round-trip del PUT)
 interface NotificationConfigResponse {
@@ -290,7 +291,7 @@ interface NotificationConfigResponse {
 // PUT /notification-config — los tres campos son obligatorios
 interface NotificationConfigUpdateRequest {
   enabled: boolean;
-  recipientUserIds: string[]; // userIds, lista compartida
+  recipientUserIds: string[]; // userIds, lista compartida de staff (alertas de staff)
   enabledActions: string[];
 }
 ```
@@ -309,17 +310,19 @@ Content-Type: application/json
     "LOW_STOCK",
     "TIME_OFF_REQUESTED",
     "DELIVERY_NEXT_STOP",
-    "PROMOTION_EXPIRING"
+    "PROMOTION_EXPIRING",
+    "DELIVERY_THANK_YOU"
   ]
 }
 ```
 
 - `enabled` es el master toggle del tenant y el primer gate: en `false` ninguna alerta envía.
-- Los destinatarios son **una única lista compartida** por todas las acciones. Los emails se resuelven al enviar y se filtran usuarios inactivos; el frontend nunca recibe ni administra direcciones de email.
-- El canal es **solo email**. Las cinco claves son miembros planos y equivalentes del enum; el grupo visual "Promociones" **no** existe en el backend.
+- Los destinatarios (`recipients`/`recipientUserIds`) son **una única lista compartida de staff** y aplican **solo a las alertas de staff** (stock, time-off, próximo stop, promociones): los emails se resuelven al enviar y se filtran usuarios inactivos. **No** aplican a `DELIVERY_THANK_YOU`; ese correo al cliente resolverá su dirección con una búsqueda **independiente y con alcance de tenant** del email del cliente en el momento del envío (consumidor aún no implementado en DTE-1). El frontend nunca recibe ni administra direcciones de email.
+- El canal es **solo email**. Las seis claves son miembros planos y equivalentes del enum; el grupo visual "Promociones" **no** existe en el backend.
 - El `PUT` es un **reemplazo completo**: destinatarios y acciones se borran y se recrean desde el cuerpo, y responde la misma vista que el `GET`; todo lo omitido se pierde.
-- **Preserva solo lo que estaba habilitado**: al togglear una acción debes reenviar las claves **actualmente habilitadas** (subconjunto de las cinco permitidas), incluidas las no relacionadas que ya estaban encendidas (por ejemplo `LOW_STOCK` o `DELIVERY_NEXT_STOP`). Enviar siempre las cinco claves **habilitaría** las que el tenant tenía apagadas; omitir una habilitada la borraría.
-- Tenant sin configuración: `{ "enabled": false, "recipients": [], "enabledActions": [] }`. No hay filas sembradas para las dos claves nuevas: quedan **deshabilitadas** hasta que el tenant las active por `PUT`.
+- **Preserva solo lo que estaba habilitado**: al togglear una acción debes reenviar las claves **actualmente habilitadas** (subconjunto de las seis permitidas), incluidas las no relacionadas que ya estaban encendidas (por ejemplo `LOW_STOCK` o `DELIVERY_NEXT_STOP`). Enviar siempre las seis claves **habilitaría** las que el tenant tenía apagadas; omitir una habilitada la borraría.
+- **`DELIVERY_THANK_YOU` (`feat/delivery-thank-you-email`, DTE-1)**: sexta clave plana, registrada para el correo de agradecimiento al cliente tras un check-in de entrega exitoso. Hoy el backend **solo la registra**: no existe todavía productor, evento, poller ni remitente, así que **activarla no envía ningún correo**. Llega **deshabilitada** por defecto (sin filas sembradas) y solo se enciende por `PUT`. Nunca la uses como destinatario: los `recipients`/`recipientUserIds` siguen siendo **staff** (userIds internos) y jamás la dirección del cliente; la clave se envía dentro de `enabledActions`, no en la lista de destinatarios.
+- Tenant sin configuración: `{ "enabled": false, "recipients": [], "enabledActions": [] }`. No hay filas sembradas para las claves nuevas (las dos de promociones y `DELIVERY_THANK_YOU`): quedan **deshabilitadas** hasta que el tenant las active por `PUT`.
 - Errores: `400 UNKNOWN_ACTION_KEY` (clave fuera del set) y `400 INVALID_RECIPIENT` (usuario que no pertenece al tenant).
 
 ```ts
@@ -332,6 +335,7 @@ const ALL_KEYS: NotificationActionKey[] = [
   'TIME_OFF_REQUESTED',
   'DELIVERY_NEXT_STOP',
   ...PROMOTION_KEYS,
+  'DELIVERY_THANK_YOU',
 ];
 
 function togglePromotionAction(
@@ -436,7 +440,7 @@ Renderiza dos toggles separados —`PROMOTION_EXPIRING` y `PROMOTION_NEAR_CAPACI
 - [ ] La UI muestra `remainingProductUnits` del servidor sin recalcular.
 - [ ] El `charge` reutiliza la clave solo con cuerpo idéntico, espera `201` en alta y replay, y maneja `409 PROMO_CAPACITY_RE_QUOTE`.
 - [ ] La cancelación usa el enum de motivo y no asume restauración por reembolso ni replay con otro actor o motivo.
-- [ ] El `PUT` de notificaciones usa `recipientUserIds` y reenvía solo las claves actualmente habilitadas (subconjunto de las cinco), sin activar las apagadas.
+- [ ] El `PUT` de notificaciones usa `recipientUserIds` y reenvía solo las claves actualmente habilitadas (subconjunto de las seis), sin activar las apagadas.
 - [ ] Los cuatro sobres de error se distinguen por forma, no solo por status.
 - [ ] El refetch corre tras cobrar y cancelar.
 
