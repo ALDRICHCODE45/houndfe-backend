@@ -53,6 +53,7 @@ export type AppSubjects =
   | 'DeliveryRoute'
   | 'TenantCatalogSettings'
   | 'Analytics'
+  | 'HumanDecision'
   | 'all';
 
 /**
@@ -614,5 +615,23 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'Analytics',
     action: 'read',
     description: 'View tenant sales analytics summaries',
+  },
+
+  // HumanDecision permissions (human-decisions-restock-v1 / HD-04).
+  // Exactly `read` + `update`: a reviewer reads the PENDING inbox and
+  // records a resolution. The bot intake route owns creation through its
+  // own service credential scope, so `create`, `delete`, `batch_delete`,
+  // and `manage` are intentionally out and the global `manage:all`
+  // super-admin rule is the only implicit grant. PermissionSeeder
+  // auto-upserts on boot.
+  {
+    subject: 'HumanDecision',
+    action: 'read',
+    description: 'View tenant human-decision requests',
+  },
+  {
+    subject: 'HumanDecision',
+    action: 'update',
+    description: 'Resolve tenant human-decision requests',
   },
 ];

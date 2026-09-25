@@ -1341,6 +1341,8 @@ async function main() {
       permissionKey('EmployeeEmergencyContact', 'delete'),
       permissionKey('GlobalPriceList', 'read'),
       permissionKey('SatKey', 'read'),
+      permissionKey('HumanDecision', 'read'),
+      permissionKey('HumanDecision', 'update'),
     ];
 
     const cashierPermissionKeys: SeedPermissionKey[] = [
@@ -1351,6 +1353,7 @@ async function main() {
       permissionKey('Brand', 'read'),
       permissionKey('Category', 'read'),
       permissionKey('GlobalPriceList', 'read'),
+      permissionKey('HumanDecision', 'read'),
     ];
 
     for (const managerRole of managerRoleByTenant.values()) {
