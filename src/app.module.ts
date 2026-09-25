@@ -35,6 +35,10 @@ import { OutboxModule } from './shared/outbox/outbox.module';
 import { UsersModule } from './users/users.module';
 import { EmployeesModule } from './employees/employees.module';
 import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
+// HD-03b2 — bot RESTOCK human-decision intake (`POST
+// /chatbot-api/human-decisions`). Self-contained: imports ChatbotApiModule
+// (exported ServiceAuthGuard + credentials provider) and DatabaseModule.
+import { HumanDecisionsModule } from './human-decisions/human-decisions.module';
 import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
 import { NotificationConfigModule } from './notification-config/notification-config.module';
@@ -122,6 +126,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
     UsersModule,
     EmployeesModule,
     ChatbotApiModule,
+    HumanDecisionsModule,
     PublicCatalogModule,
     SatCatalogModule,
     NotificationConfigModule,
