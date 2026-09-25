@@ -12,7 +12,10 @@ import { AppModule } from './app.module';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
 import { createListingValidationExceptionFactory } from './shared/listing/listing-validation-exception.factory';
-import { installHumanDecisionBodyParser } from './human-decisions/presentation/filters/human-decision-body-parser';
+import {
+  installBotApplicationOutcomeBodyParser,
+  installHumanDecisionBodyParser,
+} from './human-decisions/presentation/filters/human-decision-body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -59,6 +62,15 @@ async function bootstrap() {
   // `app.listen` -> Nest init — lets a malformed-body short-circuit carry the
   // `Access-Control-Allow-Origin` header the allowlisted browser FE requires.
   installHumanDecisionBodyParser(app);
+
+  // HD-05c2a — the bot terminal ACK body (`POST /chatbot-api/human-decisions/:
+  // id/application-outcome`) is validated by the exact pure parser, but Nest's
+  // default `json` parser (`strict: true`) would reject a JSON primitive or
+  // echo a raw body snippet on a malformed body before the controller-scoped
+  // filter can run. Mount the route-scoped parser AFTER CORS and BEFORE
+  // `app.listen` -> Nest init, with an EXACT method+path gate so the bot
+  // intake/poll and every other route keep the default parsers.
+  installBotApplicationOutcomeBodyParser(app);
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);

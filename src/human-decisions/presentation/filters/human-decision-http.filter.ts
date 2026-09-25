@@ -21,6 +21,10 @@
  * Mapping:
  *   RestockIntakeError NOT_FOUND                              -> 404 NOT_FOUND
  *   RestockIntakeError IDEMPOTENCY_CONFLICT/VERSION_CONFLICT  -> 409 (same code)
+ *   BotApplicationOutcomeError NOT_FOUND                      -> 404 NOT_FOUND
+ *   BotApplicationOutcomeError VERSION_CONFLICT               -> 409 VERSION_CONFLICT
+ *   BotApplicationOutcomeError IDEMPOTENCY_CONFLICT           -> 409 IDEMPOTENCY_CONFLICT
+ *   BotApplicationOutcomeError OUTCOME_ALREADY_RECORDED       -> 409 OUTCOME_ALREADY_RECORDED
  *   HumanDecisionReviewResolveError NOT_FOUND                 -> 404 NOT_FOUND
  *   HumanDecisionReviewResolveError UNAUTHORIZED              -> 401 UNAUTHORIZED
  *   HumanDecisionReviewResolveError FORBIDDEN                 -> 403 FORBIDDEN
@@ -53,6 +57,7 @@ import {
   InvalidArgumentError,
   InsufficientPermissionsError,
 } from '../../../shared/domain/domain-error';
+import { BotApplicationOutcomeError } from '../../domain/bot-application-outcome.repository';
 import { HumanDecisionReviewResolveError } from '../../domain/human-decision-review-resolve.repository';
 import { RestockIntakeError } from '../../domain/restock-intake.repository';
 
@@ -65,6 +70,7 @@ export type HumanDecisionErrorCode =
   | 'IDEMPOTENCY_CONFLICT'
   | 'VERSION_CONFLICT'
   | 'ALREADY_RESOLVED'
+  | 'OUTCOME_ALREADY_RECORDED'
   | 'CONFLICT'
   | 'RATE_LIMITED'
   | 'REQUEST_ERROR'
@@ -89,6 +95,8 @@ const FIXED_MESSAGES: Record<HumanDecisionErrorCode, string> = {
   IDEMPOTENCY_CONFLICT: 'Request conflicts with a previous submission',
   VERSION_CONFLICT: 'Human decision was modified by another reviewer',
   ALREADY_RESOLVED: 'Human decision was already resolved',
+  OUTCOME_ALREADY_RECORDED:
+    'A terminal application outcome is already recorded',
   CONFLICT: 'Request conflict',
   RATE_LIMITED: 'Too many requests',
   REQUEST_ERROR: 'Request failed',
@@ -111,6 +119,10 @@ export class HumanDecisionHttpFilter implements ExceptionFilter {
   private toErrorBody(exception: unknown): HumanDecisionErrorBody {
     if (exception instanceof RestockIntakeError) {
       return this.fromIntakeError(exception);
+    }
+
+    if (exception instanceof BotApplicationOutcomeError) {
+      return this.fromApplicationOutcomeError(exception);
     }
 
     if (exception instanceof HumanDecisionReviewResolveError) {
@@ -151,6 +163,29 @@ export class HumanDecisionHttpFilter implements ExceptionFilter {
         return this.build(HttpStatus.CONFLICT, 'IDEMPOTENCY_CONFLICT');
       case 'VERSION_CONFLICT':
         return this.build(HttpStatus.CONFLICT, 'VERSION_CONFLICT');
+      default:
+        return this.build(HttpStatus.INTERNAL_SERVER_ERROR, 'INTERNAL_ERROR');
+    }
+  }
+
+  /**
+   * Maps the HD-05b2 terminal-ACK port failure codes to the bot-approved
+   * machine codes. The `message` is never read, so no decision/attempt id,
+   * provider message id or tenant value can leak; each code collapses to a
+   * fixed, value-free body.
+   */
+  private fromApplicationOutcomeError(
+    error: BotApplicationOutcomeError,
+  ): HumanDecisionErrorBody {
+    switch (error.code) {
+      case 'NOT_FOUND':
+        return this.build(HttpStatus.NOT_FOUND, 'NOT_FOUND');
+      case 'VERSION_CONFLICT':
+        return this.build(HttpStatus.CONFLICT, 'VERSION_CONFLICT');
+      case 'IDEMPOTENCY_CONFLICT':
+        return this.build(HttpStatus.CONFLICT, 'IDEMPOTENCY_CONFLICT');
+      case 'OUTCOME_ALREADY_RECORDED':
+        return this.build(HttpStatus.CONFLICT, 'OUTCOME_ALREADY_RECORDED');
       default:
         return this.build(HttpStatus.INTERNAL_SERVER_ERROR, 'INTERNAL_ERROR');
     }

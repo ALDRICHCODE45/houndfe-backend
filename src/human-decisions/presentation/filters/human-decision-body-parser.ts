@@ -55,6 +55,42 @@ import { createRequire } from 'node:module';
 /** The path prefix this narrow parser pipeline owns. */
 const SCOPED_PATH = '/human-decisions';
 
+/**
+ * The bot terminal-ACK route is a SINGLE POST under the shared
+ * `chatbot-api/human-decisions` prefix. The scoped parser is mounted on that
+ * prefix and matched internally with a method+path check on `originalUrl`, so
+ * the sibling bot `POST /chatbot-api/human-decisions` intake and
+ * `GET /chatbot-api/human-decisions/:id` poll keep Nest's default parser
+ * behavior untouched. `originalUrl` is used instead of `url`/`path` because
+ * Express strips the mount prefix from `req.url` inside `app.use(path, ...)`.
+ *
+ * ROUTING-EQUIVALENCE (the gate MUST mirror the router, or a malformed body on
+ * an equivalent URL bypasses the sanitizer and reaches Nest's default parser):
+ * Express defaults — `case sensitive routing = false` and
+ * `strict routing = false`, neither changed by Nest or `main.ts` — make the ACK
+ * route reachable through case variants and a single trailing `/`. The pattern
+ * is therefore case-insensitive (`/i`) and allows exactly one optional trailing
+ * `/`. It still requires exactly ONE id segment and the exact
+ * `application-outcome` terminal, so sibling intake/poll paths, other verbs and
+ * nearby suffixes (`application-outcome-typo`) are never matched.
+ */
+const BOT_ACK_SCOPED_PREFIX = '/chatbot-api/human-decisions';
+const BOT_ACK_METHOD = 'POST';
+const BOT_ACK_PATH_PATTERN =
+  /^\/chatbot-api\/human-decisions\/[^/]+\/application-outcome\/?$/i;
+
+/** True only for `POST /chatbot-api/human-decisions/:id/application-outcome`. */
+function isBotApplicationOutcomeRequest(request: Request): boolean {
+  if (request.method !== BOT_ACK_METHOD) {
+    return false;
+  }
+
+  const originalUrl = request.originalUrl ?? request.url ?? '';
+  const pathname = originalUrl.split('?')[0];
+
+  return BOT_ACK_PATH_PATTERN.test(pathname);
+}
+
 const DEFAULT_PARSE_ERROR_STATUS = HttpStatus.BAD_REQUEST;
 
 /**
@@ -104,6 +140,24 @@ function resolveParseErrorStatus(error: unknown): number {
 }
 
 /**
+ * Write the fixed, value-free envelope for a parser failure. Nothing is
+ * derived from the error, so a raw body snippet, upstream message or nested
+ * payload can never leak through this transport handler.
+ */
+function sendFixedParseError(error: unknown, response: Response): void {
+  const statusCode = resolveParseErrorStatus(error);
+  const fixed =
+    FIXED_ERROR_BODIES[statusCode] ??
+    FIXED_ERROR_BODIES[DEFAULT_PARSE_ERROR_STATUS];
+
+  response.status(statusCode).json({
+    statusCode,
+    code: fixed.code,
+    message: fixed.message,
+  });
+}
+
+/**
  * Four-argument Express error handler placed right after the scoped parsers.
  * It only ever sees failures from those preceding parsers; router/guard and
  * filter errors happen further down the stack and never reach it.
@@ -119,16 +173,27 @@ function humanDecisionBodyParseErrorHandler(
     return;
   }
 
-  const statusCode = resolveParseErrorStatus(error);
-  const fixed =
-    FIXED_ERROR_BODIES[statusCode] ??
-    FIXED_ERROR_BODIES[DEFAULT_PARSE_ERROR_STATUS];
+  sendFixedParseError(error, response);
+}
 
-  response.status(statusCode).json({
-    statusCode,
-    code: fixed.code,
-    message: fixed.message,
-  });
+/**
+ * Four-argument Express error handler for the bot ACK parser. It is mounted on
+ * the shared bot prefix, so it re-checks the exact method+path before
+ * answering and otherwise forwards the error unchanged, keeping every sibling
+ * bot route on Nest's default behavior.
+ */
+function botApplicationOutcomeBodyParseErrorHandler(
+  error: unknown,
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): void {
+  if (!isBotApplicationOutcomeRequest(request) || response.headersSent) {
+    next(error);
+    return;
+  }
+
+  sendFixedParseError(error, response);
 }
 
 /**
@@ -150,4 +215,61 @@ export function installHumanDecisionBodyParser(app: INestApplication): void {
   app.use(SCOPED_PATH, scopedJsonParser);
   app.use(SCOPED_PATH, scopedUrlencodedParser);
   app.use(SCOPED_PATH, humanDecisionBodyParseErrorHandler);
+}
+
+/**
+ * Mount the sanitizing, route-scoped body parsers for the bot terminal-ACK
+ * route ONLY: `POST /chatbot-api/human-decisions/:id/application-outcome`.
+ *
+ * Why this is separate from `installHumanDecisionBodyParser`: the bot ACK body
+ * is validated by the exact pure parser `parseBotApplicationOutcomeRequest`,
+ * but Nest's default `json` parser (`strict: true`, registered during
+ * `init()`) would reject a JSON primitive or echo a raw body snippet on a
+ * malformed body BEFORE any controller-scoped filter can run. This helper
+ * mirrors the human-decision pipeline for exactly ONE method+path pair:
+ *
+ *   - `express.json({ strict: false })` + `express.urlencoded({ extended:
+ *     true })` accept the transport form and defer the exact shape to the pure
+ *     parser.
+ *   - a four-argument error handler, gated by the SAME method+path check,
+ *     answers a FIXED value-free 400/413 envelope for any parser failure.
+ *
+ * The wrappers only run the parsers when the request matches; every other
+ * route under the shared prefix (the bot POST intake, the GET poll) calls
+ * `next()` WITHOUT consuming the stream, so Nest's default parsers handle it
+ * exactly as before. The layers are mounted on the shared prefix (matched
+ * case-insensitively by Express's default routing, which Nest does not change)
+ * and gated internally, so their handle names never collide with Nest's
+ * `jsonParser`/`urlencodedParser` detection.
+ *
+ * Call this AFTER `enableCors` and BEFORE `app.init()` / `app.listen()`,
+ * mirroring `main.ts`, so a malformed-body short-circuit still carries the
+ * allowlisted CORS header.
+ */
+export function installBotApplicationOutcomeBodyParser(
+  app: INestApplication,
+): void {
+  const jsonParser = express.json({ strict: false });
+  const urlencodedParser = express.urlencoded({ extended: true });
+
+  const scopedJsonParser: RequestHandler = (request, response, next) => {
+    if (!isBotApplicationOutcomeRequest(request)) {
+      next();
+      return;
+    }
+
+    jsonParser(request, response, next);
+  };
+  const scopedUrlencodedParser: RequestHandler = (request, response, next) => {
+    if (!isBotApplicationOutcomeRequest(request)) {
+      next();
+      return;
+    }
+
+    urlencodedParser(request, response, next);
+  };
+
+  app.use(BOT_ACK_SCOPED_PREFIX, scopedJsonParser);
+  app.use(BOT_ACK_SCOPED_PREFIX, scopedUrlencodedParser);
+  app.use(BOT_ACK_SCOPED_PREFIX, botApplicationOutcomeBodyParseErrorHandler);
 }

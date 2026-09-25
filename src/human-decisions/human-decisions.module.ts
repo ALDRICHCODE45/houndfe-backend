@@ -23,19 +23,28 @@
  * `BOT_RESTOCK_POLL_REPOSITORY` port to `PrismaBotRestockPollRepository`, so
  * `GET /chatbot-api/human-decisions/:id` serves the bot's tenant-scoped
  * CURRENT-state poll alongside the untouched bot `POST` intake.
+ *
+ * HD-05c2a registers `BotApplicationOutcomeController` and binds the
+ * `BOT_APPLICATION_OUTCOME_REPOSITORY` port to
+ * `PrismaBotApplicationOutcomeRepository`, so
+ * `POST /chatbot-api/human-decisions/:id/application-outcome` serves the
+ * tenant-scoped terminal ACK without disturbing the intake/poll bindings.
  */
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
+import { BOT_APPLICATION_OUTCOME_REPOSITORY } from './domain/bot-application-outcome.repository';
 import { BOT_RESTOCK_POLL_REPOSITORY } from './domain/bot-restock-poll.repository';
 import { HUMAN_DECISION_REVIEW_READ_REPOSITORY } from './domain/human-decision-review-read.repository';
 import { HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY } from './domain/human-decision-review-resolve.repository';
 import { RESTOCK_INTAKE_REPOSITORY } from './domain/restock-intake.repository';
+import { PrismaBotApplicationOutcomeRepository } from './infrastructure/prisma-bot-application-outcome.repository';
 import { PrismaBotRestockPollRepository } from './infrastructure/prisma-bot-restock-poll.repository';
 import { PrismaHumanDecisionReviewReadRepository } from './infrastructure/prisma-human-decision-review-read.repository';
 import { PrismaHumanDecisionReviewResolveRepository } from './infrastructure/prisma-human-decision-review-resolve.repository';
 import { PrismaRestockIntakeRepository } from './infrastructure/prisma-restock-intake.repository';
+import { BotApplicationOutcomeController } from './presentation/bot-application-outcome.controller';
 import { BotRestockIntakeController } from './presentation/bot-restock-intake.controller';
 import { BotRestockPollController } from './presentation/bot-restock-poll.controller';
 import { HumanDecisionHttpFilter } from './presentation/filters/human-decision-http.filter';
@@ -47,6 +56,7 @@ import { HumanDecisionReviewController } from './presentation/human-decision-rev
   controllers: [
     BotRestockIntakeController,
     BotRestockPollController,
+    BotApplicationOutcomeController,
     HumanDecisionReviewController,
   ],
   providers: [
@@ -59,6 +69,10 @@ import { HumanDecisionReviewController } from './presentation/human-decision-rev
     {
       provide: BOT_RESTOCK_POLL_REPOSITORY,
       useClass: PrismaBotRestockPollRepository,
+    },
+    {
+      provide: BOT_APPLICATION_OUTCOME_REPOSITORY,
+      useClass: PrismaBotApplicationOutcomeRepository,
     },
     {
       provide: HUMAN_DECISION_REVIEW_READ_REPOSITORY,

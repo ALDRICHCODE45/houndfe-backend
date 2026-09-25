@@ -23,6 +23,7 @@ import {
   InsufficientPermissionsError,
   InvalidArgumentError,
 } from '../../../shared/domain/domain-error';
+import { BotApplicationOutcomeError } from '../../domain/bot-application-outcome.repository';
 import { HumanDecisionReviewResolveError } from '../../domain/human-decision-review-resolve.repository';
 import { RestockIntakeError } from '../../domain/restock-intake.repository';
 import {
@@ -302,6 +303,65 @@ describe('HumanDecisionHttpFilter', () => {
       'Request conflict',
     );
     expect(JSON.stringify(response.body)).not.toContain('duplicate key row');
+  });
+
+  describe('HD-05c2a bot terminal ACK mappings', () => {
+    it.each([
+      ['NOT_FOUND', HttpStatus.NOT_FOUND, 'NOT_FOUND', 'Not found'],
+      [
+        'VERSION_CONFLICT',
+        HttpStatus.CONFLICT,
+        'VERSION_CONFLICT',
+        'Human decision was modified by another reviewer',
+      ],
+      [
+        'IDEMPOTENCY_CONFLICT',
+        HttpStatus.CONFLICT,
+        'IDEMPOTENCY_CONFLICT',
+        'Request conflicts with a previous submission',
+      ],
+      [
+        'OUTCOME_ALREADY_RECORDED',
+        HttpStatus.CONFLICT,
+        'OUTCOME_ALREADY_RECORDED',
+        'A terminal application outcome is already recorded',
+      ],
+    ] as const)(
+      'maps BotApplicationOutcomeError %s to %s %s without echoing the message',
+      (errorCode, statusCode, code, message) => {
+        const sentinel = `SENTINEL-${errorCode}-7c41e9d2-attempt-credential`;
+        const response = run(
+          new BotApplicationOutcomeError(
+            errorCode,
+            `leaked ${sentinel} and provider message id 3f1c1b7a`,
+          ),
+        );
+
+        expectEnvelope(response, statusCode, code, message);
+        expect(JSON.stringify(response.body)).not.toContain(sentinel);
+        expect(JSON.stringify(response.body)).not.toContain('3f1c1b7a');
+        expect(response.body).not.toHaveProperty('timestamp');
+        expect(response.body).not.toHaveProperty('error');
+      },
+    );
+
+    it('fails closed to a value-free 500 for an unexpected ACK code at runtime', () => {
+      const sentinel = 'SENTINEL-unknown-ack-code-5d1a8b';
+      const response = run(
+        new BotApplicationOutcomeError(
+          'SOMETHING_NEW' as 'NOT_FOUND',
+          `leaked ${sentinel}`,
+        ),
+      );
+
+      expectEnvelope(
+        response,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+        'INTERNAL_ERROR',
+        'Internal server error',
+      );
+      expect(JSON.stringify(response.body)).not.toContain(sentinel);
+    });
   });
 
   describe('HD-04d0 human review GET/resolve mappings', () => {
