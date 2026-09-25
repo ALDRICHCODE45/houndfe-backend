@@ -91,12 +91,15 @@ import { createListingValidationExceptionFactory } from '../../shared/listing/li
 import { DatabaseModule } from '../../shared/prisma/prisma.module';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { HUMAN_DECISION_REVIEW_READ_REPOSITORY } from '../domain/human-decision-review-read.repository';
+import { HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY } from '../domain/human-decision-review-resolve.repository';
 import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
 import { HumanDecisionsModule } from '../human-decisions.module';
 import { PrismaHumanDecisionReviewReadRepository } from '../infrastructure/prisma-human-decision-review-read.repository';
+import { PrismaHumanDecisionReviewResolveRepository } from '../infrastructure/prisma-human-decision-review-resolve.repository';
+import { installHumanDecisionBodyParser } from './filters/human-decision-body-parser';
 import { HumanDecisionHttpFilter } from './filters/human-decision-http.filter';
 import { HumanDecisionActiveReviewerGuard } from './guards/human-decision-active-reviewer.guard';
 import { HumanDecisionReviewController } from './human-decision-review.controller';
@@ -698,6 +701,14 @@ describeIfDb(
             provide: HUMAN_DECISION_REVIEW_READ_REPOSITORY,
             useClass: PrismaHumanDecisionReviewReadRepository,
           },
+          {
+            // HD-04d2a — REAL resolve adapter so the controller's resolve
+            // dependency resolves inside this selected graph. This spec still
+            // proves READ routes only; HD-04d2b owns the real HTTP resolve/CAS
+            // proof.
+            provide: HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
+            useClass: PrismaHumanDecisionReviewResolveRepository,
+          },
         ],
       }).compile();
 
@@ -717,6 +728,9 @@ describeIfDb(
         new DomainExceptionFilter(),
         new PrismaExceptionFilter(),
       );
+      // Mirror `main.ts`: sanitize malformed/primitive `/human-decisions`
+      // bodies BEFORE Nest's default parser mounts them.
+      installHumanDecisionBodyParser(app);
 
       await app.init();
     });
@@ -774,7 +788,7 @@ describeIfDb(
     });
 
     describe('module wiring (metadata only, no AppModule boot)', () => {
-      it('imports AuthModule and binds the read port to the Prisma adapter', () => {
+      it('imports AuthModule and binds the read AND resolve ports to the Prisma adapters', () => {
         const imports = (Reflect.getMetadata(
           MODULE_METADATA.IMPORTS,
           HumanDecisionsModule,
@@ -796,6 +810,14 @@ describeIfDb(
             provider?.provide === HUMAN_DECISION_REVIEW_READ_REPOSITORY,
         );
         expect(binding?.useClass).toBe(PrismaHumanDecisionReviewReadRepository);
+
+        const resolveBinding = providers.find(
+          (provider) =>
+            provider?.provide === HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
+        );
+        expect(resolveBinding?.useClass).toBe(
+          PrismaHumanDecisionReviewResolveRepository,
+        );
       });
     });
 
@@ -1415,23 +1437,14 @@ describeIfDb(
       });
     });
 
-    describe('no POST resolve route', () => {
-      it('exposes no resolve route on the human-decisions controller', async () => {
+    describe('read-only GET leaves committed state unchanged', () => {
+      it('does not mutate the decision on the list or detail read', async () => {
         const decisionId = await seedDecision(
           pendingDecisionData(world.tenantA),
         );
 
-        await http()
-          .post(LIST_URL)
-          .set('Authorization', `Bearer ${world.tokens.managerA}`)
-          .send({ action: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 3 })
-          .expect(404);
-
-        await http()
-          .post(`${LIST_URL}/${decisionId}/resolve`)
-          .set('Authorization', `Bearer ${world.tokens.managerA}`)
-          .send({ action: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 3 })
-          .expect(404);
+        await getList('?status=PENDING', world.tokens.managerA).expect(200);
+        await getDetail(decisionId, world.tokens.managerA).expect(200);
 
         await expect(
           integrationPrisma().humanDecision.findUnique({

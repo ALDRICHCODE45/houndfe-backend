@@ -33,6 +33,25 @@
  *     port derives `tenantId` from CLS and pins `source`/`type`; the controller
  *     forwards ONLY `{ page, limit, search }`.
  *
+ * HD-04d2a adds the guarded WRITE route on the same controller:
+ *
+ *   POST /human-decisions/:id/resolve -> one-resolved|replayed decision
+ *
+ *   - Class guards (same exact order) + scoped filter are reused; the method
+ *     pins `@RequirePermissions(['update', 'HumanDecision'])` and
+ *     `@HttpCode(200)` so BOTH a first resolve and an idempotent replay answer
+ *     `200` with the same immutable projection.
+ *   - The body is an UNTRUSTED `unknown` run through the EXACT pure
+ *     `parseResolveHumanDecisionRequest` BEFORE the port; the parsed value is
+ *     never echoed.
+ *   - `actorUserId` and `actorIsSuperAdmin` come EXCLUSIVELY from the verified
+ *     `request.user` (`JwtAuthGuard`); no body/query/param value can supply
+ *     them. The command carries no `tenantId` (the adapter resolves it from CLS).
+ *   - The response is ONLY `toHumanDecisionReviewResponse(result.decision,
+ *     capability)`: the adapter `status` (`resolved`/`replayed`) and every
+ *     bot-only/authority/PII column are never surfaced, and a replay performs
+ *     NO second write (the controller performs no write of its own).
+ *
  * RESPONSE SHAPE:
  *   - List returns EXACTLY
  *     `{ data: Pending[], pagination: { pageIndex, pageSize, totalCount,
@@ -49,19 +68,25 @@
  * echoed value). A missing/cross-tenant id is a sanitized 404 that does not
  * distinguish the two cases.
  *
- * SCOPE: NO resolve route, NO bot poll/ACK. HD-04d2 owns the dedicated
- * PostgreSQL/real-ALS proof; this route's tests use a mocked read port.
+ * SCOPE: guarded reviewer READ routes PLUS the HD-04d2a guarded resolve route;
+ * NO bot poll/ACK. The resolve route's HTTP proof here uses a mocked resolve
+ * port; HD-04d2b owns the dedicated PostgreSQL/real-ALS resolve/CAS proof.
  */
 import {
+  Body,
   Controller,
   ForbiddenException,
   Get,
+  HttpCode,
+  HttpStatus,
   Inject,
   NotFoundException,
   Param,
   ParseUUIDPipe,
+  Post,
   Query,
   Req,
+  UnauthorizedException,
   UseFilters,
   UseGuards,
 } from '@nestjs/common';
@@ -76,6 +101,16 @@ import {
   HUMAN_DECISION_REVIEW_READ_REPOSITORY,
   type IHumanDecisionReviewReadRepository,
 } from '../domain/human-decision-review-read.repository';
+import {
+  HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
+  type IHumanDecisionReviewResolveRepository,
+  type ResolveHumanDecisionCommand,
+} from '../domain/human-decision-review-resolve.repository';
+import {
+  parseResolveHumanDecisionRequest,
+  RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
+  RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE,
+} from './dto/resolve-human-decision.request';
 import {
   toHumanDecisionReviewResponse,
   type HumanDecisionReviewPendingResponse,
@@ -127,6 +162,8 @@ export class HumanDecisionReviewController {
   constructor(
     @Inject(HUMAN_DECISION_REVIEW_READ_REPOSITORY)
     private readonly readRepository: IHumanDecisionReviewReadRepository,
+    @Inject(HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY)
+    private readonly resolveRepository: IHumanDecisionReviewResolveRepository,
   ) {}
 
   /**
@@ -190,6 +227,71 @@ export class HumanDecisionReviewController {
     }
 
     return toHumanDecisionReviewResponse(record, canResolve);
+  }
+
+  /**
+   * `POST /human-decisions/:id/resolve` — resolve one tenant-scoped decision.
+   *
+   * The same class guards already proved the bearer JWT, wrote the CLS tenant,
+   * admitted the active account and enforced `update:HumanDecision`. This
+   * handler then:
+   *   1. Fails closed with a sanitized 401 when no verified principal is
+   *      attached (a bypassed `JwtAuthGuard`).
+   *   2. Derives the capability from the guard-attached ability (`canResolve`),
+   *      which also re-checks the tenant context before any write.
+   *   3. Parses the UNTRUSTED body with the exact pure parser; a malformed or
+   *      authority-bearing body is a sanitized 400 BEFORE the port.
+   *   4. Builds the EXACT discriminated command with `actorUserId` /
+   *      `actorIsSuperAdmin` taken ONLY from `request.user` (never the body) and
+   *      no `tenantId` (the adapter resolves it from CLS). The negative variant
+   *      OMITS `restockDays` entirely.
+   *   5. Returns ONLY the pure reviewer projection: the adapter
+   *      `resolved`/`replayed` status and every bot/authority/PII column stay
+   *      server-side, so a replay is byte-identical and triggers no new write.
+   */
+  @Post(':id/resolve')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'HumanDecision'])
+  async resolve(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() raw: unknown,
+    @Req() request: RequestWithAbility,
+  ): Promise<HumanDecisionReviewResponse> {
+    const user = request.user;
+    if (
+      !user ||
+      typeof user.userId !== 'string' ||
+      user.userId.trim().length === 0
+    ) {
+      throw new UnauthorizedException('Authenticated user required');
+    }
+
+    const canResolve = this.canResolve(request);
+    const parsed = parseResolveHumanDecisionRequest(raw);
+
+    const command: ResolveHumanDecisionCommand =
+      parsed.action === RESOLVE_PROVIDE_RESTOCK_ESTIMATE
+        ? {
+            decisionId: id,
+            expectedVersion: parsed.expectedVersion,
+            resolutionRequestId: parsed.resolutionRequestId,
+            action: RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
+            restockDays: parsed.restockDays,
+            actorUserId: user.userId,
+            actorIsSuperAdmin: user.isSuperAdmin === true,
+          }
+        : {
+            decisionId: id,
+            expectedVersion: parsed.expectedVersion,
+            resolutionRequestId: parsed.resolutionRequestId,
+            action: RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE,
+            actorUserId: user.userId,
+            actorIsSuperAdmin: user.isSuperAdmin === true,
+          };
+
+    const result = await this.resolveRepository.resolve(command);
+
+    return toHumanDecisionReviewResponse(result.decision, canResolve);
   }
 
   /**

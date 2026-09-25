@@ -12,20 +12,22 @@
  *     controller declares. `TenantContextGuard` is instantiated by Nest and
  *     injects the globally-provided `ClsService`.
  *
- * Binds the `RESTOCK_INTAKE_REPOSITORY` port to the Prisma intake adapter and
- * the `HUMAN_DECISION_REVIEW_READ_REPOSITORY` port to the Prisma read adapter,
- * and registers the scoped filter so `@UseFilters(HumanDecisionHttpFilter)` can
- * be resolved from this module's injector. The HD-04c2 resolve port/adapter is
- * intentionally NOT bound yet: HD-04d1 exposes read routes only and there is no
- * POST resolve route to consume it.
+ * Binds the `RESTOCK_INTAKE_REPOSITORY` port to the Prisma intake adapter, the
+ * `HUMAN_DECISION_REVIEW_READ_REPOSITORY` port to the Prisma read adapter and
+ * (HD-04d2a) the `HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY` port to the Prisma
+ * resolve adapter consumed by the guarded `POST /human-decisions/:id/resolve`
+ * route. It registers the scoped filter so `@UseFilters(HumanDecisionHttpFilter)`
+ * can be resolved from this module's injector.
  */
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { HUMAN_DECISION_REVIEW_READ_REPOSITORY } from './domain/human-decision-review-read.repository';
+import { HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY } from './domain/human-decision-review-resolve.repository';
 import { RESTOCK_INTAKE_REPOSITORY } from './domain/restock-intake.repository';
 import { PrismaHumanDecisionReviewReadRepository } from './infrastructure/prisma-human-decision-review-read.repository';
+import { PrismaHumanDecisionReviewResolveRepository } from './infrastructure/prisma-human-decision-review-resolve.repository';
 import { PrismaRestockIntakeRepository } from './infrastructure/prisma-restock-intake.repository';
 import { BotRestockIntakeController } from './presentation/bot-restock-intake.controller';
 import { HumanDecisionHttpFilter } from './presentation/filters/human-decision-http.filter';
@@ -45,6 +47,10 @@ import { HumanDecisionReviewController } from './presentation/human-decision-rev
     {
       provide: HUMAN_DECISION_REVIEW_READ_REPOSITORY,
       useClass: PrismaHumanDecisionReviewReadRepository,
+    },
+    {
+      provide: HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
+      useClass: PrismaHumanDecisionReviewResolveRepository,
     },
   ],
 })

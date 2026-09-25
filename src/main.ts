@@ -12,6 +12,7 @@ import { AppModule } from './app.module';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
 import { createListingValidationExceptionFactory } from './shared/listing/listing-validation-exception.factory';
+import { installHumanDecisionBodyParser } from './human-decisions/presentation/filters/human-decision-body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -50,6 +51,14 @@ async function bootstrap() {
     );
     app.enableCors();
   }
+
+  // HD-04d2a — sanitize malformed/primitive bodies on the `/human-decisions`
+  // routes BEFORE Nest's default parser mounts them. `enableCors` registers the
+  // CORS middleware synchronously in BOTH branches above, so mounting the
+  // route-scoped parser HERE — after the whole CORS branch and still before
+  // `app.listen` -> Nest init — lets a malformed-body short-circuit carry the
+  // `Access-Control-Allow-Origin` header the allowlisted browser FE requires.
+  installHumanDecisionBodyParser(app);
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);

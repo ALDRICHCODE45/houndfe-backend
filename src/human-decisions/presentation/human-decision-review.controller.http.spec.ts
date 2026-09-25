@@ -25,12 +25,16 @@
 import {
   ForbiddenException,
   INestApplication,
+  RequestMethod,
   ValidationPipe,
 } from '@nestjs/common';
 import {
   EXCEPTION_FILTERS_METADATA,
   GUARDS_METADATA,
+  HTTP_CODE_METADATA,
+  METHOD_METADATA,
   MODULE_METADATA,
+  PATH_METADATA,
 } from '@nestjs/common/constants';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -70,8 +74,10 @@ import { HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY } from '../domain/human-decisi
 import { RESTOCK_INTAKE_REPOSITORY } from '../domain/restock-intake.repository';
 import { HumanDecisionsModule } from '../human-decisions.module';
 import { PrismaHumanDecisionReviewReadRepository } from '../infrastructure/prisma-human-decision-review-read.repository';
+import { PrismaHumanDecisionReviewResolveRepository } from '../infrastructure/prisma-human-decision-review-resolve.repository';
 import { PrismaRestockIntakeRepository } from '../infrastructure/prisma-restock-intake.repository';
 import { BotRestockIntakeController } from './bot-restock-intake.controller';
+import { installHumanDecisionBodyParser } from './filters/human-decision-body-parser';
 import { HumanDecisionHttpFilter } from './filters/human-decision-http.filter';
 import { HumanDecisionActiveReviewerGuard } from './guards/human-decision-active-reviewer.guard';
 import { HumanDecisionReviewController } from './human-decision-review.controller';
@@ -405,6 +411,10 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
           provide: HUMAN_DECISION_REVIEW_READ_REPOSITORY,
           useValue: { listPending, findById },
         },
+        {
+          provide: HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
+          useValue: { resolve: jest.fn() },
+        },
       ],
     }).compile();
 
@@ -421,6 +431,9 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
       new DomainExceptionFilter(),
       new PrismaExceptionFilter(),
     );
+    // Mirror `main.ts`: sanitize malformed/primitive `/human-decisions` bodies
+    // BEFORE Nest's default parser mounts them.
+    installHumanDecisionBodyParser(app);
     await app.init();
 
     // Only boundary mocked: the read port. Its tenant resolution mirrors the
@@ -481,7 +494,7 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
       ]);
     });
 
-    it('registers both controllers, imports AuthModule, binds the read port and does NOT bind the resolve port', () => {
+    it('registers both controllers, imports AuthModule and binds the read AND resolve ports to their Prisma adapters', () => {
       const controllers = (Reflect.getMetadata(
         MODULE_METADATA.CONTROLLERS,
         HumanDecisionsModule,
@@ -522,12 +535,32 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
         PrismaHumanDecisionReviewReadRepository,
       );
 
-      // HD-04d1 exposes read routes only: no resolve port binding yet.
+      // HD-04d2a binds the resolve port to its real Prisma adapter.
       const resolveBinding = providers.find(
         (provider) =>
           provider?.provide === HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
       );
-      expect(resolveBinding).toBeUndefined();
+      expect(resolveBinding?.useClass).toBe(
+        PrismaHumanDecisionReviewResolveRepository,
+      );
+    });
+
+    it('requires update:HumanDecision and POST 200 on the resolve handler', () => {
+      const resolveHandler = Object.getOwnPropertyDescriptor(
+        HumanDecisionReviewController.prototype,
+        'resolve',
+      )?.value as () => void;
+
+      expect(Reflect.getMetadata(PERMISSIONS_KEY, resolveHandler)).toEqual([
+        ['update', 'HumanDecision'],
+      ]);
+      expect(Reflect.getMetadata(HTTP_CODE_METADATA, resolveHandler)).toBe(200);
+      expect(Reflect.getMetadata(METHOD_METADATA, resolveHandler)).toBe(
+        RequestMethod.POST,
+      );
+      expect(Reflect.getMetadata(PATH_METADATA, resolveHandler)).toBe(
+        ':id/resolve',
+      );
     });
   });
 
@@ -935,6 +968,43 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
       expect(serialized).not.toContain('houndfe-chatbot');
       expect(serialized).not.toContain('canonicalRequestHash');
       expect(serialized).not.toContain('tenant-1');
+    });
+  });
+
+  describe('malformed body parser is route-scoped and sanitized', () => {
+    it('keeps the Nest default global body parsers mounted alongside the scoped ones', () => {
+      // Guards the regression this helper could introduce: an unrenamed
+      // route-scoped parser would make Nest's `isMiddlewareApplied` skip the
+      // global defaults, silently disabling body parsing for every other
+      // route. Both global parsers must still be present.
+      const instance = app.getHttpAdapter().getInstance() as {
+        router: { stack: Array<{ handle?: { name?: string } }> };
+      };
+      const parserNames = instance.router.stack
+        .map((layer) => layer.handle?.name)
+        .filter((name) => name === 'jsonParser' || name === 'urlencodedParser');
+
+      expect(parserNames).toEqual(['jsonParser', 'urlencodedParser']);
+    });
+
+    it('answers a malformed JSON body on the GET list route with the fixed 400 envelope before the read port', async () => {
+      const res = await http()
+        .get(LIST_URL)
+        .set('Authorization', `Bearer ${TOKENS.reader}`)
+        .set('Content-Type', 'application/json')
+        .send('{"status":"SENTINEL"')
+        .expect(400);
+      const body = res.body as ErrorEnvelope;
+
+      expect(body).toEqual({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid request',
+      });
+      expect(Object.keys(body).sort()).toEqual(EXPECTED_ERROR_KEYS);
+      expect(JSON.stringify(body)).not.toContain('SENTINEL');
+      expect(listPending).not.toHaveBeenCalled();
+      expect(findById).not.toHaveBeenCalled();
     });
   });
 
