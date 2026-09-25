@@ -21,6 +21,13 @@
  * Mapping:
  *   RestockIntakeError NOT_FOUND                              -> 404 NOT_FOUND
  *   RestockIntakeError IDEMPOTENCY_CONFLICT/VERSION_CONFLICT  -> 409 (same code)
+ *   HumanDecisionReviewResolveError NOT_FOUND                 -> 404 NOT_FOUND
+ *   HumanDecisionReviewResolveError UNAUTHORIZED              -> 401 UNAUTHORIZED
+ *   HumanDecisionReviewResolveError FORBIDDEN                 -> 403 FORBIDDEN
+ *   HumanDecisionReviewResolveError VERSION_CONFLICT          -> 409 VERSION_CONFLICT
+ *   HumanDecisionReviewResolveError IDEMPOTENCY_CONFLICT      -> 409 IDEMPOTENCY_CONFLICT
+ *   HumanDecisionReviewResolveError ALREADY_RESOLVED          -> 409 ALREADY_RESOLVED
+ *   InsufficientPermissionsError (PermissionsGuard)           -> 403 FORBIDDEN
  *   InvalidArgumentError / BadRequestException / ValidationPipe -> 400 VALIDATION_ERROR
  *   ForbiddenException                                        -> 403 FORBIDDEN
  *   UnauthorizedException                                     -> 401 UNAUTHORIZED
@@ -42,7 +49,11 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Response } from 'express';
-import { InvalidArgumentError } from '../../../shared/domain/domain-error';
+import {
+  InvalidArgumentError,
+  InsufficientPermissionsError,
+} from '../../../shared/domain/domain-error';
+import { HumanDecisionReviewResolveError } from '../../domain/human-decision-review-resolve.repository';
 import { RestockIntakeError } from '../../domain/restock-intake.repository';
 
 /** Sanitized machine codes the human-decision envelope can emit. */
@@ -53,6 +64,7 @@ export type HumanDecisionErrorCode =
   | 'NOT_FOUND'
   | 'IDEMPOTENCY_CONFLICT'
   | 'VERSION_CONFLICT'
+  | 'ALREADY_RESOLVED'
   | 'CONFLICT'
   | 'RATE_LIMITED'
   | 'REQUEST_ERROR'
@@ -76,6 +88,7 @@ const FIXED_MESSAGES: Record<HumanDecisionErrorCode, string> = {
   NOT_FOUND: 'Not found',
   IDEMPOTENCY_CONFLICT: 'Request conflicts with a previous submission',
   VERSION_CONFLICT: 'Human decision was modified by another reviewer',
+  ALREADY_RESOLVED: 'Human decision was already resolved',
   CONFLICT: 'Request conflict',
   RATE_LIMITED: 'Too many requests',
   REQUEST_ERROR: 'Request failed',
@@ -98,6 +111,14 @@ export class HumanDecisionHttpFilter implements ExceptionFilter {
   private toErrorBody(exception: unknown): HumanDecisionErrorBody {
     if (exception instanceof RestockIntakeError) {
       return this.fromIntakeError(exception);
+    }
+
+    if (exception instanceof HumanDecisionReviewResolveError) {
+      return this.fromResolveError(exception);
+    }
+
+    if (exception instanceof InsufficientPermissionsError) {
+      return this.build(HttpStatus.FORBIDDEN, 'FORBIDDEN');
     }
 
     if (
@@ -130,6 +151,32 @@ export class HumanDecisionHttpFilter implements ExceptionFilter {
         return this.build(HttpStatus.CONFLICT, 'IDEMPOTENCY_CONFLICT');
       case 'VERSION_CONFLICT':
         return this.build(HttpStatus.CONFLICT, 'VERSION_CONFLICT');
+      default:
+        return this.build(HttpStatus.INTERNAL_SERVER_ERROR, 'INTERNAL_ERROR');
+    }
+  }
+
+  /**
+   * Maps the HD-04c2 resolve port failure codes to the FE-approved machine
+   * codes. The `message` is never read, so no decision/request id or actor
+   * value can leak; each code collapses to a fixed, value-free body.
+   */
+  private fromResolveError(
+    error: HumanDecisionReviewResolveError,
+  ): HumanDecisionErrorBody {
+    switch (error.code) {
+      case 'NOT_FOUND':
+        return this.build(HttpStatus.NOT_FOUND, 'NOT_FOUND');
+      case 'UNAUTHORIZED':
+        return this.build(HttpStatus.UNAUTHORIZED, 'UNAUTHORIZED');
+      case 'FORBIDDEN':
+        return this.build(HttpStatus.FORBIDDEN, 'FORBIDDEN');
+      case 'VERSION_CONFLICT':
+        return this.build(HttpStatus.CONFLICT, 'VERSION_CONFLICT');
+      case 'IDEMPOTENCY_CONFLICT':
+        return this.build(HttpStatus.CONFLICT, 'IDEMPOTENCY_CONFLICT');
+      case 'ALREADY_RESOLVED':
+        return this.build(HttpStatus.CONFLICT, 'ALREADY_RESOLVED');
       default:
         return this.build(HttpStatus.INTERNAL_SERVER_ERROR, 'INTERNAL_ERROR');
     }

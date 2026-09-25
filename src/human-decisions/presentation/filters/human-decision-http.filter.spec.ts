@@ -19,7 +19,11 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { InvalidArgumentError } from '../../../shared/domain/domain-error';
+import {
+  InsufficientPermissionsError,
+  InvalidArgumentError,
+} from '../../../shared/domain/domain-error';
+import { HumanDecisionReviewResolveError } from '../../domain/human-decision-review-resolve.repository';
 import { RestockIntakeError } from '../../domain/restock-intake.repository';
 import {
   HumanDecisionHttpFilter,
@@ -298,5 +302,106 @@ describe('HumanDecisionHttpFilter', () => {
       'Request conflict',
     );
     expect(JSON.stringify(response.body)).not.toContain('duplicate key row');
+  });
+
+  describe('HD-04d0 human review GET/resolve mappings', () => {
+    it.each([
+      ['NOT_FOUND', HttpStatus.NOT_FOUND, 'NOT_FOUND', 'Not found'],
+      ['UNAUTHORIZED', HttpStatus.UNAUTHORIZED, 'UNAUTHORIZED', 'Unauthorized'],
+      ['FORBIDDEN', HttpStatus.FORBIDDEN, 'FORBIDDEN', 'Forbidden'],
+      [
+        'VERSION_CONFLICT',
+        HttpStatus.CONFLICT,
+        'VERSION_CONFLICT',
+        'Human decision was modified by another reviewer',
+      ],
+      [
+        'IDEMPOTENCY_CONFLICT',
+        HttpStatus.CONFLICT,
+        'IDEMPOTENCY_CONFLICT',
+        'Request conflicts with a previous submission',
+      ],
+      [
+        'ALREADY_RESOLVED',
+        HttpStatus.CONFLICT,
+        'ALREADY_RESOLVED',
+        'Human decision was already resolved',
+      ],
+    ] as const)(
+      'maps HumanDecisionReviewResolveError %s to %s %s without echoing the message',
+      (errorCode, statusCode, code, message) => {
+        const sentinel = `SENTINEL-${errorCode}-7c41e9d2-uuid-credential`;
+        const response = run(
+          new HumanDecisionReviewResolveError(
+            errorCode,
+            `leaked ${sentinel} and reviewer PII jane.doe@example.com`,
+          ),
+        );
+
+        expectEnvelope(response, statusCode, code, message);
+        expect(JSON.stringify(response.body)).not.toContain(sentinel);
+        expect(JSON.stringify(response.body)).not.toContain(
+          'jane.doe@example.com',
+        );
+        expect(response.body).not.toHaveProperty('timestamp');
+        expect(response.body).not.toHaveProperty('error');
+      },
+    );
+
+    it('fails closed to a value-free 500 for an unexpected resolve code at runtime', () => {
+      const sentinel = 'SENTINEL-unknown-code-5d1a8b';
+      const response = run(
+        new HumanDecisionReviewResolveError(
+          'SOMETHING_NEW' as 'NOT_FOUND',
+          `leaked ${sentinel}`,
+        ),
+      );
+
+      expectEnvelope(
+        response,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+        'INTERNAL_ERROR',
+        'Internal server error',
+      );
+      expect(JSON.stringify(response.body)).not.toContain(sentinel);
+    });
+
+    it('maps the real PermissionsGuard InsufficientPermissionsError to 403 FORBIDDEN', () => {
+      const response = run(new InsufficientPermissionsError());
+
+      expectEnvelope(response, HttpStatus.FORBIDDEN, 'FORBIDDEN', 'Forbidden');
+      expect(JSON.stringify(response.body)).not.toContain(
+        'Insufficient permissions',
+      );
+      expect(response.body).not.toHaveProperty('timestamp');
+      expect(response.body).not.toHaveProperty('error');
+    });
+
+    it('maps the global listing factory raw BadRequestException ValidationErrors to a value-free 400', () => {
+      const valueSentinel = 'SENTINEL-listing-value-3b8d1f';
+      const targetSentinel = 'SENTINEL-listing-target-9a4c7e';
+      const response = run(
+        new BadRequestException([
+          {
+            property: 'status',
+            value: valueSentinel,
+            target: { [targetSentinel]: true },
+            constraints: { isIn: 'status must be PENDING' },
+          },
+        ]),
+      );
+
+      expectEnvelope(
+        response,
+        HttpStatus.BAD_REQUEST,
+        'VALIDATION_ERROR',
+        'Invalid request',
+      );
+      expect(JSON.stringify(response.body)).not.toContain(valueSentinel);
+      expect(JSON.stringify(response.body)).not.toContain(targetSentinel);
+      expect(JSON.stringify(response.body)).not.toContain('must be PENDING');
+      expect(response.body).not.toHaveProperty('timestamp');
+      expect(response.body).not.toHaveProperty('error');
+    });
   });
 });
