@@ -65,9 +65,11 @@ import {
 
 /**
  * Exact SELECT allowlist of the reviewer read model. Excludes every authority,
- * credential, provider/outcome and customer column by construction.
+ * credential, provider/outcome and customer column by construction. Exported
+ * so the HD-04c2 resolve adapter reuses the SAME projection for its committed
+ * read and cannot drift back toward returning a full Prisma row.
  */
-const REVIEW_RECORD_SELECT = {
+export const REVIEW_RECORD_SELECT = {
   id: true,
   type: true,
   status: true,
