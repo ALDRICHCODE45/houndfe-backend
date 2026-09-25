@@ -129,3 +129,21 @@ describe('TENANT_SCOPED_MODELS — promotion-capacity-alerts registration (pca-3
     expect(occurrences).toEqual([...REQUIRED]);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — human-decisions-restock-v1 registration (HD-01)', () => {
+  const REQUIRED = ['HumanDecision'] as const;
+
+  it.each(REQUIRED)(
+    'registers %s so tenant-scoped decision reads inject where.tenantId',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+
+  it('contains HumanDecision exactly once', () => {
+    const occurrences = [...TENANT_SCOPED_MODELS].filter(
+      (model) => model === 'HumanDecision',
+    );
+    expect(occurrences).toEqual([...REQUIRED]);
+  });
+});

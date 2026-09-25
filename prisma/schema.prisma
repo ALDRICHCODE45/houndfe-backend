@@ -449,6 +449,12 @@ model Tenant {
   tenantCatalogPriceLists  TenantCatalogPriceList[]
   productCatalogPriceLists ProductCatalogPriceList[]
 
+  // human-decisions-restock-v1 / HD-01 — tenant-scoped RESTOCK decision rows.
+  // The runtime gate is the `HumanDecision` entry in
+  // src/shared/tenant/tenant-scoped-models.constant.ts; this back-relation only
+  // keeps Prisma's relation graph complete.
+  humanDecisions           HumanDecision[]
+
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
 }
@@ -1258,6 +1264,10 @@ model User {
   // the DeliveryRoute.driverUserId FK uses onDelete: Restrict (design ADR-1)
   // so a route cannot outlive its driver.
   deliveryRoutes         DeliveryRoute[]              @relation("DeliveryRouteDriver")
+  // human-decisions-restock-v1 / HD-01 — decisions this user resolved as the
+  // audited reviewer. onDelete: SetNull matches the other optional actor
+  // relations (e.g. `SaleRefundSettlement.settledBy`).
+  humanDecisionResolutions HumanDecision[]           @relation("HumanDecisionResolver")
 
   @@map("users")
 }
@@ -2264,4 +2274,149 @@ model ProductCatalogPriceList {
   @@unique([tenantId, productId, globalPriceListId])
   @@index([tenantId])
   @@map("product_catalog_price_lists")
+}
+
+// ============================================================================
+// HUMAN DECISIONS — RESTOCK human-decision inbox (human-decisions-restock-v1)
+// ============================================================================
+// Backend-owned, tenant-scoped `PENDING|RESOLVED` decision for a bot RESTOCK
+// ETA request. Approved design (read-only to this repo):
+// houndfe-chatbot-human-decisions/docs/human-decisions-contract-v1.md.
+//
+// Ownership split: the backend owns the request, the reviewer, the typed
+// resolution, the optimistic `version` and the audit. The bot owns its local
+// intent, application ledger and outbound attempt; the frontend only displays
+// commands. A resolved row is NOT stock mutation, NOT a sale and NOT customer
+// delivery.
+//
+// `source` is a plain string rather than an enum on purpose: later decision
+// sources reuse this table without a destructive enum migration.
+
+enum HumanDecisionType {
+  RESTOCK
+}
+
+// RESTOCK v1 has no expiry, no `EXPIRED` state and no terminal bot outcome in
+// the human-decision state.
+enum HumanDecisionStatus {
+  PENDING
+  RESOLVED
+}
+
+// Exact discriminated union, no free-text fallback.
+//   PROVIDE_RESTOCK_ESTIMATE: carries `restockDays` (integer 1..365 natural
+//     days, zero excluded) — a human estimate, never a guaranteed stock date.
+//   REPORT_RESTOCK_ESTIMATE_UNAVAILABLE: carries NO `restockDays` — "no
+//     confirmed ETA", NOT "will never be restocked" and not a rejection.
+enum HumanDecisionResolutionAction {
+  PROVIDE_RESTOCK_ESTIMATE
+  REPORT_RESTOCK_ESTIMATE_UNAVAILABLE
+}
+
+// Terminal, bot-reported application outcomes. `PENDING_DELIVERY` is derived
+// (`applicationOutcome IS NULL` before the first ACK) and is deliberately not a
+// member, so an ACKed row can never look pending. `DELIVERY_UNKNOWN` and
+// `PROVIDER_ACCEPTED_LATE` derive the per-request NEEDS_RECONCILIATION hold: no
+// automatic retry, late competing ACK or superseding decision follows.
+// `PROVIDER_ACCEPTED` is provider acceptance observed by the bot, NOT device
+// delivery. `STALE` is allowed only when no send could have occurred.
+enum HumanDecisionBotOutcome {
+  PROVIDER_ACCEPTED
+  PROVIDER_ACCEPTED_LATE
+  DELIVERY_UNKNOWN
+  STALE
+}
+
+// Uniqueness (the migration repeats both, PostgreSQL-side):
+//   * `unique (tenantId, source, sourceRequestId)` is the idempotent intake
+//     identity; the bot's stable UUID equals `X-Idempotency-Key`. It survives
+//     service-credential rotation because the credential is audit-only
+//     (`submittedCredentialId`) and excluded from `canonicalRequestHash`.
+//   * `unique (tenantId, source, supersedesDecisionId)` caps a predecessor at
+//     one correlated successor. PostgreSQL treats NULLs as distinct, so the
+//     common "first request" rows may repeat NULL. A database FK on
+//     `supersedesDecisionId` is intentionally absent: same tenant/source plus
+//     durable STALE/reconciled eligibility is validated in the intake domain
+//     transaction (HD-02), and the design names only the tenant and reviewer
+//     relations.
+model HumanDecision {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  source               String
+  sourceRequestId      String
+  type                 HumanDecisionType @default(RESTOCK)
+  // Canonical allowlisted intake hash (sorted keys, rotating credential and
+  // server-only projections excluded). Same identity + different hash => 409.
+  canonicalRequestHash String
+  // Immutable audit of the credential that performed the intake, derived
+  // server-side from ServiceAuthGuard (never client-supplied). EXCLUDED from
+  // `canonicalRequestHash`, so credential rotation cannot change the idempotent
+  // identity, and deliberately WITHOUT a FK: revoking or deleting the
+  // credential must not erase or block the intake audit.
+  submittedCredentialId String
+
+  // Immutable, sanitized snapshot. `branchId`/`branchName` are tenant-derived
+  // by the backend; the bot never supplies them. `observedStockAtRequest` and
+  // `stockObservedAt` are both NULL or both present.
+  branchId               String
+  branchName             String?
+  productId              String
+  productName            String
+  variantId              String?
+  sku                    String?
+  requestedQuantity      Int?
+  observedStockAtRequest Int?
+  stockObservedAt        DateTime?
+  // Correlated successor request; allowed only after a durably STALE or
+  // explicitly audited predecessor, never after UNKNOWN.
+  supersedesDecisionId   String?
+
+  // Human resolution + audit. `version` is the optimistic CAS token: 1 at
+  // intake, exactly 2 after one human resolve; an ACK never changes it.
+  status              HumanDecisionStatus             @default(PENDING)
+  version             Int                            @default(1)
+  resolutionAction    HumanDecisionResolutionAction?
+  restockDays         Int?
+  resolutionRequestId String?
+  resolvedAt          DateTime?
+  resolvedById        String?
+  resolvedBy          User?                          @relation("HumanDecisionResolver", fields: [resolvedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  // Immutable reviewer snapshots, server-derived from the JWT/backend actor —
+  // never from client input and never a client authority claim. The FK above
+  // can become NULL when a User is deleted, so these snapshots are the durable
+  // source for the `{resolvedBy:{id,displayName}}` projection. Both NULL while
+  // PENDING and both NOT NULL once RESOLVED (enforced by the DB CHECK).
+  resolvedByActorId     String?
+  resolvedByDisplayName String?
+
+  // Terminal bot application outcome: one per decision, and the single row IS
+  // the single-outcome guarantee. `ackReceivedAt` is the backend's own receipt
+  // time, independent of the bot-observed `providerAcceptedObservedAt`; neither
+  // proves device delivery. The DB CHECK
+  // `human_decisions_application_outcome_state` enforces the column coupling:
+  // NULL outcome keeps every outcome/evidence column NULL, a terminal outcome
+  // requires a RESOLVED decision plus attemptId/hash/ackReceivedAt, both
+  // acceptance outcomes require provider evidence and an attempt, UNKNOWN
+  // requires an attempt, and STALE forbids attempt/provider evidence.
+  applicationOutcome         HumanDecisionBotOutcome?
+  applicationAttemptId       String?
+  applicationEvidenceHash    String?
+  // Bot evidence code, part of the canonical ACK hash; optional per outcome.
+  applicationEvidenceCode    String?
+  providerMessageId          String?
+  providerAcceptedObservedAt DateTime?
+  // Bot-observed send attempt time. Persisted because the ACK hash alone
+  // cannot support UNKNOWN/LATE reconciliation.
+  applicationAttemptedAt     DateTime?
+  ackReceivedAt              DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, source, sourceRequestId])
+  @@unique([tenantId, source, supersedesDecisionId])
+  @@index([tenantId, status, createdAt, id])
+  @@map("human_decisions")
 }

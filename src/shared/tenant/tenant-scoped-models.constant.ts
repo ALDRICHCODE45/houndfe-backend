@@ -80,4 +80,11 @@ export const TENANT_SCOPED_MODELS = new Set([
   // online-catalog-publishing / F1.WU1 — tenant-scoped price-list bindings.
   'TenantCatalogPriceList',
   'ProductCatalogPriceList',
+  // human-decisions-restock-v1 / HD-01 — tenant-scoped RESTOCK human-decision
+  // inbox. Same fail-open allowlist semantics as the rest of the file: without
+  // this entry the intake idempotency lookup would not auto-inject `tenantId`,
+  // so `(tenantId, source, sourceRequestId)` could resolve a row that belongs
+  // to another tenant. The two unique constraints only protect the pair when
+  // the runtime tenantId filter is actually injected.
+  'HumanDecision',
 ]);
