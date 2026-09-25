@@ -41,38 +41,20 @@
  * publishing an invalid discriminant; malformed values are never truncated or
  * silently normalized, and a PENDING row never fabricates a resolution.
  */
+import type { HumanDecisionReviewRecord } from '../../domain/human-decision-review-read.repository';
 import {
   RESTOCK_PRODUCT_NAME_MAX_LENGTH,
   RESTOCK_TYPE,
 } from '../../domain/restock-request-canonicalizer';
 
 /**
- * Persisted row shape consumed by the mapper. Structurally compatible with a
- * selected Prisma `HumanDecision` row (the wider `string`/`string|null` enums
- * accept the generated enum values); the mapper re-validates at runtime because
- * a persisted row must never be trusted blindly.
+ * Persisted row shape consumed by the mapper. MOVED to the domain read port
+ * (`domain/human-decision-review-read.repository.ts`) so this pure mapper and
+ * the HD-04b3 Prisma read adapter share ONE shape and cannot drift. It is
+ * re-exported below UNCHANGED to preserve this module's existing public API
+ * and its specs.
  */
-export interface HumanDecisionReviewRecord {
-  id: string;
-  type: string;
-  status: string;
-  version: number;
-  createdAt: Date;
-  branchId: string;
-  branchName: string | null;
-  productId: string;
-  productName: string;
-  variantId: string | null;
-  sku: string | null;
-  requestedQuantity: number | null;
-  observedStockAtRequest: number | null;
-  stockObservedAt: Date | null;
-  resolutionAction: string | null;
-  restockDays: number | null;
-  resolvedAt: Date | null;
-  resolvedByActorId: string | null;
-  resolvedByDisplayName: string | null;
-}
+export type { HumanDecisionReviewRecord };
 
 /**
  * The only two pending action values, in the exact FE contract order. Exported
