@@ -336,6 +336,8 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
     Promise<HumanDecisionReviewPage>,
     [HumanDecisionReviewListQuery]
   >;
+  let listResolved: typeof listPending;
+  let listAll: typeof listPending;
   let findById: jest.Mock<Promise<HumanDecisionReviewRecord | null>, [string]>;
   let createForUser: jest.Mock<Promise<AppAbility>, [string]>;
   let findUnique: jest.Mock<
@@ -365,6 +367,14 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
       Promise<HumanDecisionReviewPage>,
       [HumanDecisionReviewListQuery]
     >();
+    listResolved = jest.fn<
+      Promise<HumanDecisionReviewPage>,
+      [HumanDecisionReviewListQuery]
+    >(() => Promise.resolve(listPage));
+    listAll = jest.fn<
+      Promise<HumanDecisionReviewPage>,
+      [HumanDecisionReviewListQuery]
+    >(() => Promise.resolve(listPage));
     findById = jest.fn<Promise<HumanDecisionReviewRecord | null>, [string]>();
     createForUser = jest.fn<Promise<AppAbility>, [string]>((userId: string) =>
       Promise.resolve(buildAbility(PERMISSIONS[userId] ?? [])),
@@ -409,7 +419,7 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
         },
         {
           provide: HUMAN_DECISION_REVIEW_READ_REPOSITORY,
-          useValue: { listPending, findById },
+          useValue: { listPending, listResolved, listAll, findById },
         },
         {
           provide: HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
@@ -806,11 +816,165 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
     });
   });
 
+  describe('combined list', () => {
+    it.each([TOKENS.reader, TOKENS.manager])(
+      'returns a safe mixed global page for reviewer %#',
+      async (token) => {
+        listPage = {
+          items: [PENDING_ROW, RESOLVED_POSITIVE_ROW, RESOLVED_NEGATIVE_ROW],
+          pageIndex0: 1,
+          pageSize: 20,
+          totalCount: 23,
+          pageCount: 2,
+        };
+        const res = await list(
+          '?status=ALL&page=2&search=Filtro',
+          token,
+        ).expect(200);
+        const expected: unknown[] = [];
+        for (const row of listPage.items) {
+          detailRecord = row;
+          const result = await detail(DECISION_ID, token).expect(200);
+          expected.push(result.body as unknown);
+        }
+        expect(res.body).toEqual({
+          data: expected,
+          pagination: {
+            pageIndex: 1,
+            pageSize: 20,
+            totalCount: 23,
+            pageCount: 2,
+          },
+        });
+        expect(listAll).toHaveBeenCalledWith({
+          page: 2,
+          limit: 20,
+          search: 'Filtro',
+        });
+        expect(listPending).not.toHaveBeenCalled();
+        expect(listResolved).not.toHaveBeenCalled();
+      },
+    );
+    it.each([
+      'sortBy=',
+      'sortBy=createdAt',
+      'sortOrder=desc',
+      'sortOrder=asc&sortOrder=desc',
+    ])('rejects explicit ALL sort %s', async (sort) => {
+      await list(`?status=ALL&${sort}`).expect(400);
+      expect(listAll).not.toHaveBeenCalled();
+    });
+    it('rejects a persisted ALL row instead of widening the row union', async () => {
+      listPage = {
+        ...DEFAULT_PAGE,
+        items: [{ ...PENDING_ROW, status: 'ALL' }],
+      };
+      const res = await list('?status=ALL').expect(500);
+      expect(res.body).toEqual({
+        statusCode: 500,
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error',
+      });
+    });
+  });
+
+  describe('recent resolved list', () => {
+    it.each([TOKENS.reader, TOKENS.manager])(
+      'returns both safe resolutions without actions for reviewer %#',
+      async (token) => {
+        listPage = {
+          ...DEFAULT_PAGE,
+          items: [RESOLVED_POSITIVE_ROW, RESOLVED_NEGATIVE_ROW],
+          totalCount: 2,
+        };
+        const res = await list('?status=RESOLVED', token).expect(200);
+        const expected = (row: HumanDecisionReviewRecord) => ({
+          ...EXPECTED_PENDING_PROJECTION,
+          status: 'RESOLVED',
+          version: 2,
+          allowedActions: [],
+          resolution: {
+            action: row.resolutionAction,
+            ...(row.restockDays === null
+              ? {}
+              : { restockDays: row.restockDays }),
+            resolvedAt: '2026-02-02T09:15:00.000Z',
+            resolvedBy: { id: 'reviewer-1', displayName: 'Ada Lovelace' },
+          },
+        });
+        expect(res.body).toEqual({
+          data: [
+            expected(RESOLVED_POSITIVE_ROW),
+            expected(RESOLVED_NEGATIVE_ROW),
+          ],
+          pagination: {
+            pageIndex: 0,
+            pageSize: 20,
+            totalCount: 2,
+            pageCount: 1,
+          },
+        });
+        expect(listResolved).toHaveBeenCalledWith({
+          page: 1,
+          limit: 20,
+          search: undefined,
+        });
+        expect(listPending).not.toHaveBeenCalled();
+      },
+    );
+
+    it('keeps paging independent and forwards normalized literal search only', async () => {
+      listPage = {
+        items: [],
+        pageIndex0: 1,
+        pageSize: 50,
+        totalCount: 51,
+        pageCount: 2,
+      };
+      const res = await list(
+        '?status=RESOLVED&page=2&limit=50&sortBy=resolvedAt&sortOrder=desc&search=%20Cafe%25_%20',
+      ).expect(200);
+      expect(res.body).toEqual({
+        data: [],
+        pagination: {
+          pageIndex: 1,
+          pageSize: 50,
+          totalCount: 51,
+          pageCount: 2,
+        },
+      });
+      expect(listResolved).toHaveBeenCalledWith({
+        page: 2,
+        limit: 50,
+        search: 'Cafe%_',
+      });
+      listPage = DEFAULT_PAGE;
+      await list().expect(200);
+      expect(listPending).toHaveBeenCalledWith({
+        page: 1,
+        limit: 20,
+        search: undefined,
+      });
+    });
+
+    it('fails closed when a resolved query returns a pending row', async () => {
+      const res = await list('?status=RESOLVED').expect(500);
+      expect(res.body).toEqual({
+        statusCode: 500,
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error',
+      });
+    });
+  });
+
   describe('list query constraints (sanitized 400)', () => {
     it.each([
       ['a missing status', ''],
-      ['a non-PENDING status', '?status=RESOLVED'],
-      ['an unknown status', '?status=ALL'],
+      ['an invalid status', '?status=CLOSED'],
+      ['a conflicting resolved field', '?status=RESOLVED&sortBy=createdAt'],
+      ['a conflicting resolved direction', '?status=RESOLVED&sortOrder=asc'],
+      ['a client date window', '?status=RESOLVED&from=2026-01-01'],
+      ['an unknown status', '?status=UNKNOWN'],
       ['an unwhitelisted limit', '?status=PENDING&limit=999'],
       ['a non-numeric page', '?status=PENDING&page=abc'],
       ['a float page', '?status=PENDING&page=1.5'],

@@ -97,7 +97,10 @@ import {
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
 import { HumanDecisionsModule } from '../human-decisions.module';
-import { PrismaHumanDecisionReviewReadRepository } from '../infrastructure/prisma-human-decision-review-read.repository';
+import {
+  HUMAN_DECISION_REVIEW_READ_CLOCK,
+  PrismaHumanDecisionReviewReadRepository,
+} from '../infrastructure/prisma-human-decision-review-read.repository';
 import { PrismaHumanDecisionReviewResolveRepository } from '../infrastructure/prisma-human-decision-review-resolve.repository';
 import { installHumanDecisionBodyParser } from './filters/human-decision-body-parser';
 import { HumanDecisionHttpFilter } from './filters/human-decision-http.filter';
@@ -688,6 +691,10 @@ describeIfDb(
           CaslAbilityFactory,
           HumanDecisionActiveReviewerGuard,
           {
+            provide: HUMAN_DECISION_REVIEW_READ_CLOCK,
+            useValue: () => RESOLVED_AT,
+          },
+          {
             // The ONLY substitution outside the real graph: a test-only secret
             // so the spec can mint its own principals.
             provide: ConfigService,
@@ -998,6 +1005,65 @@ describeIfDb(
         ).expect(200);
         const cashierBody = cashierRes.body as ListBody;
         expect(cashierBody.data[0].allowedActions).toEqual([]);
+      });
+
+      it('serves the combined list through the real scoped transaction', async () => {
+        const pending = await seedDecision(pendingDecisionData(world.tenantA));
+        const resolved = await seedDecision(
+          resolvedDecisionData(world.tenantA),
+        );
+        const res = await getList('?status=ALL', world.tokens.managerA).expect(
+          200,
+        );
+        const body = res.body as ListBody;
+        expect(body.data.map((row) => row.id)).toEqual([pending, resolved]);
+        expect(body.pagination).toEqual({
+          pageIndex: 0,
+          pageSize: 20,
+          totalCount: 2,
+          pageCount: 1,
+        });
+        expect(body.data[0].allowedActions).toEqual(PENDING_ACTIONS);
+        expect(body.data[1].allowedActions).toEqual([]);
+        await getList(
+          '?status=ALL&sortBy=createdAt',
+          world.tokens.managerA,
+        ).expect(400);
+      });
+
+      it('lists recent responses while old resolved details remain available', async () => {
+        const recentId = await seedDecision(
+          resolvedDecisionData(world.tenantA),
+        );
+        const oldId = await seedDecision(
+          resolvedDecisionData(world.tenantA, {
+            resolvedAt: new Date(RESOLVED_AT.getTime() - 604_800_001),
+          }),
+        );
+        await seedDecision(resolvedDecisionData(world.tenantB));
+        await seedDecision(
+          resolvedDecisionData(world.tenantA, { source: 'other-bot-source' }),
+        );
+        const res = await getList(
+          '?status=RESOLVED',
+          world.tokens.managerA,
+        ).expect(200);
+        const body = res.body as ListBody;
+        expect(body.data.map((item) => item.id)).toEqual([recentId]);
+        expect(body.pagination).toEqual({
+          pageIndex: 0,
+          pageSize: 20,
+          totalCount: 1,
+          pageCount: 1,
+        });
+        expect(body.data[0].allowedActions).toEqual([]);
+        expect(body.data[0].resolution).toMatchObject({
+          resolvedAt: RESOLVED_AT.toISOString(),
+        });
+        const oldDetail = await getDetail(oldId, world.tokens.managerA).expect(
+          200,
+        );
+        expect((oldDetail.body as { status: string }).status).toBe('RESOLVED');
       });
 
       it('lists only RESTOCK PENDING rows while the same tenant stores RESOLVED and foreign-source rows', async () => {
@@ -1365,7 +1431,7 @@ describeIfDb(
     describe('list query constraints (sanitized 400)', () => {
       it.each([
         ['a missing status', ''],
-        ['a non-PENDING status', '?status=RESOLVED'],
+        ['an invalid status', '?status=CLOSED'],
         ['an unwhitelisted limit', '?status=PENDING&limit=999'],
         ['a non-numeric page', '?status=PENDING&page=abc'],
         ['an unknown sort field', '?status=PENDING&sortBy=updatedAt'],

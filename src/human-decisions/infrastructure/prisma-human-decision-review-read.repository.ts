@@ -44,7 +44,7 @@
  * seams above, NOT real PostgreSQL `ILIKE`/CLS/tenant-extension behavior.
  * HD-04b3b owns the dedicated local PostgreSQL integration proof.
  */
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
@@ -158,9 +158,21 @@ function assertValidSearch(search: unknown): void {
   }
 }
 
+/** Optional read clock; separate from the resolution-write clock. */
+export type HumanDecisionReviewReadClock = () => Date;
+export const HUMAN_DECISION_REVIEW_READ_CLOCK = Symbol(
+  'HUMAN_DECISION_REVIEW_READ_CLOCK',
+);
+const RECENT_RESOLVED_WINDOW_MS = 604_800_000;
+
 @Injectable()
 export class PrismaHumanDecisionReviewReadRepository implements IHumanDecisionReviewReadRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaService,
+    @Optional()
+    @Inject(HUMAN_DECISION_REVIEW_READ_CLOCK)
+    private readonly clock?: HumanDecisionReviewReadClock,
+  ) {}
 
   async listPending(
     query: HumanDecisionReviewListQuery,
@@ -210,6 +222,148 @@ export class PrismaHumanDecisionReviewReadRepository implements IHumanDecisionRe
       totalCount,
       pageCount: totalCount === 0 ? 0 : Math.ceil(totalCount / limit),
     };
+  }
+
+  async listResolved(
+    query: HumanDecisionReviewListQuery,
+  ): Promise<HumanDecisionReviewPage> {
+    if (query === null || typeof query !== 'object') {
+      throw new HumanDecisionReviewReadError();
+    }
+    const { page, limit, search } = query;
+    const skip = resolveSafeSkip(page, limit);
+    assertValidSearch(search);
+    const tenantId = this.tenantPrisma.getTenantId();
+    const db = this.tenantPrisma.getClient();
+    const now = this.clock ? this.clock() : new Date();
+    const where: Prisma.HumanDecisionWhereInput = {
+      tenantId,
+      source: RESTOCK_SOURCE,
+      type: RESTOCK_TYPE,
+      status: 'RESOLVED',
+      resolvedAt: {
+        gte: new Date(now.getTime() - RECENT_RESOLVED_WINDOW_MS),
+        lte: now,
+      },
+    };
+    if (search !== undefined) {
+      where.productName = {
+        contains: escapeLikeTerm(search),
+        mode: 'insensitive',
+      };
+    }
+    const [items, totalCount]: [HumanDecisionReviewRecord[], number] =
+      await Promise.all([
+        db.humanDecision.findMany({
+          where,
+          orderBy: [{ resolvedAt: 'desc' }, { id: 'asc' }],
+          skip,
+          take: limit,
+          select: REVIEW_RECORD_SELECT,
+        }),
+        db.humanDecision.count({ where }),
+      ]);
+    return {
+      items,
+      pageIndex0: page - 1,
+      pageSize: limit,
+      totalCount,
+      pageCount: totalCount === 0 ? 0 : Math.ceil(totalCount / limit),
+    };
+  }
+
+  async listAll(
+    query: HumanDecisionReviewListQuery,
+  ): Promise<HumanDecisionReviewPage> {
+    if (query === null || typeof query !== 'object') {
+      throw new HumanDecisionReviewReadError();
+    }
+    const { page, limit, search } = query;
+    const skip = resolveSafeSkip(page, limit);
+    assertValidSearch(search);
+    // Ambient clients lack $transaction and cannot guarantee this isolation.
+    if (this.tenantPrisma.isInTransaction()) {
+      throw new HumanDecisionReviewReadError();
+    }
+    const tenantId = this.tenantPrisma.getTenantId();
+    const db = this.tenantPrisma.getClient();
+    return db.$transaction(
+      async (tx) => {
+        const now = this.clock ? this.clock() : new Date();
+        const scope: Prisma.HumanDecisionWhereInput = {
+          tenantId,
+          source: RESTOCK_SOURCE,
+          type: RESTOCK_TYPE,
+          ...(search === undefined
+            ? {}
+            : {
+                productName: {
+                  contains: escapeLikeTerm(search),
+                  mode: 'insensitive',
+                },
+              }),
+        };
+        const pendingWhere: Prisma.HumanDecisionWhereInput = {
+          ...scope,
+          status: 'PENDING',
+        };
+        const resolvedWhere: Prisma.HumanDecisionWhereInput = {
+          ...scope,
+          status: 'RESOLVED',
+          resolvedAt: {
+            gte: new Date(now.getTime() - RECENT_RESOLVED_WINDOW_MS),
+            lte: now,
+          },
+        };
+        const pendingCount = await tx.humanDecision.count({
+          where: pendingWhere,
+        });
+        const resolvedCount = await tx.humanDecision.count({
+          where: resolvedWhere,
+        });
+        const pendingTake = Math.min(limit, Math.max(pendingCount - skip, 0));
+        const resolvedSkip = Math.max(skip - pendingCount, 0);
+        const resolvedTake = Math.min(
+          limit - pendingTake,
+          Math.max(resolvedCount - resolvedSkip, 0),
+        );
+        const pending =
+          pendingTake === 0
+            ? []
+            : await tx.humanDecision.findMany({
+                where: pendingWhere,
+                orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+                skip,
+                take: pendingTake,
+                select: REVIEW_RECORD_SELECT,
+              });
+        const resolved =
+          resolvedTake === 0
+            ? []
+            : await tx.humanDecision.findMany({
+                where: resolvedWhere,
+                orderBy: [{ resolvedAt: 'desc' }, { id: 'asc' }],
+                skip: resolvedSkip,
+                take: resolvedTake,
+                select: REVIEW_RECORD_SELECT,
+              });
+        if (
+          pending.some((row) => row.status !== 'PENDING') ||
+          resolved.some((row) => row.status !== 'RESOLVED')
+        ) {
+          throw new HumanDecisionReviewReadError();
+        }
+        const totalCount = pendingCount + resolvedCount;
+        return {
+          items: [...pending, ...resolved],
+          pageIndex0: page - 1,
+          pageSize: limit,
+          totalCount,
+          pageCount: Math.ceil(totalCount / limit),
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
   }
 
   async findById(id: string): Promise<HumanDecisionReviewRecord | null> {

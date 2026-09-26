@@ -8,14 +8,14 @@
  * `?status=PENDING&page=1&limit=20&search=...&sortBy=createdAt&sortOrder=asc`.
  *
  * Scope: STRUCTURAL transport validation only.
- *   - `status` is REQUIRED and pinned to the single literal `PENDING`.
+ *   - `status` is REQUIRED: `PENDING` or recent `RESOLVED`.
  *   - `page` / `limit` are parsed with an explicit bounded parser instead of
  *     `class-transformer`'s `@Type(() => Number)`, which would silently accept
  *     `1e0`, `0x10`, `Infinity`, whitespace-padded strings or unsafe integers.
  *   - `limit` is restricted to the approved `20 | 50` set; the omitted default
  *     stays the direct number `20`.
- *   - `sortBy` is pinned to `createdAt` and `sortOrder` to `asc` (the
- *     repository adds the stable `createdAt,id` tiebreak in HD-04b3).
+ *   - Sort defaults are status-specific: `createdAt,asc` for PENDING and
+ *     `resolvedAt,desc` for RESOLVED. Explicit conflicting sorts are rejected.
  *   - `search` is optional; when supplied it is NFC-normalized,
  *     whitespace-collapsed and trimmed, bounded at 100 UTF-16 code units, and
  *     an explicitly supplied empty/blank value or any C0/C1 control character
@@ -52,7 +52,7 @@
  * explicit blocker and does not attempt to solve it here.
  */
 import 'reflect-metadata';
-import { Transform } from 'class-transformer';
+import { Expose, Transform } from 'class-transformer';
 import {
   IsIn,
   IsInt,
@@ -67,13 +67,13 @@ import {
   type ValidatorConstraintInterface,
 } from 'class-validator';
 
-/** The only status accepted by `GET /human-decisions` in RESTOCK v1. */
+/** Legacy pending queue status. */
 export const HUMAN_DECISIONS_STATUS = 'PENDING';
 
-/** The only supported list sort field (repository adds the `id` tiebreak). */
+/** Pending queue sort field (repository adds the `id` tiebreak). */
 export const HUMAN_DECISIONS_SORT_BY = 'createdAt';
 
-/** The only supported sort direction for the stable review queue. */
+/** Pending queue sort direction. */
 export const HUMAN_DECISIONS_SORT_ORDER = 'asc';
 
 /** Whitelisted page sizes. */
@@ -225,10 +225,29 @@ function IsQueryOptional(): PropertyDecorator {
   return ValidateIf((_object, value: unknown) => value !== undefined);
 }
 
+@ValidatorConstraint({ name: 'statusSort', async: false })
+class StatusSortConstraint implements ValidatorConstraintInterface {
+  validate(value: unknown, args: ValidationArguments): boolean {
+    const { status } = args.object as ListHumanDecisionsQueryDto;
+    if (status === 'ALL') return value === undefined;
+    const resolved = status === 'RESOLVED';
+    return (
+      value ===
+      (args.property === 'sortBy'
+        ? resolved
+          ? 'resolvedAt'
+          : 'createdAt'
+        : resolved
+          ? 'desc'
+          : 'asc')
+    );
+  }
+}
+
 export class ListHumanDecisionsQueryDto {
-  /** Required single literal; RESTOCK v1 has no other listable status. */
-  @IsIn([HUMAN_DECISIONS_STATUS])
-  status!: typeof HUMAN_DECISIONS_STATUS;
+  /** Required exact list status; clients cannot supply the recent window. */
+  @IsIn([HUMAN_DECISIONS_STATUS, 'RESOLVED', 'ALL'])
+  status!: 'PENDING' | 'RESOLVED' | 'ALL';
 
   /**
    * 1-based page index. Strictly parsed; omitted keeps the direct numeric
@@ -252,15 +271,36 @@ export class ListHumanDecisionsQueryDto {
   @IsIn(HUMAN_DECISIONS_LIMIT_VALUES)
   limit: number = HUMAN_DECISIONS_DEFAULT_LIMIT;
 
-  /** Only `createdAt`; the repository adds the `id` tiebreak (HD-04b3). */
-  @IsQueryOptional()
-  @IsIn([HUMAN_DECISIONS_SORT_BY])
-  sortBy: typeof HUMAN_DECISIONS_SORT_BY = HUMAN_DECISIONS_SORT_BY;
+  /** Expose runs the default transform even when the query key is absent. */
+  @Expose()
+  @Transform(({ value, obj }: { value: unknown; obj: { status?: unknown } }) =>
+    obj.status === 'ALL'
+      ? Object.hasOwn(obj, 'sortBy')
+        ? INVALID_CONSTRAINT_VALUE
+        : undefined
+      : value === undefined
+        ? obj.status === 'RESOLVED'
+          ? 'resolvedAt'
+          : HUMAN_DECISIONS_SORT_BY
+        : value,
+  )
+  @Validate(StatusSortConstraint)
+  sortBy?: 'createdAt' | 'resolvedAt';
 
-  /** Only `asc`; the review queue is oldest-first. */
-  @IsQueryOptional()
-  @IsIn([HUMAN_DECISIONS_SORT_ORDER])
-  sortOrder: typeof HUMAN_DECISIONS_SORT_ORDER = HUMAN_DECISIONS_SORT_ORDER;
+  @Expose()
+  @Transform(({ value, obj }: { value: unknown; obj: { status?: unknown } }) =>
+    obj.status === 'ALL'
+      ? Object.hasOwn(obj, 'sortOrder')
+        ? INVALID_CONSTRAINT_VALUE
+        : undefined
+      : value === undefined
+        ? obj.status === 'RESOLVED'
+          ? 'desc'
+          : HUMAN_DECISIONS_SORT_ORDER
+        : value,
+  )
+  @Validate(StatusSortConstraint)
+  sortOrder?: 'asc' | 'desc';
 
   /**
    * Optional bounded product-name search. NFC-normalized, whitespace

@@ -147,6 +147,24 @@ export interface IHumanDecisionReviewReadRepository {
   ): Promise<HumanDecisionReviewPage>;
 
   /**
+   * Recent RESOLVED RESTOCK responses within the inclusive server-owned
+   * [now - 7 days, now] window, ordered resolvedAt DESC, id ASC.
+   * This listing window does not restrict detail access or delete history.
+   */
+  listResolved(
+    query: HumanDecisionReviewListQuery,
+  ): Promise<HumanDecisionReviewPage>;
+
+  /**
+   * Globally paginated snapshot: PENDING oldest-first, then recent RESOLVED
+   * newest-first, each with id ASC tiebreak. Counts and rows share Repeatable
+   * Read isolation; ambient transactions are unsupported.
+   */
+  listAll(
+    query: HumanDecisionReviewListQuery,
+  ): Promise<HumanDecisionReviewPage>;
+
+  /**
    * One tenant-scoped decision by id, `PENDING` or `RESOLVED`. Returns `null`
    * for a missing OR cross-tenant id (the two are indistinguishable to the
    * caller). Never uses `findUnique` by id alone.

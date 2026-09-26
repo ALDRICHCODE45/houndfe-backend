@@ -75,6 +75,89 @@ describe('ListHumanDecisionsQueryDto (global ValidationPipe contract)', () => {
     expect(HUMAN_DECISIONS_SEARCH_MAX_LENGTH).toBe(100);
   });
 
+  describe('ALL uses only server sorting', () => {
+    it('accepts omission without injecting sort values', async () => {
+      const { dto, errors } = await validateQuery({ status: 'ALL' });
+      expect(errors).toHaveLength(0);
+      expect(dto.sortBy).toBeUndefined();
+      expect(dto.sortOrder).toBeUndefined();
+    });
+    describe.each(['sortBy', 'sortOrder'])('%s presence', (field) => {
+      it.each([
+        undefined,
+        null,
+        '',
+        'createdAt',
+        'resolvedAt',
+        'asc',
+        'desc',
+        ['asc'],
+        {},
+      ])('rejects supplied %p', async (value) => {
+        const { errors } = await validateQuery({
+          status: 'ALL',
+          [field]: value,
+        });
+        expect(errorProperties(errors)).toContain(field);
+      });
+    });
+    it.each(['from', 'to', 'windowDays'])(
+      'rejects a client window %s',
+      async (field) => {
+        expect(
+          errorProperties(
+            (await validateQuery({ status: 'ALL', [field]: '7' })).errors,
+          ),
+        ).toContain(field);
+      },
+    );
+  });
+
+  describe('status-specific sorting', () => {
+    it.each([
+      ['PENDING', 'createdAt', 'asc'],
+      ['RESOLVED', 'resolvedAt', 'desc'],
+    ])(
+      'defaults and accepts exact sorting for %s',
+      async (status, sortBy, sortOrder) => {
+        const omitted = await validateQuery({ status });
+        expect(omitted.errors).toHaveLength(0);
+        expect([omitted.dto.sortBy, omitted.dto.sortOrder]).toEqual([
+          sortBy,
+          sortOrder,
+        ]);
+        expect(
+          (await validateQuery({ status, sortBy, sortOrder })).errors,
+        ).toHaveLength(0);
+      },
+    );
+
+    it.each([
+      ['PENDING', 'sortBy', 'resolvedAt'],
+      ['RESOLVED', 'sortBy', 'createdAt'],
+      ['RESOLVED', 'sortOrder', 'asc'],
+      ['RESOLVED', 'sortBy', 'unknown'],
+      ['RESOLVED', 'sortBy', null],
+      ['RESOLVED', 'sortOrder', null],
+      ['RESOLVED', 'sortBy', ['resolvedAt']],
+      ['RESOLVED', 'sortOrder', ['desc']],
+    ])('rejects %s %s=%p', async (status, field, value) => {
+      const { errors } = await validateQuery({ status, [field]: value });
+      expect(errorProperties(errors)).toContain(field);
+    });
+
+    it.each(['resolvedAt', 'from', 'to', 'windowDays'])(
+      'rejects client window %s',
+      async (field) => {
+        const { errors } = await validateQuery({
+          status: 'RESOLVED',
+          [field]: '7',
+        });
+        expect(errorProperties(errors)).toContain(field);
+      },
+    );
+  });
+
   describe('defaults', () => {
     it('applies the numeric/string defaults when only status is supplied', async () => {
       const { dto, errors } = await validateQuery(baseQuery());
@@ -150,7 +233,7 @@ describe('ListHumanDecisionsQueryDto (global ValidationPipe contract)', () => {
     });
   });
 
-  describe('status (required, only PENDING)', () => {
+  describe('status (required, PENDING or RESOLVED)', () => {
     it('rejects an omitted status', async () => {
       const { errors } = await validateQuery({});
 
@@ -158,7 +241,8 @@ describe('ListHumanDecisionsQueryDto (global ValidationPipe contract)', () => {
     });
 
     it.each([
-      'RESOLVED',
+      'resolved',
+      ['RESOLVED'],
       'pending',
       'PENDING ',
       ' PENDING',

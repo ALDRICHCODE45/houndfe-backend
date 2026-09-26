@@ -212,6 +212,7 @@ interface ReviewHarness {
 function makeHarness(
   tenantId: string | null,
   isSuperAdmin = false,
+  clock?: () => Date,
 ): ReviewHarness {
   const store = new Map<string, unknown>();
   store.set('tenantId', tenantId);
@@ -230,7 +231,7 @@ function makeHarness(
   );
   const tenantPrisma = new TenantPrismaService(prisma, cls);
   return {
-    repo: new PrismaHumanDecisionReviewReadRepository(tenantPrisma),
+    repo: new PrismaHumanDecisionReviewReadRepository(tenantPrisma, clock),
     tenantPrisma,
   };
 }
@@ -510,6 +511,118 @@ describeIfDb(
           process.env.DATABASE_URL = originalUrl;
         }
       });
+    });
+
+    describe('recent resolved window (execution requires separate DB authorization)', () => {
+      it('includes exact endpoints, excludes outside instants and scopes by resolution time', async () => {
+        const tenant = await seedTenant('Recent responses');
+        const other = await seedTenant('Other responses');
+        const now = RESOLVED_AT;
+        const cutoff = new Date(now.getTime() - 604_800_000);
+        const old = new Date(cutoff.getTime() - 1);
+        const atNow = await seedDecision(
+          resolvedDecisionData(tenant, { resolvedAt: now, createdAt: old }),
+        );
+        const atCutoff = await seedDecision(
+          resolvedDecisionData(tenant, { resolvedAt: cutoff, createdAt: old }),
+        );
+        const oldId = await seedDecision(
+          resolvedDecisionData(tenant, { resolvedAt: old, createdAt: now }),
+        );
+        await seedDecision(
+          resolvedDecisionData(tenant, {
+            resolvedAt: new Date(now.getTime() + 1),
+          }),
+        );
+        await seedDecision(resolvedDecisionData(other, { resolvedAt: now }));
+        await seedDecision(
+          resolvedDecisionData(tenant, {
+            source: 'foreign-source',
+            resolvedAt: now,
+          }),
+        );
+        await seedDecision(pendingDecisionData(tenant));
+        const { repo } = makeHarness(tenant, false, () => now);
+        const result = await repo.listResolved({ page: 1, limit: 20 });
+        expect(result.items.map(({ id }) => id)).toEqual([atNow, atCutoff]);
+        expect(result.totalCount).toBe(2);
+        expect((await repo.findById(oldId))?.status).toBe('RESOLVED');
+      });
+
+      it('paginates tied resolved timestamps by id without overlapping pages', async () => {
+        const tenant = await seedTenant('Tied responses');
+        const ids: string[] = [];
+        for (let i = 0; i < 21; i++) {
+          ids.push(await seedDecision(resolvedDecisionData(tenant)));
+        }
+        ids.sort();
+        const { repo } = makeHarness(tenant, false, () => RESOLVED_AT);
+        const first = await repo.listResolved({ page: 1, limit: 20 });
+        const second = await repo.listResolved({ page: 2, limit: 20 });
+        expect(first.items.map(({ id }) => id)).toEqual(ids.slice(0, 20));
+        expect(second.items.map(({ id }) => id)).toEqual(ids.slice(20));
+        expect([
+          first.totalCount,
+          second.totalCount,
+          first.pageCount,
+          second.pageCount,
+        ]).toEqual([21, 21, 2, 2]);
+      });
+    });
+
+    it('globally pages searched mixed partitions with time bounds and tied timestamps', async () => {
+      const tenant = await seedTenant('Mixed responses');
+      const other = await seedTenant('Other mixed responses');
+      const pendingIds: string[] = [];
+      const resolvedIds: string[] = [];
+      const productName = 'Cafe%_';
+      for (let i = 0; i < 23; i++) {
+        pendingIds.push(
+          await seedDecision(
+            pendingDecisionData(tenant, {
+              productName,
+              createdAt: RESOLVED_AT,
+            }),
+          ),
+        );
+        resolvedIds.push(
+          await seedDecision(resolvedDecisionData(tenant, { productName })),
+        );
+      }
+      pendingIds.sort();
+      resolvedIds.sort();
+      const cutoffId = await seedDecision(
+        resolvedDecisionData(tenant, {
+          productName,
+          resolvedAt: new Date(RESOLVED_AT.getTime() - 604_800_000),
+        }),
+      );
+      for (const resolvedAt of [
+        new Date(RESOLVED_AT.getTime() - 604_800_001),
+        new Date(RESOLVED_AT.getTime() + 1),
+      ]) {
+        await seedDecision(
+          resolvedDecisionData(tenant, { productName, resolvedAt }),
+        );
+      }
+      await seedDecision(resolvedDecisionData(other, { productName }));
+      await seedDecision(pendingDecisionData(other, { productName }));
+      await seedDecision(
+        resolvedDecisionData(tenant, { productName, source: 'foreign-source' }),
+      );
+      await seedDecision(
+        pendingDecisionData(tenant, { productName: 'CafeXX' }),
+      );
+      const { repo } = makeHarness(tenant, false, () => RESOLVED_AT);
+      const expected = [...pendingIds, ...resolvedIds, cutoffId];
+      for (const page of [1, 2, 3]) {
+        const result = await repo.listAll({ page, limit: 20, search: '%_' });
+        expect(result.items.map(({ id }) => id)).toEqual(
+          expected.slice((page - 1) * 20, page * 20),
+        );
+        expect(result.totalCount).toBe(47);
+        expect(result.pageCount).toBe(3);
+      }
     });
 
     describe('tenant isolation through the real tenant extension', () => {

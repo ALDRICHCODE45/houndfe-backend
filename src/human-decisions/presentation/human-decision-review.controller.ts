@@ -8,7 +8,7 @@
  * `BotRestockIntakeController` so the bot route, its `ServiceAuthGuard` and its
  * credential-derived tenant stay untouched. This slice exposes READ ONLY:
  *
- *   GET /human-decisions       -> PENDING queue page (tenant-scoped)
+ *   GET /human-decisions       -> PENDING queue or recent RESOLVED page
  *   GET /human-decisions/:id   -> one PENDING|RESOLVED decision (tenant-scoped)
  *
  * AUTHORITY MODEL:
@@ -54,7 +54,7 @@
  *
  * RESPONSE SHAPE:
  *   - List returns EXACTLY
- *     `{ data: Pending[], pagination: { pageIndex, pageSize, totalCount,
+ *     `{ data: (Pending | Resolved)[], pagination: { pageIndex, pageSize, totalCount,
  *     pageCount } }`. `pageIndex` is the 0-based `pageIndex0` of the port.
  *   - Detail returns the pure `Pending | Resolved` projection from
  *     `toHumanDecisionReviewResponse`.
@@ -113,7 +113,6 @@ import {
 } from './dto/resolve-human-decision.request';
 import {
   toHumanDecisionReviewResponse,
-  type HumanDecisionReviewPendingResponse,
   type HumanDecisionReviewResponse,
 } from './dto/human-decision-review.response';
 import { ListHumanDecisionsQueryDto } from './dto/list-human-decisions.query';
@@ -141,12 +140,11 @@ export interface HumanDecisionListPaginationResponse {
 }
 
 /**
- * Exact list envelope. `data` is `Pending[]` by construction: an adapter
- * invariant violation (a non-PENDING row) fails closed instead of widening the
- * response type.
+ * Exact list envelope. Every row must match the requested status;
+ * an adapter invariant violation fails closed.
  */
 export interface HumanDecisionListResponse {
-  data: HumanDecisionReviewPendingResponse[];
+  data: HumanDecisionReviewResponse[];
   pagination: HumanDecisionListPaginationResponse;
 }
 
@@ -167,10 +165,8 @@ export class HumanDecisionReviewController {
   ) {}
 
   /**
-   * `GET /human-decisions` — one page of the tenant PENDING review queue.
-   * The query DTO pins `status=PENDING`, the `20 | 50` page sizes and the
-   * `createdAt,asc` order; the controller forwards ONLY `{ page, limit,
-   * search }`, so the transport never widens the tenant-scoped repository.
+   * Tenant PENDING queue or recent RESOLVED responses. The validated status
+   * selects a fixed repository policy; only page/limit/search are forwarded.
    */
   @Get()
   @RequirePermissions(['read', 'HumanDecision'])
@@ -180,19 +176,22 @@ export class HumanDecisionReviewController {
   ): Promise<HumanDecisionListResponse> {
     const canResolve = this.canResolve(request);
 
-    const page = await this.readRepository.listPending({
+    const input = {
       page: query.page,
       limit: query.limit,
       search: query.search,
-    });
+    };
+    const page =
+      query.status === 'ALL'
+        ? await this.readRepository.listAll(input)
+        : query.status === 'RESOLVED'
+          ? await this.readRepository.listResolved(input)
+          : await this.readRepository.listPending(input);
 
     const data = page.items.map((item) => {
       const response = toHumanDecisionReviewResponse(item, canResolve);
-      if (response.status !== 'PENDING') {
-        // The port hardcodes `status: 'PENDING'`; a RESOLVED row here means an
-        // adapter/tenant invariant was violated. Fail closed rather than
-        // publish a resolved item in a PENDING-only queue.
-        throw new Error('Human decision list returned a non-PENDING decision');
+      if (query.status !== 'ALL' && response.status !== query.status) {
+        throw new Error('Human decision list returned a mismatched status');
       }
       return response;
     });

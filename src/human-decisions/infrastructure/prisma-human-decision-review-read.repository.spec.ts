@@ -130,7 +130,7 @@ function makeClient(): ClientMock {
 
 function makeRepo(
   client: ClientMock,
-  options: { tenantId?: string | null } = {},
+  options: { tenantId?: string | null; clock?: () => Date } = {},
 ) {
   const tenantId =
     options.tenantId === undefined ? TENANT_ID : options.tenantId;
@@ -145,9 +145,258 @@ function makeRepo(
   };
   const repo = new PrismaHumanDecisionReviewReadRepository(
     tenantPrisma as unknown as TenantPrismaService,
+    options.clock,
   );
   return { repo, tenantPrisma };
 }
+
+describe('combined snapshot reads', () => {
+  function harness(pendingCount: number, resolvedCount: number) {
+    const tx = makeClient();
+    const root = makeClient();
+    root.humanDecision.count.mockImplementation(() => {
+      throw new Error('root read');
+    });
+    root.humanDecision.findMany.mockImplementation(() => {
+      throw new Error('root read');
+    });
+    tx.humanDecision.count
+      .mockResolvedValueOnce(pendingCount)
+      .mockResolvedValueOnce(resolvedCount);
+    tx.humanDecision.findMany.mockImplementation((args: CapturedFindManyArgs) =>
+      Promise.resolve(
+        Array.from({ length: args.take }, (_, index) =>
+          makeRecord({
+            id: `${String(args.where.status)}-${args.skip + index}`,
+            status: String(args.where.status),
+          }),
+        ),
+      ),
+    );
+    const transaction = jest.fn(
+      async (work: (client: ClientMock) => Promise<unknown>) => work(tx),
+    );
+    const client = Object.assign(root, { $transaction: transaction });
+    const tenant = {
+      getClient: jest.fn(() => client),
+      getTenantId: jest.fn(() => TENANT_ID),
+      isInTransaction: jest.fn(() => false),
+    };
+    const now = new Date('2026-09-30T12:00:00.000Z');
+    const clock = jest.fn(() => now);
+    const repo = new PrismaHumanDecisionReviewReadRepository(
+      tenant as unknown as TenantPrismaService,
+      clock,
+    );
+    return { repo, tx, root, tenant, transaction, clock, now };
+  }
+
+  describe.each([20, 50])('page size %i', (limit) => {
+    it.each([
+      ['empty', 0, 0, 1],
+      ['all pending', 3, 0, 1],
+      ['all resolved', 0, 3, 1],
+      ['exact boundary', limit, limit, 2],
+      ['cross boundary', limit + 3, limit * 3, 2],
+      ['full subsequent page', limit + 3, limit * 3, 3],
+      ['beyond end', 2, 2, 5],
+    ] as const)('%s', async (_label, p, r, page) => {
+      const h = harness(p, r);
+      const result = await h.repo.listAll({ page, limit });
+      const expected = [
+        ...Array.from({ length: p }, (_, i) => `PENDING-${i}`),
+        ...Array.from({ length: r }, (_, i) => `RESOLVED-${i}`),
+      ].slice((page - 1) * limit, page * limit);
+      expect(result.items.map(({ id }) => id)).toEqual(expected);
+      expect(result).toMatchObject({
+        pageIndex0: page - 1,
+        pageSize: limit,
+        totalCount: p + r,
+        pageCount: Math.ceil((p + r) / limit),
+      });
+      expect(result.items.length).toBeLessThanOrEqual(limit);
+      expect(h.transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: 'RepeatableRead',
+      });
+      expect(h.tenant.getClient).toHaveBeenCalledTimes(1);
+      expect(h.clock).toHaveBeenCalledTimes(1);
+      expect(h.root.humanDecision.count).not.toHaveBeenCalled();
+      expect(h.root.humanDecision.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  it('uses identical scoped predicates, one callback clock and fixed partition ordering', async () => {
+    const h = harness(3, 30);
+    h.clock.mockImplementation(() => {
+      expect(h.transaction).toHaveBeenCalledTimes(1);
+      return h.now;
+    });
+    await h.repo.listAll({ page: 1, limit: 20, search: 'Cafe%_\\' });
+    const counts = h.tx.humanDecision.count.mock.calls as [
+      { where: Record<string, unknown> },
+    ][];
+    for (const [index, status] of ['PENDING', 'RESOLVED'].entries()) {
+      const args = findManyArgs(h.tx, index);
+      expect(args.where).toBe(counts[index][0].where);
+      expect(args.where).toEqual({
+        tenantId: TENANT_ID,
+        source: RESTOCK_SOURCE,
+        type: RESTOCK_TYPE,
+        status,
+        productName: { contains: 'Cafe\\%\\_\\\\', mode: 'insensitive' },
+        ...(status === 'RESOLVED'
+          ? {
+              resolvedAt: {
+                gte: new Date(h.now.getTime() - 604800000),
+                lte: h.now,
+              },
+            }
+          : {}),
+      });
+      expect(args.orderBy).toEqual([
+        index === 0 ? { createdAt: 'asc' } : { resolvedAt: 'desc' },
+        { id: 'asc' },
+      ]);
+      expect(Object.keys(args.select).sort()).toEqual(REVIEW_SELECT_KEYS);
+    }
+  });
+
+  it('keeps transaction reads when external state changes after counts (orchestration only)', async () => {
+    const h = harness(3, 30);
+    h.tx.humanDecision.count
+      .mockReset()
+      .mockResolvedValueOnce(3)
+      .mockImplementationOnce(() => {
+        h.root.humanDecision.findMany.mockResolvedValue([
+          makeRecord({ id: 'external-change' }),
+        ]);
+        return Promise.resolve(30);
+      });
+    const result = await h.repo.listAll({ page: 1, limit: 20 });
+    expect(result.totalCount).toBe(33);
+    expect(result.items.slice(0, 3).map(({ id }) => id)).toEqual([
+      'PENDING-0',
+      'PENDING-1',
+      'PENDING-2',
+    ]);
+    expect(h.root.humanDecision.findMany).not.toHaveBeenCalled();
+  });
+
+  it.each(['PENDING', 'RESOLVED'])(
+    'rejects a wrong row in the %s partition',
+    async (partition) => {
+      const h = harness(partition === 'PENDING' ? 1 : 0, 1);
+      h.tx.humanDecision.findMany.mockResolvedValue([
+        makeRecord({
+          status: partition === 'PENDING' ? 'RESOLVED' : 'PENDING',
+        }),
+      ]);
+      await expect(h.repo.listAll({ page: 1, limit: 20 })).rejects.toThrow();
+    },
+  );
+
+  it('rejects ambient transactions before getClient and fails closed without tenant', async () => {
+    const h = harness(1, 1);
+    h.tenant.isInTransaction.mockReturnValue(true);
+    await expect(h.repo.listAll({ page: 1, limit: 20 })).rejects.toThrow();
+    expect(h.tenant.getClient).not.toHaveBeenCalled();
+    h.tenant.isInTransaction.mockReturnValue(false);
+    h.tenant.getTenantId.mockImplementation(() => {
+      throw new Error('missing tenant');
+    });
+    await expect(h.repo.listAll({ page: 1, limit: 20 })).rejects.toThrow();
+    expect(h.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each(['transaction', 'count', 'fetch'])(
+    'propagates %s failure without fallback',
+    async (stage) => {
+      const h = harness(1, 1);
+      const failure = new Error('read failed');
+      if (stage === 'transaction') h.transaction.mockRejectedValueOnce(failure);
+      if (stage === 'count')
+        h.tx.humanDecision.count.mockReset().mockRejectedValueOnce(failure);
+      if (stage === 'fetch')
+        h.tx.humanDecision.findMany.mockRejectedValueOnce(failure);
+      await expect(h.repo.listAll({ page: 1, limit: 20 })).rejects.toBe(
+        failure,
+      );
+      expect(h.root.humanDecision.findMany).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('recent resolved reads', () => {
+  it('captures one clock value and shares the inclusive scoped window with count', async () => {
+    const client = makeClient();
+    arrangeList(client, [], 51);
+    const now = new Date('2026-09-30T12:00:00.000Z');
+    const clock = jest.fn(() => now);
+    const { repo } = makeRepo(client, { clock });
+    const query = {
+      page: 2,
+      limit: 50,
+      search: 'Cafe%_\\',
+      status: 'PENDING',
+      sortBy: 'createdAt',
+      sortOrder: 'asc',
+    };
+    expect(await repo.listResolved(query)).toEqual({
+      items: [],
+      pageIndex0: 1,
+      pageSize: 50,
+      totalCount: 51,
+      pageCount: 2,
+    });
+    expect(clock).toHaveBeenCalledTimes(1);
+    const [[args]] = client.humanDecision.findMany.mock.calls as [
+      [CapturedFindManyArgs],
+    ];
+    expect(args.where).toEqual({
+      tenantId: TENANT_ID,
+      source: RESTOCK_SOURCE,
+      type: RESTOCK_TYPE,
+      status: 'RESOLVED',
+      resolvedAt: { gte: new Date(now.getTime() - 604800000), lte: now },
+      productName: { contains: 'Cafe\\%\\_\\\\', mode: 'insensitive' },
+    });
+    const [[countArgs]] = client.humanDecision.count.mock.calls as [
+      [{ where: unknown }],
+    ];
+    expect(countArgs.where).toBe(args.where);
+    expect(args.orderBy).toEqual([{ resolvedAt: 'desc' }, { id: 'asc' }]);
+    expect([args.skip, args.take]).toEqual([50, 50]);
+    expect(Object.keys(args.select).sort()).toEqual(REVIEW_SELECT_KEYS);
+  });
+
+  it('does not read without tenant context and keeps pending clock-free', async () => {
+    const client = makeClient();
+    arrangeList(client, []);
+    const clock = jest.fn(() => new Date());
+    await expect(
+      makeRepo(client, { tenantId: null, clock }).repo.listResolved({
+        page: 1,
+        limit: 20,
+      }),
+    ).rejects.toThrow();
+    expect(client.humanDecision.findMany).not.toHaveBeenCalled();
+    await makeRepo(client, { clock }).repo.listPending({ page: 1, limit: 20 });
+    expect(clock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { page: 0, limit: 20 },
+    { page: 1, limit: 21 },
+    { page: 1, limit: 20, search: '' },
+  ])('rejects unsafe resolved query %p', async (query) => {
+    const client = makeClient();
+    await expect(
+      makeRepo(client).repo.listResolved(query),
+    ).rejects.toBeInstanceOf(HumanDecisionReviewReadError);
+    expect(client.humanDecision.findMany).not.toHaveBeenCalled();
+    expect(client.humanDecision.count).not.toHaveBeenCalled();
+  });
+});
 
 function arrangeList(
   client: ClientMock,
