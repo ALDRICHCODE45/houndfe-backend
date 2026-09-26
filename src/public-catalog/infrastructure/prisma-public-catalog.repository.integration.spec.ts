@@ -2093,4 +2093,248 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
       expect(await reconcile(items)).toEqual(result);
     });
   });
+
+  // ── Public-catalog card image fallback — real PostgreSQL ───────────────
+  describe('card image fallback — list projections (T3)', () => {
+    const ctx = (tenantId: string, globalPriceListId: string) => ({
+      tenantId,
+      tenantSlug: tenantSlug(tenantId),
+      globalPriceListId,
+      name: 'card-img',
+      isCatalogDefault: true,
+      stockPresentationDefaults: defaultStockPresentation,
+    });
+
+    // Product images cascade with their product — no extra tracking needed.
+    async function seedProductImage(input: {
+      tenantId: string;
+      productId: string;
+      variantId?: string;
+      url: string;
+      isMain: boolean;
+      sortOrder: number;
+    }): Promise<void> {
+      await prisma.productImage.create({
+        data: {
+          id: randomUUID(),
+          tenantId: input.tenantId,
+          productId: input.productId,
+          variantId: input.variantId,
+          url: input.url,
+          isMain: input.isMain,
+          sortOrder: input.sortOrder,
+        },
+      });
+    }
+
+    const imagesByProduct = (
+      rows: Array<{ id: string; images: Array<{ url: string }> }>,
+    ): Map<string, string[]> =>
+      new Map(rows.map((r) => [r.id, r.images.map((i) => i.url)]));
+
+    /** Card image URLs read through BOTH list projections. */
+    async function cardImages(tenantId: string, globalPriceListId: string) {
+      const listed = await repo.listPublicProducts({
+        tenantId,
+        context: ctx(tenantId, globalPriceListId),
+        filters: listParams,
+      });
+      const viaFind = await repo.findProducts({
+        ...listParams,
+        globalPriceListId,
+      });
+      return {
+        listed: imagesByProduct(listed.items),
+        viaFind: imagesByProduct(viaFind.items),
+      };
+    }
+
+    it('both paths pick a main product image, else the lowest-sort product image, never a variant image', async () => {
+      const tenant = (
+        await seedTenant('card', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = tenant;
+      const gSel = await seedGlobalPriceList('card-img');
+      const cdn = (productId: string, name: string) =>
+        `https://cdn.example.com/pc-int-card/${productId}/${name}.jpg`;
+
+      // 1 — a main product image beats a lower-sortOrder sibling.
+      const mainWins = await seedProduct(tenant, 'card-main');
+      await seedProductPrice(tenant, mainWins, gSel, 1000);
+      const mainUrl = cdn(mainWins, 'main');
+      await seedProductImage({
+        tenantId: tenant,
+        productId: mainWins,
+        url: mainUrl,
+        isMain: true,
+        sortOrder: 9,
+      });
+      await seedProductImage({
+        tenantId: tenant,
+        productId: mainWins,
+        url: cdn(mainWins, 'sibling'),
+        isMain: false,
+        sortOrder: 1,
+      });
+
+      // 2 — no main image: the lowest sortOrder product-level image wins.
+      const lowestSort = await seedProduct(tenant, 'card-sort');
+      await seedProductPrice(tenant, lowestSort, gSel, 1100);
+      await seedProductImage({
+        tenantId: tenant,
+        productId: lowestSort,
+        url: cdn(lowestSort, 'seven'),
+        isMain: false,
+        sortOrder: 7,
+      });
+      const lowestSortUrl = cdn(lowestSort, 'two');
+      await seedProductImage({
+        tenantId: tenant,
+        productId: lowestSort,
+        url: lowestSortUrl,
+        isMain: false,
+        sortOrder: 2,
+      });
+
+      // 3 — a main VARIANT image never becomes the card image.
+      const variantNever = await seedProduct(tenant, 'card-var', {
+        variants: true,
+      });
+      const neverPriceRow = await seedProductPrice(
+        tenant,
+        variantNever,
+        gSel,
+        1200,
+      );
+      const neverVariant = await seedVariant(
+        variantNever,
+        tenant,
+        'img',
+        'INHERIT',
+      );
+      await seedVariantPrice(tenant, neverVariant, neverPriceRow, 1250);
+      const productShotUrl = cdn(variantNever, 'product');
+      await seedProductImage({
+        tenantId: tenant,
+        productId: variantNever,
+        url: productShotUrl,
+        isMain: false,
+        sortOrder: 3,
+      });
+      const variantShotUrl = cdn(variantNever, 'variant');
+      await seedProductImage({
+        tenantId: tenant,
+        productId: variantNever,
+        variantId: neverVariant,
+        url: variantShotUrl,
+        isMain: true,
+        sortOrder: 0,
+      });
+
+      // 4 — variant image only: the card stays imageless.
+      const variantOnly = await seedProduct(tenant, 'card-var-only', {
+        variants: true,
+      });
+      const onlyPriceRow = await seedProductPrice(
+        tenant,
+        variantOnly,
+        gSel,
+        1300,
+      );
+      const onlyVariant = await seedVariant(
+        variantOnly,
+        tenant,
+        'img-only',
+        'INHERIT',
+      );
+      await seedVariantPrice(tenant, onlyVariant, onlyPriceRow, 1350);
+      const onlyVariantShotUrl = cdn(variantOnly, 'variant-only');
+      await seedProductImage({
+        tenantId: tenant,
+        productId: variantOnly,
+        variantId: onlyVariant,
+        url: onlyVariantShotUrl,
+        isMain: true,
+        sortOrder: 0,
+      });
+
+      const { listed, viaFind } = await cardImages(tenant, gSel);
+
+      // Both projections returned the fixture products (eligibility intact).
+      for (const id of [mainWins, lowestSort, variantNever, variantOnly]) {
+        expect(listed.has(id)).toBe(true);
+        expect(viaFind.has(id)).toBe(true);
+      }
+
+      // Parity on every case, and identical behavior across both paths.
+      expect(listed.get(mainWins)).toEqual([mainUrl]);
+      expect(viaFind.get(mainWins)).toEqual([mainUrl]);
+      expect(listed.get(lowestSort)).toEqual([lowestSortUrl]);
+      expect(viaFind.get(lowestSort)).toEqual([lowestSortUrl]);
+      expect(listed.get(variantNever)).toEqual([productShotUrl]);
+      expect(viaFind.get(variantNever)).toEqual([productShotUrl]);
+      expect(listed.get(variantOnly)).toEqual([]);
+      expect(viaFind.get(variantOnly)).toEqual([]);
+
+      // A variant image URL never reaches a card projection.
+      for (const url of [variantShotUrl, onlyVariantShotUrl]) {
+        expect(JSON.stringify(listed.get(variantNever))).not.toContain(url);
+        expect(JSON.stringify(listed.get(variantOnly))).not.toContain(url);
+        expect(JSON.stringify(viaFind.get(variantNever))).not.toContain(url);
+        expect(JSON.stringify(viaFind.get(variantOnly))).not.toContain(url);
+      }
+    });
+
+    it('falls back to the lowest-sort product image in both paths after the product main image is unmarked', async () => {
+      const tenant = (
+        await seedTenant('card-un', { isActive: true, catalogPublished: true })
+      ).id;
+      currentTenantId = tenant;
+      const gSel = await seedGlobalPriceList('card-un');
+      const product = await seedProduct(tenant, 'unmark');
+      await seedProductPrice(tenant, product, gSel, 1400);
+      const cdn = (name: string) =>
+        `https://cdn.example.com/pc-int-card/${product}/${name}.jpg`;
+      const mainUrl = cdn('main');
+      const fiveUrl = cdn('five');
+      const twoUrl = cdn('two');
+      // Main carries the HIGHEST sortOrder so the fallback target is
+      // unambiguously different from the pre-unmark main image.
+      await seedProductImage({
+        tenantId: tenant,
+        productId: product,
+        url: mainUrl,
+        isMain: true,
+        sortOrder: 9,
+      });
+      await seedProductImage({
+        tenantId: tenant,
+        productId: product,
+        url: fiveUrl,
+        isMain: false,
+        sortOrder: 5,
+      });
+      await seedProductImage({
+        tenantId: tenant,
+        productId: product,
+        url: twoUrl,
+        isMain: false,
+        sortOrder: 2,
+      });
+
+      const before = await cardImages(tenant, gSel);
+      expect(before.listed.get(product)).toEqual([mainUrl]);
+      expect(before.viaFind.get(product)).toEqual([mainUrl]);
+
+      // Unmark every product-level main image — no variant image exists.
+      await prisma.productImage.updateMany({
+        where: { productId: product, variantId: null },
+        data: { isMain: false },
+      });
+
+      const after = await cardImages(tenant, gSel);
+      expect(after.listed.get(product)).toEqual([twoUrl]);
+      expect(after.viaFind.get(product)).toEqual([twoUrl]);
+    });
+  });
 });
