@@ -24,8 +24,13 @@
  * Spec: `openspec/changes/low-stock-alerts/specs/notification-config/spec.md`.
  */
 import { BadRequestException } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { NotificationConfigService } from './notification-config.service';
-import type { INotificationConfigRepository } from './domain/notification-config.repository';
+import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import {
+  NOTIFICATION_CONFIG_REPOSITORY,
+  type INotificationConfigRepository,
+} from './domain/notification-config.repository';
 import type { NotificationActionKey } from './domain/notification-config';
 
 function makePort(overrides: Partial<INotificationConfigRepository> = {}) {
@@ -371,5 +376,116 @@ describe('NotificationConfigService.replace — recipient tenant-membership (C.1
 
     expect(tp.getClient).not.toHaveBeenCalled();
     expect(port.replace).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * DTE-1 — `DELIVERY_THANK_YOU` action registration.
+ *
+ * The thank-you email feature adds a sixth, independent flat action key that
+ * stays dormant until a tenant opts in. These tests pin the config policy
+ * only: the action must be accepted by the key allowlist, must never be
+ * inferred as enabled by default, must never be conflated with the shared
+ * staff recipient list, and must not drop unrelated keys re-sent in the same
+ * full-replace payload. No sender, event, or delivery path is exercised here.
+ */
+describe('NotificationConfigService.replace — DELIVERY_THANK_YOU action (DTE-1)', () => {
+  /**
+   * Type-safe DI harness scoped to the DTE-1 tests. The `useValue` providers
+   * let Nest resolve the concrete `NotificationConfigService` (the two
+   * constructor tokens are `NOTIFICATION_CONFIG_REPOSITORY` and
+   * `TenantPrismaService`) without casting the baseline helper's untyped fake.
+   */
+  async function buildService(
+    port: jest.Mocked<INotificationConfigRepository>,
+    tenantPrisma: ReturnType<typeof makeTenantPrismaMock>,
+  ): Promise<NotificationConfigService> {
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        NotificationConfigService,
+        { provide: NOTIFICATION_CONFIG_REPOSITORY, useValue: port },
+        { provide: TenantPrismaService, useValue: tenantPrisma },
+      ],
+    }).compile();
+
+    return moduleRef.get(NotificationConfigService);
+  }
+
+  it('accepts the DELIVERY_THANK_YOU opt-in and delegates to port.replace', async () => {
+    const port = makePort({
+      replace: jest.fn().mockResolvedValue({
+        enabled: true,
+        recipients: [],
+        enabledActions: ['DELIVERY_THANK_YOU'],
+      }),
+    });
+    const svc = await buildService(port, makeTenantPrismaMock());
+
+    const view = await svc.replace({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+
+    expect(port.replace).toHaveBeenCalledWith({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+    expect(view).toEqual({
+      enabled: true,
+      recipients: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+  });
+
+  it('does NOT register the action as a staff recipient (recipients stay empty)', async () => {
+    const port = makePort({
+      replace: jest.fn().mockResolvedValue({
+        enabled: true,
+        recipients: [],
+        enabledActions: ['DELIVERY_THANK_YOU'],
+      }),
+    });
+    const tp = makeTenantPrismaMock();
+    const svc = await buildService(port, tp);
+
+    const view = await svc.replace({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['DELIVERY_THANK_YOU'],
+    });
+
+    expect(port.replace).toHaveBeenCalledWith(
+      expect.objectContaining({ recipientUserIds: [] }),
+    );
+    expect(view.recipients).toEqual([]);
+    // Empty recipients short-circuit the membership query — the action key is
+    // not a userId and must never be looked up as one.
+    expect(tp.getClient).not.toHaveBeenCalled();
+  });
+
+  it('preserves unrelated enabled keys re-sent alongside DELIVERY_THANK_YOU', async () => {
+    const port = makePort({
+      replace: jest.fn().mockResolvedValue({
+        enabled: true,
+        recipients: [],
+        enabledActions: ['LOW_STOCK', 'DELIVERY_THANK_YOU'],
+      }),
+    });
+    const svc = await buildService(port, makeTenantPrismaMock());
+
+    const view = await svc.replace({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['LOW_STOCK', 'DELIVERY_THANK_YOU'],
+    });
+
+    expect(port.replace).toHaveBeenCalledWith({
+      enabled: true,
+      recipientUserIds: [],
+      enabledActions: ['LOW_STOCK', 'DELIVERY_THANK_YOU'],
+    });
+    expect(view.enabledActions).toEqual(['LOW_STOCK', 'DELIVERY_THANK_YOU']);
   });
 });

@@ -63,10 +63,18 @@ export class OutboxPollerService {
       // still UNREGISTERED until pca-3c4c: excluding the type NOW keeps
       // expiry rows safely PENDING (never fire-and-forget published)
       // during the interim, and activation cannot double-claim them
-      // later. The literals stay literal (not imported from the
-      // promotions module) to avoid a shared→feature dependency; each
-      // dedicated poller's own spec pins the matching
-      // `"eventType" = '<literal>'` predicate.
+      // later. DTE-5a adds `delivery.thank_you.notify` for the same
+      // fail-closed reason and one stronger one: the dedicated
+      // delivery-routes poller does NOT claim this type yet (its claim
+      // still scopes to next-stop only) and the shared dispatcher would
+      // misroute it as a next-stop send. Excluding the type NOW keeps any
+      // thank-you row PENDING — never fire-and-forget published and never
+      // misrouted. Claim + awaited dispatcher routing land together in
+      // DTE-5b, at which point that dedicated spec pins the widened
+      // `"eventType" IN (...)` predicate. The literals stay literal (not
+      // imported from the feature modules) to avoid a shared→feature
+      // dependency; each dedicated poller's own spec pins the matching
+      // `"eventType"` predicate.
       const pendingRows = (await tx.$queryRawUnsafe<{ id: string }[]>(
         `
           SELECT id
@@ -74,7 +82,7 @@ export class OutboxPollerService {
           WHERE status = 'PENDING'
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
-            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected')
+            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected')
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED

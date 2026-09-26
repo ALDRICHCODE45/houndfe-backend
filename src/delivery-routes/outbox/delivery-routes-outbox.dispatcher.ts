@@ -1,10 +1,21 @@
 /**
- * DeliveryRoutesOutboxDispatcher — delivery-routes / WU3 (design §5).
+ * DeliveryRoutesOutboxDispatcher — delivery-routes / WU3 + DTE-5b.
  *
  * Receives a claimed `OutboxEvent` row from
- * `DeliveryRoutesOutboxPoller` and **AWAITS**
- * `InngestService.send('delivery/next-stop.notify', payload, idem)`
- * with the idempotency key `${tenantId}:${currentStopId}` (design §8.4).
+ * `DeliveryRoutesOutboxPoller` and **AWAITS** the matching Inngest send
+ * before marking the row `PUBLISHED`: `delivery.next_stop.notify` →
+ * `delivery/next-stop.notify` (payload VERBATIM, `${tenantId}:
+ * ${currentStopId}` idem) and `delivery.thank_you.notify` →
+ * `delivery/thank-you.notify` (ids-only payload parsed through
+ * `parseDeliveryThankYouEventPayload`, `${tenantId}:${saleId}:${stopId}`
+ * idem).
+ *
+ * **Fail-closed routing.** A row is sent ONLY when its `eventType` is
+ * known AND — for thank-you — the parsed `tenantId`/`routeId` agree with
+ * the row's `tenantId`/`aggregateId` and the row's `aggregateType` is
+ * `DeliveryRoute`. An unknown type, malformed payload, or identity
+ * mismatch NEVER reaches Inngest: it throws into the same bounded
+ * retry/backoff path as a send rejection (FAILED at `maxRetries`).
  *
  * **Why AWAIT.** The generic `OutboxDispatcherService` uses
  * `eventEmitter.emit()` which is non-awaitable; a rejected listener
@@ -14,9 +25,9 @@
  * backoff + lastError + row stays PENDING or transitions to FAILED at
  * maxRetries).
  *
- * **No enrichment.** The outbox payload is self-contained at write
- * time — `checkInStop` already loaded the customer name and stamped
- * the address label, and the idempotency seed is computed from
+ * **No enrichment (next-stop).** The outbox payload is self-contained at
+ * write time — `checkInStop` already loaded the customer name and
+ * stamped the address label, and the idempotency seed is computed from
  * `tenantId + currentStopId`. The dispatcher forwards `event.payload`
  * verbatim to Inngest. The Inngest function re-resolves the
  * authoritative email via `ISaleCustomerEmailLookup` at send time, so
@@ -26,15 +37,26 @@
  * ONE Inngest event via the `idempotencyKey` field on the payload
  * (passed as the Inngest `id`). A second check-in on a DIFFERENT stop
  * ⇒ different `currentStopId` ⇒ different idem ⇒ a new Inngest event.
+ * The thank-you route is stable the same way: the same
+ * `tenantId:saleId:stopId` triple always yields the same Inngest id.
  *
  * Spec: design.md §5 (route check-in durable pipeline) + §8.4 (outbox
- * event payload).
+ * event payload) + DTE-4b/DTE-5b thank-you event contract.
  */
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { OutboxEventStatus } from '@prisma/client';
 import { InngestService } from '../../inngest/inngest.service';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import type { DispatchableOutboxEvent } from '../../shared/outbox/outbox.types';
+import {
+  DELIVERY_THANK_YOU_NOTIFY_EVENT,
+  DELIVERY_THANK_YOU_OUTBOX_TYPE,
+  parseDeliveryThankYouEventPayload,
+} from '../inngest/delivery-thank-you.event';
+import {
+  DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
+  DELIVERY_ROUTE_OUTBOX_AGGREGATE_TYPE,
+} from './delivery-route-outbox.types';
 
 export const DELIVERY_ROUTES_OUTBOX_DISPATCHER_MAX_RETRIES = Symbol.for(
   'DeliveryRoutesOutboxDispatcherMaxRetries',
@@ -42,6 +64,13 @@ export const DELIVERY_ROUTES_OUTBOX_DISPATCHER_MAX_RETRIES = Symbol.for(
 
 const DEFAULT_MAX_RETRIES = 5;
 const BACKOFF_BASE_MS = 2_000;
+
+/**
+ * WU3 next-stop Inngest trigger (slash form). The outbox `eventType` is
+ * the dot-form DB claim key (`DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE`); the
+ * two differ on purpose, so this stays literal.
+ */
+const DELIVERY_NEXT_STOP_NOTIFY_INNGEST_EVENT = 'delivery/next-stop.notify';
 
 /**
  * Backoff schedule for `nextAttemptAt` on retry. Index = the
@@ -76,9 +105,11 @@ export class DeliveryRoutesOutboxDispatcher {
   ) {}
 
   /**
-   * Dispatch one claimed outbox row. AWAITS `InngestService.send` and
-   * only marks `PUBLISHED` on resolve. On reject: `markRetry` with
-   * backed-off `nextAttemptAt`, bumped `retryCount`, recorded
+   * Dispatch one claimed outbox row. Resolves the fail-closed route for
+   * the row's `eventType`, AWAITS `InngestService.send` and only marks
+   * `PUBLISHED` on resolve. On reject — or when the row is unroutable
+   * (unknown type, malformed payload, identity mismatch) — `markRetry`
+   * with backed-off `nextAttemptAt`, bumped `retryCount`, recorded
    * `lastError`; at `maxRetries` the row transitions to `FAILED`.
    *
    * The dispatcher manages the failure state itself — never re-throws
@@ -86,13 +117,20 @@ export class DeliveryRoutesOutboxDispatcher {
    * guard, mirroring the low-stock / hr-time-off pattern).
    */
   async dispatch(event: DispatchableOutboxEvent): Promise<void> {
-    const idemKey = computeDeliveryIdempotencyKey(event);
-
     try {
+      // Fail-closed: an unroutable row throws into the retry path below
+      // and NEVER reaches Inngest — no misroute, no silent publish.
+      const route = resolveDeliveryRoutesDispatchRoute(event);
+      if (!route) {
+        throw new Error(
+          'unroutable delivery-routes outbox row — no matching Inngest route',
+        );
+      }
+
       await this.inngestService.send(
-        'delivery/next-stop.notify',
-        event.payload,
-        idemKey,
+        route.eventName,
+        route.payload,
+        route.idempotencyKey,
       );
       await this.markPublished(event);
       this.logger.log(
@@ -101,7 +139,8 @@ export class DeliveryRoutesOutboxDispatcher {
           eventId: event.id,
           tenantId: event.tenantId,
           eventType: event.eventType,
-          idempotencyKey: idemKey,
+          inngestEventName: route.eventName,
+          idempotencyKey: route.idempotencyKey,
         },
       );
     } catch (error) {
@@ -120,7 +159,7 @@ export class DeliveryRoutesOutboxDispatcher {
 
       if (isExhausted) {
         this.logger.error(
-          '[DeliveryRoutesOutboxDispatcher] delivery.next_stop.notify exhausted retries — manual intervention needed',
+          `[DeliveryRoutesOutboxDispatcher] ${event.eventType} exhausted retries — manual intervention needed`,
           {
             eventId: event.id,
             tenantId: event.tenantId,
@@ -239,4 +278,51 @@ export function computeDeliveryIdempotencyKey(
     return `${payload.tenantId}:${payload.currentStopId}`;
   }
   return `${event.tenantId}:${event.aggregateId}`;
+}
+
+/**
+ * Fail-closed router for a claimed delivery-routes row. Returns the
+ * Inngest route (event name + exact payload + stable id) or `null` when
+ * the row MUST NOT be sent: unknown type, malformed thank-you payload,
+ * or tenant/route identity that disagrees with the row.
+ */
+function resolveDeliveryRoutesDispatchRoute(
+  event: DispatchableOutboxEvent,
+): { eventName: string; payload: unknown; idempotencyKey: string } | null {
+  if (event.eventType === DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE) {
+    return {
+      eventName: DELIVERY_NEXT_STOP_NOTIFY_INNGEST_EVENT,
+      payload: event.payload,
+      idempotencyKey: computeDeliveryIdempotencyKey(event),
+    };
+  }
+
+  if (event.eventType !== DELIVERY_THANK_YOU_OUTBOX_TYPE) {
+    return null;
+  }
+
+  const parsed = parseDeliveryThankYouEventPayload(event.payload);
+  if (
+    !parsed ||
+    event.tenantId !== parsed.tenantId ||
+    event.aggregateType !== DELIVERY_ROUTE_OUTBOX_AGGREGATE_TYPE ||
+    event.aggregateId !== parsed.routeId
+  ) {
+    return null;
+  }
+
+  return {
+    eventName: DELIVERY_THANK_YOU_NOTIFY_EVENT,
+    // Ids-only projection — never forward `event.payload` (it may carry
+    // PII); the committed parser already dropped every extra.
+    payload: {
+      tenantId: parsed.tenantId,
+      saleId: parsed.saleId,
+      routeId: parsed.routeId,
+      stopId: parsed.stopId,
+    },
+    // Stable `${tenantId}:${saleId}:${stopId}`: a replay of the same row
+    // collapses to one Inngest event; a different stop stays distinct.
+    idempotencyKey: `${parsed.tenantId}:${parsed.saleId}:${parsed.stopId}`,
+  };
 }

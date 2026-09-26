@@ -4,8 +4,10 @@
  * Covers the use-case orchestration contract (tasks.md 3.12):
  *   - `checkInStop` transaction choreography: stop flip + Sale mirror
  *     (`markSaleDelivered` via the SALE_REPOSITORY port) inside one
- *     `repo.runInTransaction`; the next-stop outbox row is published
- *     inside the SAME transaction when a next stop exists (WU3).
+ *     `repo.runInTransaction`; the next-stop outbox row (WU3) and the
+ *     ids-only `delivery.thank_you.notify` row (DTE-6) are published
+ *     inside the SAME transaction — next-stop first, thank-you after,
+ *     the thank-you row also on the LAST stop.
  *   - `list` driver-only scoping via `request.ability.can('create',
  *     'DeliveryRoute')`.
  *   - `start` eligible → proceeds / DB conflict (P2002 race) →
@@ -29,7 +31,10 @@ import {
   type DeliveryRouteReadModel,
   type IDeliveryRouteRepository,
 } from '../domain/delivery-route.repository';
-import { SALE_REPOSITORY, type ISaleRepository } from '../../sales/domain/sale.repository';
+import {
+  SALE_REPOSITORY,
+  type ISaleRepository,
+} from '../../sales/domain/sale.repository';
 import { SaleNotDeliverableError } from '../../sales/domain/sale.errors';
 import {
   ROUTE_OPTIMIZER,
@@ -50,9 +55,10 @@ import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interf
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import {
+  DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
   computeDeliveryNextStopIdempotencyKey,
-  type DeliveryNextStopNotifyPayload,
 } from '../outbox/delivery-route-outbox.types';
+import { DELIVERY_THANK_YOU_OUTBOX_TYPE } from '../inngest/delivery-thank-you.event';
 
 const TENANT_ID = 'tenant-1';
 const OTHER_TENANT_ID = 'tenant-2';
@@ -94,7 +100,11 @@ const readModelFor = (route: DeliveryRoute): DeliveryRouteReadModel => ({
   notes: route.notes,
   createdAt: route.createdAt,
   updatedAt: route.updatedAt,
-  driver: { id: route.driverUserId, name: 'Driver One', email: 'driver@example.com' },
+  driver: {
+    id: route.driverUserId,
+    name: 'Driver One',
+    email: 'driver@example.com',
+  },
   stops: route.stops.map((stop) => ({
     id: stop.id,
     saleId: stop.saleId,
@@ -237,10 +247,29 @@ const makeService = (
   return { service, repo, saleRepo, cls, tx, txPrisma, outboxWriter };
 };
 
-const makeCtx = (can: jest.Mock = jest.fn(() => false)): DeliveryRouteRequestContext => ({
+const makeCtx = (
+  can: jest.Mock = jest.fn(() => false),
+): DeliveryRouteRequestContext => ({
   userId: USER_ID,
   ability: { can } as unknown as AppAbility,
 });
+
+/** The mocked outbox seam shared by the plain-mock specs. */
+type DeliveryRoutesOutboxWriter = jest.Mocked<
+  Pick<OutboxWriterService, 'publish'>
+>;
+
+/** Publish calls for the WU3 next-stop row (order preserved). */
+const nextStopPublishes = (writer: DeliveryRoutesOutboxWriter) =>
+  writer.publish.mock.calls.filter(
+    (call) => call[4] === DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
+  );
+
+/** Publish calls for the DTE-6 thank-you row (order preserved). */
+const thankYouPublishes = (writer: DeliveryRoutesOutboxWriter) =>
+  writer.publish.mock.calls.filter(
+    (call) => call[4] === DELIVERY_THANK_YOU_OUTBOX_TYPE,
+  );
 
 // ───────────────────────────────────────────────────────────────────────
 // ODD O1 — stateful concurrency harness.
@@ -334,8 +363,10 @@ class InMemoryDeliveryRouteStore {
   /** Makes every conditional commit report `stale` (budget-exhaustion path). */
   forceStaleCommits = false;
   readonly outboxRows: Array<{
-    idempotencyKey: string;
-    currentStopId: string;
+    eventType: string;
+    aggregateType: string;
+    aggregateId: string;
+    payload: Record<string, unknown>;
   }> = [];
 
   constructor(route: DeliveryRoute) {
@@ -363,11 +394,31 @@ class InMemoryDeliveryRouteStore {
 
   outboxKeysFor(stopId: string): string[] {
     return this.outboxRows
-      .filter((row) => row.currentStopId === stopId)
-      .map((row) => row.idempotencyKey);
+      .filter(
+        (row) =>
+          row.eventType === DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE &&
+          row.payload.currentStopId === stopId,
+      )
+      .map((row) => row.payload.idempotencyKey as string);
   }
 
-  recordOutbox(row: { idempotencyKey: string; currentStopId: string }): void {
+  /** Ids-only thank-you payloads recorded for one completed stop. */
+  thankYouRowsFor(stopId: string): Array<Record<string, unknown>> {
+    return this.outboxRows
+      .filter(
+        (row) =>
+          row.eventType === DELIVERY_THANK_YOU_OUTBOX_TYPE &&
+          row.payload.stopId === stopId,
+      )
+      .map((row) => row.payload);
+  }
+
+  recordOutbox(row: {
+    eventType: string;
+    aggregateType: string;
+    aggregateId: string;
+    payload: Record<string, unknown>;
+  }): void {
     if (!this.externalWriterActive) {
       this.txJournal?.push({
         kind: 'outbox',
@@ -624,11 +675,29 @@ const runCompetingCheckIn = async (
   }
   if (wasPending && checkIn.nextStop) {
     store.recordOutbox({
-      idempotencyKey: computeDeliveryNextStopIdempotencyKey({
-        tenantId: TENANT_ID,
+      eventType: DELIVERY_NEXT_STOP_NOTIFY_EVENT_TYPE,
+      aggregateType: 'DeliveryRoute',
+      aggregateId: routeId,
+      payload: {
+        idempotencyKey: computeDeliveryNextStopIdempotencyKey({
+          tenantId: TENANT_ID,
+          currentStopId: checkIn.completedStop.id,
+        }),
         currentStopId: checkIn.completedStop.id,
-      }),
-      currentStopId: checkIn.completedStop.id,
+      },
+    });
+  }
+  if (wasPending) {
+    store.recordOutbox({
+      eventType: DELIVERY_THANK_YOU_OUTBOX_TYPE,
+      aggregateType: 'DeliveryRoute',
+      aggregateId: routeId,
+      payload: {
+        tenantId: TENANT_ID,
+        saleId: checkIn.completedStop.saleId,
+        routeId,
+        stopId: checkIn.completedStop.id,
+      },
     });
   }
 };
@@ -654,8 +723,12 @@ const runCompetingCancel = async (
   }
 };
 
-/** Wire the stateful store into the service under test. */
-const makeStoreService = (store: InMemoryDeliveryRouteStore) => {
+/** Wire the stateful store into the service under test. `failOnEventType`
+ *  lets a spec force a publish rejection to exercise tx rollback. */
+const makeStoreService = (
+  store: InMemoryDeliveryRouteStore,
+  overrides: { failOnEventType?: string } = {},
+) => {
   const built = makeService({
     repo: {
       save: (route: DeliveryRoute) => store.save(route),
@@ -676,11 +749,16 @@ const makeStoreService = (store: InMemoryDeliveryRouteStore) => {
     },
     outboxWriter: {
       publish: ((...args: unknown[]) => {
-        const payload = args[5] as DeliveryNextStopNotifyPayload;
+        const eventType = args[4] as string;
         store.recordOutbox({
-          idempotencyKey: payload.idempotencyKey,
-          currentStopId: payload.currentStopId,
+          eventType,
+          aggregateType: args[2] as string,
+          aggregateId: args[3] as string,
+          payload: args[5] as Record<string, unknown>,
         });
+        if (overrides.failOnEventType === eventType) {
+          throw new Error(`outbox publish failed for ${eventType}`);
+        }
       }) as unknown as OutboxWriterService['publish'],
     },
   });
@@ -735,9 +813,16 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
       expect(route.stops[0].status).toBe('COMPLETED');
       expect(route.status).toBe('ACTIVE');
 
-      // Outbox row published EXACTLY ONCE with the correct aggregate keys.
-      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      // TWO rows in the SAME transaction: the next-stop row FIRST, then the
+      // ids-only thank-you row for the stop just completed.
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(2);
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(1);
+      expect(thankYouPublishes(outboxWriter)).toHaveLength(1);
+      expect(outboxWriter.publish.mock.invocationCallOrder[0]).toBeLessThan(
+        outboxWriter.publish.mock.invocationCallOrder[1],
+      );
       const callArgs = outboxWriter.publish.mock.calls[0];
+      expect(callArgs[4]).toBe('delivery.next_stop.notify');
       expect(callArgs[0]).toEqual(txPrisma); // tx client (same as the runInTransaction callback's tx)
       expect(callArgs[1]).toBe(TENANT_ID);
       expect(callArgs[2]).toBe('DeliveryRoute');
@@ -763,16 +848,36 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
       expect(payload.nextCustomerName).toBe('Ada Lovelace');
       expect(payload.nextCustomerEmail).toBe('sale-2@example.com');
       expect(payload.nextAddressLabel).toContain('Av. Reforma');
-      expect(payload.idempotencyKey).toBe(
-        `${TENANT_ID}:${route.stops[0].id}`,
-      );
+      expect(payload.idempotencyKey).toBe(`${TENANT_ID}:${route.stops[0].id}`);
       expect(typeof payload.occurredAt).toBe('string');
+
+      // Thank-you row: SAME tx, SAME aggregate, committed ids-only contract.
+      const thankYouCall = outboxWriter.publish.mock.calls[1];
+      expect(thankYouCall[0]).toEqual(txPrisma);
+      expect(thankYouCall[1]).toBe(TENANT_ID);
+      expect(thankYouCall[2]).toBe('DeliveryRoute');
+      expect(thankYouCall[3]).toBe(route.id);
+      expect(thankYouCall[4]).toBe(DELIVERY_THANK_YOU_OUTBOX_TYPE);
+      const thankYouPayload = thankYouCall[5];
+      expect(thankYouPayload).toEqual({
+        tenantId: TENANT_ID,
+        saleId: 'sale-1',
+        routeId: route.id,
+        stopId: route.stops[0].id,
+      });
+      // Ids only — no email, name, amount or address may ride the event.
+      expect(Object.keys(thankYouPayload as object).sort()).toEqual([
+        'routeId',
+        'saleId',
+        'stopId',
+        'tenantId',
+      ]);
 
       expect(dto.status).toBe('ACTIVE');
       expect(dto.timeline.length).toBeGreaterThan(0);
     });
 
-    it('Given an ACTIVE route, when its last stop is checked in, then the route auto-completes and NO outbox row is emitted (no next stop)', async () => {
+    it('Given an ACTIVE route, when its last stop is checked in, then the route auto-completes and emits EXACTLY ONE thank-you row (no next stop)', async () => {
       const route = await makeRoute(['sale-1'], 'ACTIVE');
       const { service, repo, saleRepo, outboxWriter } = makeService({
         repo: {
@@ -781,18 +886,32 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
         },
       });
 
-      const dto = await service.checkInStop(makeCtx(), route.id, route.stops[0].id);
+      const dto = await service.checkInStop(
+        makeCtx(),
+        route.id,
+        route.stops[0].id,
+      );
 
       expect(route.status).toBe('COMPLETED');
       expect(saleRepo.markSaleDelivered).toHaveBeenCalledTimes(1);
       expect(repo.commitTransition).toHaveBeenCalledTimes(1);
       expect(repo.save).not.toHaveBeenCalled();
-      // No next stop ⇒ no outbox row.
-      expect(outboxWriter.publish).not.toHaveBeenCalled();
+      // No next stop ⇒ no next-stop row, but the last stop STILL gets
+      // exactly one ids-only thank-you row in the same transaction.
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(0);
+      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      const thankYouCall = outboxWriter.publish.mock.calls[0];
+      expect(thankYouCall[4]).toBe(DELIVERY_THANK_YOU_OUTBOX_TYPE);
+      expect(thankYouCall[5]).toEqual({
+        tenantId: TENANT_ID,
+        saleId: 'sale-1',
+        routeId: route.id,
+        stopId: route.stops[0].id,
+      });
       expect(dto.status).toBe('COMPLETED');
     });
 
-    it('Given a check-in replay (already-COMPLETED stop), when the service is called again, then the aggregate is a no-op AND no second outbox row is published', async () => {
+    it('Given a check-in replay (already-COMPLETED stop), when the service is called again, then the aggregate is a no-op AND neither the next-stop nor the thank-you row is duplicated', async () => {
       const route = await makeRoute(['sale-1', 'sale-2'], 'ACTIVE');
       const { service, outboxWriter } = makeService({
         repo: {
@@ -802,12 +921,15 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
       });
 
       await service.checkInStop(makeCtx(), route.id, route.stops[0].id);
-      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(1);
+      expect(thankYouPublishes(outboxWriter)).toHaveLength(1);
 
       // Second call on the SAME already-COMPLETED stop — aggregate
-      // returns the existing state (idempotent) and emits no second row.
+      // returns the existing state (idempotent) and emits no second row of
+      // either type (the producer is gated on `wasPending`).
       await service.checkInStop(makeCtx(), route.id, route.stops[0].id);
-      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(1);
+      expect(thankYouPublishes(outboxWriter)).toHaveLength(1);
     });
 
     it('Given a vanished sale (the conditional write classified `missing`), when a stop is checked in, then the service maps it to DeliveryRouteNotFoundError (404 semantics) and the outbox row is NOT published', async () => {
@@ -894,7 +1016,8 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
         },
       );
       expect(repo.commitTransition).toHaveBeenCalledTimes(1);
-      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(1);
+      expect(thankYouPublishes(outboxWriter)).toHaveLength(1);
     });
 
     it('Given a route missing inside the transaction, when a stop is checked in, then the service throws DeliveryRouteNotFoundError and nothing is persisted', async () => {
@@ -928,7 +1051,10 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
 
     it('Given an ACTIVE route, when the next sale has no customer (null projection), then the outbox row still publishes with `nextCustomerName: null`', async () => {
       const route = await makeRoute(['sale-1', 'sale-2'], 'ACTIVE');
-      const projectionMap = new Map<string, ReturnType<typeof saleProjection> | null>();
+      const projectionMap = new Map<
+        string,
+        ReturnType<typeof saleProjection> | null
+      >();
       projectionMap.set('sale-2', {
         folio: 'F-2',
         customer: null,
@@ -944,7 +1070,7 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
 
       await service.checkInStop(makeCtx(), route.id, route.stops[0].id);
 
-      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(1);
       const payload = (outboxWriter.publish.mock.calls[0] as unknown[])[5] as {
         nextCustomerName: string | null;
         nextCustomerEmail: string | null;
@@ -1023,7 +1149,7 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
 
       await service.checkInStop(makeCtx(), route.id, route.stops[0].id);
 
-      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(1);
       const payload = (outboxWriter.publish.mock.calls[0] as unknown[])[5] as {
         nextCustomerName: string | null;
         nextCustomerEmail: string | null;
@@ -1054,7 +1180,7 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
 
       await service.checkInStop(makeCtx(), route.id, route.stops[0].id);
 
-      expect(outboxWriter.publish).toHaveBeenCalledTimes(1);
+      expect(nextStopPublishes(outboxWriter)).toHaveLength(1);
       const payload = (outboxWriter.publish.mock.calls[0] as unknown[])[5] as {
         nextCustomerName: string | null;
         nextCustomerEmail: string | null;
@@ -1284,10 +1410,29 @@ describe('DeliveryRoutesService — concurrent stale-snapshot interleavings (ODD
       false,
       true,
     ]);
-    // One next-stop row per completed stop, each under its own idempotency key.
-    expect(store.outboxRows.map((row) => row.idempotencyKey)).toEqual([
+    // One next-stop row AND one ids-only thank-you row per completed stop, each
+    // under its own idempotency key; the loser wrote nothing.
+    expect(store.outboxKeysFor(route.stops[0].id)).toEqual([
       `${TENANT_ID}:${route.stops[0].id}`,
+    ]);
+    expect(store.outboxKeysFor(route.stops[1].id)).toEqual([
       `${TENANT_ID}:${route.stops[1].id}`,
+    ]);
+    expect(store.thankYouRowsFor(route.stops[0].id)).toEqual([
+      {
+        tenantId: TENANT_ID,
+        saleId: 'sale-1',
+        routeId: route.id,
+        stopId: route.stops[0].id,
+      },
+    ]);
+    expect(store.thankYouRowsFor(route.stops[1].id)).toEqual([
+      {
+        tenantId: TENANT_ID,
+        saleId: 'sale-2',
+        routeId: route.id,
+        stopId: route.stops[1].id,
+      },
     ]);
     // The stale attempt was re-evaluated against freshly persisted state.
     expect(store.commitAttempts).toBeGreaterThan(1);
@@ -1318,11 +1463,43 @@ describe('DeliveryRoutesService — concurrent stale-snapshot interleavings (ODD
       'COMPLETED',
       'PENDING',
     ]);
-    // Exactly ONE persistent side effect for one stop transition: the
-    // winner's row. The replay must not append a duplicate.
+    // Exactly ONE persistent side effect pair for one stop transition: the
+    // winner's next-stop + thank-you rows. The replay must append neither.
     expect(store.outboxKeysFor(route.stops[0].id)).toEqual([
       `${TENANT_ID}:${route.stops[0].id}`,
     ]);
+    expect(store.thankYouRowsFor(route.stops[0].id)).toEqual([
+      {
+        tenantId: TENANT_ID,
+        saleId: 'sale-1',
+        routeId: route.id,
+        stopId: route.stops[0].id,
+      },
+    ]);
+  });
+
+  it('Given a failing thank-you publish, when the check-in transaction aborts, then the stop flip AND the already-published next-stop row roll back together', async () => {
+    const route = await makeRoute(['sale-1', 'sale-2'], 'ACTIVE');
+    const store = new InMemoryDeliveryRouteStore(route);
+    const { service } = makeStoreService(store, {
+      failOnEventType: DELIVERY_THANK_YOU_OUTBOX_TYPE,
+    });
+
+    const error = await service
+      .checkInStop(makeCtx(), route.id, route.stops[0].id)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/outbox publish failed/);
+    // The next-stop row was published BEFORE the thank-you row, yet the
+    // shared transaction rollback removes it along with the stop flip.
+    const persisted = store.persistedRows();
+    expect(persisted.stops.map((stop) => stop.status)).toEqual([
+      'PENDING',
+      'PENDING',
+    ]);
+    expect(persisted.route.status).toBe('ACTIVE');
+    expect(store.outboxRows).toHaveLength(0);
   });
 
   it('Given a cancellation that already won, when the stale check-in re-evaluates, then it fails with DELIVERY_ROUTE_INVALID_TRANSITION (422) before any sale, route, stop or outbox write', async () => {

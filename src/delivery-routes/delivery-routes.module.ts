@@ -25,7 +25,12 @@
  * the registry slot empty so the `DeliveryRoute` resolver is the only
  * addition at the auth boundary.
  */
-import { Inject, Injectable, Module, OnApplicationBootstrap } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Module,
+  OnApplicationBootstrap,
+} from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { SalesModule } from '../sales/sales.module';
 import { OutboxModule } from '../shared/outbox/outbox.module';
@@ -34,11 +39,13 @@ import { DeliveryRoutesService } from './application/delivery-routes.service';
 import { PrismaDeliveryRouteRepository } from './infrastructure/prisma-delivery-route.repository';
 import { ManualRouteOptimizer } from './infrastructure/manual-route-optimizer';
 import { PrismaSaleCustomerEmailRepository } from './infrastructure/prisma-sale-customer-email.repository';
+import { PrismaSaleDeliverySummaryRepository } from './infrastructure/prisma-sale-delivery-summary.repository';
+import { PrismaSaleDeliveryStopProvenanceRepository } from './infrastructure/prisma-sale-delivery-stop-provenance.repository';
 import { DELIVERY_ROUTE_REPOSITORY } from './domain/delivery-route.repository';
 import { ROUTE_OPTIMIZER } from './domain/ports/route-optimizer.port';
-import {
-  SALE_CUSTOMER_EMAIL_LOOKUP,
-} from './domain/ports/sale-customer-email.port';
+import { SALE_CUSTOMER_EMAIL_LOOKUP } from './domain/ports/sale-customer-email.port';
+import { SALE_DELIVERY_SUMMARY_READER } from './domain/ports/sale-delivery-summary.port';
+import { SALE_DELIVERY_STOP_PROVENANCE } from './domain/ports/sale-delivery-stop-provenance.port';
 import {
   SubjectInstanceResolver,
   SubjectInstanceResolverRegistry,
@@ -104,6 +111,23 @@ class DeliveryRouteSubjectResolverRegistrar implements OnApplicationBootstrap {
       provide: SALE_CUSTOMER_EMAIL_LOOKUP,
       useClass: PrismaSaleCustomerEmailRepository,
     },
+    // DTE-2 — expose the delivered-sale summary projection so the future
+    // customer thank-you Inngest registrar (AppModule scope) can inject
+    // it. Like the email lookup above, the adapter uses PrismaService
+    // directly because the Inngest handler opens its own CLS scope.
+    {
+      provide: SALE_DELIVERY_SUMMARY_READER,
+      useClass: PrismaSaleDeliverySummaryRepository,
+    },
+    // DTE-4a.proof — tenant-qualified completed-route-stop proof. A
+    // sale's own `deliveryStatus` defaults to DELIVERED for POS, so the
+    // thank-you handler needs this separate provenance read before it
+    // may treat the sale as route-delivered. Dormant here: the provider
+    // and export exist, no handler or registrar consumes it yet.
+    {
+      provide: SALE_DELIVERY_STOP_PROVENANCE,
+      useClass: PrismaSaleDeliveryStopProvenanceRepository,
+    },
     {
       // Side-effect provider: registers the DeliveryRoute subject-
       // instance resolver into the static registry at
@@ -116,6 +140,8 @@ class DeliveryRouteSubjectResolverRegistrar implements OnApplicationBootstrap {
   exports: [
     DeliveryRoutesService,
     SALE_CUSTOMER_EMAIL_LOOKUP,
+    SALE_DELIVERY_SUMMARY_READER,
+    SALE_DELIVERY_STOP_PROVENANCE,
   ],
 })
 export class DeliveryRoutesModule {}

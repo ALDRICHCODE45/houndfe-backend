@@ -66,6 +66,10 @@ import { DeliveryRoutesOutboxModule } from './delivery-routes/outbox/delivery-ro
 // WU3 - registers the delivery-next-stop-notify Inngest function.
 // Top-level provider so the dep graph resolves through AppModule.
 import { DeliveryRoutesInngestRegistrar } from './delivery-routes/inngest/delivery-routes-inngest-registrar';
+// DTE-4e.registration - registers the delivery-thank-you-notify Inngest
+// function (customer email). Separate top-level provider from the
+// next-stop registrar; both live at AppModule scope with distinct ids.
+import { DeliveryThankYouInngestRegistrar } from './delivery-routes/inngest/delivery-thank-you-inngest-registrar';
 // online-catalog-publishing / WU3A3 - catalog-settings bounded context
 // (GET /tenants/:tenantId/catalog-settings). Hexagonal wiring mirrors
 // SatCatalogModule / NotificationConfigModule.
@@ -201,6 +205,10 @@ import { AnalyticsModule } from './analytics/analytics.module';
     // delivery-next-stop-notify event. Same registration pattern as
     // the low-stock / hr-time-off registrars.
     DeliveryRoutesInngestRegistrar,
+    // delivery-routes / DTE-4e.registration — Inngest function registrar
+    // for the delivery/thank-you.notify event. Same registration pattern,
+    // distinct id, so it coexists with the next-stop registrar.
+    DeliveryThankYouInngestRegistrar,
     // pca-3b4c — Inngest function registrar for the
     // promotion.near_capacity.detected event. Same registration pattern
     // as the low-stock / hr-time-off / delivery-routes registrars.

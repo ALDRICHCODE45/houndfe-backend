@@ -1,0 +1,21 @@
+-- delivery-thank-you-email / DTE-1 — register DELIVERY_THANK_YOU in the
+-- NotificationActionKey enum.
+--
+-- Standalone ALTER TYPE ADD VALUE, mirroring
+-- 20260922181100_add_promotion_expiring_action and
+-- 20260922181200_add_promotion_near_capacity_action. ADD VALUE cannot share a
+-- statement batch with other DDL/DML, so this migration MUST stay a single,
+-- atomic statement — nothing before or after.
+--
+-- Dormant slice: this migration only widens the enum so a tenant can opt in
+-- through PUT /notification-config. It writes no rows, seeds no action, sends
+-- no email, and creates no producer, event, poller, or Inngest function. The
+-- action stays disabled until a tenant explicitly enables it, and no
+-- NotificationConfig.recipients row is written for it.
+--
+-- Rollback: PostgreSQL cannot remove an enum value in place, so there is no
+-- automatic down-migration for this file. Removing 'DELIVERY_THANK_YOU' would
+-- require recreating the type and every dependent column. The value is
+-- therefore intentionally left in place if this migration is reverted; with
+-- no seeded rows and no sender, an unused value stays inert.
+ALTER TYPE "NotificationActionKey" ADD VALUE IF NOT EXISTS 'DELIVERY_THANK_YOU';
