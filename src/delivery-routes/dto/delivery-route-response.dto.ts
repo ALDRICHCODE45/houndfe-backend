@@ -88,6 +88,8 @@ export interface DeliveryRouteShippingAddressDto {
   city: string | null;
   state: string | null;
   label: string | null;
+  latitude: number | null;
+  longitude: number | null;
 }
 
 export interface DeliveryRouteStopDto {

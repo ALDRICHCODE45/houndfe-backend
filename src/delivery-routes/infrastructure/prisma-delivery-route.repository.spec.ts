@@ -106,6 +106,8 @@ type AddressRow = {
   city: string | null;
   state: string | null;
   label: string | null;
+  latitude: number | null;
+  longitude: number | null;
 };
 
 /** A stop row after its nested `sale` relation has been resolved. */
@@ -786,6 +788,8 @@ const NESTED_SALE_SELECT = {
       city: true,
       state: true,
       label: true,
+      latitude: true,
+      longitude: true,
     },
   },
 };
@@ -802,6 +806,8 @@ const EXPECTED_ADDRESS = {
   city: 'CDMX',
   state: 'CDMX',
   label: 'Home',
+  latitude: 0,
+  longitude: 0,
 };
 
 /** Seed the nested to-one rows the double resolves for `stops.include.sale`.
@@ -824,6 +830,8 @@ const seedSaleGraph = (
       tenantId?: string;
       street?: string;
       label?: string | null;
+      latitude?: number | null;
+      longitude?: number | null;
     } | null;
   },
 ): void => {
@@ -866,6 +874,8 @@ const seedSaleGraph = (
         city: 'CDMX',
         state: 'CDMX',
         label: address.label ?? 'Home',
+        latitude: address.latitude === undefined ? 0 : address.latitude,
+        longitude: address.longitude === undefined ? 0 : address.longitude,
       },
     ];
   }
@@ -995,6 +1005,25 @@ describe.each(READ_METHODS)(
       expect(stop.shippingAddress).toBeNull();
     });
 
+    it('projects unknown coordinates as null without losing the address', async () => {
+      const route = await makeActiveRoute(['sale-1']);
+      const client = new FakePrismaTransactionClient();
+      seed(client, route);
+      seedSaleGraph(client, {
+        saleId: 'sale-1',
+        address: {
+          id: 'address-1',
+          latitude: null,
+          longitude: null,
+        },
+      });
+      const read = await readSoleRoute(method, makeRepo(client), route.id);
+      expect(read.stops[0].shippingAddress).toMatchObject({
+        latitude: null,
+        longitude: null,
+      });
+    });
+
     it('Given a fully same-tenant nested graph, when the route is read, then the sale, customer and address projections are unchanged', async () => {
       const route = await makeActiveRoute(['sale-1']);
       const client = new FakePrismaTransactionClient();
@@ -1039,9 +1068,7 @@ describe('PrismaDeliveryRouteRepository nested sale select projection (delivery-
 
     // The detail read: the full nested projection is requested verbatim.
     expect(
-      nestedSaleSelectOf(
-        client.routeIncludes[client.routeIncludes.length - 1],
-      ),
+      nestedSaleSelectOf(client.routeIncludes[client.routeIncludes.length - 1]),
     ).toEqual(NESTED_SALE_SELECT);
     // The list read: the same projection, so neither read can drift.
     expect(

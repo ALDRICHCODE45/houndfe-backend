@@ -70,8 +70,10 @@ export class CustomersService {
             municipality: addr.municipality?.trim() || null,
             city: addr.city?.trim() || null,
             state: addr.state ?? null,
+            latitude: addr.latitude ?? null,
+            longitude: addr.longitude ?? null,
             tenantId,
-          })) as Prisma.CustomerAddressCreateManyInput[],
+          })),
         });
       }
     });
@@ -204,8 +206,10 @@ export class CustomersService {
         municipality: dto.municipality?.trim() || null,
         city: dto.city?.trim() || null,
         state: dto.state ?? null,
+        latitude: dto.latitude ?? null,
+        longitude: dto.longitude ?? null,
         tenantId,
-      } as Prisma.CustomerAddressUncheckedCreateInput,
+      },
     });
   }
 
@@ -252,6 +256,9 @@ export class CustomersService {
           : {}),
         ...(dto.city !== undefined ? { city: dto.city?.trim() || null } : {}),
         ...(dto.state !== undefined ? { state: dto.state || null } : {}),
+        ...(dto.latitude !== undefined
+          ? { latitude: dto.latitude, longitude: dto.longitude }
+          : {}),
       },
     });
   }

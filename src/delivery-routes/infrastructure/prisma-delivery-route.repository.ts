@@ -100,6 +100,8 @@ const STOP_SALE_SELECT = {
       city: true,
       state: true,
       label: true,
+      latitude: true,
+      longitude: true,
     },
   },
 } satisfies Prisma.SaleSelect;
@@ -179,6 +181,8 @@ function mapRouteStopReadModel(
           city: shippingAddress.city,
           state: shippingAddress.state,
           label: shippingAddress.label,
+          latitude: shippingAddress.latitude,
+          longitude: shippingAddress.longitude,
         }
       : null,
   };

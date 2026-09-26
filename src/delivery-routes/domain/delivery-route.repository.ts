@@ -117,6 +117,8 @@ export interface DeliveryRouteReadModel {
       city: string | null;
       state: string | null;
       label: string | null;
+      latitude: number | null;
+      longitude: number | null;
     } | null;
   }>;
 }
@@ -157,7 +159,10 @@ export interface IDeliveryRouteRepository {
   }): Promise<DeliveryRouteTransitionOutcome>;
 
   /** Tenant-scoped find by id. Returns null on cross-tenant or missing. */
-  findById(input: { tenantId: string; id: string }): Promise<DeliveryRoute | null>;
+  findById(input: {
+    tenantId: string;
+    id: string;
+  }): Promise<DeliveryRoute | null>;
 
   /** Projected read model used by the detail endpoint. null on miss. */
   findOneWithStops(input: {
@@ -198,7 +203,7 @@ export interface IDeliveryRouteRepository {
    *  inside the supplied transaction (FOR UPDATE SKIP LOCKED). */
   claimNextOutboxEvent(
     tx: import('@prisma/client').Prisma.TransactionClient,
-  ): Promise<unknown | null>;
+  ): Promise<unknown>;
 
   /** Mark a claimed outbox event as PUBLISHED (CAS via `lockToken`). */
   markOutboxEventSent(input: {
@@ -216,5 +221,7 @@ export interface IDeliveryRouteRepository {
   /** Session-scoped accessor so the service can compose writes against
    *  the ambient Prisma transaction client (mirrors `TenantPrismaService.
    *  getClient()`). Returns `null` when not inside a transaction. */
-  getTransactionClient(): import('@prisma/client').Prisma.TransactionClient | null;
+  getTransactionClient():
+    | import('@prisma/client').Prisma.TransactionClient
+    | null;
 }
