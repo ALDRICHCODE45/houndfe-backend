@@ -33,20 +33,22 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
   let mockFindMany: jest.Mock;
   let mockCount: jest.Mock;
   let mockTenantFindMany: jest.Mock;
+  let mockTenantGetClient: jest.Mock;
 
   beforeEach(() => {
     mockFindMany = jest.fn();
     mockCount = jest.fn();
     mockTenantFindMany = jest.fn().mockResolvedValue([]);
 
+    mockTenantGetClient = jest.fn(() => ({
+      product: {
+        findMany: mockFindMany,
+        count: mockCount,
+        groupBy: jest.fn().mockResolvedValue([]),
+      },
+    }));
     const mockTenantPrisma = {
-      getClient: () => ({
-        product: {
-          findMany: mockFindMany,
-          count: mockCount,
-          groupBy: jest.fn().mockResolvedValue([]),
-        },
-      }),
+      getClient: mockTenantGetClient,
     } as unknown as TenantPrismaService;
 
     const mockPrisma = {
@@ -154,6 +156,136 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
           },
         },
       ]),
+    );
+  });
+
+  describe('chatbot-only integer mg spacing', () => {
+    function textPredicates(q: string) {
+      const text = { contains: q, mode: 'insensitive' };
+      return [
+        { name: text },
+        { brand: { name: text } },
+        {
+          variants: {
+            some: {
+              catalogPublishMode: { not: 'OFF' },
+              OR: [{ name: text }, { option: text }, { value: text }],
+            },
+          },
+        },
+      ];
+    }
+
+    it.each([
+      ['ibuprofeno de 400 mg', 'ibuprofeno de 400mg'],
+      ['ibuprofeno de 400mg', 'ibuprofeno de 400 mg'],
+      ['Compound Name 50mg', 'Compound Name 50 mg'],
+      ['Compound Name 800 mg', 'Compound Name 800mg'],
+      ['Compound Name 1400mg', 'Compound Name 1400 mg'],
+      ['Compound Name 0050 Mg caja 20', 'Compound Name 0050Mg caja 20'],
+      ['400MG', '400 MG'],
+    ])('expands %s before pagination', async (q, variant) => {
+      const product = makeProduct('zero-stock', 123, { quantity: 0 });
+      mockFindMany.mockResolvedValue([product]);
+      mockCount.mockResolvedValue(31);
+      const params = {
+        q,
+        chatbotMgSpacing: true,
+        categoryId: 'cat-1',
+        sort: 'relevance' as const,
+        page: 2,
+        limit: 7,
+      };
+
+      const result = await repo.findProducts(params);
+
+      const where = {
+        includeInOnlineCatalog: true,
+        type: 'PRODUCT',
+        AND: [
+          {
+            OR: [
+              { hasVariants: false },
+              { variants: { some: { catalogPublishMode: { not: 'OFF' } } } },
+            ],
+          },
+        ],
+        categoryId: 'cat-1',
+        OR: [...textPredicates(q), ...textPredicates(variant)],
+      };
+      expect(mockFindMany).toHaveBeenCalledTimes(1);
+      expect(mockCount).toHaveBeenCalledTimes(1);
+      expect(mockTenantGetClient).toHaveBeenCalledTimes(1);
+      expect(mockFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where,
+          orderBy: [{ createdAt: 'desc' }],
+          skip: 7,
+          take: 7,
+        }),
+      );
+      const [[listArgs]] = mockFindMany.mock.calls as [{ where: unknown }][];
+      const [[countArgs]] = mockCount.mock.calls as [{ where: unknown }][];
+      expect(countArgs.where).toBe(listArgs.where);
+      expect(result).toEqual({ items: [product], total: 31 });
+    });
+
+    it.each([
+      'Compound 0.400mg',
+      'Compound 0,400mg',
+      'Compound 250/400mg',
+      'Compound 400mg/5ml',
+      'Compound x400mg',
+      'Compound 400mgazine',
+      'Compound 400mg 50mg',
+      'Compound 400mg 5ml',
+      'Compound 400mg 2 g',
+      'Compound 400  mg',
+      'Compound 400\tmg',
+      'Compound 400\u00a0mg',
+      'Compound Name',
+      'Compound 400 mcg',
+      'Compound 400mg + 5 IU',
+      'Compound 400mg 5 IU',
+      'Compound 400mg 5 mcg',
+      'Compound 400mg 5 µg',
+      'Compound 250 - 400mg',
+      'Compound ½ 400mg',
+      'Compound 400\nmg',
+    ])('keeps unsupported query unchanged: %s', async (q) => {
+      mockFindMany.mockResolvedValue([]);
+      mockCount.mockResolvedValue(0);
+      await repo.findProducts({
+        q,
+        chatbotMgSpacing: true,
+        sort: 'relevance',
+        page: 1,
+        limit: 10,
+      });
+      const [[args]] = mockFindMany.mock.calls as [
+        { where: { OR: unknown } },
+      ][];
+      expect(args.where.OR).toEqual(textPredicates(q));
+    });
+
+    it.each([undefined, false])(
+      'leaves public search unchanged with opt-in %s',
+      async (chatbotMgSpacing) => {
+        mockFindMany.mockResolvedValue([]);
+        mockCount.mockResolvedValue(0);
+        const q = 'ibuprofeno de 400 mg';
+        await repo.findProducts({
+          q,
+          chatbotMgSpacing,
+          sort: 'relevance',
+          page: 1,
+          limit: 10,
+        });
+        const [[args]] = mockFindMany.mock.calls as [
+          { where: { OR: unknown } },
+        ][];
+        expect(args.where.OR).toEqual(textPredicates(q));
+      },
     );
   });
 

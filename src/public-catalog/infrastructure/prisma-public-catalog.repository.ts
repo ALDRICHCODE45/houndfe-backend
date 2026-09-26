@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { chatbotMgSpacingQueries } from './chatbot-mg-spacing';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { PublicBranchDto } from '../application/dto/public-branch.dto';
@@ -173,12 +174,15 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
     if (params.categoryId) where.categoryId = params.categoryId;
     if (params.q) {
-      where.OR = [
-        { name: { contains: params.q, mode: 'insensitive' as const } },
+      const queries = params.chatbotMgSpacing
+        ? chatbotMgSpacingQueries(params.q)
+        : [params.q];
+      where.OR = queries.flatMap((q) => [
+        { name: { contains: q, mode: 'insensitive' as const } },
         {
           brand: {
             name: {
-              contains: params.q,
+              contains: q,
               mode: 'insensitive' as const,
             },
           },
@@ -190,19 +194,19 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
               OR: [
                 {
                   name: {
-                    contains: params.q,
+                    contains: q,
                     mode: 'insensitive' as const,
                   },
                 },
                 {
                   option: {
-                    contains: params.q,
+                    contains: q,
                     mode: 'insensitive' as const,
                   },
                 },
                 {
                   value: {
-                    contains: params.q,
+                    contains: q,
                     mode: 'insensitive' as const,
                   },
                 },
@@ -210,7 +214,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
             },
           },
         },
-      ];
+      ]);
     }
 
     const orderBy = this.resolveOrderBy(params.sort);

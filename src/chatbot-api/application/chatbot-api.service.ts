@@ -139,6 +139,7 @@ export class ChatbotApiService {
   ): Promise<CatalogItemResponse[]> {
     const { items } = await this.publicCatalogRepository.findProducts({
       q: input.q.trim(),
+      chatbotMgSpacing: true,
       sort: 'relevance',
       page: 1,
       limit: input.limit ?? 10,

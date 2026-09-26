@@ -10,6 +10,8 @@ import type { CatalogStockPresentationValue } from '../../../catalog-settings/do
 
 export interface ListProductsParams {
   q?: string;
+  /** Internal chatbot opt-in; public callers retain literal full-query search. */
+  chatbotMgSpacing?: boolean;
   categoryId?: string;
   sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
   page: number;

@@ -263,6 +263,7 @@ describe('ChatbotApiService', () => {
   beforeEach(() => {
     repository = {
       findActiveBranches: jest.fn(),
+      listTenantPublicPriceContexts: jest.fn(),
       findProducts: jest.fn(),
       findCategoryFacets: jest.fn(),
       findProductById: jest.fn(),
@@ -345,6 +346,7 @@ describe('ChatbotApiService', () => {
       [
         {
           q: 'royal',
+          chatbotMgSpacing: true,
           sort: 'relevance',
           page: 1,
           limit: 5,
@@ -395,6 +397,39 @@ describe('ChatbotApiService', () => {
     expect(result[0]).not.toHaveProperty('tenantId');
     expect(result[0]).not.toHaveProperty('purchaseNetCostCents');
     expect(result[0]).not.toHaveProperty('purchaseGrossCostCents');
+  });
+
+  it('opts in with the full trimmed query and retains zero-stock search results', async () => {
+    repository.findProducts.mockResolvedValue({
+      items: [
+        makeCatalogProduct({
+          name: 'Ibuprofeno de 400mg',
+          hasVariants: false,
+          quantity: 0,
+          variants: [],
+        }),
+      ],
+      total: 1,
+    });
+
+    const result = await service.searchCatalog({ q: ' ibuprofeno de 400 mg ' });
+
+    expect(repository.findProducts.mock.calls).toEqual([
+      [
+        {
+          q: 'ibuprofeno de 400 mg',
+          chatbotMgSpacing: true,
+          sort: 'relevance',
+          page: 1,
+          limit: 10,
+        },
+      ],
+    ]);
+    expect(result[0]).toMatchObject({
+      name: 'Ibuprofeno de 400mg',
+      stock: { status: 'out_of_stock', quantity: 0 },
+      price: { priceCents: 259900 },
+    });
   });
 
   it('returns an empty array when no catalog items match the search', async () => {
