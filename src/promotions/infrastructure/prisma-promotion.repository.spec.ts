@@ -97,6 +97,7 @@ function makePromotionRow(
 type TenantPrismaMock = TenantPrismaService & {
   getClient: jest.Mock;
   getTenantId: jest.Mock;
+  runInTransaction: jest.Mock;
   client: PrismaRepoMock;
 };
 
@@ -106,6 +107,10 @@ describe('PrismaPromotionRepository', () => {
     return {
       getClient: jest.fn().mockReturnValue(client),
       getTenantId: jest.fn().mockReturnValue('tenant-1'),
+      // Mirrors TenantPrismaService.runInTransaction: runs the work with the
+      // same mocked client available through getClient() and records the
+      // requested isolation level so tests can assert the forwarded option.
+      runInTransaction: jest.fn((work: () => Promise<unknown>) => work()),
       client,
     } as unknown as TenantPrismaMock;
   }
@@ -169,6 +174,181 @@ describe('PrismaPromotionRepository', () => {
       expect(countWhere.type).toBe('PRODUCT_DISCOUNT');
       expect(countWhere.method).toBe('AUTOMATIC');
       expect(countWhere.customerScope).toBe('SPECIFIC');
+    });
+  });
+
+  describe('findActiveAutomaticSnapshot()', () => {
+    it('filters on the manual override, not stale persisted status, when selecting effectively active promotions', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      prisma.promotion.findMany.mockResolvedValue([
+        makePromotionRow({
+          id: 'reopened-restricted',
+          status: 'ENDED',
+          manuallyEnded: false,
+          startDate: new Date('2020-01-01T00:00:00.000Z'),
+          endDate: new Date('2099-01-01T00:00:00.000Z'),
+          customerScope: 'SPECIFIC',
+          targetItems: [
+            {
+              id: 'target-1',
+              side: 'DEFAULT',
+              targetType: 'PRODUCTS',
+              targetId: 'cart-product',
+            },
+          ],
+        }),
+      ]);
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+
+      const snapshot = await repo.findActiveAutomaticSnapshot();
+      const where = prisma.promotion.findMany.mock.calls[0][0].where as Record<
+        string,
+        unknown
+      >;
+
+      // Persisted ENDED can be stale after a date-window change: the domain
+      // considers this row active. Conversely, persisted ACTIVE with a manual
+      // closure must be excluded by the same predicate.
+      expect(where.manuallyEnded).toBe(false);
+      expect(where.status).toBeUndefined();
+      expect(JSON.stringify(where)).not.toContain('"status"');
+      expect(snapshot.complete).toBe(true);
+      expect(snapshot.promotions[0].id).toBe('reopened-restricted');
+      expect(snapshot.promotions[0].customerScope).toBe('SPECIFIC');
+    });
+
+    it('reads one capped id-ordered page in a RepeatableRead transaction without skip or count', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      prisma.promotion.findMany.mockResolvedValue([makePromotionRow()]);
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+
+      const snapshot = await repo.findActiveAutomaticSnapshot();
+
+      expect(prisma.promotion.findMany.mock.calls.length).toBe(1);
+      const args = prisma.promotion.findMany.mock.calls[0][0];
+      expect(args.take).toBe(1001);
+      expect(args.orderBy).toEqual({ id: 'asc' });
+      expect(args.skip).toBeUndefined();
+
+      // The whole set is proven by the read alone: no separate count, so no
+      // count/read race.
+      expect(prisma.promotion.count.mock.calls.length).toBe(0);
+
+      // Effective ACTIVE semantics: only manual closure or a date-window
+      // boundary can exclude a row; the persisted status is merely a hint.
+      const where = args.where as {
+        method?: unknown;
+        manuallyEnded?: unknown;
+        AND?: unknown[];
+      };
+      expect(where.method).toBe('AUTOMATIC');
+      expect(where.manuallyEnded).toBe(false);
+      const and = where.AND as Array<Record<string, unknown>>;
+      expect(and).toHaveLength(2);
+
+      const [lower, upper] = and as Array<{
+        OR: Array<Record<string, unknown>>;
+      }>;
+      expect(lower.OR[0]).toEqual({ startDate: null });
+      const startBound = lower.OR[1] as { startDate: { lte: Date } };
+      expect(startBound.startDate.lte).toBeInstanceOf(Date);
+      expect(upper.OR[0]).toEqual({ endDate: null });
+      const endBound = upper.OR[1] as { endDate: { gte: Date } };
+      expect(endBound.endDate.gte).toBeInstanceOf(Date);
+
+      // Tenant-scoped client, and the isolation level is forwarded explicitly
+      // instead of relying on the driver default.
+      expect(tenantPrisma.getClient.mock.calls.length).toBe(1);
+      const runInTransaction = tenantPrisma.runInTransaction as jest.Mock<
+        Promise<unknown>,
+        [() => Promise<unknown>, string?]
+      >;
+      expect(runInTransaction.mock.calls[0][1]).toBe('RepeatableRead');
+
+      expect(snapshot.complete).toBe(true);
+      expect(snapshot.promotions.map((p) => p.id)).toEqual(['promo-1']);
+    });
+
+    it('returns the joined eligibility relations mapped to the domain entity', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      prisma.promotion.findMany.mockResolvedValue([
+        makePromotionRow({
+          targetItems: [
+            {
+              id: 'ti-1',
+              side: 'DEFAULT',
+              targetType: 'PRODUCTS',
+              targetId: 'prod-1',
+            },
+          ],
+          customers: [
+            {
+              id: 'pc-1',
+              customerId: 'cust-1',
+              customer: { id: 'cust-1', firstName: 'Ana', lastName: null },
+            },
+          ],
+          priceLists: [
+            {
+              id: 'ppl-1',
+              globalPriceListId: 'GPL-1',
+              globalPriceList: { id: 'GPL-1', name: 'Retail' },
+            },
+          ],
+          daysOfWeek: [{ id: 'dow-1', day: 'SUNDAY' }],
+        }),
+      ]);
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+
+      const { promotions } = await repo.findActiveAutomaticSnapshot();
+
+      expect(promotions[0].targetItems).toEqual([
+        {
+          id: 'ti-1',
+          side: 'DEFAULT',
+          targetType: 'PRODUCTS',
+          targetId: 'prod-1',
+        },
+      ]);
+      expect(promotions[0].customers[0].customerId).toBe('cust-1');
+      expect(promotions[0].priceLists[0].globalPriceListId).toBe('GPL-1');
+      expect(promotions[0].daysOfWeek[0].day).toBe('SUNDAY');
+    });
+
+    it('reports the snapshot complete at exactly the cap and incomplete one row above it', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      const repo = new PrismaPromotionRepository(
+        tenantPrisma as TenantPrismaService,
+      );
+      const rows = (count: number) =>
+        Array.from({ length: count }, (_, index) =>
+          makePromotionRow({ id: `promo-${String(index).padStart(4, '0')}` }),
+        );
+
+      prisma.promotion.findMany.mockResolvedValueOnce(rows(1000));
+      const atCap = await repo.findActiveAutomaticSnapshot();
+
+      prisma.promotion.findMany.mockResolvedValueOnce(rows(1001));
+      const overCap = await repo.findActiveAutomaticSnapshot();
+
+      expect(atCap.complete).toBe(true);
+      expect(atCap.promotions).toHaveLength(1000);
+
+      // The 1001st row is the overload sentinel: it proves the tenant exceeds
+      // the owner-approved cap, so the snapshot is incomplete and the returned
+      // set stays bounded at the cap.
+      expect(overCap.complete).toBe(false);
+      expect(overCap.promotions).toHaveLength(1000);
     });
   });
 

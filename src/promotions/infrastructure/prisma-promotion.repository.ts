@@ -3,11 +3,23 @@ import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { Promotion } from '../domain/promotion.entity';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import type {
+  ActiveAutomaticPromotionSnapshot,
   IPromotionRepository,
   PromotionFindAllQuery,
   PromotionFindAllResult,
 } from '../domain/promotion.repository';
 import { Prisma } from '@prisma/client';
+
+/**
+ * Owner-approved ceiling on ACTIVE AUTOMATIC promotions per bot quote.
+ *
+ * A tenant above this cap cannot be snapshotted within the agreed cost
+ * budget, so the read stays bounded and reports itself as incomplete instead
+ * of paginating (offset paging can miss a row under a concurrent
+ * delete+insert that keeps the total unchanged). The bot quote then fails
+ * closed. Overload is an explicit owner decision, not an accident.
+ */
+export const ACTIVE_AUTOMATIC_PROMOTION_CAP = 1000;
 
 // Full include shape used for findById and save return
 const PROMOTION_INCLUDE = {
@@ -200,6 +212,52 @@ export class PrismaPromotionRepository implements IPromotionRepository {
       include: PROMOTION_INCLUDE,
     });
     return data ? this.toDomain(data) : null;
+  }
+
+  // ============================================================
+  // findActiveAutomaticSnapshot — bounded whole-set read for the
+  // bot quote path.
+  //
+  // One `id`-ordered `findMany` with `take: cap + 1` inside a
+  // RepeatableRead interactive transaction. No `skip`, no separate
+  // `count`: paging can silently miss a row when a concurrent
+  // delete+insert leaves the total unchanged, and the `count` in
+  // `findAll` races the row read. The sentinel row (cap + 1) is the
+  // overload probe — when it appears, the set is larger than the cap
+  // and the snapshot is reported incomplete so callers fail closed.
+  //
+  // Tenant scoping comes from the tenant-extended client resolved
+  // through `getClient()` (same contract as the rest of this adapter).
+  // ============================================================
+  async findActiveAutomaticSnapshot(): Promise<ActiveAutomaticPromotionSnapshot> {
+    const now = new Date();
+
+    const rows = await this.tenantPrisma.runInTransaction(() => {
+      const prisma = this.tenantPrisma.getClient();
+      return prisma.promotion.findMany({
+        // Match Promotion.getEffectiveStatus(now): a manual closure is the
+        // only permanent override. Persisted status can be stale after a date
+        // change, so filtering status='ENDED' could hide an active restriction.
+        where: {
+          method: 'AUTOMATIC',
+          manuallyEnded: false,
+          AND: [
+            { OR: [{ startDate: null }, { startDate: { lte: now } }] },
+            { OR: [{ endDate: null }, { endDate: { gte: now } }] },
+          ],
+        },
+        orderBy: { id: 'asc' },
+        take: ACTIVE_AUTOMATIC_PROMOTION_CAP + 1,
+        include: PROMOTION_INCLUDE,
+      });
+    }, Prisma.TransactionIsolationLevel.RepeatableRead);
+
+    return {
+      promotions: rows
+        .slice(0, ACTIVE_AUTOMATIC_PROMOTION_CAP)
+        .map((row) => this.toDomain(row)),
+      complete: rows.length <= ACTIVE_AUTOMATIC_PROMOTION_CAP,
+    };
   }
 
   // ============================================================

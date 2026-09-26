@@ -51,7 +51,11 @@ function makeRepository(
       data: promotions,
       total: promotions.length,
     }),
+    findActiveAutomaticSnapshot: jest
+      .fn()
+      .mockResolvedValue({ promotions, complete: true }),
     delete: jest.fn(),
+    deleteMany: jest.fn(),
     updateStatus: jest.fn(),
   } as jest.Mocked<IPromotionRepository>;
 }
@@ -392,3 +396,251 @@ describe('EvaluateCartPromotionsUseCase capacity fallback', () => {
     });
   });
 });
+
+// ============================================================
+// Decided bot-preview behavior for incomplete restriction context.
+//
+// The public port is `execute({ items })` — see
+// `ports/evaluate-cart-promotions.port.ts`. It carries NO customer,
+// price-list, or weekday context, so a restricted promotion cannot be
+// proven eligible here. Policy: fail the whole cart closed with base
+// prices and `needs_human_review`, while an unrelated restricted
+// promotion or a purely open promotion keeps normal behavior.
+// ============================================================
+describe('EvaluateCartPromotionsUseCase — restricted promotions without matching context', () => {
+  const restrictedPromotions = [
+    {
+      label: 'customerScope=REGISTERED_ONLY with no customer context',
+      promotion: makePromotion({
+        id: 'promo-registered',
+        title: 'Registered customers only',
+        customerScope: 'REGISTERED_ONLY',
+      }),
+    },
+    {
+      label: 'customerScope=SPECIFIC with an unmatched customer list',
+      promotion: makePromotion({
+        id: 'promo-specific',
+        title: 'Specific customers only',
+        customerScope: 'SPECIFIC',
+        customers: [{ id: 'pc-1', customerId: 'cust-1' }],
+      }),
+    },
+    {
+      label: 'foreign global price list with no price-list context',
+      promotion: makePromotion({
+        id: 'promo-price-list',
+        title: 'GPL-retail only',
+        priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
+      }),
+    },
+    {
+      label: 'weekday-limited promotion with no day context',
+      promotion: makePromotion({
+        id: 'promo-sunday',
+        title: 'Sundays only',
+        daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
+      }),
+    },
+  ];
+
+  it.each(restrictedPromotions)(
+    'returns base prices with needs_human_review for $label',
+    async ({ promotion }) => {
+      // The bot preview cannot verify customer / price-list / weekday
+      // eligibility, so the matching line is not discounted and the
+      // whole cart is flagged for human review.
+      await expect(
+        evaluate([promotion], [cartLine('prod-1', 1)]),
+      ).resolves.toEqual({
+        items: [expectedLine('prod-1', 1, 1000, null)],
+        promotionEvaluationStatus: 'needs_human_review',
+      });
+    },
+  );
+
+  it('returns base prices for EVERY line when a restricted promotion shares the cart with an open promotion', async () => {
+    // The restricted promotion targets only prod-1, but the cart as a whole
+    // is not provably evaluable, so even prod-2 — which the open promotion
+    // would discount — stays at base price.
+    const restricted = makePromotion({
+      id: 'promo-restricted',
+      title: 'Registered customers only',
+      customerScope: 'REGISTERED_ONLY',
+      targetItems: [productTarget('prod-1')],
+    });
+    const open = makePromotion({
+      id: 'promo-open',
+      title: 'Open promo',
+      targetItems: bothProductTargets(),
+    });
+
+    await expect(
+      evaluate(
+        [restricted, open],
+        [cartLine('prod-1', 1), cartLine('prod-2', 1)],
+      ),
+    ).resolves.toEqual({
+      items: [
+        expectedLine('prod-1', 1, 1000, null),
+        expectedLine('prod-2', 1, 1000, null),
+      ],
+      promotionEvaluationStatus: 'needs_human_review',
+    });
+  });
+
+  it('does not block an evaluable cart when the restricted promotion targets a different product', async () => {
+    // The restriction is scoped to prod-2, which this cart does not contain,
+    // so prod-1 remains fully evaluable and the open promotion applies.
+    const restrictedElsewhere = makePromotion({
+      id: 'promo-elsewhere',
+      title: 'Sundays only elsewhere',
+      daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
+      targetItems: [productTarget('prod-2')],
+    });
+    const open = makePromotion({
+      id: 'promo-open',
+      title: 'Open promo',
+    });
+
+    await expect(
+      evaluate([restrictedElsewhere, open], [cartLine('prod-1', 1)]),
+    ).resolves.toEqual({
+      items: [expectedLine('prod-1', 1, 900, 'Open promo')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+
+  it('control: an unrestricted promotion on the same product still applies', async () => {
+    // Same product, same cart shape, no restriction fields set — the
+    // discount MUST land, proving the negatives above are caused by the
+    // promotion restriction and not by the cart fixture.
+    const result = await evaluate(
+      [makePromotion({ id: 'promo-open', title: 'Open promo' })],
+      [cartLine('prod-1', 1)],
+    );
+
+    expect(result).toEqual({
+      items: [expectedLine('prod-1', 1, 900, 'Open promo')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+});
+
+// ============================================================
+// The quote path reads ONE bounded ACTIVE AUTOMATIC snapshot through the
+// dedicated repository port (no offset paging and no separate count, so a
+// concurrent delete+insert cannot shift an unread row past the window).
+//
+// A restriction sitting deep in the ordered set must still fail the cart
+// closed; an unrelated one must not block a valid discount; and a snapshot
+// the adapter reports as incomplete (tenant above the approved cap) must fail
+// the WHOLE cart closed even when every visible promotion is open.
+// ============================================================
+describe('EvaluateCartPromotionsUseCase — bounded ACTIVE AUTOMATIC snapshot', () => {
+  function openPromotions(count: number): Promotion[] {
+    return Array.from({ length: count }, (_, index) =>
+      makePromotion({
+        id: `promo-open-${String(index).padStart(3, '0')}`,
+        title: `Open promo ${index}`,
+        targetItems: [productTarget('prod-1')],
+      }),
+    );
+  }
+
+  it('fails closed when a cart-relevant restriction sits deep in the ordered snapshot', async () => {
+    const repository = makeRepository([
+      ...openPromotions(100),
+      makePromotion({
+        id: 'promo-restricted-101',
+        title: 'Registered customers only',
+        customerScope: 'REGISTERED_ONLY',
+        targetItems: [productTarget('prod-1')],
+      }),
+    ]);
+    const useCase = new EvaluateCartPromotionsUseCase(repository);
+
+    await expect(
+      useCase.execute({ items: [cartLine('prod-1', 1)] }),
+    ).resolves.toEqual({
+      items: [expectedLine('prod-1', 1, 1000, null)],
+      promotionEvaluationStatus: 'needs_human_review',
+    });
+
+    // Exactly one bounded snapshot read: no per-page queries and no
+    // paginated fallback.
+    expect(repository.findActiveAutomaticSnapshot.mock.calls.length).toBe(1);
+    expect(repository.findAll.mock.calls.length).toBe(0);
+  });
+
+  it('still discounts when the only restriction targets an unrelated product', async () => {
+    const repository = makeRepository([
+      ...openPromotions(100),
+      makePromotion({
+        id: 'promo-restricted-101',
+        title: 'Sundays only elsewhere',
+        daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
+        targetItems: [productTarget('prod-2')],
+      }),
+    ]);
+
+    await expect(
+      evaluateWith(repository, [cartLine('prod-1', 1)]),
+    ).resolves.toEqual({
+      items: [expectedLine('prod-1', 1, 900, 'Open promo 0')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+    expect(repository.findActiveAutomaticSnapshot.mock.calls.length).toBe(1);
+  });
+
+  it('discounts when the snapshot holds exactly the cap and is reported complete', async () => {
+    // Boundary on the approved cap: 1000 visible rows is still a complete
+    // snapshot, so the visible discount stands.
+    const repository = makeRepository(openPromotions(1000));
+
+    await expect(
+      evaluateWith(repository, [cartLine('prod-1', 1)]),
+    ).resolves.toEqual({
+      items: [expectedLine('prod-1', 1, 900, 'Open promo 0')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+
+  it('fails the WHOLE cart closed when the snapshot is incomplete, even though every visible promotion is open', async () => {
+    // The hidden overflow rows might be unrelated, but the adapter cannot
+    // prove it — owner policy is all-or-nothing at the cap.
+    const visible = openPromotions(1000);
+    const repository = makeRepository(visible);
+    repository.findActiveAutomaticSnapshot.mockResolvedValue({
+      promotions: visible,
+      complete: false,
+    });
+
+    await expect(
+      evaluateWith(repository, [cartLine('prod-1', 1)]),
+    ).resolves.toEqual({
+      items: [expectedLine('prod-1', 1, 1000, null)],
+      promotionEvaluationStatus: 'needs_human_review',
+    });
+  });
+
+  it('fails closed without consulting the promotion set when the snapshot read fails outright', async () => {
+    // A repository error must not become a silent base-price-only quote that
+    // claims `fully_evaluated`.
+    const repository = makeRepository([]);
+    repository.findActiveAutomaticSnapshot.mockRejectedValue(
+      new Error('snapshot unavailable'),
+    );
+
+    await expect(
+      evaluateWith(repository, [cartLine('prod-1', 1)]),
+    ).rejects.toThrow('snapshot unavailable');
+  });
+});
+
+function evaluateWith(
+  repository: jest.Mocked<IPromotionRepository>,
+  items: CartItemForEvaluation[],
+) {
+  return new EvaluateCartPromotionsUseCase(repository).execute({ items });
+}
