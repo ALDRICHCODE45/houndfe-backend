@@ -88,6 +88,56 @@ const suppressLogger = () => {
   jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
 };
 
+describe('Sensitive mail', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('rejects missing provider without logging a sensitive message', async () => {
+    suppressLogger();
+    const mailer = new ResendMailer(makeConfig({ NODE_ENV: 'test' }));
+    const log = jest.spyOn(Logger.prototype, 'log');
+    const input = {
+      to: ['fake@example.test'],
+      subject: 'OTP',
+      html: '001234',
+      sensitive: true,
+    };
+    await expect(mailer.send(input)).rejects.toThrow(
+      'Sensitive email delivery unavailable',
+    );
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it.each(['reject', 'error'])(
+    'sanitizes provider %s without logging',
+    async (mode) => {
+      suppressLogger();
+      const log = jest.spyOn(Logger.prototype, 'log');
+      const error = jest.spyOn(Logger.prototype, 'error');
+      const mailer = new ResendMailer(
+        makeConfig({ RESEND_API_KEY: 'fake', MAIL_FROM: 'fake@example.test' }),
+      );
+      if (mode === 'reject')
+        resendMock.__mocks.sendMock.mockRejectedValueOnce(
+          new Error('001234 secret body'),
+        );
+      else
+        resendMock.__mocks.sendMock.mockResolvedValueOnce({
+          error: { message: '001234 secret body' },
+        });
+      await expect(
+        mailer.send({
+          to: ['fake@example.test'],
+          subject: 'OTP',
+          html: '001234',
+          sensitive: true,
+        } as Parameters<ResendMailer['send']>[0]),
+      ).rejects.toThrow('Sensitive email delivery unavailable');
+      expect(log).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('ResendMailer (F.1)', () => {
   let originalEnv: NodeJS.ProcessEnv;
 

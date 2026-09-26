@@ -50,6 +50,8 @@ export interface SendMailInput {
   subject: string;
   html: string;
   attachments?: SendMailAttachment[];
+  /** Never log content or use a successful development fallback. */
+  sensitive?: boolean;
 }
 
 export interface IMailer {

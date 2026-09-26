@@ -1263,6 +1263,7 @@ model User {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
+  loginOtpChallenge      LoginOtpChallenge?
   tenantMemberships      TenantMembership[]
   sales                  Sale[]                  @relation("SaleCashier")
   salesAsSeller          Sale[]                  @relation("SaleSeller")
@@ -1283,6 +1284,43 @@ model User {
   humanDecisionResolutions HumanDecision[]           @relation("HumanDecisionResolver")
 
   @@map("users")
+}
+
+// ============================================================================
+// PASSWORD LOGIN OTP — global account state, never tenant-scoped.
+// ============================================================================
+
+enum LoginOtpState {
+  PENDING
+  ACTIVE
+  CONSUMED
+  FAILED
+}
+
+model LoginOtpChallenge {
+  userId     String        @id
+  generation String
+  handleHash String        @unique @db.Char(64)
+  codeMac    String        @db.Char(64)
+  state      LoginOtpState @default(PENDING)
+  expiresAt  DateTime      @db.Timestamp(3)
+  createdAt  DateTime      @default(now()) @db.Timestamp(3)
+  updatedAt  DateTime      @updatedAt @db.Timestamp(3)
+  consumedAt DateTime?     @db.Timestamp(3)
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("login_otp_challenges")
+}
+
+// No challenge FK: rotating or consuming a challenge must not reset budgets.
+model AuthRateBucket {
+  key         String   @id @db.Char(64)
+  count       Int
+  windowStart DateTime @db.Timestamp(3)
+
+  @@index([windowStart])
+  @@map("auth_rate_buckets")
 }
 
 // ============================================================================

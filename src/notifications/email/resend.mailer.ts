@@ -69,6 +69,27 @@ export class ResendMailer implements IMailer {
   }
 
   async send(input: SendMailInput): Promise<void> {
+    if (input.sensitive) {
+      // Keep this boundary independent of development fallback and provider errors.
+      try {
+        if (!this.client || !this.fromAddress) throw new Error();
+        const result = await this.client.emails.send({
+          from: this.fromAddress,
+          to: input.to,
+          subject: input.subject,
+          html: input.html,
+          attachments: input.attachments?.map((a) => ({
+            filename: a.filename,
+            content: a.content,
+          })),
+        });
+        if (result.error || !result.data?.id) throw new Error();
+        return;
+      } catch {
+        throw new Error('Sensitive email delivery unavailable');
+      }
+    }
+
     const redactRecipients = this.shouldRedactRecipients();
 
     if (redactRecipients) {
@@ -147,8 +168,7 @@ export class ResendMailer implements IMailer {
       // WU4 — record attachment metadata so a developer can spot a
       // missing attachment without dumping bytes into the log.
       attachmentCount: input.attachments?.length ?? 0,
-      attachmentFilenames:
-        input.attachments?.map((a) => a.filename) ?? [],
+      attachmentFilenames: input.attachments?.map((a) => a.filename) ?? [],
       // The full html is intentionally NOT logged in production;
       // in dev we emit a truncated preview so the developer can spot
       // obvious render bugs without flooding the log.
