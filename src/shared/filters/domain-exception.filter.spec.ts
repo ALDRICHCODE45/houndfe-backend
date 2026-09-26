@@ -72,6 +72,7 @@ describe('DomainExceptionFilter', () => {
       'STOCK_INSUFFICIENT_AT_CONFIRM',
       'IDEMPOTENCY_KEY_CONFLICT',
       'IDEMPOTENCY_KEY_IN_FLIGHT',
+      'SHIPPING_APPROVAL_ALREADY_USED',
       'SALE_FULLY_PAID',
     ]) {
       const { host, status } = makeHost();

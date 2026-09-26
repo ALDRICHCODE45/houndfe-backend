@@ -341,6 +341,10 @@ export interface ISaleRepository {
     channel?: 'POS' | 'ONLINE';
     register?: string;
     deliveryStatus?: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
+    /** Bot-only shipment snapshot; omitted for legacy and POS charges. */
+    shippingChargeCents?: number;
+    shippingApprovalId?: string;
+    shippingQuoteId?: string | null;
     customerId?: string | null;
     sellerUserId?: string | null;
     dueDate?: Date | null;
@@ -507,6 +511,8 @@ export interface ISaleRepository {
     createdAt: Date;
     subtotalCents: number;
     discountCents: number;
+    /** Additive confirmed-sale snapshot. Absent on older repository mocks. */
+    shippingChargeCents?: number;
     totalCents: number;
     paidCents: number;
     debtCents: number;

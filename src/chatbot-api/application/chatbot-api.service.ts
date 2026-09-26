@@ -1,4 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { Customer } from '../../customers/domain/customer.entity';
@@ -64,9 +65,10 @@ export type RegisterBotSaleInput = {
   // this expected total against the engine-recomputed `totalCents`
   // (D7). Mismatch → `PROMO_RE_QUOTE` 409 with the three relevant
   // fields in the body so the bot can re-quote and re-issue. When
-  // omitted, the server still runs the engine and persists the
-  // recomputed totals; only the comparison is skipped.
+  // omitted on a legacy sale, the server still runs the engine and
+  // persists totals. Required whenever `shipping` is provided.
   expectedTotalCents?: number;
+  shipping?: { chargeCents: number; approvalId: string; quoteId?: string };
 };
 
 export type AttachReceiptInput = {
@@ -129,6 +131,7 @@ export class ChatbotApiService {
     @Inject(SALE_REPOSITORY)
     private readonly saleRepository: ISaleRepository,
     private readonly tenantPrisma: TenantPrismaService,
+    private readonly configService: ConfigService,
   ) {}
 
   async searchCatalog(
@@ -270,8 +273,9 @@ export class ChatbotApiService {
    * - `acquired`  → proceed to `confirmBotSale`, then stamp SUCCEEDED.
    *
    * The `requestHash` is `SHA-256(JSON.stringify(canonicalPayload))` (D9)
-   * over `{ cashierUserId, customerId, shippingAddressId, items }` with
-   * items sorted by `(productId, variantId)`. Display names are
+   * over `{ cashierUserId, customerId, shippingAddressId, shipping?, items }`
+   * with items sorted by `(productId, variantId)` and optional shipping
+   * charge/approval/quote normalized. Display names are
    * intentionally excluded so re-labels never break replay.
    *
    * The idempotency key itself is validated upstream by
@@ -285,7 +289,81 @@ export class ChatbotApiService {
    * hash). Manual cleanup is the accepted mitigation.
    */
   async registerBotSale(input: RegisterBotSaleInput): Promise<BotSaleResponse> {
-    const requestHash = computeRegisterBotSaleRequestHash(input);
+    // The bot asserts human approval; we check charge policy and address,
+    // not the human decision or freshness of its cart/destination quote.
+    let shipping = input.shipping;
+    if (shipping !== undefined) {
+      const maximum = this.configService.get<number>(
+        'BOT_SHIPPING_CHARGE_MAX_CENTS',
+      );
+      if (!Number.isSafeInteger(maximum) || !maximum || maximum <= 0) {
+        throw new BusinessRuleViolationError(
+          'Shipping charge is not available',
+          'SHIPPING_CHARGE_UNAVAILABLE',
+        );
+      }
+      if (
+        !shipping ||
+        !Number.isSafeInteger(shipping.chargeCents) ||
+        shipping.chargeCents <= 0
+      ) {
+        throw new BusinessRuleViolationError(
+          'INVALID_SHIPPING_CHARGE',
+          'INVALID_SHIPPING_CHARGE',
+        );
+      }
+      if (shipping.chargeCents > maximum) {
+        throw new BusinessRuleViolationError(
+          'Shipping charge exceeds configured maximum',
+          'SHIPPING_CHARGE_EXCEEDS_MAX',
+        );
+      }
+      if (!input.shippingAddressId) {
+        throw new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_REQUIRED',
+          'SHIPPING_ADDRESS_REQUIRED',
+        );
+      }
+      if (
+        typeof shipping.approvalId !== 'string' ||
+        !shipping.approvalId.trim()
+      ) {
+        throw new BusinessRuleViolationError(
+          'SHIPPING_APPROVAL_REQUIRED',
+          'SHIPPING_APPROVAL_REQUIRED',
+        );
+      }
+      if (
+        shipping.quoteId !== undefined &&
+        (typeof shipping.quoteId !== 'string' || !shipping.quoteId.trim())
+      ) {
+        throw new BusinessRuleViolationError(
+          'INVALID_SHIPPING_QUOTE',
+          'INVALID_SHIPPING_QUOTE',
+        );
+      }
+      if (
+        input.expectedTotalCents === undefined ||
+        !Number.isSafeInteger(input.expectedTotalCents) ||
+        input.expectedTotalCents <= 0
+      ) {
+        // Without the approved final amount the re-quote guard cannot
+        // protect a bot sale whose merchandise price changed after approval.
+        throw new BusinessRuleViolationError(
+          'Approved total is required when shipping is charged',
+          'SHIPPING_EXPECTED_TOTAL_REQUIRED',
+        );
+      }
+      shipping = {
+        chargeCents: shipping.chargeCents,
+        approvalId: shipping.approvalId.trim(),
+        ...(shipping.quoteId ? { quoteId: shipping.quoteId.trim() } : {}),
+      };
+    }
+    const requestHash = computeRegisterBotSaleRequestHash({
+      ...input,
+      shipping,
+    });
 
     const idempotency =
       await this.saleRepository.acquireSaleRegistrationIdempotency(
@@ -301,6 +379,19 @@ export class ChatbotApiService {
       // backfill it with 0 to keep the response shape consistent for
       // the bot (design risk mitigation in tasks.md).
       const cached = idempotency.payload as Partial<BotSaleResponse>;
+      if (
+        cached.shippingChargeCents &&
+        (typeof cached.subtotalCents !== 'number' ||
+          cached.subtotalCents -
+            (cached.discountCents ?? 0) +
+            cached.shippingChargeCents !==
+            cached.totalCents)
+      ) {
+        throw new BusinessRuleViolationError(
+          'Shipping replay totals are incomplete',
+          'SHIPPING_REPLAY_INCOMPLETE',
+        );
+      }
       return {
         saleId: cached.saleId ?? '',
         folio: cached.folio ?? null,
@@ -311,6 +402,12 @@ export class ChatbotApiService {
         deliveryStatus: cached.deliveryStatus ?? 'PENDING',
         totalCents: cached.totalCents ?? 0,
         discountCents: cached.discountCents ?? 0,
+        ...(cached.shippingChargeCents
+          ? {
+              subtotalCents: cached.subtotalCents,
+              shippingChargeCents: cached.shippingChargeCents,
+            }
+          : {}),
         paidCents: cached.paidCents ?? 0,
         debtCents: cached.debtCents ?? 0,
         confirmedAt: cached.confirmedAt ?? null,
@@ -342,6 +439,7 @@ export class ChatbotApiService {
       // sales service. When omitted, the sales service skips the
       // comparison but still runs the engine + persists totals.
       expectedTotalCents: input.expectedTotalCents,
+      ...(shipping ? { shipping } : {}),
     });
 
     const response: BotSaleResponse = {
@@ -354,6 +452,12 @@ export class ChatbotApiService {
       // Q2 / WU3 — engine-recomputed discount from
       // `sale.previewTotals()`. 0 when no promotion applied.
       discountCents: confirmedSale.discountCents,
+      ...(shipping
+        ? {
+            subtotalCents: confirmedSale.subtotalCents,
+            shippingChargeCents: confirmedSale.shippingChargeCents,
+          }
+        : {}),
       paidCents: confirmedSale.paidCents,
       debtCents: confirmedSale.debtCents,
       confirmedAt: confirmedSale.confirmedAt,
@@ -602,13 +706,22 @@ function normalizePhonePart(value: string): string {
  * requests that differ only by shipping address are flagged as a
  * `conflict`, not a silent replay.
  */
-function computeRegisterBotSaleRequestHash(
+export function computeRegisterBotSaleRequestHash(
   input: RegisterBotSaleInput,
 ): string {
   const canonicalPayload = {
     cashierUserId: input.cashierUserId,
     customerId: input.customerId,
     shippingAddressId: input.shippingAddressId ?? null,
+    ...(input.shipping
+      ? {
+          shipping: {
+            chargeCents: input.shipping.chargeCents,
+            approvalId: input.shipping.approvalId.trim(),
+            quoteId: input.shipping.quoteId?.trim() ?? null,
+          },
+        }
+      : {}),
     items: [...input.items]
       .map((item) => ({
         productId: item.productId,

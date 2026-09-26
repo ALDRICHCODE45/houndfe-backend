@@ -117,6 +117,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.CONFLICT;
     if (exception.code === 'IDEMPOTENCY_KEY_IN_FLIGHT')
       return HttpStatus.CONFLICT;
+    if (exception.code === 'SHIPPING_APPROVAL_ALREADY_USED')
+      return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_FULLY_PAID') return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_NOT_CANCELLABLE') return HttpStatus.CONFLICT;
     if (exception.code === 'SALE_DELIVERED_CANNOT_CANCEL')

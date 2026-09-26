@@ -117,6 +117,8 @@ export interface SaleDetailResponseDto {
   dueDate: string | null;
   subtotalCents: number;
   discountCents: number;
+  /** Positive shipping charge, omitted on legacy/POS sales without a charge. */
+  shippingChargeCents?: number;
   totalCents: number;
   paidCents: number;
   debtCents: number;

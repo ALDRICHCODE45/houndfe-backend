@@ -862,6 +862,10 @@ model Sale {
   sellerUserId        String?
   customerId          String?
   shippingAddressId   String?
+  // Bot-approved shipment snapshot; null approval is the legacy no-shipping path.
+  shippingChargeCents Int                @default(0)
+  shippingApprovalId  String?
+  shippingQuoteId     String?
   status              SaleStatus         @default(DRAFT)
   channel             SaleChannel        @default(POS)
   register            String             @default("Principal")
@@ -921,6 +925,7 @@ model Sale {
   // Composite ownership target so `PromotionUsage` can FK on (tenantId, id)
   // and the database itself rejects a cross-tenant usage row.
   @@unique([tenantId, id])
+  @@unique([tenantId, shippingApprovalId], map: "sales_tenant_shipping_approval_unique")
   @@index([tenantId, status, confirmedAt(sort: Desc)], map: "idx_sales_tenant_status_confirmedAt_desc")
   @@index([userId, status])
   @@index([sellerUserId])

@@ -94,7 +94,9 @@ export class ChatbotApiController {
     @IdempotencyKey()
     idempotencyKey: string,
   ) {
+    // The service enforces the optional owner ceiling before idempotency.
     return this.chatbotApiService.registerBotSale({
+      ...(body.shipping ? { shipping: body.shipping } : {}),
       cashierUserId: body.cashierUserId,
       customerId: body.customerId,
       shippingAddressId: body.shippingAddressId ?? null,
@@ -106,11 +108,11 @@ export class ChatbotApiController {
         quantity: item.quantity,
         unitPriceCents: item.unitPriceCents,
       })),
-          idempotencyKey,
-          // Q2 / WU3 — pass through the optional re-quote guard so the
-          // server can compare the bot's pre-computed total against the
-          // engine-recomputed total. Undefined when omitted (no comparison).
-          expectedTotalCents: body.expectedTotalCents,
+      idempotencyKey,
+      // Q2 / WU3 — pass through the optional re-quote guard so the
+      // server can compare the bot's pre-computed total against the
+      // engine-recomputed total. Undefined when omitted (no comparison).
+      expectedTotalCents: body.expectedTotalCents,
     });
   }
 

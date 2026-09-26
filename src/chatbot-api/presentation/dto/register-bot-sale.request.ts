@@ -3,10 +3,15 @@ import {
   IsArray,
   IsInt,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  MaxLength,
+  Matches,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -36,6 +41,26 @@ export class BotSaleItemDto {
   unitPriceCents!: number;
 }
 
+export class BotSaleShippingDto {
+  @IsInt()
+  @Min(1)
+  @Max(2_147_483_647)
+  chargeCents!: number;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  @Matches(/\S/)
+  approvalId!: string;
+
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  @Matches(/\S/)
+  quoteId?: string;
+}
+
 export class RegisterBotSaleRequestDto {
   /** ID of the POS user acting as cashier for this bot-created order. */
   @IsUUID()
@@ -60,11 +85,19 @@ export class RegisterBotSaleRequestDto {
    * `totalCents` (D7). A mismatch raises `PROMO_RE_QUOTE` (409) with
    * `{ recomputedTotalCents, expectedTotalCents, discountCents }` so
    * the bot can re-quote with the real totals and re-issue. When
-   * omitted, the server still runs the engine and persists the
-   * recomputed totals; only the comparison is skipped.
+   * omitted on a legacy sale, the server still runs the engine and
+   * persists totals. Required whenever `shipping` is present.
    */
   @IsOptional()
   @IsInt()
   @Min(0)
   expectedTotalCents?: number;
+
+  // Recognize and validate shipping, but reject it until receipt views
+  // reconcile and an owner-configured charge ceiling enables the feature.
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => BotSaleShippingDto)
+  shipping?: BotSaleShippingDto;
 }

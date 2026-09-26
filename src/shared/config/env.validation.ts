@@ -64,6 +64,14 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
     SPACES_PUBLIC_BASE_URL: Joi.string().uri().required(),
     SPACES_UPLOAD_MAX_MB: Joi.number().integer().min(1).max(100).default(10),
 
+    // No commercial default: absent means bot shipping remains disabled.
+    // The signed-32-bit bound reflects the Prisma INTEGER storage columns.
+    BOT_SHIPPING_CHARGE_MAX_CENTS: Joi.number()
+      .integer()
+      .min(1)
+      .max(2_147_483_647)
+      .optional(),
+
     // ─── D.4 — Inngest + Resend fail-closed posture ──────────────────────
     NODE_ENV: Joi.string()
       .valid('development', 'test', 'staging', 'production')

@@ -4747,6 +4747,139 @@ describe('SalesService', () => {
       });
     });
 
+    it('adds approved shipping after promotions without discounting merchandise or changing stock', async () => {
+      setupConfirmBotSaleHappyPath();
+      posEvaluateUseCase.evaluate.mockImplementation(
+        async (input: { lines: Array<{ itemId: string }> }) => ({
+          lines: [
+            {
+              itemId: input.lines[0]?.itemId,
+              discountType: 'percentage',
+              discountValue: 10,
+              discountTitle: '10% off',
+              promotionId: 'promo-product-1',
+            },
+          ],
+          order: null,
+          availableManualPromotions: [],
+          targetableManualPromotionIds: [],
+        }),
+      );
+
+      const result = await service.confirmBotSale({
+        ...botSaleInput,
+        shipping: {
+          chargeCents: 250,
+          approvalId: 'approval-1',
+          quoteId: 'quote-1',
+        },
+        expectedTotalCents: 2050,
+      });
+
+      expect(productsService.decrementStockForCharge).toHaveBeenCalledWith([
+        { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+      ]);
+      expect(saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotalCents: 2000,
+          discountCents: 200,
+          shippingChargeCents: 250,
+          shippingApprovalId: 'approval-1',
+          shippingQuoteId: 'quote-1',
+          totalCents: 2050,
+          debtCents: 2050,
+        }),
+      );
+      expect(result).toMatchObject({
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        debtCents: 2050,
+      });
+      expect(outboxWriter.publish.mock.calls[0]?.[5]).toMatchObject({
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        debtCents: 2050,
+      });
+    });
+
+    it('re-quotes against merchandise plus shipping before stock or persistence', async () => {
+      setupConfirmBotSaleHappyPath();
+      await expect(
+        service.confirmBotSale({
+          ...botSaleInput,
+          shipping: { chargeCents: 250, approvalId: 'approval-2' },
+          expectedTotalCents: 2000,
+        }),
+      ).rejects.toMatchObject({
+        code: 'PROMO_RE_QUOTE',
+        details: expect.objectContaining({ recomputedTotalCents: 2250 }),
+      });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it.each([-1, 0, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+      'rejects an invalid shipping charge of %s without side effects',
+      async (chargeCents) => {
+        setupConfirmBotSaleHappyPath();
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            shipping: { chargeCents, approvalId: 'approval-3' },
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_SHIPPING_CHARGE' });
+        expect(saleRepo.save).not.toHaveBeenCalled();
+        expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+        expect(outboxWriter.publish).not.toHaveBeenCalled();
+      },
+    );
+
+    it('requires a customer shipping address for an approved charge before writing', async () => {
+      setupConfirmBotSaleHappyPath();
+      await expect(
+        service.confirmBotSale({
+          ...botSaleInput,
+          shippingAddressId: null,
+          shipping: {
+            chargeCents: 250,
+            approvalId: 'approval-without-address',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_ADDRESS_REQUIRED' });
+      expect(saleRepo.runInTransaction).not.toHaveBeenCalled();
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects totals above the signed-32-bit storage limit before writing', async () => {
+      setupConfirmBotSaleHappyPath();
+      await expect(
+        service.confirmBotSale({
+          ...botSaleInput,
+          shipping: { chargeCents: 2_147_483_647, approvalId: 'approval-4' },
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_SHIPPING_CHARGE' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+    });
+
+    it('rejects an empty approval ID before stock or persistence', async () => {
+      setupConfirmBotSaleHappyPath();
+      await expect(
+        service.confirmBotSale({
+          ...botSaleInput,
+          shipping: { chargeCents: 250, approvalId: '  ' },
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_APPROVAL_REQUIRED' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+    });
+
     it('rejects stale bot prices before stock, folio, persistence, or outbox side effects', async () => {
       let priceValidationRanInsideTransaction = false;
 
@@ -5091,11 +5224,9 @@ describe('SalesService', () => {
       // `null` exactly like a genuinely missing id.
       customerFindUnique.mockResolvedValue(null);
 
-      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject(
-        {
-          code: 'CUSTOMER_NOT_FOUND',
-        },
-      );
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
+        code: 'CUSTOMER_NOT_FOUND',
+      });
 
       expect(customerFindUnique).toHaveBeenCalledWith({
         where: { id: 'customer-1', tenantId: 'tenant-1' },
@@ -5117,11 +5248,9 @@ describe('SalesService', () => {
       // tenant is indistinguishable from a missing id.
       customerAddressFindUnique.mockResolvedValue(null);
 
-      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject(
-        {
-          code: 'SHIPPING_ADDRESS_NOT_FOUND',
-        },
-      );
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
+        code: 'SHIPPING_ADDRESS_NOT_FOUND',
+      });
 
       expect(customerFindUnique).toHaveBeenCalledWith({
         where: { id: 'customer-1', tenantId: 'tenant-1' },
@@ -5143,11 +5272,9 @@ describe('SalesService', () => {
         customerId: 'customer-other',
       });
 
-      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject(
-        {
-          code: 'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
-        },
-      );
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
+        code: 'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+      });
 
       expect(customerAddressFindUnique).toHaveBeenCalledWith({
         where: { id: 'shipping-1', tenantId: 'tenant-1' },
@@ -6483,6 +6610,50 @@ describe('SalesService', () => {
   });
 
   describe('getSaleDetail', () => {
+    it('surfaces a persisted shipping charge separately so totals reconcile', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'BOT-1',
+        status: 'CONFIRMED',
+        channel: 'ONLINE',
+        register: 'Bot',
+        confirmedAt: new Date('2026-09-23T11:00:00.000Z'),
+        createdAt: new Date('2026-09-23T10:00:00.000Z'),
+        dueDate: null,
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        paidCents: 0,
+        debtCents: 2050,
+        changeDueCents: 0,
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'PENDING',
+        customer: { id: 'customer-1', name: 'Ana' },
+        cashier: { id: 'user-1', name: 'Bot' },
+        seller: null,
+        items: [],
+        payments: [],
+      });
+      saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+
+      const detail = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+      expect(detail).toMatchObject({
+        subtotalCents: 2000,
+        discountCents: 200,
+        shippingChargeCents: 250,
+        totalCents: 2050,
+        debtCents: 2050,
+      });
+      expect(
+        detail.subtotalCents -
+          detail.discountCents +
+          (detail.shippingChargeCents ?? 0),
+      ).toBe(detail.totalCents);
+    });
+
     it('interleaves COMMENT events in timeline order [REGISTERED, PAYMENT, COMMENT, DELIVERED]', async () => {
       saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
         id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
@@ -6533,6 +6704,7 @@ describe('SalesService', () => {
         'b5e2b8fd-bdfd-471f-b687-ec340d578885',
       );
 
+      expect(result).not.toHaveProperty('shippingChargeCents');
       expect(result.timeline.map((event) => event.type)).toEqual([
         'SALE_REGISTERED',
         'PAYMENT_RECEIVED',
