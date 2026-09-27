@@ -635,3 +635,123 @@ No decidas el estado vacío por la longitud de `points`: siempre hay un punto po
 - Las fechas no se desplazan por parseo UTC ni por la zona del navegador.
 - Reembolsos y moneda no se mezclan con la serie; el resumen sigue siendo la autoridad de período.
 - Existe cobertura de autorización, rango, `interval` inválido, empty y render.
+
+## 15. Reporte de ventas por vendedor (seller sales report)
+
+> **Estado**: existe solo en la rama local `feat/seller-sales-report`. **No está mergeado, publicado ni desplegado.** Confirmar la entrega antes de apuntar a un ambiente remoto.
+
+`GET /analytics/sales/sellers/:sellerUserId/report` devuelve, para un vendedor del tenant autenticado, dos secciones separadas: ventas **confirmadas** atribuidas por `confirmedAt` y ventas **canceladas** (informativas) atribuidas por `canceledAt`. No es un listado general de ventas ni reemplaza al resumen de sucursal.
+
+### 15.1 Contrato HTTP
+
+| Propiedad         | Valor                                           |
+| ----------------- | ----------------------------------------------- |
+| Método            | `GET`                                           |
+| Path              | `/analytics/sales/sellers/:sellerUserId/report` |
+| Respuesta exitosa | `200 OK` (`Cache-Control: no-store`)            |
+| Autenticación     | JWT Bearer                                      |
+| Tenant            | Derivado del JWT                                |
+| Permisos exactos  | `read:Analytics` **Y** `read:Sale`              |
+
+La cadena de seguridad es la misma del resumen (`JwtAuthGuard` → `TenantContextGuard` → `PermissionsGuard`). `read:User` es requisito de entrada de la UI, **no** permiso del endpoint. Falta cualquiera de los dos permisos del endpoint → `403`.
+
+### 15.2 Path y query params
+
+| Param          | Ubicación | Tipo     | Regla                                       |
+| -------------- | --------- | -------- | ------------------------------------------- |
+| `sellerUserId` | path      | `string` | UUID real del vendedor; otro valor da `400` |
+| `from`         | query     | `string` | Fecha local exacta `YYYY-MM-DD`; inclusiva  |
+| `to`           | query     | `string` | Fecha local exacta `YYYY-MM-DD`; exclusiva  |
+
+Hereda las reglas de rango del resumen (secciones 3.2 y 3.3): zona `America/Mexico_City`, semiabierto `[from,to)`, máximo 366 días, sin `tenantId`/`status`/`sort`/`limit`/`currency`. El tenant se toma del JWT; no se envía.
+
+### 15.3 Respuesta `200 OK`
+
+```ts
+export type SellerReportPaymentStatus = 'PAID' | 'PARTIAL' | 'CREDIT';
+
+export interface SellerSalesReportConfirmedRow {
+  id: string;
+  folio: string | null;
+  confirmedAt: string; // ISO UTC
+  totalCents: number;
+  paidCents: number;
+  debtCents: number;
+  paymentStatus: SellerReportPaymentStatus;
+}
+
+export interface SellerSalesReportCanceledRow {
+  id: string;
+  folio: string | null;
+  confirmedAt: string | null; // ISO UTC o null, sin fallback
+  canceledAt: string; // ISO UTC
+  totalCents: number;
+}
+
+export interface SellerSalesReport {
+  seller: { id: string; name: string };
+  tenantId: string;
+  timeZone: 'America/Mexico_City';
+  from: string;
+  to: string;
+  generatedAt: string; // ISO UTC, momento de generación
+  attribution: 'CURRENT_SELLER';
+  balances: 'CURRENT';
+  rowLimit: 1000;
+  rowCount: number;
+  confirmed: {
+    dateBasis: 'confirmedAt';
+    summary: {
+      saleCount: number;
+      netSalesCents: number;
+      collectedCents: number;
+      outstandingDebtCents: number;
+      averageTicketCents: number;
+    };
+    rows: SellerSalesReportConfirmedRow[];
+  };
+  canceled: {
+    dateBasis: 'canceledAt';
+    saleCount: number;
+    rows: SellerSalesReportCanceledRow[];
+  };
+}
+```
+
+### 15.4 Semántica
+
+| Regla                | Detalle                                                                                                                        |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Atribución           | Vendedor **actual** de la venta (`CURRENT_SELLER`); no se reconstruye historial                                                 |
+| Confirmadas          | Cohorte por `confirmedAt` en `[from,to)`; alimentan `summary` y sus totales                                                      |
+| Canceladas           | Cohorte informativa por `canceledAt`; **excluidas** de los totales confirmados                                                   |
+| Saldos               | `paidCents`/`debtCents` son el estado **actual** (`CURRENT`), no flujos por fecha de pago                                        |
+| Orden                | Ascendente por fecha (`confirmedAt`/`canceledAt`) y luego por `id`, dentro de cada sección                                       |
+| Centavos             | Enteros no negativos seguros; se validan filas y sumas                                                                          |
+| `averageTicketCents` | `netSalesCents / saleCount` redondeado; `0` sin ventas                                                                          |
+| `rowCount`           | Suma de filas de ambas secciones                                                                                                |
+| Elegibilidad         | El usuario existe y tiene membresía en el tenant (cualquier rol, activo o inactivo) o alguna venta asignada; un miembro inactivo **sin ventas sigue siendo elegible** |
+| `generatedAt`        | Momento de generación, no un corte contable histórico                                                                            |
+
+Sin reembolsos, sin moneda ni data de cliente/cajero/items/motivo de cancelación. No derivar un "neto de caja".
+
+### 15.5 Errores
+
+| HTTP  | Causa                                                                                        |
+| ----- | -------------------------------------------------------------------------------------------- |
+| `400` | UUID inválido, fechas inválidas o fuera de rango, rango > 366 días, params desconocidos      |
+| `401` | JWT ausente o inválido                                                                       |
+| `403` | Falta `read:Analytics` o `read:Sale`                                                         |
+| `404` | `SELLER_NOT_FOUND`: vendedor inexistente o sin vínculo con el tenant (mismo envelope)        |
+| `422` | `SELLER_REPORT_ROW_LIMIT_EXCEEDED`: más de 1000 filas combinadas; **no hay reporte parcial** |
+| `500` | Fallo inesperado de lectura/validación                                                       |
+
+El `422` trae `{ statusCode, error: 'SELLER_REPORT_ROW_LIMIT_EXCEEDED', message, timestamp, rowLimit: 1000, rowCount }`. Ante `422`, pedir un rango más corto; no renderizar un reporte parcial.
+
+### 15.6 UI y cobertura recomendadas
+
+- Filtros `from`/`to` con las mismas reglas del resumen y selector de vendedor.
+- Mostrar confirmadas (con totales) y canceladas separadas; no sumar las canceladas a los totales confirmados.
+- Usar `rows[].folio` si existe; formatear `confirmedAt`/`canceledAt` (ISO UTC) en `America/Mexico_City`.
+- Diferenciar `400`/`403`/`404`/`422`; tratar `no-store` como "no cachear".
+- Cobertura: permiso doble (falta cualquiera → `403`), UUID inválido → `400`, rango inválido → `400`, `404`, `422`, secciones separadas y estado vacío (`rowCount === 0`).

@@ -6,6 +6,7 @@
 import { HttpStatus, RequestMethod } from '@nestjs/common';
 import {
   GUARDS_METADATA,
+  HEADERS_METADATA,
   HTTP_CODE_METADATA,
   METHOD_METADATA,
   MODULE_METADATA,
@@ -18,16 +19,20 @@ import { PermissionsGuard } from '../../auth/authorization/guards/permissions.gu
 import { PERMISSIONS_KEY } from '../../auth/authorization/decorators/require-permissions.decorator';
 import { BranchSalesSummaryService } from '../application/branch-sales-summary.service';
 import { BranchSalesTimeseriesService } from '../application/branch-sales-timeseries.service';
+import { SellerSalesReportService } from '../application/seller-sales-report.service';
 import { BRANCH_SALES_SUMMARY_REPOSITORY } from '../domain/branch-sales-summary.repository';
 import { BRANCH_SALES_TIMESERIES_REPOSITORY } from '../domain/branch-sales-timeseries.repository';
+import { SELLER_SALES_REPORT_REPOSITORY } from '../domain/seller-sales-report.repository';
 import { PrismaBranchSalesSummaryRepository } from '../infrastructure/prisma-branch-sales-summary.repository';
 import { PrismaBranchSalesTimeseriesRepository } from '../infrastructure/prisma-branch-sales-timeseries.repository';
+import { PrismaSellerSalesReportRepository } from '../infrastructure/prisma-seller-sales-report.repository';
 import { DatabaseModule } from '../../shared/prisma/prisma.module';
 import { AuthModule } from '../../auth/auth.module';
 import { BranchSalesSummaryQueryDto } from '../dto/branch-sales-summary-query.dto';
 import type { BranchSalesSummaryResponseDto } from '../dto/branch-sales-summary-response.dto';
 import { BranchSalesTimeseriesQueryDto } from '../dto/branch-sales-timeseries-query.dto';
 import type { BranchSalesTimeseriesResponseDto } from '../dto/branch-sales-timeseries-response.dto';
+import type { SellerSalesReportResponseDto } from '../dto/seller-sales-report-response.dto';
 import { AnalyticsModule } from '../analytics.module';
 import { AnalyticsController } from './analytics.controller';
 
@@ -70,6 +75,45 @@ const timeseriesResponse: BranchSalesTimeseriesResponseDto = {
     },
   ],
 };
+const SELLER_ID = '11111111-1111-4111-8111-111111111111';
+const sellerReportResponse: SellerSalesReportResponseDto = {
+  seller: { id: SELLER_ID, name: 'Vendedor Uno' },
+  tenantId: 'tenant-1',
+  timeZone: 'America/Mexico_City',
+  from: '2026-01-01',
+  to: '2026-02-01',
+  generatedAt: '2026-03-01T12:00:00.000Z',
+  attribution: 'CURRENT_SELLER',
+  balances: 'CURRENT',
+  rowLimit: 1000,
+  rowCount: 1,
+  confirmed: {
+    dateBasis: 'confirmedAt',
+    summary: {
+      saleCount: 1,
+      netSalesCents: 10_000,
+      collectedCents: 4_000,
+      outstandingDebtCents: 6_000,
+      averageTicketCents: 10_000,
+    },
+    rows: [
+      {
+        id: 'sale-1',
+        folio: 'A-1',
+        confirmedAt: '2026-01-05T18:30:00.000Z',
+        totalCents: 10_000,
+        paidCents: 4_000,
+        debtCents: 6_000,
+        paymentStatus: 'PARTIAL',
+      },
+    ],
+  },
+  canceled: {
+    dateBasis: 'canceledAt',
+    saleCount: 0,
+    rows: [],
+  },
+};
 /** Reads the handler function for a route method (metadata lives there). */
 const handlerOf = (method: string): object => {
   const handler = Object.getOwnPropertyDescriptor(
@@ -83,14 +127,17 @@ const handlerOf = (method: string): object => {
 describe('AnalyticsController', () => {
   let summarize: jest.Mock;
   let getTimeseries: jest.Mock;
+  let getSellerReport: jest.Mock;
   let controller: AnalyticsController;
 
   beforeEach(() => {
     summarize = jest.fn(() => Promise.resolve(response));
     getTimeseries = jest.fn(() => Promise.resolve(timeseriesResponse));
+    getSellerReport = jest.fn(() => Promise.resolve(sellerReportResponse));
     controller = new AnalyticsController(
       { summarize } as unknown as BranchSalesSummaryService,
       { getTimeseries } as unknown as BranchSalesTimeseriesService,
+      { getSellerReport } as unknown as SellerSalesReportService,
     );
   });
 
@@ -179,6 +226,49 @@ describe('AnalyticsController', () => {
       ) as unknown,
     ).toEqual([BranchSalesSummaryQueryDto]);
   });
+  it('delegates the seller report once with the exact id and query', async () => {
+    const result = await controller.getSellerSalesReport(SELLER_ID, query);
+    expect(getSellerReport).toHaveBeenCalledTimes(1);
+    expect(getSellerReport).toHaveBeenCalledWith(SELLER_ID, query);
+    expect(result).toBe(sellerReportResponse);
+  });
+
+  it('maps GET /analytics/sales/sellers/:sellerUserId/report with 200 and no-store', () => {
+    const handler = handlerOf('getSellerSalesReport');
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(
+      'sales/sellers/:sellerUserId/report',
+    );
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.GET,
+    );
+    expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(
+      HttpStatus.OK,
+    );
+    expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toEqual([
+      { name: 'Cache-Control', value: 'no-store' },
+    ]);
+  });
+
+  it('requires the read:Analytics AND read:Sale permission conjunction', () => {
+    const permissions = Reflect.getMetadata(
+      PERMISSIONS_KEY,
+      handlerOf('getSellerSalesReport'),
+    ) as Array<[string, string]> | undefined;
+    expect(permissions).toEqual([
+      ['read', 'Analytics'],
+      ['read', 'Sale'],
+    ]);
+  });
+
+  it('validates the report path UUID and reuses the summary query DTO', () => {
+    expect(
+      Reflect.getMetadata(
+        PARAMTYPES_METADATA,
+        AnalyticsController.prototype,
+        'getSellerSalesReport',
+      ) as unknown,
+    ).toEqual([String, BranchSalesSummaryQueryDto]);
+  });
 });
 
 describe('AnalyticsModule wiring (OI-2 S4)', () => {
@@ -219,5 +309,12 @@ describe('AnalyticsModule wiring (OI-2 S4)', () => {
     expect(
       Reflect.getMetadata(MODULE_METADATA.EXPORTS, AnalyticsModule) as unknown,
     ).toBeUndefined();
+  });
+
+  it('registers the seller report service and its repository binding', () => {
+    expect(providers()).toContain(SellerSalesReportService);
+    expect(bindingFor(SELLER_SALES_REPORT_REPOSITORY)?.useClass).toBe(
+      PrismaSellerSalesReportRepository,
+    );
   });
 });

@@ -19,6 +19,7 @@ import request from 'supertest';
 import { AnalyticsController } from './analytics.controller';
 import { BranchSalesSummaryService } from '../application/branch-sales-summary.service';
 import { BranchSalesTimeseriesService } from '../application/branch-sales-timeseries.service';
+import { SellerSalesReportService } from '../application/seller-sales-report.service';
 import {
   ANALYTICS_TIME_ZONE,
   type BranchSalesSummaryQueryDto,
@@ -30,6 +31,12 @@ import {
   type BranchSalesTimeseriesResponseDto,
 } from '../dto/branch-sales-timeseries-response.dto';
 import type { BranchSalesTimeseriesQueryDto } from '../dto/branch-sales-timeseries-query.dto';
+import {
+  SELLER_SALES_REPORT_CANCELED_ROW_KEYS,
+  SELLER_SALES_REPORT_CONFIRMED_ROW_KEYS,
+  SELLER_SALES_REPORT_RESPONSE_KEYS,
+  type SellerSalesReportResponseDto,
+} from '../dto/seller-sales-report-response.dto';
 import {
   BRANCH_SALES_SUMMARY_RESPONSE_KEYS,
   type BranchSalesSummaryResponseDto,
@@ -44,6 +51,9 @@ import type {
   AppSubjects,
 } from '../../auth/authorization/domain/permission';
 import { createListingValidationExceptionFactory } from '../../shared/listing/listing-validation-exception.factory';
+import { DomainExceptionFilter } from '../../shared/filters/domain-exception.filter';
+import { SellerNotFoundError } from '../../sales/domain/sale.errors';
+import { SellerReportRowLimitExceededError } from '../domain/seller-sales-report.repository';
 
 type PermissionTuple = readonly [AppActions, AppSubjects];
 
@@ -85,6 +95,10 @@ const PRINCIPALS: Record<string, AnalyticsTestPrincipal> = {
     ['read', 'Analytics'],
   ]),
   'tenant-sale-reader': principal('sale-reader', [['read', 'Sale']]),
+  'tenant-analytics-sale-reader': principal('analytics-sale-reader', [
+    ['read', 'Analytics'],
+    ['read', 'Sale'],
+  ]),
 };
 
 class TestJwtAuthGuard implements CanActivate {
@@ -138,6 +152,55 @@ class TestPermissionsGuard implements CanActivate {
 }
 
 const RANGE = { from: '2026-01-01', to: '2026-02-01' } as const;
+
+const SELLER_ID = '11111111-1111-4111-8111-111111111111';
+
+const SELLER_REPORT_RESPONSE: SellerSalesReportResponseDto = {
+  seller: { id: SELLER_ID, name: 'Vendedor Uno' },
+  tenantId: 'tenant-analytics',
+  timeZone: ANALYTICS_TIME_ZONE,
+  from: RANGE.from,
+  to: RANGE.to,
+  generatedAt: '2026-03-01T12:00:00.000Z',
+  attribution: 'CURRENT_SELLER',
+  balances: 'CURRENT',
+  rowLimit: 1000,
+  rowCount: 2,
+  confirmed: {
+    dateBasis: 'confirmedAt',
+    summary: {
+      saleCount: 1,
+      netSalesCents: 10_000,
+      collectedCents: 4_000,
+      outstandingDebtCents: 6_000,
+      averageTicketCents: 10_000,
+    },
+    rows: [
+      {
+        id: 'sale-1',
+        folio: 'A-1',
+        confirmedAt: '2026-01-05T18:30:00.000Z',
+        totalCents: 10_000,
+        paidCents: 4_000,
+        debtCents: 6_000,
+        paymentStatus: 'PARTIAL',
+      },
+    ],
+  },
+  canceled: {
+    dateBasis: 'canceledAt',
+    saleCount: 1,
+    rows: [
+      {
+        id: 'sale-2',
+        folio: null,
+        confirmedAt: '2026-01-02T10:00:00.000Z',
+        canceledAt: '2026-01-03T10:00:00.000Z',
+        totalCents: 5_000,
+      },
+    ],
+  },
+};
 
 const FULL_RESPONSE: BranchSalesSummaryResponseDto = {
   timeZone: ANALYTICS_TIME_ZONE,
@@ -201,6 +264,9 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
   let getTimeseries: jest.MockedFunction<
     BranchSalesTimeseriesService['getTimeseries']
   >;
+  let getSellerReport: jest.MockedFunction<
+    SellerSalesReportService['getSellerReport']
+  >;
   const http = () => request(app.getHttpServer());
   const asReader = () =>
     http().get(url).set('Authorization', 'Bearer tenant-analytics-reader');
@@ -210,12 +276,15 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
     summarize.mockResolvedValue(FULL_RESPONSE);
     getTimeseries = jest.fn();
     getTimeseries.mockResolvedValue(TIMESERIES_RESPONSE);
+    getSellerReport = jest.fn();
+    getSellerReport.mockResolvedValue(SELLER_REPORT_RESPONSE);
 
     const moduleRef = await Test.createTestingModule({
       controllers: [AnalyticsController],
       providers: [
         { provide: BranchSalesSummaryService, useValue: { summarize } },
         { provide: BranchSalesTimeseriesService, useValue: { getTimeseries } },
+        { provide: SellerSalesReportService, useValue: { getSellerReport } },
       ],
     })
       .overrideGuard(JwtAuthGuard)
@@ -235,6 +304,7 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
         exceptionFactory: createListingValidationExceptionFactory(),
       }),
     );
+    app.useGlobalFilters(new DomainExceptionFilter());
     await app.init();
   });
 
@@ -427,6 +497,112 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
         interval: 'day',
       });
       expect(summarize).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GET /analytics/sales/sellers/:sellerUserId/report (seller-sales-report / v1)', () => {
+    const url = `/analytics/sales/sellers/${SELLER_ID}/report`;
+    const asReportReader = () =>
+      http()
+        .get(url)
+        .set('Authorization', 'Bearer tenant-analytics-sale-reader');
+
+    it('returns 401 without bearer authentication', async () => {
+      await http()
+        .get(url)
+        .query({ ...RANGE })
+        .expect(401);
+      expect(getSellerReport).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['lacking read:Sale', 'tenant-analytics-reader'],
+      ['lacking read:Analytics', 'tenant-sale-reader'],
+    ])(
+      'returns 403 for a tenant user %s and never delegates',
+      async (_case, token) => {
+        await http()
+          .get(url)
+          .set('Authorization', `Bearer ${token}`)
+          .query({ ...RANGE })
+          .expect(403);
+        expect(getSellerReport).not.toHaveBeenCalled();
+      },
+    );
+
+    it('returns 200 with no-store and the exact frozen contract, delegating once', async () => {
+      const res = await asReportReader()
+        .query({ ...RANGE })
+        .expect(200);
+
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(getSellerReport).toHaveBeenCalledTimes(1);
+      expect(getSellerReport).toHaveBeenCalledWith(SELLER_ID, { ...RANGE });
+
+      const body = res.body as SellerSalesReportResponseDto;
+      expect(body).toEqual(SELLER_REPORT_RESPONSE);
+      expect(Object.keys(body).sort()).toEqual(
+        [...SELLER_SALES_REPORT_RESPONSE_KEYS].sort(),
+      );
+      expect(SELLER_SALES_REPORT_RESPONSE_KEYS).toHaveLength(12);
+      expect(Object.keys(body.confirmed.rows[0]).sort()).toEqual(
+        [...SELLER_SALES_REPORT_CONFIRMED_ROW_KEYS].sort(),
+      );
+      expect(Object.keys(body.canceled.rows[0]).sort()).toEqual(
+        [...SELLER_SALES_REPORT_CANCELED_ROW_KEYS].sort(),
+      );
+      expect(JSON.stringify(body)).not.toMatch(
+        /customer|email|phone|address|currency|cashier|items|cancelReason/i,
+      );
+    });
+
+    it('rejects a non-UUID seller id with 400 and never delegates', async () => {
+      await http()
+        .get('/analytics/sales/sellers/not-a-uuid/report')
+        .set('Authorization', 'Bearer tenant-analytics-sale-reader')
+        .query({ ...RANGE })
+        .expect(400);
+      expect(getSellerReport).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['missing from', { to: RANGE.to }],
+      ['a timestamp bound', { from: '2026-01-01T00:00:00.000Z', to: RANGE.to }],
+      ['reversed bounds', { from: RANGE.to, to: RANGE.from }],
+      ['a 367-day range', { from: '2026-01-01', to: '2027-01-03' }],
+      ['an unknown query param', { ...RANGE, tenantId: 'tenant-1' }],
+    ])('returns 400 for %s', async (_case, query) => {
+      await asReportReader().query(query).expect(400);
+      expect(getSellerReport).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 with the existing SELLER_NOT_FOUND envelope', async () => {
+      getSellerReport.mockRejectedValue(new SellerNotFoundError());
+      const res = await asReportReader()
+        .query({ ...RANGE })
+        .expect(404);
+      expect(res.body).toMatchObject({
+        statusCode: 404,
+        error: 'SELLER_NOT_FOUND',
+        message: 'SELLER_NOT_FOUND',
+      });
+    });
+
+    it('returns 422 with the frozen row-limit envelope and no partial report', async () => {
+      getSellerReport.mockRejectedValue(
+        new SellerReportRowLimitExceededError(1001, 1000),
+      );
+      const res = await asReportReader()
+        .query({ ...RANGE })
+        .expect(422);
+      expect(res.body).toMatchObject({
+        statusCode: 422,
+        error: 'SELLER_REPORT_ROW_LIMIT_EXCEEDED',
+        message: 'SELLER_REPORT_ROW_LIMIT_EXCEEDED',
+        rowLimit: 1000,
+        rowCount: 1001,
+      });
+      expect(res.body).toHaveProperty('timestamp');
     });
   });
 });
