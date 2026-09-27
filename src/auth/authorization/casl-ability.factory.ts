@@ -87,8 +87,7 @@ export class CaslAbilityFactory {
         (p.action === 'create' || p.action === 'delete'),
     );
     const isDriverOnly =
-      !isRouteManager &&
-      permissions.some((p) => p.subject === 'DeliveryRoute');
+      !isRouteManager && permissions.some((p) => p.subject === 'DeliveryRoute');
 
     for (const permission of permissions) {
       // Driver-only callers on DeliveryRoute read/update get the
@@ -177,7 +176,7 @@ export class CaslAbilityFactory {
   ): Promise<EffectivePermission[] | null> {
     if (!tenantId) return [];
 
-    const membership = await this.prisma.tenantMembership.findFirst({
+    const memberships = await this.prisma.tenantMembership.findMany({
       where: { userId, tenantId },
       include: {
         role: {
@@ -192,11 +191,11 @@ export class CaslAbilityFactory {
       },
     });
 
-    if (!membership) return [];
-
-    return membership.role.permissions.map((rolePermission) => ({
-      action: rolePermission.permission.action as AppActions,
-      subject: rolePermission.permission.subject as AppSubjects,
-    }));
+    return memberships.flatMap((membership) =>
+      membership.role.permissions.map((rolePermission) => ({
+        action: rolePermission.permission.action as AppActions,
+        subject: rolePermission.permission.subject as AppSubjects,
+      })),
+    );
   }
 }

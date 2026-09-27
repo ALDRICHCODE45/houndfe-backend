@@ -13,6 +13,7 @@ import {
   Body,
   Param,
   Query,
+  Req,
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
@@ -26,6 +27,8 @@ import { AdminUserService } from './admin-user.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { PaginationQueryDto } from './dto/pagination-query.dto';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+import type { AppAbility } from '../auth/authorization/domain/permission';
 
 @Controller('admin/users')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -53,8 +56,12 @@ export class AdminUserController {
 
   @Patch(':id')
   @RequirePermissions(['update', 'User'])
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateUserDto) {
-    return this.adminUserService.update(id, dto);
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateUserDto,
+    @Req() request: { user: AuthenticatedUser; ability: AppAbility },
+  ) {
+    return this.adminUserService.update(id, dto, request.user, request.ability);
   }
 
   @Delete(':id')

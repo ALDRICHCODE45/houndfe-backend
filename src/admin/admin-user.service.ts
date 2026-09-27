@@ -8,7 +8,13 @@
  *
  * DOES NOT contain business logic (that's in User entity).
  */
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import type { IUserRepository } from '../auth/domain/user.repository';
@@ -27,6 +33,8 @@ import {
 } from '../shared/domain/domain-error';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+import type { AppAbility } from '../auth/authorization/domain/permission';
 import {
   PaginationQueryDto,
   type UserSortField,
@@ -311,14 +319,129 @@ export class AdminUserService {
   async update(
     id: string,
     dto: UpdateUserDto,
+    actor: AuthenticatedUser,
+    ability: AppAbility,
   ): Promise<ReturnType<User['toResponse']>> {
-    const user = await this.userRepo.findById(id);
-    if (!user) throw new EntityNotFoundError('User', id);
+    const { tenantId, isSuperAdmin } = actor;
+    const changesRoles = dto.roleIds !== undefined;
+    // Use the guard's pre-mutation snapshot, including for self-demotion.
+    if (
+      !ability?.can('update', 'User') ||
+      (changesRoles && !ability.can('update', 'TenantMembership')) ||
+      (!tenantId && (changesRoles || !isSuperAdmin))
+    ) {
+      throw new ForbiddenException();
+    }
 
-    user.updateProfile(dto.name);
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        // Match OTP's lock: User.id is PostgreSQL TEXT, not UUID.
+        await tx.$queryRaw(
+          Prisma.sql`SELECT "id" FROM "users" WHERE "id" = ${id} FOR UPDATE`,
+        );
+        const stored = await tx.user.findUnique({ where: { id } });
+        if (!stored) throw new EntityNotFoundError('User', id);
 
-    const updated = await this.userRepo.update(user);
-    return updated.toResponse();
+        const memberships = tenantId
+          ? await tx.tenantMembership.findMany({
+              where: { userId: id, tenantId },
+              include: { role: { select: { tenantId: true } } },
+            })
+          : [];
+        if (tenantId && memberships.length === 0) {
+          throw new EntityNotFoundError('User', id);
+        }
+        if (!isSuperAdmin) {
+          // Keep the exact global-privilege predicate used by completeLogin.
+          const privileged = await tx.role.findFirst({
+            where: {
+              tenantId: null,
+              tenantMemberships: { some: { userId: id } },
+              OR: [
+                { isSystem: true, name: 'Super Admin' },
+                {
+                  permissions: {
+                    some: { permission: { subject: 'all', action: 'manage' } },
+                  },
+                },
+              ],
+            },
+            select: { id: true },
+          });
+          if (privileged) throw new ForbiddenException();
+        }
+
+        const roleIds = dto.roleIds;
+        if (roleIds !== undefined) {
+          if (
+            !Array.isArray(roleIds) ||
+            roleIds.length === 0 ||
+            new Set(roleIds).size !== roleIds.length ||
+            memberships.some(
+              (membership) => membership.role.tenantId !== tenantId,
+            )
+          ) {
+            throw new BadRequestException('INVALID_TENANT_ROLE_SET');
+          }
+          const roles = await tx.role.findMany({
+            where: { id: { in: roleIds }, tenantId },
+            select: { id: true, tenantId: true },
+          });
+          if (
+            roles.length !== roleIds.length ||
+            roles.some((role) => role.tenantId !== tenantId)
+          ) {
+            throw new BadRequestException('INVALID_TENANT_ROLE_SET');
+          }
+        }
+
+        const user = User.fromPersistence(stored);
+        user.updateProfile(dto.name);
+        const email =
+          dto.email === undefined ? undefined : Email.create(dto.email).value;
+        const emailChanged = email !== undefined && email !== stored.email;
+        if (emailChanged) {
+          const duplicate = await tx.user.findUnique({ where: { email } });
+          if (duplicate && duplicate.id !== id)
+            throw new ConflictException('EMAIL_ALREADY_EXISTS');
+        }
+        const updated = await tx.user.update({
+          where: { id },
+          data: { name: user.name, ...(email === undefined ? {} : { email }) },
+        });
+        if (emailChanged) {
+          // Keep history and budgets; delayed delivery cannot activate FAILED.
+          await tx.loginOtpChallenge.updateMany({
+            where: { userId: id, state: { in: ['PENDING', 'ACTIVE'] } },
+            data: { state: 'FAILED' },
+          });
+        }
+        if (roleIds !== undefined && tenantId) {
+          await tx.tenantMembership.deleteMany({
+            where: { userId: id, tenantId, roleId: { notIn: roleIds } },
+          });
+          const existing = new Set(
+            memberships.map((membership) => membership.roleId),
+          );
+          const added = roleIds.filter((roleId) => !existing.has(roleId));
+          if (added.length) {
+            await tx.tenantMembership.createMany({
+              data: added.map((roleId) => ({ userId: id, tenantId, roleId })),
+            });
+          }
+        }
+        return User.fromPersistence(updated).toResponse();
+      });
+    } catch (error) {
+      // Translate uniqueness races only after Prisma has rolled back all writes.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException('USER_UPDATE_CONFLICT');
+      }
+      throw error;
+    }
   }
 
   async deactivate(id: string): Promise<void> {

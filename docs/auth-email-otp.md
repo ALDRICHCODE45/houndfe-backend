@@ -104,10 +104,18 @@ HMAC usando el email actual bajo bloqueo. Si cambió de A a B, el código enviad
 falla con `OTP_INVALID`, no se consume y el intento sí cuenta. Esto también aplica
 si el email cambia mientras el envío está en curso.
 
-Es **vinculación al email actual**, no invalidación histórica irreversible: si vuelve
+El MAC por sí solo es **vinculación al email actual**, no invalidación histórica
+irreversible: ante un cambio directo fuera de la ruta administrativa, si vuelve
 de B a A, el código puede coincidir nuevamente mientras sigan cumpliéndose TTL,
 presupuestos, usuario activo y uso único. No existe infraestructura de versiones
-históricas de email en este cambio.
+históricas de email.
+
+La [edición administrativa](admin-user-editing.md) agrega una garantía distinta:
+al cambiar efectivamente el email mediante `PATCH /admin/users/:id`, marca los
+OTP PENDING/ACTIVE como FAILED dentro de la misma transacción y bloqueo del
+usuario. Un envío demorado no puede reactivarlos y volver de B a A por esa ruta
+no los revive. El email sin cambios no invalida OTP; se conservan historial,
+presupuestos y sesiones finales existentes.
 
 El propósito interno del MAC cambia a `password-login-otp/v2`; los digests pendientes
 anteriores fallan cerrados. Esto **no cambia el contrato HTTP v1** ni el claim firmado
