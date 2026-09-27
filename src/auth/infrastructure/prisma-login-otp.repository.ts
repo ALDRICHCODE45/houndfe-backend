@@ -9,7 +9,7 @@ export type OtpReservation = {
   userId: string;
   generation: string;
   handleHash: string;
-  codeMac: string;
+  createCodeMac: (identity: OtpIdentity) => string;
   expectedHandleHash?: string;
 };
 export type ReserveResult =
@@ -118,7 +118,7 @@ export class PrismaLoginOtpRepository {
       const data = {
         generation: input.generation,
         handleHash: input.handleHash,
-        codeMac: input.codeMac,
+        codeMac: input.createCodeMac({ id: user.id, email: user.email }),
         state: 'PENDING' as const,
         expiresAt: new Date(now.getTime() + 600_000),
         createdAt: now,
@@ -170,7 +170,7 @@ export class PrismaLoginOtpRepository {
 
   async verify(
     handleHash: string,
-    matches: (challenge: LoginOtpChallenge) => boolean,
+    matches: (challenge: LoginOtpChallenge, identity: OtpIdentity) => boolean,
   ): Promise<OtpIdentity | null> {
     const found = await this.findByHandle(handleHash);
     if (!found) return null;
@@ -195,7 +195,7 @@ export class PrismaLoginOtpRepository {
         current.handleHash !== handleHash ||
         current.state !== 'ACTIVE' ||
         current.expiresAt <= now ||
-        !matches(current)
+        !matches(current, { id: user.id, email: user.email })
       )
         return null;
       await tx.loginOtpChallenge.update({

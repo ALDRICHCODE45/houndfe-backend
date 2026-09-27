@@ -78,6 +78,7 @@ export class LoginOtpService {
 
   private mac(
     userId: string,
+    email: string,
     generation: string,
     handleHash: string,
     code: string,
@@ -86,8 +87,9 @@ export class LoginOtpService {
     return createHmac('sha256', this.key)
       .update(
         JSON.stringify([
-          'password-login-otp/v1',
+          'password-login-otp/v2',
           userId,
+          email,
           generation,
           handleHash,
           code,
@@ -124,7 +126,8 @@ export class LoginOtpService {
         userId,
         generation,
         handleHash,
-        codeMac: this.mac(userId, generation, handleHash, code),
+        createCodeMac: (identity) =>
+          this.mac(identity.id, identity.email, generation, handleHash, code),
         expectedHandleHash,
       }),
     );
@@ -160,10 +163,16 @@ export class LoginOtpService {
     }
     const handleHash = this.hashHandle(challengeId);
     const identity = await this.database(() =>
-      this.repository.verify(handleHash, (challenge) => {
+      this.repository.verify(handleHash, (challenge, currentIdentity) => {
         const expected = Buffer.from(challenge.codeMac, 'hex');
         const actual = Buffer.from(
-          this.mac(challenge.userId, challenge.generation, handleHash, code),
+          this.mac(
+            challenge.userId,
+            currentIdentity.email,
+            challenge.generation,
+            handleHash,
+            code,
+          ),
           'hex',
         );
         return expected.length === 32 && timingSafeEqual(expected, actual);

@@ -28,9 +28,15 @@ import { ROLE_REPOSITORY } from './authorization/domain/role.repository';
 import { PrismaPermissionRepository } from './authorization/infrastructure/prisma-permission.repository';
 import { PERMISSION_REPOSITORY } from './authorization/domain/permission.repository';
 
+import { MailerModule } from '../notifications/email/mailer.module';
+import { LoginOtpService } from './login-otp.service';
+import { PrismaLoginOtpRepository } from './infrastructure/prisma-login-otp.repository';
+import { LoginRateLimitGuard } from './guards/login-rate-limit.guard';
+
 @Module({
   imports: [
     DatabaseModule, // Provides PrismaService
+    MailerModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -45,6 +51,9 @@ import { PERMISSION_REPOSITORY } from './authorization/domain/permission.reposit
   controllers: [AuthController],
   providers: [
     AuthService,
+    LoginOtpService,
+    PrismaLoginOtpRepository,
+    LoginRateLimitGuard,
     JwtStrategy,
     JwtAuthGuard,
     {

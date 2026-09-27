@@ -2,6 +2,7 @@ import { Prisma, type LoginOtpChallenge } from '@prisma/client';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
 import { LoginOtpService } from '../login-otp.service';
+import type { SendMailInput } from '../../notifications/email/mailer.port';
 import {
   PrismaLoginOtpRepository,
   otpBucketKey,
@@ -12,6 +13,7 @@ import {
 function setup() {
   let challenge: LoginOtpChallenge | null = null;
   let active = true;
+  let email = 'fake@example.test';
   let queue = Promise.resolve();
   let buckets = new Map<string, { count: number; windowStart: Date }>();
   const query = jest.fn((sql: Prisma.Sql) => {
@@ -39,7 +41,7 @@ function setup() {
       findUnique: jest.fn(() =>
         Promise.resolve({
           id: 'user',
-          email: 'fake@example.test',
+          email,
           isActive: active,
         }),
       ),
@@ -92,7 +94,7 @@ function setup() {
       generation,
       expectedHandleHash,
       handleHash: generation.padEnd(64, '0'),
-      codeMac: 'a'.repeat(64),
+      createCodeMac: () => 'a'.repeat(64),
     });
   return {
     repo,
@@ -101,6 +103,9 @@ function setup() {
     tx,
     state: () => challenge!,
     buckets: () => buckets,
+    changeEmail: (value: string) => {
+      email = value;
+    },
     deactivate: () => {
       active = false;
     },
@@ -112,6 +117,91 @@ describe('PrismaLoginOtpRepository', () => {
     jest.useFakeTimers({ now: new Date('2026-09-26T00:00:00Z') }),
   );
   afterEach(() => jest.useRealTimers());
+
+  it.each(['after delivery', 'during delivery'])(
+    'rejects an email change %s before consumption and commits the attempt',
+    async (timing) => {
+      const { repo, state, buckets, changeEmail } = setup();
+      let finishSend!: () => void;
+      let startedSend!: () => void;
+      const sending = new Promise<void>((resolve) => {
+        startedSend = resolve;
+      });
+      const delivery = new Promise<void>((resolve) => {
+        finishSend = resolve;
+      });
+      const send = jest.fn<Promise<void>, [SendMailInput]>(() => {
+        startedSend();
+        return delivery;
+      });
+      const service = new LoginOtpService(
+        repo,
+        { send },
+        new ConfigService({ JWT_SECRET: 'fake-test-secret' }),
+      );
+      const issuing = service.issue('user');
+      await sending;
+      const mail = send.mock.calls[0][0];
+      expect(mail.to).toEqual(['fake@example.test']);
+      const code = /<strong>([0-9]{6})<\/strong>/.exec(mail.html)?.[1];
+      expect(code).toMatch(/^[0-9]{6}$/);
+      if (timing === 'during delivery') changeEmail('changed@example.test');
+      finishSend();
+      const envelope = await issuing;
+      if (timing === 'after delivery') changeEmail('changed@example.test');
+      expect(state().state).toBe('ACTIVE');
+      await expect(
+        service.verify(envelope.challengeId, code!),
+      ).rejects.toMatchObject({
+        response: {
+          statusCode: 401,
+          error: 'Unauthorized',
+          code: 'OTP_INVALID',
+        },
+      });
+      expect(state().state).toBe('ACTIVE');
+      expect(state().consumedAt).toBeNull();
+      expect(buckets().get(otpBucketKey('verify', 'user'))?.count).toBe(1);
+    },
+  );
+
+  it.each(['unchanged', 'reverted'])(
+    'consumes a %s current-email code once and rejects replay',
+    async (mode) => {
+      const { repo, state, buckets, changeEmail } = setup();
+      const send = jest
+        .fn<Promise<void>, [SendMailInput]>()
+        .mockResolvedValue();
+      const service = new LoginOtpService(
+        repo,
+        { send },
+        new ConfigService({ JWT_SECRET: 'fake-test-secret' }),
+      );
+      const envelope = await service.issue('user');
+      const mail = send.mock.calls[0][0];
+      expect(mail.to).toEqual(['fake@example.test']);
+      const code = /<strong>([0-9]{6})<\/strong>/.exec(mail.html)?.[1];
+      expect(code).toMatch(/^[0-9]{6}$/);
+      if (mode === 'reverted') {
+        changeEmail('changed@example.test');
+        await expect(
+          service.verify(envelope.challengeId, code!),
+        ).rejects.toMatchObject({ response: { code: 'OTP_INVALID' } });
+        expect(state().consumedAt).toBeNull();
+        changeEmail('fake@example.test');
+      }
+      await expect(
+        service.verify(envelope.challengeId, code!),
+      ).resolves.toEqual({ id: 'user', email: 'fake@example.test' });
+      expect(state().state).toBe('CONSUMED');
+      await expect(
+        service.verify(envelope.challengeId, code!),
+      ).rejects.toMatchObject({ response: { code: 'OTP_INVALID' } });
+      expect(buckets().get(otpBucketKey('verify', 'user'))?.count).toBe(
+        mode === 'reverted' ? 3 : 2,
+      );
+    },
+  );
 
   it('anchors the advertised TTL and cooldown to delayed delivery activation without resetting budgets', async () => {
     const { repo, state, buckets } = setup();

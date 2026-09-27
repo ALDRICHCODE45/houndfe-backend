@@ -47,6 +47,14 @@ Lo que **SÍ se comparte** entre todos los tenants:
 
 ## 2. ¿Qué cambió a nivel general?
 
+> **Actualización: OTP de correo obligatorio.** La [guía de autenticación OTP](auth-email-otp.md)
+> reemplaza el flujo de login por contraseña de este documento, incluidos sus ejemplos,
+> diagramas y cURL. `POST /auth/login` devuelve solo un desafío; los tokens finales o
+> el `tempToken` de selección llegan únicamente después de verificar el OTP, también
+> para super-admin. Las sesiones finales válidas existentes siguen siendo compatibles;
+> los `tempToken` antiguos sin prueba OTP se rechazan. Consultar la guía nueva antes
+> de implementar o desplegar el login.
+
 ### Breaking changes (TODO esto rompe el frontend actual)
 
 | Cambio | Impacto |

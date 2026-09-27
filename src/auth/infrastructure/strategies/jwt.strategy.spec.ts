@@ -13,6 +13,46 @@ describe('JwtStrategy', () => {
     return new JwtStrategy(configService);
   };
 
+  it.each([
+    { purpose: 'tenant-selection' },
+    { purpose: false },
+    { purpose: null },
+    { purpose: '' },
+    { sub: '' },
+    { sub: ' ' },
+    { sub: 123 },
+    { sub: undefined },
+    { email: '' },
+    { email: ' ' },
+    { email: null },
+    { email: undefined },
+    { tenantId: undefined },
+    { tenantId: 1 },
+    { tenantSlug: undefined },
+    { tenantSlug: {} },
+    { isSuperAdmin: undefined },
+    { isSuperAdmin: 'false' },
+    { isSuperAdmin: null },
+  ])('rejects malformed final claims %j', (override) => {
+    expect(() =>
+      createStrategy().validate({
+        sub: 'user-1',
+        email: 'john@example.com',
+        tenantId: null,
+        tenantSlug: null,
+        isSuperAdmin: false,
+        ...override,
+      }),
+    ).toThrow();
+  });
+
+  it.each([null, undefined, false, 'signed string'])(
+    'rejects non-object payload %s',
+    (payload) => {
+      expect(() => createStrategy().validate(payload)).toThrow();
+    },
+  );
+
   it('returns authenticated user with tenant and super-admin claims', () => {
     const strategy = createStrategy();
     const payload: JwtTokenPayload = {

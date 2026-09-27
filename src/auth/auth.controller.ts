@@ -13,10 +13,13 @@ import {
   HttpCode,
   HttpStatus,
   UseGuards,
+  Res,
+  HttpException,
 } from '@nestjs/common';
 import {
   AuthService,
   type AuthResponse,
+  type RegistrationResponse,
   type LoginResponse,
   type AuthTokens,
   type UserPermissionsResponse,
@@ -30,20 +33,85 @@ import type { AuthenticatedUser } from './interfaces/jwt-payload.interface';
 import { SelectTenantDto } from './dto/select-tenant.dto';
 import { SwitchTenantDto } from './dto/switch-tenant.dto';
 
+import type { Response } from 'express';
+import type { LoginOtpEnvelope } from './login-otp.service';
+import {
+  LoginRateLimit,
+  LoginRateLimitGuard,
+} from './guards/login-rate-limit.guard';
+import { VerifyLoginOtpDto } from './dto/verify-login-otp.dto';
+import { ResendLoginOtpDto } from './dto/resend-login-otp.dto';
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  register(@Body() dto: RegisterDto): Promise<AuthResponse> {
+  register(@Body() dto: RegisterDto): Promise<RegistrationResponse> {
     return this.authService.register(dto);
   }
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto): Promise<LoginResponse> {
-    return this.authService.login(dto);
+  @LoginRateLimit('login')
+  @UseGuards(LoginRateLimitGuard)
+  login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<LoginOtpEnvelope> {
+    return this.withRetryAfter(() => this.authService.login(dto), response);
+  }
+
+  @Post('login/otp/verify')
+  @HttpCode(HttpStatus.OK)
+  @LoginRateLimit('verify')
+  @UseGuards(LoginRateLimitGuard)
+  verifyLoginOtp(
+    @Body() dto: VerifyLoginOtpDto,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<LoginResponse> {
+    return this.withRetryAfter(
+      () => this.authService.verifyLoginOtp(dto),
+      response,
+    );
+  }
+
+  @Post('login/otp/resend')
+  @HttpCode(HttpStatus.OK)
+  @LoginRateLimit('resend')
+  @UseGuards(LoginRateLimitGuard)
+  resendLoginOtp(
+    @Body() dto: ResendLoginOtpDto,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<LoginOtpEnvelope> {
+    return this.withRetryAfter(
+      () => this.authService.resendLoginOtp(dto),
+      response,
+    );
+  }
+
+  private async withRetryAfter<T>(
+    operation: () => Promise<T>,
+    response: Response,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof HttpException && error.getStatus() === 429) {
+        const body = error.getResponse();
+        if (
+          typeof body === 'object' &&
+          'retryAfter' in body &&
+          typeof body.retryAfter === 'number' &&
+          Number.isFinite(body.retryAfter) &&
+          body.retryAfter > 0
+        ) {
+          response.setHeader('Retry-After', String(body.retryAfter));
+        }
+      }
+      throw error;
+    }
   }
 
   @Post('select-tenant')

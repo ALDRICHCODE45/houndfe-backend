@@ -3,6 +3,7 @@ import { LoginOtpService } from './login-otp.service';
 import { PrismaLoginOtpRepository } from './infrastructure/prisma-login-otp.repository';
 import type { SendMailInput } from '../notifications/email/mailer.port';
 import type { LoginOtpChallenge } from '@prisma/client';
+import { createHmac } from 'node:crypto';
 
 // Only code generation is deterministic; hashing/HMAC/comparison stay real.
 jest.mock('node:crypto', () => {
@@ -54,12 +55,21 @@ describe('LoginOtpService', () => {
       expect.objectContaining({
         userId: 'user',
         handleHash: expect.stringMatching(/^[a-f0-9]{64}$/) as string,
-        codeMac: expect.stringMatching(/^[a-f0-9]{64}$/) as string,
+        createCodeMac: expect.any(Function) as unknown,
       }),
     ]);
   });
 
-  it.each(['matching', 'code', 'handle', 'generation', 'user', 'digest'])(
+  it.each([
+    'matching',
+    'code',
+    'handle',
+    'generation',
+    'user',
+    'email',
+    'digest',
+    'legacy',
+  ])(
     'executes the real cryptographic callback against %s input',
     async (variant) => {
       const { service, repo, send } = setup();
@@ -69,7 +79,10 @@ describe('LoginOtpService', () => {
         userId: reservation.userId,
         generation: reservation.generation,
         handleHash: reservation.handleHash,
-        codeMac: reservation.codeMac,
+        codeMac: reservation.createCodeMac({
+          id: 'user',
+          email: 'fake@example.test',
+        }),
         state: 'ACTIVE',
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -81,9 +94,29 @@ describe('LoginOtpService', () => {
       if (variant === 'generation') stored.generation += '-tampered';
       if (variant === 'user') stored.userId = 'other-user';
       if (variant === 'digest') stored.codeMac = 'invalid-digest';
-      const identity = { id: 'user', email: 'fake@example.test' };
+      if (variant === 'legacy') {
+        const key = createHmac('sha256', 'fake-test-secret')
+          .update('houndfe/password-login-otp/key/v1')
+          .digest();
+        stored.codeMac = createHmac('sha256', key)
+          .update(
+            JSON.stringify([
+              'password-login-otp/v1',
+              stored.userId,
+              stored.generation,
+              stored.handleHash,
+              '000001',
+            ]),
+          )
+          .digest('hex');
+      }
+      const identity = {
+        id: 'user',
+        email:
+          variant === 'email' ? 'changed@example.test' : 'fake@example.test',
+      };
       repo.verify.mockImplementation((_hash, matches) =>
-        Promise.resolve(matches(stored) ? identity : null),
+        Promise.resolve(matches(stored, identity) ? identity : null),
       );
       const wrongHandle = `${envelope.challengeId[0] === 'A' ? 'B' : 'A'}${envelope.challengeId.slice(1)}`;
       const verification = service.verify(

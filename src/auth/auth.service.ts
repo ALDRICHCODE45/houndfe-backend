@@ -42,11 +42,17 @@ import { PrismaService } from '../shared/prisma/prisma.service';
 import type { AuthenticatedUser } from './interfaces/jwt-payload.interface';
 import type { SelectTenantDto } from './dto/select-tenant.dto';
 import type { SwitchTenantDto } from './dto/switch-tenant.dto';
+import { LoginOtpService, type LoginOtpEnvelope } from './login-otp.service';
+import { isFinalJwtPayload } from './infrastructure/strategies/jwt.strategy';
+import type { VerifyLoginOtpDto } from './dto/verify-login-otp.dto';
+import type { ResendLoginOtpDto } from './dto/resend-login-otp.dto';
 
 export interface AuthTokens {
   accessToken: string;
   refreshToken: string;
 }
+
+export type RegistrationResponse = { user: ReturnType<User['toResponse']> };
 
 export interface AuthResponse extends AuthTokens {
   user: ReturnType<User['toResponse']>;
@@ -84,6 +90,7 @@ type TenantSelectionTokenPayload = {
   sub: string;
   email: string;
   purpose: 'tenant-selection';
+  authProof: 'password-email-otp-v1';
 };
 
 export interface UserPermissionsResponse {
@@ -103,9 +110,10 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly caslAbilityFactory: CaslAbilityFactory,
     private readonly prisma: PrismaService,
+    private readonly loginOtp: LoginOtpService,
   ) {}
 
-  async register(dto: RegisterDto): Promise<AuthResponse> {
+  async register(dto: RegisterDto): Promise<RegistrationResponse> {
     const email = Email.create(dto.email);
 
     const exists = await this.userRepo.existsByEmail(email);
@@ -121,20 +129,10 @@ export class AuthService {
     });
 
     const saved = await this.userRepo.save(user);
-    const tokens = await this.generateTokens(saved.id, saved.email.value, {
-      tenantId: null,
-      tenantSlug: null,
-      isSuperAdmin: false,
-    });
-    await this.updateRefreshTokenHash(saved.id, tokens.refreshToken);
-
-    return {
-      ...tokens,
-      user: saved.toResponse(),
-    };
+    return { user: saved.toResponse() };
   }
 
-  async login(dto: LoginDto): Promise<LoginResponse> {
+  async login(dto: LoginDto): Promise<LoginOtpEnvelope> {
     const email = Email.create(dto.email);
     const user = await this.userRepo.findByEmail(email);
 
@@ -147,6 +145,24 @@ export class AuthService {
       throw new InvalidCredentialsError(); // Don't reveal account is deactivated
     }
 
+    return this.loginOtp.issue(user.id);
+  }
+
+  async verifyLoginOtp(dto: VerifyLoginOtpDto): Promise<LoginResponse> {
+    // Verification consumes the challenge before any session or pending token.
+    const identity = await this.loginOtp.verify(dto.challengeId, dto.code);
+    const user = await this.userRepo.findById(identity.id);
+    if (!user || !user.isActive || user.email.value !== identity.email) {
+      throw new InvalidCredentialsError();
+    }
+    return this.completeLogin(user);
+  }
+
+  resendLoginOtp(dto: ResendLoginOtpDto): Promise<LoginOtpEnvelope> {
+    return this.loginOtp.resend(dto.challengeId);
+  }
+
+  private async completeLogin(user: User): Promise<LoginResponse> {
     const memberships = await this.prisma.tenantMembership.findMany({
       where: { userId: user.id },
       include: {
@@ -270,7 +286,9 @@ export class AuthService {
     }
 
     const user = await this.userRepo.findById(payload.sub);
-    if (!user) throw new InvalidCredentialsError();
+    if (!user || !user.isActive || user.email.value !== payload.email) {
+      throw new InvalidCredentialsError();
+    }
 
     const authContext: AuthContext = {
       tenantId: membership.tenant.id,
@@ -388,8 +406,10 @@ export class AuthService {
       throw new InvalidCredentialsError();
     }
 
+    if (!isFinalJwtPayload(payload)) throw new InvalidCredentialsError();
+
     const user = await this.userRepo.findById(payload.sub);
-    if (!user || !user.hashedRefreshToken) {
+    if (!user || !user.isActive || !user.hashedRefreshToken) {
       throw new InvalidCredentialsError();
     }
 
@@ -523,6 +543,7 @@ export class AuthService {
       sub: userId,
       email,
       purpose: 'tenant-selection',
+      authProof: 'password-email-otp-v1',
     };
 
     return this.jwtService.signAsync(payload, {
@@ -543,7 +564,15 @@ export class AuthService {
           },
         );
 
-      if (payload.purpose !== 'tenant-selection') {
+      if (
+        !payload ||
+        payload.purpose !== 'tenant-selection' ||
+        payload.authProof !== 'password-email-otp-v1' ||
+        typeof payload.sub !== 'string' ||
+        !payload.sub.trim() ||
+        typeof payload.email !== 'string' ||
+        !payload.email.trim()
+      ) {
         throw new UnauthorizedException('Invalid token purpose');
       }
 
