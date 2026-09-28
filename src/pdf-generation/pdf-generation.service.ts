@@ -68,6 +68,8 @@ import type {
 } from './templates/receipt/receipt.types';
 import type { QuotationDocumentProps } from './templates/quotation/quotation-a4.document';
 import type { QuotationResponseDto } from '../quotations/dto/quotation-response.dto';
+import type { SellerSalesReportResponseDto } from '../analytics/dto/seller-sales-report-response.dto';
+import { SellerSalesReportA4Document } from './templates/report/seller-sales-report-a4.document';
 
 const SUPPORTED_FORMATS: readonly FormatKey[] = [
   DEFAULT_FORMAT_KEY,
@@ -416,6 +418,32 @@ export class PdfGenerationService implements OnModuleInit {
     } catch (err) {
       this.logger.error(
         `PDF buffer render failed for quotation ${quotation.id} (format=${format}): ${(err as Error).message}`,
+      );
+      throw new InternalServerErrorException('PDF_GENERATION_FAILED');
+    }
+  }
+
+  /**
+   * Render the frozen report snapshot to a Buffer. Callers render before
+   * writing response headers; failures surface as 500 PDF_GENERATION_FAILED.
+   */
+  async renderSellerSalesReportPdf(
+    report: SellerSalesReportResponseDto,
+  ): Promise<Buffer> {
+    try {
+      // Lazy import so the report path shares the renderer/Yoga instance.
+      const { renderToBuffer } = await import('@react-pdf/renderer');
+      // SAFETY: `createElement` builds the element at runtime; the renderer's
+      // public signature names its own element type, so only the nominal
+      // static type differs (same pattern as the receipt/quotation paths).
+      return await renderToBuffer(
+        createElement(SellerSalesReportA4Document, {
+          report,
+        }) as unknown as Parameters<typeof renderToBuffer>[0],
+      );
+    } catch (err) {
+      this.logger.error(
+        `PDF buffer render failed for seller report ${report.seller.id}: ${(err as Error).message}`,
       );
       throw new InternalServerErrorException('PDF_GENERATION_FAILED');
     }

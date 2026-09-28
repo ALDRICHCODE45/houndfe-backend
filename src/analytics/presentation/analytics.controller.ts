@@ -21,12 +21,15 @@ import {
   Param,
   ParseUUIDPipe,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
 import { RequirePermissions } from '../../auth/authorization/decorators/require-permissions.decorator';
+import { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
 import { BranchSalesSummaryService } from '../application/branch-sales-summary.service';
 import { BranchSalesTimeseriesService } from '../application/branch-sales-timeseries.service';
 import { SellerSalesReportService } from '../application/seller-sales-report.service';
@@ -43,6 +46,7 @@ export class AnalyticsController {
     private readonly branchSalesSummaryService: BranchSalesSummaryService,
     private readonly branchSalesTimeseriesService: BranchSalesTimeseriesService,
     private readonly sellerSalesReportService: SellerSalesReportService,
+    private readonly pdfGenerationService: PdfGenerationService,
   ) {}
 
   @Get('sales/summary')
@@ -73,4 +77,41 @@ export class AnalyticsController {
   ): Promise<SellerSalesReportResponseDto> {
     return this.sellerSalesReportService.getSellerReport(sellerUserId, query);
   }
+
+  /** Branded PDF: one snapshot read, rendered before any response header. */
+  @Get('sales/sellers/:sellerUserId/report/pdf')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['read', 'Analytics'], ['read', 'Sale'])
+  @Header('Cache-Control', 'no-store')
+  async getSellerSalesReportPdf(
+    @Param('sellerUserId', new ParseUUIDPipe()) sellerUserId: string,
+    @Query() query: BranchSalesSummaryQueryDto,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    const report = await this.sellerSalesReportService.getSellerReport(
+      sellerUserId,
+      query,
+    );
+    const pdf =
+      await this.pdfGenerationService.renderSellerSalesReportPdf(report);
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${buildSellerReportPdfFilename(
+        sellerUserId,
+        query,
+      )}"`,
+      'Cache-Control': 'no-store',
+    });
+    res.send(pdf);
+  }
+}
+
+/** Fixed, user-data-free filename; every component is re-sanitized here. */
+export function buildSellerReportPdfFilename(
+  sellerUserId: string,
+  query: Pick<BranchSalesSummaryQueryDto, 'from' | 'to'>,
+): string {
+  const safe = (value: string): string => value.replace(/[^a-zA-Z0-9-]/g, '');
+  return `reporte-ventas-${safe(sellerUserId)}-${safe(query.from)}-${safe(query.to)}.pdf`;
 }

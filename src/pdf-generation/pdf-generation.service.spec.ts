@@ -24,7 +24,7 @@
  */
 import { Readable } from 'node:stream';
 import { isValidElement } from 'react';
-import { renderToStream } from '@react-pdf/renderer';
+import { renderToBuffer, renderToStream } from '@react-pdf/renderer';
 import { Test } from '@nestjs/testing';
 import {
   BadRequestException,
@@ -32,6 +32,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { SaleDetailResponseDto } from '../sales/dto/sale-detail-response.dto';
+import type { SellerSalesReportResponseDto } from '../analytics/dto/seller-sales-report-response.dto';
 import type { QuotationDocumentProps } from './templates/quotation/quotation-a4.document';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesService } from '../sales/sales.service';
@@ -100,6 +101,58 @@ function makeConfirmedSale(
     ],
     timeline: [],
     ...overrides,
+  };
+}
+
+function makeSellerReport(): SellerSalesReportResponseDto {
+  return {
+    seller: {
+      id: '11111111-1111-4111-8111-111111111111',
+      name: 'Vendedor Uno',
+    },
+    tenantId: 'tenant-1',
+    timeZone: 'America/Mexico_City',
+    from: '2026-01-01',
+    to: '2026-02-01',
+    generatedAt: '2026-03-01T12:00:00.000Z',
+    attribution: 'CURRENT_SELLER',
+    balances: 'CURRENT',
+    rowLimit: 1000,
+    rowCount: 2,
+    confirmed: {
+      dateBasis: 'confirmedAt',
+      summary: {
+        saleCount: 1,
+        netSalesCents: 10000,
+        collectedCents: 4000,
+        outstandingDebtCents: 6000,
+        averageTicketCents: 10000,
+      },
+      rows: [
+        {
+          id: 'sale-1',
+          folio: 'A-1',
+          confirmedAt: '2026-01-05T18:30:00.000Z',
+          totalCents: 10000,
+          paidCents: 4000,
+          debtCents: 6000,
+          paymentStatus: 'PARTIAL',
+        },
+      ],
+    },
+    canceled: {
+      dateBasis: 'canceledAt',
+      saleCount: 1,
+      rows: [
+        {
+          id: 'sale-2',
+          folio: null,
+          confirmedAt: null,
+          canceledAt: '2026-01-03T10:00:00.000Z',
+          totalCents: 5000,
+        },
+      ],
+    },
   };
 }
 
@@ -769,6 +822,48 @@ describe('PdfGenerationService', () => {
           quotation as never,
           'quotation-a4',
         );
+        fail('expected InternalServerErrorException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(InternalServerErrorException);
+        expect((err as InternalServerErrorException).message).toBe(
+          'PDF_GENERATION_FAILED',
+        );
+      }
+    });
+  });
+
+  describe('renderSellerSalesReportPdf', () => {
+    it('renders the exact report into a PDF buffer with magic bytes', async () => {
+      const report = makeSellerReport();
+      const renderToBufferMock = jest.mocked(renderToBuffer);
+      renderToBufferMock.mockResolvedValueOnce(Buffer.from('%PDF-1.4 report'));
+
+      const buffer = await service.renderSellerSalesReportPdf(report);
+
+      expect(buffer).toBeInstanceOf(Buffer);
+      expect(buffer.subarray(0, 4).equals(Buffer.from('%PDF'))).toBe(true);
+      expect(renderToBufferMock).toHaveBeenCalledTimes(1);
+      const [rendered] = renderToBufferMock.mock.calls[0];
+      expect(
+        (rendered.props as { report: SellerSalesReportResponseDto }).report,
+      ).toBe(report);
+    });
+
+    it('wraps render failures in InternalServerErrorException (PDF_GENERATION_FAILED)', async () => {
+      const renderToBufferMock = jest.mocked(renderToBuffer);
+      renderToBufferMock.mockRejectedValueOnce(
+        new Error('yoga-layout blew up'),
+      );
+
+      await expect(
+        service.renderSellerSalesReportPdf(makeSellerReport()),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+
+      try {
+        renderToBufferMock.mockRejectedValueOnce(
+          new Error('yoga-layout blew up'),
+        );
+        await service.renderSellerSalesReportPdf(makeSellerReport());
         fail('expected InternalServerErrorException');
       } catch (err) {
         expect(err).toBeInstanceOf(InternalServerErrorException);

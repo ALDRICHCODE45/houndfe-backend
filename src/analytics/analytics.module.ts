@@ -15,6 +15,7 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
+import { PdfGenerationModule } from '../pdf-generation/pdf-generation.module';
 import { AnalyticsController } from './presentation/analytics.controller';
 import { BranchSalesSummaryService } from './application/branch-sales-summary.service';
 import { BranchSalesTimeseriesService } from './application/branch-sales-timeseries.service';
@@ -27,7 +28,7 @@ import { BRANCH_SALES_TIMESERIES_REPOSITORY } from './domain/branch-sales-timese
 import { SELLER_SALES_REPORT_REPOSITORY } from './domain/seller-sales-report.repository';
 
 @Module({
-  imports: [DatabaseModule, AuthModule],
+  imports: [DatabaseModule, AuthModule, PdfGenerationModule],
   controllers: [AnalyticsController],
   providers: [
     BranchSalesSummaryService,

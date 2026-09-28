@@ -9,6 +9,7 @@
 import {
   ForbiddenException,
   INestApplication,
+  InternalServerErrorException,
   UnauthorizedException,
   ValidationPipe,
   type CanActivate,
@@ -20,6 +21,7 @@ import { AnalyticsController } from './analytics.controller';
 import { BranchSalesSummaryService } from '../application/branch-sales-summary.service';
 import { BranchSalesTimeseriesService } from '../application/branch-sales-timeseries.service';
 import { SellerSalesReportService } from '../application/seller-sales-report.service';
+import { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
 import {
   ANALYTICS_TIME_ZONE,
   type BranchSalesSummaryQueryDto,
@@ -155,6 +157,22 @@ const RANGE = { from: '2026-01-01', to: '2026-02-01' } as const;
 
 const SELLER_ID = '11111111-1111-4111-8111-111111111111';
 
+/** Minimal readable stream shape used by the binary response parser. */
+interface ChunkedResponse {
+  on(event: 'data', listener: (chunk: Buffer) => void): void;
+  on(event: 'end', listener: () => void): void;
+}
+
+/** Collect a binary response body into a Buffer (superagent's parser hook). */
+function binaryParser(
+  res: ChunkedResponse,
+  callback: (error: Error | null, body: Buffer) => void,
+): void {
+  const chunks: Buffer[] = [];
+  res.on('data', (chunk) => chunks.push(chunk));
+  res.on('end', () => callback(null, Buffer.concat(chunks)));
+}
+
 const SELLER_REPORT_RESPONSE: SellerSalesReportResponseDto = {
   seller: { id: SELLER_ID, name: 'Vendedor Uno' },
   tenantId: 'tenant-analytics',
@@ -267,6 +285,9 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
   let getSellerReport: jest.MockedFunction<
     SellerSalesReportService['getSellerReport']
   >;
+  let renderSellerReportPdf: jest.MockedFunction<
+    PdfGenerationService['renderSellerSalesReportPdf']
+  >;
   const http = () => request(app.getHttpServer());
   const asReader = () =>
     http().get(url).set('Authorization', 'Bearer tenant-analytics-reader');
@@ -278,6 +299,8 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
     getTimeseries.mockResolvedValue(TIMESERIES_RESPONSE);
     getSellerReport = jest.fn();
     getSellerReport.mockResolvedValue(SELLER_REPORT_RESPONSE);
+    renderSellerReportPdf = jest.fn();
+    renderSellerReportPdf.mockResolvedValue(Buffer.from('%PDF-1.4 report'));
 
     const moduleRef = await Test.createTestingModule({
       controllers: [AnalyticsController],
@@ -285,6 +308,10 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
         { provide: BranchSalesSummaryService, useValue: { summarize } },
         { provide: BranchSalesTimeseriesService, useValue: { getTimeseries } },
         { provide: SellerSalesReportService, useValue: { getSellerReport } },
+        {
+          provide: PdfGenerationService,
+          useValue: { renderSellerSalesReportPdf: renderSellerReportPdf },
+        },
       ],
     })
       .overrideGuard(JwtAuthGuard)
@@ -603,6 +630,130 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
         rowCount: 1001,
       });
       expect(res.body).toHaveProperty('timestamp');
+    });
+  });
+
+  describe('GET /analytics/sales/sellers/:sellerUserId/report/pdf (branded PDF)', () => {
+    const pdfUrl = `/analytics/sales/sellers/${SELLER_ID}/report/pdf`;
+    const asPdfReader = () =>
+      http()
+        .get(pdfUrl)
+        .set('Authorization', 'Bearer tenant-analytics-sale-reader');
+
+    it('returns 401 without bearer authentication and never reads or renders', async () => {
+      await http()
+        .get(pdfUrl)
+        .query({ ...RANGE })
+        .expect(401);
+      expect(getSellerReport).not.toHaveBeenCalled();
+      expect(renderSellerReportPdf).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['lacking read:Sale', 'tenant-analytics-reader'],
+      ['lacking read:Analytics', 'tenant-sale-reader'],
+    ])(
+      'returns 403 for a tenant user %s and never reads or renders',
+      async (_case, token) => {
+        await http()
+          .get(pdfUrl)
+          .set('Authorization', `Bearer ${token}`)
+          .query({ ...RANGE })
+          .expect(403);
+        expect(getSellerReport).not.toHaveBeenCalled();
+        expect(renderSellerReportPdf).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reads the snapshot once, renders once and returns an attachment PDF', async () => {
+      const res = await asPdfReader()
+        .query({ ...RANGE })
+        .buffer(true)
+        .parse(binaryParser)
+        .expect(200);
+
+      expect(getSellerReport).toHaveBeenCalledTimes(1);
+      expect(getSellerReport).toHaveBeenCalledWith(SELLER_ID, { ...RANGE });
+      expect(renderSellerReportPdf).toHaveBeenCalledTimes(1);
+      expect(renderSellerReportPdf).toHaveBeenCalledWith(
+        SELLER_REPORT_RESPONSE,
+      );
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-disposition']).toBe(
+        `attachment; filename="reporte-ventas-${SELLER_ID}-${RANGE.from}-${RANGE.to}.pdf"`,
+      );
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(Buffer.isBuffer(res.body)).toBe(true);
+      expect((res.body as Buffer).subarray(0, 4).toString()).toBe('%PDF');
+    });
+
+    it('returns 400 for a non-UUID seller id and never reads or renders', async () => {
+      await http()
+        .get('/analytics/sales/sellers/not-a-uuid/report/pdf')
+        .set('Authorization', 'Bearer tenant-analytics-sale-reader')
+        .query({ ...RANGE })
+        .expect(400);
+      expect(getSellerReport).not.toHaveBeenCalled();
+      expect(renderSellerReportPdf).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['missing from', { to: RANGE.to }],
+      ['reversed bounds', { from: RANGE.to, to: RANGE.from }],
+      ['a 367-day range', { from: '2026-01-01', to: '2027-01-03' }],
+      ['an unknown query param', { ...RANGE, tenantId: 'tenant-1' }],
+    ])(
+      'returns 400 for %s and never reads or renders',
+      async (_case, query) => {
+        await asPdfReader().query(query).expect(400);
+        expect(getSellerReport).not.toHaveBeenCalled();
+        expect(renderSellerReportPdf).not.toHaveBeenCalled();
+      },
+    );
+
+    it('returns 404 with SELLER_NOT_FOUND and never renders', async () => {
+      getSellerReport.mockRejectedValue(new SellerNotFoundError());
+      const res = await asPdfReader()
+        .query({ ...RANGE })
+        .expect(404);
+      expect(res.body).toMatchObject({
+        statusCode: 404,
+        error: 'SELLER_NOT_FOUND',
+      });
+      expect(renderSellerReportPdf).not.toHaveBeenCalled();
+    });
+
+    it('returns 422 with the row-limit envelope and never renders', async () => {
+      getSellerReport.mockRejectedValue(
+        new SellerReportRowLimitExceededError(1001, 1000),
+      );
+      const res = await asPdfReader()
+        .query({ ...RANGE })
+        .expect(422);
+      expect(res.body).toMatchObject({
+        statusCode: 422,
+        error: 'SELLER_REPORT_ROW_LIMIT_EXCEEDED',
+        rowLimit: 1000,
+        rowCount: 1001,
+      });
+      expect(renderSellerReportPdf).not.toHaveBeenCalled();
+    });
+
+    it('sanitizes a render failure into 500 PDF_GENERATION_FAILED without PDF headers', async () => {
+      renderSellerReportPdf.mockRejectedValue(
+        new InternalServerErrorException('PDF_GENERATION_FAILED'),
+      );
+      const res = await asPdfReader()
+        .query({ ...RANGE })
+        .expect(500);
+
+      expect(res.body).toMatchObject({
+        statusCode: 500,
+        message: 'PDF_GENERATION_FAILED',
+      });
+      expect(res.headers['content-disposition']).toBeUndefined();
+      expect(res.headers['content-type']).toContain('application/json');
+      expect(getSellerReport).toHaveBeenCalledTimes(1);
     });
   });
 });

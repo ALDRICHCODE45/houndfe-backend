@@ -34,7 +34,12 @@ import { BranchSalesTimeseriesQueryDto } from '../dto/branch-sales-timeseries-qu
 import type { BranchSalesTimeseriesResponseDto } from '../dto/branch-sales-timeseries-response.dto';
 import type { SellerSalesReportResponseDto } from '../dto/seller-sales-report-response.dto';
 import { AnalyticsModule } from '../analytics.module';
-import { AnalyticsController } from './analytics.controller';
+import { PdfGenerationModule } from '../../pdf-generation/pdf-generation.module';
+import { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
+import {
+  AnalyticsController,
+  buildSellerReportPdfFilename,
+} from './analytics.controller';
 
 const query: BranchSalesSummaryQueryDto = {
   from: '2026-01-01',
@@ -128,16 +133,21 @@ describe('AnalyticsController', () => {
   let summarize: jest.Mock;
   let getTimeseries: jest.Mock;
   let getSellerReport: jest.Mock;
+  let renderSellerSalesReportPdf: jest.Mock;
   let controller: AnalyticsController;
 
   beforeEach(() => {
     summarize = jest.fn(() => Promise.resolve(response));
     getTimeseries = jest.fn(() => Promise.resolve(timeseriesResponse));
     getSellerReport = jest.fn(() => Promise.resolve(sellerReportResponse));
+    renderSellerSalesReportPdf = jest.fn(() =>
+      Promise.resolve(Buffer.from('%PDF-1.4 report')),
+    );
     controller = new AnalyticsController(
       { summarize } as unknown as BranchSalesSummaryService,
       { getTimeseries } as unknown as BranchSalesTimeseriesService,
       { getSellerReport } as unknown as SellerSalesReportService,
+      { renderSellerSalesReportPdf } as unknown as PdfGenerationService,
     );
   });
 
@@ -269,6 +279,76 @@ describe('AnalyticsController', () => {
       ) as unknown,
     ).toEqual([String, BranchSalesSummaryQueryDto]);
   });
+
+  it('reads the snapshot once, renders once and writes an attachment PDF', async () => {
+    const res = { set: jest.fn(), send: jest.fn() };
+    await controller.getSellerSalesReportPdf(SELLER_ID, query, res as never);
+
+    expect(getSellerReport).toHaveBeenCalledTimes(1);
+    expect(getSellerReport).toHaveBeenCalledWith(SELLER_ID, query);
+    expect(renderSellerSalesReportPdf).toHaveBeenCalledTimes(1);
+    expect(renderSellerSalesReportPdf).toHaveBeenCalledWith(
+      sellerReportResponse,
+    );
+    expect(res.set).toHaveBeenCalledWith({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="reporte-ventas-${SELLER_ID}-${query.from}-${query.to}.pdf"`,
+      'Cache-Control': 'no-store',
+    });
+    expect(res.send).toHaveBeenCalledWith(expect.any(Buffer));
+  });
+
+  it('never renders or writes a body when the snapshot read fails', async () => {
+    getSellerReport.mockRejectedValueOnce(new Error('SELLER_NOT_FOUND'));
+    const res = { set: jest.fn(), send: jest.fn() };
+
+    await expect(
+      controller.getSellerSalesReportPdf(SELLER_ID, query, res as never),
+    ).rejects.toThrow('SELLER_NOT_FOUND');
+    expect(renderSellerSalesReportPdf).not.toHaveBeenCalled();
+    expect(res.set).not.toHaveBeenCalled();
+    expect(res.send).not.toHaveBeenCalled();
+  });
+
+  it('maps GET /analytics/sales/sellers/:sellerUserId/report/pdf with 200 and no-store', () => {
+    const handler = handlerOf('getSellerSalesReportPdf');
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(
+      'sales/sellers/:sellerUserId/report/pdf',
+    );
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.GET,
+    );
+    expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(
+      HttpStatus.OK,
+    );
+    expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toEqual([
+      { name: 'Cache-Control', value: 'no-store' },
+    ]);
+    expect(
+      Reflect.getMetadata(
+        PERMISSIONS_KEY,
+        handlerOf('getSellerSalesReportPdf'),
+      ),
+    ).toEqual([
+      ['read', 'Analytics'],
+      ['read', 'Sale'],
+    ]);
+  });
+
+  it('builds a fixed download filename from the validated UUID and dates only', () => {
+    expect(
+      buildSellerReportPdfFilename(SELLER_ID, {
+        from: '2026-01-01',
+        to: '2026-02-01',
+      }),
+    ).toBe(`reporte-ventas-${SELLER_ID}-2026-01-01-2026-02-01.pdf`);
+    expect(
+      buildSellerReportPdfFilename('../etc/passwd', {
+        from: '2026-01-01',
+        to: '2026-02-01/x',
+      }),
+    ).toBe('reporte-ventas-etcpasswd-2026-01-01-2026-02-01x.pdf');
+  });
 });
 
 describe('AnalyticsModule wiring (OI-2 S4)', () => {
@@ -306,6 +386,7 @@ describe('AnalyticsModule wiring (OI-2 S4)', () => {
     ) as unknown[];
     expect(imports).toContain(DatabaseModule);
     expect(imports).toContain(AuthModule);
+    expect(imports).toContain(PdfGenerationModule);
     expect(
       Reflect.getMetadata(MODULE_METADATA.EXPORTS, AnalyticsModule) as unknown,
     ).toBeUndefined();

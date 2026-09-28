@@ -755,3 +755,26 @@ El `422` trae `{ statusCode, error: 'SELLER_REPORT_ROW_LIMIT_EXCEEDED', message,
 - Usar `rows[].folio` si existe; formatear `confirmedAt`/`canceledAt` (ISO UTC) en `America/Mexico_City`.
 - Diferenciar `400`/`403`/`404`/`422`; tratar `no-store` como "no cachear".
 - Cobertura: permiso doble (falta cualquiera → `403`), UUID inválido → `400`, rango inválido → `400`, `404`, `422`, secciones separadas y estado vacío (`rowCount === 0`).
+
+### 15.7 PDF del reporte (backend)
+
+> **Estado**: solo en la rama local `feat/seller-sales-report`. **No mergeado ni desplegado.**
+
+`GET /analytics/sales/sellers/:sellerUserId/report/pdf` devuelve el mismo reporte como PDF A4 con la identidad visual del comprobante moderno (receipt-a4). El frontend no necesita convertir HTML a PDF: debe consumir este endpoint para el botón de descarga/impresión.
+
+| Propiedad        | Valor                                                                                        |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| Método           | `GET`                                                                                        |
+| Path             | `/analytics/sales/sellers/:sellerUserId/report/pdf`                                          |
+| Respuesta        | `200 OK`, `Content-Type: application/pdf`                                                    |
+| Descarga         | `Content-Disposition: attachment; filename="reporte-ventas-<sellerUserId>-<from>-<to>.pdf"` |
+| Autenticación    | JWT Bearer (idéntica al JSON)                                                                |
+| Permisos exactos | `read:Analytics` **Y** `read:Sale`                                                           |
+| Cache            | `no-store`                                                                                   |
+
+- Reutiliza exactamente el contrato de la sección 15: `sellerUserId` UUID, `from`/`to` inclusivo/exclusivo, máximo 366 días, `401`/`403`, `404` `SELLER_NOT_FOUND`, `422` `SELLER_REPORT_ROW_LIMIT_EXCEEDED`. Una sola lectura del snapshot; sin SQL ni cálculos nuevos.
+- El nombre del archivo se arma solo con el UUID y las fechas validadas; nunca con datos del usuario.
+- Renderiza antes de responder: un fallo de render es un `500` `PDF_GENERATION_FAILED` saneado, sin encabezados de PDF ni archivo parcial.
+- Contenido: encabezado de marca (wordmark HoundFe empaquetado + vendedor + período), resumen confirmado (ventas netas en azul), avisos explícitos de atribución `CURRENT_SELLER`, saldos `CURRENT` y canceladas informativas; tabla densa por `confirmedAt` y sección separada por `canceledAt`. Multipágina con encabezado y tablas repetidos, filas sin cortar, `Página X de Y` y hasta 1000 filas combinadas sin truncar.
+- Tipografía Helvetica incorporada y logo local (sin CDN) para un render determinista; no pretende replicar los glifos Inter.
+- El botón de impresión HTML actual del frontend no cambia por sí solo: hay que apuntarlo a este endpoint.
