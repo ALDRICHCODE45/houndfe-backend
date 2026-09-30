@@ -35,10 +35,9 @@
  *     Dispatch is by the persisted `type`: RESTOCK projects through
  *     `toBotRestockPollResponse`, EXPIRATION through
  *     `toBotExpirationPollResponse` (both value-free and fail-closed); any
- *     other type fails closed as a sanitized 500. NOTE: the production adapter
- *     (`PrismaBotRestockPollRepository`) still pins `type = RESTOCK`, so the
- *     live GET route is RESTOCK-only until the pending adapter slice — the
- *     EXPIRATION branch is contract-tested against the mocked port here.
+ *     other type fails closed as a sanitized 500. The production adapter
+ *     (`PrismaBotRestockPollRepository`) admits BOTH persisted types, so a
+ *     live GET for either an admitted RESTOCK or EXPIRATION row is served.
  *   - Because the poll is mutable, the route is pinned `Cache-Control: no-store`
  *     BEFORE the port read, so a success (200) AND a handler-level miss (404)
  *     both carry it. `no-store` is NOT guaranteed on early guard/pipe/route

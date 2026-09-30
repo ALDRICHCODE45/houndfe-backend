@@ -10,21 +10,25 @@
  * `isSuperAdmin && tenantId === null` bypass.
  *
  * PINNED PREDICATE: `findFirst` (never `findUnique` by id alone) with
- * `{ id, tenantId, source: RESTOCK_SOURCE, type: RESTOCK_TYPE }` and NO
- * `status` filter. A missing, cross-tenant or foreign-source id is
- * indistinguishable and returns `null`; both `PENDING` and `RESOLVED` rows
- * resolve, which is the whole point of the bot's CURRENT-state poll.
+ * `{ id, tenantId, source: RESTOCK_SOURCE, type: { in: [RESTOCK_TYPE,
+ * EXPIRATION_TYPE] } }` and NO `status` filter. A missing, cross-tenant or
+ * foreign-source id is indistinguishable and returns `null`; both `PENDING` and
+ * `RESOLVED` rows of EITHER admitted type resolve, which is the whole point of
+ * the bot's CURRENT-state poll. The type is never taken from the caller, so the
+ * closed two-member set is the only widening: an unknown/foreign type still
+ * returns `null`.
  *
  * SELECT SAFETY: `BOT_POLL_RECORD_SELECT` is the exact type-safe Prisma SELECT
- * allowlist for the poll mapper record: the immutable intake snapshot plus the
- * mutable resolution columns. Reviewer identity (`resolvedById`, its snapshot
- * columns or a `User` relation), authority/server-only columns (`source`,
- * `tenantId`, `canonicalRequestHash`, `submittedCredentialId`,
- * `resolutionRequestId`), provider/ACK/outcome evidence, bot audit and
- * customer PII are NEVER read. The persisted flat row is converted EXPLICITLY
- * into the nested `BotRestockPollRecord` (9-key snapshot); there is deliberately
- * no spread and no full-row passthrough, so a widened Prisma row could never
- * leak a forbidden field into the poll model.
+ * allowlist for the poll mapper record: the immutable intake snapshot (including
+ * the five EXPIRATION-only columns, `null` on RESTOCK) plus the mutable
+ * resolution columns. Reviewer identity (`resolvedById`, its snapshot columns or
+ * a `User` relation), authority/server-only columns (`source`, `tenantId`,
+ * `canonicalRequestHash`, `submittedCredentialId`, `resolutionRequestId`),
+ * provider/ACK/outcome evidence, bot audit and customer PII are NEVER read. The
+ * persisted flat row is converted EXPLICITLY into the nested
+ * `BotRestockPollRecord` (13-key snapshot): there is deliberately no spread and
+ * no full-row passthrough, so a widened Prisma row could never leak a forbidden
+ * field into the poll model.
  *
  * ARGUMENT SAFETY: the transport route (HD-05c) owns the client-facing
  * validation, but a caller that bypasses it must not reach Prisma with an
@@ -33,9 +37,10 @@
  * VALUE-FREE `BotRestockPollReadError` BEFORE any query; the rejected value is
  * never echoed.
  *
- * SCOPE: this slice adds ONLY the committed read adapter and its DB-free unit
- * spec. It adds NO HTTP controller, module binding, application-outcome ACK,
- * schema or credential change.
+ * SCOPE: this slice admits EXPIRATION to the committed read SELECT/predicate and
+ * maps its five columns. It adds NO HTTP controller, module binding,
+ * application-outcome ACK, schema or credential change, and the RESTOCK wire
+ * projection is untouched.
  */
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -44,6 +49,7 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   BotRestockPollReadError,
   type BotRestockPollRecord,
@@ -75,6 +81,11 @@ export const BOT_POLL_RECORD_SELECT = {
   resolutionAction: true,
   restockDays: true,
   resolvedAt: true,
+  productUnit: true,
+  variantName: true,
+  variantOption: true,
+  variantValue: true,
+  expirationText: true,
 } satisfies Prisma.HumanDecisionSelect;
 
 /** Prisma row shape produced by `BOT_POLL_RECORD_SELECT`. */
@@ -119,10 +130,15 @@ function toPollRecord(row: BotPollRecordRow): BotRestockPollRecord {
       requestedQuantity: row.requestedQuantity,
       observedStockAtRequest: row.observedStockAtRequest,
       stockObservedAt: row.stockObservedAt,
+      productUnit: row.productUnit,
+      variantName: row.variantName,
+      variantOption: row.variantOption,
+      variantValue: row.variantValue,
     },
     supersedesDecisionId: row.supersedesDecisionId,
     resolutionAction: row.resolutionAction,
     restockDays: row.restockDays,
+    expirationText: row.expirationText,
     resolvedAt: row.resolvedAt,
   };
 }
@@ -143,14 +159,14 @@ export class PrismaBotRestockPollRepository implements IBotRestockPollRepository
     const tenantId = this.tenantPrisma.getTenantId();
     const db = this.tenantPrisma.getClient();
 
-    // `findFirst` + explicit tenant/source/type: never `findUnique` by id
-    // alone, and no status filter so both PENDING and RESOLVED resolve.
+    // `findFirst` + explicit tenant/source/both-types: never `findUnique` by
+    // id alone, and no status filter so both PENDING and RESOLVED resolve.
     const row: BotPollRecordRow | null = await db.humanDecision.findFirst({
       where: {
         id,
         tenantId,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
       },
       select: BOT_POLL_RECORD_SELECT,
     });
