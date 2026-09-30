@@ -21,6 +21,9 @@
  * Mapping:
  *   RestockIntakeError NOT_FOUND                              -> 404 NOT_FOUND
  *   RestockIntakeError IDEMPOTENCY_CONFLICT/VERSION_CONFLICT  -> 409 (same code)
+ *   ExpirationIntakeError VALIDATION_ERROR                    -> 400 VALIDATION_ERROR
+ *   ExpirationIntakeError NOT_FOUND                           -> 404 NOT_FOUND
+ *   ExpirationIntakeError IDEMPOTENCY_CONFLICT                -> 409 IDEMPOTENCY_CONFLICT
  *   BotApplicationOutcomeError NOT_FOUND                      -> 404 NOT_FOUND
  *   BotApplicationOutcomeError VERSION_CONFLICT               -> 409 VERSION_CONFLICT
  *   BotApplicationOutcomeError IDEMPOTENCY_CONFLICT           -> 409 IDEMPOTENCY_CONFLICT
@@ -58,6 +61,7 @@ import {
   InsufficientPermissionsError,
 } from '../../../shared/domain/domain-error';
 import { BotApplicationOutcomeError } from '../../domain/bot-application-outcome.repository';
+import { ExpirationIntakeError } from '../../domain/expiration-intake.repository';
 import { HumanDecisionReviewResolveError } from '../../domain/human-decision-review-resolve.repository';
 import { RestockIntakeError } from '../../domain/restock-intake.repository';
 
@@ -121,6 +125,10 @@ export class HumanDecisionHttpFilter implements ExceptionFilter {
       return this.fromIntakeError(exception);
     }
 
+    if (exception instanceof ExpirationIntakeError) {
+      return this.fromExpirationIntakeError(exception);
+    }
+
     if (exception instanceof BotApplicationOutcomeError) {
       return this.fromApplicationOutcomeError(exception);
     }
@@ -163,6 +171,28 @@ export class HumanDecisionHttpFilter implements ExceptionFilter {
         return this.build(HttpStatus.CONFLICT, 'IDEMPOTENCY_CONFLICT');
       case 'VERSION_CONFLICT':
         return this.build(HttpStatus.CONFLICT, 'VERSION_CONFLICT');
+      default:
+        return this.build(HttpStatus.INTERNAL_SERVER_ERROR, 'INTERNAL_ERROR');
+    }
+  }
+
+  /**
+   * Maps the HD-EXP-01b/02 EXPIRATION intake failure codes to the
+   * bot-approved envelope. The `message` is never read, so a raw parser value,
+   * product/variant id or tenant value can never leak; each code collapses to a
+   * fixed, value-free body. A parser `InvalidArgumentError` shares the same
+   * fixed `400 VALIDATION_ERROR` branch above.
+   */
+  private fromExpirationIntakeError(
+    error: ExpirationIntakeError,
+  ): HumanDecisionErrorBody {
+    switch (error.code) {
+      case 'VALIDATION_ERROR':
+        return this.build(HttpStatus.BAD_REQUEST, 'VALIDATION_ERROR');
+      case 'NOT_FOUND':
+        return this.build(HttpStatus.NOT_FOUND, 'NOT_FOUND');
+      case 'IDEMPOTENCY_CONFLICT':
+        return this.build(HttpStatus.CONFLICT, 'IDEMPOTENCY_CONFLICT');
       default:
         return this.build(HttpStatus.INTERNAL_SERVER_ERROR, 'INTERNAL_ERROR');
     }
