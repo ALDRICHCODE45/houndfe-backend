@@ -34,6 +34,11 @@
  * SCOPE: DB-FREE foundation only. This slice adds NO Prisma adapter, HTTP
  * controller, module binding or application-outcome ACK; HD-05b/HD-05c own
  * those.
+ *
+ * EXPIRATION STAGING: the EXPIRATION-only fields are OPTIONAL so the committed
+ * HD-05b RESTOCK adapter and every fixture stay type-compatible (a RESTOCK
+ * record without them is NOT a failure); `toBotExpirationPollResponse` instead
+ * fails closed when a required one is absent or inconsistent.
  */
 import { DomainError } from '../../shared/domain/domain-error';
 
@@ -55,6 +60,15 @@ export interface BotRestockPollSnapshotRecord {
   requestedQuantity: number | null;
   observedStockAtRequest: number | null;
   stockObservedAt: Date | null;
+  /**
+   * EXPIRATION-only snapshot fields; absent/`null` on RESTOCK, all `null` on a
+   * simple product. Wire `unit` renders from `productUnit`; `variantName` is
+   * required when `variantId` is set. OPTIONAL for adapter/fixture staging.
+   */
+  productUnit?: string | null;
+  variantName?: string | null;
+  variantOption?: string | null;
+  variantValue?: string | null;
 }
 
 /**
@@ -83,6 +97,11 @@ export interface BotRestockPollRecord {
   resolutionAction: string | null;
   restockDays: number | null;
   resolvedAt: Date | null;
+  /**
+   * EXPIRATION-only operator text (`PROVIDE_EXPIRATION_TEXT`); absent/`null`
+   * otherwise. OPTIONAL for adapter/fixture staging.
+   */
+  expirationText?: string | null;
 }
 
 /**
