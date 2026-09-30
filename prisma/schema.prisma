@@ -2347,6 +2347,9 @@ model ProductCatalogPriceList {
 
 enum HumanDecisionType {
   RESTOCK
+  // EXPIRATION: the product/variant is expiring; the human operator supplies a
+  // free-text expiration note (or reports that none is available).
+  EXPIRATION
 }
 
 // RESTOCK v1 has no expiry, no `EXPIRED` state and no terminal bot outcome in
@@ -2361,9 +2364,17 @@ enum HumanDecisionStatus {
 //     days, zero excluded) — a human estimate, never a guaranteed stock date.
 //   REPORT_RESTOCK_ESTIMATE_UNAVAILABLE: carries NO `restockDays` — "no
 //     confirmed ETA", NOT "will never be restocked" and not a rejection.
+//   PROVIDE_EXPIRATION_TEXT: carries `expirationText` (normalized operator text)
+//     and NO `restockDays`; EXPIRATION-only.
+//   REPORT_EXPIRATION_UNAVAILABLE: carries neither `expirationText` nor
+//     `restockDays`; EXPIRATION-only.
+// A CHECK enforces type/action ownership, so the RESTOCK pair can never settle
+// an EXPIRATION decision and vice versa.
 enum HumanDecisionResolutionAction {
   PROVIDE_RESTOCK_ESTIMATE
   REPORT_RESTOCK_ESTIMATE_UNAVAILABLE
+  PROVIDE_EXPIRATION_TEXT
+  REPORT_EXPIRATION_UNAVAILABLE
 }
 
 // Terminal, bot-reported application outcomes. `PENDING_DELIVERY` is derived
@@ -2425,6 +2436,13 @@ model HumanDecision {
   // Correlated successor request; allowed only after a durably STALE or
   // explicitly audited predecessor, never after UNKNOWN.
   supersedesDecisionId   String?
+  // EXPIRATION snapshot columns (all NULL for RESTOCK rows). Stored projection
+  // only — never a catalog FK. The wire `unit` maps to `productUnit`; a
+  // `variantId` may be present while name/option/value stay nullable.
+  productUnit            String?
+  variantName            String?
+  variantOption          String?
+  variantValue           String?
 
   // Human resolution + audit. `version` is the optimistic CAS token: 1 at
   // intake, exactly 2 after one human resolve; an ACK never changes it.
@@ -2432,6 +2450,8 @@ model HumanDecision {
   version             Int                            @default(1)
   resolutionAction    HumanDecisionResolutionAction?
   restockDays         Int?
+  // EXPIRATION resolution text; NULL for RESTOCK and for the no-ETA action.
+  expirationText      String?
   resolutionRequestId String?
   resolvedAt          DateTime?
   resolvedById        String?

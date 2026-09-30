@@ -738,15 +738,21 @@ describeIfDb(
     });
 
     describe('pinned source, type and status', () => {
-      it('cannot be widened by type: the RESTOCK enum has exactly one member', () => {
-        expect(Object.keys(HumanDecisionType)).toEqual(['RESTOCK']);
-      });
-
-      it('excludes a RESTOCK decision from a non-pinned source and confirms the row exists', async () => {
+      it('excludes a foreign-source RESTOCK row and a same-source PENDING EXPIRATION row while both persist', async () => {
         const tenantId = await seedTenant('Source Scope Tenant');
         const inScope = await seedDecision(pendingDecisionData(tenantId));
         const outOfScope = await seedDecision(
           pendingDecisionData(tenantId, { source: 'other-bot-source' }),
+        );
+        // Dormant same-tenant/source PENDING EXPIRATION row: valid `productUnit`
+        // and NULL RESTOCK-only columns, so only `type` excludes the persisted row.
+        const expirationId = await seedDecision(
+          pendingDecisionData(tenantId, {
+            type: HumanDecisionType.EXPIRATION,
+            productUnit: 'UNIDAD',
+            sku: null,
+            requestedQuantity: null,
+          }),
         );
 
         const { repo } = makeHarness(tenantId);
@@ -755,6 +761,7 @@ describeIfDb(
         expect(page.items.map((item) => item.id)).toEqual([inScope]);
         expect(page.totalCount).toBe(1);
         await expect(repo.findById(outOfScope)).resolves.toBeNull();
+        await expect(repo.findById(expirationId)).resolves.toBeNull();
 
         const persisted = await integrationPrisma().humanDecision.findUnique({
           where: { id: outOfScope },
@@ -765,6 +772,13 @@ describeIfDb(
           source: 'other-bot-source',
           type: RESTOCK_TYPE,
           status: 'PENDING',
+        });
+        const expRow = await integrationPrisma().humanDecision.findUnique({
+          where: { id: expirationId },
+        });
+        expect(expRow).toMatchObject({
+          type: HumanDecisionType.EXPIRATION,
+          productUnit: 'UNIDAD',
         });
       });
 

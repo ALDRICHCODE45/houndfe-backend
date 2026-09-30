@@ -20,6 +20,7 @@
  * Approved design (read-only):
  * `houndfe-chatbot-human-decisions/docs/human-decisions-contract-v1.md`.
  */
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -185,11 +186,13 @@ describe('human-decisions RESTOCK schema + migration drift guard (HD-01)', () =>
 
   it('declares the exact approved enum members', () => {
     expect(schemaText).toMatch(/^enum HumanDecisionType\s/m);
-    expect(enumMembers('HumanDecisionType')).toEqual(['RESTOCK']);
+    expect(enumMembers('HumanDecisionType')).toEqual(['RESTOCK', 'EXPIRATION']);
     expect(enumMembers('HumanDecisionStatus')).toEqual(['PENDING', 'RESOLVED']);
     expect(enumMembers('HumanDecisionResolutionAction')).toEqual([
       'PROVIDE_RESTOCK_ESTIMATE',
       'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE',
+      'PROVIDE_EXPIRATION_TEXT',
+      'REPORT_EXPIRATION_UNAVAILABLE',
     ]);
     expect(enumMembers('HumanDecisionBotOutcome')).toEqual([
       'PROVIDER_ACCEPTED',
@@ -444,5 +447,460 @@ describe('human-decisions RESTOCK schema + migration drift guard (HD-01)', () =>
       'human_decisions_restock_days_range',
       'HumanDecisionBotOutcome',
     ]);
+  });
+});
+
+/**
+ * HD-EXP-01 — schema + migration drift guard for EXPIRATION human decisions.
+ *
+ * DB-free (fs only). EXPIRATION reuses `human_decisions` and adds five nullable
+ * columns; nothing existing is dropped or rewritten. The change is split across
+ * two migration files on purpose: `ALTER TYPE ... ADD VALUE` must COMMIT before
+ * a later statement can reference the new enum member, because a value added
+ * inside a transaction cannot be used again within that same transaction. The
+ * persistence migration therefore lives in its own file (SQL transaction
+ * block, opened by explicit BEGIN; and closed by COMMIT; — NOT a Git boundary).
+ *
+ * The RESTOCK `20260925000100` migration is pinned byte-identical below: this
+ * change is additive and must never rewrite existing RESTOCK truth.
+ */
+describe('human-decisions EXPIRATION schema + migration drift guard (HD-EXP-01)', () => {
+  const repoPath = (...segments: string[]): string =>
+    path.join(process.cwd(), ...segments);
+  const readIfPresent = (file: string): string =>
+    fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+
+  const schemaText = fs.readFileSync(
+    repoPath('prisma', 'schema.prisma'),
+    'utf8',
+  );
+  const enumMigrationFile = repoPath(
+    'prisma',
+    'migrations',
+    '20260929000100_human_decisions_expiration_enums',
+    'migration.sql',
+  );
+  const persistenceMigrationFile = repoPath(
+    'prisma',
+    'migrations',
+    '20260929000200_human_decisions_expiration_persistence',
+    'migration.sql',
+  );
+  const legacyMigrationFile = repoPath(
+    'prisma',
+    'migrations',
+    '20260925000100_human_decisions_restock',
+    'migration.sql',
+  );
+
+  // Missing files yield '' so every assertion below fails usefully.
+  const enumSql = readIfPresent(enumMigrationFile);
+  const persistenceSql = readIfPresent(persistenceMigrationFile);
+  // DDL only: header comments document the rollback and name DROP verbs.
+  const persistenceDdl = persistenceSql.replace(/^\s*--.*$/gm, '');
+  // Explicit commits release staging locks before scans, then scans before swaps.
+  const phases = persistenceDdl.match(/BEGIN;[\s\S]*?COMMIT;/g) ?? [];
+  const [stagingDdl = '', validateDdl = '', swapDdl = ''] = phases;
+  const validateSql = validateDdl;
+  const swapSql = swapDdl;
+
+  const enumMembers = (name: string): string[] =>
+    (
+      schemaText.match(
+        new RegExp(`enum ${name}\\s*\\{([\\s\\S]*?)\\n\\}`, 'm'),
+      )?.[1] ?? ''
+    )
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('//'));
+
+  const model = (name: string): string =>
+    schemaText.match(
+      new RegExp(`model ${name}\\s*\\{([\\s\\S]*?)\\n\\}`, 'm'),
+    )?.[1] ?? '';
+
+  const flat = (fragment: string): string =>
+    fragment.replace(/\s+/g, ' ').trim();
+
+  // Body of `ADD CONSTRAINT "<name>"` up to its terminating `;`. CHECK bodies
+  // hold no semicolon, so `NOT VALID` bodies are captured whole.
+  const constraintBody = (source: string, name: string): string => {
+    const start = source.indexOf(`ADD CONSTRAINT "${name}"`);
+    if (start < 0) return '';
+    return source.slice(start, source.indexOf(';', start));
+  };
+
+  const branch = (
+    body: string,
+    startMarker: string,
+    endMarker: string | null,
+  ): string => {
+    const start = body.indexOf(startMarker);
+    if (start < 0) return '';
+    const end =
+      endMarker === null ? body.length : body.indexOf(endMarker, start + 1);
+    return end > start ? body.slice(start, end) : '';
+  };
+
+  const addColumns = (): string[] =>
+    [...persistenceDdl.matchAll(/ADD COLUMN "([^"]+)"/g)].map(
+      (match) => match[1],
+    );
+
+  it('appends the EXPIRATION members after the existing ones, in stable order', () => {
+    expect(enumMembers('HumanDecisionType')).toEqual(['RESTOCK', 'EXPIRATION']);
+    expect(enumMembers('HumanDecisionResolutionAction')).toEqual([
+      'PROVIDE_RESTOCK_ESTIMATE',
+      'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE',
+      'PROVIDE_EXPIRATION_TEXT',
+      'REPORT_EXPIRATION_UNAVAILABLE',
+    ]);
+    // Status/outcome enums are untouched by this change.
+    expect(enumMembers('HumanDecisionStatus')).toEqual(['PENDING', 'RESOLVED']);
+    expect(enumMembers('HumanDecisionBotOutcome')).toEqual([
+      'PROVIDER_ACCEPTED',
+      'PROVIDER_ACCEPTED_LATE',
+      'DELIVERY_UNKNOWN',
+      'STALE',
+    ]);
+  });
+
+  it('ships the enums in an explicit BEGIN/COMMIT migration, committed before persistence uses them', () => {
+    expect(fs.existsSync(enumMigrationFile)).toBe(true);
+    expect(enumSql).toMatch(
+      /ALTER TYPE "HumanDecisionType" ADD VALUE 'EXPIRATION'/,
+    );
+    expect(enumSql).toMatch(
+      /ALTER TYPE "HumanDecisionResolutionAction" ADD VALUE 'PROVIDE_EXPIRATION_TEXT'/,
+    );
+    expect(enumSql).toMatch(
+      /ALTER TYPE "HumanDecisionResolutionAction" ADD VALUE 'REPORT_EXPIRATION_UNAVAILABLE'/,
+    );
+    // Enum-only file: no statement here may reference an uncommitted value.
+    const enumDdl = enumSql.replace(/^\s*--.*$/gm, '');
+    expect(enumDdl).not.toMatch(
+      /ALTER\s+TABLE|CREATE\s+TABLE|ADD\s+COLUMN|CHECK/i,
+    );
+
+    // Persistence is a distinct file that uses the new values but never
+    // re-declares the enum type.
+    expect(fs.existsSync(persistenceMigrationFile)).toBe(true);
+    expect(persistenceSql).toContain(`'EXPIRATION'`);
+    expect(persistenceSql).not.toMatch(/ALTER\s+TYPE/);
+    expect(enumDdl).toMatch(/^BEGIN;[\s\S]*COMMIT;$/m);
+    expect(enumDdl.match(/^(BEGIN|COMMIT);$/gm)).toHaveLength(2);
+  });
+
+  it('declares the five nullable columns on the Prisma model', () => {
+    const decision = model('HumanDecision');
+    expect(decision).toMatch(/^\s*productUnit\s+String\?\s*$/m);
+    expect(decision).toMatch(/^\s*variantName\s+String\?\s*$/m);
+    expect(decision).toMatch(/^\s*variantOption\s+String\?\s*$/m);
+    expect(decision).toMatch(/^\s*variantValue\s+String\?\s*$/m);
+    expect(decision).toMatch(/^\s*expirationText\s+String\?\s*$/m);
+  });
+
+  it('adds exactly those five TEXT columns and no bytes/VARCHAR', () => {
+    expect(addColumns()).toEqual([
+      'productUnit',
+      'variantName',
+      'variantOption',
+      'variantValue',
+      'expirationText',
+    ]);
+    for (const column of addColumns()) {
+      expect(persistenceDdl).toMatch(
+        new RegExp(`ADD COLUMN "${column}" TEXT(;|\\s)`),
+      );
+    }
+    expect(persistenceDdl).not.toMatch(
+      /ADD COLUMN "[^"]+" (VARCHAR|BYTEA|CHARACTER VARYING)/i,
+    );
+  });
+
+  it('pins the type-aware snapshot shape (RESTOCK null vs EXPIRATION required)', () => {
+    const snapshot = flat(
+      constraintBody(persistenceSql, 'human_decisions_snapshot_state'),
+    );
+    expect(snapshot).not.toBe('');
+
+    const restock = branch(
+      snapshot,
+      `"type" = 'RESTOCK'`,
+      `"type" = 'EXPIRATION'`,
+    );
+    expect(restock).not.toBe('');
+    for (const column of [
+      'productUnit',
+      'variantName',
+      'variantOption',
+      'variantValue',
+    ]) {
+      expect(restock).toContain(`"${column}" IS NULL`);
+    }
+
+    const expiration = branch(snapshot, `"type" = 'EXPIRATION'`, null);
+    expect(expiration).toContain('"productUnit" IS NOT NULL');
+    // RESTOCK-only snapshot columns are forbidden for an EXPIRATION decision.
+    for (const column of [
+      'sku',
+      'requestedQuantity',
+      'observedStockAtRequest',
+      'stockObservedAt',
+      'supersedesDecisionId',
+    ]) {
+      expect(expiration).toContain(`"${column}" IS NULL`);
+    }
+    // Simple variant: all four NULL. Present variantId: only variantId is
+    // required; name/option/value stay nullable.
+    expect(expiration).toMatch(
+      /"variantId" IS NULL[\s\S]*?"variantName" IS NULL[\s\S]*?"variantOption" IS NULL[\s\S]*?"variantValue" IS NULL/,
+    );
+    expect(expiration).toContain('OR "variantId" IS NOT NULL');
+    expect(expiration).not.toMatch(/"variant(Name|Option|Value)" IS NOT NULL/);
+  });
+
+  it('stages the new snapshot constraint as NOT VALID then validates it', () => {
+    expect(persistenceSql).toMatch(
+      /ADD CONSTRAINT "human_decisions_snapshot_state"[\s\S]*?NOT VALID/,
+    );
+    expect(validateSql).toMatch(
+      /VALIDATE CONSTRAINT "human_decisions_snapshot_state"/,
+    );
+  });
+
+  it('swaps human_decisions_resolution_state with the type-aware v2 body', () => {
+    expect(persistenceSql).toMatch(
+      /ADD CONSTRAINT "human_decisions_resolution_state_v2"/,
+    );
+    expect(validateSql).toMatch(
+      /VALIDATE CONSTRAINT "human_decisions_resolution_state_v2"/,
+    );
+    expect(swapSql).toMatch(
+      /DROP CONSTRAINT "human_decisions_resolution_state"/,
+    );
+    expect(swapSql).toMatch(
+      /RENAME CONSTRAINT "human_decisions_resolution_state_v2" TO "human_decisions_resolution_state"/,
+    );
+
+    const check = flat(
+      constraintBody(persistenceSql, 'human_decisions_resolution_state_v2'),
+    );
+    expect(check).not.toBe('');
+
+    // PENDING v1: every resolution field NULL, now including expirationText.
+    const pending = branch(
+      check,
+      `"status" = 'PENDING'`,
+      `"status" = 'RESOLVED'`,
+    );
+    expect(pending).not.toBe('');
+    expect(pending).toContain('"version" = 1');
+    for (const column of [
+      'resolutionAction',
+      'restockDays',
+      'expirationText',
+      'resolutionRequestId',
+      'resolvedAt',
+      'resolvedByActorId',
+      'resolvedByDisplayName',
+    ]) {
+      expect(pending).toContain(`"${column}" IS NULL`);
+    }
+
+    // RESOLVED v2 keeps the current audit requirements.
+    const resolved = branch(check, `"status" = 'RESOLVED'`, null);
+    expect(resolved).toContain('"version" = 2');
+    for (const column of [
+      'resolutionAction',
+      'resolutionRequestId',
+      'resolvedAt',
+      'resolvedByActorId',
+      'resolvedByDisplayName',
+    ]) {
+      expect(resolved).toContain(`"${column}" IS NOT NULL`);
+    }
+
+    // RESTOCK truth preserved verbatim; expirationText stays NULL.
+    expect(resolved).toContain(
+      `"resolutionAction" = 'PROVIDE_RESTOCK_ESTIMATE' AND "restockDays" IS NOT NULL`,
+    );
+    expect(resolved).toContain(
+      `"resolutionAction" = 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE' AND "restockDays" IS NULL`,
+    );
+    // EXPIRATION truth: text OR unavailable; restockDays stays NULL either way.
+    expect(resolved).toContain(
+      `"resolutionAction" = 'PROVIDE_EXPIRATION_TEXT' AND "expirationText" IS NOT NULL`,
+    );
+    expect(resolved).toContain(
+      `"resolutionAction" = 'REPORT_EXPIRATION_UNAVAILABLE' AND "expirationText" IS NULL`,
+    );
+    // Action ownership is discriminated by explicit type branches.
+    expect(resolved).toContain(`"type" = 'RESTOCK'`);
+    expect(resolved).toContain(`"type" = 'EXPIRATION'`);
+  });
+
+  it('swaps human_decisions_application_outcome_state with the shared type-aware deadline', () => {
+    expect(persistenceSql).toMatch(
+      /ADD CONSTRAINT "human_decisions_application_outcome_state_v2"/,
+    );
+    expect(validateSql).toMatch(
+      /VALIDATE CONSTRAINT "human_decisions_application_outcome_state_v2"/,
+    );
+    expect(swapSql).toMatch(
+      /DROP CONSTRAINT "human_decisions_application_outcome_state"/,
+    );
+    expect(swapSql).toMatch(
+      /RENAME CONSTRAINT "human_decisions_application_outcome_state_v2" TO "human_decisions_application_outcome_state"/,
+    );
+
+    const check = flat(
+      constraintBody(
+        persistenceSql,
+        'human_decisions_application_outcome_state_v2',
+      ),
+    );
+    expect(check).not.toBe('');
+
+    // The four terminal outcomes and the CAS/evidence shape are unchanged.
+    for (const outcome of [
+      'PROVIDER_ACCEPTED',
+      'PROVIDER_ACCEPTED_LATE',
+      'DELIVERY_UNKNOWN',
+      'STALE',
+    ]) {
+      expect(check).toContain(`"applicationOutcome" = '${outcome}'`);
+    }
+    expect(check).toContain(`"status" = 'RESOLVED'`);
+    for (const column of [
+      'resolvedAt',
+      'applicationAttemptId',
+      'applicationEvidenceHash',
+      'ackReceivedAt',
+    ]) {
+      expect(check).toContain(`"${column}" IS NOT NULL`);
+    }
+
+    // Single shared deadline expression, discriminated by type: 1h vs 24h.
+    expect(check).toContain(
+      `CASE "type" WHEN 'RESTOCK' THEN INTERVAL '1 hour' WHEN 'EXPIRATION' THEN INTERVAL '24 hours' END`,
+    );
+    // Explicit supported-type guard keeps the CASE two-valued (fail closed for
+    // an unsupported type instead of yielding UNKNOWN and passing).
+    expect(check).toContain(`"type" IN ('RESTOCK', 'EXPIRATION')`);
+
+    const onTime = branch(
+      check,
+      `"applicationOutcome" = 'PROVIDER_ACCEPTED'`,
+      `"applicationOutcome" = 'PROVIDER_ACCEPTED_LATE'`,
+    );
+    const late = branch(
+      check,
+      `"applicationOutcome" = 'PROVIDER_ACCEPTED_LATE'`,
+      `"applicationOutcome" = 'DELIVERY_UNKNOWN'`,
+    );
+    const unknown = branch(
+      check,
+      `"applicationOutcome" = 'DELIVERY_UNKNOWN'`,
+      `"applicationOutcome" = 'STALE'`,
+    );
+    const stale = branch(check, `"applicationOutcome" = 'STALE'`, null);
+    for (const clause of [onTime, late, unknown, stale]) {
+      expect(clause).not.toBe('');
+    }
+
+    // Every attempted send is in the half-open window [resolvedAt, deadline).
+    for (const attempted of [onTime, late, unknown]) {
+      expect(attempted).toContain('"applicationAttemptedAt" IS NOT NULL');
+      expect(attempted).toContain('"applicationAttemptedAt" >= "resolvedAt"');
+      expect(attempted).toContain(
+        '"applicationAttemptedAt" < "resolvedAt" + (CASE',
+      );
+    }
+
+    // On-time acceptance is strictly inside the deadline; LATE is at/after it.
+    expect(onTime).toContain('"providerAcceptedObservedAt" IS NOT NULL');
+    expect(onTime).toContain('"providerAcceptedObservedAt" >= "resolvedAt"');
+    expect(onTime).toContain(
+      '"providerAcceptedObservedAt" < "resolvedAt" + (CASE',
+    );
+    expect(late).toContain('"providerAcceptedObservedAt" IS NOT NULL');
+    expect(late).toContain(
+      '"providerAcceptedObservedAt" >= "resolvedAt" + (CASE',
+    );
+    expect(late).not.toContain('"providerAcceptedObservedAt" < "resolvedAt"');
+
+    // UNKNOWN carries no acceptance evidence; STALE could not have sent.
+    expect(unknown).toContain('"providerAcceptedObservedAt" IS NULL');
+    expect(stale).toContain('"applicationAttemptedAt" IS NULL');
+
+    // ackReceivedAt keeps presence-only semantics: no extra deadline bound.
+    expect(check).not.toMatch(/"ackReceivedAt"\s*[<>]/);
+  });
+
+  it('leaves the 20260925000100 RESTOCK migration byte-identical', () => {
+    const legacy = fs.readFileSync(legacyMigrationFile, 'utf8');
+    expect(createHash('sha256').update(legacy, 'utf8').digest('hex')).toBe(
+      '515cd9b46241a18e554f27f141abdf1f6e8579e346d1f61fe6fcbc847c7cf283',
+    );
+    expect(legacy).toContain(
+      `ADD CONSTRAINT "human_decisions_resolution_state"`,
+    );
+  });
+
+  it('is additive-only: no new tables, indexes, foreign keys or backfill', () => {
+    expect(persistenceDdl).not.toMatch(/CREATE\s+TABLE/i);
+    expect(persistenceDdl).not.toMatch(/CREATE\s+(UNIQUE\s+)?INDEX/i);
+    expect(persistenceDdl).not.toMatch(/FOREIGN KEY|REFERENCES\s+"/i);
+    expect(persistenceDdl).not.toMatch(
+      /INSERT\s+INTO|\bUPDATE\s+"|\bDELETE\s+FROM/i,
+    );
+    expect(persistenceDdl).not.toMatch(/DROP\s+(TABLE|TYPE|INDEX|COLUMN)/i);
+    // No catalog/snapshot FK: the snapshot is stored data, not a relation.
+    expect(persistenceDdl).not.toMatch(/products|variants/i);
+    // The only ALTER TABLE target is the reused human_decisions table.
+    const alteredTables = [
+      ...persistenceDdl.matchAll(/ALTER\s+TABLE\s+"([^"]+)"/gi),
+    ].map((match) => match[1]);
+    expect(new Set(alteredTables)).toEqual(new Set(['human_decisions']));
+  });
+
+  it('runs staging, validation and swap as three phased transactions', () => {
+    expect(phases).toHaveLength(3);
+    expect(persistenceDdl.replace(/BEGIN;[\s\S]*?COMMIT;/g, '').trim()).toBe(
+      '',
+    );
+    for (const ddl of phases) {
+      expect(ddl).toMatch(/^BEGIN;[\s\S]*COMMIT;$/m);
+      expect(ddl.match(/^(BEGIN|COMMIT);$/gm)).toHaveLength(2);
+    }
+    expect(stagingDdl.match(/ADD COLUMN /g)).toHaveLength(5);
+    expect(stagingDdl.match(/NOT VALID/g)).toHaveLength(3);
+    expect(stagingDdl).not.toMatch(
+      /VALIDATE CONSTRAINT|DROP CONSTRAINT|RENAME CONSTRAINT/,
+    );
+    expect(validateDdl).not.toMatch(
+      /ADD COLUMN|ADD CONSTRAINT|DROP CONSTRAINT|RENAME CONSTRAINT/,
+    );
+    expect(swapDdl).not.toMatch(
+      /ADD COLUMN|ADD CONSTRAINT|VALIDATE CONSTRAINT/,
+    );
+  });
+
+  it('stages NOT VALID checks then validates and swaps them', () => {
+    expect(persistenceDdl.match(/NOT VALID/g)).toHaveLength(3);
+    expect(validateDdl.match(/VALIDATE CONSTRAINT /g)).toHaveLength(3);
+    for (const old of [
+      'human_decisions_resolution_state',
+      'human_decisions_application_outcome_state',
+    ]) {
+      expect(swapDdl).toContain(`DROP CONSTRAINT "${old}"`);
+      expect(swapDdl).toContain(`RENAME CONSTRAINT "${old}_v2" TO "${old}"`);
+      expect(`${stagingDdl}${validateDdl}`).not.toContain(
+        `DROP CONSTRAINT "${old}"`,
+      );
+    }
+    expect(swapDdl.match(/DROP CONSTRAINT /g)).toHaveLength(2);
+    expect(swapDdl.match(/RENAME CONSTRAINT /g)).toHaveLength(2);
   });
 });

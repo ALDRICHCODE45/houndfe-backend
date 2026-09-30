@@ -39,12 +39,9 @@
  * superadmin bypass is real and that the adapter's unconditional
  * `getTenantId()` is the actual fail-closed gate.
  *
- * TYPE PIN LIMIT: `HumanDecisionType` has exactly one member (`RESTOCK`), so a
- * persisted non-RESTOCK row cannot be seeded and a "wrong type" miss is
- * structurally the same no-match as a missing row. The spec asserts the
- * single-member enum and pins the behavioral proof on the source dimension
- * (which CAN be seeded); if the enum ever grows, this spec must grow a real
- * seeded case.
+ * TYPE PIN, NOT ENUM-ONLY: `HumanDecisionType` has TWO members, so the nulls
+ * test seeds a real same-tenant/same-source PENDING EXPIRATION row and proves
+ * the `RESTOCK_TYPE` pin excludes it while the row IS committed.
  *
  * ISOLATED-DB GUARD: before this file touches a row it validates BOTH the
  * `.env.test` file parsed with the local `dotenv` AND the ACTIVE
@@ -960,7 +957,7 @@ describeIfDb(
     });
 
     describe('indistinguishable nulls and the pinned predicate', () => {
-      it('returns null for missing, cross-tenant and foreign-source ids while the rows exist', async () => {
+      it('returns null for missing, cross-tenant, foreign-source and EXPIRATION ids while the rows exist', async () => {
         const tenantA = await seedTenant('Miss Tenant A');
         const tenantB = await seedTenant('Miss Tenant B');
         const crossTenantId = await seedDecision(
@@ -969,6 +966,18 @@ describeIfDb(
         const foreignSourceId = await seedDecision(
           pendingFixture(tenantA, 'Miss Tenant A', {
             source: 'other-bot-source',
+          }).data,
+        );
+        // Dormant same-tenant/source PENDING EXPIRATION row: only the type pin
+        // excludes it, and every RESTOCK-only snapshot column is NULL.
+        const expirationId = await seedDecision(
+          pendingFixture(tenantA, 'Miss Tenant A', {
+            type: HumanDecisionType.EXPIRATION,
+            productUnit: 'UNIDAD',
+            sku: null,
+            requestedQuantity: null,
+            observedStockAtRequest: null,
+            stockObservedAt: null,
           }).data,
         );
         const missingId = crypto.randomUUID();
@@ -981,6 +990,9 @@ describeIfDb(
         ).resolves.toBeNull();
         await expect(
           withTenant(tenantA, () => repo.findById(foreignSourceId)),
+        ).resolves.toBeNull();
+        await expect(
+          withTenant(tenantA, () => repo.findById(expirationId)),
         ).resolves.toBeNull();
 
         // The cross-tenant id DOES resolve for its owning tenant: the null
@@ -1002,13 +1014,15 @@ describeIfDb(
           source: 'other-bot-source',
           type: RESTOCK_TYPE,
         });
+        await expect(persistedRow(expirationId)).resolves.toMatchObject({
+          id: expirationId,
+          tenantId: tenantA,
+          source: RESTOCK_SOURCE,
+          type: HumanDecisionType.EXPIRATION,
+          productUnit: 'UNIDAD',
+        });
 
-        // The `type` pin is defense-in-depth: the enum has exactly one member,
-        // so no persisted non-RESTOCK row can exist and a "wrong type" miss is
-        // the same `findFirst` no-match as a missing row. If the enum grows,
-        // this spec must grow a real seeded case.
-        expect(Object.keys(HumanDecisionType)).toEqual(['RESTOCK']);
-        expect(HumanDecisionType.RESTOCK).toBe(RESTOCK_TYPE);
+        // Same tenant/source, so only the `type` dimension explains its null.
       });
     });
 
