@@ -29,10 +29,16 @@
  *     the tenant from CLS and pins `source`/`type` in the same WHERE clause, so
  *     a missing, cross-tenant or foreign-source id is indistinguishable and the
  *     port returns `null`.
- *   - The response is ONLY `toBotRestockPollResponse(record)`: an exact
- *     discriminated projection of the CURRENT decision state (PENDING or
- *     RESOLVED) with reviewer identity, authority, credential, provider/ACK and
- *     customer fields excluded by construction.
+ *   - The response is an exact discriminated projection of the CURRENT
+ *     decision state (PENDING or RESOLVED) with reviewer identity, authority,
+ *     credential, provider/ACK and customer fields excluded by construction.
+ *     Dispatch is by the persisted `type`: RESTOCK projects through
+ *     `toBotRestockPollResponse`, EXPIRATION through
+ *     `toBotExpirationPollResponse` (both value-free and fail-closed); any
+ *     other type fails closed as a sanitized 500. NOTE: the production adapter
+ *     (`PrismaBotRestockPollRepository`) still pins `type = RESTOCK`, so the
+ *     live GET route is RESTOCK-only until the pending adapter slice — the
+ *     EXPIRATION branch is contract-tested against the mocked port here.
  *   - Because the poll is mutable, the route is pinned `Cache-Control: no-store`
  *     BEFORE the port read, so a success (200) AND a handler-level miss (404)
  *     both carry it. `no-store` is NOT guaranteed on early guard/pipe/route
@@ -63,10 +69,15 @@ import { RequiredScopes } from '../../chatbot-api/presentation/decorators/requir
 import { ServiceAuthGuard } from '../../chatbot-api/presentation/guards/service-auth.guard';
 import {
   BOT_RESTOCK_POLL_REPOSITORY,
+  type BotRestockPollRecord,
   type IBotRestockPollRepository,
 } from '../domain/bot-restock-poll.repository';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
+import { RESTOCK_TYPE } from '../domain/restock-request-canonicalizer';
 import {
+  toBotExpirationPollResponse,
   toBotRestockPollResponse,
+  type BotExpirationPollResponse,
   type BotRestockPollResponse,
 } from './dto/bot-restock-poll.response';
 import { HumanDecisionHttpFilter } from './filters/human-decision-http.filter';
@@ -109,7 +120,7 @@ export class BotRestockPollController {
     @Param('id', ParseUUIDPipe) id: string,
     @Req() request: ServiceAuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<BotRestockPollResponse> {
+  ): Promise<BotRestockPollResponse | BotExpirationPollResponse> {
     if (!request.serviceCredential) {
       // The guard always sets this; a missing value means the trusted
       // credential context was lost, so deny rather than serve an
@@ -132,7 +143,26 @@ export class BotRestockPollController {
       throw new NotFoundException('Human decision not found');
     }
 
-    return toBotRestockPollResponse(record);
+    return this.toPollResponse(record);
+  }
+
+  /**
+   * Dispatches on the persisted decision `type`. Both projections are pure,
+   * value-free and fail closed on malformed state; an unsupported type is a
+   * programmer/transport-bypass state that must never be served, so it throws
+   * a value-free `Error` the scoped filter reduces to a sanitized 500.
+   */
+  private toPollResponse(
+    record: BotRestockPollRecord,
+  ): BotRestockPollResponse | BotExpirationPollResponse {
+    switch (record.type) {
+      case RESTOCK_TYPE:
+        return toBotRestockPollResponse(record);
+      case EXPIRATION_TYPE:
+        return toBotExpirationPollResponse(record);
+      default:
+        throw new Error('Unsupported human decision type');
+    }
   }
 
   /**

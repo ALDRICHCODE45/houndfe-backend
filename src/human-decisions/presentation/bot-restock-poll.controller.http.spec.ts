@@ -63,6 +63,7 @@ import {
   type RestockIntakeInput,
   type RestockIntakeResult,
 } from '../domain/restock-intake.repository';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import { EXPIRATION_INTAKE_REPOSITORY } from '../domain/expiration-intake.repository';
 import { HumanDecisionsModule } from '../human-decisions.module';
 import { PrismaBotRestockPollRepository } from '../infrastructure/prisma-bot-restock-poll.repository';
@@ -258,6 +259,112 @@ const EXPECTED_RESOLVED_NEGATIVE = {
   },
   applyBefore: APPLY_BEFORE_ISO,
 };
+
+// --- EXPIRATION dispatch fixtures (built from the shared RESTOCK base). ---
+const EXPIRATION_POSITIVE_ACTION = 'PROVIDE_EXPIRATION_TEXT';
+const EXPIRATION_NEGATIVE_ACTION = 'REPORT_EXPIRATION_UNAVAILABLE';
+const EXPIRATION_UNIT = 'UNIDAD';
+const EXPIRATION_TEXT = 'Vence el 2026-05';
+const VARIANT_ID = '550e8400-e29b-41d4-a716-446655440000';
+// EXPIRATION shares `resolvedAt` but the owner-approved deadline is 24h.
+const EXPIRATION_APPLY_BEFORE_ISO = '2026-06-02T12:00:00.000Z';
+
+const EXPIRATION_SNAPSHOT_OVERRIDES = {
+  sku: null,
+  requestedQuantity: null,
+  observedStockAtRequest: null,
+  stockObservedAt: null,
+  productUnit: EXPIRATION_UNIT,
+  variantName: null,
+  variantOption: null,
+  variantValue: null,
+};
+
+const EXPIRATION_PENDING_RECORD: BotRestockPollRecord = {
+  ...PENDING_RECORD,
+  type: EXPIRATION_TYPE,
+  snapshot: { ...PENDING_RECORD.snapshot, ...EXPIRATION_SNAPSHOT_OVERRIDES },
+};
+
+const EXPIRATION_VARIANT_RECORD: BotRestockPollRecord = {
+  ...EXPIRATION_PENDING_RECORD,
+  snapshot: {
+    ...EXPIRATION_PENDING_RECORD.snapshot,
+    variantId: VARIANT_ID,
+    variantName: 'Presentación A',
+    variantOption: 'Peso',
+    variantValue: '1 kg',
+  },
+};
+
+const EXPIRATION_RESOLVED_TEXT_RECORD: BotRestockPollRecord = {
+  ...EXPIRATION_PENDING_RECORD,
+  status: 'RESOLVED',
+  version: 2,
+  resolutionAction: EXPIRATION_POSITIVE_ACTION,
+  expirationText: EXPIRATION_TEXT,
+  resolvedAt: new Date(RESOLVED_AT_ISO),
+};
+
+const EXPIRATION_RESOLVED_UNAVAILABLE_RECORD: BotRestockPollRecord = {
+  ...EXPIRATION_RESOLVED_TEXT_RECORD,
+  resolutionAction: EXPIRATION_NEGATIVE_ACTION,
+  expirationText: null,
+};
+
+const EXPECTED_EXPIRATION_SNAPSHOT_KEYS = [
+  'branchId',
+  'branchName',
+  'productId',
+  'productName',
+  'unit',
+  'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
+];
+
+const EXPECTED_EXPIRATION_PENDING = {
+  id: DECISION_ID,
+  sourceRequestId: SOURCE_REQUEST_ID,
+  type: 'EXPIRATION',
+  status: 'PENDING',
+  version: 1,
+  createdAt: CREATED_AT_ISO,
+  snapshot: {
+    branchId: 'branch-1',
+    branchName: 'Sucursal Centro',
+    productId: PRODUCT_ID,
+    productName: 'Filtro de aceite',
+    unit: EXPIRATION_UNIT,
+    variantId: null,
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
+  },
+  supersedesDecisionId: null,
+  resolution: null,
+  applyBefore: null,
+};
+
+const EXPIRATION_RESOLVED_CASES: Array<
+  [string, BotRestockPollRecord, Record<string, unknown>]
+> = [
+  [
+    EXPIRATION_POSITIVE_ACTION,
+    EXPIRATION_RESOLVED_TEXT_RECORD,
+    {
+      action: EXPIRATION_POSITIVE_ACTION,
+      expirationText: EXPIRATION_TEXT,
+      resolvedAt: RESOLVED_AT_ISO,
+    },
+  ],
+  [
+    EXPIRATION_NEGATIVE_ACTION,
+    EXPIRATION_RESOLVED_UNAVAILABLE_RECORD,
+    { action: EXPIRATION_NEGATIVE_ACTION, resolvedAt: RESOLVED_AT_ISO },
+  ],
+];
 
 const INTAKE_VALID_BODY = {
   sourceRequestId: SOURCE_REQUEST_ID,
@@ -524,6 +631,101 @@ describe('Bot restock poll HTTP contract (HD-05c)', () => {
       expect(body).not.toHaveProperty('canonicalRequestHash');
       expect(body).not.toHaveProperty('submittedCredentialId');
       expect(body).not.toHaveProperty('applicationOutcome');
+    });
+  });
+
+  describe('EXPIRATION dispatch (mock port; production adapter still RESTOCK-only)', () => {
+    it('returns the exact EXPIRATION PENDING body with unit and variant keys', async () => {
+      findById.mockResolvedValue(EXPIRATION_PENDING_RECORD);
+
+      const res = await get().expect(200);
+      const body = res.body as Record<string, unknown>;
+
+      expect(body).toEqual(EXPECTED_EXPIRATION_PENDING);
+      expect(Object.keys(body).sort()).toEqual(EXPECTED_TOP_LEVEL_KEYS);
+      expect(Object.keys(body.snapshot as object).sort()).toEqual(
+        EXPECTED_EXPIRATION_SNAPSHOT_KEYS,
+      );
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(findById).toHaveBeenCalledWith(DECISION_ID);
+    });
+
+    it('projects the variant identity when variantId is set', async () => {
+      findById.mockResolvedValue(EXPIRATION_VARIANT_RECORD);
+
+      const res = await get().expect(200);
+      const snapshot = (res.body as Record<string, unknown>).snapshot as Record<
+        string,
+        unknown
+      >;
+
+      expect(snapshot.variantId).toBe(VARIANT_ID);
+      expect(snapshot.variantName).toBe('Presentación A');
+      expect(snapshot.variantOption).toBe('Peso');
+      expect(snapshot.variantValue).toBe('1 kg');
+      expect(Object.keys(snapshot).sort()).toEqual(
+        EXPECTED_EXPIRATION_SNAPSHOT_KEYS,
+      );
+    });
+
+    it.each(EXPIRATION_RESOLVED_CASES)(
+      'returns the exact RESOLVED %s body with the 24h applyBefore',
+      async (_action, record, expectedResolution) => {
+        findById.mockResolvedValue(record);
+
+        const res = await get().expect(200);
+        const body = res.body as Record<string, unknown>;
+
+        expect(body.status).toBe('RESOLVED');
+        expect(body.version).toBe(2);
+        expect(body.type).toBe('EXPIRATION');
+        expect(body.resolution).toEqual(expectedResolution);
+        expect(body.applyBefore).toBe(EXPIRATION_APPLY_BEFORE_ISO);
+        expect(res.headers['cache-control']).toBe('no-store');
+      },
+    );
+
+    it('omits expirationText entirely for the unavailable action', async () => {
+      findById.mockResolvedValue(EXPIRATION_RESOLVED_UNAVAILABLE_RECORD);
+
+      const res = await get().expect(200);
+      const resolution = (res.body as Record<string, unknown>)
+        .resolution as Record<string, unknown>;
+
+      expect(resolution).not.toHaveProperty('expirationText');
+      expect(Object.keys(resolution).sort()).toEqual(['action', 'resolvedAt']);
+    });
+
+    it('never leaks reviewer, authority, provider or PII fields for EXPIRATION', async () => {
+      findById.mockResolvedValue(EXPIRATION_RESOLVED_TEXT_RECORD);
+
+      const res = await get().expect(200);
+      const body = res.body as Record<string, unknown>;
+      const snapshot = body.snapshot as Record<string, unknown>;
+      const resolution = body.resolution as Record<string, unknown>;
+
+      for (const key of FORBIDDEN_KEYS) {
+        expect(body).not.toHaveProperty(key);
+        expect(snapshot).not.toHaveProperty(key);
+        expect(resolution).not.toHaveProperty(key);
+      }
+      // EXPIRATION carries no RESTOCK-only snapshot/resolution field either.
+      expect(snapshot).not.toHaveProperty('sku');
+      expect(resolution).not.toHaveProperty('restockDays');
+    });
+
+    it('fails closed with a sanitized 500 for an unsupported persisted type', async () => {
+      findById.mockResolvedValue({ ...PENDING_RECORD, type: 'SHIPPING' });
+
+      const res = await get().expect(500);
+      const body = res.body as ErrorEnvelope;
+
+      expect(body).toEqual({
+        statusCode: 500,
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error',
+      });
+      expect(JSON.stringify(body)).not.toContain('SHIPPING');
     });
   });
 
