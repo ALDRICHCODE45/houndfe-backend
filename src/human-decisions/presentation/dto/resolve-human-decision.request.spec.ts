@@ -15,15 +15,22 @@
  * `houndfe-chatbot-human-decisions/docs/human-decisions-contract-v1.md`.
  */
 import { InvalidArgumentError } from '../../../shared/domain/domain-error';
+import { EXPIRATION_TEXT_MAX_LENGTH } from '../../domain/expiration-text';
 import { normalizeRestockRequest } from '../../domain/restock-request-canonicalizer';
 import {
   INVALID_RESOLVE_REQUEST_CODE,
+  parseExpirationResolveHumanDecisionRequest,
   parseResolveHumanDecisionRequest,
+  RESOLVE_PROVIDE_EXPIRATION_TEXT,
   RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
+  RESOLVE_REPORT_EXPIRATION_UNAVAILABLE,
   RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE,
   RESOLVE_RESTOCK_DAYS_MAX,
   RESOLVE_RESTOCK_DAYS_MIN,
+  type ResolveExpirationHumanDecisionRequest,
+  type ResolveProvideExpirationTextRequest,
   type ResolveProvideRestockEstimateRequest,
+  type ResolveReportExpirationUnavailableRequest,
   type ResolveReportRestockEstimateUnavailableRequest,
 } from './resolve-human-decision.request';
 
@@ -576,5 +583,217 @@ describe('parseResolveHumanDecisionRequest types', () => {
     expect(Object.prototype.hasOwnProperty.call(negative, 'restockDays')).toBe(
       false,
     );
+  });
+});
+
+type NegativeExpirationVariantForbidsText =
+  'expirationText' extends keyof ResolveReportExpirationUnavailableRequest
+    ? never
+    : true;
+
+describe('parseExpirationResolveHumanDecisionRequest (EXPIRATION)', () => {
+  const ok = (extra: Record<string, unknown>): Record<string, unknown> => ({
+    action: RESOLVE_PROVIDE_EXPIRATION_TEXT,
+    expirationText: 'Lote 2026-A vence en agosto',
+    expectedVersion: 1,
+    resolutionRequestId: RESOLUTION_REQUEST_ID,
+    ...extra,
+  });
+  const bad = (extra: Record<string, unknown>): Record<string, unknown> => ({
+    action: RESOLVE_REPORT_EXPIRATION_UNAVAILABLE,
+    expectedVersion: 1,
+    resolutionRequestId: RESOLUTION_REQUEST_ID,
+    ...extra,
+  });
+  const parse = parseExpirationResolveHumanDecisionRequest;
+
+  function expectInvalid(value: unknown): void {
+    expect(() => parse(value)).toThrow(InvalidArgumentError);
+  }
+
+  it('parses PROVIDE_EXPIRATION_TEXT exactly, normalizing expirationText', () => {
+    expect(
+      parse(ok({ expirationText: '  Cafe\u0301   de   filtro  ' })),
+    ).toEqual({
+      action: RESOLVE_PROVIDE_EXPIRATION_TEXT,
+      expirationText: 'Caf\u00e9 de filtro',
+      expectedVersion: 1,
+      resolutionRequestId: RESOLUTION_REQUEST_ID,
+    });
+  });
+
+  it('parses REPORT_EXPIRATION_UNAVAILABLE with NO expirationText', () => {
+    const parsed = parse(bad({}));
+
+    expect(parsed).toEqual({
+      action: RESOLVE_REPORT_EXPIRATION_UNAVAILABLE,
+      expectedVersion: 1,
+      resolutionRequestId: RESOLUTION_REQUEST_ID,
+    });
+    expect(Object.prototype.hasOwnProperty.call(parsed, 'expirationText')).toBe(
+      false,
+    );
+  });
+
+  it('accepts the 500 bound and rejects 501 without truncating', () => {
+    const atLimit = 'a'.repeat(EXPIRATION_TEXT_MAX_LENGTH);
+
+    expect(parse(ok({ expirationText: atLimit }))).toMatchObject({
+      expirationText: atLimit,
+    });
+    expectInvalid(
+      ok({ expirationText: 'a'.repeat(EXPIRATION_TEXT_MAX_LENGTH + 1) }),
+    );
+  });
+
+  it('rejects control characters and invalid expirationText values', () => {
+    const controls = ['line\nbreak', 'tab\there', 'cr\rhere', 'del\u007f'];
+
+    for (const text of [
+      ...controls,
+      undefined,
+      null,
+      7,
+      true,
+      {},
+      [],
+      '',
+      '   ',
+    ]) {
+      expectInvalid(ok({ expirationText: text }));
+    }
+  });
+
+  it('accepts canonical trimmed UUIDs and rejects invalid ones', () => {
+    for (const uuid of [UUID_V1, RESOLUTION_REQUEST_ID, UUID_V7, UUID_V8]) {
+      const raw = `  ${uuid.toUpperCase()}  `;
+
+      expect(parse(ok({ resolutionRequestId: raw }))).toMatchObject({
+        resolutionRequestId: uuid,
+      });
+      expect(parse(bad({ resolutionRequestId: raw }))).toMatchObject({
+        resolutionRequestId: uuid,
+      });
+    }
+    for (const uuid of INVALID_RESOLUTION_REQUEST_IDS) {
+      expectInvalid(bad({ resolutionRequestId: uuid }));
+    }
+  });
+
+  it('accepts positive versions and rejects invalid ones', () => {
+    for (const version of [1, 2, 7, 123_456]) {
+      expect(parse(ok({ expectedVersion: version }))).toMatchObject({
+        expectedVersion: version,
+      });
+    }
+    for (const version of INVALID_EXPECTED_VERSIONS) {
+      expectInvalid(ok({ expectedVersion: version }));
+    }
+  });
+
+  it('rejects every extra/authority key on either variant', () => {
+    for (const key of AUTHORITY_KEYS) {
+      expectInvalid(ok({ [key]: 'x' }));
+      expectInvalid(bad({ [key]: 'x' }));
+    }
+  });
+
+  it('rejects restockDays smuggled into either variant', () => {
+    expectInvalid(ok({ restockDays: 7 }));
+    expectInvalid(bad({ restockDays: 7 }));
+  });
+
+  it('rejects a body missing any required key', () => {
+    for (const key of [
+      'action',
+      'expirationText',
+      'expectedVersion',
+      'resolutionRequestId',
+    ]) {
+      expectInvalid(omit(ok({}), [key]));
+    }
+    for (const key of ['action', 'expectedVersion', 'resolutionRequestId']) {
+      expectInvalid(omit(bad({}), [key]));
+    }
+  });
+
+  it.each([null, undefined, '', 'hola'])(
+    'rejects UNAVAILABLE carrying expirationText %p',
+    (text) => {
+      expectInvalid(bad({ expirationText: text }));
+    },
+  );
+
+  it.each([null, undefined, 7, true, [], [{}]])(
+    'rejects the non-object EXP body %p',
+    (value) => {
+      expectInvalid(value);
+    },
+  );
+
+  it.each([
+    '',
+    'provide_expiration_text',
+    RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
+    RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE,
+    true,
+    {},
+  ])('rejects the invalid EXP action %p (RESTOCK included)', (action) => {
+    expectInvalid({
+      action,
+      expectedVersion: 1,
+      resolutionRequestId: RESOLUTION_REQUEST_ID,
+    });
+  });
+
+  it('fails value-free with one fixed message and code', () => {
+    const secret = 'PII-secret-42';
+    const errors = [
+      captureError(() => parse(ok({ expirationText: `bad\n${secret}` }))),
+      captureError(() =>
+        parse(bad({ resolutionRequestId: secret, note: secret })),
+      ),
+    ];
+
+    for (const error of errors) {
+      expect(error).toBeInstanceOf(InvalidArgumentError);
+      expect(error.message).toBe(errors[0].message);
+      expect(error.message).not.toContain(secret);
+      expect(
+        JSON.stringify(error, Object.getOwnPropertyNames(error)),
+      ).not.toContain(secret);
+    }
+    expect((errors[0] as InvalidArgumentError).code).toBe(
+      INVALID_RESOLVE_REQUEST_CODE,
+    );
+  });
+
+  it('leaves the RESTOCK parser behavior unchanged', () => {
+    expect(parseResolveHumanDecisionRequest(positiveBody()).action).toBe(
+      RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
+    );
+    expectInvalid(positiveBody());
+    expectInvalid(negativeBody());
+  });
+
+  it('types: UNAVAILABLE forbids expirationText and literals satisfy', () => {
+    const guard: NegativeExpirationVariantForbidsText = true;
+    const unavailable = {
+      action: RESOLVE_REPORT_EXPIRATION_UNAVAILABLE,
+      expectedVersion: 1,
+      resolutionRequestId: RESOLUTION_REQUEST_ID,
+    } satisfies ResolveReportExpirationUnavailableRequest;
+    const union: ResolveExpirationHumanDecisionRequest = {
+      action: RESOLVE_PROVIDE_EXPIRATION_TEXT,
+      expirationText: 'Lote 2026-A',
+      expectedVersion: 1,
+      resolutionRequestId: RESOLUTION_REQUEST_ID,
+    } satisfies ResolveProvideExpirationTextRequest;
+
+    expect(guard).toBe(true);
+    expect(union.action).toBe(RESOLVE_PROVIDE_EXPIRATION_TEXT);
+    expect(
+      Object.prototype.hasOwnProperty.call(unavailable, 'expirationText'),
+    ).toBe(false);
   });
 });

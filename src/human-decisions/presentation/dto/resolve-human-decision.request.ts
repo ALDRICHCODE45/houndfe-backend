@@ -51,6 +51,7 @@
  * derived server-side by HD-04c2 and are deliberately NOT read from the body.
  */
 import { InvalidArgumentError } from '../../../shared/domain/domain-error';
+import { normalizeExpirationText } from '../../domain/expiration-text';
 
 /** Positive action code: a confirmed estimate of `restockDays` natural days. */
 export const RESOLVE_PROVIDE_RESTOCK_ESTIMATE = 'PROVIDE_RESTOCK_ESTIMATE';
@@ -273,6 +274,133 @@ export function parseResolveHumanDecisionRequest(
 ): ResolveHumanDecisionRequest {
   try {
     return parseResolveRequest(value);
+  } catch {
+    fail();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HD-EXP-02a — EXPIRATION resolution parser (foundation, UNWIRED).
+// ---------------------------------------------------------------------------
+
+/**
+ * HD-EXP-02a — pure `expirationText` resolution parser (foundation, UNWIRED).
+ *
+ * Approved design (read-only):
+ * `houndfe-chatbot-human-decisions/docs/human-decisions-expiration-v1.md`.
+ * The body is EXACTLY one of two variants and nothing else:
+ *   positive `{action:'PROVIDE_EXPIRATION_TEXT',expirationText,expectedVersion,resolutionRequestId}`
+ *   negative `{action:'REPORT_EXPIRATION_UNAVAILABLE',expectedVersion,resolutionRequestId}`
+ *
+ * This is a SEPARATE export from `parseResolveHumanDecisionRequest`, which the
+ * RESTOCK controller/port still consume unchanged; widening the existing union
+ * would force downstream RESTOCK types to change. `expirationText` reuses the
+ * HD-EXP-01a `normalizeExpirationText` policy verbatim (NFC, C0/C1 reject,
+ * whitespace collapse+trim, 1..500 UTF-16 units) — no duplicated policy.
+ * `expectedVersion`, `resolutionRequestId` and the exact own-key/authority,
+ * accessor, symbol and trap defenses mirror the RESTOCK boundary, so every
+ * rejection is the SAME fixed value-free `InvalidArgumentError`.
+ */
+
+/** EXP positive action: a confirmed plain-text expiration answer. */
+export const RESOLVE_PROVIDE_EXPIRATION_TEXT = 'PROVIDE_EXPIRATION_TEXT';
+
+/** EXP negative action: the team could not confirm the expiration. */
+export const RESOLVE_REPORT_EXPIRATION_UNAVAILABLE =
+  'REPORT_EXPIRATION_UNAVAILABLE';
+
+/** Positive EXP variant; `expirationText` is normalized to 1..500 units. */
+export interface ResolveProvideExpirationTextRequest {
+  action: typeof RESOLVE_PROVIDE_EXPIRATION_TEXT;
+  expirationText: string;
+  expectedVersion: number;
+  resolutionRequestId: string;
+}
+
+/** Negative EXP variant; `expirationText` is deliberately ABSENT. */
+export interface ResolveReportExpirationUnavailableRequest {
+  action: typeof RESOLVE_REPORT_EXPIRATION_UNAVAILABLE;
+  expectedVersion: number;
+  resolutionRequestId: string;
+}
+
+/** Exact, discriminated EXPIRATION resolve body returned to the caller. */
+export type ResolveExpirationHumanDecisionRequest =
+  | ResolveProvideExpirationTextRequest
+  | ResolveReportExpirationUnavailableRequest;
+
+/** Exact own-key allowlists for the two EXP variants. */
+const EXP_POSITIVE_KEYS = [
+  'action',
+  'expirationText',
+  'expectedVersion',
+  'resolutionRequestId',
+] as const;
+const EXP_NEGATIVE_KEYS = [
+  'action',
+  'expectedVersion',
+  'resolutionRequestId',
+] as const;
+
+/** Reuses the HD-EXP-01a normalization/validation policy verbatim. */
+function readExpirationText(fields: Record<string, unknown>): string {
+  return normalizeExpirationText(fields.expirationText);
+}
+
+/** Untrusted EXP-body parse; the exported boundary wraps unexpected throws. */
+function parseExpirationRequest(
+  value: unknown,
+): ResolveExpirationHumanDecisionRequest {
+  if (!isRecord(value)) {
+    fail();
+  }
+
+  const action = readOwnDataField(value, 'action');
+  if (action === null) {
+    fail();
+  }
+
+  if (action.value === RESOLVE_PROVIDE_EXPIRATION_TEXT) {
+    const fields = readExactDataFields(value, EXP_POSITIVE_KEYS);
+    if (fields === null) {
+      fail();
+    }
+    return {
+      action: RESOLVE_PROVIDE_EXPIRATION_TEXT,
+      expirationText: readExpirationText(fields),
+      expectedVersion: readExpectedVersion(fields),
+      resolutionRequestId: readResolutionRequestId(fields),
+    };
+  }
+
+  if (action.value === RESOLVE_REPORT_EXPIRATION_UNAVAILABLE) {
+    const fields = readExactDataFields(value, EXP_NEGATIVE_KEYS);
+    if (fields === null) {
+      fail();
+    }
+    return {
+      action: RESOLVE_REPORT_EXPIRATION_UNAVAILABLE,
+      expectedVersion: readExpectedVersion(fields),
+      resolutionRequestId: readResolutionRequestId(fields),
+    };
+  }
+
+  fail();
+}
+
+/**
+ * Parse an untrusted EXPIRATION resolve body into the exact discriminated EXP
+ * union. Pure and non-mutating; UNWIRED (no controller/adapter calls it yet)
+ * and it never widens or alters `parseResolveHumanDecisionRequest`. The
+ * boundary is wrapped so ANY thrown value — including an
+ * `InvalidArgumentError` from `normalizeExpirationText` — is REPLACED by the
+ * same fixed, value-free `InvalidArgumentError` used by the RESTOCK parser.
+ */
+export function parseExpirationResolveHumanDecisionRequest(
+  value: unknown,
+): ResolveExpirationHumanDecisionRequest {
+  try {
+    return parseExpirationRequest(value);
   } catch {
     fail();
   }
