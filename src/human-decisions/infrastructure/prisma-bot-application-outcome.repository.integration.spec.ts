@@ -107,6 +107,7 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   APPLICATION_OUTCOME_STATE_SELECT,
   INVALID_OUTCOME_WINDOW_CODE,
@@ -243,6 +244,13 @@ const CREATED_AT = new Date('2026-06-15T11:00:00.000Z');
 const OBSERVED_AT = new Date('2026-06-15T10:30:00.000Z');
 const RESOLVED_AT = new Date('2026-06-15T12:00:00.000Z');
 const DEADLINE_AT = '2026-06-15T13:00:00.000Z';
+/** EXPIRATION shares `resolvedAt` but the owner-approved deadline is 24h. */
+const EXP_ATTEMPTED_AT = '2026-06-15T14:00:00.000Z';
+const EXP_OBSERVED_AT = '2026-06-15T14:00:04.500Z';
+const EXP_DEADLINE_AT = '2026-06-16T12:00:00.000Z';
+const EXP_PRODUCT_UNIT = 'caja';
+const EXP_RESOLUTION_TEXT = 'Vence en marzo de 2027';
+const EXP_RESOLUTION_PROVIDE = 'PROVIDE_EXPIRATION_TEXT';
 const ATTEMPTED_AT = '2026-06-15T12:00:00.000Z';
 const ACCEPTED_OBSERVED_AT = '2026-06-15T12:00:04.500Z';
 const LATE_ATTEMPTED_AT = '2026-06-15T12:59:59.000Z';
@@ -251,7 +259,7 @@ const BEFORE_RESOLVED_AT = '2026-06-15T11:59:59.000Z';
 const FIXED_NOW = new Date('2026-06-15T12:05:00.000Z');
 const REPLAY_NOW = new Date('2026-06-15T14:30:00.000Z');
 
-/** The 8 keys of the adapter's exact state SELECT allowlist, sorted. */
+/** The 9 keys of the adapter's exact state SELECT allowlist, sorted. */
 const STATE_SELECT_KEYS = [
   'ackReceivedAt',
   'applicationAttemptId',
@@ -260,6 +268,7 @@ const STATE_SELECT_KEYS = [
   'id',
   'resolvedAt',
   'status',
+  'type',
   'version',
 ];
 
@@ -422,6 +431,24 @@ function resolvedNegativeDecisionData(
   return resolvedDecisionData(tenantId, resolvedById, {
     resolutionAction: HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE,
     restockDays: null,
+  });
+}
+
+/** Valid `RESOLVED` EXPIRATION fixture: `productUnit` set, the RESTOCK snapshot NULL. */
+function expirationResolvedDecisionData(
+  tenantId: string,
+  resolvedById: string,
+): Prisma.HumanDecisionUncheckedCreateInput {
+  return resolvedDecisionData(tenantId, resolvedById, {
+    type: EXPIRATION_TYPE,
+    sku: null,
+    requestedQuantity: null,
+    observedStockAtRequest: null,
+    stockObservedAt: null,
+    productUnit: EXP_PRODUCT_UNIT,
+    resolutionAction: EXP_RESOLUTION_PROVIDE,
+    restockDays: null,
+    expirationText: EXP_RESOLUTION_TEXT,
   });
 }
 
@@ -1043,6 +1070,69 @@ describeIfDb(
             where: { supersedesDecisionId: decisionId },
           }),
         ).resolves.toBe(0);
+      });
+    });
+
+    describe('record — EXPIRATION type-aware deadline (24h)', () => {
+      it('records an EXPIRATION PROVIDER_ACCEPTED attempt 2h in, accepted by the real DB CHECK', async () => {
+        const tenantId = await seedTenant('Outcome Tenant Expiration');
+        const reviewerId = await seedReviewerUser();
+        const decisionId = await seedDecision(
+          expirationResolvedDecisionData(tenantId, reviewerId),
+        );
+
+        const body = acceptedBody({
+          attemptedAt: EXP_ATTEMPTED_AT,
+          providerAcceptedObservedAt: EXP_OBSERVED_AT,
+        });
+        const result = await withTenant(tenantId, () =>
+          repo.record(command(parseRequest(body), decisionId)),
+        );
+
+        expect(result.status).toBe('recorded');
+        expect(result.acknowledgment.outcome).toBe(PROVIDER_ACCEPTED);
+
+        const row = await fullRow(decisionId);
+        expect(row?.type).toBe(EXPIRATION_TYPE);
+        expect(row?.applicationOutcome).toBe(PROVIDER_ACCEPTED);
+        expect(row?.applicationEvidenceHash).toBe(hashOf(body));
+        expect(row?.applicationAttemptedAt?.toISOString()).toBe(
+          new Date(EXP_ATTEMPTED_AT).toISOString(),
+        );
+        expect(row?.status).toBe('RESOLVED');
+        expect(row?.version).toBe(2);
+      });
+
+      it('rejects an EXPIRATION attempt exactly at the 24h deadline value-free with no mutation', async () => {
+        const tenantId = await seedTenant('Outcome Tenant Expiration Late');
+        const reviewerId = await seedReviewerUser();
+        const decisionId = await seedDecision(
+          expirationResolvedDecisionData(tenantId, reviewerId),
+        );
+        const before = await fullRow(decisionId);
+
+        const error = await captureError(() =>
+          withTenant(tenantId, () =>
+            repo.record(
+              command(
+                parseRequest(
+                  acceptedBody({
+                    attemptedAt: EXP_DEADLINE_AT,
+                    providerAcceptedObservedAt: EXP_DEADLINE_AT,
+                  }),
+                ),
+                decisionId,
+              ),
+            ),
+          ),
+        );
+
+        expect(error).toBeInstanceOf(InvalidArgumentError);
+        const after = await fullRow(decisionId);
+        expect(after?.applicationOutcome).toBeNull();
+        expect(after?.updatedAt.toISOString()).toBe(
+          before?.updatedAt.toISOString(),
+        );
       });
     });
 

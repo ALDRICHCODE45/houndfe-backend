@@ -37,6 +37,7 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   APPLICATION_OUTCOME_STATE_SELECT,
   BOT_APPLICATION_OUTCOME_CLOCK,
@@ -54,6 +55,11 @@ const ATTEMPTED_AT = '2026-06-15T12:00:00.000Z';
 const ACCEPTED_OBSERVED_AT = '2026-06-15T12:00:04.500Z';
 const LATE_ATTEMPTED_AT = '2026-06-15T12:59:59.000Z';
 const LATE_ACCEPTED_OBSERVED_AT = '2026-06-15T13:05:00.000Z';
+/** EXPIRATION shares `resolvedAt` but the owner-approved deadline is 24h. */
+const EXP_ATTEMPTED_AT = '2026-06-15T14:00:00.000Z';
+const EXP_OBSERVED_AT = '2026-06-15T14:00:04.500Z';
+const EXP_BEFORE_DEADLINE_AT = '2026-06-16T11:59:59.000Z';
+const EXP_DEADLINE_AT = '2026-06-16T12:00:00.000Z';
 const FIXED_NOW = new Date('2026-09-03T12:00:00.000Z');
 const PERSISTED_ACK_AT = new Date('2026-06-15T12:01:00.000Z');
 const ACCEPTED_HASH =
@@ -61,7 +67,7 @@ const ACCEPTED_HASH =
 const STALE_HASH =
   'b623f85e54953edac8a33a25f84c8fdbe9c7baae60bdb4fe3d05d550c99ed9f0';
 
-/** Exact internal state SELECT allowlist (version/status/resolvedAt/terminal+ACK). */
+/** Exact internal state SELECT allowlist (version/type/status/resolvedAt/terminal+ACK). */
 const STATE_SELECT_KEYS = [
   'ackReceivedAt',
   'applicationAttemptId',
@@ -70,6 +76,7 @@ const STATE_SELECT_KEYS = [
   'id',
   'resolvedAt',
   'status',
+  'type',
   'version',
 ];
 
@@ -125,6 +132,7 @@ const ACK_KEYS = ['ackReceivedAt', 'attemptId', 'id', 'outcome', 'version'];
 
 interface OutcomeStateRow {
   id: string;
+  type: string;
   status: string;
   version: number;
   resolvedAt: Date | null;
@@ -297,6 +305,7 @@ function resolvedRow(
 ): OutcomeStateRow {
   return {
     id: DECISION_ID,
+    type: RESTOCK_TYPE,
     status: 'RESOLVED',
     version: 2,
     resolvedAt: RESOLVED_AT,
@@ -372,7 +381,7 @@ describe('PrismaBotApplicationOutcomeRepository', () => {
         id: DECISION_ID,
         tenantId: TENANT_ID,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
         status: 'RESOLVED',
         version: 2,
         applicationOutcome: null,
@@ -600,7 +609,7 @@ describe('PrismaBotApplicationOutcomeRepository', () => {
         id: DECISION_ID,
         tenantId: TENANT_ID,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
       });
       expect(where).not.toHaveProperty('status');
       expect(Object.keys(where).sort()).toEqual([
@@ -1061,6 +1070,172 @@ describe('PrismaBotApplicationOutcomeRepository', () => {
         expect(error.code).toBe('VERSION_CONFLICT');
       },
     );
+  });
+
+  describe('record — type-aware application window (EXPIRATION 24h)', () => {
+    it.each<[string, string, string, string, boolean]>([
+      [
+        'EXPIRATION in-window 2h',
+        EXPIRATION_TYPE,
+        EXP_ATTEMPTED_AT,
+        EXP_OBSERVED_AT,
+        true,
+      ],
+      [
+        'EXPIRATION just before 24h',
+        EXPIRATION_TYPE,
+        EXP_BEFORE_DEADLINE_AT,
+        EXP_BEFORE_DEADLINE_AT,
+        true,
+      ],
+      [
+        'EXPIRATION exactly at 24h',
+        EXPIRATION_TYPE,
+        EXP_DEADLINE_AT,
+        EXP_DEADLINE_AT,
+        false,
+      ],
+      [
+        'RESTOCK 2h (outside 1h)',
+        RESTOCK_TYPE,
+        EXP_ATTEMPTED_AT,
+        EXP_OBSERVED_AT,
+        false,
+      ],
+    ])(
+      'classifies %s against the persisted-type deadline',
+      async (
+        _label,
+        persistedType,
+        attemptedAt,
+        providerAcceptedObservedAt,
+        accepted,
+      ) => {
+        const client = makeClient();
+        const request = parseRequest(
+          acceptedBody({ attemptedAt, providerAcceptedObservedAt }),
+        );
+        client.humanDecision.findFirst.mockResolvedValueOnce(
+          resolvedRow({ type: persistedType }),
+        );
+        if (accepted) {
+          client.humanDecision.findFirst.mockResolvedValueOnce(
+            terminalRow({
+              type: persistedType,
+              applicationEvidenceHash:
+                hashBotApplicationOutcomeEvidence(request),
+              ackReceivedAt: FIXED_NOW,
+            }),
+          );
+          client.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+        }
+        const { repo } = makeRepo(client);
+
+        if (accepted) {
+          const result = await repo.record(command(request));
+          expect(result.status).toBe('recorded');
+          expect(updateManyArgs(client).where.type).toEqual({
+            in: [RESTOCK_TYPE, EXPIRATION_TYPE],
+          });
+          return;
+        }
+        const error = await captureError(() => repo.record(command(request)));
+        expect(error).toBeInstanceOf(InvalidArgumentError);
+        expect(client.humanDecision.updateMany).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects EXPIRATION PROVIDER_ACCEPTED observed exactly at 24h but records PROVIDER_ACCEPTED_LATE there', async () => {
+      const earlyClient = makeClient();
+      earlyClient.humanDecision.findFirst.mockResolvedValueOnce(
+        resolvedRow({ type: EXPIRATION_TYPE }),
+      );
+      const earlyError = await captureError(() =>
+        makeRepo(earlyClient).repo.record(
+          command(
+            parseRequest(
+              acceptedBody({
+                attemptedAt: EXP_BEFORE_DEADLINE_AT,
+                providerAcceptedObservedAt: EXP_DEADLINE_AT,
+              }),
+            ),
+          ),
+        ),
+      );
+      expect(earlyError).toBeInstanceOf(InvalidArgumentError);
+
+      const lateClient = makeClient();
+      const lateRequest = parseRequest(
+        lateBody({ providerAcceptedObservedAt: EXP_DEADLINE_AT }),
+      );
+      lateClient.humanDecision.findFirst
+        .mockResolvedValueOnce(resolvedRow({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(
+          terminalRow({
+            type: EXPIRATION_TYPE,
+            applicationOutcome: PROVIDER_ACCEPTED_LATE,
+            applicationEvidenceHash:
+              hashBotApplicationOutcomeEvidence(lateRequest),
+            ackReceivedAt: FIXED_NOW,
+          }),
+        );
+      lateClient.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await makeRepo(lateClient).repo.record(
+        command(lateRequest),
+      );
+
+      expect(result.status).toBe('recorded');
+      expect(result.acknowledgment.outcome).toBe(PROVIDER_ACCEPTED_LATE);
+    });
+
+    it('replays a persisted EXPIRATION terminal without re-validating the 24h window after the deadline', async () => {
+      const client = makeClient();
+      const request = parseRequest(
+        acceptedBody({
+          attemptedAt: EXP_BEFORE_DEADLINE_AT,
+          providerAcceptedObservedAt: EXP_BEFORE_DEADLINE_AT,
+        }),
+      );
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        terminalRow({
+          type: EXPIRATION_TYPE,
+          applicationEvidenceHash: hashBotApplicationOutcomeEvidence(request),
+        }),
+      );
+      const { repo } = makeRepo(client);
+
+      const result = await repo.record(command(request));
+
+      expect(result.status).toBe('replayed');
+      expect(client.humanDecision.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('fails closed with a value-free integrity error for an unknown persisted type', async () => {
+      const client = makeClient();
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        resolvedRow({ type: 'SHIPPING' }),
+      );
+      const { repo } = makeRepo(client);
+
+      const error = await captureError(() =>
+        repo.record(
+          command(
+            parseRequest(
+              acceptedBody({
+                attemptedAt: EXP_ATTEMPTED_AT,
+                providerAcceptedObservedAt: EXP_OBSERVED_AT,
+              }),
+            ),
+          ),
+        ),
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(BotApplicationOutcomeError);
+      expect(error).not.toBeInstanceOf(InvalidArgumentError);
+      expect(client.humanDecision.updateMany).not.toHaveBeenCalled();
+    });
   });
 
   describe('record — integrity guards', () => {
