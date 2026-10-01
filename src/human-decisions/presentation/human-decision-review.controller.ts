@@ -41,9 +41,9 @@
  *     pins `@RequirePermissions(['update', 'HumanDecision'])` and
  *     `@HttpCode(200)` so BOTH a first resolve and an idempotent replay answer
  *     `200` with the same immutable projection.
- *   - The body is an UNTRUSTED `unknown` run through the EXACT pure
- *     `parseResolveHumanDecisionRequest` BEFORE the port; the parsed value is
- *     never echoed.
+ *   - The body is an UNTRUSTED `unknown` run through the EXACT pure RESTOCK
+ *     parser, then the EXPIRATION parser only when the RESTOCK boundary rejects
+ *     its own fixed code, BEFORE the port; the parsed value is never echoed.
  *   - `actorUserId` and `actorIsSuperAdmin` come EXCLUSIVELY from the verified
  *     `request.user` (`JwtAuthGuard`); no body/query/param value can supply
  *     them. The command carries no `tenantId` (the adapter resolves it from CLS).
@@ -96,6 +96,7 @@ import { RequirePermissions } from '../../auth/authorization/decorators/require-
 import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
+import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import {
   HUMAN_DECISION_REVIEW_READ_REPOSITORY,
@@ -107,9 +108,15 @@ import {
   type ResolveHumanDecisionCommand,
 } from '../domain/human-decision-review-resolve.repository';
 import {
+  INVALID_RESOLVE_REQUEST_CODE,
+  parseExpirationResolveHumanDecisionRequest,
   parseResolveHumanDecisionRequest,
+  RESOLVE_PROVIDE_EXPIRATION_TEXT,
   RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
+  RESOLVE_REPORT_EXPIRATION_UNAVAILABLE,
   RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE,
+  type ResolveExpirationHumanDecisionRequest,
+  type ResolveHumanDecisionRequest,
 } from './dto/resolve-human-decision.request';
 import {
   toHumanDecisionReviewResponse,
@@ -238,12 +245,14 @@ export class HumanDecisionReviewController {
    *      attached (a bypassed `JwtAuthGuard`).
    *   2. Derives the capability from the guard-attached ability (`canResolve`),
    *      which also re-checks the tenant context before any write.
-   *   3. Parses the UNTRUSTED body with the exact pure parser; a malformed or
-   *      authority-bearing body is a sanitized 400 BEFORE the port.
-   *   4. Builds the EXACT discriminated command with `actorUserId` /
-   *      `actorIsSuperAdmin` taken ONLY from `request.user` (never the body) and
-   *      no `tenantId` (the adapter resolves it from CLS). The negative variant
-   *      OMITS `restockDays` entirely.
+   *   3. Parses the UNTRUSTED body with the exact pure parsers (RESTOCK first,
+   *      then EXPIRATION); a malformed or authority-bearing body is a sanitized
+   *      400 BEFORE the port.
+   *   4. Builds the EXACT discriminated command with one explicit branch per
+   *      action and `actorUserId` / `actorIsSuperAdmin` taken ONLY from
+   *      `request.user` (never the body) and no `tenantId` (the adapter resolves
+   *      it from CLS). Each variant OMITS its absent `restockDays`/
+   *      `expirationText` key entirely.
    *   5. Returns ONLY the pure reviewer projection: the adapter
    *      `resolved`/`replayed` status and every bot/authority/PII column stay
    *      server-side, so a replay is byte-identical and triggers no new write.
@@ -266,27 +275,13 @@ export class HumanDecisionReviewController {
     }
 
     const canResolve = this.canResolve(request);
-    const parsed = parseResolveHumanDecisionRequest(raw);
-
-    const command: ResolveHumanDecisionCommand =
-      parsed.action === RESOLVE_PROVIDE_RESTOCK_ESTIMATE
-        ? {
-            decisionId: id,
-            expectedVersion: parsed.expectedVersion,
-            resolutionRequestId: parsed.resolutionRequestId,
-            action: RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
-            restockDays: parsed.restockDays,
-            actorUserId: user.userId,
-            actorIsSuperAdmin: user.isSuperAdmin === true,
-          }
-        : {
-            decisionId: id,
-            expectedVersion: parsed.expectedVersion,
-            resolutionRequestId: parsed.resolutionRequestId,
-            action: RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE,
-            actorUserId: user.userId,
-            actorIsSuperAdmin: user.isSuperAdmin === true,
-          };
+    const parsed = parseReviewerResolveRequest(raw);
+    const command = toResolveCommand(
+      id,
+      parsed,
+      user.userId,
+      user.isSuperAdmin === true,
+    );
 
     const result = await this.resolveRepository.resolve(command);
 
@@ -313,5 +308,85 @@ export class HumanDecisionReviewController {
       );
     }
     return ability.can('update', 'HumanDecision');
+  }
+}
+
+/**
+ * HD-EXP-02b — route-level dispatch over the untrusted resolve body.
+ *
+ * The RESTOCK parser runs FIRST and keeps the EXACT existing behavior and `400`
+ * codes for every RESTOCK request. Only when it rejects with its own fixed
+ * `INVALID_RESOLVE_REQUEST_CODE` is the EXPIRATION parser tried. The controller
+ * never reads `body.action` directly, so a hostile accessor/getter on an
+ * arbitrary unknown object can never run before a parser owns it; both parsers
+ * are value-free and fail closed with the same sanitized envelope.
+ */
+function parseReviewerResolveRequest(
+  raw: unknown,
+): ResolveHumanDecisionRequest | ResolveExpirationHumanDecisionRequest {
+  try {
+    return parseResolveHumanDecisionRequest(raw);
+  } catch (error) {
+    if (
+      error instanceof InvalidArgumentError &&
+      error.code === INVALID_RESOLVE_REQUEST_CODE
+    ) {
+      return parseExpirationResolveHumanDecisionRequest(raw);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Builds the EXACT discriminated command with one explicit branch per supported
+ * action. `actorUserId`/`actorIsSuperAdmin` are injected from the verified
+ * principal; no body value is spread, and each variant deliberately OMITS the
+ * key it must not carry (`restockDays`/`expirationText`).
+ */
+function toResolveCommand(
+  decisionId: string,
+  parsed: ResolveHumanDecisionRequest | ResolveExpirationHumanDecisionRequest,
+  actorUserId: string,
+  actorIsSuperAdmin: boolean,
+): ResolveHumanDecisionCommand {
+  switch (parsed.action) {
+    case RESOLVE_PROVIDE_RESTOCK_ESTIMATE:
+      return {
+        decisionId,
+        expectedVersion: parsed.expectedVersion,
+        resolutionRequestId: parsed.resolutionRequestId,
+        action: RESOLVE_PROVIDE_RESTOCK_ESTIMATE,
+        restockDays: parsed.restockDays,
+        actorUserId,
+        actorIsSuperAdmin,
+      };
+    case RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE:
+      return {
+        decisionId,
+        expectedVersion: parsed.expectedVersion,
+        resolutionRequestId: parsed.resolutionRequestId,
+        action: RESOLVE_REPORT_RESTOCK_ESTIMATE_UNAVAILABLE,
+        actorUserId,
+        actorIsSuperAdmin,
+      };
+    case RESOLVE_PROVIDE_EXPIRATION_TEXT:
+      return {
+        decisionId,
+        expectedVersion: parsed.expectedVersion,
+        resolutionRequestId: parsed.resolutionRequestId,
+        action: RESOLVE_PROVIDE_EXPIRATION_TEXT,
+        expirationText: parsed.expirationText,
+        actorUserId,
+        actorIsSuperAdmin,
+      };
+    case RESOLVE_REPORT_EXPIRATION_UNAVAILABLE:
+      return {
+        decisionId,
+        expectedVersion: parsed.expectedVersion,
+        resolutionRequestId: parsed.resolutionRequestId,
+        action: RESOLVE_REPORT_EXPIRATION_UNAVAILABLE,
+        actorUserId,
+        actorIsSuperAdmin,
+      };
   }
 }

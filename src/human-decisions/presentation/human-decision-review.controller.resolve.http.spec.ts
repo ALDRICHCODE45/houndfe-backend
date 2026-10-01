@@ -140,6 +140,52 @@ const VALID_NEGATIVE_BODY = {
   resolutionRequestId: RESOLUTION_REQUEST_ID,
 } as const;
 
+const EXP_POSITIVE_ACTION = 'PROVIDE_EXPIRATION_TEXT';
+const EXP_NEGATIVE_ACTION = 'REPORT_EXPIRATION_UNAVAILABLE';
+const EXPIRATION_UNIT = 'UNIDAD';
+
+/** Well-formed EXP positive body; `expirationText` is deliberately untrimmed. */
+const VALID_EXP_POSITIVE_BODY = {
+  action: EXP_POSITIVE_ACTION,
+  expirationText: '  Vence   el 2026-05  ',
+  expectedVersion: 1,
+  resolutionRequestId: RESOLUTION_REQUEST_ID,
+} as const;
+
+/** Text the EXP parser must normalize the untrimmed body to. */
+const NORMALIZED_EXPIRATION_TEXT = 'Vence el 2026-05';
+
+/** Well-formed EXP negative body; `expirationText` is deliberately ABSENT. */
+const VALID_EXP_NEGATIVE_BODY = {
+  action: EXP_NEGATIVE_ACTION,
+  expectedVersion: 1,
+  resolutionRequestId: RESOLUTION_REQUEST_ID,
+} as const;
+
+/** Exact EXPIRATION projection top-level keys. */
+const EXPECTED_EXP_TOP_LEVEL_KEYS = [
+  'allowedActions',
+  'createdAt',
+  'id',
+  'resolution',
+  'sanitizedSummary',
+  'snapshot',
+  'status',
+  'title',
+  'type',
+  'version',
+];
+
+/** RESTOCK-only keys that must NEVER appear on an EXPIRATION resolve projection. */
+const EXP_FORBIDDEN_KEYS = [
+  'restockDays',
+  'sku',
+  'requestedQuantity',
+  'observedStockAtRequest',
+  'stockObservedAt',
+  'productUnit',
+];
+
 // ---------------------------------------------------------------------------
 // Principal fixtures + real CASL abilities
 // ---------------------------------------------------------------------------
@@ -320,6 +366,40 @@ const RESOLVED_NEGATIVE_ROW: HumanDecisionReviewRecord = {
   resolvedByDisplayName: 'Ada Lovelace',
 };
 
+/** Simple-product EXPIRATION row (variant columns intentionally null). */
+const EXP_PENDING_ROW: HumanDecisionReviewRecord = {
+  ...PENDING_ROW,
+  type: 'EXPIRATION',
+  productUnit: EXPIRATION_UNIT,
+  variantId: null,
+  variantName: null,
+  variantOption: null,
+  variantValue: null,
+  expirationText: null,
+};
+
+const RESOLVED_EXP_POSITIVE_ROW: HumanDecisionReviewRecord = {
+  ...EXP_PENDING_ROW,
+  status: 'RESOLVED',
+  version: 2,
+  resolutionAction: EXP_POSITIVE_ACTION,
+  expirationText: NORMALIZED_EXPIRATION_TEXT,
+  resolvedAt: utcDate('2026-02-02T09:15:00.000Z'),
+  resolvedByActorId: 'reviewer-1',
+  resolvedByDisplayName: 'Ada Lovelace',
+};
+
+const RESOLVED_EXP_NEGATIVE_ROW: HumanDecisionReviewRecord = {
+  ...EXP_PENDING_ROW,
+  status: 'RESOLVED',
+  version: 2,
+  resolutionAction: EXP_NEGATIVE_ACTION,
+  expirationText: null,
+  resolvedAt: utcDate('2026-02-02T09:15:00.000Z'),
+  resolvedByActorId: 'reviewer-1',
+  resolvedByDisplayName: 'Ada Lovelace',
+};
+
 /** Exact resolved projection, pinned as a literal (not derived from the mapper). */
 const EXPECTED_RESOLVED_POSITIVE = {
   id: DECISION_ID,
@@ -354,6 +434,44 @@ const EXPECTED_RESOLVED_NEGATIVE = {
   ...EXPECTED_RESOLVED_POSITIVE,
   resolution: {
     action: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE',
+    resolvedAt: '2026-02-02T09:15:00.000Z',
+    resolvedBy: { id: 'reviewer-1', displayName: 'Ada Lovelace' },
+  },
+};
+
+const EXPECTED_EXP_RESOLVED_POSITIVE = {
+  id: DECISION_ID,
+  type: 'EXPIRATION',
+  title: 'Consulta de vencimiento',
+  sanitizedSummary:
+    'El chatbot solicitó información de vencimiento de un producto.',
+  createdAt: '2026-02-01T10:00:00.000Z',
+  snapshot: {
+    branchId: 'branch-1',
+    branchName: 'Sucursal Centro',
+    productId: PRODUCT_ID,
+    productName: 'Filtro de aceite',
+    unit: EXPIRATION_UNIT,
+    variantId: null,
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
+  },
+  status: 'RESOLVED',
+  version: 2,
+  resolution: {
+    action: EXP_POSITIVE_ACTION,
+    expirationText: NORMALIZED_EXPIRATION_TEXT,
+    resolvedAt: '2026-02-02T09:15:00.000Z',
+    resolvedBy: { id: 'reviewer-1', displayName: 'Ada Lovelace' },
+  },
+  allowedActions: [],
+};
+
+const EXPECTED_EXP_RESOLVED_NEGATIVE = {
+  ...EXPECTED_EXP_RESOLVED_POSITIVE,
+  resolution: {
+    action: EXP_NEGATIVE_ACTION,
     resolvedAt: '2026-02-02T09:15:00.000Z',
     resolvedBy: { id: 'reviewer-1', displayName: 'Ada Lovelace' },
   },
@@ -772,6 +890,148 @@ describe('Human decision resolve HTTP contract (HD-04d2a)', () => {
       expect(serialized).not.toContain('houndfe-chatbot');
       expect(serialized).not.toContain('canonicalRequestHash');
       expect(serialized).not.toContain('tenant-1');
+    });
+  });
+
+  describe('resolve contract (EXPIRATION dispatch)', () => {
+    it('resolves PROVIDE_EXPIRATION_TEXT with 200, normalized text and the JWT-derived command', async () => {
+      resolveMock.mockResolvedValueOnce({
+        status: 'resolved',
+        decision: RESOLVED_EXP_POSITIVE_ROW,
+      });
+
+      const res = await postResolve(VALID_EXP_POSITIVE_BODY).expect(200);
+
+      expect(res.body).toEqual(EXPECTED_EXP_RESOLVED_POSITIVE);
+      expect(Object.keys(res.body as Record<string, unknown>).sort()).toEqual(
+        EXPECTED_EXP_TOP_LEVEL_KEYS,
+      );
+      for (const key of [...FORBIDDEN_KEYS, ...EXP_FORBIDDEN_KEYS]) {
+        expect(res.body).not.toHaveProperty(key);
+      }
+
+      const command = resolveMock.mock.calls[0][0];
+      expect(command).toEqual({
+        decisionId: DECISION_ID,
+        expectedVersion: 1,
+        resolutionRequestId: RESOLUTION_REQUEST_ID,
+        action: EXP_POSITIVE_ACTION,
+        expirationText: NORMALIZED_EXPIRATION_TEXT,
+        actorUserId: MANAGER_ID,
+        actorIsSuperAdmin: false,
+      });
+      expect(command).not.toHaveProperty('tenantId');
+      expect(command).not.toHaveProperty('restockDays');
+    });
+
+    it('resolves REPORT_EXPIRATION_UNAVAILABLE with 200 and a command that OMITS expirationText', async () => {
+      resolveMock.mockResolvedValueOnce({
+        status: 'resolved',
+        decision: RESOLVED_EXP_NEGATIVE_ROW,
+      });
+
+      const res = await postResolve(VALID_EXP_NEGATIVE_BODY).expect(200);
+
+      expect(res.body).toEqual(EXPECTED_EXP_RESOLVED_NEGATIVE);
+      const resolution = (res.body as { resolution: object }).resolution;
+      expect(resolution).not.toHaveProperty('expirationText');
+
+      const command = resolveMock.mock.calls[0][0];
+      expect(command).toEqual({
+        decisionId: DECISION_ID,
+        expectedVersion: 1,
+        resolutionRequestId: RESOLUTION_REQUEST_ID,
+        action: EXP_NEGATIVE_ACTION,
+        actorUserId: MANAGER_ID,
+        actorIsSuperAdmin: false,
+      });
+      expect(command).not.toHaveProperty('expirationText');
+    });
+
+    it('maps an EXPIRATION VERSION_CONFLICT to 409 without echoing the version', async () => {
+      resolveMock.mockRejectedValueOnce(
+        new HumanDecisionReviewResolveError(
+          'VERSION_CONFLICT',
+          'value-free server message',
+        ),
+      );
+
+      const res = await postResolve({
+        ...VALID_EXP_POSITIVE_BODY,
+        expectedVersion: 7,
+      }).expect(409);
+
+      expect(res.body).toEqual({
+        statusCode: 409,
+        code: 'VERSION_CONFLICT',
+        message: 'Human decision was modified by another reviewer',
+      });
+      expect(resolveMock).toHaveBeenCalledTimes(1);
+      expect(resolveMock.mock.calls[0][0].expectedVersion).toBe(7);
+    });
+
+    it('rejects a spoofed EXPIRATION actor key with a value-free 400 before the port', async () => {
+      const spoofValue = 'spoof-exp-sentinel';
+      const res = await postResolve({
+        ...VALID_EXP_POSITIVE_BODY,
+        actorUserId: spoofValue,
+      }).expect(400);
+
+      expect(res.body).toEqual({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid request',
+      });
+      expect(JSON.stringify(res.body)).not.toContain(spoofValue);
+      expect(resolveMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a control character', 'line\nbreak'],
+      ['an over-limit value', 'a'.repeat(501)],
+    ])(
+      'rejects an EXP expirationText with %s as a value-free 400 before the port',
+      async (_label, expirationText) => {
+        const res = await postResolve({
+          ...VALID_EXP_POSITIVE_BODY,
+          expirationText,
+        }).expect(400);
+
+        expect(res.body).toEqual({
+          statusCode: 400,
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid request',
+        });
+        expect(resolveMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects cross-type keys (restockDays on EXP, expirationText on RESTOCK)', async () => {
+      await postResolve({
+        ...VALID_EXP_POSITIVE_BODY,
+        restockDays: 7,
+      }).expect(400);
+      await postResolve({
+        ...VALID_POSITIVE_BODY,
+        expirationText: NORMALIZED_EXPIRATION_TEXT,
+      }).expect(400);
+
+      expect(resolveMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects an EXPIRATION resolve without a bearer token before the port', async () => {
+      const res = await postResolve(
+        VALID_EXP_POSITIVE_BODY,
+        DECISION_ID,
+        null,
+      ).expect(401);
+
+      expect(res.body).toEqual({
+        statusCode: 401,
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized',
+      });
+      expect(resolveMock).not.toHaveBeenCalled();
     });
   });
 
