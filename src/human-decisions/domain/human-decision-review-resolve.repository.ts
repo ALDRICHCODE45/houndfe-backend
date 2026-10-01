@@ -24,11 +24,17 @@
  * `1 -> 2`; every loser re-reads the committed winner and is classified as an
  * idempotent replay, an idempotency conflict or an already-resolved conflict.
  *
- * IDEMPOTENT REPLAY: the same `resolutionRequestId` + exact action/days +
+ * IDEMPOTENT REPLAY: the same `resolutionRequestId` + exact action/days/text +
  * `expectedVersion=1` + same actor id replays the committed result with NO
  * mutation, preserving the persisted `resolvedAt` and reviewer snapshot. The
  * same key with a different payload/actor is `IDEMPOTENCY_CONFLICT`; a
  * different key against a resolved decision is `ALREADY_RESOLVED`.
+ *
+ * TYPE OWNERSHIP: the command carries NO `type`. The adapter infers the EXACT
+ * decision `type` from `action` (`RESTOCK` for the two RESTOCK actions,
+ * `EXPIRATION` for the two EXPIRATION actions) and pins it in EVERY where
+ * clause, so a RESTOCK command can never write an EXPIRATION decision (or vice
+ * versa) even when ids collide across types.
  *
  * ERROR SAFETY: every error is value-free and carries one stable code
  * (`NOT_FOUND`, `UNAUTHORIZED`, `FORBIDDEN`, `VERSION_CONFLICT`,
@@ -47,10 +53,25 @@ export const HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE =
 export const HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE =
   'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE';
 
-/** The only two persisted `HumanDecisionResolutionAction` values. */
+/**
+ * EXPIRATION positive action: a confirmed operator `expirationText`. The
+ * persisted column is the HD-EXP-01a-normalized text; the adapter re-normalizes
+ * before writing and comparing, so the domain invariant never depends on the
+ * transport parser.
+ */
+export const HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT =
+  'PROVIDE_EXPIRATION_TEXT';
+
+/** EXPIRATION negative action: no confirmed expiration text was provided. */
+export const HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE =
+  'REPORT_EXPIRATION_UNAVAILABLE';
+
+/** The only four persisted `HumanDecisionResolutionAction` values. */
 export type HumanDecisionResolutionAction =
   | typeof HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE
-  | typeof HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE;
+  | typeof HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE
+  | typeof HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT
+  | typeof HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE;
 
 /** Positive resolve command; `restockDays` is a natural-day count 1..365. */
 export interface ResolveHumanDecisionProvideCommand {
@@ -73,10 +94,37 @@ export interface ResolveHumanDecisionUnavailableCommand {
   actorIsSuperAdmin: boolean;
 }
 
+/**
+ * EXPIRATION positive command; `expirationText` is normalized by the adapter
+ * (HD-EXP-01a policy) before write/compare. No `type` field: the adapter infers
+ * the exact decision `type` from `action` so a caller can never cross types.
+ */
+export interface ResolveHumanDecisionProvideExpirationTextCommand {
+  decisionId: string;
+  expectedVersion: number;
+  resolutionRequestId: string;
+  action: typeof HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT;
+  expirationText: string;
+  actorUserId: string;
+  actorIsSuperAdmin: boolean;
+}
+
+/** EXPIRATION negative command; `expirationText` is deliberately absent. */
+export interface ResolveHumanDecisionReportExpirationUnavailableCommand {
+  decisionId: string;
+  expectedVersion: number;
+  resolutionRequestId: string;
+  action: typeof HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE;
+  actorUserId: string;
+  actorIsSuperAdmin: boolean;
+}
+
 /** Exact discriminated resolve command handed to the adapter. */
 export type ResolveHumanDecisionCommand =
   | ResolveHumanDecisionProvideCommand
-  | ResolveHumanDecisionUnavailableCommand;
+  | ResolveHumanDecisionUnavailableCommand
+  | ResolveHumanDecisionProvideExpirationTextCommand
+  | ResolveHumanDecisionReportExpirationUnavailableCommand;
 
 /**
  * `resolved` is the first winner; `replayed` is an exact idempotent retry.
