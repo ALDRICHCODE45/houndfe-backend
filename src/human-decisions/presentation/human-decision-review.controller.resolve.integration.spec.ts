@@ -106,6 +106,7 @@ import { DatabaseModule } from '../../shared/prisma/prisma.module';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { HUMAN_DECISION_REVIEW_READ_REPOSITORY } from '../domain/human-decision-review-read.repository';
 import { HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY } from '../domain/human-decision-review-resolve.repository';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
@@ -240,6 +241,22 @@ const jwtService = new JwtService({
 const POSITIVE_ACTION = 'PROVIDE_RESTOCK_ESTIMATE';
 const NEGATIVE_ACTION = 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE';
 
+/** EXPIRATION action codes and projection phrases (mirror the real mapper). */
+const EXP_POSITIVE_ACTION = 'PROVIDE_EXPIRATION_TEXT';
+const EXP_NEGATIVE_ACTION = 'REPORT_EXPIRATION_UNAVAILABLE';
+const EXPIRATION_UNIT = 'UNIDAD';
+const EXPIRATION_TITLE = 'Consulta de vencimiento';
+const EXPIRATION_SANITIZED_SUMMARY =
+  'El chatbot solicitó información de vencimiento de un producto.';
+
+/**
+ * Raw positive operator text: decomposed (`Cafe` + combining acute) with
+ * leading/trailing and repeated whitespace, so the persisted/response value can
+ * only match after NFC + whitespace collapse + trim (HD-EXP-01a).
+ */
+const RAW_EXPIRATION_TEXT = '  Vence   el Cafe\u0301  2027-01  ';
+const NORMALIZED_EXPIRATION_TEXT = 'Vence el Café 2027-01';
+
 const ERROR_ENVELOPE_KEYS = ['code', 'message', 'statusCode'];
 
 /** Exact reviewer projection top-level key set (literal, never derived). */
@@ -282,6 +299,17 @@ const NEGATIVE_RESOLUTION_KEYS = ['action', 'resolvedAt', 'resolvedBy'];
 
 /** Exact `resolvedBy` key set (sorted). */
 const RESOLVED_BY_KEYS = ['displayName', 'id'];
+
+/** RESTOCK-only / bot-only keys that must NEVER appear on an EXP projection. */
+const EXP_FORBIDDEN_KEYS = [
+  'restockDays',
+  'sku',
+  'requestedQuantity',
+  'observedStockAtRequest',
+  'stockObservedAt',
+  'productUnit',
+  'applyBefore',
+];
 
 /** Keys that must NEVER appear on a human reviewer resolve projection. */
 const FORBIDDEN_KEYS = [
@@ -327,6 +355,19 @@ const EXPECTED_SNAPSHOT = {
   requestedQuantity: 3,
   observedStockAtRequest: 2,
   stockObservedAt: STABLE_OBSERVED_AT.toISOString(),
+};
+
+/** EXPIRATION snapshot: `unit` present, no SKU/stock keys, variant absent. */
+const EXPECTED_EXP_SNAPSHOT = {
+  branchId: 'branch-stable',
+  branchName: 'Sucursal Centro',
+  productId: STABLE_PRODUCT_ID,
+  productName: 'Filtro de aceite',
+  unit: EXPIRATION_UNIT,
+  variantId: null,
+  variantName: null,
+  variantOption: null,
+  variantValue: null,
 };
 
 const MANAGER_A_NAME = 'Manager A';
@@ -444,6 +485,16 @@ async function totalDecisionRows(): Promise<number> {
   return integrationPrisma().humanDecision.count();
 }
 
+/** Assert the projected subset of one committed row; value-free. */
+async function expectCommittedRow(
+  id: string,
+  match: Record<string, unknown>,
+): Promise<void> {
+  await expect(
+    integrationPrisma().humanDecision.findUniqueOrThrow({ where: { id } }),
+  ).resolves.toMatchObject(match);
+}
+
 /** Well-formed positive body; the four exact keys only. */
 function positiveBody(
   overrides: Record<string, unknown> = {},
@@ -463,6 +514,59 @@ function negativeBody(
 ): Record<string, unknown> {
   return {
     action: NEGATIVE_ACTION,
+    expectedVersion: 1,
+    resolutionRequestId: RESOLUTION_REQUEST_ID,
+    ...overrides,
+  };
+}
+
+/** Valid PENDING EXPIRATION fixture: EXPIRATION snapshot shape, no SKU/stock. */
+function pendingExpirationDecisionData(
+  tenantId: string,
+  overrides: Partial<Prisma.HumanDecisionUncheckedCreateInput> = {},
+): Prisma.HumanDecisionUncheckedCreateInput {
+  return {
+    tenantId,
+    source: RESTOCK_SOURCE,
+    sourceRequestId: crypto.randomUUID(),
+    type: EXPIRATION_TYPE,
+    canonicalRequestHash: `hash-${crypto.randomUUID()}`,
+    submittedCredentialId: SUBMITTED_CREDENTIAL_ID,
+    branchId: 'branch-stable',
+    branchName: 'Sucursal Centro',
+    productId: STABLE_PRODUCT_ID,
+    productName: 'Filtro de aceite',
+    productUnit: EXPIRATION_UNIT,
+    sku: null,
+    requestedQuantity: null,
+    observedStockAtRequest: null,
+    stockObservedAt: null,
+    status: 'PENDING',
+    version: 1,
+    createdAt: STABLE_CREATED_AT,
+    ...overrides,
+  };
+}
+
+/** Well-formed EXP positive body; the four exact keys only. */
+function expPositiveBody(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    action: EXP_POSITIVE_ACTION,
+    expirationText: NORMALIZED_EXPIRATION_TEXT,
+    expectedVersion: 1,
+    resolutionRequestId: RESOLUTION_REQUEST_ID,
+    ...overrides,
+  };
+}
+
+/** Well-formed EXP negative body; `expirationText` is deliberately ABSENT. */
+function expNegativeBody(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    action: EXP_NEGATIVE_ACTION,
     expectedVersion: 1,
     resolutionRequestId: RESOLUTION_REQUEST_ID,
     ...overrides,
@@ -1409,6 +1513,248 @@ describeIfDb(
           source: 'other-bot-source',
           status: 'PENDING',
         });
+      });
+    });
+
+    describe('manager EXPIRATION resolve (200 exact FE projection)', () => {
+      it.each([
+        {
+          label: 'PROVIDE_EXPIRATION_TEXT',
+          action: EXP_POSITIVE_ACTION,
+          text: NORMALIZED_EXPIRATION_TEXT as string | null,
+          body: () => expPositiveBody({ expirationText: RAW_EXPIRATION_TEXT }),
+        },
+        {
+          label: 'REPORT_EXPIRATION_UNAVAILABLE',
+          action: EXP_NEGATIVE_ACTION,
+          text: null as string | null,
+          body: () => expNegativeBody(),
+        },
+      ])(
+        'resolves $label to version 2 with the EXPIRATION snapshot, normalized text and server actor',
+        async ({ action, text, body }) => {
+          const decisionId = await seedDecision(
+            pendingExpirationDecisionData(world.tenantA),
+          );
+
+          const res = await postResolve(decisionId, body()).expect(200);
+          const response = res.body as Record<string, unknown>;
+          const snapshot = response.snapshot as Record<string, unknown>;
+          const resolution = response.resolution as Record<string, unknown>;
+
+          // The exact `toEqual` below pins the top-level, snapshot, resolution
+          // and resolvedBy key sets; no extra property can pass.
+          expect(Object.keys(response).sort()).toEqual(RESPONSE_KEYS);
+
+          // The persisted server clock and the normalized text are the truth.
+          const row = await integrationPrisma().humanDecision.findUniqueOrThrow(
+            {
+              where: { id: decisionId },
+            },
+          );
+          const expectedResolution: Record<string, unknown> = {
+            action,
+            resolvedAt: row.resolvedAt?.toISOString(),
+            resolvedBy: { id: world.managerAId, displayName: MANAGER_A_NAME },
+          };
+          if (text !== null) {
+            expectedResolution.expirationText = text;
+          }
+          expect(response).toEqual({
+            id: decisionId,
+            type: EXPIRATION_TYPE,
+            title: EXPIRATION_TITLE,
+            sanitizedSummary: EXPIRATION_SANITIZED_SUMMARY,
+            createdAt: STABLE_CREATED_AT.toISOString(),
+            snapshot: EXPECTED_EXP_SNAPSHOT,
+            status: 'RESOLVED',
+            version: 2,
+            resolution: expectedResolution,
+            allowedActions: [],
+          });
+
+          // Persisted EXPIRATION invariant: no SKU/stock and never restockDays.
+          expect(row).toMatchObject({
+            type: EXPIRATION_TYPE,
+            status: 'RESOLVED',
+            version: 2,
+            resolutionAction: action,
+            restockDays: null,
+            expirationText: text,
+            resolvedById: world.managerAId,
+            resolvedByActorId: world.managerAId,
+            resolvedByDisplayName: MANAGER_A_NAME,
+          });
+
+          for (const key of EXP_FORBIDDEN_KEYS) {
+            expect(response).not.toHaveProperty(key);
+            expect(snapshot).not.toHaveProperty(key);
+          }
+          expect(snapshot.unit).toBe(EXPIRATION_UNIT);
+          if (text !== null) {
+            // NFC + whitespace collapsed: the raw operator text is not echoed.
+            expect(JSON.stringify(response)).not.toContain(RAW_EXPIRATION_TEXT);
+          } else {
+            expect(resolution).not.toHaveProperty('expirationText');
+          }
+          await expect(totalDecisionRows()).resolves.toBe(1);
+        },
+      );
+    });
+
+    describe('EXPIRATION idempotent replay (same key, actor, payload, expectedVersion)', () => {
+      it('answers 200 with an identical body and performs no second write', async () => {
+        const decisionId = await seedDecision(
+          pendingExpirationDecisionData(world.tenantA),
+        );
+        const body = expPositiveBody();
+
+        const first = await postResolve(decisionId, body).expect(200);
+        const rowAfterFirst =
+          await integrationPrisma().humanDecision.findUniqueOrThrow({
+            where: { id: decisionId },
+          });
+
+        const replay = await postResolve(decisionId, body).expect(200);
+
+        expect(replay.body).toEqual(first.body);
+        expect((replay.body as { status: string }).status).toBe('RESOLVED');
+
+        const rowAfterReplay =
+          await integrationPrisma().humanDecision.findUniqueOrThrow({
+            where: { id: decisionId },
+          });
+        expect(rowAfterReplay.version).toBe(2);
+        expect(rowAfterReplay.expirationText).toBe(NORMALIZED_EXPIRATION_TEXT);
+        expect(rowAfterReplay.resolvedAt?.toISOString()).toBe(
+          rowAfterFirst.resolvedAt?.toISOString(),
+        );
+        expect(rowAfterReplay.updatedAt.toISOString()).toBe(
+          rowAfterFirst.updatedAt.toISOString(),
+        );
+        expect(rowAfterReplay.resolvedByActorId).toBe(world.managerAId);
+        await expect(totalDecisionRows()).resolves.toBe(1);
+      });
+    });
+
+    describe('EXPIRATION resolve conflicts (409, no mutation)', () => {
+      it.each([
+        {
+          label: 'a stale expectedVersion',
+          seeded: false,
+          code: 'VERSION_CONFLICT',
+          message: 'Human decision was modified by another reviewer',
+          body: () => expPositiveBody({ expectedVersion: 7 }),
+        },
+        {
+          label: 'a changed action under the same key',
+          seeded: true,
+          code: 'IDEMPOTENCY_CONFLICT',
+          message: 'Request conflicts with a previous submission',
+          body: () => expNegativeBody(),
+        },
+        {
+          label: 'a changed expirationText under the same key',
+          seeded: true,
+          code: 'IDEMPOTENCY_CONFLICT',
+          message: 'Request conflicts with a previous submission',
+          body: () => expPositiveBody({ expirationText: 'Otra fecha' }),
+        },
+      ])(
+        'answers $label with a value-free 409 and leaves the row untouched',
+        async ({ seeded, code, message, body }) => {
+          const decisionId = await seedDecision(
+            pendingExpirationDecisionData(world.tenantA),
+          );
+          if (seeded) {
+            await postResolve(decisionId, expPositiveBody()).expect(200);
+          }
+
+          const res = await postResolve(decisionId, body()).expect(409);
+
+          expect(res.body).toEqual({ statusCode: 409, code, message });
+          expect(Object.keys(res.body as object).sort()).toEqual(
+            ERROR_ENVELOPE_KEYS,
+          );
+          await expect(
+            integrationPrisma().humanDecision.findUniqueOrThrow({
+              where: { id: decisionId },
+            }),
+          ).resolves.toMatchObject(
+            seeded
+              ? {
+                  type: EXPIRATION_TYPE,
+                  status: 'RESOLVED',
+                  version: 2,
+                  expirationText: NORMALIZED_EXPIRATION_TEXT,
+                  resolutionRequestId: RESOLUTION_REQUEST_ID,
+                  resolvedByActorId: world.managerAId,
+                }
+              : {
+                  type: EXPIRATION_TYPE,
+                  status: 'PENDING',
+                  version: 1,
+                  expirationText: null,
+                },
+          );
+        },
+      );
+    });
+
+    describe('EXPIRATION type/tenant/source isolation (no cross-write)', () => {
+      it('rejects mismatched-type, cross-tenant and foreign-source resolves with an indistinguishable 404', async () => {
+        const restockId = await seedDecision(
+          pendingDecisionData(world.tenantA),
+        );
+        const expId = await seedDecision(
+          pendingExpirationDecisionData(world.tenantA),
+        );
+        const crossTenantId = await seedDecision(
+          pendingExpirationDecisionData(world.tenantB),
+        );
+        const foreignSourceId = await seedDecision(
+          pendingExpirationDecisionData(world.tenantA, {
+            source: 'other-bot-source',
+          }),
+        );
+        const cases: Array<[string, Record<string, unknown>]> = [
+          [restockId, expPositiveBody()],
+          [expId, positiveBody()],
+          [crossTenantId, expPositiveBody()],
+          [foreignSourceId, expPositiveBody()],
+        ];
+        const expected = {
+          statusCode: 404,
+          code: 'NOT_FOUND',
+          message: 'Not found',
+        };
+        for (const [id, body] of cases) {
+          const res = await postResolve(id, body).expect(404);
+          expect(res.body).toEqual(expected);
+        }
+
+        // Non-vacuous: every hidden row is still committed and still PENDING.
+        await expectCommittedRow(restockId, {
+          type: RESTOCK_TYPE,
+          status: 'PENDING',
+          version: 1,
+        });
+        await expectCommittedRow(expId, {
+          type: EXPIRATION_TYPE,
+          status: 'PENDING',
+          version: 1,
+        });
+        await expectCommittedRow(crossTenantId, {
+          tenantId: world.tenantB,
+          status: 'PENDING',
+          version: 1,
+        });
+        await expectCommittedRow(foreignSourceId, {
+          source: 'other-bot-source',
+          status: 'PENDING',
+          version: 1,
+        });
+        await expect(totalDecisionRows()).resolves.toBe(4);
       });
     });
 
