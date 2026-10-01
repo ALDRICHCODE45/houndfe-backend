@@ -75,6 +75,8 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_INTAKE_REPOSITORY } from '../domain/expiration-intake.repository';
+import { PrismaExpirationIntakeRepository } from '../infrastructure/prisma-expiration-intake.repository';
 import { RESTOCK_INTAKE_REPOSITORY } from '../domain/restock-intake.repository';
 import { PrismaRestockIntakeRepository } from '../infrastructure/prisma-restock-intake.repository';
 import { BotRestockIntakeController } from './bot-restock-intake.controller';
@@ -356,6 +358,10 @@ describeIfDb('Bot restock intake HTTP integration (HD-03b3)', () => {
         {
           provide: RESTOCK_INTAKE_REPOSITORY,
           useClass: PrismaRestockIntakeRepository,
+        },
+        {
+          provide: EXPIRATION_INTAKE_REPOSITORY,
+          useClass: PrismaExpirationIntakeRepository,
         },
       ],
     }).compile();
