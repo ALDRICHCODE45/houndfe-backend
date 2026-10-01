@@ -68,6 +68,19 @@ export interface HumanDecisionReviewRecord {
   resolvedAt: Date | null;
   resolvedByActorId: string | null;
   resolvedByDisplayName: string | null;
+  /**
+   * EXPIRATION-only snapshot columns (absent/`null` for RESTOCK). OPTIONAL so
+   * the RESTOCK-only adapter SELECT stays assignable; the pure reviewer mapper
+   * fails closed when an EXPIRATION row omits or contradicts one. The wire
+   * `unit` renders from `productUnit`; there is no SKU on an EXPIRATION
+   * decision, and `variantName` is required whenever `variantId` is set.
+   */
+  productUnit?: string | null;
+  variantName?: string | null;
+  variantOption?: string | null;
+  variantValue?: string | null;
+  /** EXPIRATION-only operator text; absent/`null` for RESTOCK and unavailable. */
+  expirationText?: string | null;
 }
 
 /**

@@ -10,6 +10,8 @@
  * Approved design (read-only):
  * `houndfe-chatbot-human-decisions/docs/human-decisions-contract-v1.md`.
  */
+import { EXPIRATION_TYPE } from '../../domain/expiration-intake.request';
+import { EXPIRATION_TEXT_MAX_LENGTH } from '../../domain/expiration-text';
 import { RESTOCK_TYPE } from '../../domain/restock-request-canonicalizer';
 import {
   toHumanDecisionReviewResponse,
@@ -390,6 +392,9 @@ describe('toHumanDecisionReviewResponse — UTC ISO date projection', () => {
     );
 
     expect(body.createdAt).toBe('2026-02-01T10:00:00.000Z');
+    if (body.type !== RESTOCK_TYPE) {
+      throw new Error('expected a RESTOCK projection');
+    }
     expect(body.snapshot.stockObservedAt).toBe('2026-01-31T21:30:00.000Z');
     expect(body.resolution).toMatchObject({
       resolvedAt: '2026-02-02T09:15:00.000Z',
@@ -409,6 +414,9 @@ describe('toHumanDecisionReviewResponse — UTC ISO date projection', () => {
       false,
     );
 
+    if (body.type !== RESTOCK_TYPE) {
+      throw new Error('expected a RESTOCK projection');
+    }
     expect(body.snapshot.stockObservedAt).toBeNull();
     expect(Object.keys(body.snapshot).sort()).toEqual(
       [...EXPECTED_SNAPSHOT_KEYS].sort(),
@@ -754,5 +762,438 @@ describe('toHumanDecisionReviewResponse — snapshot invariant fail-closed', () 
 
     expect(message).not.toBe('');
     expect(message).not.toContain(PRODUCT_NAME);
+  });
+});
+
+// EXPIRATION (POS reviewer) projection — HD-EXP projection dispatch.
+
+const EXPIRATION_PRODUCT_UNIT = 'UNIDAD';
+const EXPIRATION_VARIANT_NAME = 'Presentación A';
+const EXPIRATION_VARIANT_OPTION = 'Peso';
+const EXPIRATION_VARIANT_VALUE = '1 kg';
+const EXPIRATION_TEXT = 'Vence el 2026-05';
+const EXPIRATION_UNTRIMMED_TEXT = '  Vence   el 2026-05  ';
+const EXPIRATION_POSITIVE_ACTION = 'PROVIDE_EXPIRATION_TEXT';
+const EXPIRATION_NEGATIVE_ACTION = 'REPORT_EXPIRATION_UNAVAILABLE';
+
+const EXPECTED_EXPIRATION_SNAPSHOT_KEYS = [
+  'branchId',
+  'branchName',
+  'productId',
+  'productName',
+  'unit',
+  'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
+];
+
+const EXPECTED_EXPIRATION_ACTIONS = [
+  EXPIRATION_POSITIVE_ACTION,
+  EXPIRATION_NEGATIVE_ACTION,
+];
+
+/** RESTOCK-only keys that must NEVER appear on an EXPIRATION projection. */
+const EXPIRATION_FORBIDDEN_KEYS = [
+  ...FORBIDDEN_KEYS,
+  'sku',
+  'requestedQuantity',
+  'observedStockAtRequest',
+  'stockObservedAt',
+  'restockDays',
+  'productUnit',
+];
+
+/** Simple-product EXPIRATION row; RESTOCK-only columns are ignored sentinels. */
+function expirationRecord(
+  overrides: DecisionOverrides = {},
+): HumanDecisionReviewRecord {
+  return reviewRecord({
+    type: EXPIRATION_TYPE,
+    productUnit: EXPIRATION_PRODUCT_UNIT,
+    variantId: null,
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
+    expirationText: null,
+    ...overrides,
+  });
+}
+
+function expirationVariantRecord(
+  overrides: DecisionOverrides = {},
+): HumanDecisionReviewRecord {
+  return expirationRecord({
+    variantId: VARIANT_ID,
+    variantName: EXPIRATION_VARIANT_NAME,
+    variantOption: EXPIRATION_VARIANT_OPTION,
+    variantValue: EXPIRATION_VARIANT_VALUE,
+    ...overrides,
+  });
+}
+
+function resolvedExpirationRecord(
+  overrides: DecisionOverrides = {},
+): HumanDecisionReviewRecord {
+  return expirationRecord({
+    status: 'RESOLVED',
+    version: 2,
+    resolutionAction: EXPIRATION_POSITIVE_ACTION,
+    expirationText: EXPIRATION_TEXT,
+    resolvedAt: utcDate(RESOLVED_AT_ISO),
+    resolvedByActorId: REVIEWER_ID,
+    resolvedByDisplayName: REVIEWER_NAME,
+    ...overrides,
+  });
+}
+
+describe('toHumanDecisionReviewResponse — EXPIRATION exact projection shape', () => {
+  it('exposes exactly the human top-level key set and the fixed value-free copy', () => {
+    const pending = toHumanDecisionReviewResponse(expirationRecord(), true);
+    const resolved = toHumanDecisionReviewResponse(
+      resolvedExpirationRecord(),
+      true,
+    );
+
+    for (const body of [pending, resolved]) {
+      expect(Object.keys(body).sort()).toEqual(
+        [...EXPECTED_TOP_LEVEL_KEYS].sort(),
+      );
+    }
+    expect(pending.status).toBe('PENDING');
+    expect(resolved.status).toBe('RESOLVED');
+    expect(pending.type).toBe('EXPIRATION');
+    expect(pending.id).toBe(DECISION_ID);
+    expect(pending.createdAt).toBe(CREATED_AT_ISO);
+    expect(pending.title).toBe('Consulta de vencimiento');
+    expect(pending.sanitizedSummary).toBe(
+      'El chatbot solicitó información de vencimiento de un producto.',
+    );
+    expect(pending.title).not.toContain(PRODUCT_NAME);
+    expect(pending.sanitizedSummary).not.toContain(PRODUCT_NAME);
+  });
+
+  it('exposes exactly the EXPIRATION snapshot keys and never SKU/stock keys', () => {
+    const body = toHumanDecisionReviewResponse(
+      expirationVariantRecord(),
+      false,
+    );
+
+    expect(Object.keys(body.snapshot).sort()).toEqual(
+      [...EXPECTED_EXPIRATION_SNAPSHOT_KEYS].sort(),
+    );
+    for (const key of [
+      'sku',
+      'requestedQuantity',
+      'observedStockAtRequest',
+      'stockObservedAt',
+    ]) {
+      expect(body.snapshot).not.toHaveProperty(key);
+    }
+  });
+});
+
+describe('toHumanDecisionReviewResponse — EXPIRATION snapshot variants', () => {
+  it('projects simple products with null variant fields and variant products with a required name', () => {
+    const simple = toHumanDecisionReviewResponse(expirationRecord(), false);
+    const variant = toHumanDecisionReviewResponse(
+      expirationVariantRecord(),
+      false,
+    );
+    const bare = toHumanDecisionReviewResponse(
+      expirationVariantRecord({ variantOption: null, variantValue: null }),
+      false,
+    );
+
+    expect(simple.snapshot).toEqual({
+      branchId: BRANCH_ID,
+      branchName: BRANCH_NAME,
+      productId: PRODUCT_ID,
+      productName: PRODUCT_NAME,
+      unit: EXPIRATION_PRODUCT_UNIT,
+      variantId: null,
+      variantName: null,
+      variantOption: null,
+      variantValue: null,
+    });
+    expect(variant.snapshot).toMatchObject({
+      unit: EXPIRATION_PRODUCT_UNIT,
+      variantId: VARIANT_ID,
+      variantName: EXPIRATION_VARIANT_NAME,
+      variantOption: EXPIRATION_VARIANT_OPTION,
+      variantValue: EXPIRATION_VARIANT_VALUE,
+    });
+    expect(bare.snapshot).toMatchObject({
+      variantName: EXPIRATION_VARIANT_NAME,
+      variantOption: null,
+      variantValue: null,
+    });
+  });
+});
+
+describe('toHumanDecisionReviewResponse — EXPIRATION PENDING projection', () => {
+  it('returns the pending discriminant with a null resolution and no fabricated fields', () => {
+    const body = toHumanDecisionReviewResponse(expirationRecord(), false);
+
+    expect(body.status).toBe('PENDING');
+    expect(body.version).toBe(1);
+    expect(body.resolution).toBeNull();
+    expect(body).not.toHaveProperty('expirationText');
+    expect(body).not.toHaveProperty('restockDays');
+  });
+
+  it('derives the ordered action pair from capability and returns a fresh array', () => {
+    const resolver = toHumanDecisionReviewResponse(expirationRecord(), true);
+    const reader = toHumanDecisionReviewResponse(expirationRecord(), false);
+    const again = toHumanDecisionReviewResponse(expirationRecord(), true);
+
+    expect(resolver.allowedActions).toEqual(EXPECTED_EXPIRATION_ACTIONS);
+    expect(reader.allowedActions).toEqual([]);
+    expect(resolver.allowedActions).not.toBe(again.allowedActions);
+    expect(resolver.allowedActions).toEqual(again.allowedActions);
+  });
+});
+
+describe('toHumanDecisionReviewResponse — EXPIRATION RESOLVED projection', () => {
+  const unavailable = (): HumanDecisionReviewResponse =>
+    toHumanDecisionReviewResponse(
+      resolvedExpirationRecord({
+        resolutionAction: EXPIRATION_NEGATIVE_ACTION,
+        expirationText: null,
+      }),
+      true,
+    );
+
+  it('projects the text plus the resolvedBy audit and always clears actions', () => {
+    const body = toHumanDecisionReviewResponse(
+      resolvedExpirationRecord(),
+      true,
+    );
+
+    expect(body.status).toBe('RESOLVED');
+    expect(body.version).toBe(2);
+    expect(body.allowedActions).toEqual([]);
+    expect(body.resolution).toEqual({
+      action: EXPIRATION_POSITIVE_ACTION,
+      expirationText: EXPIRATION_TEXT,
+      resolvedAt: RESOLVED_AT_ISO,
+      resolvedBy: { id: REVIEWER_ID, displayName: REVIEWER_NAME },
+    });
+    expect(unavailable().allowedActions).toEqual([]);
+  });
+
+  it('omits expirationText entirely for the unavailable action', () => {
+    const body = unavailable();
+
+    expect(body.resolution).toEqual({
+      action: EXPIRATION_NEGATIVE_ACTION,
+      resolvedAt: RESOLVED_AT_ISO,
+      resolvedBy: { id: REVIEWER_ID, displayName: REVIEWER_NAME },
+    });
+    expect(body.resolution).not.toHaveProperty('expirationText');
+    expect(body.resolution && 'expirationText' in body.resolution).toBe(false);
+  });
+
+  it('projects the durable reviewer snapshot even after the User FK is nulled', () => {
+    const body = toHumanDecisionReviewResponse(
+      withExtraFields(resolvedExpirationRecord(), { resolvedById: null }),
+      false,
+    );
+
+    expect(body.resolution).toMatchObject({
+      resolvedBy: { id: REVIEWER_ID, displayName: REVIEWER_NAME },
+    });
+    expect(body).not.toHaveProperty('resolvedById');
+  });
+});
+
+describe('toHumanDecisionReviewResponse — EXPIRATION fail-closed', () => {
+  const pending = (o: DecisionOverrides): HumanDecisionReviewRecord =>
+    expirationRecord(o);
+  const resolved = (o: DecisionOverrides): HumanDecisionReviewRecord =>
+    resolvedExpirationRecord(o);
+
+  const invalidRecords: Array<[string, HumanDecisionReviewRecord]> = [
+    ['a missing product unit', pending({ productUnit: undefined })],
+    ['a null product unit', pending({ productUnit: null })],
+    [
+      'a non-string product unit',
+      pending({ productUnit: 7 as unknown as string }),
+    ],
+    [
+      'a variant id without a variant name',
+      pending({ variantId: VARIANT_ID, variantName: null }),
+    ],
+    [
+      'variant metadata without a variant id',
+      pending({ variantOption: EXPIRATION_VARIANT_OPTION }),
+    ],
+    ['an invalid product UUID', pending({ productId: 'not-a-uuid' })],
+    ['an invalid createdAt', pending({ createdAt: new Date('invalid') })],
+    ['a pending row pinned to version 2', pending({ version: 2 })],
+    [
+      'a pending row carrying an action',
+      pending({ resolutionAction: EXPIRATION_POSITIVE_ACTION }),
+    ],
+    ['an unknown status', pending({ status: 'EXPIRED' })],
+    ['a resolved row pinned to version 1', resolved({ version: 1 })],
+    ['a missing resolvedAt', resolved({ resolvedAt: null })],
+    [
+      'a missing reviewer actor snapshot',
+      resolved({ resolvedByActorId: null }),
+    ],
+    ['a missing expiration text', resolved({ expirationText: null })],
+    ['non-NFC text', resolved({ expirationText: 'Cafe\u0301' })],
+    [
+      'a control-character expiration text',
+      resolved({ expirationText: `Vence${C0_CONTROL}` }),
+    ],
+    [
+      'an untrimmed expiration text',
+      resolved({ expirationText: EXPIRATION_UNTRIMMED_TEXT }),
+    ],
+    [
+      'an over-long expiration text',
+      resolved({ expirationText: 'a'.repeat(EXPIRATION_TEXT_MAX_LENGTH + 1) }),
+    ],
+    [
+      'the RESTOCK positive action',
+      resolved({ resolutionAction: 'PROVIDE_RESTOCK_ESTIMATE' }),
+    ],
+    ['restock days on an EXPIRATION action', resolved({ restockDays: 5 })],
+  ];
+
+  it.each(invalidRecords)('rejects %s', (_label, record) => {
+    expect(() => toHumanDecisionReviewResponse(record, true)).toThrow(Error);
+  });
+
+  it('rejects expiration text and restock days on the unavailable action', () => {
+    expect(() =>
+      toHumanDecisionReviewResponse(
+        resolvedExpirationRecord({
+          resolutionAction: EXPIRATION_NEGATIVE_ACTION,
+        }),
+        true,
+      ),
+    ).toThrow(Error);
+    expect(() =>
+      toHumanDecisionReviewResponse(
+        resolvedExpirationRecord({
+          resolutionAction: EXPIRATION_NEGATIVE_ACTION,
+          expirationText: null,
+          restockDays: 3,
+        }),
+        true,
+      ),
+    ).toThrow(Error);
+  });
+
+  it('accepts a normalized text exactly at the 500-unit boundary', () => {
+    const atLimit = 'a'.repeat(EXPIRATION_TEXT_MAX_LENGTH);
+    const body = toHumanDecisionReviewResponse(
+      resolvedExpirationRecord({ expirationText: atLimit }),
+      false,
+    );
+
+    expect(body.resolution).toMatchObject({
+      action: EXPIRATION_POSITIVE_ACTION,
+      expirationText: atLimit,
+    });
+  });
+
+  it('throws a value-free error that never echoes EXPIRATION values', () => {
+    let message = '';
+    try {
+      toHumanDecisionReviewResponse(
+        resolvedExpirationRecord({
+          resolutionAction: 'BOGUS_ACTION',
+          expirationText: 'EXPIRATION-TEXT-SENTINEL',
+          resolvedByDisplayName: 'REVIEWER-SENTINEL',
+        }),
+        true,
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).not.toBe('');
+    expect(message).not.toContain('BOGUS_ACTION');
+    expect(message).not.toContain('EXPIRATION-TEXT-SENTINEL');
+    expect(message).not.toContain('REVIEWER-SENTINEL');
+  });
+});
+
+describe('toHumanDecisionReviewResponse — EXPIRATION no leaks and purity', () => {
+  it('omits every forbidden key and ignores injected RESTOCK/server-only values', () => {
+    const pending = toHumanDecisionReviewResponse(
+      expirationVariantRecord(),
+      true,
+    );
+    const resolved = toHumanDecisionReviewResponse(
+      resolvedExpirationRecord(),
+      false,
+    );
+    const injected = toHumanDecisionReviewResponse(
+      withExtraFields(expirationRecord(), {
+        tenantId: 'TENANT-SECRET',
+        applyBefore: 'APPLY-BEFORE-SECRET',
+        sourceRequestId: 'SOURCE-REQUEST-SECRET',
+      }),
+      true,
+    );
+
+    for (const key of EXPIRATION_FORBIDDEN_KEYS) {
+      expect(pending).not.toHaveProperty(key);
+      expect(resolved).not.toHaveProperty(key);
+      expect(pending.snapshot).not.toHaveProperty(key);
+      expect(resolved.snapshot).not.toHaveProperty(key);
+    }
+    const serialized = JSON.stringify(injected);
+    expect(serialized).not.toContain('TENANT-SECRET');
+    expect(serialized).not.toContain('APPLY-BEFORE-SECRET');
+    expect(serialized).not.toContain('SOURCE-REQUEST-SECRET');
+    expect(serialized).not.toContain(SKU);
+    expect(injected.snapshot).not.toHaveProperty('sku');
+  });
+
+  it('does not mutate the input record or its dates and maps a frozen input', () => {
+    const createdAt = utcDate(CREATED_AT_ISO);
+    const resolvedAt = utcDate(RESOLVED_AT_ISO);
+    const record = resolvedExpirationRecord({ createdAt, resolvedAt });
+    const snapshotValues = JSON.parse(JSON.stringify(record)) as unknown;
+
+    toHumanDecisionReviewResponse(record, true);
+
+    expect(createdAt.getTime()).toBe(utcDate(CREATED_AT_ISO).getTime());
+    expect(resolvedAt.getTime()).toBe(utcDate(RESOLVED_AT_ISO).getTime());
+    expect(record.createdAt).toBe(createdAt);
+    expect(record.resolvedAt).toBe(resolvedAt);
+    expect(JSON.parse(JSON.stringify(record))).toEqual(snapshotValues);
+
+    const frozen = resolvedExpirationRecord();
+    Object.freeze(frozen);
+    expect(() => toHumanDecisionReviewResponse(frozen, true)).not.toThrow();
+  });
+});
+
+describe('toHumanDecisionReviewResponse — RESTOCK unchanged by the EXPIRATION branch', () => {
+  it('keeps the fixed RESTOCK copy and ignores stray EXPIRATION fields', () => {
+    const body = toHumanDecisionReviewResponse(
+      withExtraFields(reviewRecord(), {
+        productUnit: EXPIRATION_PRODUCT_UNIT,
+        expirationText: EXPIRATION_TEXT,
+      }),
+      true,
+    );
+
+    expect(body.type).toBe(RESTOCK_TYPE);
+    expect(body.title).toBe('Solicitud de reposición de stock');
+    expect(body.sanitizedSummary).toBe(
+      'El chatbot solicitó una estimación de reposición de stock para un producto.',
+    );
+    expect(body.allowedActions).toEqual(EXPECTED_PENDING_ACTIONS);
+    expect(body.snapshot).toHaveProperty('sku', SKU);
+    expect(body.snapshot).not.toHaveProperty('unit');
+    expect(JSON.stringify(body)).not.toContain(EXPIRATION_TEXT);
   });
 });
