@@ -1701,6 +1701,145 @@ describeIfDb(
       );
     });
 
+    describe('EXPIRATION real PostgreSQL one-winner CAS under concurrent HTTP', () => {
+      it('yields exactly one 200 and one 409 ALREADY_RESOLVED and pins the committed winner', async () => {
+        const decisionId = await seedDecision(
+          pendingExpirationDecisionData(world.tenantA),
+        );
+        // Two REAL active reviewers of the SAME tenant, both holding
+        // update:HumanDecision, sending OPPOSITE EXP actions under DIFFERENT
+        // resolutionRequestIds and the SAME expectedVersion=1: manager A sends
+        // the positive EXP action with the normalized text, manager A2 the
+        // negative EXP action (which omits `expirationText`).
+        //
+        // The interleaving is NOT forced: the route exposes no barrier/hook, so
+        // the two transactions race on their own with no sleeps. Because the
+        // loser either reads the committed winner (ALREADY_RESOLVED) or loses
+        // the CAS and re-reads that same winner (also ALREADY_RESOLVED), the
+        // observed 409 code alone does NOT prove the `count === 0` CAS branch
+        // was taken; only a mocked adapter seam or a DB-level lock could. This
+        // asserts the durable outcome instead: exactly one commit, exact winner
+        // provenance, and no overwrite on replay/retry.
+        const positive = {
+          body: () => expPositiveBody(),
+          token: world.tokens.managerA,
+          action: EXP_POSITIVE_ACTION,
+          expirationText: NORMALIZED_EXPIRATION_TEXT as string | null,
+          actorId: world.managerAId,
+          actorName: MANAGER_A_NAME,
+          requestId: RESOLUTION_REQUEST_ID,
+        };
+        const negative = {
+          body: () =>
+            expNegativeBody({ resolutionRequestId: RESOLUTION_REQUEST_ID_ALT }),
+          token: world.tokens.managerA2,
+          action: EXP_NEGATIVE_ACTION,
+          expirationText: null as string | null,
+          actorId: world.managerA2Id,
+          actorName: MANAGER_A2_NAME,
+          requestId: RESOLUTION_REQUEST_ID_ALT,
+        };
+
+        const [positiveRes, negativeRes] = await Promise.all([
+          postResolve(decisionId, positive.body(), positive.token),
+          postResolve(decisionId, negative.body(), negative.token),
+        ]);
+        const statuses = [positiveRes.status, negativeRes.status].sort();
+        expect(statuses).toEqual([200, 409]);
+
+        // Identify the winner from the OBSERVED responses, never a presumed
+        // arrival order.
+        const positiveWon = positiveRes.status === 200;
+        const winner = {
+          ...(positiveWon ? positive : negative),
+          response: positiveWon ? positiveRes : negativeRes,
+        };
+        const loser = {
+          ...(positiveWon ? negative : positive),
+          response: positiveWon ? negativeRes : positiveRes,
+        };
+
+        const alreadyResolved = {
+          statusCode: 409,
+          code: 'ALREADY_RESOLVED',
+          message: 'Human decision was already resolved',
+        };
+        expect(loser.response.body).toEqual(alreadyResolved);
+        // The winner's own 200 projection is the winner's action, never the
+        // loser's.
+        expect(winner.response.body).toMatchObject({
+          status: 'RESOLVED',
+          version: 2,
+          resolution: { action: winner.action },
+        });
+
+        const rowAfterRace =
+          await integrationPrisma().humanDecision.findUniqueOrThrow({
+            where: { id: decisionId },
+          });
+        // Exactly the winner's action/text/server actor/request key committed
+        // at version 2; `restockDays` stays null across the EXP type.
+        expect(rowAfterRace).toMatchObject({
+          type: EXPIRATION_TYPE,
+          status: 'RESOLVED',
+          version: 2,
+          resolutionAction: winner.action,
+          expirationText: winner.expirationText,
+          resolutionRequestId: winner.requestId,
+          restockDays: null,
+          resolvedById: winner.actorId,
+          resolvedByActorId: winner.actorId,
+          resolvedByDisplayName: winner.actorName,
+        });
+        // Exactly one winner: the loser's key/text never reached the row.
+        expect(rowAfterRace.resolutionRequestId).not.toBe(loser.requestId);
+        expect(rowAfterRace.expirationText).not.toBe(loser.expirationText);
+        await expect(totalDecisionRows()).resolves.toBe(1);
+
+        // Replay the WINNING request: 200, identical body, no second write.
+        const replay = await postResolve(
+          decisionId,
+          winner.body(),
+          winner.token,
+        ).expect(200);
+        expect(replay.body).toEqual(winner.response.body);
+        const rowAfterReplay =
+          await integrationPrisma().humanDecision.findUniqueOrThrow({
+            where: { id: decisionId },
+          });
+        expect(rowAfterReplay.version).toBe(2);
+        expect(rowAfterReplay.resolvedAt?.toISOString()).toBe(
+          rowAfterRace.resolvedAt?.toISOString(),
+        );
+        expect(rowAfterReplay.updatedAt.toISOString()).toBe(
+          rowAfterRace.updatedAt.toISOString(),
+        );
+
+        // Retry the LOSING request: still 409 ALREADY_RESOLVED and still no
+        // overwrite of the committed winner.
+        const loserRetry = await postResolve(
+          decisionId,
+          loser.body(),
+          loser.token,
+        ).expect(409);
+        expect(loserRetry.body).toEqual(alreadyResolved);
+        const rowAfterLoserRetry =
+          await integrationPrisma().humanDecision.findUniqueOrThrow({
+            where: { id: decisionId },
+          });
+        expect(rowAfterLoserRetry).toMatchObject({
+          version: 2,
+          resolutionAction: winner.action,
+          expirationText: winner.expirationText,
+          resolutionRequestId: winner.requestId,
+          resolvedByActorId: winner.actorId,
+        });
+        expect(rowAfterLoserRetry.updatedAt.toISOString()).toBe(
+          rowAfterRace.updatedAt.toISOString(),
+        );
+      }, 20_000);
+    });
+
     describe('EXPIRATION type/tenant/source isolation (no cross-write)', () => {
       it('rejects mismatched-type, cross-tenant and foreign-source resolves with an indistinguishable 404', async () => {
         const restockId = await seedDecision(
