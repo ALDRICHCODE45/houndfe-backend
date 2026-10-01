@@ -249,10 +249,12 @@ const REVIEW_SELECT_KEYS = [
   'branchId',
   'branchName',
   'createdAt',
+  'expirationText',
   'id',
   'observedStockAtRequest',
   'productId',
   'productName',
+  'productUnit',
   'requestedQuantity',
   'resolutionAction',
   'resolvedAt',
@@ -264,6 +266,9 @@ const REVIEW_SELECT_KEYS = [
   'stockObservedAt',
   'type',
   'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
   'version',
 ];
 
@@ -738,30 +743,58 @@ describeIfDb(
     });
 
     describe('pinned source, type and status', () => {
-      it('excludes a foreign-source RESTOCK row and a same-source PENDING EXPIRATION row while both persist', async () => {
+      it('admits a same-source PENDING EXPIRATION row while still excluding a foreign-source RESTOCK row', async () => {
         const tenantId = await seedTenant('Source Scope Tenant');
-        const inScope = await seedDecision(pendingDecisionData(tenantId));
-        const outOfScope = await seedDecision(
-          pendingDecisionData(tenantId, { source: 'other-bot-source' }),
+        const inScope = await seedDecision(
+          pendingDecisionData(tenantId, {
+            createdAt: new Date('2026-09-01T00:00:00.000Z'),
+          }),
         );
-        // Dormant same-tenant/source PENDING EXPIRATION row: valid `productUnit`
-        // and NULL RESTOCK-only columns, so only `type` excludes the persisted row.
+        const outOfScope = await seedDecision(
+          pendingDecisionData(tenantId, {
+            source: 'other-bot-source',
+            createdAt: new Date('2026-09-01T00:01:00.000Z'),
+          }),
+        );
+        // Admitted same-tenant/source PENDING EXPIRATION row with a valid unit
+        // and variant fields and NULL RESTOCK-only columns. `source` is shared
+        // (both 'houndfe-chatbot'), so the widened closed type set is the ONLY
+        // reason it is now readable while the foreign SOURCE row stays excluded.
         const expirationId = await seedDecision(
           pendingDecisionData(tenantId, {
             type: HumanDecisionType.EXPIRATION,
             productUnit: 'UNIDAD',
+            variantId: crypto.randomUUID(),
+            variantName: 'Presentación A',
+            variantOption: 'Peso',
+            variantValue: '1 kg',
             sku: null,
             requestedQuantity: null,
+            createdAt: new Date('2026-09-01T00:02:00.000Z'),
           }),
         );
 
         const { repo } = makeHarness(tenantId);
         const page = await repo.listPending({ page: 1, limit: 20 });
 
-        expect(page.items.map((item) => item.id)).toEqual([inScope]);
-        expect(page.totalCount).toBe(1);
+        expect(page.items.map((item) => item.id)).toEqual([
+          inScope,
+          expirationId,
+        ]);
+        expect(page.totalCount).toBe(2);
+        expect(Object.keys(page.items[0]).sort()).toEqual(REVIEW_SELECT_KEYS);
+        const expirationDetail = await readDetail(repo, expirationId);
+        expect(Object.keys(expirationDetail).sort()).toEqual(
+          REVIEW_SELECT_KEYS,
+        );
+        expect(expirationDetail).toMatchObject({
+          type: HumanDecisionType.EXPIRATION,
+          productUnit: 'UNIDAD',
+          variantName: 'Presentación A',
+          variantOption: 'Peso',
+          variantValue: '1 kg',
+        });
         await expect(repo.findById(outOfScope)).resolves.toBeNull();
-        await expect(repo.findById(expirationId)).resolves.toBeNull();
 
         const persisted = await integrationPrisma().humanDecision.findUnique({
           where: { id: outOfScope },
@@ -779,6 +812,7 @@ describeIfDb(
         expect(expRow).toMatchObject({
           type: HumanDecisionType.EXPIRATION,
           productUnit: 'UNIDAD',
+          variantName: 'Presentación A',
         });
       });
 

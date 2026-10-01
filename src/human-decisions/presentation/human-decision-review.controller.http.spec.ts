@@ -288,6 +288,65 @@ const RESOLVED_NEGATIVE_ROW: HumanDecisionReviewRecord = {
   resolvedByDisplayName: 'Ada Lovelace',
 };
 
+const EXPIRATION_PRODUCT_ID = '1b2c3d4e-5f60-4712-8a9b-0c1d2e3f4a5b';
+const EXPIRATION_UNIT = 'UNIDAD';
+const EXPIRATION_PENDING_ACTIONS = [
+  'PROVIDE_EXPIRATION_TEXT',
+  'REPORT_EXPIRATION_UNAVAILABLE',
+];
+
+/** EXPIRATION simple-product PENDING row: no SKU/stock keys, valid unit. */
+const EXPIRATION_PENDING_ROW: HumanDecisionReviewRecord = {
+  ...PENDING_ROW,
+  type: 'EXPIRATION',
+  productId: EXPIRATION_PRODUCT_ID,
+  productName: 'Yogur natural',
+  variantId: null,
+  sku: null,
+  requestedQuantity: null,
+  observedStockAtRequest: null,
+  stockObservedAt: null,
+  productUnit: EXPIRATION_UNIT,
+  variantName: null,
+  variantOption: null,
+  variantValue: null,
+};
+
+const EXPECTED_EXPIRATION_PENDING_PROJECTION = {
+  id: DECISION_ID,
+  type: 'EXPIRATION',
+  title: 'Consulta de vencimiento',
+  sanitizedSummary:
+    'El chatbot solicitó información de vencimiento de un producto.',
+  createdAt: '2026-02-01T10:00:00.000Z',
+  snapshot: {
+    branchId: 'branch-1',
+    branchName: 'Sucursal Centro',
+    productId: EXPIRATION_PRODUCT_ID,
+    productName: 'Yogur natural',
+    unit: EXPIRATION_UNIT,
+    variantId: null,
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
+  },
+  status: 'PENDING',
+  version: 1,
+  resolution: null,
+};
+
+const EXPIRATION_SNAPSHOT_KEYS = [
+  'branchId',
+  'branchName',
+  'productId',
+  'productName',
+  'unit',
+  'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
+];
+
 const DEFAULT_PAGE: HumanDecisionReviewPage = {
   items: [PENDING_ROW],
   pageIndex0: 0,
@@ -1132,6 +1191,65 @@ describe('Human decision review HTTP contract (HD-04d1)', () => {
       expect(serialized).not.toContain('houndfe-chatbot');
       expect(serialized).not.toContain('canonicalRequestHash');
       expect(serialized).not.toContain('tenant-1');
+    });
+
+    it('returns the exact EXPIRATION PENDING projection through the real guard pipeline', async () => {
+      detailRecord = EXPIRATION_PENDING_ROW;
+
+      const res = await detail(DECISION_ID, TOKENS.manager).expect(200);
+      const body = res.body as { snapshot: Record<string, unknown> };
+
+      expect(res.body).toEqual({
+        ...EXPECTED_EXPIRATION_PENDING_PROJECTION,
+        allowedActions: EXPIRATION_PENDING_ACTIONS,
+      });
+      expect(Object.keys(body.snapshot).sort()).toEqual(
+        EXPIRATION_SNAPSHOT_KEYS,
+      );
+      // No RESTOCK key bleeds into the EXPIRATION snapshot and no server column
+      // (productUnit / tenantId / source) is ever renamed onto the wire.
+      expect(body.snapshot).not.toHaveProperty('sku');
+      expect(body.snapshot).not.toHaveProperty('productUnit');
+      for (const key of FORBIDDEN_KEYS) {
+        expect(res.body).not.toHaveProperty(key);
+      }
+      expect(findUnique).toHaveBeenCalledWith({
+        where: { id: MANAGER_ID },
+        select: { isActive: true },
+      });
+      expect(findById).toHaveBeenCalledTimes(1);
+      expect(findById.mock.calls[0][0]).toBe(DECISION_ID);
+    });
+
+    it('lists a mixed RESTOCK + EXPIRATION page through the ALL policy without widening either projection', async () => {
+      listPage = {
+        items: [PENDING_ROW, EXPIRATION_PENDING_ROW],
+        pageIndex0: 0,
+        pageSize: 20,
+        totalCount: 2,
+        pageCount: 1,
+      };
+
+      const res = await list('?status=ALL', TOKENS.reader).expect(200);
+      const data = (res.body as { data: Array<Record<string, unknown>> }).data;
+
+      expect(data).toHaveLength(2);
+      expect(data[0]).toMatchObject({ type: 'RESTOCK' });
+      expect(data[1]).toMatchObject({
+        type: 'EXPIRATION',
+        allowedActions: [],
+      });
+      expect(listAll).toHaveBeenCalledWith({
+        page: 1,
+        limit: 20,
+        search: undefined,
+      });
+      expect(listPending).not.toHaveBeenCalled();
+      expect(listResolved).not.toHaveBeenCalled();
+      for (const key of FORBIDDEN_KEYS) {
+        expect(data[1]).not.toHaveProperty(key);
+      }
+      expect(JSON.stringify(res.body)).not.toContain('tenant-1');
     });
   });
 

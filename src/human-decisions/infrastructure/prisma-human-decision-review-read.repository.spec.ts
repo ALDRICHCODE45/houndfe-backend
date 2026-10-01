@@ -18,6 +18,7 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   HumanDecisionReviewReadError,
   type HumanDecisionReviewListQuery,
@@ -32,10 +33,12 @@ const REVIEW_SELECT_KEYS = [
   'branchId',
   'branchName',
   'createdAt',
+  'expirationText',
   'id',
   'observedStockAtRequest',
   'productId',
   'productName',
+  'productUnit',
   'requestedQuantity',
   'resolutionAction',
   'resolvedAt',
@@ -47,8 +50,14 @@ const REVIEW_SELECT_KEYS = [
   'stockObservedAt',
   'type',
   'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
   'version',
 ];
+
+/** The closed RESTOCK/EXPIRATION type predicate the adapter must pin. */
+const REVIEW_TYPE_SCOPE = { in: [RESTOCK_TYPE, EXPIRATION_TYPE] };
 
 const FORBIDDEN_SELECT_KEYS = [
   'tenantId',
@@ -114,6 +123,27 @@ function makeRecord(
     resolvedAt: null,
     resolvedByActorId: null,
     resolvedByDisplayName: null,
+    ...overrides,
+  };
+}
+
+/** EXPIRATION-shaped persisted row: simple product, no SKU/stock keys. */
+function makeExpirationRecord(
+  overrides: Partial<HumanDecisionReviewRecord> = {},
+): HumanDecisionReviewRecord {
+  return {
+    ...makeRecord(),
+    id: '55555555-5555-4555-8555-555555555555',
+    type: EXPIRATION_TYPE,
+    variantId: null,
+    sku: null,
+    requestedQuantity: null,
+    observedStockAtRequest: null,
+    stockObservedAt: null,
+    productUnit: 'UNIDAD',
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
     ...overrides,
   };
 }
@@ -241,7 +271,7 @@ describe('combined snapshot reads', () => {
       expect(args.where).toEqual({
         tenantId: TENANT_ID,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: REVIEW_TYPE_SCOPE,
         status,
         productName: { contains: 'Cafe\\%\\_\\\\', mode: 'insensitive' },
         ...(status === 'RESOLVED'
@@ -355,7 +385,7 @@ describe('recent resolved reads', () => {
     expect(args.where).toEqual({
       tenantId: TENANT_ID,
       source: RESTOCK_SOURCE,
-      type: RESTOCK_TYPE,
+      type: REVIEW_TYPE_SCOPE,
       status: 'RESOLVED',
       resolvedAt: { gte: new Date(now.getTime() - 604800000), lte: now },
       productName: { contains: 'Cafe\\%\\_\\\\', mode: 'insensitive' },
@@ -435,7 +465,7 @@ describe('PrismaHumanDecisionReviewReadRepository', () => {
           where: {
             tenantId: TENANT_ID,
             source: RESTOCK_SOURCE,
-            type: RESTOCK_TYPE,
+            type: REVIEW_TYPE_SCOPE,
             status: 'PENDING',
           },
         }),
@@ -457,6 +487,24 @@ describe('PrismaHumanDecisionReviewReadRepository', () => {
       expect(findManyArgs(client).where).not.toHaveProperty(
         'status',
         'RESOLVED',
+      );
+    });
+
+    it('ignores an unknown caller-supplied type and keeps the closed RESTOCK/EXPIRATION set', async () => {
+      const client = makeClient();
+      arrangeList(client);
+      const { repo } = makeRepo(client);
+
+      await repo.listPending({
+        page: 1,
+        limit: 20,
+        type: 'ADMIN',
+      } as unknown as HumanDecisionReviewListQuery);
+
+      expect(findManyArgs(client).where.type).toEqual(REVIEW_TYPE_SCOPE);
+      expect(findManyArgs(client).where.type).not.toHaveProperty(
+        'type',
+        'ADMIN',
       );
     });
 
@@ -724,7 +772,7 @@ describe('PrismaHumanDecisionReviewReadRepository', () => {
         id: DECISION_ID,
         tenantId: TENANT_ID,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: REVIEW_TYPE_SCOPE,
       });
       expect(args.where).not.toHaveProperty('status');
     });
@@ -835,6 +883,67 @@ describe('PrismaHumanDecisionReviewReadRepository', () => {
       const { repo } = makeRepo(client);
 
       await expect(repo.findById(DECISION_ID)).rejects.toBe(failure);
+    });
+  });
+
+  describe('mixed-type read pass-through (RESTOCK + EXPIRATION)', () => {
+    it.each(['PENDING', 'RESOLVED'] as const)(
+      'returns an EXPIRATION %s row with the five EXPIRATION fields intact',
+      async (status) => {
+        const client = makeClient();
+        const expiration = makeExpirationRecord({
+          status,
+          version: status === 'PENDING' ? 1 : 2,
+          resolutionAction:
+            status === 'PENDING' ? null : 'PROVIDE_EXPIRATION_TEXT',
+          expirationText: status === 'PENDING' ? null : 'Vence el 2026-05',
+          resolvedAt:
+            status === 'PENDING' ? null : new Date('2026-09-02T00:00:00Z'),
+          resolvedByActorId: status === 'PENDING' ? null : 'user-1',
+          resolvedByDisplayName: status === 'PENDING' ? null : 'Ana',
+        });
+        arrangeList(client, [expiration]);
+        const { repo } = makeRepo(client);
+
+        const page =
+          status === 'PENDING'
+            ? await repo.listPending({ page: 1, limit: 20 })
+            : await repo.listResolved({ page: 1, limit: 20 });
+
+        expect(page.items).toEqual([expiration]);
+        expect(page.items[0]).toMatchObject({
+          type: EXPIRATION_TYPE,
+          productUnit: 'UNIDAD',
+          variantName: null,
+          variantOption: null,
+          variantValue: null,
+        });
+        expect(findManyArgs(client).where.type).toEqual(REVIEW_TYPE_SCOPE);
+      },
+    );
+
+    it('returns an EXPIRATION detail row with the five EXPIRATION fields intact', async () => {
+      const client = makeClient();
+      const expiration = makeExpirationRecord({
+        variantId: '66666666-6666-4666-8666-666666666666',
+        variantName: 'Presentación A',
+        variantOption: 'Peso',
+        variantValue: '1 kg',
+      });
+      client.humanDecision.findFirst.mockResolvedValue(expiration);
+      const { repo } = makeRepo(client);
+
+      const record = await repo.findById(DECISION_ID);
+
+      expect(record).toEqual(expiration);
+      expect(record).toMatchObject({
+        type: EXPIRATION_TYPE,
+        productUnit: 'UNIDAD',
+        variantName: 'Presentación A',
+        variantOption: 'Peso',
+        variantValue: '1 kg',
+      });
+      expect(findFirstArgs(client).where.type).toEqual(REVIEW_TYPE_SCOPE);
     });
   });
 });

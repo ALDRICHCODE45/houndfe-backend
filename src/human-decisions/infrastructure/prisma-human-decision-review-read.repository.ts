@@ -10,9 +10,12 @@
  * query when there is no tenant context — even for a superadmin.
  *
  * Every `findMany` / `count` / `findFirst` carries the full pinned predicate
- * `{ tenantId, source: RESTOCK_SOURCE, type: RESTOCK_TYPE }`. `listPending`
- * additionally hardcodes `status: 'PENDING'` and ignores any `status` key on
- * the caller object, so the review queue can never be widened.
+ * `{ tenantId, source: RESTOCK_SOURCE, type: { in: [RESTOCK_TYPE,
+ * EXPIRATION_TYPE] } }`: the CLOSED two-member RESTOCK/EXPIRATION set (both
+ * admitted types share one `source`, so `type` is the discriminator). The
+ * caller can never widen past that set. `listPending` additionally hardcodes
+ * `status: 'PENDING'` and ignores any `status` key on the caller object, so the
+ * review queue can never be widened.
  *
  * ORDER + PAGINATION: `createdAt` ascending with an `id` ascending tiebreak,
  * `skip = (page - 1) * limit`, `take = limit` (whitelisted `20 | 50`). Page,
@@ -29,16 +32,19 @@
  * a LITERAL substring match. Only the persisted `productName` is searched.
  *
  * SELECT SAFETY: the adapter selects the exact `HumanDecisionReviewRecord`
- * allowlist. It never reads `sourceRequestId`, `source`, `tenantId`,
+ * allowlist, INCLUDING the five EXPIRATION-only columns (`productUnit`,
+ * `variantName`, `variantOption`, `variantValue`, `expirationText`; `null` on a
+ * RESTOCK row). It never reads `sourceRequestId`, `source`, `tenantId`,
  * `canonicalRequestHash`, `submittedCredentialId`, `resolutionRequestId`, the
  * `resolvedById` FK, `supersedesDecisionId`, application/provider/outcome
  * evidence, customer PII or bot audit.
  *
  * DETAIL: `findById` uses `findFirst` (never `findUnique` by id alone) with
- * `{ id, tenantId, source, type }` and NO status filter, so it resolves both
- * `PENDING` and `RESOLVED` and returns `null` for a missing OR cross-tenant id
- * (the two are indistinguishable). There is no branch-level authorization
- * beyond the tenant scope.
+ * `{ id, tenantId, source, type: <closed RESTOCK/EXPIRATION set> }` and NO
+ * status filter, so it resolves both `PENDING` and `RESOLVED` of EITHER admitted
+ * type and returns `null` for a missing OR cross-tenant id (the two are
+ * indistinguishable). There is no branch-level authorization beyond the tenant
+ * scope.
  *
  * DB-FREE PROOF: the companion spec mocks `TenantPrismaService`; it proves the
  * seams above, NOT real PostgreSQL `ILIKE`/CLS/tenant-extension behavior.
@@ -51,6 +57,7 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   HUMAN_DECISION_REVIEW_LIMIT_VALUES,
   HUMAN_DECISION_REVIEW_PENDING_STATUS,
@@ -64,10 +71,12 @@ import {
 } from '../domain/human-decision-review-read.repository';
 
 /**
- * Exact SELECT allowlist of the reviewer read model. Excludes every authority,
- * credential, provider/outcome and customer column by construction. Exported
- * so the HD-04c2 resolve adapter reuses the SAME projection for its committed
- * read and cannot drift back toward returning a full Prisma row.
+ * Exact SELECT allowlist of the reviewer read model, covering BOTH admitted
+ * types: the RESTOCK snapshot/resolution columns plus the five EXPIRATION-only
+ * columns (`null` on a RESTOCK row). Excludes every authority, credential,
+ * provider/outcome and customer column by construction. Exported so the HD-04c2
+ * resolve adapter reuses the SAME projection for its committed read and cannot
+ * drift back toward returning a full Prisma row.
  */
 export const REVIEW_RECORD_SELECT = {
   id: true,
@@ -89,6 +98,12 @@ export const REVIEW_RECORD_SELECT = {
   resolvedAt: true,
   resolvedByActorId: true,
   resolvedByDisplayName: true,
+  // EXPIRATION-only snapshot/resolution columns (NULL on a RESTOCK row).
+  productUnit: true,
+  variantName: true,
+  variantOption: true,
+  variantValue: true,
+  expirationText: true,
 } satisfies Prisma.HumanDecisionSelect;
 
 /** Prisma row shape produced by `REVIEW_RECORD_SELECT`. */
@@ -192,7 +207,7 @@ export class PrismaHumanDecisionReviewReadRepository implements IHumanDecisionRe
     const where: Prisma.HumanDecisionWhereInput = {
       tenantId,
       source: RESTOCK_SOURCE,
-      type: RESTOCK_TYPE,
+      type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
       // Hardcoded: a caller-supplied `status` is ignored by construction.
       status: HUMAN_DECISION_REVIEW_PENDING_STATUS,
     };
@@ -239,7 +254,7 @@ export class PrismaHumanDecisionReviewReadRepository implements IHumanDecisionRe
     const where: Prisma.HumanDecisionWhereInput = {
       tenantId,
       source: RESTOCK_SOURCE,
-      type: RESTOCK_TYPE,
+      type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
       status: 'RESOLVED',
       resolvedAt: {
         gte: new Date(now.getTime() - RECENT_RESOLVED_WINDOW_MS),
@@ -293,7 +308,7 @@ export class PrismaHumanDecisionReviewReadRepository implements IHumanDecisionRe
         const scope: Prisma.HumanDecisionWhereInput = {
           tenantId,
           source: RESTOCK_SOURCE,
-          type: RESTOCK_TYPE,
+          type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
           ...(search === undefined
             ? {}
             : {
@@ -381,7 +396,7 @@ export class PrismaHumanDecisionReviewReadRepository implements IHumanDecisionRe
         id,
         tenantId,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
       },
       select: REVIEW_RECORD_SELECT,
     });

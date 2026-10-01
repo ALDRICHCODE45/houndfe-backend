@@ -43,10 +43,12 @@ const REVIEW_SELECT_KEYS = [
   'branchId',
   'branchName',
   'createdAt',
+  'expirationText',
   'id',
   'observedStockAtRequest',
   'productId',
   'productName',
+  'productUnit',
   'requestedQuantity',
   'resolutionAction',
   'resolvedAt',
@@ -58,6 +60,9 @@ const REVIEW_SELECT_KEYS = [
   'stockObservedAt',
   'type',
   'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
   'version',
 ];
 

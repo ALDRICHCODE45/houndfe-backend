@@ -5,6 +5,13 @@
  *   * `listPending` — the `PENDING` review queue, oldest-first.
  *   * `findById` — one decision by id, `PENDING` or `RESOLVED`.
  *
+ * MIXED READ MODEL: the committed HD-04b3 adapter now serves BOTH admitted
+ * decision types in one inbox. `type` is pinned every where-clause to the
+ * CLOSED `{ in: [RESTOCK_TYPE, EXPIRATION_TYPE] }` set (both share the same
+ * `source`), the five EXPIRATION-only columns are selected for either type
+ * (`null` on a RESTOCK row), and the pure reviewer mapper dispatches on `type`.
+ * A caller can never widen beyond that closed set.
+ *
  * Approved design (read-only):
  * `houndfe-chatbot-human-decisions/docs/human-decisions-contract-v1.md`.
  *
@@ -12,9 +19,10 @@
  * term. `tenantId`, `source` and `type` are NEVER taken from the caller. The
  * adapter resolves `tenantId` from `TenantPrismaService.getTenantId()`, which
  * throws when no tenant context exists — INCLUDING for a superadmin session —
- * and pins `source`/`type` to the RESTOCK server constants in every WHERE
- * clause. `listPending` hardcodes `status: 'PENDING'`; a runtime `status` key
- * on the query object is ignored, so a caller can never widen the queue.
+ * and pins `source`/`type` to the server constants in every WHERE clause
+ * (`type` to the closed RESTOCK/EXPIRATION set). `listPending` hardcodes
+ * `status: 'PENDING'`; a runtime `status` key on the query object is ignored,
+ * so a caller can never widen the queue.
  *
  * SELECT SAFETY: the adapter selects ONLY the `HumanDecisionReviewRecord`
  * fields the reviewer projection needs. Authority/server-only columns
@@ -44,9 +52,11 @@ import { DomainError } from '../../shared/domain/domain-error';
  * enums accept the generated enum values); the mapper re-validates at runtime
  * because a persisted row must never be trusted blindly.
  *
- * This is the exact SELECT allowlist of the HD-04b3 read adapter. Adding a
- * field here is a deliberate widening of what a reviewer may read, so it must
- * never include authority, credential, provider/outcome or customer fields.
+ * This is the exact SELECT allowlist of the HD-04b3 read adapter: the RESTOCK
+ * snapshot/resolution columns PLUS the five EXPIRATION-only columns (all
+ * `null` on a RESTOCK row). Adding a field here is a deliberate widening of
+ * what a reviewer may read, so it must never include authority, credential,
+ * provider/outcome or customer fields.
  */
 export interface HumanDecisionReviewRecord {
   id: string;
@@ -70,10 +80,11 @@ export interface HumanDecisionReviewRecord {
   resolvedByDisplayName: string | null;
   /**
    * EXPIRATION-only snapshot columns (absent/`null` for RESTOCK). OPTIONAL so
-   * the RESTOCK-only adapter SELECT stays assignable; the pure reviewer mapper
-   * fails closed when an EXPIRATION row omits or contradicts one. The wire
-   * `unit` renders from `productUnit`; there is no SKU on an EXPIRATION
-   * decision, and `variantName` is required whenever `variantId` is set.
+   * RESTOCK-only fixtures/mocks stay assignable while the committed adapter
+   * selects them for BOTH admitted types; the pure reviewer mapper fails closed
+   * when an EXPIRATION row omits or contradicts one. The wire `unit` renders
+   * from `productUnit`; there is no SKU on an EXPIRATION decision, and
+   * `variantName` is required whenever `variantId` is set.
    */
   productUnit?: string | null;
   variantName?: string | null;
@@ -149,19 +160,19 @@ export interface HumanDecisionReviewPage {
 
 export interface IHumanDecisionReviewReadRepository {
   /**
-   * One tenant-scoped page of the `PENDING` RESTOCK queue, ordered by
-   * `createdAt` ascending with an `id` ascending tiebreak. When `search` is
-   * present it matches the persisted `productName` as a LITERAL substring
-   * (case-insensitive); the adapter escapes the LIKE wildcards `%`, `_` and
-   * `\` so the term is never interpreted as a pattern.
+   * One tenant-scoped page of the `PENDING` queue (RESTOCK and EXPIRATION),
+   * ordered by `createdAt` ascending with an `id` ascending tiebreak. When
+   * `search` is present it matches the persisted `productName` as a LITERAL
+   * substring (case-insensitive); the adapter escapes the LIKE wildcards `%`,
+   * `_` and `\` so the term is never interpreted as a pattern.
    */
   listPending(
     query: HumanDecisionReviewListQuery,
   ): Promise<HumanDecisionReviewPage>;
 
   /**
-   * Recent RESOLVED RESTOCK responses within the inclusive server-owned
-   * [now - 7 days, now] window, ordered resolvedAt DESC, id ASC.
+   * Recent RESOLVED responses (RESTOCK and EXPIRATION) within the inclusive
+   * server-owned [now - 7 days, now] window, ordered resolvedAt DESC, id ASC.
    * This listing window does not restrict detail access or delete history.
    */
   listResolved(
@@ -170,8 +181,9 @@ export interface IHumanDecisionReviewReadRepository {
 
   /**
    * Globally paginated snapshot: PENDING oldest-first, then recent RESOLVED
-   * newest-first, each with id ASC tiebreak. Counts and rows share Repeatable
-   * Read isolation; ambient transactions are unsupported.
+   * newest-first, across BOTH admitted types, each with id ASC tiebreak.
+   * Counts and rows share Repeatable Read isolation; ambient transactions are
+   * unsupported.
    */
   listAll(
     query: HumanDecisionReviewListQuery,
