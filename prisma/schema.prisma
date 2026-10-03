@@ -2476,7 +2476,9 @@ model HumanDecision {
   applicationOutcome         HumanDecisionBotOutcome?
   applicationAttemptId       String?
   applicationEvidenceHash    String?
-  // Bot evidence code, part of the canonical ACK hash; optional per outcome.
+  // RESERVED for a future approved evidence-code enum: the current ACK wire
+  // FORBIDS `evidenceCode` outright, the canonical evidence hash EXCLUDES it,
+  // and the ACK adapter always persists this column as `null`.
   applicationEvidenceCode    String?
   providerMessageId          String?
   providerAcceptedObservedAt DateTime?

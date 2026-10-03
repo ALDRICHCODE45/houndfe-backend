@@ -9,6 +9,11 @@
  * outcome per request: backend hashes the canonical allowlisted evidence,
  * exact replay of the same attempt ID/hash returns the same result").
  *
+ * The sketch's `evidenceCode?` is superseded by the current parser below:
+ * `evidenceCode` is FORBIDDEN on the wire (even as `null`), the canonical
+ * evidence hash EXCLUDES it, and the reserved `applicationEvidenceCode` DB
+ * column is always persisted `null` by the ACK adapter.
+ *
  * The route body is EXACTLY one of four variants and nothing else:
  *   `PROVIDER_ACCEPTED`      `{attemptId,expectedResolutionVersion,outcome,attemptedAt,providerMessageId,providerAcceptedObservedAt}`
  *   `PROVIDER_ACCEPTED_LATE` same six keys

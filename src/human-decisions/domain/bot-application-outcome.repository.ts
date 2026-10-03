@@ -15,7 +15,12 @@
  * providerAcceptedObservedAt?,attemptedAt?,evidenceCode?}` is one TERMINAL
  * outcome per request: backend hashes the canonical allowlisted evidence,
  * exact replay of the same attempt ID/hash returns the same result, changed
- * payload or second terminal attempt returns `409`"). UNKNOWN/LATE enter the
+ * payload or second terminal attempt returns `409`").
+ *
+ * The sketch's `evidenceCode?` is superseded: the current HD-05b1 parser
+ * FORBIDS `evidenceCode` on the wire (even as `null`), the canonical evidence
+ * hash EXCLUDES it, and the reserved `applicationEvidenceCode` DB column is
+ * always persisted `null` by the adapter. UNKNOWN/LATE enter the
  * per-request `NEEDS_RECONCILIATION` hold: no automatic retry, late competing
  * ACK or superseding decision.
  *
