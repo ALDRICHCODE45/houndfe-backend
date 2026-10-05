@@ -22,7 +22,8 @@
  * CATEGORIES/BRANDS spec scenarios are DEFERRED — `PRODUCT_DISCOUNT`
  * is restricted to `appliesTo='PRODUCTS'` in this slice.
  */
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PROMOTION_REPOSITORY } from '../domain/promotion.repository';
 import type { IPromotionRepository } from '../domain/promotion.repository';
 import { Promotion, type DayOfWeek } from '../domain/promotion.entity';
@@ -391,24 +392,14 @@ function comparePromotionIdsAsc(a: string, b: string): number {
   return a < b ? -1 : 1;
 }
 
-const JS_DAY_OF_WEEK: ReadonlyArray<DayOfWeek> = [
-  'SUNDAY', // 0
-  'MONDAY', // 1
-  'TUESDAY', // 2
-  'WEDNESDAY', // 3
-  'THURSDAY', // 4
-  'FRIDAY', // 5
-  'SATURDAY', // 6
-];
-
-function jsDayToDayOfWeek(jsDay: number): DayOfWeek {
-  // getUTCDay returns 0..6 in UTC regardless of the host's local TZ,
-  // making weekday resolution deterministic across host environments.
-  const mapped = JS_DAY_OF_WEEK[jsDay];
-  if (mapped === undefined) {
-    return 'SUNDAY';
-  }
-  return mapped;
+function matchesPriceList(promo: Promotion, line: PosEvalLine): boolean {
+  return (
+    promo.priceLists.length === 0 ||
+    (line.appliedGlobalPriceListId != null &&
+      promo.priceLists.some(
+        (list) => list.globalPriceListId === line.appliedGlobalPriceListId,
+      ))
+  );
 }
 
 // ============================================================
@@ -431,10 +422,21 @@ interface EvaluationPassOutcome {
 
 @Injectable()
 export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCase {
+  private readonly businessWeekday: Intl.DateTimeFormat;
+
   constructor(
     @Inject(PROMOTION_REPOSITORY)
     private readonly promotionRepository: IPromotionRepository,
-  ) {}
+    @Optional() configService: ConfigService = new ConfigService(),
+  ) {
+    this.businessWeekday = new Intl.DateTimeFormat('en-US', {
+      timeZone: configService.get<string>(
+        'PROMOTIONS_BUSINESS_TIMEZONE',
+        'America/Mexico_City',
+      ),
+      weekday: 'long',
+    });
+  }
 
   async evaluate(input: PosEvalInput): Promise<PosEvalResult> {
     // 1. Load the ACTIVE candidate snapshot ONCE. Do NOT filter by method —
@@ -870,7 +872,9 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
     // 2. daysOfWeek — empty opens the gate.
     if (promo.daysOfWeek.length > 0) {
-      const today = jsDayToDayOfWeek(input.now.getUTCDay());
+      const today = this.businessWeekday
+        .format(input.now)
+        .toUpperCase() as DayOfWeek;
       const allowed = promo.daysOfWeek.some((d) => d.day === today);
       if (!allowed) return false;
     }
@@ -1138,6 +1142,9 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       }
 
       if (!this.passesPromotionWideGates(promo, input)) continue;
+
+      // A sale-level discount requires every cart line on an allowed list.
+      if (!input.lines.every((line) => matchesPriceList(promo, line))) continue;
 
       // minPurchaseAmountCents gate — against the draft's pre-promo subtotal.
       if (promo.minPurchaseAmountCents != null) {
@@ -1480,9 +1487,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       // Spec.md:43-55 — null or unsupported buy/get target types
       // silently skip the candidate.
       if (!this.passesPromotionWideGates(promo, input)) continue;
-      // The price-list gate is irrelevant for ADVANCED (it has no
-      // `appliesTo` and the engine does not consult `priceLists` for
-      // ADVANCED in this slice).
+      // Price-list eligibility is checked separately on both BUY and GET lines.
       if (
         promo.buyQuantity == null ||
         promo.getQuantity == null ||
@@ -1499,6 +1504,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       const buyMatchedItemIds = new Set<string>();
       for (const line of lines) {
         if (line.hasManualDiscount) continue;
+        if (!matchesPriceList(promo, line)) continue;
         if (matchTargetTier(promo.targetItems, line, 'BUY') === null) continue;
         totalBuyMatchedQty += line.quantity;
         buyMatchedItemIds.add(line.itemId);
@@ -1533,6 +1539,7 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       }> = [];
       for (const line of lines) {
         if (line.hasManualDiscount) continue;
+        if (!matchesPriceList(promo, line)) continue;
         if (matchTargetTier(promo.targetItems, line, 'GET') === null) continue;
         // D7 partition: BUY-side lines cannot also be GET-side.
         if (buyMatchedItemIds.has(line.itemId)) continue;

@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 /**
  * PosEvaluatePromotionsUseCase — POS promotion engine unit tests (RED).
  *
@@ -1026,7 +1027,10 @@ describe('PosEvaluatePromotionsUseCase — dayOfWeek mapping', () => {
         daysOfWeek: [{ id: `d-${c.expected}`, day: c.expected }],
       });
       const repo = makeRepository([promo]);
-      const useCase = new PosEvaluatePromotionsUseCase(repo);
+      const useCase = new PosEvaluatePromotionsUseCase(
+        repo,
+        new ConfigService({ PROMOTIONS_BUSINESS_TIMEZONE: 'UTC' }),
+      );
 
       const result = await useCase.evaluate(
         makeInput({
@@ -1167,5 +1171,175 @@ describe('PosEvaluatePromotionsUseCase — context discriminant (WU3)', () => {
 
     expect(resultOmitted.lines).toEqual(resultSale.lines);
     expect(resultOmitted.order).toEqual(resultSale.order);
+  });
+});
+
+// ============================================================
+// Proposed policy tests for restriction-context discrepancies.
+//
+// ORDER_DISCOUNT price-list semantics are not specified for sale-level
+// discounts, and the weekday spec does not choose a timezone. These
+// cases isolate the observed behavior without claiming a confirmed
+// contract regression; neither has a second promotion to affect ranking.
+// ============================================================
+describe('PosEvaluatePromotionsUseCase — restriction context negatives', () => {
+  it('ORDER_DISCOUNT restricted to price list GPL-retail does NOT apply to a cart solely on GPL-mayoreo', async () => {
+    // Proposed rule: a promo restricted to GPL-retail should not
+    // discount a cart whose only line resolves to GPL-mayoreo.
+    const promo = makeOrderPromotion({
+      id: 'promo-order-gpl',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+      priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            appliedPriceListId: 'PL-row-mayoreo',
+            appliedGlobalPriceListId: 'GPL-mayoreo',
+            effectiveUnitPriceCents: 1000,
+          }),
+        ],
+      }),
+    );
+
+    expect(result.order).toBeNull();
+    expect(result.lines).toEqual([]);
+  });
+
+  it('daysOfWeek=SUNDAY applies at a Sunday-local instant in America/Mexico_City even though UTC is Monday', async () => {
+    // 2026-06-15T02:00:00Z is Monday 02:00 UTC but Sunday 20:00 in
+    // America/Mexico_City (UTC-6, no DST). The local calendar day is
+    // resolved with an explicit timeZone so this expectation cannot
+    // depend on the host machine's TZ.
+    const now = new Date('2026-06-15T02:00:00.000Z');
+    const localWeekday = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Mexico_City',
+      weekday: 'long',
+    }).format(now);
+    expect(localWeekday).toBe('Sunday');
+
+    const promo = makePromotion({
+      id: 'promo-sunday',
+      daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
+    });
+    const repo = makeRepository([promo]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        now,
+        lines: [makeLine({ effectiveUnitPriceCents: 1000 })],
+      }),
+    );
+
+    // Proposed weekday interpretation: use the same business-local day
+    // that PromotionsService uses to normalize promotion date windows.
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].promotionId).toBe('promo-sunday');
+  });
+});
+
+describe('POS order price-list eligibility controls', () => {
+  it.each([
+    ['matching', ['A', 'A'], true, true],
+    ['mixed', ['A', 'B'], true, false],
+    ['unresolved', ['A', null], true, false],
+    ['unrestricted', ['A', null], false, true],
+  ] as const)('%s cart', async (_name, ids, restricted, applies) => {
+    const promo = makeOrderPromotion({
+      priceLists: restricted
+        ? [{ id: 'restriction', globalPriceListId: 'A' }]
+        : [],
+    });
+    const result = await new PosEvaluatePromotionsUseCase(
+      makeRepository([promo]),
+    ).evaluate(
+      makeInput({
+        lines: ids.map((id: string | null, i: number) =>
+          makeLine({
+            itemId: `item-${i}`,
+            appliedGlobalPriceListId: id,
+            appliedPriceListId: 'A',
+          }),
+        ),
+      }),
+    );
+    expect(result.lines).toEqual([]);
+    expect(result.order).toEqual(
+      applies
+        ? {
+            promotionId: promo.id,
+            discountType: 'percentage',
+            discountValue: 10,
+            discountTitle: 'X',
+            discountAmountCents: 200,
+          }
+        : null,
+    );
+  });
+});
+
+describe('POS configured business weekday', () => {
+  it.each([
+    ['PRODUCT_DISCOUNT', 'America/Mexico_City', 'SUNDAY', true],
+    ['PRODUCT_DISCOUNT', 'America/Mexico_City', 'MONDAY', false],
+    ['PRODUCT_DISCOUNT', 'UTC', 'MONDAY', true],
+    ['ORDER_DISCOUNT', 'America/Mexico_City', 'SUNDAY', true],
+    ['BUY_X_GET_Y', 'America/Mexico_City', 'SUNDAY', true],
+    ['ADVANCED', 'America/Mexico_City', 'SUNDAY', true],
+  ] as const)('%s in %s on %s', async (type, timezone, day, applies) => {
+    const promo = makePromotion({
+      type,
+      daysOfWeek: [{ id: 'day', day }],
+      buyQuantity: 1,
+      getQuantity: 1,
+      getDiscountPercent: 50,
+      buyTargetType: 'PRODUCTS',
+      getTargetType: 'PRODUCTS',
+      targetItems:
+        type === 'ADVANCED'
+          ? [
+              {
+                id: 'buy',
+                side: 'BUY',
+                targetType: 'PRODUCTS',
+                targetId: 'prod-1',
+              },
+              {
+                id: 'get',
+                side: 'GET',
+                targetType: 'PRODUCTS',
+                targetId: 'prod-2',
+              },
+            ]
+          : [
+              {
+                id: 'default',
+                side: 'DEFAULT',
+                targetType: 'PRODUCTS',
+                targetId: 'prod-1',
+              },
+            ],
+    });
+    const result = await new PosEvaluatePromotionsUseCase(
+      makeRepository([promo]),
+      new ConfigService({ PROMOTIONS_BUSINESS_TIMEZONE: timezone }),
+    ).evaluate(
+      makeInput({
+        now: new Date('2026-06-15T02:00:00.000Z'),
+        lines: [
+          makeLine({ quantity: 2 }),
+          makeLine({ itemId: 'get', productId: 'prod-2' }),
+        ],
+      }),
+    );
+    expect(
+      result.order?.promotionId ?? result.lines[0]?.promotionId ?? null,
+    ).toBe(applies ? promo.id : null);
   });
 });

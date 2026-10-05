@@ -755,6 +755,13 @@ export interface PromotionResponse {
 
 Tie-break: `promotionId` ascendente. No hay stacking de ganadores en una misma línea.
 
+Restricciones de elegibilidad:
+
+- `daysOfWeek` se evalúa en `PROMOTIONS_BUSINESS_TIMEZONE` (por defecto `America/Mexico_City`), no según el día UTC ni la zona del navegador.
+- `ORDER_DISCOUNT` con listas restringidas requiere que **todas** las líneas tengan un `appliedGlobalPriceListId` permitido. Una línea con lista distinta o sin resolver impide aplicar ese descuento sobre la orden.
+- `ADVANCED` con listas restringidas cuenta unidades BUY y recompensa unidades GET **solamente en líneas de listas permitidas**. Las otras líneas no aportan unidades ni reciben esa recompensa.
+- Una lista de restricciones vacía no limita la elegibilidad. Se comparan IDs de listas globales, no `PriceList.id`.
+
 ### 16.2 ADVANCED — reglas de matching
 
 - **Lado BUY**: la suma de cantidades de las líneas del cart cuyo entity (VARIANT > PRODUCT > CATEGORY/BRAND) matchea un `buyTargetItems` (lado `BUY`) debe alcanzar `buyQuantity`. Las líneas se agregan a través del cart — una sola línea con `qty ≥ buyQuantity` también cuenta.

@@ -991,3 +991,178 @@ describe('PosEvaluatePromotionsUseCase — ADVANCED zero-skip (D3 / 4R-review)',
     }
   });
 });
+
+// ============================================================
+// Proposed ADVANCED price-list policy — not an existing engine contract.
+//
+// Intake accepts price-list restrictions on ADVANCED, but the archived
+// engine slice intentionally ignores them. One promotion only avoids
+// mixed-list ambiguity: BUY and GET lines are both GPL-mayoreo while
+// the promotion is restricted to GPL-retail.
+// ============================================================
+describe('PosEvaluatePromotionsUseCase — ADVANCED price-list restriction', () => {
+  it('ADVANCED restricted to GPL-retail does NOT reward a GET line whose cart is exclusively GPL-mayoreo', async () => {
+    const advanced = makeAdvancedPromotion(
+      {
+        buyTargetType: 'PRODUCTS',
+        buyTargetIds: ['prod-buy'],
+        getTargetType: 'PRODUCTS',
+        getTargetIds: ['prod-get'],
+      },
+      {
+        buyQuantity: 1,
+        getQuantity: 1,
+        getDiscountPercent: 50,
+        priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
+      },
+    );
+    const repo = makeRepository([advanced]);
+    const useCase = new PosEvaluatePromotionsUseCase(repo);
+
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'item-buy',
+            productId: 'prod-buy',
+            quantity: 1,
+            effectiveUnitPriceCents: 1000,
+            appliedGlobalPriceListId: 'GPL-mayoreo',
+          }),
+          makeLine({
+            itemId: 'item-get',
+            productId: 'prod-get',
+            quantity: 1,
+            effectiveUnitPriceCents: 1000,
+            appliedGlobalPriceListId: 'GPL-mayoreo',
+          }),
+        ],
+      }),
+    );
+
+    // Proposed safety rule: a wholly non-matching cart should not get
+    // an ADVANCED reward from a price-list-restricted promotion.
+    expect(result.lines.find((l) => l.kind === 'advanced')).toBeUndefined();
+  });
+});
+
+describe('ADVANCED eligible BUY and GET price-list lines', () => {
+  it.each([
+    ['matching', 'A', 'A', true, true],
+    ['wrong BUY', 'B', 'A', true, false],
+    ['unresolved BUY', null, 'A', true, false],
+    ['wrong GET', 'A', 'B', true, false],
+    ['unresolved GET', 'A', null, true, false],
+    ['unrestricted', null, 'B', false, true],
+  ] as const)('%s', async (_name, buyList, getList, restricted, applies) => {
+    const promo = makeAdvancedPromotion(
+      {
+        buyTargetType: 'PRODUCTS',
+        buyTargetIds: ['buy'],
+        getTargetType: 'PRODUCTS',
+        getTargetIds: ['get'],
+      },
+      {
+        buyQuantity: 2,
+        priceLists: restricted ? [{ id: 'pl', globalPriceListId: 'A' }] : [],
+      },
+    );
+    const result = await new PosEvaluatePromotionsUseCase(
+      makeRepository([promo]),
+    ).evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'buy',
+            productId: 'buy',
+            quantity: 2,
+            appliedGlobalPriceListId: buyList,
+          }),
+          makeLine({
+            itemId: 'get',
+            productId: 'get',
+            appliedGlobalPriceListId: getList,
+          }),
+        ],
+      }),
+    );
+    expect(result.order).toBeNull();
+    expect(result.lines).toEqual(
+      applies
+        ? [
+            {
+              itemId: 'get',
+              promotionId: promo.id,
+              discountTitle: 'X',
+              kind: 'advanced',
+              lineDiscountCents: 500,
+              perUnitRewardCents: 500,
+              discountedUnitCount: 1,
+              getDiscountPercent: 50,
+            },
+          ]
+        : [],
+    );
+  });
+
+  it('does not count ineligible BUY units or allocate to ineligible GET lines in mixed carts', async () => {
+    const promo = makeAdvancedPromotion(
+      {
+        buyTargetType: 'PRODUCTS',
+        buyTargetIds: ['buy'],
+        getTargetType: 'PRODUCTS',
+        getTargetIds: ['get'],
+      },
+      { buyQuantity: 2, priceLists: [{ id: 'pl', globalPriceListId: 'A' }] },
+    );
+    const useCase = new PosEvaluatePromotionsUseCase(makeRepository([promo]));
+    const lines = [
+      makeLine({
+        itemId: 'buy-a',
+        productId: 'buy',
+        quantity: 1,
+        appliedGlobalPriceListId: 'A',
+      }),
+      makeLine({
+        itemId: 'buy-b',
+        productId: 'buy',
+        quantity: 10,
+        appliedGlobalPriceListId: 'B',
+      }),
+      makeLine({
+        itemId: 'get-0',
+        productId: 'get',
+        appliedGlobalPriceListId: 'B',
+      }),
+      makeLine({
+        itemId: 'get-1',
+        productId: 'get',
+        quantity: 3,
+        appliedGlobalPriceListId: 'A',
+      }),
+    ];
+    const below = await useCase.evaluate(makeInput({ lines }));
+    expect(below.lines).toEqual([]);
+    expect(below.order).toBeNull();
+    const eligible = await useCase.evaluate(
+      makeInput({
+        lines: lines.map((line) =>
+          line.itemId === 'buy-a' ? { ...line, quantity: 2 } : line,
+        ),
+      }),
+    );
+    expect(eligible.order).toBeNull();
+    expect(eligible.lines).toEqual([
+      {
+        itemId: 'get-1',
+        promotionId: promo.id,
+        discountTitle: 'X',
+        kind: 'advanced',
+        lineDiscountCents: 500,
+        perUnitRewardCents: 500,
+        discountedUnitCount: 1,
+        getDiscountPercent: 50,
+      },
+    ]);
+  });
+});
