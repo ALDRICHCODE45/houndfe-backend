@@ -80,6 +80,7 @@ import {
   type RestockIntakeInput,
   type RestockIntakeResult,
 } from '../domain/restock-intake.repository';
+import { EXPIRATION_INTAKE_REPOSITORY } from '../domain/expiration-intake.repository';
 import { HumanDecisionsModule } from '../human-decisions.module';
 import { PrismaBotApplicationOutcomeRepository } from '../infrastructure/prisma-bot-application-outcome.repository';
 import { PrismaBotRestockPollRepository } from '../infrastructure/prisma-bot-restock-poll.repository';
@@ -390,6 +391,14 @@ describe('Bot application outcome HTTP contract (HD-05c2a)', () => {
         {
           provide: RESTOCK_INTAKE_REPOSITORY,
           useValue: { submit },
+        },
+        {
+          provide: EXPIRATION_INTAKE_REPOSITORY,
+          useValue: {
+            submit: jest
+              .fn()
+              .mockRejectedValue(new Error('Unexpected expiration intake')),
+          },
         },
       ],
     }).compile();

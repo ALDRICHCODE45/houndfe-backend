@@ -40,8 +40,17 @@
  * be non-blank. A corrupted persisted row throws a VALUE-FREE `Error` instead of
  * publishing an invalid discriminant; malformed values are never truncated or
  * silently normalized, and a PENDING row never fabricates a resolution.
+ *
+ * EXPIRATION DISPATCH: an `EXPIRATION` row projects an EXPIRATION union
+ * (snapshot `{branchId,branchName,productId,productName,unit,variantId,
+ * variantName,variantOption,variantValue}`, NO SKU/stock keys). It keeps the
+ * POS `resolvedBy` audit, verifies `expirationText` against the HD-EXP-01a
+ * normalizer by EQUALITY, and offers the ordered EXPIRATION action pair.
+ * `applyBefore`/ACK stay bot-only; the RESTOCK-pinned adapter adds no behavior.
  */
 import type { HumanDecisionReviewRecord } from '../../domain/human-decision-review-read.repository';
+import { EXPIRATION_TYPE } from '../../domain/expiration-intake.request';
+import { normalizeExpirationText } from '../../domain/expiration-text';
 import {
   RESTOCK_PRODUCT_NAME_MAX_LENGTH,
   RESTOCK_TYPE,
@@ -142,16 +151,98 @@ export interface HumanDecisionReviewResolvedResponse extends HumanDecisionReview
   allowedActions: [];
 }
 
+/** The two EXPIRATION pending actions, in the exact FE contract order. */
+const EXPIRATION_PENDING_ALLOWED_ACTIONS = [
+  'PROVIDE_EXPIRATION_TEXT',
+  'REPORT_EXPIRATION_UNAVAILABLE',
+] as const;
+
+/** One exact EXPIRATION reviewer action code. */
+export type HumanDecisionExpirationReviewAction =
+  (typeof EXPIRATION_PENDING_ALLOWED_ACTIONS)[number];
+
+/**
+ * The empty array (read-only) or the two EXPIRATION codes in the fixed order;
+ * a partial or reordered array does not type-check.
+ */
+export type HumanDecisionExpirationPendingActions =
+  | []
+  | [
+      (typeof EXPIRATION_PENDING_ALLOWED_ACTIONS)[0],
+      (typeof EXPIRATION_PENDING_ALLOWED_ACTIONS)[1],
+    ];
+
+/** Immutable EXPIRATION snapshot: `unit` from `productUnit`, no SKU/stock key. */
+export interface HumanDecisionExpirationSnapshotResponse {
+  branchId: string;
+  branchName: string | null;
+  productId: string;
+  productName: string;
+  /** `Product.unit` for both simple and variant products. */
+  unit: string;
+  variantId: string | null;
+  variantName: string | null;
+  variantOption: string | null;
+  variantValue: string | null;
+}
+
+/** EXPIRATION resolution; the unavailable variant OMITS `expirationText`. */
+export type HumanDecisionExpirationResolutionResponse =
+  | {
+      action: 'PROVIDE_EXPIRATION_TEXT';
+      expirationText: string;
+      resolvedAt: string;
+      resolvedBy: HumanDecisionReviewResolvedByResponse;
+    }
+  | {
+      action: 'REPORT_EXPIRATION_UNAVAILABLE';
+      resolvedAt: string;
+      resolvedBy: HumanDecisionReviewResolvedByResponse;
+    };
+
+interface HumanDecisionExpirationBaseResponse {
+  id: string;
+  type: typeof EXPIRATION_TYPE;
+  title: string;
+  sanitizedSummary: string;
+  /** Canonical UTC ISO string. */
+  createdAt: string;
+  snapshot: HumanDecisionExpirationSnapshotResponse;
+}
+
+/** PENDING decision: no resolution, version 1, capability-derived actions. */
+export interface HumanDecisionExpirationPendingResponse extends HumanDecisionExpirationBaseResponse {
+  status: 'PENDING';
+  version: 1;
+  resolution: null;
+  allowedActions: HumanDecisionExpirationPendingActions;
+}
+
+/** RESOLVED decision: typed resolution, version 2, no further actions. */
+export interface HumanDecisionExpirationResolvedResponse extends HumanDecisionExpirationBaseResponse {
+  status: 'RESOLVED';
+  version: 2;
+  resolution: HumanDecisionExpirationResolutionResponse;
+  allowedActions: [];
+}
+
 export type HumanDecisionReviewResponse =
   | HumanDecisionReviewPendingResponse
-  | HumanDecisionReviewResolvedResponse;
+  | HumanDecisionReviewResolvedResponse
+  | HumanDecisionExpirationPendingResponse
+  | HumanDecisionExpirationResolvedResponse;
 
 const RESTOCK_TITLE = 'Solicitud de reposición de stock';
 const RESTOCK_SANITIZED_SUMMARY =
   'El chatbot solicitó una estimación de reposición de stock para un producto.';
+const EXPIRATION_TITLE = 'Consulta de vencimiento';
+const EXPIRATION_SANITIZED_SUMMARY =
+  'El chatbot solicitó información de vencimiento de un producto.';
 
 const POSITIVE_ACTION = PENDING_ALLOWED_ACTIONS[0];
 const NEGATIVE_ACTION = PENDING_ALLOWED_ACTIONS[1];
+const EXPIRATION_POSITIVE_ACTION = EXPIRATION_PENDING_ALLOWED_ACTIONS[0];
+const EXPIRATION_NEGATIVE_ACTION = EXPIRATION_PENDING_ALLOWED_ACTIONS[1];
 const MIN_RESTOCK_DAYS = 1;
 const MAX_RESTOCK_DAYS = 365;
 
@@ -177,13 +268,14 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
-function assertValidCreatedAt(record: HumanDecisionReviewRecord): void {
-  if (
-    !(record.createdAt instanceof Date) ||
-    Number.isNaN(record.createdAt.getTime())
-  ) {
+function assertValidDate(value: Date): void {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
     failClosed();
   }
+}
+
+function assertValidCreatedAt(record: HumanDecisionReviewRecord): void {
+  assertValidDate(record.createdAt);
 }
 
 function assertValidProductName(value: string): void {
@@ -394,17 +486,229 @@ function toResolution(
   failClosed();
 }
 
+/** True when `value` is a non-blank string; any other value fails closed. */
+function assertNonBlankString(value: unknown): void {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    failClosed();
+  }
+}
+
+/** `null` or a string; a missing/`undefined` value is corruption. */
+function assertNullableString(value: string | null | undefined): void {
+  if (value !== null && typeof value !== 'string') {
+    failClosed();
+  }
+}
+
+/** EXPIRATION snapshot: `productUnit` required, variant coupling pinned. */
+function assertExpirationSnapshot(record: HumanDecisionReviewRecord): void {
+  assertNonBlankString(record.branchId);
+  assertNullableString(record.branchName);
+  assertValidUuid(record.productId);
+  if (typeof record.productName !== 'string') {
+    failClosed();
+  }
+  if (typeof record.productUnit !== 'string') {
+    failClosed();
+  }
+  if (record.variantId !== null) {
+    assertValidUuid(record.variantId);
+  }
+  assertNullableString(record.variantName);
+  assertNullableString(record.variantOption);
+  assertNullableString(record.variantValue);
+  if (record.variantId !== null && record.variantName === null) {
+    failClosed();
+  }
+  if (
+    record.variantId === null &&
+    (record.variantName !== null ||
+      record.variantOption !== null ||
+      record.variantValue !== null)
+  ) {
+    failClosed();
+  }
+}
+
+/** Validates the persisted EXPIRATION row (dates and snapshot). */
+function assertExpirationReviewableRecord(
+  record: HumanDecisionReviewRecord,
+): void {
+  assertValidCreatedAt(record);
+  assertExpirationSnapshot(record);
+}
+
+/** Fresh EXPIRATION snapshot projection; copies no RESTOCK-only field. */
+function toExpirationSnapshot(
+  record: HumanDecisionReviewRecord,
+): HumanDecisionExpirationSnapshotResponse {
+  const unit = record.productUnit;
+  if (typeof unit !== 'string') {
+    failClosed();
+  }
+  return {
+    branchId: record.branchId,
+    branchName: record.branchName,
+    productId: record.productId,
+    productName: record.productName,
+    unit,
+    variantId: record.variantId,
+    variantName: record.variantName ?? null,
+    variantOption: record.variantOption ?? null,
+    variantValue: record.variantValue ?? null,
+  };
+}
+
+/** HD-EXP-01a normalizer by EQUALITY: a changed/rejected text fails closed. */
+function requireNormalizedExpirationText(value: string | null): string {
+  if (value === null) {
+    failClosed();
+  }
+  let normalized: string;
+  try {
+    normalized = normalizeExpirationText(value);
+  } catch {
+    return failClosed();
+  }
+  if (normalized !== value) {
+    failClosed();
+  }
+  return normalized;
+}
+
+/** Typed EXPIRATION resolution, or `null` for a well-formed PENDING row. */
+function toExpirationResolution(
+  record: HumanDecisionReviewRecord,
+): HumanDecisionExpirationResolutionResponse | null {
+  const expirationText = record.expirationText ?? null;
+
+  if (record.status === 'PENDING') {
+    if (
+      record.version !== 1 ||
+      record.resolutionAction !== null ||
+      record.restockDays !== null ||
+      expirationText !== null ||
+      record.resolvedAt !== null ||
+      record.resolvedByActorId !== null ||
+      record.resolvedByDisplayName !== null
+    ) {
+      failClosed();
+    }
+    return null;
+  }
+
+  if (record.status !== 'RESOLVED') {
+    failClosed();
+  }
+
+  if (
+    record.version !== 2 ||
+    record.resolvedAt === null ||
+    record.resolvedByActorId === null ||
+    record.resolvedByDisplayName === null
+  ) {
+    failClosed();
+  }
+  assertValidDate(record.resolvedAt);
+  if (
+    typeof record.resolvedByActorId !== 'string' ||
+    record.resolvedByActorId.trim().length === 0 ||
+    typeof record.resolvedByDisplayName !== 'string' ||
+    record.resolvedByDisplayName.trim().length === 0
+  ) {
+    failClosed();
+  }
+  // EXPIRATION never uses the RESTOCK-only day count; a stray value is corruption.
+  if (record.restockDays !== null) {
+    failClosed();
+  }
+
+  const resolvedAt = record.resolvedAt.toISOString();
+  const resolvedBy: HumanDecisionReviewResolvedByResponse = {
+    id: record.resolvedByActorId,
+    displayName: record.resolvedByDisplayName,
+  };
+
+  if (record.resolutionAction === EXPIRATION_POSITIVE_ACTION) {
+    return {
+      action: EXPIRATION_POSITIVE_ACTION,
+      expirationText: requireNormalizedExpirationText(expirationText),
+      resolvedAt,
+      resolvedBy,
+    };
+  }
+
+  if (record.resolutionAction === EXPIRATION_NEGATIVE_ACTION) {
+    if (expirationText !== null) {
+      failClosed();
+    }
+    return { action: EXPIRATION_NEGATIVE_ACTION, resolvedAt, resolvedBy };
+  }
+
+  failClosed();
+}
+
+/** Fresh, exact-typed copy of the fixed EXPIRATION pending action tuple. */
+function copyExpirationPendingActions(): HumanDecisionExpirationPendingActions {
+  return [
+    EXPIRATION_PENDING_ALLOWED_ACTIONS[0],
+    EXPIRATION_PENDING_ALLOWED_ACTIONS[1],
+  ];
+}
+
+/** Pure EXPIRATION projection with fixed copy and capability actions. */
+function toExpirationReviewResponse(
+  decision: HumanDecisionReviewRecord,
+  canResolve: boolean,
+):
+  | HumanDecisionExpirationPendingResponse
+  | HumanDecisionExpirationResolvedResponse {
+  assertExpirationReviewableRecord(decision);
+  const resolution = toExpirationResolution(decision);
+  const base: HumanDecisionExpirationBaseResponse = {
+    id: decision.id,
+    type: EXPIRATION_TYPE,
+    title: EXPIRATION_TITLE,
+    sanitizedSummary: EXPIRATION_SANITIZED_SUMMARY,
+    createdAt: decision.createdAt.toISOString(),
+    snapshot: toExpirationSnapshot(decision),
+  };
+
+  if (resolution === null) {
+    return {
+      ...base,
+      status: 'PENDING',
+      version: 1,
+      resolution: null,
+      allowedActions: canResolve ? copyExpirationPendingActions() : [],
+    };
+  }
+
+  return {
+    ...base,
+    status: 'RESOLVED',
+    version: 2,
+    resolution,
+    allowedActions: [],
+  };
+}
+
 /**
  * Pure projection from a persisted decision to the human reviewer DTO.
- * Validates the persisted record first, converts every `Date` to a canonical UTC
- * ISO string without mutating the input, and derives `allowedActions` solely
- * from the caller's resolve capability. Throws a value-free `Error` on a
- * malformed persisted state.
+ * Dispatches on the persisted `type`: `EXPIRATION` rows take the EXPIRATION
+ * branch, every other readable row takes the RESTOCK branch. Validates the
+ * persisted record first, converts every `Date` to a canonical UTC ISO string
+ * without mutating the input, and derives `allowedActions` solely from the
+ * caller's resolve capability. Throws a value-free `Error` on a malformed
+ * persisted state.
  */
 export function toHumanDecisionReviewResponse(
   decision: HumanDecisionReviewRecord,
   canResolve: boolean,
 ): HumanDecisionReviewResponse {
+  if (decision.type === EXPIRATION_TYPE) {
+    return toExpirationReviewResponse(decision, canResolve);
+  }
   assertReviewableRecord(decision);
   const resolution = toResolution(decision);
   const base: HumanDecisionReviewBaseResponse = {

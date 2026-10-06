@@ -153,6 +153,7 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   BOT_APPLICATION_OUTCOME_CLOCK,
   PrismaBotApplicationOutcomeRepository,
@@ -492,6 +493,24 @@ function resolvedDecisionData(
     createdAt: CREATED_AT,
     ...overrides,
   };
+}
+
+/** Valid `RESOLVED` EXPIRATION fixture: `productUnit` set, the RESTOCK snapshot NULL. */
+function expirationResolvedDecisionData(
+  tenantId: string,
+  resolvedById: string,
+): TenantScopedHumanDecisionUpdate {
+  return resolvedDecisionData(tenantId, resolvedById, {
+    type: EXPIRATION_TYPE,
+    sku: null,
+    requestedQuantity: null,
+    observedStockAtRequest: null,
+    stockObservedAt: null,
+    productUnit: 'caja',
+    resolutionAction: 'PROVIDE_EXPIRATION_TEXT',
+    restockDays: null,
+    expirationText: 'Vence en marzo de 2027',
+  });
 }
 
 /** Valid `PENDING` fixture, used for the version/status conflict case. */
@@ -1090,6 +1109,36 @@ describeIfDb(
             where: { supersedesDecisionId: decisionId },
           }),
         ).resolves.toBe(0);
+      });
+    });
+
+    describe('EXPIRATION type-aware deadline over real PostgreSQL + HTTP', () => {
+      it('records an EXPIRATION ACK 2h inside the 24h window over real HTTP', async () => {
+        const tenantId = await seedTenant('ACK Expiration Tenant');
+        const reviewerId = await seedReviewerUser();
+        const credential = await seedCredential({ tenantId });
+        const decisionId = await seedDecision(
+          expirationResolvedDecisionData(tenantId, reviewerId),
+        );
+
+        const body = acceptedBody({
+          attemptedAt: '2026-06-15T14:00:00.000Z',
+          providerAcceptedObservedAt: '2026-06-15T14:00:04.500Z',
+        });
+        const res = await postAck(decisionId, credential.token, body).expect(
+          200,
+        );
+
+        expect((res.body as { outcome: string }).outcome).toBe(
+          PROVIDER_ACCEPTED,
+        );
+        const row = await fullRow(decisionId);
+        expect(row?.type).toBe(EXPIRATION_TYPE);
+        expect(row?.applicationOutcome).toBe(PROVIDER_ACCEPTED);
+        expect(row?.applicationAttemptedAt?.toISOString()).toBe(
+          new Date('2026-06-15T14:00:00.000Z').toISOString(),
+        );
+        expect(row?.version).toBe(2);
       });
     });
 

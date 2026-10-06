@@ -18,6 +18,7 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import {
   BotRestockPollReadError,
   type BotRestockPollRecord,
@@ -27,6 +28,7 @@ import {
   HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
   HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE,
 } from '../domain/human-decision-review-resolve.repository';
+import { toBotExpirationPollResponse } from '../presentation/dto/bot-restock-poll.response';
 import {
   BOT_POLL_RECORD_SELECT,
   PrismaBotRestockPollRepository,
@@ -70,16 +72,23 @@ interface PollRow {
   resolutionAction: string | null;
   restockDays: number | null;
   resolvedAt: Date | null;
+  productUnit: string | null;
+  variantName: string | null;
+  variantOption: string | null;
+  variantValue: string | null;
+  expirationText: string | null;
 }
 
 const EXPECTED_SELECT_KEYS = [
   'branchId',
   'branchName',
   'createdAt',
+  'expirationText',
   'id',
   'observedStockAtRequest',
   'productId',
   'productName',
+  'productUnit',
   'requestedQuantity',
   'resolutionAction',
   'resolvedAt',
@@ -91,6 +100,9 @@ const EXPECTED_SELECT_KEYS = [
   'supersedesDecisionId',
   'type',
   'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
   'version',
 ];
 
@@ -129,6 +141,7 @@ const POLL_RECORD_TOP_LEVEL_KEYS = [
   'supersedesDecisionId',
   'resolutionAction',
   'restockDays',
+  'expirationText',
   'resolvedAt',
 ];
 
@@ -142,6 +155,10 @@ const SNAPSHOT_KEYS = [
   'requestedQuantity',
   'observedStockAtRequest',
   'stockObservedAt',
+  'productUnit',
+  'variantName',
+  'variantOption',
+  'variantValue',
 ];
 
 const PENDING_SNAPSHOT: BotRestockPollSnapshotRecord = {
@@ -154,6 +171,10 @@ const PENDING_SNAPSHOT: BotRestockPollSnapshotRecord = {
   requestedQuantity: REQUESTED_QUANTITY,
   observedStockAtRequest: OBSERVED_STOCK,
   stockObservedAt: OBSERVED_AT,
+  productUnit: null,
+  variantName: null,
+  variantOption: null,
+  variantValue: null,
 };
 
 function makeRow(overrides: Partial<PollRow> = {}): PollRow {
@@ -177,6 +198,11 @@ function makeRow(overrides: Partial<PollRow> = {}): PollRow {
     resolutionAction: null,
     restockDays: null,
     resolvedAt: null,
+    productUnit: null,
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
+    expirationText: null,
     ...overrides,
   };
 }
@@ -257,7 +283,7 @@ describe('PrismaBotRestockPollRepository', () => {
         id: DECISION_ID,
         tenantId: TENANT_ID,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
       });
       expect(args.where).not.toHaveProperty('status');
     });
@@ -312,7 +338,7 @@ describe('PrismaBotRestockPollRepository', () => {
   });
 
   describe('findById — SELECT allowlist', () => {
-    it('selects exactly the 19 mapper fields and no authority/reviewer column', async () => {
+    it('selects exactly the 24 mapper fields and no authority/reviewer column', async () => {
       const client = makeClient();
       client.humanDecision.findFirst.mockResolvedValue(makeRow());
       const { repo } = makeRepo(client);
@@ -355,6 +381,7 @@ describe('PrismaBotRestockPollRepository', () => {
         resolutionAction: null,
         restockDays: null,
         resolvedAt: null,
+        expirationText: null,
       };
 
       await expect(repo.findById(DECISION_ID)).resolves.toEqual(expected);
@@ -377,6 +404,7 @@ describe('PrismaBotRestockPollRepository', () => {
         resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
         restockDays: RESTOCK_DAYS,
         resolvedAt: RESOLVED_AT,
+        expirationText: null,
       };
 
       await expect(repo.findById(DECISION_ID)).resolves.toEqual(expected);
@@ -470,6 +498,99 @@ describe('PrismaBotRestockPollRepository', () => {
       expect(record?.snapshot).not.toBe(row);
       expect(record?.snapshot).toEqual(PENDING_SNAPSHOT);
     });
+  });
+
+  describe('findById — EXPIRATION current state (both types admitted)', () => {
+    const EXPIRATION_UNIT = 'UNIDAD';
+    const EXPIRATION_VARIANT_NAME = 'Presentación A';
+    const EXPIRATION_VARIANT_OPTION = 'Peso';
+    const EXPIRATION_VARIANT_VALUE = '1 kg';
+    const EXPIRATION_TEXT = 'Vence el 2026-05';
+
+    function expirationRow(overrides: Partial<PollRow> = {}): PollRow {
+      return makeRow({
+        type: EXPIRATION_TYPE,
+        productUnit: EXPIRATION_UNIT,
+        variantName: EXPIRATION_VARIANT_NAME,
+        variantOption: EXPIRATION_VARIANT_OPTION,
+        variantValue: EXPIRATION_VARIANT_VALUE,
+        ...overrides,
+      });
+    }
+
+    it('maps the five EXPIRATION columns onto the nested record', async () => {
+      const client = makeClient();
+      client.humanDecision.findFirst.mockResolvedValue(expirationRow());
+      const { repo } = makeRepo(client);
+
+      const record = await repo.findById(DECISION_ID);
+
+      expect(record?.type).toBe(EXPIRATION_TYPE);
+      expect(record?.expirationText).toBeNull();
+      expect(record?.snapshot).toMatchObject({
+        productUnit: EXPIRATION_UNIT,
+        variantName: EXPIRATION_VARIANT_NAME,
+        variantOption: EXPIRATION_VARIANT_OPTION,
+        variantValue: EXPIRATION_VARIANT_VALUE,
+      });
+    });
+
+    it.each<[string, PollRow, Record<string, unknown>]>([
+      [
+        'PENDING',
+        expirationRow(),
+        { status: 'PENDING', resolution: null, applyBefore: null },
+      ],
+      [
+        'PROVIDE_EXPIRATION_TEXT',
+        expirationRow({
+          status: 'RESOLVED',
+          version: 2,
+          resolutionAction: 'PROVIDE_EXPIRATION_TEXT',
+          expirationText: EXPIRATION_TEXT,
+          resolvedAt: RESOLVED_AT,
+        }),
+        {
+          status: 'RESOLVED',
+          resolution: {
+            action: 'PROVIDE_EXPIRATION_TEXT',
+            expirationText: EXPIRATION_TEXT,
+            resolvedAt: RESOLVED_AT.toISOString(),
+          },
+        },
+      ],
+      [
+        'REPORT_EXPIRATION_UNAVAILABLE',
+        expirationRow({
+          status: 'RESOLVED',
+          version: 2,
+          resolutionAction: 'REPORT_EXPIRATION_UNAVAILABLE',
+          expirationText: null,
+          resolvedAt: RESOLVED_AT,
+        }),
+        {
+          status: 'RESOLVED',
+          resolution: {
+            action: 'REPORT_EXPIRATION_UNAVAILABLE',
+            resolvedAt: RESOLVED_AT.toISOString(),
+          },
+        },
+      ],
+    ])(
+      'projects the EXPIRATION %s state through the committed mapper',
+      async (_label, row, expected) => {
+        const client = makeClient();
+        client.humanDecision.findFirst.mockResolvedValue(row);
+        const { repo } = makeRepo(client);
+
+        const record = await repo.findById(DECISION_ID);
+        if (record === null) {
+          throw new Error('expected a projected record');
+        }
+
+        expect(toBotExpirationPollResponse(record)).toMatchObject(expected);
+      },
+    );
   });
 
   describe('findById — missing / cross-tenant', () => {

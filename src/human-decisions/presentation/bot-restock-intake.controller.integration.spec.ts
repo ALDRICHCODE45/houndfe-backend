@@ -75,9 +75,12 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_INTAKE_REPOSITORY } from '../domain/expiration-intake.repository';
+import { PrismaExpirationIntakeRepository } from '../infrastructure/prisma-expiration-intake.repository';
 import { RESTOCK_INTAKE_REPOSITORY } from '../domain/restock-intake.repository';
 import { PrismaRestockIntakeRepository } from '../infrastructure/prisma-restock-intake.repository';
 import { BotRestockIntakeController } from './bot-restock-intake.controller';
+import type { BotExpirationIntakeResponse } from './dto/bot-expiration-intake.response';
 import type { BotRestockIntakeResponse } from './dto/bot-restock-intake.response';
 import { HumanDecisionHttpFilter } from './filters/human-decision-http.filter';
 
@@ -315,6 +318,89 @@ function receiptOf(response: { body: unknown }): BotRestockIntakeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// EXPIRATION intake fixtures (HD-EXP-03b)
+// ---------------------------------------------------------------------------
+
+interface ExpirationIntakeBody {
+  sourceRequestId: string;
+  type: 'EXPIRATION';
+  productId: string;
+  variantId: string | null;
+}
+
+/** Exact bot-safe receipt keys; EXPIRATION carries no SKU or stock fields. */
+const EXPIRATION_RECEIPT_KEYS = [
+  'applyBefore',
+  'createdAt',
+  'id',
+  'resolution',
+  'snapshot',
+  'sourceRequestId',
+  'status',
+  'supersedesDecisionId',
+  'type',
+  'version',
+].sort();
+
+function expirationBody(
+  overrides: Partial<ExpirationIntakeBody> = {},
+): ExpirationIntakeBody {
+  return {
+    sourceRequestId: crypto.randomUUID(),
+    type: 'EXPIRATION',
+    productId: crypto.randomUUID(),
+    variantId: null,
+    ...overrides,
+  };
+}
+
+/** Seed a bot-visible catalog product through the existing test DB client. */
+async function seedCatalogProduct(params: {
+  tenantId: string;
+  name: string;
+  unit?: 'UNIDAD' | 'CAJA';
+  hasVariants?: boolean;
+  includeInOnlineCatalog?: boolean;
+}): Promise<string> {
+  const id = crypto.randomUUID();
+  await integrationPrisma().product.create({
+    data: {
+      id,
+      tenantId: params.tenantId,
+      name: params.name,
+      unit: params.unit ?? 'UNIDAD',
+      hasVariants: params.hasVariants ?? false,
+      includeInOnlineCatalog: params.includeInOnlineCatalog ?? true,
+    },
+  });
+  return id;
+}
+
+/** Seed a catalog variant; `catalogPublishMode` defaults to INHERIT. */
+async function seedCatalogVariant(params: {
+  tenantId: string;
+  productId: string;
+  name: string;
+  option?: string | null;
+  value?: string | null;
+  catalogPublishMode?: 'INHERIT' | 'ON' | 'OFF';
+}): Promise<string> {
+  const id = crypto.randomUUID();
+  await integrationPrisma().variant.create({
+    data: {
+      id,
+      tenantId: params.tenantId,
+      productId: params.productId,
+      name: params.name,
+      option: params.option ?? null,
+      value: params.value ?? null,
+      catalogPublishMode: params.catalogPublishMode ?? 'INHERIT',
+    },
+  });
+  return id;
+}
+
+// ---------------------------------------------------------------------------
 // Suite
 // ---------------------------------------------------------------------------
 
@@ -356,6 +442,10 @@ describeIfDb('Bot restock intake HTTP integration (HD-03b3)', () => {
         {
           provide: RESTOCK_INTAKE_REPOSITORY,
           useClass: PrismaRestockIntakeRepository,
+        },
+        {
+          provide: EXPIRATION_INTAKE_REPOSITORY,
+          useClass: PrismaExpirationIntakeRepository,
         },
       ],
     }).compile();
@@ -742,6 +832,266 @@ describeIfDb('Bot restock intake HTTP integration (HD-03b3)', () => {
       expect(JSON.stringify(forbidden.body)).not.toContain(readOnly.id);
       expect(
         await integrationPrisma().humanDecision.count({ where: { tenantId } }),
+      ).toBe(0);
+    });
+  });
+
+  describe('EXPIRATION intake on the shared route (HD-EXP-03b)', () => {
+    const expPost = (body: ExpirationIntakeBody, token: string) =>
+      http()
+        .post(INTAKE_URL)
+        .set('Authorization', `Bearer ${token}`)
+        .set('X-Idempotency-Key', body.sourceRequestId)
+        .send(body);
+
+    it('creates a 201 PENDING/v1 receipt for a simple product with the persisted unit and no SKU', async () => {
+      const tenantId = await seedTenant('Exp Simple Tenant');
+      const credential = registerCredential({
+        tenantId,
+        token: 'svc_exp_simple',
+      });
+      const productId = await seedCatalogProduct({
+        tenantId,
+        name: 'Ibuprofeno 400 mg',
+        unit: 'CAJA',
+      });
+      const body = expirationBody({ productId });
+      const response = await expPost(body, 'svc_exp_simple').expect(201);
+      const receipt = response.body as BotExpirationIntakeResponse;
+
+      expect(Object.keys(receipt).sort()).toEqual(EXPIRATION_RECEIPT_KEYS);
+      expect(receipt.type).toBe('EXPIRATION');
+      expect(receipt.status).toBe('PENDING');
+      expect(receipt.version).toBe(1);
+      expect(receipt.sourceRequestId).toBe(body.sourceRequestId);
+      expect(receipt.supersedesDecisionId).toBeNull();
+      expect(receipt.resolution).toBeNull();
+      expect(receipt.applyBefore).toBeNull();
+      expect(receipt.snapshot).toEqual({
+        branchId: tenantId,
+        branchName: 'Exp Simple Tenant',
+        productId,
+        productName: 'Ibuprofeno 400 mg',
+        unit: 'CAJA',
+        variantId: null,
+        variantName: null,
+        variantOption: null,
+        variantValue: null,
+      });
+      expect(JSON.stringify(receipt)).not.toContain(credential.id);
+      const row = await findDecisionOrFail(receipt.id);
+      expect(row).toMatchObject({
+        tenantId,
+        type: 'EXPIRATION',
+        status: 'PENDING',
+        version: 1,
+        submittedCredentialId: credential.id,
+        branchId: tenantId,
+        productId,
+        productName: 'Ibuprofeno 400 mg',
+        productUnit: 'CAJA',
+        variantId: null,
+        variantName: null,
+        variantOption: null,
+        variantValue: null,
+        sku: null,
+      });
+    });
+
+    it('creates a 201 variant receipt with unit and variant metadata and no SKU', async () => {
+      const tenantId = await seedTenant('Exp Variant Tenant');
+      registerCredential({ tenantId, token: 'svc_exp_variant' });
+      const productId = await seedCatalogProduct({
+        tenantId,
+        name: 'Filtro de aceite',
+        hasVariants: true,
+      });
+      const variantId = await seedCatalogVariant({
+        tenantId,
+        productId,
+        name: 'Verde',
+        option: 'Color',
+        value: 'Verde',
+        catalogPublishMode: 'ON',
+      });
+      const body = expirationBody({ productId, variantId });
+      const response = await expPost(body, 'svc_exp_variant').expect(201);
+      const receipt = response.body as BotExpirationIntakeResponse;
+
+      expect(receipt.snapshot).toEqual({
+        branchId: tenantId,
+        branchName: 'Exp Variant Tenant',
+        productId,
+        productName: 'Filtro de aceite',
+        unit: 'UNIDAD',
+        variantId,
+        variantName: 'Verde',
+        variantOption: 'Color',
+        variantValue: 'Verde',
+      });
+      expect(receipt).not.toHaveProperty('sku');
+      const row = await findDecisionOrFail(receipt.id);
+      expect(row).toMatchObject({
+        productUnit: 'UNIDAD',
+        variantId,
+        variantName: 'Verde',
+        variantOption: 'Color',
+        variantValue: 'Verde',
+        sku: null,
+      });
+    });
+
+    it('replays an exact request as a 200 unchanged historical receipt after a catalog rename and unpublish', async () => {
+      const tenantId = await seedTenant('Exp Replay Tenant');
+      registerCredential({ tenantId, token: 'svc_exp_replay' });
+      const productId = await seedCatalogProduct({
+        tenantId,
+        name: 'Original Label',
+      });
+      const body = expirationBody({ productId });
+      const created = await expPost(body, 'svc_exp_replay').expect(201);
+      const createdReceipt = created.body as BotExpirationIntakeResponse;
+      const before = await findDecisionOrFail(createdReceipt.id);
+      // Mutate the live catalog through the existing test DB client: rename the
+      // product and remove it from the online catalog, so replay must win
+      // BEFORE any current-catalog validation.
+      await integrationPrisma().product.update({
+        where: { id: productId },
+        data: { name: 'Renamed Label', includeInOnlineCatalog: false },
+      });
+      const replayed = await expPost(body, 'svc_exp_replay').expect(200);
+      const replayedReceipt = replayed.body as BotExpirationIntakeResponse;
+
+      expect(replayed.body).toEqual(created.body);
+      expect(replayedReceipt.snapshot.productName).toBe('Original Label');
+      const after = await findDecisionOrFail(createdReceipt.id);
+      expect(after.productName).toBe('Original Label');
+      expect(after.productName).toBe(before.productName);
+      expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+      expect(
+        await integrationPrisma().humanDecision.count({
+          where: { tenantId, type: 'EXPIRATION' },
+        }),
+      ).toBe(1);
+    });
+
+    it('rejects a changed payload under the same key with a 409 envelope and no extra row', async () => {
+      const tenantId = await seedTenant('Exp Conflict Tenant');
+      registerCredential({ tenantId, token: 'svc_exp_conflict' });
+      const productId = await seedCatalogProduct({
+        tenantId,
+        name: 'Conflict A',
+      });
+      const otherProductId = await seedCatalogProduct({
+        tenantId,
+        name: 'Conflict B',
+      });
+      const body = expirationBody({ productId });
+      const created = await expPost(body, 'svc_exp_conflict').expect(201);
+      const before = await findDecisionOrFail(
+        (created.body as BotExpirationIntakeResponse).id,
+      );
+      const response = await expPost(
+        expirationBody({
+          sourceRequestId: body.sourceRequestId,
+          productId: otherProductId,
+        }),
+        'svc_exp_conflict',
+      ).expect(409);
+      const envelope = response.body as ErrorEnvelope;
+
+      expect(envelope).toEqual({
+        statusCode: 409,
+        code: 'IDEMPOTENCY_CONFLICT',
+        message: 'Request conflicts with a previous submission',
+      });
+      expect(Object.keys(envelope).sort()).toEqual(ERROR_ENVELOPE_KEYS);
+      expect(JSON.stringify(envelope)).not.toContain('hash');
+      const after = await findDecisionOrFail(before.id);
+      expect(after.productId).toBe(productId);
+      expect(after.canonicalRequestHash).toBe(before.canonicalRequestHash);
+      expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+      expect(
+        await integrationPrisma().humanDecision.count({ where: { tenantId } }),
+      ).toBe(1);
+    });
+
+    it('isolates tenant catalog eligibility: foreign product and cross-tenant variant 404, variant mismatches 400, nothing persisted', async () => {
+      const tenantA = await seedTenant('Exp Ownership A');
+      const tenantB = await seedTenant('Exp Ownership B');
+      registerCredential({ tenantId: tenantA, token: 'svc_exp_own_a' });
+      const simpleProductId = await seedCatalogProduct({
+        tenantId: tenantA,
+        name: 'Owned Simple',
+      });
+      const variantProductId = await seedCatalogProduct({
+        tenantId: tenantA,
+        name: 'Owned Variant',
+        hasVariants: true,
+      });
+      // Owned visible variant keeps the variant product eligible for the 400.
+      await seedCatalogVariant({
+        tenantId: tenantA,
+        productId: variantProductId,
+        name: 'Owned Visible',
+      });
+      const foreignProductId = await seedCatalogProduct({
+        tenantId: tenantB,
+        name: 'Foreign Secret Product',
+      });
+      // The variant claims tenant A's product but belongs to tenant B: the
+      // adapter predicate requires BOTH productId and tenantId, so it is hidden.
+      const crossTenantVariantId = await seedCatalogVariant({
+        tenantId: tenantB,
+        productId: variantProductId,
+        name: 'Foreign Variant',
+      });
+
+      const foreignProduct = await expPost(
+        expirationBody({ productId: foreignProductId }),
+        'svc_exp_own_a',
+      ).expect(404);
+      const crossTenantVariant = await expPost(
+        expirationBody({
+          productId: variantProductId,
+          variantId: crossTenantVariantId,
+        }),
+        'svc_exp_own_a',
+      ).expect(404);
+      const variantRequired = await expPost(
+        expirationBody({ productId: variantProductId, variantId: null }),
+        'svc_exp_own_a',
+      ).expect(400);
+      const variantNotAllowed = await expPost(
+        expirationBody({
+          productId: simpleProductId,
+          variantId: crypto.randomUUID(),
+        }),
+        'svc_exp_own_a',
+      ).expect(400);
+
+      const notFound = {
+        statusCode: 404,
+        code: 'NOT_FOUND',
+        message: 'Not found',
+      };
+      expect(foreignProduct.body).toEqual(notFound);
+      expect(crossTenantVariant.body).toEqual(notFound);
+      expect(JSON.stringify(foreignProduct.body)).not.toContain(tenantB);
+      expect(JSON.stringify(foreignProduct.body)).not.toContain(
+        'Foreign Secret Product',
+      );
+      const validation = {
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid request',
+      };
+      expect(variantRequired.body).toEqual(validation);
+      expect(variantNotAllowed.body).toEqual(validation);
+      expect(
+        await integrationPrisma().humanDecision.count({
+          where: { tenantId: tenantA },
+        }),
       ).toBe(0);
     });
   });

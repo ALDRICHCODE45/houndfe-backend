@@ -34,8 +34,9 @@
  * JWT/guard — never from the request body. Until that wiring exists this port
  * is NOT a privilege boundary and must not be exposed by any route.
  *
- * ONE-WINNER CAS: the decision is looked up by id + tenant + RESTOCK
- * source/type. A `PENDING` row whose `version` differs from `expectedVersion`
+ * ONE-WINNER CAS: the decision is looked up by id + tenant + source + the
+ * EXACT, action-inferred `type` (never the open RESTOCK/EXPIRATION set). A
+ * `PENDING` row whose `version` differs from `expectedVersion`
  * is `VERSION_CONFLICT`. Otherwise a single `updateMany` conditioned on
  * `status='PENDING' AND version=expectedVersion` flips it to `RESOLVED`/
  * version 2 with the immutable reviewer snapshots (`resolvedById` FK +
@@ -47,11 +48,17 @@
  * value-free plain `Error` (rolling the transaction back) instead of a false
  * replay or a fabricated 409.
  *
- * REPLAY/CONFLICT: same `resolutionRequestId` + exact action/days +
- * `expectedVersion=1` + same actor id replays with no mutation; any other
- * payload/actor under the same key is `IDEMPOTENCY_CONFLICT`; a different key
- * is `ALREADY_RESOLVED`. A missing/cross-tenant/foreign-source decision is a
- * sanitized `NOT_FOUND`.
+ * REPLAY/CONFLICT: same `resolutionRequestId` + exact action + exact
+ * type/payload (`restockDays` for RESTOCK, HD-EXP-01a-normalized
+ * `expirationText` for EXPIRATION) + `expectedVersion=1` + same actor id
+ * replays with no mutation; any other payload/actor under the same key is
+ * `IDEMPOTENCY_CONFLICT`; a different key is `ALREADY_RESOLVED`. A
+ * missing/cross-tenant/foreign-source decision is a sanitized `NOT_FOUND`.
+ *
+ * TYPE OWNERSHIP: the command carries NO `type`. The adapter infers the exact
+ * `type` from `action` and pins it in the state read, the CAS, the loser
+ * reread and the projection read, so a RESTOCK command can never write an
+ * EXPIRATION decision (or vice versa) even when ids collide across types.
  *
  * MUTATION SCOPE: the only write is the `humanDecision.updateMany` above. This
  * adapter never touches bot outcome, provider, stock, sale or any other model.
@@ -89,8 +96,13 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
+import { normalizeExpirationText } from '../domain/expiration-text';
 import {
   HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
+  HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT,
+  HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE,
+  HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
   HumanDecisionReviewResolveError,
   type HumanDecisionReviewResolveErrorCode,
   type HumanDecisionReviewResolveResult,
@@ -105,16 +117,18 @@ type TenantScopedClient = ReturnType<TenantPrismaService['getClient']>;
 /**
  * Internal decision-state projection. It carries ONLY the fields needed to
  * classify the CAS (`status`/`version`) and to compare an idempotent replay
- * (`resolutionRequestId`/`resolutionAction`/`restockDays`/`resolvedByActorId`).
- * It is NEVER returned to the caller.
+ * (`type`/`resolutionRequestId`/`resolutionAction`/`restockDays`/`
+ * expirationText`/`resolvedByActorId`). It is NEVER returned to the caller.
  */
 const DECISION_STATE_SELECT = {
   id: true,
+  type: true,
   status: true,
   version: true,
   resolutionRequestId: true,
   resolutionAction: true,
   restockDays: true,
+  expirationText: true,
   resolvedByActorId: true,
 } satisfies Prisma.HumanDecisionSelect;
 
@@ -126,6 +140,28 @@ type DecisionStateRow = Prisma.HumanDecisionGetPayload<{
 interface ReviewerActor {
   id: string;
   name: string;
+}
+
+/** The exact, closed decision-type set this resolve port may write. */
+type PinnedDecisionType = typeof RESTOCK_TYPE | typeof EXPIRATION_TYPE;
+
+/**
+ * Infer the EXACT decision `type` from the command `action`. The command
+ * carries NO `type`, so a caller can never cross types: the state read, the CAS
+ * and the loser reread are each pinned to this SINGLE value — never the open
+ * `{ in: [RESTOCK, EXPIRATION] }` set the read inbox uses.
+ */
+function decisionTypeForAction(
+  action: ResolveHumanDecisionCommand['action'],
+): PinnedDecisionType {
+  switch (action) {
+    case HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE:
+    case HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE:
+      return RESTOCK_TYPE;
+    case HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT:
+    case HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE:
+      return EXPIRATION_TYPE;
+  }
 }
 
 /**
@@ -191,8 +227,10 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
     }
 
     // Tenant is ALWAYS from the CLS context, never the command, and is
-    // resolved unconditionally so a tenantless superadmin fails closed.
+    // resolved unconditionally so a tenantless superadmin fails closed. The
+    // exact decision `type` is inferred from the action (never supplied).
     const tenantId = this.tenantPrisma.getTenantId();
+    const type = decisionTypeForAction(command.action);
 
     return this.tenantPrisma.runInTransaction(async () => {
       const db = this.tenantPrisma.getClient();
@@ -206,6 +244,7 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
         db,
         tenantId,
         command.decisionId,
+        type,
       );
       if (current === null) {
         return fail('NOT_FOUND');
@@ -215,7 +254,12 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
         this.assertExactReplay(current, command);
         return {
           status: 'replayed',
-          decision: await this.readProjection(db, tenantId, command.decisionId),
+          decision: await this.readProjection(
+            db,
+            tenantId,
+            command.decisionId,
+            type,
+          ),
         };
       }
 
@@ -228,7 +272,7 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
           id: command.decisionId,
           tenantId,
           source: RESTOCK_SOURCE,
-          type: RESTOCK_TYPE,
+          type,
           status: 'PENDING',
           version: command.expectedVersion,
         },
@@ -238,7 +282,12 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
       if (updated.count === 1) {
         return {
           status: 'resolved',
-          decision: await this.readProjection(db, tenantId, command.decisionId),
+          decision: await this.readProjection(
+            db,
+            tenantId,
+            command.decisionId,
+            type,
+          ),
         };
       }
 
@@ -257,6 +306,7 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
         db,
         tenantId,
         command.decisionId,
+        type,
       );
       if (winner === null || winner.status !== 'RESOLVED') {
         return fail('VERSION_CONFLICT');
@@ -264,7 +314,12 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
       this.assertExactReplay(winner, command);
       return {
         status: 'replayed',
-        decision: await this.readProjection(db, tenantId, command.decisionId),
+        decision: await this.readProjection(
+          db,
+          tenantId,
+          command.decisionId,
+          type,
+        ),
       };
     });
   }
@@ -304,13 +359,14 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
     db: TenantScopedClient,
     tenantId: string,
     decisionId: string,
+    type: PinnedDecisionType,
   ): Promise<DecisionStateRow | null> {
     return db.humanDecision.findFirst({
       where: {
         id: decisionId,
         tenantId,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type,
       },
       select: DECISION_STATE_SELECT,
     });
@@ -318,19 +374,20 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
 
   /**
    * Committed reviewer projection read, reusing the SAME `REVIEW_RECORD_SELECT`
-   * allowlist as the HD-04b3 read adapter.
+   * allowlist as the HD-04b3 read adapter, pinned to the inferred type.
    */
   private async readProjection(
     db: TenantScopedClient,
     tenantId: string,
     decisionId: string,
+    type: PinnedDecisionType,
   ): Promise<HumanDecisionReviewRecord> {
     const record = await db.humanDecision.findFirst({
       where: {
         id: decisionId,
         tenantId,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type,
       },
       select: REVIEW_RECORD_SELECT,
     });
@@ -343,8 +400,9 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
   /**
    * Classify an already-`RESOLVED` decision against the command. Throws
    * `ALREADY_RESOLVED` for a different key and `IDEMPOTENCY_CONFLICT` for the
-   * same key with any non-exact payload/actor; returns silently for an exact
-   * replay.
+   * same key with any non-exact action/type/payload/actor/version; returns
+   * silently for an exact replay. The EXPIRATION text is re-normalized with the
+   * HD-EXP-01a domain policy, so the comparison never trusts the transport.
    */
   private assertExactReplay(
     decision: DecisionStateRow,
@@ -353,33 +411,49 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
     if (decision.resolutionRequestId !== command.resolutionRequestId) {
       return fail('ALREADY_RESOLVED');
     }
-    const expectedDays =
+    const expectedRestockDays =
       command.action === HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE
         ? command.restockDays
         : null;
+    const expectedExpirationText =
+      command.action === HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT
+        ? normalizeExpirationText(command.expirationText)
+        : null;
     const isExactReplay =
+      decision.type === decisionTypeForAction(command.action) &&
       command.expectedVersion === 1 &&
       decision.resolutionAction === command.action &&
-      decision.restockDays === expectedDays &&
+      decision.restockDays === expectedRestockDays &&
+      decision.expirationText === expectedExpirationText &&
       decision.resolvedByActorId === command.actorUserId;
     if (!isExactReplay) {
       return fail('IDEMPOTENCY_CONFLICT');
     }
   }
 
-  /** Immutable resolution write payload; server time and server actor only. */
+  /**
+   * Immutable resolution write payload; server time and server actor only. The
+   * exact action column is written verbatim; a positive EXPIRATION action
+   * stores the normalized text and `null` restockDays while every RESTOCK and
+   * negative action stores `null` expirationText — so the two field families
+   * never couple across types.
+   */
   private buildResolutionData(
     command: ResolveHumanDecisionCommand,
     actor: ReviewerActor,
   ): Prisma.HumanDecisionUncheckedUpdateManyInput {
+    const isProvideRestock =
+      command.action === HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE;
+    const isProvideExpirationText =
+      command.action === HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT;
     return {
       status: 'RESOLVED',
       version: 2,
       resolutionAction: command.action,
-      restockDays:
-        command.action === HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE
-          ? command.restockDays
-          : null,
+      restockDays: isProvideRestock ? command.restockDays : null,
+      expirationText: isProvideExpirationText
+        ? normalizeExpirationText(command.expirationText)
+        : null,
       resolutionRequestId: command.resolutionRequestId,
       resolvedAt: this.now(),
       resolvedById: actor.id,

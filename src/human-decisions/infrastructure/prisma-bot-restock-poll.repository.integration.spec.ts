@@ -39,12 +39,10 @@
  * superadmin bypass is real and that the adapter's unconditional
  * `getTenantId()` is the actual fail-closed gate.
  *
- * TYPE PIN LIMIT: `HumanDecisionType` has exactly one member (`RESTOCK`), so a
- * persisted non-RESTOCK row cannot be seeded and a "wrong type" miss is
- * structurally the same no-match as a missing row. The spec asserts the
- * single-member enum and pins the behavioral proof on the source dimension
- * (which CAN be seeded); if the enum ever grows, this spec must grow a real
- * seeded case.
+ * TYPE ADMISSION, NOT ENUM-ONLY: `HumanDecisionType` has TWO members; the
+ * nulls test seeds a real same-tenant/same-source PENDING EXPIRATION row and
+ * proves the closed `{ RESTOCK, EXPIRATION }` type set ADMITS it (with its
+ * product unit) while cross-tenant and foreign-source rows stay null.
  *
  * ISOLATED-DB GUARD: before this file touches a row it validates BOTH the
  * `.env.test` file parsed with the local `dotenv` AND the ACTIVE
@@ -291,9 +289,10 @@ const RESOLVED_PLUS_1H_ISO = new Date(
 ).toISOString();
 const SUPERSEDES_ID = '77777777-7777-4777-8777-777777777777';
 
-/** Top-level keys of the nested poll record (11), sorted. */
+/** Top-level keys of the nested poll record (12), sorted. */
 const POLL_RECORD_KEYS = [
   'createdAt',
+  'expirationText',
   'id',
   'resolutionAction',
   'resolvedAt',
@@ -306,7 +305,7 @@ const POLL_RECORD_KEYS = [
   'version',
 ];
 
-/** Immutable snapshot keys (9), sorted. */
+/** Immutable snapshot keys of the RESTOCK wire/receipt projection (9), sorted. */
 const SNAPSHOT_KEYS = [
   'branchId',
   'branchName',
@@ -319,15 +318,30 @@ const SNAPSHOT_KEYS = [
   'variantId',
 ];
 
-/** The 19 keys of the adapter's exact SELECT allowlist, sorted. */
+/**
+ * The adapter record always carries the four EXPIRATION snapshot columns
+ * (`null` on RESTOCK), while the wire/receipt projections still carry the nine
+ * immutable intake keys — so the two keysets are deliberately separate.
+ */
+const RECORD_SNAPSHOT_KEYS = [
+  ...SNAPSHOT_KEYS,
+  'productUnit',
+  'variantName',
+  'variantOption',
+  'variantValue',
+].sort();
+
+/** The 24 keys of the adapter's exact SELECT allowlist, sorted. */
 const SELECT_KEYS = [
   'branchId',
   'branchName',
   'createdAt',
+  'expirationText',
   'id',
   'observedStockAtRequest',
   'productId',
   'productName',
+  'productUnit',
   'requestedQuantity',
   'resolutionAction',
   'resolvedAt',
@@ -339,6 +353,9 @@ const SELECT_KEYS = [
   'supersedesDecisionId',
   'type',
   'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
   'version',
 ];
 
@@ -405,6 +422,24 @@ const FORBIDDEN_SELECT_KEYS = [
 interface PollFixture {
   data: Prisma.HumanDecisionUncheckedCreateInput;
   expectedSnapshot: BotRestockPollSnapshotRecord;
+}
+
+/**
+ * The adapter record carries the four EXPIRATION snapshot columns (`null` on a
+ * RESTOCK row); the RESTOCK wire/receipt projections still carry the nine
+ * immutable intake keys. Keeping the record-level expectation separate avoids
+ * widening the RESTOCK wire contract.
+ */
+function recordSnapshot(
+  snapshot: BotRestockPollSnapshotRecord,
+): BotRestockPollSnapshotRecord {
+  return {
+    ...snapshot,
+    productUnit: null,
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
+  };
 }
 
 /** One explicit tenant per test; the baseline tenant is never reused. */
@@ -694,18 +729,21 @@ describeIfDb(
           status: 'PENDING',
           version: 1,
           createdAt: CREATED_AT,
-          snapshot: selected.expectedSnapshot,
+          snapshot: recordSnapshot(selected.expectedSnapshot),
           supersedesDecisionId: SUPERSEDES_ID,
           resolutionAction: null,
           restockDays: null,
+          expirationText: null,
           resolvedAt: null,
         });
         // The row actually selected is the requested one, not a decoy.
         expect(record.id).not.toBe(decoyId);
         expect(record.id).not.toBe(foreignId);
-        // Real DB: exactly the 11 record keys and 9 snapshot keys.
+        // Real DB: exactly the 12 record keys and 13 snapshot keys.
         expect(Object.keys(record).sort()).toEqual(POLL_RECORD_KEYS);
-        expect(Object.keys(record.snapshot).sort()).toEqual(SNAPSHOT_KEYS);
+        expect(Object.keys(record.snapshot).sort()).toEqual(
+          RECORD_SNAPSHOT_KEYS,
+        );
 
         // Non-vacuous: all three rows ARE committed in the dedicated DB, and
         // the two decoys differ from the selected row in the pinned dimensions.
@@ -787,11 +825,15 @@ describeIfDb(
         expect(record.resolvedAt?.toISOString()).toBe(
           RESOLVED_AT.toISOString(),
         );
-        expect(record.snapshot).toEqual(fixture.expectedSnapshot);
+        expect(record.snapshot).toEqual(
+          recordSnapshot(fixture.expectedSnapshot),
+        );
 
         // Exact top-level and snapshot keysets; no forbidden key may appear.
         expect(Object.keys(record).sort()).toEqual(POLL_RECORD_KEYS);
-        expect(Object.keys(record.snapshot).sort()).toEqual(SNAPSHOT_KEYS);
+        expect(Object.keys(record.snapshot).sort()).toEqual(
+          RECORD_SNAPSHOT_KEYS,
+        );
         for (const forbidden of FORBIDDEN_RECORD_KEYS) {
           expect(record).not.toHaveProperty(forbidden);
         }
@@ -960,7 +1002,7 @@ describeIfDb(
     });
 
     describe('indistinguishable nulls and the pinned predicate', () => {
-      it('returns null for missing, cross-tenant and foreign-source ids while the rows exist', async () => {
+      it('returns null for missing, cross-tenant and foreign-source ids while the same-tenant EXPIRATION row resolves', async () => {
         const tenantA = await seedTenant('Miss Tenant A');
         const tenantB = await seedTenant('Miss Tenant B');
         const crossTenantId = await seedDecision(
@@ -969,6 +1011,20 @@ describeIfDb(
         const foreignSourceId = await seedDecision(
           pendingFixture(tenantA, 'Miss Tenant A', {
             source: 'other-bot-source',
+          }).data,
+        );
+        // Same tenant/source PENDING EXPIRATION row: the committed closed
+        // `{ RESTOCK, EXPIRATION }` type set ADMITS it (with its product unit)
+        // while every RESTOCK-only snapshot column stays NULL.
+        const expirationId = await seedDecision(
+          pendingFixture(tenantA, 'Miss Tenant A', {
+            type: HumanDecisionType.EXPIRATION,
+            productUnit: 'UNIDAD',
+            variantName: null,
+            sku: null,
+            requestedQuantity: null,
+            observedStockAtRequest: null,
+            stockObservedAt: null,
           }).data,
         );
         const missingId = crypto.randomUUID();
@@ -982,6 +1038,27 @@ describeIfDb(
         await expect(
           withTenant(tenantA, () => repo.findById(foreignSourceId)),
         ).resolves.toBeNull();
+        await expect(
+          withTenant(tenantA, () => repo.findById(expirationId)),
+        ).resolves.toMatchObject({
+          id: expirationId,
+          type: HumanDecisionType.EXPIRATION,
+          status: 'PENDING',
+          version: 1,
+          supersedesDecisionId: null,
+          restockDays: null,
+          expirationText: null,
+          snapshot: {
+            productUnit: 'UNIDAD',
+            variantName: null,
+            variantOption: null,
+            variantValue: null,
+            sku: null,
+            requestedQuantity: null,
+            observedStockAtRequest: null,
+            stockObservedAt: null,
+          },
+        });
 
         // The cross-tenant id DOES resolve for its owning tenant: the null
         // above is tenant scope, not a missing row.
@@ -1002,13 +1079,16 @@ describeIfDb(
           source: 'other-bot-source',
           type: RESTOCK_TYPE,
         });
+        await expect(persistedRow(expirationId)).resolves.toMatchObject({
+          id: expirationId,
+          tenantId: tenantA,
+          source: RESTOCK_SOURCE,
+          type: HumanDecisionType.EXPIRATION,
+          productUnit: 'UNIDAD',
+        });
 
-        // The `type` pin is defense-in-depth: the enum has exactly one member,
-        // so no persisted non-RESTOCK row can exist and a "wrong type" miss is
-        // the same `findFirst` no-match as a missing row. If the enum grows,
-        // this spec must grow a real seeded case.
-        expect(Object.keys(HumanDecisionType)).toEqual(['RESTOCK']);
-        expect(HumanDecisionType.RESTOCK).toBe(RESTOCK_TYPE);
+        // The EXPIRATION row IS committed under the same tenant/source: the
+        // closed type set admits it, so it is no longer a null case.
       });
     });
 

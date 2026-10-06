@@ -48,6 +48,8 @@ import {
   HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
   HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE,
 } from '../../domain/human-decision-review-resolve.repository';
+import { EXPIRATION_TYPE } from '../../domain/expiration-intake.request';
+import { normalizeExpirationText } from '../../domain/expiration-text';
 import type {
   BotRestockPollRecord,
   BotRestockPollSnapshotRecord,
@@ -121,11 +123,80 @@ export type BotRestockPollResponse =
   | BotRestockPollPendingResponse
   | BotRestockPollResolvedResponse;
 
+/**
+ * Immutable EXPIRATION snapshot: `productUnit` renders as `unit`, there is no
+ * SKU/RESTOCK field, and `variantName` is required whenever `variantId` is set.
+ */
+export interface BotExpirationPollSnapshotResponse {
+  branchId: string;
+  branchName: string | null;
+  productId: string;
+  productName: string;
+  /** `Product.unit` for both simple and variant products. */
+  unit: string;
+  variantId: string | null;
+  variantName: string | null;
+  variantOption: string | null;
+  variantValue: string | null;
+}
+
+/** The unavailable variant OMITS `expirationText` entirely (never `null`). */
+export type BotExpirationPollResolutionResponse =
+  | {
+      action: typeof EXPIRATION_POSITIVE_ACTION;
+      expirationText: string;
+      resolvedAt: string;
+    }
+  | {
+      action: typeof EXPIRATION_NEGATIVE_ACTION;
+      resolvedAt: string;
+    };
+
+/** Current PENDING EXPIRATION decision: no resolution and no deadline yet. */
+export interface BotExpirationPollPendingResponse {
+  id: string;
+  sourceRequestId: string;
+  type: typeof EXPIRATION_TYPE;
+  status: 'PENDING';
+  version: 1;
+  /** Canonical UTC ISO string. */
+  createdAt: string;
+  snapshot: BotExpirationPollSnapshotResponse;
+  supersedesDecisionId: null;
+  resolution: null;
+  applyBefore: null;
+}
+
+/** Current RESOLVED EXPIRATION decision: typed resolution and a 24h deadline. */
+export interface BotExpirationPollResolvedResponse {
+  id: string;
+  sourceRequestId: string;
+  type: typeof EXPIRATION_TYPE;
+  status: 'RESOLVED';
+  version: 2;
+  /** Canonical UTC ISO string. */
+  createdAt: string;
+  snapshot: BotExpirationPollSnapshotResponse;
+  supersedesDecisionId: null;
+  resolution: BotExpirationPollResolutionResponse;
+  /** Canonical UTC ISO string: `resolvedAt + 24 hours`. */
+  applyBefore: string;
+}
+
+export type BotExpirationPollResponse =
+  | BotExpirationPollPendingResponse
+  | BotExpirationPollResolvedResponse;
+
 const POSITIVE_ACTION = HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE;
 const NEGATIVE_ACTION = HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE;
+/** EXPIRATION-only action pair; deliberately LOCAL, not a shared constant. */
+const EXPIRATION_POSITIVE_ACTION = 'PROVIDE_EXPIRATION_TEXT';
+const EXPIRATION_NEGATIVE_ACTION = 'REPORT_EXPIRATION_UNAVAILABLE';
 const MIN_RESTOCK_DAYS = 1;
 const MAX_RESTOCK_DAYS = 365;
 const APPLY_BEFORE_OFFSET_MS = 3_600_000;
+/** Owner-approved EXPIRATION freshness: `resolvedAt + 24 hours`, both actions. */
+const EXPIRATION_APPLY_BEFORE_OFFSET_MS = 86_400_000;
 /** Largest valid `Date` time value (`+275760-09-13T00:00:00.000Z`). */
 const MAX_DATE_TIME_MS = 8_640_000_000_000_000;
 
@@ -287,6 +358,66 @@ function assertPollableRecord(record: BotRestockPollRecord): void {
   assertPollableSnapshot(record.snapshot);
 }
 
+/** `null` or a string, never `undefined` (EXPIRATION forbids stray variant fields). */
+function assertStringOrNull(value: unknown): void {
+  if (value !== null && typeof value !== 'string') {
+    failClosed();
+  }
+}
+
+/**
+ * Validates the immutable EXPIRATION snapshot. Catalog labels are NOT
+ * re-canonicalized; missing `productUnit`/`variantName` coupling fails closed.
+ */
+function assertExpirationPollableSnapshot(
+  snapshot: BotRestockPollSnapshotRecord,
+): void {
+  if (typeof snapshot !== 'object' || snapshot === null) {
+    failClosed();
+  }
+  assertNonBlankString(snapshot.branchId);
+  assertValidOptionalBranchName(snapshot.branchName);
+  assertValidUuid(snapshot.productId);
+  if (typeof snapshot.productName !== 'string') {
+    failClosed();
+  }
+  if (typeof snapshot.productUnit !== 'string') {
+    failClosed();
+  }
+  assertValidOptionalUuid(snapshot.variantId);
+  assertStringOrNull(snapshot.variantName);
+  assertStringOrNull(snapshot.variantOption);
+  assertStringOrNull(snapshot.variantValue);
+  if (snapshot.variantId !== null && snapshot.variantName === null) {
+    failClosed();
+  }
+  if (
+    snapshot.variantId === null &&
+    (snapshot.variantName !== null ||
+      snapshot.variantOption !== null ||
+      snapshot.variantValue !== null)
+  ) {
+    failClosed();
+  }
+}
+
+/** Validates the persisted EXPIRATION row BEFORE projection. */
+function assertExpirationPollableRecord(record: BotRestockPollRecord): void {
+  if (typeof record !== 'object' || record === null) {
+    failClosed();
+  }
+  if (record.type !== EXPIRATION_TYPE) {
+    failClosed();
+  }
+  assertValidUuid(record.id);
+  assertValidUuid(record.sourceRequestId);
+  if (record.supersedesDecisionId !== null) {
+    failClosed();
+  }
+  assertValidDate(record.createdAt);
+  assertExpirationPollableSnapshot(record.snapshot);
+}
+
 interface ValidatedResolution {
   response: BotRestockPollResolutionResponse;
   resolvedAt: Date;
@@ -360,8 +491,8 @@ function toResolution(
  * `toISOString`, so a resolved timestamp within an hour of the maximum `Date`
  * fails closed instead of throwing a `RangeError`.
  */
-function toApplyBefore(resolvedAt: Date): string {
-  const shifted = resolvedAt.getTime() + APPLY_BEFORE_OFFSET_MS;
+function toApplyBefore(resolvedAt: Date, offsetMs: number): string {
+  const shifted = resolvedAt.getTime() + offsetMs;
   if (!Number.isSafeInteger(shifted) || shifted > MAX_DATE_TIME_MS) {
     failClosed();
   }
@@ -416,7 +547,10 @@ export function toBotRestockPollResponse(
     };
   }
 
-  const applyBefore = toApplyBefore(resolution.resolvedAt);
+  const applyBefore = toApplyBefore(
+    resolution.resolvedAt,
+    APPLY_BEFORE_OFFSET_MS,
+  );
 
   return {
     id: record.id,
@@ -429,5 +563,151 @@ export function toBotRestockPollResponse(
     supersedesDecisionId: record.supersedesDecisionId,
     resolution: resolution.response,
     applyBefore,
+  };
+}
+
+interface ValidatedExpirationResolution {
+  response: BotExpirationPollResolutionResponse;
+  resolvedAt: Date;
+}
+
+/**
+ * Normalizes persisted operator text via the approved helper; any rejection
+ * (non-string, control char, empty/over-long) fails closed value-free.
+ */
+function toNormalizedExpirationText(value: unknown): string {
+  try {
+    return normalizeExpirationText(value);
+  } catch {
+    return failClosed();
+  }
+}
+
+/**
+ * Validates the persisted EXPIRATION resolution state, returning the typed
+ * resolution plus its `Date`, or `null` for a well-formed PENDING row.
+ */
+function toExpirationResolution(
+  record: BotRestockPollRecord,
+): ValidatedExpirationResolution | null {
+  const expirationText = record.expirationText ?? null;
+
+  if (record.status === 'PENDING') {
+    if (
+      record.version !== 1 ||
+      record.resolutionAction !== null ||
+      record.restockDays !== null ||
+      expirationText !== null ||
+      record.resolvedAt !== null
+    ) {
+      failClosed();
+    }
+    return null;
+  }
+
+  if (record.status !== 'RESOLVED') {
+    failClosed();
+  }
+
+  if (record.version !== 2 || record.resolvedAt === null) {
+    failClosed();
+  }
+  assertValidDate(record.resolvedAt);
+
+  const resolvedAt: string = record.resolvedAt.toISOString();
+
+  if (record.resolutionAction === EXPIRATION_POSITIVE_ACTION) {
+    if (record.restockDays !== null) {
+      failClosed();
+    }
+    return {
+      response: {
+        action: EXPIRATION_POSITIVE_ACTION,
+        expirationText: toNormalizedExpirationText(expirationText),
+        resolvedAt,
+      },
+      resolvedAt: record.resolvedAt,
+    };
+  }
+
+  if (record.resolutionAction === EXPIRATION_NEGATIVE_ACTION) {
+    if (record.restockDays !== null || expirationText !== null) {
+      failClosed();
+    }
+    return {
+      response: { action: EXPIRATION_NEGATIVE_ACTION, resolvedAt },
+      resolvedAt: record.resolvedAt,
+    };
+  }
+
+  failClosed();
+}
+
+/**
+ * Fresh EXPIRATION snapshot projection; copies no RESTOCK-only field, so
+ * `sku`/quantities/observations can never leak.
+ */
+function toExpirationSnapshot(
+  record: BotRestockPollRecord,
+): BotExpirationPollSnapshotResponse {
+  const snapshot = record.snapshot;
+  if (typeof snapshot.productUnit !== 'string') {
+    failClosed();
+  }
+  return {
+    branchId: snapshot.branchId,
+    branchName: snapshot.branchName,
+    productId: snapshot.productId,
+    productName: snapshot.productName,
+    unit: snapshot.productUnit,
+    variantId: snapshot.variantId,
+    variantName: snapshot.variantName ?? null,
+    variantOption: snapshot.variantOption ?? null,
+    variantValue: snapshot.variantValue ?? null,
+  };
+}
+
+/**
+ * Pure projection from a persisted EXPIRATION decision to the bot poll DTO.
+ * Validates first, never spreads the persisted row, and derives
+ * `applyBefore = resolvedAt + 24h` for BOTH actions.
+ */
+export function toBotExpirationPollResponse(
+  record: BotRestockPollRecord,
+): BotExpirationPollResponse {
+  assertExpirationPollableRecord(record);
+  const resolution = toExpirationResolution(record);
+  const snapshot = toExpirationSnapshot(record);
+  const createdAt = record.createdAt.toISOString();
+
+  if (resolution === null) {
+    return {
+      id: record.id,
+      sourceRequestId: record.sourceRequestId,
+      type: EXPIRATION_TYPE,
+      status: 'PENDING',
+      version: 1,
+      createdAt,
+      snapshot,
+      supersedesDecisionId: null,
+      resolution: null,
+      applyBefore: null,
+    };
+  }
+
+  return {
+    id: record.id,
+    sourceRequestId: record.sourceRequestId,
+    type: EXPIRATION_TYPE,
+    status: 'RESOLVED',
+    version: 2,
+    createdAt,
+    snapshot,
+    supersedesDecisionId: null,
+    resolution: resolution.response,
+    applyBefore: toApplyBefore(
+      resolution.resolvedAt,
+      EXPIRATION_APPLY_BEFORE_OFFSET_MS,
+    ),
   };
 }

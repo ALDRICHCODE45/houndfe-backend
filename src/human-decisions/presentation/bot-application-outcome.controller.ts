@@ -10,6 +10,11 @@
  * replay of the same attempt ID/hash returns the same result, changed payload
  * or second terminal attempt returns `409`").
  *
+ * The sketch's `evidenceCode?` is superseded: the current HD-05b1 parser
+ * FORBIDS `evidenceCode` on the wire (even as `null`), the canonical evidence
+ * hash EXCLUDES it, and the reserved `applicationEvidenceCode` DB column is
+ * always persisted `null` by the adapter.
+ *
  * This is a NEW, separate controller so the existing bot `POST` intake
  * (`BotRestockIntakeController`) and the bot `GET` poll
  * (`BotRestockPollController`) keep their methods, guards and projections

@@ -27,13 +27,20 @@
  *
  * NO PRESENTATION COUPLING: this port does not reference the presentation DTO.
  * The record shape lives here so the pure mapper
- * (`toBotRestockPollResponse`) and the future HD-05b Prisma adapter share ONE
- * type and cannot drift. The mapper re-validates the persisted row at runtime
- * because a database row is never trusted blindly.
+ * (`toBotRestockPollResponse`) and the committed HD-05b Prisma adapter share
+ * ONE type and cannot drift. The mapper re-validates the persisted row at
+ * runtime because a database row is never trusted blindly.
  *
- * SCOPE: DB-FREE foundation only. This slice adds NO Prisma adapter, HTTP
- * controller, module binding or application-outcome ACK; HD-05b/HD-05c own
- * those.
+ * SCOPE: DB-FREE foundation only. The committed HD-05b Prisma adapter and
+ * HD-05c HTTP controller consume this port; this file itself adds no adapter,
+ * module binding or application-outcome ACK.
+ *
+ * EXPIRATION READ: the committed poll adapter selects and maps the
+ * EXPIRATION-only fields for BOTH admitted types (`null` on a RESTOCK row).
+ * They stay OPTIONAL here so every fixture and mapper remains type-compatible;
+ * a RESTOCK record without them is NOT a failure, while
+ * `toBotExpirationPollResponse` fails closed when a required one is absent or
+ * inconsistent.
  */
 import { DomainError } from '../../shared/domain/domain-error';
 
@@ -55,6 +62,15 @@ export interface BotRestockPollSnapshotRecord {
   requestedQuantity: number | null;
   observedStockAtRequest: number | null;
   stockObservedAt: Date | null;
+  /**
+   * EXPIRATION-only snapshot fields; absent/`null` on RESTOCK, all `null` on a
+   * simple product. Wire `unit` renders from `productUnit`; `variantName` is
+   * required when `variantId` is set. OPTIONAL for adapter/fixture staging.
+   */
+  productUnit?: string | null;
+  variantName?: string | null;
+  variantOption?: string | null;
+  variantValue?: string | null;
 }
 
 /**
@@ -63,7 +79,7 @@ export interface BotRestockPollSnapshotRecord {
  * `string`/`number` fields accept the generated enum values); the mapper
  * re-validates every invariant at runtime.
  *
- * This is the exact SELECT allowlist of the future HD-05b poll adapter.
+ * This is the exact SELECT allowlist of the committed HD-05b poll adapter.
  * Adding a field here is a deliberate widening of what the bot may read, so it
  * must never include reviewer identity, authority, credential, provider/ACK or
  * customer fields.
@@ -83,6 +99,11 @@ export interface BotRestockPollRecord {
   resolutionAction: string | null;
   restockDays: number | null;
   resolvedAt: Date | null;
+  /**
+   * EXPIRATION-only operator text (`PROVIDE_EXPIRATION_TEXT`); absent/`null`
+   * otherwise. OPTIONAL for adapter/fixture staging.
+   */
+  expirationText?: string | null;
 }
 
 /**

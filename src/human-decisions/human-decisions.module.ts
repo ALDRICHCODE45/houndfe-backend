@@ -29,6 +29,11 @@
  * `PrismaBotApplicationOutcomeRepository`, so
  * `POST /chatbot-api/human-decisions/:id/application-outcome` serves the
  * tenant-scoped terminal ACK without disturbing the intake/poll bindings.
+ *
+ * HD-EXP-03 binds the `EXPIRATION_INTAKE_REPOSITORY` port to
+ * `PrismaExpirationIntakeRepository` so the SAME `POST` intake route can also
+ * serve an `EXPIRATION` body. No controller/route is added: EXPIRATION shares
+ * the existing `BotRestockIntakeController` and its guard/filter.
  */
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
@@ -36,11 +41,13 @@ import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { BOT_APPLICATION_OUTCOME_REPOSITORY } from './domain/bot-application-outcome.repository';
 import { BOT_RESTOCK_POLL_REPOSITORY } from './domain/bot-restock-poll.repository';
+import { EXPIRATION_INTAKE_REPOSITORY } from './domain/expiration-intake.repository';
 import { HUMAN_DECISION_REVIEW_READ_REPOSITORY } from './domain/human-decision-review-read.repository';
 import { HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY } from './domain/human-decision-review-resolve.repository';
 import { RESTOCK_INTAKE_REPOSITORY } from './domain/restock-intake.repository';
 import { PrismaBotApplicationOutcomeRepository } from './infrastructure/prisma-bot-application-outcome.repository';
 import { PrismaBotRestockPollRepository } from './infrastructure/prisma-bot-restock-poll.repository';
+import { PrismaExpirationIntakeRepository } from './infrastructure/prisma-expiration-intake.repository';
 import { PrismaHumanDecisionReviewReadRepository } from './infrastructure/prisma-human-decision-review-read.repository';
 import { PrismaHumanDecisionReviewResolveRepository } from './infrastructure/prisma-human-decision-review-resolve.repository';
 import { PrismaRestockIntakeRepository } from './infrastructure/prisma-restock-intake.repository';
@@ -65,6 +72,10 @@ import { HumanDecisionReviewController } from './presentation/human-decision-rev
     {
       provide: RESTOCK_INTAKE_REPOSITORY,
       useClass: PrismaRestockIntakeRepository,
+    },
+    {
+      provide: EXPIRATION_INTAKE_REPOSITORY,
+      useClass: PrismaExpirationIntakeRepository,
     },
     {
       provide: BOT_RESTOCK_POLL_REPOSITORY,

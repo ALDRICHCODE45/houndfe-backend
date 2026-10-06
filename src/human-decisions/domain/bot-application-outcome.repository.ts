@@ -3,18 +3,24 @@
  * port).
  *
  * Versioned, audited ONE-TERMINAL application-outcome contract for a
- * tenant-scoped RESTOCK human decision. The concrete adapter is
+ * tenant-scoped RESTOCK/EXPIRATION human decision. The concrete adapter is
  * `infrastructure/prisma-bot-application-outcome.repository.ts`; HD-05c owns the
  * NestJS binding and the HTTP route that derives the tenant from the
  * service-credential guard.
  *
  * Approved design (read-only):
  * `houndfe-chatbot-human-decisions/docs/human-decisions-contract-v1.md`
+ * (RESTOCK) and `.../human-decisions-expiration-v1.md` (EXPIRATION, 24h).
  * ("ACK `{attemptId,expectedResolutionVersion,outcome,providerMessageId?,
  * providerAcceptedObservedAt?,attemptedAt?,evidenceCode?}` is one TERMINAL
  * outcome per request: backend hashes the canonical allowlisted evidence,
  * exact replay of the same attempt ID/hash returns the same result, changed
- * payload or second terminal attempt returns `409`"). UNKNOWN/LATE enter the
+ * payload or second terminal attempt returns `409`").
+ *
+ * The sketch's `evidenceCode?` is superseded: the current HD-05b1 parser
+ * FORBIDS `evidenceCode` on the wire (even as `null`), the canonical evidence
+ * hash EXCLUDES it, and the reserved `applicationEvidenceCode` DB column is
+ * always persisted `null` by the adapter. UNKNOWN/LATE enter the
  * per-request `NEEDS_RECONCILIATION` hold: no automatic retry, late competing
  * ACK or superseding decision.
  *
@@ -27,10 +33,11 @@
  *
  * ONE-TERMINAL CAS: exactly one ACK may commit. The decision must already be
  * `RESOLVED` at version 2, and a single conditional `updateMany` on
- * `(id, tenantId, source, type, status='RESOLVED', version=2,
- * applicationOutcome IS NULL)` writes the terminal outcome. The DB CHECK
- * `human_decisions_application_outcome_state` enforces the outcome/evidence
- * coupling and the half-open `[resolvedAt, resolvedAt + 1h)` window on the
+ * `(id, tenantId, source, type IN ('RESTOCK','EXPIRATION'),
+ * status='RESOLVED', version=2, applicationOutcome IS NULL)` writes the
+ * terminal outcome. The DB CHECK `human_decisions_application_outcome_state`
+ * enforces the outcome/evidence coupling and the type-aware half-open window
+ * (`resolvedAt + 1h` for RESTOCK, `resolvedAt + 24h` for EXPIRATION) on the
  * PostgreSQL side.
  *
  * IDEMPOTENT REPLAY: the same persisted attempt id + canonical evidence hash

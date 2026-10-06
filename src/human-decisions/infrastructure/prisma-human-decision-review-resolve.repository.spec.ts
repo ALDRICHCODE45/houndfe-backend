@@ -23,10 +23,15 @@ import {
 import {
   HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
   HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE,
+  HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT,
+  HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
   HumanDecisionReviewResolveError,
   type ResolveHumanDecisionProvideCommand,
   type ResolveHumanDecisionUnavailableCommand,
+  type ResolveHumanDecisionProvideExpirationTextCommand,
+  type ResolveHumanDecisionReportExpirationUnavailableCommand,
 } from '../domain/human-decision-review-resolve.repository';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import { PrismaHumanDecisionReviewResolveRepository } from './prisma-human-decision-review-resolve.repository';
 
 const TENANT_ID = '11111111-1111-1111-1111-111111111111';
@@ -37,16 +42,19 @@ const RESOLUTION_REQUEST_ID = '3f1c1b7a-9c2e-4d5f-8a6b-1c2d3e4f5a6b';
 const OTHER_RESOLUTION_REQUEST_ID = '0192a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a6b';
 const ACTOR_NAME = 'Ana Reviewer';
 const FIXED_NOW = new Date('2026-09-03T12:00:00.000Z');
+const EXPIRATION_TEXT = 'Vence el 2026-12-31';
 
 /** Exact reviewer projection allowlist shared with the read adapter. */
 const REVIEW_SELECT_KEYS = [
   'branchId',
   'branchName',
   'createdAt',
+  'expirationText',
   'id',
   'observedStockAtRequest',
   'productId',
   'productName',
+  'productUnit',
   'requestedQuantity',
   'resolutionAction',
   'resolvedAt',
@@ -58,6 +66,9 @@ const REVIEW_SELECT_KEYS = [
   'stockObservedAt',
   'type',
   'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
   'version',
 ];
 
@@ -84,6 +95,7 @@ const FORBIDDEN_SELECT_KEYS = [
 
 /** Exact CAS mutation payload keys; no bot/provider/stock/outcome field. */
 const RESOLUTION_DATA_KEYS = [
+  'expirationText',
   'resolutionAction',
   'resolutionRequestId',
   'resolvedAt',
@@ -198,11 +210,13 @@ function pendingState(
 ): Record<string, unknown> {
   return {
     id: DECISION_ID,
+    type: RESTOCK_TYPE,
     status: 'PENDING',
     version: 1,
     resolutionRequestId: null,
     resolutionAction: null,
     restockDays: null,
+    expirationText: null,
     resolvedByActorId: null,
     ...overrides,
   };
@@ -213,11 +227,13 @@ function resolvedState(
 ): Record<string, unknown> {
   return {
     id: DECISION_ID,
+    type: RESTOCK_TYPE,
     status: 'RESOLVED',
     version: 2,
     resolutionRequestId: RESOLUTION_REQUEST_ID,
     resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
     restockDays: 7,
+    expirationText: null,
     resolvedByActorId: ACTOR_ID,
     ...overrides,
   };
@@ -243,6 +259,7 @@ function resolvedRecord(
     stockObservedAt: new Date('2026-09-01T10:00:00.000Z'),
     resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
     restockDays: 7,
+    expirationText: null,
     resolvedAt: FIXED_NOW,
     resolvedByActorId: ACTOR_ID,
     resolvedByDisplayName: ACTOR_NAME,
@@ -277,6 +294,59 @@ function negativeCommand(
     actorIsSuperAdmin: false,
     ...overrides,
   };
+}
+
+function positiveExpirationCommand(
+  overrides: Partial<ResolveHumanDecisionProvideExpirationTextCommand> = {},
+): ResolveHumanDecisionProvideExpirationTextCommand {
+  return {
+    decisionId: DECISION_ID,
+    expectedVersion: 1,
+    resolutionRequestId: RESOLUTION_REQUEST_ID,
+    action: HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT,
+    expirationText: EXPIRATION_TEXT,
+    actorUserId: ACTOR_ID,
+    actorIsSuperAdmin: false,
+    ...overrides,
+  };
+}
+
+function negativeExpirationCommand(
+  overrides: Partial<ResolveHumanDecisionReportExpirationUnavailableCommand> = {},
+): ResolveHumanDecisionReportExpirationUnavailableCommand {
+  return {
+    decisionId: DECISION_ID,
+    expectedVersion: 1,
+    resolutionRequestId: RESOLUTION_REQUEST_ID,
+    action: HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
+    actorUserId: ACTOR_ID,
+    actorIsSuperAdmin: false,
+    ...overrides,
+  };
+}
+
+function expirationResolvedState(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return resolvedState({
+    type: EXPIRATION_TYPE,
+    resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT,
+    restockDays: null,
+    expirationText: EXPIRATION_TEXT,
+    ...overrides,
+  });
+}
+
+function expirationResolvedRecord(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return resolvedRecord({
+    type: EXPIRATION_TYPE,
+    resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT,
+    restockDays: null,
+    expirationText: EXPIRATION_TEXT,
+    ...overrides,
+  });
 }
 
 function updateManyArgs(client: ClientMock, call = 0): CapturedUpdateMany {
@@ -324,6 +394,7 @@ describe('PrismaHumanDecisionReviewResolveRepository', () => {
         version: 2,
         resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
         restockDays: 7,
+        expirationText: null,
         resolutionRequestId: RESOLUTION_REQUEST_ID,
         resolvedAt: FIXED_NOW,
         resolvedById: ACTOR_ID,
@@ -353,6 +424,7 @@ describe('PrismaHumanDecisionReviewResolveRepository', () => {
         version: 2,
         resolutionAction: HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE,
         restockDays: null,
+        expirationText: null,
         resolutionRequestId: RESOLUTION_REQUEST_ID,
         resolvedAt: FIXED_NOW,
         resolvedById: ACTOR_ID,
@@ -910,12 +982,14 @@ describe('PrismaHumanDecisionReviewResolveRepository', () => {
 
       const stateSelect = findFirstArgs(client, 0).select;
       expect(Object.keys(stateSelect).sort()).toEqual([
+        'expirationText',
         'id',
         'resolutionAction',
         'resolutionRequestId',
         'resolvedByActorId',
         'restockDays',
         'status',
+        'type',
         'version',
       ]);
       expect(stateSelect).not.toHaveProperty('productName');
@@ -946,6 +1020,340 @@ describe('PrismaHumanDecisionReviewResolveRepository', () => {
       expect(error.message).not.toContain(OTHER_RESOLUTION_REQUEST_ID);
       expect(error.message).not.toContain(ACTOR_ID);
       expect(error.message).not.toContain(TENANT_ID);
+    });
+  });
+
+  describe('resolve — EXPIRATION one-winner CAS', () => {
+    it('resolves a PENDING EXPIRATION estimate', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      const projection = expirationResolvedRecord();
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(projection);
+      client.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      const { repo } = makeRepo(client);
+
+      const result = await repo.resolve(positiveExpirationCommand());
+
+      expect(result).toEqual({ status: 'resolved', decision: projection });
+      expect(updateManyArgs(client).where).toEqual({
+        id: DECISION_ID,
+        tenantId: TENANT_ID,
+        source: RESTOCK_SOURCE,
+        type: EXPIRATION_TYPE,
+        status: 'PENDING',
+        version: 1,
+      });
+      expect(updateManyArgs(client).data).toEqual({
+        status: 'RESOLVED',
+        version: 2,
+        resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_EXPIRATION_TEXT,
+        restockDays: null,
+        expirationText: EXPIRATION_TEXT,
+        resolutionRequestId: RESOLUTION_REQUEST_ID,
+        resolvedAt: FIXED_NOW,
+        resolvedById: ACTOR_ID,
+        resolvedByActorId: ACTOR_ID,
+        resolvedByDisplayName: ACTOR_NAME,
+      });
+      expect(Object.keys(updateManyArgs(client).data).sort()).toEqual(
+        RESOLUTION_DATA_KEYS,
+      );
+    });
+
+    it('resolves a PENDING EXPIRATION as unavailable', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      const projection = expirationResolvedRecord({
+        resolutionAction:
+          HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
+        expirationText: null,
+      });
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(projection);
+      client.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      const { repo } = makeRepo(client);
+
+      const result = await repo.resolve(negativeExpirationCommand());
+
+      expect(result).toEqual({ status: 'resolved', decision: projection });
+      expect(updateManyArgs(client).data).toEqual({
+        status: 'RESOLVED',
+        version: 2,
+        resolutionAction:
+          HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
+        restockDays: null,
+        expirationText: null,
+        resolutionRequestId: RESOLUTION_REQUEST_ID,
+        resolvedAt: FIXED_NOW,
+        resolvedById: ACTOR_ID,
+        resolvedByActorId: ACTOR_ID,
+        resolvedByDisplayName: ACTOR_NAME,
+      });
+    });
+
+    it('normalizes the operator expiration text before writing', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(expirationResolvedRecord());
+      client.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      const { repo } = makeRepo(client);
+
+      await repo.resolve(
+        positiveExpirationCommand({
+          expirationText: '  Vence\u00a0el  2026-12-31  ',
+        }),
+      );
+
+      expect(updateManyArgs(client).data.expirationText).toBe(EXPIRATION_TEXT);
+    });
+
+    it('pins EXPIRATION on the state read and CAS', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(expirationResolvedRecord());
+      client.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      const { repo } = makeRepo(client);
+
+      await repo.resolve(positiveExpirationCommand());
+
+      expect(findFirstArgs(client, 0).where.type).toBe(EXPIRATION_TYPE);
+      expect(updateManyArgs(client).where.type).toBe(EXPIRATION_TYPE);
+      expect(findFirstArgs(client, 1).where.type).toBe(EXPIRATION_TYPE);
+    });
+
+    it('keeps RESTOCK writes free of expirationText', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState())
+        .mockResolvedValueOnce(resolvedRecord());
+      client.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      const { repo } = makeRepo(client);
+
+      await repo.resolve(positiveCommand());
+
+      expect(updateManyArgs(client).where.type).toBe(RESTOCK_TYPE);
+      expect(updateManyArgs(client).data.expirationText).toBeNull();
+    });
+  });
+
+  describe('resolve — EXPIRATION replay and conflicts', () => {
+    it('replays an exact positive EXPIRATION resolution', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      const projection = expirationResolvedRecord();
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(expirationResolvedState())
+        .mockResolvedValueOnce(projection);
+      const { repo } = makeRepo(client);
+
+      const result = await repo.resolve(
+        positiveExpirationCommand({
+          expirationText: 'Vence\u00a0el 2026-12-31',
+        }),
+      );
+
+      expect(result).toEqual({ status: 'replayed', decision: projection });
+      expect(client.humanDecision.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('replays an exact negative EXPIRATION resolution', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      const projection = expirationResolvedRecord({
+        resolutionAction:
+          HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
+        expirationText: null,
+      });
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(
+          expirationResolvedState({
+            resolutionAction:
+              HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
+            expirationText: null,
+          }),
+        )
+        .mockResolvedValueOnce(projection);
+      const { repo } = makeRepo(client);
+
+      const result = await repo.resolve(negativeExpirationCommand());
+
+      expect(result).toEqual({ status: 'replayed', decision: projection });
+      expect(client.humanDecision.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('conflicts on a different normalized expiration text', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        expirationResolvedState({ expirationText: 'Vence el 2026-12-30' }),
+      );
+      const { repo } = makeRepo(client);
+
+      const error: unknown = await repo
+        .resolve(positiveExpirationCommand())
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HumanDecisionReviewResolveError);
+      if (!(error instanceof HumanDecisionReviewResolveError)) {
+        throw new Error('expected HumanDecisionReviewResolveError');
+      }
+      expect(error.code).toBe('IDEMPOTENCY_CONFLICT');
+      expect(client.humanDecision.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('conflicts on a different EXPIRATION action', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        expirationResolvedState({
+          resolutionAction:
+            HUMAN_DECISION_RESOLUTION_REPORT_EXPIRATION_UNAVAILABLE,
+          expirationText: null,
+        }),
+      );
+      const { repo } = makeRepo(client);
+
+      const error: unknown = await repo
+        .resolve(positiveExpirationCommand())
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HumanDecisionReviewResolveError);
+      if (!(error instanceof HumanDecisionReviewResolveError)) {
+        throw new Error('expected HumanDecisionReviewResolveError');
+      }
+      expect(error.code).toBe('IDEMPOTENCY_CONFLICT');
+    });
+
+    it('fails the type guard on a different persisted type', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        expirationResolvedState({ type: RESTOCK_TYPE }),
+      );
+      const { repo } = makeRepo(client);
+
+      const error: unknown = await repo
+        .resolve(positiveExpirationCommand())
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HumanDecisionReviewResolveError);
+      if (!(error instanceof HumanDecisionReviewResolveError)) {
+        throw new Error('expected HumanDecisionReviewResolveError');
+      }
+      expect(error.code).toBe('IDEMPOTENCY_CONFLICT');
+    });
+
+    it('conflicts on a different key as ALREADY_RESOLVED', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        expirationResolvedState(),
+      );
+      const { repo } = makeRepo(client);
+
+      const error: unknown = await repo
+        .resolve(
+          positiveExpirationCommand({
+            resolutionRequestId: OTHER_RESOLUTION_REQUEST_ID,
+          }),
+        )
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HumanDecisionReviewResolveError);
+      if (!(error instanceof HumanDecisionReviewResolveError)) {
+        throw new Error('expected HumanDecisionReviewResolveError');
+      }
+      expect(error.code).toBe('ALREADY_RESOLVED');
+    });
+
+    it('conflicts on a different EXPIRATION actor', async () => {
+      const client = makeClient();
+      arrangeReviewer(client, OTHER_ACTOR_ID);
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        expirationResolvedState(),
+      );
+      const { repo } = makeRepo(client);
+
+      const error: unknown = await repo
+        .resolve(positiveExpirationCommand({ actorUserId: OTHER_ACTOR_ID }))
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HumanDecisionReviewResolveError);
+      if (!(error instanceof HumanDecisionReviewResolveError)) {
+        throw new Error('expected HumanDecisionReviewResolveError');
+      }
+      expect(error.code).toBe('IDEMPOTENCY_CONFLICT');
+    });
+
+    it('conflicts on a non-replay expectedVersion', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst.mockResolvedValueOnce(
+        expirationResolvedState(),
+      );
+      const { repo } = makeRepo(client);
+
+      const error: unknown = await repo
+        .resolve(positiveExpirationCommand({ expectedVersion: 2 }))
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HumanDecisionReviewResolveError);
+      if (!(error instanceof HumanDecisionReviewResolveError)) {
+        throw new Error('expected HumanDecisionReviewResolveError');
+      }
+      expect(error.code).toBe('IDEMPOTENCY_CONFLICT');
+    });
+  });
+
+  describe('resolve — EXPIRATION losing CAS', () => {
+    it('replays a same-key EXPIRATION winner after CAS loss', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      const projection = expirationResolvedRecord();
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(expirationResolvedState())
+        .mockResolvedValueOnce(projection);
+      client.humanDecision.updateMany.mockResolvedValue({ count: 0 });
+      const { repo } = makeRepo(client);
+
+      const result = await repo.resolve(positiveExpirationCommand());
+
+      expect(result).toEqual({ status: 'replayed', decision: projection });
+      expect(client.humanDecision.updateMany).toHaveBeenCalledTimes(1);
+      expect(findFirstArgs(client, 1).where.type).toBe(EXPIRATION_TYPE);
+    });
+
+    it('rejects a different-key EXPIRATION CAS loser', async () => {
+      const client = makeClient();
+      arrangeReviewer(client);
+      client.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(
+          expirationResolvedState({
+            resolutionRequestId: OTHER_RESOLUTION_REQUEST_ID,
+          }),
+        );
+      client.humanDecision.updateMany.mockResolvedValue({ count: 0 });
+      const { repo } = makeRepo(client);
+
+      const error: unknown = await repo
+        .resolve(positiveExpirationCommand())
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HumanDecisionReviewResolveError);
+      if (!(error instanceof HumanDecisionReviewResolveError)) {
+        throw new Error('expected HumanDecisionReviewResolveError');
+      }
+      expect(error.code).toBe('ALREADY_RESOLVED');
     });
   });
 });

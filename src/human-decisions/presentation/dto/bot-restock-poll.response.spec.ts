@@ -21,6 +21,7 @@
  * Prisma adapter pins `source`/`type`/tenant in the WHERE clause, so a caller
  * can never widen this projection by injecting a `source`.
  */
+import { EXPIRATION_TYPE } from '../../domain/expiration-intake.request';
 import { RESTOCK_SOURCE } from '../../domain/restock-request-canonicalizer';
 import { RESTOCK_TYPE } from '../../domain/restock-request-canonicalizer';
 import type { PersistedRestockDecision } from '../../domain/restock-intake.repository';
@@ -34,7 +35,9 @@ import type {
 } from '../../domain/bot-restock-poll.repository';
 import { toBotRestockIntakeResponse } from './bot-restock-intake.response';
 import {
+  toBotExpirationPollResponse,
   toBotRestockPollResponse,
+  type BotExpirationPollResponse,
   type BotRestockPollResponse,
 } from './bot-restock-poll.response';
 
@@ -54,6 +57,16 @@ const CREATED_AT_ISO = '2026-02-01T10:00:00.000Z';
 const OBSERVED_AT_ISO = '2026-01-31T23:30:00.000Z';
 const RESOLVED_AT_ISO = '2026-02-01T23:30:00.000Z';
 const APPLY_BEFORE_ISO = '2026-02-02T00:30:00.000Z';
+// EXPIRATION shares `resolvedAt` but the owner-approved deadline is 24h.
+const EXPIRATION_APPLY_BEFORE_ISO = '2026-02-02T23:30:00.000Z';
+const EXPIRATION_POSITIVE_ACTION = 'PROVIDE_EXPIRATION_TEXT';
+const EXPIRATION_NEGATIVE_ACTION = 'REPORT_EXPIRATION_UNAVAILABLE';
+const EXPIRATION_UNIT = 'UNIDAD';
+const EXPIRATION_VARIANT_NAME = 'Presentación A';
+const EXPIRATION_VARIANT_OPTION = 'Peso';
+const EXPIRATION_VARIANT_VALUE = '1 kg';
+const EXPIRATION_TEXT = 'Vence el 2026-05';
+const EXPIRATION_UNTRIMMED_TEXT = '  Vence   el 2026-05  ';
 
 const NFD_PRODUCT_NAME = 'Caf\u0065\u0301';
 const NFD_SKU = 'Caf\u0065\u0301';
@@ -83,6 +96,29 @@ const EXPECTED_SNAPSHOT_KEYS = [
   'requestedQuantity',
   'observedStockAtRequest',
   'stockObservedAt',
+];
+
+/** EXPIRATION snapshot has `unit` and NO sku/restock field. */
+const EXPECTED_EXPIRATION_SNAPSHOT_KEYS = [
+  'branchId',
+  'branchName',
+  'productId',
+  'productName',
+  'unit',
+  'variantId',
+  'variantName',
+  'variantOption',
+  'variantValue',
+];
+
+/** Must NEVER appear on an EXPIRATION body/snapshot. */
+const EXPIRATION_FORBIDDEN_KEYS = [
+  'sku',
+  'requestedQuantity',
+  'observedStockAtRequest',
+  'stockObservedAt',
+  'restockDays',
+  'productUnit',
 ];
 
 /** Keys that must NEVER appear on the bot poll body (reviewer identity/authority). */
@@ -160,6 +196,73 @@ function resolvedRecord(overrides: PollOverrides = {}): BotRestockPollRecord {
     version: 2,
     resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
     restockDays: RESTOCK_DAYS,
+    resolvedAt: utcDate(RESOLVED_AT_ISO),
+    ...overrides,
+  });
+}
+
+/** Persisted EXPIRATION row; EXPIRATION forbids every RESTOCK-only snapshot field. */
+function expirationPollRecord(
+  overrides: PollOverrides = {},
+): BotRestockPollRecord {
+  const snapshot: BotRestockPollSnapshotRecord = {
+    branchId: BRANCH_ID,
+    branchName: BRANCH_NAME,
+    productId: PRODUCT_ID,
+    productName: PRODUCT_NAME,
+    variantId: null,
+    sku: null,
+    requestedQuantity: null,
+    observedStockAtRequest: null,
+    stockObservedAt: null,
+    productUnit: EXPIRATION_UNIT,
+    variantName: null,
+    variantOption: null,
+    variantValue: null,
+    ...overrides.snapshot,
+  };
+
+  return {
+    id: DECISION_ID,
+    sourceRequestId: SOURCE_REQUEST_ID,
+    type: EXPIRATION_TYPE,
+    status: 'PENDING',
+    version: 1,
+    createdAt: utcDate(CREATED_AT_ISO),
+    supersedesDecisionId: null,
+    resolutionAction: null,
+    restockDays: null,
+    expirationText: null,
+    resolvedAt: null,
+    ...overrides,
+    snapshot,
+  };
+}
+
+/** Identity variant product: `variantName` is required, option/value nullable. */
+function expirationVariantRecord(
+  overrides: PollOverrides = {},
+): BotRestockPollRecord {
+  return expirationPollRecord({
+    ...overrides,
+    snapshot: {
+      variantId: VARIANT_ID,
+      variantName: EXPIRATION_VARIANT_NAME,
+      variantOption: EXPIRATION_VARIANT_OPTION,
+      variantValue: EXPIRATION_VARIANT_VALUE,
+      ...overrides.snapshot,
+    },
+  });
+}
+
+function resolvedExpirationRecord(
+  overrides: PollOverrides = {},
+): BotRestockPollRecord {
+  return expirationPollRecord({
+    status: 'RESOLVED',
+    version: 2,
+    resolutionAction: EXPIRATION_POSITIVE_ACTION,
+    expirationText: EXPIRATION_TEXT,
     resolvedAt: utcDate(RESOLVED_AT_ISO),
     ...overrides,
   });
@@ -673,5 +776,287 @@ describe('toBotRestockPollResponse — no reviewer identity / authority / PII le
     expect(JSON.stringify(pending)).not.toContain('PROVIDE_RESTOCK_ESTIMATE');
     expect(JSON.stringify(pending)).not.toContain('INJECTED-ID-SENTINEL');
     expect(JSON.stringify(pending)).not.toContain('INJECTED-APPLY-SENTINEL');
+  });
+});
+
+describe('toBotExpirationPollResponse — exact shape and PENDING', () => {
+  it('exposes the exact 10 top-level and 9 EXPIRATION snapshot keys', () => {
+    const pending = toBotExpirationPollResponse(expirationPollRecord());
+    const resolved = toBotExpirationPollResponse(resolvedExpirationRecord());
+
+    for (const body of [pending, resolved]) {
+      expect(Object.keys(body).sort()).toEqual(
+        [...EXPECTED_TOP_LEVEL_KEYS].sort(),
+      );
+      expect(Object.keys(body).length).toBe(10);
+    }
+    expect(Object.keys(pending.snapshot).sort()).toEqual(
+      [...EXPECTED_EXPIRATION_SNAPSHOT_KEYS].sort(),
+    );
+    expect(pending.snapshot.unit).toBe(EXPIRATION_UNIT);
+    expect(pending.snapshot).not.toHaveProperty('productUnit');
+  });
+
+  it('narrows the union and reports the current PENDING state', () => {
+    const pending: BotExpirationPollResponse = toBotExpirationPollResponse(
+      expirationPollRecord(),
+    );
+    const resolved: BotExpirationPollResponse = toBotExpirationPollResponse(
+      resolvedExpirationRecord(),
+    );
+
+    expect(pending.type).toBe('EXPIRATION');
+    expect(resolved.type).toBe('EXPIRATION');
+    expect(pending.id).toBe(DECISION_ID);
+    expect(pending.sourceRequestId).toBe(SOURCE_REQUEST_ID);
+    expect(pending.status).toBe('PENDING');
+    expect(pending.version).toBe(1);
+    expect(pending.createdAt).toBe(CREATED_AT_ISO);
+    expect(pending.supersedesDecisionId).toBeNull();
+    expect(pending.resolution).toBeNull();
+    expect(pending.applyBefore).toBeNull();
+    expect(resolved.status).toBe('RESOLVED');
+    if (resolved.status === 'RESOLVED') {
+      expect(resolved.version).toBe(2);
+      expect(resolved.applyBefore).toBe(EXPIRATION_APPLY_BEFORE_ISO);
+    }
+  });
+});
+
+describe('toBotExpirationPollResponse — snapshot projection', () => {
+  it('projects a simple product with every variant field explicitly null', () => {
+    const body = toBotExpirationPollResponse(expirationPollRecord());
+
+    expect(body.snapshot).toEqual({
+      branchId: BRANCH_ID,
+      branchName: BRANCH_NAME,
+      productId: PRODUCT_ID,
+      productName: PRODUCT_NAME,
+      unit: EXPIRATION_UNIT,
+      variantId: null,
+      variantName: null,
+      variantOption: null,
+      variantValue: null,
+    });
+  });
+
+  it('requires a variant name and allows nullable option/value', () => {
+    const variant = toBotExpirationPollResponse(expirationVariantRecord());
+    const bare = toBotExpirationPollResponse(
+      expirationVariantRecord({
+        snapshot: { variantOption: null, variantValue: null },
+      }),
+    );
+
+    for (const body of [variant, bare]) {
+      expect(body.snapshot.variantId).toBe(VARIANT_ID);
+      expect(body.snapshot.variantName).toBe(EXPIRATION_VARIANT_NAME);
+    }
+    expect(variant.snapshot.variantOption).toBe(EXPIRATION_VARIANT_OPTION);
+    expect(variant.snapshot.variantValue).toBe(EXPIRATION_VARIANT_VALUE);
+    expect(bare.snapshot.variantOption).toBeNull();
+    expect(bare.snapshot.variantValue).toBeNull();
+  });
+});
+
+describe('toBotExpirationPollResponse — RESOLVED projection', () => {
+  const unavailable = (): BotExpirationPollResponse =>
+    toBotExpirationPollResponse(
+      resolvedExpirationRecord({
+        resolutionAction: EXPIRATION_NEGATIVE_ACTION,
+        expirationText: null,
+      }),
+    );
+
+  it('projects the provided text with the 24h applyBefore', () => {
+    const body = toBotExpirationPollResponse(resolvedExpirationRecord());
+
+    expect(body.status).toBe('RESOLVED');
+    expect(body.version).toBe(2);
+    expect(body.resolution).toEqual({
+      action: EXPIRATION_POSITIVE_ACTION,
+      expirationText: EXPIRATION_TEXT,
+      resolvedAt: RESOLVED_AT_ISO,
+    });
+    expect(Object.keys(body.resolution as object).sort()).toEqual(
+      ['action', 'expirationText', 'resolvedAt'].sort(),
+    );
+    expect(body.applyBefore).toBe(EXPIRATION_APPLY_BEFORE_ISO);
+  });
+
+  it('omits expirationText entirely for the unavailable action', () => {
+    const body = unavailable();
+
+    expect(body.resolution).toEqual({
+      action: EXPIRATION_NEGATIVE_ACTION,
+      resolvedAt: RESOLVED_AT_ISO,
+    });
+    expect(body.resolution).not.toHaveProperty('expirationText');
+    expect(Object.keys(body.resolution as object).sort()).toEqual([
+      'action',
+      'resolvedAt',
+    ]);
+  });
+
+  it('applies the same 24h deadline to both actions, unlike RESTOCK 1h', () => {
+    const positive = toBotExpirationPollResponse(resolvedExpirationRecord());
+
+    expect(positive.applyBefore).toBe(EXPIRATION_APPLY_BEFORE_ISO);
+    expect(unavailable().applyBefore).toBe(EXPIRATION_APPLY_BEFORE_ISO);
+    expect(toBotRestockPollResponse(resolvedRecord()).applyBefore).toBe(
+      APPLY_BEFORE_ISO,
+    );
+  });
+
+  it('normalizes persisted expiration text before projecting it', () => {
+    const body = toBotExpirationPollResponse(
+      resolvedExpirationRecord({ expirationText: EXPIRATION_UNTRIMMED_TEXT }),
+    );
+
+    expect((body.resolution as { expirationText: string }).expirationText).toBe(
+      EXPIRATION_TEXT,
+    );
+  });
+});
+
+describe('toBotExpirationPollResponse — fail-closed on malformed EXPIRATION state', () => {
+  const resolvedBase: PollOverrides = {
+    status: 'RESOLVED',
+    version: 2,
+    resolutionAction: EXPIRATION_POSITIVE_ACTION,
+    expirationText: EXPIRATION_TEXT,
+    resolvedAt: utcDate(RESOLVED_AT_ISO),
+  };
+
+  it('fails closed on every malformed persisted EXPIRATION shape', () => {
+    const rejects = (overrides: PollOverrides): void => {
+      expect(() =>
+        toBotExpirationPollResponse(expirationPollRecord(overrides)),
+      ).toThrow('Malformed persisted bot restock poll state');
+    };
+
+    // Type, unit, variant coupling and non-null supersedes.
+    rejects({ type: RESTOCK_TYPE });
+    rejects({ type: 'SHIPPING' });
+    rejects({ snapshot: { productUnit: null } });
+    rejects({ snapshot: { productUnit: 7 as unknown as string } });
+    rejects({ snapshot: { variantId: VARIANT_ID, variantName: null } });
+    rejects({ snapshot: { variantName: EXPIRATION_VARIANT_NAME } });
+    rejects({ snapshot: { variantOption: EXPIRATION_VARIANT_OPTION } });
+    rejects({ snapshot: { variantValue: EXPIRATION_VARIANT_VALUE } });
+    rejects({ supersedesDecisionId: SUPERSEDES_ID });
+    // PENDING/RESOLVED version coupling.
+    rejects({ status: 'PENDING', version: 2 });
+    rejects({
+      status: 'PENDING',
+      version: 1,
+      resolutionAction: EXPIRATION_POSITIVE_ACTION,
+    });
+    rejects({ status: 'PENDING', version: 1, expirationText: EXPIRATION_TEXT });
+    rejects({
+      status: 'PENDING',
+      version: 1,
+      resolvedAt: utcDate(RESOLVED_AT_ISO),
+    });
+    rejects({ ...resolvedBase, version: 1 });
+    rejects({ ...resolvedBase, version: 3 });
+    rejects({ ...resolvedBase, resolvedAt: null });
+    // Action ownership and expiration-text validity.
+    rejects({
+      ...resolvedBase,
+      resolutionAction: HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE,
+    });
+    rejects({ ...resolvedBase, resolutionAction: 'BOGUS' });
+    rejects({ ...resolvedBase, expirationText: null });
+    rejects({ ...resolvedBase, expirationText: '   ' });
+    rejects({ ...resolvedBase, expirationText: `Vence${C0_CONTROL}` });
+    rejects({ ...resolvedBase, expirationText: 'a'.repeat(501) });
+    rejects({ ...resolvedBase, restockDays: RESTOCK_DAYS });
+    rejects({ ...resolvedBase, resolutionAction: EXPIRATION_NEGATIVE_ACTION });
+    rejects({
+      ...resolvedBase,
+      resolutionAction: EXPIRATION_NEGATIVE_ACTION,
+      expirationText: null,
+      restockDays: RESTOCK_DAYS,
+    });
+    // Shared id/date guards, re-exercised through the EXPIRATION path.
+    rejects({ id: '00000000-0000-0000-0000-000000000000' });
+    rejects({ id: DECISION_ID.toUpperCase() });
+    rejects({ sourceRequestId: '00000000-0000-0000-0000-000000000000' });
+    rejects({ createdAt: new Date('invalid') });
+    rejects({ ...resolvedBase, resolvedAt: new Date('invalid') });
+  });
+
+  it('fails closed when resolvedAt + 24h overflows the Date range', () => {
+    const record = resolvedExpirationRecord({
+      resolvedAt: new Date(8_640_000_000_000_000),
+    });
+
+    expect(() => toBotExpirationPollResponse(record)).toThrow(
+      'Malformed persisted bot restock poll state',
+    );
+  });
+
+  it('throws a value-free error that never echoes persisted values', () => {
+    const record = resolvedExpirationRecord({
+      resolutionAction: 'BOGUS_ACTION',
+      snapshot: {
+        productName: 'PRODUCT-NAME-SENTINEL',
+        variantName: 'VARIANT-NAME-SENTINEL',
+      },
+    });
+
+    let message = '';
+    try {
+      toBotExpirationPollResponse(record);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).not.toBe('');
+    expect(message).not.toContain('BOGUS_ACTION');
+    expect(message).not.toContain('PRODUCT-NAME-SENTINEL');
+    expect(message).not.toContain('VARIANT-NAME-SENTINEL');
+    expect(message).not.toContain(DECISION_ID);
+  });
+});
+
+describe('toBotExpirationPollResponse — no reviewer identity / authority / PII leaks', () => {
+  it('omits every forbidden key and ignores injected server-only fields', () => {
+    const injected = {
+      source: 'SOURCE-SENTINEL',
+      tenantId: 'TENANT-SECRET',
+      canonicalRequestHash: 'HASH-SECRET',
+      submittedCredentialId: 'CREDENTIAL-SECRET',
+      resolvedById: 'REVIEWER-ID-SECRET',
+      resolvedByDisplayName: 'REVIEWER-NAME-SECRET',
+      resolutionRequestId: 'RESOLUTION-REQUEST-SECRET',
+      applicationOutcome: 'PROVIDER_ACCEPTED',
+      providerMessageId: 'PROVIDER-MESSAGE-SECRET',
+      ackReceivedAt: 'ACK-RECEIVED-SECRET',
+    };
+    const bodies = [
+      toBotExpirationPollResponse(
+        withExtraFields(expirationPollRecord(), injected),
+      ),
+      toBotExpirationPollResponse(
+        withExtraFields(resolvedExpirationRecord(), injected),
+      ),
+    ];
+    const forbidden = [...FORBIDDEN_KEYS, ...EXPIRATION_FORBIDDEN_KEYS];
+
+    for (const body of bodies) {
+      for (const key of forbidden) {
+        expect(body).not.toHaveProperty(key);
+        expect(body.snapshot).not.toHaveProperty(key);
+      }
+      const serialized = JSON.stringify(body);
+      for (const key of forbidden) {
+        expect(serialized).not.toContain(`"${key}"`);
+      }
+      for (const sentinel of Object.values(injected)) {
+        expect(serialized).not.toContain(sentinel);
+      }
+    }
   });
 });

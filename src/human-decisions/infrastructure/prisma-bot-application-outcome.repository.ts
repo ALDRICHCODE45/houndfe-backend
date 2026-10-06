@@ -22,16 +22,19 @@
  * read. `tenantId`, `source`, `type` and `ackReceivedAt` come from the
  * server/CLS, never from the command.
  *
- * ONE-TERMINAL CAS: the decision is looked up by id + tenant + RESTOCK
- * source/type (never `findUnique` by id alone). A missing/foreign row is a
- * sanitized `NOT_FOUND`; a non-`RESOLVED` row, a non-2 `expectedResolutionVersion`
- * or a persisted `version` other than the expected 2 is `VERSION_CONFLICT`.
- * With no terminal present, the bot-observed `attemptedAt` must fall inside the
- * half-open `[resolvedAt, resolvedAt + 1h)` window, `PROVIDER_ACCEPTED` must be
- * observed strictly before the deadline and `PROVIDER_ACCEPTED_LATE` at/after
- * it (an out-of-contract window is a fixed value-free `InvalidArgumentError`,
- * mapping to `400`). A single `updateMany` conditioned on
- * `status='RESOLVED' AND version=2 AND applicationOutcome IS NULL` then writes
+ * ONE-TERMINAL CAS: the decision is looked up by id + tenant + shared source
+ * with a CLOSED type admission of RESTOCK/EXPIRATION (never `findUnique` by id
+ * alone, and an unknown/foreign type is a sanitized `NOT_FOUND`). A missing/
+ * foreign row is a sanitized `NOT_FOUND`; a non-`RESOLVED` row, a non-2
+ * `expectedResolutionVersion` or a persisted `version` other than the expected
+ * 2 is `VERSION_CONFLICT`. With no terminal present, the bot-observed
+ * `attemptedAt` must fall inside the type-aware half-open
+ * `[resolvedAt, resolvedAt + window)` window (1h for RESTOCK, 24h for
+ * EXPIRATION), `PROVIDER_ACCEPTED` must be observed strictly before the
+ * deadline and `PROVIDER_ACCEPTED_LATE` at/after it (an out-of-contract window
+ * is a fixed value-free `InvalidArgumentError`, mapping to `400`). A single
+ * `updateMany` conditioned on `status='RESOLVED' AND version=2 AND
+ * applicationOutcome IS NULL` then writes
  * the terminal outcome. `count === 1` re-reads and returns the committed row;
  * `count === 0` re-reads the winner and classifies it. Any other count is an
  * integrity/programmer error and throws a value-free plain `Error`.
@@ -87,12 +90,13 @@ import {
   RESTOCK_SOURCE,
   RESTOCK_TYPE,
 } from '../domain/restock-request-canonicalizer';
+import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 
 type TenantScopedClient = ReturnType<TenantPrismaService['getClient']>;
 
 /**
  * Exact internal state SELECT: the fields needed to gate the CAS
- * (`status`/`version`/`resolvedAt`), to classify a persisted terminal
+ * (`type`/`status`/`version`/`resolvedAt`), to classify a persisted terminal
  * (`applicationOutcome`/`applicationAttemptId`/`applicationEvidenceHash`) and
  * to rebuild the acknowledgment (`id`/`status`/`version`/`ackReceivedAt`). The
  * provider/bot evidence columns are WRITTEN, never read back, and no PII or
@@ -100,6 +104,7 @@ type TenantScopedClient = ReturnType<TenantPrismaService['getClient']>;
  */
 export const APPLICATION_OUTCOME_STATE_SELECT = {
   id: true,
+  type: true,
   status: true,
   version: true,
   resolvedAt: true,
@@ -113,8 +118,22 @@ type ApplicationOutcomeStateRow = Prisma.HumanDecisionGetPayload<{
   select: typeof APPLICATION_OUTCOME_STATE_SELECT;
 }>;
 
-/** One hour in milliseconds: the owner-approved half-open application window. */
-const APPLICATION_WINDOW_MS = 60 * 60 * 1000;
+/**
+ * Owner-approved half-open application window per admitted decision type:
+ * `RESTOCK` keeps 1h, `EXPIRATION` gets 24h (the SQL CHECK mirrors this). Any
+ * other persisted type is impossible behind the closed read/CAS admission and
+ * fails closed as a value-free integrity error.
+ */
+function windowMsForType(type: string): number {
+  switch (type) {
+    case RESTOCK_TYPE:
+      return 60 * 60 * 1000;
+    case EXPIRATION_TYPE:
+      return 24 * 60 * 60 * 1000;
+    default:
+      throw new Error(UNKNOWN_DECISION_TYPE_ERROR);
+  }
+}
 
 /**
  * Fixed, value-free messages. Nothing here is derived from the command, so a
@@ -165,6 +184,10 @@ const NESTED_TRANSACTION_ERROR =
  */
 const UNEXPECTED_UPDATE_COUNT_ERROR =
   'PrismaBotApplicationOutcomeRepository.record observed an unexpected updateMany count';
+
+/** Value-free integrity error for a persisted type outside the closed set. */
+const UNKNOWN_DECISION_TYPE_ERROR =
+  'PrismaBotApplicationOutcomeRepository.record observed an unsupported decision type';
 
 /** Value-free integrity error for a RESOLVED row missing `resolvedAt`. */
 const MISSING_RESOLVED_AT_ERROR =
@@ -269,14 +292,14 @@ export class PrismaBotApplicationOutcomeRepository implements IBotApplicationOut
       if (resolvedAt === null) {
         throw new Error(MISSING_RESOLVED_AT_ERROR);
       }
-      this.assertTemporalWindow(request, resolvedAt);
+      this.assertTemporalWindow(request, resolvedAt, current.type);
 
       const updated = await db.humanDecision.updateMany({
         where: {
           id: command.decisionId,
           tenantId,
           source: RESTOCK_SOURCE,
-          type: RESTOCK_TYPE,
+          type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
           status: 'RESOLVED',
           version: 2,
           applicationOutcome: null,
@@ -336,7 +359,7 @@ export class PrismaBotApplicationOutcomeRepository implements IBotApplicationOut
         id: decisionId,
         tenantId,
         source: RESTOCK_SOURCE,
-        type: RESTOCK_TYPE,
+        type: { in: [RESTOCK_TYPE, EXPIRATION_TYPE] },
       },
       select: APPLICATION_OUTCOME_STATE_SELECT,
     });
@@ -362,20 +385,22 @@ export class PrismaBotApplicationOutcomeRepository implements IBotApplicationOut
   }
 
   /**
-   * Half-open `[resolvedAt, resolvedAt + 1h)` window on the bot-observed
-   * attempt, plus the acceptance-vs-deadline split. `STALE` carries no send
-   * evidence (the parser guarantees it), so it has no window to check.
+   * Half-open `[resolvedAt, resolvedAt + window(type))` window on the
+   * bot-observed attempt, plus the acceptance-vs-deadline split; the window is
+   * 1h for `RESTOCK` and 24h for `EXPIRATION`. `STALE` carries no send evidence
+   * (the parser guarantees it), so it has no window to check.
    */
   private assertTemporalWindow(
     request: BotApplicationOutcomeRequest,
     resolvedAt: Date,
+    type: string,
   ): void {
     if (request.outcome === STALE) {
       return;
     }
 
     const windowStart = resolvedAt.getTime();
-    const windowEnd = windowStart + APPLICATION_WINDOW_MS;
+    const windowEnd = windowStart + windowMsForType(type);
     const attemptedMs = new Date(request.attemptedAt).getTime();
     if (attemptedMs < windowStart || attemptedMs >= windowEnd) {
       return failWindow();
