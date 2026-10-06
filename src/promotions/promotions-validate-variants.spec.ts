@@ -191,15 +191,21 @@ describe('PromotionsService.validateTargetIds — VARIANTS (W5)', () => {
 
     expect(repo.save).toHaveBeenCalledTimes(1);
     expect(result.appliesTo).toBe('VARIANTS');
-    // The tenant-scoped variant.findMany was called exactly once with the
-    // expected where clause (id IN ['V-A']).
-    expect(prisma.variant.findMany).toHaveBeenCalledTimes(1);
-    expect(prisma.variant.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: { in: ['V-A'] } },
-        select: { id: true },
-      }),
-    );
+    // Creation validates the target before enriching the response.
+    expect(prisma.variant.findMany).toHaveBeenCalledTimes(2);
+    expect(prisma.variant.findMany).toHaveBeenNthCalledWith(1, {
+      where: { id: { in: ['V-A'] } },
+      select: { id: true },
+    });
+    expect(prisma.variant.findMany).toHaveBeenNthCalledWith(2, {
+      where: { id: { in: ['V-A'] } },
+      select: {
+        id: true,
+        productId: true,
+        name: true,
+        product: { select: { name: true } },
+      },
+    });
   });
 });
 
@@ -345,7 +351,20 @@ describe('PromotionsService.validateTargetIds — VARIANTS uses tenant-scoped cl
       }),
     );
 
-    // The variant lookup MUST be invoked (the symbol the helper binds to).
-    expect(variantFindMany).toHaveBeenCalledTimes(1);
+    // Both validation and response enrichment use the variant lookup.
+    expect(variantFindMany).toHaveBeenCalledTimes(2);
+    expect(variantFindMany).toHaveBeenNthCalledWith(1, {
+      where: { id: { in: ['V-A'] } },
+      select: { id: true },
+    });
+    expect(variantFindMany).toHaveBeenNthCalledWith(2, {
+      where: { id: { in: ['V-A'] } },
+      select: {
+        id: true,
+        productId: true,
+        name: true,
+        product: { select: { name: true } },
+      },
+    });
   });
 });
