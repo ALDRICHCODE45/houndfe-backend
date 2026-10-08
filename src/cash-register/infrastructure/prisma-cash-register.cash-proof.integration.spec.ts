@@ -124,6 +124,283 @@ proof('cash register disposable PostgreSQL proof', () => {
     };
   }
 
+  async function member(tenantId: string, userId: string = randomUUID()) {
+    await prisma.user.upsert({
+      where: { id: userId },
+      create: {
+        id: userId,
+        email: `${userId}@cash-proof.invalid`,
+        name: 'Discovery recipient',
+        hashedPassword: 'not-a-password',
+        isActive: true,
+      },
+      update: {},
+    });
+    const role = await prisma.role.create({
+      data: { name: randomUUID(), tenantId },
+    });
+    await prisma.tenantMembership.create({
+      data: { tenantId, userId, roleId: role.id },
+    });
+    return userId;
+  }
+
+  function object(value: unknown): CashDocument {
+    expect(value).not.toBeNull();
+    expect(typeof value).toBe('object');
+    expect(Array.isArray(value)).toBe(false);
+    return value as CashDocument;
+  }
+
+  function custodyActor(userId: string): CashActor {
+    return {
+      userId,
+      ability: createMongoAbility<AppAbility>([
+        { action: 'read', subject: 'CashHandover' },
+        { action: 'update', subject: 'CashHandover' },
+        { action: 'create', subject: 'CashSession' },
+        { action: 'read', subject: 'CashSession' },
+      ]),
+    };
+  }
+
+  it('discovers frozen cash and transfer identities through a fresh client without exposing blind amounts', async () => {
+    const f = await fixture();
+    const id = sessionId(
+      await f.first.app.execute(f.actor, f.command, randomUUID()),
+    );
+    const reader: CashActor = {
+      userId: f.actor.userId,
+      ability: createMongoAbility<AppAbility>([
+        { action: 'read', subject: 'CashSession' },
+      ]),
+    };
+    expect(
+      await f.first.app.query(reader, { kind: 'SESSION', id }),
+    ).not.toHaveProperty('requiredChannels');
+    await f.first.tenant.runInTransaction(() =>
+      f.first.app.recordPayments({
+        sessionId: id,
+        actorId: f.actor.userId,
+        saleId: randomUUID(),
+        payments: [
+          { paymentId: randomUUID(), method: 'cash', amountCents: 1000 },
+          { paymentId: randomUUID(), method: 'transfer', amountCents: 250 },
+        ],
+        changeDueCents: 0,
+        occurredAt: new Date(),
+      }),
+    );
+    await f.first.app.execute(
+      f.actor,
+      { kind: 'START_COUNT', sessionId: id },
+      randomUUID(),
+    );
+    const detail = await f.second.app.query(reader, { kind: 'SESSION', id });
+    expect(object(detail.session)).toMatchObject({ blind: true });
+    expect(object(detail.session)).not.toHaveProperty('expectedCashCents');
+    expect(detail.channelSnapshot).toBeNull();
+    expect(detail.movements).toEqual([]);
+    expect(detail.requiredChannels).toEqual([
+      { channelKey: 'CASH', channelLabel: 'Efectivo', method: 'CASH' },
+      {
+        channelKey: 'METHOD:TRANSFER',
+        channelLabel: 'Transferencia',
+        method: 'TRANSFER',
+      },
+    ]);
+    expect(await f.first.app.query(reader, { kind: 'SESSION', id })).toEqual(
+      detail,
+    );
+    const foreign = await fixture();
+    await member(foreign.tenantId, reader.userId);
+    await expect(
+      foreign.first.app.query(reader, { kind: 'SESSION', id }),
+    ).rejects.toMatchObject({ code: 'CASH_SESSION_NOT_FOUND' });
+    await f.first.app.execute(
+      f.actor,
+      {
+        kind: 'DECLARE',
+        sessionId: id,
+        lines: [
+          { channelKey: 'CASH', amountCents: 1000 },
+          { channelKey: 'METHOD:TRANSFER', amountCents: 250 },
+        ],
+      },
+      randomUUID(),
+    );
+    const submitted = await f.second.app.query(reader, { kind: 'SESSION', id });
+    expect(submitted).not.toHaveProperty('requiredChannels');
+    expect(object(submitted.session).blind).toBe(false);
+    expect(submitted.channelSnapshot).not.toBeNull();
+  });
+
+  it('scopes custody to authorized tenant recipients and consumes a received FLOAT only once', async () => {
+    const f = await fixture();
+    const recipient = custodyActor(await member(f.tenantId));
+    const other = custodyActor(await member(f.tenantId));
+    const id = sessionId(
+      await f.first.app.execute(f.actor, f.command, randomUUID()),
+    );
+    await f.first.app.execute(
+      f.actor,
+      {
+        kind: 'CASH_IN',
+        sessionId: id,
+        amountCents: 1000,
+        reason: 'Fictional proof',
+      },
+      randomUUID(),
+    );
+    await f.first.app.execute(
+      f.actor,
+      { kind: 'START_COUNT', sessionId: id },
+      randomUUID(),
+    );
+    await f.first.app.execute(
+      f.actor,
+      {
+        kind: 'DECLARE',
+        sessionId: id,
+        lines: [{ channelKey: 'CASH', amountCents: 1000 }],
+      },
+      randomUUID(),
+    );
+    const handover = await f.first.app.execute(
+      f.actor,
+      {
+        kind: 'CREATE_HANDOVER',
+        sessionId: id,
+        handoverKind: 'FLOAT',
+        recipientUserId: recipient.userId,
+        declaredCents: 1000,
+      },
+      randomUUID(),
+    );
+    expect(typeof handover.id).toBe('string');
+    const handoverId = handover.id as string;
+    const query = { kind: 'CUSTODY' as const, page: { page: 1, limit: 10 } };
+    const empty = {
+      pendingHandovers: { items: [], page: 1, limit: 10, total: 0 },
+      eligibleFloat: { items: [], page: 1, limit: 10, total: 0 },
+    };
+    const pending = await f.second.app.query(recipient, query);
+    expect(object(pending.pendingHandovers)).toMatchObject({
+      total: 1,
+      page: 1,
+      limit: 10,
+    });
+    expect(object(pending.pendingHandovers).items).toEqual([
+      {
+        id: handoverId,
+        sessionId: id,
+        kind: 'FLOAT',
+        declaredCents: 1000,
+        receivedCents: null,
+        senderUserId: f.actor.userId,
+        receiverUserId: recipient.userId,
+        declaredAt: handover.declaredAt,
+        receivedAt: null,
+        sourceRegisterId: f.command.registerId,
+        sourceDrawerReleasedAt: null,
+      },
+    ]);
+    expect(object(pending.eligibleFloat)).toEqual(empty.eligibleFloat);
+    expect(await f.second.app.query(other, query)).toEqual(empty);
+    const foreign = await fixture();
+    await member(foreign.tenantId, recipient.userId);
+    expect(await foreign.first.app.query(recipient, query)).toEqual(empty);
+    for (const rules of [
+      [],
+      [{ action: 'read' as const, subject: 'CashSessionAudit' as const }],
+    ]) {
+      await expect(
+        f.second.app.query(
+          {
+            userId: recipient.userId,
+            ability: createMongoAbility<AppAbility>(rules),
+          },
+          query,
+        ),
+      ).rejects.toMatchObject({ code: 'CASH_PERMISSION_DENIED' });
+    }
+    const conditional: CashActor = {
+      userId: recipient.userId,
+      ability: createMongoAbility<AppAbility>([
+        {
+          action: 'read',
+          subject: 'CashHandover',
+          conditions: { kind: 'WITHDRAWAL' },
+        },
+      ]),
+    };
+    expect(await f.second.app.query(conditional, query)).toEqual(empty);
+    await expect(
+      f.second.app.execute(
+        other,
+        { kind: 'RECEIVE_HANDOVER', id: handoverId, receivedCents: 1000 },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ code: 'CASH_HANDOVER_RECIPIENT_INVALID' });
+    expect(await f.second.app.query(recipient, query)).toEqual(pending);
+    const receipt = await f.second.app.execute(
+      recipient,
+      { kind: 'RECEIVE_HANDOVER', id: handoverId, receivedCents: 1000 },
+      randomUUID(),
+    );
+    const received = await f.second.app.query(recipient, query);
+    expect(object(received.pendingHandovers)).toEqual(empty.pendingHandovers);
+    expect(object(received.eligibleFloat)).toMatchObject({ total: 1 });
+    expect(object(received.eligibleFloat).items).toEqual([
+      {
+        ...object((object(pending.pendingHandovers).items as unknown[])[0]),
+        receivedCents: 1000,
+        receivedAt: receipt.receivedAt,
+      },
+    ]);
+    const opening = {
+      ...f.command,
+      openingCents: 1000,
+      openingHandoverId: handoverId,
+    };
+    await expect(
+      f.second.app.execute(recipient, opening, randomUUID()),
+    ).rejects.toMatchObject({ code: 'CASH_REGISTER_UNRELEASED_SESSION' });
+    expect(await f.second.app.query(recipient, query)).toEqual(received);
+    const newRegister = await f.first.app.execute(
+      f.actor,
+      { kind: 'CREATE_REGISTER', name: randomUUID() },
+      randomUUID(),
+    );
+    const opened = await f.second.app.execute(
+      recipient,
+      { ...opening, registerId: newRegister.id as string },
+      randomUUID(),
+    );
+    expect(sessionId(opened)).toEqual(expect.any(String));
+    expect(await f.second.app.query(recipient, query)).toEqual(empty);
+    const thirdRegister = await f.first.app.execute(
+      f.actor,
+      { kind: 'CREATE_REGISTER', name: randomUUID() },
+      randomUUID(),
+    );
+    const beforeRejected = await f.second.app.query(recipient, {
+      kind: 'SESSIONS',
+      page: {},
+    });
+    await expect(
+      f.second.app.execute(
+        recipient,
+        { ...opening, registerId: thirdRegister.id as string },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ code: 'CASH_OPENING_FLOAT_REUSE' });
+    expect(
+      await f.second.app.query(recipient, { kind: 'SESSIONS', page: {} }),
+    ).toEqual(beforeRejected);
+    expect(await f.second.app.query(recipient, query)).toEqual(empty);
+  });
+
   it('enforces one unreleased drawer under concurrent opens and rejects cross-tenant register references', async () => {
     const f = await fixture();
     const outcomes = await Promise.allSettled([
