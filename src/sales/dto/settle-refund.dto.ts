@@ -3,6 +3,7 @@ import {
   IsInt,
   IsISO8601,
   IsString,
+  IsUUID,
   Matches,
   Max,
   Min,
@@ -57,4 +58,13 @@ export class SettleRefundDto {
   @IsISO8601()
   @Matches(EXPLICIT_TIMEZONE_SUFFIX)
   settledAt: string;
+
+  // Cash-register closing / T4 — optional explicit POS cash-session binding.
+  // Only actual settlements may bind: a session-bound `credit` refund is
+  // rejected at the service layer because credit is not an actual tender.
+  // Omitted keeps the legacy flow and the exact legacy idempotency hash.
+  // Only omission is optional; null must not bypass session validation.
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsUUID('all', { message: 'INVALID_CASH_SESSION_ID' })
+  cashSessionId?: string;
 }

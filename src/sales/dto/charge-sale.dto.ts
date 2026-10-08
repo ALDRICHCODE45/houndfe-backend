@@ -10,6 +10,7 @@ import {
   IsString,
   IsUUID,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
@@ -63,6 +64,16 @@ export class ChargeSaleDto {
   @IsOptional()
   @IsISO8601()
   dueDate?: string;
+
+  // Cash-register closing / T4 — optional explicit POS cash-session binding.
+  // When present, the charge is a session-bound POS operation: the ledger
+  // fences the session before any sale/stock/folio write and records the
+  // initial tender + change. Omitted keeps the legacy external flow and the
+  // exact legacy idempotency requestHash.
+  // Only omission is optional; null must not bypass session validation.
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsUUID('all', { message: 'INVALID_CASH_SESSION_ID' })
+  cashSessionId?: string;
 
   // pos-sale-delivery — POS cashier flag to confirm the sale as
   // `deliveryStatus: 'PENDING'` (route-eligible) instead of inheriting the
