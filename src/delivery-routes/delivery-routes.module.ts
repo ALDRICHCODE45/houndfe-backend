@@ -35,6 +35,10 @@ import { AuthModule } from '../auth/auth.module';
 import { SalesModule } from '../sales/sales.module';
 import { OutboxModule } from '../shared/outbox/outbox.module';
 import { DeliveryRoutesController } from './presentation/delivery-routes.controller';
+import { EligibleSalesController } from './presentation/eligible-sales.controller';
+import { EligibleSalesService } from './application/eligible-sales.service';
+import { ELIGIBLE_SALES_READER } from './application/eligible-sales-reader.port';
+import { PrismaEligibleSalesReader } from './infrastructure/eligible-sales-prisma.reader';
 import { DeliveryRoutesService } from './application/delivery-routes.service';
 import { PrismaDeliveryRouteRepository } from './infrastructure/prisma-delivery-route.repository';
 import { ManualRouteOptimizer } from './infrastructure/manual-route-optimizer';
@@ -91,9 +95,15 @@ class DeliveryRouteSubjectResolverRegistrar implements OnApplicationBootstrap {
 
 @Module({
   imports: [AuthModule, SalesModule, OutboxModule],
-  controllers: [DeliveryRoutesController],
+  // Register the literal selector route before DeliveryRoutesController's :id.
+  controllers: [EligibleSalesController, DeliveryRoutesController],
   providers: [
     DeliveryRoutesService,
+    EligibleSalesService,
+    {
+      provide: ELIGIBLE_SALES_READER,
+      useClass: PrismaEligibleSalesReader,
+    },
     {
       provide: DELIVERY_ROUTE_REPOSITORY,
       useClass: PrismaDeliveryRouteRepository,

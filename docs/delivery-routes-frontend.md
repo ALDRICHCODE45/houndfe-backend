@@ -382,3 +382,105 @@ The error body follows the global envelope: `{ statusCode, error, message, times
 - **Next-stop email pipeline**: `checkInStop` → outbox `delivery.next_stop.notify` (idempotency key `${tenantId}:${currentStopId}`) → dedicated poller/dispatcher → Inngest `delivery-next-stop-notify` fn → React-email template sent via `MAILER`. The customer email is re-resolved at send time; config re-gated at send time (§6).
 - **Thank-you email pipeline (dormant action)**: the same `checkInStop` transaction writes an ids-only `delivery.thank_you.notify` row for every completed stop (last included) → dedicated claim `IN ('delivery.next_stop.notify', 'delivery.thank_you.notify')` → fail-closed awaited dispatcher → Inngest `delivery-thank-you-notify` fn → `DeliveryThankYouSender`. The generic poller **excludes** `delivery.thank_you.notify`, so an unrouted row stays `PENDING` instead of being mis-dispatched. The sender proves the exact completed stop (both timestamps, tenant-scoped), reads the persisted `CONFIRMED` + `DELIVERED` summary, resolves the customer email at send time, re-gates master/action at send time, and sends only to the customer. Stable Inngest id `${tenantId}:${saleId}:${stopId}`; **no** exactly-once guarantee. The action is disabled by default — see `docs/delivery-thank-you-activation.md`.
 - **Permissions**: the 4 `DeliveryRoute` permissions auto-seed on boot; `create`/`delete` presence is the manager discriminator (ADR-5), and driver-only callers receive CASL conditional rules `{ driverUserId: userId }` for read/update.
+
+---
+
+## 11. Eligible-sales selector — `GET /delivery-routes/eligible-sales`
+
+Route-manager only: requires **both** `read:Sale` and `create:DeliveryRoute` (the same manager discriminator as §5). A driver-only caller gets `403`. This is the supported way to populate the "add sales to a route" picker: it is server-scoped, paginated and searchable, and returns the authoritative availability state for every row.
+
+### 11.1 Query
+
+| Param | Type | Default | Validation / meaning |
+| ----- | ---- | ------- | -------------------- |
+| `page` | number | `1` | ≥ 1 (1-based) |
+| `limit` | number | `20` | 1–100 |
+| `q` | string | — | Optional, ≤ 200 chars. Free-text over customer first/last name, the **numeric suffix** of the folio, and the shipping address (`street`, `neighborhood`, `municipality`, `city`, `zipCode`) |
+| `contextRouteId` | uuid v4 | — | Optional. The route currently being edited; its stops drive `IN_CURRENT_ROUTE` |
+
+```http
+GET /delivery-routes/eligible-sales?page=1&limit=20&q=ana&contextRouteId=00000000-0000-0000-0000-0000000000aa
+```
+
+### 11.2 Response
+
+```typescript
+{
+  data: EligibleSaleRow[];              // ordered: confirmedAt DESC NULLS LAST, then id DESC
+  pagination: { page: number; limit: number; total: number; totalPages: number };
+}
+```
+
+`totalPages` is `0` when `total` is `0`.
+
+```typescript
+interface EligibleSaleRow {
+  id: string;
+  folio: string | null;
+  status: string;                       // raw Sale.status
+  paymentStatus: string | null;         // raw Sale.paymentStatus
+  deliveryStatus: string;               // raw Sale.deliveryStatus
+  totalCents: number;
+  debtCents: number;
+  confirmedAt: string | null;           // ISO 8601
+  dueDate: string | null;               // ISO 8601
+  customer: { id: string; name: string } | null;   // name = firstName + ' ' + lastName (trimmed)
+  shippingAddress: EligibleSaleShippingAddress | null;
+  productSummary: string[];             // ≤ 3 SaleItem.productName, in sale-line order
+  availability: EligibleSaleAvailability;
+}
+
+interface EligibleSaleShippingAddress {
+  id: string;
+  label: string | null;
+  street: string;                       // non-null (unlike DeliveryRouteStop.shippingAddress)
+  exteriorNumber: string | null;
+  interiorNumber: string | null;
+  neighborhood: string | null;
+  municipality: string | null;
+  city: string | null;
+  state: string | null;
+  zipCode: string | null;
+}
+
+type EligibleSaleAvailability =
+  | { state: 'AVAILABLE' }
+  | { state: 'IN_CURRENT_ROUTE'; stopId: string; sortOrder: number }
+  | { state: 'OCCUPIED'; reason: 'RESERVED_BY_ROUTE';
+      occupiedRoute: { id: string; status: 'DRAFT' | 'ACTIVE' } | null }
+  | { state: 'INELIGIBLE'; reason: 'MISSING_ADDRESS' | 'DELIVERY_STATUS' };
+```
+
+### 11.3 Availability semantics (precedence is server-side)
+
+`INELIGIBLE` → `IN_CURRENT_ROUTE` → `OCCUPIED` → `AVAILABLE`.
+
+| State | Meaning | Selectable? |
+| ----- | ------- | ----------- |
+| `AVAILABLE` | Eligible and not reserved anywhere | ✅ |
+| `IN_CURRENT_ROUTE` | Already a stop of `contextRouteId` (live route) | Already in the route |
+| `OCCUPIED` | Reserved by another DRAFT/ACTIVE route | ❌ **never** |
+| `INELIGIBLE` | Missing shipping address (`MISSING_ADDRESS`) or `deliveryStatus ∉ {PENDING, SHIPPED}` (`DELIVERY_STATUS`) | ❌ |
+
+- **`occupiedRoute: null` is NOT "free".** The backend returns `null` when the caller cannot read the occupying route instance (driver-scoped CASL condition) **or** when the reservation marker's route status is outside `{DRAFT, ACTIVE}`. In both cases the row stays `OCCUPIED` — a forbidden or unknown holder is **never** downgraded to `AVAILABLE`. Render an "occupied by another route" state without a link.
+- `IN_CURRENT_ROUTE` is only produced for a **live** (`DRAFT`/`ACTIVE`) context route. A `COMPLETED`/`CANCELLED` `contextRouteId` is validated for existence/authorization but contributes no stops, so its sales fall through to normal occupancy (historical routes do not block re-selection).
+- `INELIGIBLE` rows are intentionally kept in the page (with the reason) so the UI can explain why a search hit is not selectable.
+
+### 11.4 `contextRouteId` authorization
+
+`contextRouteId` must exist in the caller's tenant **and** the caller must be able to read that route instance. Any miss — unknown, cross-tenant, or unauthorized — returns `404 ENTITY_NOT_FOUND` (never `403`, never an existence oracle), the same rule as `GET /delivery-routes/:id`.
+
+### 11.5 Errors
+
+| HTTP | Code | Cause |
+| ---- | ---- | ----- |
+| `401` | — | No/invalid token |
+| `403` | — | Caller lacks `read:Sale` and/or `create:DeliveryRoute` |
+| `404` | `ENTITY_NOT_FOUND` | `contextRouteId` unknown, cross-tenant, or not instance-readable |
+| `400` | — | DTO validation (`page`/`limit` out of range, `q` > 200, non-uuid `contextRouteId`) |
+
+### 11.6 Invalidate after mutations
+
+Availability is a snapshot. **Refetch the selector after every mutating call** (`create`, `POST :id/stops`, `transfer`, `start`, `cancel`): a reservation is taken/released the moment a sale joins or leaves a DRAFT/ACTIVE route, so cached rows can go stale between two writes.
+
+> Backend wiring note: the selector lives in `EligibleSalesController`, which must be registered **before** `DeliveryRoutesController` so `GET /delivery-routes/:id` does not shadow `GET /delivery-routes/eligible-sales`.
