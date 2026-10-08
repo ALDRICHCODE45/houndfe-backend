@@ -123,6 +123,16 @@ export const CASH_SESSION_READ_REQUIREMENT: CashAbilityRequirement = {
   subject: 'CashSession',
 };
 
+/**
+ * S2 — recipient custody discovery (`read:CashHandover`). Granular on purpose:
+ * `read:CashSessionAudit` is a wider session-visibility grant and must NOT be
+ * accepted as a substitute for listing one's own pending/received handovers.
+ */
+export const CASH_HANDOVER_READ_REQUIREMENT: CashAbilityRequirement = {
+  action: 'read',
+  subject: 'CashHandover',
+};
+
 export const CASH_CLOSING_READ_REQUIREMENT: CashAbilityRequirement = {
   action: 'read',
   subject: 'CashClosing',

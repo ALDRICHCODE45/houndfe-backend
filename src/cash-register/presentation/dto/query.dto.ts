@@ -71,3 +71,28 @@ export class ListSessionsQueryDto extends CashListQueryDto {
 }
 
 export class ListClosingsQueryDto extends CashListQueryDto {}
+
+/**
+ * S2 — recipient custody discovery. Deliberately exposes ONLY the shared
+ * 1-based `page` / `limit`; there is no recipient, tenant or cashier filter,
+ * and any extra query key is rejected by `forbidNonWhitelisted`.
+ */
+export class ListCustodyQueryDto {
+  @IsCashOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    parseStrictNonNegativeInteger(value),
+  )
+  @IsInt()
+  @Min(1)
+  @Max(CASH_LIST_MAX_PAGE)
+  page: number = CASH_LIST_DEFAULT_PAGE;
+
+  @IsCashOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    parseStrictNonNegativeInteger(value),
+  )
+  @IsInt()
+  @Min(1)
+  @Max(CASH_LIST_MAX_LIMIT)
+  limit: number = CASH_LIST_DEFAULT_LIMIT;
+}

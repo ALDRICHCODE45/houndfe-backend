@@ -29,7 +29,7 @@ const EXPECTED: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['CashIn', ['create']],
   ['CashOut', ['create']],
   ['CashVerification', ['create']],
-  ['CashHandover', ['create', 'update']],
+  ['CashHandover', ['create', 'read', 'update']],
   ['CashClosing', ['create', 'read']],
   ['CashSessionAudit', ['read']],
 ];

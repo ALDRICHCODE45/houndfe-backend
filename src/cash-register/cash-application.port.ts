@@ -77,7 +77,10 @@ export type CashQuery =
   | { kind: 'SESSION'; id: string }
   | { kind: 'SESSIONS'; page: CashPageInput; pendingOnly?: boolean }
   | { kind: 'CLOSINGS'; page: CashPageInput }
-  | { kind: 'CLOSING'; id: string };
+  | { kind: 'CLOSING'; id: string }
+  // S2 — recipient custody discovery. Scoped to the authenticated recipient
+  // by the application; the page holds no actor/recipient override.
+  | { kind: 'CUSTODY'; page: CashPageInput };
 
 /** HTTP adapters supply authenticated actors; the service rechecks instance scope. */
 export interface ICashApplication {

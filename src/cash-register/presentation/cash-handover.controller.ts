@@ -1,22 +1,30 @@
 /**
- * HTTP CONTROLLER: cash-handover receipt (T3/S2,S3).
+ * HTTP CONTROLLER: cash-handover receipt and recipient custody discovery
+ * (T3/S2,S3).
  *
  *   POST /cash-handovers/:id/receive → update:CashHandover (RECEIVE_HANDOVER)
+ *   GET  /cash-handovers/custody     → read:CashHandover   (query CUSTODY)
  *
  * The receiving actor is the authenticated JWT subject; the application
  * re-checks that it matches the handover's bound recipient and that the
  * declaration precedes the receipt. The sender can never assert another
  * person's receipt through this body.
+ *
+ * Custody discovery is scoped by the application to the authenticated
+ * recipient; the route accepts only `page`/`limit`, so a caller cannot supply
+ * a recipient or tenant.
  */
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Inject,
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -34,6 +42,7 @@ import {
 import { requireCashActor, type CashRequestWithAbility } from './cash-actor';
 import { IdempotencyKey } from './decorators/idempotency-key.decorator';
 import { ReceiveHandoverDto } from './dto/handover.dto';
+import { ListCustodyQueryDto } from './dto/query.dto';
 
 @Controller('cash-handovers')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -42,6 +51,19 @@ export class CashHandoverController {
     @Inject(CASH_APPLICATION)
     private readonly application: ICashApplication,
   ) {}
+
+  @Get('custody')
+  @RequirePermissions(['read', 'CashHandover'])
+  listCustody(
+    @Query() query: ListCustodyQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: CashRequestWithAbility,
+  ): Promise<CashDocument> {
+    return this.application.query(requireCashActor(user, request), {
+      kind: 'CUSTODY',
+      page: { page: query.page, limit: query.limit },
+    });
+  }
 
   @Post(':id/receive')
   @HttpCode(HttpStatus.OK)

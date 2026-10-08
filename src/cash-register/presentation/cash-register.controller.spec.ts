@@ -80,6 +80,7 @@ const FULL_PERMISSIONS: PermissionTuple[] = [
   ['create', 'CashOut'],
   ['create', 'CashVerification'],
   ['create', 'CashHandover'],
+  ['read', 'CashHandover'],
   ['update', 'CashHandover'],
   ['create', 'CashClosing'],
   ['read', 'CashClosing'],
@@ -93,6 +94,8 @@ const PERMISSIONS: Record<string, PermissionTuple[]> = {
   'user-closing-reader': [['read', 'CashClosing']],
   'user-cash-in-only': [['create', 'CashIn']],
   'user-count-only': [['create', 'CashCount']],
+  'user-custody-reader': [['read', 'CashHandover']],
+  'user-audit-only': [['read', 'CashSessionAudit']],
   'user-no-perms': [],
   'user-super': [['manage', 'all']],
 };
@@ -856,6 +859,60 @@ describe('Cash register HTTP contract (T3 presentation)', () => {
         kind: 'RELEASE_DRAWER',
         sessionId: SESSION_ID,
       });
+    });
+  });
+
+  describe('custody discovery (GET /cash-handovers/custody)', () => {
+    it('forwards the default page/limit as the CUSTODY query', async () => {
+      const res = await get('/cash-handovers/custody').expect(200);
+
+      expect(res.body).toEqual(FIXED_DOCUMENT);
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(lastQuery()).toEqual({
+        kind: 'CUSTODY',
+        page: { page: 1, limit: 25 },
+      });
+      expect(lastQueryActor().userId).toBe('user-full');
+    });
+
+    it('forwards page and limit and never a recipient/tenant override', async () => {
+      await get('/cash-handovers/custody')
+        .query({ page: '2', limit: '50' })
+        .expect(200);
+
+      expect(lastQuery()).toEqual({
+        kind: 'CUSTODY',
+        page: { page: 2, limit: 50 },
+      });
+    });
+
+    it('accepts the dedicated custody reader', async () => {
+      await get('/cash-handovers/custody', 'user-custody-reader').expect(200);
+
+      expect(lastQuery()).toEqual({
+        kind: 'CUSTODY',
+        page: { page: 1, limit: 25 },
+      });
+    });
+
+    it.each([
+      ['a tenant override', { tenantId: TENANT_ID }],
+      ['a recipient override', { recipientUserId: RECIPIENT_ID }],
+      ['an unknown key', { cashierUserId: RECIPIENT_ID }],
+      ['a zero page', { page: '0' }],
+      ['a limit above the cap', { limit: '101' }],
+    ])(
+      'rejects %s with 400 and never calls the application',
+      async (_case, params) => {
+        await get('/cash-handovers/custody').query(params).expect(400);
+        expect(query).not.toHaveBeenCalled();
+      },
+    );
+
+    it('denies a user without read:CashHandover (audit is not a substitute)', async () => {
+      await get('/cash-handovers/custody', 'user-audit-only').expect(403);
+      await get('/cash-handovers/custody', 'user-no-perms').expect(403);
+      expect(query).not.toHaveBeenCalled();
     });
   });
 

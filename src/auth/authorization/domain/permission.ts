@@ -708,6 +708,11 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   },
   {
     subject: 'CashHandover',
+    action: 'read',
+    description: 'View own pending handovers and eligible received FLOAT',
+  },
+  {
+    subject: 'CashHandover',
     action: 'update',
     description: 'Confirm receipt of a cash custody handover',
   },
