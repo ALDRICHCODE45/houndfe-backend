@@ -3,9 +3,9 @@
  * `DeliveryRoute` aggregate (delivery-routes / WU2).
  *
  * Owns per-stop lifecycle state (`status`, `checkedInAt`, `completedAt`,
- * `skippedReason`) plus the ADR-7 `activeRouteId` marker that pins the
- * "one Sale in at most one ACTIVE route" invariant. Pure domain — no
- * NestJS, no Prisma, no I/O.
+ * `skippedReason`) plus the ADR-7 reservation marker that pins the
+ * "one Sale reserved by at most one DRAFT/ACTIVE route" invariant. Pure
+ * domain — no NestJS, no Prisma, no I/O.
  *
  * Construction is via `static create(...)` (for a fresh PENDING stop on
  * `DeliveryRoute.create` / `addStop`) or `static fromPersistence(...)`
@@ -34,11 +34,15 @@ export interface DeliveryRouteStopProps {
   completedAt: Date | null;
   skippedReason: string | null;
   /**
-   * ADR-7 — non-null exactly while the owning route is `ACTIVE`. The
-   * partial unique index on `(tenantId, saleId) WHERE activeRouteId IS
-   * NOT NULL` enforces "one Sale in at most one ACTIVE route" at commit
-   * time. The value is set/cleared by the aggregate (never the stop).
-   * Never exposed on the read model.
+   * ADR-7 / S2 — non-null while the owning route is `DRAFT` or `ACTIVE`
+   * (the reservation is armed the moment the sale is assigned to a
+   * DRAFT route and survives the DRAFT→ACTIVE transition). It is cleared
+   * when the route reaches a terminal state (`COMPLETED` / `CANCELLED`)
+   * or when the stop leaves the route (transfer / delete). The partial
+   * unique index on `(tenantId, saleId) WHERE activeRouteId IS NOT NULL`
+   * enforces "one DRAFT-or-ACTIVE route per Sale" at commit time. The
+   * value is set/cleared by the aggregate (never the stop). Never exposed
+   * on the read model.
    */
   activeRouteId: string | null;
   createdAt: Date;
@@ -196,13 +200,52 @@ export class DeliveryRouteStop {
   }
 
   /**
-   * Set the ADR-7 active marker. Called by the aggregate on
-   * `start()` / `cancel()` / `checkInStop()` (auto-complete). The
-   * marker is the join between a stop and the active route — non-null
-   * exactly while the owning route is ACTIVE.
+   * Set the ADR-7 / S2 reservation marker. Called by the aggregate on
+   * `create` / `addStop` (arms the DRAFT reservation) and on
+   * `start()` / `cancel()` / `checkInStop()` (preserve or release it).
+   * The marker is the join between a stop and its reserving route —
+   * non-null while the owning route is DRAFT or ACTIVE.
    */
   setActiveRouteId(activeRouteId: string | null): void {
     this._activeRouteId = activeRouteId;
+  }
+
+  /**
+   * Relocate this stop to another route within the same tenant
+   * (S3 — explicit DRAFT→DRAFT transfer). Returns a NEW stop value that
+   * preserves the stop identity (`id`, `saleId`, `createdAt`) but is
+   * owned by `routeId`, placed at `sortOrder`, reset to `PENDING` with no
+   * check-in / completion stamps, and RESERVED for the destination route
+   * (the ADR-7 marker is set to the destination route id so the
+   * reservation is preserved across the move and never briefly dropped).
+   */
+  relocateTo(input: {
+    routeId: string;
+    sortOrder: number;
+    now: Date;
+  }): DeliveryRouteStop {
+    if (!input.routeId || input.routeId.trim() === '') {
+      throw new Error('DeliveryRouteStop routeId is required');
+    }
+    if (!Number.isInteger(input.sortOrder) || input.sortOrder < 0) {
+      throw new Error(
+        'DeliveryRouteStop sortOrder must be a non-negative integer',
+      );
+    }
+    return new DeliveryRouteStop(
+      this.id,
+      this.tenantId,
+      input.routeId,
+      this.saleId,
+      input.sortOrder,
+      'PENDING',
+      null,
+      null,
+      null,
+      input.routeId,
+      this.createdAt,
+      input.now,
+    );
   }
 
   /**

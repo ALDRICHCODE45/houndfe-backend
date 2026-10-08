@@ -36,7 +36,7 @@ const eligible = (saleId: string): SaleEligibilitySnapshot => ({
 /** Build a `checkSaleEligibility` probe from a snapshot map. */
 const makeProbe = (
   snapshots: Record<string, SaleEligibilitySnapshot | null>,
-): jest.Mock => jest.fn(async (saleId: string) => snapshots[saleId] ?? null);
+): jest.Mock => jest.fn((saleId: string) => snapshots[saleId] ?? null);
 
 /** Probe that answers `eligible(saleId)` for every listed sale id. */
 const probeForAll = (saleIds: string[]): jest.Mock =>
@@ -134,19 +134,22 @@ describe('DeliveryRoute (delivery-routes / WU2)', () => {
 
     it('Given a sale id the tenant does not own (probe resolves null), when the route is created, then it throws DeliveryRouteSaleNotEligibleError', async () => {
       const probe = makeProbe({});
-      await expect(createRoute(['sale-missing'], { probe })).rejects.toBeInstanceOf(
-        DeliveryRouteSaleNotEligibleError,
-      );
+      await expect(
+        createRoute(['sale-missing'], { probe }),
+      ).rejects.toBeInstanceOf(DeliveryRouteSaleNotEligibleError);
     });
 
-    it('Given eligible saleIds, when the route is created, then it is a DRAFT route with ordered PENDING stops', async () => {
+    it('Given eligible saleIds, when the route is created, then it is a DRAFT route with ordered PENDING stops whose sale reservations are armed at assignment time (S2)', async () => {
       const route = await createRoute(['sale-1', 'sale-2']);
       expect(route.status).toBe('DRAFT');
       expect(route.startedAt).toBeNull();
       expect(route.stops.map((s) => s.saleId)).toEqual(['sale-1', 'sale-2']);
       expect(route.stops.map((s) => s.sortOrder)).toEqual([0, 1]);
       expect(route.stops.every((s) => s.status === 'PENDING')).toBe(true);
-      expect(route.stops.every((s) => s.activeRouteId === null)).toBe(true);
+      // S2 — the reservation marker is armed from DRAFT assignment, not only
+      // when the route starts, so a second route cannot claim the sale.
+      expect(route.stops.every((s) => s.activeRouteId === route.id)).toBe(true);
+      expect(route.stops.every((s) => s.routeId === route.id)).toBe(true);
     });
   });
 
@@ -173,8 +176,9 @@ describe('DeliveryRoute (delivery-routes / WU2)', () => {
   });
 
   describe('cancel — DRAFT | ACTIVE → CANCELLED', () => {
-    it('Given a DRAFT route, when it is cancelled, then it becomes CANCELLED and stamps cancelledAt', async () => {
+    it('Given a DRAFT route, when it is cancelled, then it becomes CANCELLED, stamps cancelledAt, and releases every sale reservation', async () => {
       const route = await createRoute(['sale-1']);
+      expect(route.stops[0].activeRouteId).toBe(route.id);
       route.cancel({ now: NOW });
 
       expect(route.status).toBe('CANCELLED');
@@ -284,9 +288,9 @@ describe('DeliveryRoute (delivery-routes / WU2)', () => {
 
     it('Given a DRAFT route, when a stop is checked in, then it throws DeliveryRouteInvalidTransitionError (CHECKIN_NOT_ACTIVE)', async () => {
       const route = await createRoute(['sale-1']);
-      expect(() => route.checkInStop({ stopId: route.stops[0].id, now: NOW })).toThrow(
-        DeliveryRouteInvalidTransitionError,
-      );
+      expect(() =>
+        route.checkInStop({ stopId: route.stops[0].id, now: NOW }),
+      ).toThrow(DeliveryRouteInvalidTransitionError);
     });
   });
 
@@ -316,7 +320,11 @@ describe('DeliveryRoute (delivery-routes / WU2)', () => {
       route.reorderStops({ orderedStopIds: [c.id, a.id, b.id], now: NOW });
 
       expect(route.stops.map((s) => s.id)).toEqual([c.id, a.id, b.id]);
-      expect(route.stops.map((s) => s.saleId)).toEqual(['sale-3', 'sale-1', 'sale-2']);
+      expect(route.stops.map((s) => s.saleId)).toEqual([
+        'sale-3',
+        'sale-1',
+        'sale-2',
+      ]);
       expect(route.stops.map((s) => s.sortOrder)).toEqual([0, 1, 2]);
     });
 
@@ -355,6 +363,168 @@ describe('DeliveryRoute (delivery-routes / WU2)', () => {
       expect(() =>
         route.assignDriver({ driverUserId: 'driver-2', now: NOW }),
       ).toThrow(DeliveryRouteInvalidTransitionError);
+    });
+  });
+
+  // ── S2 — DRAFT assignment reserves the sale ──────────────────────────
+
+  describe('sale reservation (S2)', () => {
+    it('Given a DRAFT route, when a sale is appended, then its reservation marker is armed for this route', async () => {
+      const route = await createRoute(['sale-1']);
+
+      await route.addStop({
+        saleId: 'sale-2',
+        checkSaleEligibility: probeForAll(['sale-2']),
+        now: NOW,
+      });
+
+      expect(route.stops.map((stop) => stop.activeRouteId)).toEqual([
+        route.id,
+        route.id,
+      ]);
+      expect(route.stops.every((stop) => stop.routeId === route.id)).toBe(true);
+    });
+
+    it('Given a DRAFT route, when it starts, then the reservation survives the DRAFT→ACTIVE transition', async () => {
+      const route = await createRoute(['sale-1', 'sale-2']);
+      route.start({ now: NOW });
+
+      expect(route.status).toBe('ACTIVE');
+      expect(route.stops.every((stop) => stop.activeRouteId === route.id)).toBe(
+        true,
+      );
+    });
+
+    it('Given an ACTIVE route, when its last stop is checked in (terminal), then every reservation is released', async () => {
+      const route = await createRoute(['sale-1']);
+      route.start({ now: NOW });
+      route.checkInStop({ stopId: route.stops[0].id, now: NOW });
+
+      expect(route.status).toBe('COMPLETED');
+      expect(route.stops[0].activeRouteId).toBeNull();
+    });
+  });
+
+  // ── S3 — explicit DRAFT→DRAFT stop transfer ──────────────────────────
+
+  describe('transferStopTo — DRAFT→DRAFT explicit move', () => {
+    it('Given two DRAFT routes, when a stop is transferred, then it is appended last in the destination, removed from the origin, and re-reserved for the destination', async () => {
+      const origin = await createRoute(['sale-1', 'sale-2']);
+      const destination = await createRoute(['sale-3']);
+      const movedStopId = origin.stops[0].id;
+
+      const relocated = origin.transferStopTo({
+        stopId: movedStopId,
+        destination,
+        now: NOW,
+      });
+
+      // Origin: adapts the remaining stop order to a contiguous sequence and
+      // releases its own reservation for the moved sale.
+      expect(origin.stops.map((stop) => stop.saleId)).toEqual(['sale-2']);
+      expect(origin.stops.map((stop) => stop.sortOrder)).toEqual([0]);
+      expect(
+        origin.stops.every((stop) => stop.activeRouteId === origin.id),
+      ).toBe(true);
+
+      // Destination: append at the end, reserved for the destination route,
+      // PENDING with no check-in/completion stamps.
+      expect(destination.stops.map((stop) => stop.saleId)).toEqual([
+        'sale-3',
+        'sale-1',
+      ]);
+      expect(destination.stops.map((stop) => stop.sortOrder)).toEqual([0, 1]);
+      expect(destination.stops[1].activeRouteId).toBe(destination.id);
+      expect(relocated.id).toBe(movedStopId);
+      expect(relocated.status).toBe('PENDING');
+      expect(relocated.checkedInAt).toBeNull();
+      expect(relocated.completedAt).toBeNull();
+    });
+
+    it('Given a single-stop DRAFT origin, when its only stop is transferred, then the origin is left empty and is not activatable', async () => {
+      const origin = await createRoute(['sale-1']);
+      const destination = await createRoute(['sale-2']);
+
+      origin.transferStopTo({
+        stopId: origin.stops[0].id,
+        destination,
+        now: NOW,
+      });
+
+      expect(origin.stops).toHaveLength(0);
+      expect(origin.status).toBe('DRAFT');
+      expect(() => origin.start({ now: NOW })).toThrow(
+        DeliveryRouteInvalidTransitionError,
+      );
+      expect(origin.status).toBe('DRAFT');
+    });
+
+    it('Given a stop id that does not belong to the origin, when a transfer is attempted, then it throws DeliveryRouteInvalidTransitionError (UNKNOWN_STOP_ID)', async () => {
+      const origin = await createRoute(['sale-1']);
+      const destination = await createRoute(['sale-2']);
+
+      expect(() =>
+        origin.transferStopTo({
+          stopId: 'stop-foreign',
+          destination,
+          now: NOW,
+        }),
+      ).toThrow(DeliveryRouteInvalidTransitionError);
+    });
+
+    it('Given the same route as origin and destination, when a transfer is attempted, then it throws DeliveryRouteInvalidTransitionError (SAME_ROUTE_TRANSFER)', async () => {
+      const route = await createRoute(['sale-1']);
+
+      expect(() =>
+        route.transferStopTo({
+          stopId: route.stops[0].id,
+          destination: route,
+          now: NOW,
+        }),
+      ).toThrow(DeliveryRouteInvalidTransitionError);
+    });
+
+    it('Given a destination that already owns the sale, when a transfer is attempted, then it throws DeliveryRouteInvalidTransitionError (DESTINATION_ALREADY_HAS_SALE)', async () => {
+      const origin = await createRoute(['sale-1']);
+      const destination = await createRoute(['sale-1']);
+
+      expect(() =>
+        origin.transferStopTo({
+          stopId: origin.stops[0].id,
+          destination,
+          now: NOW,
+        }),
+      ).toThrow(DeliveryRouteInvalidTransitionError);
+    });
+
+    it('Given an ACTIVE origin, when a transfer is attempted, then it throws DeliveryRouteInvalidTransitionError (NOT_DRAFT) and nothing moves', async () => {
+      const origin = await createRoute(['sale-1']);
+      origin.start({ now: NOW });
+      const destination = await createRoute(['sale-2']);
+
+      expect(() =>
+        origin.transferStopTo({
+          stopId: origin.stops[0].id,
+          destination,
+          now: NOW,
+        }),
+      ).toThrow(DeliveryRouteInvalidTransitionError);
+      expect(destination.stops.map((stop) => stop.saleId)).toEqual(['sale-2']);
+    });
+
+    it('Given an ACTIVE destination, when a transfer is attempted, then it throws DeliveryRouteInvalidTransitionError (NOT_DRAFT) and nothing moves', async () => {
+      const origin = await createRoute(['sale-1']);
+      const destination = await createRoute(['sale-2']);
+      destination.start({ now: NOW });
+
+      expect(() =>
+        origin.transferStopTo({
+          stopId: origin.stops[0].id,
+          destination,
+          now: NOW,
+        }),
+      ).toThrow(DeliveryRouteInvalidTransitionError);
+      expect(origin.stops.map((stop) => stop.saleId)).toEqual(['sale-1']);
     });
   });
 });

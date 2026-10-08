@@ -20,8 +20,12 @@
  * Lifecycle guards raise `DeliveryRouteInvalidTransitionError` (422).
  * Sale-conflict checks raise `DeliveryRouteSaleAlreadyInActiveRouteError`
  * (409) so the global filter maps the partial-unique-index race to the
- * correct HTTP status. The aggregate performs the application-level
- * pre-check; the DB index is the race-safe authoritative guard.
+ * correct HTTP status. S2 — assignment to a DRAFT route reserves the sale
+ * (the ADR-7 marker is armed on `create` / `addStop`), so the partial
+ * unique index `(tenantId, saleId) WHERE activeRouteId IS NOT NULL`
+ * enforces "one DRAFT-or-ACTIVE route per Sale". The repository performs
+ * the application-level conflict pre-check; the DB index is the race-safe
+ * authoritative guard.
  */
 import { randomUUID } from 'node:crypto';
 import {
@@ -205,6 +209,9 @@ export class DeliveryRoute {
     }
 
     const now = input.now ?? new Date();
+    // Resolve the aggregate id BEFORE building the stops: the stops carry
+    // this route as both their `routeId` and their S2 reservation marker.
+    const routeId = input.id ?? randomUUID();
     const stops: DeliveryRouteStop[] = [];
     for (let index = 0; index < input.saleIds.length; index++) {
       const saleId = input.saleIds[index];
@@ -225,20 +232,23 @@ export class DeliveryRoute {
           },
         );
       }
-      stops.push(
-        DeliveryRouteStop.create({
-          id: randomUUID(),
-          tenantId: input.tenantId,
-          routeId: input.id ?? 'pending',
-          saleId,
-          sortOrder: index,
-          now,
-        }),
-      );
+      const stop = DeliveryRouteStop.create({
+        id: randomUUID(),
+        tenantId: input.tenantId,
+        routeId,
+        saleId,
+        sortOrder: index,
+        now,
+      });
+      // S2 — reserve the sale the moment it is assigned to this DRAFT
+      // route. The reservation survives DRAFT→ACTIVE and is released on a
+      // terminal state or when the stop leaves the route.
+      stop.setActiveRouteId(routeId);
+      stops.push(stop);
     }
 
     return new DeliveryRoute(
-      input.id ?? randomUUID(),
+      routeId,
       input.tenantId,
       input.driverUserId,
       'DRAFT',
@@ -346,16 +356,17 @@ export class DeliveryRoute {
     }
     const now = input.now ?? new Date();
     const nextIndex = this._stops.length;
-    this._stops.push(
-      DeliveryRouteStop.create({
-        id: randomUUID(),
-        tenantId: this.tenantId,
-        routeId: this.id,
-        saleId: input.saleId,
-        sortOrder: nextIndex,
-        now,
-      }),
-    );
+    const stop = DeliveryRouteStop.create({
+      id: randomUUID(),
+      tenantId: this.tenantId,
+      routeId: this.id,
+      saleId: input.saleId,
+      sortOrder: nextIndex,
+      now,
+    });
+    // S2 — reserve the appended sale for this DRAFT route immediately.
+    stop.setActiveRouteId(this.id);
+    this._stops.push(stop);
     this._updatedAt = now;
     return this;
   }
@@ -428,12 +439,80 @@ export class DeliveryRoute {
     return this;
   }
 
+  /**
+   * S3 — move one stop from THIS DRAFT route to `destination` (also DRAFT),
+   * appending it as the last stop of the destination. Both aggregates are
+   * mutated in place; the caller persists both inside the SAME transaction
+   * (and only after both rows are locked — see `lockRoutesForUpdate`).
+   *
+   * Rules:
+   *   - Both routes must be DRAFT ("no active transfer").
+   *   - `destination` must be a different route (same-origin is invalid).
+   *   - The stop must belong to this route.
+   *   - The destination must not already own the moved sale (the partial
+   *     unique reservation index would otherwise conflict).
+   *
+   * Effects: the origin drops the stop and re-numbers its remaining stops
+   * to a contiguous `sortOrder` (an empty origin is allowed but cannot be
+   * started); the destination appends the relocated stop — same stop id,
+   * sale id and `createdAt`, reset to PENDING — with its reservation marker
+   * set to the DESTINATION route id (the reservation never drops during
+   * the move). Returns the relocated stop for callers that need its id.
+   */
+  transferStopTo(input: {
+    stopId: string;
+    destination: DeliveryRoute;
+    now?: Date;
+  }): DeliveryRouteStop {
+    if (input.destination === this || input.destination.id === this.id) {
+      throw new DeliveryRouteInvalidTransitionError(
+        'Cannot transfer a stop to its own route',
+        { reason: 'SAME_ROUTE_TRANSFER', routeId: this.id },
+      );
+    }
+    this.assertDraft();
+    input.destination.assertDraft();
+    const index = this._stops.findIndex((stop) => stop.id === input.stopId);
+    if (index < 0) {
+      throw new DeliveryRouteInvalidTransitionError(
+        `Stop "${input.stopId}" does not belong to this route`,
+        { reason: 'UNKNOWN_STOP_ID', stopId: input.stopId },
+      );
+    }
+    const moved = this._stops[index];
+    if (input.destination._stops.some((stop) => stop.saleId === moved.saleId)) {
+      throw new DeliveryRouteInvalidTransitionError(
+        `Destination route already has a stop for sale "${moved.saleId}"`,
+        {
+          reason: 'DESTINATION_ALREADY_HAS_SALE',
+          saleId: moved.saleId,
+          destinationRouteId: input.destination.id,
+        },
+      );
+    }
+
+    const now = input.now ?? new Date();
+    this._stops.splice(index, 1);
+    this._stops.forEach((stop, position) => stop.setSortOrder(position));
+    this._updatedAt = now;
+
+    const relocated = moved.relocateTo({
+      routeId: input.destination.id,
+      sortOrder: input.destination._stops.length,
+      now,
+    });
+    input.destination._stops.push(relocated);
+    input.destination._updatedAt = now;
+    return relocated;
+  }
+
   // ── Lifecycle transitions ────────────────────────────────────────────
 
   /**
-   * DRAFT → ACTIVE. Sets `activeRouteId` on every stop (ADR-7) so the
-   * partial unique index `(tenantId, saleId) WHERE activeRouteId IS NOT
-   * NULL` arms. The route's `_driverUserId` is immutable from here.
+   * DRAFT → ACTIVE. Requires the reservation markers armed on every stop
+   * (they were set at DRAFT assignment / addStop); re-arming them here is
+   * idempotent and covers a legacy row that reached ACTIVE without a
+   * marker. The route's `_driverUserId` is immutable from here.
    */
   start(input: StartInput): DeliveryRoute {
     this.assertDraft();
@@ -536,9 +615,9 @@ export class DeliveryRoute {
   }
 
   /**
-   * DRAFT | ACTIVE → CANCELLED. Clears `activeRouteId` on every stop
-   * (ADR-7) so the sales can join a new ACTIVE route in a future
-   * change. COMPLETED is terminal.
+   * DRAFT | ACTIVE → CANCELLED. Releases every sale reservation (ADR-7 /
+   * S2) so the sales can join a new DRAFT route afterwards. COMPLETED is
+   * terminal.
    */
   cancel(input: CancelInput): DeliveryRoute {
     if (this._status !== 'DRAFT' && this._status !== 'ACTIVE') {
@@ -551,10 +630,10 @@ export class DeliveryRoute {
       );
     }
     const now = input.now ?? new Date();
-    if (this._status === 'ACTIVE') {
-      for (const stop of this._stops) {
-        stop.setActiveRouteId(null);
-      }
+    // A cancellation releases the reservation regardless of DRAFT/ACTIVE:
+    // a DRAFT route already holds its sales' reservations from assignment.
+    for (const stop of this._stops) {
+      stop.setActiveRouteId(null);
     }
     this._status = 'CANCELLED';
     this._cancelledAt = now;

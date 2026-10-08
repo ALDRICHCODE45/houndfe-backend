@@ -2220,14 +2220,17 @@ model StockAlertState {
 // DeliveryRoute assigned to a driver User. Driver ownership is enforced by the
 // CASL subject-condition matcher (design ADR-5 — WU2 wiring).
 //
-// Schema-only additions in WU1; no runtime code reads/writes these tables yet.
-// Back-relations on Tenant, User and Sale are added in WU1 to keep the schema
-// relation graph complete (Prisma's reverse-relation inference).
+// Back-relations on Tenant, User and Sale keep the schema relation graph
+// complete (Prisma's reverse-relation inference).
 //
 // `DeliveryRouteStop.activeRouteId` is the denormalized ADR-7 marker column:
-// non-null exactly while the owning route is ACTIVE. It is referenced by the
-// partial unique index on (tenantId, saleId) WHERE activeRouteId IS NOT NULL,
-// which makes "one Sale in at most one ACTIVE route" enforceable by the DB.
+// non-null from DRAFT assignment and kept across DRAFT→ACTIVE (cleared on
+// cancel/complete). It is referenced by the partial unique index on
+// (tenantId, saleId) WHERE activeRouteId IS NOT NULL, which makes "one Sale
+// reserved by at most one DRAFT-or-ACTIVE route" enforceable by the DB.
+// Migration 20261007221500_reserve_draft_delivery_route_sales backfills
+// legacy DRAFT/ACTIVE rows and refuses ambiguous duplicates (no automatic
+// cleanup — human remediation required).
 
 model DeliveryRoute {
   id           String              @id @default(uuid())
@@ -2264,9 +2267,11 @@ model DeliveryRouteStop {
   checkedInAt   DateTime?
   completedAt   DateTime?
   skippedReason String?
-  // ADR-7: non-null exactly while the owning route is ACTIVE. Feeds the
-  // partial unique index `delivery_route_stops_active_sale_uniq`. Never
-  // surfaced on the read model (see design §7.2).
+  // ADR-7: non-null from DRAFT assignment and kept across DRAFT→ACTIVE
+  // (cleared on cancel/complete; re-pointed, never released, by a
+  // DRAFT→DRAFT transfer). Feeds the partial unique index
+  // `delivery_route_stops_active_sale_uniq`. Never surfaced on the read
+  // model (see design §7.2).
   activeRouteId String?
   createdAt     DateTime                @default(now())
   updatedAt     DateTime                @updatedAt

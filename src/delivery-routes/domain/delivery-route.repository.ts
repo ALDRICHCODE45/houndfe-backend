@@ -125,8 +125,34 @@ export interface DeliveryRouteReadModel {
 
 export interface IDeliveryRouteRepository {
   /** Persist a route (insert or update). The implementation handles the
-   *  parent row + child stop set (createMany / deleteMany) atomically. */
+   *  parent row + child stop set (createMany / deleteMany) atomically.
+   *
+   *  S2 — a save that would leave two DRAFT/ACTIVE routes reserving the same
+   *  sale is rejected with `DeliveryRouteSaleAlreadyInActiveRouteError`
+   *  (409): the adapter pre-checks the reservation table inside the same
+   *  transaction and the partial unique index remains the race-safe
+   *  authoritative guard. */
   save(route: DeliveryRoute): Promise<DeliveryRoute>;
+
+  /**
+   * S2/S3 concurrency seam — acquire row-level write locks
+   * (`SELECT … FOR UPDATE`) on the given routes inside `tx`,
+   * tenant-qualified and ordered by id so concurrent multi-route writers
+   * cannot deadlock. Returns the ids that do NOT exist in this tenant (an
+   * empty array means every requested route was locked).
+   *
+   * Every read-modify-write path (DRAFT CRUD, `start`, delete, transfer)
+   * MUST call this BEFORE loading the aggregate it is about to mutate: the
+   * lock is what serializes the writers so an unconditional aggregate
+   * `save` can never resurrect a snapshot that a concurrent transfer,
+   * start, cancel or CRUD write has already superseded. A transaction alone
+   * does NOT provide this — under READ COMMITTED two writers can load the
+   * same snapshot and both commit a full replacement. */
+  lockRoutesForUpdate(input: {
+    tx: import('@prisma/client').Prisma.TransactionClient;
+    tenantId: string;
+    routeIds: string[];
+  }): Promise<string[]>;
 
   /**
    * Tenant-qualified CONDITIONAL transition commit for the concurrent

@@ -20,6 +20,7 @@
  * container.
  */
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import {
   DeliveryRoutesService,
   captureRouteTransitionExpectation,
@@ -27,19 +28,12 @@ import {
 } from './delivery-routes.service';
 import { DeliveryRoute } from '../domain/delivery-route.entity';
 import {
-  DELIVERY_ROUTE_REPOSITORY,
   type DeliveryRouteReadModel,
   type IDeliveryRouteRepository,
 } from '../domain/delivery-route.repository';
-import {
-  SALE_REPOSITORY,
-  type ISaleRepository,
-} from '../../sales/domain/sale.repository';
+import { type ISaleRepository } from '../../sales/domain/sale.repository';
 import { SaleNotDeliverableError } from '../../sales/domain/sale.errors';
-import {
-  ROUTE_OPTIMIZER,
-  type IRouteOptimizer,
-} from '../domain/ports/route-optimizer.port';
+import { type IRouteOptimizer } from '../domain/ports/route-optimizer.port';
 import {
   DeliveryRouteInvalidTransitionError,
   DeliveryRouteNotFoundError,
@@ -48,6 +42,7 @@ import {
 import {
   BusinessRuleViolationError,
   EntityNotFoundError,
+  InsufficientPermissionsError,
 } from '../../shared/domain/domain-error';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ClsService } from 'nestjs-cls';
@@ -212,6 +207,9 @@ const makeService = (
     findById: jest.fn(async () => null),
     findOneWithStops: jest.fn(async () => null),
     list: jest.fn(async () => []),
+    // Default: every requested route is lockable (no 404). S3 specs that
+    // exercise the missing-destination path override this.
+    lockRoutesForUpdate: jest.fn(() => Promise.resolve([] as string[])),
     runInTransaction: jest.fn(
       async (work: (t: Prisma.TransactionClient) => Promise<unknown>) =>
         work({ ...tx, ...txPrisma } as unknown as Prisma.TransactionClient),
@@ -739,6 +737,22 @@ const makeStoreService = (
       runInTransaction: <T>(
         work: (tx: Prisma.TransactionClient) => Promise<T>,
       ) => store.runInTransaction(work),
+      lockRoutesForUpdate: async (input: {
+        tx: Prisma.TransactionClient;
+        tenantId: string;
+        routeIds: string[];
+      }) => {
+        void input.tx;
+        const missing: string[] = [];
+        for (const id of new Set(input.routeIds)) {
+          const found = await store.findById({
+            tenantId: input.tenantId,
+            id,
+          });
+          if (!found) missing.push(id);
+        }
+        return missing.sort((a, b) => a.localeCompare(b));
+      },
       commitTransition: (input: {
         tx: Prisma.TransactionClient;
         tenantId: string;
@@ -1291,6 +1305,300 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
 
       expect(error).toBeInstanceOf(DeliveryRouteNotFoundError);
       expect(error).toBeInstanceOf(EntityNotFoundError);
+    });
+  });
+
+  describe('transferStop — explicit DRAFT→DRAFT move (S3)', () => {
+    const buildDraft = (
+      saleIds: string[],
+      driverUserId = USER_ID,
+    ): Promise<DeliveryRoute> =>
+      DeliveryRoute.create({
+        tenantId: TENANT_ID,
+        driverUserId,
+        saleIds,
+        checkSaleEligibility: jest.fn(() =>
+          Promise.resolve({
+            deliveryStatus: 'PENDING' as const,
+            shippingAddressId: 'addr-1',
+          }),
+        ),
+        now: NOW,
+      });
+
+    it('Given read+update on both DRAFT routes, when a stop is transferred, then both routes are saved and both response models are built inside the same locked transaction', async () => {
+      const origin = await buildDraft(['sale-1'], 'driver-origin');
+      const destination = await buildDraft(['sale-2'], 'driver-destination');
+      const movedStopId = origin.stops[0].id;
+      // Track the instance (action, driver) pairs the service evaluates.
+      const evaluated: string[] = [];
+      const can = jest.fn(
+        (action: string, subject: { driverUserId?: string }) => {
+          if (subject.driverUserId) {
+            evaluated.push(`${action}:${subject.driverUserId}`);
+          }
+          return true;
+        },
+      );
+      let inTransaction = false;
+      let readsInsideTransaction = 0;
+      const runInTransactionMock = jest.fn(
+        (work: (tx: Prisma.TransactionClient) => Promise<unknown>) => {
+          inTransaction = true;
+          return work({} as Prisma.TransactionClient).finally(() => {
+            inTransaction = false;
+          });
+        },
+      );
+      const { service, repo } = makeService({
+        repo: {
+          runInTransaction:
+            runInTransactionMock as unknown as IDeliveryRouteRepository['runInTransaction'],
+          findById: jest.fn((input: { id: string }) =>
+            Promise.resolve(
+              input.id === origin.id
+                ? origin
+                : input.id === destination.id
+                  ? destination
+                  : null,
+            ),
+          ),
+          findOneWithStops: jest.fn((input: { id: string }) => {
+            if (inTransaction) readsInsideTransaction++;
+            return Promise.resolve(
+              readModelFor(input.id === origin.id ? origin : destination),
+            );
+          }),
+        },
+      });
+
+      const dto = await service.transferStop(
+        makeCtx(can),
+        origin.id,
+        movedStopId,
+        { destinationRouteId: destination.id },
+      );
+
+      // One locked transaction, origin persisted before destination.
+      expect(runInTransactionMock).toHaveBeenCalledTimes(1);
+      expect(repo.lockRoutesForUpdate).toHaveBeenCalledTimes(1);
+      expect(repo.lockRoutesForUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: TENANT_ID,
+          routeIds: [origin.id, destination.id],
+        }),
+      );
+      expect(repo.save).toHaveBeenNthCalledWith(1, origin);
+      expect(repo.save).toHaveBeenNthCalledWith(2, destination);
+
+      // Domain effect: the stop left the origin and is last in destination.
+      expect(origin.stops).toHaveLength(0);
+      expect(destination.stops.map((s) => s.saleId)).toEqual([
+        'sale-2',
+        'sale-1',
+      ]);
+      expect(destination.stops[1].activeRouteId).toBe(destination.id);
+      expect(dto.originRoute.stops).toHaveLength(0);
+      expect(dto.destinationRoute.stops.map((s) => s.saleId)).toEqual([
+        'sale-2',
+        'sale-1',
+      ]);
+      // BOTH routes must be authorized for BOTH read and update, checked
+      // before any mutation.
+      expect(evaluated).toEqual([
+        'read:driver-origin',
+        'update:driver-origin',
+        'read:driver-destination',
+        'update:driver-destination',
+      ]);
+      // The response projections are built from the locked transaction, so a
+      // later reassignment cannot change or re-disclose what the caller sees.
+      expect(readsInsideTransaction).toBe(2);
+    });
+
+    it('Given the caller may UPDATE but not READ the destination, when a transfer is attempted, then it fails 403 and writes nothing', async () => {
+      const origin = await buildDraft(['sale-1'], 'driver-origin');
+      const destination = await buildDraft(['sale-2'], 'driver-destination');
+      const can = jest.fn(
+        (action: string, subject: { driverUserId?: string }) =>
+          !(action === 'read' && subject.driverUserId === 'driver-destination'),
+      );
+      const { service, repo } = makeService({
+        repo: {
+          findById: jest.fn((input: { id: string }) =>
+            Promise.resolve(input.id === origin.id ? origin : destination),
+          ),
+        },
+      });
+
+      const error = await service
+        .transferStop(makeCtx(can), origin.id, origin.stops[0].id, {
+          destinationRouteId: destination.id,
+        })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(InsufficientPermissionsError);
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(repo.findOneWithStops).not.toHaveBeenCalled();
+    });
+
+    it('Given the caller may READ but not UPDATE the origin, when a transfer is attempted, then it fails 403 and writes nothing', async () => {
+      const origin = await buildDraft(['sale-1'], 'driver-origin');
+      const destination = await buildDraft(['sale-2'], 'driver-destination');
+      const can = jest.fn(
+        (action: string, subject: { driverUserId?: string }) =>
+          !(action === 'update' && subject.driverUserId === 'driver-origin'),
+      );
+      const { service, repo } = makeService({
+        repo: {
+          findById: jest.fn((input: { id: string }) =>
+            Promise.resolve(input.id === origin.id ? origin : destination),
+          ),
+        },
+      });
+
+      const error = await service
+        .transferStop(makeCtx(can), origin.id, origin.stops[0].id, {
+          destinationRouteId: destination.id,
+        })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(InsufficientPermissionsError);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('Given the caller may update the origin but NOT the destination, when a transfer is attempted, then it fails with InsufficientPermissionsError (403) and writes nothing', async () => {
+      const origin = await buildDraft(['sale-1'], 'driver-origin');
+      const destination = await buildDraft(['sale-2'], 'driver-destination');
+      const can = jest.fn(
+        (_action: string, subject: { driverUserId?: string }) =>
+          subject.driverUserId === 'driver-origin',
+      );
+      const { service, repo } = makeService({
+        repo: {
+          findById: jest.fn((input: { id: string }) =>
+            Promise.resolve(input.id === origin.id ? origin : destination),
+          ),
+        },
+      });
+
+      const error = await service
+        .transferStop(makeCtx(can), origin.id, origin.stops[0].id, {
+          destinationRouteId: destination.id,
+        })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(InsufficientPermissionsError);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('Given the same route as origin and destination, when a transfer is attempted, then it fails with DELIVERY_ROUTE_INVALID_TRANSITION (422) and writes nothing', async () => {
+      const route = await buildDraft(['sale-1']);
+      const { service, repo } = makeService({
+        repo: {
+          findById: jest.fn().mockResolvedValue(route),
+        },
+      });
+
+      const error = await service
+        .transferStop(
+          makeCtx(jest.fn(() => true)),
+          route.id,
+          route.stops[0].id,
+          {
+            destinationRouteId: route.id,
+          },
+        )
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(DeliveryRouteInvalidTransitionError);
+      expect((error as DeliveryRouteInvalidTransitionError).code).toBe(
+        'DELIVERY_ROUTE_INVALID_TRANSITION',
+      );
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('Given an ACTIVE origin, when a transfer is attempted, then it fails with DELIVERY_ROUTE_INVALID_TRANSITION (422) and writes nothing', async () => {
+      const origin = await buildDraft(['sale-1']);
+      origin.start({ now: NOW });
+      const destination = await buildDraft(['sale-2']);
+      const { service, repo } = makeService({
+        repo: {
+          findById: jest.fn((input: { id: string }) =>
+            Promise.resolve(input.id === origin.id ? origin : destination),
+          ),
+        },
+      });
+
+      const error = await service
+        .transferStop(
+          makeCtx(jest.fn(() => true)),
+          origin.id,
+          origin.stops[0].id,
+          {
+            destinationRouteId: destination.id,
+          },
+        )
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(DeliveryRouteInvalidTransitionError);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('Given an ACTIVE destination, when a transfer is attempted, then it fails with DELIVERY_ROUTE_INVALID_TRANSITION (422) and writes nothing', async () => {
+      const origin = await buildDraft(['sale-1']);
+      const destination = await buildDraft(['sale-2']);
+      destination.start({ now: NOW });
+      const { service, repo } = makeService({
+        repo: {
+          findById: jest.fn((input: { id: string }) =>
+            Promise.resolve(input.id === origin.id ? origin : destination),
+          ),
+        },
+      });
+
+      const error = await service
+        .transferStop(
+          makeCtx(jest.fn(() => true)),
+          origin.id,
+          origin.stops[0].id,
+          {
+            destinationRouteId: destination.id,
+          },
+        )
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(DeliveryRouteInvalidTransitionError);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('Given a destination route that does not exist in the tenant, when a transfer is attempted, then it fails with DeliveryRouteNotFoundError (404) and writes nothing', async () => {
+      const origin = await buildDraft(['sale-1']);
+      const missingDestinationId = randomUUID();
+      const { service, repo } = makeService({
+        repo: {
+          findById: jest.fn((input: { id: string }) =>
+            Promise.resolve(input.id === origin.id ? origin : null),
+          ),
+          lockRoutesForUpdate: jest.fn(() =>
+            Promise.resolve([missingDestinationId]),
+          ),
+        },
+      });
+
+      const error = await service
+        .transferStop(
+          makeCtx(jest.fn(() => true)),
+          origin.id,
+          origin.stops[0].id,
+          {
+            destinationRouteId: missingDestinationId,
+          },
+        )
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(DeliveryRouteNotFoundError);
+      expect(repo.save).not.toHaveBeenCalled();
     });
   });
 

@@ -22,30 +22,25 @@ import {
  * attempted transition in `details` for the FE contract.
  */
 export class DeliveryRouteInvalidTransitionError extends BusinessRuleViolationError {
-  constructor(
-    message: string,
-    details?: Record<string, unknown>,
-  ) {
+  constructor(message: string, details?: Record<string, unknown>) {
     super(message, 'DELIVERY_ROUTE_INVALID_TRANSITION', details);
   }
 }
 
 /**
  * 409 — the application pre-check or the DB partial-unique index
- * detected that one of the route's sales is already on another ACTIVE
- * route. Mapped from P2002 on the `(tenantId, saleId) WHERE activeRouteId
- * IS NOT NULL` index (design ADR-7).
+ * detected that one of the route's sales is already reserved by another
+ * DRAFT-or-ACTIVE route. The reservation is armed at DRAFT assignment and
+ * survives DRAFT→ACTIVE (see migration
+ * 20261007221500_reserve_draft_delivery_route_sales). Mapped from the
+ * pre-save conflict query or from P2002 on the `(tenantId, saleId) WHERE
+ * activeRouteId IS NOT NULL` index (design ADR-7). The wire code keeps the
+ * historic `..._ON_ACTIVE_ROUTE` suffix for FE-contract stability; the body
+ * carries structured `details` (`reason`, `routeId`, `conflictSaleIds`).
  */
 export class DeliveryRouteSaleAlreadyInActiveRouteError extends BusinessRuleViolationError {
-  constructor(
-    message: string,
-    details?: Record<string, unknown>,
-  ) {
-    super(
-      message,
-      'DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE',
-      details,
-    );
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 'DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE', details);
   }
 }
 
@@ -54,13 +49,12 @@ export class DeliveryRouteSaleAlreadyInActiveRouteError extends BusinessRuleViol
  * `deliveryStatus` is outside `{PENDING, SHIPPED}` or its
  * `shippingAddressId` is null. Re-checked on `start()` (the chatbot's
  * `SHIPPED` writer is orthogonal and can flip a stop's eligibility
- * between `create` and `start`).
+ * between `create` and `start`). The eligible-sales selector reports the
+ * same conditions as an `INELIGIBLE` availability state instead of this
+ * error.
  */
 export class DeliveryRouteSaleNotEligibleError extends BusinessRuleViolationError {
-  constructor(
-    message: string,
-    details?: Record<string, unknown>,
-  ) {
+  constructor(message: string, details?: Record<string, unknown>) {
     super(message, 'DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE', details);
   }
 }

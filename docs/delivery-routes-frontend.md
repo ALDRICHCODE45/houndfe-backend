@@ -6,6 +6,10 @@
 **Branch**: `feat/delivery-routes-wu3`
 **Status**: ✅ WU3 implemented (timeline on detail, next-stop email pipeline via outbox + Inngest)
 
+> ⚠️ **Local implementation; not deployed.** DRAFT+ACTIVE reservation, the `eligible-sales` selector (§11) and the explicit DRAFT→DRAFT transfer (§12) are implemented locally. Local commits do not imply a push, deployment or integrated browser validation. Isolated integration evidence is **bounded to ordering**: an integration run covered controlled `transfer`/`start` in **both orderings** across independent CLS contexts (19/19 PASS, exit 0) with clean resource teardown. It does **not** prove all concurrent interleavings and there is **no** `pg_locks` confirmation that a contender was actually blocked. Treat this as the agreed contract, not as verified production behaviour. The checks described here are **not** deployment approval.
+
+---
+
 > **TL;DR.** A route-manager groups eligible sales (`deliveryStatus` `PENDING`/`SHIPPED` + a shipping address) into a `DeliveryRoute` assigned to a driver. The route goes `DRAFT → ACTIVE → COMPLETED` (or `CANCELLED`). Drivers check in each stop from the field; every check-in mirrors the sale to `DELIVERED` and — when another stop follows — queues the "next stop arriving soon" email to the next customer (opt-in per tenant via `PUT /notification-config`). Every completed stop, **including the last**, also queues an ids-only customer thank-you email gated by its own flat opt-in action (§6.1). The detail endpoint returns a read-only `timeline` so the frontend can render route history without polling extra endpoints.
 
 ---
@@ -25,7 +29,9 @@ All routes are under `/delivery-routes` and require a JWT bearer token. The tena
 | `POST` | `/delivery-routes/:id/cancel` | `update:DeliveryRoute` | DRAFT or ACTIVE → CANCELLED |
 | `POST` | `/delivery-routes/:id/stops` | `update:DeliveryRoute` | Append one eligible sale to a DRAFT route (`201 Created`) |
 | `POST` | `/delivery-routes/:id/stops/:stopId/check-in` | `update:DeliveryRoute` | Check in a stop on an ACTIVE route; mirrors the sale to DELIVERED; queues the next-stop row when a next stop exists and the ids-only thank-you row for every completed stop (last included) |
+| `POST` | `/delivery-routes/:routeId/stops/:stopId/transfer` | `update:DeliveryRoute` | Move one stop DRAFT → DRAFT (both routes must be DRAFT) — §12 |
 | `PUT` | `/delivery-routes/:id/stops/reorder` | `update:DeliveryRoute` | Replace the stop order of a DRAFT route |
+| `GET` | `/delivery-routes/eligible-sales` | `read:Sale` **and** `create:DeliveryRoute` | Paginated/searchable eligible-sale selector with availability state — §11 |
 
 **Route lifecycle** (server-enforced):
 
@@ -37,7 +43,9 @@ DRAFT ──start──▶ ACTIVE ──checkInStop(last)──▶ COMPLETED
           CANCELLED
 ```
 
-`COMPLETED` is terminal. `start` requires at least one stop; `PATCH`/`stops`/`reorder` are DRAFT-only; `check-in` requires ACTIVE.
+`COMPLETED` is terminal. `start` requires at least one stop; `PATCH`/`stops`/`reorder`/`transfer` are DRAFT-only; `check-in` requires ACTIVE.
+
+**Reservation starts at DRAFT (not at start).** A sale is reserved by a route as soon as it is assigned while the route is `DRAFT`, and the reservation survives `DRAFT → ACTIVE` (cleared on `COMPLETED`/`CANCELLED`). At most one `DRAFT`-or-`ACTIVE` route may hold a given sale; the DB partial unique index enforces it. The older "one sale in one ACTIVE route" wording is obsolete. `transfer` is the only DRAFT→DRAFT move — there are **no** transfers involving `ACTIVE` routes.
 
 ---
 
@@ -119,7 +127,7 @@ Notes:
 
 **Eligibility rule (server-side)**: a sale can join a route only when `deliveryStatus ∈ {PENDING, SHIPPED}` **and** it has a `shippingAddressId`. Any ineligible sale fails the whole create with `422 DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE` (details include the offending `saleId`).
 
-**Errors**: `401` no token · `403` missing `create:DeliveryRoute` · `422 DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE` · `400` DTO validation (non-uuid ids, empty `saleIds`).
+**Errors**: `401` no token · `403` missing `create:DeliveryRoute` · `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` (a sale is already reserved by another DRAFT/ACTIVE route — `conflictSaleIds`) · `422 DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE` · `400` DTO validation (non-uuid ids, empty `saleIds`).
 
 ### 3.2 `GET /delivery-routes` — list routes (`read:DeliveryRoute`)
 
@@ -180,7 +188,7 @@ Notes:
 
 **Rules**:
 - `DRAFT → ACTIVE`; requires ≥ 1 stop.
-- Server-side conflict check: if any sale on the route already belongs to **another ACTIVE route**, the DB partial-unique index raises and the backend returns `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`.
+- Reservation is armed when a sale joins a DRAFT route; `start` re-arms each stop's marker idempotently. If any sale is already reserved by **another DRAFT-or-ACTIVE route**, the DB partial-unique index raises and the backend returns `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` (the historic code suffix is kept for wire stability; see §12 for the structured `details`).
 
 **Errors**: `404 ENTITY_NOT_FOUND` · `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` · `422 DELIVERY_ROUTE_INVALID_TRANSITION` (not DRAFT / zero stops).
 
@@ -200,7 +208,7 @@ Notes:
 
 **Response**: updated `DeliveryRouteResponseDto` with the new stop appended (`sortOrder = stops.length`).
 
-**Rules**: DRAFT-only; the sale is re-checked for eligibility (same rule as create).
+**Rules**: DRAFT-only; the sale is re-checked for eligibility (same rule as create). The reservation is taken here too: if the sale is already reserved by another DRAFT/ACTIVE route the call fails `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` with `conflictSaleIds`.
 
 ### 3.9 `POST /delivery-routes/:id/stops/:stopId/check-in` — check in a stop (`update:DeliveryRoute`)
 
@@ -276,6 +284,7 @@ Four `DeliveryRoute` permissions exist (auto-seeded in the boot `PermissionSeede
 
 1. **List scoping** — `GET /delivery-routes` returns the tenant-wide list for managers and **only the caller's own routes** for drivers. The filter is server-side (CASL); the frontend cannot and should not send a `driverUserId` filter.
 2. **Detail authorization** — for a driver-only caller, `GET /delivery-routes/:id` and every `update:` action additionally require `route.driverUserId === currentUserId`; otherwise `403`.
+3. **Selector access** — `GET /delivery-routes/eligible-sales` (§11) requires `read:Sale` **and** `create:DeliveryRoute`, so only managers can read it; a driver-only caller gets `403`.
 
 **Frontend guidance**:
 - Use `GET /auth/me/permissions` to detect `create:DeliveryRoute` / `delete:DeliveryRoute`. If present → render the manager UI (create/edit/delete/reorder); if only `read`/`update` → render the driver UI (route list + check-in buttons only). Do **not** infer roles from the route payload itself.
@@ -330,7 +339,7 @@ When a driver completes a stop — the **last** one included — the backend als
 | 401 | — | all | Token missing/expired → redirect to login |
 | 403 | — | all | Missing the required CASL permission, or driver-only caller acting on someone else's route → hide/disable the action |
 | 404 | `ENTITY_NOT_FOUND` | `GET/:id`, `PATCH`, `DELETE`, `start`, `cancel`, `stops`, `check-in`, `reorder` | Route id missing or belongs to another tenant → show "Route not found"; do not leak presence |
-| 409 | `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` | `start` | One or more sales already belong to another ACTIVE route → surface a clear conflict message |
+| 409 | `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` | `POST /delivery-routes`, `POST :id/stops`, `POST :routeId/stops/:stopId/transfer`, `start` | One or more sales are already **reserved** by another DRAFT-or-ACTIVE route. `details` = `{ reason, routeId, conflictSaleIds }`; `conflictSaleIds` is always an array (empty for a raw index race) → render an inline conflict per `saleId` and keep the manager's selection |
 | 422 | `DELIVERY_ROUTE_INVALID_TRANSITION` | `PATCH`, `DELETE`, `start`, `cancel`, `stops`, `check-in`, `reorder` | Illegal lifecycle transition (e.g. editing a non-DRAFT route, cancelling a COMPLETED route, checking in on a DRAFT route, bad reorder payload). Details carry `reason` |
 | 422 | `DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE` | `POST /delivery-routes`, `POST :id/stops` | A sale is not `PENDING`/`SHIPPED` or has no shipping address. Details carry `saleId` + `deliveryStatus` |
 | 400 | — | create/PATCH/stops/reorder | DTO validation (bad uuid, empty `saleIds`, notes > 280, `forbidNonWhitelisted`) |
@@ -344,7 +353,7 @@ The error body follows the global envelope: `{ statusCode, error, message, times
 
 ### 8.1 Route manager screen (create/plan)
 
-- Fetch eligible sales from the existing sales list (a sale is eligible when `deliveryStatus ∈ {PENDING, SHIPPED}` and `shippingAddress != null` — pre-filter client-side for UX; the backend re-validates anyway).
+- Fetch eligible sales from `GET /delivery-routes/eligible-sales` (§11) instead of the shared sales list: it is paginated, searchable, and reports each row's `availability` (`AVAILABLE` / `IN_CURRENT_ROUTE` / `OCCUPIED` / `INELIGIBLE`). The backend still re-validates on write.
 - Create: `POST /delivery-routes` with `saleIds[]` + `driverUserId` + optional `notes`. The route returns `DRAFT` — the manager can keep editing before start.
 - While `DRAFT`: allow `PATCH` (driver + notes), `POST :id/stops` (append sale), `PUT :id/stops/reorder` (drag & drop), and `DELETE` (only meaningful with zero stops; hide the button once stops exist).
 - Start: `POST :id/start` — confirm before firing; a `409` means a sale got claimed by another active route (reload the list and let the manager pick again).
@@ -369,6 +378,9 @@ The error body follows the global envelope: `{ statusCode, error, message, times
 - [ ] Driver: check-in via `POST :id/stops/:stopId/check-in`; refresh detail + timeline after success; replay-safe.
 - [ ] Render the `timeline` from `GET /delivery-routes/:id` (types `ROUTE_CREATED | ROUTE_STARTED | STOP_CHECKED_IN | ROUTE_COMPLETED | ROUTE_CANCELLED`).
 - [ ] Notification admin: `GET /notification-config` → merge toggle → `PUT /notification-config` with `enabledActions` including `DELIVERY_NEXT_STOP` (full overwrite); handle `400 UNKNOWN_ACTION_KEY` / `400 INVALID_RECIPIENT`.
+- [ ] Selector: call `GET /delivery-routes/eligible-sales` with `page`/`limit`/`q`/`contextRouteId`; only `availability.state === 'AVAILABLE'` rows are selectable — `OCCUPIED` (even with `occupiedRoute: null`) and `INELIGIBLE` are never selectable (§11).
+- [ ] Transfer: `POST /delivery-routes/:routeId/stops/:stopId/transfer` with `{ destinationRouteId }`; both routes must be DRAFT and both return in the `200` body (§12).
+- [ ] After every create/append/transfer/start/cancel write, invalidate and refetch the selector (availability changes when a reservation moves).
 - [ ] Never send `id`, `tenantId`, `createdAt`, `updatedAt`, `timeline`, or `activeRouteId` in any request body (rejected by `forbidNonWhitelisted`).
 
 ---
@@ -376,7 +388,9 @@ The error body follows the global envelope: `{ statusCode, error, message, times
 ## 10. Technical notes
 
 - **Tenant isolation**: every repository read takes an explicit `tenantId` (defense in depth on top of the CLS-injected tenant filter); a cross-tenant route surfaces as `404 ENTITY_NOT_FOUND`, never `403`.
-- **ADR-7 active marker**: a stop pins `activeRouteId` exactly while its route is `ACTIVE`; a partial unique index on `(tenantId, saleId) WHERE activeRouteId IS NOT NULL` guarantees "one sale in at most one ACTIVE route" at commit time. The `start` race maps `P2002` → `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`.
+- **ADR-7 reservation marker (extended by migration `20261007221500_reserve_draft_delivery_route_sales`)**: a stop pins `activeRouteId` from DRAFT assignment and keeps it across `DRAFT → ACTIVE` (cleared on cancel/complete, and re-pointed — never released — by a DRAFT→DRAFT transfer). The partial unique index on `(tenantId, saleId) WHERE activeRouteId IS NOT NULL` therefore guarantees "one sale reserved by at most one DRAFT-or-ACTIVE route" at commit time. The `save`/`start`/`transfer` race maps `P2002` → `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` with structured `details`.
+- **Legacy reservation migration (no automatic cleanup)**: the migration backfills `activeRouteId` for every pre-existing DRAFT/ACTIVE stop that still has a NULL marker, so older DRAFT reservations are enforced by the same index. If a `(tenantId, saleId)` is claimed by more than one DRAFT/ACTIVE route, the migration **refuses to backfill** and aborts with a `RAISE EXCEPTION`; it never deletes, moves or reassigns a stop, and there is **no automatic duplicate resolution** — the ambiguous rows require a **human remediation decision** before the migration can be re-run.
+- **Bounded concurrency evidence (ordering, not a full proof)**: an isolated integration run exercised controlled `transfer` and `start` in **both orderings** under independent CLS tenant contexts (19/19 PASS, exit 0) and confirmed the reservation invariant with clean teardown. This is an **ordering** proof only — it does not enumerate every concurrent interleaving, and no `pg_locks` check confirmed that a contending writer was blocked. The race-safe guarantee still rests on the DB partial unique index (ADR-7 bullet above), not on this test.
 - **Check-in atomicity**: stop flip + `Sale.deliveryStatus = DELIVERED` mirror + outbox row commit in one transaction; a replay of an already-`COMPLETED` stop is a no-op and does not duplicate the email.
 - **Timeline**: built by the pure `buildDeliveryRouteTimeline` function — no extra queries, deterministic ascending order, `ROUTE_COMPLETED`/`ROUTE_CANCELLED` mutually exclusive, actor = assigned driver (MVP has no per-action actor ids).
 - **Next-stop email pipeline**: `checkInStop` → outbox `delivery.next_stop.notify` (idempotency key `${tenantId}:${currentStopId}`) → dedicated poller/dispatcher → Inngest `delivery-next-stop-notify` fn → React-email template sent via `MAILER`. The customer email is re-resolved at send time; config re-gated at send time (§6).
@@ -484,3 +498,74 @@ type EligibleSaleAvailability =
 Availability is a snapshot. **Refetch the selector after every mutating call** (`create`, `POST :id/stops`, `transfer`, `start`, `cancel`): a reservation is taken/released the moment a sale joins or leaves a DRAFT/ACTIVE route, so cached rows can go stale between two writes.
 
 > Backend wiring note: the selector lives in `EligibleSalesController`, which must be registered **before** `DeliveryRoutesController` so `GET /delivery-routes/:id` does not shadow `GET /delivery-routes/eligible-sales`.
+
+---
+
+## 12. Stop transfer — `POST /delivery-routes/:routeId/stops/:stopId/transfer`
+
+Moves one stop from the **origin** route (path `:routeId`) to a **destination** DRAFT route, appending it as the destination's last stop. It is the explicit replacement for editing two routes by hand, and the only way a sale changes route.
+
+### 12.1 Request / response
+
+```http
+POST /delivery-routes/11111111-1111-1111-1111-111111111111/stops/22222222-2222-2222-2222-222222222222/transfer
+```
+
+```json
+{ "destinationRouteId": "33333333-3333-3333-3333-333333333333" }
+```
+
+| Field | Type | Required | Validation |
+| ----- | ---- | -------- | ---------- |
+| `destinationRouteId` | uuid v4 | ✅ | Must be a **different** DRAFT route |
+
+**Response** `200` — both routes with their committed state, so the caller can replace both cached copies without a follow-up read:
+
+```typescript
+interface TransferStopResponseDto {
+  originRoute: DeliveryRouteResponseDto;       // §2
+  destinationRoute: DeliveryRouteResponseDto;  // §2
+}
+```
+
+Permission is `update:DeliveryRoute` at the controller, but the service additionally requires **`read` + `update` on `DeliveryRoute` for the instance of *both* routes** (the response discloses both full projections). A denial is `403` with **no write**.
+
+### 12.2 Rules and effects
+
+- Both origin and destination must be `DRAFT` — **no transfers with an ACTIVE route**, and origin ≠ destination.
+- The stop must belong to the origin; the destination must not already hold the moved sale.
+- Effects: the origin drops the stop and **re-numbers its remaining stops contiguously**; an empty origin is allowed but **cannot be started**; the destination appends the relocated stop with the **same stop id, sale id and `createdAt`, reset to `PENDING`**; the reservation marker is re-pointed to the destination route id (the reservation never drops during the move, so the sale is never briefly free).
+- Both route projections are built **inside the locked transaction**, so the returned state is exactly what this request committed.
+
+### 12.3 Reason codes (`422 DELIVERY_ROUTE_INVALID_TRANSITION` → `reason`)
+
+| `reason` | Condition |
+| ---------------- | --------- |
+| `NOT_DRAFT` | Origin or destination is not DRAFT (`currentStatus` = the offending status) |
+| `SAME_ROUTE_TRANSFER` | `destinationRouteId` equals the origin route |
+| `UNKNOWN_STOP_ID` | The stop does not belong to the origin route |
+| `DESTINATION_ALREADY_HAS_SALE` | The destination already has a stop for this sale (`saleId`, `destinationRouteId`) |
+
+### 12.4 Errors
+
+| HTTP | Code | Cause |
+| ---- | ---- | ----- |
+| `404` | `ENTITY_NOT_FOUND` | Origin or destination route missing / cross-tenant |
+| `403` | — | Missing coarse `update:DeliveryRoute`, or instance `read`/`update` fails on either route (no write) |
+| `422` | `DELIVERY_ROUTE_INVALID_TRANSITION` | Any rule in §12.2 fails — see `reason` |
+| `409` | `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` | The moved sale is reserved by a **third** DRAFT/ACTIVE route; `conflictSaleIds` carries it |
+| `400` | — | DTO validation (bad `stopId`/`destinationRouteId` uuid, unknown body field) |
+
+### 12.5 Invalidate after transfer
+
+The response already returns both routes, but the **selector** (§11) and any route list still need a refetch: a stop leaving/joining a DRAFT route changes reservations and stop counts immediately.
+
+---
+
+## 13. Legacy reservation migration (operator note)
+
+The DRAFT+ACTIVE reservation change ships with migration `20261007221500_reserve_draft_delivery_route_sales`, which widens the meaning of `activeRouteId` (previously armed only while the route was ACTIVE). It is **not** a schema change — the column and its partial unique index already exist.
+
+- **Safe backfill**: inside one `DO` block it sets `activeRouteId = routeId` for every pre-existing `DRAFT`/`ACTIVE` stop whose marker is still `NULL`, so older DRAFT reservations become enforced by the same index as new ones.
+- **Refusal on ambiguous legacy state**: if any `(tenantId, saleId)` is claimed by more than one `DRAFT`/`ACTIVE` route, the migration raises an exception and **aborts the whole block**. It never deletes, moves or reassigns a stop.
+- **Human remediation required**: there is **no automatic duplicate cleanup**. The ambiguous rows must be resolved manually (decide the owning route), then the migration re-run. Surface this to backend/ops — it is not a frontend decision.

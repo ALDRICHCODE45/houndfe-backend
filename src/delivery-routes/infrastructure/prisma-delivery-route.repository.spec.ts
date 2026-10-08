@@ -19,8 +19,12 @@
  * exercised or claimed here; `pnpm test` never reaches a database.
  */
 import { Prisma } from '@prisma/client';
-import { PrismaDeliveryRouteRepository } from './prisma-delivery-route.repository';
+import {
+  PrismaDeliveryRouteRepository,
+  isSaleReservationP2002,
+} from './prisma-delivery-route.repository';
 import { DeliveryRoute } from '../domain/delivery-route.entity';
+import { DeliveryRouteSaleAlreadyInActiveRouteError } from '../domain/delivery-route.errors';
 import { captureRouteTransitionExpectation } from '../application/delivery-routes.service';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type { DeliveryRouteReadModel } from '../domain/delivery-route.repository';
@@ -1438,5 +1442,194 @@ describe('PrismaDeliveryRouteRepository.commitTransition (delivery-routes / ODD 
         status: { in: ['PENDING', 'IN_PROGRESS'] },
       },
     ]);
+  });
+});
+
+describe('PrismaDeliveryRouteRepository.lockRoutesForUpdate (delivery-routes / S2-S3)', () => {
+  const makeLockRepo = (rows: Array<{ id: string }>) => {
+    const $queryRaw = jest.fn((query: unknown) => {
+      void query;
+      return Promise.resolve(rows);
+    });
+    const tx = { $queryRaw } as unknown as Prisma.TransactionClient;
+    const repo = new PrismaDeliveryRouteRepository({
+      getClient: () => tx,
+    } as unknown as TenantPrismaService);
+    return { repo, $queryRaw, tx };
+  };
+
+  it('Given duplicated route ids, when they are locked, then one tenant-qualified FOR UPDATE statement is issued over the deduped ids', async () => {
+    const { repo, $queryRaw, tx } = makeLockRepo([
+      { id: 'route-a' },
+      { id: 'route-b' },
+    ]);
+
+    const missing = await repo.lockRoutesForUpdate({
+      tx,
+      tenantId: TENANT_ID,
+      routeIds: ['route-b', 'route-a', 'route-b'],
+    });
+
+    expect(missing).toEqual([]);
+    expect($queryRaw).toHaveBeenCalledTimes(1);
+    const [statement] = $queryRaw.mock.calls[0];
+    const typedStatement = statement as { sql: string; values: unknown[] };
+    expect(typedStatement.sql).toContain('FOR UPDATE');
+    expect(typedStatement.sql).toContain('"delivery_routes"');
+    expect(typedStatement.sql).toContain('"tenantId"');
+    // tenantId first, then the deduped ids flattened into the IN list (the
+    // adapter sorts before locking, hence a-b even for the b,a,b input).
+    expect(typedStatement.values).toEqual([TENANT_ID, 'route-a', 'route-b']);
+  });
+
+  it('Given an id with no tenant-owned row, when it is locked, then it is reported missing while the locked ids are not', async () => {
+    const { repo, tx } = makeLockRepo([{ id: 'route-a' }]);
+
+    const missing = await repo.lockRoutesForUpdate({
+      tx,
+      tenantId: TENANT_ID,
+      routeIds: ['route-a', 'route-missing'],
+    });
+
+    expect(missing).toEqual(['route-missing']);
+  });
+
+  it('Given no route ids, when locking is requested, then no statement is issued', async () => {
+    const { repo, $queryRaw, tx } = makeLockRepo([]);
+
+    const missing = await repo.lockRoutesForUpdate({
+      tx,
+      tenantId: TENANT_ID,
+      routeIds: [],
+    });
+
+    expect(missing).toEqual([]);
+    expect($queryRaw).not.toHaveBeenCalled();
+  });
+});
+
+describe('isSaleReservationP2002 (delivery-routes / S2)', () => {
+  const p2002 = (target: unknown): Prisma.PrismaClientKnownRequestError =>
+    new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+      code: 'P2002',
+      clientVersion: 'test',
+      meta: target === undefined ? undefined : { target },
+    });
+
+  it('Given a P2002 whose target includes saleId, then it is a sale reservation conflict', () => {
+    expect(isSaleReservationP2002(p2002(['tenantId', 'saleId']))).toBe(true);
+  });
+
+  it('Given a P2002 whose target is the partial index name, then it is a sale reservation conflict', () => {
+    expect(
+      isSaleReservationP2002(p2002('delivery_route_stops_active_sale_uniq')),
+    ).toBe(true);
+  });
+
+  it('Given a P2002 from the (routeId, sortOrder) stop index, then it is NOT mislabelled as a sale conflict', () => {
+    expect(isSaleReservationP2002(p2002(['routeId', 'sortOrder']))).toBe(false);
+  });
+
+  it('Given a non-P2002 error, then it is not a sale reservation conflict', () => {
+    expect(isSaleReservationP2002(new Error('boom'))).toBe(false);
+  });
+
+  it('Given a P2002 with no reported target, then the historical 409 mapping is preserved', () => {
+    expect(isSaleReservationP2002(p2002(undefined))).toBe(true);
+  });
+});
+
+describe('PrismaDeliveryRouteRepository.save — reservation conflict mapping (delivery-routes / S2)', () => {
+  const makeSaveRepo = (stubs: {
+    findMany: jest.Mock;
+    createMany?: jest.Mock;
+  }) => {
+    const client = {
+      deliveryRoute: { upsert: jest.fn(() => Promise.resolve({})) },
+      deliveryRouteStop: {
+        deleteMany: jest.fn(() => Promise.resolve({ count: 0 })),
+        findMany: stubs.findMany,
+        createMany:
+          stubs.createMany ?? jest.fn(() => Promise.resolve({ count: 0 })),
+      },
+    };
+    const tenantPrisma = {
+      getClient: () => client,
+      runInTransaction: <T>(work: () => Promise<T>) => work(),
+    };
+    return new PrismaDeliveryRouteRepository(
+      tenantPrisma as unknown as TenantPrismaService,
+    );
+  };
+
+  it('Given a sale already reserved by another route, when this route is saved, then it fails 409 with the structured conflictSaleIds and never reaches the insert', async () => {
+    const createMany = jest.fn(() => Promise.resolve({ count: 0 }));
+    const repo = makeSaveRepo({
+      findMany: jest.fn(() => Promise.resolve([{ saleId: 'sale-1' }])),
+      createMany,
+    });
+    const route = await makeDraftRoute(['sale-1']);
+
+    const error = await repo.save(route).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(DeliveryRouteSaleAlreadyInActiveRouteError);
+    expect(
+      (error as DeliveryRouteSaleAlreadyInActiveRouteError).details,
+    ).toMatchObject({
+      reason: 'SALE_ALREADY_RESERVED',
+      routeId: route.id,
+      conflictSaleIds: ['sale-1'],
+    });
+    expect(createMany).not.toHaveBeenCalled();
+  });
+
+  it('Given the pre-check is clean but a concurrent writer wins the sale, when the insert raises the reservation P2002, then it maps to the 409 code with a stable conflictSaleIds array', async () => {
+    const repo = makeSaveRepo({
+      findMany: jest.fn(() => Promise.resolve([])),
+      createMany: jest.fn(() =>
+        Promise.reject(
+          new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+            code: 'P2002',
+            clientVersion: 'test',
+            meta: { target: ['tenantId', 'saleId'] },
+          }),
+        ),
+      ),
+    });
+    const route = await makeDraftRoute(['sale-1']);
+
+    const error = await repo.save(route).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(DeliveryRouteSaleAlreadyInActiveRouteError);
+    expect(
+      (error as DeliveryRouteSaleAlreadyInActiveRouteError).details,
+    ).toMatchObject({
+      reason: 'PARTIAL_UNIQUE_INDEX_VIOLATION',
+      routeId: route.id,
+      conflictSaleIds: [],
+    });
+  });
+
+  it('Given a P2002 from a different unique index, when the insert fails, then the original error is rethrown (never mislabelled as a sale conflict)', async () => {
+    const sortOrderConflict = new Prisma.PrismaClientKnownRequestError(
+      'Unique constraint failed',
+      {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['routeId', 'sortOrder'] },
+      },
+    );
+    const repo = makeSaveRepo({
+      findMany: jest.fn(() => Promise.resolve([])),
+      createMany: jest.fn(() => Promise.reject(sortOrderConflict)),
+    });
+    const route = await makeDraftRoute(['sale-1']);
+
+    const error = await repo.save(route).catch((e: unknown) => e);
+
+    expect(error).toBe(sortOrderConflict);
+    expect(error).not.toBeInstanceOf(
+      DeliveryRouteSaleAlreadyInActiveRouteError,
+    );
   });
 });

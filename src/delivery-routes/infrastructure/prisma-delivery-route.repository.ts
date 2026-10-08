@@ -11,11 +11,15 @@
  * P2002 → 409 mapping: the partial unique index
  * `delivery_route_stops_active_sale_uniq` on
  * `(tenant_id, sale_id) WHERE activeRouteId IS NOT NULL` raises
- * `P2002` when a concurrent route-start race violates the invariant.
- * The adapter maps that to
+ * `P2002` when a route claims a sale already reserved by another
+ * DRAFT/ACTIVE route (S2 — the marker is armed at DRAFT assignment and
+ * survives DRAFT→ACTIVE). The adapter maps that violation to
  * `DeliveryRouteSaleAlreadyInActiveRouteError` (HTTP 409 via the
  * global filter's `BusinessRuleViolationError` branch — see design §9
- * error table).
+ * error table) and carries the structured `conflictSaleIds` the wire
+ * contract exposes; a P2002 from a DIFFERENT unique index (e.g. the
+ * `(routeId, sortOrder)` stop index) is rethrown instead of being
+ * mislabelled as a sale reservation conflict.
  *
  * The outbox-claim trio (`claimNextOutboxEvent` / `markOutboxEventSent` /
  * `markOutboxEventFailed`) is stubbed with `null` / no-ops for WU2;
@@ -65,6 +69,47 @@ function stopTransitionChanged(
 
 function sameInstant(a: Date | null, b: Date | null): boolean {
   return a === b || (a !== null && b !== null && a.getTime() === b.getTime());
+}
+
+/**
+ * Is this error the sale-reservation P2002 raised by the ADR-7 partial
+ * unique index `delivery_route_stops_active_sale_uniq`? Every other P2002
+ * (notably the `delivery_route_stops_routeId_sortOrder_key` index) is NOT
+ * a sale conflict and must be rethrown so the wire never reports a
+ * misleading `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`.
+ *
+ * Prisma reports the offending fields in `meta.target`. The reservation
+ * index is `(tenantId, saleId)` while the stop-order index is
+ * `(routeId, sortOrder)`, so `saleId` is the discriminator. An unknown /
+ * absent target preserves the historical 409 mapping (defensive: the
+ * reservation index is by far the likeliest P2002 on this table).
+ */
+export function isSaleReservationP2002(error: unknown): boolean {
+  if (
+    !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+    error.code !== 'P2002'
+  ) {
+    return false;
+  }
+  const target = error.meta?.target;
+  const fields =
+    typeof target === 'string'
+      ? [target]
+      : Array.isArray(target)
+        ? target.map((entry) => String(entry))
+        : null;
+  if (fields === null) {
+    // Unknown target shape — keep the historical 409 contract.
+    return true;
+  }
+  return fields.some((field) => {
+    const normalized = field.toLowerCase();
+    return (
+      normalized === 'saleid' ||
+      normalized === 'sale_id' ||
+      normalized.includes('active_sale_uniq')
+    );
+  });
 }
 
 /**
@@ -197,6 +242,16 @@ export class PrismaDeliveryRouteRepository implements IDeliveryRouteRepository {
   }
 
   async save(route: DeliveryRoute): Promise<DeliveryRoute> {
+    // Parent state and stop replacement must commit or roll back together.
+    // Reuse an ambient transaction when the caller already owns one.
+    return this.tenantPrisma.runInTransaction(() =>
+      this.saveInTransaction(route),
+    );
+  }
+
+  private async saveInTransaction(
+    route: DeliveryRoute,
+  ): Promise<DeliveryRoute> {
     const prisma = this.getClient();
     const data = route.toPersistence();
 
@@ -230,13 +285,41 @@ export class PrismaDeliveryRouteRepository implements IDeliveryRouteRepository {
       });
 
       // Child stops: delete-then-recreate so the aggregate is the
-      // single source of truth. The P2002 raised by the
-      // `(tenantId, saleId) WHERE activeRouteId IS NOT NULL` partial
-      // unique index surfaces from this createMany — caught below and
-      // translated to a 409.
+      // single source of truth. Deleting first also releases this route's
+      // own reservations, so the S2 conflict pre-check below observes only
+      // OTHER routes' reservations.
       await prisma.deliveryRouteStop.deleteMany({
         where: { routeId: route.id },
       });
+
+      // S2 conflict pre-check — surface the structured `conflictSaleIds`
+      // the wire contract exposes (per-sale inline conflicts). The partial
+      // unique index below is still the race-safe authoritative guard.
+      const saleIds = data.stops.map((stop) => stop.saleId);
+      if (saleIds.length > 0) {
+        const conflicting = await prisma.deliveryRouteStop.findMany({
+          where: {
+            tenantId: data.tenantId,
+            saleId: { in: saleIds },
+            activeRouteId: { not: null },
+          },
+          select: { saleId: true },
+        });
+        const conflictSaleIds = [
+          ...new Set(conflicting.map((row) => row.saleId)),
+        ];
+        if (conflictSaleIds.length > 0) {
+          throw new DeliveryRouteSaleAlreadyInActiveRouteError(
+            'One or more sales are already reserved by another draft or active route',
+            {
+              reason: 'SALE_ALREADY_RESERVED',
+              routeId: route.id,
+              conflictSaleIds,
+            },
+          );
+        }
+      }
+
       if (data.stops.length > 0) {
         await prisma.deliveryRouteStop.createMany({
           data: data.stops.map((stop) => ({
@@ -256,19 +339,19 @@ export class PrismaDeliveryRouteRepository implements IDeliveryRouteRepository {
         });
       }
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
+      if (isSaleReservationP2002(error)) {
         // ADR-7 — the partial unique index
         // `delivery_route_stops_active_sale_uniq` raised. Translate to
         // the canonical 409 domain error so the global filter maps it
-        // to HTTP 409 (design §9).
+        // to HTTP 409 (design §9). A concurrent winner beat the pre-check
+        // to the sale, so the conflicting ids are not resolvable from the
+        // already-aborted transaction; the field stays a stable array.
         throw new DeliveryRouteSaleAlreadyInActiveRouteError(
-          'One or more sales already belong to another active route',
+          'One or more sales already belong to another draft or active route',
           {
             reason: 'PARTIAL_UNIQUE_INDEX_VIOLATION',
             routeId: route.id,
+            conflictSaleIds: [],
           },
         );
       }
@@ -276,6 +359,36 @@ export class PrismaDeliveryRouteRepository implements IDeliveryRouteRepository {
     }
 
     return (await this.findById({ tenantId: data.tenantId, id: route.id }))!;
+  }
+
+  /**
+   * S2/S3 concurrency seam. See the port docs: this is the row-level lock
+   * that every read-modify-write path takes before loading the aggregate,
+   * so two writers can never commit full-replacement `save`s derived from
+   * the same stale snapshot (a transaction alone does not prevent that).
+   *
+   * Locks are taken in ascending id order so a two-route transfer and a
+   * single-route mutation can never deadlock. The raw statement bypasses
+   * the CLS tenant extension, so `tenantId` is passed explicitly; the
+   * explicit tenant predicate also keeps a foreign-tenant id from being
+   * locked (it is reported as missing).
+   */
+  async lockRoutesForUpdate(input: {
+    tx: Prisma.TransactionClient;
+    tenantId: string;
+    routeIds: string[];
+  }): Promise<string[]> {
+    const orderedIds = [...new Set(input.routeIds)].sort((a, b) =>
+      a.localeCompare(b),
+    );
+    if (orderedIds.length === 0) return [];
+    const rows = await input.tx.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT "id" FROM "delivery_routes" WHERE "tenantId" = ${input.tenantId} AND "id" IN (${Prisma.join(
+        orderedIds,
+      )}) ORDER BY "id" FOR UPDATE`,
+    );
+    const locked = new Set(rows.map((row) => row.id));
+    return orderedIds.filter((id) => !locked.has(id));
   }
 
   async findById(input: {

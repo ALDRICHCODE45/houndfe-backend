@@ -30,6 +30,8 @@
  * or unset `DATABASE_URL`).
  */
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import {
   BASELINE_TENANT_ID,
@@ -393,6 +395,8 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         city: 'CDMX',
         state: 'CDMX',
         label: 'Oficina',
+        latitude: null,
+        longitude: null,
       });
 
       expect(row?.stops[1]?.saleFolio).toBe('A-202608-000002');
@@ -451,19 +455,62 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
 
   // ── ADR-7 partial unique index (P2002 → 409 domain error) ──────────────
 
-  describe('ADR-7 partial unique index conflict', () => {
-    it('saving a second ACTIVE route that shares a sale maps P2002 to DeliveryRouteSaleAlreadyInActiveRouteError', async () => {
-      const { route: routeA } = await seedDraftRoute(2);
-      const sharedSaleId = routeA.stops[0].saleId;
-
-      // Start route A → arms activeRouteId on every stop.
+  describe('ADR-7 partial unique index conflict (S2 reservation)', () => {
+    it('saving a DRAFT route that appends a sale already reserved by an ACTIVE route maps to the 409 domain error and rolls back BOTH routes', async () => {
+      const { route: routeA } = await seedDraftRoute(1);
+      // Start route A → arms the reservation on every stop.
       routeA.start({});
       await repo.save(routeA);
+      const sharedSaleId = routeA.stops[0].saleId;
 
-      // Route B shares route A's first sale. Starting B arms its own
-      // activeRouteId, and the partial unique index
-      // (tenantId, saleId) WHERE activeRouteId IS NOT NULL raises P2002
-      // on the stop createMany — mapped by the adapter to the 409 domain error.
+      // Route B is a DRAFT route with its OWN eligible sale, so it is valid
+      // state (its own reservation) and persists.
+      const { route: routeB, addressId } = await seedDraftRoute(1);
+      const routeBSaleId = routeB.stops[0].saleId;
+      expect(routeBSaleId).not.toBe(sharedSaleId);
+
+      const beforeA = await repo.findOneWithStops({ tenantId, id: routeA.id });
+      const beforeB = await repo.findOneWithStops({ tenantId, id: routeB.id });
+      expect(beforeA?.status).toBe('ACTIVE');
+      expect(beforeB?.status).toBe('DRAFT');
+
+      // Attempt to append the sale route A already reserves. The
+      // reservation conflict is detected INSIDE the save transaction, so
+      // route B's upsert + full stop replacement roll back together (T1
+      // atomicity) and neither read model changes.
+      await routeB.addStop({
+        saleId: sharedSaleId,
+        checkSaleEligibility: async () => ({
+          deliveryStatus: 'PENDING' as const,
+          shippingAddressId: addressId,
+        }),
+      });
+
+      const error = await repo.save(routeB).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(DeliveryRouteSaleAlreadyInActiveRouteError);
+      expect((error as DeliveryRouteSaleAlreadyInActiveRouteError).code).toBe(
+        'DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE',
+      );
+      expect(
+        (error as DeliveryRouteSaleAlreadyInActiveRouteError).details,
+      ).toMatchObject({
+        reason: 'SALE_ALREADY_RESERVED',
+        routeId: routeB.id,
+        conflictSaleIds: [sharedSaleId],
+      });
+
+      const afterA = await repo.findOneWithStops({ tenantId, id: routeA.id });
+      const afterB = await repo.findOneWithStops({ tenantId, id: routeB.id });
+      expect(afterA).toEqual(beforeA);
+      // Compare the complete read model so a rejected write cannot silently
+      // change status, timestamps, stop identities, ordering, or projection.
+      expect(afterB).toEqual(beforeB);
+    });
+
+    it('saving a second DRAFT route that claims a sale already reserved by another DRAFT route is rejected — the reservation is armed at assignment', async () => {
+      const { route: routeA, saleIds } = await seedDraftRoute(1);
+      const sharedSaleId = saleIds[0];
       const driverB = await seedDriver();
       const routeB = await DeliveryRoute.create({
         id: randomUUID(),
@@ -475,14 +522,68 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
           shippingAddressId: randomUUID(),
         }),
       });
-      routeB.start({});
 
       const error = await repo.save(routeB).catch((e: unknown) => e);
 
       expect(error).toBeInstanceOf(DeliveryRouteSaleAlreadyInActiveRouteError);
-      expect((error as DeliveryRouteSaleAlreadyInActiveRouteError).code).toBe(
-        'DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE',
-      );
+      expect(
+        (error as DeliveryRouteSaleAlreadyInActiveRouteError).details,
+      ).toMatchObject({ conflictSaleIds: [sharedSaleId] });
+
+      // The rejected DRAFT route never persisted; the holder is untouched
+      // and still owns the reservation.
+      expect(
+        await repo.findOneWithStops({ tenantId, id: routeB.id }),
+      ).toBeNull();
+      const foundA = await repo.findById({ tenantId, id: routeA.id });
+      expect(foundA?.status).toBe('DRAFT');
+      expect(foundA?.stops.map((stop) => stop.saleId)).toEqual([sharedSaleId]);
+      expect(foundA?.stops[0].activeRouteId).toBe(routeA.id);
+    });
+
+    it('rolls back the parent upsert and the stop replacement when the createMany hits a real unique conflict beyond the pre-check', async () => {
+      const { route, saleIds } = await seedDraftRoute(1);
+      const before = await repo.findOneWithStops({ tenantId, id: route.id });
+      expect(before?.stops).toHaveLength(1);
+
+      // `addStop` does not dedupe, so appending the route's OWN sale makes
+      // the createMany insert two stops for the same (tenantId, saleId) with
+      // an armed reservation. The save pre-check cannot see an
+      // intra-statement duplicate, so the ADR-7 partial unique index fails
+      // the createMany AFTER the parent upsert and the deleteMany already
+      // ran — the recreate-stage rollback a pre-check rejection cannot
+      // prove.
+      await route.addStop({
+        saleId: saleIds[0],
+        checkSaleEligibility: async () => ({
+          deliveryStatus: 'PENDING' as const,
+          shippingAddressId: randomUUID(),
+        }),
+      });
+
+      const error = await repo.save(route).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(DeliveryRouteSaleAlreadyInActiveRouteError);
+      expect(
+        (error as DeliveryRouteSaleAlreadyInActiveRouteError).details,
+      ).toMatchObject({
+        reason: 'PARTIAL_UNIQUE_INDEX_VIOLATION',
+        routeId: route.id,
+        conflictSaleIds: [],
+      });
+
+      // The parent upsert (incl. updatedAt) and the deleteMany must have
+      // rolled back together: the complete read model is the pre-attempt
+      // state, and the original single stop row survives.
+      const after = await repo.findOneWithStops({ tenantId, id: route.id });
+      expect(after).toEqual(before);
+      const persistedStops = await prisma.deliveryRouteStop.findMany({
+        where: { routeId: route.id },
+        select: { saleId: true, activeRouteId: true },
+      });
+      expect(persistedStops).toEqual([
+        { saleId: saleIds[0], activeRouteId: route.id },
+      ]);
     });
 
     it('starting the SAME sale twice on the same route (duplicate) does not conflict — only cross-route duplicates do', async () => {
@@ -708,6 +809,491 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
       expect(await deliveryStatusOf(saleIds[0])).toEqual({
         deliveryStatus: 'PENDING',
       });
+    });
+  });
+
+  // ── transferStop — explicit DRAFT→DRAFT move (S3) ────────────────────
+
+  describe('transferStop (real transaction)', () => {
+    const ctx = {
+      userId: randomUUID(),
+      ability: { can: () => true },
+    } as unknown as DeliveryRouteRequestContext;
+
+    const makeService = () =>
+      new DeliveryRoutesService(
+        repo,
+        saleRepo,
+        new ManualRouteOptimizer(),
+        tenantPrisma,
+        cls,
+        new OutboxWriterService(),
+      );
+
+    it('moves the stop between two DRAFT routes, releases the origin reservation and arms the destination, and refuses to start an emptied origin', async () => {
+      const { route: origin } = await seedDraftRoute(1);
+      const { route: destination } = await seedDraftRoute(1);
+      const movedSaleId = origin.stops[0].saleId;
+      const movedStopId = origin.stops[0].id;
+      const destinationSaleId = destination.stops[0].saleId;
+      const service = makeService();
+
+      const result = await service.transferStop(ctx, origin.id, movedStopId, {
+        destinationRouteId: destination.id,
+      });
+
+      // Response carries both committed routes.
+      expect(result.originRoute.stops).toHaveLength(0);
+      expect(result.destinationRoute.stops.map((stop) => stop.saleId)).toEqual([
+        destinationSaleId,
+        movedSaleId,
+      ]);
+
+      // Persisted state: the stop left the origin and is last in the
+      // destination, reserved by the destination.
+      const persistedOrigin = await repo.findById({
+        tenantId,
+        id: origin.id,
+      });
+      expect(persistedOrigin?.status).toBe('DRAFT');
+      expect(persistedOrigin?.stops).toHaveLength(0);
+      const persistedDestination = await repo.findById({
+        tenantId,
+        id: destination.id,
+      });
+      expect(persistedDestination?.stops.map((stop) => stop.saleId)).toEqual([
+        destinationSaleId,
+        movedSaleId,
+      ]);
+      expect(
+        persistedDestination?.stops.find((stop) => stop.saleId === movedSaleId)
+          ?.activeRouteId,
+      ).toBe(destination.id);
+
+      // The sale is reserved by EXACTLY ONE DRAFT/ACTIVE route — never both.
+      const reservations = await prisma.deliveryRouteStop.findMany({
+        where: {
+          tenantId,
+          saleId: movedSaleId,
+          activeRouteId: { not: null },
+        },
+        select: { routeId: true },
+      });
+      expect(reservations).toEqual([{ routeId: destination.id }]);
+
+      // An emptied DRAFT origin is allowed but cannot be started.
+      await expect(service.start(ctx, origin.id)).rejects.toBeInstanceOf(
+        DeliveryRouteInvalidTransitionError,
+      );
+    });
+  });
+
+  // ── transferStop vs start — real lock serialization (two isolated ctx) ─
+  //
+  // Proven with TWO independent Prisma/CLS contexts: a shared CLS `tx` slot
+  // (the Map in `beforeAll`) would let the two ambient-transaction pointers
+  // collide. The winner's repository is wrapped so it acquires the real
+  // `FOR UPDATE` row locks and then BLOCKS on a test-controlled barrier,
+  // holding its transaction open. The loser is launched afterwards and can
+  // therefore never acquire the locks first: it blocks behind the winner at
+  // the DATABASE level and only proceeds after the winner commits. The
+  // barrier is released in `finally` and every await is bounded, so a broken
+  // race fails loudly instead of leaking an open transaction.
+
+  describe('transferStop vs start — lock serialization (two isolated contexts)', () => {
+    const RACE_TIMEOUT_MS = 10_000;
+    const raceCtx = {
+      userId: randomUUID(),
+      ability: { can: () => true },
+    } as unknown as DeliveryRouteRequestContext;
+
+    /** Reject a bounded await so a broken race fails instead of hanging. */
+    async function withTimeout<T>(
+      promise: Promise<T>,
+      label: string,
+    ): Promise<T> {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`race timeout: ${label}`)),
+              RACE_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    /**
+     * Barrier that holds the WINNER's route locks open until `release()` —
+     * deterministic DB-level ordering with no sleep timing.
+     */
+    function createLockHoldBarrier(): {
+      acquired: Promise<void>;
+      released: Promise<void>;
+      signalAcquired: () => void;
+      release: () => void;
+    } {
+      let signalAcquired!: () => void;
+      const acquired = new Promise<void>((resolve) => {
+        signalAcquired = resolve;
+      });
+      let signalRelease!: () => void;
+      const released = new Promise<void>((resolve) => {
+        signalRelease = resolve;
+      });
+      return {
+        acquired,
+        released,
+        signalAcquired,
+        release: () => signalRelease(),
+      };
+    }
+
+    /**
+     * Real repository subclass whose row-lock acquisition holds the winner's
+     * transaction open until the barrier releases it.
+     */
+    class BarrierAwareDeliveryRouteRepository extends PrismaDeliveryRouteRepository {
+      constructor(
+        tenantPrisma: TenantPrismaService,
+        private readonly barrier: {
+          signalAcquired: () => void;
+          released: Promise<void>;
+        },
+      ) {
+        super(tenantPrisma);
+      }
+
+      override async lockRoutesForUpdate(
+        input: Parameters<
+          PrismaDeliveryRouteRepository['lockRoutesForUpdate']
+        >[0],
+      ): Promise<string[]> {
+        const missing = await super.lockRoutesForUpdate(input);
+        this.barrier.signalAcquired();
+        await this.barrier.released;
+        return missing;
+      }
+    }
+
+    /** A fully isolated Prisma/CLS/repo/service context. */
+    function makeIsolatedContext(barrier?: {
+      signalAcquired: () => void;
+      released: Promise<void>;
+    }) {
+      const txSlots = new Map<string, unknown>();
+      const isolatedCls = {
+        get: (key?: string): unknown => {
+          if (key === undefined) return { tenantId, isSuperAdmin: false };
+          if (key === 'tenantId') return tenantId;
+          if (key === 'isSuperAdmin') return false;
+          return txSlots.get(key);
+        },
+        set: (key: string, value: unknown): void => {
+          txSlots.set(key, value);
+        },
+      } as unknown as ClsService<TenantClsStore>;
+      const isolatedTenantPrisma = new TenantPrismaService(
+        prisma as unknown as ConstructorParameters<
+          typeof TenantPrismaService
+        >[0],
+        isolatedCls,
+      );
+      const isolatedRepo = barrier
+        ? new BarrierAwareDeliveryRouteRepository(isolatedTenantPrisma, barrier)
+        : new PrismaDeliveryRouteRepository(isolatedTenantPrisma);
+      const service = new DeliveryRoutesService(
+        isolatedRepo,
+        new PrismaSaleRepository(isolatedTenantPrisma),
+        new ManualRouteOptimizer(),
+        isolatedTenantPrisma,
+        isolatedCls,
+        new OutboxWriterService(),
+      );
+      return { service };
+    }
+
+    function outcome<T>(promise: Promise<T>) {
+      return promise.then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    }
+
+    function reservationsOf(saleId: string) {
+      return prisma.deliveryRouteStop.findMany({
+        where: { tenantId, saleId, activeRouteId: { not: null } },
+        select: { routeId: true },
+      });
+    }
+
+    it('start wins: the concurrent transfer observes the committed ACTIVE origin and rejects unchanged', async () => {
+      const { route: origin } = await seedDraftRoute(1);
+      const { route: destination } = await seedDraftRoute(1);
+      const movedSaleId = origin.stops[0].saleId;
+      const movedStopId = origin.stops[0].id;
+
+      const barrier = createLockHoldBarrier();
+      const winner = makeIsolatedContext(barrier); // start
+      const contender = makeIsolatedContext(); // transferStop
+
+      const beforeDestination = await repo.findOneWithStops({
+        tenantId,
+        id: destination.id,
+      });
+
+      const startPromise = outcome(winner.service.start(raceCtx, origin.id));
+      await withTimeout(barrier.acquired, 'winner acquired origin lock');
+      const transferPromise = outcome(
+        contender.service.transferStop(raceCtx, origin.id, movedStopId, {
+          destinationRouteId: destination.id,
+        }),
+      );
+      barrier.release();
+
+      try {
+        const startResult = await withTimeout(startPromise, 'start settles');
+        expect(startResult.ok).toBe(true);
+        expect(startResult.ok && startResult.value.status).toBe('ACTIVE');
+
+        const transferResult = await withTimeout(
+          transferPromise,
+          'transfer settles',
+        );
+        expect(transferResult.ok).toBe(false);
+        if (!transferResult.ok) {
+          expect(transferResult.error).toBeInstanceOf(
+            DeliveryRouteInvalidTransitionError,
+          );
+          expect(
+            (transferResult.error as DeliveryRouteInvalidTransitionError).code,
+          ).toBe('DELIVERY_ROUTE_INVALID_TRANSITION');
+        }
+      } finally {
+        barrier.release();
+      }
+
+      const afterOrigin = await repo.findOneWithStops({
+        tenantId,
+        id: origin.id,
+      });
+      const afterDestination = await repo.findOneWithStops({
+        tenantId,
+        id: destination.id,
+      });
+
+      // The rejected transfer changed NEITHER route: the origin keeps its
+      // single stop (now reserved by the ACTIVE origin) and the destination
+      // is byte-for-byte the pre-race read model.
+      expect(afterDestination).toEqual(beforeDestination);
+      expect(afterOrigin?.status).toBe('ACTIVE');
+      expect(afterOrigin?.stops.map((stop) => stop.saleId)).toEqual([
+        movedSaleId,
+      ]);
+      expect(afterOrigin?.stops.map((stop) => stop.id)).toEqual([movedStopId]);
+      expect(await reservationsOf(movedSaleId)).toEqual([
+        { routeId: origin.id },
+      ]);
+    });
+
+    it('transfer wins: the concurrent start observes the emptied origin and rejects with EMPTY_ROUTE; the moved sale is reserved only by the destination', async () => {
+      const { route: origin } = await seedDraftRoute(1);
+      const { route: destination } = await seedDraftRoute(1);
+      const movedSaleId = origin.stops[0].saleId;
+      const movedStopId = origin.stops[0].id;
+      const destinationSaleId = destination.stops[0].saleId;
+
+      const barrier = createLockHoldBarrier();
+      const winner = makeIsolatedContext(barrier); // transferStop
+      const contender = makeIsolatedContext(); // start
+
+      const transferPromise = outcome(
+        winner.service.transferStop(raceCtx, origin.id, movedStopId, {
+          destinationRouteId: destination.id,
+        }),
+      );
+      await withTimeout(barrier.acquired, 'winner acquired route locks');
+      const startPromise = outcome(contender.service.start(raceCtx, origin.id));
+      barrier.release();
+
+      try {
+        const transferResult = await withTimeout(
+          transferPromise,
+          'transfer settles',
+        );
+        expect(transferResult.ok).toBe(true);
+
+        const startResult = await withTimeout(startPromise, 'start settles');
+        expect(startResult.ok).toBe(false);
+        if (!startResult.ok) {
+          expect(startResult.error).toBeInstanceOf(
+            DeliveryRouteInvalidTransitionError,
+          );
+          expect(
+            (startResult.error as DeliveryRouteInvalidTransitionError).code,
+          ).toBe('DELIVERY_ROUTE_INVALID_TRANSITION');
+          expect(
+            (startResult.error as DeliveryRouteInvalidTransitionError).details,
+          ).toMatchObject({ reason: 'EMPTY_ROUTE' });
+        }
+      } finally {
+        barrier.release();
+      }
+
+      const afterOrigin = await repo.findOneWithStops({
+        tenantId,
+        id: origin.id,
+      });
+      const afterDestination = await repo.findOneWithStops({
+        tenantId,
+        id: destination.id,
+      });
+
+      // `start` observed the COMMITTED transfer: the origin is an empty
+      // DRAFT and the moved sale is reserved by the destination ONLY.
+      expect(afterOrigin?.status).toBe('DRAFT');
+      expect(afterOrigin?.stops).toHaveLength(0);
+      expect(afterDestination?.stops.map((stop) => stop.saleId)).toEqual([
+        destinationSaleId,
+        movedSaleId,
+      ]);
+      expect(await reservationsOf(movedSaleId)).toEqual([
+        { routeId: destination.id },
+      ]);
+    });
+  });
+
+  // ── reservation migration guard (fixtures only) ──────────────────────
+
+  describe('reservation migration guard (fixtures only)', () => {
+    const migrationSql = () =>
+      readFileSync(
+        resolve(
+          process.cwd(),
+          'prisma/migrations/20261007221500_reserve_draft_delivery_route_sales/migration.sql',
+        ),
+        'utf8',
+      );
+
+    /** Insert a route row directly, bypassing the adapter (legacy shape). */
+    async function seedLegacyRoute(
+      status: 'DRAFT' | 'ACTIVE',
+      driverId: string,
+    ): Promise<string> {
+      const id = randomUUID();
+      await prisma.deliveryRoute.create({
+        data: {
+          id,
+          tenantId,
+          driverUserId: driverId,
+          status,
+          startedAt: status === 'ACTIVE' ? new Date() : null,
+        },
+      });
+      return id;
+    }
+
+    /** Insert a stop row with an explicit (possibly NULL) marker. */
+    async function seedLegacyStop(input: {
+      routeId: string;
+      saleId: string;
+      sortOrder: number;
+      activeRouteId: string | null;
+    }): Promise<string> {
+      const id = randomUUID();
+      await prisma.deliveryRouteStop.create({
+        data: {
+          id,
+          tenantId,
+          routeId: input.routeId,
+          saleId: input.saleId,
+          sortOrder: input.sortOrder,
+          status: 'PENDING',
+          activeRouteId: input.activeRouteId,
+        },
+      });
+      return id;
+    }
+
+    it('refuses to backfill when one sale is claimed by two DRAFT routes, choosing no owner and changing nothing', async () => {
+      const driver = await seedDriver();
+      const { customerId, addressId } = await seedCustomerAndAddress();
+      const sale = await seedEligibleSale({
+        addressId,
+        customerId,
+        folio: 'LEGACY-DUP',
+      });
+      const routeA = await seedLegacyRoute('DRAFT', driver.id);
+      const routeB = await seedLegacyRoute('DRAFT', driver.id);
+      const stopA = await seedLegacyStop({
+        routeId: routeA,
+        saleId: sale.id,
+        sortOrder: 0,
+        activeRouteId: null,
+      });
+      const stopB = await seedLegacyStop({
+        routeId: routeB,
+        saleId: sale.id,
+        sortOrder: 0,
+        activeRouteId: null,
+      });
+
+      await expect(prisma.$executeRawUnsafe(migrationSql())).rejects.toThrow(
+        /refusing to backfill/,
+      );
+
+      const rows = await prisma.deliveryRouteStop.findMany({
+        where: { id: { in: [stopA, stopB] } },
+        select: { activeRouteId: true },
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.activeRouteId)).toEqual([null, null]);
+    });
+
+    it('backfills the reservation for an existing DRAFT stop and leaves ACTIVE markers untouched', async () => {
+      const driver = await seedDriver();
+      const { customerId, addressId } = await seedCustomerAndAddress();
+      const draftSale = await seedEligibleSale({
+        addressId,
+        customerId,
+        folio: 'LEGACY-DRAFT',
+      });
+      const activeSale = await seedEligibleSale({
+        addressId,
+        customerId,
+        folio: 'LEGACY-ACTIVE',
+      });
+      const draftRoute = await seedLegacyRoute('DRAFT', driver.id);
+      const activeRoute = await seedLegacyRoute('ACTIVE', driver.id);
+      const draftStop = await seedLegacyStop({
+        routeId: draftRoute,
+        saleId: draftSale.id,
+        sortOrder: 0,
+        activeRouteId: null,
+      });
+      const activeStop = await seedLegacyStop({
+        routeId: activeRoute,
+        saleId: activeSale.id,
+        sortOrder: 0,
+        activeRouteId: activeRoute,
+      });
+
+      await prisma.$executeRawUnsafe(migrationSql());
+
+      const rows = await prisma.deliveryRouteStop.findMany({
+        where: { id: { in: [draftStop, activeStop] } },
+        select: { id: true, activeRouteId: true },
+      });
+      const markerById = new Map(
+        rows.map((row) => [row.id, row.activeRouteId]),
+      );
+      expect(markerById.get(draftStop)).toBe(draftRoute);
+      expect(markerById.get(activeStop)).toBe(activeRoute);
     });
   });
 });

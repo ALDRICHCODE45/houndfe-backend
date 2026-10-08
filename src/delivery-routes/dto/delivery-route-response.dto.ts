@@ -117,3 +117,13 @@ export interface DeliveryRouteResponseDto {
    *  is stable across the chained-PR boundary. */
   timeline: DeliveryRouteTimelineEventDto[];
 }
+
+/**
+ * S3 — wire response of the explicit DRAFT→DRAFT stop transfer. Both
+ * routes are returned with their committed state so the caller can
+ * replace its cached copies without a follow-up read.
+ */
+export interface TransferStopResponseDto {
+  originRoute: DeliveryRouteResponseDto;
+  destinationRoute: DeliveryRouteResponseDto;
+}

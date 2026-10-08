@@ -3,8 +3,10 @@
 > **Para:** equipo frontend (houndfe)
 > **De:** backend (houndfe-backend)
 > **Feature:** `delivery-routes` — rutas de entrega con repartidor, check-in por parada y email "tu paquete está por llegar"
-> **Rama:** `main` (mergeada)
+> **Base:** `main`; reserva, selector y transferencia son cambios locales, todavía no desplegados.
 > **Doc técnica completa:** `docs/delivery-routes-frontend.md` (endpoints, DTOs, errores y checklist al detalle)
+
+> ⚠️ **Estado:** la reserva DRAFT+ACTIVE, el selector `GET /delivery-routes/eligible-sales` y la transferencia explícita `POST .../transfer` están implementados **localmente, sin push ni deploy**. Los commits locales no prueban validación integrada en navegador. Evidencia aislada acotada a **orden**: integración 19/19 PASS (exit 0) con `transfer`/`start` en ambos órdenes y contextos CLS independientes, sin recursos residuales; **no** prueba todas las intercalaciones concurrentes ni hay confirmación `pg_locks` de que un contendiente quedara bloqueado. Tratalos como contrato local con las comprobaciones indicadas, no como comportamiento desplegado; estas comprobaciones **no** son una aprobación de despliegue.
 
 ---
 
@@ -28,7 +30,7 @@ El repartidor **es un `User` con un rol específico** (no un `Employee`). Se reu
 | **Repartidor** | Es un `User` con un rol que tenga permisos `read` + `update` sobre `DeliveryRoute`. No es un Employee. |
 | **Discriminador manager vs driver** | Si el usuario tiene `create` **o** `delete` sobre `DeliveryRoute` → es **manager** (crea/edita/reordena/borra rutas). Si solo tiene `read` + `update` → es **driver** (solo ve sus rutas y hace check-in). |
 | **Parada = venta** | Una parada es una venta existente con `deliveryStatus ∈ {PENDING, SHIPPED}` **y** con `shippingAddress`. No se crean paradas sueltas. |
-| **Una venta en una sola ruta activa** | El backend garantiza (a nivel de BD) que una venta no esté en dos rutas activas a la vez. Si pasa, `start` devuelve `409`. |
+| **Una venta reservada por una sola ruta** | El backend garantiza (a nivel de BD) que una venta no esté reservada por dos rutas `DRAFT` o `ACTIVE` a la vez. La reserva se toma al asignar la venta a una ruta **BORRADOR** (no recién al activar) y se mantiene al pasar a `ACTIVE`. Si hay conflicto, `create`/`stops`/`transfer`/`start` devuelven `409` con `conflictSaleIds`. |
 | **Email al cliente** | Opt-in por tenant vía `PUT /notification-config`. El destinatario es el **email del cliente de la parada siguiente**, resuelto en el momento del envío. |
 | **Sin GPS ni tráfico** | El orden de las paradas es **manual** (drag & drop). La optimización automática por mapas queda como fase futura detrás de un puerto abstraído. |
 
@@ -49,7 +51,9 @@ Todos bajo `/delivery-routes`, requieren JWT. El tenant se resuelve del token (C
 | `POST` | `/delivery-routes/:id/cancel` | `update:DeliveryRoute` | DRAFT/ACTIVE → CANCELLED |
 | `POST` | `/delivery-routes/:id/stops` | `update:DeliveryRoute` | Agregar una venta a un DRAFT |
 | `POST` | `/delivery-routes/:id/stops/:stopId/check-in` | `update:DeliveryRoute` | Check-in de parada (marca venta DELIVERED + dispara email de la siguiente) |
+| `POST` | `/delivery-routes/:routeId/stops/:stopId/transfer` | `update:DeliveryRoute` | Mover una parada DRAFT → DRAFT (ambas rutas BORRADOR, body `{ destinationRouteId }`) |
 | `PUT` | `/delivery-routes/:id/stops/reorder` | `update:DeliveryRoute` | Reordenar paradas (solo DRAFT) |
+| `GET` | `/delivery-routes/eligible-sales` | `read:Sale` + `create:DeliveryRoute` | Selector de ventas elegibles con disponibilidad, búsqueda y paginación |
 
 **Ciclo de vida:** `DRAFT → ACTIVE → COMPLETED` (o `CANCELLED`). `COMPLETED` es terminal. Check-in del último stop auto-completa la ruta.
 
@@ -68,10 +72,10 @@ Usá `GET /auth/me/permissions`:
 
 ### 4.2 Pantalla de manager
 
-1. Elegir ventas elegibles (filtro client-side: `deliveryStatus ∈ {PENDING, SHIPPED}` + `shippingAddress != null`; el backend re-valida).
+1. Elegir ventas elegibles con `GET /delivery-routes/eligible-sales` (paginado + búsqueda `q`; cada fila trae `availability` y, si está ocupada, `occupiedRoute`; ver doc técnica §11). Solo `availability.state === 'AVAILABLE'` es seleccionable — `OCCUPIED` con `occupiedRoute: null` **no** está libre.
 2. `POST /delivery-routes` con `{ saleIds[], driverUserId, notes? }` → ruta en `DRAFT`.
-3. Mientras esté en `DRAFT`: editar repartidor/notas (`PATCH`), agregar venta (`POST :id/stops`), reordenar (`PUT :id/stops/reorder`).
-4. `POST :id/start` para arrancar. Si devuelve `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`, es que una venta ya está en otra ruta activa → mostrar conflicto y recargar.
+3. Mientras esté en `DRAFT`: editar repartidor/notas (`PATCH`), agregar venta (`POST :id/stops`), reordenar (`PUT :id/stops/reorder`), mover una venta a otra ruta BORRADOR (`POST :routeId/stops/:stopId/transfer`, body `{ destinationRouteId }`; devuelve ambas rutas).
+4. `POST :id/start` para arrancar. Si devuelve `409 DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE`, una venta ya está reservada por otra ruta DRAFT/ACTIVE → mostrar conflicto inline por `saleId` (`conflictSaleIds`) y recargar el selector.
 
 ### 4.3 Pantalla de driver
 
@@ -112,12 +116,12 @@ type DeliveryRouteTimelineEvent =
 |---|---|---|
 | `404` | `ENTITY_NOT_FOUND` | Ruta no existe o es de otro tenant |
 | `403` | — | Falta permiso, o un driver intenta actuar sobre la ruta de otro |
-| `409` | `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` | Una venta ya está en otra ruta activa al hacer `start` |
+| `409` | `DELIVERY_ROUTE_STOP_SALE_ALREADY_ON_ACTIVE_ROUTE` | Una venta ya está reservada por otra ruta DRAFT/ACTIVE (`create`, `stops`, `transfer`, `start`). `details` incluye `conflictSaleIds` |
 | `422` | `DELIVERY_ROUTE_INVALID_TRANSITION` | Transición ilegal (editar no-DRAFT, cancelar COMPLETED, check-in en DRAFT, reorder inválido) |
 | `422` | `DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE` | Venta no `PENDING`/`SHIPPED` o sin dirección de envío |
 | `400` | — | Validación de DTO (uuid inválido, `saleIds` vacío, `notes` > 280) |
 
-Envelope global: `{ statusCode, error, message, timestamp }` + `details` cuando aplica.
+Envelope global: `{ statusCode, error, message, timestamp }` más las propiedades del error de dominio **en el nivel superior**. No existe un objeto HTTP `details`: leé `body.conflictSaleIds` y `body.reason`. Un arreglo `conflictSaleIds: []` sigue siendo un conflicto.
 
 ---
 

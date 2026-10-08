@@ -19,11 +19,13 @@
  * without depending on the outbox table writes.
  */
 import { Inject, Injectable } from '@nestjs/common';
+import { subject as caslSubject } from '@casl/ability';
 import { ClsService } from 'nestjs-cls';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import {
   BusinessRuleViolationError,
+  InsufficientPermissionsError,
   InvalidArgumentError,
 } from '../../shared/domain/domain-error';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
@@ -61,7 +63,10 @@ import {
   type DeliveryThankYouEventPayload,
 } from '../inngest/delivery-thank-you.event';
 import { buildDeliveryRouteTimeline } from '../domain/build-delivery-route-timeline';
-import type { AppAbility } from '../../auth/authorization/domain/permission';
+import type {
+  AppAbility,
+  AppSubjects,
+} from '../../auth/authorization/domain/permission';
 import type {
   IRouteOptimizer,
   OptimizeRouteInput,
@@ -70,10 +75,14 @@ import type {
 import { ROUTE_OPTIMIZER } from '../domain/ports/route-optimizer.port';
 import type { CreateDeliveryRouteDto } from '../dto/create-delivery-route.dto';
 import type { AddStopDto } from '../dto/add-stop.dto';
+import type { TransferStopDto } from '../dto/transfer-stop.dto';
 import type { ReorderStopsDto } from '../dto/reorder-stops.dto';
 import type { UpdateDeliveryRouteDto } from '../dto/update-delivery-route.dto';
 import type { ListDeliveryRoutesQueryDto } from '../dto/list-delivery-routes-query.dto';
-import type { DeliveryRouteResponseDto } from '../dto/delivery-route-response.dto';
+import type {
+  DeliveryRouteResponseDto,
+  TransferStopResponseDto,
+} from '../dto/delivery-route-response.dto';
 
 export type DeliveryRouteRequestContext = {
   userId: string;
@@ -153,6 +162,7 @@ export class DeliveryRoutesService {
     dto: CreateDeliveryRouteDto,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
+    void ctx;
     const ordered = await this.runOptimizer({
       tenantId,
       saleIds: dto.saleIds,
@@ -183,15 +193,20 @@ export class DeliveryRoutesService {
     dto: AddStopDto,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
-    const existing = await this.requireRoute({ tenantId, id: routeId });
-    await existing.addStop({
-      saleId: dto.saleId,
-      checkSaleEligibility: (saleId) =>
-        this.checkSaleEligibility(saleId, tenantId),
+    void ctx;
+    // Lock + reload inside one transaction so a concurrent transfer / start /
+    // cancel cannot be overwritten by this stop append's full save.
+    await this.runWithRouteLocks(tenantId, [routeId], async (routes) => {
+      const existing = routes.get(routeId)!;
+      await existing.addStop({
+        saleId: dto.saleId,
+        checkSaleEligibility: (saleId) =>
+          this.checkSaleEligibility(saleId, tenantId),
+      });
+      await this.repo.save(existing);
     });
-    const saved = await this.repo.save(existing);
     return this.toResponseDto(
-      await this.requireReadModel({ tenantId, id: saved.id }),
+      await this.requireReadModel({ tenantId, id: routeId }),
     );
   }
 
@@ -205,12 +220,84 @@ export class DeliveryRoutesService {
     dto: ReorderStopsDto,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
-    const existing = await this.requireRoute({ tenantId, id: routeId });
-    existing.reorderStops({ orderedStopIds: dto.orderedStopIds });
-    const saved = await this.repo.save(existing);
+    void ctx;
+    await this.runWithRouteLocks(tenantId, [routeId], async (routes) => {
+      const existing = routes.get(routeId)!;
+      existing.reorderStops({ orderedStopIds: dto.orderedStopIds });
+      await this.repo.save(existing);
+    });
     return this.toResponseDto(
-      await this.requireReadModel({ tenantId, id: saved.id }),
+      await this.requireReadModel({ tenantId, id: routeId }),
     );
+  }
+
+  /**
+   * `POST /delivery-routes/:routeId/stops/:stopId/transfer` (S3) — move a
+   * stop from the origin DRAFT route to the destination DRAFT route.
+   *
+   * Both routes are locked (in deterministic id order) and re-read INSIDE
+   * one transaction before either aggregate is mutated, so the transfer is
+   * serialized with every other writer (start / add / reorder / update /
+   * delete / cancel / check-in). Committing both full-replacement saves in
+   * the same transaction also means a failure between them leaves NEITHER
+   * route changed — the sale is never reserved by both, and never dropped
+   * by both.
+   *
+   * Instance authorization: the caller's ability must allow BOTH `read`
+   * and `update` on `DeliveryRoute` for BOTH the origin and the destination
+   * driver, checked BEFORE any mutation. `read` is required because the
+   * response discloses both full route projections; `update` is required
+   * because both routes are mutated (the controller-level
+   * `@RequirePermissions` only gates the coarse permission — the guard's
+   * instance resolver keys on `:id`, which this route names `:routeId`).
+   * Denial is a 403 with no write.
+   *
+   * Both response projections are built from INSIDE the locked transaction,
+   * so the returned state is the state this request committed: a post-commit
+   * reload could observe (and disclose) a later reassignment or a route the
+   * caller no longer has access to.
+   */
+  async transferStop(
+    ctx: DeliveryRouteRequestContext,
+    routeId: string,
+    stopId: string,
+    dto: TransferStopDto,
+  ): Promise<TransferStopResponseDto> {
+    const tenantId = this.requireTenantId();
+    const destinationRouteId = dto.destinationRouteId;
+
+    const [originRow, destinationRow] = await this.runWithRouteLocks(
+      tenantId,
+      [routeId, destinationRouteId],
+      async (routes) => {
+        const origin = routes.get(routeId)!;
+        const destination = routes.get(destinationRouteId)!;
+        this.assertInstancePermission(ctx.ability, origin.driverUserId);
+        this.assertInstancePermission(ctx.ability, destination.driverUserId);
+        origin.transferStopTo({ stopId, destination });
+        // Persist the origin FIRST: its save releases the moved sale's
+        // reservation, so the destination's createMany cannot trip the
+        // partial unique index on the same sale within this transaction.
+        await this.repo.save(origin);
+        await this.repo.save(destination);
+        // Build both projections inside the locked transaction so the
+        // response reflects exactly the committed transfer.
+        const originRead = await this.requireReadModel({
+          tenantId,
+          id: routeId,
+        });
+        const destinationRead = await this.requireReadModel({
+          tenantId,
+          id: destinationRouteId,
+        });
+        return [originRead, destinationRead] as const;
+      },
+    );
+
+    return {
+      originRoute: this.toResponseDto(originRow),
+      destinationRoute: this.toResponseDto(destinationRow),
+    };
   }
 
   /**
@@ -224,16 +311,19 @@ export class DeliveryRoutesService {
     dto: UpdateDeliveryRouteDto,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
-    const existing = await this.requireRoute({ tenantId, id: routeId });
-    if (dto.driverUserId !== undefined) {
-      existing.assignDriver({ driverUserId: dto.driverUserId });
-    }
-    if (dto.notes !== undefined) {
-      existing.updateNotes(dto.notes ?? null);
-    }
-    const saved = await this.repo.save(existing);
+    void ctx;
+    await this.runWithRouteLocks(tenantId, [routeId], async (routes) => {
+      const existing = routes.get(routeId)!;
+      if (dto.driverUserId !== undefined) {
+        existing.assignDriver({ driverUserId: dto.driverUserId });
+      }
+      if (dto.notes !== undefined) {
+        existing.updateNotes(dto.notes ?? null);
+      }
+      await this.repo.save(existing);
+    });
     return this.toResponseDto(
-      await this.requireReadModel({ tenantId, id: saved.id }),
+      await this.requireReadModel({ tenantId, id: routeId }),
     );
   }
 
@@ -248,11 +338,18 @@ export class DeliveryRoutesService {
     routeId: string,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
-    const existing = await this.requireRoute({ tenantId, id: routeId });
-    existing.start({});
-    const saved = await this.repo.save(existing);
+    void ctx;
+    // The DRAFT→ACTIVE transition is a full-replacement save, so it must run
+    // under the same route lock as every other writer: without it a transfer
+    // that committed after this request loaded its snapshot would be undone
+    // by the start write.
+    await this.runWithRouteLocks(tenantId, [routeId], async (routes) => {
+      const existing = routes.get(routeId)!;
+      existing.start({});
+      await this.repo.save(existing);
+    });
     return this.toResponseDto(
-      await this.requireReadModel({ tenantId, id: saved.id }),
+      await this.requireReadModel({ tenantId, id: routeId }),
     );
   }
 
@@ -269,6 +366,7 @@ export class DeliveryRoutesService {
     routeId: string,
   ): Promise<DeliveryRouteResponseDto> {
     const tenantId = this.requireTenantId();
+    void ctx;
     await this.runTransitionWithStaleRetry(
       tenantId,
       routeId,
@@ -506,18 +604,21 @@ export class DeliveryRoutesService {
    * precondition re-check.
    */
   async delete(
-    _ctx: DeliveryRouteRequestContext,
+    ctx: DeliveryRouteRequestContext,
     routeId: string,
   ): Promise<void> {
     const tenantId = this.requireTenantId();
-    const existing = await this.requireRoute({ tenantId, id: routeId });
-    if (!existing.canDelete()) {
-      throw new BusinessRuleViolationError(
-        'DeliveryRoute can only be deleted when DRAFT with no stops',
-        'DELIVERY_ROUTE_INVALID_TRANSITION',
-      );
-    }
-    await this.repo.delete({ tenantId, id: routeId });
+    void ctx;
+    await this.runWithRouteLocks(tenantId, [routeId], async (routes) => {
+      const existing = routes.get(routeId)!;
+      if (!existing.canDelete()) {
+        throw new BusinessRuleViolationError(
+          'DeliveryRoute can only be deleted when DRAFT with no stops',
+          'DELIVERY_ROUTE_INVALID_TRANSITION',
+        );
+      }
+      await this.repo.delete({ tenantId, id: routeId });
+    });
   }
 
   // ── Private helpers ──────────────────────────────────────────────────
@@ -545,16 +646,68 @@ export class DeliveryRoutesService {
     };
   }
 
-  /** Re-load the aggregate by id (throws 404 on miss). */
-  private async requireRoute(input: {
-    tenantId: string;
-    id: string;
-  }): Promise<DeliveryRoute> {
-    const route = await this.repo.findById(input);
-    if (!route) {
-      throw new DeliveryRouteNotFoundError(input.id);
+  /**
+   * S2/S3 — run a read-modify-write mutation under row-level locks.
+   *
+   * Opens one transaction, acquires `FOR UPDATE` locks on every requested
+   * route (deterministic id order → deadlock-free), then loads each
+   * aggregate from the locked transaction before handing it to `work`. The
+   * lock guarantees the loaded snapshot cannot be superseded before this
+   * mutation commits, which is exactly what a full-replacement `save`
+   * needs: a bare transaction alone still lets two writers load the same
+   * stale snapshot and commit it in sequence. A missing route (or a
+   * foreign-tenant id) is a 404.
+   */
+  private async runWithRouteLocks<T>(
+    tenantId: string,
+    routeIds: string[],
+    work: (routes: Map<string, DeliveryRoute>) => Promise<T>,
+  ): Promise<T> {
+    return this.repo.runInTransaction(async (tx) => {
+      const uniqueIds = [...new Set(routeIds)];
+      const missing = await this.repo.lockRoutesForUpdate({
+        tx,
+        tenantId,
+        routeIds: uniqueIds,
+      });
+      if (missing.length > 0) {
+        throw new DeliveryRouteNotFoundError(missing[0]);
+      }
+      const routes = new Map<string, DeliveryRoute>();
+      for (const id of uniqueIds) {
+        const route = await this.findByIdInTx(tx, tenantId, id);
+        if (!route) {
+          throw new DeliveryRouteNotFoundError(id);
+        }
+        routes.set(id, route);
+      }
+      return work(routes);
+    });
+  }
+
+  /**
+   * S3 — instance-level `read` + `update` check for a specific route.
+   * Route managers hold unconditional rules, so the tagged subject passes;
+   * a driver-only caller must match the `{ driverUserId }` condition on BOTH
+   * actions (the response discloses the route projection, so update alone is
+   * not sufficient). A denial is 403 (mirrors `PermissionsGuard` step 6b).
+   */
+  private assertInstancePermission(
+    ability: AppAbility,
+    driverUserId: string,
+  ): void {
+    const instance = caslSubject('DeliveryRoute', { driverUserId });
+    // SAFETY: `caslSubject()` returns a tagged subject object; CASL's `can`
+    // overload types the subject as `AppSubjects`, while the runtime matcher
+    // only needs the `__caslSubjectType__` tag it added. The cast is a
+    // type-only bridge and does not change runtime behavior.
+    const typedInstance = instance as unknown as AppSubjects;
+    if (
+      !ability.can('read', typedInstance) ||
+      !ability.can('update', typedInstance)
+    ) {
+      throw new InsufficientPermissionsError();
     }
-    return route;
   }
 
   /** Same as requireRoute but uses the supplied transaction client. */

@@ -20,6 +20,8 @@
  *   POST   /delivery-routes/:id/cancel                 → update:DeliveryRoute
  *   POST   /delivery-routes/:id/stops                  → update:DeliveryRoute
  *   POST   /delivery-routes/:id/stops/:stopId/check-in → update:DeliveryRoute
+ *   POST   /delivery-routes/:routeId/stops/:stopId/transfer
+ *                                                      → update:DeliveryRoute
  *   PUT    /delivery-routes/:id/stops/reorder          → update:DeliveryRoute
  */
 import {
@@ -46,13 +48,20 @@ import { RequirePermissions } from '../../auth/authorization/decorators/require-
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import type { AppAbility } from '../../auth/authorization/domain/permission';
-import { DeliveryRoutesService, type DeliveryRouteRequestContext } from '../application/delivery-routes.service';
+import {
+  DeliveryRoutesService,
+  type DeliveryRouteRequestContext,
+} from '../application/delivery-routes.service';
 import { CreateDeliveryRouteDto } from '../dto/create-delivery-route.dto';
 import { AddStopDto } from '../dto/add-stop.dto';
+import { TransferStopDto } from '../dto/transfer-stop.dto';
 import { ReorderStopsDto } from '../dto/reorder-stops.dto';
 import { UpdateDeliveryRouteDto } from '../dto/update-delivery-route.dto';
 import { ListDeliveryRoutesQueryDto } from '../dto/list-delivery-routes-query.dto';
-import type { DeliveryRouteResponseDto } from '../dto/delivery-route-response.dto';
+import type {
+  DeliveryRouteResponseDto,
+  TransferStopResponseDto,
+} from '../dto/delivery-route-response.dto';
 
 /**
  * Request augmentation: `PermissionsGuard` (modified in WU2 — 2.18)
@@ -68,9 +77,7 @@ type RequestWithAbility = Request & {
 @Controller('delivery-routes')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class DeliveryRoutesController {
-  constructor(
-    private readonly deliveryRoutesService: DeliveryRoutesService,
-  ) {}
+  constructor(private readonly deliveryRoutesService: DeliveryRoutesService) {}
 
   /**
    * Build the per-request context the service consumes. Centralizes the
@@ -203,6 +210,30 @@ export class DeliveryRoutesController {
     return this.deliveryRoutesService.reorderStops(
       this.context(user, req),
       id,
+      dto,
+    );
+  }
+
+  /**
+   * S3 — explicit DRAFT→DRAFT stop transfer. The coarse
+   * `update:DeliveryRoute` permission is gated here; the service enforces
+   * the instance-scoped permission on BOTH routes (the guard's instance
+   * resolver keys on `:id`, so it cannot cover this `:routeId` route).
+   */
+  @Post(':routeId/stops/:stopId/transfer')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'DeliveryRoute'])
+  transferStop(
+    @Param('routeId', new ParseUUIDPipe()) routeId: string,
+    @Param('stopId', new ParseUUIDPipe()) stopId: string,
+    @Body() dto: TransferStopDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: RequestWithAbility,
+  ): Promise<TransferStopResponseDto> {
+    return this.deliveryRoutesService.transferStop(
+      this.context(user, req),
+      routeId,
+      stopId,
       dto,
     );
   }
