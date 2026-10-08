@@ -151,6 +151,24 @@ export async function querySession(
     where: { tenantId, id: row.registerId },
   });
   const blind = projection.blind === true;
+  // S1 — additive blind discovery. A frozen COUNTING session owned by the
+  // declarant hides `channelSnapshot`/`movements`, so the client cannot know
+  // which channels the blind count must declare. Expose the IDENTITY list
+  // only, derived from the FROZEN expected snapshot (never the current
+  // payment catalog, so a later rename/removal cannot rewrite history) and
+  // exactly the channels DECLARE accepts as `requiredChannelKeys` (always
+  // including pooled CASH). No expected cents, differences, movement or
+  // source metadata. Absent for the blind OPEN window (nothing frozen yet),
+  // for a wider audit reader, and once expected values are revealed via
+  // `channelSnapshot`.
+  const requiredChannels =
+    blind && expectedSnapshot
+      ? expectedSnapshot.channels.map((channel) => ({
+          channelKey: channel.channelKey,
+          channelLabel: channel.channelLabel,
+          method: channel.method,
+        }))
+      : null;
   return document({
     session: projection,
     register: register
@@ -177,6 +195,7 @@ export async function querySession(
       : expectedSnapshot
         ? expectedSnapshot.channels
         : null,
+    ...(requiredChannels === null ? {} : { requiredChannels }),
   });
 }
 
