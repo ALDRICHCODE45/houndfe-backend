@@ -1,4 +1,9 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
@@ -34,6 +39,8 @@ import type {
 } from '../presentation/dto/customer-lookup.response';
 import type { CustomerUpsertRequestDto } from '../presentation/dto/customer-upsert.request';
 import type { StockCheckResponse } from '../presentation/dto/stock-check.response';
+import type { CheckoutContextQueryDto } from '../presentation/dto/checkout-context.query';
+import type { CheckoutContextResponse } from '../presentation/dto/checkout-context.response';
 import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
 import type { AttachReceiptResponse } from '../presentation/dto/attach-receipt.request';
 import type { PaymentDetailResponse } from '../presentation/dto/payment-detail.response';
@@ -163,6 +170,105 @@ export class ChatbotApiService {
     items: CartItemForEvaluation[];
   }): Promise<CartEvaluationResult> {
     return this.evaluateCartPromotionsUseCase.execute(input);
+  }
+
+  /** Read-only checkout discovery; deliberately does not reuse newest-phone lookup. */
+  async getCheckoutContext(
+    input: Pick<
+      CheckoutContextQueryDto,
+      'phoneCountryCode' | 'phone' | 'afterAddressId'
+    > & { limit?: number },
+  ): Promise<CheckoutContextResponse> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    const prisma = this.tenantPrisma.getClient();
+    const customers = await prisma.customer.findMany({
+      where: {
+        tenantId,
+        phoneCountryCode: input.phoneCountryCode,
+        phone: input.phone,
+      },
+      take: 2,
+      select: { id: true, firstName: true, lastName: true },
+    });
+    if (customers.length !== 1) {
+      return {
+        status: customers.length === 0 ? 'not_found' : 'ambiguous',
+        customer: null,
+        addresses: [],
+        nextAfterAddressId: null,
+      };
+    }
+
+    const customer = customers[0];
+    const where: Prisma.CustomerAddressWhereInput = {
+      tenantId,
+      customerId: customer.id,
+    };
+    if (input.afterAddressId !== undefined) {
+      const cursor = await prisma.customerAddress.findFirst({
+        where: { ...where, id: input.afterAddressId },
+        select: { id: true, createdAt: true },
+      });
+      if (!cursor) {
+        throw new BadRequestException({
+          statusCode: 400,
+          error: 'INVALID_ADDRESS_CURSOR',
+          message: 'INVALID_ADDRESS_CURSOR',
+        });
+      }
+      where.OR = [
+        { createdAt: { gt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+      ];
+    }
+
+    const limit = input.limit ?? 10;
+    const rows = await prisma.customerAddress.findMany({
+      where,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: limit + 1,
+      select: {
+        id: true,
+        updatedAt: true,
+        label: true,
+        street: true,
+        exteriorNumber: true,
+        interiorNumber: true,
+        zipCode: true,
+        neighborhood: true,
+        municipality: true,
+        city: true,
+        state: true,
+        visualReferences: true,
+        carrierPhone: true,
+      },
+    });
+    const addresses = rows.slice(0, limit).map((address) => ({
+      id: address.id,
+      version: address.updatedAt.toISOString(),
+      label: address.label,
+      street: address.street,
+      exteriorNumber: address.exteriorNumber,
+      interiorNumber: address.interiorNumber,
+      zipCode: address.zipCode,
+      neighborhood: address.neighborhood,
+      municipality: address.municipality,
+      city: address.city,
+      state: address.state,
+      visualReferences: address.visualReferences,
+      carrierPhone: address.carrierPhone,
+    }));
+    return {
+      status: 'unique',
+      customer: {
+        customerId: customer.id,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+      },
+      addresses,
+      nextAfterAddressId:
+        rows.length > limit ? addresses[addresses.length - 1].id : null,
+    };
   }
 
   async findCustomerByPhone(input: {

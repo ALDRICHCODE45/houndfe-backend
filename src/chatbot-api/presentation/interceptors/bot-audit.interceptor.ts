@@ -41,6 +41,10 @@ const ROUTE_AUDIT_MAP: Record<string, RouteAuditDefinition> = {
     resourceType: 'product',
     resourceIdParam: 'productId',
   },
+  'GET customers/checkout-context': {
+    action: 'customers.checkout_context',
+    resourceType: 'customer',
+  },
   'GET customers/by-phone': {
     action: 'customers.find_by_phone',
     resourceType: 'customer',

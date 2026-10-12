@@ -1,4 +1,8 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import {
+  BadRequestException,
+  INestApplication,
+  ValidationPipe,
+} from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import request from 'supertest';
@@ -37,6 +41,7 @@ describe('ChatbotApiController', () => {
     searchCatalog: jest.Mock;
     checkStock: jest.Mock;
     findCustomerByPhone: jest.Mock;
+    getCheckoutContext: jest.Mock;
     upsertCustomerProfile: jest.Mock;
     evaluateCart: jest.Mock;
     registerBotSale: jest.Mock;
@@ -100,6 +105,12 @@ describe('ChatbotApiController', () => {
             carrierPhone: '5511223344',
           },
         },
+      }),
+      getCheckoutContext: jest.fn().mockResolvedValue({
+        status: 'not_found',
+        customer: null,
+        addresses: [],
+        nextAfterAddressId: null,
       }),
       upsertCustomerProfile: jest.fn().mockResolvedValue({
         status: 'created',
@@ -212,34 +223,44 @@ describe('ChatbotApiController', () => {
           .digest('hex');
 
         if (hashedKey === validKey) {
-          return makeCredential(['catalog:read'], 'svc_valid-key');
+          return Promise.resolve(
+            makeCredential(['catalog:read'], 'svc_valid-key'),
+          );
         }
 
         if (hashedKey === limitedKey) {
-          return makeCredential(['customers:read'], 'svc_limited-key');
+          return Promise.resolve(
+            makeCredential(['customers:read'], 'svc_limited-key'),
+          );
         }
 
         if (
           hashedKey ===
           createHash('sha256').update('svc_write-key').digest('hex')
         ) {
-          return makeCredential(['customers:write'], 'svc_write-key');
+          return Promise.resolve(
+            makeCredential(['customers:write'], 'svc_write-key'),
+          );
         }
 
         if (
           hashedKey ===
           createHash('sha256').update('svc_pricing-key').digest('hex')
         ) {
-          return makeCredential(['pricing:evaluate'], 'svc_pricing-key');
+          return Promise.resolve(
+            makeCredential(['pricing:evaluate'], 'svc_pricing-key'),
+          );
         }
 
         if (
           hashedKey ===
           createHash('sha256').update('svc_sales-key').digest('hex')
         ) {
-          return makeCredential(
-            ['sales:create', 'sales:write', 'customers:read'],
-            'svc_sales-key',
+          return Promise.resolve(
+            makeCredential(
+              ['sales:create', 'sales:write', 'customers:read'],
+              'svc_sales-key',
+            ),
           );
         }
 
@@ -248,13 +269,15 @@ describe('ChatbotApiController', () => {
           hashedKey ===
           createHash('sha256').update('svc_payment-key').digest('hex')
         ) {
-          return makeCredential(
-            ['payment-details:read', 'catalog:read'],
-            'svc_payment-key',
+          return Promise.resolve(
+            makeCredential(
+              ['payment-details:read', 'catalog:read'],
+              'svc_payment-key',
+            ),
           );
         }
 
-        return null;
+        return Promise.resolve(null);
       }),
       touchLastUsedAt: jest.fn(),
     };
@@ -400,6 +423,266 @@ describe('ChatbotApiController', () => {
       .set('Authorization', 'Bearer svc_limited-key')
       .query({ phoneCountryCode: '+52' })
       .expect(400);
+  });
+
+  describe('GET /chatbot-api/customers/checkout-context', () => {
+    const route = '/chatbot-api/customers/checkout-context';
+    const phoneQuery = { phoneCountryCode: '52', phone: '5512345678' };
+
+    it.each(['not_found', 'unique', 'ambiguous'])(
+      'returns the exact %s envelope with default pagination and audit telemetry',
+      async (status) => {
+        const result = {
+          status,
+          customer:
+            status === 'unique'
+              ? { customerId: 'cust-1', firstName: 'Ada', lastName: null }
+              : null,
+          addresses: [],
+          nextAfterAddressId: null,
+        };
+        service.getCheckoutContext.mockResolvedValue(result);
+        await request(httpServer())
+          .get(route)
+          .set('Authorization', 'Bearer svc_limited-key')
+          .query(phoneQuery)
+          .expect(200)
+          .expect(result);
+        expect(service.getCheckoutContext.mock.calls).toEqual([
+          [
+            {
+              ...phoneQuery,
+              limit: 10,
+              afterAddressId: undefined,
+            },
+          ],
+        ]);
+        expect(cls.set).toHaveBeenCalledWith('tenantId', 'tenant-1');
+        expect(repository.touchLastUsedAt.mock.calls).toEqual([['cred-1']]);
+        expect(auditLogs.append.mock.calls).toEqual([
+          [
+            {
+              tenantId: 'tenant-1',
+              credentialId: 'cred-1',
+              action: 'customers.checkout_context',
+              resourceType: 'customer',
+              resourceId: null,
+              metadata: {
+                branchId: 'tenant-1',
+                httpMethod: 'GET',
+                routePath: route,
+                statusCode: 200,
+                outcome: 'success',
+              },
+            },
+          ],
+        ]);
+        expect(service.upsertCustomerProfile).not.toHaveBeenCalled();
+        expect(service.registerBotSale).not.toHaveBeenCalled();
+      },
+    );
+
+    it('forwards an explicit owned cursor and maximum limit', async () => {
+      const afterAddressId = 'a8fdbf81-31ee-4f43-8739-0c70c9388d72';
+      await request(httpServer())
+        .get(route)
+        .set('Authorization', 'Bearer svc_limited-key')
+        .query({ ...phoneQuery, limit: '20', afterAddressId })
+        .expect(200);
+      expect(service.getCheckoutContext).toHaveBeenCalledWith({
+        ...phoneQuery,
+        limit: 20,
+        afterAddressId,
+      });
+    });
+
+    it.each([
+      {},
+      { phone: '5512345678' },
+      { phoneCountryCode: '52' },
+      { ...phoneQuery, phone: '' },
+      { ...phoneQuery, phone: '+5512345678' },
+      { ...phoneQuery, phone: '5'.repeat(21) },
+      { ...phoneQuery, phoneCountryCode: '5'.repeat(11) },
+      { ...phoneQuery, phoneCountryCode: '+52' },
+      { ...phoneQuery, limit: '0' },
+      { ...phoneQuery, limit: '21' },
+      { ...phoneQuery, limit: '1.5' },
+      { ...phoneQuery, limit: '' },
+      { ...phoneQuery, limit: 'NaN' },
+      { ...phoneQuery, afterAddressId: '' },
+      { ...phoneQuery, afterAddressId: 'invalid' },
+      { ...phoneQuery, tenantId: 'foreign' },
+      { ...phoneQuery, customerId: 'foreign' },
+    ])('rejects malformed input without business calls: %j', async (query) => {
+      await request(httpServer())
+        .get(route)
+        .set('Authorization', 'Bearer svc_limited-key')
+        .query(query)
+        .expect(400);
+      expect(service.getCheckoutContext).not.toHaveBeenCalled();
+      expect(service.upsertCustomerProfile).not.toHaveBeenCalled();
+      expect(service.registerBotSale).not.toHaveBeenCalled();
+      const auditCalls = auditLogs.append.mock.calls as unknown[][];
+      expect(auditCalls[0]?.[0]).toMatchObject({
+        action: 'customers.checkout_context',
+        metadata: { statusCode: 400, outcome: 'error' },
+      });
+    });
+
+    it.each([
+      [undefined, undefined, 401],
+      ['Bearer svc_valid-key', undefined, 403],
+      ['Bearer svc_limited-key', 'other-tenant', 403],
+    ])(
+      'preserves auth/tenant rejection (%s, %s)',
+      async (token, branch, status) => {
+        const call = request(httpServer()).get(route).query(phoneQuery);
+        if (token) call.set('Authorization', token);
+        if (branch) call.set('X-Branch-Id', branch);
+        await call.expect(status);
+        expect(service.getCheckoutContext).not.toHaveBeenCalled();
+        expect(repository.touchLastUsedAt.mock.calls).toEqual([]);
+        expect(auditLogs.append).not.toHaveBeenCalled();
+      },
+    );
+
+    it('returns a scoped cursor error without converting failure to customer absence', async () => {
+      service.getCheckoutContext.mockRejectedValue(
+        new BadRequestException({
+          statusCode: 400,
+          error: 'INVALID_ADDRESS_CURSOR',
+          message: 'INVALID_ADDRESS_CURSOR',
+        }),
+      );
+      await request(httpServer())
+        .get(route)
+        .set('Authorization', 'Bearer svc_limited-key')
+        .query(phoneQuery)
+        .expect(400)
+        .expect(({ body }: { body: { error: string } }) => {
+          expect(body.error).toBe('INVALID_ADDRESS_CURSOR');
+        });
+      const auditCalls = auditLogs.append.mock.calls as unknown[][];
+      expect(auditCalls[0]?.[0]).toMatchObject({
+        metadata: { statusCode: 400, outcome: 'error' },
+      });
+    });
+
+    // S6 privacy correction — a raw read failure can carry sender phone or
+    // saved-address text (driver/ORM message). The public new route must not
+    // echo it on the wire or into audit.errorMessage, and must stay a failure
+    // (safe 500), never a fabricated not_found. This exercises the real
+    // `ChatbotApiService` with a mock tenant client, not a hand-made rejection.
+    it.each(['customer', 'address', 'cursor'] as const)(
+      'sanitizes a %s read failure carrying phone/address text into a safe 500 and safe audit errorMessage',
+      async (stage) => {
+        const sensitivePhone = phoneQuery.phone;
+        const sensitiveStreet = 'Evergreen 742';
+        const leak = `read failed phone=${sensitivePhone} street=${sensitiveStreet}`;
+        const customerRow = { id: 'cust-1', firstName: 'Ada', lastName: null };
+        const customerState = structuredClone(customerRow);
+        const addressState = structuredClone([
+          {
+            id: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+            updatedAt: new Date('2026-10-12T00:00:00.000Z'),
+            street: sensitiveStreet,
+          },
+        ]);
+
+        const readClient = {
+          customer: { findMany: jest.fn().mockResolvedValue([customerRow]) },
+          customerAddress: {
+            findFirst: jest.fn().mockResolvedValue({
+              id: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+              createdAt: new Date('2026-01-01T00:00:00.000Z'),
+            }),
+            findMany: jest.fn().mockResolvedValue([]),
+          },
+        };
+        const failure = new Error(leak);
+        if (stage === 'customer') {
+          readClient.customer.findMany.mockRejectedValue(failure);
+        } else if (stage === 'address') {
+          readClient.customerAddress.findMany.mockRejectedValue(failure);
+        } else {
+          readClient.customerAddress.findFirst.mockRejectedValue(failure);
+        }
+
+        const realService = new ChatbotApiService(
+          {} as never,
+          {} as never,
+          {} as never,
+          {} as never,
+          {} as never,
+          {
+            getTenantId: () => 'tenant-1',
+            getClient: () => readClient,
+          } as never,
+          {} as never,
+        );
+        service.getCheckoutContext.mockImplementation(
+          (input: Parameters<ChatbotApiService['getCheckoutContext']>[0]) =>
+            realService.getCheckoutContext(input),
+        );
+
+        const response = await request(httpServer())
+          .get(route)
+          .set('Authorization', 'Bearer svc_limited-key')
+          .query(
+            stage === 'cursor'
+              ? {
+                  ...phoneQuery,
+                  afterAddressId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+                }
+              : phoneQuery,
+          );
+
+        const auditCalls = auditLogs.append.mock.calls as unknown[][];
+        expect(auditCalls).toHaveLength(1);
+        const auditEntry = auditCalls[0][0] as {
+          action: string;
+          metadata: {
+            statusCode: number;
+            outcome: string;
+            errorMessage?: string;
+          };
+        };
+        expect(auditEntry.action).toBe('customers.checkout_context');
+        expect(auditEntry.metadata.errorMessage).toBe(
+          'CHECKOUT_CONTEXT_READ_FAILED',
+        );
+        expect(auditEntry.metadata).toMatchObject({
+          statusCode: 500,
+          outcome: 'error',
+        });
+        expect(JSON.stringify(auditEntry)).not.toContain(sensitivePhone);
+        expect(JSON.stringify(auditEntry)).not.toContain(sensitiveStreet);
+
+        expect(response.status).toBe(500);
+        expect(response.body).toEqual({
+          statusCode: 500,
+          error: 'CHECKOUT_CONTEXT_READ_FAILED',
+          message: 'CHECKOUT_CONTEXT_READ_FAILED',
+        });
+        expect(JSON.stringify(response.body)).not.toContain(sensitivePhone);
+        expect(JSON.stringify(response.body)).not.toContain(sensitiveStreet);
+
+        // Failure stays a failure; no read is converted into a synthetic
+        // absence and no business write happens.
+        expect(readClient.customer.findMany).toHaveBeenCalledTimes(1);
+        expect(customerRow).toEqual(customerState);
+        expect(addressState).toEqual([
+          {
+            id: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+            updatedAt: new Date('2026-10-12T00:00:00.000Z'),
+            street: sensitiveStreet,
+          },
+        ]);
+        expect(service.upsertCustomerProfile).not.toHaveBeenCalled();
+        expect(service.registerBotSale).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('PUT /chatbot-api/customers/by-phone requires customers:write scope', async () => {

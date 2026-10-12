@@ -10,6 +10,7 @@ import type {
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { IEvaluateCartPromotionsUseCase } from '../../promotions/application/ports/evaluate-cart-promotions.port';
 import type { SalesService } from '../../sales/sales.service';
+import type { ISaleRepository } from '../../sales/domain/sale.repository';
 import {
   ChatbotApiService,
   computeRegisterBotSaleRequestHash,
@@ -242,6 +243,343 @@ function makeDetailProduct(
   };
 }
 
+describe('ChatbotApiService checkout context (business-data read-only)', () => {
+  const customerId = '11111111-1111-4111-8111-111111111111';
+  const addressId = '22222222-2222-4222-8222-222222222222';
+  const secondAddressId = '33333333-3333-4333-8333-333333333333';
+  const phone = { phoneCountryCode: '52', phone: '5512345678' };
+  const selectCustomer = { id: true, firstName: true, lastName: true };
+  const selectAddress = {
+    id: true,
+    updatedAt: true,
+    label: true,
+    street: true,
+    exteriorNumber: true,
+    interiorNumber: true,
+    zipCode: true,
+    neighborhood: true,
+    municipality: true,
+    city: true,
+    state: true,
+    visualReferences: true,
+    carrierPhone: true,
+  };
+  const address = {
+    id: addressId,
+    tenantId: 'tenant-1',
+    customerId,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-10-12T00:00:00Z'),
+    street: 'Saved street',
+    label: null,
+    exteriorNumber: null,
+    interiorNumber: null,
+    zipCode: null,
+    neighborhood: null,
+    municipality: null,
+    city: null,
+    state: null,
+    visualReferences: null,
+    carrierPhone: null,
+    latitude: 19,
+    longitude: -99,
+  };
+  let client: {
+    customer: {
+      findMany: jest.Mock;
+      create: jest.Mock;
+      update: jest.Mock;
+      upsert: jest.Mock;
+    };
+    customerAddress: {
+      findFirst: jest.Mock;
+      findMany: jest.Mock;
+      create: jest.Mock;
+      update: jest.Mock;
+      delete: jest.Mock;
+    };
+  };
+  let mutations: jest.Mock[];
+  let lookup: (input: {
+    phoneCountryCode: string;
+    phone: string;
+    limit?: number;
+    afterAddressId?: string;
+  }) => Promise<unknown>;
+  let stored: unknown;
+
+  beforeEach(() => {
+    client = {
+      customer: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: customerId,
+            firstName: 'Ada',
+            lastName: null,
+            rfc: 'private',
+          },
+        ]),
+        create: jest.fn(),
+        update: jest.fn(),
+        upsert: jest.fn(),
+      },
+      customerAddress: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ id: addressId, createdAt: address.createdAt }),
+        findMany: jest.fn().mockResolvedValue([address]),
+        create: jest.fn(),
+        update: jest.fn(),
+        delete: jest.fn(),
+      },
+    };
+    const saveCustomer = jest.fn();
+    const confirmBotSale = jest.fn();
+    const evaluateCart = jest.fn();
+    const acquire = jest.fn();
+    const stamp = jest.fn();
+    mutations = [
+      client.customer.create,
+      client.customer.update,
+      client.customer.upsert,
+      client.customerAddress.create,
+      client.customerAddress.update,
+      client.customerAddress.delete,
+      saveCustomer,
+      confirmBotSale,
+      evaluateCart,
+      acquire,
+      stamp,
+    ];
+    const service = new ChatbotApiService(
+      {} as never,
+      { save: saveCustomer } as never,
+      { execute: evaluateCart } as never,
+      { confirmBotSale } as never,
+      {
+        acquireSaleRegistrationIdempotency: acquire,
+        markSaleRegistrationIdempotencySucceeded: stamp,
+      } as never,
+      { getTenantId: () => 'tenant-1', getClient: () => client } as never,
+      {} as never,
+    );
+    lookup = (input) => service.getCheckoutContext(input);
+    stored = structuredClone(address);
+  });
+
+  afterEach(() => {
+    for (const mutation of mutations) expect(mutation).not.toHaveBeenCalled();
+    expect(address).toEqual(stored);
+  });
+
+  it.each([
+    ['not_found', []],
+    ['ambiguous', [{ id: customerId }, { id: 'duplicate' }]],
+  ] as const)(
+    'returns %s without address reads or duplicate identities',
+    async (status, matches) => {
+      client.customer.findMany.mockResolvedValue(matches);
+      await expect(lookup(phone)).resolves.toEqual({
+        status,
+        customer: null,
+        addresses: [],
+        nextAfterAddressId: null,
+      });
+      expect(client.customer.findMany.mock.calls).toEqual([
+        [
+          {
+            where: { tenantId: 'tenant-1', ...phone },
+            take: 2,
+            select: selectCustomer,
+          },
+        ],
+      ]);
+      expect(client.customerAddress.findFirst).not.toHaveBeenCalled();
+      expect(client.customerAddress.findMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns exact unique customer and nullable address projection without private fields', async () => {
+    await expect(lookup(phone)).resolves.toEqual({
+      status: 'unique',
+      customer: { customerId, firstName: 'Ada', lastName: null },
+      addresses: [
+        {
+          id: addressId,
+          version: '2026-10-12T00:00:00.000Z',
+          street: 'Saved street',
+          label: null,
+          exteriorNumber: null,
+          interiorNumber: null,
+          zipCode: null,
+          neighborhood: null,
+          municipality: null,
+          city: null,
+          state: null,
+          visualReferences: null,
+          carrierPhone: null,
+        },
+      ],
+      nextAfterAddressId: null,
+    });
+    expect(client.customerAddress.findMany.mock.calls).toEqual([
+      [
+        {
+          where: { tenantId: 'tenant-1', customerId },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: 11,
+          select: selectAddress,
+        },
+      ],
+    ]);
+  });
+
+  it('distinguishes unique customer with no saved address from absence', async () => {
+    client.customerAddress.findMany.mockResolvedValue([]);
+    await expect(lookup(phone)).resolves.toEqual({
+      status: 'unique',
+      customer: { customerId, firstName: 'Ada', lastName: null },
+      addresses: [],
+      nextAfterAddressId: null,
+    });
+  });
+
+  it('reads limit+1 and emits only limit and last emitted cursor (same-createdAt tie)', async () => {
+    client.customerAddress.findMany.mockResolvedValue([
+      address,
+      { ...address, id: secondAddressId },
+    ]);
+    const result = (await lookup({ ...phone, limit: 1 })) as {
+      addresses: unknown[];
+      nextAfterAddressId: string;
+    };
+    expect(result.addresses).toHaveLength(1);
+    expect(result.nextAfterAddressId).toBe(addressId);
+    expect(client.customerAddress.findMany.mock.calls[0]).toEqual([
+      {
+        where: { tenantId: 'tenant-1', customerId },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: 2,
+        select: selectAddress,
+      },
+    ]);
+  });
+
+  it('binds cursor lookup and stable keyset to tenant/customer without offset paging', async () => {
+    client.customerAddress.findMany.mockResolvedValue([
+      { ...address, id: secondAddressId },
+    ]);
+    const result = (await lookup({
+      ...phone,
+      limit: 1,
+      afterAddressId: addressId,
+    })) as { addresses: Array<{ id: string }>; nextAfterAddressId: null };
+    expect(result.addresses.map((item) => item.id)).toEqual([secondAddressId]);
+    expect(result.nextAfterAddressId).toBeNull();
+    expect(client.customerAddress.findFirst.mock.calls).toEqual([
+      [
+        {
+          where: { id: addressId, tenantId: 'tenant-1', customerId },
+          select: { id: true, createdAt: true },
+        },
+      ],
+    ]);
+    expect(client.customerAddress.findMany.mock.calls).toEqual([
+      [
+        {
+          where: {
+            tenantId: 'tenant-1',
+            customerId,
+            OR: [
+              { createdAt: { gt: address.createdAt } },
+              { createdAt: address.createdAt, id: { gt: addressId } },
+            ],
+          },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: 2,
+          select: selectAddress,
+        },
+      ],
+    ]);
+  });
+
+  it.each(['missing', 'foreign-tenant', 'foreign-customer'])(
+    'rejects %s cursor uniformly, never querying the address page',
+    async () => {
+      // An explicitly scoped database lookup returns null for all these cases.
+      client.customerAddress.findFirst.mockResolvedValue(null);
+      await expect(
+        lookup({ ...phone, afterAddressId: addressId }),
+      ).rejects.toMatchObject({
+        response: {
+          statusCode: 400,
+          error: 'INVALID_ADDRESS_CURSOR',
+          message: 'INVALID_ADDRESS_CURSOR',
+        },
+      });
+      expect(client.customerAddress.findFirst.mock.calls[0]).toEqual([
+        {
+          where: { id: addressId, tenantId: 'tenant-1', customerId },
+          select: { id: true, createdAt: true },
+        },
+      ]);
+      expect(client.customerAddress.findMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves populated saved values and freshness without truncating or normalizing', async () => {
+    client.customerAddress.findMany.mockResolvedValue([
+      {
+        ...address,
+        label: 'Home',
+        exteriorNumber: '2A',
+        interiorNumber: '3',
+        zipCode: '01234',
+        neighborhood: 'Centro',
+        municipality: 'Test',
+        city: 'CDMX',
+        state: 'Ciudad de México',
+        visualReferences: '  Saved references  ',
+        carrierPhone: '+52 5512345678',
+      },
+    ]);
+    const result = (await lookup(phone)) as { addresses: unknown[] };
+    expect(result.addresses[0]).toEqual({
+      id: addressId,
+      version: '2026-10-12T00:00:00.000Z',
+      street: 'Saved street',
+      label: 'Home',
+      exteriorNumber: '2A',
+      interiorNumber: '3',
+      zipCode: '01234',
+      neighborhood: 'Centro',
+      municipality: 'Test',
+      city: 'CDMX',
+      state: 'Ciudad de México',
+      visualReferences: '  Saved references  ',
+      carrierPhone: '+52 5512345678',
+    });
+  });
+
+  it.each(['customer', 'address', 'cursor'])(
+    'propagates %s read failure rather than treating it as not_found',
+    async (stage) => {
+      const failure = new Error('read unavailable');
+      const input = {
+        ...phone,
+        ...(stage === 'cursor' ? { afterAddressId: addressId } : {}),
+      };
+      if (stage === 'customer')
+        client.customer.findMany.mockRejectedValue(failure);
+      if (stage === 'address')
+        client.customerAddress.findMany.mockRejectedValue(failure);
+      if (stage === 'cursor')
+        client.customerAddress.findFirst.mockRejectedValue(failure);
+      await expect(lookup(input)).rejects.toBe(failure);
+    },
+  );
+});
+
 describe('ChatbotApiService', () => {
   let repository: jest.Mocked<IPublicCatalogRepository>;
   let customerRepository: jest.Mocked<ICustomerRepository>;
@@ -253,8 +591,14 @@ describe('ChatbotApiService', () => {
   // because the bot path no longer calls `prisma.saleIdempotency.*`
   // directly (delegated to the repo port).
   let saleRepository: {
-    acquireSaleRegistrationIdempotency: jest.Mock;
-    markSaleRegistrationIdempotencySucceeded: jest.Mock;
+    acquireSaleRegistrationIdempotency: jest.Mock<
+      ReturnType<ISaleRepository['acquireSaleRegistrationIdempotency']>,
+      Parameters<ISaleRepository['acquireSaleRegistrationIdempotency']>
+    >;
+    markSaleRegistrationIdempotencySucceeded: jest.Mock<
+      ReturnType<ISaleRepository['markSaleRegistrationIdempotencySucceeded']>,
+      Parameters<ISaleRepository['markSaleRegistrationIdempotencySucceeded']>
+    >;
   };
   let tenantPrisma: MockTenantPrisma;
   let shippingConfig: { get: jest.Mock };
@@ -284,9 +628,19 @@ describe('ChatbotApiService', () => {
       confirmBotSale: jest.fn(),
     };
     saleRepository = {
-      acquireSaleRegistrationIdempotency: jest.fn(),
+      acquireSaleRegistrationIdempotency: jest.fn<
+        ReturnType<ISaleRepository['acquireSaleRegistrationIdempotency']>,
+        Parameters<ISaleRepository['acquireSaleRegistrationIdempotency']>
+      >(),
       markSaleRegistrationIdempotencySucceeded: jest
-        .fn()
+        .fn<
+          ReturnType<
+            ISaleRepository['markSaleRegistrationIdempotencySucceeded']
+          >,
+          Parameters<
+            ISaleRepository['markSaleRegistrationIdempotencySucceeded']
+          >
+        >()
         .mockResolvedValue(undefined),
     };
     const tenantClient: MockTenantClient = {
@@ -1078,8 +1432,7 @@ describe('ChatbotApiService', () => {
         saleRepository.acquireSaleRegistrationIdempotency,
       ).toHaveBeenCalledWith('bot-order-abc-123', expect.any(String));
       expect(
-        saleRepository.acquireSaleRegistrationIdempotency.mock
-          .calls[0]?.[1] as string,
+        saleRepository.acquireSaleRegistrationIdempotency.mock.calls[0]?.[1],
       ).toMatch(/^[0-9a-f]{64}$/);
       expect(salesService.confirmBotSale).toHaveBeenCalledTimes(1);
       expect(salesService.confirmBotSale).toHaveBeenCalledWith({
