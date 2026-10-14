@@ -11,6 +11,8 @@ import {
   UseGuards,
   HttpCode,
   Headers,
+  HttpException,
+  InternalServerErrorException,
   UseInterceptors,
   HttpStatus,
 } from '@nestjs/common';
@@ -19,6 +21,7 @@ import { RequiredScopes } from './decorators/required-scopes.decorator';
 import { IdempotencyKey } from './decorators/idempotency-key.decorator';
 import { CatalogSearchQueryDto } from './dto/catalog-search.query';
 import { EvaluateCartRequestDto } from './dto/evaluate-cart.request';
+import { CheckoutContextQueryDto } from './dto/checkout-context.query';
 import {
   CustomerPhoneLookupQueryDto,
   CustomerUpsertRequestDto,
@@ -29,6 +32,16 @@ import { AttachReceiptRequestDto } from './dto/attach-receipt.request';
 import { DeliveryMetadataRequestDto } from './dto/delivery-metadata.request';
 import { CancelBotSaleRequestDto } from './dto/cancel-bot-sale.request';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
+
+/**
+ * S6 privacy correction — the sole unexpected-failure code emitted by the
+ * additive checkout-context route. A raw read failure can carry sender
+ * phone or saved-address text (driver/ORM message), so this new route maps
+ * any non-HTTP error to a fixed, safe 500 envelope instead of echoing it on
+ * the wire or into `audit.errorMessage`. Legacy filters/interceptors and
+ * every other route keep their existing behavior.
+ */
+const CHECKOUT_CONTEXT_READ_FAILED = 'CHECKOUT_CONTEXT_READ_FAILED';
 
 @Controller('chatbot-api')
 @UseGuards(ServiceAuthGuard)
@@ -61,6 +74,33 @@ export class ChatbotApiController {
         unitPriceCents: item.unitPriceCents,
       })),
     });
+  }
+
+  @Get('customers/checkout-context')
+  @RequiredScopes('customers:read')
+  async getCheckoutContext(@Query() query: CheckoutContextQueryDto) {
+    try {
+      return await this.chatbotApiService.getCheckoutContext({
+        phoneCountryCode: query.phoneCountryCode,
+        phone: query.phone,
+        limit: query.limit,
+        afterAddressId: query.afterAddressId,
+      });
+    } catch (error) {
+      // Expected contract failures (e.g. INVALID_ADDRESS_CURSOR) are already
+      // safe HTTP exceptions and must pass through untouched.
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      // Unexpected read failure: never surface its message. It can contain the
+      // sender phone or saved-address text, and the bot audit interceptor logs
+      // `error.message` verbatim. Scoped to this new route only.
+      throw new InternalServerErrorException({
+        statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+        error: CHECKOUT_CONTEXT_READ_FAILED,
+        message: CHECKOUT_CONTEXT_READ_FAILED,
+      });
+    }
   }
 
   @Get('customers/by-phone')

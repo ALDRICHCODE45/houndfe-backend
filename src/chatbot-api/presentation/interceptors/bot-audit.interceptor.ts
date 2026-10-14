@@ -32,6 +32,14 @@ type RouteAuditDefinition = {
 };
 
 const ROUTE_AUDIT_MAP: Record<string, RouteAuditDefinition> = {
+  'POST checkouts': {
+    action: 'checkouts.create',
+    resourceType: 'sale',
+  },
+  'GET checkouts/status': {
+    action: 'checkouts.status',
+    resourceType: 'sale',
+  },
   'GET catalog/search': {
     action: 'catalog.search',
     resourceType: 'catalog',
@@ -40,6 +48,10 @@ const ROUTE_AUDIT_MAP: Record<string, RouteAuditDefinition> = {
     action: 'catalog.check_stock',
     resourceType: 'product',
     resourceIdParam: 'productId',
+  },
+  'GET customers/checkout-context': {
+    action: 'customers.checkout_context',
+    resourceType: 'customer',
   },
   'GET customers/by-phone': {
     action: 'customers.find_by_phone',

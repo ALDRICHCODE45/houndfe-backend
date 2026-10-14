@@ -1,0 +1,971 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/require-await */
+// Isolated fixture: actual sale/ledger/stock-alert/outbox adapters; pricing/demand selection remains deterministic.
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Test } from '@nestjs/testing';
+import { Prisma, PrismaClient } from '@prisma/client';
+import { plainToInstance } from 'class-transformer';
+import { CheckoutRequestDto } from './dto/checkout.request';
+import { computeCheckoutRequestHash } from '../application/checkout.service';
+import { PrismaPromotionUsageRepository } from '../../promotions/infrastructure/prisma-promotion-usage.repository';
+import { PrismaProductRepository } from '../../products/infrastructure/prisma-product.repository';
+import { PrismaStockAlertStateRepository } from '../../stock-alerts/infrastructure/prisma-stock-alert-state.repository';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
+import { ClsService } from 'nestjs-cls';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash, randomUUID } from 'node:crypto';
+import request from 'supertest';
+import { CheckoutController } from './checkout.controller';
+import { CheckoutService } from '../application/checkout.service';
+import { ChatbotApiController } from './chatbot-api.controller';
+import { ChatbotApiService } from '../application/chatbot-api.service';
+import { PrismaCustomerRepository } from '../../customers/infrastructure/prisma-customer.repository';
+import { PrismaSaleRepository } from '../../sales/infrastructure/prisma-sale.repository';
+import { SalesService } from '../../sales/sales.service';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import type { PrismaService } from '../../shared/prisma/prisma.service';
+import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import { PrismaServiceCredentialRepository } from '../infrastructure/prisma-service-credential.repository';
+import { SERVICE_CREDENTIAL_REPOSITORY } from '../domain/service-credential.repository';
+import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
+import { ServiceAuthGuard } from './guards/service-auth.guard';
+import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
+
+const token = 'svc_disposable-checkout-test';
+const rotatedToken = 'svc_disposable-checkout-rotated';
+const foreignToken = 'svc_disposable-checkout-other-tenant';
+const hashToken = (value: string) =>
+  createHash('sha256').update(value).digest('hex');
+function disposableUrl(): string {
+  const raw = process.env.ATOMIC_CHECKOUT_TEST_DATABASE_URL;
+  if (!raw)
+    throw new Error(
+      'Explicit disposable ATOMIC_CHECKOUT_TEST_DATABASE_URL required; no dotenv fallback',
+    );
+  const url = new URL(raw);
+  if (
+    url.protocol !== 'postgresql:' ||
+    url.hostname !== '127.0.0.1' ||
+    !url.port ||
+    url.pathname !== '/atomic_checkout_test'
+  )
+    throw new Error('Refusing non-loopback or non-disposable checkout target');
+  return raw;
+}
+
+describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
+  let db: PrismaClient;
+  let app: INestApplication;
+  let tenantId: string;
+  let cashier: string;
+  let productId: string;
+  let tenant: TenantPrismaService;
+  let failOutbox: boolean;
+  let hold: { entered: () => void; wait: Promise<void> } | undefined;
+  let confirmation: jest.SpyInstance;
+  let audit: { append: jest.Mock };
+  let credentialId: string;
+  let extraTenantIds: string[];
+  let capacityDemands: Array<{ promotionId: string; units: number }>;
+  let afterSaleOutbox: (() => Promise<void>) | undefined;
+  beforeAll(() => {
+    db = new PrismaClient({ datasources: { db: { url: disposableUrl() } } });
+  });
+  afterAll(async () => {
+    await db.$disconnect();
+  });
+  beforeEach(async () => {
+    tenantId = randomUUID();
+    cashier = randomUUID();
+    productId = randomUUID();
+    failOutbox = false;
+    hold = undefined;
+    afterSaleOutbox = undefined;
+    capacityDemands = [];
+    extraTenantIds = [];
+    credentialId = randomUUID();
+    await db.tenant.create({
+      data: {
+        id: tenantId,
+        name: 'Isolated checkout fixture',
+        slug: `checkout-${tenantId}`,
+      },
+    });
+    await db.serviceCredential.create({
+      data: {
+        id: credentialId,
+        tenantId,
+        name: 'Disposable fixture',
+        hashedKey: hashToken(token),
+        scopes: ['customers:read', 'customers:write', 'sales:create'],
+        rateLimit: 1000,
+      },
+    });
+    await db.user.create({
+      data: {
+        id: cashier,
+        name: 'Fixture cashier',
+        email: `${cashier}@example.invalid`,
+        hashedPassword: 'unused-test-fixture',
+      },
+    });
+    const role = await db.role.create({
+      data: { tenantId, name: 'Fixture cashier' },
+    });
+    await db.tenantMembership.create({
+      data: { tenantId, userId: cashier, roleId: role.id },
+    });
+    await db.product.create({
+      data: {
+        id: productId,
+        tenantId,
+        name: 'Fixture item',
+        quantity: 10,
+        useStock: true,
+      },
+    });
+    const contexts = new AsyncLocalStorage<Record<string, unknown>>();
+    const cls = {
+      get: (key: string) => contexts.getStore()?.[key],
+      set: (key: string, value: unknown) => {
+        const ctx = contexts.getStore();
+        if (!ctx) throw new Error('Fixture CLS missing');
+        ctx[key] = value;
+      },
+    };
+    // SAFETY: PrismaService extends PrismaClient; this owned fixture uses its generated client API only.
+    // SAFETY: the CLS shim supplies exactly get/set used by the tenant extension/ambient transaction.
+    tenant = new TenantPrismaService(
+      db as unknown as PrismaService,
+      cls as unknown as ClsService<TenantClsStore>,
+    );
+    const repo = new PrismaSaleRepository(tenant);
+    // SAFETY: the actual confirmBotSale method uses the explicitly installed ports below.
+    const sales = Object.create(SalesService.prototype) as SalesService;
+    const outbox = new OutboxWriterService();
+    const publish: OutboxWriterService['publish'] = outbox.publish.bind(outbox);
+    // Observe/inject only AFTER the actual adapter writes the final sale event.
+    // Stock/promotion event writes run unchanged, through that same real writer.
+    jest
+      .spyOn(outbox, 'publish')
+      .mockImplementation(
+        async (...args: Parameters<OutboxWriterService['publish']>) => {
+          await publish(...args);
+          if (args[2] !== 'Sale') return;
+          if (afterSaleOutbox) await afterSaleOutbox();
+          if (hold) {
+            const current = hold;
+            hold = undefined;
+            current.entered();
+            await current.wait;
+          }
+          if (failOutbox)
+            throw new Error('driver error phone 5512345678 Private Street');
+        },
+      );
+    const products = new PrismaProductRepository(
+      tenant,
+      outbox,
+      new PrismaStockAlertStateRepository(),
+    );
+    Object.assign(sales, {
+      tenantPrisma: tenant,
+      saleRepo: repo,
+      productsService: {
+        getApplicablePrices: async () => [{ priceCents: 10000 }],
+        decrementStockForCharge: (
+          items: Parameters<
+            PrismaProductRepository['decrementStockForCharge']
+          >[0],
+        ) => products.decrementStockForCharge(items),
+      },
+      recomputePricingAndPromotions: async () => ({
+        promotionCapacityDemands: capacityDemands,
+      }),
+      promotionUsageRepo: new PrismaPromotionUsageRepository(tenant, outbox),
+      outboxWriter: outbox,
+    });
+    confirmation = jest.spyOn(sales, 'confirmBotSale');
+    const config = new ConfigService({ BOT_SHIPPING_CHARGE_MAX_CENTS: 50000 });
+    type ReadPorts = ConstructorParameters<typeof ChatbotApiService>;
+    // SAFETY: catalog/promotion ports are unused by the checkout-context read exercised here.
+    const reads = new ChatbotApiService(
+      {} as ReadPorts[0],
+      new PrismaCustomerRepository(tenant),
+      {} as ReadPorts[2],
+      sales,
+      repo,
+      tenant,
+      config,
+    );
+    audit = { append: jest.fn().mockResolvedValue(undefined) };
+    const module = await Test.createTestingModule({
+      controllers: [CheckoutController, ChatbotApiController],
+      providers: [
+        CheckoutService,
+        ServiceAuthGuard,
+        BotAuditInterceptor,
+        { provide: TenantPrismaService, useValue: tenant },
+        { provide: SalesService, useValue: sales },
+        { provide: ConfigService, useValue: config },
+        { provide: ChatbotApiService, useValue: reads },
+        { provide: ClsService, useValue: cls },
+        { provide: BOT_AUDIT_LOG_REPOSITORY, useValue: audit },
+        {
+          provide: SERVICE_CREDENTIAL_REPOSITORY,
+          // SAFETY: the owned generated client supplies PrismaService's credential API.
+          useValue: new PrismaServiceCredentialRepository(
+            db as unknown as PrismaService,
+          ),
+        },
+      ],
+    }).compile();
+    app = module.createNestApplication();
+    app.use((_req: unknown, _res: unknown, next: () => void) =>
+      contexts.run({}, next),
+    );
+    app.useGlobalPipes(
+      new ValidationPipe({ transform: true, whitelist: true }),
+    );
+    await app.init();
+  });
+  afterEach(async () => {
+    await app?.close();
+    if (tenantId)
+      await db.tenant.deleteMany({
+        where: { id: { in: [tenantId, ...extraTenantIds] } },
+      });
+    if (cashier) await db.user.deleteMany({ where: { id: cashier } });
+  });
+
+  const body = () => ({
+    phoneCountryCode: '52',
+    phone: '5512345678',
+    customer: { mode: 'createIfAbsent', firstName: 'Ana' },
+    deliveryAddress: {
+      mode: 'newSaved',
+      address: { street: 'Fixture Street' },
+    },
+    sale: {
+      cashierUserId: cashier,
+      items: [
+        {
+          productId,
+          productName: 'Fixture item',
+          quantity: 1,
+          unitPriceCents: 10000,
+        },
+      ],
+      expectedTotalCents: 10000,
+    },
+  });
+  const post = (value: object, key = 'atomic-key', auth = token) =>
+    request(app.getHttpServer())
+      .post('/chatbot-api/checkouts')
+      .set('Authorization', `Bearer ${auth}`)
+      .set('X-Idempotency-Key', key)
+      .send(value);
+  const status = (key = 'atomic-key', auth = token) =>
+    request(app.getHttpServer())
+      .get('/chatbot-api/checkouts/status')
+      .set('Authorization', `Bearer ${auth}`)
+      .set('X-Idempotency-Key', key);
+  const context = () =>
+    request(app.getHttpServer())
+      .get(
+        '/chatbot-api/customers/checkout-context?phoneCountryCode=52&phone=5512345678',
+      )
+      .set('Authorization', `Bearer ${token}`);
+  // Isolated physical transaction probes supplement public HTTP reads for effects with no public listing API.
+  const committedEffects = async (
+    owner = tenantId,
+    item = productId,
+    client: Prisma.TransactionClient = db,
+  ) => ({
+    customers: await client.customer.count({ where: { tenantId: owner } }),
+    addresses: await client.customerAddress.count({
+      where: { tenantId: owner },
+    }),
+    sales: await client.sale.count({ where: { tenantId: owner } }),
+    receipts: await client.saleIdempotency.count({
+      where: { tenantId: owner },
+    }),
+    outbox: await client.outboxEvent.count({ where: { tenantId: owner } }),
+    folios: await client.saleFolioCounter.findMany({
+      where: { tenantId: owner },
+      select: { period: true, lastNumber: true },
+      orderBy: { period: 'asc' },
+    }),
+    stock: (await client.product.findUniqueOrThrow({ where: { id: item } }))
+      .quantity,
+    promotionUsages: await client.promotionUsage.count({
+      where: { tenantId: owner },
+    }),
+    promotions: await client.promotion.findMany({
+      where: { tenantId: owner },
+      select: { id: true, consumedProductUnits: true },
+      orderBy: { id: 'asc' },
+    }),
+    stockAlerts: await client.stockAlertState.findMany({
+      where: { tenantId: owner },
+      select: { productId: true, alerted: true, alertEpoch: true },
+      orderBy: { productId: 'asc' },
+    }),
+  });
+
+  it('commits and replays customer/address/actual confirmed sale/folio/stock/outbox together', async () => {
+    const first = await post(body());
+    expect(first.status).toBe(201);
+    expect(first.body.sale).toMatchObject({
+      totalCents: 10000,
+      paidCents: 0,
+      debtCents: 10000,
+    });
+    const before = await committedEffects();
+    const replay = await post(body());
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+    expect(await committedEffects()).toEqual(before);
+    expect(confirmation).toHaveBeenCalledTimes(1);
+    expect(before).toMatchObject({
+      customers: 1,
+      addresses: 1,
+      sales: 1,
+      receipts: 1,
+      outbox: 1,
+      stock: 9,
+    });
+    expect((await status()).body).toEqual({
+      status: 'succeeded',
+      checkout: first.body,
+    });
+  });
+  it('rolls back all effects after post-confirm outbox failure and permits same-key recovery', async () => {
+    const baseline = await committedEffects();
+    const publicBefore = (await context()).body;
+    failOutbox = true;
+    const failed = await post(body());
+    expect(failed.status).toBe(500);
+    expect(failed.body).toEqual({
+      statusCode: 500,
+      error: 'CHECKOUT_CREATE_FAILED',
+      message: 'CHECKOUT_CREATE_FAILED',
+    });
+    expect(await committedEffects()).toEqual(baseline);
+    expect((await context()).body).toEqual(publicBefore);
+    expect((await status()).body).toEqual({
+      status: 'not_observed',
+      checkout: null,
+    });
+    expect(JSON.stringify(audit.append.mock.calls)).not.toMatch(
+      /5512345678|Private Street/,
+    );
+    failOutbox = false;
+    expect((await post(body())).status).toBe(201);
+  });
+  it('rolls back new records when actual sales re-quote rejects total', async () => {
+    const baseline = await committedEffects();
+    const value = body();
+    value.sale.expectedTotalCents = 1;
+    const rejected = await post(value);
+    expect(rejected.status).toBe(409);
+    expect(rejected.body).toEqual({
+      statusCode: 409,
+      error: 'PROMO_RE_QUOTE',
+      message: 'PROMO_RE_QUOTE',
+    });
+    expect(await committedEffects()).toEqual(baseline);
+    expect((await context()).body.status).toBe('not_found');
+  });
+  it('different concurrent keys for same phone create one customer and two sales', async () => {
+    const responses = await Promise.all([
+      post(body(), 'one'),
+      post(body(), 'two'),
+    ]);
+    expect(responses.map((r) => r.status)).toEqual([201, 201]);
+    expect(responses[0].body.customer.customerId).toBe(
+      responses[1].body.customer.customerId,
+    );
+    expect(await committedEffects()).toMatchObject({
+      customers: 1,
+      addresses: 2,
+      sales: 2,
+      receipts: 2,
+      outbox: 2,
+      stock: 8,
+    });
+  });
+  it('same key in progress yields safe conflict/not_observed then exact replay after commit', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((r) => {
+      entered = r;
+    });
+    const wait = new Promise<void>((r) => {
+      release = r;
+    });
+    hold = { entered, wait };
+    const first = post(body()).then((result) => result);
+    try {
+      // Fail promptly if the first request exits before reaching the latch; do not mask it as a timeout.
+      await Promise.race([
+        reached,
+        first.then((response) => {
+          throw new Error(
+            `Checkout ended before latch with status ${response.status}`,
+          );
+        }),
+      ]);
+      expect((await status()).body).toEqual({
+        status: 'not_observed',
+        checkout: null,
+      });
+      const concurrent = await post(body());
+      expect(concurrent.status).toBe(409);
+      expect(concurrent.body).toEqual({
+        statusCode: 409,
+        error: 'IDEMPOTENCY_KEY_IN_FLIGHT',
+        message: 'IDEMPOTENCY_KEY_IN_FLIGHT',
+      });
+    } finally {
+      release();
+    }
+    const success = await first;
+    expect(success.status).toBe(201);
+    expect((await post(body())).body).toEqual(success.body);
+    expect(confirmation).toHaveBeenCalledTimes(1);
+  });
+  it('includes approved freight and approval uniqueness in the same rollback boundary', async () => {
+    const value = {
+      ...body(),
+      sale: {
+        ...body().sale,
+        expectedTotalCents: 10500,
+        shipping: {
+          chargeCents: 500,
+          approvalId: 'approval-one',
+          quoteId: 'quote-one',
+        },
+      },
+    };
+    const first = await post(value);
+    expect(first.status).toBe(201);
+    expect(first.body.sale).toMatchObject({
+      subtotalCents: 10000,
+      shippingChargeCents: 500,
+      totalCents: 10500,
+    });
+    const baseline = await committedEffects();
+    const replay = await post(value);
+    expect(replay.body).toEqual(first.body);
+    const reused = await post(value, 'different-key');
+    expect(reused.status).toBe(409);
+    expect(reused.body.error).toBe('SHIPPING_APPROVAL_ALREADY_USED');
+    expect(await committedEffects()).toEqual(baseline);
+    value.sale.shipping.quoteId = 'different-quote';
+    expect((await post(value)).body.error).toBe('IDEMPOTENCY_KEY_CONFLICT');
+  });
+  it('rejects stale existing address, preserves saved profile/address and appends only on success', async () => {
+    const customer = await db.customer.create({
+      data: {
+        tenantId,
+        firstName: 'Saved',
+        phoneCountryCode: '52',
+        phone: '5512345678',
+      },
+    });
+    const address = await db.customerAddress.create({
+      data: { tenantId, customerId: customer.id, street: 'Saved Street' },
+    });
+    const value = {
+      ...body(),
+      customer: { mode: 'existing', customerId: customer.id },
+      deliveryAddress: {
+        mode: 'existing',
+        addressId: address.id,
+        expectedVersion: address.updatedAt.toISOString(),
+      },
+    };
+    const before = (await context()).body;
+    const created = await post(value);
+    expect(created.status).toBe(201);
+    expect((await context()).body).toEqual(before);
+    await db.customerAddress.update({
+      where: { id: address.id },
+      data: {
+        street: 'Changed Street',
+        updatedAt: new Date(address.updatedAt.getTime() + 1000),
+      },
+    });
+    const baseline = await committedEffects();
+    const stale = await post(value, 'stale-key');
+    expect(stale.status).toBe(409);
+    expect(stale.body.error).toBe('ADDRESS_VERSION_CONFLICT');
+    expect(await committedEffects()).toEqual(baseline);
+  });
+
+  it('S7 gap 1: rolls back real promotion ledger/counter, stock alert and all actual outbox writes', async () => {
+    const promotion = await db.promotion.create({
+      data: {
+        tenantId,
+        title: 'Fixture capacity',
+        type: 'PRODUCT_DISCOUNT',
+        method: 'AUTOMATIC',
+        maxProductUnits: 1,
+      },
+    });
+    await db.product.update({
+      where: { id: productId },
+      data: { minQuantity: 9 },
+    });
+    capacityDemands = [{ promotionId: promotion.id, units: 1 }];
+    const baseline = await committedEffects();
+    const publicBefore = (await context()).body;
+    let inside: Awaited<ReturnType<typeof committedEffects>> | undefined;
+    let eventTypes: string[] = [];
+    afterSaleOutbox = async () => {
+      // SAFETY: ambient transaction client exposes the generated read API used by this probe.
+      const tx = tenant.getClient() as unknown as Prisma.TransactionClient;
+      inside = await committedEffects(tenantId, productId, tx);
+      eventTypes = (
+        await tx.outboxEvent.findMany({
+          where: { tenantId },
+          select: { eventType: true },
+          orderBy: { eventType: 'asc' },
+        })
+      ).map((row) => row.eventType);
+    };
+    failOutbox = true;
+    const failed = await post(body());
+    expect(failed.status).toBe(500);
+    expect(failed.body).toEqual({
+      statusCode: 500,
+      error: 'CHECKOUT_CREATE_FAILED',
+      message: 'CHECKOUT_CREATE_FAILED',
+    });
+    // Prove those real writes occurred BEFORE failure; absence after rollback alone is not enough.
+    expect(inside).toMatchObject({
+      customers: 1,
+      addresses: 1,
+      sales: 1,
+      receipts: 0,
+      outbox: 3,
+      stock: 9,
+      promotionUsages: 1,
+      promotions: [{ id: promotion.id, consumedProductUnits: 1 }],
+      stockAlerts: [{ productId, alerted: true, alertEpoch: 1 }],
+    });
+    expect(inside?.folios).toEqual([
+      { period: expect.any(String), lastNumber: 1 },
+    ]);
+    expect(eventTypes).toEqual([
+      'promotion.near_capacity.detected',
+      'sale.confirmed',
+      'stock.low.detected',
+    ]);
+    expect(await committedEffects()).toEqual(baseline);
+    expect((await context()).body).toEqual(publicBefore);
+    expect((await status()).body).toEqual({
+      status: 'not_observed',
+      checkout: null,
+    });
+    expect(JSON.stringify(audit.append.mock.calls)).not.toMatch(
+      /5512345678|Private Street/,
+    );
+    failOutbox = false;
+    afterSaleOutbox = undefined;
+    const success = await post(body());
+    expect(success.status).toBe(201);
+    const committed = await committedEffects();
+    expect(committed).toMatchObject({
+      customers: 1,
+      addresses: 1,
+      sales: 1,
+      receipts: 1,
+      outbox: 3,
+      stock: 9,
+      promotionUsages: 1,
+      promotions: [{ id: promotion.id, consumedProductUnits: 1 }],
+      stockAlerts: [{ productId, alerted: true, alertEpoch: 1 }],
+    });
+    expect((await status()).body).toEqual({
+      status: 'succeeded',
+      checkout: success.body,
+    });
+    expect((await post(body())).body).toEqual(success.body);
+    expect(await committedEffects()).toEqual(committed);
+  });
+
+  it.each([
+    { row: 'customer', action: 'update' },
+    { row: 'customer', action: 'delete' },
+    { row: 'address', action: 'update' },
+    { row: 'address', action: 'delete' },
+  ])(
+    'S7 gap 2: holds $row row against concurrent non-advisory legacy-style $action',
+    async ({ row, action }) => {
+      const customer = await db.customer.create({
+        data: {
+          tenantId,
+          firstName: 'Saved',
+          phoneCountryCode: '52',
+          phone: '5512345678',
+        },
+      });
+      const address = await db.customerAddress.create({
+        data: { tenantId, customerId: customer.id, street: 'Saved Street' },
+      });
+      const value = {
+        ...body(),
+        customer: { mode: 'existing', customerId: customer.id },
+        deliveryAddress: {
+          mode: 'existing',
+          addressId: address.id,
+          expectedVersion: address.updatedAt.toISOString(),
+        },
+      };
+      const baseline = await committedEffects();
+      const publicBefore = (await context()).body;
+      let entered!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      hold = { entered, wait };
+      const first = post(value).then((result) => result);
+      const table =
+        row === 'customer'
+          ? Prisma.raw('customers')
+          : Prisma.raw('customer_addresses');
+      const id = row === 'customer' ? customer.id : address.id;
+      const update =
+        row === 'customer'
+          ? Prisma.sql`UPDATE customers SET "firstName" = 'Legacy Changed' WHERE id = ${id} AND "tenantId" = ${tenantId}`
+          : Prisma.sql`UPDATE customer_addresses SET street = 'Legacy Changed' WHERE id = ${id} AND "tenantId" = ${tenantId}`;
+      const write =
+        action === 'update'
+          ? update
+          : Prisma.sql`DELETE FROM ${table} WHERE id = ${id} AND "tenantId" = ${tenantId}`;
+      try {
+        await Promise.race([
+          reached,
+          first.then((response) => {
+            throw new Error(
+              `Checkout ended before row-lock latch: ${response.status}`,
+            );
+          }),
+        ]);
+        // An independent connection does not cooperate with checkout advisory locks.
+        // PostgreSQL's bounded lock_timeout is the observation, not a sleep/timing guess.
+        await expect(
+          db.$transaction(async (tx) => {
+            await tx.$executeRaw`SET LOCAL lock_timeout = '100ms'`;
+            return tx.$executeRaw(write);
+          }),
+        ).rejects.toMatchObject({ code: 'P2010', meta: { code: '55P03' } });
+        expect(await committedEffects()).toEqual(baseline);
+        expect((await context()).body).toEqual(publicBefore);
+        expect((await status()).body).toEqual({
+          status: 'not_observed',
+          checkout: null,
+        });
+      } finally {
+        release();
+      }
+      const success = await first;
+      expect(success.status).toBe(201);
+      expect(success.body.customer).toMatchObject({
+        customerId: customer.id,
+        firstName: 'Saved',
+      });
+      expect(success.body.address).toMatchObject({
+        id: address.id,
+        version: address.updatedAt.toISOString(),
+      });
+      expect((await status()).body).toEqual({
+        status: 'succeeded',
+        checkout: success.body,
+      });
+      expect((await context()).body).toEqual(publicBefore);
+      // Lock is released on commit. Do not infer delete permission/snapshot semantics from that.
+      const unlocked = await db.$queryRaw<Array<{ id: string }>>(
+        Prisma.sql`SELECT id FROM ${table} WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE NOWAIT`,
+      );
+      expect(unlocked).toEqual([{ id }]);
+      expect(await committedEffects()).toMatchObject({
+        customers: 1,
+        addresses: 1,
+        sales: 1,
+        receipts: 1,
+        stock: 9,
+        outbox: 1,
+      });
+    },
+  );
+
+  it('S7 gap 3: keeps identical phone/key isolated between two dynamically authenticated tenants', async () => {
+    const other = randomUUID();
+    extraTenantIds.push(other);
+    const otherProduct = randomUUID();
+    await db.tenant.create({
+      data: {
+        id: other,
+        name: 'Other isolated fixture',
+        slug: `checkout-${other}`,
+      },
+    });
+    const role = await db.role.create({
+      data: { tenantId: other, name: 'Fixture cashier' },
+    });
+    await db.tenantMembership.create({
+      data: { tenantId: other, userId: cashier, roleId: role.id },
+    });
+    await db.product.create({
+      data: {
+        id: otherProduct,
+        tenantId: other,
+        name: 'Fixture item',
+        quantity: 10,
+        useStock: true,
+      },
+    });
+    await db.serviceCredential.create({
+      data: {
+        tenantId: other,
+        name: 'Other disposable fixture',
+        hashedKey: hashToken(foreignToken),
+        scopes: ['customers:read', 'customers:write', 'sales:create'],
+        rateLimit: 1000,
+      },
+    });
+    const a = await post(body());
+    expect(a.status).toBe(201);
+    expect((await status('atomic-key', foreignToken)).body).toEqual({
+      status: 'not_observed',
+      checkout: null,
+    });
+    const value = body();
+    value.sale.items[0].productId = otherProduct;
+    const b = await post(value, 'atomic-key', foreignToken);
+    expect(b.status).toBe(201);
+    expect(b.body.customer.customerId).not.toBe(a.body.customer.customerId);
+    expect(b.body.address.id).not.toBe(a.body.address.id);
+    expect(b.body.sale.saleId).not.toBe(a.body.sale.saleId);
+    expect((await status()).body).toEqual({
+      status: 'succeeded',
+      checkout: a.body,
+    });
+    expect((await status('atomic-key', foreignToken)).body).toEqual({
+      status: 'succeeded',
+      checkout: b.body,
+    });
+    const beforeA = await committedEffects();
+    const beforeB = await committedEffects(other, otherProduct);
+    const foreignCustomer = await post(
+      {
+        ...value,
+        customer: { mode: 'existing', customerId: a.body.customer.customerId },
+      },
+      'foreign-customer',
+      foreignToken,
+    );
+    expect(foreignCustomer.status).toBe(404);
+    expect(foreignCustomer.body).toEqual({
+      statusCode: 404,
+      error: 'CUSTOMER_NOT_FOUND',
+      message: 'CUSTOMER_NOT_FOUND',
+    });
+    const foreignAddress = await post(
+      {
+        ...value,
+        customer: { mode: 'existing', customerId: b.body.customer.customerId },
+        deliveryAddress: {
+          mode: 'existing',
+          addressId: a.body.address.id,
+          expectedVersion: a.body.address.version,
+        },
+      },
+      'foreign-address',
+      foreignToken,
+    );
+    expect(foreignAddress.status).toBe(404);
+    expect(foreignAddress.body).toEqual({
+      statusCode: 404,
+      error: 'SHIPPING_ADDRESS_NOT_FOUND',
+      message: 'SHIPPING_ADDRESS_NOT_FOUND',
+    });
+    for (const key of ['foreign-customer', 'foreign-address'])
+      expect((await status(key, foreignToken)).body).toEqual({
+        status: 'not_observed',
+        checkout: null,
+      });
+    expect(await committedEffects()).toEqual(beforeA);
+    expect(await committedEffects(other, otherProduct)).toEqual(beforeB);
+    expect((await post(body())).body).toEqual(a.body);
+    expect((await post(value, 'atomic-key', foreignToken)).body).toEqual(
+      b.body,
+    );
+    expect(await committedEffects()).toEqual(beforeA);
+    expect(await committedEffects(other, otherProduct)).toEqual(beforeB);
+  });
+
+  it('S7 gap 3: recovers/replays a committed key after credential rotation without a new sale', async () => {
+    const value = body();
+    const original = await post(value);
+    expect(original.status).toBe(201);
+    const baseline = await committedEffects();
+    expect(
+      (
+        await db.serviceCredential.findUniqueOrThrow({
+          where: { id: credentialId },
+        })
+      ).lastUsedAt,
+    ).toBeInstanceOf(Date);
+    await db.serviceCredential.update({
+      where: { id: credentialId },
+      data: { isActive: false, revokedAt: new Date() },
+    });
+    const rotated = await db.serviceCredential.create({
+      data: {
+        tenantId,
+        name: 'Rotated disposable fixture',
+        hashedKey: hashToken(rotatedToken),
+        scopes: ['customers:read', 'customers:write', 'sales:create'],
+        rateLimit: 1000,
+      },
+    });
+    expect(rotated.id).not.toBe(credentialId);
+    const revoked = await post(value);
+    expect(revoked.status).toBe(401);
+    expect(revoked.body).toEqual({
+      statusCode: 401,
+      message: 'Invalid service credential',
+      error: 'Unauthorized',
+    });
+    expect(await committedEffects()).toEqual(baseline);
+    expect((await status('atomic-key', rotatedToken)).body).toEqual({
+      status: 'succeeded',
+      checkout: original.body,
+    });
+    const replay = await post(value, 'atomic-key', rotatedToken);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(original.body);
+    const changed = await post(
+      { ...value, customer: { mode: 'createIfAbsent', firstName: 'Changed' } },
+      'atomic-key',
+      rotatedToken,
+    );
+    expect(changed.status).toBe(409);
+    expect(changed.body).toEqual({
+      statusCode: 409,
+      error: 'IDEMPOTENCY_KEY_CONFLICT',
+      message: 'IDEMPOTENCY_KEY_CONFLICT',
+    });
+    expect(await committedEffects()).toEqual(baseline);
+    expect(confirmation).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      name: 'matching success',
+      receiptStatus: 'SUCCEEDED' as const,
+      changedHash: false,
+      expectedError: null,
+    },
+    {
+      name: 'changed intent',
+      receiptStatus: 'SUCCEEDED' as const,
+      changedHash: true,
+      expectedError: 'IDEMPOTENCY_KEY_CONFLICT',
+    },
+    {
+      name: 'in-flight record',
+      receiptStatus: 'IN_FLIGHT' as const,
+      changedHash: false,
+      expectedError: 'IDEMPOTENCY_KEY_IN_FLIGHT',
+    },
+  ])(
+    'S7 gap 3: handles actual PostgreSQL P2002 with $name after rollback/outside-tx read',
+    async ({ receiptStatus, changedHash, expectedError }) => {
+      const value = body();
+      const winner = await post(value, 'winner');
+      expect(winner.status).toBe(201);
+      const baseline = await committedEffects();
+      const errors: string[] = [];
+      let outsideReads = 0;
+      const run: TenantPrismaService['runInTransaction'] =
+        tenant.runInTransaction.bind(tenant);
+      const getClient: TenantPrismaService['getClient'] =
+        tenant.getClient.bind(tenant);
+      jest
+        .spyOn(tenant, 'runInTransaction')
+        .mockImplementation(async (work, level) => {
+          try {
+            return await run(work, level);
+          } catch (error) {
+            if (error instanceof Prisma.PrismaClientKnownRequestError)
+              errors.push(error.code);
+            throw error;
+          }
+        });
+      jest.spyOn(tenant, 'getClient').mockImplementation(() => {
+        if (errors.includes('P2002') && !tenant.isInTransaction())
+          outsideReads++;
+        return getClient();
+      });
+      afterSaleOutbox = async () => {
+        afterSaleOutbox = undefined;
+        // Deliberately non-cooperating writer: current checkout writers serialize this key,
+        // so the unique-error fallback cannot be reached by two cooperating HTTP writers.
+        // Insert a real, independently committed receipt referencing an actual committed sale;
+        // never mock/throw P2002. The pending checkout's receipt INSERT hits the real constraint.
+        await db.saleIdempotency.create({
+          data: {
+            tenantId,
+            operation: 'bot_checkout_create',
+            key: 'unique-race',
+            requestHash: changedHash
+              ? 'different-intent'
+              : computeCheckoutRequestHash(
+                  plainToInstance(CheckoutRequestDto, value),
+                ),
+            status: receiptStatus,
+            saleId: winner.body.sale.saleId,
+            responseJson: winner.body as Prisma.InputJsonValue,
+          },
+        });
+      };
+      const result = await post(value, 'unique-race');
+      expect(errors).toEqual(['P2002']);
+      expect(outsideReads).toBeGreaterThan(0);
+      if (expectedError) {
+        expect(result.status).toBe(409);
+        expect(result.body).toEqual({
+          statusCode: 409,
+          error: expectedError,
+          message: expectedError,
+        });
+      } else {
+        expect(result.status).toBe(201);
+        expect(result.body).toEqual(winner.body);
+      }
+      // Only the independently inserted winner receipt is new; all losing order effects rollback.
+      expect(await committedEffects()).toEqual({
+        ...baseline,
+        receipts: baseline.receipts + 1,
+      });
+      expect((await status('winner')).body).toEqual({
+        status: 'succeeded',
+        checkout: winner.body,
+      });
+      expect((await status('unique-race')).body).toEqual(
+        receiptStatus === 'SUCCEEDED'
+          ? { status: 'succeeded', checkout: winner.body }
+          : { status: 'not_observed', checkout: null },
+      );
+    },
+  );
+});
