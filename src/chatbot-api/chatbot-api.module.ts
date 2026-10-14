@@ -10,6 +10,8 @@ import { PROMOTION_REPOSITORY } from '../promotions/domain/promotion.repository'
 import { PrismaPromotionRepository } from '../promotions/infrastructure/prisma-promotion.repository';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { ChatbotApiService } from './application/chatbot-api.service';
+import { CheckoutService } from './application/checkout.service';
+import { CheckoutController } from './presentation/checkout.controller';
 import { ServiceAuthGuard } from './presentation/guards/service-auth.guard';
 import { ChatbotApiController } from './presentation/chatbot-api.controller';
 import { SERVICE_CREDENTIAL_REPOSITORY } from './domain/service-credential.repository';
@@ -23,9 +25,10 @@ import { SalesModule } from '../sales/sales.module';
 
 @Module({
   imports: [ClsModule, DatabaseModule, SalesModule],
-  controllers: [ChatbotApiController],
+  controllers: [ChatbotApiController, CheckoutController],
   providers: [
     ChatbotApiService,
+    CheckoutService,
     ServiceAuthGuard,
     BotAuditInterceptor,
     EvaluateCartPromotionsUseCase,

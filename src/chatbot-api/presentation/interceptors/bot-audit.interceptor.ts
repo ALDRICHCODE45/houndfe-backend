@@ -32,6 +32,14 @@ type RouteAuditDefinition = {
 };
 
 const ROUTE_AUDIT_MAP: Record<string, RouteAuditDefinition> = {
+  'POST checkouts': {
+    action: 'checkouts.create',
+    resourceType: 'sale',
+  },
+  'GET checkouts/status': {
+    action: 'checkouts.status',
+    resourceType: 'sale',
+  },
   'GET catalog/search': {
     action: 'catalog.search',
     resourceType: 'catalog',
