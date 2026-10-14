@@ -39,7 +39,9 @@ describe('AuthService - login multi-tenant flow', () => {
       ...overrides,
     }) as unknown as User;
 
-  const createService = () => {
+  const createService = (
+    env: { nodeEnv?: string } = { nodeEnv: 'production' },
+  ) => {
     const userRepo = {
       findByEmail: jest.fn(),
       findById: jest.fn(),
@@ -61,8 +63,8 @@ describe('AuthService - login multi-tenant flow', () => {
     const configService = {
       get: jest
         .fn()
-        .mockImplementation(
-          (key: string, fallback?: string) => fallback ?? key,
+        .mockImplementation((key: string, fallback?: string) =>
+          key === 'NODE_ENV' ? env.nodeEnv : (fallback ?? key),
         ),
       getOrThrow: jest.fn().mockImplementation((key: string) => key),
     } as unknown as ConfigService;
@@ -138,6 +140,180 @@ describe('AuthService - login multi-tenant flow', () => {
     expect(jwtService.signAsync).not.toHaveBeenCalled();
   });
 
+  it.each(['single tenant', 'super-admin'])(
+    'development completes password login for %s without issuing OTP',
+    async (kind) => {
+      const { service, userRepo, prisma, jwtService, otp } = createService({
+        nodeEnv: 'development',
+      });
+      const compare = jest.fn().mockResolvedValue(true);
+      const updateRefreshToken = jest.fn();
+      const user = createMockUser({
+        hashedPassword: { compare },
+        updateRefreshToken,
+      });
+      userRepo.findByEmail.mockResolvedValue(user);
+      userRepo.findById.mockResolvedValue(user);
+      prisma.tenantMembership.findMany.mockResolvedValue(
+        kind === 'single tenant'
+          ? [
+              {
+                tenant: {
+                  id: 'tenant-1',
+                  name: 'Centro',
+                  slug: 'centro',
+                  isActive: true,
+                },
+              },
+            ]
+          : [],
+      );
+      prisma.role.findFirst.mockResolvedValue(
+        kind === 'super-admin' ? { id: 'superadmin' } : null,
+      );
+      await expect(service.login(loginDto)).resolves.toEqual({
+        requiresTenantSelection: false,
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        user: user.toResponse(),
+        tenants:
+          kind === 'single tenant'
+            ? [{ id: 'tenant-1', name: 'Centro', slug: 'centro' }]
+            : [],
+      });
+      expect(compare).toHaveBeenCalledWith(loginDto.password);
+      expect(jwtService.signAsync).toHaveBeenCalledTimes(2);
+      expect(jwtService.signAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: kind === 'single tenant' ? 'tenant-1' : null,
+          isSuperAdmin: kind === 'super-admin',
+        }),
+        expect.any(Object),
+      );
+      expect(updateRefreshToken).toHaveBeenCalledWith(expect.any(String));
+      expect(userRepo.save).toHaveBeenCalledWith(user);
+      expect(otp.issue).not.toHaveBeenCalled();
+      expect(otp.verify).not.toHaveBeenCalled();
+      expect(otp.resend).not.toHaveBeenCalled();
+    },
+  );
+
+  it('development preserves tenant selection without falsely claiming OTP proof', async () => {
+    const { service, userRepo, prisma, jwtService, otp } = createService({
+      nodeEnv: 'development',
+    });
+    const user = createMockUser();
+    userRepo.findByEmail.mockResolvedValue(user);
+    userRepo.findById.mockResolvedValue(user);
+    const tenants = [
+      { id: 'tenant-1', name: 'Centro', slug: 'centro', isActive: true },
+      { id: 'tenant-2', name: 'Norte', slug: 'norte', isActive: true },
+    ];
+    prisma.tenantMembership.findMany.mockResolvedValue(
+      tenants.map((tenant) => ({ tenant })),
+    );
+    prisma.role.findFirst.mockResolvedValue(null);
+    jwtService.signAsync.mockReset().mockResolvedValueOnce('temp-token');
+    await expect(service.login(loginDto)).resolves.toEqual({
+      requiresTenantSelection: true,
+      tempToken: 'temp-token',
+      expiresIn: 300,
+      user: user.toResponse(),
+      tenants: tenants.map(({ id, name, slug }) => ({ id, name, slug })),
+    });
+    expect(jwtService.signAsync).toHaveBeenCalledTimes(1);
+    const calls = jwtService.signAsync.mock.calls as Array<
+      [Record<string, string>]
+    >;
+    const claims = calls[0][0];
+    expect(claims).toEqual({
+      sub: 'user-1',
+      email: 'john@example.com',
+      purpose: 'tenant-selection',
+      authProof: 'password-development-v1',
+    });
+    expect(userRepo.save).not.toHaveBeenCalled();
+    expect(otp.issue).not.toHaveBeenCalled();
+    expect(otp.verify).not.toHaveBeenCalled();
+    prisma.tenantMembership.findFirst.mockResolvedValue({ tenant: tenants[0] });
+    jwtService.verifyAsync.mockResolvedValue(claims);
+    jwtService.signAsync
+      .mockResolvedValueOnce('access-token')
+      .mockResolvedValueOnce('refresh-token');
+    await expect(
+      service.selectTenant({ tempToken: 'temp-token', tenantId: 'tenant-1' }),
+    ).resolves.toMatchObject({
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      user: user.toResponse(),
+    });
+    expect(prisma.tenantMembership.findFirst).toHaveBeenCalledWith({
+      where: { userId: 'user-1', tenantId: 'tenant-1' },
+      include: { tenant: true },
+    });
+    expect(userRepo.save).toHaveBeenCalledWith(user);
+  });
+
+  it('development denies password login without active tenants or a global role', async () => {
+    const { service, userRepo, prisma, jwtService, otp } = createService({
+      nodeEnv: 'development',
+    });
+    userRepo.findByEmail.mockResolvedValue(createMockUser());
+    prisma.tenantMembership.findMany.mockResolvedValue([
+      { tenant: { id: 'tenant-1', isActive: false } },
+    ]);
+    prisma.role.findFirst.mockResolvedValue(null);
+    await expect(service.login(loginDto)).rejects.toThrow(
+      'User does not belong to an active tenant',
+    );
+    expect(jwtService.signAsync).not.toHaveBeenCalled();
+    expect(userRepo.save).not.toHaveBeenCalled();
+    expect(otp.issue).not.toHaveBeenCalled();
+  });
+
+  it.each(['staging', 'production', 'test', undefined, '', 'Development'])(
+    'requires OTP outside exact development: %s',
+    async (nodeEnv) => {
+      const { service, userRepo, prisma, jwtService, otp } = createService({
+        nodeEnv,
+      });
+      userRepo.findByEmail.mockResolvedValue(createMockUser());
+      await expect(service.login(loginDto)).resolves.toEqual({
+        requiresOtp: true,
+        challengeId: 'a'.repeat(43),
+        expiresIn: 600,
+        resendAfter: 60,
+      });
+      expect(otp.issue).toHaveBeenCalledTimes(1);
+      expect(otp.issue).toHaveBeenCalledWith('user-1');
+      expect(prisma.tenantMembership.findMany).not.toHaveBeenCalled();
+      expect(jwtService.signAsync).not.toHaveBeenCalled();
+      expect(userRepo.save).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['staging', 'production', 'test', undefined])(
+    'rejects development-only tenant proof outside development: %s',
+    async (nodeEnv) => {
+      const { service, prisma, jwtService, userRepo } = createService({
+        nodeEnv,
+      });
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        email: 'john@example.com',
+        purpose: 'tenant-selection',
+        authProof: 'password-development-v1',
+      });
+      await expect(
+        service.selectTenant({ tempToken: 'dev-only', tenantId: 'tenant-1' }),
+      ).rejects.toThrow('Invalid or expired temp token');
+      expect(prisma.tenantMembership.findFirst).not.toHaveBeenCalled();
+      expect(userRepo.findById).not.toHaveBeenCalled();
+      expect(jwtService.signAsync).not.toHaveBeenCalled();
+      expect(userRepo.save).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects legacy tenant-selection tokens without OTP proof', async () => {
     const { service, userRepo, prisma, jwtService } = createService();
     jwtService.verifyAsync.mockResolvedValue({
@@ -155,10 +331,19 @@ describe('AuthService - login multi-tenant flow', () => {
     expect(jwtService.signAsync).not.toHaveBeenCalled();
   });
 
-  it.each(['unknown', 'wrong password', 'disabled'])(
-    'rejects %s before OTP issuance',
-    async (kind) => {
-      const { service, userRepo, jwtService, otp, prisma } = createService();
+  it.each([
+    ['production', 'unknown'],
+    ['production', 'wrong password'],
+    ['production', 'disabled'],
+    ['development', 'unknown'],
+    ['development', 'wrong password'],
+    ['development', 'disabled'],
+  ])(
+    'rejects %s / %s before issuing OTP or credentials',
+    async (nodeEnv, kind) => {
+      const { service, userRepo, jwtService, otp, prisma } = createService({
+        nodeEnv,
+      });
       const user = createMockUser({
         isActive: kind !== 'disabled',
         hashedPassword: {

@@ -39,6 +39,36 @@ const setup = () => {
 
 describe('AuthController OTP boundary', () => {
   it.each([
+    {
+      requiresTenantSelection: false,
+      accessToken: 'synthetic-access',
+      refreshToken: 'synthetic-refresh',
+      user: { id: 'user-1' },
+      tenants: [{ id: 'tenant-1', name: 'Centro', slug: 'centro' }],
+    },
+    {
+      requiresTenantSelection: true,
+      tempToken: 'synthetic-selection',
+      expiresIn: 300,
+      user: { id: 'user-1' },
+      tenants: [
+        { id: 'tenant-1', name: 'Centro', slug: 'centro' },
+        { id: 'tenant-2', name: 'Norte', slug: 'norte' },
+      ],
+    },
+  ])(
+    'passes development login responses through unchanged: %j',
+    async (result) => {
+      const { controller, service, response, setHeader } = setup();
+      const dto = { email: 'test@example.com', password: 'synthetic-password' };
+      service.login.mockResolvedValue(result);
+      await expect(controller.login(dto, response)).resolves.toBe(result);
+      expect(service.login).toHaveBeenCalledWith(dto);
+      expect(setHeader).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
     ['login', 'login', 'login'],
     ['verifyLoginOtp', 'login/otp/verify', 'verify'],
     ['resendLoginOtp', 'login/otp/resend', 'resend'],

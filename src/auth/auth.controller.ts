@@ -59,7 +59,7 @@ export class AuthController {
   login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<LoginOtpEnvelope> {
+  ): Promise<LoginOtpEnvelope | LoginResponse> {
     return this.withRetryAfter(() => this.authService.login(dto), response);
   }
 

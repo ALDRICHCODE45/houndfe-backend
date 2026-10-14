@@ -34,6 +34,11 @@
  *     preview route; both seams share the same render method.
  */
 import { Module } from '@nestjs/common';
+import { CashRegisterModule } from '../cash-register/cash-register.module';
+import {
+  CashClosingPdfController,
+  CashClosingPdfService,
+} from './cash-closing';
 import { AuthModule } from '../auth/auth.module';
 import { SalesModule } from '../sales/sales.module';
 import { TenantsModule } from '../tenants/tenants.module';
@@ -41,9 +46,9 @@ import { PdfGenerationController } from './pdf-generation.controller';
 import { PdfGenerationService } from './pdf-generation.service';
 
 @Module({
-  imports: [AuthModule, SalesModule, TenantsModule],
-  providers: [PdfGenerationService],
-  controllers: [PdfGenerationController],
+  imports: [AuthModule, SalesModule, TenantsModule, CashRegisterModule],
+  providers: [PdfGenerationService, CashClosingPdfService],
+  controllers: [PdfGenerationController, CashClosingPdfController],
   exports: [PdfGenerationService],
 })
 export class PdfGenerationModule {}

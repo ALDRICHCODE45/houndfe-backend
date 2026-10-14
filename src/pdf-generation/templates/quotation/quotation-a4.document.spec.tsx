@@ -34,7 +34,9 @@ const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
 const baseProps: QuotationDocumentProps = {
   business: {
     companyName: 'HoundFe',
-    logoUrl: 'https://example.com/logo.png',
+    // Embedded 8×8 PNG keeps real image decoding independent of the network.
+    logoUrl:
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGMwSJiAFTEMLQkACmxIAasRElQAAAAASUVORK5CYII=',
     address: 'Av. Reforma 123, CDMX',
     phone: '+52 55 1234 5678',
   },
@@ -187,6 +189,21 @@ describe('QuotationA4Document — IVA incluido row (WU3 / T3.1)', () => {
 });
 
 describe('QuotationA4Document (WU4 / T046)', () => {
+  it('renders the logo offline without fetching remote assets', async () => {
+    const fetchSpy = jest
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('Network disabled in PDF unit tests'));
+    try {
+      const buffer = await renderToBuffer(
+        <QuotationA4Document {...baseProps} />,
+      );
+      expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('renders a non-empty PDF buffer with PDF magic bytes', async () => {
     const buffer = await renderToBuffer(<QuotationA4Document {...baseProps} />);
 
@@ -201,14 +218,20 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     // `ItemsList`. If a future refactor swaps the rendering block, this
     // test fails loudly so the redesigned visual contract stays intact.
     const { readFileSync } = await import('node:fs');
-    const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
+    const source = readFileSync(
+      `${__dirname}/quotation-a4.document.tsx`,
+      'utf8',
+    );
     expect(source).toContain('<ItemsList items={items} />');
     expect(source).not.toContain('<LineItemsTable');
   });
 
   it('renders the modern header with the COTIZACIÓN meta card', async () => {
     const { readFileSync } = await import('node:fs');
-    const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
+    const source = readFileSync(
+      `${__dirname}/quotation-a4.document.tsx`,
+      'utf8',
+    );
     expect(source).toContain('SHARED_STYLES.modern.header');
     expect(source).toContain('COTIZACIÓN');
   });
@@ -221,7 +244,10 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     expect(buffer.length).toBeGreaterThan(0);
 
     const { readFileSync } = await import('node:fs');
-    const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
+    const source = readFileSync(
+      `${__dirname}/quotation-a4.document.tsx`,
+      'utf8',
+    );
     expect(source).toContain('VENDEDOR {sellerName}');
     expect(source).toContain('sellerName={seller?.name ?? null}');
   });
@@ -257,7 +283,10 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     // allowed (they describe the contract); rendered JSX must be
     // payment-free.
     const { readFileSync } = await import('node:fs');
-    const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
+    const source = readFileSync(
+      `${__dirname}/quotation-a4.document.tsx`,
+      'utf8',
+    );
 
     // Strip all block + line comments before checking — we care about
     // what the user sees, not what the file documents.
@@ -285,11 +314,16 @@ describe('QuotationA4Document (WU4 / T046)', () => {
       },
     };
 
-    const buffer = await renderToBuffer(<QuotationA4Document {...propsWithExpiry} />);
+    const buffer = await renderToBuffer(
+      <QuotationA4Document {...propsWithExpiry} />,
+    );
     expect(buffer.length).toBeGreaterThan(0);
 
     const { readFileSync } = await import('node:fs');
-    const source = readFileSync(`${__dirname}/quotation-a4.document.tsx`, 'utf8');
+    const source = readFileSync(
+      `${__dirname}/quotation-a4.document.tsx`,
+      'utf8',
+    );
     expect(source).toContain('Válido hasta:');
     expect(source).toContain('Sin fecha de expiración');
   });

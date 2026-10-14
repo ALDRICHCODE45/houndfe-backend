@@ -90,7 +90,7 @@ type TenantSelectionTokenPayload = {
   sub: string;
   email: string;
   purpose: 'tenant-selection';
-  authProof: 'password-email-otp-v1';
+  authProof: 'password-email-otp-v1' | 'password-development-v1';
 };
 
 export interface UserPermissionsResponse {
@@ -132,7 +132,7 @@ export class AuthService {
     return { user: saved.toResponse() };
   }
 
-  async login(dto: LoginDto): Promise<LoginOtpEnvelope> {
+  async login(dto: LoginDto): Promise<LoginOtpEnvelope | LoginResponse> {
     const email = Email.create(dto.email);
     const user = await this.userRepo.findByEmail(email);
 
@@ -143,6 +143,10 @@ export class AuthService {
 
     if (!user.isActive) {
       throw new InvalidCredentialsError(); // Don't reveal account is deactivated
+    }
+
+    if (this.configService.get<string>('NODE_ENV') === 'development') {
+      return this.completeLogin(user, 'password-development-v1');
     }
 
     return this.loginOtp.issue(user.id);
@@ -162,7 +166,10 @@ export class AuthService {
     return this.loginOtp.resend(dto.challengeId);
   }
 
-  private async completeLogin(user: User): Promise<LoginResponse> {
+  private async completeLogin(
+    user: User,
+    authProof: TenantSelectionTokenPayload['authProof'] = 'password-email-otp-v1',
+  ): Promise<LoginResponse> {
     const memberships = await this.prisma.tenantMembership.findMany({
       where: { userId: user.id },
       include: {
@@ -248,6 +255,7 @@ export class AuthService {
       const tempToken = await this.generateTenantSelectionToken(
         user.id,
         user.email.value,
+        authProof,
       );
 
       return {
@@ -538,12 +546,13 @@ export class AuthService {
   private async generateTenantSelectionToken(
     userId: string,
     email: string,
+    authProof: TenantSelectionTokenPayload['authProof'],
   ): Promise<string> {
     const payload: TenantSelectionTokenPayload = {
       sub: userId,
       email,
       purpose: 'tenant-selection',
-      authProof: 'password-email-otp-v1',
+      authProof,
     };
 
     return this.jwtService.signAsync(payload, {
@@ -564,10 +573,15 @@ export class AuthService {
           },
         );
 
+      const validProof =
+        payload?.authProof === 'password-email-otp-v1' ||
+        (this.configService.get<string>('NODE_ENV') === 'development' &&
+          payload?.authProof === 'password-development-v1');
+
       if (
         !payload ||
         payload.purpose !== 'tenant-selection' ||
-        payload.authProof !== 'password-email-otp-v1' ||
+        !validProof ||
         typeof payload.sub !== 'string' ||
         !payload.sub.trim() ||
         typeof payload.email !== 'string' ||

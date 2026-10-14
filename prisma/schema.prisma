@@ -463,6 +463,19 @@ model Tenant {
   // keeps Prisma's relation graph complete.
   humanDecisions           HumanDecision[]
 
+  // cash-register-closing / T2 — tenant-scoped POS cash persistence. The
+  // runtime gate is the seven `Cash*` entries in
+  // src/shared/tenant/tenant-scoped-models.constant.ts; these back-relations
+  // only keep Prisma's relation graph complete. Cascade from Tenant matches
+  // the project-wide tenant-deletion pattern.
+  cashRegisters CashRegister[]
+  cashSessions  CashSession[]
+  cashMovements CashMovement[]
+  cashCounts    CashCount[]
+  cashHandovers CashHandover[]
+  cashClosings  CashClosing[]
+  cashCommands  CashCommand[]
+
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
 }
@@ -1282,6 +1295,16 @@ model User {
   // audited reviewer. onDelete: SetNull matches the other optional actor
   // relations (e.g. `SaleRefundSettlement.settledBy`).
   humanDecisionResolutions HumanDecision[]           @relation("HumanDecisionResolver")
+  // cash-register-closing / T2 — retained financial-audit actor relations.
+  // Every actor FK is required with onDelete: Restrict so deleting a User can
+  // never erase who opened, moved, counted, handed over or closed cash.
+  cashSessions          CashSession[]  @relation("CashSessionCashier")
+  cashMovements         CashMovement[] @relation("CashMovementActor")
+  cashCounts            CashCount[]    @relation("CashCountActor")
+  cashHandoversReceived   CashHandover[] @relation("CashHandoverRecipient")
+  cashHandoversCreated    CashHandover[] @relation("CashHandoverCreator")
+  cashHandoversReceivedBy CashHandover[] @relation("CashHandoverReceiver")
+  cashClosings          CashClosing[]  @relation("CashClosingActor")
 
   @@map("users")
 }
@@ -2499,4 +2522,232 @@ model HumanDecision {
   @@unique([tenantId, source, supersedesDecisionId])
   @@index([tenantId, status, createdAt, id])
   @@map("human_decisions")
+}
+
+// ============================================================================
+// CASH REGISTER CLOSING — cash-register-closing / T2 (S1, S3, S8)
+// ============================================================================
+// Additive POS cash persistence: named registers, individually custodied
+// sessions, an append-only movement ledger, declaration/verification counts,
+// custody handovers, an immutable closing snapshot and a request-idempotency
+// command log. No existing table is altered and there is no FK into
+// `sales` / `sale_payments` yet: POS linkage is by `CashMovement` source
+// identity, so the sales/refund models can be wired deliberately in T4.
+//
+// Tenant safety is structural: every table carries `tenantId`, and every
+// cash-to-cash FK is tenant-qualified (`fields: [tenantId, <id>]`) so
+// PostgreSQL rejects a cross-tenant link even if the application forgets a
+// guard. Actor FKs are required with `onDelete: Restrict` so a User deletion
+// can never erase who opened, moved, counted, handed over or closed cash.
+//
+// The `cash_sessions_one_unreleased_per_register` partial unique index
+// (`WHERE "drawerReleasedAt" IS NULL`) is migration-authoritative because
+// Prisma's DSL cannot express partial indexes; it is the DB guarantee that a
+// register has at most one unreleased session regardless of review state.
+
+enum CashSessionStatus {
+  OPEN
+  COUNTING
+  SUBMITTED
+  CLOSED
+}
+
+// Signed deltas are direction-checked per kind by the migration CHECK
+// (`cash_movements_delta_direction`), which also forbids a zero delta.
+enum CashMovementKind {
+  SALE_PAYMENT
+  SALE_CHANGE
+  REFUND_SETTLEMENT
+  CASH_IN
+  CASH_OUT
+}
+
+enum CashCountKind {
+  DECLARATION
+  VERIFICATION
+}
+
+enum CashHandoverKind {
+  WITHDRAWAL
+  FLOAT
+}
+
+model CashRegister {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sessions CashSession[]
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, id])
+  @@index([tenantId, isActive])
+  @@map("cash_registers")
+}
+
+model CashSession {
+  id                String             @id @default(uuid())
+  tenantId          String
+  registerId        String
+  // Required: the individual custodian of this session (audit retention).
+  cashierUserId     String
+  openingCents      Int
+  status            CashSessionStatus @default(OPEN)
+  openedAt          DateTime           @default(now())
+  frozenAt          DateTime?
+  submittedAt       DateTime?
+  closedAt          DateTime?
+  // Physical drawer release is independent of review completion.
+  drawerReleasedAt  DateTime?
+  // Exactly-once float reuse: a FLOAT handover funds at most one session.
+  openingHandoverId String?
+  // Freeze snapshot of expected values; never the pre-submission projection.
+  expectedJson      Json?
+
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  register        CashRegister   @relation(fields: [tenantId, registerId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  cashier         User           @relation("CashSessionCashier", fields: [cashierUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  openingHandover CashHandover?  @relation("CashSessionOpeningHandover", fields: [tenantId, openingHandoverId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+
+  movements CashMovement[]
+  counts    CashCount[]
+  handovers CashHandover[] @relation("CashHandoverSourceSession")
+  closing   CashClosing?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, openingHandoverId])
+  @@index([tenantId, registerId, status])
+  @@index([tenantId, cashierUserId, openedAt])
+  @@map("cash_sessions")
+}
+
+// Append-only ledger: no `updatedAt`, no delete rail. `sourceType`/`sourceId`
+// is the POS linkage key (e.g. a sale payment id) and is unique within the
+// tenant, so replaying the same source cannot double-count money.
+model CashMovement {
+  id           String           @id @default(uuid())
+  tenantId     String
+  sessionId    String
+  kind         CashMovementKind
+  deltaCents   Int
+  // CREDIT is rejected by the migration CHECK: sessions track cash only.
+  method       SalePaymentMethod
+  channelKey   String
+  channelLabel String
+  sourceType   String
+  sourceId     String
+  actorUserId  String
+  reason       String?
+  occurredAt   DateTime
+  createdAt    DateTime         @default(now())
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  session CashSession @relation(fields: [tenantId, sessionId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  actor   User        @relation("CashMovementActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([tenantId, sourceType, sourceId])
+  @@index([tenantId, sessionId, occurredAt])
+  @@index([tenantId, actorUserId])
+  @@map("cash_movements")
+}
+
+// Original declarations/verifications are immutable: a recount is a new
+// `revision`, never an update, and the DB CHECK keeps `revision >= 1`.
+model CashCount {
+  id                String        @id @default(uuid())
+  tenantId          String
+  sessionId         String
+  kind              CashCountKind
+  revision          Int           @default(1)
+  actorUserId       String
+  linesJson         Json
+  denominationsJson Json?
+  notes             String?
+  createdAt         DateTime      @default(now())
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  session CashSession @relation(fields: [tenantId, sessionId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  actor   User        @relation("CashCountActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([tenantId, sessionId, kind, revision])
+  @@index([tenantId, sessionId, kind, createdAt])
+  @@map("cash_counts")
+}
+
+// Custody transfer. Declared is what the sender counts; received is what the
+// recipient confirms (optional until receipt). A FLOAT may fund one session
+// through `CashSession.openingHandoverId`.
+model CashHandover {
+  id              String           @id @default(uuid())
+  tenantId        String
+  sourceSessionId String
+  kind            CashHandoverKind
+  recipientUserId String
+  createdByUserId String
+  declaredCents   Int
+  receivedCents   Int?
+  notes           String?
+  receiptNotes    String?
+  receivedAt      DateTime?
+  // Authenticated actor who records the receipt; NULL until the receipt is
+  // recorded, then the durable receiver identity. Deliberately separate from
+  // the intended `recipientUserId`: the service requires the receipt actor to
+  // match the recipient for a same-person FLOAT, while a self-recorded
+  // WITHDRAWAL and self verification/closing stay prohibited.
+  receivedByUserId String?
+  createdAt       DateTime         @default(now())
+
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sourceSession CashSession  @relation("CashHandoverSourceSession", fields: [tenantId, sourceSessionId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  recipient     User         @relation("CashHandoverRecipient", fields: [recipientUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy     User         @relation("CashHandoverCreator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receivedBy    User?        @relation("CashHandoverReceiver", fields: [receivedByUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  fundedSession CashSession? @relation("CashSessionOpeningHandover")
+
+  @@unique([tenantId, id])
+  @@index([tenantId, sourceSessionId, createdAt])
+  @@index([tenantId, recipientUserId])
+  @@map("cash_handovers")
+}
+
+// Immutable final cut. `folio` is an opaque, tenant-unique identifier (no
+// sequence counter required); `snapshotJson` is the frozen print source.
+model CashClosing {
+  id             String   @id @default(uuid())
+  tenantId       String
+  sessionId      String
+  folio          String
+  closedByUserId String
+  snapshotJson   Json
+  createdAt      DateTime @default(now())
+
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  session  CashSession @relation(fields: [tenantId, sessionId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  closedBy User        @relation("CashClosingActor", fields: [closedByUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([tenantId, sessionId])
+  @@unique([tenantId, folio])
+  @@index([tenantId, createdAt])
+  @@map("cash_closings")
+}
+
+// Request idempotency log: `(tenantId, key)` identifies a write, and a
+// different `requestHash` under the same key is a conflict.
+model CashCommand {
+  id           String   @id @default(uuid())
+  tenantId     String
+  key          String
+  requestHash  String
+  responseJson Json
+  createdAt    DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, key])
+  @@index([tenantId, createdAt])
+  @@map("cash_commands")
 }

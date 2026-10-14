@@ -54,6 +54,18 @@ export type AppSubjects =
   | 'TenantCatalogSettings'
   | 'Analytics'
   | 'HumanDecision'
+  // cash-register-closing / T2 (S3) — granular POS cash duties. Kept as
+  // separate subjects (never an action-per-kind on CashMovement) so roles can
+  // be composed per duty without a broad `update:CashSession` grant.
+  | 'CashRegister'
+  | 'CashSession'
+  | 'CashCount'
+  | 'CashIn'
+  | 'CashOut'
+  | 'CashVerification'
+  | 'CashHandover'
+  | 'CashClosing'
+  | 'CashSessionAudit'
   | 'all';
 
 /**
@@ -633,5 +645,90 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'HumanDecision',
     action: 'update',
     description: 'Resolve tenant human-decision requests',
+  },
+
+  // Cash-register-closing / T2 (S1, S3) — granular POS cash permissions.
+  // Roles are arbitrary compositions of these rows, so there are deliberately
+  // NO role-name checks and NO default role assignment. Only existing
+  // `AppActions` verbs are used (no invented count/verify/close action) and
+  // `manage` is intentionally omitted from every subject: each duty is a
+  // separate grant, and `CashSession` has no broad `update`. The Cash* names
+  // that are not persistence models (`CashIn`, `CashOut`, `CashVerification`,
+  // `CashSessionAudit`) exist so manual-in/out, independent verification and
+  // wider audit visibility can be delegated independently of counting.
+  {
+    subject: 'CashRegister',
+    action: 'create',
+    description: 'Create POS cash registers',
+  },
+  {
+    subject: 'CashRegister',
+    action: 'read',
+    description: 'View POS cash registers',
+  },
+  {
+    subject: 'CashRegister',
+    action: 'update',
+    description: 'Rename or deactivate POS cash registers',
+  },
+  {
+    subject: 'CashSession',
+    action: 'create',
+    description: 'Open a POS cash session',
+  },
+  {
+    subject: 'CashSession',
+    action: 'read',
+    description: 'View POS cash sessions',
+  },
+  {
+    subject: 'CashCount',
+    action: 'create',
+    description: 'Submit a blind cash count declaration',
+  },
+  {
+    subject: 'CashIn',
+    action: 'create',
+    description: 'Record a manual cash in',
+  },
+  {
+    subject: 'CashOut',
+    action: 'create',
+    description: 'Record a manual cash out',
+  },
+  {
+    subject: 'CashVerification',
+    action: 'create',
+    description: 'Independently verify a cash declaration',
+  },
+  {
+    subject: 'CashHandover',
+    action: 'create',
+    description: 'Create a cash custody handover',
+  },
+  {
+    subject: 'CashHandover',
+    action: 'read',
+    description: 'View own pending handovers and eligible received FLOAT',
+  },
+  {
+    subject: 'CashHandover',
+    action: 'update',
+    description: 'Confirm receipt of a cash custody handover',
+  },
+  {
+    subject: 'CashClosing',
+    action: 'create',
+    description: 'Close a POS cash session',
+  },
+  {
+    subject: 'CashClosing',
+    action: 'read',
+    description: 'View cash closings and history',
+  },
+  {
+    subject: 'CashSessionAudit',
+    action: 'read',
+    description: 'View wider cash-session audit visibility',
   },
 ];

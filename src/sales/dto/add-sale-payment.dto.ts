@@ -9,6 +9,7 @@ import {
   IsUUID,
   Min,
   Validate,
+  ValidateIf,
   ValidateNested,
   ValidationArguments,
   ValidatorConstraint,
@@ -93,4 +94,14 @@ export class AddSalePaymentDto {
   @ValidateNested({ each: true })
   @Type(() => AddSalePaymentEntryDto)
   payments?: AddSalePaymentEntryDto[];
+
+  // Cash-register closing / T4 — optional explicit POS cash-session binding.
+  // When present the collection is a session-bound POS operation; the
+  // reviewer/bot auth mode is rejected and the session is fenced before any
+  // payment write. Omitted keeps the legacy external flow and the exact
+  // legacy idempotency requestHash.
+  // Only omission is optional; null must not bypass session validation.
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsUUID('all', { message: 'INVALID_CASH_SESSION_ID' })
+  cashSessionId?: string;
 }

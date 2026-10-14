@@ -9,6 +9,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
@@ -93,6 +94,11 @@ import {
   IPaymentMethodResolver,
   PAYMENT_METHOD_RESOLVER,
 } from '../admin/payment-methods/domain/payment-method.resolver';
+import {
+  CASH_LEDGER,
+  type CashPaymentMethod,
+  type ICashLedger,
+} from '../cash-register/cash-ledger.port';
 
 type SupportedChargeMethod =
   | 'cash'
@@ -443,6 +449,34 @@ function isSupportedCollectionMethod(
   return ['cash', 'card_credit', 'card_debit', 'transfer'].includes(method);
 }
 
+/**
+ * Cash-register closing / T4 — tender methods the cash ledger can carry.
+ * `credit` is deliberately absent: it is not an actual tender, so a
+ * session-bound credit refund is rejected rather than recorded as movement.
+ */
+function isLedgerPaymentMethod(method: string): method is CashPaymentMethod {
+  return (
+    method === 'cash' ||
+    method === 'card_credit' ||
+    method === 'card_debit' ||
+    method === 'transfer'
+  );
+}
+
+/**
+ * Cash-register closing / T4 — narrows a refund's tender method to the
+ * ledger contract or fails closed with the session-bound credit rejection.
+ */
+function requireLedgerPaymentMethod(method: string): CashPaymentMethod {
+  if (!isLedgerPaymentMethod(method)) {
+    throw new BusinessRuleViolationError(
+      'CASH_SESSION_CREDIT_NOT_ALLOWED',
+      'CASH_SESSION_CREDIT_NOT_ALLOWED',
+    );
+  }
+  return method;
+}
+
 function normalizeCollectionRequestPayments(dto: {
   method?: string;
   amountCents?: number;
@@ -549,7 +583,31 @@ export class SalesService {
     // pca-2c2 — capacity claim ledger (ambient-tx port; PromotionsModule).
     @Inject(PROMOTION_USAGE_REPOSITORY)
     private readonly promotionUsageRepo: IPromotionUsageRepository,
+    // Cash-register closing / T4 — optional cash-ledger seam (paren-owned
+    // module wiring lands later). Bound POS money paths assert the session
+    // is OPEN and record payments/refunds in the SAME ambient transaction.
+    // Optional so every existing constructor and non-POS flow stays
+    // unchanged; a missing ledger fails closed the moment a caller
+    // supplies `cashSessionId`.
+    @Optional()
+    @Inject(CASH_LEDGER)
+    private readonly cashLedger?: ICashLedger,
   ) {}
+
+  /**
+   * Cash-register closing / T4 — the optional ledger must never silently
+   * degrade. A session-bound request with no wired ledger fails closed
+   * before any lock or money write instead of skipping the session fence.
+   */
+  private requireCashLedger(): ICashLedger {
+    if (!this.cashLedger) {
+      throw new BusinessRuleViolationError(
+        'CASH_LEDGER_UNAVAILABLE',
+        'CASH_LEDGER_UNAVAILABLE',
+      );
+    }
+    return this.cashLedger;
+  }
 
   /**
    * WU2 — `recomputePricingAndPromotions` (renamed from
@@ -1517,10 +1575,17 @@ export class SalesService {
    *
    * `settledAt` is normalized once (a `Date` for the write, the canonical
    * `toISOString()` for the hash and the response) so an equivalent instant
-   * sent with a non-UTC offset replays the same slot. Acquire MUST stay
-   * OUTSIDE the interactive transaction: the P2002 that signals a retry
-   * aborts the ambient transaction, and its follow-up replay read would fail
-   * on an aborted client (rfs-2 invariant).
+   * sent with a non-UTC offset replays the same slot. The unbound path keeps
+   * the legacy autocommit acquire; the repository now uses a conflict-safe
+   * insert whenever it runs inside an ambient transaction (T4/T6 S5,S8), so a
+   * retry can no longer abort that transaction through a P2002.
+   *
+   * Cash-register closing / T4 — when `dto.cashSessionId` is present the
+   * ENTIRE flow (acquire included) runs inside one ambient transaction, so a
+   * rejected session fence or a session-bound credit tender leaves no new
+   * idempotency row; the actual settlement is recorded in the ledger in the
+   * SAME transaction. An omitted session keeps legacy behavior and the exact
+   * legacy hash.
    */
   async settleRefund(
     refundId: string,
@@ -1528,12 +1593,53 @@ export class SalesService {
     dto: SettleRefundDto,
     idempotencyKey: string,
   ): Promise<RefundSettlementResponseDto> {
+    const cashSessionId = dto.cashSessionId;
+    if (cashSessionId === undefined) {
+      return this.executeSettleRefund(
+        refundId,
+        actorId,
+        dto,
+        idempotencyKey,
+        undefined,
+      );
+    }
+
+    return this.tenantPrisma.runInTransaction(() =>
+      this.executeSettleRefund(
+        refundId,
+        actorId,
+        dto,
+        idempotencyKey,
+        cashSessionId,
+      ),
+    );
+  }
+
+  private async executeSettleRefund(
+    refundId: string,
+    actorId: string,
+    dto: SettleRefundDto,
+    idempotencyKey: string,
+    cashSessionId: string | undefined,
+  ): Promise<RefundSettlementResponseDto> {
     const settledAt = new Date(dto.settledAt);
     const settledAtIso = settledAt.toISOString();
     const reference = dto.reference ?? null;
 
+    // Cash-register closing / T4 — credit is not an actual tender. It stays
+    // legacy behavior when no session is supplied; a session-bound credit
+    // refund is rejected before the acquire, so it leaves no money effect
+    // and no idempotency row. The narrowed method is what the ledger records.
+    const boundMethod =
+      cashSessionId === undefined
+        ? null
+        : requireLedgerPaymentMethod(dto.method);
+
     // Actor participates in the hash: the same key sent by a different
     // user is a different request (conflict), never a silent replay.
+    // Cash-register closing / T4 — `cashSessionId` participates ONLY when
+    // present, so an omitted session keeps the exact legacy hash while a
+    // session-bound key can never replay across sessions.
     const requestHash = createHash('sha256')
       .update(
         JSON.stringify({
@@ -1543,6 +1649,7 @@ export class SalesService {
           method: dto.method,
           reference,
           settledAt: settledAtIso,
+          ...(cashSessionId === undefined ? {} : { cashSessionId }),
         }),
       )
       .digest('hex');
@@ -1577,6 +1684,17 @@ export class SalesService {
     }
 
     const transaction = this.saleRepo.runInTransaction(async () => {
+      // Cash-register closing / T4 — session fence (tenant/owner/OPEN) and,
+      // with it, the fail-closed missing-ledger guard. Runs before the
+      // refund/sale lock. A replayed idempotency key returns above and never
+      // reaches this fence.
+      if (cashSessionId !== undefined) {
+        await this.requireCashLedger().assertOpenSession(
+          cashSessionId,
+          actorId,
+        );
+      }
+
       const settlement = await this.saleRepo.settleRefund({
         refundId,
         settledByUserId: actorId,
@@ -1597,6 +1715,20 @@ export class SalesService {
         settledCents: settlement.settledCents,
         outstandingCents: settlement.outstandingCents,
       };
+
+      // Cash-register closing / T4 — record the ACTUAL settlement (not the
+      // pending obligation) keyed by its settlement id, with the client's
+      // effective date, in the SAME ambient transaction as the refund write.
+      if (cashSessionId !== undefined && boundMethod !== null) {
+        await this.requireCashLedger().recordRefund({
+          sessionId: cashSessionId,
+          actorId,
+          settlementId: settlement.settlementId,
+          amountCents: dto.amountCents,
+          method: boundMethod,
+          occurredAt: settledAt,
+        });
+      }
 
       await this.saleRepo.markSettlementIdempotencySucceeded(
         idempotency.token,
@@ -2615,6 +2747,41 @@ export class SalesService {
     dto: ChargeSaleDto,
     idempotencyKey: string,
   ) {
+    const cashSessionId = dto.cashSessionId;
+    if (cashSessionId === undefined) {
+      return this.executeChargeDraft(
+        saleId,
+        actorId,
+        dto,
+        idempotencyKey,
+        undefined,
+      );
+    }
+
+    // Cash-register closing / T4 — bound path. Open the ambient transaction
+    // BEFORE the idempotency acquire so a rejected session fence (or any
+    // later failure) rolls the freshly acquired idempotency row back with
+    // the money writes; the nested `saleRepo.runInTransaction` joins it.
+    // Acquire/replay still happens BEFORE the session assertion so a
+    // completed same-key replay keeps working after the session is frozen.
+    return this.tenantPrisma.runInTransaction(() =>
+      this.executeChargeDraft(
+        saleId,
+        actorId,
+        dto,
+        idempotencyKey,
+        cashSessionId,
+      ),
+    );
+  }
+
+  private async executeChargeDraft(
+    saleId: string,
+    actorId: string,
+    dto: ChargeSaleDto,
+    idempotencyKey: string,
+    cashSessionId: string | undefined,
+  ) {
     const normalizedPayments = normalizeChargeRequestPayments(dto);
     const hashPayments = sortPaymentsForHash(normalizedPayments);
 
@@ -2624,6 +2791,11 @@ export class SalesService {
     // normalization `JSON.stringify` would drop the `undefined` key
     // and a same-key retry with a flipped flag would silently
     // replay the stale non-delivery payload.
+    //
+    // Cash-register closing / T4 — `cashSessionId` participates ONLY when
+    // present, so an omitted session keeps the exact legacy hash while a
+    // session-bound key can never replay across sessions (session + actor
+    // are both in the digest).
     const requestHash = createHash('sha256')
       .update(
         JSON.stringify({
@@ -2632,6 +2804,7 @@ export class SalesService {
           payments: hashPayments,
           dueDate: dto.dueDate ?? null,
           delivery: dto.delivery ?? false,
+          ...(cashSessionId === undefined ? {} : { cashSessionId }),
         }),
       )
       .digest('hex');
@@ -2670,6 +2843,17 @@ export class SalesService {
 
     return this.saleRepo.runInTransaction(async () => {
       const tenantId = this.tenantPrisma.getTenantId();
+      // Cash-register closing / T4 — session fence (tenant/owner/OPEN) and,
+      // with it, the fail-closed missing-ledger guard. Runs before
+      // `findByIdForUpdate`, i.e. before any sale lock or price/stock/folio
+      // write. A replayed idempotency key returns above and never reaches
+      // this fence.
+      if (cashSessionId !== undefined) {
+        await this.requireCashLedger().assertOpenSession(
+          cashSessionId,
+          actorId,
+        );
+      }
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
       if (!sale) {
         throw new BusinessRuleViolationError(
@@ -2901,6 +3085,26 @@ export class SalesService {
         // (W1 + C2).
         appliedOrderPromotion: sale.appliedOrderPromotion,
       });
+
+      // Cash-register closing / T4 — record the initial tender + change in
+      // the SAME transaction as the SalePayment rows. Payments keep the
+      // canonical input order and their resolved catalog snapshots, and the
+      // sale-level `changeDueCents` is recorded exactly once, here.
+      if (cashSessionId !== undefined) {
+        await this.requireCashLedger().recordPayments({
+          sessionId: cashSessionId,
+          actorId,
+          saleId,
+          payments: createdPayments.map((payment, index) => ({
+            paymentId: payment.paymentId,
+            method: payment.method,
+            amountCents: payment.amountCents,
+            metadataJson: canonicalPayments[index]?.metadataJson,
+          })),
+          changeDueCents,
+          occurredAt: confirmedAt,
+        });
+      }
 
       await this.publishSaleConfirmedEvent({
         saleId,
@@ -3517,15 +3721,90 @@ export class SalesService {
         reference?: string;
         paymentMethodId?: string;
       }>;
+      // Cash-register closing / T4 — optional explicit POS session binding.
+      cashSessionId?: string;
     },
     idempotencyKey: string,
     authMode: AddPaymentAuthMode = 'owner',
   ) {
+    const cashSessionId = dto.cashSessionId;
+    if (cashSessionId === undefined) {
+      return this.executeAddPayment(
+        saleId,
+        actorId,
+        dto,
+        idempotencyKey,
+        authMode,
+        undefined,
+      );
+    }
+
+    // Cash-register closing / T4 — bound path. Open the ambient transaction
+    // BEFORE the idempotency acquire so a rejected session fence (or any
+    // later failure) rolls the freshly acquired idempotency row back with
+    // the payment writes; the nested `saleRepo.runInTransaction` joins it.
+    // Acquire/replay still happens BEFORE the session assertion so a
+    // completed same-key replay keeps working after the session is frozen.
+    return this.tenantPrisma.runInTransaction(() =>
+      this.executeAddPayment(
+        saleId,
+        actorId,
+        dto,
+        idempotencyKey,
+        authMode,
+        cashSessionId,
+      ),
+    );
+  }
+
+  private async executeAddPayment(
+    saleId: string,
+    actorId: string,
+    dto: {
+      method?: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
+      amountCents?: number;
+      reference?: string;
+      // Custom Payment Methods (custom-payment-methods / WU2 — D5)
+      paymentMethodId?: string;
+      payments?: Array<{
+        method: 'cash' | 'card_credit' | 'card_debit' | 'transfer' | 'credit';
+        amountCents: number;
+        reference?: string;
+        paymentMethodId?: string;
+      }>;
+      cashSessionId?: string;
+    },
+    idempotencyKey: string,
+    authMode: AddPaymentAuthMode,
+    cashSessionId: string | undefined,
+  ) {
+    // Cash-register closing / T4 — a session must never be selected by the
+    // reviewer/bot identity. Rejected BEFORE the acquire, so no money effect
+    // and no new idempotency row; the union of session + reviewer is a
+    // contradiction, not a fallback.
+    if (cashSessionId !== undefined && authMode === 'reviewer') {
+      throw new BusinessRuleViolationError(
+        'CASH_SESSION_REVIEWER_NOT_ALLOWED',
+        'CASH_SESSION_REVIEWER_NOT_ALLOWED',
+      );
+    }
+
     const normalizedPayments = normalizeCollectionRequestPayments(dto);
     const hashPayments = sortPaymentsForHash(normalizedPayments);
 
+    // Cash-register closing / T4 — `cashSessionId` participates ONLY when
+    // present, so an omitted session keeps the exact legacy hash while a
+    // session-bound key can never replay across sessions (session + actor
+    // are both in the digest).
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ saleId, actorId, payments: hashPayments }))
+      .update(
+        JSON.stringify({
+          saleId,
+          actorId,
+          payments: hashPayments,
+          ...(cashSessionId === undefined ? {} : { cashSessionId }),
+        }),
+      )
       .digest('hex');
 
     const idempotency = await this.saleRepo.acquirePaymentIdempotency(
@@ -3551,6 +3830,16 @@ export class SalesService {
 
     return this.saleRepo.runInTransaction(async () => {
       const tenantId = this.tenantPrisma.getTenantId();
+      // Cash-register closing / T4 — session fence (tenant/owner/OPEN) and,
+      // with it, the fail-closed missing-ledger guard. Runs before the sale
+      // lock. A replayed idempotency key returns above and never reaches
+      // this fence.
+      if (cashSessionId !== undefined) {
+        await this.requireCashLedger().assertOpenSession(
+          cashSessionId,
+          actorId,
+        );
+      }
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
       if (!sale || (authMode === 'owner' && sale.userId !== actorId)) {
         throw new BusinessRuleViolationError(
@@ -3619,6 +3908,26 @@ export class SalesService {
         userId: authMode === 'reviewer' ? null : actorId,
         payments: paymentsToPersist,
       });
+
+      // Cash-register closing / T4 — later collection: `changeDueCents` is
+      // always 0 on this path, the created rows keep the resolved catalog /
+      // bot-origin snapshots, and the movement lands in the SAME ambient
+      // transaction as the SalePayment rows.
+      if (cashSessionId !== undefined) {
+        await this.requireCashLedger().recordPayments({
+          sessionId: cashSessionId,
+          actorId,
+          saleId,
+          payments: paymentsToPersist.map((payment, index) => ({
+            paymentId: updated.paymentIds[index],
+            method: payment.method,
+            amountCents: payment.amountCents,
+            metadataJson: payment.metadataJson,
+          })),
+          changeDueCents: 0,
+          occurredAt: new Date(),
+        });
+      }
 
       const eventPayments = paymentsToPersist.map((payment, index) => ({
         paymentId: updated.paymentIds[index],

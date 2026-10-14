@@ -9,6 +9,7 @@
  * Depends on ProductsModule for product/variant validation and stock checks.
  */
 import { Module } from '@nestjs/common';
+import { CashRegisterModule } from '../cash-register/cash-register.module';
 import { SalesController } from './sales.controller';
 import { SalesCatalogController } from './sales-catalog.controller';
 import { SalesService } from './sales.service';
@@ -45,6 +46,7 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     SaleCommentsModule,
     PromotionsModule,
     AdminPaymentMethodModule,
+    CashRegisterModule,
   ],
   controllers: [
     SalesController,

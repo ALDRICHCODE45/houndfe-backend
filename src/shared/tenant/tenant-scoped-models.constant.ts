@@ -87,4 +87,16 @@ export const TENANT_SCOPED_MODELS = new Set([
   // to another tenant. The two unique constraints only protect the pair when
   // the runtime tenantId filter is actually injected.
   'HumanDecision',
+  // cash-register-closing / T2 — seven tenant-scoped POS cash tables. Same
+  // fail-open allowlist semantics as the rest of the file: without these
+  // entries the tenant-scoped client would not inject `tenantId`, so a
+  // cross-tenant register, session, movement, count, handover, closing or
+  // command row could be read or rewritten through TenantPrismaService.
+  'CashRegister',
+  'CashSession',
+  'CashMovement',
+  'CashCount',
+  'CashHandover',
+  'CashClosing',
+  'CashCommand',
 ]);

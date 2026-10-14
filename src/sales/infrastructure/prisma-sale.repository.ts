@@ -150,6 +150,21 @@ function toDomainRefundMethod(method: string): SaleRefundMethod {
  * live request keeps its slot, short enough that a crashed acquire self-heals. */
 const SETTLEMENT_LEASE_TTL_MS = 5 * 60 * 1000;
 
+/** Operation discriminator stored on every `sale_idempotency` slot. */
+type IdempotencyOperation =
+  | 'sale_charge'
+  | 'sale_payment'
+  | 'sale_cancel'
+  | 'bot_sale_register'
+  | 'sale_refund_settlement';
+
+/** Externally consumed acquire outcome shared by every public acquire method. */
+type IdempotencyAcquireOutcome =
+  | { kind: 'acquired'; token: string }
+  | { kind: 'replay'; payload: unknown }
+  | { kind: 'conflict' }
+  | { kind: 'in_flight' };
+
 @Injectable()
 export class PrismaSaleRepository implements ISaleRepository {
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
@@ -2216,6 +2231,12 @@ export class PrismaSaleRepository implements ISaleRepository {
     };
   }
 
+  /**
+   * Charge-slot acquire. Thin delegate to the shared `acquireIdempotency`
+   * core with `operation='sale_charge'`, so the POS charge path inherits the
+   * conflict-safe ambient-transaction branch below and keeps the exact same
+   * discriminated-union contract as payment / cancel / bot / settlement.
+   */
   async acquireChargeIdempotency(
     saleId: string,
     key: string,
@@ -2226,61 +2247,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     | { kind: 'conflict' }
     | { kind: 'in_flight' }
   > {
-    const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.requireTenantId();
-    const operation = 'sale_charge';
-
-    try {
-      const created = await prisma.saleIdempotency.create({
-        data: {
-          tenantId,
-          operation,
-          key,
-          requestHash,
-          status: 'IN_FLIGHT',
-          saleId,
-        },
-      });
-
-      return { kind: 'acquired', token: created.id };
-    } catch (error) {
-      if (
-        !(error instanceof Prisma.PrismaClientKnownRequestError) &&
-        !(typeof error === 'object' && error !== null && 'code' in error)
-      ) {
-        throw error;
-      }
-
-      const prismaCode =
-        error instanceof Prisma.PrismaClientKnownRequestError
-          ? error.code
-          : String((error as { code?: string }).code ?? '');
-      if (prismaCode !== 'P2002') {
-        throw error;
-      }
-
-      const existing = await prisma.saleIdempotency.findUnique({
-        where: {
-          tenantId_operation_key: {
-            tenantId,
-            operation,
-            key,
-          },
-        },
-      });
-
-      if (!existing) {
-        throw new BusinessRuleViolationError(
-          'IDEMPOTENCY_STATE_NOT_FOUND',
-          'IDEMPOTENCY_STATE_NOT_FOUND',
-        );
-      }
-
-      if (existing.requestHash !== requestHash) return { kind: 'conflict' };
-      if (existing.status === 'SUCCEEDED' && existing.responseJson)
-        return { kind: 'replay', payload: existing.responseJson };
-      return { kind: 'in_flight' };
-    }
+    return this.acquireIdempotency('sale_charge', saleId, key, requestHash);
   }
 
   async markChargeIdempotencySucceeded(
@@ -2465,24 +2432,44 @@ export class PrismaSaleRepository implements ISaleRepository {
     }
   }
 
+  /**
+   * Shared idempotency acquire. Two branches with one externally consumed
+   * outcome:
+   *
+   * - AMBIENT TRANSACTION (`isInTransaction()`): insert with
+   *   `createMany({ skipDuplicates: true })` (INSERT ... ON CONFLICT DO
+   *   NOTHING) plus an explicitly generated UUID. A plain
+   *   `create → catch P2002` CANNOT be used here: PostgreSQL aborts the
+   *   WHOLE transaction on the unique violation (25P02), so even a NORMAL
+   *   retry against a completed slot poisons the transaction and the
+   *   follow-up replay read fails. The conflict-safe insert never raises,
+   *   so the row stays inside the caller's transaction and rolls back
+   *   together with a rejected session fence or tender. See
+   *   `acquireIdempotencyInAmbientTransaction`.
+   *
+   * - LEGACY / UNBOUND: the untouched autocommit
+   *   `create → catch P2002 → re-read` flow. A client that does not expose
+   *   the conflict-safe insert also falls back to it.
+   */
   private async acquireIdempotency(
-    operation:
-      | 'sale_charge'
-      | 'sale_payment'
-      | 'sale_cancel'
-      | 'bot_sale_register'
-      | 'sale_refund_settlement',
+    operation: IdempotencyOperation,
     saleId: string | null,
     key: string,
     requestHash: string,
-  ): Promise<
-    | { kind: 'acquired'; token: string }
-    | { kind: 'replay'; payload: unknown }
-    | { kind: 'conflict' }
-    | { kind: 'in_flight' }
-  > {
+  ): Promise<IdempotencyAcquireOutcome> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
+
+    if (this.canInsertIdempotencyConflictSafe(prisma)) {
+      return this.acquireIdempotencyInAmbientTransaction(
+        prisma,
+        tenantId,
+        operation,
+        saleId,
+        key,
+        requestHash,
+      );
+    }
 
     try {
       const created = await prisma.saleIdempotency.create({
@@ -2513,28 +2500,115 @@ export class PrismaSaleRepository implements ISaleRepository {
         throw error;
       }
 
-      const existing = await prisma.saleIdempotency.findUnique({
-        where: {
-          tenantId_operation_key: {
-            tenantId,
-            operation,
-            key,
-          },
-        },
-      });
-
-      if (!existing) {
-        throw new BusinessRuleViolationError(
-          'IDEMPOTENCY_STATE_NOT_FOUND',
-          'IDEMPOTENCY_STATE_NOT_FOUND',
-        );
-      }
-
-      if (existing.requestHash !== requestHash) return { kind: 'conflict' };
-      if (existing.status === 'SUCCEEDED' && existing.responseJson)
-        return { kind: 'replay', payload: existing.responseJson };
-      return { kind: 'in_flight' };
+      return this.resolveIdempotencyOutcome(
+        prisma,
+        tenantId,
+        operation,
+        key,
+        requestHash,
+      );
     }
+  }
+
+  /**
+   * T4/T6 (S5,S8) — the conflict-safe branch is reachable only INSIDE an
+   * ambient transaction AND when the client exposes `createMany`. Every
+   * real Prisma client does (the tenant-scoping extension forwards it
+   * unchanged); a narrow fake without the delegate keeps the legacy branch
+   * instead of failing the acquire. `isInTransaction()` is the same guard
+   * `settleRefund` uses, so the whole bound money path shares it.
+   */
+  private canInsertIdempotencyConflictSafe(
+    prisma: ReturnType<TenantPrismaService['getClient']>,
+  ): boolean {
+    // SAFETY: the generated Prisma delegate always declares `createMany`,
+    // but a narrow runtime double may omit it. Widening to an optional
+    // shape is the only way to PROBE availability instead of assuming it.
+    const createMany = (
+      prisma.saleIdempotency as unknown as { createMany?: unknown }
+    ).createMany;
+    return (
+      this.tenantPrisma.isInTransaction() && typeof createMany === 'function'
+    );
+  }
+
+  /**
+   * T4/T6 (S5,S8) — conflict-safe acquire for an ambient transaction.
+   * `count === 1` means this caller owns the fresh slot and gets the token
+   * it generated; `count === 0` means the business key is already owned and
+   * the SAME discriminated outcome is resolved by a follow-up read. The
+   * settlement lease reclaim path re-enters `acquireIdempotency` unchanged,
+   * so an expired slot is re-acquired through this same branch.
+   */
+  private async acquireIdempotencyInAmbientTransaction(
+    prisma: ReturnType<TenantPrismaService['getClient']>,
+    tenantId: string,
+    operation: IdempotencyOperation,
+    saleId: string | null,
+    key: string,
+    requestHash: string,
+  ): Promise<IdempotencyAcquireOutcome> {
+    const token = randomUUID();
+    const inserted = await prisma.saleIdempotency.createMany({
+      data: [
+        {
+          id: token,
+          tenantId,
+          operation,
+          key,
+          requestHash,
+          status: 'IN_FLIGHT',
+          saleId,
+        },
+      ],
+      skipDuplicates: true,
+    });
+
+    if (inserted.count === 1) {
+      return { kind: 'acquired', token };
+    }
+
+    return this.resolveIdempotencyOutcome(
+      prisma,
+      tenantId,
+      operation,
+      key,
+      requestHash,
+    );
+  }
+
+  /**
+   * Shared post-collision read: the four outcome semantics are resolved in
+   * exactly one place so the conflict-safe and legacy branches cannot drift.
+   */
+  private async resolveIdempotencyOutcome(
+    prisma: ReturnType<TenantPrismaService['getClient']>,
+    tenantId: string,
+    operation: IdempotencyOperation,
+    key: string,
+    requestHash: string,
+  ): Promise<IdempotencyAcquireOutcome> {
+    const existing = await prisma.saleIdempotency.findUnique({
+      where: {
+        tenantId_operation_key: {
+          tenantId,
+          operation,
+          key,
+        },
+      },
+    });
+
+    if (!existing) {
+      throw new BusinessRuleViolationError(
+        'IDEMPOTENCY_STATE_NOT_FOUND',
+        'IDEMPOTENCY_STATE_NOT_FOUND',
+      );
+    }
+
+    if (existing.requestHash !== requestHash) return { kind: 'conflict' };
+    if (existing.status === 'SUCCEEDED' && existing.responseJson)
+      return { kind: 'replay', payload: existing.responseJson };
+    return { kind: 'in_flight' };
   }
 
   private async markIdempotencySucceeded(
