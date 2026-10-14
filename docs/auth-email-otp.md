@@ -1,12 +1,18 @@
 # Activación del login con contraseña y OTP por correo
 
 El acceso nuevo requiere **contraseña → OTP de correo → sesión**, también para
-super-admin. Esta guía reemplaza el login por contraseña de
+super-admin, en staging, producción y pruebas (`NODE_ENV=test`). **Solo con
+`NODE_ENV=development`**, el login valida contraseña y usuario activo y continúa
+sin pedir ni enviar OTP. Un entorno ausente o distinto de `development` no activa
+esta excepción; Joi sigue exigiendo un `NODE_ENV` válido al arrancar.
+Esta guía reemplaza el login por contraseña de
 [multi-tenant-api.md](multi-tenant-api.md); la selección y el cambio de sucursal
 conservan sus respuestas posteriores a la autenticación.
 
 **Solo el dueño hace push y despliega.** Esta guía no ejecuta ni autoriza migraciones,
-pruebas vivas o envíos. No hay flag de bypass OTP. La verificación local usa mocks;
+pruebas vivas o envíos. No hay flag de bypass OTP: la excepción local depende
+exclusivamente de `NODE_ENV=development`. Nunca configurar un despliegue como
+`development` para evitar OTP. La verificación local usa mocks;
 no demuestra entrega en inbox ni concurrencia real de PostgreSQL.
 
 ## 1. Ruta rápida del dueño
@@ -20,13 +26,13 @@ no demuestra entrega en inbox ni concurrencia real de PostgreSQL.
 
 ## 2. Prerrequisitos
 
-| Área | Requisito antes de activar |
-| --- | --- |
-| PostgreSQL | Migración aditiva `20260926183000_login_email_otp`: desafíos y presupuestos persistentes. Preparar respaldo y revisar el conjunto de migraciones pendientes. |
-| Prisma Client | Cliente generado con el esquema nuevo. El [Dockerfile](../Dockerfile) lo genera durante el build, antes de compilar. |
-| Correo | `RESEND_API_KEY` válido y `MAIL_FROM` habilitado por el proveedor, en **todo `NODE_ENV`**, incluidos desarrollo y pruebas vivas. |
-| Secretos | Conservar `JWT_SECRET` consistente entre todas las réplicas y la configuración existente de refresh. No se introduce otro secreto OTP ni se prescribe rotación. |
-| Clientes | Frontend OTP y backend activado deben salir coordinados. Los usuarios necesitan acceso a su dirección de correo actual. |
+| Área          | Requisito antes de activar                                                                                                                                                                                                                    |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL    | Migración aditiva `20260926183000_login_email_otp`: desafíos y presupuestos persistentes. Preparar respaldo y revisar el conjunto de migraciones pendientes.                                                                                  |
+| Prisma Client | Cliente generado con el esquema nuevo. El [Dockerfile](../Dockerfile) lo genera durante el build, antes de compilar.                                                                                                                          |
+| Correo        | `RESEND_API_KEY` válido y `MAIL_FROM` habilitado para flujos OTP en staging, producción y `test`. El login normal en `development` no envía correo ni crea un desafío; otros correos y los endpoints OTP explícitos conservan sus requisitos. |
+| Secretos      | Conservar `JWT_SECRET` consistente entre todas las réplicas y la configuración existente de refresh. No se introduce otro secreto OTP ni se prescribe rotación.                                                                               |
+| Clientes      | Frontend y backend deben salir coordinados. El frontend debe aceptar el sobre OTP o el `LoginResponse` directo del login local; en entornos OTP los usuarios necesitan acceso a su correo actual.                                             |
 
 La ruta `sensitive` del [mailer](../src/notifications/email/resend.mailer.ts)
 falla cerrada si faltan proveedor o remitente; nunca usa el fallback de logs de
@@ -36,13 +42,13 @@ JWT ni secretos en tickets o evidencias. Confirmar configuración sin compartir 
 
 ## 3. Contrato HTTP v1
 
-| Paso | Solicitud | Éxito |
-| --- | --- | --- |
-| Contraseña | `POST /auth/login` con el DTO existente `{email,password}` | HTTP 200, exclusivamente el sobre OTP de abajo. No devuelve usuario, tenants ni tokens. |
-| Verificación | `POST /auth/login/otp/verify` con `{challengeId,code}` | HTTP 200, el `LoginResponse` existente, solo después de consumir el OTP. |
-| Reenvío | `POST /auth/login/otp/resend` con `{challengeId}` | HTTP 200, reemplaza el sobre completo e invalida el handle/código anterior. |
-| Selección | `POST /auth/select-tenant` con `{tempToken,tenantId}` | Conserva la respuesta de sesión; comprueba usuario activo y pertenencia a un tenant activo. |
-| Registro | `POST /auth/register` con el DTO existente | HTTP 201, solo `{user}` creado. Luego debe hacerse login normal con contraseña y OTP. |
+| Paso         | Solicitud                                                  | Éxito                                                                                                                                                                                     |
+| ------------ | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contraseña   | `POST /auth/login` con el DTO existente `{email,password}` | HTTP 200: en `development`, `LoginResponse` directo (sesión final o selección de sucursal); fuera de `development`, exclusivamente el sobre OTP de abajo, sin usuario, tenants ni tokens. |
+| Verificación | `POST /auth/login/otp/verify` con `{challengeId,code}`     | HTTP 200, el `LoginResponse` existente, solo después de consumir el OTP.                                                                                                                  |
+| Reenvío      | `POST /auth/login/otp/resend` con `{challengeId}`          | HTTP 200, reemplaza el sobre completo e invalida el handle/código anterior.                                                                                                               |
+| Selección    | `POST /auth/select-tenant` con `{tempToken,tenantId}`      | Conserva la respuesta de sesión; comprueba usuario activo y pertenencia a un tenant activo.                                                                                               |
+| Registro     | `POST /auth/register` con el DTO existente                 | HTTP 201, solo `{user}` creado. Luego debe hacerse login: contraseña en `development`, contraseña y OTP en los demás entornos.                                                            |
 
 ```json
 {
@@ -59,7 +65,8 @@ El desafío vive diez minutos desde su activación tras el envío aceptado; el r
 requiere esperar al menos 60 segundos. Un nuevo login válido también reemplaza el
 desafío, sujeto a los mismos presupuestos y cooldown.
 
-Después de verificar:
+Después de verificar OTP, o directamente tras contraseña válida en `development`:
+
 - Una sucursal activa: credenciales finales y `requiresTenantSelection:false`.
 - Varias sucursales activas: `requiresTenantSelection:true`, tenants y `tempToken`
   por 300 segundos; todavía no hay sesión final.
@@ -69,17 +76,22 @@ Después de verificar:
 El frontend conserva el desafío **solo en memoria** en login, no en almacenamiento
 persistente ni en slots de tokens. No debe hidratar permisos ni navegar a rutas
 protegidas antes de obtener credenciales finales. Una recarga reinicia desde contraseña.
+En `development`, si el login devuelve `requiresTenantSelection:false`, el cliente
+completa la sesión directamente; si devuelve `true`, muestra el selector y usa
+`tempToken` sin tratarlo como sesión final. No llamar a verify/resend sin desafío.
+La validación de contraseña, usuario activo, pertenencia y permisos se conserva,
+así como el rate limit del password login. No se desactiva el mailer globalmente.
 
 ## 4. Fallos y límites
 
-| Respuesta | Significado y recuperación |
-| --- | --- |
-| 400 | DTO malformado o campos extra. Se mantiene el sobre de validación, sin `target` ni `value` que expongan datos enviados. |
-| Error de contraseña | Conserva el comportamiento anterior; no crea OTP ni credenciales. |
-| 401 `OTP_INVALID` | Genérico para código incorrecto, expirado, consumido, desconocido o presupuesto de verificación agotado. No distingue la causa. Reiniciar desde contraseña cuando corresponda; un resend 401 obliga a reiniciar. |
-| 429 `OTP_RATE_LIMITED` | Incluye `retryAfter` en segundos y cabecera `Retry-After`. Esperar; un reenvío limitado conserva el desafío actual. |
-| 503 `OTP_DELIVERY_UNAVAILABLE` | No hay desafío utilizable tras el fallo de entrega; un reenvío fallido invalida el anterior. Reiniciar desde contraseña. |
-| Otro 503 genérico | Infraestructura de autenticación no disponible; no asumir emisión de sesión o entrega. |
+| Respuesta                      | Significado y recuperación                                                                                                                                                                                       |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400                            | DTO malformado o campos extra. Se mantiene el sobre de validación, sin `target` ni `value` que expongan datos enviados.                                                                                          |
+| Error de contraseña            | Conserva el comportamiento anterior; no crea OTP ni credenciales.                                                                                                                                                |
+| 401 `OTP_INVALID`              | Genérico para código incorrecto, expirado, consumido, desconocido o presupuesto de verificación agotado. No distingue la causa. Reiniciar desde contraseña cuando corresponda; un resend 401 obliga a reiniciar. |
+| 429 `OTP_RATE_LIMITED`         | Incluye `retryAfter` en segundos y cabecera `Retry-After`. Esperar; un reenvío limitado conserva el desafío actual.                                                                                              |
+| 503 `OTP_DELIVERY_UNAVAILABLE` | No hay desafío utilizable tras el fallo de entrega; un reenvío fallido invalida el anterior. Reiniciar desde contraseña.                                                                                         |
+| Otro 503 genérico              | Infraestructura de autenticación no disponible; no asumir emisión de sesión o entrega.                                                                                                                           |
 
 Los sobres OTP conservan `statusCode`, `error`, `code` y `message`; el 429 además
 incluye `retryAfter`. Ante timeout ambiguo de reenvío o respuesta de verificación
@@ -120,7 +132,10 @@ presupuestos y sesiones finales existentes.
 El propósito interno del MAC cambia a `password-login-otp/v2`; los digests pendientes
 anteriores fallan cerrados. Esto **no cambia el contrato HTTP v1** ni el claim firmado
 `authProof:'password-email-otp-v1'` del token de selección, emitido solo tras OTP.
-Los tokens de selección antiguos sin esa prueba se rechazan. Las sesiones finales
+El login local con contraseña emite `authProof:'password-development-v1'`:
+`select-tenant` acepta esa prueba únicamente en `NODE_ENV=development`; staging,
+producción, `test` y entornos ausentes la rechazan antes de consultar pertenencia
+o emitir credenciales. Los tokens antiguos sin prueba válida siguen rechazados. Las sesiones finales
 válidas existentes, refresh y switch siguen compatibles; no requieren agregar esa
 prueba. Un token temporal no se acepta como sesión final ni como refresh.
 
@@ -147,23 +162,30 @@ requisito OTP. Coordinar también el frontend; no introducir un flag de bypass.
 
 ## 7. Aceptación manual mínima del dueño
 
+Para desarrollo local (`NODE_ENV=development`): contraseña válida entra sin correo
+ni pantalla OTP; varias sucursales conservan su selector; contraseña incorrecta,
+usuario inactivo o ausencia de sucursal activa y rol global no permiten acceso.
+El frontend debe admitir ambos resultados del login. Reiniciar el backend tras
+configurar `NODE_ENV`; esta guía no modifica `.env` ni prepara bases de datos.
+
+El siguiente checklist corresponde a los entornos que exigen OTP.
 Solo en el entorno y con las cuentas de prueba que el dueño autorice; sin automatización
 visual extensa ni exposición de códigos o credenciales en evidencias:
 
 - [ ] Contraseña incorrecta no envía correo ni crea sesión. Contraseña correcta
-  muestra el desafío sin permitir una ruta protegida; confirmar recepción real en inbox.
+      muestra el desafío sin permitir una ruta protegida; confirmar recepción real en inbox.
 - [ ] Con OTP válido: una sucursal abre su sesión; varias ofrecen selector antes de
-  abrirla; super-admin también exige OTP y luego entra en contexto global.
+      abrirla; super-admin también exige OTP y luego entra en contexto global.
 - [ ] Código incorrecto y expirado fallan genéricamente sin sesión. Un código ya
-  consumido no puede crear otra sesión. Respetar presupuestos al preparar los casos.
+      consumido no puede crear otra sesión. Respetar presupuestos al preparar los casos.
 - [ ] Tras el cooldown, reenviar reemplaza el desafío; el código anterior falla y
-  el nuevo permite continuar. Un 429 conserva el desafío y muestra la espera.
+      el nuevo permite continuar. Un 429 conserva el desafío y muestra la espera.
 - [ ] Recargar login reinicia desde contraseña; un timeout ambiguo o respuesta de
-  verify perdida permite reiniciar sin tratar el desafío como credencial.
+      verify perdida permite reiniciar sin tratar el desafío como credencial.
 - [ ] Tras completar el flujo, comprobar acceso protegido, permisos y selección de
-  tenant esperados; una sesión final anterior válida conserva refresh/switch.
+      tenant esperados; una sesión final anterior válida conserva refresh/switch.
 - [ ] Registro devuelve usuario sin tokens; el usuario nuevo debe pasar por login
-  con contraseña y OTP antes de acceder.
+      con contraseña y OTP antes de acceder.
 
 ## 8. Evidencia y límites de verificación
 
