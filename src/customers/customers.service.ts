@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Customer } from './domain/customer.entity';
+import { Customer, normalizePhoneDigits } from './domain/customer.entity';
 import type { ICustomerRepository } from './domain/customer.repository';
 import { CUSTOMER_REPOSITORY } from './domain/customer.repository';
 import { CreateCustomerDto } from './dto/create-customer.dto';
@@ -139,8 +139,9 @@ export class CustomersService {
     if (dto.lastName !== undefined)
       customer.lastName = dto.lastName?.trim() || null;
     if (dto.phoneCountryCode !== undefined)
-      customer.phoneCountryCode = dto.phoneCountryCode?.trim() || null;
-    if (dto.phone !== undefined) customer.phone = dto.phone?.trim() || null;
+      customer.phoneCountryCode = normalizePhoneDigits(dto.phoneCountryCode);
+    if (dto.phone !== undefined)
+      customer.phone = normalizePhoneDigits(dto.phone);
     if (dto.email !== undefined)
       customer.email = dto.email?.trim().toLowerCase() || null;
     if (dto.globalPriceListId !== undefined)

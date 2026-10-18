@@ -19,6 +19,7 @@ import { CheckoutController } from './checkout.controller';
 import { CheckoutService } from '../application/checkout.service';
 import { ChatbotApiController } from './chatbot-api.controller';
 import { ChatbotApiService } from '../application/chatbot-api.service';
+import { CustomersService } from '../../customers/customers.service';
 import { PrismaCustomerRepository } from '../../customers/infrastructure/prisma-customer.repository';
 import { PrismaSaleRepository } from '../../sales/infrastructure/prisma-sale.repository';
 import { SalesService } from '../../sales/sales.service';
@@ -60,6 +61,7 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
   let cashier: string;
   let productId: string;
   let tenant: TenantPrismaService;
+  let contexts: AsyncLocalStorage<Record<string, unknown>>;
   let failOutbox: boolean;
   let hold: { entered: () => void; wait: Promise<void> } | undefined;
   let confirmation: jest.SpyInstance;
@@ -124,7 +126,7 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
         useStock: true,
       },
     });
-    const contexts = new AsyncLocalStorage<Record<string, unknown>>();
+    contexts = new AsyncLocalStorage<Record<string, unknown>>();
     const cls = {
       get: (key: string) => contexts.getStore()?.[key],
       set: (key: string, value: unknown) => {
@@ -394,6 +396,54 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
       outbox: 2,
       stock: 8,
     });
+  });
+  it('finds a POS-typed phone through every chatbot lookup without duplicating the customer', async () => {
+    const pos = new CustomersService(
+      new PrismaCustomerRepository(tenant),
+      db as unknown as PrismaService,
+      tenant,
+    );
+    const created = await contexts.run({ tenantId }, () =>
+      pos.create({
+        firstName: 'Pos',
+        phoneCountryCode: '+52',
+        phone: '55 8587 6245',
+      }),
+    );
+    const lookup = await request(app.getHttpServer())
+      .get(
+        '/chatbot-api/customers/checkout-context?phoneCountryCode=52&phone=5585876245',
+      )
+      .set('Authorization', `Bearer ${token}`);
+    expect(lookup.status).toBe(200);
+    expect(lookup.body).toMatchObject({
+      status: 'unique',
+      customer: { customerId: created.id },
+    });
+    const byPhone = await request(app.getHttpServer())
+      .get(
+        '/chatbot-api/customers/by-phone?phoneCountryCode=52&phone=5585876245',
+      )
+      .set('Authorization', `Bearer ${token}`);
+    expect(byPhone.status).toBe(200);
+    expect(byPhone.body).toMatchObject({
+      found: true,
+      customer: {
+        customerId: created.id,
+        phoneCountryCode: '52',
+        phone: '5585876245',
+      },
+    });
+    const checkout = await post(
+      { ...body(), phone: '5585876245' },
+      'pos-phone',
+    );
+    expect(checkout.status).toBe(201);
+    expect(checkout.body.customer).toMatchObject({
+      resolution: 'existing',
+      customerId: created.id,
+    });
+    expect(await committedEffects()).toMatchObject({ customers: 1, sales: 1 });
   });
   it('same key in progress yields safe conflict/not_observed then exact replay after commit', async () => {
     let entered!: () => void;

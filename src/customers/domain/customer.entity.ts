@@ -129,8 +129,8 @@ export class Customer {
       id: params.id,
       firstName,
       lastName: params.lastName?.trim() || null,
-      phoneCountryCode: params.phoneCountryCode?.trim() || null,
-      phone: params.phone?.trim() || null,
+      phoneCountryCode: normalizePhoneDigits(params.phoneCountryCode),
+      phone: normalizePhoneDigits(params.phone),
       email: params.email?.trim().toLowerCase() || null,
       globalPriceListId: params.globalPriceListId ?? null,
       comments: params.comments?.trim() || null,
@@ -213,4 +213,12 @@ export class Customer {
       updatedAt: this.updatedAt.toISOString(),
     };
   }
+}
+
+/**
+ * Canonical stored form of a phone part: digits only, `null` when none remain.
+ * Lookups match phone parts exactly, so `'+52'` and `'52'` must not coexist.
+ */
+export function normalizePhoneDigits(value?: string | null): string | null {
+  return value?.replace(/\D/g, '') || null;
 }
