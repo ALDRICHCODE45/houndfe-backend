@@ -1,4 +1,5 @@
 import { CustomersService } from './customers.service';
+import { Customer } from './domain/customer.entity';
 import type { PrismaService } from '../shared/prisma/prisma.service';
 import type { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 
@@ -254,5 +255,92 @@ describe('CustomersService address coordinates', () => {
     expect(await service.getAddresses('cust-1')).toEqual([
       { latitude: 0, longitude: 0 },
     ]);
+  });
+});
+
+describe('CustomersService phone normalization', () => {
+  it('stores only digits for a POS-created phone and country code', async () => {
+    const { service, prisma, tenantClient } = makeService();
+    tenantClient.customer.findUnique.mockResolvedValue({
+      ...makeCustomerRecord('cust-1'),
+      globalPriceList: null,
+      addresses: [],
+    });
+    await service.create({
+      firstName: 'Ada',
+      phoneCountryCode: '+52',
+      phone: '55 8587 6245',
+    });
+    const [{ data }] = prisma.customer.create.mock.calls[0] as [
+      { data: { phoneCountryCode: string | null; phone: string | null } },
+    ];
+    expect(data).toMatchObject({ phoneCountryCode: '52', phone: '5585876245' });
+  });
+
+  it('stores null when a phone part has no digits on create', async () => {
+    const { service, prisma, tenantClient } = makeService();
+    tenantClient.customer.findUnique.mockResolvedValue({
+      ...makeCustomerRecord('cust-1'),
+      globalPriceList: null,
+      addresses: [],
+    });
+    await service.create({
+      firstName: 'Ada',
+      phoneCountryCode: '+',
+      phone: ' - ',
+    });
+    const [{ data }] = prisma.customer.create.mock.calls[0] as [
+      { data: { phoneCountryCode: string | null; phone: string | null } },
+    ];
+    expect(data).toMatchObject({ phoneCountryCode: null, phone: null });
+  });
+
+  it('stores only digits on update and null when nothing remains', async () => {
+    const { service, customerRepo, tenantClient } = makeService();
+    const record = {
+      ...makeCustomerRecord('cust-1'),
+      phoneCountryCode: '52',
+      phone: '5512345678',
+    };
+    customerRepo.findById.mockResolvedValue(
+      Customer.fromPersistence({ ...record, preferredPaymentMethod: null }),
+    );
+    tenantClient.customer.findUnique.mockResolvedValue({
+      ...record,
+      globalPriceList: null,
+      addresses: [],
+    });
+    await service.update('cust-1', {
+      phoneCountryCode: ' +52 ',
+      phone: '(55) 8587-6245',
+    });
+    expect(customerRepo.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phoneCountryCode: '52', phone: '5585876245' }),
+    );
+    await service.update('cust-1', { phoneCountryCode: '+', phone: '' });
+    expect(customerRepo.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phoneCountryCode: null, phone: null }),
+    );
+  });
+
+  it('keeps stored phone parts when update omits them', async () => {
+    const { service, customerRepo, tenantClient } = makeService();
+    const record = {
+      ...makeCustomerRecord('cust-1'),
+      phoneCountryCode: '52',
+      phone: '5512345678',
+    };
+    customerRepo.findById.mockResolvedValue(
+      Customer.fromPersistence({ ...record, preferredPaymentMethod: null }),
+    );
+    tenantClient.customer.findUnique.mockResolvedValue({
+      ...record,
+      globalPriceList: null,
+      addresses: [],
+    });
+    await service.update('cust-1', { firstName: 'Eva' });
+    expect(customerRepo.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phoneCountryCode: '52', phone: '5512345678' }),
+    );
   });
 });
