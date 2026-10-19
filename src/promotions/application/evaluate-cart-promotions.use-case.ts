@@ -25,8 +25,7 @@ export class EvaluateCartPromotionsUseCase implements IEvaluateCartPromotionsUse
       snapshot.some(
         (promotion) =>
           promotion.botEligible && !isBotEligibilitySupported(promotion),
-      ) ||
-      input.hasAdvancedReward;
+      );
 
     return {
       items: needsReview

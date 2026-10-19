@@ -34,6 +34,14 @@ export const BOT_ELIGIBILITY_RULES: readonly BotEligibilityRule[] = [
     allowsPriceLists: true,
     allowsDaysOfWeek: true,
   },
+  {
+    type: 'ADVANCED',
+    method: 'AUTOMATIC',
+    appliesTo: null,
+    customerScopes: ['ALL', 'REGISTERED_ONLY', 'SPECIFIC'],
+    allowsPriceLists: true,
+    allowsDaysOfWeek: true,
+  },
 ];
 
 interface BotEligibilityInput {

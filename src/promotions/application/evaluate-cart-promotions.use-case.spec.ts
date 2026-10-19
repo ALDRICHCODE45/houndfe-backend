@@ -33,7 +33,6 @@ const pricing = {
       appliedPromotionTitle: 'Bot discount',
     },
   ],
-  hasAdvancedReward: false,
 };
 const base = {
   ...pricing.items[0],
@@ -87,7 +86,7 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
   });
 
   it('ignores unsupported promotions that are not bot eligible', async () => {
-    const h = harness([promotion({ type: 'ADVANCED', botEligible: false })]);
+    const h = harness([promotion({ method: 'MANUAL', botEligible: false })]);
     await expect(h.useCase.execute(pricing)).resolves.toEqual({
       items: pricing.items,
       promotionEvaluationStatus: 'fully_evaluated',
@@ -112,7 +111,7 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
     },
   );
 
-  it.each([{ type: 'ADVANCED' as const }])(
+  it.each([{ method: 'MANUAL' as const }])(
     'fails closed for an unsupported eligible snapshot: %j',
     async (rule) => {
       const h = harness([promotion(rule)]);
@@ -147,18 +146,13 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
     });
   });
 
-  it.each([{ hasAdvancedReward: true }])(
-    'fails closed for unsupported rewards applied by the sale: %j',
-    async (flags) => {
-      const h = harness();
-      await expect(
-        h.useCase.execute({ ...pricing, ...flags }),
-      ).resolves.toEqual({
-        items: [base],
-        promotionEvaluationStatus: 'needs_human_review',
-      });
-    },
-  );
+  it('keeps an eligible ADVANCED get-side reward fully evaluated', async () => {
+    const h = harness([promotion({ type: 'ADVANCED', appliesTo: null })]);
+    await expect(h.useCase.execute(pricing)).resolves.toEqual({
+      items: pricing.items,
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
 
   it('propagates snapshot failures rather than silently quoting', async () => {
     const h = harness();

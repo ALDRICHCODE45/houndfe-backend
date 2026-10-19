@@ -246,9 +246,10 @@ describe('bot eligibility CRUD contract', () => {
       },
     ],
     [
-      'type',
+      'method',
       {
         type: PromotionTypeEnum.ADVANCED,
+        method: PromotionMethodEnum.MANUAL,
         appliesTo: undefined,
         discountType: undefined,
         discountValue: undefined,
@@ -404,6 +405,86 @@ describe('bot eligibility CRUD contract', () => {
     },
   );
 
+  it.each([
+    CustomerScopeEnum.ALL,
+    CustomerScopeEnum.REGISTERED_ONLY,
+    CustomerScopeEnum.SPECIFIC,
+  ])(
+    'creates and patches ADVANCED with %s, price lists and weekdays',
+    async (customerScope) => {
+      const { repo, service } = harness();
+      const deal = {
+        type: PromotionTypeEnum.ADVANCED,
+        buyQuantity: 2,
+        getQuantity: 1,
+        getDiscountPercent: 100,
+        buyTargetType: PromotionTargetTypeEnum.CATEGORIES,
+        getTargetType: PromotionTargetTypeEnum.BRANDS,
+      };
+      const restrictions = {
+        customerScope,
+        customerIds:
+          customerScope === CustomerScopeEnum.SPECIFIC ? ['customer-1'] : [],
+        priceListIds: ['list-1'],
+        daysOfWeek: [DayOfWeekEnum.MONDAY],
+      };
+      const buyTargetItems = [
+        { targetType: deal.buyTargetType, targetId: 'target-1' },
+      ];
+      const getTargetItems = [
+        { targetType: deal.getTargetType, targetId: 'target-1' },
+      ];
+      const expected = {
+        ...deal,
+        botEligible: true,
+        appliesTo: null,
+        customerScope,
+        priceLists: [expect.objectContaining({ globalPriceListId: 'list-1' })],
+        daysOfWeek: [expect.objectContaining({ day: 'MONDAY' })],
+        customers: restrictions.customerIds.map((customerId): unknown =>
+          expect.objectContaining({ customerId }),
+        ),
+        targetItems: [
+          expect.objectContaining({ ...buyTargetItems[0], side: 'BUY' }),
+          expect.objectContaining({ ...getTargetItems[0], side: 'GET' }),
+        ],
+      };
+      await expect(
+        service.create({
+          title: 'Buy A get B',
+          method: PromotionMethodEnum.AUTOMATIC,
+          ...deal,
+          ...restrictions,
+          buyTargetItems,
+          getTargetItems,
+          botEligible: true,
+        }),
+      ).resolves.toMatchObject(expected);
+      const stored = makePromotion({
+        ...deal,
+        discountType: null,
+        discountValue: null,
+        appliesTo: null,
+        targetItems: [
+          { ...buyTargetItems[0], id: 'buy', side: 'BUY' },
+          { ...getTargetItems[0], id: 'get', side: 'GET' },
+        ],
+      });
+      repo.findById.mockResolvedValue(stored);
+      await expect(
+        service.update('promo-1', { ...restrictions, botEligible: true }),
+      ).resolves.toMatchObject(expected);
+      stored.botEligible = false;
+      await expect(
+        service.update('promo-1', { botEligible: true }),
+      ).resolves.toMatchObject(expected);
+      await expect(
+        service.update('promo-1', { title: 'Renamed' }),
+      ).resolves.toMatchObject(expected);
+      expect(repo.save.mock.calls).toHaveLength(4);
+    },
+  );
+
   it('allows a flag-only PATCH and preserves the flag when omitted', async () => {
     const { repo, service } = harness();
     repo.findById.mockResolvedValue(makePromotion({ appliesTo: 'PRODUCTS' }));
@@ -466,7 +547,7 @@ describe('bot eligibility CRUD contract', () => {
     ['method', { method: 'MANUAL' }],
     ['method', { type: 'ORDER_DISCOUNT', method: 'MANUAL', appliesTo: null }],
     ['method', { type: 'BUY_X_GET_Y', method: 'MANUAL' }],
-    ['type', { type: 'ADVANCED' }],
+    ['method', { type: 'ADVANCED', method: 'MANUAL', appliesTo: null }],
   ])('validates stored %s on a flag-only PATCH', async (condition, stored) => {
     const { repo, service } = harness();
     repo.findById.mockResolvedValue(
