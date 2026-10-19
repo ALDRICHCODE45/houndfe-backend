@@ -33,6 +33,10 @@ import {
 } from './domain/events/sale.events';
 import { InvalidDueDateError } from './domain/sale.errors';
 import type { IPromotionUsageRepository } from '../promotions/domain/promotion-usage.repository';
+import { Promotion } from '../promotions/domain/promotion.entity';
+import type { IPromotionRepository } from '../promotions/domain/promotion.repository';
+import { PosEvaluatePromotionsUseCase } from '../promotions/application/pos-evaluate-promotions.use-case';
+import type { PosEvalInput } from '../promotions/application/ports/pos-evaluate-promotions.port';
 
 interface RecomputeProbe {
   recomputePricingAndPromotions(sale: Sale): Promise<void>;
@@ -4581,6 +4585,56 @@ describe('SalesService', () => {
 
       return { customerFindUnique, customerAddressFindUnique };
     };
+
+    it.each([false, true])(
+      'revalidates bot-only pricing with the real engine for botEligible=%s (also used by atomic checkout)',
+      async (botEligible) => {
+        setupConfirmBotSaleHappyPath();
+        const promotion = Promotion.create({
+          id: 'promo-bot',
+          title: 'Bot discount',
+          type: 'PRODUCT_DISCOUNT',
+          method: 'AUTOMATIC',
+          botEligible,
+          appliesTo: 'PRODUCTS',
+          discountType: 'PERCENTAGE',
+          discountValue: 10,
+        });
+        promotion.targetItems = [
+          {
+            id: 'target-1',
+            side: 'DEFAULT',
+            targetType: 'PRODUCTS',
+            targetId: 'prod-1',
+          },
+        ];
+        const repository = {
+          findAll: jest.fn().mockResolvedValue({
+            data: [promotion],
+            total: 1,
+          }),
+        } as unknown as IPromotionRepository;
+        const engine = new PosEvaluatePromotionsUseCase(repository);
+        const posEvaluate = posEvaluateUseCase as PosEvaluateUseCaseMock;
+        posEvaluate.evaluate.mockImplementation((input: PosEvalInput) =>
+          engine.evaluate(input),
+        );
+        const expectedTotalCents = botEligible ? 1800 : 2000;
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          expectedTotalCents,
+        });
+        expect(posEvaluate.evaluate.mock.calls[0][0]).toMatchObject({
+          botEligibleOnly: true,
+        });
+        expect(result.totalCents).toBe(expectedTotalCents);
+        expect(result.discountCents).toBe(botEligible ? 200 : 0);
+        expect(saleRepo.persistChargeConfirmation.mock.calls[0][0]).toMatchObject({
+          totalCents: expectedTotalCents,
+          discountCents: botEligible ? 200 : 0,
+        });
+      },
+    );
 
     it('pca-2c2 — claims exact capacity demands after save and before stock', async () => {
       setupConfirmBotSaleHappyPath();

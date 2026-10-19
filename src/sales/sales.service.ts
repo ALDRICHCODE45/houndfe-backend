@@ -656,7 +656,10 @@ export class SalesService {
    * pca-2c2 — also returns the engine capacity demands / exclusions so
    * confirmation can claim them; draft previews discard the value.
    */
-  private async recomputePricingAndPromotions(sale: Sale): Promise<{
+  private async recomputePricingAndPromotions(
+    sale: Sale,
+    botEligibleOnly = false,
+  ): Promise<{
     promotionCapacityDemands: PromotionCapacityClaim[];
     capacityExcludedPromotionIds: string[];
   }> {
@@ -680,7 +683,7 @@ export class SalesService {
     // (3) Build input + (4) call engine — see `buildPosEvalInput`.
     //     `effectiveUnitPriceCents` reads the post-reprice
     //     `unitPriceCents` so the engine sees the tier-adjusted price.
-    const result = await this.evaluatePromotionsForSale(sale);
+    const result = await this.evaluatePromotionsForSale(sale, botEligibleOnly);
 
     // (5) Apply each per-line result. Engine guarantees `hasManualDiscount
     //     === false` for lines it returns, so manual-discount lines are
@@ -821,8 +824,9 @@ export class SalesService {
    * without changing the draft. Read-only — the spec scenario for
    * `GET /sales/drafts/:id/applicable-promotions` is non-mutating.
    */
-  private async evaluatePromotionsForSale(sale: Sale) {
+  private async evaluatePromotionsForSale(sale: Sale, botEligibleOnly = false) {
     const input = await this.buildPosEvalInput(sale);
+    if (botEligibleOnly) input.botEligibleOnly = true;
     return this.posEvaluatePromotions.evaluate(input);
   }
 
@@ -3454,17 +3458,14 @@ export class SalesService {
         null;
       sale.setGlobalPriceList(customerList, false);
 
-      // D4 — re-evaluate the bot cart with the FULL POS promotions
-      // engine (the same call `chargeDraft` uses at sales.service.ts:2364).
-      // This handles PRODUCT_DISCOUNT / ORDER_DISCOUNT / BXGY / ADVANCED,
-      // tier-aware reprice, customer scope, date windows, daysOfWeek,
-      // and price-list gating. The simplified `evaluate-cart` engine is
-      // NOT used here (see exploration.md).
+      // Re-evaluate with the full POS engine, but only bot-eligible
+      // promotions. Atomic checkout shares this confirmation path;
+      // POS drafts, charge, and quotations keep the default candidate set.
       //
       // pca-2c2 — capture capacity demands. The bot's first commit is this
       // recompute, so no stale-preview guard applies here.
       const { promotionCapacityDemands } =
-        await this.recomputePricingAndPromotions(sale);
+        await this.recomputePricingAndPromotions(sale, true);
 
       // D4 — totals are the SINGLE source of truth from
       // `sale.previewTotals()`: the same helper the draft preview and the

@@ -36,6 +36,60 @@ import type {
   PosEvalResult,
 } from './ports/pos-evaluate-promotions.port';
 
+describe('POS bot eligibility filtering', () => {
+  it.each([undefined, false, true])(
+    'filters a non-eligible promotion only when botEligibleOnly=%s',
+    async (botEligibleOnly) => {
+      const engine = new PosEvaluatePromotionsUseCase(
+        makeRepository([makePromotion({ botEligible: false })]),
+      );
+      const result = await engine.evaluate(
+        Object.assign(makeInput(), { botEligibleOnly }),
+      );
+      expect(result.lines).toHaveLength(botEligibleOnly ? 0 : 1);
+      expect(result.promotionCapacityDemands).toHaveLength(
+        botEligibleOnly ? 0 : 1,
+      );
+    },
+  );
+
+  it.each([
+    [true, { botEligible: true }],
+    [undefined, {}],
+  ])(
+    'asks the repository for bot-eligible rows when botEligibleOnly=%s',
+    async (botEligibleOnly, filter) => {
+      const repository = makeRepository([]);
+      const engine = new PosEvaluatePromotionsUseCase(repository);
+      await engine.evaluate(Object.assign(makeInput(), { botEligibleOnly }));
+      expect(repository.findAll).toHaveBeenCalledWith({
+        page: 1,
+        limit: 500,
+        status: 'ACTIVE',
+        ...filter,
+      });
+    },
+  );
+
+  it('applies an eligible automatic promotion in bot-only mode', async () => {
+    const engine = new PosEvaluatePromotionsUseCase(
+      makeRepository([makePromotion({ botEligible: true })]),
+    );
+    const result = await engine.evaluate(
+      Object.assign(makeInput(), { botEligibleOnly: true }),
+    );
+    expect(result.lines).toEqual([
+      {
+        itemId: 'item-1',
+        promotionId: 'promo-x',
+        discountType: 'percentage',
+        discountValue: 10,
+        discountTitle: 'X',
+      },
+    ]);
+  });
+});
+
 // ============================================================
 // Fixtures
 // ============================================================

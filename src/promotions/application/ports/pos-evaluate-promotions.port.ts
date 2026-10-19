@@ -58,6 +58,8 @@ export interface PosEvalLine {
 }
 
 export interface PosEvalInput {
+  /** Bot confirmation only; omitted/false preserves POS and quotation behavior. */
+  botEligibleOnly?: boolean;
   /** Recompute time — every gate evaluates against this. */
   now: Date;
   customerId: string | null;

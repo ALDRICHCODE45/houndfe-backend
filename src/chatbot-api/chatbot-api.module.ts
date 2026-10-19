@@ -4,10 +4,6 @@ import { CUSTOMER_REPOSITORY } from '../customers/domain/customer.repository';
 import { PrismaCustomerRepository } from '../customers/infrastructure/prisma-customer.repository';
 import { PUBLIC_CATALOG_REPOSITORY } from '../public-catalog/application/ports/public-catalog.repository';
 import { PrismaPublicCatalogRepository } from '../public-catalog/infrastructure/prisma-public-catalog.repository';
-import { EvaluateCartPromotionsUseCase } from '../promotions/application/evaluate-cart-promotions.use-case';
-import { EVALUATE_CART_PROMOTIONS_USE_CASE } from '../promotions/application/ports/evaluate-cart-promotions.port';
-import { PROMOTION_REPOSITORY } from '../promotions/domain/promotion.repository';
-import { PrismaPromotionRepository } from '../promotions/infrastructure/prisma-promotion.repository';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { ChatbotApiService } from './application/chatbot-api.service';
 import { CheckoutService } from './application/checkout.service';
@@ -22,16 +18,18 @@ import {
 import { PrismaServiceCredentialRepository } from './infrastructure/prisma-service-credential.repository';
 import { BotAuditInterceptor } from './presentation/interceptors/bot-audit.interceptor';
 import { SalesModule } from '../sales/sales.module';
+import { PromotionsModule } from '../promotions/promotions.module';
 
 @Module({
-  imports: [ClsModule, DatabaseModule, SalesModule],
+  // PromotionsModule supplies the cart evaluator and the POS engine it shares
+  // with bot sale confirmation, so preview and sale price identically.
+  imports: [ClsModule, DatabaseModule, SalesModule, PromotionsModule],
   controllers: [ChatbotApiController, CheckoutController],
   providers: [
     ChatbotApiService,
     CheckoutService,
     ServiceAuthGuard,
     BotAuditInterceptor,
-    EvaluateCartPromotionsUseCase,
     {
       provide: SERVICE_CREDENTIAL_REPOSITORY,
       useClass: PrismaServiceCredentialRepository,
@@ -47,14 +45,6 @@ import { SalesModule } from '../sales/sales.module';
     {
       provide: CUSTOMER_REPOSITORY,
       useClass: PrismaCustomerRepository,
-    },
-    {
-      provide: PROMOTION_REPOSITORY,
-      useClass: PrismaPromotionRepository,
-    },
-    {
-      provide: EVALUATE_CART_PROMOTIONS_USE_CASE,
-      useExisting: EvaluateCartPromotionsUseCase,
     },
   ],
   exports: [SERVICE_CREDENTIAL_REPOSITORY, ServiceAuthGuard, ChatbotApiService],
