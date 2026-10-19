@@ -33,7 +33,6 @@ const pricing = {
       appliedPromotionTitle: 'Bot discount',
     },
   ],
-  hasOrderPromotion: false,
   hasNonPerUnitReward: false,
 };
 const base = {
@@ -113,17 +112,16 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
     },
   );
 
-  it.each([
-    { type: 'BUY_X_GET_Y' as const },
-    { type: 'ORDER_DISCOUNT' as const },
-    { type: 'ADVANCED' as const },
-  ])('fails closed for an unsupported eligible snapshot: %j', async (rule) => {
-    const h = harness([promotion(rule)]);
-    await expect(h.useCase.execute(pricing)).resolves.toEqual({
-      items: [base],
-      promotionEvaluationStatus: 'needs_human_review',
-    });
-  });
+  it.each([{ type: 'BUY_X_GET_Y' as const }, { type: 'ADVANCED' as const }])(
+    'fails closed for an unsupported eligible snapshot: %j',
+    async (rule) => {
+      const h = harness([promotion(rule)]);
+      await expect(h.useCase.execute(pricing)).resolves.toEqual({
+        items: [base],
+        promotionEvaluationStatus: 'needs_human_review',
+      });
+    },
+  );
 
   it('keeps backend base prices for an incomplete snapshot', async () => {
     const h = harness([], false);
@@ -133,7 +131,15 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
     });
   });
 
-  it.each([{ hasOrderPromotion: true }, { hasNonPerUnitReward: true }])(
+  it('keeps a prorated eligible order promotion fully evaluated', async () => {
+    const h = harness([promotion({ type: 'ORDER_DISCOUNT', appliesTo: null })]);
+    await expect(h.useCase.execute(pricing)).resolves.toEqual({
+      items: pricing.items,
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+
+  it.each([{ hasNonPerUnitReward: true }])(
     'fails closed for unsupported rewards applied by the sale: %j',
     async (flags) => {
       const h = harness();

@@ -194,6 +194,159 @@ const item = {
 };
 
 describe('Bot preview / confirmation parity through the same SalesService', () => {
+  describe('ORDER_DISCOUNT per-line allocation', () => {
+    it.each([
+      {
+        name: 'percentage',
+        discountType: 'PERCENTAGE',
+        value: 10,
+        shares: [100, 100, 100],
+      },
+      {
+        name: 'fixed indivisible',
+        discountType: 'FIXED',
+        value: 100,
+        shares: [34, 33, 33],
+      },
+      {
+        name: 'minimum not reached',
+        discountType: 'FIXED',
+        value: 100,
+        minimum: 3001,
+        shares: [0, 0, 0],
+      },
+      {
+        name: 'fixed exceeds subtotal',
+        discountType: 'FIXED',
+        value: 4000,
+        shares: [1000, 1000, 1000],
+      },
+      {
+        name: 'not bot eligible',
+        discountType: 'FIXED',
+        value: 100,
+        eligible: false,
+        shares: [0, 0, 0],
+      },
+      {
+        name: 'combined line and order',
+        discountType: 'FIXED',
+        value: 100,
+        combined: true,
+        shares: [228, 36, 36],
+      },
+      {
+        name: 'zero shares preserve titles',
+        discountType: 'FIXED',
+        value: 1,
+        combined: true,
+        shares: [200, 1, 0],
+      },
+      {
+        name: 'zero subtotal',
+        discountType: 'FIXED',
+        value: 100,
+        free: true,
+        shares: [0, 0, 0],
+      },
+    ] as const)(
+      '$name preserves quote-to-sale totals and line identities',
+      async (testCase) => {
+        const h = harness(null, testCase.combined ? 20 : 0);
+        h.promo.targetItems[0].targetId = 'prod-3';
+        const order = Promotion.create({
+          id: 'order',
+          title: 'Order discount',
+          type: 'ORDER_DISCOUNT',
+          method: 'AUTOMATIC',
+          botEligible: testCase.eligible !== false,
+          discountType: testCase.discountType,
+          discountValue: testCase.value,
+          minPurchaseAmountCents: testCase.minimum ?? null,
+        });
+        const promotions = testCase.combined ? [h.promo, order] : [order];
+        if (testCase.free) {
+          h.products.batchResolvePriceMap.mockImplementation((inputs) =>
+            Promise.resolve(
+              new Map(
+                inputs.map((line) => [
+                  `${line.productId}::${line.variantId ?? ''}::${line.priceListId}`,
+                  new Map([[line.quantity, 0]]),
+                ]),
+              ),
+            ),
+          );
+          h.products.getApplicablePrices.mockResolvedValue([{ priceCents: 0 }]);
+        }
+        h.findAll.mockResolvedValue({
+          data: promotions,
+          total: promotions.length,
+        });
+        const input = {
+          customerId: 'customer',
+          items: [
+            { ...item, productId: 'prod-3' },
+            item,
+            { ...item, productId: 'prod-2' },
+          ],
+        };
+        const preview = await h.service.previewBotPricing(input);
+        expect(preview.items.map((line) => line.discountAmountCents)).toEqual(
+          testCase.shares,
+        );
+        const repeated = await h.service.previewBotPricing(input);
+        expect(repeated.items).toEqual(preview.items);
+        const guard = new EvaluateCartPromotionsUseCase({
+          findActiveAutomaticSnapshot: jest
+            .fn()
+            .mockResolvedValue({ promotions, complete: true }),
+        } as unknown as IPromotionRepository);
+        await expect(guard.execute(preview)).resolves.toEqual({
+          items: preview.items,
+          promotionEvaluationStatus: 'fully_evaluated',
+        });
+        for (const [index, line] of preview.items.entries()) {
+          expect(line.finalPriceCents).toBeGreaterThanOrEqual(0);
+          expect(line.finalPriceCents + line.discountAmountCents).toBe(
+            line.originalPriceCents,
+          );
+          const lineTitle =
+            testCase.combined && index === 0 ? 'Bot discount' : null;
+          const orderShare =
+            testCase.shares[index] -
+            (testCase.combined && index === 0 ? 200 : 0);
+          expect(line.appliedPromotionTitle).toBe(
+            orderShare > 0
+              ? lineTitle
+                ? `${lineTitle} + Order discount`
+                : 'Order discount'
+              : lineTitle,
+          );
+        }
+        const expectedTotalCents = preview.items.reduce(
+          (sum, line) => sum + line.finalPriceCents,
+          0,
+        );
+        const result = await h.service.confirmBotSale({
+          customerId: 'customer',
+          cashierUserId: 'cashier',
+          items: preview.items.map((line) => ({
+            ...line,
+            productName: 'Product',
+          })),
+          expectedTotalCents,
+        });
+        expect(result.totalCents).toBe(expectedTotalCents);
+        expect(result.discountCents).toBe(
+          preview.items.reduce(
+            (sum, line) => sum + line.discountAmountCents,
+            0,
+          ),
+        );
+      },
+    );
+  });
+
   it.each([
     {
       scope: 'REGISTERED_ONLY',
@@ -520,7 +673,6 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
           appliedPromotionTitle: percent ? 'Bot discount' : null,
         },
       ],
-      hasOrderPromotion: false,
       hasNonPerUnitReward: false,
     });
     for (const mock of [
@@ -613,7 +765,6 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
             appliedPromotionTitle: null,
           },
         ],
-        hasOrderPromotion: false,
         hasNonPerUnitReward: false,
       });
       for (const line of preview.items) {
@@ -810,7 +961,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
   });
 
   it.each(['buy-x-get-y', 'advanced', 'order'] as const)(
-    'reports an applied %s reward for the bot safety guard',
+    'projects an applied %s reward and flags only non-per-unit rewards',
     async (kind) => {
       const h = harness('customer-list');
       jest.spyOn(h.engine, 'evaluate').mockImplementation((input) =>
@@ -851,14 +1002,13 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
         items: [item],
       });
       expect(preview).toMatchObject({
-        hasOrderPromotion: kind === 'order',
         hasNonPerUnitReward: kind !== 'order',
         items: [
           {
             unitPriceCents: 800,
             originalPriceCents: 800,
-            finalPriceCents: kind === 'order' ? 800 : 700,
-            discountAmountCents: kind === 'order' ? 0 : 100,
+            finalPriceCents: 700,
+            discountAmountCents: 100,
           },
         ],
       });

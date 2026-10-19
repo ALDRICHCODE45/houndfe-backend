@@ -3,7 +3,7 @@ import { InvalidArgumentError } from '../../shared/domain/domain-error';
 export interface BotEligibilityRule {
   type: string;
   method: string;
-  appliesTo: readonly string[];
+  appliesTo: readonly string[] | null;
   customerScopes: readonly string[];
   allowsPriceLists: boolean;
   allowsDaysOfWeek: boolean;
@@ -14,6 +14,14 @@ export const BOT_ELIGIBILITY_RULES: readonly BotEligibilityRule[] = [
     type: 'PRODUCT_DISCOUNT',
     method: 'AUTOMATIC',
     appliesTo: ['PRODUCTS', 'VARIANTS', 'CATEGORIES', 'BRANDS'],
+    customerScopes: ['ALL', 'REGISTERED_ONLY', 'SPECIFIC'],
+    allowsPriceLists: true,
+    allowsDaysOfWeek: true,
+  },
+  {
+    type: 'ORDER_DISCOUNT',
+    method: 'AUTOMATIC',
+    appliesTo: null,
     customerScopes: ['ALL', 'REGISTERED_ONLY', 'SPECIFIC'],
     allowsPriceLists: true,
     allowsDaysOfWeek: true,
@@ -34,7 +42,12 @@ function unsupportedCondition(input: BotEligibilityInput): string | null {
   const conditions: [string, (rule: BotEligibilityRule) => boolean][] = [
     ['type', (rule) => rule.type === input.type],
     ['method', (rule) => rule.method === input.method],
-    ['appliesTo', (rule) => rule.appliesTo.includes(input.appliesTo ?? '')],
+    [
+      'appliesTo',
+      (rule) =>
+        rule.appliesTo === null ||
+        rule.appliesTo.includes(input.appliesTo ?? ''),
+    ],
     [
       'customerScope',
       (rule) => rule.customerScopes.includes(input.customerScope ?? 'ALL'),

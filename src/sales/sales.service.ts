@@ -3376,37 +3376,84 @@ export class SalesService {
     // using the stacked quantity's tier and per-unit rounding. Whole-line
     // rewards are allocated cumulatively so their sum remains exact.
     const allocatedQuantities = new Map<string, number>();
+    const items = input.items.map((inputItem) => {
+      const item = sale.items.find((line) =>
+        line.matches(inputItem.productId, inputItem.variantId),
+      )!;
+      const unitPriceCents =
+        item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;
+      const originalPriceCents = unitPriceCents * inputItem.quantity;
+      const allocated = allocatedQuantities.get(item.id) ?? 0;
+      const next = allocated + inputItem.quantity;
+      allocatedQuantities.set(item.id, next);
+      const reward = item.isBuyXGetYReward()
+        ? (item.discountAmountCents ?? 0)
+        : 0;
+      const rewardShare =
+        Math.floor((reward * next) / item.quantity) -
+        Math.floor((reward * allocated) / item.quantity);
+      const finalPriceCents =
+        item.unitPriceCents * inputItem.quantity - rewardShare;
+      return {
+        productId: inputItem.productId,
+        variantId: inputItem.variantId,
+        quantity: inputItem.quantity,
+        unitPriceCents,
+        originalPriceCents,
+        finalPriceCents,
+        discountAmountCents: originalPriceCents - finalPriceCents,
+        appliedPromotionTitle: item.discountTitle ?? null,
+      };
+    });
+
+    const orderPromotion = sale.appliedOrderPromotion;
+    if (orderPromotion) {
+      const subtotal = items.reduce(
+        (sum, item) => sum + item.finalPriceCents,
+        0,
+      );
+      // Allocate only the charged discount: previewTotals clamps at zero.
+      const discount = subtotal - sale.previewTotals().totalCents;
+      if (discount > 0 && subtotal > 0) {
+        const denominator = BigInt(subtotal);
+        const shares = items.map((item, index) => {
+          // Integer remainders avoid floating-point ties on fractional cents.
+          const numerator = BigInt(discount) * BigInt(item.finalPriceCents);
+          return {
+            index,
+            cents: Number(numerator / denominator),
+            remainder: numerator % denominator,
+          };
+        });
+        let remaining =
+          discount - shares.reduce((sum, share) => sum + share.cents, 0);
+        shares.sort((a, b) =>
+          a.remainder === b.remainder
+            ? a.index - b.index
+            : a.remainder > b.remainder
+              ? -1
+              : 1,
+        );
+        for (const share of shares) {
+          if (remaining > 0) {
+            share.cents++;
+            remaining--;
+          }
+          if (share.cents === 0) continue;
+          // The charged discount never exceeds subtotal, so no share can
+          // exceed its line's post-line-discount amount.
+          const item = items[share.index];
+          item.finalPriceCents -= share.cents;
+          item.discountAmountCents += share.cents;
+          item.appliedPromotionTitle = item.appliedPromotionTitle
+            ? `${item.appliedPromotionTitle} + ${orderPromotion.discountTitle}`
+            : orderPromotion.discountTitle;
+        }
+      }
+    }
+
     return {
-      items: input.items.map((inputItem) => {
-        const item = sale.items.find((line) =>
-          line.matches(inputItem.productId, inputItem.variantId),
-        )!;
-        const unitPriceCents =
-          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;
-        const originalPriceCents = unitPriceCents * inputItem.quantity;
-        const allocated = allocatedQuantities.get(item.id) ?? 0;
-        const next = allocated + inputItem.quantity;
-        allocatedQuantities.set(item.id, next);
-        const reward = item.isBuyXGetYReward()
-          ? (item.discountAmountCents ?? 0)
-          : 0;
-        const rewardShare =
-          Math.floor((reward * next) / item.quantity) -
-          Math.floor((reward * allocated) / item.quantity);
-        const finalPriceCents =
-          item.unitPriceCents * inputItem.quantity - rewardShare;
-        return {
-          productId: inputItem.productId,
-          variantId: inputItem.variantId,
-          quantity: inputItem.quantity,
-          unitPriceCents,
-          originalPriceCents,
-          finalPriceCents,
-          discountAmountCents: originalPriceCents - finalPriceCents,
-          appliedPromotionTitle: item.discountTitle ?? null,
-        };
-      }),
-      hasOrderPromotion: sale.appliedOrderPromotion !== null,
+      items,
       hasNonPerUnitReward: sale.items.some((item) => item.isBuyXGetYReward()),
     };
   }

@@ -220,7 +220,14 @@ describe('bot eligibility CRUD contract', () => {
 
   it.each([
     ['method', { method: PromotionMethodEnum.MANUAL }],
-    ['type', { type: PromotionTypeEnum.ORDER_DISCOUNT, appliesTo: undefined }],
+    [
+      'method',
+      {
+        type: PromotionTypeEnum.ORDER_DISCOUNT,
+        method: PromotionMethodEnum.MANUAL,
+        appliesTo: undefined,
+      },
+    ],
     [
       'type',
       {
@@ -256,6 +263,60 @@ describe('bot eligibility CRUD contract', () => {
     });
     expect(repo.save.mock.calls).toHaveLength(0);
   });
+
+  it.each([
+    CustomerScopeEnum.ALL,
+    CustomerScopeEnum.REGISTERED_ONLY,
+    CustomerScopeEnum.SPECIFIC,
+  ])(
+    'accepts automatic ORDER_DISCOUNT with %s, lists and weekdays on create/PATCH',
+    async (customerScope) => {
+      const { repo, service } = harness();
+      const restrictions = {
+        customerScope,
+        customerIds:
+          customerScope === CustomerScopeEnum.SPECIFIC ? ['customer-1'] : [],
+        priceListIds: ['list-1'],
+        daysOfWeek: [DayOfWeekEnum.MONDAY],
+      };
+      const expected = {
+        type: 'ORDER_DISCOUNT',
+        appliesTo: null,
+        botEligible: true,
+        customerScope,
+        priceLists: [expect.objectContaining({ globalPriceListId: 'list-1' })],
+        daysOfWeek: [expect.objectContaining({ day: 'MONDAY' })],
+        customers: restrictions.customerIds.map((customerId): unknown =>
+          expect.objectContaining({ customerId }),
+        ),
+      };
+      await expect(
+        service.create({
+          ...supported,
+          type: PromotionTypeEnum.ORDER_DISCOUNT,
+          appliesTo: undefined,
+          botEligible: true,
+          ...restrictions,
+        }),
+      ).resolves.toMatchObject(expected);
+      const stored = makePromotion({ type: 'ORDER_DISCOUNT', appliesTo: null });
+      repo.findById.mockResolvedValue(stored);
+      await expect(
+        service.update('promo-1', {
+          ...restrictions,
+          botEligible: true,
+        }),
+      ).resolves.toMatchObject(expected);
+      stored.botEligible = false;
+      await expect(
+        service.update('promo-1', { botEligible: true }),
+      ).resolves.toMatchObject(expected);
+      await expect(
+        service.update('promo-1', { title: 'Renamed' }),
+      ).resolves.toMatchObject(expected);
+      expect(repo.save.mock.calls).toHaveLength(4);
+    },
+  );
 
   it('allows a flag-only PATCH and preserves the flag when omitted', async () => {
     const { repo, service } = harness();
@@ -317,7 +378,7 @@ describe('bot eligibility CRUD contract', () => {
 
   it.each<[string, Partial<PromotionProps>]>([
     ['method', { method: 'MANUAL' }],
-    ['type', { type: 'ORDER_DISCOUNT' }],
+    ['method', { type: 'ORDER_DISCOUNT', method: 'MANUAL', appliesTo: null }],
     ['type', { type: 'BUY_X_GET_Y' }],
     ['type', { type: 'ADVANCED' }],
   ])('validates stored %s on a flag-only PATCH', async (condition, stored) => {

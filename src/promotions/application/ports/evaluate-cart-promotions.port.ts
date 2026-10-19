@@ -14,7 +14,6 @@ export interface EvaluatedCartItem extends CartItemForEvaluation {
 
 export interface BotPricingPreview {
   items: EvaluatedCartItem[];
-  hasOrderPromotion: boolean;
   hasNonPerUnitReward: boolean;
 }
 
