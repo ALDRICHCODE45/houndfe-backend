@@ -72,7 +72,7 @@ describe('PromotionsController', () => {
           appliesTo: ['PRODUCTS', 'VARIANTS', 'CATEGORIES', 'BRANDS'],
           customerScopes: ['ALL'],
           allowsPriceLists: false,
-          allowsDaysOfWeek: false,
+          allowsDaysOfWeek: true,
         },
       ],
     });

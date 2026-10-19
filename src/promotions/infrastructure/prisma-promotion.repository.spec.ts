@@ -195,6 +195,30 @@ describe('PrismaPromotionRepository', () => {
   });
 
   describe('findActiveAutomaticSnapshot()', () => {
+    it('uses inclusive date bounds at the current instant without filtering weekdays', async () => {
+      jest.useFakeTimers();
+      const now = new Date('2026-10-20T00:30:00.000Z');
+      jest.setSystemTime(now);
+      try {
+        const tenantPrisma = makeTenantPrismaMock();
+        const repo = new PrismaPromotionRepository(tenantPrisma);
+        await repo.findActiveAutomaticSnapshot();
+        const where =
+          tenantPrisma.client.promotion.findMany.mock.calls[0][0].where;
+        expect(where).toEqual({
+          method: 'AUTOMATIC',
+          botEligible: true,
+          manuallyEnded: false,
+          AND: [
+            { OR: [{ startDate: null }, { startDate: { lte: now } }] },
+            { OR: [{ endDate: null }, { endDate: { gte: now } }] },
+          ],
+        });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('filters bot eligibility before the snapshot cap and hydrates the flag', async () => {
       const tenantPrisma = makeTenantPrismaMock();
       const prisma = tenantPrisma.client;

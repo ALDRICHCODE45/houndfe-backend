@@ -73,6 +73,20 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
     },
   );
 
+  it('keeps the shared preview for eligible weekday and date-window discounts', async () => {
+    const h = harness([
+      promotion({
+        daysOfWeek: [{ id: 'day-1', day: 'MONDAY' }],
+        startDate: new Date('2026-10-01T06:00:00.000Z'),
+        endDate: new Date('2026-11-01T05:59:59.999Z'),
+      }),
+    ]);
+    await expect(h.useCase.execute(pricing)).resolves.toEqual({
+      items: pricing.items,
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+
   it('ignores unsupported promotions that are not bot eligible', async () => {
     const h = harness([promotion({ type: 'BUY_X_GET_Y', botEligible: false })]);
     await expect(h.useCase.execute(pricing)).resolves.toEqual({
@@ -90,7 +104,6 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
       customers: [{ id: 'restriction', customerId: 'customer' }],
     },
     { priceLists: [{ id: 'restriction', globalPriceListId: 'list' }] },
-    { daysOfWeek: [{ id: 'restriction', day: 'SUNDAY' as const }] },
   ])('fails closed for an unsupported eligible snapshot: %j', async (rule) => {
     const h = harness([promotion(rule)]);
     await expect(h.useCase.execute(pricing)).resolves.toEqual({

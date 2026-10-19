@@ -157,6 +157,66 @@ describe('bot eligibility CRUD contract', () => {
     expect(repo.save.mock.calls).toHaveLength(1);
   });
 
+  it('creates a bot-eligible discount with weekdays and a date window', async () => {
+    const { repo, service } = harness();
+    await expect(
+      service.create({
+        ...supported,
+        botEligible: true,
+        daysOfWeek: [DayOfWeekEnum.MONDAY],
+        startDate: '2026-10-01T00:00:00.000Z',
+        endDate: '2026-10-31T00:00:00.000Z',
+      }),
+    ).resolves.toMatchObject({
+      botEligible: true,
+      daysOfWeek: [expect.objectContaining({ day: 'MONDAY' })],
+      startDate: '2026-10-01T06:00:00.000Z',
+      endDate: '2026-11-01T05:59:59.999Z',
+    });
+    expect(repo.save.mock.calls).toHaveLength(1);
+  });
+
+  it('adds weekdays and a date window to an eligible promotion via PATCH', async () => {
+    const { repo, service } = harness();
+    repo.findById.mockResolvedValue(
+      makePromotion({ appliesTo: 'PRODUCTS', botEligible: true }),
+    );
+    await expect(
+      service.update('promo-1', {
+        daysOfWeek: [DayOfWeekEnum.MONDAY],
+        startDate: '2026-10-01T00:00:00.000Z',
+        endDate: '2026-10-31T00:00:00.000Z',
+      }),
+    ).resolves.toMatchObject({
+      botEligible: true,
+      daysOfWeek: [expect.objectContaining({ day: 'MONDAY' })],
+      startDate: '2026-10-01T06:00:00.000Z',
+      endDate: '2026-11-01T05:59:59.999Z',
+    });
+    expect(repo.save.mock.calls).toHaveLength(1);
+  });
+
+  it('enables and preserves bot eligibility on a stored weekday and date window', async () => {
+    const { repo, service } = harness();
+    repo.findById.mockResolvedValue(
+      makePromotion({
+        appliesTo: 'PRODUCTS',
+        daysOfWeek: [{ id: 'day-1', day: 'MONDAY' }],
+        startDate: new Date('2026-10-01T06:00:00.000Z'),
+        endDate: new Date('2026-11-01T05:59:59.999Z'),
+      }),
+    );
+    for (const patch of [{ botEligible: true }, { title: 'Renamed' }]) {
+      await expect(service.update('promo-1', patch)).resolves.toMatchObject({
+        botEligible: true,
+        daysOfWeek: [{ id: 'day-1', day: 'MONDAY' }],
+        startDate: '2026-10-01T06:00:00.000Z',
+        endDate: '2026-11-01T05:59:59.999Z',
+      });
+    }
+    expect(repo.save.mock.calls).toHaveLength(2);
+  });
+
   it.each([
     ['method', { method: PromotionMethodEnum.MANUAL }],
     ['type', { type: PromotionTypeEnum.ORDER_DISCOUNT, appliesTo: undefined }],
@@ -186,7 +246,6 @@ describe('bot eligibility CRUD contract', () => {
     ['customerScope', { customerScope: CustomerScopeEnum.REGISTERED_ONLY }],
     ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
     ['priceLists', { priceListIds: ['list-1'] }],
-    ['daysOfWeek', { daysOfWeek: [DayOfWeekEnum.MONDAY] }],
   ])('rejects unsupported %s on create', async (condition, patch) => {
     const { repo, service } = harness();
     await expect(
@@ -218,7 +277,6 @@ describe('bot eligibility CRUD contract', () => {
     ['customerScope', { customerScope: CustomerScopeEnum.REGISTERED_ONLY }],
     ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
     ['priceLists', { priceListIds: ['list-1'] }],
-    ['daysOfWeek', { daysOfWeek: [DayOfWeekEnum.MONDAY] }],
   ])(
     'rejects a PATCH making an eligible promotion unsupported: %s',
     async (condition, patch) => {
@@ -247,7 +305,6 @@ describe('bot eligibility CRUD contract', () => {
       'priceLists',
       { priceLists: [{ id: 'link-1', globalPriceListId: 'list-1' }] },
     ],
-    ['daysOfWeek', { daysOfWeek: [{ id: 'day-1', day: 'MONDAY' }] }],
   ])('validates stored %s on a flag-only PATCH', async (condition, stored) => {
     const { repo, service } = harness();
     repo.findById.mockResolvedValue(
