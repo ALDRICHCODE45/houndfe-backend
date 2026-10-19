@@ -12,15 +12,23 @@ export interface EvaluatedCartItem extends CartItemForEvaluation {
   discountAmountCents: number;
 }
 
-export interface CartEvaluationResult {
+export interface BotPricingPreview {
+  items: EvaluatedCartItem[];
+  hasOrderPromotion: boolean;
+  hasNonPerUnitReward: boolean;
+}
+
+export interface CartPromotionEvaluation {
   items: EvaluatedCartItem[];
   promotionEvaluationStatus: 'fully_evaluated' | 'needs_human_review';
 }
 
+export interface CartEvaluationResult extends CartPromotionEvaluation {
+  customerResolution: 'unique' | 'not_found' | 'ambiguous' | 'not_provided';
+}
+
 export interface IEvaluateCartPromotionsUseCase {
-  execute(input: {
-    items: CartItemForEvaluation[];
-  }): Promise<CartEvaluationResult>;
+  execute(input: BotPricingPreview): Promise<CartPromotionEvaluation>;
 }
 
 export const EVALUATE_CART_PROMOTIONS_USE_CASE = Symbol(

@@ -23,7 +23,10 @@ import {
   type CartItemForEvaluation,
   type IEvaluateCartPromotionsUseCase,
 } from '../../promotions/application/ports/evaluate-cart-promotions.port';
-import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import {
+  BusinessRuleViolationError,
+  InvalidArgumentError,
+} from '../../shared/domain/domain-error';
 import type {
   ProductDetailWithIncludes,
   ProductWithIncludes,
@@ -168,8 +171,49 @@ export class ChatbotApiService {
 
   async evaluateCart(input: {
     items: CartItemForEvaluation[];
+    phoneCountryCode?: string;
+    phone?: string;
   }): Promise<CartEvaluationResult> {
-    return this.evaluateCartPromotionsUseCase.execute(input);
+    // The sale validates each submitted line's quantity tier before stacking
+    // repeated lines, while a quote prices the stacked quantity. Require one
+    // line per product/variant so a quote can never promise a tier the sale
+    // would reject.
+    const lineKeys = new Set(
+      input.items.map((item) => `${item.productId}::${item.variantId ?? ''}`),
+    );
+    if (lineKeys.size !== input.items.length) {
+      throw new InvalidArgumentError(
+        'Each product/variant must appear in only one cart line',
+        'DUPLICATE_CART_LINE',
+      );
+    }
+    let customerId: string | null = null;
+    let customerResolution: CartEvaluationResult['customerResolution'] =
+      'not_provided';
+    if (input.phoneCountryCode !== undefined && input.phone !== undefined) {
+      const customers = await this.tenantPrisma.getClient().customer.findMany({
+        where: {
+          tenantId: this.tenantPrisma.getTenantId(),
+          phoneCountryCode: input.phoneCountryCode,
+          phone: input.phone,
+        },
+        take: 2,
+        select: { id: true },
+      });
+      customerResolution =
+        customers.length === 1
+          ? 'unique'
+          : customers.length === 0
+            ? 'not_found'
+            : 'ambiguous';
+      if (customers.length === 1) customerId = customers[0].id;
+    }
+    const pricing = await this.salesService.previewBotPricing({
+      items: input.items,
+      customerId,
+    });
+    const result = await this.evaluateCartPromotionsUseCase.execute(pricing);
+    return { ...result, customerResolution };
   }
 
   /** Read-only checkout discovery; deliberately does not reuse newest-phone lookup. */

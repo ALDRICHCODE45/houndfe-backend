@@ -584,7 +584,9 @@ describe('ChatbotApiService', () => {
   let repository: jest.Mocked<IPublicCatalogRepository>;
   let customerRepository: jest.Mocked<ICustomerRepository>;
   let evaluateCartPromotionsUseCase: jest.Mocked<IEvaluateCartPromotionsUseCase>;
-  let salesService: jest.Mocked<Pick<SalesService, 'confirmBotSale'>>;
+  let salesService: jest.Mocked<
+    Pick<SalesService, 'confirmBotSale' | 'previewBotPricing'>
+  >;
   // Q3 / WU2 — mock the atomic idempotency port so `registerBotSale` can
   // exercise the four outcomes (acquired / replay / conflict / in_flight)
   // without touching Prisma. Only the two new methods are stubbed here
@@ -626,6 +628,7 @@ describe('ChatbotApiService', () => {
     };
     salesService = {
       confirmBotSale: jest.fn(),
+      previewBotPricing: jest.fn(),
     };
     saleRepository = {
       acquireSaleRegistrationIdempotency: jest.fn<
@@ -856,107 +859,44 @@ describe('ChatbotApiService', () => {
     );
   });
 
-  it('delegates cart pricing evaluation and preserves fully_evaluated status', async () => {
-    evaluateCartPromotionsUseCase.execute.mockResolvedValue({
-      items: [
-        {
-          productId: 'prod-1',
-          variantId: null,
-          quantity: 2,
-          unitPriceCents: 1000,
-          originalPriceCents: 2000,
-          finalPriceCents: 1800,
-          appliedPromotionTitle: '10% off Royal Canin',
-          discountAmountCents: 200,
-        },
-      ],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-
-    await expect(
-      service.evaluateCart({
-        items: [
-          {
-            productId: 'prod-1',
-            variantId: null,
-            quantity: 2,
-            unitPriceCents: 1000,
-          },
-        ],
-      }),
-    ).resolves.toEqual({
-      items: [
-        {
-          productId: 'prod-1',
-          variantId: null,
-          quantity: 2,
-          unitPriceCents: 1000,
-          originalPriceCents: 2000,
-          finalPriceCents: 1800,
-          appliedPromotionTitle: '10% off Royal Canin',
-          discountAmountCents: 200,
-        },
-      ],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-    expect(evaluateCartPromotionsUseCase.execute.mock.calls[0]).toEqual([
-      {
-        items: [
-          {
-            productId: 'prod-1',
-            variantId: null,
-            quantity: 2,
-            unitPriceCents: 1000,
-          },
-        ],
-      },
-    ]);
-  });
-
-  it('delegates cart pricing evaluation and surfaces needs_human_review status', async () => {
-    evaluateCartPromotionsUseCase.execute.mockResolvedValue({
-      items: [
-        {
-          productId: 'prod-2',
-          variantId: null,
-          quantity: 1,
-          unitPriceCents: 2500,
-          originalPriceCents: 2500,
-          finalPriceCents: 2500,
-          appliedPromotionTitle: null,
-          discountAmountCents: 0,
-        },
-      ],
-      promotionEvaluationStatus: 'needs_human_review',
-    });
-
-    await expect(
-      service.evaluateCart({
-        items: [
-          {
-            productId: 'prod-2',
-            variantId: null,
-            quantity: 1,
-            unitPriceCents: 2500,
-          },
-        ],
-      }),
-    ).resolves.toEqual({
-      items: [
-        {
-          productId: 'prod-2',
-          variantId: null,
-          quantity: 1,
-          unitPriceCents: 2500,
-          originalPriceCents: 2500,
-          finalPriceCents: 2500,
-          appliedPromotionTitle: null,
-          discountAmountCents: 0,
-        },
-      ],
-      promotionEvaluationStatus: 'needs_human_review',
-    });
-  });
+  it.each(['fully_evaluated', 'needs_human_review'] as const)(
+    'delegates the backend preview to the safety guard and preserves %s',
+    async (promotionEvaluationStatus) => {
+      const item = {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 2,
+        unitPriceCents: 800,
+        originalPriceCents: 1600,
+        finalPriceCents: 1280,
+        appliedPromotionTitle: '20% off',
+        discountAmountCents: 320,
+      };
+      const pricing = {
+        items: [item],
+        hasOrderPromotion: false,
+        hasNonPerUnitReward: false,
+      };
+      salesService.previewBotPricing.mockResolvedValue(pricing);
+      evaluateCartPromotionsUseCase.execute.mockResolvedValue({
+        items: [item],
+        promotionEvaluationStatus,
+      });
+      await expect(
+        service.evaluateCart({ items: [{ ...item, unitPriceCents: 1000 }] }),
+      ).resolves.toEqual({
+        items: [item],
+        promotionEvaluationStatus,
+        customerResolution: 'not_provided',
+      });
+      expect(salesService.previewBotPricing.mock.calls).toEqual([
+        [{ customerId: null, items: [{ ...item, unitPriceCents: 1000 }] }],
+      ]);
+      expect(evaluateCartPromotionsUseCase.execute.mock.calls).toEqual([
+        [pricing],
+      ]);
+    },
+  );
 
   it('returns a returning customer profile by normalized WhatsApp phone', async () => {
     const addressClient = tenantPrisma.getClient();

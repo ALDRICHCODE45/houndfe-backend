@@ -6,6 +6,8 @@ import {
   IsOptional,
   IsUUID,
   Min,
+  Matches,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
@@ -29,9 +31,21 @@ export class EvaluateCartItemRequestDto {
 }
 
 export class EvaluateCartRequestDto {
+  @ValidateIf(hasCustomerPhone)
+  @Matches(/^[0-9]{1,10}$/)
+  phoneCountryCode?: string;
+
+  @ValidateIf(hasCustomerPhone)
+  @Matches(/^[0-9]{1,20}$/)
+  phone?: string;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => EvaluateCartItemRequestDto)
   items!: EvaluateCartItemRequestDto[];
+}
+
+function hasCustomerPhone(input: EvaluateCartRequestDto): boolean {
+  return input.phoneCountryCode !== undefined || input.phone !== undefined;
 }
