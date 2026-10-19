@@ -1,7 +1,10 @@
 import { SalesService } from '../../sales/sales.service';
 import type { Sale } from '../../sales/domain/sale.entity';
 import { Promotion } from '../domain/promotion.entity';
-import type { PromotionTargetType } from '../domain/promotion.entity';
+import type {
+  CreatePromotionParams,
+  PromotionTargetType,
+} from '../domain/promotion.entity';
 import { EvaluateCartPromotionsUseCase } from './evaluate-cart-promotions.use-case';
 import type { IPromotionRepository } from '../domain/promotion.repository';
 import { PosEvaluatePromotionsUseCase } from './pos-evaluate-promotions.use-case';
@@ -13,6 +16,10 @@ function harness(
   percent = 0,
   missingListPrice = false,
   appliesTo: PromotionTargetType = 'PRODUCTS',
+  schedule: Pick<
+    CreatePromotionParams,
+    'daysOfWeek' | 'startDate' | 'endDate'
+  > = {},
 ) {
   const promo = Promotion.create({
     id: 'promo',
@@ -23,6 +30,7 @@ function harness(
     appliesTo,
     discountType: 'PERCENTAGE',
     discountValue: percent || 20,
+    ...schedule,
   });
   promo.targetItems = [
     {
@@ -348,6 +356,134 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
       );
     },
   );
+
+  describe('weekday and date-window parity in the business timezone', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it.each([
+      {
+        name: 'allowed Monday',
+        now: '2026-10-19T18:00:00.000Z',
+        day: 'MONDAY',
+        discount: 400,
+      },
+      {
+        name: 'disallowed Tuesday',
+        now: '2026-10-20T18:00:00.000Z',
+        day: 'MONDAY',
+        discount: 0,
+      },
+      {
+        name: 'Monday in Mexico City while UTC is already Tuesday',
+        now: '2026-10-20T00:30:00.000Z',
+        day: 'MONDAY',
+        discount: 400,
+      },
+      {
+        name: 'UTC Tuesday does not activate a local Tuesday promotion on Monday',
+        now: '2026-10-20T00:30:00.000Z',
+        day: 'TUESDAY',
+        discount: 0,
+      },
+      {
+        name: 'future date window',
+        now: '2026-10-19T18:00:00.000Z',
+        startDate: '2026-10-19T18:00:00.001Z',
+        discount: 0,
+      },
+      {
+        name: 'expired date window',
+        now: '2026-10-19T18:00:00.000Z',
+        endDate: '2026-10-19T17:59:59.999Z',
+        discount: 0,
+      },
+      {
+        name: 'inclusive start date',
+        now: '2026-10-19T18:00:00.000Z',
+        startDate: '2026-10-19T18:00:00.000Z',
+        discount: 400,
+      },
+      {
+        name: 'inclusive end date',
+        now: '2026-10-19T18:00:00.000Z',
+        endDate: '2026-10-19T18:00:00.000Z',
+        discount: 400,
+      },
+    ] as const)('$name', async (testCase) => {
+      jest.setSystemTime(new Date(testCase.now));
+      const h = harness(null, 20, false, 'PRODUCTS', {
+        daysOfWeek: testCase.day ? [{ id: 'day-1', day: testCase.day }] : [],
+        startDate: testCase.startDate ? new Date(testCase.startDate) : null,
+        endDate: testCase.endDate ? new Date(testCase.endDate) : null,
+      });
+      const preview = await h.service.previewBotPricing({
+        customerId: 'customer',
+        items: [
+          { ...item, quantity: 2 },
+          { ...item, productId: 'prod-2' },
+        ],
+      });
+      const guard = new EvaluateCartPromotionsUseCase({
+        findActiveAutomaticSnapshot: jest.fn().mockResolvedValue({
+          promotions: [h.promo],
+          complete: true,
+        }),
+      } as unknown as IPromotionRepository);
+      const quote = await guard.execute(preview);
+      expect(quote.promotionEvaluationStatus).toBe('fully_evaluated');
+      expect(quote.items.map((line) => line.discountAmountCents)).toEqual([
+        testCase.discount,
+        0,
+      ]);
+      expect(quote.items[0].appliedPromotionTitle).toBe(
+        testCase.discount ? 'Bot discount' : null,
+      );
+      for (const line of quote.items) {
+        expect(line.finalPriceCents + line.discountAmountCents).toBe(
+          line.originalPriceCents,
+        );
+      }
+      const expectedTotalCents = 3000 - testCase.discount;
+      expect(
+        quote.items.reduce((sum, line) => sum + line.finalPriceCents, 0),
+      ).toBe(expectedTotalCents);
+      const result = await h.service.confirmBotSale({
+        customerId: 'customer',
+        cashierUserId: 'cashier',
+        items: quote.items.map((line) => ({ ...line, productName: 'Product' })),
+        expectedTotalCents,
+      });
+      expect(result.totalCents).toBe(expectedTotalCents);
+      expect(result.discountCents).toBe(testCase.discount);
+      const chargedSale = h.saleRepo.save.mock.calls.at(-1)![0];
+      expect(
+        chargedSale.items.map((line) => [
+          line.subtotalCents,
+          (line.discountAmountCents ?? 0) * line.quantity,
+        ]),
+      ).toEqual(
+        quote.items.map((line) => [
+          line.finalPriceCents,
+          line.discountAmountCents,
+        ]),
+      );
+      expect(h.saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          totalCents: expectedTotalCents,
+          discountCents: testCase.discount,
+        }),
+      );
+      expect(h.findAll).toHaveBeenCalledWith(
+        expect.objectContaining({ botEligible: true }),
+      );
+    });
+  });
 
   it('rejects a vanished or foreign customer using the tenant-qualified lookup', async () => {
     const h = harness('customer-list');
