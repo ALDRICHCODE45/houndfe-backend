@@ -59,7 +59,7 @@ describe('Chatbot customer-aware pricing', () => {
                 appliedPromotionTitle: null,
               },
             ],
-            hasNonPerUnitReward: false,
+            hasAdvancedReward: false,
           });
         });
       const snapshot = {
@@ -156,7 +156,7 @@ describe('Chatbot customer-aware pricing', () => {
             appliedPromotionTitle: '20% off',
           },
         ],
-        hasNonPerUnitReward: reason === 'reward',
+        hasAdvancedReward: reason === 'reward',
       });
       const service = new ChatbotApiService(
         {} as Dependencies[0],

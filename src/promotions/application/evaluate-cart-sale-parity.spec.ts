@@ -194,6 +194,207 @@ const item = {
 };
 
 describe('Bot preview / confirmation parity through the same SalesService', () => {
+  describe('BUY_X_GET_Y in-line reward parity', () => {
+    it.each<{
+      name: string;
+      quantity: number;
+      shares: number[];
+      buy?: number;
+      percent?: number;
+      order?: boolean;
+      productPercent?: number;
+      productWins?: boolean;
+      capacity?: number;
+      consumed?: number;
+      appliesTo?: PromotionTargetType;
+    }>([
+      { name: 'buy two get one free', quantity: 3, shares: [1000, 0] },
+      {
+        name: 'buy one get one at 50%',
+        quantity: 2,
+        buy: 1,
+        percent: 50,
+        shares: [500, 0],
+      },
+      { name: 'below buy threshold', quantity: 1, shares: [0, 0] },
+      { name: 'below full group', quantity: 2, shares: [0, 0] },
+      { name: 'two complete groups', quantity: 6, shares: [2000, 0] },
+      {
+        name: 'order discount uses post-reward weights',
+        quantity: 3,
+        order: true,
+        shares: [1067, 33],
+      },
+      {
+        name: 'BXGY beats product discount',
+        quantity: 3,
+        productPercent: 20,
+        shares: [1000, 0],
+      },
+      {
+        name: 'product discount beats BXGY',
+        quantity: 3,
+        productPercent: 40,
+        shares: [1200, 0],
+        productWins: true,
+      },
+      {
+        name: 'capacity exact fit counts rewarded units only',
+        quantity: 6,
+        capacity: 3,
+        consumed: 1,
+        shares: [2000, 0],
+      },
+      {
+        name: 'insufficient capacity falls back to product discount',
+        quantity: 6,
+        capacity: 3,
+        consumed: 2,
+        productPercent: 10,
+        productWins: true,
+        shares: [600, 0],
+      },
+      {
+        name: 'exhausted capacity omits reward',
+        quantity: 3,
+        capacity: 1,
+        consumed: 1,
+        shares: [0, 0],
+      },
+      {
+        name: 'variant target',
+        appliesTo: 'VARIANTS',
+        quantity: 3,
+        shares: [1000, 0],
+      },
+      {
+        name: 'category target',
+        appliesTo: 'CATEGORIES',
+        quantity: 3,
+        shares: [1000, 0],
+      },
+      {
+        name: 'brand target',
+        appliesTo: 'BRANDS',
+        quantity: 3,
+        shares: [1000, 0],
+      },
+    ])('$name', async (testCase) => {
+      const h = harness(null, testCase.productPercent ?? 0);
+      const bxgy = Promotion.create({
+        id: 'bxgy',
+        title: 'Buy X get Y',
+        type: 'BUY_X_GET_Y',
+        method: 'AUTOMATIC',
+        botEligible: true,
+        appliesTo: testCase.appliesTo ?? 'PRODUCTS',
+        buyQuantity: testCase.buy ?? 2,
+        getQuantity: 1,
+        getDiscountPercent: testCase.percent ?? 100,
+        maxProductUnits: testCase.capacity ?? null,
+        consumedProductUnits: testCase.consumed ?? 0,
+      });
+      bxgy.targetItems = [
+        {
+          id: 'bxgy-target',
+          side: 'DEFAULT',
+          targetType: bxgy.appliesTo!,
+          targetId: {
+            PRODUCTS: 'prod-1',
+            VARIANTS: 'variant-1',
+            CATEGORIES: 'category-1',
+            BRANDS: 'brand-1',
+          }[bxgy.appliesTo!],
+        },
+      ];
+      const order = Promotion.create({
+        id: 'order',
+        title: 'Order discount',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        botEligible: true,
+        discountType: 'FIXED',
+        discountValue: 100,
+      });
+      const promotions = [
+        bxgy,
+        ...(testCase.productPercent ? [h.promo] : []),
+        ...(testCase.order ? [order] : []),
+      ];
+      h.findAll.mockResolvedValue({
+        data: promotions,
+        total: promotions.length,
+      });
+      const preview = await h.service.previewBotPricing({
+        customerId: 'customer',
+        items: [
+          { ...item, variantId: 'variant-1', quantity: testCase.quantity },
+          { ...item, productId: 'prod-2' },
+        ],
+      });
+      expect(preview.items.map((line) => line.discountAmountCents)).toEqual(
+        testCase.shares,
+      );
+      const reward = testCase.productWins
+        ? 0
+        : testCase.shares[0] - (testCase.order ? 67 : 0);
+      const lineTitle = testCase.productWins
+        ? 'Bot discount'
+        : reward > 0
+          ? 'Buy X get Y'
+          : null;
+      expect(preview.items.map((line) => line.appliedPromotionTitle)).toEqual([
+        testCase.order ? `${lineTitle} + Order discount` : lineTitle,
+        testCase.order ? 'Order discount' : null,
+      ]);
+      for (const line of preview.items) {
+        expect(line.unitPriceCents).toBe(1000);
+        expect(line.originalPriceCents).toBe(1000 * line.quantity);
+        expect(line.finalPriceCents).toBeGreaterThanOrEqual(0);
+        expect(line.finalPriceCents + line.discountAmountCents).toBe(
+          line.originalPriceCents,
+        );
+      }
+      expect(h.usage.claimForSale).not.toHaveBeenCalled();
+      expect(h.saleRepo.save).not.toHaveBeenCalled();
+      const expectedTotalCents = preview.items.reduce(
+        (sum, line) => sum + line.finalPriceCents,
+        0,
+      );
+      // Resubmit the preview's base unit prices, not discounted unit prices.
+      // A successful confirmation also proves there was no PROMO_RE_QUOTE.
+      const result = await h.service.confirmBotSale({
+        customerId: 'customer',
+        cashierUserId: 'cashier',
+        items: preview.items.map((line) => ({
+          ...line,
+          productName: 'Product',
+        })),
+        expectedTotalCents,
+      });
+      expect(result.totalCents).toBe(expectedTotalCents);
+      expect(result.discountCents).toBe(
+        testCase.shares.reduce((sum, share) => sum + share, 0),
+      );
+      const charged = h.saleRepo.save.mock.calls.at(-1)![0];
+      expect(charged.items[0].promotionId).toBe(
+        testCase.productWins ? 'promo' : reward > 0 ? 'bxgy' : null,
+      );
+      expect(charged.items[0].rewardKind).toBe(
+        reward > 0 ? 'buy_x_get_y' : null,
+      );
+      const guard = new EvaluateCartPromotionsUseCase({
+        findActiveAutomaticSnapshot: jest
+          .fn()
+          .mockResolvedValue({ promotions, complete: true }),
+      } as unknown as IPromotionRepository);
+      await expect(guard.execute(preview)).resolves.toEqual({
+        items: preview.items,
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+    });
+  });
+
   describe('ORDER_DISCOUNT per-line allocation', () => {
     it.each([
       {
@@ -673,7 +874,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
           appliedPromotionTitle: percent ? 'Bot discount' : null,
         },
       ],
-      hasNonPerUnitReward: false,
+      hasAdvancedReward: false,
     });
     for (const mock of [
       h.saleRepo.runInTransaction,
@@ -765,7 +966,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
             appliedPromotionTitle: null,
           },
         ],
-        hasNonPerUnitReward: false,
+        hasAdvancedReward: false,
       });
       for (const line of preview.items) {
         expect(line.finalPriceCents + line.discountAmountCents).toBe(
@@ -961,7 +1162,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
   });
 
   it.each(['buy-x-get-y', 'advanced', 'order'] as const)(
-    'projects an applied %s reward and flags only non-per-unit rewards',
+    'projects an applied %s reward and flags only ADVANCED for review',
     async (kind) => {
       const h = harness('customer-list');
       jest.spyOn(h.engine, 'evaluate').mockImplementation((input) =>
@@ -1002,7 +1203,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
         items: [item],
       });
       expect(preview).toMatchObject({
-        hasNonPerUnitReward: kind !== 'order',
+        hasAdvancedReward: kind === 'advanced',
         items: [
           {
             unitPriceCents: 800,
@@ -1012,6 +1213,18 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
           },
         ],
       });
+      const guard = new EvaluateCartPromotionsUseCase({
+        findActiveAutomaticSnapshot: jest
+          .fn()
+          .mockResolvedValue({ promotions: [], complete: true }),
+      } as unknown as IPromotionRepository);
+      const quote = await guard.execute(preview);
+      expect(quote.promotionEvaluationStatus).toBe(
+        kind === 'advanced' ? 'needs_human_review' : 'fully_evaluated',
+      );
+      expect(quote.items[0].discountAmountCents).toBe(
+        kind === 'advanced' ? 0 : 100,
+      );
       expect(h.usage.claimForSale).not.toHaveBeenCalled();
     },
   );

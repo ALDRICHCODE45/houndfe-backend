@@ -26,6 +26,14 @@ export const BOT_ELIGIBILITY_RULES: readonly BotEligibilityRule[] = [
     allowsPriceLists: true,
     allowsDaysOfWeek: true,
   },
+  {
+    type: 'BUY_X_GET_Y',
+    method: 'AUTOMATIC',
+    appliesTo: ['PRODUCTS', 'VARIANTS', 'CATEGORIES', 'BRANDS'],
+    customerScopes: ['ALL', 'REGISTERED_ONLY', 'SPECIFIC'],
+    allowsPriceLists: true,
+    allowsDaysOfWeek: true,
+  },
 ];
 
 interface BotEligibilityInput {
