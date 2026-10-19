@@ -888,7 +888,10 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
 
     // 3. customerScope
     const customerId = input.customerId;
-    if (promo.customerScope === 'REGISTERED_ONLY' && customerId == null) {
+    if (
+      promo.customerScope === 'REGISTERED_ONLY' &&
+      (customerId == null || input.treatCustomerAsUnregistered)
+    ) {
       return false; // silent skip — no exception
     }
     if (promo.customerScope === 'SPECIFIC') {

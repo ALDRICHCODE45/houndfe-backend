@@ -139,7 +139,7 @@ describe('Chatbot customer-aware pricing', () => {
         appliesTo: 'PRODUCTS',
       });
       // Model a legacy unsupported row, not a valid new promotion.
-      promotion.customerScope = 'REGISTERED_ONLY';
+      Object.assign(promotion, { type: 'ORDER_DISCOUNT' });
       const guard = new EvaluateCartPromotionsUseCase({
         findActiveAutomaticSnapshot: jest.fn().mockResolvedValue({
           promotions: reason === 'unsupported' ? [promotion] : [],

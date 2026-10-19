@@ -1,3 +1,14 @@
+import { ConfigService } from '@nestjs/config';
+import type { CallHandler, ExecutionContext } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import request from 'supertest';
+import type { Server } from 'node:http';
+import { CheckoutController } from '../../chatbot-api/presentation/checkout.controller';
+import type { CheckoutResponse } from '../../chatbot-api/presentation/dto/checkout.response';
+import { ServiceAuthGuard } from '../../chatbot-api/presentation/guards/service-auth.guard';
+import { BotAuditInterceptor } from '../../chatbot-api/presentation/interceptors/bot-audit.interceptor';
+import { CheckoutService } from '../../chatbot-api/application/checkout.service';
+import { ChatbotApiService } from '../../chatbot-api/application/chatbot-api.service';
 import { SalesService } from '../../sales/sales.service';
 import type { Sale } from '../../sales/domain/sale.entity';
 import { Promotion } from '../domain/promotion.entity';
@@ -18,8 +29,8 @@ function harness(
   appliesTo: PromotionTargetType = 'PRODUCTS',
   schedule: Pick<
     CreatePromotionParams,
-    'daysOfWeek' | 'startDate' | 'endDate'
-  > = {},
+    'daysOfWeek' | 'startDate' | 'endDate' | 'customerScope' | 'priceLists'
+  > & { customers?: Promotion['customers'] } = {},
 ) {
   const promo = Promotion.create({
     id: 'promo',
@@ -32,6 +43,7 @@ function harness(
     discountValue: percent || 20,
     ...schedule,
   });
+  promo.customers = schedule.customers ?? [];
   promo.targetItems = [
     {
       id: 'target',
@@ -108,6 +120,9 @@ function harness(
     id: 'customer',
     globalPriceListId: customerList,
   });
+  const addressFindUnique = jest
+    .fn()
+    .mockResolvedValue({ id: 'address', customerId: 'customer' });
   const outbox = { publish: jest.fn() };
   const usage = { claimForSale: jest.fn() };
   const service = new SalesService(
@@ -119,6 +134,9 @@ function harness(
       getTenantId: () => 'tenant',
       getClient: () => ({
         customer: { findUnique: customerFindUnique },
+        customerAddress: {
+          findUnique: addressFindUnique,
+        },
         globalPriceList: {
           findFirst: jest.fn().mockResolvedValue({ id: 'public' }),
         },
@@ -138,8 +156,34 @@ function harness(
     usage,
     findAll,
     customerFindUnique,
+    addressFindUnique,
     engine,
   };
+}
+
+function quoteService(
+  h: ReturnType<typeof harness>,
+  customers: () => Array<{ id: string }>,
+) {
+  type Ports = ConstructorParameters<typeof ChatbotApiService>;
+  return new ChatbotApiService(
+    {} as Ports[0],
+    {} as Ports[1],
+    new EvaluateCartPromotionsUseCase({
+      findActiveAutomaticSnapshot: jest
+        .fn()
+        .mockResolvedValue({ promotions: [h.promo], complete: true }),
+    } as unknown as IPromotionRepository),
+    h.service,
+    {} as Ports[4],
+    {
+      getTenantId: () => 'tenant',
+      getClient: () => ({
+        customer: { findMany: jest.fn(() => Promise.resolve(customers())) },
+      }),
+    } as unknown as Ports[5],
+    new ConfigService(),
+  );
 }
 
 const item = {
@@ -150,6 +194,265 @@ const item = {
 };
 
 describe('Bot preview / confirmation parity through the same SalesService', () => {
+  it.each([
+    {
+      scope: 'REGISTERED_ONLY',
+      customerId: 'customer',
+      list: null,
+      restrictedList: null,
+      discount: 200,
+    },
+    {
+      scope: 'SPECIFIC',
+      customerId: 'customer',
+      list: null,
+      restrictedList: null,
+      discount: 200,
+    },
+    {
+      scope: 'SPECIFIC',
+      customerId: 'other',
+      list: null,
+      restrictedList: null,
+      discount: 0,
+    },
+    {
+      scope: 'ALL',
+      customerId: 'customer',
+      list: 'customer-list',
+      restrictedList: 'customer-list',
+      discount: 160,
+    },
+    {
+      scope: 'ALL',
+      customerId: 'customer',
+      list: null,
+      restrictedList: 'customer-list',
+      discount: 0,
+    },
+    {
+      scope: 'ALL',
+      customerId: 'customer',
+      list: 'customer-list',
+      restrictedList: 'public',
+      discount: 0,
+    },
+    {
+      scope: 'ALL',
+      customerId: 'customer',
+      list: null,
+      restrictedList: 'public',
+      discount: 200,
+    },
+  ] as const)(
+    'quotes and charges $scope / $customerId / $list restricted to $restrictedList',
+    async ({ scope, customerId, list, restrictedList, discount }) => {
+      const h = harness(list, 20, false, 'PRODUCTS', {
+        customerScope: scope,
+        customers: [{ id: 'customer-link', customerId: 'customer' }],
+        priceLists: restrictedList
+          ? [{ id: 'list-link', globalPriceListId: restrictedList }]
+          : [],
+      });
+      const quote = await quoteService(h, () => [
+        { id: customerId },
+      ]).evaluateCart({
+        phoneCountryCode: '52',
+        phone: '5512345678',
+        items: [item],
+      });
+      expect(quote.customerResolution).toBe('unique');
+      expect(quote.promotionEvaluationStatus).toBe('fully_evaluated');
+      expect(quote.items[0].discountAmountCents).toBe(discount);
+      for (const line of quote.items) {
+        expect(line.finalPriceCents + line.discountAmountCents).toBe(
+          line.originalPriceCents,
+        );
+      }
+      const result = await h.service.confirmBotSale({
+        customerId,
+        cashierUserId: 'cashier',
+        items: quote.items.map((line) => ({ ...line, productName: 'Product' })),
+        expectedTotalCents: quote.items[0].finalPriceCents,
+      });
+      expect(result.totalCents).toBe(quote.items[0].finalPriceCents);
+      expect(result.discountCents).toBe(discount);
+      const chargedLine = h.saleRepo.save.mock.calls.at(-1)![0].items[0];
+      expect(chargedLine.subtotalCents).toBe(quote.items[0].finalPriceCents);
+      expect(chargedLine.promotionId).toBe(discount ? 'promo' : null);
+    },
+  );
+
+  it.each(['REGISTERED_ONLY', 'SPECIFIC'] as const)(
+    'excludes %s without an identified customer for every public resolution',
+    async (customerScope) => {
+      const h = harness(null, 20, false, 'PRODUCTS', {
+        customerScope,
+        customers: [{ id: 'link', customerId: 'customer' }],
+      });
+      for (const resolution of ['not_found', 'ambiguous', 'not_provided']) {
+        const customers =
+          resolution === 'ambiguous'
+            ? [{ id: 'customer' }, { id: 'other' }]
+            : [];
+        const quote = await quoteService(h, () => customers).evaluateCart({
+          items: [item],
+          ...(resolution !== 'not_provided'
+            ? { phoneCountryCode: '52', phone: '5512345678' }
+            : {}),
+        });
+        expect(quote.customerResolution).toBe(resolution);
+        expect(quote.promotionEvaluationStatus).toBe('fully_evaluated');
+        expect(quote.items[0]).toMatchObject({
+          originalPriceCents: 1000,
+          finalPriceCents: 1000,
+          discountAmountCents: 0,
+          appliedPromotionTitle: null,
+        });
+      }
+      expect(h.customerFindUnique).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'checkout preserves quote pricing for an initially existing customer=%s and subsequent purchases',
+    async (initiallyExisting) => {
+      const h = harness(null, 20, false, 'PRODUCTS', {
+        customerScope: 'REGISTERED_ONLY',
+      });
+      const productId = '10000000-0000-4000-8000-000000000001';
+      const cashierUserId = '20000000-0000-4000-8000-000000000001';
+      const customer = {
+        id: '30000000-0000-4000-8000-000000000001',
+        firstName: 'Ana',
+        lastName: null,
+        globalPriceListId: null,
+      };
+      h.promo.targetItems[0].targetId = productId;
+      h.customerFindUnique.mockResolvedValue(customer);
+      let exists = initiallyExisting;
+      const address = {
+        id: '40000000-0000-4000-8000-000000000001',
+        customerId: customer.id,
+        updatedAt: new Date('2026-10-19T18:00:00.000Z'),
+      };
+      h.addressFindUnique.mockResolvedValue(address);
+      const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([{ acquired: true }]),
+        saleIdempotency: {
+          findUnique: jest.fn().mockResolvedValue(null),
+          create: jest.fn().mockResolvedValue({}),
+        },
+        tenantMembership: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'membership' }),
+        },
+        customer: {
+          findMany: jest.fn(() => Promise.resolve(exists ? [customer] : [])),
+          create: jest.fn(() => {
+            exists = true;
+            return Promise.resolve(customer);
+          }),
+        },
+        customerAddress: { create: jest.fn().mockResolvedValue(address) },
+      };
+      const tenant = {
+        getTenantId: () => 'tenant',
+        getClient: () => tx,
+        runInTransaction: <T>(work: () => Promise<T>) => work(),
+      };
+      const checkout = new CheckoutService(
+        tenant as unknown as ConstructorParameters<typeof CheckoutService>[0],
+        h.service,
+        new ConfigService(),
+      );
+      const confirm = jest.spyOn(h.service, 'confirmBotSale');
+      const quotes = quoteService(h, () => (exists ? [customer] : []));
+      // Authentication is outside this pricing proof; request parsing and HTTP status are real.
+      const module = await Test.createTestingModule({
+        controllers: [CheckoutController],
+        providers: [{ provide: CheckoutService, useValue: checkout }],
+      })
+        .overrideGuard(ServiceAuthGuard)
+        .useValue({ canActivate: () => true })
+        .overrideInterceptor(BotAuditInterceptor)
+        .useValue({
+          intercept: (_context: ExecutionContext, next: CallHandler) =>
+            next.handle(),
+        })
+        .compile();
+      const app = module.createNestApplication();
+      await app.init();
+      try {
+        for (let purchase = 0; purchase < 2; purchase++) {
+          const quote = await quotes.evaluateCart({
+            phoneCountryCode: '52',
+            phone: '5512345678',
+            items: [{ ...item, productId }],
+          });
+          const created = !initiallyExisting && purchase === 0;
+          expect(quote.customerResolution).toBe(
+            created ? 'not_found' : 'unique',
+          );
+          expect(quote.promotionEvaluationStatus).toBe('fully_evaluated');
+          const expectedTotalCents = created ? 1000 : 800;
+          expect(quote.items[0].finalPriceCents).toBe(expectedTotalCents);
+          const http = await request(app.getHttpServer() as Server)
+            .post('/chatbot-api/checkouts')
+            .set('X-Idempotency-Key', `purchase-${purchase}`)
+            .send({
+              phoneCountryCode: '52',
+              phone: '5512345678',
+              customer: initiallyExisting
+                ? { mode: 'existing', customerId: customer.id }
+                : { mode: 'createIfAbsent', firstName: 'Ana' },
+              deliveryAddress: {
+                mode: 'newSaved',
+                address: { street: 'Fixture Street' },
+              },
+              sale: {
+                cashierUserId,
+                items: quote.items.map((line) => ({
+                  productId: line.productId,
+                  variantId: line.variantId,
+                  quantity: line.quantity,
+                  unitPriceCents: line.unitPriceCents,
+                  productName: 'Product',
+                })),
+                expectedTotalCents,
+              },
+            });
+          expect(http.status).toBe(201);
+          const response = http.body as CheckoutResponse;
+          expect(response.status).toBe('created');
+          expect(response.customer.resolution).toBe(
+            created ? 'created' : 'existing',
+          );
+          expect(response.sale.totalCents).toBe(expectedTotalCents);
+          expect(response.sale.discountCents).toBe(created ? 0 : 200);
+          const confirmationInput = confirm.mock.calls.at(-1)![0];
+          if (created) {
+            expect(confirmationInput).toHaveProperty(
+              'excludeRegisteredOnlyPromotions',
+              true,
+            );
+          } else {
+            expect(confirmationInput).not.toHaveProperty(
+              'excludeRegisteredOnlyPromotions',
+            );
+          }
+          const chargedLine = h.saleRepo.save.mock.calls.at(-1)![0].items[0];
+          expect(chargedLine.subtotalCents).toBe(expectedTotalCents);
+          expect(chargedLine.promotionId).toBe(created ? null : 'promo');
+        }
+        expect(tx.customer.create).toHaveBeenCalledTimes(
+          initiallyExisting ? 0 : 1,
+        );
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it.each([
     {
       name: 'customer list without promo',

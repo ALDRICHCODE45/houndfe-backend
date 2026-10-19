@@ -142,6 +142,8 @@ type ConfirmBotSaleInput = {
   cashierUserId: string;
   customerId: string;
   shippingAddressId?: string | null;
+  // Atomic checkout only: preserve the not_found quote on customer creation.
+  excludeRegisteredOnlyPromotions?: boolean;
   items: Array<{
     productId: string;
     variantId?: string | null;
@@ -663,6 +665,7 @@ export class SalesService {
   private async recomputePricingAndPromotions(
     sale: Sale,
     botEligibleOnly = false,
+    treatCustomerAsUnregistered = false,
   ): Promise<{
     promotionCapacityDemands: PromotionCapacityClaim[];
     capacityExcludedPromotionIds: string[];
@@ -687,7 +690,11 @@ export class SalesService {
     // (3) Build input + (4) call engine — see `buildPosEvalInput`.
     //     `effectiveUnitPriceCents` reads the post-reprice
     //     `unitPriceCents` so the engine sees the tier-adjusted price.
-    const result = await this.evaluatePromotionsForSale(sale, botEligibleOnly);
+    const result = await this.evaluatePromotionsForSale(
+      sale,
+      botEligibleOnly,
+      treatCustomerAsUnregistered,
+    );
 
     // (5) Apply each per-line result. Engine guarantees `hasManualDiscount
     //     === false` for lines it returns, so manual-discount lines are
@@ -828,9 +835,25 @@ export class SalesService {
    * without changing the draft. Read-only — the spec scenario for
    * `GET /sales/drafts/:id/applicable-promotions` is non-mutating.
    */
-  private async evaluatePromotionsForSale(sale: Sale, botEligibleOnly = false) {
+  private async evaluatePromotionsForSale(
+    sale: Sale,
+    botEligibleOnly = false,
+    treatCustomerAsUnregistered = false,
+  ) {
     const input = await this.buildPosEvalInput(sale);
-    if (botEligibleOnly) input.botEligibleOnly = true;
+    if (botEligibleOnly) {
+      input.botEligibleOnly = true;
+      // Bot lines bind the customer's global list, not a per-product override.
+      const boundListId =
+        sale.globalPriceListId ??
+        (await this.resolveDefaultGlobalPriceListId());
+      for (const line of input.lines) {
+        if (line.appliedPriceListId === null) {
+          line.appliedGlobalPriceListId = boundListId;
+        }
+      }
+    }
+    if (treatCustomerAsUnregistered) input.treatCustomerAsUnregistered = true;
     return this.posEvaluatePromotions.evaluate(input);
   }
 
@@ -3394,6 +3417,7 @@ export class SalesService {
       cashierUserId: string;
       shippingAddressId?: string | null;
       items: ConfirmBotSaleInput['items'];
+      excludeRegisteredOnlyPromotions?: boolean;
     },
     customerList: string | null,
     seedFromCatalog = false,
@@ -3428,7 +3452,11 @@ export class SalesService {
     // Re-evaluate with the full POS engine, but only bot-eligible promotions.
     // Preview, bot confirmation and atomic checkout share this path; POS
     // drafts, charge and quotations keep the default candidate set.
-    const metadata = await this.recomputePricingAndPromotions(sale, true);
+    const metadata = await this.recomputePricingAndPromotions(
+      sale,
+      true,
+      input.excludeRegisteredOnlyPromotions,
+    );
     return { sale, ...metadata };
   }
 

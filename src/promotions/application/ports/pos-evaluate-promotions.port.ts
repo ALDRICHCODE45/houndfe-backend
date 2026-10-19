@@ -60,6 +60,8 @@ export interface PosEvalLine {
 export interface PosEvalInput {
   /** Bot confirmation only; omitted/false preserves POS and quotation behavior. */
   botEligibleOnly?: boolean;
+  /** Same-request checkout creation excludes REGISTERED_ONLY, without changing identity or lists. */
+  treatCustomerAsUnregistered?: boolean;
   /** Recompute time — every gate evaluates against this. */
   now: Date;
   customerId: string | null;
