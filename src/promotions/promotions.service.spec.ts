@@ -52,6 +52,7 @@ describe('bot eligibility CRUD contract', () => {
     repo.save.mockImplementation((promotion) => Promise.resolve(promotion));
     const prisma = makePrisma();
     prisma.globalPriceList.findMany.mockResolvedValue([{ id: 'list-1' }]);
+    prisma.customer.findMany.mockResolvedValue([{ id: 'customer-1' }]);
     for (const lookup of [prisma.variant, prisma.category, prisma.brand]) {
       lookup.findMany.mockResolvedValue([{ id: 'target-1' }]);
     }
@@ -243,9 +244,6 @@ describe('bot eligibility CRUD contract', () => {
         getDiscountPercent: 50,
       },
     ],
-    ['customerScope', { customerScope: CustomerScopeEnum.REGISTERED_ONLY }],
-    ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
-    ['priceLists', { priceListIds: ['list-1'] }],
   ])('rejects unsupported %s on create', async (condition, patch) => {
     const { repo, service } = harness();
     await expect(
@@ -274,23 +272,46 @@ describe('bot eligibility CRUD contract', () => {
   });
 
   it.each([
-    ['customerScope', { customerScope: CustomerScopeEnum.REGISTERED_ONLY }],
-    ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
-    ['priceLists', { priceListIds: ['list-1'] }],
+    CustomerScopeEnum.ALL,
+    CustomerScopeEnum.REGISTERED_ONLY,
+    CustomerScopeEnum.SPECIFIC,
   ])(
-    'rejects a PATCH making an eligible promotion unsupported: %s',
-    async (condition, patch) => {
+    'accepts bot-eligible %s with a price list on create and PATCH',
+    async (customerScope) => {
       const { repo, service } = harness();
-      repo.findById.mockResolvedValue(
-        Object.assign(makePromotion({ appliesTo: 'PRODUCTS' }), {
-          botEligible: true,
-        }),
-      );
-      await expect(service.update('promo-1', patch)).rejects.toMatchObject({
-        code: 'BOT_ELIGIBILITY_UNSUPPORTED',
-        message: expect.stringContaining(condition) as unknown as string,
+      const restrictions = {
+        customerScope,
+        customerIds:
+          customerScope === CustomerScopeEnum.SPECIFIC ? ['customer-1'] : [],
+        priceListIds: ['list-1'],
+      };
+      const expected = {
+        botEligible: true,
+        customerScope,
+        priceLists: [expect.objectContaining({ globalPriceListId: 'list-1' })],
+        customers: restrictions.customerIds.map((customerId): unknown =>
+          expect.objectContaining({ customerId }),
+        ),
+      };
+      await expect(
+        service.create({ ...supported, ...restrictions, botEligible: true }),
+      ).resolves.toMatchObject(expected);
+      const stored = makePromotion({
+        appliesTo: 'PRODUCTS',
+        botEligible: true,
       });
-      expect(repo.save.mock.calls).toHaveLength(0);
+      repo.findById.mockResolvedValue(stored);
+      await expect(
+        service.update('promo-1', restrictions),
+      ).resolves.toMatchObject(expected);
+      stored.botEligible = false;
+      await expect(
+        service.update('promo-1', { botEligible: true }),
+      ).resolves.toMatchObject(expected);
+      await expect(
+        service.update('promo-1', { title: 'Renamed' }),
+      ).resolves.toMatchObject(expected);
+      expect(repo.save.mock.calls).toHaveLength(4);
     },
   );
 
@@ -299,12 +320,6 @@ describe('bot eligibility CRUD contract', () => {
     ['type', { type: 'ORDER_DISCOUNT' }],
     ['type', { type: 'BUY_X_GET_Y' }],
     ['type', { type: 'ADVANCED' }],
-    ['customerScope', { customerScope: 'REGISTERED_ONLY' }],
-    ['customerScope', { customerScope: 'SPECIFIC' }],
-    [
-      'priceLists',
-      { priceLists: [{ id: 'link-1', globalPriceListId: 'list-1' }] },
-    ],
   ])('validates stored %s on a flag-only PATCH', async (condition, stored) => {
     const { repo, service } = harness();
     repo.findById.mockResolvedValue(

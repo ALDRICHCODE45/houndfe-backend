@@ -79,6 +79,12 @@ Only two customer rows are read. Read failures remain failures, never `not_found
 
 The bound customer list is repriced with confirmation's tier logic. Existing repricing leaves a line's seed untouched if that list has no matching product/variant row. The quote therefore seeds that case from backend PUBLICO pricing; confirmation preserves that returned base when the bot resubmits it. If neither the bound list nor PUBLICO has a catalog price, pricing fails with `PRICE_OUT_OF_DATE` instead of trusting the informational input or inventing a free item.
 
+## Customer-scoped promotions and first checkout
+
+Bot-eligible automatic PRODUCT_DISCOUNT promotions support `ALL`, `REGISTERED_ONLY`, `SPECIFIC` and price-list restrictions. `REGISTERED_ONLY` requires an identified customer; `SPECIFIC` also requires membership in the promotion's customer list. Neither applies to `not_found`, `ambiguous` or `not_provided` quotes. Price-list restrictions use the customer's bound global list, or PUBLICO when no list is assigned, in both quote and confirmation.
+
+When atomic checkout actually creates a customer via `createIfAbsent`, that request excludes `REGISTERED_ONLY` promotions, matching its `not_found` quote. With unchanged catalog/promotion state, the first checkout accepts that quoted total without `PROMO_RE_QUOTE`. A later purchase resolves the customer as `unique` and can receive those promotions. `createIfAbsent` reusing an existing customer and explicit `existing` checkout keep their normal discounts. This internal checkout rule does not clear customer identity or alter SPECIFIC membership, price-list restrictions, POS, quotations or legacy `POST /chatbot-api/sales`.
+
 ## Promotion safety and parity boundary
 
 `promotionEvaluationStatus` remains `fully_evaluated | needs_human_review`. An incomplete bot-eligible snapshot, unsupported eligible promotion, applied order-level promotion, or applied non-per-unit BXGY/ADVANCED reward fails the whole cart closed. Every review line retains its **repriced** base but has `finalPriceCents = originalPriceCents`, zero discount and null title. Unsupported non-bot-eligible promotions do not block the cart.
@@ -91,7 +97,7 @@ Confirmation's existing validation against **any applicable live list price** is
 
 Mocked unit tests exercise the real `SalesService` and promotion evaluator for customer list 800 (with/without 20%), no-list and newly created customer PUBLICO 1000, missing-list-row fallback, and preview-to-confirmation totals/discounts. They also cover DTO/HTTP validation, all customer resolutions, repriced review amounts, unsupported reward flags, duplicate input order, rounding and absence of preview business writes.
 
-The existing PostgreSQL checkout fixture stubs `recomputePricingAndPromotions`; extending it would not prove real pricing parity. This change instead proves pricing through the actual shared confirmation path that checkout calls. No database or production operation is needed for these tests.
+The existing PostgreSQL checkout fixture stubs `recomputePricingAndPromotions`; extending it would not prove real pricing parity. The parity suite instead exercises HTTP checkout with the real CheckoutService, SalesService and promotion engine, mocking persistence and bypassing authentication/audit only. It verifies first-purchase HTTP 201 without the registered-only discount, a second unique-customer purchase with it, and unchanged existing-customer checkout. Scope/list quote-to-sale tests also preserve each line's amount identity. No database or production operation is needed for these tests.
 
 ## Errors
 

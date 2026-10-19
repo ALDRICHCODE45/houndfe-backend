@@ -264,6 +264,10 @@ export class CheckoutService {
           shippingAddressId: address.id,
           items: input.sale.items,
           expectedTotalCents: input.sale.expectedTotalCents,
+          // Match the not_found quote even though the customer now has an ID.
+          ...(customerResolution === 'created'
+            ? { excludeRegisteredOnlyPromotions: true }
+            : {}),
           ...(shipping ? { shipping } : {}),
         });
         const response: CheckoutResponse = {

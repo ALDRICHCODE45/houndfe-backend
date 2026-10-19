@@ -38,6 +38,56 @@ import type {
 
 describe('POS bot eligibility filtering', () => {
   it.each([undefined, false, true])(
+    'REGISTERED_ONLY respects treatCustomerAsUnregistered=%s',
+    async (treatCustomerAsUnregistered) => {
+      const engine = new PosEvaluatePromotionsUseCase(
+        makeRepository([
+          makePromotion({
+            customerScope: 'REGISTERED_ONLY',
+            botEligible: true,
+          }),
+        ]),
+      );
+      const result = await engine.evaluate(
+        Object.assign(makeInput({ customerId: 'customer' }), {
+          treatCustomerAsUnregistered,
+        }),
+      );
+      expect(result.lines).toHaveLength(treatCustomerAsUnregistered ? 0 : 1);
+      expect(result.promotionCapacityDemands).toHaveLength(
+        treatCustomerAsUnregistered ? 0 : 1,
+      );
+    },
+  );
+
+  it.each(['ALL', 'SPECIFIC'] as const)(
+    'does not change %s or price-list eligibility when treating a customer as unregistered',
+    async (customerScope) => {
+      const engine = new PosEvaluatePromotionsUseCase(
+        makeRepository([
+          makePromotion({
+            customerScope,
+            customers: [{ id: 'link', customerId: 'customer' }],
+            priceLists: [{ id: 'list-link', globalPriceListId: 'list' }],
+          }),
+        ]),
+      );
+      for (const list of ['list', 'other']) {
+        const result = await engine.evaluate(
+          Object.assign(
+            makeInput({
+              customerId: 'customer',
+              lines: [makeLine({ appliedGlobalPriceListId: list })],
+            }),
+            { treatCustomerAsUnregistered: true },
+          ),
+        );
+        expect(result.lines).toHaveLength(list === 'list' ? 1 : 0);
+      }
+    },
+  );
+
+  it.each([undefined, false, true])(
     'filters a non-eligible promotion only when botEligibleOnly=%s',
     async (botEligibleOnly) => {
       const engine = new PosEvaluatePromotionsUseCase(

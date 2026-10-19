@@ -96,14 +96,27 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
   });
 
   it.each([
-    { type: 'BUY_X_GET_Y' as const },
-    { type: 'ORDER_DISCOUNT' as const },
     { customerScope: 'REGISTERED_ONLY' as const },
     {
       customerScope: 'SPECIFIC' as const,
       customers: [{ id: 'restriction', customerId: 'customer' }],
     },
     { priceLists: [{ id: 'restriction', globalPriceListId: 'list' }] },
+  ])(
+    'keeps the shared preview for supported customer/list restrictions: %j',
+    async (rule) => {
+      const h = harness([promotion(rule)]);
+      await expect(h.useCase.execute(pricing)).resolves.toEqual({
+        items: pricing.items,
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+    },
+  );
+
+  it.each([
+    { type: 'BUY_X_GET_Y' as const },
+    { type: 'ORDER_DISCOUNT' as const },
+    { type: 'ADVANCED' as const },
   ])('fails closed for an unsupported eligible snapshot: %j', async (rule) => {
     const h = harness([promotion(rule)]);
     await expect(h.useCase.execute(pricing)).resolves.toEqual({
