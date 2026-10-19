@@ -26,7 +26,6 @@ export class EvaluateCartPromotionsUseCase implements IEvaluateCartPromotionsUse
         (promotion) =>
           promotion.botEligible && !isBotEligibilitySupported(promotion),
       ) ||
-      input.hasOrderPromotion ||
       input.hasNonPerUnitReward;
 
     return {

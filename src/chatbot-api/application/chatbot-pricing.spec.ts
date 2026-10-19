@@ -59,7 +59,6 @@ describe('Chatbot customer-aware pricing', () => {
                 appliedPromotionTitle: null,
               },
             ],
-            hasOrderPromotion: false,
             hasNonPerUnitReward: false,
           });
         });
@@ -125,7 +124,7 @@ describe('Chatbot customer-aware pricing', () => {
     },
   );
 
-  it.each(['incomplete', 'unsupported', 'order', 'reward'] as const)(
+  it.each(['incomplete', 'unsupported', 'reward'] as const)(
     '%s review quotes keep the backend base, not the submitted price',
     async (reason) => {
       const promotion = Promotion.create({
@@ -139,7 +138,7 @@ describe('Chatbot customer-aware pricing', () => {
         appliesTo: 'PRODUCTS',
       });
       // Model a legacy unsupported row, not a valid new promotion.
-      Object.assign(promotion, { type: 'ORDER_DISCOUNT' });
+      Object.assign(promotion, { type: 'ADVANCED' });
       const guard = new EvaluateCartPromotionsUseCase({
         findActiveAutomaticSnapshot: jest.fn().mockResolvedValue({
           promotions: reason === 'unsupported' ? [promotion] : [],
@@ -157,7 +156,6 @@ describe('Chatbot customer-aware pricing', () => {
             appliedPromotionTitle: '20% off',
           },
         ],
-        hasOrderPromotion: reason === 'order',
         hasNonPerUnitReward: reason === 'reward',
       });
       const service = new ChatbotApiService(

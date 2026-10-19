@@ -874,7 +874,6 @@ describe('ChatbotApiService', () => {
       };
       const pricing = {
         items: [item],
-        hasOrderPromotion: false,
         hasNonPerUnitReward: false,
       };
       salesService.previewBotPricing.mockResolvedValue(pricing);
