@@ -67,6 +67,8 @@ export class ChatbotApiController {
   @RequiredScopes('pricing:evaluate')
   evaluateCart(@Body() body: EvaluateCartRequestDto) {
     return this.chatbotApiService.evaluateCart({
+      phoneCountryCode: body.phoneCountryCode,
+      phone: body.phone,
       items: body.items.map((item) => ({
         productId: item.productId,
         variantId: item.variantId ?? null,

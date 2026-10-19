@@ -151,6 +151,7 @@ describe('ChatbotApiController', () => {
           },
         ],
         promotionEvaluationStatus: 'fully_evaluated',
+        customerResolution: 'not_provided',
       }),
       registerBotSale: jest.fn().mockResolvedValue({
         saleId: 'sale-bot-1',
@@ -806,8 +807,90 @@ describe('ChatbotApiController', () => {
             },
           ],
           promotionEvaluationStatus: 'fully_evaluated',
+          customerResolution: 'not_provided',
         });
       });
+  });
+
+  it.each([
+    { phoneCountryCode: '52' },
+    { phone: '5512345678' },
+    { phoneCountryCode: '+52', phone: '5512345678' },
+  ])(
+    'rejects invalid pricing phone pairs with the standard DTO error: %j',
+    async (phone) => {
+      const response = await request(httpServer())
+        .post('/chatbot-api/pricing/evaluate-cart')
+        .set('Authorization', 'Bearer svc_pricing-key')
+        .send({
+          ...phone,
+          items: [
+            {
+              productId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+              quantity: 1,
+              unitPriceCents: 1000,
+            },
+          ],
+        })
+        .expect(400);
+      expect(response.body).toMatchObject({
+        statusCode: 400,
+        error: 'Bad Request',
+        message: expect.any(Array) as unknown[],
+      });
+      expect(service.evaluateCart).not.toHaveBeenCalled();
+    },
+  );
+
+  it('forwards the pricing customer pair and returns the backend price unchanged', async () => {
+    service.evaluateCart.mockResolvedValue({
+      items: [
+        {
+          productId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+          variantId: null,
+          quantity: 1,
+          unitPriceCents: 800,
+          originalPriceCents: 800,
+          finalPriceCents: 640,
+          discountAmountCents: 160,
+          appliedPromotionTitle: '20% off',
+        },
+      ],
+      promotionEvaluationStatus: 'fully_evaluated',
+      customerResolution: 'unique',
+    });
+    const response = await request(httpServer())
+      .post('/chatbot-api/pricing/evaluate-cart')
+      .set('Authorization', 'Bearer svc_pricing-key')
+      .send({
+        phoneCountryCode: '052',
+        phone: '05512345678',
+        items: [
+          {
+            productId: 'a8fdbf81-31ee-4f43-8739-0c70c9388d72',
+            quantity: 1,
+            unitPriceCents: 7,
+          },
+        ],
+      })
+      .expect(201);
+    expect(response.body).toMatchObject({
+      customerResolution: 'unique',
+      items: [
+        {
+          unitPriceCents: 800,
+          originalPriceCents: 800,
+          finalPriceCents: 640,
+          discountAmountCents: 160,
+        },
+      ],
+    });
+    expect(service.evaluateCart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phoneCountryCode: '052',
+        phone: '05512345678',
+      }),
+    );
   });
 
   it('POST /chatbot-api/pricing/evaluate-cart returns 400 for invalid item payloads', async () => {

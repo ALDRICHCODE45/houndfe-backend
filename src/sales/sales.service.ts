@@ -26,6 +26,10 @@ import type {
   PosEvalInput,
 } from '../promotions/application/ports/pos-evaluate-promotions.port';
 import { POS_EVALUATE_PROMOTIONS_USE_CASE } from '../promotions/application/ports/pos-evaluate-promotions.port';
+import type {
+  BotPricingPreview,
+  CartItemForEvaluation,
+} from '../promotions/application/ports/evaluate-cart-promotions.port';
 import {
   type IPromotionUsageRepository,
   PROMOTION_USAGE_REPOSITORY,
@@ -3309,6 +3313,170 @@ export class SalesService {
     });
   }
 
+  /** Read-only quote: no transaction, persistence, capacity claim or stock effects. */
+  async previewBotPricing(input: {
+    customerId: string | null;
+    items: CartItemForEvaluation[];
+  }): Promise<BotPricingPreview> {
+    let customerList: string | null = null;
+    if (input.customerId !== null) {
+      const customer = await this.tenantPrisma.getClient().customer.findUnique({
+        where: {
+          id: input.customerId,
+          tenantId: this.tenantPrisma.getTenantId(),
+        },
+      });
+      if (!customer) {
+        throw new BusinessRuleViolationError(
+          'CUSTOMER_NOT_FOUND',
+          'CUSTOMER_NOT_FOUND',
+        );
+      }
+      customerList = customer.globalPriceListId ?? null;
+    }
+    const { sale } = await this.buildBotPricingSale(
+      {
+        customerId: input.customerId,
+        cashierUserId: 'bot-pricing-preview',
+        items: input.items.map((item) => ({
+          ...item,
+          productName: item.productId,
+          // Never seed a quote from the informational submitted price.
+          unitPriceCents: 0,
+        })),
+      },
+      customerList,
+      true,
+    );
+
+    // addItem stacks product/variant duplicates. Project back to input order,
+    // using the stacked quantity's tier and per-unit rounding. Whole-line
+    // rewards are allocated cumulatively so their sum remains exact.
+    const allocatedQuantities = new Map<string, number>();
+    return {
+      items: input.items.map((inputItem) => {
+        const item = sale.items.find((line) =>
+          line.matches(inputItem.productId, inputItem.variantId),
+        )!;
+        const unitPriceCents =
+          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;
+        const originalPriceCents = unitPriceCents * inputItem.quantity;
+        const allocated = allocatedQuantities.get(item.id) ?? 0;
+        const next = allocated + inputItem.quantity;
+        allocatedQuantities.set(item.id, next);
+        const reward = item.isBuyXGetYReward()
+          ? (item.discountAmountCents ?? 0)
+          : 0;
+        const rewardShare =
+          Math.floor((reward * next) / item.quantity) -
+          Math.floor((reward * allocated) / item.quantity);
+        const finalPriceCents =
+          item.unitPriceCents * inputItem.quantity - rewardShare;
+        return {
+          productId: inputItem.productId,
+          variantId: inputItem.variantId,
+          quantity: inputItem.quantity,
+          unitPriceCents,
+          originalPriceCents,
+          finalPriceCents,
+          discountAmountCents: originalPriceCents - finalPriceCents,
+          appliedPromotionTitle: item.discountTitle ?? null,
+        };
+      }),
+      hasOrderPromotion: sale.appliedOrderPromotion !== null,
+      hasNonPerUnitReward: sale.items.some((item) => item.isBuyXGetYReward()),
+    };
+  }
+
+  private async buildBotPricingSale(
+    input: {
+      customerId: string | null;
+      cashierUserId: string;
+      shippingAddressId?: string | null;
+      items: ConfirmBotSaleInput['items'];
+    },
+    customerList: string | null,
+    seedFromCatalog = false,
+  ) {
+    const saleId = randomUUID();
+    const sale = Sale.create({ id: saleId, userId: input.cashierUserId });
+    if (input.customerId !== null) {
+      sale.assignCustomer(input.customerId, input.shippingAddressId ?? null);
+    }
+    sale.assignSeller(input.cashierUserId);
+    for (const item of input.items) {
+      sale.addItem({
+        id: randomUUID(),
+        saleId,
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        productName: item.productName,
+        variantName: item.variantName ?? null,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
+    }
+    // D5 — bind the customer's default price list BEFORE the engine runs, so
+    // repriceNonStickyLines quotes the customer's list instead of silently
+    // falling back to PUBLICO. null deliberately binds PUBLICO, exactly as for
+    // a new checkout customer.
+    sale.setGlobalPriceList(customerList, false);
+    if (seedFromCatalog && sale.items.length > 0) {
+      await this.seedBotPreviewPrices(sale);
+    }
+    // Re-evaluate with the full POS engine, but only bot-eligible promotions.
+    // Preview, bot confirmation and atomic checkout share this path; POS
+    // drafts, charge and quotations keep the default candidate set.
+    const metadata = await this.recomputePricingAndPromotions(sale, true);
+    return { sale, ...metadata };
+  }
+
+  private async seedBotPreviewPrices(sale: Sale): Promise<void> {
+    const publicList = await this.resolveDefaultGlobalPriceListId();
+    const listIds = [
+      ...new Set(
+        [sale.globalPriceListId, publicList].filter(
+          (id): id is string => id !== null,
+        ),
+      ),
+    ];
+    const prices = await this.productsService.batchResolvePriceMap(
+      sale.items.flatMap((item) =>
+        listIds.map((priceListId) => ({
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+          priceListId,
+          globalPriceListId: priceListId,
+        })),
+      ),
+    );
+    for (const item of sale.items) {
+      const price = listIds
+        .map((id) =>
+          prices
+            .get(`${item.productId}::${item.variantId ?? ''}::${id}`)
+            ?.get(item.quantity),
+        )
+        .find((cents) => cents !== undefined);
+      // Repricing preserves the seed when the bound list lacks a product.
+      // Seed from PUBLICO in that case, never from the caller's price. With
+      // no catalog price at all, fail rather than inventing a zero-price quote.
+      if (price === undefined) {
+        throw new BusinessRuleViolationError(
+          'PRICE_OUT_OF_DATE',
+          'PRICE_OUT_OF_DATE',
+        );
+      }
+      item.reprice({
+        priceCents: price,
+        priceSource: 'price_list',
+        appliedPriceListId: null,
+      });
+    }
+  }
+
   async confirmBotSale(
     input: ConfirmBotSaleInput,
   ): Promise<ConfirmBotSaleResult> {
@@ -3421,51 +3589,11 @@ export class SalesService {
         }
       }
 
-      const saleId = randomUUID();
-      const sale = Sale.create({
-        id: saleId,
-        userId: input.cashierUserId,
-      });
-
-      sale.assignCustomer(input.customerId, shippingAddressId);
-      sale.assignSeller(input.cashierUserId);
-
-      for (const item of input.items) {
-        sale.addItem({
-          id: randomUUID(),
-          saleId,
-          productId: item.productId,
-          variantId: item.variantId ?? null,
-          productName: item.productName,
-          variantName: item.variantName ?? null,
-          quantity: item.quantity,
-          unitPriceCents: item.unitPriceCents,
-          unitPriceCurrency: 'MXN',
-        });
-      }
-
-      // D5 — bind the customer's default price list BEFORE the engine
-      // runs. Without this, `recomputePricingAndPromotions` →
-      // `repriceNonStickyLines` would fall back to the PUBLICO default
-      // list and could silently re-quote non-sticky lines against a
-      // list the bot may not have quoted. The same auto-seed pattern
-      // lives in `SalesService.assignCustomer` (sales.service.ts:1913).
-      // When the customer has no list, `null` lets the engine fall
-      // back to PUBLICO via `resolveDefaultGlobalPriceListId()`. The
-      // customer row was already loaded (and tenant-qualified) above.
-      const customerList =
-        (customer as { globalPriceListId?: string | null }).globalPriceListId ??
-        null;
-      sale.setGlobalPriceList(customerList, false);
-
-      // Re-evaluate with the full POS engine, but only bot-eligible
-      // promotions. Atomic checkout shares this confirmation path;
-      // POS drafts, charge, and quotations keep the default candidate set.
-      //
-      // pca-2c2 — capture capacity demands. The bot's first commit is this
-      // recompute, so no stale-preview guard applies here.
-      const { promotionCapacityDemands } =
-        await this.recomputePricingAndPromotions(sale, true);
+      const { sale, promotionCapacityDemands } = await this.buildBotPricingSale(
+        { ...input, shippingAddressId },
+        customer.globalPriceListId ?? null,
+      );
+      const saleId = sale.id;
 
       // D4 — totals are the SINGLE source of truth from
       // `sale.previewTotals()`: the same helper the draft preview and the

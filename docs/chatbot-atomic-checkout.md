@@ -7,7 +7,7 @@ This is an additive API. Existing customer GET/PUT and `POST /chatbot-api/sales`
 ## Quick path
 
 1. Obtain sender phone, cashier and customer/address references from the trusted chatbot application, not free model input.
-2. Confirm the intended cart, address and final amount; generate and persist one idempotency key for that exact checkout.
+2. [Quote customer-aware pricing](chatbot-customer-pricing.md) with the same trusted sender phone. Use the returned pre-discount unit prices and final line totals, then confirm the intended cart, address and final amount; generate and persist one idempotency key for that exact checkout.
 3. POST the checkout. On timeout, 5xx or an in-flight response, keep the cart locked and retry the **same request and key**.
 4. GET `/chatbot-api/checkouts/status` with that key to recover a committed result. `not_observed` is **not** proof that the request failed.
 
