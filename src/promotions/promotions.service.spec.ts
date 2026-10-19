@@ -23,6 +23,7 @@ import { IPromotionRepository } from './domain/promotion.repository';
 import {
   CreatePromotionDto,
   CustomerScopeEnum,
+  DayOfWeekEnum,
   DiscountTypeEnum,
   PromotionMethodEnum,
   PromotionTargetTypeEnum,
@@ -35,6 +36,200 @@ import {
   SortOrderEnum,
 } from './dto/promotion-query.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
+
+describe('bot eligibility CRUD contract', () => {
+  const supported = {
+    title: 'Bot discount',
+    type: PromotionTypeEnum.PRODUCT_DISCOUNT,
+    method: PromotionMethodEnum.AUTOMATIC,
+    discountType: DiscountTypeEnum.PERCENTAGE,
+    discountValue: 10,
+    appliesTo: PromotionTargetTypeEnum.PRODUCTS,
+  };
+
+  function harness() {
+    const repo = makeRepo();
+    repo.save.mockImplementation((promotion) => Promise.resolve(promotion));
+    const prisma = makePrisma();
+    prisma.globalPriceList.findMany.mockResolvedValue([{ id: 'list-1' }]);
+    return { repo, service: makeService(repo, prisma) };
+  }
+
+  it.each([undefined, false, true])(
+    'creates and responds with botEligible=%s',
+    async (flag) => {
+      const { service } = harness();
+      const dto = Object.assign(
+        {},
+        supported,
+        flag === undefined ? {} : { botEligible: flag },
+      );
+      await expect(service.create(dto)).resolves.toMatchObject({
+        botEligible: flag ?? false,
+      });
+    },
+  );
+
+  it.each([
+    ['method', { method: PromotionMethodEnum.MANUAL }],
+    ['type', { type: PromotionTypeEnum.ORDER_DISCOUNT, appliesTo: undefined }],
+    [
+      'type',
+      {
+        type: PromotionTypeEnum.BUY_X_GET_Y,
+        discountType: undefined,
+        discountValue: undefined,
+        buyQuantity: 1,
+        getQuantity: 1,
+        getDiscountPercent: 50,
+      },
+    ],
+    [
+      'type',
+      {
+        type: PromotionTypeEnum.ADVANCED,
+        appliesTo: undefined,
+        discountType: undefined,
+        discountValue: undefined,
+        buyQuantity: 1,
+        getQuantity: 1,
+        getDiscountPercent: 50,
+      },
+    ],
+    ['appliesTo', { appliesTo: PromotionTargetTypeEnum.CATEGORIES }],
+    ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
+    ['priceLists', { priceListIds: ['list-1'] }],
+    ['daysOfWeek', { daysOfWeek: [DayOfWeekEnum.MONDAY] }],
+  ])('rejects unsupported %s on create', async (condition, patch) => {
+    const { repo, service } = harness();
+    await expect(
+      service.create(
+        Object.assign({}, supported, patch, { botEligible: true }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'BOT_ELIGIBILITY_UNSUPPORTED',
+      message: expect.stringContaining(condition) as unknown as string,
+    });
+    expect(repo.save.mock.calls).toHaveLength(0);
+  });
+
+  it('allows a flag-only PATCH and preserves the flag when omitted', async () => {
+    const { repo, service } = harness();
+    repo.findById.mockResolvedValue(makePromotion({ appliesTo: 'PRODUCTS' }));
+    await expect(
+      service.update(
+        'promo-1',
+        Object.assign(new UpdatePromotionDto(), { botEligible: true }),
+      ),
+    ).resolves.toMatchObject({ botEligible: true });
+    await expect(
+      service.update('promo-1', { title: 'Renamed' }),
+    ).resolves.toMatchObject({ botEligible: true });
+  });
+
+  it.each([
+    ['appliesTo', { appliesTo: PromotionTargetTypeEnum.CATEGORIES }],
+    ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
+    ['priceLists', { priceListIds: ['list-1'] }],
+    ['daysOfWeek', { daysOfWeek: [DayOfWeekEnum.MONDAY] }],
+  ])(
+    'rejects a PATCH making an eligible promotion unsupported: %s',
+    async (condition, patch) => {
+      const { repo, service } = harness();
+      repo.findById.mockResolvedValue(
+        Object.assign(makePromotion({ appliesTo: 'PRODUCTS' }), {
+          botEligible: true,
+        }),
+      );
+      await expect(service.update('promo-1', patch)).rejects.toMatchObject({
+        code: 'BOT_ELIGIBILITY_UNSUPPORTED',
+        message: expect.stringContaining(condition) as unknown as string,
+      });
+      expect(repo.save.mock.calls).toHaveLength(0);
+    },
+  );
+
+  it.each<[string, Partial<PromotionProps>]>([
+    ['method', { method: 'MANUAL' }],
+    ['type', { type: 'ORDER_DISCOUNT' }],
+    ['type', { type: 'BUY_X_GET_Y' }],
+    ['type', { type: 'ADVANCED' }],
+    ['appliesTo', { appliesTo: 'CATEGORIES' }],
+    ['customerScope', { customerScope: 'SPECIFIC' }],
+    [
+      'priceLists',
+      { priceLists: [{ id: 'link-1', globalPriceListId: 'list-1' }] },
+    ],
+    ['daysOfWeek', { daysOfWeek: [{ id: 'day-1', day: 'MONDAY' }] }],
+  ])('validates stored %s on a flag-only PATCH', async (condition, stored) => {
+    const { repo, service } = harness();
+    repo.findById.mockResolvedValue(
+      makePromotion({ appliesTo: 'PRODUCTS', ...stored }),
+    );
+    await expect(
+      service.update('promo-1', { botEligible: true }),
+    ).rejects.toMatchObject({
+      code: 'BOT_ELIGIBILITY_UNSUPPORTED',
+      message: expect.stringContaining(condition) as unknown as string,
+    });
+    expect(repo.save.mock.calls).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    'includes botEligible=%s in every read and lifecycle response',
+    async (botEligible) => {
+      const { repo, service } = harness();
+      const promotion = makePromotion({ appliesTo: 'PRODUCTS', botEligible });
+      repo.findById.mockResolvedValue(promotion);
+      repo.findAll.mockResolvedValue({ data: [promotion], total: 1 });
+      expect((await service.findAll({})).data[0]).toHaveProperty(
+        'botEligible',
+        botEligible,
+      );
+      await expect(service.findOne('promo-1')).resolves.toHaveProperty(
+        'botEligible',
+        botEligible,
+      );
+      await expect(service.endPromotion('promo-1')).resolves.toHaveProperty(
+        'botEligible',
+        botEligible,
+      );
+      await expect(
+        service.activatePromotion('promo-1'),
+      ).resolves.toHaveProperty('botEligible', botEligible);
+    },
+  );
+
+  it('keeps ignoring a method in PATCH, as before bot eligibility', async () => {
+    const { repo, service } = harness();
+    repo.findById.mockResolvedValue(
+      makePromotion({ appliesTo: 'PRODUCTS', botEligible: true }),
+    );
+    await expect(
+      service.update('promo-1', { method: PromotionMethodEnum.MANUAL }),
+    ).resolves.toMatchObject({ botEligible: true, method: 'AUTOMATIC' });
+  });
+
+  it('allows restrictions when the same PATCH explicitly disables bot eligibility', async () => {
+    const { repo, service } = harness();
+    repo.findById.mockResolvedValue(
+      Object.assign(makePromotion({ appliesTo: 'PRODUCTS' }), {
+        botEligible: true,
+      }),
+    );
+    await expect(
+      service.update('promo-1', {
+        ...{ botEligible: false },
+        daysOfWeek: [DayOfWeekEnum.MONDAY],
+      }),
+    ).resolves.toMatchObject({
+      botEligible: false,
+      daysOfWeek: [
+        { day: 'MONDAY', id: expect.any(String) as unknown as string },
+      ],
+    });
+  });
+});
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -2188,11 +2383,7 @@ describe('PromotionsService', () => {
       });
       const service = makeService(repo, prisma);
 
-      const result = await service.validateForBatchDeletion([
-        'p1',
-        'p2',
-        'p3',
-      ]);
+      const result = await service.validateForBatchDeletion(['p1', 'p2', 'p3']);
 
       expect(result.valid).toBe(true);
       expect(prisma.saleItem.findMany).toHaveBeenCalledWith(
@@ -2220,18 +2411,12 @@ describe('PromotionsService', () => {
             .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]),
         },
         saleItem: {
-          findMany: jest
-            .fn()
-            .mockResolvedValue([{ promotionId: 'p2' }]),
+          findMany: jest.fn().mockResolvedValue([{ promotionId: 'p2' }]),
         },
       });
       const service = makeService(repo, prisma);
 
-      const result = await service.validateForBatchDeletion([
-        'p1',
-        'p2',
-        'p3',
-      ]);
+      const result = await service.validateForBatchDeletion(['p1', 'p2', 'p3']);
 
       expect(result.valid).toBe(false);
       expect(result.code).toBe('PROMOTION_REFERENCED_BY_SALE');
@@ -2247,18 +2432,12 @@ describe('PromotionsService', () => {
             .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]),
         },
         salePromotionApplied: {
-          findMany: jest
-            .fn()
-            .mockResolvedValue([{ promotionId: 'p3' }]),
+          findMany: jest.fn().mockResolvedValue([{ promotionId: 'p3' }]),
         },
       });
       const service = makeService(repo, prisma);
 
-      const result = await service.validateForBatchDeletion([
-        'p1',
-        'p2',
-        'p3',
-      ]);
+      const result = await service.validateForBatchDeletion(['p1', 'p2', 'p3']);
 
       expect(result.valid).toBe(false);
       expect(result.offendingIds).toEqual(['p3']);
@@ -2268,14 +2447,10 @@ describe('PromotionsService', () => {
       const repo = makeRepo();
       const prisma = makePrisma({
         promotion: {
-          findMany: jest
-            .fn()
-            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
+          findMany: jest.fn().mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
         },
         saleItem: {
-          findMany: jest
-            .fn()
-            .mockResolvedValue([{ promotionId: 'p2' }]),
+          findMany: jest.fn().mockResolvedValue([{ promotionId: 'p2' }]),
         },
         salePromotionApplied: {
           findMany: jest
@@ -2372,11 +2547,9 @@ describe('PromotionsService', () => {
 
       const tenantClient = {
         promotion: {
-          findMany: jest.fn().mockResolvedValue([
-            { id: 'p1' },
-            { id: 'p2' },
-            { id: 'p3' },
-          ]),
+          findMany: jest
+            .fn()
+            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]),
           findUniqueOrThrow: jest.fn(),
         },
       };
@@ -2423,10 +2596,7 @@ describe('PromotionsService', () => {
     it('should throw BatchDeleteValidationError (BATCH_DELETE_NOT_FOUND) when an id is missing', async () => {
       const tenantClient = {
         promotion: {
-          findMany: jest.fn().mockResolvedValue([
-            { id: 'p1' },
-            { id: 'p2' },
-          ]),
+          findMany: jest.fn().mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
         },
       };
       const tenantPrisma = {
@@ -2467,9 +2637,7 @@ describe('PromotionsService', () => {
 
       const tenantClient = {
         promotion: {
-          findMany: jest
-            .fn()
-            .mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
+          findMany: jest.fn().mockResolvedValue([{ id: 'p1' }, { id: 'p2' }]),
         },
       };
       const tenantPrisma = {

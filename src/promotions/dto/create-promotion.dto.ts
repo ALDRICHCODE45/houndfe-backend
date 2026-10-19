@@ -1,5 +1,6 @@
 import {
   IsString,
+  IsBoolean,
   IsOptional,
   IsEnum,
   IsInt,
@@ -92,6 +93,10 @@ export class CreatePromotionDto {
 
   @IsEnum(PromotionMethodEnum)
   method: PromotionMethodEnum;
+
+  @IsOptional()
+  @IsBoolean()
+  botEligible?: boolean;
 
   // ── Dates (optional) ──
 

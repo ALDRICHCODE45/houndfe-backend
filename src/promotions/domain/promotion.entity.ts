@@ -1,3 +1,4 @@
+import { assertBotEligibilitySupported } from './bot-eligibility';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 
 // ============================================================
@@ -59,6 +60,7 @@ export interface PromotionDayOfWeekData {
 // Props interface (internal entity state)
 // ============================================================
 export interface PromotionProps {
+  botEligible?: boolean;
   id: string;
   title: string;
   type: PromotionType;
@@ -106,6 +108,9 @@ export interface PromotionProps {
 // Create params (input to static create())
 // ============================================================
 export interface CreatePromotionParams {
+  botEligible?: boolean;
+  priceLists?: PromotionPriceListData[];
+  daysOfWeek?: PromotionDayOfWeekData[];
   id: string;
   title: string;
   type: PromotionType;
@@ -287,6 +292,7 @@ function deriveStatus(
 // Entity
 // ============================================================
 export class Promotion {
+  public botEligible: boolean;
   public readonly id: string;
   public title: string;
   public readonly type: PromotionType;
@@ -321,6 +327,7 @@ export class Promotion {
   public daysOfWeek: PromotionDayOfWeekData[];
 
   private constructor(props: PromotionProps) {
+    this.botEligible = props.botEligible ?? false;
     this.id = props.id;
     this.title = props.title;
     this.type = props.type;
@@ -365,6 +372,8 @@ export class Promotion {
     const endDate = params.endDate ?? null;
     validateDateRange(startDate, endDate);
 
+    if (params.botEligible) assertBotEligibilitySupported(params);
+
     // Type-specific validation
     validateByType(params);
 
@@ -377,6 +386,7 @@ export class Promotion {
     const now = new Date();
     const manuallyEnded = params.manuallyEnded ?? false;
     return new Promotion({
+      botEligible: params.botEligible ?? false,
       id: params.id,
       title,
       type: params.type,
@@ -404,8 +414,8 @@ export class Promotion {
       updatedAt: now,
       targetItems: [],
       customers: [],
-      priceLists: [],
-      daysOfWeek: [],
+      priceLists: params.priceLists ?? [],
+      daysOfWeek: params.daysOfWeek ?? [],
     });
   }
 
@@ -536,6 +546,7 @@ export class Promotion {
     const effectiveNow = now ?? new Date();
     return {
       id: this.id,
+      botEligible: this.botEligible,
       title: this.title,
       type: this.type,
       method: this.method,

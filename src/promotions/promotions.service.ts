@@ -7,6 +7,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Promotion } from './domain/promotion.entity';
+import { assertBotEligibilitySupported } from './domain/bot-eligibility';
 import {
   normalizePromotionDateRange,
   startOfBusinessDay,
@@ -46,7 +47,10 @@ import type {
   PromotionType,
   TargetSide,
 } from './domain/promotion.entity';
-import { BatchDeletableService, ValidationResult } from '../shared/batch-delete/batch-delete.types';
+import {
+  BatchDeletableService,
+  ValidationResult,
+} from '../shared/batch-delete/batch-delete.types';
 
 @Injectable()
 export class PromotionsService extends BatchDeletableService {
@@ -78,6 +82,9 @@ export class PromotionsService extends BatchDeletableService {
   // ==================== Create ====================
 
   async create(dto: CreatePromotionDto) {
+    if (dto.botEligible) {
+      assertBotEligibilitySupported({ ...dto, priceLists: dto.priceListIds });
+    }
     // ── Validate type cannot be changed (already enforced by entity, but guard early) ──
 
     // ── Validate referenced target IDs ──
@@ -108,6 +115,7 @@ export class PromotionsService extends BatchDeletableService {
       title: dto.title,
       type: dto.type as PromotionType,
       method: dto.method as PromotionMethod,
+      botEligible: dto.botEligible ?? false,
       startDate: normalizedDates.startDate,
       endDate: normalizedDates.endDate,
       customerScope: dto.customerScope as CustomerScope,
@@ -221,6 +229,7 @@ export class PromotionsService extends BatchDeletableService {
       targetItems,
     );
 
+    existing.botEligible = mergedForValidation.botEligible ?? false;
     existing.title = mergedForValidation.title;
     existing.startDate = mergedForValidation.startDate ?? null;
     existing.endDate = mergedForValidation.endDate ?? null;
@@ -481,9 +490,7 @@ export class PromotionsService extends BatchDeletableService {
     // Prioritise the FK-referenced code over the not-found code so
     // a caller that happens to send a mix of both still gets the
     // actionable error.
-    const hasSaleRef = offendingList.some(
-      (id) => !missingIds.includes(id),
-    );
+    const hasSaleRef = offendingList.some((id) => !missingIds.includes(id));
     const code = hasSaleRef
       ? 'PROMOTION_REFERENCED_BY_SALE'
       : 'BATCH_DELETE_NOT_FOUND';
@@ -708,6 +715,18 @@ export class PromotionsService extends BatchDeletableService {
       title: dto.title ?? existing.title,
       type: existing.type,
       method: existing.method,
+      botEligible: dto.botEligible ?? existing.botEligible,
+      priceLists:
+        dto.priceListIds === undefined
+          ? existing.priceLists
+          : (dto.priceListIds ?? []).map((globalPriceListId) => ({
+              id: '',
+              globalPriceListId,
+            })),
+      daysOfWeek:
+        dto.daysOfWeek === undefined
+          ? existing.daysOfWeek
+          : (dto.daysOfWeek ?? []).map((day) => ({ id: '', day })),
       startDate: mergedStartDate,
       endDate: mergedEndDate,
       customerScope: (dto.customerScope ??

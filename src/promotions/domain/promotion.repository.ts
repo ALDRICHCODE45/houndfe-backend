@@ -7,6 +7,8 @@ export interface PromotionFindAllQuery {
   status?: string;
   method?: string;
   customerScope?: string;
+  /** Database-level filter so bot-only reads are not truncated by `limit`. */
+  botEligible?: boolean;
   search?: string;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
