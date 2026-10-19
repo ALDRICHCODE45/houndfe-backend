@@ -62,6 +62,17 @@ describe('EvaluateCartPromotionsUseCase preview safety guards', () => {
     });
   });
 
+  it.each(['VARIANTS', 'CATEGORIES', 'BRANDS'] as const)(
+    'keeps the shared preview for eligible %s discounts',
+    async (appliesTo) => {
+      const h = harness([promotion({ appliesTo })]);
+      await expect(h.useCase.execute(pricing)).resolves.toEqual({
+        items: pricing.items,
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+    },
+  );
+
   it('ignores unsupported promotions that are not bot eligible', async () => {
     const h = harness([promotion({ type: 'BUY_X_GET_Y', botEligible: false })]);
     await expect(h.useCase.execute(pricing)).resolves.toEqual({

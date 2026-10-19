@@ -1,6 +1,8 @@
 import { SalesService } from '../../sales/sales.service';
 import type { Sale } from '../../sales/domain/sale.entity';
 import { Promotion } from '../domain/promotion.entity';
+import type { PromotionTargetType } from '../domain/promotion.entity';
+import { EvaluateCartPromotionsUseCase } from './evaluate-cart-promotions.use-case';
 import type { IPromotionRepository } from '../domain/promotion.repository';
 import { PosEvaluatePromotionsUseCase } from './pos-evaluate-promotions.use-case';
 
@@ -10,6 +12,7 @@ function harness(
   customerList: string | null,
   percent = 0,
   missingListPrice = false,
+  appliesTo: PromotionTargetType = 'PRODUCTS',
 ) {
   const promo = Promotion.create({
     id: 'promo',
@@ -17,7 +20,7 @@ function harness(
     type: 'PRODUCT_DISCOUNT',
     method: 'AUTOMATIC',
     botEligible: true,
-    appliesTo: 'PRODUCTS',
+    appliesTo,
     discountType: 'PERCENTAGE',
     discountValue: percent || 20,
   });
@@ -25,8 +28,13 @@ function harness(
     {
       id: 'target',
       side: 'DEFAULT',
-      targetType: 'PRODUCTS',
-      targetId: 'prod-1',
+      targetType: appliesTo,
+      targetId: {
+        PRODUCTS: 'prod-1',
+        VARIANTS: 'variant-1',
+        CATEGORIES: 'category-1',
+        BRANDS: 'brand-1',
+      }[appliesTo],
     },
   ];
   const findAll = jest.fn().mockResolvedValue({
@@ -80,7 +88,12 @@ function harness(
           ),
         ),
     ),
-    resolveProductCategoryBrandIds: jest.fn().mockResolvedValue(new Map()),
+    resolveProductCategoryBrandIds: jest.fn().mockResolvedValue(
+      new Map([
+        ['prod-1', { categoryId: 'category-1', brandId: 'brand-1' }],
+        ['prod-2', { categoryId: 'category-2', brandId: 'brand-2' }],
+      ]),
+    ),
     decrementStockForCharge: jest.fn().mockResolvedValue([]),
   };
   const customerFindUnique = jest.fn().mockResolvedValue({
@@ -110,6 +123,7 @@ function harness(
   );
   return {
     service,
+    promo,
     saleRepo,
     products,
     outbox,
@@ -245,6 +259,95 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
       expect.objectContaining({ botEligible: true }),
     );
   });
+
+  it.each(['VARIANTS', 'CATEGORIES', 'BRANDS'] as const)(
+    'quotes and charges the same eligible %s discount only on matching lines',
+    async (appliesTo) => {
+      const h = harness(null, 20, false, appliesTo);
+      const preview = await h.service.previewBotPricing({
+        customerId: 'customer',
+        items: [
+          { ...item, variantId: 'variant-1', quantity: 2 },
+          {
+            ...item,
+            productId: appliesTo === 'VARIANTS' ? 'prod-1' : 'prod-2',
+            variantId: 'variant-2',
+          },
+        ],
+      });
+      const guard = new EvaluateCartPromotionsUseCase({
+        findActiveAutomaticSnapshot: jest.fn().mockResolvedValue({
+          promotions: [h.promo],
+          complete: true,
+        }),
+      } as unknown as IPromotionRepository);
+      await expect(guard.execute(preview)).resolves.toEqual({
+        items: preview.items,
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+      expect(preview).toMatchObject({
+        items: [
+          {
+            unitPriceCents: 1000,
+            originalPriceCents: 2000,
+            finalPriceCents: 1600,
+            discountAmountCents: 400,
+            appliedPromotionTitle: 'Bot discount',
+          },
+          {
+            unitPriceCents: 1000,
+            originalPriceCents: 1000,
+            finalPriceCents: 1000,
+            discountAmountCents: 0,
+            appliedPromotionTitle: null,
+          },
+        ],
+        hasOrderPromotion: false,
+        hasNonPerUnitReward: false,
+      });
+      for (const line of preview.items) {
+        expect(line.finalPriceCents + line.discountAmountCents).toBe(
+          line.originalPriceCents,
+        );
+      }
+      const expectedTotalCents = preview.items.reduce(
+        (sum, line) => sum + line.finalPriceCents,
+        0,
+      );
+      const result = await h.service.confirmBotSale({
+        customerId: 'customer',
+        cashierUserId: 'cashier',
+        items: preview.items.map((line) => ({
+          ...line,
+          productName: 'Product',
+        })),
+        expectedTotalCents,
+      });
+      expect(result.totalCents).toBe(expectedTotalCents);
+      expect(result.discountCents).toBe(400);
+      const chargedSale = h.saleRepo.save.mock.calls.at(-1)![0];
+      expect(
+        chargedSale.items.map((line) => [
+          line.subtotalCents,
+          (line.discountAmountCents ?? 0) * line.quantity,
+        ]),
+      ).toEqual(
+        preview.items.map((line) => [
+          line.finalPriceCents,
+          line.discountAmountCents,
+        ]),
+      );
+      expect(h.saleRepo.persistChargeConfirmation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          totalCents: expectedTotalCents,
+          discountCents: 400,
+        }),
+      );
+      expect(h.findAll).toHaveBeenCalledWith(
+        expect.objectContaining({ botEligible: true }),
+      );
+    },
+  );
 
   it('rejects a vanished or foreign customer using the tenant-qualified lookup', async () => {
     const h = harness('customer-list');

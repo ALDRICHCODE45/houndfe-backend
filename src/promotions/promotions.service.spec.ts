@@ -52,6 +52,9 @@ describe('bot eligibility CRUD contract', () => {
     repo.save.mockImplementation((promotion) => Promise.resolve(promotion));
     const prisma = makePrisma();
     prisma.globalPriceList.findMany.mockResolvedValue([{ id: 'list-1' }]);
+    for (const lookup of [prisma.variant, prisma.category, prisma.brand]) {
+      lookup.findMany.mockResolvedValue([{ id: 'target-1' }]);
+    }
     return { repo, service: makeService(repo, prisma) };
   }
 
@@ -69,6 +72,90 @@ describe('bot eligibility CRUD contract', () => {
       });
     },
   );
+
+  it.each([
+    PromotionTargetTypeEnum.VARIANTS,
+    PromotionTargetTypeEnum.CATEGORIES,
+    PromotionTargetTypeEnum.BRANDS,
+  ])('creates a bot-eligible %s discount with targets', async (appliesTo) => {
+    const { repo, service } = harness();
+    await expect(
+      service.create({
+        ...supported,
+        botEligible: true,
+        appliesTo,
+        targetItems: [{ targetType: appliesTo, targetId: 'target-1' }],
+      }),
+    ).resolves.toMatchObject({
+      botEligible: true,
+      appliesTo,
+      targetItems: [
+        expect.objectContaining({
+          targetType: appliesTo,
+          targetId: 'target-1',
+        }),
+      ],
+    });
+    expect(repo.save.mock.calls).toHaveLength(1);
+  });
+
+  it.each([
+    PromotionTargetTypeEnum.VARIANTS,
+    PromotionTargetTypeEnum.CATEGORIES,
+    PromotionTargetTypeEnum.BRANDS,
+  ])(
+    'enables and preserves bot eligibility on a %s PATCH',
+    async (appliesTo) => {
+      const { repo, service } = harness();
+      repo.findById.mockResolvedValue(
+        makePromotion({
+          appliesTo,
+          targetItems: [
+            {
+              id: 'target',
+              side: 'DEFAULT',
+              targetType: appliesTo,
+              targetId: 'target-1',
+            },
+          ],
+        }),
+      );
+      await expect(
+        service.update('promo-1', { botEligible: true }),
+      ).resolves.toMatchObject({ botEligible: true, appliesTo });
+      await expect(
+        service.update('promo-1', { title: 'Renamed' }),
+      ).resolves.toMatchObject({ botEligible: true, appliesTo });
+      expect(repo.save.mock.calls).toHaveLength(2);
+    },
+  );
+
+  it.each([
+    PromotionTargetTypeEnum.VARIANTS,
+    PromotionTargetTypeEnum.CATEGORIES,
+    PromotionTargetTypeEnum.BRANDS,
+  ])('retargets an eligible promotion to %s via PATCH', async (appliesTo) => {
+    const { repo, service } = harness();
+    repo.findById.mockResolvedValue(
+      makePromotion({ appliesTo: 'PRODUCTS', botEligible: true }),
+    );
+    await expect(
+      service.update('promo-1', {
+        appliesTo,
+        targetItems: [{ targetType: appliesTo, targetId: 'target-1' }],
+      }),
+    ).resolves.toMatchObject({
+      botEligible: true,
+      appliesTo,
+      targetItems: [
+        expect.objectContaining({
+          targetType: appliesTo,
+          targetId: 'target-1',
+        }),
+      ],
+    });
+    expect(repo.save.mock.calls).toHaveLength(1);
+  });
 
   it.each([
     ['method', { method: PromotionMethodEnum.MANUAL }],
@@ -96,7 +183,7 @@ describe('bot eligibility CRUD contract', () => {
         getDiscountPercent: 50,
       },
     ],
-    ['appliesTo', { appliesTo: PromotionTargetTypeEnum.CATEGORIES }],
+    ['customerScope', { customerScope: CustomerScopeEnum.REGISTERED_ONLY }],
     ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
     ['priceLists', { priceListIds: ['list-1'] }],
     ['daysOfWeek', { daysOfWeek: [DayOfWeekEnum.MONDAY] }],
@@ -128,7 +215,7 @@ describe('bot eligibility CRUD contract', () => {
   });
 
   it.each([
-    ['appliesTo', { appliesTo: PromotionTargetTypeEnum.CATEGORIES }],
+    ['customerScope', { customerScope: CustomerScopeEnum.REGISTERED_ONLY }],
     ['customerScope', { customerScope: CustomerScopeEnum.SPECIFIC }],
     ['priceLists', { priceListIds: ['list-1'] }],
     ['daysOfWeek', { daysOfWeek: [DayOfWeekEnum.MONDAY] }],
@@ -154,7 +241,7 @@ describe('bot eligibility CRUD contract', () => {
     ['type', { type: 'ORDER_DISCOUNT' }],
     ['type', { type: 'BUY_X_GET_Y' }],
     ['type', { type: 'ADVANCED' }],
-    ['appliesTo', { appliesTo: 'CATEGORIES' }],
+    ['customerScope', { customerScope: 'REGISTERED_ONLY' }],
     ['customerScope', { customerScope: 'SPECIFIC' }],
     [
       'priceLists',
