@@ -3452,12 +3452,7 @@ export class SalesService {
       }
     }
 
-    return {
-      items,
-      hasAdvancedReward: sale.items.some(
-        (item) => item.rewardKind === 'advanced',
-      ),
-    };
+    return { items };
   }
 
   private async buildBotPricingSale(

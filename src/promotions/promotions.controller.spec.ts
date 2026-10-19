@@ -90,6 +90,14 @@ describe('PromotionsController', () => {
           allowsPriceLists: true,
           allowsDaysOfWeek: true,
         },
+        {
+          type: 'ADVANCED',
+          method: 'AUTOMATIC',
+          appliesTo: null,
+          customerScopes: ['ALL', 'REGISTERED_ONLY', 'SPECIFIC'],
+          allowsPriceLists: true,
+          allowsDaysOfWeek: true,
+        },
       ],
     });
     expect(Reflect.getMetadata('path', handler!)).toBe(

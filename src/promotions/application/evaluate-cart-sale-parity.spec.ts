@@ -194,6 +194,273 @@ const item = {
 };
 
 describe('Bot preview / confirmation parity through the same SalesService', () => {
+  describe('ADVANCED get-side in-line reward parity', () => {
+    it.each<{
+      name: string;
+      buy: number;
+      get: number;
+      shares: number[];
+      percent?: number;
+      order?: boolean;
+      competitor?: 'product' | 'bxgy';
+      competitorWins?: boolean;
+      capacity?: number;
+      consumed?: number;
+      targetType?: PromotionTargetType;
+    }>([
+      { name: 'buy A get B free', buy: 2, get: 1, shares: [0, 1000] },
+      {
+        name: 'buy A get B at 50%',
+        buy: 2,
+        get: 1,
+        percent: 50,
+        shares: [0, 500],
+      },
+      { name: 'get-side absent', buy: 2, get: 0, shares: [0] },
+      { name: 'buy threshold unmet', buy: 1, get: 1, shares: [0, 0] },
+      { name: 'multiple groups', buy: 4, get: 2, shares: [0, 2000] },
+      {
+        name: 'order uses post-reward amounts',
+        buy: 2,
+        get: 2,
+        order: true,
+        shares: [67, 1033],
+      },
+      {
+        name: 'advanced beats product',
+        buy: 2,
+        get: 2,
+        competitor: 'product',
+        shares: [0, 1000],
+      },
+      {
+        name: 'product beats advanced',
+        buy: 2,
+        get: 2,
+        percent: 50,
+        competitor: 'product',
+        competitorWins: true,
+        shares: [0, 800],
+      },
+      {
+        name: 'advanced beats BXGY',
+        buy: 4,
+        get: 3,
+        competitor: 'bxgy',
+        shares: [0, 2000],
+      },
+      {
+        name: 'BXGY beats advanced',
+        buy: 2,
+        get: 3,
+        percent: 50,
+        competitor: 'bxgy',
+        competitorWins: true,
+        shares: [0, 1000],
+      },
+      {
+        name: 'capacity exact fit',
+        buy: 4,
+        get: 2,
+        capacity: 3,
+        consumed: 1,
+        shares: [0, 2000],
+      },
+      {
+        name: 'insufficient capacity',
+        buy: 4,
+        get: 2,
+        capacity: 3,
+        consumed: 2,
+        shares: [0, 0],
+      },
+      {
+        name: 'exhausted capacity',
+        buy: 2,
+        get: 1,
+        capacity: 1,
+        consumed: 1,
+        shares: [0, 0],
+      },
+      {
+        name: 'category sides',
+        buy: 2,
+        get: 1,
+        targetType: 'CATEGORIES',
+        shares: [0, 1000],
+      },
+      {
+        name: 'brand sides',
+        buy: 2,
+        get: 1,
+        targetType: 'BRANDS',
+        shares: [0, 1000],
+      },
+      {
+        name: 'variant sides',
+        buy: 2,
+        get: 1,
+        targetType: 'VARIANTS',
+        shares: [0, 1000],
+      },
+    ])('$name', async (testCase) => {
+      const h = harness(null, 40);
+      h.promo.targetItems[0].targetId = 'prod-2';
+      const targetType = testCase.targetType ?? 'PRODUCTS';
+      const advanced = Promotion.create({
+        id: 'advanced',
+        title: 'Buy A get B',
+        type: 'ADVANCED',
+        method: 'AUTOMATIC',
+        botEligible: true,
+        buyTargetType: targetType,
+        getTargetType: targetType,
+        buyQuantity: 2,
+        getQuantity: 1,
+        getDiscountPercent: testCase.percent ?? 100,
+        maxProductUnits: testCase.capacity ?? null,
+        consumedProductUnits: testCase.consumed ?? 0,
+      });
+      advanced.targetItems = (['BUY', 'GET'] as const).map((side, index) => ({
+        id: side,
+        side,
+        targetType,
+        targetId: {
+          PRODUCTS: `prod-${index + 1}`,
+          VARIANTS: `variant-${index + 1}`,
+          CATEGORIES: `category-${index + 1}`,
+          BRANDS: `brand-${index + 1}`,
+        }[targetType],
+      }));
+      const bxgy = Promotion.create({
+        id: 'bxgy',
+        title: 'Buy X get Y',
+        type: 'BUY_X_GET_Y',
+        method: 'AUTOMATIC',
+        botEligible: true,
+        appliesTo: 'PRODUCTS',
+        buyQuantity: 2,
+        getQuantity: 1,
+        getDiscountPercent: 100,
+      });
+      bxgy.targetItems = [
+        {
+          id: 'bxgy-target',
+          side: 'DEFAULT',
+          targetType: 'PRODUCTS',
+          targetId: 'prod-2',
+        },
+      ];
+      const order = Promotion.create({
+        id: 'order',
+        title: 'Order discount',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        botEligible: true,
+        discountType: 'FIXED',
+        discountValue: 100,
+      });
+      const promotions = [
+        advanced,
+        ...(testCase.competitor
+          ? [testCase.competitor === 'product' ? h.promo : bxgy]
+          : []),
+        ...(testCase.order ? [order] : []),
+      ];
+      h.findAll.mockResolvedValue({
+        data: promotions,
+        total: promotions.length,
+      });
+      const preview = await h.service.previewBotPricing({
+        customerId: 'customer',
+        items: [
+          { ...item, variantId: 'variant-1', quantity: testCase.buy },
+          ...(testCase.get
+            ? [
+                {
+                  ...item,
+                  productId: 'prod-2',
+                  variantId: 'variant-2',
+                  quantity: testCase.get,
+                },
+              ]
+            : []),
+        ],
+      });
+      expect(preview.items.map((line) => line.discountAmountCents)).toEqual(
+        testCase.shares,
+      );
+      const rewarded = testCase.shares[1] > 0;
+      const competitorTitle =
+        testCase.competitor === 'product' ? 'Bot discount' : 'Buy X get Y';
+      const getTitle = testCase.competitorWins
+        ? competitorTitle
+        : rewarded
+          ? 'Buy A get B'
+          : null;
+      expect(preview.items.map((line) => line.appliedPromotionTitle)).toEqual([
+        testCase.order ? 'Order discount' : null,
+        ...(testCase.get
+          ? [testCase.order ? `${getTitle} + Order discount` : getTitle]
+          : []),
+      ]);
+      for (const line of preview.items) {
+        expect(line.unitPriceCents).toBe(1000);
+        expect(line.originalPriceCents).toBe(1000 * line.quantity);
+        expect(line.finalPriceCents).toBeGreaterThanOrEqual(0);
+        expect(line.finalPriceCents + line.discountAmountCents).toBe(
+          line.originalPriceCents,
+        );
+      }
+      expect(h.saleRepo.save).not.toHaveBeenCalled();
+      expect(h.usage.claimForSale).not.toHaveBeenCalled();
+      const expectedTotalCents = preview.items.reduce(
+        (sum, line) => sum + line.finalPriceCents,
+        0,
+      );
+      const result = await h.service.confirmBotSale({
+        customerId: 'customer',
+        cashierUserId: 'cashier',
+        items: preview.items.map((line) => ({
+          ...line,
+          productName: 'Product',
+        })),
+        expectedTotalCents,
+      });
+      expect(result.totalCents).toBe(expectedTotalCents);
+      expect(result.discountCents).toBe(
+        testCase.shares.reduce((sum, share) => sum + share, 0),
+      );
+      const charged = h.saleRepo.save.mock.calls.at(-1)![0];
+      if (testCase.get) {
+        const reward = charged.items[1];
+        const competitorId =
+          testCase.competitor === 'product' ? 'promo' : 'bxgy';
+        const competitorKind =
+          testCase.competitor === 'bxgy' ? 'buy_x_get_y' : null;
+        expect(reward.promotionId).toBe(
+          testCase.competitorWins ? competitorId : rewarded ? 'advanced' : null,
+        );
+        expect(reward.rewardKind).toBe(
+          testCase.competitorWins
+            ? competitorKind
+            : rewarded
+              ? 'advanced'
+              : null,
+        );
+      }
+      const guard = new EvaluateCartPromotionsUseCase({
+        findActiveAutomaticSnapshot: jest
+          .fn()
+          .mockResolvedValue({ promotions, complete: true }),
+      } as unknown as IPromotionRepository);
+      await expect(guard.execute(preview)).resolves.toEqual({
+        items: preview.items,
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+    });
+  });
+
   describe('BUY_X_GET_Y in-line reward parity', () => {
     it.each<{
       name: string;
@@ -874,7 +1141,6 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
           appliedPromotionTitle: percent ? 'Bot discount' : null,
         },
       ],
-      hasAdvancedReward: false,
     });
     for (const mock of [
       h.saleRepo.runInTransaction,
@@ -966,7 +1232,6 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
             appliedPromotionTitle: null,
           },
         ],
-        hasAdvancedReward: false,
       });
       for (const line of preview.items) {
         expect(line.finalPriceCents + line.discountAmountCents).toBe(
@@ -1162,7 +1427,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
   });
 
   it.each(['buy-x-get-y', 'advanced', 'order'] as const)(
-    'projects an applied %s reward and flags only ADVANCED for review',
+    'projects an applied %s reward without requiring review',
     async (kind) => {
       const h = harness('customer-list');
       jest.spyOn(h.engine, 'evaluate').mockImplementation((input) =>
@@ -1203,7 +1468,6 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
         items: [item],
       });
       expect(preview).toMatchObject({
-        hasAdvancedReward: kind === 'advanced',
         items: [
           {
             unitPriceCents: 800,
@@ -1219,12 +1483,8 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
           .mockResolvedValue({ promotions: [], complete: true }),
       } as unknown as IPromotionRepository);
       const quote = await guard.execute(preview);
-      expect(quote.promotionEvaluationStatus).toBe(
-        kind === 'advanced' ? 'needs_human_review' : 'fully_evaluated',
-      );
-      expect(quote.items[0].discountAmountCents).toBe(
-        kind === 'advanced' ? 0 : 100,
-      );
+      expect(quote.promotionEvaluationStatus).toBe('fully_evaluated');
+      expect(quote.items[0].discountAmountCents).toBe(100);
       expect(h.usage.claimForSale).not.toHaveBeenCalled();
     },
   );
