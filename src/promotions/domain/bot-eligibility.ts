@@ -13,7 +13,7 @@ export const BOT_ELIGIBILITY_RULES: readonly BotEligibilityRule[] = [
   {
     type: 'PRODUCT_DISCOUNT',
     method: 'AUTOMATIC',
-    appliesTo: ['PRODUCTS'],
+    appliesTo: ['PRODUCTS', 'VARIANTS', 'CATEGORIES', 'BRANDS'],
     customerScopes: ['ALL'],
     allowsPriceLists: false,
     allowsDaysOfWeek: false,
