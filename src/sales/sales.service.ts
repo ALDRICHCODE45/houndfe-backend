@@ -3454,7 +3454,9 @@ export class SalesService {
 
     return {
       items,
-      hasNonPerUnitReward: sale.items.some((item) => item.isBuyXGetYReward()),
+      hasAdvancedReward: sale.items.some(
+        (item) => item.rewardKind === 'advanced',
+      ),
     };
   }
 

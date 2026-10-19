@@ -53,7 +53,12 @@ describe('bot eligibility CRUD contract', () => {
     const prisma = makePrisma();
     prisma.globalPriceList.findMany.mockResolvedValue([{ id: 'list-1' }]);
     prisma.customer.findMany.mockResolvedValue([{ id: 'customer-1' }]);
-    for (const lookup of [prisma.variant, prisma.category, prisma.brand]) {
+    for (const lookup of [
+      prisma.product,
+      prisma.variant,
+      prisma.category,
+      prisma.brand,
+    ]) {
       lookup.findMany.mockResolvedValue([{ id: 'target-1' }]);
     }
     return { repo, service: makeService(repo, prisma) };
@@ -229,9 +234,10 @@ describe('bot eligibility CRUD contract', () => {
       },
     ],
     [
-      'type',
+      'method',
       {
         type: PromotionTypeEnum.BUY_X_GET_Y,
+        method: PromotionMethodEnum.MANUAL,
         discountType: undefined,
         discountValue: undefined,
         buyQuantity: 1,
@@ -318,6 +324,86 @@ describe('bot eligibility CRUD contract', () => {
     },
   );
 
+  it.each(
+    [
+      PromotionTargetTypeEnum.PRODUCTS,
+      PromotionTargetTypeEnum.VARIANTS,
+      PromotionTargetTypeEnum.CATEGORIES,
+      PromotionTargetTypeEnum.BRANDS,
+    ].flatMap((appliesTo) =>
+      [
+        CustomerScopeEnum.ALL,
+        CustomerScopeEnum.REGISTERED_ONLY,
+        CustomerScopeEnum.SPECIFIC,
+      ].map((customerScope) => ({ appliesTo, customerScope })),
+    ),
+  )(
+    'accepts automatic BXGY $appliesTo / $customerScope with lists and weekdays on create/PATCH',
+    async ({ appliesTo, customerScope }) => {
+      const { repo, service } = harness();
+      const deal = {
+        type: PromotionTypeEnum.BUY_X_GET_Y,
+        buyQuantity: 2,
+        getQuantity: 1,
+        getDiscountPercent: 100,
+        appliesTo,
+      };
+      const restrictions = {
+        customerScope,
+        customerIds:
+          customerScope === CustomerScopeEnum.SPECIFIC ? ['customer-1'] : [],
+        priceListIds: ['list-1'],
+        daysOfWeek: [DayOfWeekEnum.MONDAY],
+      };
+      const targetItems = [{ targetType: appliesTo, targetId: 'target-1' }];
+      const expected = {
+        ...deal,
+        botEligible: true,
+        customerScope,
+        targetItems: targetItems.map((target): unknown =>
+          expect.objectContaining(target),
+        ),
+        priceLists: [expect.objectContaining({ globalPriceListId: 'list-1' })],
+        daysOfWeek: [expect.objectContaining({ day: 'MONDAY' })],
+        customers: restrictions.customerIds.map((customerId): unknown =>
+          expect.objectContaining({ customerId }),
+        ),
+      };
+      await expect(
+        service.create({
+          title: 'Buy two get one',
+          method: PromotionMethodEnum.AUTOMATIC,
+          ...deal,
+          ...restrictions,
+          targetItems,
+          botEligible: true,
+        }),
+      ).resolves.toMatchObject(expected);
+      const stored = makePromotion({
+        ...deal,
+        discountType: null,
+        discountValue: null,
+        targetItems: targetItems.map((target) => ({
+          ...target,
+          id: 'target',
+          side: 'DEFAULT',
+        })),
+      });
+      repo.findById.mockResolvedValue(stored);
+      await expect(
+        service.update('promo-1', { ...restrictions, botEligible: true }),
+      ).resolves.toMatchObject(expected);
+      stored.botEligible = false;
+      await expect(
+        service.update('promo-1', { botEligible: true }),
+      ).resolves.toMatchObject(expected);
+      await expect(
+        service.update('promo-1', { title: 'Renamed' }),
+      ).resolves.toMatchObject(expected);
+      expect(repo.save.mock.calls).toHaveLength(4);
+    },
+  );
+
   it('allows a flag-only PATCH and preserves the flag when omitted', async () => {
     const { repo, service } = harness();
     repo.findById.mockResolvedValue(makePromotion({ appliesTo: 'PRODUCTS' }));
@@ -379,7 +465,7 @@ describe('bot eligibility CRUD contract', () => {
   it.each<[string, Partial<PromotionProps>]>([
     ['method', { method: 'MANUAL' }],
     ['method', { type: 'ORDER_DISCOUNT', method: 'MANUAL', appliesTo: null }],
-    ['type', { type: 'BUY_X_GET_Y' }],
+    ['method', { type: 'BUY_X_GET_Y', method: 'MANUAL' }],
     ['type', { type: 'ADVANCED' }],
   ])('validates stored %s on a flag-only PATCH', async (condition, stored) => {
     const { repo, service } = harness();
