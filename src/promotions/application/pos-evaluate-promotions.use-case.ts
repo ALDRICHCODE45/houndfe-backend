@@ -441,11 +441,18 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
   async evaluate(input: PosEvalInput): Promise<PosEvalResult> {
     // 1. Load the ACTIVE candidate snapshot ONCE. Do NOT filter by method —
     //    MANUAL promos must be available for opt-in and for ranking when opted-in.
-    const { data: loadedCandidates } = await this.promotionRepository.findAll({
+    //    Bot confirmation filters in the query so ineligible rows never
+    //    consume the snapshot limit; the in-memory filter is defense in depth.
+    const { data } = await this.promotionRepository.findAll({
       page: 1,
       limit: 500,
       status: 'ACTIVE',
+      ...(input.botEligibleOnly ? { botEligible: true } : {}),
     });
+
+    const loadedCandidates = input.botEligibleOnly
+      ? data.filter((promotion) => promotion.botEligible)
+      : data;
 
     // pca-2b1 — deterministic capacity fallback over the fixed snapshot: each
     // retry re-runs the whole selection pass from clean state with the

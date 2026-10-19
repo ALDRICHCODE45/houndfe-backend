@@ -1,7 +1,43 @@
-import { Promotion } from './promotion.entity';
+import { Promotion, type PromotionProps } from './promotion.entity';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 
 const BASE_ID = '550e8400-e29b-41d4-a716-446655440000';
+
+// Own public fields carry the persisted state needed for hydration.
+const stored = (promotion: Promotion): PromotionProps =>
+  ({ ...promotion }) as unknown as PromotionProps;
+
+describe('Promotion bot eligibility state', () => {
+  const params = {
+    id: BASE_ID,
+    title: 'Bot promotion',
+    type: 'PRODUCT_DISCOUNT' as const,
+    method: 'AUTOMATIC' as const,
+    appliesTo: 'PRODUCTS' as const,
+    discountType: 'PERCENTAGE' as const,
+    discountValue: 10,
+  };
+
+  it('defaults to false in creation and legacy hydration', () => {
+    const promotion = Promotion.create(params);
+    expect(promotion.toResponse()).toHaveProperty('botEligible', false);
+    const legacy = { ...stored(promotion), botEligible: undefined };
+    expect(Promotion.fromPersistence(legacy).toResponse()).toHaveProperty(
+      'botEligible',
+      false,
+    );
+  });
+
+  it('round-trips true through hydration and response', () => {
+    const promotion = Promotion.create(
+      Object.assign({}, params, { botEligible: true }),
+    );
+    expect(promotion.toResponse()).toHaveProperty('botEligible', true);
+    expect(
+      Promotion.fromPersistence(stored(promotion)).toResponse(),
+    ).toHaveProperty('botEligible', true);
+  });
+});
 
 describe('Promotion Entity', () => {
   // ============================================================

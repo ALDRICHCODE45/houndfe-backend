@@ -60,6 +60,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             id: promotion.id,
             title: promotion.title,
             type: promotion.type,
+            botEligible: promotion.botEligible,
             method: promotion.method,
             status: promotion.status,
             manuallyEnded: promotion.manuallyEnded,
@@ -82,6 +83,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
             tenantId,
           } as Prisma.PromotionUncheckedCreateInput,
           update: {
+            botEligible: promotion.botEligible,
             title: promotion.title,
             method: promotion.method,
             status: promotion.status,
@@ -240,6 +242,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
         // change, so filtering status='ENDED' could hide an active restriction.
         where: {
           method: 'AUTOMATIC',
+          botEligible: true,
           manuallyEnded: false,
           AND: [
             { OR: [{ startDate: null }, { startDate: { lte: now } }] },
@@ -272,6 +275,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
       status,
       method,
       customerScope,
+      botEligible,
       search,
       sortBy = 'createdAt',
       sortOrder = 'desc',
@@ -290,6 +294,9 @@ export class PrismaPromotionRepository implements IPromotionRepository {
     }
     if (customerScope) {
       where.customerScope = customerScope as Prisma.EnumCustomerScopeFilter;
+    }
+    if (botEligible) {
+      where.botEligible = true;
     }
     if (search) {
       where.title = { contains: search, mode: 'insensitive' };
@@ -406,6 +413,7 @@ export class PrismaPromotionRepository implements IPromotionRepository {
       // The `?? false` guard keeps the mapper safe even if Prisma's typed
       // shape ever changes (e.g. selects without the column).
       manuallyEnded: data.manuallyEnded ?? false,
+      botEligible: data.botEligible ?? false,
       startDate: data.startDate,
       endDate: data.endDate,
       customerScope: data.customerScope,

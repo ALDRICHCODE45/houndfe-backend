@@ -135,6 +135,23 @@ describe('PrismaPromotionRepository', () => {
       expect(countWhere.customerScope).toBe('SPECIFIC');
     });
 
+    it.each([true, undefined])(
+      'filters botEligible in the database only when requested (%s)',
+      async (botEligible) => {
+        const tenantPrisma = makeTenantPrismaMock();
+        const prisma = tenantPrisma.client;
+        const repo = new PrismaPromotionRepository(
+          tenantPrisma as TenantPrismaService,
+        );
+
+        await repo.findAll({ page: 1, limit: 500, botEligible });
+
+        const findManyWhere = prisma.promotion.findMany.mock.calls[0][0]
+          .where as Record<string, unknown>;
+        expect(findManyWhere.botEligible).toBe(botEligible);
+      },
+    );
+
     it('should compose combined filters (type/status/method/search/customerScope) into query', async () => {
       const tenantPrisma = makeTenantPrismaMock();
       const prisma = tenantPrisma.client;
@@ -178,6 +195,22 @@ describe('PrismaPromotionRepository', () => {
   });
 
   describe('findActiveAutomaticSnapshot()', () => {
+    it('filters bot eligibility before the snapshot cap and hydrates the flag', async () => {
+      const tenantPrisma = makeTenantPrismaMock();
+      const prisma = tenantPrisma.client;
+      prisma.promotion.findMany.mockResolvedValue([
+        makePromotionRow({ botEligible: true }),
+      ]);
+      const repo = new PrismaPromotionRepository(tenantPrisma);
+      const snapshot = await repo.findActiveAutomaticSnapshot();
+      expect(prisma.promotion.findMany.mock.calls[0][0].where).toMatchObject({
+        botEligible: true,
+      });
+      expect(snapshot.promotions[0].toResponse()).toHaveProperty(
+        'botEligible',
+        true,
+      );
+    });
     it('filters on the manual override, not stale persisted status, when selecting effectively active promotions', async () => {
       const tenantPrisma = makeTenantPrismaMock();
       const prisma = tenantPrisma.client;
@@ -442,6 +475,24 @@ describe('PrismaPromotionRepository', () => {
       );
       return { repo, prisma };
     }
+
+    it.each([false, true])(
+      'persists and hydrates botEligible=%s',
+      async (botEligible) => {
+        const { repo, prisma } = makeRepoWithSave(
+          makePromotionRow({ botEligible }),
+        );
+        const promotion = (await repo.findById('promo-1'))!;
+        expect(promotion.toResponse()).toHaveProperty(
+          'botEligible',
+          botEligible,
+        );
+        await repo.save(promotion);
+        const args = prisma.promotion.upsert.mock.calls[0][0];
+        expect(args.create).toMatchObject({ botEligible });
+        expect(args.update).toMatchObject({ botEligible });
+      },
+    );
 
     it('persists the cap through a guarded updateMany and never overwrites consumed', async () => {
       const { repo, prisma } = makeRepoWithSave(

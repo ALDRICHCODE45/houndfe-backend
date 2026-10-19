@@ -1,7 +1,13 @@
 import { Promotion } from '../domain/promotion.entity';
 import type { IPromotionRepository } from '../domain/promotion.repository';
 import { EvaluateCartPromotionsUseCase } from './evaluate-cart-promotions.use-case';
+import { PosEvaluatePromotionsUseCase } from './pos-evaluate-promotions.use-case';
 import type { CartItemForEvaluation } from './ports/evaluate-cart-promotions.port';
+import type {
+  IPosEvaluatePromotionsUseCase,
+  PosEvalLineResult,
+  PosEvalResult,
+} from './ports/pos-evaluate-promotions.port';
 
 function makePromotion(
   overrides: Partial<Parameters<typeof Promotion.fromPersistence>[0]> = {},
@@ -11,6 +17,7 @@ function makePromotion(
     title: 'Automatic promo',
     type: 'PRODUCT_DISCOUNT',
     method: 'AUTOMATIC',
+    botEligible: true,
     status: 'ACTIVE',
     startDate: null,
     endDate: null,
@@ -26,14 +33,7 @@ function makePromotion(
     getTargetType: null,
     createdAt: new Date('2026-06-11T00:00:00.000Z'),
     updatedAt: new Date('2026-06-11T00:00:00.000Z'),
-    targetItems: [
-      {
-        id: 'target-1',
-        side: 'DEFAULT',
-        targetType: 'PRODUCTS',
-        targetId: 'prod-1',
-      },
-    ],
+    targetItems: [productTarget('prod-1')],
     customers: [],
     priceLists: [],
     daysOfWeek: [],
@@ -47,170 +47,26 @@ function makeRepository(
   return {
     save: jest.fn(),
     findById: jest.fn(),
-    findAll: jest.fn().mockResolvedValue({
-      data: promotions,
-      total: promotions.length,
-    }),
+    findAll: jest
+      .fn()
+      .mockResolvedValue({ data: promotions, total: promotions.length }),
     findActiveAutomaticSnapshot: jest
       .fn()
       .mockResolvedValue({ promotions, complete: true }),
     delete: jest.fn(),
     deleteMany: jest.fn(),
     updateStatus: jest.fn(),
-  } as jest.Mocked<IPromotionRepository>;
+  };
 }
 
-describe('EvaluateCartPromotionsUseCase', () => {
-  it('applies an active percentage product discount to matching cart items', async () => {
-    const repository = makeRepository([
-      makePromotion({
-        title: '10% off Royal Canin',
-        discountType: 'PERCENTAGE',
-        discountValue: 10,
-      }),
-    ]);
-    const useCase = new EvaluateCartPromotionsUseCase(repository);
-
-    await expect(
-      useCase.execute({
-        items: [
-          {
-            productId: 'prod-1',
-            variantId: null,
-            quantity: 2,
-            unitPriceCents: 1000,
-          },
-        ],
-      }),
-    ).resolves.toEqual({
-      items: [
-        {
-          productId: 'prod-1',
-          variantId: null,
-          quantity: 2,
-          unitPriceCents: 1000,
-          originalPriceCents: 2000,
-          finalPriceCents: 1800,
-          appliedPromotionTitle: '10% off Royal Canin',
-          discountAmountCents: 200,
-        },
-      ],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-  });
-
-  it('applies an active fixed product discount and caps it at the line total', async () => {
-    const repository = makeRepository([
-      makePromotion({
-        title: '$3 off snack',
-        discountType: 'FIXED',
-        discountValue: 300,
-      }),
-    ]);
-    const useCase = new EvaluateCartPromotionsUseCase(repository);
-
-    await expect(
-      useCase.execute({
-        items: [
-          {
-            productId: 'prod-1',
-            variantId: 'var-1',
-            quantity: 2,
-            unitPriceCents: 250,
-          },
-        ],
-      }),
-    ).resolves.toEqual({
-      items: [
-        {
-          productId: 'prod-1',
-          variantId: 'var-1',
-          quantity: 2,
-          unitPriceCents: 250,
-          originalPriceCents: 500,
-          finalPriceCents: 0,
-          appliedPromotionTitle: '$3 off snack',
-          discountAmountCents: 500,
-        },
-      ],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-  });
-
-  it('returns needs_human_review when an unsupported active promotion is present', async () => {
-    const repository = makeRepository([
-      makePromotion({
-        id: 'promo-advanced',
-        title: 'Buy one get one mystery',
-        type: 'BUY_X_GET_Y',
-        discountType: null,
-        discountValue: null,
-        appliesTo: null,
-        targetItems: [],
-      }),
-    ]);
-    const useCase = new EvaluateCartPromotionsUseCase(repository);
-
-    await expect(
-      useCase.execute({
-        items: [
-          {
-            productId: 'prod-1',
-            variantId: null,
-            quantity: 1,
-            unitPriceCents: 1000,
-          },
-        ],
-      }),
-    ).resolves.toEqual({
-      items: [
-        {
-          productId: 'prod-1',
-          variantId: null,
-          quantity: 1,
-          unitPriceCents: 1000,
-          originalPriceCents: 1000,
-          finalPriceCents: 1000,
-          appliedPromotionTitle: null,
-          discountAmountCents: 0,
-        },
-      ],
-      promotionEvaluationStatus: 'needs_human_review',
-    });
-  });
-
-  it('returns base pricing with fully_evaluated when there are no active automatic promotions', async () => {
-    const repository = makeRepository([]);
-    const useCase = new EvaluateCartPromotionsUseCase(repository);
-
-    await expect(
-      useCase.execute({
-        items: [
-          {
-            productId: 'prod-1',
-            variantId: null,
-            quantity: 3,
-            unitPriceCents: 1000,
-          },
-        ],
-      }),
-    ).resolves.toEqual({
-      items: [
-        {
-          productId: 'prod-1',
-          variantId: null,
-          quantity: 3,
-          unitPriceCents: 1000,
-          originalPriceCents: 3000,
-          finalPriceCents: 3000,
-          appliedPromotionTitle: null,
-          discountAmountCents: 0,
-        },
-      ],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-  });
-});
+function makeUseCase(
+  repository: jest.Mocked<IPromotionRepository>,
+  engine: IPosEvaluatePromotionsUseCase = new PosEvaluatePromotionsUseCase(
+    repository,
+  ),
+): EvaluateCartPromotionsUseCase {
+  return new EvaluateCartPromotionsUseCase(repository, engine);
+}
 
 function productTarget(productId: string) {
   return {
@@ -221,426 +77,418 @@ function productTarget(productId: string) {
   };
 }
 
-function bothProductTargets() {
-  return [productTarget('prod-1'), productTarget('prod-2')];
-}
-
 function cartLine(
-  productId: string,
-  quantity: number,
+  productId = 'prod-1',
+  quantity = 1,
   unitPriceCents = 1000,
 ): CartItemForEvaluation {
   return { productId, variantId: null, quantity, unitPriceCents };
 }
 
 function expectedLine(
-  productId: string,
-  quantity: number,
+  item: CartItemForEvaluation,
   finalPriceCents: number,
-  appliedPromotionTitle: string | null,
-  unitPriceCents = 1000,
+  title: string | null = null,
 ) {
-  const originalPriceCents = unitPriceCents * quantity;
+  const originalPriceCents = item.unitPriceCents * item.quantity;
   return {
-    productId,
-    variantId: null,
-    quantity,
-    unitPriceCents,
+    ...item,
     originalPriceCents,
     finalPriceCents,
-    appliedPromotionTitle,
     discountAmountCents: originalPriceCents - finalPriceCents,
+    appliedPromotionTitle: title,
   };
 }
 
-function evaluate(promotions: Promotion[], items: CartItemForEvaluation[]) {
-  return new EvaluateCartPromotionsUseCase(makeRepository(promotions)).execute({
-    items,
-  });
+function evaluate(promotions: Promotion[], items = [cartLine()]) {
+  return makeUseCase(makeRepository(promotions)).execute({ items });
 }
 
-describe('EvaluateCartPromotionsUseCase capacity fallback', () => {
-  it('excludes a capped promotion whose aggregate demand overruns and falls back on both lines without leaking the internal id', async () => {
-    const result = await evaluate(
-      [
-        makePromotion({
-          id: 'promo-capped',
-          title: '10% off capped',
-          maxProductUnits: 1,
-          targetItems: bothProductTargets(),
-        }),
-        makePromotion({
-          id: 'promo-fallback',
-          title: '20% off fallback',
-          discountValue: 20,
-          targetItems: bothProductTargets(),
-        }),
-      ],
-      [cartLine('prod-1', 1), cartLine('prod-2', 1)],
-    );
+function engineResult(overrides: Partial<PosEvalResult> = {}): PosEvalResult {
+  return {
+    lines: [],
+    order: null,
+    availableManualPromotions: [],
+    targetableManualPromotionIds: [],
+    promotionCapacityDemands: [],
+    capacityExcludedPromotionIds: [],
+    ...overrides,
+  };
+}
 
-    expect(result).toEqual({
-      items: [
-        expectedLine('prod-1', 1, 800, '20% off fallback'),
-        expectedLine('prod-2', 1, 800, '20% off fallback'),
-      ],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-    expect(Object.keys(result.items[0]).sort()).toEqual([
-      'appliedPromotionTitle',
-      'discountAmountCents',
-      'finalPriceCents',
-      'originalPriceCents',
-      'productId',
-      'quantity',
-      'unitPriceCents',
-      'variantId',
-    ]);
-  });
-
-  const capacityCases = [
-    {
-      label:
-        'returns base prices when a capped promotion overruns with no fallback',
-      promotions: [
-        makePromotion({
-          id: 'promo-capped',
-          maxProductUnits: 1,
-          targetItems: bothProductTargets(),
-        }),
-      ],
-      items: [cartLine('prod-1', 1), cartLine('prod-2', 1)],
-      expectedItems: [
-        expectedLine('prod-1', 1, 1000, null),
-        expectedLine('prod-2', 1, 1000, null),
-      ],
-    },
-    {
-      label: 'applies a capped promotion when aggregate demand fits exactly',
-      promotions: [
-        makePromotion({
-          id: 'promo-capped',
-          maxProductUnits: 2,
-          targetItems: bothProductTargets(),
-        }),
-      ],
-      items: [cartLine('prod-1', 1), cartLine('prod-2', 1)],
-      expectedItems: [
-        expectedLine('prod-1', 1, 900, 'Automatic promo'),
-        expectedLine('prod-2', 1, 900, 'Automatic promo'),
-      ],
-    },
-    {
-      label: 'applies an unlimited promotion regardless of aggregate demand',
-      promotions: [
-        makePromotion({
-          id: 'promo-unlimited',
-          maxProductUnits: null,
-          targetItems: bothProductTargets(),
-        }),
-      ],
-      items: [cartLine('prod-1', 5), cartLine('prod-2', 7)],
-      expectedItems: [
-        expectedLine('prod-1', 5, 4500, 'Automatic promo'),
-        expectedLine('prod-2', 7, 6300, 'Automatic promo'),
-      ],
-    },
-  ];
-
-  it.each(capacityCases)(
-    '$label',
-    async ({ promotions, items, expectedItems }) => {
-      await expect(evaluate(promotions, items)).resolves.toEqual({
-        items: expectedItems,
+describe('EvaluateCartPromotionsUseCase with the POS engine', () => {
+  it.each(['PRODUCT_DISCOUNT', 'ORDER_DISCOUNT', 'BUY_X_GET_Y'] as const)(
+    'ignores non-eligible %s without blocking or discounting',
+    async (type) => {
+      const item = cartLine('prod-1', 2);
+      await expect(
+        evaluate([makePromotion({ type, botEligible: false })], [item]),
+      ).resolves.toEqual({
+        items: [expectedLine(item, 2000)],
         promotionEvaluationStatus: 'fully_evaluated',
       });
     },
   );
 
-  it('excludes every overrun winner from the same pass and preserves needs_human_review for unsupported promotions', async () => {
-    const promotions = [
-      makePromotion({
-        id: 'promo-a',
-        maxProductUnits: 1,
-        targetItems: [productTarget('prod-1')],
-      }),
-      makePromotion({
-        id: 'promo-b',
-        maxProductUnits: 1,
-        targetItems: [productTarget('prod-2')],
-      }),
-      makePromotion({
-        id: 'promo-fallback',
-        title: '30% off fallback',
-        discountValue: 30,
-        targetItems: bothProductTargets(),
-      }),
-      makePromotion({
-        id: 'promo-unsupported',
-        type: 'BUY_X_GET_Y',
-        discountType: null,
-        discountValue: null,
-        appliesTo: null,
-        targetItems: [],
-      }),
-    ];
+  it('applies an eligible percentage product discount and preserves the public shape', async () => {
+    const item = cartLine('prod-1', 2);
+    await expect(evaluate([makePromotion()], [item])).resolves.toEqual({
+      items: [expectedLine(item, 1800, 'Automatic promo')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
 
+  it('chooses 20% over the first matching 10% promotion', async () => {
     await expect(
-      evaluate(promotions, [cartLine('prod-1', 2), cartLine('prod-2', 2)]),
+      evaluate([
+        makePromotion(),
+        makePromotion({ id: 'promo-2', title: '20% off', discountValue: 20 }),
+      ]),
     ).resolves.toEqual({
-      items: [
-        expectedLine('prod-1', 2, 1400, '30% off fallback'),
-        expectedLine('prod-2', 2, 1400, '30% off fallback'),
-      ],
+      items: [expectedLine(cartLine(), 800, '20% off')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+
+  it('applies FIXED 150 per unit to a variant line', async () => {
+    const item = { ...cartLine('prod-1', 2, 250), variantId: 'var-1' };
+    await expect(
+      evaluate(
+        [makePromotion({ discountType: 'FIXED', discountValue: 150 })],
+        [item],
+      ),
+    ).resolves.toEqual({
+      items: [expectedLine(item, 200, 'Automatic promo')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+
+  it('returns base prices when there are no active automatic promotions or no matching target', async () => {
+    const item = cartLine('prod-other', 3);
+    for (const promotions of [[], [makePromotion()]]) {
+      await expect(evaluate(promotions, [item])).resolves.toEqual({
+        items: [expectedLine(item, 3000)],
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+    }
+  });
+
+  it('excludes the best capped promotion on aggregate overrun and falls back on both lines', async () => {
+    const items = [cartLine(), cartLine('prod-2')];
+    const targetItems = items.map((item) => productTarget(item.productId));
+    await expect(
+      evaluate(
+        [
+          makePromotion({
+            id: 'capped',
+            discountValue: 30,
+            maxProductUnits: 1,
+            targetItems,
+          }),
+          makePromotion({
+            id: 'fallback',
+            title: '20% fallback',
+            discountValue: 20,
+            targetItems,
+          }),
+        ],
+        items,
+      ),
+    ).resolves.toEqual({
+      items: items.map((item) => expectedLine(item, 800, '20% fallback')),
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+  });
+
+  it.each([
+    {
+      maxProductUnits: 1,
+      consumedProductUnits: 0,
+      final: 1000,
+      title: null,
+    },
+    {
+      maxProductUnits: 2,
+      consumedProductUnits: 2,
+      final: 1000,
+      title: null,
+    },
+    {
+      maxProductUnits: 2,
+      consumedProductUnits: 0,
+      final: 900,
+      title: 'Automatic promo',
+    },
+    {
+      maxProductUnits: null,
+      consumedProductUnits: 0,
+      final: 900,
+      title: 'Automatic promo',
+    },
+  ])(
+    'handles aggregate capacity $maxProductUnits with $consumedProductUnits consumed',
+    async ({ maxProductUnits, consumedProductUnits, final, title }) => {
+      const items = [cartLine(), cartLine('prod-2')];
+      await expect(
+        evaluate(
+          [
+            makePromotion({
+              maxProductUnits,
+              consumedProductUnits,
+              targetItems: items.map((item) => productTarget(item.productId)),
+            }),
+          ],
+          items,
+        ),
+      ).resolves.toEqual({
+        items: items.map((item) => expectedLine(item, final, title)),
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+    },
+  );
+});
+
+describe('EvaluateCartPromotionsUseCase snapshot guards', () => {
+  const unsupported = [
+    { type: 'BUY_X_GET_Y' as const, appliesTo: null },
+    { customerScope: 'REGISTERED_ONLY' as const },
+    {
+      customerScope: 'SPECIFIC' as const,
+      customers: [{ id: 'pc-1', customerId: 'cust-1' }],
+    },
+    { priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }] },
+    { daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' as const }] },
+  ];
+
+  it.each(unsupported)(
+    'fails the whole cart closed for unsupported eligible rules: %j',
+    async (overrides) => {
+      const repository = makeRepository([
+        makePromotion(),
+        makePromotion({ id: 'unsupported', ...overrides }),
+      ]);
+      const engine = { evaluate: jest.fn() };
+      const items = [cartLine(), cartLine('prod-2')];
+      await expect(
+        makeUseCase(repository, engine).execute({ items }),
+      ).resolves.toEqual({
+        items: items.map((item) => expectedLine(item, 1000)),
+        promotionEvaluationStatus: 'needs_human_review',
+      });
+      expect(engine.evaluate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([0, 100])(
+    'fails closed for an unrelated eligible restriction after %i open promotions',
+    async (count) => {
+      const repository = makeRepository([
+        ...Array.from({ length: count }, (_, index) =>
+          makePromotion({ id: `open-${index}` }),
+        ),
+        makePromotion({
+          id: 'restricted',
+          daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
+          targetItems: [productTarget('prod-2')],
+        }),
+      ]);
+      const engine = { evaluate: jest.fn() };
+      await expect(
+        makeUseCase(repository, engine).execute({ items: [cartLine()] }),
+      ).resolves.toEqual({
+        items: [expectedLine(cartLine(), 1000)],
+        promotionEvaluationStatus: 'needs_human_review',
+      });
+      expect(repository.findActiveAutomaticSnapshot.mock.calls).toHaveLength(1);
+      expect(repository.findAll.mock.calls).toHaveLength(0);
+      expect(engine.evaluate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('discounts when the bounded snapshot is exactly at its cap and complete', async () => {
+    const repository = makeRepository(
+      Array.from({ length: 1000 }, (_, index) =>
+        makePromotion({ id: `open-${index}` }),
+      ),
+    );
+    await expect(
+      makeUseCase(repository).execute({ items: [cartLine()] }),
+    ).resolves.toEqual({
+      items: [expectedLine(cartLine(), 900, 'Automatic promo')],
+      promotionEvaluationStatus: 'fully_evaluated',
+    });
+    expect(repository.findActiveAutomaticSnapshot.mock.calls).toHaveLength(1);
+    expect(repository.findAll.mock.calls).toEqual([
+      [{ page: 1, limit: 500, status: 'ACTIVE', botEligible: true }],
+    ]);
+  });
+
+  it('fails the whole cart closed for an incomplete snapshot without invoking the engine', async () => {
+    const repository = makeRepository([makePromotion()]);
+    repository.findActiveAutomaticSnapshot.mockResolvedValue({
+      promotions: [makePromotion()],
+      complete: false,
+    });
+    const engine = { evaluate: jest.fn() };
+    const items = [cartLine(), cartLine('prod-2')];
+    await expect(
+      makeUseCase(repository, engine).execute({ items }),
+    ).resolves.toEqual({
+      items: items.map((item) => expectedLine(item, 1000)),
       promotionEvaluationStatus: 'needs_human_review',
     });
+    expect(engine.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('propagates a snapshot read failure instead of silently quoting', async () => {
+    const repository = makeRepository([]);
+    repository.findActiveAutomaticSnapshot.mockRejectedValue(
+      new Error('snapshot unavailable'),
+    );
+    const engine = { evaluate: jest.fn() };
+    await expect(
+      makeUseCase(repository, engine).execute({ items: [cartLine()] }),
+    ).rejects.toThrow('snapshot unavailable');
+    expect(engine.evaluate).not.toHaveBeenCalled();
   });
 });
 
-// ============================================================
-// Decided bot-preview behavior for incomplete restriction context.
-//
-// The public port is `execute({ items })` — see
-// `ports/evaluate-cart-promotions.port.ts`. It carries NO customer,
-// price-list, or weekday context, so a restricted promotion cannot be
-// proven eligible here. Policy: fail the whole cart closed with base
-// prices and `needs_human_review`, while an unrelated restricted
-// promotion or a purely open promotion keeps normal behavior.
-// ============================================================
-describe('EvaluateCartPromotionsUseCase — restricted promotions without matching context', () => {
-  const restrictedPromotions = [
-    {
-      label: 'customerScope=REGISTERED_ONLY with no customer context',
-      promotion: makePromotion({
-        id: 'promo-registered',
-        title: 'Registered customers only',
-        customerScope: 'REGISTERED_ONLY',
-      }),
-    },
-    {
-      label: 'customerScope=SPECIFIC with an unmatched customer list',
-      promotion: makePromotion({
-        id: 'promo-specific',
-        title: 'Specific customers only',
-        customerScope: 'SPECIFIC',
-        customers: [{ id: 'pc-1', customerId: 'cust-1' }],
-      }),
-    },
-    {
-      label: 'foreign global price list with no price-list context',
-      promotion: makePromotion({
-        id: 'promo-price-list',
-        title: 'GPL-retail only',
-        priceLists: [{ id: 'ppl-1', globalPriceListId: 'GPL-retail' }],
-      }),
-    },
-    {
-      label: 'weekday-limited promotion with no day context',
-      promotion: makePromotion({
-        id: 'promo-sunday',
-        title: 'Sundays only',
-        daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
-      }),
-    },
-  ];
-
-  it.each(restrictedPromotions)(
-    'returns base prices with needs_human_review for $label',
-    async ({ promotion }) => {
-      // The bot preview cannot verify customer / price-list / weekday
-      // eligibility, so the matching line is not discounted and the
-      // whole cart is flagged for human review.
+describe('EvaluateCartPromotionsUseCase engine contract', () => {
+  it.each([undefined, 'per-unit'] as const)(
+    'maps %s results by stable line id, not result order or product id',
+    async (kind) => {
+      const items = [
+        cartLine(),
+        { ...cartLine('prod-1', 3, 999), variantId: 'var-1' },
+        cartLine('prod-2'),
+      ];
+      const engine = {
+        evaluate: jest.fn().mockResolvedValue(
+          engineResult({
+            lines: [
+              {
+                kind,
+                itemId: 'line-1',
+                promotionId: 'p2',
+                discountType: 'percentage',
+                discountValue: 33,
+                discountTitle: '33%',
+              },
+              {
+                kind,
+                itemId: 'line-0',
+                promotionId: 'p1',
+                discountType: 'amount',
+                discountValue: 150,
+                discountTitle: '150 off',
+              },
+            ],
+          }),
+        ),
+      };
       await expect(
-        evaluate([promotion], [cartLine('prod-1', 1)]),
+        makeUseCase(makeRepository([]), engine).execute({ items }),
       ).resolves.toEqual({
-        items: [expectedLine('prod-1', 1, 1000, null)],
+        items: [
+          expectedLine(items[0], 850, '150 off'),
+          expectedLine(items[1], 2007, '33%'),
+          expectedLine(items[2], 1000),
+        ],
+        promotionEvaluationStatus: 'fully_evaluated',
+      });
+      expect(engine.evaluate).toHaveBeenCalledTimes(1);
+      expect(engine.evaluate).toHaveBeenCalledWith({
+        now: expect.any(Date) as Date,
+        customerId: null,
+        botEligibleOnly: true,
+        vetoedPromotionIds: [],
+        optedInManualPromotionIds: [],
+        lines: items.map((item, index) => ({
+          itemId: `line-${index}`,
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+          effectiveUnitPriceCents: item.unitPriceCents,
+          appliedPriceListId: null,
+          appliedGlobalPriceListId: null,
+          categoryId: null,
+          brandId: null,
+          hasManualDiscount: false,
+        })),
+      });
+    },
+  );
+
+  it.each(['buy-x-get-y', 'advanced'] as const)(
+    'fails the whole cart closed for an unexpected %s engine result',
+    async (kind) => {
+      const lines: PosEvalLineResult[] = [
+        {
+          itemId: 'line-0',
+          promotionId: 'p1',
+          discountType: 'percentage',
+          discountValue: 10,
+          discountTitle: '10%',
+        },
+        {
+          kind,
+          itemId: 'line-1',
+          promotionId: 'p2',
+          discountTitle: 'Reward',
+          lineDiscountCents: 100,
+          perUnitRewardCents: 100,
+          discountedUnitCount: 1,
+          getDiscountPercent: 10,
+        },
+      ];
+      const engine = {
+        evaluate: jest.fn().mockResolvedValue(engineResult({ lines })),
+      };
+      const items = [cartLine(), cartLine('prod-2')];
+      await expect(
+        makeUseCase(makeRepository([]), engine).execute({ items }),
+      ).resolves.toEqual({
+        items: items.map((item) => expectedLine(item, 1000)),
         promotionEvaluationStatus: 'needs_human_review',
       });
     },
   );
 
-  it('returns base prices for EVERY line when a restricted promotion shares the cart with an open promotion', async () => {
-    // The restricted promotion targets only prod-1, but the cart as a whole
-    // is not provably evaluable, so even prod-2 — which the open promotion
-    // would discount — stays at base price.
-    const restricted = makePromotion({
-      id: 'promo-restricted',
-      title: 'Registered customers only',
-      customerScope: 'REGISTERED_ONLY',
-      targetItems: [productTarget('prod-1')],
-    });
-    const open = makePromotion({
-      id: 'promo-open',
-      title: 'Open promo',
-      targetItems: bothProductTargets(),
-    });
-
-    await expect(
-      evaluate(
-        [restricted, open],
-        [cartLine('prod-1', 1), cartLine('prod-2', 1)],
+  it('fails the whole cart closed for an unexpected order result even with valid line discounts', async () => {
+    const engine = {
+      evaluate: jest.fn().mockResolvedValue(
+        engineResult({
+          lines: [
+            {
+              itemId: 'line-0',
+              promotionId: 'p1',
+              discountType: 'percentage',
+              discountValue: 10,
+              discountTitle: '10%',
+            },
+          ],
+          order: {
+            promotionId: 'order',
+            discountType: 'amount',
+            discountValue: 100,
+            discountTitle: 'Order',
+            discountAmountCents: 100,
+          },
+        }),
       ),
+    };
+    await expect(
+      makeUseCase(makeRepository([]), engine).execute({ items: [cartLine()] }),
     ).resolves.toEqual({
-      items: [
-        expectedLine('prod-1', 1, 1000, null),
-        expectedLine('prod-2', 1, 1000, null),
-      ],
+      items: [expectedLine(cartLine(), 1000)],
       promotionEvaluationStatus: 'needs_human_review',
     });
   });
 
-  it('does not block an evaluable cart when the restricted promotion targets a different product', async () => {
-    // The restriction is scoped to prod-2, which this cart does not contain,
-    // so prod-1 remains fully evaluable and the open promotion applies.
-    const restrictedElsewhere = makePromotion({
-      id: 'promo-elsewhere',
-      title: 'Sundays only elsewhere',
-      daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
-      targetItems: [productTarget('prod-2')],
-    });
-    const open = makePromotion({
-      id: 'promo-open',
-      title: 'Open promo',
-    });
-
-    await expect(
-      evaluate([restrictedElsewhere, open], [cartLine('prod-1', 1)]),
-    ).resolves.toEqual({
-      items: [expectedLine('prod-1', 1, 900, 'Open promo')],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-  });
-
-  it('control: an unrestricted promotion on the same product still applies', async () => {
-    // Same product, same cart shape, no restriction fields set — the
-    // discount MUST land, proving the negatives above are caused by the
-    // promotion restriction and not by the cart fixture.
-    const result = await evaluate(
-      [makePromotion({ id: 'promo-open', title: 'Open promo' })],
-      [cartLine('prod-1', 1)],
-    );
-
-    expect(result).toEqual({
-      items: [expectedLine('prod-1', 1, 900, 'Open promo')],
+  it('evaluates an empty cart without inventing lines', async () => {
+    await expect(evaluate([], [])).resolves.toEqual({
+      items: [],
       promotionEvaluationStatus: 'fully_evaluated',
     });
   });
 });
-
-// ============================================================
-// The quote path reads ONE bounded ACTIVE AUTOMATIC snapshot through the
-// dedicated repository port (no offset paging and no separate count, so a
-// concurrent delete+insert cannot shift an unread row past the window).
-//
-// A restriction sitting deep in the ordered set must still fail the cart
-// closed; an unrelated one must not block a valid discount; and a snapshot
-// the adapter reports as incomplete (tenant above the approved cap) must fail
-// the WHOLE cart closed even when every visible promotion is open.
-// ============================================================
-describe('EvaluateCartPromotionsUseCase — bounded ACTIVE AUTOMATIC snapshot', () => {
-  function openPromotions(count: number): Promotion[] {
-    return Array.from({ length: count }, (_, index) =>
-      makePromotion({
-        id: `promo-open-${String(index).padStart(3, '0')}`,
-        title: `Open promo ${index}`,
-        targetItems: [productTarget('prod-1')],
-      }),
-    );
-  }
-
-  it('fails closed when a cart-relevant restriction sits deep in the ordered snapshot', async () => {
-    const repository = makeRepository([
-      ...openPromotions(100),
-      makePromotion({
-        id: 'promo-restricted-101',
-        title: 'Registered customers only',
-        customerScope: 'REGISTERED_ONLY',
-        targetItems: [productTarget('prod-1')],
-      }),
-    ]);
-    const useCase = new EvaluateCartPromotionsUseCase(repository);
-
-    await expect(
-      useCase.execute({ items: [cartLine('prod-1', 1)] }),
-    ).resolves.toEqual({
-      items: [expectedLine('prod-1', 1, 1000, null)],
-      promotionEvaluationStatus: 'needs_human_review',
-    });
-
-    // Exactly one bounded snapshot read: no per-page queries and no
-    // paginated fallback.
-    expect(repository.findActiveAutomaticSnapshot.mock.calls.length).toBe(1);
-    expect(repository.findAll.mock.calls.length).toBe(0);
-  });
-
-  it('still discounts when the only restriction targets an unrelated product', async () => {
-    const repository = makeRepository([
-      ...openPromotions(100),
-      makePromotion({
-        id: 'promo-restricted-101',
-        title: 'Sundays only elsewhere',
-        daysOfWeek: [{ id: 'd-sun', day: 'SUNDAY' }],
-        targetItems: [productTarget('prod-2')],
-      }),
-    ]);
-
-    await expect(
-      evaluateWith(repository, [cartLine('prod-1', 1)]),
-    ).resolves.toEqual({
-      items: [expectedLine('prod-1', 1, 900, 'Open promo 0')],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-    expect(repository.findActiveAutomaticSnapshot.mock.calls.length).toBe(1);
-  });
-
-  it('discounts when the snapshot holds exactly the cap and is reported complete', async () => {
-    // Boundary on the approved cap: 1000 visible rows is still a complete
-    // snapshot, so the visible discount stands.
-    const repository = makeRepository(openPromotions(1000));
-
-    await expect(
-      evaluateWith(repository, [cartLine('prod-1', 1)]),
-    ).resolves.toEqual({
-      items: [expectedLine('prod-1', 1, 900, 'Open promo 0')],
-      promotionEvaluationStatus: 'fully_evaluated',
-    });
-  });
-
-  it('fails the WHOLE cart closed when the snapshot is incomplete, even though every visible promotion is open', async () => {
-    // The hidden overflow rows might be unrelated, but the adapter cannot
-    // prove it — owner policy is all-or-nothing at the cap.
-    const visible = openPromotions(1000);
-    const repository = makeRepository(visible);
-    repository.findActiveAutomaticSnapshot.mockResolvedValue({
-      promotions: visible,
-      complete: false,
-    });
-
-    await expect(
-      evaluateWith(repository, [cartLine('prod-1', 1)]),
-    ).resolves.toEqual({
-      items: [expectedLine('prod-1', 1, 1000, null)],
-      promotionEvaluationStatus: 'needs_human_review',
-    });
-  });
-
-  it('fails closed without consulting the promotion set when the snapshot read fails outright', async () => {
-    // A repository error must not become a silent base-price-only quote that
-    // claims `fully_evaluated`.
-    const repository = makeRepository([]);
-    repository.findActiveAutomaticSnapshot.mockRejectedValue(
-      new Error('snapshot unavailable'),
-    );
-
-    await expect(
-      evaluateWith(repository, [cartLine('prod-1', 1)]),
-    ).rejects.toThrow('snapshot unavailable');
-  });
-});
-
-function evaluateWith(
-  repository: jest.Mocked<IPromotionRepository>,
-  items: CartItemForEvaluation[],
-) {
-  return new EvaluateCartPromotionsUseCase(repository).execute({ items });
-}

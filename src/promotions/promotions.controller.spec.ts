@@ -60,6 +60,28 @@ describe('PromotionsController', () => {
     );
   });
 
+  it('exposes the exact bot eligibility capabilities on a static read route', () => {
+    const handler = Reflect.get(controller, 'botEligibilityCapabilities') as
+      | (() => unknown)
+      | undefined;
+    expect(handler?.()).toEqual({
+      rules: [
+        {
+          type: 'PRODUCT_DISCOUNT',
+          method: 'AUTOMATIC',
+          appliesTo: ['PRODUCTS'],
+          customerScopes: ['ALL'],
+          allowsPriceLists: false,
+          allowsDaysOfWeek: false,
+        },
+      ],
+    });
+    expect(Reflect.getMetadata('path', handler!)).toBe(
+      'bot-eligibility-capabilities',
+    );
+    expect(Reflect.getMetadata('method', handler!)).toBe(0);
+  });
+
   it('create() should call service.create with dto', async () => {
     const dto: CreatePromotionDto = {
       title: 'Test',

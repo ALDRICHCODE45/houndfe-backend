@@ -25,6 +25,7 @@ import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
 import { PromotionsService } from './promotions.service';
+import { BOT_ELIGIBILITY_RULES } from './domain/bot-eligibility';
 import { CreatePromotionDto } from './dto/create-promotion.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
 import { PromotionQueryDto } from './dto/promotion-query.dto';
@@ -55,6 +56,12 @@ export class PromotionsController {
   @RequirePermissions(['read', 'Promotion'])
   findAll(@Query() query: PromotionQueryDto) {
     return this.promotionsService.findAll(query);
+  }
+
+  @Get('bot-eligibility-capabilities')
+  @RequirePermissions(['read', 'Promotion'])
+  botEligibilityCapabilities() {
+    return { rules: BOT_ELIGIBILITY_RULES };
   }
 
   @Get(':id')

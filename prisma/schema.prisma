@@ -1501,6 +1501,7 @@ model Promotion {
   // honours this flag as a permanent override, while a stale `status`
   // column value alone MUST NOT force ENDED when dates are still valid.
   manuallyEnded Boolean         @default(false)
+  botEligible   Boolean         @default(false)
   startDate     DateTime?
   endDate       DateTime?
   customerScope CustomerScope   @default(ALL)
