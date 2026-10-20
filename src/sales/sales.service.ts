@@ -2517,6 +2517,12 @@ export class SalesService {
     }
 
     if (!sale.customerId) {
+      // A deleted customer nulls customerId and the address FK but keeps the
+      // draft's copy; clearing must still drop that copy.
+      if (sale.shippingAddressSnapshot) {
+        sale.setShippingAddress(null);
+        await this.saleRepo.save(sale);
+      }
       return;
     }
 
@@ -2765,11 +2771,17 @@ export class SalesService {
       );
     }
 
-    if (!sale.shippingAddressId) {
+    const previousShippingAddressId = sale.shippingAddressId;
+    if (!previousShippingAddressId) {
+      // A deleted customer address nulls the FK but keeps the draft's copy;
+      // clearing must still drop that copy. No address id to announce.
+      if (sale.shippingAddressSnapshot) {
+        sale.setShippingAddress(null);
+        await this.saleRepo.save(sale);
+      }
       return;
     }
 
-    const previousShippingAddressId = sale.shippingAddressId;
     sale.setShippingAddress(null);
     await this.saleRepo.save(sale);
     this.eventEmitter.emit(

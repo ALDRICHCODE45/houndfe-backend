@@ -130,6 +130,34 @@ describe('sale shipping address snapshot writes', () => {
     },
   );
 
+  it.each(['address', 'null body', 'customer'] as const)(
+    'clears a draft snapshot on POS clear %s after the address was deleted',
+    async (path) => {
+      const { service, sale: draft, repo } = fixture();
+      await service.assignCustomer(draft.id, draft.userId, assignment);
+      // Deleting the customer address nulls the FK and keeps the snapshot.
+      Object.assign(draft, {
+        _shippingAddressId: null,
+        ...(path === 'customer' ? { _customerId: null } : {}),
+      });
+      expect(draft.shippingAddressSnapshot).toEqual(snapshot);
+      if (path === 'address')
+        await service.clearShippingAddress(draft.id, draft.userId);
+      else if (path === 'customer')
+        await service.clearCustomer(draft.id, draft.userId);
+      else
+        await service.setShippingAddress(draft.id, draft.userId, {
+          shippingAddressId: null,
+        });
+      expect(repo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          shippingAddressId: null,
+          shippingAddressSnapshot: null,
+        }),
+      );
+    },
+  );
+
   it('refreshes the live address inside POS DRAFT confirmation', async () => {
     const { service, sale, live, repo } = fixture();
     await service.assignCustomer(sale.id, sale.userId, assignment);

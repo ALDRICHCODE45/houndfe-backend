@@ -11,8 +11,10 @@ No response keys were added or removed. Where an address object includes `id`, i
 | `PUT /sales/drafts/:id/customer` | Same `shippingAddress` fields; snapshot instead of relation. `shippingAddress.id` is nullable. No snapshot means `shippingAddress: null`. |
 | `PUT /sales/drafts/:id/shipping-address` | Same rule, including the null-address request body. |
 | `PUT /sales/drafts/:id/price-list` | Same enriched draft projection and rule. |
+| `PUT /sales/:id/seller` (DRAFT) | Returns the same enriched draft projection; same nullable `shippingAddress.id` rule. |
 | `GET /delivery-routes`, `GET /delivery-routes/:id` | Same `stops[].shippingAddress` fields and coordinates; address `id` is nullable. No snapshot means a null address. |
 | `POST /delivery-routes`, `PATCH /delivery-routes/:id`, `POST /delivery-routes/:id/start`, `POST /delivery-routes/:id/cancel`, `POST /delivery-routes/:id/stops`, `POST /delivery-routes/:id/stops/:stopId/check-in` | Responses reuse the same route projection and nullable address id. |
+| `PUT /delivery-routes/:id/stops/reorder` | Same route projection and nullable address id. |
 | `POST /delivery-routes/:routeId/stops/:stopId/transfer` | Both returned route projections use the same snapshot/nullability rule. |
 | `GET /delivery-routes/eligible-sales` | Same `rows[].shippingAddress` structure; `id` is nullable. Snapshot-less rows remain visible with null address and `INELIGIBLE/MISSING_ADDRESS`. |
 | `GET /chatbot-api/customers/by-phone/:phone/orders` | Same `shippingAddress: { street, zipCode } \| null`; no id exposed. A snapshot survives deletion; a legacy row without one is null even if its live address exists. |
