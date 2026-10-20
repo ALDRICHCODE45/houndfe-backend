@@ -2971,6 +2971,23 @@ describe('SalesService', () => {
       expect(call.customerId).toBeNull();
     });
     describe('pos-sale-delivery — delivery flag at charge time', () => {
+      beforeEach(() => {
+        tenantPrisma.getClient = jest.fn(
+          () =>
+            ({
+              customerAddress: {
+                findUnique: jest.fn().mockResolvedValue({
+                  id: 'addr-1',
+                  customerId: 'customer-1',
+                  street: 'Fixture Street',
+                }),
+              },
+              globalPriceList: {
+                findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+              },
+            }) as never,
+        );
+      });
       const buildDraftWithAddress = (
         id: string,
         shippingAddressId: string | null = 'addr-1',

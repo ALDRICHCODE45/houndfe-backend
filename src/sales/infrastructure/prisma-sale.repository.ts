@@ -24,6 +24,11 @@ import {
   type AppliedOrderPromotionSnapshot,
 } from '../domain/sale.entity';
 import { SaleItem } from '../domain/sale-item.entity';
+import type { ShippingAddressSnapshot } from '../domain/shipping-address-snapshot';
+import {
+  shippingAddressColumns,
+  hydrateShippingAddress,
+} from './shipping-address-snapshot.mapper';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import {
@@ -384,6 +389,10 @@ export class PrismaSaleRepository implements ISaleRepository {
       deliveryStatus: sale.deliveryStatus,
       customerId: sale.customerId,
       shippingAddressId: sale.shippingAddressId,
+      // Confirmed/canceled snapshots are immutable, including generic metadata saves.
+      ...(!existing || existing.status === 'DRAFT'
+        ? shippingAddressColumns(sale.shippingAddressSnapshot)
+        : {}),
       sellerUserId: sale.sellerUserId,
       dueDate: sale.dueDate,
       confirmedAt: sale.confirmedAt,
@@ -579,6 +588,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       dueDate: persistedSale.dueDate,
       confirmedAt: persistedSale.confirmedAt,
       folio: persistedSale.folio,
+      shippingAddressSnapshot: hydrateShippingAddress(saleData),
       // WU1 — round-trip sale-level price-list binding. Legacy rows
       // (pre-migration) read `null` / `undefined` here and the entity
       // defaults to `null` / `false` on `fromPersistence`.
@@ -712,6 +722,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         | 'NOT_APPLICABLE',
       customerId: saleData.customerId,
       shippingAddressId: saleData.shippingAddressId,
+      shippingAddressSnapshot: hydrateShippingAddress(saleData),
       sellerUserId: saleData.sellerUserId,
       dueDate: saleData.dueDate,
       confirmedAt: saleData.confirmedAt,
@@ -861,6 +872,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           | 'NOT_APPLICABLE',
         customerId: (saleData as any).customerId,
         shippingAddressId: (saleData as any).shippingAddressId,
+        shippingAddressSnapshot: hydrateShippingAddress(saleData),
         sellerUserId: (saleData as any).sellerUserId,
         dueDate: (saleData as any).dueDate,
         items: (saleData as any).items.map((item) => ({
@@ -984,6 +996,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         | 'NOT_APPLICABLE',
       customerId: persistedSale.customerId,
       shippingAddressId: persistedSale.shippingAddressId,
+      shippingAddressSnapshot: hydrateShippingAddress(saleData),
       sellerUserId: persistedSale.sellerUserId,
       dueDate: persistedSale.dueDate,
       confirmedAt: persistedSale.confirmedAt,
@@ -1164,6 +1177,7 @@ export class PrismaSaleRepository implements ISaleRepository {
 
   async persistChargeConfirmation(input: {
     saleId: string;
+    shippingAddressSnapshot?: ShippingAddressSnapshot | null;
     userId: string;
     payments: PersistedChargePayment[];
     subtotalCents: number;
@@ -1226,6 +1240,12 @@ export class PrismaSaleRepository implements ISaleRepository {
       confirmedAt: input.confirmedAt,
       folio: input.folio,
     };
+    if (input.shippingAddressSnapshot !== undefined) {
+      Object.assign(
+        data,
+        shippingAddressColumns(input.shippingAddressSnapshot),
+      );
+    }
     if (input.channel !== undefined) data.channel = input.channel;
     if (input.register !== undefined) data.register = input.register;
     if (input.deliveryStatus !== undefined)
@@ -1332,10 +1352,22 @@ export class PrismaSaleRepository implements ISaleRepository {
     }
 
     try {
-      await prisma.sale.updateMany({
-        where: { id: input.saleId, tenantId },
+      const updated = await prisma.sale.updateMany({
+        where: {
+          id: input.saleId,
+          tenantId,
+          ...(input.shippingAddressSnapshot !== undefined
+            ? { status: 'DRAFT' as const }
+            : {}),
+        },
         data,
       });
+      if (input.shippingAddressSnapshot !== undefined && updated.count !== 1) {
+        throw new BusinessRuleViolationError(
+          'SALE_NOT_DRAFT',
+          'SALE_NOT_DRAFT',
+        );
+      }
     } catch (error) {
       const target =
         error instanceof Prisma.PrismaClientKnownRequestError

@@ -65,6 +65,7 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
   let failOutbox: boolean;
   let hold: { entered: () => void; wait: Promise<void> } | undefined;
   let confirmation: jest.SpyInstance;
+  let sales: SalesService;
   let audit: { append: jest.Mock };
   let credentialId: string;
   let extraTenantIds: string[];
@@ -143,7 +144,7 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
     );
     const repo = new PrismaSaleRepository(tenant);
     // SAFETY: the actual confirmBotSale method uses the explicitly installed ports below.
-    const sales = Object.create(SalesService.prototype) as SalesService;
+    sales = Object.create(SalesService.prototype) as SalesService;
     const outbox = new OutboxWriterService();
     const publish: OutboxWriterService['publish'] = outbox.publish.bind(outbox);
     // Observe/inject only AFTER the actual adapter writes the final sale event.
@@ -186,6 +187,7 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
       }),
       promotionUsageRepo: new PrismaPromotionUsageRepository(tenant, outbox),
       outboxWriter: outbox,
+      eventEmitter: { emit: jest.fn() },
     });
     confirmation = jest.spyOn(sales, 'confirmBotSale');
     const config = new ConfigService({ BOT_SHIPPING_CHARGE_MAX_CENTS: 50000 });
@@ -313,6 +315,205 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
       select: { productId: true, alerted: true, alertEpoch: true },
       orderBy: { productId: 'asc' },
     }),
+  });
+
+  const deliveryFields = {
+    street: 'Snapshot Street',
+    exteriorNumber: '14',
+    interiorNumber: '2B',
+    zipCode: '64000',
+    neighborhood: 'Centro',
+    municipality: 'Monterrey',
+    city: 'Monterrey',
+    state: 'Nuevo León',
+    visualReferences: 'Blue gate',
+    carrierPhone: '5512345678',
+    label: 'Home',
+    latitude: 25.68,
+    longitude: -100.31,
+  };
+  const snapshotColumns = (fields = deliveryFields) =>
+    Object.fromEntries(
+      Object.entries(fields).map(([key, value]) => [
+        `shipping${key[0].toUpperCase()}${key.slice(1)}`,
+        value,
+      ]),
+    );
+  const persistedSale = (id: string) =>
+    db.sale.findUniqueOrThrow({ where: { id, tenantId } });
+
+  const savedDeliveryAddress = async () => {
+    const customer = await db.customer.create({
+      data: {
+        tenantId,
+        firstName: 'Fixture',
+        phoneCountryCode: '52',
+        phone: '5512345678',
+      },
+    });
+    const address = await db.customerAddress.create({
+      data: { tenantId, customerId: customer.id, ...deliveryFields },
+    });
+    return { customer, address };
+  };
+
+  it.each(['new', 'existing', 'legacy bot', 'POS'] as const)(
+    'snapshot: persists and freezes all delivery fields for %s',
+    async (path) => {
+      const { customer, address } = await savedDeliveryAddress();
+      let saleId: string;
+      if (path === 'new' || path === 'existing') {
+        const value = {
+          ...body(),
+          customer: { mode: 'existing', customerId: customer.id },
+          deliveryAddress:
+            path === 'new'
+              ? {
+                  mode: 'newSaved',
+                  address: Object.fromEntries(
+                    Object.entries(deliveryFields).filter(
+                      ([, value]) => typeof value === 'string',
+                    ),
+                  ),
+                }
+              : {
+                  mode: 'existing',
+                  addressId: address.id,
+                  expectedVersion: address.updatedAt.toISOString(),
+                },
+        };
+        const response = await post(value);
+        expect(response.status).toBe(201);
+        saleId = response.body.sale.saleId;
+      } else if (path === 'legacy bot') {
+        const response = await request(app.getHttpServer())
+          .post('/chatbot-api/sales')
+          .set('Authorization', `Bearer ${token}`)
+          .set('X-Idempotency-Key', 'snapshot-bot')
+          .send({
+            ...body().sale,
+            customerId: customer.id,
+            shippingAddressId: address.id,
+          });
+        expect(response.status).toBe(201);
+        saleId = response.body.saleId;
+      } else {
+        saleId = randomUUID();
+        await db.sale.create({
+          data: { id: saleId, tenantId, userId: cashier },
+        });
+        await contexts.run({ tenantId }, async () => {
+          await sales.assignCustomer(saleId, cashier, {
+            customerId: customer.id,
+            shippingAddressId: address.id,
+          });
+          expect(await persistedSale(saleId)).toMatchObject(snapshotColumns());
+          await sales.clearShippingAddress(saleId, cashier);
+          expect(await persistedSale(saleId)).toMatchObject({
+            shippingAddressId: null,
+            shippingStreet: null,
+            shippingLatitude: null,
+          });
+          await sales.setShippingAddress(saleId, cashier, {
+            shippingAddressId: address.id,
+          });
+          expect(await persistedSale(saleId)).toMatchObject(snapshotColumns());
+          await db.customerAddress.update({
+            where: { id: address.id },
+            data: { street: 'Before confirmation' },
+          });
+          await sales.chargeDraft(
+            saleId,
+            cashier,
+            { payments: [] },
+            'snapshot-pos',
+          );
+        });
+      }
+      const before = await persistedSale(saleId);
+      const fields = {
+        ...deliveryFields,
+        street: path === 'POS' ? 'Before confirmation' : deliveryFields.street,
+      };
+      // The newSaved DTO currently accepts no coordinates; they remain nullable.
+      expect(before).toMatchObject({
+        ...snapshotColumns(fields),
+        ...(path === 'new'
+          ? { shippingLatitude: null, shippingLongitude: null }
+          : {}),
+      });
+      const addressId = before.shippingAddressId!;
+      const customers = new CustomersService(
+        new PrismaCustomerRepository(tenant),
+        db as unknown as PrismaService,
+        tenant,
+      );
+      await contexts.run({ tenantId }, () =>
+        customers.updateAddress(customer.id, addressId, {
+          street: 'After confirmation',
+        }),
+      );
+      expect(await persistedSale(saleId)).toEqual(before);
+      await db.customerAddress.delete({ where: { id: addressId, tenantId } });
+      expect(await persistedSale(saleId)).toEqual({
+        ...before,
+        shippingAddressId: null,
+      });
+      const reloaded = await contexts.run({ tenantId }, () =>
+        new PrismaSaleRepository(tenant).findById(saleId),
+      );
+      expect(reloaded).toHaveProperty('shippingAddressSnapshot', {
+        ...fields,
+        ...(path === 'new' ? { latitude: null, longitude: null } : {}),
+      });
+      // A generic metadata save must not erase a confirmed snapshot.
+      await contexts.run({ tenantId }, () =>
+        new PrismaSaleRepository(tenant).save(reloaded!),
+      );
+      expect(await persistedSale(saleId)).toMatchObject({
+        ...snapshotColumns(fields),
+        ...(path === 'new'
+          ? { shippingLatitude: null, shippingLongitude: null }
+          : {}),
+      });
+    },
+  );
+
+  it('snapshot: rolls back persisted columns after confirmation fails and leaves existing address unchanged', async () => {
+    const { customer, address } = await savedDeliveryAddress();
+    const value = {
+      ...body(),
+      customer: { mode: 'existing', customerId: customer.id },
+      deliveryAddress: {
+        mode: 'existing',
+        addressId: address.id,
+        expectedVersion: address.updatedAt.toISOString(),
+      },
+    };
+    let observed: unknown;
+    afterSaleOutbox = async () => {
+      observed = await tenant
+        .getClient()
+        .sale.findFirstOrThrow({ where: { tenantId } });
+    };
+    failOutbox = true;
+    expect((await post(value)).status).toBe(500);
+    expect(observed).toMatchObject(snapshotColumns());
+    expect(await db.sale.count({ where: { tenantId } })).toBe(0);
+    expect(
+      await db.customerAddress.findUniqueOrThrow({
+        where: { id: address.id },
+      }),
+    ).toEqual(address);
+    value.sale.expectedTotalCents = 1;
+    failOutbox = false;
+    expect((await post(value, 're-quote')).status).toBe(409);
+    expect(await db.sale.count({ where: { tenantId } })).toBe(0);
+    expect(
+      await db.customerAddress.findUniqueOrThrow({
+        where: { id: address.id },
+      }),
+    ).toEqual(address);
   });
 
   it('commits and replays customer/address/actual confirmed sale/folio/stock/outbox together', async () => {

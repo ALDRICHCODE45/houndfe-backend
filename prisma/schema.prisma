@@ -883,6 +883,19 @@ model Sale {
   sellerUserId        String?
   customerId          String?
   shippingAddressId   String?
+  shippingStreet           String?
+  shippingExteriorNumber   String?
+  shippingInteriorNumber   String?
+  shippingZipCode          String?
+  shippingNeighborhood     String?
+  shippingMunicipality     String?
+  shippingCity             String?
+  shippingState            String?
+  shippingVisualReferences String?
+  shippingCarrierPhone     String?
+  shippingLabel            String?
+  shippingLatitude         Float?
+  shippingLongitude        Float?
   // Bot-approved shipment snapshot; null approval is the legacy no-shipping path.
   shippingChargeCents Int                @default(0)
   shippingApprovalId  String?
