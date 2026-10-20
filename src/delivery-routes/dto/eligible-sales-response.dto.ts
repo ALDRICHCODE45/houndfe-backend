@@ -15,8 +15,8 @@
  *   Sale.confirmedAt       DateTime? → ISO string | null
  *   Sale.dueDate           DateTime? → ISO string | null
  *
- * `shippingAddress` is the structured `CustomerAddress` projection (or
- * `null` when the sale has no address). `productSummary` is at most three
+ * `shippingAddress` is the sale's structured shipping snapshot (or
+ * `null` when the sale has no snapshot). `productSummary` is at most three
  * `SaleItem.productName` strings.
  *
  * `availability` is a discriminated union on `state`:
@@ -49,7 +49,7 @@ export type EligibleSaleAvailabilityDto =
     };
 
 export interface EligibleSaleShippingAddressDto {
-  id: string;
+  id: string | null;
   label: string | null;
   street: string;
   exteriorNumber: string | null;

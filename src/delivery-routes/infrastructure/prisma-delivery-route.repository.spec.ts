@@ -20,6 +20,11 @@
  */
 import { Prisma } from '@prisma/client';
 import {
+  shippingAddressColumns,
+  shippingAddressSnapshotSelect,
+  type SnapshotRow,
+} from '../../sales/infrastructure/shipping-address-snapshot.mapper';
+import {
   PrismaDeliveryRouteRepository,
   isSaleReservationP2002,
 } from './prisma-delivery-route.repository';
@@ -82,7 +87,7 @@ type StopRow = {
 };
 
 /** Nested to-one graph the double resolves for `stops.include.sale`. */
-type SaleRow = {
+type SaleRow = Partial<SnapshotRow> & {
   id: string;
   tenantId: string;
   folio: string | null;
@@ -485,7 +490,7 @@ const makeActiveRoute = async (
     checkSaleEligibility: () =>
       Promise.resolve({
         deliveryStatus: 'PENDING' as const,
-        shippingAddressId: 'addr-1',
+        hasShippingAddress: true,
       }),
     now,
   });
@@ -507,7 +512,7 @@ const makeDraftRoute = (
     checkSaleEligibility: () =>
       Promise.resolve({
         deliveryStatus: 'PENDING' as const,
-        shippingAddressId: 'addr-1',
+        hasShippingAddress: true,
       }),
     now: options.now ?? NOW,
   });
@@ -779,23 +784,8 @@ const NESTED_SALE_SELECT = {
       email: true,
     },
   },
-  shippingAddress: {
-    select: {
-      id: true,
-      tenantId: true,
-      street: true,
-      exteriorNumber: true,
-      interiorNumber: true,
-      zipCode: true,
-      neighborhood: true,
-      municipality: true,
-      city: true,
-      state: true,
-      label: true,
-      latitude: true,
-      longitude: true,
-    },
-  },
+  shippingAddressId: true,
+  ...shippingAddressSnapshotSelect,
 };
 
 /** The projected address `seedSaleGraph` produces for `address-1`. */
@@ -847,6 +837,25 @@ const seedSaleGraph = (
       folio: graph.folio ?? `FOLIO-${graph.saleId}`,
       customerId: graph.customer?.id ?? null,
       shippingAddressId: graph.address?.id ?? null,
+      ...shippingAddressColumns(
+        graph.address && (graph.address.tenantId ?? TENANT_ID) === TENANT_ID
+          ? {
+              ...EXPECTED_ADDRESS,
+              street: graph.address.street ?? EXPECTED_ADDRESS.street,
+              label: graph.address.label ?? EXPECTED_ADDRESS.label,
+              latitude:
+                graph.address.latitude === undefined
+                  ? 0
+                  : graph.address.latitude,
+              longitude:
+                graph.address.longitude === undefined
+                  ? 0
+                  : graph.address.longitude,
+              visualReferences: null,
+              carrierPhone: null,
+            }
+          : null,
+      ),
     },
   ];
   const customer = graph.customer;
@@ -1061,7 +1070,7 @@ describe.each(READ_METHODS)(
 );
 
 describe('PrismaDeliveryRouteRepository nested sale select projection (delivery-routes / ODD O1)', () => {
-  it('Given both route read methods, when the nested include is submitted, then the sale, customer and shippingAddress select all request tenantId', async () => {
+  it('Given both route read methods, when the nested include is submitted, then the sale and customer request tenantId and address fields come from the sale', async () => {
     const route = await makeActiveRoute(['sale-1']);
     const client = new FakePrismaTransactionClient();
     seed(client, route);
@@ -1088,7 +1097,7 @@ describe('PrismaDeliveryRouteRepository nested sale select projection (delivery-
       expect(nestedSaleSelectOf(include)).toMatchObject({
         tenantId: true,
         customer: { select: { tenantId: true } },
-        shippingAddress: { select: { tenantId: true } },
+        ...shippingAddressSnapshotSelect,
       });
     }
   });

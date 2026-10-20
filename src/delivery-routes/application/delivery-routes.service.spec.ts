@@ -20,6 +20,11 @@
  * container.
  */
 import { Prisma } from '@prisma/client';
+import {
+  shippingAddressColumns,
+  shippingAddressSnapshotSelect,
+  type SnapshotRow,
+} from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import { randomUUID } from 'node:crypto';
 import {
   DeliveryRoutesService,
@@ -72,7 +77,7 @@ const makeRoute = async (
     saleIds,
     checkSaleEligibility: jest.fn(async () => ({
       deliveryStatus: 'PENDING' as const,
-      shippingAddressId: 'addr-1',
+      hasShippingAddress: true,
     })),
     now: NOW,
   });
@@ -115,10 +120,9 @@ const readModelFor = (route: DeliveryRoute): DeliveryRouteReadModel => ({
 
 /**
  * Minimal in-memory sale projection used by the next-stop payload composer.
- * `customer` / `shippingAddress` are nullable so the outbox composer's
- * "missing customer" degrade path can be exercised with a partial row, and
- * each nullable child carries its own `tenantId` so the composer's
- * post-read tenant filter can be exercised independently.
+ * The customer is nullable and carries its own tenant id. Address fields
+ * come from the sale snapshot; a missing snapshot exercises graceful
+ * degradation without consulting a customer address.
  */
 type SaleCustomerProjection = {
   tenantId: string;
@@ -127,14 +131,9 @@ type SaleCustomerProjection = {
   email: string;
 };
 
-type SaleAddressProjection = Record<string, string | null> & {
-  tenantId: string;
-};
-
-type SaleProjection = {
+type SaleProjection = Partial<SnapshotRow> & {
   folio: string;
   customer: SaleCustomerProjection | null;
-  shippingAddress: SaleAddressProjection | null;
 };
 
 const saleProjection = (
@@ -144,24 +143,32 @@ const saleProjection = (
     addressTenantId?: string;
   } = {},
 ): SaleProjection => ({
+  ...shippingAddressColumns(
+    childTenantIds.addressTenantId &&
+      childTenantIds.addressTenantId !== TENANT_ID
+      ? null
+      : {
+          street: 'Av. Reforma',
+          exteriorNumber: '123',
+          interiorNumber: null,
+          zipCode: '06600',
+          neighborhood: 'Centro',
+          municipality: 'Cuauhtémoc',
+          city: 'CDMX',
+          state: 'CDMX',
+          label: null,
+          visualReferences: null,
+          carrierPhone: null,
+          latitude: null,
+          longitude: null,
+        },
+  ),
   folio: `F-${saleId}`,
   customer: {
     tenantId: childTenantIds.customerTenantId ?? TENANT_ID,
     firstName: 'Ada',
     lastName: 'Lovelace',
     email: `${saleId}@example.com`,
-  },
-  shippingAddress: {
-    tenantId: childTenantIds.addressTenantId ?? TENANT_ID,
-    label: null,
-    street: 'Av. Reforma',
-    exteriorNumber: '123',
-    interiorNumber: null,
-    zipCode: '06600',
-    neighborhood: 'Centro',
-    municipality: 'Cuauhtémoc',
-    city: 'CDMX',
-    state: 'CDMX',
   },
 });
 
@@ -1072,7 +1079,7 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
       projectionMap.set('sale-2', {
         folio: 'F-2',
         customer: null,
-        shippingAddress: null,
+        shippingStreet: null,
       });
       const { service, outboxWriter } = makeService({
         repo: {
@@ -1095,7 +1102,7 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
       expect(payload.nextAddressLabel).toBeNull();
     });
 
-    it('Given an ACTIVE route, when the next-stop payload is composed, then the next-sale read keeps the exact top-level tenant predicate on the raw tx client and requests nested customer/address tenant ids', async () => {
+    it('Given an ACTIVE route, when the next-stop payload is composed, then the next-sale read keeps the exact top-level tenant predicate on the raw tx client and requests the customer tenant id and sale address snapshot', async () => {
       const route = await makeRoute(['sale-1', 'sale-2'], 'ACTIVE');
       const { service, txPrisma, outboxWriter } = makeService({
         repo: {
@@ -1119,20 +1126,7 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
               email: true,
             },
           },
-          shippingAddress: {
-            select: {
-              tenantId: true,
-              label: true,
-              street: true,
-              exteriorNumber: true,
-              interiorNumber: true,
-              zipCode: true,
-              neighborhood: true,
-              municipality: true,
-              city: true,
-              state: true,
-            },
-          },
+          ...shippingAddressSnapshotSelect,
         },
       });
       // The payload read runs on the very same raw transaction client the
@@ -1320,7 +1314,7 @@ describe('DeliveryRoutesService (delivery-routes / WU2+WU3)', () => {
         checkSaleEligibility: jest.fn(() =>
           Promise.resolve({
             deliveryStatus: 'PENDING' as const,
-            shippingAddressId: 'addr-1',
+            hasShippingAddress: true,
           }),
         ),
         now: NOW,

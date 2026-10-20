@@ -2,7 +2,7 @@
  * INFRASTRUCTURE SPEC: PrismaEligibleSalesReader — delivery-routes / T4.
  *
  * Uses a mocked Prisma client (no DB). Proves the tenant defenses on the
- * `q` search: every `customer` / `shippingAddress` relation branch carries
+ * `q` search: every `customer` relation branch carries
  * the caller's `tenantId`, and the SAME tenant-scoped `where` drives both
  * `findMany` (rows) and `count`, so a foreign-tenant related row cannot be
  * matched by either the page or the total.
@@ -198,7 +198,7 @@ describe('PrismaEligibleSalesReader — tenant defenses', () => {
     }
   });
 
-  it('scopes every shippingAddress search branch by tenantId', async () => {
+  it('searches sale snapshot columns instead of the live address relation', async () => {
     const { reader, findMany } = makeHarness();
 
     await reader.findEligibleSales({
@@ -212,10 +212,16 @@ describe('PrismaEligibleSalesReader — tenant defenses', () => {
     const branches = searchBranches(whereOf(findMany)).filter(
       (clause) => 'shippingAddress' in clause,
     );
-    expect(branches.length).toBeGreaterThan(0);
-    for (const branch of branches) {
-      expect(branch.shippingAddress).toMatchObject({ tenantId: 't1' });
-    }
+    expect(branches).toHaveLength(0);
+    expect(searchBranches(whereOf(findMany))).toEqual(
+      expect.arrayContaining([
+        { shippingStreet: { contains: 'Centro', mode: 'insensitive' } },
+        { shippingNeighborhood: { contains: 'Centro', mode: 'insensitive' } },
+        { shippingMunicipality: { contains: 'Centro', mode: 'insensitive' } },
+        { shippingCity: { contains: 'Centro', mode: 'insensitive' } },
+        { shippingZipCode: { contains: 'Centro', mode: 'insensitive' } },
+      ]),
+    );
   });
 
   it('does not push a search clause when q is blank', async () => {

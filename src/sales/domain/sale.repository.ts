@@ -1,5 +1,6 @@
 import { Sale } from './sale.entity';
 import { SaleItem } from './sale-item.entity';
+import type { ShippingAddressSnapshot } from './shipping-address-snapshot';
 import type {
   AppliedOrderPromotionSnapshot,
   SaleCancelReason,
@@ -108,7 +109,7 @@ export type DraftCustomerSummary = {
 };
 
 export type DraftShippingAddressSummary = {
-  id: string;
+  id: string | null;
   street: string | null;
   exteriorNumber: string | null;
   interiorNumber: string | null;
@@ -329,6 +330,7 @@ export interface ISaleRepository {
 
   persistChargeConfirmation(input: {
     saleId: string;
+    shippingAddressSnapshot?: ShippingAddressSnapshot | null;
     userId: string;
     payments: PersistedChargePayment[];
     subtotalCents: number;

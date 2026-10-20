@@ -14,6 +14,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
 import { Sale, type SaleCancelReason } from './domain/sale.entity';
+import type { ShippingAddressSnapshot } from './domain/shipping-address-snapshot';
 import type { ISaleRepository } from './domain/sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
 import { ProductsService } from '../products/products.service';
@@ -2429,9 +2430,13 @@ export class SalesService {
       sale.setGlobalPriceList(customerList, false);
     }
 
+    let shippingAddress: ShippingAddressSnapshot | null = null;
     if (dto.shippingAddressId !== undefined && dto.shippingAddressId !== null) {
       const address = await prisma.customerAddress.findUnique({
-        where: { id: dto.shippingAddressId },
+        where: {
+          id: dto.shippingAddressId,
+          tenantId: this.tenantPrisma.getTenantId(),
+        },
       });
       if (!address) {
         throw new BusinessRuleViolationError(
@@ -2445,11 +2450,13 @@ export class SalesService {
           'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
         );
       }
+      shippingAddress = address;
     }
 
     const previousCustomerId = sale.customerId;
     const previousShippingAddressId = sale.shippingAddressId;
     sale.assignCustomer(dto.customerId, dto.shippingAddressId ?? null);
+    sale.captureShippingAddress(shippingAddress);
     // Work Unit 4 — recompute (SPECIFIC / REGISTERED_ONLY promos only become
     // eligible after the eligible customer is assigned; removing the customer
     // would re-drop them).
@@ -2510,6 +2517,12 @@ export class SalesService {
     }
 
     if (!sale.customerId) {
+      // A deleted customer nulls customerId and the address FK but keeps the
+      // draft's copy; clearing must still drop that copy.
+      if (sale.shippingAddressSnapshot) {
+        sale.setShippingAddress(null);
+        await this.saleRepo.save(sale);
+      }
       return;
     }
 
@@ -2572,7 +2585,10 @@ export class SalesService {
 
     const prisma = this.tenantPrisma.getClient();
     const address = await prisma.customerAddress.findUnique({
-      where: { id: dto.shippingAddressId },
+      where: {
+        id: dto.shippingAddressId,
+        tenantId: this.tenantPrisma.getTenantId(),
+      },
     });
     if (!address) {
       throw new BusinessRuleViolationError(
@@ -2589,6 +2605,7 @@ export class SalesService {
 
     const previousShippingAddressId = sale.shippingAddressId;
     sale.setShippingAddress(dto.shippingAddressId);
+    sale.captureShippingAddress(address);
     await this.saleRepo.save(sale);
 
     if (
@@ -2754,11 +2771,17 @@ export class SalesService {
       );
     }
 
-    if (!sale.shippingAddressId) {
+    const previousShippingAddressId = sale.shippingAddressId;
+    if (!previousShippingAddressId) {
+      // A deleted customer address nulls the FK but keeps the draft's copy;
+      // clearing must still drop that copy. No address id to announce.
+      if (sale.shippingAddressSnapshot) {
+        sale.setShippingAddress(null);
+        await this.saleRepo.save(sale);
+      }
       return;
     }
 
-    const previousShippingAddressId = sale.shippingAddressId;
     sale.setShippingAddress(null);
     await this.saleRepo.save(sale);
     this.eventEmitter.emit(
@@ -2770,6 +2793,35 @@ export class SalesService {
         previousShippingAddressId,
       ),
     );
+  }
+
+  private async refreshShippingAddressSnapshot(sale: Sale): Promise<void> {
+    sale.ensureDraft();
+    if (!sale.shippingAddressId) {
+      sale.captureShippingAddress(null);
+      return;
+    }
+    const address = await this.tenantPrisma
+      .getClient()
+      .customerAddress.findUnique({
+        where: {
+          id: sale.shippingAddressId,
+          tenantId: this.tenantPrisma.getTenantId(),
+        },
+      });
+    if (!address) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_NOT_FOUND',
+        'SHIPPING_ADDRESS_NOT_FOUND',
+      );
+    }
+    if (address.customerId !== sale.customerId) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+        'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
+      );
+    }
+    sale.captureShippingAddress(address);
   }
 
   async chargeDraft(
@@ -2904,6 +2956,9 @@ export class SalesService {
           'SALE_ALREADY_CONFIRMED',
         );
       }
+
+      // Capture the live delivery facts inside the confirmation transaction.
+      await this.refreshShippingAddressSnapshot(sale);
 
       // pos-sale-delivery -- POS cashier delivery flag. Placed
       // immediately after the DRAFT lifecycle guard and BEFORE
@@ -3091,6 +3146,7 @@ export class SalesService {
         // preserves them. Passing `null` for "Público en General" is the
         // intentional empty-customer case, not the destructive default.
         customerId: sale.customerId,
+        shippingAddressSnapshot: sale.shippingAddressSnapshot,
         sellerUserId: sale.sellerUserId,
         dueDate: sale.dueDate,
         confirmedAt,
@@ -3643,6 +3699,7 @@ export class SalesService {
       // `setShippingAddress` (sales.service.ts:2222). A null/omitted
       // address stays valid and never touches the address delegate.
       const shippingAddressId = input.shippingAddressId ?? null;
+      let shippingAddress: ShippingAddressSnapshot | null = null;
       if (shippingAddressId !== null) {
         const address = await prisma.customerAddress.findUnique({
           where: { id: shippingAddressId, tenantId },
@@ -3659,12 +3716,14 @@ export class SalesService {
             'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER',
           );
         }
+        shippingAddress = address;
       }
 
       const { sale, promotionCapacityDemands } = await this.buildBotPricingSale(
         { ...input, shippingAddressId },
         customer.globalPriceListId ?? null,
       );
+      sale.captureShippingAddress(shippingAddress);
       const saleId = sale.id;
 
       // D4 — totals are the SINGLE source of truth from
@@ -3764,6 +3823,7 @@ export class SalesService {
         channel: 'ONLINE',
         deliveryStatus: 'PENDING',
         customerId: input.customerId,
+        shippingAddressSnapshot: sale.shippingAddressSnapshot,
         sellerUserId: input.cashierUserId,
         dueDate,
         confirmedAt,

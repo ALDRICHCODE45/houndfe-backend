@@ -35,7 +35,7 @@ export interface EligibleSaleCustomerProjection {
 }
 
 export interface EligibleSaleAddressProjection {
-  id: string;
+  id: string | null;
   label: string | null;
   street: string;
   exteriorNumber: string | null;

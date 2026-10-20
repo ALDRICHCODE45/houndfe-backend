@@ -13,7 +13,7 @@
  *
  * Pure domain — no NestJS, no Prisma, no I/O. The Sale eligibility check
  * the create/start transitions rely on (`deliveryStatus ∈ {PENDING,
- * SHIPPED}` + non-null `shippingAddressId`) is supplied as a callback
+ * SHIPPED}` + a shipping address snapshot) is supplied as a callback
  * `checkSaleEligibility: (saleId) => SaleEligibilitySnapshot` so the
  * domain stays decoupled from the Sale repository.
  *
@@ -49,8 +49,8 @@ export type DeliveryRouteStatusValue =
 export interface SaleEligibilitySnapshot {
   /** `PENDING` or `SHIPPED` only — every other value is ineligible. */
   deliveryStatus: 'PENDING' | 'DELIVERED' | 'NOT_APPLICABLE' | 'SHIPPED';
-  /** Required for an ONLINE / bot sale — null blocks the route. */
-  shippingAddressId: string | null;
+  /** A sale snapshot is required; the live address reference is irrelevant. */
+  hasShippingAddress: boolean;
 }
 
 export interface CreateDeliveryRouteInput {
@@ -220,7 +220,7 @@ export class DeliveryRoute {
         !eligibility ||
         (eligibility.deliveryStatus !== 'PENDING' &&
           eligibility.deliveryStatus !== 'SHIPPED') ||
-        !eligibility.shippingAddressId
+        !eligibility.hasShippingAddress
       ) {
         throw new DeliveryRouteSaleNotEligibleError(
           `Sale "${saleId}" is not eligible for delivery`,
@@ -228,7 +228,7 @@ export class DeliveryRoute {
             reason: 'INELIGIBLE_SALE',
             saleId,
             deliveryStatus: eligibility?.deliveryStatus ?? null,
-            hasShippingAddress: Boolean(eligibility?.shippingAddressId),
+            hasShippingAddress: eligibility?.hasShippingAddress ?? false,
           },
         );
       }
@@ -342,7 +342,7 @@ export class DeliveryRoute {
       !eligibility ||
       (eligibility.deliveryStatus !== 'PENDING' &&
         eligibility.deliveryStatus !== 'SHIPPED') ||
-      !eligibility.shippingAddressId
+      !eligibility.hasShippingAddress
     ) {
       throw new DeliveryRouteSaleNotEligibleError(
         `Sale "${input.saleId}" is not eligible for delivery`,
@@ -350,7 +350,7 @@ export class DeliveryRoute {
           reason: 'INELIGIBLE_SALE',
           saleId: input.saleId,
           deliveryStatus: eligibility?.deliveryStatus ?? null,
-          hasShippingAddress: Boolean(eligibility?.shippingAddressId),
+          hasShippingAddress: eligibility?.hasShippingAddress ?? false,
         },
       );
     }

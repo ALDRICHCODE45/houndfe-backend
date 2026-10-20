@@ -78,7 +78,7 @@ export interface DeliveryRouteCustomerDto {
 }
 
 export interface DeliveryRouteShippingAddressDto {
-  id: string;
+  id: string | null;
   street: string | null;
   exteriorNumber: string | null;
   interiorNumber: string | null;

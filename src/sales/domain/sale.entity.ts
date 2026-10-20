@@ -15,6 +15,11 @@ import {
   SaleNotDeliverableError,
 } from './sale.errors';
 
+import {
+  copyShippingAddress,
+  type ShippingAddressSnapshot,
+} from './shipping-address-snapshot';
+
 export type SaleStatus = 'DRAFT' | 'CONFIRMED' | 'CANCELED';
 export type SaleChannel = 'POS' | 'ONLINE';
 export type SaleDeliveryStatus =
@@ -59,6 +64,7 @@ export interface SaleFromPersistenceProps {
   deliveryStatus?: SaleDeliveryStatus;
   customerId?: string | null;
   shippingAddressId?: string | null;
+  shippingAddressSnapshot?: ShippingAddressSnapshot | null;
   sellerUserId?: string | null;
   dueDate?: Date | null;
   items: SaleItemProps[];
@@ -143,6 +149,7 @@ export class Sale {
   private _items: SaleItem[] = [];
   private _customerId: string | null;
   private _shippingAddressId: string | null;
+  private _shippingAddressSnapshot: ShippingAddressSnapshot | null;
   private _sellerUserId: string | null;
   private _dueDate: Date | null;
   private _carrierName: string | null;
@@ -190,10 +197,14 @@ export class Sale {
     // `Sale.create({...})`; round-trip from persistence via `fromPersistence`.
     globalPriceListId: string | null = null,
     priceListExplicitlySet: boolean = false,
+    shippingAddressSnapshot: ShippingAddressSnapshot | null = null,
   ) {
     this._items = items;
     this._customerId = customerId;
     this._shippingAddressId = shippingAddressId;
+    this._shippingAddressSnapshot = shippingAddressSnapshot
+      ? copyShippingAddress(shippingAddressSnapshot)
+      : null;
     this._sellerUserId = sellerUserId;
     this._dueDate = dueDate;
     this._carrierName = carrierName;
@@ -269,6 +280,7 @@ export class Sale {
       // not have the new columns populated yet).
       props.globalPriceListId ?? null,
       props.priceListExplicitlySet ?? false,
+      props.shippingAddressSnapshot ?? null,
     );
   }
 
@@ -324,6 +336,7 @@ export class Sale {
       // binding itself is the cashier's standing choice and stays.
       this._globalPriceListId,
       this._priceListExplicitlySet,
+      this._shippingAddressSnapshot,
     );
   }
 
@@ -382,6 +395,7 @@ export class Sale {
         undefined,
         undefined,
         undefined,
+        this._shippingAddressSnapshot,
       ),
       refundedCents,
     };
@@ -397,6 +411,19 @@ export class Sale {
 
   get shippingAddressId(): string | null {
     return this._shippingAddressId;
+  }
+
+  get shippingAddressSnapshot(): ShippingAddressSnapshot | null {
+    return this._shippingAddressSnapshot
+      ? copyShippingAddress(this._shippingAddressSnapshot)
+      : null;
+  }
+
+  captureShippingAddress(address: ShippingAddressSnapshot | null): void {
+    this.ensureDraft();
+    this._shippingAddressSnapshot = address
+      ? copyShippingAddress(address)
+      : null;
   }
 
   get dueDate(): Date | null {
@@ -705,12 +732,14 @@ export class Sale {
 
     this._customerId = customerId;
     this._shippingAddressId = shippingAddressId ?? null;
+    this._shippingAddressSnapshot = null;
   }
 
   clearCustomer(): void {
     this.ensureDraft();
     this._customerId = null;
     this._shippingAddressId = null;
+    this._shippingAddressSnapshot = null;
   }
 
   setShippingAddress(addressId: string | null): void {
@@ -724,6 +753,7 @@ export class Sale {
     }
 
     this._shippingAddressId = addressId;
+    this._shippingAddressSnapshot = null;
   }
 
   /**

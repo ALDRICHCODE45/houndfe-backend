@@ -28,9 +28,9 @@ const DRIVER_USER_ID = 'driver-1';
 const NOW = new Date('2026-08-01T12:00:00.000Z');
 
 /** Default eligible snapshot for a sale id. */
-const eligible = (saleId: string): SaleEligibilitySnapshot => ({
+const eligible = (): SaleEligibilitySnapshot => ({
   deliveryStatus: 'PENDING',
-  shippingAddressId: `addr-${saleId}`,
+  hasShippingAddress: true,
 });
 
 /** Build a `checkSaleEligibility` probe from a snapshot map. */
@@ -38,11 +38,9 @@ const makeProbe = (
   snapshots: Record<string, SaleEligibilitySnapshot | null>,
 ): jest.Mock => jest.fn((saleId: string) => snapshots[saleId] ?? null);
 
-/** Probe that answers `eligible(saleId)` for every listed sale id. */
+/** Probe that answers `eligible()` for every listed sale id. */
 const probeForAll = (saleIds: string[]): jest.Mock =>
-  makeProbe(
-    Object.fromEntries(saleIds.map((saleId) => [saleId, eligible(saleId)])),
-  );
+  makeProbe(Object.fromEntries(saleIds.map((saleId) => [saleId, eligible()])));
 
 const createRoute = async (
   saleIds: string[],
@@ -106,7 +104,7 @@ describe('DeliveryRoute (delivery-routes / WU2)', () => {
 
     it('Given a sale whose deliveryStatus is not PENDING/SHIPPED, when the route is created, then it throws DeliveryRouteSaleNotEligibleError (INELIGIBLE_SALE)', async () => {
       const probe = makeProbe({
-        'sale-1': { deliveryStatus: 'DELIVERED', shippingAddressId: 'addr-1' },
+        'sale-1': { deliveryStatus: 'DELIVERED', hasShippingAddress: true },
       });
       await expect(createRoute(['sale-1'], { probe })).rejects.toMatchObject({
         code: 'DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE',
@@ -118,9 +116,9 @@ describe('DeliveryRoute (delivery-routes / WU2)', () => {
       });
     });
 
-    it('Given a PENDING sale without a shippingAddressId, when the route is created, then it throws DeliveryRouteSaleNotEligibleError (INELIGIBLE_SALE)', async () => {
+    it('Given a PENDING sale without a shipping snapshot, when the route is created, then it throws DeliveryRouteSaleNotEligibleError (INELIGIBLE_SALE)', async () => {
       const probe = makeProbe({
-        'sale-1': { deliveryStatus: 'PENDING', shippingAddressId: null },
+        'sale-1': { deliveryStatus: 'PENDING', hasShippingAddress: false },
       });
       await expect(createRoute(['sale-1'], { probe })).rejects.toMatchObject({
         code: 'DELIVERY_ROUTE_STOP_SALE_NOT_ELIGIBLE',
