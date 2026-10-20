@@ -23,6 +23,10 @@ import { CustomersService } from '../../customers/customers.service';
 import { PrismaCustomerRepository } from '../../customers/infrastructure/prisma-customer.repository';
 import { PrismaSaleRepository } from '../../sales/infrastructure/prisma-sale.repository';
 import { SalesService } from '../../sales/sales.service';
+import { DeliveryRoute } from '../../delivery-routes/domain/delivery-route.entity';
+import { DeliveryRoutesService } from '../../delivery-routes/application/delivery-routes.service';
+import { PrismaDeliveryRouteRepository } from '../../delivery-routes/infrastructure/prisma-delivery-route.repository';
+import { PrismaEligibleSalesReader } from '../../delivery-routes/infrastructure/eligible-sales-prisma.reader';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { PrismaService } from '../../shared/prisma/prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
@@ -475,6 +479,130 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
         ...(path === 'new'
           ? { shippingLatitude: null, shippingLongitude: null }
           : {}),
+      });
+    },
+  );
+
+  it.each(['edit', 'delete'] as const)(
+    'snapshot reads: POS, bot, routes, search and next-stop survive customer address %s',
+    async (mutation) => {
+      const { customer, address } = await savedDeliveryAddress();
+      const response = await post({
+        ...body(),
+        customer: { mode: 'existing', customerId: customer.id },
+        deliveryAddress: {
+          mode: 'existing',
+          addressId: address.id,
+          expectedVersion: address.updatedAt.toISOString(),
+        },
+      });
+      expect(response.status).toBe(201);
+      const saleId: string = response.body.sale.saleId;
+      await db.sale.update({
+        where: { id: saleId },
+        data: { deliveryStatus: 'PENDING' },
+      });
+      await contexts.run({ tenantId }, async () => {
+        const repo = new PrismaSaleRepository(tenant);
+        const routeRepo = new PrismaDeliveryRouteRepository(tenant);
+        const reader = new PrismaEligibleSalesReader(tenant);
+        const routes = Object.create(
+          DeliveryRoutesService.prototype,
+        ) as DeliveryRoutesService;
+        Object.assign(routes, { tenantPrisma: tenant });
+        const route = await DeliveryRoute.create({
+          tenantId,
+          driverUserId: cashier,
+          saleIds: [saleId],
+          checkSaleEligibility: (id) =>
+            routes['checkSaleEligibility'](id, tenantId),
+        });
+        await routeRepo.save(route);
+        const read = async () => {
+          const pos = await repo.findDraftResponseById(saleId);
+          const detail = await routeRepo.findOneWithStops({
+            tenantId,
+            id: route.id,
+          });
+          const list = await routeRepo.list({ tenantId });
+          const eligible = await reader.findEligibleSales({
+            tenantId,
+            page: 1,
+            limit: 10,
+            saleScope: null,
+          });
+          const next = await routes['composeNextStopPayload'](
+            db,
+            tenantId,
+            route,
+            'current-stop',
+            'next-stop',
+            saleId,
+          );
+          const history = await request(app.getHttpServer())
+            .get(
+              '/chatbot-api/customers/by-phone/5512345678/orders?phoneCountryCode=52',
+            )
+            .set('Authorization', `Bearer ${token}`);
+          expect(history.status).toBe(200);
+          return {
+            pos: pos?.shippingAddress,
+            detail: detail?.stops[0].shippingAddress,
+            list: list[0].stops[0].shippingAddress,
+            eligible: eligible.rows[0].shippingAddress,
+            next: next.nextAddressLabel,
+            bot: history.body[0].shippingAddress,
+          };
+        };
+        const before = await read();
+        if (mutation === 'edit')
+          await db.customerAddress.update({
+            where: { id: address.id },
+            data: {
+              street: 'Changed Street',
+              zipCode: '99999',
+              latitude: 0,
+              longitude: 0,
+            },
+          });
+        else await db.customerAddress.delete({ where: { id: address.id } });
+        const after = await read();
+        for (const key of ['pos', 'detail', 'list', 'eligible'] as const) {
+          expect(after[key]).toEqual({
+            ...before[key],
+            id: mutation === 'delete' ? null : address.id,
+          });
+        }
+        expect(after.bot).toEqual(before.bot);
+        expect(after.next).toEqual(before.next);
+        expect(after.detail).toMatchObject({
+          latitude: deliveryFields.latitude,
+          longitude: deliveryFields.longitude,
+        });
+        for (const q of [deliveryFields.street, deliveryFields.zipCode]) {
+          const matches = await reader.findEligibleSales({
+            tenantId,
+            page: 1,
+            limit: 10,
+            saleScope: null,
+            q,
+          });
+          expect(matches.total).toBe(1);
+          expect(matches.rows[0].id).toBe(saleId);
+        }
+        for (const q of ['Changed Street', '99999']) {
+          const matches = await reader.findEligibleSales({
+            tenantId,
+            page: 1,
+            limit: 10,
+            saleScope: null,
+            q,
+          });
+          expect(matches.total).toBe(0);
+        }
+        await expect(
+          routes['checkSaleEligibility'](saleId, tenantId),
+        ).resolves.toMatchObject({ hasShippingAddress: true });
       });
     },
   );

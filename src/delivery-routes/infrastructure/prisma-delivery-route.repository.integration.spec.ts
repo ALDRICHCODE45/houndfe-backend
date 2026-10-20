@@ -208,6 +208,14 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         userId: cashierId,
         customerId: input.customerId,
         shippingAddressId: input.addressId,
+        shippingStreet: 'Av. Reforma',
+        shippingExteriorNumber: '123',
+        shippingZipCode: '06600',
+        shippingNeighborhood: 'Juárez',
+        shippingMunicipality: 'Cuauhtémoc',
+        shippingCity: 'CDMX',
+        shippingState: 'CDMX',
+        shippingLabel: 'Oficina',
         tenantId,
         status: 'CONFIRMED',
         channel: 'ONLINE',
@@ -257,7 +265,7 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         saleId,
       ): Promise<SaleEligibilitySnapshot | null> =>
         seeded.includes(saleId)
-          ? { deliveryStatus: 'PENDING', shippingAddressId: addressId }
+          ? { deliveryStatus: 'PENDING', hasShippingAddress: true }
           : null,
     });
     await repo.save(route);
@@ -465,7 +473,7 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
 
       // Route B is a DRAFT route with its OWN eligible sale, so it is valid
       // state (its own reservation) and persists.
-      const { route: routeB, addressId } = await seedDraftRoute(1);
+      const { route: routeB } = await seedDraftRoute(1);
       const routeBSaleId = routeB.stops[0].saleId;
       expect(routeBSaleId).not.toBe(sharedSaleId);
 
@@ -482,7 +490,7 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         saleId: sharedSaleId,
         checkSaleEligibility: async () => ({
           deliveryStatus: 'PENDING' as const,
-          shippingAddressId: addressId,
+          hasShippingAddress: true,
         }),
       });
 
@@ -519,7 +527,7 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         saleIds: [sharedSaleId],
         checkSaleEligibility: async () => ({
           deliveryStatus: 'PENDING' as const,
-          shippingAddressId: randomUUID(),
+          hasShippingAddress: true,
         }),
       });
 
@@ -557,7 +565,7 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         saleId: saleIds[0],
         checkSaleEligibility: async () => ({
           deliveryStatus: 'PENDING' as const,
-          shippingAddressId: randomUUID(),
+          hasShippingAddress: true,
         }),
       });
 

@@ -10,12 +10,17 @@
  *   - occupancy from the `DeliveryRouteStop.activeRouteId` reservation
  *     marker, with tenant-qualified stops and post-read stop/route defenses
  *
- * Nested relations (`customer`, `shippingAddress`, `route`) cannot carry a
+ * Nested relations (`customer`, `route`) cannot carry a
  * tenant predicate of their own, so every related row is re-checked against
  * the caller's `tenantId` after the read and dropped on mismatch — no
  * cross-tenant related PII ever reaches the service.
  */
 import { Injectable } from '@nestjs/common';
+import {
+  hydrateShippingAddress,
+  shippingAddressSnapshotSelect,
+  type SnapshotRow,
+} from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import type { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type {
@@ -30,7 +35,7 @@ import type {
 } from '../application/eligible-sales-reader.port';
 
 /** Row shape produced by the explicit `select` below. */
-interface EligibleSalesQueryRow {
+interface EligibleSalesQueryRow extends SnapshotRow {
   id: string;
   folio: string | null;
   status: string;
@@ -46,9 +51,7 @@ interface EligibleSalesQueryRow {
     lastName: string | null;
     tenantId: string;
   } | null;
-  shippingAddress:
-    | (EligibleSaleAddressProjection & { tenantId: string })
-    | null;
+  shippingAddressId: string | null;
   items: { productName: string }[];
   deliveryRouteStops: {
     tenantId: string;
@@ -114,21 +117,8 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
               tenantId: true,
             },
           },
-          shippingAddress: {
-            select: {
-              id: true,
-              tenantId: true,
-              label: true,
-              street: true,
-              exteriorNumber: true,
-              interiorNumber: true,
-              neighborhood: true,
-              municipality: true,
-              city: true,
-              state: true,
-              zipCode: true,
-            },
-          },
+          shippingAddressId: true,
+          ...shippingAddressSnapshotSelect,
           items: {
             select: { productName: true },
             orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -216,7 +206,7 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
       confirmedAt: row.confirmedAt,
       dueDate: row.dueDate,
       customer: this.mapCustomer(row.customer, tenantId),
-      shippingAddress: this.mapAddress(row.shippingAddress, tenantId),
+      shippingAddress: this.mapAddress(row),
       productNames: row.items.map((item) => item.productName),
       occupancy: this.resolveOccupancy(row.deliveryRouteStops, tenantId),
     };
@@ -235,12 +225,12 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
   }
 
   private mapAddress(
-    address: EligibleSalesQueryRow['shippingAddress'],
-    tenantId: string,
+    row: EligibleSalesQueryRow,
   ): EligibleSaleAddressProjection | null {
-    if (!address || address.tenantId !== tenantId) return null;
+    const address = hydrateShippingAddress(row);
+    if (!address) return null;
     return {
-      id: address.id,
+      id: row.shippingAddressId,
       label: address.label,
       street: address.street,
       exteriorNumber: address.exteriorNumber,
@@ -285,11 +275,10 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
  * same convention as `GET /sales`), everything else matches folio/last name/
  * address substrings case-insensitively.
  *
- * Every `customer` / `shippingAddress` branch carries the caller's
- * `tenantId`: the ambient tenant extension only scopes the top-level `sale`,
- * so without this a foreign-tenant related row could match the term and turn
- * the page/total into an existence oracle. The same `where` drives both
- * `findMany` and `count`.
+ * Every customer branch carries the caller's `tenantId` to prevent a
+ * foreign related row from turning the page/total into an existence oracle.
+ * Address searches use sale snapshot columns, scoped by the top-level sale
+ * tenant predicate. The same `where` drives both `findMany` and `count`.
  */
 function buildEligibleSalesSearchWhere(
   term: string,
@@ -308,36 +297,11 @@ function buildEligibleSalesSearchWhere(
         lastName: { contains: term, mode: 'insensitive' },
       },
     },
-    {
-      shippingAddress: {
-        tenantId,
-        street: { contains: term, mode: 'insensitive' },
-      },
-    },
-    {
-      shippingAddress: {
-        tenantId,
-        neighborhood: { contains: term, mode: 'insensitive' },
-      },
-    },
-    {
-      shippingAddress: {
-        tenantId,
-        municipality: { contains: term, mode: 'insensitive' },
-      },
-    },
-    {
-      shippingAddress: {
-        tenantId,
-        city: { contains: term, mode: 'insensitive' },
-      },
-    },
-    {
-      shippingAddress: {
-        tenantId,
-        zipCode: { contains: term, mode: 'insensitive' },
-      },
-    },
+    { shippingStreet: { contains: term, mode: 'insensitive' } },
+    { shippingNeighborhood: { contains: term, mode: 'insensitive' } },
+    { shippingMunicipality: { contains: term, mode: 'insensitive' } },
+    { shippingCity: { contains: term, mode: 'insensitive' } },
+    { shippingZipCode: { contains: term, mode: 'insensitive' } },
   ];
   if (/^\d+$/.test(term)) {
     or.push({

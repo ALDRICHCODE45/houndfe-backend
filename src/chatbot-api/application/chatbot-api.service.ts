@@ -117,7 +117,6 @@ type OrderHistorySaleRecord = Prisma.SaleGetPayload<{
   include: {
     items: true;
     payments: true;
-    shippingAddress: true;
   };
 }>;
 
@@ -770,7 +769,6 @@ export class ChatbotApiService {
       include: {
         items: true,
         payments: true,
-        shippingAddress: true,
       },
       orderBy: { confirmedAt: 'desc' },
       take: input.limit ?? 5,
@@ -1040,12 +1038,13 @@ function toOrderHistoryResponse(
         reference: payment.reference ?? null,
       }),
     ),
-    shippingAddress: sale.shippingAddress
-      ? {
-          street: sale.shippingAddress.street ?? null,
-          zipCode: sale.shippingAddress.zipCode ?? null,
-        }
-      : null,
+    shippingAddress:
+      sale.shippingStreet != null
+        ? {
+            street: sale.shippingStreet,
+            zipCode: sale.shippingZipCode,
+          }
+        : null,
   };
 }
 

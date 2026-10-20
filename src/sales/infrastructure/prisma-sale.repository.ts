@@ -680,19 +680,6 @@ export class PrismaSaleRepository implements ISaleRepository {
             lastName: true,
           },
         },
-        shippingAddress: {
-          select: {
-            id: true,
-            street: true,
-            exteriorNumber: true,
-            interiorNumber: true,
-            zipCode: true,
-            neighborhood: true,
-            municipality: true,
-            city: true,
-            state: true,
-          },
-        },
         // Unit 3 — W2: load veto + applied-promo for draft preview.
         promotionVetoes: {
           select: { promotionId: true },
@@ -818,19 +805,20 @@ export class PrismaSaleRepository implements ISaleRepository {
             lastName: saleData.customer.lastName,
           }
         : null,
-      shippingAddress: saleData.shippingAddress
-        ? {
-            id: saleData.shippingAddress.id,
-            street: saleData.shippingAddress.street,
-            exteriorNumber: saleData.shippingAddress.exteriorNumber,
-            interiorNumber: saleData.shippingAddress.interiorNumber,
-            zipCode: saleData.shippingAddress.zipCode,
-            neighborhood: saleData.shippingAddress.neighborhood,
-            municipality: saleData.shippingAddress.municipality,
-            city: saleData.shippingAddress.city,
-            state: saleData.shippingAddress.state,
-          }
-        : null,
+      shippingAddress:
+        saleData.shippingStreet != null
+          ? {
+              id: saleData.shippingAddressId,
+              street: saleData.shippingStreet,
+              exteriorNumber: saleData.shippingExteriorNumber,
+              interiorNumber: saleData.shippingInteriorNumber,
+              zipCode: saleData.shippingZipCode,
+              neighborhood: saleData.shippingNeighborhood,
+              municipality: saleData.shippingMunicipality,
+              city: saleData.shippingCity,
+              state: saleData.shippingState,
+            }
+          : null,
     };
   }
 

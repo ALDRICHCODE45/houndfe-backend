@@ -109,7 +109,7 @@ export type DraftCustomerSummary = {
 };
 
 export type DraftShippingAddressSummary = {
-  id: string;
+  id: string | null;
   street: string | null;
   exteriorNumber: string | null;
   interiorNumber: string | null;

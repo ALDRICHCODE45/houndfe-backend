@@ -47,7 +47,7 @@ export class DeliveryRouteSaleAlreadyInActiveRouteError extends BusinessRuleViol
 /**
  * 422 — a sale on the route is not eligible for delivery: either its
  * `deliveryStatus` is outside `{PENDING, SHIPPED}` or its
- * `shippingAddressId` is null. Re-checked on `start()` (the chatbot's
+ * shipping snapshot is absent. Re-checked on `start()` (the chatbot's
  * `SHIPPED` writer is orthogonal and can flip a stop's eligibility
  * between `create` and `start`). The eligible-sales selector reports the
  * same conditions as an `INELIGIBLE` availability state instead of this

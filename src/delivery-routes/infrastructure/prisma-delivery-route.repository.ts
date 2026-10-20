@@ -28,6 +28,10 @@
  * swap implementations without churning the service contract.
  */
 import { Injectable } from '@nestjs/common';
+import {
+  hydrateShippingAddress,
+  shippingAddressSnapshotSelect,
+} from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
@@ -114,10 +118,9 @@ export function isSaleReservationP2002(error: unknown): boolean {
 
 /**
  * ODD O1 — the single nested sale projection shared by the two route read
- * models. `tenantId` is selected on the sale AND on both of its to-one
- * children because Prisma cannot express a tenant `where` on a to-one
- * relation (and the CLS tenant extension never recurses into a nested
- * `select`), so the tenant check has to happen during mapping.
+ * models. `tenantId` is selected on the sale and its customer because the
+ * CLS tenant extension never recurses into a nested `select`. Address
+ * fields belong to the sale snapshot and share its tenant boundary.
  */
 const STOP_SALE_SELECT = {
   id: true,
@@ -132,23 +135,8 @@ const STOP_SALE_SELECT = {
       email: true,
     },
   },
-  shippingAddress: {
-    select: {
-      id: true,
-      tenantId: true,
-      street: true,
-      exteriorNumber: true,
-      interiorNumber: true,
-      zipCode: true,
-      neighborhood: true,
-      municipality: true,
-      city: true,
-      state: true,
-      label: true,
-      latitude: true,
-      longitude: true,
-    },
-  },
+  shippingAddressId: true,
+  ...shippingAddressSnapshotSelect,
 } satisfies Prisma.SaleSelect;
 
 type StopSaleProjection = Prisma.SaleGetPayload<{
@@ -175,8 +163,8 @@ type RouteReadStopProjection = {
  * rewrites top-level predicates. A row owned by another tenant is
  * therefore treated as absent: the stop keeps its own `saleId` (a column
  * of the tenant's own stop row) while every nested field resolves to
- * `null`. The sale's customer and address are checked INDEPENDENTLY, so a
- * foreign child never suppresses an otherwise valid sibling.
+ * `null`. The customer is checked independently; the address is hydrated
+ * only from the tenant-owned sale's snapshot.
  */
 function mapRouteStopReadModel(
   stop: RouteReadStopProjection,
@@ -192,12 +180,7 @@ function mapRouteStopReadModel(
     sale.customer.tenantId === routeTenantId
       ? sale.customer
       : null;
-  const shippingAddress =
-    sale !== null &&
-    sale.shippingAddress !== null &&
-    sale.shippingAddress.tenantId === routeTenantId
-      ? sale.shippingAddress
-      : null;
+  const shippingAddress = sale ? hydrateShippingAddress(sale) : null;
 
   return {
     id: stop.id,
@@ -216,7 +199,7 @@ function mapRouteStopReadModel(
       : null,
     shippingAddress: shippingAddress
       ? {
-          id: shippingAddress.id,
+          id: sale?.shippingAddressId ?? null,
           street: shippingAddress.street,
           exteriorNumber: shippingAddress.exteriorNumber,
           interiorNumber: shippingAddress.interiorNumber,

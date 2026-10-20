@@ -21,7 +21,23 @@ export function shippingAddressColumns(
   };
 }
 
-type SnapshotRow = Pick<
+export const shippingAddressSnapshotSelect = {
+  shippingStreet: true,
+  shippingExteriorNumber: true,
+  shippingInteriorNumber: true,
+  shippingZipCode: true,
+  shippingNeighborhood: true,
+  shippingMunicipality: true,
+  shippingCity: true,
+  shippingState: true,
+  shippingVisualReferences: true,
+  shippingCarrierPhone: true,
+  shippingLabel: true,
+  shippingLatitude: true,
+  shippingLongitude: true,
+} as const;
+
+export type SnapshotRow = Pick<
   PrismaSale,
   keyof ReturnType<typeof shippingAddressColumns>
 >;

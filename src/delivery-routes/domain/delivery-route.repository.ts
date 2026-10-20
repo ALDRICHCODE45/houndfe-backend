@@ -107,7 +107,7 @@ export interface DeliveryRouteReadModel {
     completedAt: Date | null;
     customer: { id: string; name: string; email: string | null } | null;
     shippingAddress: {
-      id: string;
+      id: string | null;
       street: string | null;
       exteriorNumber: string | null;
       interiorNumber: string | null;

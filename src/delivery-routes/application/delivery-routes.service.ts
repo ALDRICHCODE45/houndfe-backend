@@ -3,7 +3,7 @@
  *
  * Use-case orchestrator for the bounded context. Owns:
  *   - eligibility probes for the aggregate (sale → deliveryStatus +
- *     shippingAddressId snapshots)
+ *     shipping address snapshots)
  *   - the `runInTransaction` choreography around checkInStop (stop +
  *     Sale mirror + outbox emission when a next stop exists)
  *   - list-scope filtering on `request.ability.can('create',
@@ -30,6 +30,10 @@ import {
 } from '../../shared/domain/domain-error';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import {
+  hydrateShippingAddress,
+  shippingAddressSnapshotSelect,
+} from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import {
   DeliveryRoute,
   type SaleEligibilitySnapshot,
@@ -636,13 +640,13 @@ export class DeliveryRoutesService {
     const prisma = this.tenantPrisma.getClient();
     const row = await prisma.sale.findFirst({
       where: { id: saleId, tenantId },
-      select: { deliveryStatus: true, shippingAddressId: true },
+      select: { deliveryStatus: true, shippingStreet: true },
     });
     if (!row) return null;
     return {
       deliveryStatus:
         row.deliveryStatus as SaleEligibilitySnapshot['deliveryStatus'],
-      shippingAddressId: row.shippingAddressId,
+      hasShippingAddress: row.shippingStreet != null,
     };
   }
 
@@ -872,13 +876,9 @@ export class DeliveryRoutesService {
    * gracefully degrades (name/email/label all null → template still
    * renders with a generic greeting).
    *
-   * The nested `customer` / `shippingAddress` relations cannot carry a
-   * tenant predicate of their own (single-column relations, and the CLS
-   * extension only rewrites top-level models), so both children are
-   * re-checked against `tenantId` after the read. A foreign-tenant child
-   * is treated exactly like a missing one — and each child is filtered
-   * independently, so one foreign relation never suppresses a valid
-   * sibling.
+   * The nested customer is re-checked against `tenantId` after the read
+   * because the CLS extension only rewrites top-level models. Address
+   * fields come directly from the tenant-owned sale snapshot.
    */
   private async composeNextStopPayload(
     tx: Prisma.TransactionClient,
@@ -907,20 +907,7 @@ export class DeliveryRoutesService {
             email: true,
           },
         },
-        shippingAddress: {
-          select: {
-            tenantId: true,
-            label: true,
-            street: true,
-            exteriorNumber: true,
-            interiorNumber: true,
-            zipCode: true,
-            neighborhood: true,
-            municipality: true,
-            city: true,
-            state: true,
-          },
-        },
+        ...shippingAddressSnapshotSelect,
       },
     });
 
@@ -932,11 +919,7 @@ export class DeliveryRoutesService {
       projectedCustomer && projectedCustomer.tenantId === tenantId
         ? projectedCustomer
         : null;
-    const projectedAddress = sale?.shippingAddress ?? null;
-    const address =
-      projectedAddress && projectedAddress.tenantId === tenantId
-        ? projectedAddress
-        : null;
+    const address = sale ? hydrateShippingAddress(sale) : null;
     const fullName = customer
       ? `${customer.firstName ?? ''}${
           customer.lastName ? ' ' + customer.lastName : ''
@@ -971,7 +954,7 @@ export class DeliveryRoutesService {
 }
 
 /**
- * Format a `CustomerAddress` row into a multi-line label suitable for
+ * Format a sale shipping snapshot into a multi-line label suitable for
  * the email body. Returns `null` when every line would be empty
  * (defensive — the template's `nextAddressLabel` block is conditionally
  * rendered, so an all-empty label degrades gracefully).
