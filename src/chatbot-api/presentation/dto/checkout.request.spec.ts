@@ -66,6 +66,73 @@ describe('Standalone checkout structural schema', () => {
       expectedVersion: '2026-10-14T00:00:00.000Z',
     });
   });
+  it('selects existingUpdated with the same nested address schema as newSaved', () => {
+    const { dto, errors } = check({
+      ...input(),
+      deliveryAddress: {
+        mode: 'existingUpdated',
+        addressId: id,
+        expectedVersion: '2026-10-14T00:00:00.000Z',
+        address: { street: 'Corrected Street', label: null },
+      },
+    });
+    expect(errors).toEqual([]);
+    expect(dto.deliveryAddress.constructor.name).toBe(
+      'ExistingUpdatedCheckoutAddressDto',
+    );
+  });
+  it.each([
+    { addressId: undefined },
+    { addressId: 'invalid' },
+    { expectedVersion: undefined },
+    { expectedVersion: '2026-10-14T00:00:00Z' },
+    { address: undefined },
+    { address: null },
+    { address: { street: ' ' } },
+    { address: { street: 'Street', state: 'invalid' } },
+    { address: { street: 'Street', latitude: 1 } },
+    { address: { street: 'Street', label: 'x'.repeat(101) } },
+  ])('rejects invalid existingUpdated input %j', (change) => {
+    expect(
+      check({
+        ...input(),
+        deliveryAddress: {
+          mode: 'existingUpdated',
+          addressId: id,
+          expectedVersion: '2026-10-14T00:00:00.000Z',
+          address: { street: 'Street' },
+          ...change,
+        },
+      }).errors.length,
+    ).toBeGreaterThan(0);
+  });
+  it.each([
+    { street: 'x'.repeat(201) },
+    { street: 'Street', exteriorNumber: 'x'.repeat(21) },
+    { street: 'Street', interiorNumber: 'x'.repeat(21) },
+    { street: 'Street', zipCode: 'x'.repeat(11) },
+    { street: 'Street', neighborhood: 'x'.repeat(101) },
+    { street: 'Street', municipality: 'x'.repeat(101) },
+    { street: 'Street', city: 'x'.repeat(101) },
+    { street: 'Street', visualReferences: 'x'.repeat(501) },
+    { street: 'Street', carrierPhone: 'x'.repeat(21) },
+    { street: 'Street', state: null, label: null },
+  ])('keeps nested validation identical to newSaved for %j', (address) => {
+    const saved = check({
+      ...input(),
+      deliveryAddress: { mode: 'newSaved', address },
+    });
+    const corrected = check({
+      ...input(),
+      deliveryAddress: {
+        mode: 'existingUpdated',
+        addressId: id,
+        expectedVersion: '2026-10-14T00:00:00.000Z',
+        address,
+      },
+    });
+    expect(corrected.errors.length).toBe(saved.errors.length);
+  });
   it('reuses approved-shipping validation without changing omitted-shipping behavior', () => {
     expect(check(input()).errors).toEqual([]);
     const { dto, errors } = check({

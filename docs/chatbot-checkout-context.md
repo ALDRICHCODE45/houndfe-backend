@@ -37,7 +37,9 @@ Unique with no address is distinct from customer absence. Each address contains:
 `{id,version,label,street,exteriorNumber,interiorNumber,zipCode,neighborhood,
 municipality,city,state,visualReferences,carrierPhone}`. Street is non-null; all
 other delivery fields are nullable. `version` is ISO `updatedAt`: a freshness
-marker, NOT a compare-and-swap editing guarantee. Saved values are returned
+marker, not a version counter. Discovery itself does not lock or edit the row;
+[atomic checkout](chatbot-atomic-checkout.md) checks this exact version under a
+row lock for `existing` and `existingUpdated`. Saved values are returned
 unaltered, never silently truncated/normalized. Coordinates, billing, profile
 comments and unrelated data are excluded by explicit database projection and
 response mapping.
@@ -74,8 +76,10 @@ customer delivery DTO: label100, street200, exterior/interior number20, zipCode1
 neighborhood/municipality/city100, visualReferences500, carrierPhone20;
 state must be a `MEXICAN_STATES` value. A completed draft requires nonblank street.
 Optional draft omission means unknown and null means unsupplied; neither is a
-saved-profile clearing instruction. Draft validation is chatbot-owned and does
-not truncate this read response.
+saved-profile clearing instruction. When submitting `existingUpdated` to
+[atomic checkout](chatbot-atomic-checkout.md), send the complete desired address:
+that write contract normalizes omitted optional fields to null, unlike a local
+draft. Draft validation is chatbot-owned and does not truncate this read response.
 
 ## Offline verification and rollback
 

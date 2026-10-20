@@ -361,6 +361,332 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
     return { customer, address };
   };
 
+  const correctionBody = (
+    customerId: string,
+    address: { id: string; updatedAt: Date },
+    changes: Record<string, string | null> = {},
+  ) => {
+    const fields = Object.fromEntries(
+      Object.entries(deliveryFields).filter(
+        ([, value]) => typeof value === 'string',
+      ),
+    );
+    return {
+      ...body(),
+      customer: { mode: 'existing', customerId },
+      deliveryAddress: {
+        mode: 'existingUpdated',
+        addressId: address.id,
+        expectedVersion: address.updatedAt.toISOString(),
+        address: { ...fields, ...changes },
+      },
+    };
+  };
+
+  it('existingUpdated: updates in place, snapshots corrected fields and replays without another write', async () => {
+    const { customer, address } = await savedDeliveryAddress();
+    const value = correctionBody(customer.id, address, { zipCode: '64001' });
+    const first = await post(value);
+    expect(first.status).toBe(201);
+    const updated = await db.customerAddress.findUniqueOrThrow({
+      where: { id: address.id },
+    });
+    expect(updated).toEqual({
+      ...address,
+      zipCode: '64001',
+      latitude: null,
+      longitude: null,
+      updatedAt: expect.any(Date),
+    });
+    expect(updated.updatedAt).not.toEqual(address.updatedAt);
+    expect(first.body.address).toEqual({
+      resolution: 'updated',
+      id: address.id,
+      version: updated.updatedAt.toISOString(),
+    });
+    expect(await persistedSale(first.body.sale.saleId)).toMatchObject({
+      shippingAddressId: address.id,
+      ...snapshotColumns(),
+      shippingZipCode: '64001',
+      shippingLatitude: null,
+      shippingLongitude: null,
+    });
+    const effects = await committedEffects();
+    expect((await post(value)).body).toEqual(first.body);
+    expect((await status()).body.checkout).toEqual(first.body);
+    expect(await committedEffects()).toEqual(effects);
+    expect(
+      await db.customerAddress.findUniqueOrThrow({ where: { id: address.id } }),
+    ).toEqual(updated);
+    const conflict = await post({
+      ...value,
+      deliveryAddress: {
+        ...value.deliveryAddress,
+        address: { ...value.deliveryAddress.address, zipCode: '64002' },
+      },
+    });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error).toBe('IDEMPOTENCY_KEY_CONFLICT');
+    expect(await committedEffects()).toEqual(effects);
+  });
+
+  it.each(['re-quote', 'late failure'] as const)(
+    'existingUpdated: rolls back the correction on %s',
+    async (failure) => {
+      const { customer, address } = await savedDeliveryAddress();
+      const value = correctionBody(customer.id, address, { zipCode: '64001' });
+      const before = await committedEffects();
+      if (failure === 're-quote') value.sale.expectedTotalCents = 1;
+      else failOutbox = true;
+      let observed: unknown;
+      afterSaleOutbox = async () => {
+        observed = await tenant.getClient().customerAddress.findUniqueOrThrow({
+          where: { id: address.id },
+        });
+      };
+      const response = await post(value);
+      expect(response.status).toBe(failure === 're-quote' ? 409 : 500);
+      expect(response.body.error).toBe(
+        failure === 're-quote' ? 'PROMO_RE_QUOTE' : 'CHECKOUT_CREATE_FAILED',
+      );
+      if (failure === 'late failure')
+        expect(observed).toMatchObject({ zipCode: '64001', latitude: null });
+      expect(
+        await db.customerAddress.findUniqueOrThrow({
+          where: { id: address.id },
+        }),
+      ).toEqual(address);
+      expect(await committedEffects()).toEqual(before);
+    },
+  );
+
+  it('existingUpdated: replaces all body fields, clearing omitted optional values and preserving other columns', async () => {
+    const { customer, address } = await savedDeliveryAddress();
+    const value = correctionBody(customer.id, address);
+    value.deliveryAddress.address = { street: 'Replacement Street' };
+    const response = await post(value);
+    expect(response.status).toBe(201);
+    expect(
+      await db.customerAddress.findUniqueOrThrow({ where: { id: address.id } }),
+    ).toEqual({
+      ...address,
+      street: 'Replacement Street',
+      exteriorNumber: null,
+      interiorNumber: null,
+      zipCode: null,
+      neighborhood: null,
+      municipality: null,
+      city: null,
+      state: null,
+      label: null,
+      visualReferences: null,
+      carrierPhone: null,
+      latitude: null,
+      longitude: null,
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it('existingUpdated: rejects noncanonical dates before any business changes', async () => {
+    const { customer, address } = await savedDeliveryAddress();
+    const value = correctionBody(customer.id, address);
+    value.deliveryAddress.expectedVersion = '2026-02-31T00:00:00.000Z';
+    const before = await committedEffects();
+    const response = await post(value);
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('INVALID_CHECKOUT_REQUEST');
+    expect(await committedEffects()).toEqual(before);
+  });
+
+  it('existingUpdated: stale version rejects without any business changes', async () => {
+    const { customer, address } = await savedDeliveryAddress();
+    const value = correctionBody(customer.id, address, { zipCode: '64001' });
+    value.deliveryAddress.expectedVersion = '2000-01-01T00:00:00.000Z';
+    const before = await committedEffects();
+    const response = await post(value);
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('ADDRESS_VERSION_CONFLICT');
+    expect(await committedEffects()).toEqual(before);
+    expect(
+      await db.customerAddress.findUniqueOrThrow({ where: { id: address.id } }),
+    ).toEqual(address);
+  });
+
+  it.each(['customer', 'tenant', 'missing'] as const)(
+    'existingUpdated: hides an address owned by another %s',
+    async (owner) => {
+      const { customer, address } = await savedDeliveryAddress();
+      let ownerTenant = tenantId;
+      if (owner === 'tenant') {
+        ownerTenant = randomUUID();
+        extraTenantIds.push(ownerTenant);
+        await db.tenant.create({
+          data: { id: ownerTenant, name: 'Foreign fixture', slug: ownerTenant },
+        });
+      }
+      const foreign = await db.customer.create({
+        data: { tenantId: ownerTenant, firstName: 'Other' },
+      });
+      const foreignAddress = await db.customerAddress.create({
+        data: {
+          tenantId: ownerTenant,
+          customerId: foreign.id,
+          street: 'Other',
+        },
+      });
+      const value = correctionBody(customer.id, address, { zipCode: '64001' });
+      value.deliveryAddress.addressId =
+        owner === 'missing' ? randomUUID() : foreignAddress.id;
+      const before = await committedEffects();
+      const response = await post(value);
+      expect(response.status).toBe(404);
+      expect(response.body.error).toBe('SHIPPING_ADDRESS_NOT_FOUND');
+      expect(await committedEffects()).toEqual(before);
+      expect(
+        await db.customerAddress.findUniqueOrThrow({
+          where: { id: address.id },
+        }),
+      ).toEqual(address);
+      expect(
+        await db.customerAddress.findUniqueOrThrow({
+          where: { id: foreignAddress.id },
+        }),
+      ).toEqual(foreignAddress);
+    },
+  );
+
+  it('existingUpdated: identical normalized body is existing with no write or version change', async () => {
+    const { customer, address } = await savedDeliveryAddress();
+    await db.customerAddress.update({
+      where: { id: address.id },
+      data: { label: null, updatedAt: address.updatedAt },
+    });
+    const value = correctionBody(customer.id, address);
+    // Optional omission and stored null compare identically.
+    Reflect.deleteProperty(value.deliveryAddress.address, 'label');
+    const response = await post(value);
+    expect(response.status).toBe(201);
+    expect(response.body.address).toEqual({
+      resolution: 'existing',
+      id: address.id,
+      version: address.updatedAt.toISOString(),
+    });
+    expect(
+      await db.customerAddress.findUniqueOrThrow({ where: { id: address.id } }),
+    ).toEqual({ ...address, label: null });
+  });
+
+  it.each([
+    'street',
+    'exteriorNumber',
+    'interiorNumber',
+    'zipCode',
+    'neighborhood',
+    'municipality',
+    'city',
+    'state',
+  ])(
+    'existingUpdated: invalidates coordinates on changed location field %s',
+    async (field) => {
+      const { customer, address } = await savedDeliveryAddress();
+      const response = await post(
+        correctionBody(customer.id, address, {
+          [field]: field === 'state' ? 'Jalisco' : 'Changed',
+        }),
+      );
+      expect(response.status).toBe(201);
+      expect(response.body.address.resolution).toBe('updated');
+      expect(
+        await db.customerAddress.findUniqueOrThrow({
+          where: { id: address.id },
+        }),
+      ).toMatchObject({ latitude: null, longitude: null });
+    },
+  );
+
+  it.each(['label', 'visualReferences', 'carrierPhone'])(
+    'existingUpdated: preserves coordinates when only %s changes',
+    async (field) => {
+      const { customer, address } = await savedDeliveryAddress();
+      const response = await post(
+        correctionBody(customer.id, address, { [field]: 'Changed' }),
+      );
+      expect(response.status).toBe(201);
+      expect(response.body.address.resolution).toBe('updated');
+      expect(
+        await db.customerAddress.findUniqueOrThrow({
+          where: { id: address.id },
+        }),
+      ).toEqual({
+        ...address,
+        [field]: 'Changed',
+        updatedAt: expect.any(Date),
+      });
+      expect(await persistedSale(response.body.sale.saleId)).toMatchObject({
+        shippingLatitude: deliveryFields.latitude,
+        shippingLongitude: deliveryFields.longitude,
+      });
+    },
+  );
+
+  it('existingUpdated: leaves a previous confirmed order on a route stop unchanged', async () => {
+    const { customer, address } = await savedDeliveryAddress();
+    const previous = await post(
+      {
+        ...body(),
+        customer: { mode: 'existing', customerId: customer.id },
+        deliveryAddress: {
+          mode: 'existing',
+          addressId: address.id,
+          expectedVersion: address.updatedAt.toISOString(),
+        },
+      },
+      'previous-order',
+    );
+    expect(previous.status).toBe(201);
+    const saleId: string = previous.body.sale.saleId;
+    const before = await persistedSale(saleId);
+    await contexts.run({ tenantId }, async () => {
+      const routeRepo = new PrismaDeliveryRouteRepository(tenant);
+      const routes = Object.create(
+        DeliveryRoutesService.prototype,
+      ) as DeliveryRoutesService;
+      Object.assign(routes, { tenantPrisma: tenant });
+      const route = await DeliveryRoute.create({
+        tenantId,
+        driverUserId: cashier,
+        saleIds: [saleId],
+        checkSaleEligibility: (id) =>
+          routes['checkSaleEligibility'](id, tenantId),
+      });
+      await routeRepo.save(route);
+      const beforeRoute = await routeRepo.findOneWithStops({
+        tenantId,
+        id: route.id,
+      });
+      const corrected = await post(
+        correctionBody(customer.id, address, { street: 'Corrected Street' }),
+        'corrected-order',
+      );
+      expect(corrected.status).toBe(201);
+      expect(corrected.body.address.resolution).toBe('updated');
+      expect(await persistedSale(corrected.body.sale.saleId)).toMatchObject({
+        shippingAddressId: address.id,
+        shippingStreet: 'Corrected Street',
+      });
+      expect(await persistedSale(saleId)).toEqual(before);
+      expect(
+        await routeRepo.findOneWithStops({ tenantId, id: route.id }),
+      ).toEqual(beforeRoute);
+      expect(beforeRoute?.stops[0].shippingAddress).toMatchObject({
+        street: deliveryFields.street,
+        zipCode: deliveryFields.zipCode,
+        latitude: deliveryFields.latitude,
+        longitude: deliveryFields.longitude,
+      });
+    });
+  });
+
   it.each(['new', 'existing', 'legacy bot', 'POS'] as const)(
     'snapshot: persists and freezes all delivery fields for %s',
     async (path) => {
