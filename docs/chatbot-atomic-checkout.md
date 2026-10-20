@@ -1,6 +1,6 @@
 # Create a customer, destination and order atomically
 
-`POST /chatbot-api/checkouts` creates or resolves the sender's customer, selects or appends a saved address, and confirms one credit order. The business writes and successful idempotency response commit together. A rejected transaction leaves no new customer, address or order. Existing customer/address profiles are never overwritten.
+`POST /chatbot-api/checkouts` creates or resolves the sender's customer, selects, appends or explicitly corrects a saved address, and confirms one credit order. The business writes and successful idempotency response commit together. A rejected transaction leaves no new customer, address or order and rolls back any address correction. Customer profiles are never overwritten; saved addresses change only with `existingUpdated`.
 
 This is an additive API. Existing customer GET/PUT and `POST /chatbot-api/sales` remain unchanged. See [checkout discovery](chatbot-checkout-context.md) to select a unique customer and an existing address first.
 
@@ -91,7 +91,36 @@ For an existing saved address, replace the complete `deliveryAddress` object wit
 }
 ```
 
-`expectedVersion` must be the exact canonical UTC ISO `version` returned by checkout discovery. It is checked under an address row lock through commit. It is a freshness marker, not a version counter. There is no edit/patch/upsert mode and no fallback to the oldest address.
+To correct a saved address in place, replace the complete `deliveryAddress` object with:
+
+```json
+{
+  "mode": "existingUpdated",
+  "addressId": "<address-uuid>",
+  "expectedVersion": "2026-10-13T22:00:00.000Z",
+  "address": {
+    "label": "Home",
+    "street": "Corrected Street",
+    "exteriorNumber": "12",
+    "interiorNumber": null,
+    "zipCode": "01001",
+    "neighborhood": null,
+    "municipality": null,
+    "city": null,
+    "state": null,
+    "visualReferences": "Blue gate",
+    "carrierPhone": null
+  }
+}
+```
+
+`address` uses exactly the same nested fields and validation as `newSaved`. This is a **complete replacement**, not a patch: omitted optional fields normalize to null. Send every value that should remain saved.
+
+For both existing-address modes, `expectedVersion` must be the exact canonical UTC ISO `version` returned by checkout discovery. The row is locked `FOR UPDATE`, scoped by address ID, credential tenant and resolved owning customer. Missing, other-customer and other-tenant addresses all return HTTP 404 `SHIPPING_ADDRESS_NOT_FOUND`; a mismatched version returns HTTP 409 `ADDRESS_VERSION_CONFLICT` before comparison or mutation. It is an `updatedAt` freshness marker, not a version counter. There is no fallback to another address.
+
+For `existingUpdated`, normalized fields identical to storage cause **no address write**: resolution is `existing`, with the same ID and version. Otherwise the address is updated in place, resolution is `updated`, and version is its new `updatedAt` ISO string. The new sale uses the same address ID and snapshots the corrected fields. Any sale failure rolls back the correction, including its version and coordinates. Earlier confirmed orders and their delivery-route reads keep their original snapshots.
+
+Coordinates are not accepted in the body. Changing any of `street`, `exteriorNumber`, `interiorNumber`, `zipCode`, `neighborhood`, `municipality`, `city` or `state` clears **both** `latitude` and `longitude` to null. Changing only `label`, `visualReferences` or `carrierPhone` preserves coordinates. All other address columns absent from the `newSaved` body are preserved.
 
 ### Customer and address rules
 
@@ -101,7 +130,7 @@ For an existing saved address, replace the complete `deliveryAddress` object wit
 | `phone` | Required string of 1–20 ASCII digits. No `+`, spaces or silent punctuation stripping. |
 | `firstName` | Required for `createIfAbsent`, nonblank string, at most 100 characters. |
 | `lastName` | Optional string of at most 100 characters or null; omission means null only on a newly created customer. |
-| `street` | Required for `newSaved`, nonblank string, at most 200 characters. |
+| `street` | Required for `newSaved` / `existingUpdated`, nonblank string; see existing validation limitation below. |
 | `label` | Optional/null, at most 100 characters. |
 | `exteriorNumber`, `interiorNumber`, `carrierPhone` | Optional/null, at most 20 characters. |
 | `zipCode` | Optional/null, at most 10 characters. |
@@ -109,7 +138,9 @@ For an existing saved address, replace the complete `deliveryAddress` object wit
 | `state` | Optional/null; existing `MEXICAN_STATES` enum, not free text. |
 | `visualReferences` | Optional/null, at most 500 characters. |
 
-Omitted optional address fields become null **on the new row**, never clear an existing address. Coordinates, billing and preferred-payment fields are not accepted.
+Omitted optional address fields become null on the new row (`newSaved`) or corrected row (`existingUpdated`). `existing` never mutates the address. Coordinates, billing and preferred-payment fields are not accepted.
+
+Existing validation limitation (unchanged): the shared checkout street subclass's nonblank decorator shadows its inherited length validation under the current validator. The nominal 200-character street maximum is not enforced by either `newSaved` or `existingUpdated`; this increment preserves their identical validation rather than changing existing-mode behavior.
 
 Phone lookup is tenant-qualified and stops at two matches. An ambiguous sender is rejected; the API never guesses a customer. `existing` requires the unique phone match to have exactly the supplied customer ID. `createIfAbsent` creates on zero matches, or reuses a unique match without changing its name/profile. `resolution` in the response reports which happened. New addresses are appended only if the order succeeds. Existing address ownership must match both tenant and customer.
 
@@ -163,7 +194,7 @@ Missing/unusable shipping ceiling rejects new charged-shipping checkouts with `S
 }
 ```
 
-Both resolution fields are `created | existing`. `sale` uses `BotSaleResponse` (folio/confirmedAt types allow null); subtotal and shipping charge are included only when freight is charged. This is a credit order, not payment collection, packaging, delivery-route assignment or carrier dispatch. API money is integer cents; user-facing chatbot input remains normal currency.
+Customer resolution is `created | existing`. Address resolution is `created | existing | updated`; `updated` occurs only for a changed `existingUpdated` body and returns `{ "resolution": "updated", "id": "<same address-uuid>", "version": "<new updatedAt ISO UTC>" }`. Identical `existingUpdated` returns `existing` with unchanged version; `newSaved` still returns `created`. The enclosing success shape and HTTP 201 are unchanged. `sale` uses `BotSaleResponse` (folio/confirmedAt types allow null); subtotal and shipping charge are included only when freight is charged. This is a credit order, not payment collection, packaging, delivery-route assignment or carrier dispatch. API money is integer cents; user-facing chatbot input remains normal currency.
 
 ## Recover committed status: HTTP 200
 
@@ -183,7 +214,7 @@ An in-flight or delayed request may still succeed after `not_observed`. Keep the
 
 ## Idempotency and rollback
 
-Identity is `(credential tenant, bot_checkout_create, trimmed key)`, so credential rotation within the same tenant does not duplicate a successful checkout. The SHA-256 canonical hash covers the complete intent: customer/address modes, exact IDs/version, names/address fields, sender phone, cashier, ordered items including display names, expected total and shipping charge/approval/quote. Optional nullable omission/null are equivalent only where validation allows them; shipping omission/null are not interchangeable because null is rejected.
+Identity is `(credential tenant, bot_checkout_create, trimmed key)`, so credential rotation within the same tenant does not duplicate a successful checkout. The SHA-256 canonical hash covers the complete intent: customer/address modes, exact IDs/version, names/address fields, sender phone, cashier, ordered items including display names, expected total and shipping charge/approval/quote. For `existingUpdated`, the hash includes mode, address ID, expected version and every normalized address field. Existing `existing` / `newSaved` canonical hashes are unchanged. Optional nullable omission/null are equivalent only where validation allows them; shipping omission/null are not interchangeable because null is rejected.
 
 Same successful key/hash returns the original HTTP 201/body without additional business writes. Changed semantic payload returns `IDEMPOTENCY_KEY_CONFLICT`. A demonstrably busy key returns `IDEMPOTENCY_KEY_IN_FLIGHT`. Neither a rejected request nor a rolled-back transaction reserves the key. Successful receipts have no automatic expiry/deletion.
 
@@ -201,7 +232,7 @@ New-route controlled errors are fixed code-only envelopes; arbitrary domain/driv
 | --- | --- |
 | 400 | `INVALID_CHECKOUT_REQUEST`, `INVALID_IDEMPOTENCY_KEY`. |
 | 404 | `CUSTOMER_NOT_FOUND`, `SHIPPING_ADDRESS_NOT_FOUND`, `CASHIER_NOT_FOUND`; missing/foreign identities are not distinguished. |
-| 409 | `CUSTOMER_PHONE_AMBIGUOUS`, `ADDRESS_VERSION_CONFLICT`, `IDEMPOTENCY_KEY_CONFLICT`, `IDEMPOTENCY_KEY_IN_FLIGHT`. |
+| 409 | `CUSTOMER_PHONE_AMBIGUOUS`, `ADDRESS_VERSION_CONFLICT` (both existing-address modes), `IDEMPOTENCY_KEY_CONFLICT` (including a different correction body under the same key), `IDEMPOTENCY_KEY_IN_FLIGHT`. |
 | 409 | Existing `PRICE_OUT_OF_DATE`, `PROMO_RE_QUOTE`, `STOCK_INSUFFICIENT_AT_CONFIRM`, `SHIPPING_APPROVAL_ALREADY_USED` and promotion-capacity conflicts. |
 | 422 | Existing shipping policy or other typed domain-rule rejections; code only, no raw details. |
 | 503 | `CHECKOUT_RETRY_REQUIRED`; retry the same request/key, never assume the cart is safe to replace. |
@@ -213,7 +244,7 @@ Existing guard 401/403/429 envelopes are unchanged. Audit actions are `checkouts
 
 New checkout writers serialize same-phone creation even with different keys. This is **not global phone uniqueness against legacy/admin writers**, which do not participate in the new lock protocol. Duplicate existing phone rows remain representable and are rejected, not cleaned up. This feature adds no schema migration or legacy uniqueness change.
 
-Address row locking/version validation guarantees the selected saved address at commit. Historical destinations are not immutable snapshots: the existing sale address relation remains a live foreign key, and later authorized legacy editing can change that saved address. Editing/history changes are outside this slice.
+Address row locking/version validation guarantees the selected or corrected saved address at commit. Confirmed sales use immutable delivery snapshots; their address foreign key remains a reference, not the source of historical destinations. A correction changes neither a previous order nor a route stop's snapshot-backed address projection.
 
 Unit command (no database access):
 
@@ -229,6 +260,8 @@ node node_modules/jest/bin/jest.js --config jest.config.js --runInBand \
   --testPathIgnorePatterns /node_modules/ \
   --runTestsByPath src/chatbot-api/presentation/checkout.integration.spec.ts
 ```
+
+The `existingUpdated` cases cover in-place replacement and corrected-sale snapshots, full rollback on re-quote and late failure, stale/foreign/missing address rejection, exact replay and changed-body conflict, normalized no-op/version preservation, each location field invalidating coordinates, metadata-only coordinate preservation, and a previous confirmed order attached to a persisted route stop retaining its original address. Existing/newSaved tests remain unchanged.
 
 The fixture exercises real ambient transactions, actual sale confirmation/repository/folio persistence, `PrismaPromotionUsageRepository`, `PrismaProductRepository`, `PrismaStockAlertStateRepository`, `OutboxWriterService` and persisted service credentials through the actual credential repository/guard. Pricing and promotion-demand selection remain deterministic: this is not proof of production promotion evaluation or carrier behavior.
 

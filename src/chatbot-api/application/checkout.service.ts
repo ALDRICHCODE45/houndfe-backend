@@ -8,6 +8,7 @@ import {
   CheckoutRequestDto,
   ExistingCheckoutAddressDto,
   ExistingCheckoutCustomerDto,
+  ExistingUpdatedCheckoutAddressDto,
   NewCheckoutAddressDto,
 } from '../presentation/dto/checkout.request';
 import type {
@@ -27,6 +28,16 @@ const ADDRESS_FIELDS = [
   'state',
   'visualReferences',
   'carrierPhone',
+] as const;
+const LOCATION_FIELDS = [
+  'street',
+  'exteriorNumber',
+  'interiorNumber',
+  'zipCode',
+  'neighborhood',
+  'municipality',
+  'city',
+  'state',
 ] as const;
 
 /** New-route errors contain codes only, including when the audit interceptor sees them. */
@@ -48,16 +59,23 @@ export function computeCheckoutRequestHash(input: CheckoutRequestDto): string {
           lastName: input.customer.lastName ?? null,
         };
   const address =
-    input.deliveryAddress instanceof ExistingCheckoutAddressDto
+    input.deliveryAddress instanceof ExistingUpdatedCheckoutAddressDto
       ? {
-          mode: 'existing',
+          mode: 'existingUpdated',
           addressId: input.deliveryAddress.addressId,
           expectedVersion: input.deliveryAddress.expectedVersion,
-        }
-      : {
-          mode: 'newSaved',
           address: normalizedAddress(input.deliveryAddress.address),
-        };
+        }
+      : input.deliveryAddress instanceof ExistingCheckoutAddressDto
+        ? {
+            mode: 'existing',
+            addressId: input.deliveryAddress.addressId,
+            expectedVersion: input.deliveryAddress.expectedVersion,
+          }
+        : {
+            mode: 'newSaved',
+            address: normalizedAddress(input.deliveryAddress.address),
+          };
   return createHash('sha256')
     .update(
       JSON.stringify({
@@ -231,7 +249,7 @@ export class CheckoutService {
         }
 
         let address: CustomerAddress | null;
-        const addressResolution =
+        let addressResolution: CheckoutResponse['address']['resolution'] =
           input.deliveryAddress instanceof ExistingCheckoutAddressDto
             ? 'existing'
             : 'created';
@@ -249,6 +267,30 @@ export class CheckoutService {
             input.deliveryAddress.expectedVersion
           )
             throw checkoutError(409, 'ADDRESS_VERSION_CONFLICT');
+          if (
+            input.deliveryAddress instanceof ExistingUpdatedCheckoutAddressDto
+          ) {
+            const corrected = normalizedAddress(input.deliveryAddress.address);
+            const storedAddress = address;
+            const changed = (['street', ...ADDRESS_FIELDS] as const).some(
+              (field) => corrected[field] !== storedAddress[field],
+            );
+            if (changed) {
+              const locationChanged = LOCATION_FIELDS.some(
+                (field) => corrected[field] !== storedAddress[field],
+              );
+              address = await tx.customerAddress.update({
+                where: { id: addressId, tenantId, customerId: customer.id },
+                data: {
+                  ...corrected,
+                  ...(locationChanged
+                    ? { latitude: null, longitude: null }
+                    : {}),
+                },
+              });
+              addressResolution = 'updated';
+            }
+          }
         } else {
           address = await tx.customerAddress.create({
             data: {

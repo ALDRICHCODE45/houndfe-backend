@@ -9,7 +9,7 @@ export interface CheckoutResponse {
     lastName: string | null;
   };
   address: {
-    resolution: 'created' | 'existing';
+    resolution: 'created' | 'existing' | 'updated';
     id: string;
     version: string;
   };

@@ -41,7 +41,7 @@ export class NewCheckoutCustomerDto extends CustomerIntent {
   lastName?: string | null;
 }
 class AddressIntent {
-  @IsIn(['existing', 'newSaved'])
+  @IsIn(['existing', 'newSaved', 'existingUpdated'])
   mode!: string;
 }
 export class ExistingCheckoutAddressDto extends AddressIntent {
@@ -57,6 +57,12 @@ class NewAddressFields extends CustomerDeliveryAddressDto {
   declare street: string;
 }
 export class NewCheckoutAddressDto extends AddressIntent {
+  @IsObject()
+  @ValidateNested()
+  @Type(() => NewAddressFields)
+  address!: NewAddressFields;
+}
+export class ExistingUpdatedCheckoutAddressDto extends ExistingCheckoutAddressDto {
   @IsObject()
   @ValidateNested()
   @Type(() => NewAddressFields)
@@ -114,11 +120,15 @@ export class CheckoutRequestDto {
       subTypes: [
         { name: 'existing', value: ExistingCheckoutAddressDto },
         { name: 'newSaved', value: NewCheckoutAddressDto },
+        { name: 'existingUpdated', value: ExistingUpdatedCheckoutAddressDto },
       ],
     },
     keepDiscriminatorProperty: true,
   })
-  deliveryAddress!: ExistingCheckoutAddressDto | NewCheckoutAddressDto;
+  deliveryAddress!:
+    | ExistingCheckoutAddressDto
+    | NewCheckoutAddressDto
+    | ExistingUpdatedCheckoutAddressDto;
 
   @IsObject()
   @ValidateNested()
