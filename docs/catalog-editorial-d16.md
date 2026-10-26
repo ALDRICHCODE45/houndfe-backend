@@ -41,3 +41,27 @@ remains an independent gate; no empty asset list is a substitute.
 
 Rollback boundary for E1: remove only the new contextual validator, its tests and
 this document; the original validator and consumers are unchanged.
+
+## Disposable two-client prerequisite (E2)
+
+`infrastructure/d16-postgres-runner.ts` admits only the newly authorized container
+`f764e05bf359e64cb912d5c3d56c11c4803ea5b6f8bd611091cbe2f35a68fb7b`, named
+`catalog-d16-01a1764b-1793012714`, database `catalog_d16_isolated`.
+It checks exact identity, local image, nonprivileged bridge, no published ports,
+labels, volumes or binds, and tmpfs metadata plus the actual data filesystem.
+Credentials come only from that target and are never logged; generated-client
+`.env` paths are disabled. There is no ambient database fallback.
+
+```sh
+pnpm exec jest --config jest.config.js --runInBand --runTestsByPath src/catalog-editorial/infrastructure/d16-postgres-runner.spec.ts
+CATALOG_EDITORIAL_D16_TEST_CONTAINER=f764e05bf359e64cb912d5c3d56c11c4803ea5b6f8bd611091cbe2f35a68fb7b pnpm exec jest --config src/catalog-editorial/infrastructure/d16-postgres.config.cjs --runInBand
+```
+
+Each invocation creates one random synthetic schema with a minimal Product table
+and the five existing editorial migration artifacts. Two independent single-connection
+clients share that schema; `close()` disconnects both, not the container.
+Tests prove distinct backend sessions, shared committed state, rollback visibility
+and installed empty editorial artifacts. They do not yet prove save/initialize
+locks, production schema compatibility, authorization or private-media access.
+After authorized work, remove only the exact container ID above and confirm absence.
+These commands must then fail closed; never repoint or revive historical runners.
