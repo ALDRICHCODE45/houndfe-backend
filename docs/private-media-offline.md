@@ -36,6 +36,24 @@ env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
 
 These tests apply the new migration to a minimal synthetic schema, not to a deployment database. They do not validate decoded image content or the full application schema with Prisma's schema engine.
 
+## Private metadata repository
+
+`PrismaPrivateMediaRepository` accepts a real Prisma `$queryRaw` dependency. `create(asset)` validates and copies metadata before a parameterized insert; `find(scope)` qualifies every lookup by asset ID, tenant ID and Product ID. Returned rows are decoded and checked against that identity.
+
+Invalid inputs cause no query. Missing rows, query failures or invalid returned rows yield `null`. **A null create result after a query is indeterminate, not proof that the insert rolled back.** Likewise, a null lookup does not prove absence after an infrastructure failure. Callers must not delete potentially referenced bytes on that evidence.
+
+This repository is not a user-authorization boundary and exposes no update/delete/garbage-collection operation. Current permission checks and storage orchestration must be composed separately before bytes are returned.
+
+Run repository unit and actual isolated-SQL tests:
+
+```sh
+NODE_BIN="$(command -v node)"
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
+  node_modules/jest/bin/jest.js --config src/private-media/infrastructure/private-media-repository.config.cjs --runInBand
+```
+
+The SQL proof uses only the admitted target and synthetic schema; it checks independent-client persistence, injection-shaped identifiers, foreign scope denial and unchanged rows after rejected writes.
+
 ## Explicit private configuration
 
 `resolvePrivateMediaConfig(input)` reads only the supplied object and returns a frozen internal configuration (including frozen credentials), or `null` to disable private storage. It does not load environment files or construct a client.
