@@ -98,7 +98,8 @@ Missing positives reject. Its restricted snapshot contains only locked rows:
 no unlocked global read, cross-product bindings, or active-option-only filter.
 Locks remain until the caller transaction ends. Save now uses this helper inside
 its write transaction; the global reader and legacy create/read implementations
-remain unchanged. Explicit initialization is still pending.
+remain separate. Explicit initialization uses the same scoped observation inside
+its Product-locked transaction.
 
 The D16 PostgreSQL command above also runs scoped observation tests: selected
 archival waits, an unselected option progresses, and an earlier writer's committed
@@ -129,7 +130,7 @@ retains archived options. Warnings are recomputed against current vocabulary on
 replay; historical content/revisions are not replaced with the current Draft.
 Authority is observed per attempt, not locked across external permission/media
 revocation. This internal implementation adds no HTTP/UI registration or private
-media provider. Explicit E3 initialization remains pending.
+media provider. Explicit initialization follows the contract below.
 
 ## Legacy create archive protection
 
@@ -152,3 +153,30 @@ passthrough remains unchanged—including historical malformed Published fixture
 this is not an endorsement of that data or the stricter initialization contract.
 The D16 tests exercise these denials without state/receipt/Product changes and use
 a real second PostgreSQL writer to observe blocking at receipt insertion.
+
+## Explicit Published/empty initialization
+
+`initialize(context, {expectedCycle, idempotencyKey})` accepts neither `document`
+nor `baseline` nor an operation selector. It uses the same current qualified create
+port (explicit read+update through the authority adapter), Product lock, cycle/no-Draft
+check and atomic state/receipt writes as legacy create. With Published it copies that
+persisted document and revision; otherwise it starts with `emptyDocument()`.
+Malformed Published never falls back to empty. No operational Product fields are copied.
+
+The existing create receipt table is reused: initialize request JSON contains
+`operation: 'initialize'`, while legacy request JSON is unchanged. The scoped key
+namespace is shared; using a key across the two methods conflicts rather than
+replaying a different operation. No migration or separate receipt table is added.
+
+Fresh initialization validates the persisted source against current references and
+locked vocabulary. Existing archived options can be conserved with Draft warnings;
+publication completeness remains a separate, unimplemented gate. Replay uses the
+matched receipt's Published/empty source, requires cycle `expectedCycle + 1` (null
+starts at 1), Draft revision 1, matching base Published revision and identical Draft
+content. Every returned document is validated, warnings are recomputed, and newer
+state is never restored or written. Corrupted/revoked results deny before disclosure.
+
+The D16 suite now includes empty/Published initialization, caller-input rejection,
+cross-method key conflicts, corrupt-result and current-authority/reference denials,
+no-write historical replay, and real PostgreSQL locking through receipt insertion.
+These are synthetic-database checks, not production provider or transport activation.

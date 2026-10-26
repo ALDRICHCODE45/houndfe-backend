@@ -36,6 +36,11 @@ export interface EditorialCreateAuthority {
     | null
   >;
 }
+/** Explicit persisted Published/empty initialization; no caller document or baseline. */
+export interface EditorialInitializeRequest {
+  expectedCycle: number | null;
+  idempotencyKey: string;
+}
 export interface EditorialCreateRequest {
   expectedCycle: number | null;
   idempotencyKey: string;
@@ -57,6 +62,10 @@ export interface EditorialSaveRequest extends EditorialCreateRequest {
 }
 /** Internal callable boundary only; no transport or effective grants. */
 export interface CatalogEditorialCore {
+  initialize(
+    context: EditorialContext,
+    request: EditorialInitializeRequest,
+  ): Promise<EditorialReadResult>;
   read(context: EditorialContext): Promise<EditorialReadResult>;
   save(
     context: EditorialContext,

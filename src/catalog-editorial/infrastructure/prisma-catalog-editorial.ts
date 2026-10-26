@@ -3,12 +3,17 @@ import { isDeepStrictEqual } from 'node:util';
 import type { DocumentAuthority, EditorialDocument } from '../domain/document';
 import { validateContextualDocument } from '../domain/contextual-document';
 import { readLockedEditorialDefinitions } from './prisma-locked-editorial-definitions';
-import { closedObject, validateDocument } from '../domain/document';
+import {
+  closedObject,
+  emptyDocument,
+  validateDocument,
+} from '../domain/document';
 import type {
   CatalogEditorialCore,
   EditorialContext,
   EditorialCreateAuthority,
   EditorialCreateRequest,
+  EditorialInitializeRequest,
   EditorialReadAuthority,
   EditorialReadResult,
   EditorialSaveAuthority,
@@ -269,13 +274,30 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
     )
       throw new Error('MALFORMED');
   }
-  async create(
+  initialize(context: EditorialContext, request: EditorialInitializeRequest) {
+    return this.createDraft(context, request, true);
+  }
+  create(context: EditorialContext, request: EditorialCreateRequest) {
+    return this.createDraft(context, request, false);
+  }
+  private async createDraft(
     context: EditorialContext,
-    request: EditorialCreateRequest,
+    request: EditorialCreateRequest | EditorialInitializeRequest,
+    fromPublished: boolean,
   ): Promise<EditorialReadResult> {
     const scope = { ...context };
-    closedObject(request, ['expectedCycle', 'idempotencyKey', 'document']);
-    const input = { ...request, document: snapshot(request.document) };
+    closedObject(
+      request,
+      fromPublished
+        ? ['expectedCycle', 'idempotencyKey']
+        : ['expectedCycle', 'idempotencyKey', 'document'],
+    );
+    const input = {
+      ...request,
+      document: fromPublished
+        ? undefined
+        : snapshot((request as EditorialCreateRequest).document),
+    };
     const work = async (tx: Prisma.TransactionClient) => {
       const access = await this.createAuthority
         ?.resolve({ ...scope })
@@ -298,21 +320,43 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           (!Number.isInteger(input.expectedCycle) || input.expectedCycle < 1))
       )
         throw new Error('MALFORMED');
-      const document = validateDocument(
-        input.document,
-        access.documentAuthority,
-      );
+      let document = fromPublished
+        ? emptyDocument()
+        : validateDocument(input.document, access.documentAuthority);
+      const validateInitialization = async (result: EditorialReadResult) => {
+        const candidate =
+          result?.published === null
+            ? emptyDocument()
+            : result?.published?.document;
+        const validated = await validateStoredSave(
+          tx,
+          result,
+          candidate,
+          access.documentAuthority,
+        );
+        const { state } = validated;
+        if (
+          state.cycle !== (input.expectedCycle ?? 0) + 1 ||
+          state.draft?.revision !== 1 ||
+          state.draft.basePublishedRevision !==
+            (state.published?.revision ?? null) ||
+          !isDeepStrictEqual(state.draft.document, validated.document)
+        )
+          throw new Error('MALFORMED');
+        return state;
+      };
       // Lock the existing Product, including when editorial state is still absent.
       const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
         SELECT "id" FROM "products" WHERE "tenantId" = ${scope.tenantId}
           AND "id" = ${scope.productId} FOR UPDATE
       `);
       if (products.length !== 1) throw new Error('NOT_FOUND');
-      await this.requireActiveCreateOptions(tx, document);
-      const requestJson = JSON.stringify({
-        expectedCycle: input.expectedCycle,
-        document,
-      });
+      if (!fromPublished) await this.requireActiveCreateOptions(tx, document);
+      const requestJson = JSON.stringify(
+        fromPublished
+          ? { operation: 'initialize', expectedCycle: input.expectedCycle }
+          : { expectedCycle: input.expectedCycle, document },
+      );
       const receipts = await tx.$queryRaw<
         { matches: boolean; result: EditorialReadResult }[]
       >(Prisma.sql`
@@ -323,6 +367,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
       `);
       if (receipts[0]) {
         if (!receipts[0].matches) throw new Error('CONFLICT');
+        if (fromPublished) return validateInitialization(receipts[0].result);
         const replayDocument = validateDocument(
           receipts[0].result?.draft?.document,
           access.documentAuthority,
@@ -353,7 +398,12 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         throw new Error('CONFLICT');
       const cycle = (state?.cycle ?? 0) + 1;
       if (cycle > 2147483647) throw new Error('CONFLICT');
-      const result: EditorialReadResult = {
+      if (fromPublished)
+        document =
+          state?.publishedRevision == null
+            ? emptyDocument()
+            : state.publishedDocument;
+      let result: EditorialReadResult = {
         cycle,
         draft: {
           revision: 1,
@@ -368,6 +418,10 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
                 document: state.publishedDocument,
               },
       };
+      if (fromPublished) {
+        result = await validateInitialization(result);
+        document = result.draft!.document;
+      }
       await tx.$executeRaw(Prisma.sql`
         INSERT INTO "catalog_editorial_states"
           ("tenantId", "productId", "cycle", "draftRevision", "basePublishedRevision", "draftDocument")

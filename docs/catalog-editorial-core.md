@@ -5,6 +5,12 @@ controller or module registration exists. A callable Prisma capability/read
 authority is available but is not registered in runtime wiring. Verified transport,
 document-authority integration and C3.1 remain pending.
 
+Current internal `save`, legacy `create` archive restrictions, and explicit
+`initialize(context, {expectedCycle, idempotencyKey})` are documented in
+[catalog-editorial-d16.md](catalog-editorial-d16.md). Initialization derives only
+persisted Published or empty content and uses the guarded create-authority port.
+The historical slices below retain their original evidence and rollback boundaries.
+
 ## Permission provisioning (P1)
 
 `src/catalog-editorial/domain/editorial-permissions.ts` exports
@@ -184,8 +190,10 @@ Creation increments cycle, starts revision 1 and captures Published's revision a
 base without modifying Published or any operational Product fields.
 
 The separate additive receipt migration stores request/result atomically with the
-Draft. Keys are scoped to tenant, Product, actor and create operation (dedicated
-table). JSONB request equality ignores object-key order but preserves array order.
+Draft. Keys are scoped to tenant, Product and actor in the create receipt table.
+D16 initialization shares this key namespace with operation-tagged request JSON;
+cross-method reuse conflicts. Legacy request JSON remains unchanged.
+JSONB request equality ignores object-key order but preserves array order.
 Changed content/cycle under the same key conflicts. A matching receipt returns the
 original result, not current state; it never recreates a consumed Draft. Rejected
 attempts leave state, receipts and counters unchanged. Receipts have no expiry.
