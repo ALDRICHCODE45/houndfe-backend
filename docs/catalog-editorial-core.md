@@ -1,8 +1,29 @@
 # Catalog editorial core — unactivated
 
 This is a callable internal contract, **not a deployable API**. No route,
-controller, module registration, permission subject or effective grant exists.
-Integration and C3.1 remain pending.
+controller, module registration or effective editorial authority exists.
+Permission identities are registered for provisioning only; integration and C3.1
+remain pending.
+
+## Permission provisioning (P1; authority integration pending)
+
+`src/catalog-editorial/domain/editorial-permissions.ts` exports
+`EDITORIAL_PERMISSIONS.read` (`read:ProductEditorialDraft`) and
+`EDITORIAL_PERMISSIONS.update` (`update:ProductEditorialDraft`), plus the exact
+row-matching `isEditorialPermission` predicate. Only these two identities are
+registered. The standalone seed uses this predicate to skip their automatic
+SuperAdmin grants; all other autogrants and Manager/Cashier lists stay unchanged.
+Bootstrap upserts the rows but still links only `manage:all`. Neither path removes
+existing grants. These checks are mocked/in-memory, not real seed/DB execution.
+
+Provisioning is **not effective authorization**. Global CASL still expands wildcard
+permissions; do not enable editorial UI with generic `userCan`. P2 must resolve
+current active actor, tenant membership and tenant/Product scope on each call:
+exact read maps to `canRead`, exact update to `canCreate`/`canSave`; wildcard or
+superAdmin flags alone must not qualify. No capability snapshot export or HTTP DTO
+is delivered by P1. Definitions/private-media DocumentAuthority providers, verified
+transport and integrated writes remain pending. P1 rollback removes these two
+registry rows, helper, exclusion and their tests/docs, without deleting DB grants.
 
 ## Closed document validation (first review slice)
 

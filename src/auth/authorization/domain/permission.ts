@@ -11,6 +11,7 @@
  */
 
 import { MongoAbility } from '@casl/ability';
+import { EDITORIAL_PERMISSIONS } from '../../../catalog-editorial/domain/editorial-permissions';
 
 /** All possible actions users can perform. */
 export type AppActions =
@@ -24,6 +25,7 @@ export type AppActions =
 /** All possible subjects (resources) in the application. */
 export type AppSubjects =
   | 'Product'
+  | 'ProductEditorialDraft'
   | 'Order'
   | 'Sale'
   | 'SatKey'
@@ -112,6 +114,16 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'Product',
     action: 'manage',
     description: 'Full product management',
+  },
+
+  // Provisioning identities only; explicit editorial authority is feature-local.
+  {
+    ...EDITORIAL_PERMISSIONS.read,
+    description: 'Read product editorial drafts',
+  },
+  {
+    ...EDITORIAL_PERMISSIONS.update,
+    description: 'Create and save product editorial drafts',
   },
 
   // Order permissions
