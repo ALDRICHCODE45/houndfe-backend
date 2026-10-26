@@ -1,11 +1,11 @@
 # Catalog editorial core — unactivated
 
 This is a callable internal contract, **not a deployable API**. No route,
-controller, module registration or effective editorial authority exists.
-Permission identities are registered for provisioning only; integration and C3.1
-remain pending.
+controller or module registration exists. A callable Prisma capability/read
+authority is available but is not registered in runtime wiring. Verified transport,
+document-authority integration and C3.1 remain pending.
 
-## Permission provisioning (P1; authority integration pending)
+## Permission provisioning (P1)
 
 `src/catalog-editorial/domain/editorial-permissions.ts` exports
 `EDITORIAL_PERMISSIONS.read` (`read:ProductEditorialDraft`) and
@@ -17,13 +17,42 @@ Bootstrap upserts the rows but still links only `manage:all`. Neither path remov
 existing grants. These checks are mocked/in-memory, not real seed/DB execution.
 
 Provisioning is **not effective authorization**. Global CASL still expands wildcard
-permissions; do not enable editorial UI with generic `userCan`. P2 must resolve
-current active actor, tenant membership and tenant/Product scope on each call:
-exact read maps to `canRead`, exact update to `canCreate`/`canSave`; wildcard or
-superAdmin flags alone must not qualify. No capability snapshot export or HTTP DTO
-is delivered by P1. Definitions/private-media DocumentAuthority providers, verified
-transport and integrated writes remain pending. P1 rollback removes these two
-registry rows, helper, exclusion and their tests/docs, without deleting DB grants.
+permissions; do not enable editorial UI with generic `userCan`. P1 alone does not
+provide capability enforcement. Definitions/private-media DocumentAuthority
+providers, verified transport and integrated writes remain pending. P1 rollback
+removes these two registry rows, helper, exclusion and their tests/docs, without
+deleting DB grants.
+
+## Current capability/read authority (P2a; internal only)
+
+`infrastructure/prisma-editorial-authority.ts` exports `PrismaEditorialAuthority`
+and `EditorialCapabilitySnapshot`. Construct with the root Prisma client:
+`const authority = new PrismaEditorialAuthority(prisma)`, then explicitly pass it
+to `new PrismaCatalogEditorial(prisma, authority)` for the existing read port.
+Nothing registers this wiring automatically. `resolve(context: EditorialContext)`
+returns `Promise<EditorialCapabilitySnapshot | null>`; the snapshot contains only
+`actorId`, `tenantId`, `productId`, `activeMember`, `canRead`, `canCreate`, `canSave`.
+
+Each resolution copies scope before awaiting and freshly queries `User.isActive`,
+current tenant membership roles/permission rows and tenant-qualified Product.
+Missing/inactive/misqualified/unavailable dependencies return null. Membership
+without grants returns a qualified snapshot with all capabilities false. Exact
+`read:ProductEditorialDraft` enables only `canRead`; exact update enables only
+`canCreate`/`canSave`. Roles union; wildcard/manage grants and caller admin/authority
+flags never qualify. This is editorial scope, not generic operational Product auth.
+
+The snapshot is a current-resolution observation, not a reusable authorization
+lease, HTTP DTO, verified JWT/transport context or DocumentAuthority. Callers must
+supply trusted principal scope internally; body IDs/flags are not authenticated by
+this class. Subsequent calls revalidate revocation; sequential queries do not
+promise atomic in-flight revocation. No definitions/media provider is invoked.
+Create/save booleans are capabilities only: required write-authority ports remain
+absent and the existing core denies writes. P2b owns qualified document-authority
+wrappers, provider-denial/mutation checks and replay revalidation coverage.
+
+Evidence is mocked/in-memory only, including read-through-core revalidation; no
+fresh PostgreSQL proof or public activation. P2a rollback removes this adapter,
+its tests and this documentation, retaining P1 identities and existing core ports.
 
 ## Closed document validation (first review slice)
 
@@ -39,8 +68,8 @@ Missing attribute values are allowed: this is not publish completeness checking.
 there are no runtime fixture definitions. The future core must check that
 snapshot's qualification, current membership/capability and Product access
 before reads, writes **and receipt replay**. The validator alone is not an
-access-control boundary. Definitions, private media and permission authority
-integrations are still missing; existing public upload paths are not assets.
+access-control boundary. Definitions, private media and runtime authority wiring
+are still missing; existing public upload paths are not assets.
 
 Validation never reads or changes `Product.name`, POS data or public catalog
 consumers. `emptyDocument()` starts incomplete with no copied operational name.
@@ -58,7 +87,8 @@ implements the internal `CatalogEditorialCore` read contract. The required
 integration port must resolve an active actor, current tenant membership and
 explicit Product-scoped read capability on every call. Null/unavailable/denied
 or differently qualified snapshots fail closed before Product/state lookup.
-No production authority provider or verified actor transport is wired yet.
+The P2a authority can now supply this port explicitly; no verified actor transport
+or production runtime wiring exists yet.
 
 The adapter uses tenant-qualified parameterized Prisma queries in a repeatable-read
 transaction. Missing Products fail `NOT_FOUND`; authorized Products without state
