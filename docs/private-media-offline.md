@@ -36,6 +36,23 @@ env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
 
 These tests apply the new migration to a minimal synthetic schema, not to a deployment database. They do not validate decoded image content or the full application schema with Prisma's schema engine.
 
+## Explicit private configuration
+
+`resolvePrivateMediaConfig(input)` reads only the supplied object and returns a frozen internal configuration (including frozen credentials), or `null` to disable private storage. It does not load environment files or construct a client.
+
+| Name | Requirement |
+| --- | --- |
+| `PRIVATE_MEDIA_ENDPOINT` | Nonblank HTTPS URL without embedded credentials, query or fragment |
+| `PRIVATE_MEDIA_REGION` | Nonblank string |
+| `PRIVATE_MEDIA_BUCKET` | Nonblank string; existence and privacy are not verified here |
+| `PRIVATE_MEDIA_ACCESS_KEY_ID` | Nonblank internal credential string; never expose it |
+| `PRIVATE_MEDIA_SECRET_ACCESS_KEY` | Nonblank internal credential string, preserved without trimming; never expose it |
+| `PRIVATE_MEDIA_MAX_BYTES` | Optional number or numeric string resolving to an integer from 1 through 10,485,760; omission defaults to that ceiling |
+
+Missing, partial or invalid private settings disable the resolver, even if all public `SPACES_*` settings are present. There is no public-bucket or credential-chain fallback, and no input logging.
+
+For synthetic-only configuration tests, use the clean-child command above with `--config src/private-media/infrastructure/private-media-config.unit.config.cjs`. Passing these tests establishes neither lazy SDK composition nor provider policy.
+
 ## Evidence boundaries
 
 - SDK transport tests must remain simulated; no DigitalOcean request is authorized.
