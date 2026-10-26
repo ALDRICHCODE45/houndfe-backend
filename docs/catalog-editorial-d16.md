@@ -65,3 +65,18 @@ and installed empty editorial artifacts. They do not yet prove save/initialize
 locks, production schema compatibility, authorization or private-media access.
 After authorized work, remove only the exact container ID above and confirm absence.
 These commands must then fail closed; never repoint or revive historical runners.
+
+## Existing regression contracts on the new target
+
+```sh
+CATALOG_EDITORIAL_D16_TEST_CONTAINER=f764e05bf359e64cb912d5c3d56c11c4803ea5b6f8bd611091cbe2f35a68fb7b pnpm exec jest --config src/catalog-editorial/infrastructure/d16-regression.config.cjs --runInBand
+```
+
+This dedicated config runs the existing read/create/save suite unchanged. It maps
+only its relative runner import to `d16-regression-adapter.ts`; the retired runner
+is never loaded or executed. The legacy environment variable is set only to enable
+that suite's presence gate; the D16 runner still admits its exact new target.
+The adapter disconnects the unused second client; existing hooks close the first.
+Failure disconnects both and propagates without fallback. This proves historical
+behavior on synthetic PostgreSQL, not contextual save/replay or archive locking.
+Run this command only while the authorized new target exists; no fallback applies.
