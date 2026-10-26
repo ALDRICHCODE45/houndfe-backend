@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { emptyDocument } from '../domain/document';
 import type { EditorialReadAuthority } from '../application/catalog-editorial-core';
 import { PrismaCatalogEditorial } from './prisma-catalog-editorial';
 
@@ -24,6 +25,19 @@ describe('callable authorized editorial read', () => {
       resolve: () => Promise.resolve(snapshot),
     });
     await expect(core.read(context)).rejects.toThrow('FORBIDDEN');
+    expect(query).not.toHaveBeenCalled();
+  });
+  it('create fails closed without an explicit create authority', async () => {
+    const core = new PrismaCatalogEditorial(client, {
+      resolve: () => Promise.resolve(granted),
+    });
+    await expect(
+      core.create(context, {
+        expectedCycle: null,
+        idempotencyKey: 'k',
+        document: emptyDocument(),
+      }),
+    ).rejects.toThrow('FORBIDDEN');
     expect(query).not.toHaveBeenCalled();
   });
   it('fails closed when the authority is unavailable', async () => {

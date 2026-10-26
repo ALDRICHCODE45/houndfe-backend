@@ -57,7 +57,7 @@ Prisma 6 generated-client dotenv paths and never uses ambient database URLs.
 
 ```sh
 pnpm exec jest --config jest.config.js --runInBand --no-cache --runTestsByPath prisma/catalog-editorial-schema.spec.ts src/catalog-editorial/infrastructure/catalog-editorial-core.spec.ts
-CATALOG_EDITORIAL_TEST_CONTAINER=256a679dca7808e9ceb3f4e3e6489a56a384b5faa0f836d178040ad302b9d372 pnpm exec jest --config src/catalog-editorial/infrastructure/isolated-postgres.config.cjs --runInBand --no-cache
+CATALOG_EDITORIAL_TEST_CONTAINER=2c90b3e3bdd23cdc367d95c68cf7ba30e169b6e552d96287558cf33d3aa2ab8c pnpm exec jest --config src/catalog-editorial/infrastructure/isolated-postgres.config.cjs --runInBand --no-cache
 ```
 
 The isolated runner refuses an absent/different container selection, verifies the
@@ -65,8 +65,7 @@ pinned name/image/isolation/database, keeps credentials in memory and leaves its
 synthetic schemas for parent-owned container cleanup. Normal unit discovery skips
 that DB spec unless explicitly selected by the container environment variable.
 
-Create/receipts (B2), save/CAS (C), lifecycle transitions and complete anti-ABA or
-concurrency proof remain pending. No retention/expiry/cleanup is implemented or
+Save/CAS (C) and lifecycle transitions remain pending. No retention/expiry/cleanup is implemented or
 approved; no 24-hour claim applies. Future integration still needs authoritative
 permissions, definitions, private assets, verified actor transport and routes.
 C3.1 and integrated read/create/save remain open.
@@ -75,3 +74,33 @@ B1 rollback boundary: the new read contract/adapter/tests/runner and additive st
 artifact, plus its Product inverse/composite unique declaration. No public consumer
 or shared runtime helper changed. Once committed, B1's migration stays immutable;
 B2 must use a separate additive artifact.
+
+## Atomic create (B2)
+
+`create(context, { expectedCycle, idempotencyKey, document })` uses a separate,
+required create-authority port (third constructor argument). Missing authority
+fails closed; read capability never implies create. Every attempt, including
+replay, resolves active membership, explicit create capability and tenant/Product
+qualified definitions/private asset authority, then reuses `validateDocument`.
+The request is captured before awaiting; incomplete content is accepted.
+
+A tenant-qualified Product row lock serializes initially absent state and receipts
+under read-committed isolation. Expected cycle is null only for untouched state;
+otherwise it must equal the durable consumed cycle. An active Draft conflicts.
+Creation increments cycle, starts revision 1 and captures Published's revision as
+base without modifying Published or any operational Product fields.
+
+The separate additive receipt migration stores request/result atomically with the
+Draft. Keys are scoped to tenant, Product, actor and create operation (dedicated
+table). JSONB request equality ignores object-key order but preserves array order.
+Changed content/cycle under the same key conflicts. A matching receipt returns the
+original result, not current state; it never recreates a consumed Draft. Rejected
+attempts leave state, receipts and counters unchanged. Receipts have no expiry.
+
+PostgreSQL tests cover duplicate/competing transactions, rollback on receipt
+failure, scoped keys, replay authorization/reference revocation and consumed-cycle
+anti-ABA. Consumed states are synthetic fixtures, not publish/discard endpoints.
+The replacement runner pins the authorized ID/name and checks Docker 29's empty
+Mounts plus exact tmpfs configuration, no binds/mounts/ports and actual tmpfs.
+B2 rollback boundary: create port/method/tests and receipt schema/migration only;
+retain B1 state/read. No transport, authority provider or public activation exists.

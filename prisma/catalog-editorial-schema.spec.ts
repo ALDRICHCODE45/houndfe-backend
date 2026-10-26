@@ -19,6 +19,21 @@ describe('additive editorial state artifact', () => {
     expect(sql).toContain('REFERENCES "products" ("tenantId", "id")');
     expect(sql).toContain('PRIMARY KEY ("tenantId", "productId")');
   });
+  it('adds scoped durable create receipts without rewriting existing data', () => {
+    const create = readFileSync(
+      join(__dirname, 'migrations/20261026030000_catalog_editorial_create/migration.sql'),
+      'utf8',
+    );
+    expect(schema).toContain('model CatalogEditorialCreateReceipt');
+    expect(schema).toContain('@@id([tenantId, productId, actorId, idempotencyKey])');
+    expect(create).toContain(
+      'PRIMARY KEY ("tenantId", "productId", "actorId", "idempotencyKey")',
+    );
+    expect(create).toContain(
+      'REFERENCES "catalog_editorial_states" ("tenantId", "productId")',
+    );
+    expect(create).not.toMatch(/INSERT INTO|UPDATE "|DELETE FROM|DROP TABLE/i);
+  });
   it('contains no data migration or future lifecycle tables', () => {
     expect(sql).not.toMatch(/INSERT INTO|UPDATE "|DELETE FROM|DROP TABLE|receipt/i);
   });

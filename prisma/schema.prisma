@@ -609,10 +609,24 @@ model CatalogEditorialState {
   draftDocument Json?
   publishedRevision Int?
   publishedDocument Json?
+  createReceipts CatalogEditorialCreateReceipt[]
   product Product @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
 
   @@id([tenantId, productId])
   @@map("catalog_editorial_states")
+}
+
+model CatalogEditorialCreateReceipt {
+  tenantId String
+  productId String
+  actorId String
+  idempotencyKey String
+  request Json
+  result Json
+  state CatalogEditorialState @relation(fields: [tenantId, productId], references: [tenantId, productId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId, actorId, idempotencyKey])
+  @@map("catalog_editorial_create_receipts")
 }
 
 model ServiceDetail {

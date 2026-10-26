@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import type { GetPrismaClientConfig } from '@prisma/client/runtime/library';
 
-const id = '256a679dca7808e9ceb3f4e3e6489a56a384b5faa0f836d178040ad302b9d372';
+const id = '2c90b3e3bdd23cdc367d95c68cf7ba30e169b6e552d96287558cf33d3aa2ab8c';
 const database = 'catalog_editorial_isolated';
 function docker(...args: string[]): string {
   try {
@@ -32,17 +32,25 @@ export async function isolatedPostgres(): Promise<PrismaClient> {
       '{{.HostConfig.NetworkMode}}',
       '{{json .HostConfig.PortBindings}}',
       '{{len .Config.Labels}}',
-      '{{len .Mounts}}',
-      '{{range .Mounts}}{{.Type}}:{{.Destination}}{{end}}',
+      '{{json .Mounts}}',
+      '{{json .HostConfig.Tmpfs}}',
+      '{{json .HostConfig.Binds}}',
+      '{{json (index .HostConfig "Mounts")}}',
     ].join('|'),
     id,
   );
   if (
     signature !==
-      `${id}|/catalog-draft-core-01a175b8-test|postgres:16-alpine|true|false|bridge|{}|0|1|tmpfs:/var/lib/postgresql/data` ||
+      `${id}|/catalog-draft-core-01a1764b-test|postgres:16-alpine|true|false|bridge|{}|0|[]|{"/var/lib/postgresql/data":"rw"}|null|null` ||
     docker('exec', id, 'printenv', 'POSTGRES_DB') !== database
   )
     throw new Error('Isolated container/database guard rejected target');
+  if (
+    !/\btmpfs\b/.test(
+      docker('exec', id, 'df', '-T', '/var/lib/postgresql/data'),
+    )
+  )
+    throw new Error('Isolated data filesystem must be tmpfs');
   docker('exec', id, 'pg_isready', '-U', 'postgres', '-d', database);
   const ip = docker(
     'inspect',
@@ -90,6 +98,13 @@ export async function isolatedPostgres(): Promise<PrismaClient> {
       ),
       'utf8',
     );
+    const createMigration = readFileSync(
+      join(
+        __dirname,
+        '../../../prisma/migrations/20261026030000_catalog_editorial_create/migration.sql',
+      ),
+      'utf8',
+    );
     execFileSync(
       'docker',
       [
@@ -111,7 +126,8 @@ export async function isolatedPostgres(): Promise<PrismaClient> {
           SET search_path TO "${schema}";
           CREATE TABLE products (id TEXT PRIMARY KEY, "tenantId" TEXT NOT NULL,
             name TEXT NOT NULL, description TEXT);
-          ${migration}`,
+          ${migration}
+          ${createMigration}`,
       },
     );
     const identity = await prisma.$queryRaw<
