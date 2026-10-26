@@ -9,8 +9,23 @@ represent these CHECK constraints: use the reviewed migration, not schema push.
 
 Codes are stable identities. This unit exposes no rename/delete/write API, loads
 no vocabulary and does not make arbitrary administrative SQL safe. Existing
-Category, Brand, Product and Variant data are not converted. Options, archive
-state and numeric units follow in D1b; an authoritative reader follows in D2.
+Category, Brand, Product and Variant data are not converted. D1b adds options
+with `archivedAt`, and explicit nullable/named numeric units. An authoritative
+reader follows in D2.
+
+Options use stable `(definitionId, code)` identities; archived rows remain stored
+and reserve their codes. Only options have archive state. Composite definition/type
+FKs and child CHECK constraints reject options for non-selection definitions,
+units for non-numeric definitions, incompatible parent type updates and cascading
+deletions. PostgreSQL **15+** is required: `UNIQUE NULLS NOT DISTINCT` permits
+one null unit per definition and rejects a second, without sentinel collisions.
+Prisma's nullable unique declaration cannot express that SQL detail; schema push
+is not an equivalent deployment path. Empty tables mean no authorized vocabulary
+has been loaded, not an editor-ready source. No current write API deletes/reuses
+codes; administrative SQL outside this boundary is not protected by that policy.
+
+These constraints do not implement D16 preservation against an authorized Draft
+baseline, nor archived Published-to-Draft copying or publication eligibility.
 No DocumentAuthority provider, routes, UI, media or runtime wiring is activated.
 Approved copying of archived options from Published belongs to future orchestration.
 

@@ -96,6 +96,13 @@ export async function definitionsPostgres(): Promise<PrismaClient> {
       '../../../prisma/migrations/20261026050000_catalog_editorial_definitions/migration.sql',
     );
     const migration = readFileSync(migrationPath, 'utf8');
+    const optionsMigration = readFileSync(
+      join(
+        __dirname,
+        '../../../prisma/migrations/20261026060000_catalog_editorial_options/migration.sql',
+      ),
+      'utf8',
+    );
     execFileSync(
       'docker',
       [
@@ -115,7 +122,8 @@ export async function definitionsPostgres(): Promise<PrismaClient> {
         stdio: 'pipe',
         input: `CREATE SCHEMA "${schema}";
           SET search_path TO "${schema}";
-          ${migration}`,
+          ${migration}
+          ${optionsMigration}`,
       },
     );
     const identity = await prisma.$queryRaw<

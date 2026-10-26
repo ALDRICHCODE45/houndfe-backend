@@ -657,9 +657,34 @@ model EditorialDefinition {
   code     String @unique
   type     String
   bindings EditorialBinding[]
+  options  EditorialOption[]
+  units    EditorialUnit[]
 
   @@unique([id, type])
   @@map("editorial_definitions")
+}
+
+model EditorialOption {
+  definitionId   String
+  definitionType String
+  code           String
+  archivedAt     DateTime? @db.Timestamp(3)
+  definition     EditorialDefinition @relation(fields: [definitionId, definitionType], references: [id, type], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([definitionId, code])
+  @@map("editorial_options")
+}
+
+model EditorialUnit {
+  id             String @id
+  definitionId   String
+  definitionType String @default("number")
+  unitCode       String?
+  definition     EditorialDefinition @relation(fields: [definitionId, definitionType], references: [id, type], onDelete: Restrict, onUpdate: Restrict)
+
+  // Migration upgrades nullable uniqueness to PostgreSQL NULLS NOT DISTINCT.
+  @@unique([definitionId, unitCode])
+  @@map("editorial_units")
 }
 
 model EditorialBinding {
