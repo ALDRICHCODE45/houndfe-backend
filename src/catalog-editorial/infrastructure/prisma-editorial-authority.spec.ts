@@ -287,16 +287,23 @@ describe.each(['create', 'save'] as const)(
         const result = {
           cycle: 1,
           draft: {
-            revision: 1,
+            revision: operation === 'save' ? 2 : 1,
             basePublishedRevision: 2,
             document: f.request.document,
           },
           published: { revision: 2, document: emptyDocument() },
         };
-        for (let attempt = 0; attempt < 2; attempt++) {
+        const enqueueReplay = () => {
           f.query
             .mockResolvedValueOnce([{ id: scope.productId }])
             .mockResolvedValueOnce([{ matches: true, result }]);
+          // Save observes five locked vocabulary collections even for empty documents.
+          if (operation === 'save')
+            for (let table = 0; table < 5; table++)
+              f.query.mockResolvedValueOnce([]);
+        };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          enqueueReplay();
           expect(await f.attempt()).toEqual(result);
         }
         if (revoked === 'read')
@@ -306,7 +313,10 @@ describe.each(['create', 'save'] as const)(
         if (revoked === 'membership') f.members.mockResolvedValue([]);
         if (revoked === 'account')
           f.user.mockResolvedValue({ isActive: false });
-        if (revoked === 'references') f.document.assetIds = [];
+        if (revoked === 'references') {
+          f.document.assetIds = [];
+          if (operation === 'save') enqueueReplay();
+        }
         await expect(f.attempt()).rejects.toThrow(
           revoked === 'references' ? 'MALFORMED' : 'FORBIDDEN',
         );
@@ -314,7 +324,9 @@ describe.each(['create', 'save'] as const)(
         expect(f.provider.resolve).toHaveBeenCalledTimes(
           revoked === 'references' ? 3 : 2,
         );
-        expect(f.query).toHaveBeenCalledTimes(4);
+        expect(f.query).toHaveBeenCalledTimes(
+          operation === 'save' ? (revoked === 'references' ? 21 : 14) : 4,
+        );
         expect(f.write).not.toHaveBeenCalled();
       },
     );

@@ -1,4 +1,5 @@
 import type { DocumentAuthority, EditorialDocument } from '../domain/document';
+import type { ArchivedOptionWarning } from '../domain/contextual-document';
 
 export interface EditorialContext {
   actorId: string;
@@ -15,6 +16,8 @@ export interface EditorialReadAuthority {
   resolve(context: EditorialContext): Promise<ReadAuthoritySnapshot | null>;
 }
 export interface EditorialReadResult {
+  /** Current contextual warnings for the returned Draft, when present. */
+  warnings?: ArchivedOptionWarning[];
   cycle: number | null;
   draft: {
     revision: number;

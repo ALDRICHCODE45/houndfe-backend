@@ -420,13 +420,13 @@ isolated('real PostgreSQL atomic create and durable receipts', () => {
     it('saves incomplete content, preserves Published/base and operational fields', async () => {
       await prisma.$executeRaw`UPDATE catalog_editorial_states SET
         "basePublishedRevision" = 3, "publishedRevision" = 3,
-        "publishedDocument" = '{}'::jsonb WHERE "productId" = 'p'`;
+        "publishedDocument" = CAST(${JSON.stringify(emptyDocument())} AS jsonb) WHERE "productId" = 'p'`;
       const document = { ...emptyDocument(), commercialTitle: 'Editorial' };
       const result = await save({ ...input, document });
       expect(result).toEqual({
         cycle: 1,
         draft: { revision: 2, basePublishedRevision: 3, document },
-        published: { revision: 3, document: {} },
+        published: { revision: 3, document: emptyDocument() },
       });
       expect(await core().read(context)).toEqual(result);
       expect(

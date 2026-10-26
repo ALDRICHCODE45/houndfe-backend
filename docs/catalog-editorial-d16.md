@@ -72,7 +72,9 @@ These commands must then fail closed; never repoint or revive historical runners
 CATALOG_EDITORIAL_D16_TEST_CONTAINER=f764e05bf359e64cb912d5c3d56c11c4803ea5b6f8bd611091cbe2f35a68fb7b pnpm exec jest --config src/catalog-editorial/infrastructure/d16-regression.config.cjs --runInBand
 ```
 
-This dedicated config runs the existing read/create/save suite unchanged. It maps
+This dedicated config reuses the existing read/create/save contracts. The save
+Published-preservation fixture now uses a valid document; corruption denial has
+its own D16 test. The config maps
 only its relative runner import to `d16-regression-adapter.ts`; the retired runner
 is never loaded or executed. The legacy environment variable is set only to enable
 that suite's presence gate; the D16 runner still admits its exact new target.
@@ -81,7 +83,7 @@ Failure disconnects both and propagates without fallback. This proves historical
 behavior on synthetic PostgreSQL, not contextual save/replay or archive locking.
 Run this command only while the authorized new target exists; no fallback applies.
 
-## Scoped vocabulary locks (unactivated prerequisite)
+## Scoped vocabulary locks
 
 `readLockedEditorialDefinitions(tx, documents)` accepts a transaction and unknown
 JSON documents. It captures data descriptors before awaiting, rejecting accessors
@@ -94,8 +96,9 @@ options and numeric units with parameterized `FOR SHARE` queries in table/PK ord
 Null units require a real row; empty multi values require no option rows.
 Missing positives reject. Its restricted snapshot contains only locked rows:
 no unlocked global read, cross-product bindings, or active-option-only filter.
-Locks remain until the caller transaction ends. The existing global reader and
-core consumers are unchanged; Product provenance/save/replay wiring is still pending.
+Locks remain until the caller transaction ends. Save now uses this helper inside
+its write transaction; the global reader and legacy create/read implementations
+remain unchanged. Explicit initialization is still pending.
 
 The D16 PostgreSQL command above also runs scoped observation tests: selected
 archival waits, an unselected option progresses, and an earlier writer's committed
@@ -104,3 +107,26 @@ This proves current membership, not historical identity across administrative
 code reuse/deletion/reinsertion. Deterministic ordering is not a guarantee against
 arbitrary writer deadlocks; errors abort rather than falling back to unlocked data.
 No atomic external authorization or private-media revocation guarantee is added.
+
+## Atomic contextual save and replay
+
+`save(context, request)` still requires current qualified write authority, including
+explicit read+update through the authority adapter and a real document provider.
+It locks the scoped Product before reading the Draft or matching a persisted receipt.
+The request cannot supply a baseline. A fresh save uses only the persisted Draft;
+a historical replay uses only the successful result of the exactly matching
+actor/tenant/Product/key/request receipt, before CAS and without any writes.
+
+Both paths validate persisted metadata and every returned document against current
+references and locked vocabulary. Receipt cycle, resulting revision and Draft
+content must agree with the request. Malformed or revoked persisted content is
+not disclosed. Conservation does not turn a receipt into an authorization grant.
+Fresh save retains atomic CAS/update/receipt insertion and does not touch operational
+Product fields. Locks cover the state write and receipt insertion until commit.
+
+`EditorialReadResult.warnings` is optional and present only when the returned Draft
+retains archived options. Warnings are recomputed against current vocabulary on
+replay; historical content/revisions are not replaced with the current Draft.
+Authority is observed per attempt, not locked across external permission/media
+revocation. This internal implementation adds no HTTP/UI registration or private
+media provider. E3 initialization and legacy-create archive integration remain pending.

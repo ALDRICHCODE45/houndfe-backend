@@ -1,4 +1,8 @@
 import { Prisma, PrismaClient } from '@prisma/client';
+import { isDeepStrictEqual } from 'node:util';
+import type { DocumentAuthority, EditorialDocument } from '../domain/document';
+import { validateContextualDocument } from '../domain/contextual-document';
+import { readLockedEditorialDefinitions } from './prisma-locked-editorial-definitions';
 import { closedObject, validateDocument } from '../domain/document';
 import type {
   CatalogEditorialCore,
@@ -31,6 +35,79 @@ function snapshot(value: unknown): InputSnapshot {
   if (value == null || ['string', 'number', 'boolean'].includes(typeof value))
     return value as InputSnapshot;
   throw new Error('MALFORMED');
+}
+
+const positiveRevision = (value: unknown): value is number =>
+  typeof value === 'number' &&
+  Number.isInteger(value) &&
+  value > 0 &&
+  value <= 2147483647;
+
+async function validateStoredSave(
+  tx: Prisma.TransactionClient,
+  stored: unknown,
+  candidate: unknown,
+  authority: DocumentAuthority,
+) {
+  const extra =
+    stored && typeof stored === 'object' && Object.hasOwn(stored, 'warnings')
+      ? ['warnings']
+      : [];
+  const raw = closedObject(stored, ['cycle', 'draft', 'published', ...extra]);
+  const draft = closedObject(raw.draft, [
+    'revision',
+    'basePublishedRevision',
+    'document',
+  ]);
+  const published =
+    raw.published === null
+      ? null
+      : closedObject(raw.published, ['revision', 'document']);
+  if (
+    !positiveRevision(raw.cycle) ||
+    !positiveRevision(draft.revision) ||
+    (draft.basePublishedRevision !== null &&
+      !positiveRevision(draft.basePublishedRevision)) ||
+    (published && !positiveRevision(published.revision))
+  )
+    throw new Error('MALFORMED');
+  const definitions = await readLockedEditorialDefinitions(tx, [
+    candidate,
+    draft.document,
+    ...(published ? [published.document] : []),
+  ]);
+  // These baselines come only from the scoped stored state or exactly matched receipt.
+  // The strict validator checks each document before inspecting conservation membership.
+  const check = (document: unknown) =>
+    validateContextualDocument(
+      document,
+      authority,
+      definitions,
+      document as EditorialDocument,
+    ).document;
+  const baseline = check(draft.document);
+  const validated = validateContextualDocument(
+    candidate,
+    authority,
+    definitions,
+    baseline,
+  );
+  const state: EditorialReadResult = {
+    cycle: raw.cycle,
+    draft: {
+      revision: draft.revision,
+      basePublishedRevision: draft.basePublishedRevision,
+      document: baseline,
+    },
+    published: published
+      ? {
+          revision: published.revision as number,
+          document: check(published.document),
+        }
+      : null,
+    ...(validated.warnings.length ? { warnings: validated.warnings } : {}),
+  };
+  return { state, document: validated.document };
 }
 
 export class PrismaCatalogEditorial implements CatalogEditorialCore {
@@ -75,10 +152,6 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         )
       )
         throw new Error('MALFORMED');
-      const document = validateDocument(
-        input.document,
-        access.documentAuthority,
-      );
       const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
         SELECT "id" FROM "products" WHERE "tenantId" = ${scope.tenantId}
           AND "id" = ${scope.productId} FOR UPDATE
@@ -87,7 +160,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
       const requestJson = JSON.stringify({
         expectedCycle: input.expectedCycle,
         expectedRevision: input.expectedRevision,
-        document,
+        document: input.document,
       });
       const receipts = await tx.$queryRaw<
         { matches: boolean; result: EditorialReadResult }[]
@@ -99,7 +172,19 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
       `);
       if (receipts[0]) {
         if (!receipts[0].matches) throw new Error('CONFLICT');
-        return receipts[0].result;
+        const replay = await validateStoredSave(
+          tx,
+          receipts[0].result,
+          input.document,
+          access.documentAuthority,
+        );
+        if (
+          replay.state.cycle !== input.expectedCycle ||
+          replay.state.draft?.revision !== input.expectedRevision + 1 ||
+          !isDeepStrictEqual(replay.state.draft.document, replay.document)
+        )
+          throw new Error('MALFORMED');
+        return replay.state;
       }
       const states = await tx.$queryRaw<EditorialReadResult[]>(Prisma.sql`
         SELECT "cycle", CASE WHEN "draftRevision" IS NULL THEN NULL ELSE jsonb_build_object(
@@ -117,6 +202,13 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         input.expectedRevision >= 2147483647
       )
         throw new Error('CONFLICT');
+      const validated = await validateStoredSave(
+        tx,
+        state,
+        input.document,
+        access.documentAuthority,
+      );
+      const { document } = validated;
       const updated = await tx.$executeRaw(Prisma.sql`
         UPDATE "catalog_editorial_states" SET "draftRevision" = "draftRevision" + 1,
           "draftDocument" = CAST(${JSON.stringify(document)} AS JSONB)
@@ -125,7 +217,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
       `);
       if (updated !== 1) throw new Error('CONFLICT');
       const result: EditorialReadResult = {
-        ...state,
+        ...validated.state,
         draft: {
           ...state.draft,
           revision: input.expectedRevision + 1,
