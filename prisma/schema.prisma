@@ -590,11 +590,29 @@ model Product {
 
   // F1.WU1 back-relation — declared here so it references ProductCatalogPriceList declared later.
   catalogPriceLists ProductCatalogPriceList[]
+  editorialState CatalogEditorialState?
 
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([tenantId, includeInOnlineCatalog, categoryId])
   @@index([tenantId, includeInOnlineCatalog, createdAt(sort: Desc)])
   @@map("products")
+}
+
+// Private descriptive state. B1 exposes read only; no lifecycle writes.
+model CatalogEditorialState {
+  tenantId String
+  productId String
+  cycle Int
+  draftRevision Int?
+  basePublishedRevision Int?
+  draftDocument Json?
+  publishedRevision Int?
+  publishedDocument Json?
+  product Product @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId])
+  @@map("catalog_editorial_states")
 }
 
 model ServiceDetail {
