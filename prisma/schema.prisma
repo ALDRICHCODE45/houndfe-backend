@@ -643,6 +643,36 @@ model CatalogEditorialSaveReceipt {
   @@map("catalog_editorial_save_receipts")
 }
 
+// Company-wide editorial vocabulary; SQL migration owns type/owner CHECK constraints.
+model EditorialFamily {
+  id       String @id
+  code     String @unique
+  bindings EditorialBinding[]
+
+  @@map("editorial_families")
+}
+
+model EditorialDefinition {
+  id       String @id
+  code     String @unique
+  type     String
+  bindings EditorialBinding[]
+
+  @@unique([id, type])
+  @@map("editorial_definitions")
+}
+
+model EditorialBinding {
+  familyId     String
+  definitionId String
+  owner        String
+  family       EditorialFamily @relation(fields: [familyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  definition   EditorialDefinition @relation(fields: [definitionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([familyId, definitionId])
+  @@map("editorial_bindings")
+}
+
 model ServiceDetail {
   id        String  @id @default(uuid())
   productId String  @unique
