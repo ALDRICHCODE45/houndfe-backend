@@ -80,3 +80,27 @@ The adapter disconnects the unused second client; existing hooks close the first
 Failure disconnects both and propagates without fallback. This proves historical
 behavior on synthetic PostgreSQL, not contextual save/replay or archive locking.
 Run this command only while the authorized new target exists; no fallback applies.
+
+## Scoped vocabulary locks (unactivated prerequisite)
+
+`readLockedEditorialDefinitions(tx, documents)` accepts a transaction and unknown
+JSON documents. It captures data descriptors before awaiting, rejecting accessors
+and unsupported values without invoking them. It decodes reference selectors;
+full validation still belongs to `validateContextualDocument`. Callers must capture
+once and use the same stable documents for observation and validation.
+
+The helper resolves and locks families, definitions, exact bindings, selected
+options and numeric units with parameterized `FOR SHARE` queries in table/PK order.
+Null units require a real row; empty multi values require no option rows.
+Missing positives reject. Its restricted snapshot contains only locked rows:
+no unlocked global read, cross-product bindings, or active-option-only filter.
+Locks remain until the caller transaction ends. The existing global reader and
+core consumers are unchanged; Product provenance/save/replay wiring is still pending.
+
+The D16 PostgreSQL command above also runs scoped observation tests: selected
+archival waits, an unselected option progresses, and an earlier writer's committed
+archive status is observed. Barriers inspect PostgreSQL blocking PIDs, not sleeps.
+This proves current membership, not historical identity across administrative
+code reuse/deletion/reinsertion. Deterministic ordering is not a guarantee against
+arbitrary writer deadlocks; errors abort rather than falling back to unlocked data.
+No atomic external authorization or private-media revocation guarantee is added.

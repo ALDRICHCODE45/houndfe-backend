@@ -6,6 +6,7 @@ module.exports = {
   roots: ['<rootDir>/src/catalog-editorial'],
   testMatch: [
     '<rootDir>/src/catalog-editorial/infrastructure/d16-postgres.integration.spec.ts',
+    '<rootDir>/src/catalog-editorial/infrastructure/prisma-locked-editorial-definitions.integration.spec.ts',
   ],
   transform: { '^.+\\.ts$': ['ts-jest', { tsconfig: { incremental: false } }] },
   testEnvironment: 'node',
