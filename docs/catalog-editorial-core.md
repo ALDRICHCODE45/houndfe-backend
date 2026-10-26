@@ -65,7 +65,7 @@ pinned name/image/isolation/database, keeps credentials in memory and leaves its
 synthetic schemas for parent-owned container cleanup. Normal unit discovery skips
 that DB spec unless explicitly selected by the container environment variable.
 
-Save/CAS (C) and lifecycle transitions remain pending. No retention/expiry/cleanup is implemented or
+Lifecycle transitions remain pending. No retention/expiry/cleanup is implemented or
 approved; no 24-hour claim applies. Future integration still needs authoritative
 permissions, definitions, private assets, verified actor transport and routes.
 C3.1 and integrated read/create/save remain open.
@@ -104,3 +104,15 @@ The replacement runner pins the authorized ID/name and checks Docker 29's empty
 Mounts plus exact tmpfs configuration, no binds/mounts/ports and actual tmpfs.
 B2 rollback boundary: create port/method/tests and receipt schema/migration only;
 retain B1 state/read. No transport, authority provider or public activation exists.
+
+## Atomic save (C)
+
+`save(context, { expectedCycle, expectedRevision, idempotencyKey, document })`
+requires a separate fourth constructor port with explicit `canSave`; no inherited grants.
+Current membership, scope and document references are checked before every replay.
+Under the same Product lock, cycle/revision CAS must update exactly one active Draft.
+Success increments revision once, preserving cycle, base, Published and operational fields.
+Separate save receipts scope keys by tenant/Product/actor/operation, never create keys.
+Replay compares both expectations and content, returns the original result and never writes.
+Receipt failure rolls back the update; overflow/stale/consumed states reject unchanged.
+C rollback: remove save port/method/tests and additive save receipt artifact; retain A/B1/B2.

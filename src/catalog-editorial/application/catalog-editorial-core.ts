@@ -38,9 +38,27 @@ export interface EditorialCreateRequest {
   idempotencyKey: string;
   document: unknown;
 }
+export interface EditorialSaveAuthority {
+  resolve(context: EditorialContext): Promise<
+    | (EditorialContext & {
+        activeMember: boolean;
+        canSave: boolean;
+        documentAuthority: DocumentAuthority;
+      })
+    | null
+  >;
+}
+export interface EditorialSaveRequest extends EditorialCreateRequest {
+  expectedCycle: number;
+  expectedRevision: number;
+}
 /** Internal callable boundary only; no transport or effective grants. */
 export interface CatalogEditorialCore {
   read(context: EditorialContext): Promise<EditorialReadResult>;
+  save(
+    context: EditorialContext,
+    request: EditorialSaveRequest,
+  ): Promise<EditorialReadResult>;
   create(
     context: EditorialContext,
     request: EditorialCreateRequest,

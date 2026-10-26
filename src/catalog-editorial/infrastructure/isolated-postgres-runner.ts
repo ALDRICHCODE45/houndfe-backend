@@ -105,6 +105,13 @@ export async function isolatedPostgres(): Promise<PrismaClient> {
       ),
       'utf8',
     );
+    const saveMigration = readFileSync(
+      join(
+        __dirname,
+        '../../../prisma/migrations/20261026040000_catalog_editorial_save/migration.sql',
+      ),
+      'utf8',
+    );
     execFileSync(
       'docker',
       [
@@ -127,7 +134,8 @@ export async function isolatedPostgres(): Promise<PrismaClient> {
           CREATE TABLE products (id TEXT PRIMARY KEY, "tenantId" TEXT NOT NULL,
             name TEXT NOT NULL, description TEXT);
           ${migration}
-          ${createMigration}`,
+          ${createMigration}
+          ${saveMigration}`,
       },
     );
     const identity = await prisma.$queryRaw<

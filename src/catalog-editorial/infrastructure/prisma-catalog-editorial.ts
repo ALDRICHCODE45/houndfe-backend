@@ -7,6 +7,8 @@ import type {
   EditorialCreateRequest,
   EditorialReadAuthority,
   EditorialReadResult,
+  EditorialSaveAuthority,
+  EditorialSaveRequest,
 } from '../application/catalog-editorial-core';
 
 type InputSnapshot =
@@ -36,7 +38,112 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
     private readonly prisma: PrismaClient,
     private readonly authority: EditorialReadAuthority,
     private readonly createAuthority?: EditorialCreateAuthority,
+    private readonly saveAuthority?: EditorialSaveAuthority,
   ) {}
+  async save(
+    context: EditorialContext,
+    request: EditorialSaveRequest,
+  ): Promise<EditorialReadResult> {
+    const scope = { ...context };
+    closedObject(request, [
+      'expectedCycle',
+      'expectedRevision',
+      'idempotencyKey',
+      'document',
+    ]);
+    const input = { ...request, document: snapshot(request.document) };
+    const work = async (tx: Prisma.TransactionClient) => {
+      const access = await this.saveAuthority
+        ?.resolve({ ...scope })
+        .catch(() => null);
+      if (
+        access?.activeMember !== true ||
+        access.canSave !== true ||
+        access.actorId !== scope.actorId ||
+        access.tenantId !== scope.tenantId ||
+        access.productId !== scope.productId ||
+        access.documentAuthority?.tenantId !== scope.tenantId ||
+        access.documentAuthority.productId !== scope.productId
+      )
+        throw new Error('FORBIDDEN');
+      if (
+        typeof input.idempotencyKey !== 'string' ||
+        input.idempotencyKey.length < 1 ||
+        input.idempotencyKey.length > 200 ||
+        [input.expectedCycle, input.expectedRevision].some(
+          (v) => !Number.isInteger(v) || v < 1,
+        )
+      )
+        throw new Error('MALFORMED');
+      const document = validateDocument(
+        input.document,
+        access.documentAuthority,
+      );
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${scope.tenantId}
+          AND "id" = ${scope.productId} FOR UPDATE
+      `);
+      if (products.length !== 1) throw new Error('NOT_FOUND');
+      const requestJson = JSON.stringify({
+        expectedCycle: input.expectedCycle,
+        expectedRevision: input.expectedRevision,
+        document,
+      });
+      const receipts = await tx.$queryRaw<
+        { matches: boolean; result: EditorialReadResult }[]
+      >(Prisma.sql`
+        SELECT ("request" = CAST(${requestJson} AS JSONB)) AS matches, "result"
+        FROM "catalog_editorial_save_receipts"
+        WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
+          AND "actorId" = ${scope.actorId} AND "idempotencyKey" = ${input.idempotencyKey}
+      `);
+      if (receipts[0]) {
+        if (!receipts[0].matches) throw new Error('CONFLICT');
+        return receipts[0].result;
+      }
+      const states = await tx.$queryRaw<EditorialReadResult[]>(Prisma.sql`
+        SELECT "cycle", CASE WHEN "draftRevision" IS NULL THEN NULL ELSE jsonb_build_object(
+          'revision', "draftRevision", 'basePublishedRevision', "basePublishedRevision",
+          'document', "draftDocument") END AS "draft",
+          CASE WHEN "publishedRevision" IS NULL THEN NULL ELSE jsonb_build_object(
+          'revision', "publishedRevision", 'document', "publishedDocument") END AS "published"
+        FROM "catalog_editorial_states"
+        WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
+      `);
+      const state = states[0];
+      if (
+        state?.cycle !== input.expectedCycle ||
+        state.draft?.revision !== input.expectedRevision ||
+        input.expectedRevision >= 2147483647
+      )
+        throw new Error('CONFLICT');
+      const updated = await tx.$executeRaw(Prisma.sql`
+        UPDATE "catalog_editorial_states" SET "draftRevision" = "draftRevision" + 1,
+          "draftDocument" = CAST(${JSON.stringify(document)} AS JSONB)
+        WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
+          AND "cycle" = ${input.expectedCycle} AND "draftRevision" = ${input.expectedRevision}
+      `);
+      if (updated !== 1) throw new Error('CONFLICT');
+      const result: EditorialReadResult = {
+        ...state,
+        draft: {
+          ...state.draft,
+          revision: input.expectedRevision + 1,
+          document,
+        },
+      };
+      await tx.$executeRaw(Prisma.sql`
+        INSERT INTO "catalog_editorial_save_receipts"
+          ("tenantId", "productId", "actorId", "idempotencyKey", "request", "result")
+        VALUES (${scope.tenantId}, ${scope.productId}, ${scope.actorId}, ${input.idempotencyKey},
+          CAST(${requestJson} AS JSONB), CAST(${JSON.stringify(result)} AS JSONB))
+      `);
+      return result;
+    };
+    return await this.prisma.$transaction(work, {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    });
+  }
   async create(
     context: EditorialContext,
     request: EditorialCreateRequest,

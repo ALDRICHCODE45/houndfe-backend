@@ -40,6 +40,20 @@ describe('callable authorized editorial read', () => {
     ).rejects.toThrow('FORBIDDEN');
     expect(query).not.toHaveBeenCalled();
   });
+  it('save requires its own explicit authority', async () => {
+    const core = new PrismaCatalogEditorial(client, {
+      resolve: () => Promise.resolve(granted),
+    });
+    await expect(
+      core.save(context, {
+        expectedCycle: 1,
+        expectedRevision: 1,
+        idempotencyKey: 'k',
+        document: emptyDocument(),
+      }),
+    ).rejects.toThrow('FORBIDDEN');
+    expect(query).not.toHaveBeenCalled();
+  });
   it('fails closed when the authority is unavailable', async () => {
     const authority: EditorialReadAuthority = {
       resolve: () => Promise.reject(new Error('unavailable')),

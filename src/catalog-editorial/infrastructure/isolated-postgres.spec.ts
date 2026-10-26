@@ -1,6 +1,10 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { emptyDocument } from '../domain/document';
-import type { EditorialCreateAuthority } from '../application/catalog-editorial-core';
+import type {
+  EditorialCreateAuthority,
+  EditorialSaveAuthority,
+  EditorialSaveRequest,
+} from '../application/catalog-editorial-core';
 import { PrismaCatalogEditorial } from './prisma-catalog-editorial';
 import { isolatedPostgres } from './isolated-postgres-runner';
 
@@ -147,6 +151,7 @@ isolated('real PostgreSQL atomic create and durable receipts', () => {
     authority: EditorialCreateAuthority = {
       resolve: () => Promise.resolve(access),
     },
+    saveAuthority?: EditorialSaveAuthority,
   ) =>
     new PrismaCatalogEditorial(
       prisma,
@@ -155,10 +160,12 @@ isolated('real PostgreSQL atomic create and durable receipts', () => {
           Promise.resolve({ ...scope, activeMember: true, canRead: true }),
       },
       authority,
+      saveAuthority,
     );
   const snapshot = () => prisma.$queryRaw`
     SELECT (SELECT jsonb_agg(to_jsonb(s)) FROM catalog_editorial_states s) AS states,
       (SELECT jsonb_agg(to_jsonb(r)) FROM catalog_editorial_create_receipts r) AS receipts,
+      (SELECT jsonb_agg(to_jsonb(r)) FROM catalog_editorial_save_receipts r) AS saves,
       (SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM products p) AS products`;
   const rejectUnchanged = async (
     operation: () => Promise<unknown>,
@@ -385,5 +392,218 @@ isolated('real PostgreSQL atomic create and durable receipts', () => {
         cycle: 1,
       });
     }
+  });
+  describe('save/CAS/replay', () => {
+    const input: EditorialSaveRequest = {
+      expectedCycle: 1,
+      expectedRevision: 1,
+      idempotencyKey: 'key',
+      document: emptyDocument(),
+    };
+    const granted = { ...access, canSave: true };
+    const authority: EditorialSaveAuthority = {
+      resolve: () => Promise.resolve(granted),
+    };
+    const scoped: EditorialSaveAuthority = {
+      resolve: (scope) =>
+        Promise.resolve({
+          ...granted,
+          ...scope,
+          documentAuthority: { ...granted.documentAuthority, ...scope },
+        }),
+    };
+    const save = (value = input, port = authority, scope = context) =>
+      core(undefined, port).save(scope, value);
+    beforeEach(async () => {
+      await core().create(context, request);
+    });
+    it('saves incomplete content, preserves Published/base and operational fields', async () => {
+      await prisma.$executeRaw`UPDATE catalog_editorial_states SET
+        "basePublishedRevision" = 3, "publishedRevision" = 3,
+        "publishedDocument" = '{}'::jsonb WHERE "productId" = 'p'`;
+      const document = { ...emptyDocument(), commercialTitle: 'Editorial' };
+      const result = await save({ ...input, document });
+      expect(result).toEqual({
+        cycle: 1,
+        draft: { revision: 2, basePublishedRevision: 3, document },
+        published: { revision: 3, document: {} },
+      });
+      expect(await core().read(context)).toEqual(result);
+      expect(
+        await prisma.$queryRaw`SELECT name FROM products WHERE id = 'p'`,
+      ).toEqual([{ name: 'Operational' }]);
+    });
+    it('replays durably before CAS without replacing a newer document', async () => {
+      const original = await save();
+      await save({
+        ...input,
+        expectedRevision: 2,
+        idempotencyKey: 'next',
+        document: { ...emptyDocument(), description: 'Newer' },
+      });
+      const before = await snapshot();
+      expect(await save()).toEqual(original);
+      expect(await snapshot()).toEqual(before);
+    });
+    it.each([
+      { expectedRevision: 2 },
+      { expectedCycle: 2 },
+      { document: { ...emptyDocument(), description: 'Changed' } },
+    ])('rejects same-key request mismatch %j', async (change) => {
+      await save();
+      await rejectUnchanged(() => save({ ...input, ...change }), 'CONFLICT');
+    });
+    it.each([
+      'activeMember',
+      'canSave',
+      'actorId',
+      'tenantId',
+      'productId',
+      'documentAuthority',
+      'offline',
+      'missing',
+    ])('rechecks authority on replay: %s', async (field) => {
+      await save();
+      const denied = {
+        ...granted,
+        [field]:
+          field === 'documentAuthority'
+            ? { ...granted.documentAuthority, productId: 'other' }
+            : false,
+      };
+      const port: EditorialSaveAuthority = {
+        resolve: () =>
+          field === 'offline'
+            ? Promise.reject(new Error('offline'))
+            : Promise.resolve(
+                field === 'missing' ? null : (denied as typeof granted),
+              ),
+      };
+      await rejectUnchanged(() => save(input, port), 'FORBIDDEN');
+    });
+    it.each([
+      { document: {} },
+      { document: { ...emptyDocument(), mediaRefs: ['public'] } },
+      { expectedCycle: 0 },
+      { expectedRevision: 0 },
+      { expectedRevision: 1.5 },
+      { idempotencyKey: '' },
+    ])('rejects malformed request unchanged: %j', async (change) => {
+      await rejectUnchanged(() => save({ ...input, ...change }), 'MALFORMED');
+    });
+    it('checks current private references before replay and preserves media order', async () => {
+      const port: EditorialSaveAuthority = {
+        resolve: () =>
+          Promise.resolve({
+            ...granted,
+            documentAuthority: {
+              ...granted.documentAuthority,
+              assetIds: ['a', 'b'],
+            },
+          }),
+      };
+      const value = {
+        ...input,
+        document: { ...emptyDocument(), mediaRefs: ['b', 'a'] },
+      };
+      expect((await save(value, port)).draft?.document).toEqual(value.document);
+      await rejectUnchanged(() => save(value), 'MALFORMED');
+      await rejectUnchanged(
+        () =>
+          save(
+            {
+              ...value,
+              document: { ...value.document, mediaRefs: ['a', 'b'] },
+            },
+            port,
+          ),
+        'CONFLICT',
+      );
+    });
+    it('rejects absent/consumed Drafts, stale revisions, stale cycles and overflow', async () => {
+      await rejectUnchanged(
+        () => save({ ...input, expectedRevision: 2 }),
+        'CONFLICT',
+      );
+      await rejectUnchanged(
+        () => save(input, scoped, { ...context, productId: 'q' }),
+        'CONFLICT',
+      );
+      await prisma.$executeRaw`UPDATE catalog_editorial_states SET
+        "draftRevision" = NULL, "draftDocument" = NULL WHERE "productId" = 'p'`;
+      await rejectUnchanged(() => save(), 'CONFLICT');
+      await core().create(context, {
+        ...request,
+        expectedCycle: 1,
+        idempotencyKey: 'new-cycle',
+      });
+      await rejectUnchanged(() => save(), 'CONFLICT');
+      await prisma.$executeRaw`UPDATE catalog_editorial_states SET
+        "draftRevision" = 2147483647 WHERE "productId" = 'p'`;
+      await rejectUnchanged(
+        () =>
+          save({ ...input, expectedCycle: 2, expectedRevision: 2147483647 }),
+        'CONFLICT',
+      );
+    });
+    it('isolates actor/Product/tenant keys and rejects foreign Products', async () => {
+      await save();
+      await rejectUnchanged(
+        () => save(input, scoped, { ...context, productId: 'foreign' }),
+        'NOT_FOUND',
+      );
+      const another = { ...context, actorId: 'another' };
+      await rejectUnchanged(() => save(input, scoped, another), 'CONFLICT');
+      await expect(
+        save({ ...input, expectedRevision: 2 }, scoped, another),
+      ).resolves.toMatchObject({ draft: { revision: 3 } });
+      for (const scope of [
+        { ...context, productId: 'q' },
+        { ...context, productId: 'foreign', tenantId: 'other' },
+      ]) {
+        const createAuthority: EditorialCreateAuthority = {
+          resolve: () =>
+            Promise.resolve({
+              ...access,
+              ...scope,
+              documentAuthority: { ...access.documentAuthority, ...scope },
+            }),
+        };
+        await core(createAuthority).create(scope, request);
+        await expect(save(input, scoped, scope)).resolves.toMatchObject({
+          draft: { revision: 2 },
+        });
+      }
+    });
+    it.each([true, false])(
+      'serializes concurrent saves; duplicate key=%s',
+      async (duplicate) => {
+        const outcomes = await Promise.allSettled(
+          ['key', duplicate ? 'key' : 'rival'].map((idempotencyKey) =>
+            save({ ...input, idempotencyKey }),
+          ),
+        );
+        expect(outcomes.filter((v) => v.status === 'fulfilled')).toHaveLength(
+          duplicate ? 2 : 1,
+        );
+        if (duplicate) expect(outcomes[0]).toEqual(outcomes[1]);
+        else
+          expect(outcomes.find((v) => v.status === 'rejected')).toMatchObject({
+            reason: new Error('CONFLICT'),
+          });
+        expect((await core().read(context)).draft?.revision).toBe(2);
+        expect(
+          await prisma.$queryRaw`SELECT count(*)::int AS n FROM catalog_editorial_save_receipts`,
+        ).toEqual([{ n: 1 }]);
+      },
+    );
+    it('rolls revision/document back if receipt insertion fails', async () => {
+      await prisma.$executeRaw`ALTER TABLE catalog_editorial_save_receipts
+        ADD CONSTRAINT save_proof_failure CHECK ("idempotencyKey" <> 'fail')`;
+      await rejectUnchanged(
+        () => save({ ...input, idempotencyKey: 'fail' }),
+        'save_proof_failure',
+      );
+    });
   });
 });
