@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { definitionsPostgres } from './definitions-postgres-runner';
+import { PrismaEditorialDefinitions } from './prisma-editorial-definitions';
 
 let db: PrismaClient;
 beforeAll(async () => {
@@ -22,6 +23,13 @@ async function rejected(sql: string, code: string) {
   });
   expect(await state()).toEqual(before);
 }
+
+it('reads a genuinely empty persisted catalogue', async () => {
+  expect(await new PrismaEditorialDefinitions(db).read()).toEqual({
+    families: [],
+    definitions: [],
+  });
+});
 
 it('persists company-wide families and typed definitions with explicit binding owner', async () => {
   expect(
@@ -203,4 +211,64 @@ describe('typed options and allowed units', () => {
       await db.$queryRaw`SELECT "unitCode" FROM editorial_units WHERE "definitionId" = 'number' ORDER BY "unitCode" NULLS FIRST`,
     ).toEqual([{ unitCode: null }, { unitCode: 'kg' }, { unitCode: 'null' }]);
   });
+});
+
+it('reads all persisted types, bindings, archived options and empty children without writes', async () => {
+  await db.$executeRaw`INSERT INTO editorial_families VALUES ('empty', 'empty-family')`;
+  await db.$executeRaw`INSERT INTO editorial_definitions VALUES ('empty-selection', 'empty-selection', 'single'), ('empty-number', 'empty-number', 'number')`;
+  await db.$executeRaw`INSERT INTO editorial_bindings VALUES ('f', 'empty-selection', 'sellable')`;
+  const before = await state();
+  const reader = new PrismaEditorialDefinitions(db);
+  const snapshot = await reader.read();
+  expect(snapshot).toEqual({
+    families: [
+      {
+        id: 'f',
+        code: 'clothes',
+        bindings: [
+          { definitionId: 'd', owner: 'product' },
+          { definitionId: 'empty-selection', owner: 'sellable' },
+        ],
+      },
+      { id: 'empty', code: 'empty-family', bindings: [] },
+      {
+        id: 'g',
+        code: 'equipment',
+        bindings: [{ definitionId: 'd', owner: 'sellable' }],
+      },
+    ],
+    definitions: [
+      { id: 'boolean', code: 'boolean', type: 'boolean' },
+      { id: 'empty-number', code: 'empty-number', type: 'number', units: [] },
+      {
+        id: 'empty-selection',
+        code: 'empty-selection',
+        type: 'single',
+        options: [],
+      },
+      {
+        id: 'multi',
+        code: 'multi',
+        type: 'multi',
+        options: [{ code: 'red', archived: false }],
+      },
+      {
+        id: 'number',
+        code: 'number',
+        type: 'number',
+        units: [null, 'kg', 'null'],
+      },
+      { id: 'number2', code: 'other-number', type: 'number', units: [null] },
+      {
+        id: 'single',
+        code: 'single',
+        type: 'single',
+        options: [{ code: 'red', archived: true }],
+      },
+      { id: 'd', code: 'title', type: 'text' },
+    ],
+  });
+  expect(await state()).toEqual(before);
+  snapshot.families[0].bindings.length = 0;
+  expect(await reader.read()).not.toEqual(snapshot);
 });

@@ -10,8 +10,8 @@ represent these CHECK constraints: use the reviewed migration, not schema push.
 Codes are stable identities. This unit exposes no rename/delete/write API, loads
 no vocabulary and does not make arbitrary administrative SQL safe. Existing
 Category, Brand, Product and Variant data are not converted. D1b adds options
-with `archivedAt`, and explicit nullable/named numeric units. An authoritative
-reader follows in D2.
+with `archivedAt`, and explicit nullable/named numeric units. D2 adds an internal
+read-only source of the persisted company-wide catalogue.
 
 Options use stable `(definitionId, code)` identities; archived rows remain stored
 and reserve their codes. Only options have archive state. Composite definition/type
@@ -29,12 +29,38 @@ baseline, nor archived Published-to-Draft copying or publication eligibility.
 No DocumentAuthority provider, routes, UI, media or runtime wiring is activated.
 Approved copying of archived options from Published belongs to future orchestration.
 
+## Internal authoritative reader
+
+`PrismaEditorialDefinitions` in `infrastructure/prisma-editorial-definitions.ts`
+accepts an explicitly injected Prisma query client. `read()` returns
+`Promise<EditorialDefinitionsSnapshot>` (exported from
+`domain/editorial-definitions.ts`): families with identity/code and
+`{ definitionId, owner }` bindings, plus typed definitions with identity/code.
+Number definitions include allowed `units` (including explicit null); selection
+definitions include `{ code, archived }` options, including archived rows.
+Unbound definitions, empty families and empty child collections remain visible.
+Families/definitions/options are ordered by code, bindings by definition identity,
+and units null-first then by code, using the database collation.
+
+The single read-only SQL statement observes related data in one database snapshot.
+Each call queries again; no cache/lease is implied. An observed empty database
+returns `{ families: [], definitions: [] }`; connection/query failures reject,
+never become empty success. There is no vocabulary fallback or automatic loading.
+The snapshot is not an active-code allowlist, HTTP DTO or Product/tenant-qualified
+DocumentAuthority. Callers must not wire it straight into draft validation: D16
+needs authorized persisted-baseline provenance, and private-media/variant scope,
+transport and current permissions remain separate integration requirements.
+
+Tests use only PostgreSQL 16 in the authorized disposable instance. This does not
+prove deployment PostgreSQL compatibility: verify PostgreSQL >=15 and reviewed
+migration application before any future activation, without probing a real DB now.
+
 ## Verification
 
 Unit/artifact checks never connect to a database:
 
 ```sh
-pnpm exec jest --config jest.config.js --runInBand --runTestsByPath prisma/catalog-editorial-definitions-schema.spec.ts src/catalog-editorial/infrastructure/definitions-postgres-runner.spec.ts
+pnpm exec jest --config jest.config.js --runInBand --runTestsByPath prisma/catalog-editorial-definitions-schema.spec.ts src/catalog-editorial/infrastructure/definitions-postgres-runner.spec.ts src/catalog-editorial/infrastructure/prisma-editorial-definitions.spec.ts
 ```
 
 The separate live suite requires the exact currently authorized disposable target:
