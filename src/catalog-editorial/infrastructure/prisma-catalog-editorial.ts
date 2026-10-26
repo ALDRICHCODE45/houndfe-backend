@@ -236,6 +236,39 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
       isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
     });
   }
+  private async requireActiveCreateOptions(
+    tx: Prisma.TransactionClient,
+    document: EditorialDocument,
+  ) {
+    const pairs = new Map<string, Prisma.Sql>();
+    for (const value of document.values) {
+      const codes =
+        value.type === 'single'
+          ? [value.value]
+          : value.type === 'multi'
+            ? value.value
+            : [];
+      for (const code of codes) {
+        pairs.set(
+          JSON.stringify([value.code, value.type, code]),
+          Prisma.sql`(d."code" = ${value.code} AND d."type" = ${value.type} AND o."code" = ${code})`,
+        );
+      }
+    }
+    if (!pairs.size) return;
+    const rows = await tx.$queryRaw<{ archivedAt: Date | null }[]>(Prisma.sql`
+      SELECT o."archivedAt" FROM "editorial_definitions" d
+      JOIN "editorial_options" o ON o."definitionId" = d."id"
+      WHERE ${Prisma.join([...pairs.values()], ' OR ')}
+      ORDER BY d."id", o."code" FOR SHARE OF d, o
+    `);
+    // Missing membership denies; absence is never treated as a lockable active option.
+    if (
+      rows.length !== pairs.size ||
+      rows.some((row) => row.archivedAt !== null)
+    )
+      throw new Error('MALFORMED');
+  }
   async create(
     context: EditorialContext,
     request: EditorialCreateRequest,
@@ -275,6 +308,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           AND "id" = ${scope.productId} FOR UPDATE
       `);
       if (products.length !== 1) throw new Error('NOT_FOUND');
+      await this.requireActiveCreateOptions(tx, document);
       const requestJson = JSON.stringify({
         expectedCycle: input.expectedCycle,
         document,
@@ -289,6 +323,12 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
       `);
       if (receipts[0]) {
         if (!receipts[0].matches) throw new Error('CONFLICT');
+        const replayDocument = validateDocument(
+          receipts[0].result?.draft?.document,
+          access.documentAuthority,
+        );
+        if (!isDeepStrictEqual(replayDocument, document))
+          throw new Error('MALFORMED');
         return receipts[0].result;
       }
       const states = await tx.$queryRaw<

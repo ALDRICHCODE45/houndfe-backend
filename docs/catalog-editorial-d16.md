@@ -129,4 +129,26 @@ retains archived options. Warnings are recomputed against current vocabulary on
 replay; historical content/revisions are not replaced with the current Draft.
 Authority is observed per attempt, not locked across external permission/media
 revocation. This internal implementation adds no HTTP/UI registration or private
-media provider. E3 initialization and legacy-create archive integration remain pending.
+media provider. Explicit E3 initialization remains pending.
+
+## Legacy create archive protection
+
+`create(context, {expectedCycle, idempotencyKey, document})` remains a caller-document
+operation, not Published initialization. Its existing strict authority-based
+validation still runs. The approved additional restriction requires every assigned
+single/multi option pair to exist in the persisted catalogue and be active.
+Missing pairs fail closed with `MALFORMED`, even if a trusted legacy provider lists
+them. Non-option values and empty multi selections retain their previous contract.
+
+After the Product lock, a parameterized exact-pair join locks matching definition
+and option rows with `FOR SHARE`, including active options, through the state and
+receipt writes. Missing rows never count as active membership. There are no global
+vocabulary locks, fallback allowlists, or assumed administrative lifecycle guards.
+
+Legacy replay revalidates its Draft against current authority and requires equality
+with the validated matching request. It cannot substitute another receipt Draft or
+reuse an assignment that is now archived. Replay writes nothing. Legacy Published
+passthrough remains unchanged—including historical malformed Published fixtures;
+this is not an endorsement of that data or the stricter initialization contract.
+The D16 tests exercise these denials without state/receipt/Product changes and use
+a real second PostgreSQL writer to observe blocking at receipt insertion.
