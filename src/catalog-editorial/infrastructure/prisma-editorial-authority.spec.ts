@@ -1,7 +1,11 @@
 import type { PrismaClient } from '@prisma/client';
 import { EDITORIAL_PERMISSIONS as grants } from '../domain/editorial-permissions';
 import { PrismaCatalogEditorial } from './prisma-catalog-editorial';
-import { PrismaEditorialAuthority } from './prisma-editorial-authority';
+import { emptyDocument } from '../domain/document';
+import {
+  PrismaEditorialAuthority,
+  type EditorialDocumentAuthorityProvider,
+} from './prisma-editorial-authority';
 
 const scope = { actorId: 'actor', tenantId: 'tenant', productId: 'product' };
 const membership = (permissions: { subject: string; action: string }[]) => ({
@@ -9,7 +13,7 @@ const membership = (permissions: { subject: string; action: string }[]) => ({
   tenantId: scope.tenantId,
   role: { permissions: permissions.map((permission) => ({ permission })) },
 });
-function fixture() {
+function fixture(documents?: EditorialDocumentAuthorityProvider) {
   const user = jest.fn().mockResolvedValue({ isActive: true });
   const members = jest
     .fn()
@@ -26,8 +30,13 @@ function fixture() {
     $transaction: (work: (tx: unknown) => unknown) =>
       work({ $queryRaw: query, $executeRaw: write }),
   } as unknown as PrismaClient;
-  const authority = new PrismaEditorialAuthority(prisma);
-  const core = new PrismaCatalogEditorial(prisma, authority);
+  const authority = new PrismaEditorialAuthority(prisma, documents);
+  const core = new PrismaCatalogEditorial(
+    prisma,
+    authority,
+    authority.createAuthority,
+    authority.saveAuthority,
+  );
   return { user, members, product, query, write, authority, core };
 }
 
@@ -35,7 +44,7 @@ describe('current Prisma editorial capability/read authority', () => {
   it.each([
     [[], false, false],
     [[grants.read], true, false],
-    [[grants.update], false, true],
+    [[grants.update], false, false],
     [[grants.read, grants.update], true, true],
     [[{ subject: 'all', action: 'manage' }], false, false],
     [[{ subject: 'Product', action: 'manage' }], false, false],
@@ -181,3 +190,133 @@ describe('current Prisma editorial capability/read authority', () => {
     },
   );
 });
+
+describe.each(['create', 'save'] as const)(
+  'guarded %s authority',
+  (operation) => {
+    function setup(withProvider = true) {
+      // Test-only authoritative source; no fixture provider is registered at runtime.
+      const document = {
+        tenantId: scope.tenantId,
+        productId: scope.productId,
+        variantIds: [],
+        assetIds: ['asset'],
+        families: [],
+      };
+      const provider = { resolve: jest.fn().mockResolvedValue(document) };
+      const f = fixture(withProvider ? provider : undefined);
+      const request = {
+        expectedCycle: 1,
+        idempotencyKey: 'key',
+        document: { ...emptyDocument(), mediaRefs: ['asset'] },
+      };
+      const attempt = () =>
+        operation === 'create'
+          ? f.core.create(scope, request)
+          : f.core.save(scope, { ...request, expectedRevision: 1 });
+      const port =
+        operation === 'create'
+          ? f.authority.createAuthority
+          : f.authority.saveAuthority;
+      return { ...f, provider, document, request, attempt, port };
+    }
+
+    it.each([
+      [],
+      [grants.read],
+      [grants.update],
+      [{ subject: 'all', action: 'manage' }],
+      [{ subject: 'Product', action: 'manage' }],
+      [{ subject: 'ProductEditorialDraft', action: 'manage' }],
+    ])('requires both explicit permissions, not %j', async (...permissions) => {
+      const f = setup();
+      f.members.mockResolvedValue([membership(permissions)]);
+      await expect(f.attempt()).rejects.toThrow('FORBIDDEN');
+      expect(f.provider.resolve).not.toHaveBeenCalled();
+      expect(f.query).not.toHaveBeenCalled();
+      expect(f.write).not.toHaveBeenCalled();
+    });
+
+    it.each(['absent', 'null', 'unavailable', 'tenant', 'product'])(
+      'denies %s document provider before receipt/state/write',
+      async (reason) => {
+        const f = setup(reason !== 'absent');
+        if (reason === 'null') f.provider.resolve.mockResolvedValue(null);
+        if (reason === 'unavailable')
+          f.provider.resolve.mockRejectedValue(new Error('private detail'));
+        if (reason === 'tenant') f.document.tenantId = 'other';
+        if (reason === 'product') f.document.productId = 'other';
+        await expect(f.attempt()).rejects.toThrow('FORBIDDEN');
+        expect(f.query).not.toHaveBeenCalled();
+        expect(f.write).not.toHaveBeenCalled();
+      },
+    );
+
+    it('captures caller scope and detaches returned document authority from provider mutation', async () => {
+      const f = setup();
+      f.provider.resolve.mockImplementation((input: typeof scope) => {
+        expect(input).toEqual(scope);
+        input.actorId = input.tenantId = input.productId = 'other';
+        return Promise.resolve(f.document);
+      });
+      const input = { ...scope };
+      const pending = f.port.resolve(input);
+      input.actorId = input.tenantId = input.productId = 'changed';
+      const access = await pending;
+      expect(access).toMatchObject({ ...scope, activeMember: true });
+      f.document.tenantId = f.document.productId = 'redirected';
+      f.document.assetIds.push('foreign');
+      expect(access?.documentAuthority).toEqual({
+        tenantId: scope.tenantId,
+        productId: scope.productId,
+        variantIds: [],
+        assetIds: ['asset'],
+        families: [],
+      });
+      expect(scope).toEqual({
+        actorId: 'actor',
+        tenantId: 'tenant',
+        productId: 'product',
+      });
+    });
+
+    it.each(['read', 'update', 'membership', 'account', 'references'])(
+      'returns full historical result only until current %s is revoked',
+      async (revoked) => {
+        const f = setup();
+        const result = {
+          cycle: 1,
+          draft: {
+            revision: 1,
+            basePublishedRevision: 2,
+            document: f.request.document,
+          },
+          published: { revision: 2, document: emptyDocument() },
+        };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          f.query
+            .mockResolvedValueOnce([{ id: scope.productId }])
+            .mockResolvedValueOnce([{ matches: true, result }]);
+          expect(await f.attempt()).toEqual(result);
+        }
+        if (revoked === 'read')
+          f.members.mockResolvedValue([membership([grants.update])]);
+        if (revoked === 'update')
+          f.members.mockResolvedValue([membership([grants.read])]);
+        if (revoked === 'membership') f.members.mockResolvedValue([]);
+        if (revoked === 'account')
+          f.user.mockResolvedValue({ isActive: false });
+        if (revoked === 'references') f.document.assetIds = [];
+        await expect(f.attempt()).rejects.toThrow(
+          revoked === 'references' ? 'MALFORMED' : 'FORBIDDEN',
+        );
+        expect(f.user).toHaveBeenCalledTimes(3);
+        expect(f.provider.resolve).toHaveBeenCalledTimes(
+          revoked === 'references' ? 3 : 2,
+        );
+        expect(f.query).toHaveBeenCalledTimes(4);
+        expect(f.write).not.toHaveBeenCalled();
+      },
+    );
+  },
+);

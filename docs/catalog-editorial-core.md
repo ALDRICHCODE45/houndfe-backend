@@ -37,22 +37,64 @@ Each resolution copies scope before awaiting and freshly queries `User.isActive`
 current tenant membership roles/permission rows and tenant-qualified Product.
 Missing/inactive/misqualified/unavailable dependencies return null. Membership
 without grants returns a qualified snapshot with all capabilities false. Exact
-`read:ProductEditorialDraft` enables only `canRead`; exact update enables only
-`canCreate`/`canSave`. Roles union; wildcard/manage grants and caller admin/authority
-flags never qualify. This is editorial scope, not generic operational Product auth.
+`read:ProductEditorialDraft` enables `canRead`; `canCreate`/`canSave` require both
+current explicit read and update (P2b human-approved disclosure policy). Update
+alone never implies read or executable writes. Roles union; wildcard/manage grants
+and caller admin/authority flags never qualify. This is editorial scope, not generic
+operational Product auth.
 
 The snapshot is a current-resolution observation, not a reusable authorization
 lease, HTTP DTO, verified JWT/transport context or DocumentAuthority. Callers must
 supply trusted principal scope internally; body IDs/flags are not authenticated by
 this class. Subsequent calls revalidate revocation; sequential queries do not
-promise atomic in-flight revocation. No definitions/media provider is invoked.
-Create/save booleans are capabilities only: required write-authority ports remain
-absent and the existing core denies writes. P2b owns qualified document-authority
-wrappers, provider-denial/mutation checks and replay revalidation coverage.
+promise atomic in-flight revocation. Resolving capabilities alone invokes no
+definitions/media provider and does not establish write/document authority.
 
 Evidence is mocked/in-memory only, including read-through-core revalidation; no
 fresh PostgreSQL proof or public activation. P2a rollback removes this adapter,
 its tests and this documentation, retaining P1 identities and existing core ports.
+
+## Guarded create/save ports (P2b; internal only)
+
+The same adapter exports `EditorialDocumentAuthorityProvider` with
+`resolve(context: EditorialContext): Promise<DocumentAuthority | null>`.
+A genuinely authoritative implementation must supply current tenant/Product
+qualified definitions, variants and private asset references. No production
+implementation, private-media bytes access or definition source is supplied here.
+
+Explicit integration wiring (not runtime registration):
+
+```ts
+const authority = new PrismaEditorialAuthority(
+  prisma,
+  documentAuthorityProvider,
+);
+const core = new PrismaCatalogEditorial(
+  prisma,
+  authority,
+  authority.createAuthority,
+  authority.saveAuthority,
+);
+```
+
+`createAuthority: EditorialCreateAuthority` and `saveAuthority: EditorialSaveAuthority`
+freshly resolve active membership/Product and **both explicit read+update** before
+each attempt/replay. Missing/null/unavailable/misqualified document providers deny.
+Scope is copied before awaiting and provider results are deep-cloned before
+qualification checks, isolating provider-owned objects and allowlists. The existing
+core validates current document references before receipts; success/replay may
+return full Draft/Published content only after these checks. Revoking either
+permission denies before receipt/state/write access. Capability flags alone do not
+mean the provider exists or that a write API is usable.
+
+Raw core ports remain trusted injected authorities: arbitrary custom write ports
+can bypass the adapter's read+update policy. Production integration must inject
+these guarded adapters, never expose caller-selected authority or use raw core as
+an HTTP security boundary. Transport, real definitions/private-media providers,
+media-byte authorization and runtime wiring remain separate gates. New evidence
+is mocked/in-memory, not fresh PostgreSQL execution. P2b rollback removes write
+ports/provider contract/tests and reverts its derived-capability policy change;
+P1/P2a remain independent historical units.
 
 ## Closed document validation (first review slice)
 
