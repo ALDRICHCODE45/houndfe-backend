@@ -89,6 +89,18 @@ Missing, partial or invalid private settings disable the resolver, even if all p
 
 For synthetic-only configuration tests, use the clean-child command above with `--config src/private-media/infrastructure/private-media-config.unit.config.cjs`. Passing these tests establishes neither lazy SDK composition nor provider policy.
 
+## Private SDK upload
+
+`PrivateS3Storage(config)` revalidates explicit private configuration before constructing the real SDK client with explicit credentials and `maxAttempts: 1`. It reads no environment settings and returns no public URL.
+
+- `put(metadata, bytes)` accepts JPEG/PNG/WebP only, with positive integer declared size within the configured cap and an exactly matching Buffer. It copies bytes and sends the exact bucket/key, content type/length and `ACL: 'private'`.
+- `remove(storageKey)` sends one exact-key delete. Only orchestration that proves ownership of a new attempt may use it for compensation; never use it after an indeterminate database outcome or for garbage collection.
+- Invalid input rejects before a command is sent. SDK failures propagate; the adapter performs no automatic cleanup.
+
+This slice has no read method yet. Neither explicit private ACL nor synthetic SDK tests establish real destination policy or production readiness.
+
+Run simulated upload/configuration/removal tests with the clean-child command above and `--config src/private-media/infrastructure/private-s3-storage.config.cjs`.
+
 ## Evidence boundaries
 
 - SDK transport tests must remain simulated; no DigitalOcean request is authorized.
