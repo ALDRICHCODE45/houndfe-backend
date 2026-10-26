@@ -54,6 +54,24 @@ env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
 
 The SQL proof uses only the admitted target and synthetic schema; it checks independent-client persistence, injection-shaped identifiers, foreign scope denial and unchanged rows after rejected writes.
 
+## Current private-media permissions
+
+`PrivateMediaAccess` composes the real `PrismaEditorialAuthority` with Prisma user, membership and Product queries. Each call resolves current authority; grants are not cached or accepted from callers.
+
+- `canUpload(context)` requires a matching active-member snapshot with exact editorial read and update permissions.
+- `canRead(context)` requires a matching active-member snapshot with exact editorial read permission.
+- Invalid identities, unavailable authority or mismatched actor/tenant/Product snapshots deny access. Role names and wildcard grants are not substitutes.
+
+The context is trusted internal identity, not HTTP authentication. Byte orchestration must derive tenant/Product qualification from the persisted asset before checking access. This observation does not make revocation atomic with a later storage operation.
+
+Run permission tests with real resolver composition and synthetic Prisma responses:
+
+```sh
+NODE_BIN="$(command -v node)"
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
+  node_modules/jest/bin/jest.js --config src/private-media/infrastructure/private-media-access.config.cjs --runInBand
+```
+
 ## Explicit private configuration
 
 `resolvePrivateMediaConfig(input)` reads only the supplied object and returns a frozen internal configuration (including frozen credentials), or `null` to disable private storage. It does not load environment files or construct a client.
