@@ -30,6 +30,7 @@ import type { IStockAlertStateRepository } from '../../stock-alerts/domain/stock
 function makeTxMock() {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   let responses: Array<Array<unknown>> = [];
+  let responseIndex = 0;
   const $queryRaw = ((
     strings: TemplateStringsArray,
     ...values: unknown[]
@@ -40,8 +41,9 @@ function makeTxMock() {
       if (i < values.length) sql += `$${i + 1}`;
     }
     calls.push({ sql, values });
+    if (/FOR (UPDATE|KEY SHARE)/.test(sql)) return Promise.resolve([]);
     const r = (responses as unknown as Array<Promise<unknown>>)[
-      calls.length - 1
+      responseIndex++
     ];
     return r ?? Promise.resolve([]);
   }) as unknown as jest.Mock;

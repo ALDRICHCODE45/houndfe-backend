@@ -39,6 +39,7 @@ type RawCall = { sql: string; values: unknown[] };
 function makeTxMock() {
   const calls: RawCall[] = [];
   let responses: Array<Array<unknown>> = [];
+  let responseIndex = 0;
 
   const $queryRaw = ((
     strings: TemplateStringsArray,
@@ -52,7 +53,9 @@ function makeTxMock() {
       }
     }
     calls.push({ sql, values });
-    const response = responses[calls.length - 1] ?? [];
+    // Parent locks have no stock result; retain the existing UPDATE/fallback fixtures.
+    if (/FOR (UPDATE|KEY SHARE)/.test(sql)) return Promise.resolve([]);
+    const response = responses[responseIndex++] ?? [];
     return Promise.resolve(response);
   }) as unknown as jest.Mock;
 
@@ -102,6 +105,73 @@ function makeStockAlertRepo(): jest.Mocked<IStockAlertStateRepository> {
 }
 
 const TENANT = 'tenant-1';
+
+describe('charge global ordering', () => {
+  it('locks mixed parents once in id order, processes row/alert keys in order, returns input-order crossings', async () => {
+    const tx = makeTxMock();
+    tx.setResponses(
+      Array.from({ length: 5 }, () => [
+        { newQuantity: 0, minQuantity: 0, useLotsAndExpirations: false },
+      ]),
+    );
+    const alerts = makeStockAlertRepo();
+    alerts.seedAndFlip.mockResolvedValue(1);
+    const outbox = makeOutboxWriter();
+    const repo = new PrismaProductRepository(
+      makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
+        typeof PrismaProductRepository
+      >[0],
+      outbox,
+      alerts,
+    );
+    const items = [
+      { productId: 'z', quantity: 1 },
+      { productId: 'm', variantId: 'v2', quantity: 1 },
+      { productId: 'a', variantId: 'v1', quantity: 1 },
+      { productId: 'm', quantity: 1 },
+      { productId: 'm', variantId: 'v1', quantity: 1 },
+      { productId: 'ignored', quantity: 0 },
+      { productId: 'negative', quantity: -1 },
+    ];
+    const result = await repo.decrementStockForCharge(items);
+    const locks = tx.calls.slice(0, 3);
+    expect(locks.map((c) => c.values)).toEqual([
+      ['a', TENANT],
+      ['m', TENANT],
+      ['z', TENANT],
+    ]);
+    expect(
+      locks.map((c) => c.sql.match(/FOR (UPDATE|KEY SHARE)/)?.[1]),
+    ).toEqual(['KEY SHARE', 'UPDATE', 'UPDATE']);
+    for (const lock of locks) {
+      expect(lock.sql).toMatch(/FROM "products"/);
+      expect(lock.sql).toMatch(/"id" = \$1 AND "tenantId" = \$2/);
+    }
+    const order = [
+      ['a', 'v1'],
+      ['m', null],
+      ['m', 'v1'],
+      ['m', 'v2'],
+      ['z', null],
+    ];
+    expect(
+      alerts.seedAndFlip.mock.calls.map(([c]) => [c.productId, c.variantId]),
+    ).toEqual(order);
+    expect(outbox.publish.mock.calls.map((c) => c[3])).toEqual(
+      order.map(([p, v]) => `${p}:${v ?? '__PRODUCT__'}`),
+    );
+    expect(tx.calls.slice(3).map((c) => c.values.slice(0, 3))).toEqual([
+      [1, 'v1', 'a'],
+      [1, 'm', TENANT],
+      [1, 'v1', 'm'],
+      [1, 'v2', 'm'],
+      [1, 'z', TENANT],
+    ]);
+    expect(result.map((c) => [c.productId, c.variantId])).toEqual(
+      items.slice(0, 5).map((c) => [c.productId, c.variantId ?? null]),
+    );
+  });
+});
 
 // ── Original contract — Stock-guard failure semantics unchanged ────────
 
@@ -362,7 +432,7 @@ describe('PrismaProductRepository.decrementStockForCharge — crossings (E.2)', 
     ]);
 
     // UPDATE variants — no useStock, no useLotsAndExpirations
-    const updateCall = tx.calls[0];
+    const updateCall = tx.calls[1];
     expect(updateCall.sql).toMatch(/UPDATE "variants"/);
     expect(updateCall.sql).not.toMatch(/"useStock"/);
     expect(updateCall.sql).not.toMatch(/"useLotsAndExpirations"/);
@@ -410,7 +480,7 @@ describe('PrismaProductRepository.decrementStockForCharge — crossings (E.2)', 
     ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
 
     // No SELECT fallback for variants (design Decision 5, finding #9).
-    expect(tx.calls).toHaveLength(1);
+    expect(tx.calls).toHaveLength(2); // qualified parent lock + Variant UPDATE
     expect(alertState.seedAndFlip).not.toHaveBeenCalled();
     expect(outbox.publish).not.toHaveBeenCalled();
   });
@@ -435,7 +505,7 @@ describe('PrismaProductRepository.decrementStockForCharge — crossings (E.2)', 
       ]),
     ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
 
-    const updateCall = tx.calls[0];
+    const updateCall = tx.calls[1];
     expect(updateCall.sql).toMatch(/"tenantId" = \$/);
     expect(updateCall.values).toContain(TENANT);
   });

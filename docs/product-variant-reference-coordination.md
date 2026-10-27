@@ -75,22 +75,27 @@ Witnesses are `pg_blocking_pids` edges and persisted readbacks, not timing.
    Variant, unchanged flags, one tenant price row; the Product gate is released.
    No database-native late failure exists here: `variants` has no unique SKU/barcode
    index (uniqueness is the application `isSkuTaken`/`isBarcodeTaken` check).
-3. **Stock inversion — reproduced deadlock.** `decrementStockForCharge` with the
-   batch `[Variant adjustment, parent Product adjustment]` updates the Variant row,
-   then the Product row; `removeVariant` takes the Product gate, then deletes the
-   Variant. Forcing that interleaving, PostgreSQL detected the cycle (`40P01`) and
-   aborted the removal; the charge committed (Variant and Product quantity 10 → 9)
-   and membership/prices stayed intact. The test asserts exactly one rejection whose
-   SQLSTATE is `40P01`, extracted from the engine error
-   (`PrismaClientUnknownRequestError` → the structured `PostgresError { code: "40P01" }`
-   fragment of its message), not from wording heuristics such as "deadlock"; the
-   winner's persisted state is checked for either branch.
-   The removal was the aborted side in every observed run (parent and verifier).
+3. **Stock inversion — fixed for charges (T8a).** RED reproduced `40P01` against
+   removal with `[Variant, parent Product]`; GREEN commits both, removal waiting on
+   the charge's Product gate. The pause remains before the Product UPDATE: formerly
+   after the Variant UPDATE, now before the first stock UPDATE. Readback: parent
+   quantity 9, no Variants or removed-Variant prices, `hasVariants = false`.
 
-Limits. This proves the internal service route accepts a same-parent mixed batch and
-that the interleaving deadlocks; it does NOT establish that upstream sale/charge
-callers build such batches, how often the window occurs, or that callers retry.
-PostgreSQL resolves the cycle by aborting one transaction, so no partial state was
-observed. No production change is made here; ordering stock adjustments
-Product-first, or retrying `40P01`, is a separate decision. External writers,
-triggers and DDL remain out of scope.
+Precondition caveat. The test still forces parent `quantity = 10` (`useStock` true)
+with Variants. The old cycle needed the guarded parent UPDATE to match; quantity 0
+would avoid that wait (inference, not separately tested). T7 found this state
+reachable through cancellation/restock of an old parent sale after adding Variants;
+PATCH can also diverge flags and membership. It is not an unreachable invariant.
+
+Charges now lock distinct qualified parents in one ascending-id sequence: UPDATE
+for parent-row adjustments, KEY SHARE for Variant-only parents. Mixed modes cannot
+be split into two ordered groups without risking inversion. KEY SHARE protects
+membership without serializing sibling Variant charges. Stock and alert/outbox keys
+then follow Product id, parent row first, Variant id; crossings retain input order.
+The new live spec proves opposite-order charges commit (exact quantities 8/8), and
+sibling charges finish while one is paused holding locks, with no observed blockers.
+
+Restock ordering remains unchanged, pending T8b; charge/restock deadlocks are not
+claimed fixed yet. Restock into a now-variant parent, bot parent+variant validation,
+and PATCH flag/member divergence remain open product decisions. No retry policy,
+HTTP/runtime activation, external-writer, trigger or DDL guarantee is introduced.

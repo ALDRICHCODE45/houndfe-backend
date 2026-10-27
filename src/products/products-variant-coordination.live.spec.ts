@@ -346,12 +346,13 @@ describe('live Variant membership and stock coordination', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('records the actual outcome of a Variant-then-Product stock batch against Product-then-Variant removal', async () => {
+  it('serializes a mixed stock charge before removal without a deadlock', async () => {
     const seed = await freshSeed();
     // Parent stock for the Product branch; thresholds avoid low-stock crossings/outbox.
     await observer.$executeRaw`UPDATE "products" SET "quantity" = ${10}, "minQuantity" = ${0}
       WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
     const batchBase = await open();
+    // Pause before the first stock UPDATE: fixed code already holds its parent gate.
     const paused = latch(batchBase, (sql) => sql.includes('UPDATE "products"'));
     const batch = actor(paused.client);
     const remover = actor(await open());
@@ -373,55 +374,39 @@ describe('live Variant membership and stock coordination', () => {
     );
     let removal: Promise<void> | undefined;
     try {
-      await paused.reached; // the Variant UPDATE has executed; Product UPDATE not yet sent
+      await paused.reached;
       removal = remover.run(seed, (p) =>
         p.removeVariant(seed.ids.productId, seed.ids.variantId),
       );
-      // Witness: removal holds the Product gate and waits on the batch's Variant row.
+      // Removal must wait on the charge's parent gate, before reading/deleting the child.
       expect(await waitForLockWait(observer, removerPid)).toContain(batchPid);
     } finally {
       paused.release();
       await Promise.allSettled([charge, removal]);
     }
     const [charged, removed] = await Promise.allSettled([charge, removal]);
-    const outcomes = [charged, removed];
-    const rejected = outcomes.filter((o) => o.status === 'rejected');
-    // Exactly one side aborts, with the PostgreSQL deadlock SQLSTATE itself.
-    expect(rejected).toHaveLength(1);
-    expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
-    const sqlState = postgresSqlState(rejected[0].reason);
-    expect(sqlState).toBe('40P01');
+    process.stdout.write(
+      `mixed charge/removal pids=${batchPid},${removerPid} SQLSTATEs=${JSON.stringify(
+        [charged, removed].map((o) =>
+          o.status === 'rejected' ? postgresSqlState(o.reason) : null,
+        ),
+      )}\n`,
+    );
+    expect(charged.status).toBe('fulfilled');
+    expect(removed.status).toBe('fulfilled');
 
     const membership = await readVariantMembership(
       observer,
       seed.ids.tenantId,
       seed.ids.productId,
     );
-    if (removed.status === 'fulfilled') {
-      // Charge aborted: no decrement persisted, removal committed.
-      expect(membership.variants).toEqual([]);
-      expect(membership.products[0]).toMatchObject({
-        hasVariants: false,
-        quantity: 10,
-      });
-      await expect(
-        readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
-      ).resolves.toEqual([]);
-    } else {
-      // Removal aborted: membership and prices intact, both decrements committed.
-      expect(membership.variants).toEqual([
-        { id: seed.ids.variantId, quantity: 9, minQuantity: 0 },
-      ]);
-      expect(membership.products[0]).toMatchObject({
-        hasVariants: true,
-        quantity: 9,
-      });
-      await expect(
-        readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
-      ).resolves.toHaveLength(1);
-    }
-    process.stdout.write(
-      `stock-inversion outcome: ${removed.status === 'fulfilled' ? 'charge' : 'removal'} aborted (SQLSTATE ${sqlState}), ${removed.status === 'fulfilled' ? 'removal' : 'charge'} committed\n`,
-    );
+    expect(membership.variants).toEqual([]);
+    expect(membership.products[0]).toMatchObject({
+      hasVariants: false,
+      quantity: 9,
+    });
+    await expect(
+      readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
+    ).resolves.toEqual([]);
   });
 });

@@ -304,11 +304,14 @@ export class PrismaProductRepository implements IProductRepository {
 
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
-    const crossings: StockCrossing[] = [];
+    const crossings: StockCrossing[][] = adjustments.map(() => []);
+    const ordered = await this.lockStockAdjustments(
+      prisma,
+      tenantId,
+      adjustments,
+    );
 
-    for (const adjustment of adjustments) {
-      if (adjustment.quantity <= 0) continue;
-
+    for (const { adjustment, index } of ordered) {
       if (adjustment.variantId) {
         // Variant path: no useStock / useLotsAndExpirations columns on
         // the variants table (design Decision 5, finding #9).
@@ -343,7 +346,7 @@ export class PrismaProductRepository implements IProductRepository {
             minQuantity,
           });
           if (won) {
-            crossings.push({
+            crossings[index].push({
               productId: adjustment.productId,
               variantId: adjustment.variantId,
               newQuantity,
@@ -407,7 +410,7 @@ export class PrismaProductRepository implements IProductRepository {
           minQuantity,
         });
         if (won) {
-          crossings.push({
+          crossings[index].push({
             productId: adjustment.productId,
             variantId: null,
             newQuantity,
@@ -417,7 +420,49 @@ export class PrismaProductRepository implements IProductRepository {
       }
     }
 
-    return crossings;
+    return crossings.flat();
+  }
+
+  private async lockStockAdjustments(
+    tx: TxClient,
+    tenantId: string,
+    adjustments: Array<{
+      productId: string;
+      variantId?: string | null;
+      quantity: number;
+    }>,
+  ) {
+    const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    const ordered = adjustments
+      .map((adjustment, index) => ({ adjustment: { ...adjustment }, index }))
+      .filter(({ adjustment }) => adjustment.quantity > 0)
+      .sort(
+        (a, b) =>
+          compare(a.adjustment.productId, b.adjustment.productId) ||
+          compare(a.adjustment.variantId || '', b.adjustment.variantId || ''),
+      );
+    const parents = new Map<string, boolean>();
+    for (const { adjustment } of ordered) {
+      parents.set(
+        adjustment.productId,
+        (parents.get(adjustment.productId) ?? false) || !adjustment.variantId,
+      );
+    }
+    // One global id sequence, not separate mode groups (which can invert ids).
+    // A single FOR UPDATE over the mixed set would over-lock sibling charges.
+    // KEY SHARE conflicts with membership/editorial FOR UPDATE, but not another
+    // charge's non-key UPDATE (FOR NO KEY UPDATE), keeping siblings concurrent.
+    for (const [productId, updatesParent] of parents) {
+      if (updatesParent) {
+        await tx.$queryRaw`SELECT "id" FROM "products"
+          WHERE "id" = ${productId} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      } else {
+        await tx.$queryRaw`SELECT "id" FROM "products"
+          WHERE "id" = ${productId} AND "tenantId" = ${tenantId} FOR KEY SHARE`;
+      }
+    }
+    // The caller also touches stock-alert keys/outbox in this same row order.
+    return ordered;
   }
 
   /**
