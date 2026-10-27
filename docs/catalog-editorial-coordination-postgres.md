@@ -1,0 +1,52 @@
+# Editorial PostgreSQL foundation (T4/U5a; S2/S5)
+
+Offline foundation only: no SQL, schema, seeds, target creation, consent proof or
+concurrency/rollback proof. U5b/U6/U7 remain separate. Existing core/services and
+root guards are unchanged. Rollback boundary: remove these four new harness,
+unit-spec, focused-config and documentation files; no production registration exists.
+
+## Operator contract
+
+Parent alone must create a NEW disposable target from the authorized cached image
+and freshly inspect/reinspect its full container ID, image ID, name, ownership label,
+and actual 127.0.0.1 port publication before each live run. Pin that observation
+separately from the requested binding. Matching caller metadata is NOT evidence of
+human consent, Docker ownership or continued identity; this API cannot prove those.
+Never reuse retired identifiers, endpoints or grants. Parent owns all SQL and cleanup.
+
+`constructEditorialPostgresClient(binding, pinned)` returns `Promise<PrismaClient>`
+without connecting. `PinnedPostgresTarget` requires full 64-lowercase-hex container
+ID, `sha256:` image ID, name `editorial-coordination-[a-z0-9-]{1,60}`, an owner
+identifier, exact host `127.0.0.1`, integer port 1–65535, and database/user matching
+`editorial_test_[a-z0-9_]{1,32}`. Binding contains only target, generated schema
+`editorial_test_[a-f0-9]{16}`, and an explicit disposable password (1–256 characters,
+no controls). All identity fields must match the separate pin. No URL/env fallback.
+Do not log bindings, options or clients; their URL necessarily contains credentials.
+Failures are generic and never forward dependency error text.
+
+After admission, static installed-client metadata inspection MUST succeed before
+client import; the constructor also clears BOTH relativeEnvPaths and
+injectableEdgeEnv while preserving other config. Explicit datasource alone is unsafe.
+Future live specs MUST dynamically import application code ONLY AFTER awaiting this
+safe bootstrap; static application imports can trigger Prisma dotenv before the guard.
+The optional generic `HarnessDependencies<T>` seam is for offline fakes only; it still
+runs mandatory admission and metadata validation, not a supported live guard bypass.
+URL pool limit is 1; connect/pool waits 5s, socket/transaction timeout 10s and
+transaction maxWait 5s. This is bounded client configuration, not a process sandbox.
+
+## Audited installed dependency boundary
+
+Current generated client: Prisma 6.19.2, `.prisma/client/index.js` lines1474 and1523:
+JSON-shaped relativeEnvPaths has null root and absent schema; warnEnvConflicts runs
+before export. Runtime `@prisma/client/runtime/library.js` lines12–16 contains env
+loading guarded by truthy existing paths; line130 applies configOverride BEFORE
+relativeEnvPaths resolution/env loading and then considers injectableEdgeEnv.
+These source bytes were read statically, never evaluated for inspection. Parser
+accepts only one bounded JSON object with absent/null root/schema fields; unknown,
+duplicate, non-null or malformed metadata fails closed. Source maximum is 2MB.
+This is a narrow current-dependency audit, NOT arbitrary JavaScript validation or
+protection against malicious installed packages/concurrent package replacement.
+Dependency changes require re-audit, not bypassing the check. No generated files
+are modified. Unit tests use fake constructors, including one installed metadata
+read; they do not establish live SQL correctness. Focused CJS project-service lint
+coverage may be limited; syntax check and ts-jest diagnostics remain mandatory.
