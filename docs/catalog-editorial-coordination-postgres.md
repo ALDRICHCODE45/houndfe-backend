@@ -154,8 +154,8 @@ env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 \
   src/catalog-editorial/infrastructure/editorial-coordination-foundation.live.spec.ts
 ```
 
-Implementation verification is offline only; the live smoke has NOT been run.
-A later parent run proves only these sequential persisted cases, not contention,
+The parent ran the smoke live (4/4) on a fresh PostgreSQL 16 target; see the
+feature log. It proves only these sequential persisted cases, not contention,
 selected-row lock edges, late-failure rollback, full Variant membership/stock
 coordination, permission-revocation atomicity, byte availability or HTTP activation.
 U6/U7 must supply their own concurrency/rollback witnesses. Remove only the two

@@ -49,3 +49,48 @@ sales, global transaction service, HTTP transport or production activation chang
 U4 rollback boundary: only the `removeVariant` hunk, removal fixture adaptations,
 new removal spec, its config entry and this U4 documentation; retain accepted U3.
 Risk item 4 / consumed-contract item 3 require parent independent verification.
+
+## Live evidence (U7, T4)
+
+`src/products/products-variant-coordination.live.spec.ts` runs against the
+disposable PostgreSQL 16 target through the live config
+(`docs/catalog-editorial-coordination-postgres.md`), with real `ProductsService`,
+`PrismaProductRepository`, `TenantPrismaService` and CLS. Each actor owns one
+connection. A test-only Prisma query extension on that actor's client pauses one
+statement before it is sent; pausing between two statements of one transaction takes
+and releases no lock, so it only fixes an interleaving the scheduler could produce.
+Witnesses are `pg_blocking_pids` edges and persisted readbacks, not timing.
+
+1. **Membership gate.** While an actual coordinated editorial create is paused just
+   before its state INSERT (Product gate and reference locks held), `removeVariant`
+   waits on the editorial backend and `addVariant` waits behind it (PostgreSQL may
+   report the second waiter as blocked by the first queued waiter's tuple lock).
+   A removal on another Product completes while the gate is held. After release the
+   draft commits, both membership writers complete, the Product keeps exactly the
+   added Variant with `hasVariants = true`, its price row is initialized at 0 for the
+   Product's price list, and the removed Variant's prices are gone.
+2. **Late rollback.** `addVariant` fails after its Variant INSERT executed (witness:
+   `RowExclusiveLock` on `variants` held by its backend); the failure is injected at
+   the client boundary before `variantPrice.createMany`. Readback: only the seeded
+   Variant, unchanged flags, one tenant price row; the Product gate is released.
+   No database-native late failure exists here: `variants` has no unique SKU/barcode
+   index (uniqueness is the application `isSkuTaken`/`isBarcodeTaken` check).
+3. **Stock inversion — reproduced deadlock.** `decrementStockForCharge` with the
+   batch `[Variant adjustment, parent Product adjustment]` updates the Variant row,
+   then the Product row; `removeVariant` takes the Product gate, then deletes the
+   Variant. Forcing that interleaving, PostgreSQL detected the cycle (`40P01`) and
+   aborted the removal; the charge committed (Variant and Product quantity 10 → 9)
+   and membership/prices stayed intact. The test asserts exactly one rejection whose
+   SQLSTATE is `40P01`, extracted from the engine error
+   (`PrismaClientUnknownRequestError` → the structured `PostgresError { code: "40P01" }`
+   fragment of its message), not from wording heuristics such as "deadlock"; the
+   winner's persisted state is checked for either branch.
+   The removal was the aborted side in every observed run (parent and verifier).
+
+Limits. This proves the internal service route accepts a same-parent mixed batch and
+that the interleaving deadlocks; it does NOT establish that upstream sale/charge
+callers build such batches, how often the window occurs, or that callers retry.
+PostgreSQL resolves the cycle by aborting one transaction, so no partial state was
+observed. No production change is made here; ordering stock adjustments
+Product-first, or retrying `40P01`, is a separate decision. External writers,
+triggers and DDL remain out of scope.
