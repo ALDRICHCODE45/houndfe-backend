@@ -1,4 +1,4 @@
-# Editorial editor HTTP contract — PROPOSAL (not implemented)
+# Editorial editor HTTP contract — PROPOSAL v2 (not implemented)
 
 Status: draft for joint BE/FE review. Nothing here exists yet except the read
 endpoint in §1. Neither side writes code against §2–§4 until this is closed.
@@ -24,15 +24,17 @@ GET never returns `warnings`.
 
 ## 2. Phase A — expose the existing core (no new domain logic)
 
-The core already implements these three writes; this phase only adds HTTP.
+The core already implements these writes; this phase only adds HTTP. The core
+also has an internal `create(document)`; it is NOT exposed: the editor flow is
+initialize (from published or empty) and then save. CORS already reflects
+requested headers (`enableCors()` defaults), so `Idempotency-Key` passes the
+preflight.
 
 | Operation  | Method and path                                        | Body                                            | Success |
 | ---------- | ------------------------------------------------------ | ----------------------------------------------- | ------- |
-| Create     | `POST /products/:productId/editorial/draft`            | `{ expectedCycle, document }`                   | `201`   |
 | Initialize | `POST /products/:productId/editorial/draft/initialize` | `{ expectedCycle }`                             | `201`   |
 | Save       | `PUT /products/:productId/editorial/draft`             | `{ expectedCycle, expectedRevision, document }` | `200`   |
 
-- **Create** starts a new draft from the caller's document (revision 1).
 - **Initialize** starts a new draft from the current published document, or an
   empty one if nothing is published. It takes no document.
 - **Save** replaces the whole draft document and increments the revision.
@@ -44,13 +46,14 @@ The core already implements these three writes; this phase only adds HTTP.
 
 ### 2.1 Idempotency
 
-Header `Idempotency-Key` (same name as cash-register), required on the three
+Header `Idempotency-Key` (same name as cash-register), required on both
 writes: 1–200 characters, sent as-is (not trimmed).
 
-- Scope: tenant + product + actor + key. Create and initialize share one key
-  space; save has its own.
-- Same key and same body → the recorded result is returned again. It is
-  rechecked against current permissions and vocabulary, so it can still fail.
+- Scope: tenant + product + actor + key. Initialize and save have separate key
+  spaces.
+- Same key and same body → the recorded result is returned again with the same
+  status (`201` for initialize, `200` for save). It is rechecked against current
+  permissions and vocabulary, so it can still fail.
 - Same key, different body → `409 CONFLICT`.
 - FE: generate a new key per user action, reuse it only when retrying the
   same request after a network failure.
@@ -86,7 +89,8 @@ Rules the backend enforces (FE should mirror them to avoid round trips):
 - `code`, `owner` and `type` must match a definition bound to the family.
 - A new assignment cannot use an archived option. An archived option already
   present in the draft can be kept.
-- There are no length or count limits today (see open question Q4).
+- The validator has no length or count limits today. The only real limit is
+  the default JSON body size of 100 kB (Nest/body-parser). See Q4.
 
 ### 2.3 Warnings
 
@@ -124,8 +128,11 @@ This is NOT the global `{ statusCode, error, message, timestamp }` envelope.
 | 409    | `CONFLICT`       | Stale cycle/revision, draft already exists, or key reused with other body |
 | 500    | `INTERNAL_ERROR` | Unexpected                                                                |
 
-Suggested FE handling of `409`: reload with GET and tell the user the draft
-changed; keep their unsaved edits locally so they can reapply them.
+`409` covers several causes with the same body. The editor tells them apart by
+reloading with GET: if `cycle`/`draft.revision` differ from what it loaded, the
+draft changed (show reconcile, keep the local buffer); if they are equal, the
+key was reused with another body (an FE bug: new key, resend). No autosave or
+automatic retry on `409`.
 
 ## 3. Phase B — new backend work an editor needs
 
@@ -156,19 +163,27 @@ Without these the editor cannot list vocabulary or attach images.
 }
 ```
 
-Company-wide vocabulary, permission `ProductEditorialDraft:read`. Managing the
-vocabulary (creating families/definitions/options) is out of scope.
+Company-wide vocabulary, permission `ProductEditorialDraft:read`. Bindings are
+returned with the definition code for convenience; the stored key is the
+definition id. Archived options are listed with `archived: true` so the editor
+can show kept values.
+
+Gaps found in the schema: families, definitions, options and units store only a
+`code` — no display label, no sort order, no version. The editor can only show
+codes unless we add labels (Q7). There is also no way to create vocabulary other
+than writing to the database (Q8).
 
 ### 3.2 Product media
 
-| Operation | Method and path                                         | Notes                                                      |
-| --------- | ------------------------------------------------------- | ---------------------------------------------------------- |
-| Upload    | `POST /products/:productId/editorial/media` (multipart) | PNG only today; returns `{ assetId, mimeType, sizeBytes }` |
-| List      | `GET /products/:productId/editorial/media`              | Needs a new repository query                               |
-| Read      | `GET /products/:productId/editorial/media/:assetId`     | Streams bytes; authenticated, no public URL                |
+| Operation | Method and path                                         | Notes                                                                                                               |
+| --------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Upload    | `POST /products/:productId/editorial/media` (multipart) | JPEG, PNG or WebP, 1 byte to 10 MiB (existing schema and domain limits); returns `{ assetId, mimeType, sizeBytes }` |
+| List      | `GET /products/:productId/editorial/media`              | Needs a new repository query                                                                                        |
+| Read      | `GET /products/:productId/editorial/media/:assetId`     | Streams bytes; authenticated, no public URL                                                                         |
 
 Requires wiring private storage configuration (S3/Spaces) for the API, which
-today exists only as an offline factory.
+today exists only as an offline factory. That configuration and a privacy proof
+against real storage need their own authorization.
 
 ## 4. Phase C — publish (needs a product decision first)
 
@@ -176,15 +191,24 @@ The core cannot publish: published content only changes through code that does
 not exist yet. Publishing needs a new core operation, a new permission and a
 decision on what consumes the published document (public catalog, POS, both).
 
-## 5. Open questions
+## 5. Decisions and open questions
 
-- Q1 (user): Is publish part of this delivery, or a later phase?
-- Q2 (user): Which role(s) should get `ProductEditorialDraft:read`/`:update`?
-  Today nobody has them by default, not even Super Admin via `manage:all`.
-- Q3 (FE): Is a generic `400 MALFORMED` / `409 CONFLICT` acceptable for a first
-  version, or do you need field-level reasons? Field reasons need core changes.
-- Q4 (FE/user): Do you want length/count limits (title, description, media,
-  values)? None exist today.
-- Q5 (FE): Path and method names in §2 and §3, and `Idempotency-Key` as a
-  header rather than a body field.
-- Q6 (user): Image formats beyond PNG, and maximum size.
+Decided by the user:
+
+- Publish is a later phase (§4 stays out of this delivery).
+- The tenant admin role gets `ProductEditorialDraft:read` and `:update` by
+  default (seeder); `manage:all` is still NOT an editorial grant.
+- Images: JPEG, PNG, WebP, as the schema already allows.
+
+Open:
+
+- Q3 (FE): generic `400 MALFORMED` is acceptable only with verifiable client
+  validation (mirroring §2.2) and a preserved local buffer — confirm.
+- Q4 (user): explicit limits to add as contract (title, description, number of
+  media and values, body size). Proposed, to be confirmed: title ≤ 200,
+  description ≤ 20 000 characters, ≤ 20 media, ≤ 200 values, body ≤ 100 kB.
+- Q5 (FE): paths, methods, header — confirm with this v2.
+- Q6 (user): keep the existing 10 MiB image limit (proposal) or lower it.
+- Q7 (user): add display labels (and sort order) to the vocabulary, or have FE
+  map codes to labels.
+- Q8 (user): how vocabulary is created (seed, admin screen, import).
