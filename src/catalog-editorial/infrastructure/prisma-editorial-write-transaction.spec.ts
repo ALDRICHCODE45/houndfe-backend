@@ -5,7 +5,11 @@ import {
   createPrismaEditorialWriteAuthority,
   type EditorialWriteAuthorityFactory,
 } from './prisma-editorial-write-authority';
-import { emptyDocument, type DocumentAuthority } from '../domain/document';
+import {
+  emptyDocument,
+  type DocumentAuthority,
+  type EditorialDocument,
+} from '../domain/document';
 import { EDITORIAL_PERMISSIONS as grants } from '../domain/editorial-permissions';
 
 const scope = { actorId: 'actor', tenantId: 'tenant', productId: 'product' };
@@ -157,6 +161,202 @@ function fixture(operation: Operation, coordinated = true) {
     before,
   };
 }
+
+function limitsFixture(document: EditorialDocument) {
+  const f = fixture('save', false);
+  const authority: DocumentAuthority = {
+    ...f.document,
+    assetIds: document.mediaRefs,
+    families:
+      document.familyCode === null
+        ? []
+        : [
+            {
+              code: document.familyCode,
+              attributes: document.values.map((value) => ({
+                code: value.code,
+                owner: value.owner,
+                type: 'text',
+              })),
+            },
+          ],
+  };
+  f.legacy.resolve.mockResolvedValue({
+    ...scope,
+    activeMember: true,
+    canRead: true,
+    canCreate: true,
+    canSave: true,
+    documentAuthority: authority,
+  } as never);
+  const query = f.query.getMockImplementation()!;
+  f.query.mockImplementation((sql) => {
+    const text = sql.sql;
+    if (text.includes('FROM editorial_families'))
+      return document.familyCode === null
+        ? []
+        : [{ id: 'family', code: document.familyCode }];
+    if (text.includes('FROM editorial_definitions'))
+      return document.values.map((value) => ({
+        id: value.code,
+        code: value.code,
+        type: 'text',
+      }));
+    if (text.includes('FROM editorial_bindings'))
+      return document.values.map((value) => ({
+        familyId: 'family',
+        definitionId: value.code,
+        owner: value.owner,
+      }));
+    return query(sql);
+  });
+  const save = () =>
+    f.core.save(scope, {
+      expectedCycle: 1,
+      expectedRevision: 1,
+      idempotencyKey: 'limits',
+      document,
+    });
+  return { ...f, save };
+}
+
+function countedDocument(field: string, count: number): EditorialDocument {
+  const document = emptyDocument();
+  if (field === 'commercialTitle' || field === 'description')
+    document[field] = '😀'.repeat(count);
+  if (field === 'mediaRefs')
+    document.mediaRefs = Array.from({ length: count }, (_, i) => `asset-${i}`);
+  if (field === 'values') {
+    document.familyCode = 'family';
+    document.values = Array.from({ length: count }, (_, i) => ({
+      code: `text-${i}`,
+      owner: 'product',
+      variantId: null,
+      type: 'text',
+      value: 'unchanged',
+    }));
+  }
+  return document;
+}
+
+describe('fresh-save document limits', () => {
+  const boundaries = [
+    ['commercialTitle', 200],
+    ['description', 20000],
+    ['mediaRefs', 20],
+    ['values', 200],
+  ] as const;
+
+  it.each(boundaries)(
+    'accepts %s exactly at %i without normalization',
+    async (field, maximum) => {
+      const document = countedDocument(field, maximum);
+      const f = limitsFixture(document);
+      await expect(f.save()).resolves.toMatchObject({ draft: { document } });
+      expect(f.write).toHaveBeenCalledTimes(2);
+      const [sql] = f.write.mock.calls[0] as [Prisma.Sql];
+      expect(sql.values).toContain(JSON.stringify(document));
+    },
+  );
+
+  it.each(boundaries)(
+    'rejects %s above %i without any write',
+    async (field, maximum) => {
+      const f = limitsFixture(countedDocument(field, maximum + 1));
+      await expect(f.save()).rejects.toThrow('MALFORMED');
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(f.before);
+    },
+  );
+
+  it.each([
+    ['commercialTitle', 200],
+    ['description', 20000],
+  ] as const)(
+    'counts combining marks separately for %s',
+    async (field, maximum) => {
+      const document = emptyDocument();
+      document[field] = 'e\u0301'.repeat(maximum / 2);
+      await expect(limitsFixture(document).save()).resolves.toMatchObject({
+        draft: { document },
+      });
+      document[field] += '\u0301';
+      const f = limitsFixture(document);
+      await expect(f.save()).rejects.toThrow('MALFORMED');
+      expect(f.write).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(boundaries)(
+    'does not apply %s limits to a matching historical replay',
+    async (field, maximum) => {
+      const document = countedDocument(field, maximum + 1);
+      const f = limitsFixture(document);
+      const result = {
+        cycle: 1,
+        draft: { revision: 2, basePublishedRevision: null, document },
+        published: null,
+      };
+      const query = f.query.getMockImplementation()!;
+      f.query.mockImplementation((sql) =>
+        sql.sql.includes('catalog_editorial_save_receipts')
+          ? [{ matches: true, result }]
+          : query(sql),
+      );
+      await expect(f.save()).resolves.toEqual(result);
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(f.before);
+    },
+  );
+
+  it.each(boundaries)(
+    'initializes from Published above the %s limit',
+    async (field, maximum) => {
+      const document = countedDocument(field, maximum + 1);
+      const f = limitsFixture(document);
+      const query = f.query.getMockImplementation()!;
+      f.query.mockImplementation((sql) =>
+        sql.sql.includes('FROM "catalog_editorial_states"')
+          ? [
+              {
+                cycle: 1,
+                draftRevision: null,
+                publishedRevision: 1,
+                publishedDocument: document,
+              },
+            ]
+          : query(sql),
+      );
+      await expect(
+        f.core.initialize(scope, {
+          expectedCycle: 1,
+          idempotencyKey: 'initialize',
+        }),
+      ).resolves.toMatchObject({ draft: { document } });
+      expect(f.write).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('keeps internal create unchanged', async () => {
+    const document = countedDocument('commercialTitle', 201);
+    const f = limitsFixture(document);
+    f.persistence.state = null;
+    await expect(
+      f.core.create(scope, {
+        expectedCycle: null,
+        idempotencyKey: 'create',
+        document,
+      }),
+    ).resolves.toMatchObject({ draft: { document } });
+  });
+
+  it('keeps stale state CONFLICT ahead of an over-limit candidate', async () => {
+    const f = limitsFixture(countedDocument('commercialTitle', 201));
+    f.persistence.state!.draft.revision = 2;
+    await expect(f.save()).rejects.toThrow('CONFLICT');
+    expect(f.write).not.toHaveBeenCalled();
+  });
+});
 
 describe.each(operations)('transaction-scoped %s authority', (operation) => {
   it('binds once to actual callback tx, gates before documents, and persists state plus receipt', async () => {

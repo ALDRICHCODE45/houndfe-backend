@@ -3,6 +3,7 @@ module.exports = {
   testEnvironment: 'node',
   testMatch: [
     '<rootDir>/src/catalog-editorial/http/editorial-read.http.spec.ts',
+    '<rootDir>/src/catalog-editorial/http/editorial-write.http.spec.ts',
   ],
   transform: {
     '^.+\\.ts$': [

@@ -21,7 +21,8 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --config jest.config.js --runInBand",
     "test:db:up": "docker compose up -d postgres-test",
     "test:db:down": "docker compose down postgres-test",
-    "seed:sat": "ts-node prisma/seed-sat-run.ts"
+    "seed:sat": "ts-node prisma/seed-sat-run.ts",
+    "seed:editorial-vocabulary": "ts-node prisma/editorial-vocabulary-seed.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1035.0",
