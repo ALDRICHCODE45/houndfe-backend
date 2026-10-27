@@ -1406,6 +1406,33 @@ describe('ChatbotApiService', () => {
       expect(result.channel).toBe('ONLINE');
     });
 
+    it.each([
+      'PRICE_OUT_OF_DATE',
+      'BOT_ITEM_VARIANT_REQUIRED',
+      'BOT_ITEM_VARIANT_NOT_ALLOWED',
+      'BOT_ITEM_VARIANT_MISMATCH',
+    ])('preserves registration idempotency handling on %s', async (code) => {
+      saleRepository.acquireSaleRegistrationIdempotency.mockResolvedValue({
+        kind: 'acquired',
+        token: 'idem-1',
+      });
+      const rejection = new BusinessRuleViolationError(code, code);
+      salesService.confirmBotSale.mockRejectedValueOnce(rejection);
+      await expect(service.registerBotSale(botSaleInput)).rejects.toBe(
+        rejection,
+      );
+      expect(
+        saleRepository.acquireSaleRegistrationIdempotency,
+      ).toHaveBeenCalledWith(
+        botSaleInput.idempotencyKey,
+        computeRegisterBotSaleRequestHash(botSaleInput),
+      );
+      expect(salesService.confirmBotSale).toHaveBeenCalledTimes(1);
+      expect(
+        saleRepository.markSaleRegistrationIdempotencySucceeded,
+      ).not.toHaveBeenCalled();
+    });
+
     it('returns cached response without creating a duplicate sale on idempotency replay', async () => {
       // Q3 / WU2 — the repo returns { kind: 'replay', payload } when a
       // SUCCEEDED row with matching hash already exists; the service

@@ -2,7 +2,11 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { createHash } from 'node:crypto';
 import { CheckoutRequestDto } from '../presentation/dto/checkout.request';
-import { computeCheckoutRequestHash } from './checkout.service';
+import {
+  CheckoutService,
+  computeCheckoutRequestHash,
+} from './checkout.service';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 
 const id = '00000000-0000-4000-8000-000000000001';
 const version = '2026-10-14T00:00:00.000Z';
@@ -41,6 +45,75 @@ const correction = () => ({
   addressId: id,
   expectedVersion: version,
   address: { ...address },
+});
+
+describe('Checkout confirmation rejection', () => {
+  it.each([
+    'PRICE_OUT_OF_DATE',
+    'BOT_ITEM_VARIANT_REQUIRED',
+    'BOT_ITEM_VARIANT_NOT_ALLOWED',
+    'BOT_ITEM_VARIANT_MISMATCH',
+  ])(
+    'rolls back customer/address effects and skips receipt on %s',
+    async (code) => {
+      const pending: string[] = [];
+      const committed: string[] = [];
+      const receiptCreate = jest.fn();
+      const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([{ acquired: true }]),
+        saleIdempotency: {
+          findUnique: jest.fn().mockResolvedValue(null),
+          create: receiptCreate,
+        },
+        tenantMembership: { findFirst: jest.fn().mockResolvedValue({ id }) },
+        customer: {
+          findMany: jest.fn().mockResolvedValue([]),
+          create: jest.fn().mockImplementation(() => {
+            pending.push('customer');
+            return { id, firstName: 'Buyer', lastName: null };
+          }),
+        },
+        customerAddress: {
+          create: jest.fn().mockImplementation(() => {
+            pending.push('address');
+            return { id, updatedAt: new Date(version) };
+          }),
+        },
+      };
+      const tenant = {
+        getTenantId: () => 'tenant-1',
+        getClient: () => tx,
+        runInTransaction: jest.fn(async (work: () => Promise<unknown>) => {
+          try {
+            const result = await work();
+            committed.push(...pending);
+            return result;
+          } finally {
+            pending.length = 0;
+          }
+        }),
+      };
+      const rejection = new BusinessRuleViolationError(code, code);
+      const confirmBotSale = jest.fn().mockImplementation(() => {
+        expect(pending).toEqual(['customer', 'address']);
+        return Promise.reject(rejection);
+      });
+      const service = new CheckoutService(
+        tenant as never,
+        { confirmBotSale } as never,
+        {} as never,
+      );
+      const request = plainToInstance(CheckoutRequestDto, {
+        ...input({ mode: 'newSaved', address }),
+        customer: { mode: 'createIfAbsent', firstName: 'Buyer' },
+      });
+      await expect(service.create(request, 'key')).rejects.toBe(rejection);
+      expect(tenant.runInTransaction).toHaveBeenCalledTimes(1);
+      expect(confirmBotSale).toHaveBeenCalledTimes(1);
+      expect(committed).toEqual([]);
+      expect(receiptCreate).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('Checkout intent hash', () => {

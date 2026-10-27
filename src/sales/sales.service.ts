@@ -3678,6 +3678,47 @@ export class SalesService {
       const tenantId = this.tenantPrisma.getTenantId();
       const prisma = this.tenantPrisma.getClient();
 
+      // Keep live-price errors first, but check current membership before
+      // any confirmation writes. The POS helper also checks sellInPos,
+      // which is deliberately not a requirement for bot sales.
+      for (const item of input.items) {
+        const { productId } = item;
+        const variantId = item.variantId ?? null;
+        const details = { productId, ...(variantId ? { variantId } : {}) };
+        const product = await prisma.product.findUnique({
+          where: { id: productId, tenantId },
+          select: { hasVariants: true },
+        });
+        if (!product) throw new EntityNotFoundError('Product', productId);
+        if (product.hasVariants && !variantId) {
+          throw new BusinessRuleViolationError(
+            'A variant is required for this product',
+            'BOT_ITEM_VARIANT_REQUIRED',
+            details,
+          );
+        }
+        if (!product.hasVariants && variantId) {
+          throw new BusinessRuleViolationError(
+            'This product does not allow a variant',
+            'BOT_ITEM_VARIANT_NOT_ALLOWED',
+            details,
+          );
+        }
+        if (variantId) {
+          const variant = await prisma.variant.findFirst({
+            where: { id: variantId, productId, tenantId },
+            select: { id: true },
+          });
+          if (!variant) {
+            throw new BusinessRuleViolationError(
+              'Variant does not belong to this product',
+              'BOT_ITEM_VARIANT_MISMATCH',
+              details,
+            );
+          }
+        }
+      }
+
       // O1 — the customer must exist INSIDE this tenant before any of its
       // identifiers reach the aggregate. A missing customer and a foreign
       // (other-tenant) customer are indistinguishable through the

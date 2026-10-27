@@ -15,12 +15,12 @@ Neither endpoint takes tenant information from the request body. Service credent
 
 ## Headers
 
-| Header | Rule |
-| --- | --- |
-| `Authorization` | Existing `Bearer svc_…` service authentication. |
-| `X-Branch-Id` | Optional existing guard behavior: if supplied, must equal credential tenant. |
+| Header              | Rule                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| `Authorization`     | Existing `Bearer svc_…` service authentication.                                      |
+| `X-Branch-Id`       | Optional existing guard behavior: if supplied, must equal credential tenant.         |
 | `X-Idempotency-Key` | Required for POST and GET; trimmed, nonempty, at most 200 characters after trimming. |
-| `Content-Type` | `application/json` for POST. |
+| `Content-Type`      | `application/json` for POST.                                                         |
 
 Keys belong in the header, not a URL or query string. Authentication, credential activity, branch ownership and existing rate limits apply unchanged.
 
@@ -124,19 +124,19 @@ Coordinates are not accepted in the body. Changing any of `street`, `exteriorNum
 
 ### Customer and address rules
 
-| Field | Validation |
-| --- | --- |
-| `phoneCountryCode` | Required string of 1–10 ASCII digits. |
-| `phone` | Required string of 1–20 ASCII digits. No `+`, spaces or silent punctuation stripping. |
-| `firstName` | Required for `createIfAbsent`, nonblank string, at most 100 characters. |
-| `lastName` | Optional string of at most 100 characters or null; omission means null only on a newly created customer. |
-| `street` | Required for `newSaved` / `existingUpdated`, nonblank string; see existing validation limitation below. |
-| `label` | Optional/null, at most 100 characters. |
-| `exteriorNumber`, `interiorNumber`, `carrierPhone` | Optional/null, at most 20 characters. |
-| `zipCode` | Optional/null, at most 10 characters. |
-| `neighborhood`, `municipality`, `city` | Optional/null, at most 100 characters. |
-| `state` | Optional/null; existing `MEXICAN_STATES` enum, not free text. |
-| `visualReferences` | Optional/null, at most 500 characters. |
+| Field                                              | Validation                                                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `phoneCountryCode`                                 | Required string of 1–10 ASCII digits.                                                                    |
+| `phone`                                            | Required string of 1–20 ASCII digits. No `+`, spaces or silent punctuation stripping.                    |
+| `firstName`                                        | Required for `createIfAbsent`, nonblank string, at most 100 characters.                                  |
+| `lastName`                                         | Optional string of at most 100 characters or null; omission means null only on a newly created customer. |
+| `street`                                           | Required for `newSaved` / `existingUpdated`, nonblank string; see existing validation limitation below.  |
+| `label`                                            | Optional/null, at most 100 characters.                                                                   |
+| `exteriorNumber`, `interiorNumber`, `carrierPhone` | Optional/null, at most 20 characters.                                                                    |
+| `zipCode`                                          | Optional/null, at most 10 characters.                                                                    |
+| `neighborhood`, `municipality`, `city`             | Optional/null, at most 100 characters.                                                                   |
+| `state`                                            | Optional/null; existing `MEXICAN_STATES` enum, not free text.                                            |
+| `visualReferences`                                 | Optional/null, at most 500 characters.                                                                   |
 
 Omitted optional address fields become null on the new row (`newSaved`) or corrected row (`existingUpdated`). `existing` never mutates the address. Coordinates, billing and preferred-payment fields are not accepted.
 
@@ -145,6 +145,24 @@ Existing validation limitation (unchanged): the shared checkout street subclass'
 Phone lookup is tenant-qualified and stops at two matches. An ambiguous sender is rejected; the API never guesses a customer. `existing` requires the unique phone match to have exactly the supplied customer ID. `createIfAbsent` creates on zero matches, or reuses a unique match without changing its name/profile. `resolution` in the response reports which happened. New addresses are appended only if the order succeeds. Existing address ownership must match both tenant and customer.
 
 UUID syntax follows the existing validator. IDs are exact opaque strings; do not lowercase or case-fold them for identity comparisons. The cashier must have a membership in the credential tenant.
+
+### Current Product/Variant validation
+
+Both `POST /chatbot-api/sales` and `POST /chatbot-api/checkouts` validate current tenant-qualified Product/Variant rows during confirmation:
+
+| HTTP | Domain code                    | Rejection                                                         |
+| ---- | ------------------------------ | ----------------------------------------------------------------- |
+| 422  | `BOT_ITEM_VARIANT_REQUIRED`    | Product has variants, but the item omits `variantId`.             |
+| 422  | `BOT_ITEM_VARIANT_NOT_ALLOWED` | Item supplies `variantId`, but Product has no variants.           |
+| 422  | `BOT_ITEM_VARIANT_MISMATCH`    | Variant is missing or does not belong to this Product and tenant. |
+
+A parent item plus its Variant in the same batch is rejected when the Product has variants. A valid Variant remains accepted. These checks do not impose the POS-only `sellInPos` restriction. Missing/foreign Products use the existing `EntityNotFoundError` contract.
+
+Domain errors carry details `{ productId, variantId? }`. The sales route's shared filter returns `statusCode: 422`, `error: <domain code>`, a descriptive `message`, `timestamp`, and flattened details. The checkout controller preserves the code but strips details: `{ "statusCode": 422, "error": "BOT_ITEM_VARIANT_REQUIRED", "message": "BOT_ITEM_VARIANT_REQUIRED" }`. Neither envelope adds a separate `code` field.
+
+Existing shipping checks and registration/checkout idempotency replay/conflict handling remain first. Confirmation validates all live prices before the new rules, then resolves customer/address references and recomputes pricing. Thus `PRICE_OUT_OF_DATE` still wins over an invalid variant. Variant failures occur before sale save, promotion-capacity claim, stock, folio, confirmation persistence and outbox writes. Registration handles them exactly like price-validation failures (no success stamp; existing acquisition behavior unchanged). Checkout rolls back earlier customer/address writes and writes no successful receipt.
+
+These are transactional read-time checks, not a new lock protocol or a guarantee against concurrent membership changes. Offline tests exercise confirmation and entry-path rejection handling; no new live-database proof is claimed.
 
 ### Sale and approved shipping
 
@@ -201,7 +219,10 @@ Customer resolution is `created | existing`. Address resolution is `created | ex
 `GET /chatbot-api/checkouts/status` uses the same authorization/scopes and `X-Idempotency-Key` header. It reads only `bot_checkout_create`, never legacy sale registration receipts.
 
 ```json
-{ "status": "succeeded", "checkout": "<the complete original POST success object>" }
+{
+  "status": "succeeded",
+  "checkout": "<the complete original POST success object>"
+}
 ```
 
 The placeholder above is an **object**, not a string in the actual response. If no committed successful result is visible:
@@ -225,18 +246,22 @@ The operation takes transaction-scoped key/phone locks, uses the ambient transac
 New-route controlled errors are fixed code-only envelopes; arbitrary domain/driver messages and details are never copied into the response or audit error message:
 
 ```json
-{ "statusCode": 409, "error": "CUSTOMER_PHONE_AMBIGUOUS", "message": "CUSTOMER_PHONE_AMBIGUOUS" }
+{
+  "statusCode": 409,
+  "error": "CUSTOMER_PHONE_AMBIGUOUS",
+  "message": "CUSTOMER_PHONE_AMBIGUOUS"
+}
 ```
 
-| HTTP | Code / meaning |
-| --- | --- |
-| 400 | `INVALID_CHECKOUT_REQUEST`, `INVALID_IDEMPOTENCY_KEY`. |
-| 404 | `CUSTOMER_NOT_FOUND`, `SHIPPING_ADDRESS_NOT_FOUND`, `CASHIER_NOT_FOUND`; missing/foreign identities are not distinguished. |
-| 409 | `CUSTOMER_PHONE_AMBIGUOUS`, `ADDRESS_VERSION_CONFLICT` (both existing-address modes), `IDEMPOTENCY_KEY_CONFLICT` (including a different correction body under the same key), `IDEMPOTENCY_KEY_IN_FLIGHT`. |
-| 409 | Existing `PRICE_OUT_OF_DATE`, `PROMO_RE_QUOTE`, `STOCK_INSUFFICIENT_AT_CONFIRM`, `SHIPPING_APPROVAL_ALREADY_USED` and promotion-capacity conflicts. |
-| 422 | Existing shipping policy or other typed domain-rule rejections; code only, no raw details. |
-| 503 | `CHECKOUT_RETRY_REQUIRED`; retry the same request/key, never assume the cart is safe to replace. |
-| 500 | `CHECKOUT_CREATE_FAILED`, also the fixed code for unexpected status-read failures. |
+| HTTP | Code / meaning                                                                                                                                                                                            |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400  | `INVALID_CHECKOUT_REQUEST`, `INVALID_IDEMPOTENCY_KEY`.                                                                                                                                                    |
+| 404  | `CUSTOMER_NOT_FOUND`, `SHIPPING_ADDRESS_NOT_FOUND`, `CASHIER_NOT_FOUND`; missing/foreign identities are not distinguished.                                                                                |
+| 409  | `CUSTOMER_PHONE_AMBIGUOUS`, `ADDRESS_VERSION_CONFLICT` (both existing-address modes), `IDEMPOTENCY_KEY_CONFLICT` (including a different correction body under the same key), `IDEMPOTENCY_KEY_IN_FLIGHT`. |
+| 409  | Existing `PRICE_OUT_OF_DATE`, `PROMO_RE_QUOTE`, `STOCK_INSUFFICIENT_AT_CONFIRM`, `SHIPPING_APPROVAL_ALREADY_USED` and promotion-capacity conflicts.                                                       |
+| 422  | Existing shipping policy or other typed domain-rule rejections; code only, no raw details.                                                                                                                |
+| 503  | `CHECKOUT_RETRY_REQUIRED`; retry the same request/key, never assume the cart is safe to replace.                                                                                                          |
+| 500  | `CHECKOUT_CREATE_FAILED`, also the fixed code for unexpected status-read failures.                                                                                                                        |
 
 Existing guard 401/403/429 envelopes are unchanged. Audit actions are `checkouts.create` and `checkouts.status` with route/status/outcome only; body, phone/address and idempotency key are not included. Credential last-used/rate-limit/audit telemetry is not business data and is not rolled back with the order.
 
