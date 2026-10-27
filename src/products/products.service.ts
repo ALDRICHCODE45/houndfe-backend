@@ -1369,29 +1369,35 @@ export class ProductsService {
   }
 
   async removeVariant(productId: string, variantId: string) {
-    // F1.WU4d2b — tenant-scoped pre-read with explicit predicates.
     const tenantId = this.tenantPrisma.getTenantId();
-    const tenantClient = this.tenantPrisma.getClient();
-    const variant = await tenantClient.variant.findFirst({
-      where: { id: variantId, productId, tenantId },
-    });
-    if (!variant) throw new EntityNotFoundError('Variant', variantId);
-
-    // F1.WU4d2b — tenant client, still a single-row delete (not deleteMany).
-    await tenantClient.variant.delete({
-      where: { id: variantId, tenantId },
-    });
-
-    // Check if product still has variants
-    const remaining = await tenantClient.variant.count({
-      where: { productId, tenantId },
-    });
-    if (remaining === 0) {
-      await this.prisma.product.update({
-        where: { id: productId },
-        data: { hasVariants: false },
+    await this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      // Match addVariant's qualified Product-first membership gate.
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      if (products.length !== 1) {
+        throw new EntityNotFoundError('Variant', variantId);
+      }
+      const variant = await tx.variant.findFirst({
+        where: { id: variantId, productId, tenantId },
       });
-    }
+      if (!variant) throw new EntityNotFoundError('Variant', variantId);
+
+      await tx.variant.delete({
+        where: { id: variantId, productId, tenantId },
+      });
+      const remaining = await tx.variant.count({
+        where: { productId, tenantId },
+      });
+      if (remaining === 0) {
+        await tx.product.update({
+          where: { id: productId, tenantId },
+          data: { hasVariants: false },
+        });
+      }
+    });
   }
 
   async getVariantPrices(productId: string, variantId: string) {

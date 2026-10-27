@@ -1,4 +1,4 @@
-# Product-first variant addition
+# Product-first variant membership
 
 ## U3 — S3, bounded by S1/S5/S6
 
@@ -24,6 +24,28 @@ ts-jest pass is not a global TypeScript or ESLint claim.
 
 Rollback boundary: revert only this unit's addVariant changes, its fixture
 adaptations, focused test/config and this document. No editorial-file dependency
-is introduced. Next dependencies are parent seam/independent verification, T3
-atomic removal and a separately authorized T4 SQL concurrency/rollback proof.
+is introduced. U4 below adds atomic removal separately; T4 SQL
+concurrency/rollback proof still requires separate authorization.
 No new endpoint, response/status contract or runtime activation is included.
+
+## U4 — S3/S5 atomic removal (T2, formerly T3)
+
+`removeVariant` captures tenant/Product/Variant identifiers and joins or opens the
+existing ambient transaction. The qualified Product `FOR UPDATE` gate precedes
+Variant observation. Qualified Variant read, single-row delete, remaining-count
+read and last-Variant Product flag update all use one captured transaction client;
+there is no root Product update. Non-last removal leaves flags unchanged. Success
+remains void; an empty Product gate or missing qualified Variant retains
+`EntityNotFoundError('Variant', variantId)`. SQL and late failures propagate without
+retry. Intentional observable change: deletion and flag maintenance fail atomically.
+
+The removal fixture checks gate ordering/parameters, explicit predicates, last and
+non-last effects, error precedence, no root writes and modeled rollback on late
+count/flag failure. Existing service and U3 addition regressions remain included.
+Fixture effects are not real SQL rollback or concurrency proof: T4 must establish
+cross-route behavior, including potential stock-path lock interactions. No stock,
+sales, global transaction service, HTTP transport or production activation changes.
+
+U4 rollback boundary: only the `removeVariant` hunk, removal fixture adaptations,
+new removal spec, its config entry and this U4 documentation; retain accepted U3.
+Risk item 4 / consumed-contract item 3 require parent independent verification.

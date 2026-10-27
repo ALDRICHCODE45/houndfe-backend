@@ -4,6 +4,7 @@ module.exports = {
   cache: false,
   testMatch: [
     '<rootDir>/src/products/products-variant-reference.spec.ts',
+    '<rootDir>/src/products/products-variant-removal-reference.spec.ts',
     '<rootDir>/src/products/products.service.spec.ts',
   ],
   moduleNameMapper: { '^src/(.*)$': '<rootDir>/src/$1' },

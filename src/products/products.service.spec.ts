@@ -3082,6 +3082,8 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
     remainingCount?: number;
   } = {}) {
     const tenantClient = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]),
+      product: { update: jest.fn().mockResolvedValue(undefined) },
       variant: {
         findFirst: jest.fn().mockResolvedValue(tenantVariantRow),
         delete: jest.fn().mockResolvedValue(tenantVariantRow),
@@ -3142,15 +3144,16 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
     });
     expect(tenantClient.variant.delete).toHaveBeenCalledTimes(1);
     expect(tenantClient.variant.delete).toHaveBeenCalledWith({
-      where: { id: VARIANT_A_ID, tenantId: TENANT_ID },
+      where: { id: VARIANT_A_ID, productId: PRODUCT_ID, tenantId: TENANT_ID },
     });
     expect(tenantClient.variant.count).toHaveBeenCalledWith({
       where: { productId: PRODUCT_ID, tenantId: TENANT_ID },
     });
-    expect(rawPrisma.product.update).toHaveBeenCalledWith({
-      where: { id: PRODUCT_ID },
+    expect(tenantClient.product.update).toHaveBeenCalledWith({
+      where: { id: PRODUCT_ID, tenantId: TENANT_ID },
       data: { hasVariants: false },
     });
+    expect(rawPrisma.product.update).not.toHaveBeenCalled();
     expect(rawPrisma.variant.findFirst).not.toHaveBeenCalled();
     expect(rawPrisma.variant.delete).not.toHaveBeenCalled();
     expect(rawPrisma.variant.count).not.toHaveBeenCalled();
@@ -3164,6 +3167,7 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
     await service.removeVariant(PRODUCT_ID, VARIANT_A_ID);
 
     expect(tenantClient.variant.delete).toHaveBeenCalledTimes(1);
+    expect(tenantClient.product.update).not.toHaveBeenCalled();
     expect(rawPrisma.product.update).not.toHaveBeenCalled();
   });
 
