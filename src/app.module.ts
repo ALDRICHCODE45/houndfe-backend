@@ -91,6 +91,7 @@ import { PromotionExpiryInngestRegistrar } from './promotions/inngest/promotion-
 // branch-analytics-summary / bas-3a — read-only branch sales summary
 // bounded context. Imports DatabaseModule + AuthModule only.
 import { AnalyticsModule } from './analytics/analytics.module';
+import { CatalogEditorialReadModule } from './catalog-editorial/catalog-editorial-read.module';
 
 @Module({
   imports: [
@@ -192,6 +193,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
     // branch-analytics-summary / bas-3a — read-only branch sales summary
     // (GET /analytics/sales/summary behind read:Analytics).
     AnalyticsModule,
+    CatalogEditorialReadModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
