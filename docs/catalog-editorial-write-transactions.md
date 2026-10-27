@@ -24,5 +24,25 @@ postcommit integrity, or broader historical replay guarantee is established.
 T2 must supply the real transaction-bound reference reader; runtime composition
 and separately authorized SQL verification remain later dependencies.
 
-Rollback boundary: remove this helper, optional constructor seam, focused config,
-tests, and this document together; no domain contract or runtime wiring changes.
+U1 rollback boundary: remove its helper, optional constructor seam, focused config,
+tests, and documentation together; retain subsequent units when reverting them separately.
+
+## U2b1: preparation at validation boundaries
+
+The optional factory result may supply `prepareDocuments`, bound to its transaction.
+It receives recursively frozen, detached scope/documents/prior authority and a
+`create`, `create-replay`, or `stored` mode. The factory still receives only `tx`.
+Returned authority is qualification-checked and cloned; null/invalid results deny,
+and callback rejection propagates without fallback or persistence effects.
+
+Prepared create acquires the core Product gate before candidate preparation.
+Legacy ordering is unchanged. Create replay prepares only its draft, not unrelated
+published history. Save/initialize prepare candidate/draft/published documents after
+existing receipt/revision conflict selection and stored-envelope checks. Existing
+strict validation and conservation rules remain authoritative.
+
+Offline tests pin these boundaries, caller mutation, denial/no-effects, and legacy
+compatibility. Real reference/vocabulary composition remains U2b2; this callback
+alone supplies no SQL, authorization, rollback, or concurrency proof. H1 and public
+core method signatures are unchanged. Revert only U2b1 callback/types, invocation
+sites, added tests and this section; preserve accepted U1/U2a/U3/U4.

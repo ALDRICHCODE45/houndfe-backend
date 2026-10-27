@@ -20,7 +20,11 @@ import type {
   EditorialSaveRequest,
 } from '../application/catalog-editorial-core';
 
-import type { EditorialWriteAuthorityFactory } from './prisma-editorial-write-authority';
+import type {
+  EditorialDocumentPreparation,
+  EditorialPreparationMode,
+  EditorialWriteAuthorityFactory,
+} from './prisma-editorial-write-authority';
 
 type InputSnapshot =
   | string
@@ -50,11 +54,48 @@ const positiveRevision = (value: unknown): value is number =>
   value > 0 &&
   value <= 2147483647;
 
+function freezeSnapshot<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(freezeSnapshot);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+async function prepareDocumentAuthority(
+  prepare: EditorialDocumentPreparation,
+  scope: EditorialContext,
+  documents: readonly unknown[],
+  authority: DocumentAuthority,
+  mode: EditorialPreparationMode,
+): Promise<DocumentAuthority> {
+  if (typeof prepare !== 'function') throw new Error('FORBIDDEN');
+  const result = await prepare(
+    Object.freeze({
+      scope: Object.freeze({ ...scope }),
+      documents: freezeSnapshot(documents.map(snapshot)),
+      authority: freezeSnapshot(structuredClone(authority)),
+      mode,
+    }),
+  );
+  if (
+    !result ||
+    result.tenantId !== scope.tenantId ||
+    result.productId !== scope.productId ||
+    !Array.isArray(result.variantIds) ||
+    !Array.isArray(result.assetIds) ||
+    !Array.isArray(result.families)
+  )
+    throw new Error('FORBIDDEN');
+  return structuredClone(result);
+}
+
 async function validateStoredSave(
   tx: Prisma.TransactionClient,
   stored: unknown,
   candidate: unknown,
   authority: DocumentAuthority,
+  prepare?: (documents: readonly unknown[]) => Promise<DocumentAuthority>,
 ) {
   const extra =
     stored && typeof stored === 'object' && Object.hasOwn(stored, 'warnings')
@@ -78,24 +119,26 @@ async function validateStoredSave(
     (published && !positiveRevision(published.revision))
   )
     throw new Error('MALFORMED');
-  const definitions = await readLockedEditorialDefinitions(tx, [
+  const documents = [
     candidate,
     draft.document,
     ...(published ? [published.document] : []),
-  ]);
+  ];
+  const preparedAuthority = prepare ? await prepare(documents) : authority;
+  const definitions = await readLockedEditorialDefinitions(tx, documents);
   // These baselines come only from the scoped stored state or exactly matched receipt.
   // The strict validator checks each document before inspecting conservation membership.
   const check = (document: unknown) =>
     validateContextualDocument(
       document,
-      authority,
+      preparedAuthority,
       definitions,
       document as EditorialDocument,
     ).document;
   const baseline = check(draft.document);
   const validated = validateContextualDocument(
     candidate,
-    authority,
+    preparedAuthority,
     definitions,
     baseline,
   );
@@ -136,6 +179,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
     return {
       createAuthority: this.createAuthority,
       saveAuthority: this.saveAuthority,
+      prepareDocuments: undefined,
     };
   }
   async save(
@@ -179,6 +223,17 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           AND "id" = ${scope.productId} FOR UPDATE
       `);
       if (products.length !== 1) throw new Error('NOT_FOUND');
+      const prepare =
+        authority?.prepareDocuments === undefined
+          ? undefined
+          : (documents: readonly unknown[]) =>
+              prepareDocumentAuthority(
+                authority.prepareDocuments!,
+                scope,
+                documents,
+                access.documentAuthority,
+                'stored',
+              );
       const requestJson = JSON.stringify({
         expectedCycle: input.expectedCycle,
         expectedRevision: input.expectedRevision,
@@ -199,6 +254,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           receipts[0].result,
           input.document,
           access.documentAuthority,
+          prepare,
         );
         if (
           replay.state.cycle !== input.expectedCycle ||
@@ -229,6 +285,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         state,
         input.document,
         access.documentAuthority,
+        prepare,
       );
       const { document } = validated;
       const updated = await tx.$executeRaw(Prisma.sql`
@@ -338,9 +395,35 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           (!Number.isInteger(input.expectedCycle) || input.expectedCycle < 1))
       )
         throw new Error('MALFORMED');
+      const prepare =
+        authority?.prepareDocuments === undefined
+          ? undefined
+          : (documents: readonly unknown[], mode: EditorialPreparationMode) =>
+              prepareDocumentAuthority(
+                authority.prepareDocuments!,
+                scope,
+                documents,
+                access.documentAuthority,
+                mode,
+              );
+      // Keep legacy ordering; opted-in create preparation requires the gate first.
+      const lockProduct = async () => {
+        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT "id" FROM "products" WHERE "tenantId" = ${scope.tenantId}
+            AND "id" = ${scope.productId} FOR UPDATE
+        `);
+        if (products.length !== 1) throw new Error('NOT_FOUND');
+      };
+      const preparedCreate = !fromPublished && prepare !== undefined;
+      if (preparedCreate) await lockProduct();
       let document = fromPublished
         ? emptyDocument()
-        : validateDocument(input.document, access.documentAuthority);
+        : validateDocument(
+            input.document,
+            prepare
+              ? await prepare([input.document], 'create')
+              : access.documentAuthority,
+          );
       const validateInitialization = async (result: EditorialReadResult) => {
         const candidate =
           result?.published === null
@@ -351,6 +434,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           result,
           candidate,
           access.documentAuthority,
+          prepare ? (documents) => prepare(documents, 'stored') : undefined,
         );
         const { state } = validated;
         if (
@@ -363,12 +447,8 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           throw new Error('MALFORMED');
         return state;
       };
-      // Lock the existing Product, including when editorial state is still absent.
-      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        SELECT "id" FROM "products" WHERE "tenantId" = ${scope.tenantId}
-          AND "id" = ${scope.productId} FOR UPDATE
-      `);
-      if (products.length !== 1) throw new Error('NOT_FOUND');
+      // Lock even when editorial state is still absent; prepared create did so above.
+      if (!preparedCreate) await lockProduct();
       if (!fromPublished) await this.requireActiveCreateOptions(tx, document);
       const requestJson = JSON.stringify(
         fromPublished
@@ -388,7 +468,12 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         if (fromPublished) return validateInitialization(receipts[0].result);
         const replayDocument = validateDocument(
           receipts[0].result?.draft?.document,
-          access.documentAuthority,
+          prepare
+            ? await prepare(
+                [receipts[0].result?.draft?.document],
+                'create-replay',
+              )
+            : access.documentAuthority,
         );
         if (!isDeepStrictEqual(replayDocument, document))
           throw new Error('MALFORMED');

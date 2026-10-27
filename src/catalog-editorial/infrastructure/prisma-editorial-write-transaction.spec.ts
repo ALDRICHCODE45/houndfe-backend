@@ -4,7 +4,7 @@ import {
   createPrismaEditorialWriteAuthority,
   type EditorialWriteAuthorityFactory,
 } from './prisma-editorial-write-authority';
-import { emptyDocument } from '../domain/document';
+import { emptyDocument, type DocumentAuthority } from '../domain/document';
 import { EDITORIAL_PERMISSIONS as grants } from '../domain/editorial-permissions';
 
 const scope = { actorId: 'actor', tenantId: 'tenant', productId: 'product' };
@@ -45,18 +45,20 @@ function fixture(operation: Operation, coordinated = true) {
   const product = jest
     .fn()
     .mockResolvedValue({ id: scope.productId, tenantId: scope.tenantId });
-  const query = jest.fn().mockImplementation((sql: Prisma.Sql) => {
-    const text = sql.strings.join('?');
-    if (text.includes('FROM "products"')) {
-      events.push('gate');
-      expect(sql.values).toEqual([scope.tenantId, scope.productId]);
-      return [{ id: scope.productId }];
-    }
-    if (text.includes('receipts')) return [];
-    if (text.includes('FROM "catalog_editorial_states"'))
-      return persistence.state ? [persistence.state] : [];
-    return [];
-  });
+  const query = jest
+    .fn<unknown[] | Promise<unknown[]>, [Prisma.Sql]>()
+    .mockImplementation((sql) => {
+      const text = sql.strings.join('?');
+      if (text.includes('FROM "products"')) {
+        events.push('gate');
+        expect(sql.values).toEqual([scope.tenantId, scope.productId]);
+        return [{ id: scope.productId }];
+      }
+      if (text.includes('receipts')) return [];
+      if (text.includes('FROM "catalog_editorial_states"'))
+        return persistence.state ? [persistence.state] : [];
+      return [];
+    });
   const write = jest.fn().mockImplementation((sql: Prisma.Sql) => {
     if (sql.strings.join('').includes('receipts'))
       persistence.receipts.push('receipt');
@@ -296,4 +298,267 @@ it('read ignores the opted-in write factory and retains the existing read author
   expect(f.factory).not.toHaveBeenCalled();
   expect(f.legacy.resolve).toHaveBeenCalledWith(scope);
   expect(f.persistence).toEqual(f.before);
+});
+
+function preparationFixture(operation: Operation) {
+  const f = fixture(operation);
+  const prepare = jest.fn(
+    (context: {
+      scope: Readonly<typeof scope>;
+      documents: readonly unknown[];
+      mode: 'create' | 'create-replay' | 'stored';
+      authority: Readonly<DocumentAuthority>;
+    }) => {
+      f.events.push('prepare');
+      expect(f.events).toContain('gate');
+      expect(Object.isFrozen(context.scope)).toBe(true);
+      expect(Object.isFrozen(context.documents)).toBe(true);
+      expect(Object.isFrozen(context.documents[0])).toBe(true);
+      expect(Object.isFrozen(context.authority.assetIds)).toBe(true);
+      expect(
+        Reflect.set(context.documents[0] as object, 'description', 'changed'),
+      ).toBe(false);
+      return Promise.resolve({ ...context.authority, assetIds: ['asset'] });
+    },
+  );
+  f.factory.mockImplementation((tx) =>
+    Object.assign(createPrismaEditorialWriteAuthority(tx, f.documents), {
+      prepareDocuments: prepare,
+    }),
+  );
+  return { ...f, prepare };
+}
+
+describe('staged document preparation', () => {
+  it.each(operations)(
+    'prepares only selected %s documents with detached inputs',
+    async (operation) => {
+      const f = preparationFixture(operation);
+      const result = await f.attempt();
+      expect(f.prepare).toHaveBeenCalledTimes(1);
+      const context = f.prepare.mock.calls[0][0];
+      expect(context.scope).toEqual(scope);
+      expect(context.mode).toBe(operation === 'create' ? 'create' : 'stored');
+      expect(context.documents).toEqual(
+        operation === 'create'
+          ? [emptyDocument()]
+          : [emptyDocument(), emptyDocument()],
+      );
+      expect(result.draft?.document).toEqual(emptyDocument());
+      expect(f.document.assetIds).toEqual([]);
+      expect(f.write).toHaveBeenCalledTimes(2);
+      expect(f.legacy.resolve).not.toHaveBeenCalled();
+      expect(f.factory).toHaveBeenCalledWith(f.tx);
+    },
+  );
+
+  it.each(['throw', 'null', 'foreign', 'shape'])(
+    'denies %s preparation without fallback or effects',
+    async (failure) => {
+      const f = preparationFixture('create');
+      const error = new Error('preparation failed');
+      if (failure === 'throw') f.prepare.mockRejectedValueOnce(error);
+      if (failure === 'null') f.prepare.mockResolvedValueOnce(null as never);
+      if (failure === 'foreign')
+        f.prepare.mockResolvedValueOnce({ ...f.document, tenantId: 'foreign' });
+      if (failure === 'shape')
+        f.prepare.mockResolvedValueOnce({
+          ...f.document,
+          assetIds: null as never,
+        });
+      await expect(f.attempt()).rejects.toThrow(
+        failure === 'throw' ? error : 'FORBIDDEN',
+      );
+      expect(f.prepare).toHaveBeenCalledTimes(1);
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(f.before);
+      expect(f.legacy.resolve).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['receipt', 'revision'])(
+    'keeps %s conflict ahead of malformed stored documents',
+    async (failure) => {
+      const f = preparationFixture('save');
+      const query = f.query.getMockImplementation()!;
+      if (failure === 'receipt')
+        f.query.mockImplementation((sql: Prisma.Sql) =>
+          sql.strings.join('').includes('catalog_editorial_save_receipts')
+            ? [{ matches: false, result: { draft: 'invalid' } }]
+            : query(sql),
+        );
+      else {
+        f.persistence.state!.cycle = 2;
+        f.persistence.state!.draft.document = { invalid: true } as never;
+      }
+      const before = structuredClone(f.persistence);
+      await expect(f.attempt()).rejects.toThrow('CONFLICT');
+      expect(f.prepare).not.toHaveBeenCalled();
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(before);
+    },
+  );
+
+  it('retains invalid create before receipt conflict', async () => {
+    const f = preparationFixture('create');
+    const query = f.query.getMockImplementation()!;
+    f.query.mockImplementation((sql: Prisma.Sql) =>
+      sql.strings.join('').includes('receipts')
+        ? [{ matches: false }]
+        : query(sql),
+    );
+    await expect(
+      f.core.create(scope, {
+        expectedCycle: null,
+        idempotencyKey: 'key',
+        document: { invalid: true } as never,
+      }),
+    ).rejects.toThrow('MALFORMED');
+    expect(f.prepare).toHaveBeenCalledTimes(1);
+    expect(
+      f.query.mock.calls.some(([sql]: [Prisma.Sql]) =>
+        sql.strings.join('').includes('receipts'),
+      ),
+    ).toBe(false);
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.persistence).toEqual(f.before);
+  });
+
+  it('prepares matched create receipt draft only, without newly validating published history', async () => {
+    const f = preparationFixture('create');
+    const receipt = {
+      cycle: 1,
+      draft: {
+        revision: 1,
+        basePublishedRevision: null,
+        document: emptyDocument(),
+      },
+      published: {
+        revision: 1,
+        document: { mediaRefs: ['irrelevant-history'] },
+      },
+    };
+    const query = f.query.getMockImplementation()!;
+    f.query.mockImplementation((sql: Prisma.Sql) =>
+      sql.strings.join('').includes('receipts')
+        ? [{ matches: true, result: receipt }]
+        : query(sql),
+    );
+    await expect(f.attempt()).resolves.toEqual(receipt);
+    expect(f.prepare.mock.calls.map(([context]) => context.mode)).toEqual([
+      'create',
+      'create-replay',
+    ]);
+    expect(f.prepare.mock.calls.map(([context]) => context.documents)).toEqual([
+      [emptyDocument()],
+      [emptyDocument()],
+    ]);
+    expect(f.provider.resolve).toHaveBeenCalledTimes(1);
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.persistence).toEqual(f.before);
+  });
+
+  it.each(['save', 'initialize'] as const)(
+    'prepares existing %s receipt baselines at the stored boundary',
+    async (operation) => {
+      const f = preparationFixture(operation);
+      const receipt = {
+        cycle: 1,
+        draft: {
+          revision: operation === 'save' ? 2 : 1,
+          basePublishedRevision: 1,
+          document: emptyDocument(),
+        },
+        published: { revision: 1, document: emptyDocument() },
+      };
+      const query = f.query.getMockImplementation()!;
+      f.query.mockImplementation((sql: Prisma.Sql) =>
+        sql.strings.join('').includes('receipts')
+          ? [{ matches: true, result: receipt }]
+          : query(sql),
+      );
+      await expect(f.attempt()).resolves.toEqual(receipt);
+      expect(f.prepare).toHaveBeenCalledTimes(1);
+      expect(f.prepare.mock.calls[0][0].documents).toEqual([
+        emptyDocument(),
+        emptyDocument(),
+        emptyDocument(),
+      ]);
+      expect(f.prepare.mock.calls[0][0].mode).toBe('stored');
+      expect(f.provider.resolve).toHaveBeenCalledTimes(1);
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(f.before);
+    },
+  );
+
+  it('captures request identity and selectors before suspended capability resolution', async () => {
+    const f = preparationFixture('create');
+    const context = { ...scope };
+    const request = {
+      expectedCycle: null,
+      idempotencyKey: 'original',
+      document: { ...emptyDocument(), mediaRefs: ['asset'] },
+    };
+    f.user.mockImplementationOnce(() => {
+      context.tenantId = 'foreign';
+      context.actorId = 'intruder';
+      request.idempotencyKey = 'changed';
+      request.document.mediaRefs.push('injected');
+      return Promise.resolve({ isActive: true });
+    });
+    const result = await f.core.create(context, request);
+    expect(result.draft?.document.mediaRefs).toEqual(['asset']);
+    expect(f.prepare.mock.calls[0][0].scope).toEqual(scope);
+    expect(f.prepare.mock.calls[0][0].documents).toEqual([
+      { ...emptyDocument(), mediaRefs: ['asset'] },
+    ]);
+    const receiptQuery = f.query.mock.calls.find(([sql]: [Prisma.Sql]) =>
+      sql.strings.join('').includes('receipts'),
+    )![0];
+    expect(receiptQuery.values).toContain('original');
+    expect(receiptQuery.values).not.toContain('changed');
+  });
+
+  it.each(operations)(
+    'does not prepare %s after current capability denial',
+    async (operation) => {
+      const f = preparationFixture(operation);
+      f.user.mockResolvedValue({ isActive: false });
+      await expect(f.attempt()).rejects.toThrow('FORBIDDEN');
+      expect(f.prepare).not.toHaveBeenCalled();
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(f.before);
+    },
+  );
+
+  it.each([true, false])(
+    'enforces the core create gate for a custom preparation factory; exists=%s',
+    async (exists) => {
+      const f = preparationFixture('create');
+      const port = {
+        resolve: jest.fn().mockResolvedValue({
+          ...scope,
+          activeMember: true,
+          canCreate: true,
+          canSave: true,
+          documentAuthority: f.document,
+        }),
+      };
+      f.factory.mockResolvedValue({
+        createAuthority: port,
+        saveAuthority: port,
+        prepareDocuments: f.prepare,
+      } as never);
+      if (!exists) f.query.mockResolvedValue([]);
+      if (exists) {
+        await expect(f.attempt()).resolves.toMatchObject({ cycle: 1 });
+        expect(f.events.slice(0, 2)).toEqual(['gate', 'prepare']);
+      } else {
+        await expect(f.attempt()).rejects.toThrow('NOT_FOUND');
+        expect(f.prepare).not.toHaveBeenCalled();
+        expect(f.write).not.toHaveBeenCalled();
+        expect(f.persistence).toEqual(f.before);
+      }
+    },
+  );
 });

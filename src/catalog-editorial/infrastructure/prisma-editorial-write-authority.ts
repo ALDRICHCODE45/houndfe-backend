@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import type {
+  EditorialContext,
   EditorialCreateAuthority,
   EditorialSaveAuthority,
 } from '../application/catalog-editorial-core';
@@ -8,16 +9,30 @@ import {
   type EditorialDocumentAuthorityProvider,
 } from './prisma-editorial-authority';
 
-export type EditorialWriteAuthorityFactory = (tx: Prisma.TransactionClient) =>
-  | {
-      createAuthority: EditorialCreateAuthority;
-      saveAuthority: EditorialSaveAuthority;
-    }
+import type { DocumentAuthority } from '../domain/document';
+
+export type EditorialPreparationMode = 'create' | 'create-replay' | 'stored';
+/** Bound to the factory's transaction; invoked only at core validation sites. */
+export type EditorialDocumentPreparation = (
+  context: Readonly<{
+    scope: Readonly<EditorialContext>;
+    documents: readonly unknown[];
+    authority: Readonly<DocumentAuthority>;
+    mode: EditorialPreparationMode;
+  }>,
+) => DocumentAuthority | null | Promise<DocumentAuthority | null>;
+
+interface EditorialWriteAuthorities {
+  createAuthority: EditorialCreateAuthority;
+  saveAuthority: EditorialSaveAuthority;
+  prepareDocuments?: EditorialDocumentPreparation;
+}
+export type EditorialWriteAuthorityFactory = (
+  tx: Prisma.TransactionClient,
+) =>
+  | EditorialWriteAuthorities
   | null
-  | Promise<{
-      createAuthority: EditorialCreateAuthority;
-      saveAuthority: EditorialSaveAuthority;
-    } | null>;
+  | Promise<EditorialWriteAuthorities | null>;
 
 /** Internal opt-in composition; no reference reader or runtime registration. */
 export function createPrismaEditorialWriteAuthority(
