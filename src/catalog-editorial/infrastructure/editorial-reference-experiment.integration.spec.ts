@@ -521,9 +521,24 @@ async function semanticFixture(
     }
   });
 }
+async function rejectSemantic(
+  f: { effects: () => Promise<unknown> },
+  attempt: () => Promise<unknown>,
+  message: string,
+) {
+  const before = await f.effects();
+  await expect(attempt()).rejects.toThrow(message);
+  expect(await f.effects()).toEqual(before);
+}
 const createRequest = (document = semanticDocument()) => ({
   expectedCycle: null,
   idempotencyKey: 'create',
+  document,
+});
+const saveRequest = (document = semanticDocument(), expectedRevision = 1) => ({
+  expectedCycle: 1,
+  expectedRevision,
+  idempotencyKey: `save-${expectedRevision}`,
   document,
 });
 
@@ -579,6 +594,253 @@ live(
             'SELECT id FROM private_media_assets ORDER BY id',
           ),
         ).toEqual([{ id: 'm' }, { id: 'same-tenant-m' }]);
+      });
+    });
+    test('D16 conserves only the same archived assignment; create stays active-only', async () => {
+      await semanticFixture(async (f) => {
+        await rejectSemantic(
+          f,
+          () =>
+            f.run((c) =>
+              c.create(semanticScope, createRequest(semanticDocument('old'))),
+            ),
+          'MALFORMED',
+        );
+        const published = semanticDocument('old');
+        await f.a.$executeRaw(
+          Prisma.sql`INSERT INTO catalog_editorial_states ("tenantId","productId",cycle,"publishedRevision","publishedDocument") VALUES ('t','p',1,7,${JSON.stringify(published)}::jsonb)`,
+        );
+        const initial = await f.run((c) =>
+          c.initialize(semanticScope, {
+            expectedCycle: 1,
+            idempotencyKey: 'initialize',
+          }),
+        );
+        expect(initial.draft).toEqual({
+          revision: 1,
+          basePublishedRevision: 7,
+          document: published,
+        });
+        expect(initial.warnings).toEqual([
+          {
+            code: 'ARCHIVED_OPTION',
+            familyId: 'family',
+            definitionId: 'definition',
+            owner: 'sellable',
+            variantId: 'v',
+            optionCode: 'old',
+          },
+        ]);
+        const request = { ...saveRequest(published), expectedCycle: 2 };
+        const saved = await f.run((c) => c.save(semanticScope, request));
+        expect(saved.draft?.revision).toBe(2);
+        expect(saved.draft?.document).toEqual(published);
+        expect(saved.warnings).toEqual(initial.warnings);
+        expect(saved.published).toEqual({ revision: 7, document: published });
+        expect(await f.run((c) => c.read(semanticScope))).toEqual({
+          cycle: 2,
+          draft: saved.draft,
+          published: saved.published,
+        });
+        expect(
+          await f.b.$queryRawUnsafe(
+            'SELECT result FROM catalog_editorial_create_receipts',
+          ),
+        ).toEqual([{ result: initial }]);
+        const moved = {
+          ...semanticDocument('old', 'v2'),
+          values: [
+            ...published.values,
+            ...semanticDocument('old', 'v2').values,
+          ],
+        };
+        await rejectSemantic(
+          f,
+          () =>
+            f.run((c) =>
+              c.save(semanticScope, {
+                ...request,
+                expectedRevision: 2,
+                idempotencyKey: 'move',
+                document: moved,
+              }),
+            ),
+          'MALFORMED',
+        );
+        const ownerChanged = {
+          ...published,
+          values: published.values.map((v) => ({
+            ...v,
+            owner: 'product' as const,
+            variantId: null,
+          })),
+        };
+        await rejectSemantic(
+          f,
+          () =>
+            f.run((c) =>
+              c.save(semanticScope, {
+                ...request,
+                expectedRevision: 2,
+                idempotencyKey: 'owner',
+                document: ownerChanged,
+              }),
+            ),
+          'MALFORMED',
+        );
+        expect(
+          await f.b.$queryRawUnsafe(
+            'SELECT result FROM catalog_editorial_save_receipts',
+          ),
+        ).toEqual([{ result: saved }]);
+      });
+    });
+    test('historical replay differs from current state and rechecks current permissions', async () => {
+      await semanticFixture(async (f) => {
+        const create = (c: PrismaCatalogEditorial) =>
+          c.create(semanticScope, createRequest(emptyDocument()));
+        const save = (c: PrismaCatalogEditorial) =>
+          c.save(semanticScope, saveRequest(emptyDocument()));
+        const created = await f.run(create);
+        const saved = await f.run(save);
+        const changed = { ...semanticDocument(), commercialTitle: 'later' };
+        const current = await f.run((c) =>
+          c.save(semanticScope, saveRequest(changed, 2)),
+        );
+        expect(
+          await f.a.$executeRawUnsafe(
+            'UPDATE editorial_options SET "archivedAt" = now() WHERE code = \'new\'',
+          ),
+        ).toBe(1);
+        const before = await f.effects();
+        expect(await f.run(create)).toEqual(created);
+        expect(await f.run(save)).toEqual(saved);
+        expect(await f.run((c) => c.read(semanticScope))).toEqual(current);
+        expect([
+          created.draft?.revision,
+          saved.draft?.revision,
+          current.draft?.revision,
+        ]).toEqual([1, 2, 3]);
+        expect(created.draft?.document).toEqual(emptyDocument());
+        expect(saved.draft?.document).toEqual(emptyDocument());
+        expect(current.draft?.document).toEqual(changed);
+        expect(await f.effects()).toEqual(before);
+        expect(
+          await f.a.$executeRawUnsafe(
+            "DELETE FROM role_permissions WHERE id = 'e'",
+          ),
+        ).toBe(1);
+        for (const attempt of [() => f.run(create), () => f.run(save)])
+          await rejectSemantic(f, attempt, 'FORBIDDEN');
+        expect(await f.run((c) => c.read(semanticScope))).toEqual(current);
+      });
+    });
+    test.each([
+      'variants',
+      'private_media_assets',
+      'editorial_families',
+    ] as const)(
+      '%s query failure denies replay, never empty fallback',
+      async (table) => {
+        await semanticFixture(async (f) => {
+          await f.run((c) => c.create(semanticScope, createRequest()));
+          const current = await f.run((c) =>
+            c.save(semanticScope, saveRequest()),
+          );
+          // Real undefined-column SQL failure, not a mocked authority/provider failure.
+          const [alter, probe] = {
+            variants: [
+              'ALTER TABLE variants RENAME COLUMN "tenantId" TO unavailable',
+              'SELECT "tenantId" FROM variants',
+            ],
+            private_media_assets: [
+              'ALTER TABLE private_media_assets RENAME COLUMN "tenantId" TO unavailable',
+              'SELECT "tenantId" FROM private_media_assets',
+            ],
+            editorial_families: [
+              'ALTER TABLE editorial_families RENAME COLUMN code TO unavailable',
+              'SELECT code FROM editorial_families',
+            ],
+          }[table];
+          await f.a.$executeRawUnsafe(alter);
+          // Same missing source column really raises PostgreSQL undefined_column.
+          expect(await execute(f.b, probe)).toEqual({ code: '42703' });
+          for (const attempt of [
+            () => f.run((c) => c.create(semanticScope, createRequest())),
+            () => f.run((c) => c.save(semanticScope, saveRequest())),
+          ])
+            await rejectSemantic(f, attempt, 'FORBIDDEN');
+          expect(await f.run((c) => c.read(semanticScope))).toEqual(current);
+        });
+      },
+    );
+    test.each(['wrong-tenant', 'wrong-product', 'foreign-m', 'same-tenant-m'])(
+      'rejects unqualified source %s without effects',
+      async (id) => {
+        await semanticFixture(async (f) => {
+          const document = id.endsWith('-m')
+            ? { ...semanticDocument(), mediaRefs: [id] }
+            : semanticDocument('new', id);
+          await rejectSemantic(
+            f,
+            () =>
+              f.run((c) => c.create(semanticScope, createRequest(document))),
+            'MALFORMED',
+          );
+          expect(await f.run((c) => c.read(semanticScope))).toEqual({
+            cycle: null,
+            draft: null,
+            published: null,
+          });
+        });
+      },
+    );
+    test('genuinely empty references and vocabulary permit empty create', async () => {
+      await semanticFixture(async (f) => {
+        for (const table of [
+          'variants',
+          'private_media_assets',
+          'editorial_bindings',
+          'editorial_options',
+          'editorial_definitions',
+          'editorial_families',
+        ])
+          await f.a.$executeRaw(Prisma.sql`DELETE FROM ${Prisma.raw(table)}`);
+        const before = await f.effects();
+        for (const table of [
+          'variants',
+          'private_media_assets',
+          'editorial_families',
+          'editorial_definitions',
+        ])
+          expect(before[table]).toEqual([]);
+        const result = await f.run((c) =>
+          c.create(semanticScope, createRequest(emptyDocument())),
+        );
+        expect(result).toEqual({
+          cycle: 1,
+          draft: {
+            revision: 1,
+            basePublishedRevision: null,
+            document: emptyDocument(),
+          },
+          published: null,
+        });
+        expect(await f.run((c) => c.read(semanticScope))).toEqual(result);
+        expect(
+          await f.b.$queryRawUnsafe(
+            'SELECT result FROM catalog_editorial_create_receipts',
+          ),
+        ).toEqual([{ result }]);
+        const after = await f.effects();
+        for (const table of semanticTables)
+          if (
+            ![
+              'catalog_editorial_states',
+              'catalog_editorial_create_receipts',
+            ].includes(table)
+          )
+            expect(after[table]).toEqual(before[table]);
       });
     });
   },

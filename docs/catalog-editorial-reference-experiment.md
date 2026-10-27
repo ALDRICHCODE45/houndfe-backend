@@ -31,7 +31,7 @@ command bound; never automatically retry a timeout. The real smoke freshly admit
 invocation, verifies database/schema identity and different backend PIDs, shares a table
 across clients, and verifies prior success/failure schemas absent through public SQL.
 It proves neither a lock protocol nor global schema absence. Parent retains exact-target
-removal/absence verification (S4/T3). T2 dependent semantic proof remains pending.
+removal/absence verification (S4/T3). T2 passed parent and independent verification.
 Rollback boundary: remove only the four experiment runner/spec/config/doc files; no
 production provider, dependency, route, database migration, or shared runtime changed.
 Risk: item2 — isolation/admission remains a review boundary, not a reusable target grant.
@@ -67,10 +67,10 @@ core semantic fixtures. Synthetic state/receipt counters are rollback sentinels 
 not proof of core/D16 correctness. No production adapter or authority is modified.
 The semantic continuation is partitioned into foundation/create-boundary and dependent
 D16/create-active-only/replay/source-failure/qualification/empty-metadata proof.
-Foundation adds the real SQL authority/core composition described below; the remaining
-semantic cases are preserved as pending source, not counted as passing tests.
+Foundation adds the real SQL authority/core composition described below; all ten
+restored dependent cases are now exercised, including the latest replay clarification.
 Do not import d16-create-fixture: it imports the retired runner and registers hooks.
-T2/S2/S6 remain incomplete until all dependent semantic proof and independent verification.
+T2/S2/S6 passed bounded independent verification; no runtime adoption.
 
 ### First-slice observed evidence
 
@@ -99,7 +99,7 @@ lint remains the known configuration gap; no global configuration fix is authori
 Rollback of this slice: remove the new integration spec and revert only this slice's
 config/doc additions; retain the accepted T1 runner/spec and target lifecycle ownership.
 
-## Semantic foundation only (dependent proof remains pending)
+## Real-core semantic composition (isolated experiment only)
 
 The owned minimal schema includes actual definition/state/create/save receipt columns,
 keys, checks and relevant FKs. Permission/member rows are synthetic; the accepted
@@ -121,23 +121,47 @@ idle timeout3s; peer autocommit retains runner1s/3s bounds. Pending work settles
 both clients roll back; peer idle is checked before runner schema cleanup.
 
 Prior draft RED omitted source barriers and failed the receipt-boundary wait assertion.
-The prior 11-case GREEN preceded the latest historical-replay edit and is NOT current
-proof for the extracted cases. Ten cases plus rejectSemantic/saveRequest are preserved
-byte-for-byte in `.tmp/editorial-reference-semantic-pending.json`, with hashes/counts
-and fragment insertion instructions. It is mutable resumable source, NOT native review
-transport. Restore fragments only after foundation acceptance, then format and validate.
-Pending: D16 same-assignment/create-active-only; historical replay/current permission;
-three source-query failures; four qualification denials; genuine empty metadata.
-Risk item4 remains: global blocking/deadlock costs are unaccepted and T2 is incomplete;
-item2 remains governed by unchanged T1 admission. No production security guard changed.
+The old draft 11-case GREEN was not treated as current evidence. After foundation
+acceptance, all three fragments were hash/byte/newline verified and inserted exactly
+before formatting, without changing foundation bytes. The artifact remains unchanged
+at `.tmp/editorial-reference-semantic-pending.json` (9,488 bytes, SHA256
+`6a2a760fcac3834e3fcab2b776acc76444f49b7b59509c4a2449d330b50632b1`),
+as preserved draft source for parent cleanup, NOT frozen review transport or unexecuted
+pending tests. Restoration and strengthened observations passed 11/11 focused cases.
+Risk item4 remains: global blocking/deadlock costs are unaccepted; item2 remains governed
+by unchanged T1 admission. No production security guard changed.
 Snapshot identifier interpolation uses ONLY the closed semanticTables literal list;
 the prior static “SQL injection risk” identifier diagnostic is a false positive for
-this fixture, not a reason for a broad suppression. Pending ALTER identifiers likewise
-come from closed test literals and must be rechecked on restoration. CJS service gap
-remains deferred. Rollback this unit independently by removing its semantic foundation
-and doc additions; retain accepted SQL scenarios and the pending artifact.
+this fixture, not a reason for a broad suppression. Restored failure injection/probes
+now select complete SQL statements from a closed literal map, eliminating their dynamic
+identifier warning without suppression. CJS service gap remains deferred. Rollback this
+unit by removing restored helpers/tests and its doc changes; preserve foundation and artifact.
 
-Current foundation validation: SQL+smoke flags yield 40/40 passes (39 accepted + one
-foundation), 3.889s; default yields 24 passes/16 skips, 0.588s. Scoped strict TS,
-TS ESLint, CJS syntax, Prettier and diff checks pass. These counts exclude all ten
-extracted pending cases; they are not disabled passing tests or completed T2 proof.
+### Dependent semantic results
+
+D16 initialize preserves archived Published `old` at the same sellable/variant binding,
+then save preserves it with ARCHIVED_OPTION warning and revision2. Legacy create rejects
+that archived option; new variant and changed owner assignments reject MALFORMED.
+The owner case proves binding-mismatch rejection, not dynamic binding-mutation behavior.
+Actual create/save receipts and public stored state are checked, not toy counters.
+Historical create/save replays return revisions1/2 with empty documents after current
+state reaches revision3 with a later document and its option is subsequently archived.
+Replay leaves every fixture-table snapshot unchanged; removing the current update
+permission makes both replays FORBIDDEN while read still returns current revision3.
+This is per-attempt permission observation, NOT atomic revocation or historical=current.
+
+All three source-column failures produce real 42703 probes and fail closed as FORBIDDEN
+on create/save replay. SQL snapshots of all 16 fixture tables remain unchanged, including
+all state/revisions/receipts/source/permission rows; public read still returns current
+state. Four wrong-tenant/product variant/private-media IDs reject MALFORMED without any
+persisted effect. Truly empty SQL references AND vocabulary allow a real empty create,
+with exact public state/create receipt and all other table snapshots unchanged.
+SQL deadlock/timeout rollback uses the separate reduced-schema sentinels; core semantic
+rejection/replay uses actual tables. Neither proves a production concurrent adapter,
+production read isolation, deadlock retry policy, or permanent post-commit integrity.
+
+Current validation: explicit SQL+smoke flags pass 50/50 (14 SQL + 25 T1 + 11 core),
+6.041s; default passes 24 with 26 skipped, 0.575s. Scoped strict TS, TS ESLint,
+CJS syntax, narrow Prettier and diff checks pass. All ten restored cases are exercised;
+independent verification also passed 50/50 (7.494s) and default 24/26 skipped (0.601s).
+T2 is accepted within this experimental scope; T3 exact-target removal remains pending.
