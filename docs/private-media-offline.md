@@ -119,7 +119,7 @@ The adapter does not authorize users or establish persisted linkage. Those check
 - The service generates new opaque IDs/keys, awaits private upload before creating the qualified asset row, and returns persisted metadata without a storage key or public URL.
 - Invalid input, denied/unavailable authority, upload failure or indeterminate persistence returns `null`. No lookup, deletion or retry is attempted; bytes may remain after an ambiguous write, which is not proof of rollback.
 
-Concrete factory composition remains pending. Permission observation is not atomic with later storage/persistence, and the service does not activate HTTP.
+Permission observation is not atomic with later storage/persistence, and the service does not activate HTTP.
 
 Run simulated orchestration tests with the clean-child command above and `--config src/private-media/infrastructure/private-media-service.config.cjs`.
 
@@ -131,7 +131,15 @@ Run simulated orchestration tests with the clean-child command above and `--conf
 - Persisted key/MIME/size are copied before the permission await. Assets above the current service cap are rejected; the SDK adapter enforces complete, bounded byte delivery.
 - Invalid qualification, absent/foreign assets, denial or dependency failure returns `null`. Reads never create linkage, upload, delete or retry.
 
-Success returns only the complete Buffer, not a storage key or public URL. These orchestration tests use injected dependencies; concrete factory and composed-flow verification remain separate.
+Success returns only the complete Buffer, not a storage key or public URL. The orchestration suite uses injected dependencies; the composed-flow suite below exercises the concrete classes.
+
+## Internal composition
+
+`createPrivateMediaService(settings, prisma)` composes the actual configuration resolver, permission access, private SDK storage, metadata repository and service. The injected Prisma dependency supplies `user`, `tenantMembership`, `product` and `$queryRaw`; the factory does not construct a database client.
+
+Missing, partial, invalid or public-only settings return `null` before SDK client construction. Valid explicit private settings return a `PrivateMediaService`; construction performs no queries or storage commands. There is no environment discovery, public fallback or HTTP/module activation.
+
+The existing `private-media-service.config.cjs` command selects service, factory and composed-flow suites. Composition tests simulate only Prisma responses and SDK transport: private upload/persistence/read, configured-cap rejection, current revocation, foreign qualification, indeterminate committed creation without deletion/retry, and read failure without state changes. They are not live SQL or provider-policy proof.
 
 ## Evidence boundaries
 
