@@ -20,6 +20,8 @@ import type {
   EditorialSaveRequest,
 } from '../application/catalog-editorial-core';
 
+import type { EditorialWriteAuthorityFactory } from './prisma-editorial-write-authority';
+
 type InputSnapshot =
   | string
   | number
@@ -121,7 +123,21 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
     private readonly authority: EditorialReadAuthority,
     private readonly createAuthority?: EditorialCreateAuthority,
     private readonly saveAuthority?: EditorialSaveAuthority,
+    private readonly writeAuthorityFactory?: EditorialWriteAuthorityFactory,
   ) {}
+  private async writeAuthority(tx: Prisma.TransactionClient) {
+    if (this.writeAuthorityFactory) {
+      try {
+        return await this.writeAuthorityFactory(tx);
+      } catch {
+        return null;
+      }
+    }
+    return {
+      createAuthority: this.createAuthority,
+      saveAuthority: this.saveAuthority,
+    };
+  }
   async save(
     context: EditorialContext,
     request: EditorialSaveRequest,
@@ -135,7 +151,8 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
     ]);
     const input = { ...request, document: snapshot(request.document) };
     const work = async (tx: Prisma.TransactionClient) => {
-      const access = await this.saveAuthority
+      const authority = await this.writeAuthority(tx);
+      const access = await authority?.saveAuthority
         ?.resolve({ ...scope })
         .catch(() => null);
       if (
@@ -299,7 +316,8 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         : snapshot((request as EditorialCreateRequest).document),
     };
     const work = async (tx: Prisma.TransactionClient) => {
-      const access = await this.createAuthority
+      const authority = await this.writeAuthority(tx);
+      const access = await authority?.createAuthority
         ?.resolve({ ...scope })
         .catch(() => null);
       if (
