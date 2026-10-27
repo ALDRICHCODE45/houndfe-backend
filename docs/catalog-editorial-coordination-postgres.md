@@ -50,3 +50,22 @@ Dependency changes require re-audit, not bypassing the check. No generated files
 are modified. Unit tests use fake constructors, including one installed metadata
 read; they do not establish live SQL correctness. Focused CJS project-service lint
 coverage may be limited; syntax check and ts-jest diagnostics remain mandatory.
+
+## Binding file (U5b1)
+
+`loadEditorialPostgresClient()` reads only `EDITORIAL_COORDINATION_PG_BINDING`;
+missing/empty values fail, with no dotenv, ambient URL or other-variable fallback.
+Parent supplies an absolute path to a regular, non-symlink file outside the real
+repository root, owned by the current uid, mode exactly 0600, at most 4096 bytes.
+Both paths are realpath-resolved; containment uses path segments, not name prefixes.
+The JSON envelope has exactly two object fields, `{binding, pinned}`; U5a retains
+all nested admission checks. Parent must independently inspect/pin the fresh target.
+
+The loader opens once with O_NOFOLLOW, matches fstat device/inode to lstat, checks
+opened-file metadata, bounds reads to 4097 bytes, rechecks size/metadata and closes
+before invoking U5a. Failures expose only a generic message, never paths or contents.
+The optional dependency seam is for offline tests, not a live admission bypass.
+This does not prove target ownership/consent or prevent same-size concurrent content
+changes by the owning uid; parent must keep the binding private and stable.
+No connection is opened by this slice. Seeds, SQL observations, live smoke and the
+parent-owned container/migration/retirement lifecycle remain U5b2/U5b3 work.
