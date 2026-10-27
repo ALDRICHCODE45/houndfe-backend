@@ -3,6 +3,7 @@ module.exports = {
   testEnvironment: 'node',
   cache: false,
   testMatch: [
+    '<rootDir>/src/catalog-editorial/infrastructure/prisma-locked-editorial-references.spec.ts',
     '<rootDir>/src/catalog-editorial/infrastructure/prisma-editorial-write-transaction.spec.ts',
     '<rootDir>/src/catalog-editorial/infrastructure/prisma-editorial-authority.spec.ts',
   ],
