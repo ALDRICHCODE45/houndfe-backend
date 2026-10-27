@@ -3,6 +3,7 @@ module.exports = {
   testEnvironment: 'node',
   testMatch: [
     '<rootDir>/src/catalog-editorial/infrastructure/editorial-reference-experiment-runner.spec.ts',
+    '<rootDir>/src/catalog-editorial/infrastructure/editorial-reference-experiment.integration.spec.ts',
   ],
   transform: {
     '^.+\\.ts$': [
