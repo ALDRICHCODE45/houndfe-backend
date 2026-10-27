@@ -20,14 +20,11 @@ export interface ContextualDocumentResult {
   warnings: ArchivedOptionWarning[];
 }
 
-/** Baseline provenance is the caller's responsibility; this pure function cannot prove it. */
-export function validateContextualDocument(
-  input: unknown,
-  references: Omit<DocumentAuthority, 'families'>,
+/** Strict code/reference projection, never an archived-assignment allowlist. */
+export function projectDefinitionFamilies(
   definitions: EditorialDefinitionsSnapshot,
-  baseline: EditorialDocument | null,
-): ContextualDocumentResult {
-  const families = definitions.families.map((family) => ({
+): DocumentAuthority['families'] {
+  return definitions.families.map((family) => ({
     code: family.code,
     attributes: family.bindings.map((binding): Definition => {
       const definition = definitions.definitions.find(
@@ -50,6 +47,16 @@ export function validateContextualDocument(
       }
     }),
   }));
+}
+
+/** Baseline provenance is the caller's responsibility; this pure function cannot prove it. */
+export function validateContextualDocument(
+  input: unknown,
+  references: Omit<DocumentAuthority, 'families'>,
+  definitions: EditorialDefinitionsSnapshot,
+  baseline: EditorialDocument | null,
+): ContextualDocumentResult {
+  const families = projectDefinitionFamilies(definitions);
   // The temporary code projection is only a strict shape/reference check.
   // It is never returned as an assignment allowlist.
   const document = validateDocument(input, { ...references, families });

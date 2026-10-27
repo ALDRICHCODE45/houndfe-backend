@@ -42,7 +42,7 @@ existing receipt/revision conflict selection and stored-envelope checks. Existin
 strict validation and conservation rules remain authoritative.
 
 Offline tests pin these boundaries, caller mutation, denial/no-effects, and legacy
-compatibility. Real reference/vocabulary composition remains U2b2; this callback
-alone supplies no SQL, authorization, rollback, or concurrency proof. H1 and public
+compatibility. U2b2 composition is described in [reference locks](catalog-editorial-reference-locks.md);
+this callback alone supplies no SQL, authorization, rollback, or concurrency proof. H1 and public
 core method signatures are unchanged. Revert only U2b1 callback/types, invocation
 sites, added tests and this section; preserve accepted U1/U2a/U3/U4.

@@ -37,3 +37,26 @@ Rollback boundary: remove this reader/spec/document and its single focused Jest
 `testMatch` entry. Existing U1 authority/seam and U3 membership commits remain
 intact. This primitive owns no transaction commit/rollback or persisted effects;
 its caller must propagate rejection and manage the surrounding transaction.
+
+## U2b2: opt-in coordinated composition
+
+Pass `createCoordinatedEditorialWriteAuthority` as the fifth
+`PrismaCatalogEditorial` constructor argument. This internal factory is not
+registered in a module or HTTP transport.
+
+Every transaction reaching authority resolution checks current capabilities and
+the qualified Product gate before observing real Variant, asset and all five
+vocabulary sources with empty selections. Source failure denies even empty
+attempts; no asset/vocabulary rows are selected by these probes.
+
+At existing validation boundaries, preparation collects recognizable media IDs
+without replacing strict validation and locks only selected qualified assets.
+Create and create-replay also read selected vocabulary and reuse the contextual
+validator's code projection. Create's existing active-option check still rejects
+archived new assignments. Stored save/initialize retain their existing selected
+definitions and same-assignment conservation checks.
+
+Offline public-core tests cover source failures, empty operations, nonempty
+selection, missing assets, archived creation denial and nonempty archived-option
+save replay. These are not PostgreSQL lock/rollback witnesses or a universal
+replay guarantee. T4 still requires a new SQL target grant.

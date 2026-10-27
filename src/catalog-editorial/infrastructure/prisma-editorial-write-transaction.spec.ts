@@ -1,3 +1,4 @@
+import { createCoordinatedEditorialWriteAuthority } from './prisma-coordinated-editorial-authority';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { PrismaCatalogEditorial } from './prisma-catalog-editorial';
 import {
@@ -561,4 +562,192 @@ describe('staged document preparation', () => {
       }
     },
   );
+});
+
+const referenceSources = [
+  'variants',
+  'private_media_assets',
+  'editorial_families',
+  'editorial_definitions',
+  'editorial_bindings',
+  'editorial_options',
+  'editorial_units',
+] as const;
+
+function coordinatedFixture(operation: Operation, archived = false) {
+  const f = fixture(operation);
+  f.factory.mockImplementation(createCoordinatedEditorialWriteAuthority);
+  const original = f.query.getMockImplementation()!;
+  f.query.mockImplementation((sql) => {
+    const text = sql.sql;
+    if (text.includes('SELECT o."archivedAt"'))
+      return [{ archivedAt: archived ? new Date('2020-01-01') : null }];
+    if (!referenceSources.some((source) => text.includes('FROM ' + source)))
+      return original(sql);
+    if (text.includes('FALSE')) return [];
+    if (text.includes('FROM private_media_assets'))
+      return sql.values.includes('asset') ? [{ id: 'asset' }] : [];
+    if (text.includes('FROM editorial_families'))
+      return [{ id: 'family-id', code: 'family' }];
+    if (text.includes('FROM editorial_definitions'))
+      return [{ id: 'color-id', code: 'color', type: 'single' }];
+    if (text.includes('FROM editorial_bindings'))
+      return [
+        { familyId: 'family-id', definitionId: 'color-id', owner: 'sellable' },
+      ];
+    if (text.includes('FROM editorial_options'))
+      return [{ definitionId: 'color-id', code: 'red', archived }];
+    return [];
+  });
+  return f;
+}
+const selectedDocument = () => ({
+  ...emptyDocument(),
+  mediaRefs: ['asset'],
+  familyCode: 'family',
+  values: [
+    {
+      code: 'color',
+      owner: 'sellable' as const,
+      variantId: null,
+      type: 'single' as const,
+      value: 'red',
+    },
+  ],
+});
+
+describe('coordinated reference composition', () => {
+  it.each(operations)(
+    'observes every real source for empty %s',
+    async (operation) => {
+      const f = coordinatedFixture(operation);
+      await expect(f.attempt()).resolves.toMatchObject({ cycle: 1 });
+      for (const source of referenceSources)
+        expect(
+          f.query.mock.calls.some(([sql]) =>
+            sql.sql.includes('FROM ' + source),
+          ),
+        ).toBe(true);
+      expect(f.legacy.resolve).not.toHaveBeenCalled();
+      expect(f.write).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(referenceSources)(
+    'denies unavailable %s even for empty create',
+    async (source) => {
+      const f = coordinatedFixture('create');
+      const query = f.query.getMockImplementation()!;
+      f.query.mockImplementation((sql) => {
+        if (sql.sql.includes('FROM ' + source))
+          throw new Error('source unavailable');
+        return query(sql);
+      });
+      await expect(f.attempt()).rejects.toThrow('FORBIDDEN');
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(f.before);
+      expect(f.legacy.resolve).not.toHaveBeenCalled();
+    },
+  );
+
+  it('creates nonempty selected references with positive vocabulary locks', async () => {
+    const f = coordinatedFixture('create');
+    const document = selectedDocument();
+    const result = await f.core.create(scope, {
+      expectedCycle: null,
+      idempotencyKey: 'selected',
+      document,
+    });
+    expect(result.draft?.document).toEqual(document);
+    const assets = f.query.mock.calls
+      .map(([sql]) => sql)
+      .filter(
+        (sql) =>
+          sql.sql.includes('FROM private_media_assets') &&
+          !sql.sql.includes('FALSE'),
+      );
+    expect(assets).toHaveLength(1);
+    expect(assets[0].values).toEqual([
+      scope.tenantId,
+      scope.productId,
+      'asset',
+    ]);
+    expect(assets[0].sql).toContain('ORDER BY id FOR SHARE');
+    for (const source of [
+      'editorial_families',
+      'editorial_definitions',
+      'editorial_bindings',
+      'editorial_options',
+    ]) {
+      expect(
+        f.query.mock.calls.some(
+          ([sql]) =>
+            sql.sql.includes('FROM ' + source) &&
+            !sql.sql.includes('FALSE') &&
+            sql.sql.includes('FOR SHARE'),
+        ),
+      ).toBe(true);
+    }
+    expect(f.write).toHaveBeenCalledTimes(2);
+    const [stateWrite] = f.write.mock.calls[0] as [Prisma.Sql];
+    expect(stateWrite.values).toContain(JSON.stringify(document));
+    expect(f.persistence.receipts).toEqual(['receipt']);
+  });
+
+  it.each(['missing asset', 'archived option'])(
+    'rejects new %s without effects',
+    async (failure) => {
+      const f = coordinatedFixture('create', failure === 'archived option');
+      const document = selectedDocument();
+      if (failure === 'missing asset') document.mediaRefs = ['missing'];
+      await expect(
+        f.core.create(scope, {
+          expectedCycle: null,
+          idempotencyKey: 'selected',
+          document,
+        }),
+      ).rejects.toThrow('MALFORMED');
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.persistence).toEqual(f.before);
+    },
+  );
+
+  it('preserves an archived assignment on nonempty save replay', async () => {
+    const f = coordinatedFixture('save', true);
+    const document = selectedDocument();
+    const receipt = {
+      cycle: 1,
+      draft: {
+        revision: 2,
+        basePublishedRevision: null,
+        document,
+      },
+      published: null,
+    };
+    const query = f.query.getMockImplementation()!;
+    f.query.mockImplementation((sql) =>
+      sql.sql.includes('catalog_editorial_save_receipts')
+        ? [{ matches: true, result: receipt }]
+        : query(sql),
+    );
+    const result = await f.core.save(scope, {
+      expectedCycle: 1,
+      expectedRevision: 1,
+      idempotencyKey: 'replay',
+      document,
+    });
+    expect(result.draft?.document).toEqual(document);
+    expect(result.warnings).toEqual([
+      {
+        code: 'ARCHIVED_OPTION',
+        familyId: 'family-id',
+        definitionId: 'color-id',
+        owner: 'sellable',
+        variantId: null,
+        optionCode: 'red',
+      },
+    ]);
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.persistence).toEqual(f.before);
+  });
 });
