@@ -88,3 +88,75 @@ admitted observer client for lock polling: bounded to 5000ms, generic errors,
 Lock wait plus nonempty blocking-pid evidence; a timed-out query is not cancelled.
 Readbacks are tenant-qualified, not a cross-query atomic snapshot unless given a tx.
 All verification here is offline; no PostgreSQL seed, lock or rollback proof exists.
+
+## Live smoke and parent lifecycle (U5b3)
+
+The separate `editorial-coordination-live.config.cjs` discovers only editorial and
+Products live specs, with one worker, no cache/setup hooks, ts-jest diagnostics and
+30-second test/hook timeouts. It is not included in the offline unit config.
+The smoke fails when unbound (never skips), awaits the guarded client before any
+application imports, uses a fresh random seed per test and disconnects in afterAll.
+It checks seeded membership/prices, actual coordinated create with selected private
+asset and active vocabulary, persisted state/create receipt, archived-option
+rejection with no editorial rows, and actual ProductsService.findOne through CLS.
+
+Only unexercised collaborators are fail-fast proxies (any property access throws):
+
+- ProductsService root PrismaService: findOne uses TenantPrismaService instead.
+- FilesService: this read performs no upload/download/file-service operation.
+- SatCatalogService: this path performs no SAT lookup.
+- Repository OutboxWriterService: findById publishes no events.
+- Repository IStockAlertStateRepository: findById performs no stock mutation/rearm.
+
+The real TenantPrismaService receives the admitted PrismaClient, with a type-only
+adaptation to its PrismaService constructor type: only inherited client APIs are
+used. No PrismaService lifecycle hooks, application/auth/seeder bootstrap or
+production registrations are invoked. All other exercised collaborators are real.
+
+Parent alone performs the lifecycle, including cleanup on failure:
+
+1. Create a NEW disposable container from the authorized cached image (no pull),
+   publishing PostgreSQL only on 127.0.0.1. Do not reuse an existing/retired target.
+2. Inspect and independently pin full container ID, image ID, name, owner label and
+   actual loopback port. Create the test database/user and fresh generated schema
+   matching the U5a binding contract; no existing databases are modified.
+3. Apply EVERY `prisma/migrations/*/migration.sql` in sorted order, verbatim, using
+   `psql` with `ON_ERROR_STOP=1` and search_path set to that generated schema on
+   every application connection. Record each file's SHA-256 and application exit;
+   stop on any failure. Do not replace the canonical history with extracted DDL.
+4. Write the closed `{binding, pinned}` JSON to a current-uid-owned regular 0600
+   file outside the real repository root, at most 4096 bytes. Keep contents private;
+   never log credentials, clients or datasource URLs. Reinspect the target pin.
+5. From this checkout, run the command below, replacing only the absolute file path.
+   The binding assignment MUST be inside `env -i`, which discards outer assignments.
+6. On success or failure, retire the exact pinned container and remove its binding
+   file; record retirement and explicit container/file absence proof. Parent owns
+   any disposable resources created during setup. This section does not run Docker.
+
+```sh
+node_bin=$(command -v node)
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 \
+  EDITORIAL_COORDINATION_PG_BINDING=/absolute/private/editorial-binding.json \
+  "$node_bin" node_modules/jest/bin/jest.js \
+  --config src/catalog-editorial/infrastructure/editorial-coordination-live.config.cjs \
+  --runInBand
+```
+
+Offline type-check (does not execute the spec or imported application modules):
+
+```sh
+node_bin=$(command -v node)
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 \
+  "$node_bin" node_modules/typescript/bin/tsc --noEmit \
+  --module commonjs --target ES2023 --moduleResolution node --esModuleInterop \
+  --experimentalDecorators --emitDecoratorMetadata --strictNullChecks \
+  --skipLibCheck --isolatedModules false --types node,jest,express,multer \
+  src/catalog-editorial/infrastructure/editorial-coordination-foundation.live.spec.ts
+```
+
+Implementation verification is offline only; the live smoke has NOT been run.
+A later parent run proves only these sequential persisted cases, not contention,
+selected-row lock edges, late-failure rollback, full Variant membership/stock
+coordination, permission-revocation atomicity, byte availability or HTTP activation.
+U6/U7 must supply their own concurrency/rollback witnesses. Remove only the two
+new U5b3 files and this appendix to roll back this slice; production is unchanged.
