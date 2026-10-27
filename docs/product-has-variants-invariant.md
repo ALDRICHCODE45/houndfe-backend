@@ -7,8 +7,10 @@ actual membership.
 
 The rejection is a `BusinessRuleViolationError` with code
 `PRODUCT_HAS_VARIANTS` and details `{ productId, variantCount }`. The existing
-domain exception filter's default mapping returns HTTP **422**, including the
-code; no filter mapping is added.
+domain exception filter's default mapping returns HTTP **422** with body
+`{ statusCode: 422, error: "PRODUCT_HAS_VARIANTS", message, timestamp, productId,
+variantCount }`: the domain code is in `error` (there is no `code` field) and the
+details are flattened at the root. No filter mapping is added.
 
 ## Transaction and ordering
 

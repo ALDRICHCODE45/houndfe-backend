@@ -121,7 +121,9 @@ parent-only restock after conversion. The guarded Product UPDATE requires
 distinguishes conversion from missing/non-stock targets. Conversion raises
 `BusinessRuleViolationError` with code `RESTOCK_TARGET_HAS_VARIANTS`, the Product
 name in the message and `{ productId }` details. The existing default filter
-returns HTTP 422 with that code; no special mapping is added.
+returns HTTP 422 with body `{ statusCode: 422, error: "RESTOCK_TARGET_HAS_VARIANTS",
+message, timestamp, productId }`: the code is in `error` (no `code` field), details
+flattened at the root; no special mapping is added.
 
 POS and bot cancellation both call `SalesService.cancelSale`, whose restock and
 cancellation persistence run in one ambient transaction. Rejection propagates and
