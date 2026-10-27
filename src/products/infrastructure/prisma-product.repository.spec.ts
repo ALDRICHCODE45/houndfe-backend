@@ -18,6 +18,7 @@
  *     has no useStock/useLots columns)
  */
 import { PrismaProductRepository } from './prisma-product.repository';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import type { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import type { IStockAlertStateRepository } from '../../stock-alerts/domain/stock-alert-state.repository';
 
@@ -625,6 +626,82 @@ describe('PrismaProductRepository.decrementStockForCharge — crossings (E.2)', 
 // ── E.2 NEW BEHAVIOR — incrementStockForRestock with strict > re-arm ──
 
 describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (E.2)', () => {
+  it.each([false, true])(
+    'rejects converted parent (%s)',
+    async (hasEarlierItem) => {
+      const tx = makeTxMock();
+      tx.setResponses([
+        ...(hasEarlierItem ? [[{ newQuantity: 5, minQuantity: 0 }]] : []),
+        [],
+        [{ name: 'Converted product', hasVariants: true, useStock: true }],
+      ]);
+      const alerts = makeStockAlertRepo();
+      const outbox = makeOutboxWriter();
+      const repo = new PrismaProductRepository(
+        makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
+          typeof PrismaProductRepository
+        >[0],
+        outbox,
+        alerts,
+      );
+      const result = repo.incrementStockForRestock([
+        ...(hasEarlierItem ? [{ productId: 'a', quantity: 1 }] : []),
+        { productId: 'b', quantity: 1 },
+        { productId: 'c', variantId: 'v', quantity: 1 },
+      ]);
+      await expect(result).rejects.toBeInstanceOf(BusinessRuleViolationError);
+      await expect(result).rejects.toMatchObject({
+        code: 'RESTOCK_TARGET_HAS_VARIANTS',
+        details: { productId: 'b' },
+      });
+      await expect(result).rejects.toThrow('Converted product');
+      const updates = tx.calls.filter((call) => /UPDATE "/.test(call.sql));
+      expect(updates).toHaveLength(hasEarlierItem ? 2 : 1);
+      expect(updates.at(-1)?.sql).toContain('AND "hasVariants" = false');
+      expect(updates.at(-1)?.values).toEqual([1, 'b', TENANT]);
+      expect(tx.calls.at(-1)?.sql).toMatch(
+        /SELECT.*"name"[\s\S]*FROM "products"/,
+      );
+      expect(tx.calls.at(-1)?.values).toEqual(['b', TENANT]);
+      expect(alerts.rearm.mock.calls.map(([call]) => call.productId)).toEqual(
+        hasEarlierItem ? ['a'] : [],
+      );
+      expect(alerts.seedAndFlip.mock.calls).toEqual([]);
+      expect(outbox.publish.mock.calls).toEqual([]);
+    },
+  );
+
+  it('silently skips a non-stock Product even when it now has Variants', async () => {
+    const tx = makeTxMock();
+    tx.setResponses([
+      [],
+      [{ name: 'Non-stock product', useStock: false, hasVariants: true }],
+      [{ newQuantity: 5, minQuantity: 0 }],
+    ]);
+    const alerts = makeStockAlertRepo();
+    const outbox = makeOutboxWriter();
+    const repo = new PrismaProductRepository(
+      makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
+        typeof PrismaProductRepository
+      >[0],
+      outbox,
+      alerts,
+    );
+    await expect(
+      repo.incrementStockForRestock([
+        { productId: 'a', quantity: 1 },
+        { productId: 'b', variantId: 'v', quantity: 1 },
+      ]),
+    ).resolves.toBeUndefined();
+    expect(tx.calls).toHaveLength(5);
+    expect(tx.calls[3].values).toEqual(['a', TENANT]);
+    expect(tx.calls[4].sql).toContain('UPDATE "variants"');
+    expect(alerts.rearm.mock.calls).toEqual([
+      [{ tx, tenantId: TENANT, productId: 'b', variantId: 'v' }],
+    ]);
+    expect(alerts.seedAndFlip.mock.calls).toEqual([]);
+    expect(outbox.publish.mock.calls).toEqual([]);
+  });
   it('locks mixed parents once in global id order and restocks/rearms in row order', async () => {
     const tx = makeTxMock();
     tx.setResponses(
@@ -684,7 +761,7 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
 
   it('skips nonpositive entries and preserves no-match/useStock and Variant rearm boundaries', async () => {
     const tx = makeTxMock();
-    tx.setResponses([[], [], [{ newQuantity: 2, minQuantity: 3 }]]);
+    tx.setResponses([[], [], [], [{ newQuantity: 2, minQuantity: 3 }]]);
     const alerts = makeStockAlertRepo();
     const outbox = makeOutboxWriter();
     // SAFETY: the fixture supplies the exact tenant/transaction port used here.
@@ -704,7 +781,7 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
         { productId: 'negative', variantId: 'v', quantity: -1 },
       ]),
     ).resolves.toBeUndefined();
-    expect(tx.calls).toHaveLength(5); // two parents, three updates, no fallback
+    expect(tx.calls).toHaveLength(6); // two parents, three updates, qualified fallback
     expect(tx.calls.slice(0, 2).map((c) => c.values)).toEqual([
       ['a', TENANT],
       ['b', TENANT],

@@ -6,6 +6,7 @@
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import { Product } from '../domain/product.entity';
 import type { IProductRepository } from '../domain/product.repository';
 import {
@@ -596,11 +597,29 @@ export class PrismaProductRepository implements IProductRepository {
          WHERE "id" = ${adjustment.productId}
            AND "tenantId" = ${tenantId}
            AND "useStock" = true
+           AND "hasVariants" = false
          RETURNING "quantity"::int AS "newQuantity",
                    "minQuantity"::int AS "minQuantity"
       `) as Array<{ newQuantity: number; minQuantity: number }>;
 
-      if (productRows.length !== 1) continue;
+      if (productRows.length !== 1) {
+        // The sorted parent FOR UPDATE lock remains held through this read.
+        // Missing/non-stock Products retain their silent-skip behavior.
+        const products = await prisma.$queryRaw<
+          Array<{ name: string; useStock: boolean; hasVariants: boolean }>
+        >`
+          SELECT "name", "useStock", "hasVariants" FROM "products"
+           WHERE "id" = ${adjustment.productId} AND "tenantId" = ${tenantId}
+        `;
+        if (products[0]?.useStock && products[0].hasVariants) {
+          throw new BusinessRuleViolationError(
+            `Cannot restock Product "${products[0].name}" without a Variant because it now has Variants`,
+            'RESTOCK_TARGET_HAS_VARIANTS',
+            { productId: adjustment.productId },
+          );
+        }
+        continue;
+      }
 
       const { newQuantity, minQuantity } = productRows[0];
       if (newQuantity > minQuantity) {

@@ -109,5 +109,23 @@ and `>`), not locale/collation order. Future multi-Product lockers must use this
 same ordering. These live cases exercise stock-row contention and real rearm calls,
 not competing alert-state rows or alert-contention behavior. Restock into a
 now-variant parent, bot parent+variant validation, and PATCH flag/member divergence
-remain open product decisions. No retry policy, HTTP/runtime activation,
-external-writer, trigger or DDL guarantee is introduced.
+were separate product decisions at T8 acceptance; T9a below resolves the restock
+case. No retry policy, HTTP/runtime activation, external-writer, trigger or DDL
+guarantee is introduced.
+
+## Restock into a variant Product (T9a)
+
+A stock-tracked Product sold before it gained Variants can no longer receive a
+parent-only restock after conversion. The guarded Product UPDATE requires
+`hasVariants = false`; a tenant-qualified read under the existing T8 parent lock
+distinguishes conversion from missing/non-stock targets. Conversion raises
+`BusinessRuleViolationError` with code `RESTOCK_TARGET_HAS_VARIANTS`, the Product
+name in the message and `{ productId }` details. The existing default filter
+returns HTTP 422 with that code; no special mapping is added.
+
+POS and bot cancellation both call `SalesService.cancelSale`, whose restock and
+cancellation persistence run in one ambient transaction. Rejection propagates and
+aborts the cancellation, including earlier restocks in a mixed batch. Nonpositive
+adjustments and non-stock Products remain silent skips; Variant restocks and
+strict rearm thresholds are unchanged. Offline tests verify rejection and absence
+of subsequent effects, not live PostgreSQL rollback or contention.
