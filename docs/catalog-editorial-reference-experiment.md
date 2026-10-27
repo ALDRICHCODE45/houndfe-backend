@@ -31,7 +31,7 @@ command bound; never automatically retry a timeout. The real smoke freshly admit
 invocation, verifies database/schema identity and different backend PIDs, shares a table
 across clients, and verifies prior success/failure schemas absent through public SQL.
 It proves neither a lock protocol nor global schema absence. Parent retains exact-target
-removal/absence verification (S4/T3). T2 concurrency/cost/rollback witnesses remain pending.
+removal/absence verification (S4/T3). T2 dependent semantic proof remains pending.
 Rollback boundary: remove only the four experiment runner/spec/config/doc files; no
 production provider, dependency, route, database migration, or shared runtime changed.
 Risk: item2 — isolation/admission remains a review boundary, not a reusable target grant.
@@ -65,12 +65,12 @@ cleanup failures must propagate to the runner, which drops the random owned sche
 This slice uses reduced source schemas with real qualification/FK shapes, NOT actual
 core semantic fixtures. Synthetic state/receipt counters are rollback sentinels only,
 not proof of core/D16 correctness. No production adapter or authority is modified.
-Dependent slice (same integration spec, estimated +250–350 lines): transaction-bound
-real SQL permission/reference provider and accepted PrismaCatalogEditorial invocation,
-actual definition/state/create/save receipt fixtures, D16 archived same-assignment,
-create active-only, replay permission/source rechecks and rejected-effect snapshots.
+The semantic continuation is partitioned into foundation/create-boundary and dependent
+D16/create-active-only/replay/source-failure/qualification/empty-metadata proof.
+Foundation adds the real SQL authority/core composition described below; the remaining
+semantic cases are preserved as pending source, not counted as passing tests.
 Do not import d16-create-fixture: it imports the retired runner and registers hooks.
-T2/S2/S6 remain incomplete until that semantic slice and independent verification.
+T2/S2/S6 remain incomplete until all dependent semantic proof and independent verification.
 
 ### First-slice observed evidence
 
@@ -98,3 +98,46 @@ connection is expected. Scoped strict TS and CJS syntax checks pass. CJS project
 lint remains the known configuration gap; no global configuration fix is authorized.
 Rollback of this slice: remove the new integration spec and revert only this slice's
 config/doc additions; retain the accepted T1 runner/spec and target lifecycle ownership.
+
+## Semantic foundation only (dependent proof remains pending)
+
+The owned minimal schema includes actual definition/state/create/save receipt columns,
+keys, checks and relevant FKs. Permission/member rows are synthetic; the accepted
+PrismaEditorialAuthority reads them through real transaction-bound Prisma delegates.
+Its test-only document provider reads variants/private_media_assets using parameterized
+SQL with BOTH tenantId and productId, and reads real vocabulary through
+PrismaEditorialDefinitions. No mocked authority or public media URL supplies access.
+
+A test-only $transaction dispatch bridge invokes accepted PrismaCatalogEditorial
+inside the same real READ COMMITTED transaction as permission/reference observation.
+Source SHARE locks precede those observations; validation, state write and receipt
+insert retain the transaction. A receipt-boundary observer detects the foreign media
+DELETE waiting on that backend with an ungranted lock, then verifies release after
+commit. Public read, exact create receipt/request, zero save receipts, retained media
+IDs and unchanged other fixture-table snapshots are checked. This composes test seams;
+production has NO such reference-authority/transaction composition from this work.
+Local lock/statement bounds are 2s/2.5s, interactive transaction 2.8s/maxWait1s, inherited
+idle timeout3s; peer autocommit retains runner1s/3s bounds. Pending work settles and
+both clients roll back; peer idle is checked before runner schema cleanup.
+
+Prior draft RED omitted source barriers and failed the receipt-boundary wait assertion.
+The prior 11-case GREEN preceded the latest historical-replay edit and is NOT current
+proof for the extracted cases. Ten cases plus rejectSemantic/saveRequest are preserved
+byte-for-byte in `.tmp/editorial-reference-semantic-pending.json`, with hashes/counts
+and fragment insertion instructions. It is mutable resumable source, NOT native review
+transport. Restore fragments only after foundation acceptance, then format and validate.
+Pending: D16 same-assignment/create-active-only; historical replay/current permission;
+three source-query failures; four qualification denials; genuine empty metadata.
+Risk item4 remains: global blocking/deadlock costs are unaccepted and T2 is incomplete;
+item2 remains governed by unchanged T1 admission. No production security guard changed.
+Snapshot identifier interpolation uses ONLY the closed semanticTables literal list;
+the prior static “SQL injection risk” identifier diagnostic is a false positive for
+this fixture, not a reason for a broad suppression. Pending ALTER identifiers likewise
+come from closed test literals and must be rechecked on restoration. CJS service gap
+remains deferred. Rollback this unit independently by removing its semantic foundation
+and doc additions; retain accepted SQL scenarios and the pending artifact.
+
+Current foundation validation: SQL+smoke flags yield 40/40 passes (39 accepted + one
+foundation), 3.889s; default yields 24 passes/16 skips, 0.588s. Scoped strict TS,
+TS ESLint, CJS syntax, Prettier and diff checks pass. These counts exclude all ten
+extracted pending cases; they are not disabled passing tests or completed T2 proof.

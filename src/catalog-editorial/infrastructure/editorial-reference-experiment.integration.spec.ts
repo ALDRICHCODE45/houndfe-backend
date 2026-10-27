@@ -1,4 +1,12 @@
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
+import { PrismaCatalogEditorial } from './prisma-catalog-editorial';
+import { PrismaEditorialAuthority } from './prisma-editorial-authority';
+import { PrismaEditorialDefinitions } from './prisma-editorial-definitions';
+import {
+  emptyDocument,
+  type Definition,
+  type EditorialDocument,
+} from '../domain/document';
 import { withEditorialReferenceDatabase } from './editorial-reference-experiment-runner';
 
 const live =
@@ -22,7 +30,9 @@ async function begin(client: PrismaClient) {
   ])
     await client.$executeRawUnsafe(`SET LOCAL ${setting}`);
 }
-async function sources(client: PrismaClient) {
+async function sources(
+  client: Pick<PrismaClient, '$executeRawUnsafe' | '$queryRawUnsafe'>,
+) {
   await client.$executeRawUnsafe(
     'LOCK TABLE private_media_assets IN SHARE MODE',
   );
@@ -106,7 +116,7 @@ async function pid(client: PrismaClient) {
   return row.pid;
 }
 async function waiting(
-  observer: PrismaClient,
+  observer: Pick<PrismaClient, '$queryRawUnsafe'>,
   blocked: number,
   blocker: number,
 ) {
@@ -289,3 +299,287 @@ live('isolated source-table SHARE hypothesis (not core semantic proof)', () => {
     });
   });
 });
+
+const semanticScope = { actorId: 'actor', tenantId: 't', productId: 'p' };
+const semanticTables = [
+  'products',
+  'variants',
+  'private_media_assets',
+  'users',
+  'roles',
+  'permissions',
+  'role_permissions',
+  'tenant_memberships',
+  'editorial_families',
+  'editorial_definitions',
+  'editorial_bindings',
+  'editorial_options',
+  'editorial_units',
+  'catalog_editorial_states',
+  'catalog_editorial_create_receipts',
+  'catalog_editorial_save_receipts',
+] as const;
+const semanticDocument = (
+  option = 'new',
+  variantId = 'v',
+): EditorialDocument => ({
+  ...emptyDocument(),
+  familyCode: 'f',
+  mediaRefs: ['m'],
+  values: [
+    {
+      code: 'color',
+      owner: 'sellable',
+      variantId,
+      type: 'single',
+      value: option,
+    },
+  ],
+});
+async function semanticFixture(
+  work: (f: {
+    a: PrismaClient;
+    b: PrismaClient;
+    run: <T>(
+      call: (core: PrismaCatalogEditorial) => Promise<T>,
+      receiptBarrier?: boolean,
+    ) => Promise<T>;
+    effects: () => Promise<Record<string, unknown>>;
+  }) => Promise<void>,
+) {
+  await withEditorialReferenceDatabase(async ({ first: a, second: b }) => {
+    let peerMutation: Promise<Outcome> | undefined;
+    const peerPid = await pid(b);
+    const effects = async () => {
+      // Identifiers come only from the closed fixture table list, never input.
+      return Object.fromEntries<unknown>(
+        await Promise.all(
+          semanticTables.map(
+            async (table) =>
+              [
+                table,
+                await b.$queryRaw(
+                  Prisma.sql`SELECT to_jsonb(x) AS row FROM ${Prisma.raw(table)} x ORDER BY to_jsonb(x)::text`,
+                ),
+              ] as const,
+          ),
+        ),
+      );
+    };
+    try {
+      // Minimal owned fixture, not production migrations; constraints mirror accepted artifacts.
+      for (const sql of [
+        'CREATE TABLE products (id text PRIMARY KEY, "tenantId" text NOT NULL, UNIQUE ("tenantId", id))',
+        'CREATE TABLE variants (id text PRIMARY KEY, "productId" text NOT NULL REFERENCES products(id) ON DELETE CASCADE, "tenantId" text NOT NULL)',
+        'CREATE TABLE private_media_assets (id text PRIMARY KEY, "tenantId" text NOT NULL, "productId" text NOT NULL, "storageKey" text NOT NULL UNIQUE, "mimeType" text NOT NULL, "sizeBytes" integer NOT NULL, "createdAt" timestamp(3) NOT NULL DEFAULT now(), FOREIGN KEY ("tenantId", "productId") REFERENCES products("tenantId", id) ON DELETE RESTRICT ON UPDATE CASCADE)',
+        'CREATE TABLE users (id text PRIMARY KEY, "isActive" boolean NOT NULL)',
+        'CREATE TABLE roles (id text PRIMARY KEY, name text NOT NULL, "tenantId" text, description text, "isSystem" boolean NOT NULL DEFAULT false, "createdAt" timestamp(3) NOT NULL DEFAULT now(), "updatedAt" timestamp(3) NOT NULL DEFAULT now(), UNIQUE ("tenantId", name))',
+        'CREATE TABLE permissions (id text PRIMARY KEY, subject text NOT NULL, action text NOT NULL, description text, "createdAt" timestamp(3) NOT NULL DEFAULT now(), UNIQUE (subject, action))',
+        'CREATE TABLE role_permissions (id text PRIMARY KEY, "roleId" text NOT NULL REFERENCES roles(id), "permissionId" text NOT NULL REFERENCES permissions(id), UNIQUE ("roleId", "permissionId"))',
+        'CREATE TABLE tenant_memberships (id text PRIMARY KEY, "userId" text NOT NULL REFERENCES users(id), "tenantId" text NOT NULL, "roleId" text NOT NULL REFERENCES roles(id), "createdAt" timestamp(3) NOT NULL DEFAULT now(), UNIQUE ("userId", "tenantId", "roleId"))',
+        'CREATE TABLE editorial_families (id text PRIMARY KEY, code text NOT NULL UNIQUE)',
+        `CREATE TABLE editorial_definitions (id text PRIMARY KEY, code text NOT NULL UNIQUE, type text NOT NULL CHECK (type IN ('text','boolean','number','single','multi')), UNIQUE(id, type))`,
+        `CREATE TABLE editorial_bindings ("familyId" text REFERENCES editorial_families(id) ON DELETE RESTRICT ON UPDATE RESTRICT, "definitionId" text REFERENCES editorial_definitions(id) ON DELETE RESTRICT ON UPDATE RESTRICT, owner text NOT NULL CHECK (owner IN ('product','sellable')), PRIMARY KEY ("familyId", "definitionId"))`,
+        `CREATE TABLE editorial_options ("definitionId" text, "definitionType" text NOT NULL CHECK ("definitionType" IN ('single','multi')), code text, "archivedAt" timestamp(3), PRIMARY KEY ("definitionId",code), FOREIGN KEY ("definitionId","definitionType") REFERENCES editorial_definitions(id,type) ON DELETE RESTRICT ON UPDATE RESTRICT)`,
+        `CREATE TABLE editorial_units (id text PRIMARY KEY, "definitionId" text NOT NULL, "definitionType" text NOT NULL DEFAULT 'number' CHECK ("definitionType" = 'number'), "unitCode" text, UNIQUE NULLS NOT DISTINCT ("definitionId","unitCode"), FOREIGN KEY ("definitionId","definitionType") REFERENCES editorial_definitions(id,type) ON DELETE RESTRICT ON UPDATE RESTRICT)`,
+        `CREATE TABLE catalog_editorial_states ("tenantId" text, "productId" text, cycle integer NOT NULL CHECK (cycle > 0), "draftRevision" integer, "basePublishedRevision" integer, "draftDocument" jsonb, "publishedRevision" integer, "publishedDocument" jsonb, PRIMARY KEY ("tenantId","productId"), FOREIGN KEY ("tenantId","productId") REFERENCES products("tenantId",id) ON DELETE RESTRICT ON UPDATE CASCADE,
+          CHECK (("draftRevision" IS NULL AND "draftDocument" IS NULL AND "basePublishedRevision" IS NULL) OR ("draftRevision" > 0 AND "draftRevision" IS NOT NULL AND "draftDocument" IS NOT NULL AND jsonb_typeof("draftDocument") = 'object' AND ("basePublishedRevision" IS NULL OR "basePublishedRevision" > 0))),
+          CHECK (("publishedRevision" IS NULL AND "publishedDocument" IS NULL) OR ("publishedRevision" > 0 AND "publishedRevision" IS NOT NULL AND "publishedDocument" IS NOT NULL AND jsonb_typeof("publishedDocument") = 'object')))`,
+        ...['create', 'save'].map(
+          (operation) =>
+            `CREATE TABLE catalog_editorial_${operation}_receipts ("tenantId" text, "productId" text, "actorId" text, "idempotencyKey" text CHECK (length("idempotencyKey") BETWEEN 1 AND 200), request jsonb NOT NULL, result jsonb NOT NULL, PRIMARY KEY ("tenantId","productId","actorId","idempotencyKey"), FOREIGN KEY ("tenantId","productId") REFERENCES catalog_editorial_states("tenantId","productId") ON DELETE RESTRICT ON UPDATE CASCADE)`,
+        ),
+        "INSERT INTO products VALUES ('p','t'), ('foreign','other'), ('same-tenant','t')",
+        "INSERT INTO variants VALUES ('v','p','t'), ('v2','p','t'), ('wrong-tenant','p','other'), ('wrong-product','same-tenant','t')",
+        "INSERT INTO private_media_assets (id,\"tenantId\",\"productId\",\"storageKey\",\"mimeType\",\"sizeBytes\") VALUES ('m','t','p','opaque','image/png',1), ('foreign-m','other','foreign','foreign-opaque','image/png',1), ('same-tenant-m','t','same-tenant','same-opaque','image/png',1)",
+        "INSERT INTO users VALUES ('actor',true)",
+        "INSERT INTO roles (id,name,\"tenantId\") VALUES ('role','editor','t')",
+        "INSERT INTO permissions (id,subject,action) VALUES ('read','ProductEditorialDraft','read'), ('edit','ProductEditorialDraft','update')",
+        "INSERT INTO role_permissions VALUES ('r','role','read'), ('e','role','edit')",
+        "INSERT INTO tenant_memberships (id,\"userId\",\"tenantId\",\"roleId\") VALUES ('member','actor','t','role')",
+        "INSERT INTO editorial_families VALUES ('family','f')",
+        "INSERT INTO editorial_definitions VALUES ('definition','color','single')",
+        "INSERT INTO editorial_bindings VALUES ('family','definition','sellable')",
+        "INSERT INTO editorial_options VALUES ('definition','single','old',now()), ('definition','single','new',NULL)",
+      ])
+        await a.$executeRawUnsafe(sql);
+      const run = <T>(
+        call: (core: PrismaCatalogEditorial) => Promise<T>,
+        receiptBarrier = false,
+      ) =>
+        a.$transaction(
+          async (tx) => {
+            await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '2000ms'");
+            await tx.$executeRawUnsafe(
+              "SET LOCAL statement_timeout = '2500ms'",
+            );
+            await sources(tx); // Before authority/Product/reference observation.
+            const authority = new PrismaEditorialAuthority(tx, {
+              resolve: async (scope) => {
+                const variants = await tx.$queryRaw<
+                  { id: string }[]
+                >`SELECT id FROM variants WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}`;
+                const assets = await tx.$queryRaw<
+                  { id: string }[]
+                >`SELECT id FROM private_media_assets WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}`;
+                const vocabulary = await new PrismaEditorialDefinitions(
+                  tx,
+                ).read();
+                return {
+                  ...scope,
+                  variantIds: variants.map((v) => v.id),
+                  assetIds: assets.map((m) => m.id),
+                  families: vocabulary.families.map((family) => ({
+                    code: family.code,
+                    attributes: family.bindings.map((binding): Definition => {
+                      const d = vocabulary.definitions.find(
+                        (d) => d.id === binding.definitionId,
+                      );
+                      if (!d) throw new Error('Missing definition');
+                      const common = { code: d.code, owner: binding.owner };
+                      switch (d.type) {
+                        case 'single':
+                        case 'multi':
+                          return {
+                            ...common,
+                            type: d.type,
+                            codes: d.options.map((o) => o.code),
+                          };
+                        case 'number':
+                          return { ...common, type: d.type, units: d.units };
+                        default:
+                          return { ...common, type: d.type };
+                      }
+                    }),
+                  })),
+                };
+              },
+            });
+            // Only transaction dispatch is adapted. Authority uses real Prisma delegates;
+            // all core queries/validation/state/receipts execute on this very transaction.
+            const coreTx = new Proxy(tx, {
+              get(target, key) {
+                if (key !== '$executeRaw')
+                  return Reflect.get(target, key) as unknown;
+                return async (sql: Prisma.Sql) => {
+                  if (
+                    receiptBarrier &&
+                    sql.text.includes(
+                      'INSERT INTO "catalog_editorial_create_receipts"',
+                    )
+                  ) {
+                    peerMutation = execute(
+                      b,
+                      "DELETE FROM private_media_assets WHERE id = 'foreign-m'",
+                    );
+                    const [backend] = await tx.$queryRaw<
+                      { pid: number }[]
+                    >`SELECT pg_backend_pid() AS pid`;
+                    expect(await waiting(tx, peerPid, backend.pid)).toBe(true);
+                  }
+                  return target.$executeRaw(sql);
+                };
+              },
+            });
+            const client = {
+              $transaction: (
+                work: (bound: Prisma.TransactionClient) => Promise<unknown>,
+              ) => work(coreTx),
+            } as unknown as PrismaClient;
+            return call(
+              new PrismaCatalogEditorial(
+                client,
+                authority,
+                authority.createAuthority,
+                authority.saveAuthority,
+              ),
+            );
+          },
+          {
+            isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+            maxWait: 1000,
+            timeout: 2800,
+          },
+        );
+      await work({ a, b, run, effects });
+    } finally {
+      const settled = await Promise.allSettled(
+        peerMutation ? [peerMutation] : [],
+      );
+      const rollback = await Promise.allSettled(
+        [a, b].map((c) => c.$executeRawUnsafe('ROLLBACK')),
+      );
+      expect(rollback.every((r) => r.status === 'fulfilled')).toBe(true);
+      if (peerMutation)
+        expect(settled).toEqual([{ status: 'fulfilled', value: { count: 1 } }]);
+      expect(
+        await a.$queryRawUnsafe(
+          'SELECT state FROM pg_stat_activity WHERE pid = $1',
+          peerPid,
+        ),
+      ).toEqual([{ state: 'idle' }]);
+    }
+  });
+}
+const createRequest = (document = semanticDocument()) => ({
+  expectedCycle: null,
+  idempotencyKey: 'create',
+  document,
+});
+
+live(
+  'actual core through isolated transaction-bound SQL authority bridge',
+  () => {
+    test('core create holds source barrier through receipt write', async () => {
+      await semanticFixture(async (f) => {
+        const before = await f.effects();
+        const result = await f.run(
+          (core) => core.create(semanticScope, createRequest()),
+          true,
+        );
+        expect(result).toEqual({
+          cycle: 1,
+          draft: {
+            revision: 1,
+            basePublishedRevision: null,
+            document: semanticDocument(),
+          },
+          published: null,
+        });
+        expect(await f.run((core) => core.read(semanticScope))).toEqual(result);
+        expect(
+          await f.b.$queryRawUnsafe(
+            'SELECT "tenantId", "productId", "actorId", "idempotencyKey", request, result FROM catalog_editorial_create_receipts',
+          ),
+        ).toEqual([
+          {
+            ...semanticScope,
+            idempotencyKey: 'create',
+            request: { expectedCycle: null, document: semanticDocument() },
+            result,
+          },
+        ]);
+        expect(
+          await f.b.$queryRawUnsafe(
+            'SELECT count(*)::int AS n FROM catalog_editorial_save_receipts',
+          ),
+        ).toEqual([{ n: 0 }]);
+        const after = await f.effects();
+        for (const table of semanticTables)
+          if (
+            ![
+              'private_media_assets',
+              'catalog_editorial_states',
+              'catalog_editorial_create_receipts',
+            ].includes(table)
+          )
+            expect(after[table]).toEqual(before[table]);
+        expect(
+          await f.b.$queryRawUnsafe(
+            'SELECT id FROM private_media_assets ORDER BY id',
+          ),
+        ).toEqual([{ id: 'm' }, { id: 'same-tenant-m' }]);
+      });
+    });
+  },
+);
