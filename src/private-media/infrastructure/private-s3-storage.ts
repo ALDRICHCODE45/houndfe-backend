@@ -1,5 +1,6 @@
 import {
   DeleteObjectCommand,
+  GetObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -74,6 +75,54 @@ export class PrivateS3Storage {
         ACL: 'private',
       }),
     );
+  }
+
+  async read(metadata: StorageMetadata): Promise<Buffer> {
+    const { storageKey, mimeType, sizeBytes } = metadata;
+    this.validate({ storageKey, mimeType, sizeBytes });
+    const response = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.config.bucket,
+        Key: storageKey,
+      }),
+    );
+    const body = response.Body;
+    try {
+      if (
+        (response.ContentLength !== undefined &&
+          response.ContentLength !== sizeBytes) ||
+        (response.ContentType !== undefined &&
+          response.ContentType !== mimeType) ||
+        response.ContentRange !== undefined ||
+        !body ||
+        typeof (body as Partial<AsyncIterable<unknown>>)[
+          Symbol.asyncIterator
+        ] !== 'function'
+      )
+        throw new Error('Invalid private media response');
+      const chunks: Buffer[] = [];
+      let length = 0;
+      for await (const chunk of body as AsyncIterable<unknown>) {
+        if (!(chunk instanceof Uint8Array))
+          throw new Error('Invalid private media chunk');
+        length += chunk.byteLength;
+        if (length > this.config.maxBytes || length > sizeBytes)
+          throw new Error('Private media response exceeds limit');
+        chunks.push(Buffer.from(chunk));
+      }
+      if (length !== sizeBytes)
+        throw new Error('Private media response length mismatch');
+      return Buffer.concat(chunks, length);
+    } catch (error) {
+      // Rejected Node SDK streams must release resources, preserving the failure.
+      try {
+        if (body && 'destroy' in body && typeof body.destroy === 'function')
+          body.destroy();
+      } catch {
+        // Cleanup must not replace the original error or disclose partial bytes.
+      }
+      throw error;
+    }
   }
 
   /** Compensation for a caller-owned new attempt only; never enumerate or GC. */

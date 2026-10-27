@@ -97,9 +97,19 @@ For synthetic-only configuration tests, use the clean-child command above with `
 - `remove(storageKey)` sends one exact-key delete. Only orchestration that proves ownership of a new attempt may use it for compensation; never use it after an indeterminate database outcome or for garbage collection.
 - Invalid input rejects before a command is sent. SDK failures propagate; the adapter performs no automatic cleanup.
 
-This slice has no read method yet. Neither explicit private ACL nor synthetic SDK tests establish real destination policy or production readiness.
+Neither explicit private ACL nor synthetic SDK tests establish real destination policy or production readiness.
 
-Run simulated upload/configuration/removal tests with the clean-child command above and `--config src/private-media/infrastructure/private-s3-storage.config.cjs`.
+Run simulated upload/read/configuration/removal tests with the clean-child command above and `--config src/private-media/infrastructure/private-s3-storage.config.cjs`.
+
+## Private SDK reads
+
+`read(metadata)` snapshots the validated storage key, MIME type and expected size before awaiting the exact-key request. It returns a Buffer only after complete, exact-length consumption.
+
+- Optional content-length/type headers must match persisted metadata; ranged responses are rejected.
+- Only asynchronous byte chunks are accepted. Each chunk is copied, and accumulated bytes must stay within both the configured cap and expected size. Empty, truncated, oversized and non-byte bodies reject; unbounded byte-array transforms are never called.
+- SDK and stream errors propagate unchanged. Rejected Node streams are destroyed without replacing the original failure; no partial bytes, retry or automatic deletion is returned or initiated.
+
+The adapter does not authorize users or establish persisted linkage. Those checks belong to the internal orchestration before calling this read method.
 
 ## Evidence boundaries
 

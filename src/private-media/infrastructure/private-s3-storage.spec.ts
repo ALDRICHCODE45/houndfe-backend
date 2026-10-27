@@ -3,6 +3,9 @@ jest.mock('@aws-sdk/client-s3', () => ({
   PutObjectCommand: jest
     .fn()
     .mockImplementation((input: unknown) => ({ input })),
+  GetObjectCommand: jest
+    .fn()
+    .mockImplementation((input: unknown) => ({ input })),
   DeleteObjectCommand: jest
     .fn()
     .mockImplementation((input: unknown) => ({ input })),
@@ -11,7 +14,9 @@ import {
   S3Client,
   PutObjectCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
 } from '@aws-sdk/client-s3';
+import { Readable } from 'node:stream';
 import { PrivateS3Storage } from './private-s3-storage';
 import { PrivateMediaConfig } from './private-media-config';
 
@@ -100,7 +105,11 @@ test.each([
       Buffer.from('abc'),
     ),
   ).rejects.toThrow();
+  await expect(
+    new PrivateS3Storage(config).read(invalid as typeof metadata),
+  ).rejects.toThrow();
   expect(PutObjectCommand).not.toHaveBeenCalled();
+  expect(GetObjectCommand).not.toHaveBeenCalled();
   expect(mockSend).not.toHaveBeenCalled();
 });
 
@@ -131,6 +140,117 @@ test.each([
   expect(mockSend).not.toHaveBeenCalled();
 });
 
+function stream(chunks: unknown[]) {
+  const body = Readable.from(chunks);
+  const destroy = jest.spyOn(body, 'destroy');
+  return { body, destroy };
+}
+
+test('bounded read uses exact persisted key and returns complete bytes', async () => {
+  mockSend.mockResolvedValue({
+    Body: stream([Buffer.from('a'), new Uint8Array([98, 99])]).body,
+    ContentType: metadata.mimeType,
+    ContentLength: 3,
+  });
+  const bytes = await new PrivateS3Storage(config).read(metadata);
+  expect(Buffer.isBuffer(bytes)).toBe(true);
+  expect(bytes).toEqual(Buffer.from('abc'));
+  expect(GetObjectCommand).toHaveBeenCalledWith({
+    Bucket: config.bucket,
+    Key: metadata.storageKey,
+  });
+});
+
+test('missing optional headers still checks actual bytes', async () => {
+  mockSend.mockResolvedValue({ Body: stream([Buffer.from('abc')]).body });
+  await expect(new PrivateS3Storage(config).read(metadata)).resolves.toEqual(
+    Buffer.from('abc'),
+  );
+});
+
+test.each([
+  { ContentLength: 2 },
+  { ContentLength: 4 },
+  { ContentType: 'image/jpeg' },
+  { ContentRange: 'bytes 0-2/10' },
+])('rejects mismatched response headers: %j', async (headers) => {
+  const { body, destroy } = stream([Buffer.from('abc')]);
+  mockSend.mockResolvedValue({ Body: body, ...headers });
+  await expect(new PrivateS3Storage(config).read(metadata)).rejects.toThrow();
+  expect(destroy).toHaveBeenCalled();
+});
+
+test.each([
+  { chunks: [] },
+  { chunks: [Buffer.from('ab')] },
+  { chunks: [Buffer.from('ab'), Buffer.from('cd')] },
+  { chunks: [Buffer.alloc(5)] },
+  { chunks: ['abc'] },
+  { chunks: [42] },
+])(
+  'rejects invalid actual body without partial bytes: %j',
+  async ({ chunks }) => {
+    const { body, destroy } = stream(chunks);
+    mockSend.mockResolvedValue({ Body: body });
+    await expect(new PrivateS3Storage(config).read(metadata)).rejects.toThrow();
+    expect(destroy).toHaveBeenCalled();
+  },
+);
+
+test.each([undefined, {}, { transformToByteArray: jest.fn() }])(
+  'rejects unsupported bodies without unbounded transforms',
+  async (Body) => {
+    mockSend.mockResolvedValue({ Body });
+    await expect(new PrivateS3Storage(config).read(metadata)).rejects.toThrow();
+    if (Body && 'transformToByteArray' in Body)
+      expect(Body.transformToByteArray).not.toHaveBeenCalled();
+  },
+);
+
+test('stream error after a chunk preserves failure and destroys body', async () => {
+  const failure = new Error('synthetic stream failure');
+  const body = Readable.from(
+    (function* () {
+      yield Buffer.from('a');
+      throw failure;
+    })(),
+  );
+  const destroy = jest.spyOn(body, 'destroy');
+  mockSend.mockResolvedValue({ Body: body });
+  await expect(new PrivateS3Storage(config).read(metadata)).rejects.toBe(
+    failure,
+  );
+  expect(destroy).toHaveBeenCalled();
+  expect(DeleteObjectCommand).not.toHaveBeenCalled();
+});
+
+test('snapshots key, MIME and size before pending Get', async () => {
+  let complete!: (value: unknown) => void;
+  mockSend.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+  );
+  const mutable = { ...metadata };
+  const pending = new PrivateS3Storage(config).read(mutable);
+  Object.assign(mutable, {
+    storageKey: 'changed',
+    mimeType: 'image/jpeg',
+    sizeBytes: 1,
+  });
+  complete({
+    Body: stream([Buffer.from('abc')]).body,
+    ContentType: metadata.mimeType,
+    ContentLength: metadata.sizeBytes,
+  });
+  await expect(pending).resolves.toEqual(Buffer.from('abc'));
+  expect(GetObjectCommand).toHaveBeenCalledWith({
+    Bucket: config.bucket,
+    Key: metadata.storageKey,
+  });
+});
+
 test('remove sends only exact known key, rejects empty keys', async () => {
   const storage = new PrivateS3Storage(config);
   await expect(storage.remove('new-attempt/key')).resolves.toBeUndefined();
@@ -148,7 +268,8 @@ test('SDK failures propagate unchanged with no automatic delete or retry', async
   mockSend.mockRejectedValue(failure);
   const storage = new PrivateS3Storage(config);
   await expect(storage.put(metadata, Buffer.from('abc'))).rejects.toBe(failure);
+  await expect(storage.read(metadata)).rejects.toBe(failure);
   expect(DeleteObjectCommand).not.toHaveBeenCalled();
   await expect(storage.remove(metadata.storageKey)).rejects.toBe(failure);
-  expect(mockSend).toHaveBeenCalledTimes(2);
+  expect(mockSend).toHaveBeenCalledTimes(3);
 });
