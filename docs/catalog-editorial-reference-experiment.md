@@ -1,8 +1,8 @@
 # Editorial reference experiment: isolated SQL hypothesis
 
-Covers S1/S3/S4/S5 of `odd/tasks/editorial-reference-sql-experiment.md` within T1.
-The human grant is recorded in L2; target lifecycle belongs exclusively to the parent.
-T1 claims no production integration, reference locks, D16/create/replay proof, or runtime readiness.
+Records the completed T1–T3 experiment in `odd/tasks/editorial-reference-sql-experiment.md`.
+The human grant is recorded in L2. The exact disposable target is now retired.
+No production integration, operational lock adoption, or runtime readiness is claimed.
 
 ## Boundary
 
@@ -20,7 +20,10 @@ and return clients idle (no open transactions). Cleanup errors propagate, never 
 
 ## Focused validation
 
-Resolve `node_bin=$(command -v node)` first. From this workspace, run:
+The following is the historical live invocation, not permission to recreate the retired
+target. Future live execution requires separate authorization and a newly admitted target.
+For database-free checks, omit both `EDITORIAL_REFERENCE_SMOKE` and `EDITORIAL_REFERENCE_SQL`.
+Resolve `node_bin=$(command -v node)` first; the authorized live run used:
 
 ```sh
 env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 EDITORIAL_REFERENCE_SMOKE=1 "$node_bin" node_modules/jest/bin/jest.js --config src/catalog-editorial/infrastructure/editorial-reference-experiment.config.cjs --runInBand
@@ -30,8 +33,8 @@ Omit `EDITORIAL_REFERENCE_SMOKE=1` for mock-only admission/lifecycle tests. Use 
 command bound; never automatically retry a timeout. The real smoke freshly admits each
 invocation, verifies database/schema identity and different backend PIDs, shares a table
 across clients, and verifies prior success/failure schemas absent through public SQL.
-It proves neither a lock protocol nor global schema absence. Parent retains exact-target
-removal/absence verification (S4/T3). T2 passed parent and independent verification.
+It proves neither a lock protocol nor global schema absence. Exact-target removal/absence
+verification (S4/T3) is recorded below. T2 passed parent and independent verification.
 Rollback boundary: remove only the four experiment runner/spec/config/doc files; no
 production provider, dependency, route, database migration, or shared runtime changed.
 Risk: item2 — isolation/admission remains a review boundary, not a reusable target grant.
@@ -123,11 +126,12 @@ both clients roll back; peer idle is checked before runner schema cleanup.
 Prior draft RED omitted source barriers and failed the receipt-boundary wait assertion.
 The old draft 11-case GREEN was not treated as current evidence. After foundation
 acceptance, all three fragments were hash/byte/newline verified and inserted exactly
-before formatting, without changing foundation bytes. The artifact remains unchanged
-at `.tmp/editorial-reference-semantic-pending.json` (9,488 bytes, SHA256
-`6a2a760fcac3834e3fcab2b776acc76444f49b7b59509c4a2449d330b50632b1`),
-as preserved draft source for parent cleanup, NOT frozen review transport or unexecuted
-pending tests. Restoration and strengthened observations passed 11/11 focused cases.
+before formatting, without changing foundation bytes. After the restored tests were
+committed, the parent removed only `.tmp/editorial-reference-semantic-pending.json`,
+first verifying its 9,488 bytes and SHA256
+`6a2a760fcac3834e3fcab2b776acc76444f49b7b59509c4a2449d330b50632b1`.
+It was preserved draft source, never frozen review transport. Restoration and strengthened
+observations passed 11/11 focused cases; no pending cases were discarded.
 Risk item4 remains: global blocking/deadlock costs are unaccepted; item2 remains governed
 by unchanged T1 admission. No production security guard changed.
 Snapshot identifier interpolation uses ONLY the closed semanticTables literal list;
@@ -135,7 +139,7 @@ the prior static “SQL injection risk” identifier diagnostic is a false posit
 this fixture, not a reason for a broad suppression. Restored failure injection/probes
 now select complete SQL statements from a closed literal map, eliminating their dynamic
 identifier warning without suppression. CJS service gap remains deferred. Rollback this
-unit by removing restored helpers/tests and its doc changes; preserve foundation and artifact.
+unit by reverting its committed helpers/tests and doc changes; preserve the foundation.
 
 ### Dependent semantic results
 
@@ -164,4 +168,19 @@ Current validation: explicit SQL+smoke flags pass 50/50 (14 SQL + 25 T1 + 11 cor
 6.041s; default passes 24 with 26 skipped, 0.575s. Scoped strict TS, TS ESLint,
 CJS syntax, narrow Prettier and diff checks pass. All ten restored cases are exercised;
 independent verification also passed 50/50 (7.494s) and default 24/26 skipped (0.601s).
-T2 is accepted within this experimental scope; T3 exact-target removal remains pending.
+T2 is accepted within this experimental scope; T3 cleanup is complete.
+
+## Retirement and decision boundary
+
+After all SQL verification, the parent freshly matched the full container ID, exact name,
+image and ownership labels, then removed only
+`c5a4f914265edb542ab7506905952314dff5228d5ebd7e8efa377f49e3ae38c8`.
+Post-removal inspection exited 1 with `No such container`; reachable-daemon exact-ID and
+anchored-name filters both returned zero matches. The restored temporary fragment file
+was also removed after hash and committed-source checks. No other target or runtime changed.
+Do not reconnect, recreate, adopt, or replace this target under the expired experiment grant.
+
+The experiment establishes evidence, not a deployable coordination policy. Source-table
+SHARE locks affect unrelated tenants and can deadlock with existing Product-first writes.
+Any production strategy needs a separate scope/tradeoff decision and appropriate proof;
+this work activates no provider, write route, publication, or shared API restart.
