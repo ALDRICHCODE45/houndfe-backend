@@ -590,11 +590,128 @@ model Product {
 
   // F1.WU1 back-relation — declared here so it references ProductCatalogPriceList declared later.
   catalogPriceLists ProductCatalogPriceList[]
+  editorialState CatalogEditorialState?
+  privateMediaAssets PrivateMediaAsset[]
 
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([tenantId, includeInOnlineCatalog, categoryId])
   @@index([tenantId, includeInOnlineCatalog, createdAt(sort: Desc)])
   @@map("products")
+}
+
+// Private bytes are referenced by opaque key, never by public URL.
+model PrivateMediaAsset {
+  id String @id @default(uuid())
+  tenantId String
+  productId String
+  storageKey String @unique
+  mimeType String
+  sizeBytes Int
+  createdAt DateTime @default(now())
+  product Product @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([tenantId, productId])
+  @@map("private_media_assets")
+}
+
+// Private descriptive state. B1 exposes read only; no lifecycle writes.
+model CatalogEditorialState {
+  tenantId String
+  productId String
+  cycle Int
+  draftRevision Int?
+  basePublishedRevision Int?
+  draftDocument Json?
+  publishedRevision Int?
+  publishedDocument Json?
+  createReceipts CatalogEditorialCreateReceipt[]
+  saveReceipts CatalogEditorialSaveReceipt[]
+  product Product @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId])
+  @@map("catalog_editorial_states")
+}
+
+model CatalogEditorialCreateReceipt {
+  tenantId String
+  productId String
+  actorId String
+  idempotencyKey String
+  request Json
+  result Json
+  state CatalogEditorialState @relation(fields: [tenantId, productId], references: [tenantId, productId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId, actorId, idempotencyKey])
+  @@map("catalog_editorial_create_receipts")
+}
+
+model CatalogEditorialSaveReceipt {
+  tenantId String
+  productId String
+  actorId String
+  idempotencyKey String
+  request Json
+  result Json
+  state CatalogEditorialState @relation(fields: [tenantId, productId], references: [tenantId, productId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId, actorId, idempotencyKey])
+  @@map("catalog_editorial_save_receipts")
+}
+
+// Company-wide editorial vocabulary; SQL migration owns type/owner CHECK constraints.
+model EditorialFamily {
+  id       String @id
+  code     String @unique
+  bindings EditorialBinding[]
+
+  @@map("editorial_families")
+}
+
+model EditorialDefinition {
+  id       String @id
+  code     String @unique
+  type     String
+  bindings EditorialBinding[]
+  options  EditorialOption[]
+  units    EditorialUnit[]
+
+  @@unique([id, type])
+  @@map("editorial_definitions")
+}
+
+model EditorialOption {
+  definitionId   String
+  definitionType String
+  code           String
+  archivedAt     DateTime? @db.Timestamp(3)
+  definition     EditorialDefinition @relation(fields: [definitionId, definitionType], references: [id, type], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([definitionId, code])
+  @@map("editorial_options")
+}
+
+model EditorialUnit {
+  id             String @id
+  definitionId   String
+  definitionType String @default("number")
+  unitCode       String?
+  definition     EditorialDefinition @relation(fields: [definitionId, definitionType], references: [id, type], onDelete: Restrict, onUpdate: Restrict)
+
+  // Migration upgrades nullable uniqueness to PostgreSQL NULLS NOT DISTINCT.
+  @@unique([definitionId, unitCode])
+  @@map("editorial_units")
+}
+
+model EditorialBinding {
+  familyId     String
+  definitionId String
+  owner        String
+  family       EditorialFamily @relation(fields: [familyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  definition   EditorialDefinition @relation(fields: [definitionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([familyId, definitionId])
+  @@map("editorial_bindings")
 }
 
 model ServiceDetail {

@@ -45,6 +45,7 @@ interface RecomputeProbe {
 // pca-2c2 — narrow typed views over the `any`-typed shared mocks so the new
 // capacity tests stay lint-clean without widening the shared factory types.
 type ProductsServiceMock = {
+  getApplicablePrices: jest.Mock;
   getProductInfoForSale: jest.Mock;
   decrementStockForCharge: jest.Mock;
 };
@@ -4592,7 +4593,13 @@ describe('SalesService', () => {
       const customerAddressFindUnique = jest
         .fn()
         .mockResolvedValue({ id: 'shipping-1', customerId: 'customer-1' });
+      const productFindUnique = jest
+        .fn()
+        .mockResolvedValue({ hasVariants: true });
+      const variantFindFirst = jest.fn().mockResolvedValue({ id: 'var-1' });
       (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        product: { findUnique: productFindUnique },
+        variant: { findFirst: variantFindFirst },
         customer: { findUnique: customerFindUnique },
         customerAddress: { findUnique: customerAddressFindUnique },
         globalPriceList: {
@@ -4600,8 +4607,93 @@ describe('SalesService', () => {
         },
       });
 
-      return { customerFindUnique, customerAddressFindUnique };
+      return {
+        customerFindUnique,
+        customerAddressFindUnique,
+        productFindUnique,
+        variantFindFirst,
+      };
     };
+
+    it.each([
+      ['required', true, undefined, true, 'BOT_ITEM_VARIANT_REQUIRED'],
+      ['not allowed', false, 'var-1', true, 'BOT_ITEM_VARIANT_NOT_ALLOWED'],
+      [
+        'wrong parent or missing',
+        true,
+        'foreign-variant',
+        false,
+        'BOT_ITEM_VARIANT_MISMATCH',
+      ],
+      [
+        'parent and variant batch',
+        true,
+        undefined,
+        true,
+        'BOT_ITEM_VARIANT_REQUIRED',
+      ],
+    ] as const)(
+      'rejects %s before confirmation writes',
+      async (scenario, hasVariants, variantId, found, code) => {
+        const { productFindUnique, variantFindFirst } =
+          setupConfirmBotSaleHappyPath();
+        productFindUnique.mockResolvedValue({ hasVariants });
+        variantFindFirst.mockResolvedValue(found ? { id: variantId } : null);
+        const item = { ...botSaleInput.items[0], variantId };
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            items:
+              scenario === 'parent and variant batch'
+                ? [botSaleInput.items[0], item]
+                : [item],
+          }),
+        ).rejects.toMatchObject({
+          code,
+          details: { productId: 'prod-1', ...(variantId ? { variantId } : {}) },
+        });
+        expect(productFindUnique).toHaveBeenCalledWith({
+          where: { id: 'prod-1', tenantId: 'tenant-1' },
+          select: { hasVariants: true },
+        });
+        if (code === 'BOT_ITEM_VARIANT_MISMATCH') {
+          expect(variantFindFirst).toHaveBeenCalledWith({
+            where: { id: variantId, productId: 'prod-1', tenantId: 'tenant-1' },
+            select: { id: true },
+          });
+        }
+        expect(saleRepo.save.mock.calls).toHaveLength(0);
+        expect(promotionUsageRepo.claimForSale.mock.calls).toHaveLength(0);
+        expect(
+          (productsService as ProductsServiceMock).decrementStockForCharge.mock
+            .calls,
+        ).toHaveLength(0);
+        expect(saleRepo.allocateNextFolio.mock.calls).toHaveLength(0);
+        expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(0);
+        expect(outboxWriter.publish.mock.calls).toHaveLength(0);
+      },
+    );
+
+    it('keeps live-price rejection before variant validation', async () => {
+      const { productFindUnique } = setupConfirmBotSaleHappyPath();
+      (
+        productsService as ProductsServiceMock
+      ).getApplicablePrices.mockResolvedValue([]);
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
+        code: 'PRICE_OUT_OF_DATE',
+      });
+      expect(productFindUnique).not.toHaveBeenCalled();
+    });
+
+    it('accepts a current tenant-qualified variant', async () => {
+      const { variantFindFirst } = setupConfirmBotSaleHappyPath();
+      await service.confirmBotSale(botSaleInput);
+      expect(variantFindFirst).toHaveBeenCalledWith({
+        where: { id: 'var-1', productId: 'prod-1', tenantId: 'tenant-1' },
+        select: { id: true },
+      });
+      expect(saleRepo.save.mock.calls).toHaveLength(1);
+    });
 
     it.each([false, true])(
       'revalidates bot-only pricing with the real engine for botEligible=%s (also used by atomic checkout)',
@@ -4646,7 +4738,9 @@ describe('SalesService', () => {
         });
         expect(result.totalCents).toBe(expectedTotalCents);
         expect(result.discountCents).toBe(botEligible ? 200 : 0);
-        expect(saleRepo.persistChargeConfirmation.mock.calls[0][0]).toMatchObject({
+        expect(
+          saleRepo.persistChargeConfirmation.mock.calls[0][0],
+        ).toMatchObject({
           totalCents: expectedTotalCents,
           discountCents: botEligible ? 200 : 0,
         });

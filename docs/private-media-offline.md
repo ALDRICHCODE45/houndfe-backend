@@ -1,0 +1,148 @@
+# Offline private media
+
+The approved scope is an internal private-media flow, separate from legacy public files. It does not activate HTTP, configure a real Space, or establish production readiness.
+
+## Isolated PostgreSQL proof
+
+Use only the explicitly authorized disposable target recorded in `odd/tasks/private-media-offline.md`. Readiness alone does not prove persistence constraints.
+
+```sh
+NODE_BIN="$(command -v node)"
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
+  node_modules/jest/bin/jest.js --config src/private-media/infrastructure/private-media-postgres.config.cjs --runInBand
+```
+
+The clean child receives only the explicitly supplied non-secret test environment; dependencies must not inherit host credentials or configuration. Prisma dotenv loading must also be disabled.
+
+The dedicated harness must admit the pinned container identity and isolation settings before constructing clients. It uses explicit synthetic connection settings, not `.env`, ambient database URLs, or the application's integration setup. Each invocation owns a fresh schema and two independent clients; cleanup is limited to that schema.
+
+A retired or mismatched target must fail closed. Never replace its ID or reconnect to an existing database to make tests pass. Container creation and exact-ID removal belong to the separately authorized lifecycle, not the test helper.
+
+## Private asset persistence
+
+`PrivateMediaAsset` links an opaque asset ID and internal storage key to a tenant-qualified Product, separately from `FileObject` and `ProductImage`. `PrivateMediaMetadata` omits the storage key; neither shape adds a public URL.
+
+- The composite Product foreign key rejects missing and cross-tenant links; storage keys are globally unique.
+- Required metadata permits exactly `image/jpeg`, `image/png`, or `image/webp`, with an integer size from 1 through 10,485,760 bytes. SQL CHECK constraints live in the additive migration.
+- Linked Product deletion is restricted; a Product without private assets remains deletable under this constraint. This cut adds no asset deletion or garbage collection API.
+
+Run schema alignment and actual SQL constraint tests only against the admitted disposable target:
+
+```sh
+NODE_BIN="$(command -v node)"
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
+  node_modules/jest/bin/jest.js --config src/private-media/infrastructure/private-media-schema.config.cjs --runInBand
+```
+
+These tests apply the new migration to a minimal synthetic schema, not to a deployment database. They do not validate decoded image content or the full application schema with Prisma's schema engine.
+
+## Private metadata repository
+
+`PrismaPrivateMediaRepository` accepts a real Prisma `$queryRaw` dependency. `create(asset)` validates and copies metadata before a parameterized insert; `find(scope)` qualifies every lookup by asset ID, tenant ID and Product ID. Returned rows are decoded and checked against that identity.
+
+Invalid inputs cause no query. Missing rows, query failures or invalid returned rows yield `null`. **A null create result after a query is indeterminate, not proof that the insert rolled back.** Likewise, a null lookup does not prove absence after an infrastructure failure. Callers must not delete potentially referenced bytes on that evidence.
+
+This repository is not a user-authorization boundary and exposes no update/delete/garbage-collection operation. Current permission checks and storage orchestration must be composed separately before bytes are returned.
+
+Run repository unit and actual isolated-SQL tests:
+
+```sh
+NODE_BIN="$(command -v node)"
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
+  node_modules/jest/bin/jest.js --config src/private-media/infrastructure/private-media-repository.config.cjs --runInBand
+```
+
+The SQL proof uses only the admitted target and synthetic schema; it checks independent-client persistence, injection-shaped identifiers, foreign scope denial and unchanged rows after rejected writes.
+
+## Current private-media permissions
+
+`PrivateMediaAccess` composes the real `PrismaEditorialAuthority` with Prisma user, membership and Product queries. Each call resolves current authority; grants are not cached or accepted from callers.
+
+- `canUpload(context)` requires a matching active-member snapshot with exact editorial read and update permissions.
+- `canRead(context)` requires a matching active-member snapshot with exact editorial read permission.
+- Invalid identities, unavailable authority or mismatched actor/tenant/Product snapshots deny access. Role names and wildcard grants are not substitutes.
+
+The context is trusted internal identity, not HTTP authentication. Read orchestration must derive tenant/Product qualification from the persisted asset before checking access. This observation does not make revocation atomic with a later storage operation.
+
+Run permission tests with real resolver composition and synthetic Prisma responses:
+
+```sh
+NODE_BIN="$(command -v node)"
+env -i PATH=/usr/bin:/bin NODE_ENV=test FORCE_COLOR=0 "$NODE_BIN" \
+  node_modules/jest/bin/jest.js --config src/private-media/infrastructure/private-media-access.config.cjs --runInBand
+```
+
+## Explicit private configuration
+
+`resolvePrivateMediaConfig(input)` reads only the supplied object and returns a frozen internal configuration (including frozen credentials), or `null` to disable private storage. It does not load environment files or construct a client.
+
+| Name | Requirement |
+| --- | --- |
+| `PRIVATE_MEDIA_ENDPOINT` | Nonblank HTTPS URL without embedded credentials, query or fragment |
+| `PRIVATE_MEDIA_REGION` | Nonblank string |
+| `PRIVATE_MEDIA_BUCKET` | Nonblank string; existence and privacy are not verified here |
+| `PRIVATE_MEDIA_ACCESS_KEY_ID` | Nonblank internal credential string; never expose it |
+| `PRIVATE_MEDIA_SECRET_ACCESS_KEY` | Nonblank internal credential string, preserved without trimming; never expose it |
+| `PRIVATE_MEDIA_MAX_BYTES` | Optional number or numeric string resolving to an integer from 1 through 10,485,760; omission defaults to that ceiling |
+
+Missing, partial or invalid private settings disable the resolver, even if all public `SPACES_*` settings are present. There is no public-bucket or credential-chain fallback, and no input logging.
+
+For synthetic-only configuration tests, use the clean-child command above with `--config src/private-media/infrastructure/private-media-config.unit.config.cjs`. Passing these tests establishes neither lazy SDK composition nor provider policy.
+
+## Private SDK upload
+
+`PrivateS3Storage(config)` revalidates explicit private configuration before constructing the real SDK client with explicit credentials and `maxAttempts: 1`. It reads no environment settings and returns no public URL.
+
+- `put(metadata, bytes)` accepts JPEG/PNG/WebP only, with positive integer declared size within the configured cap and an exactly matching Buffer. It copies bytes and sends the exact bucket/key, content type/length and `ACL: 'private'`.
+- `remove(storageKey)` sends one exact-key delete. Only orchestration that proves ownership of a new attempt may use it for compensation; never use it after an indeterminate database outcome or for garbage collection.
+- Invalid input rejects before a command is sent. SDK failures propagate; the adapter performs no automatic cleanup.
+
+Neither explicit private ACL nor synthetic SDK tests establish real destination policy or production readiness.
+
+Run simulated upload/read/configuration/removal tests with the clean-child command above and `--config src/private-media/infrastructure/private-s3-storage.config.cjs`.
+
+## Private SDK reads
+
+`read(metadata)` snapshots the validated storage key, MIME type and expected size before awaiting the exact-key request. It returns a Buffer only after complete, exact-length consumption.
+
+- Optional content-length/type headers must match persisted metadata; ranged responses are rejected.
+- Only asynchronous byte chunks are accepted. Each chunk is copied, and accumulated bytes must stay within both the configured cap and expected size. Empty, truncated, oversized and non-byte bodies reject; unbounded byte-array transforms are never called.
+- SDK and stream errors propagate unchanged. Rejected Node streams are destroyed without replacing the original failure; no partial bytes, retry or automatic deletion is returned or initiated.
+
+The adapter does not authorize users or establish persisted linkage. Those checks belong to the internal orchestration before calling this read method.
+
+## Internal upload orchestration
+
+`PrivateMediaService(access, storage, repository, { maxBytes })` accepts the internal dependencies and snapshots a valid positive cap no greater than 10 MiB. Invalid caps throw before any operation.
+
+- `upload(context, { mimeType, bytes })` validates trusted actor/tenant/Product identity, JPEG/PNG/WebP and a nonempty Buffer within the cap before effects. It copies scope, MIME and bytes before awaiting current upload permission.
+- The service generates new opaque IDs/keys, awaits private upload before creating the qualified asset row, and returns persisted metadata without a storage key or public URL.
+- Invalid input, denied/unavailable authority, upload failure or indeterminate persistence returns `null`. No lookup, deletion or retry is attempted; bytes may remain after an ambiguous write, which is not proof of rollback.
+
+Permission observation is not atomic with later storage/persistence, and the service does not activate HTTP.
+
+Run simulated orchestration tests with the clean-child command above and `--config src/private-media/infrastructure/private-media-service.config.cjs`.
+
+## Internal mediated reads
+
+`read(context, assetId)` snapshots trusted actor/tenant/Product qualification before lookup. The repository query includes the asset ID, tenant and Product; a missing or mismatched row cannot reach storage.
+
+- Current read permission is resolved against the persisted asset's tenant/Product and original actor before requesting bytes. Grants are not cached between calls.
+- Persisted key/MIME/size are copied before the permission await. Assets above the current service cap are rejected; the SDK adapter enforces complete, bounded byte delivery.
+- Invalid qualification, absent/foreign assets, denial or dependency failure returns `null`. Reads never create linkage, upload, delete or retry.
+
+Success returns only the complete Buffer, not a storage key or public URL. The orchestration suite uses injected dependencies; the composed-flow suite below exercises the concrete classes.
+
+## Internal composition
+
+`createPrivateMediaService(settings, prisma)` composes the actual configuration resolver, permission access, private SDK storage, metadata repository and service. The injected Prisma dependency supplies `user`, `tenantMembership`, `product` and `$queryRaw`; the factory does not construct a database client.
+
+Missing, partial, invalid or public-only settings return `null` before SDK client construction. Valid explicit private settings return a `PrivateMediaService`; construction performs no queries or storage commands. There is no environment discovery, public fallback or HTTP/module activation.
+
+The existing `private-media-service.config.cjs` command selects service, factory and composed-flow suites. Composition tests simulate only Prisma responses and SDK transport: private upload/persistence/read, configured-cap rejection, current revocation, foreign qualification, indeterminate committed creation without deletion/retry, and read failure without state changes. They are not live SQL or provider-policy proof.
+
+## Evidence boundaries
+
+- SDK transport tests must remain simulated; no DigitalOcean request is authorized.
+- Harness lifecycle and asset metadata constraint checks are separate suites. Neither establishes current application authorization or storage privacy.
+- Real private upload, authorized retrieval, anonymous denial and destination policy verification remain pending until a concrete Space is configured and separately authorized.

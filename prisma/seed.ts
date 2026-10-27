@@ -13,6 +13,7 @@ import {
 import bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import { PERMISSION_REGISTRY } from '../src/auth/authorization/domain/permission';
+import { isEditorialPermission } from '../src/catalog-editorial/domain/editorial-permissions';
 import { ingestSatCatalog } from './seed-sat';
 import { seedOnlineCatalogDefaults } from './online-catalog-seed';
 
@@ -1273,6 +1274,7 @@ async function main() {
     const cashierUser = await upsertUser(tx, USERS.cashier);
 
     for (const permission of permissions.values()) {
+      if (isEditorialPermission(permission)) continue;
       await tx.rolePermission.upsert({
         where: {
           roleId_permissionId: {

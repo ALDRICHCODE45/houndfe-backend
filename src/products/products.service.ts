@@ -1038,6 +1038,30 @@ export class ProductsService {
     // INSIDE the wrap so the rearm method's ambient-tx guard sees an
     // active tx and the rearm SELECT commits with the writes.
     await this.tenantPrisma.runInTransaction(async () => {
+      if (dto.hasVariants === false) {
+        const tx = this.tenantPrisma.getClient();
+        const tenantId = this.tenantPrisma.getTenantId();
+        // Match add/remove's qualified Product gate before observing membership.
+        // Hold it through save so a concurrent add cannot invalidate the count.
+        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+            AND "id" = ${id} FOR UPDATE
+        `);
+        if (products.length !== 1) {
+          throw new EntityNotFoundError('Product', id);
+        }
+        const variantCount = await tx.variant.count({
+          where: { tenantId, productId: id },
+        });
+        if (variantCount > 0) {
+          throw new BusinessRuleViolationError(
+            'Cannot disable variants while the Product still has Variants',
+            'PRODUCT_HAS_VARIANTS',
+            { productId: id, variantCount },
+          );
+        }
+      }
+
       // 1. priceList write — re-routed through the tx client so it
       //    joins the wrap.
       if (dto.priceCents !== undefined && defaultGlobalListId) {
@@ -1117,27 +1141,33 @@ export class ProductsService {
 
   async addVariant(productId: string, dto: CreateVariantDto) {
     const tenantId = this.tenantPrisma.getTenantId();
-    const product = await this.productRepo.findById(productId);
-    if (!product) throw new EntityNotFoundError('Product', productId);
+    return this.tenantPrisma
+      .runInTransaction(async () => {
+        const tx = this.tenantPrisma.getClient();
+        // Serialize membership changes with qualified editorial Product readers.
+        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+            AND "id" = ${productId} FOR UPDATE
+        `);
+        if (products.length !== 1) {
+          throw new EntityNotFoundError('Product', productId);
+        }
+        const product = await this.productRepo.findById(productId);
+        if (!product) throw new EntityNotFoundError('Product', productId);
 
-    if (dto.sku) {
-      const taken = await this.productRepo.isSkuTaken(dto.sku);
-      if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
-    }
-    if (dto.barcode) {
-      const taken = await this.productRepo.isBarcodeTaken(dto.barcode);
-      if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
-    }
-
-    const resolvedName = this.resolveVariantName(
-      dto.name,
-      dto.option,
-      dto.value,
-    );
-
-    const variant = await this.tenantPrisma
-      .getClient()
-      .$transaction(async (tx) => {
+        if (dto.sku) {
+          const taken = await this.productRepo.isSkuTaken(dto.sku);
+          if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
+        }
+        if (dto.barcode) {
+          const taken = await this.productRepo.isBarcodeTaken(dto.barcode);
+          if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
+        }
+        const resolvedName = this.resolveVariantName(
+          dto.name,
+          dto.option,
+          dto.value,
+        );
         const createdVariant = await tx.variant.create({
           data: {
             productId,
@@ -1189,9 +1219,8 @@ export class ProductsService {
         }
 
         return createdVariant;
-      });
-
-    return this.enrichVariantCostResponse(variant);
+      })
+      .then((variant) => this.enrichVariantCostResponse(variant));
   }
 
   async getVariants(productId: string) {
@@ -1364,29 +1393,35 @@ export class ProductsService {
   }
 
   async removeVariant(productId: string, variantId: string) {
-    // F1.WU4d2b — tenant-scoped pre-read with explicit predicates.
     const tenantId = this.tenantPrisma.getTenantId();
-    const tenantClient = this.tenantPrisma.getClient();
-    const variant = await tenantClient.variant.findFirst({
-      where: { id: variantId, productId, tenantId },
-    });
-    if (!variant) throw new EntityNotFoundError('Variant', variantId);
-
-    // F1.WU4d2b — tenant client, still a single-row delete (not deleteMany).
-    await tenantClient.variant.delete({
-      where: { id: variantId, tenantId },
-    });
-
-    // Check if product still has variants
-    const remaining = await tenantClient.variant.count({
-      where: { productId, tenantId },
-    });
-    if (remaining === 0) {
-      await this.prisma.product.update({
-        where: { id: productId },
-        data: { hasVariants: false },
+    await this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      // Match addVariant's qualified Product-first membership gate.
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      if (products.length !== 1) {
+        throw new EntityNotFoundError('Variant', variantId);
+      }
+      const variant = await tx.variant.findFirst({
+        where: { id: variantId, productId, tenantId },
       });
-    }
+      if (!variant) throw new EntityNotFoundError('Variant', variantId);
+
+      await tx.variant.delete({
+        where: { id: variantId, productId, tenantId },
+      });
+      const remaining = await tx.variant.count({
+        where: { productId, tenantId },
+      });
+      if (remaining === 0) {
+        await tx.product.update({
+          where: { id: productId, tenantId },
+          data: { hasVariants: false },
+        });
+      }
+    });
   }
 
   async getVariantPrices(productId: string, variantId: string) {

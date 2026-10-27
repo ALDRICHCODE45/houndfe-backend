@@ -39,6 +39,9 @@ function fixture() {
     .fn()
     .mockImplementation(() => Promise.resolve({ ...live }));
   const client = {
+    product: {
+      findUnique: jest.fn().mockResolvedValue({ hasVariants: false }),
+    },
     customer: { findUnique: jest.fn().mockResolvedValue({ id: 'customer-1' }) },
     customerAddress: { findUnique: findAddress },
   };

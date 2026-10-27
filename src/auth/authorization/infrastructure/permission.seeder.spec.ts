@@ -115,6 +115,28 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
     await expect(seeder.onApplicationBootstrap()).resolves.not.toThrow();
   });
 
+  it('provisions editorial rows but links only manage:all on repeated bootstrap', async () => {
+    const { prisma, permissionUpsertCalls } = makePrismaStub();
+    const seeder = new PermissionSeeder(prisma);
+    await seeder.onApplicationBootstrap();
+    await seeder.onApplicationBootstrap();
+    expect(
+      permissionUpsertCalls
+        .filter(
+          (c) => c.where.subject_action.subject === 'ProductEditorialDraft',
+        )
+        .map((c) => c.where.subject_action.action),
+    ).toEqual(['read', 'update', 'read', 'update']);
+    const api = prisma.rolePermission as unknown as { upsert: jest.Mock };
+    expect(api.upsert).toHaveBeenCalledTimes(2);
+    expect(
+      api.upsert.mock.calls.map(
+        ([call]: [RolePermissionUpsertCall]) =>
+          call.where.roleId_permissionId.permissionId,
+      ),
+    ).toEqual(['perm-all-manage', 'perm-all-manage']);
+  });
+
   // ── Q1 / WU1 — PaymentDetail permissions are auto-seeded ───────────────
 
   it('upserts (PaymentDetail, read/create/update/delete) from the registry', async () => {

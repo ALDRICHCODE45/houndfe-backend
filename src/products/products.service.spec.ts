@@ -125,6 +125,26 @@ function createService(
   );
 }
 
+// Legacy add fixtures expose their tx through $transaction. Adapt only those
+// fixtures to the ambient client contract used by addVariant.
+function createVariantService(repo: IProductRepository, prisma: any) {
+  const service = createService(repo, prisma);
+  const tenant = (service as any).tenantPrisma;
+  tenant.runInTransaction.mockImplementation(
+    async (work: () => Promise<unknown>) =>
+      prisma.$transaction(async (tx: any) => {
+        tx.$queryRaw = jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]);
+        tenant.getClient.mockReturnValue(tx);
+        try {
+          return await work();
+        } finally {
+          tenant.getClient.mockReturnValue(prisma);
+        }
+      }),
+  );
+  return service;
+}
+
 function makeNoopSatCatalog() {
   return {
     assertExists: jest.fn().mockResolvedValue(undefined),
@@ -180,6 +200,91 @@ function makePersistenceProduct(
     updatedAt: overrides.updatedAt ?? now,
   };
 }
+
+describe('ProductsService — PATCH Variant membership invariant', () => {
+  function fixture(variantCount: number, hasVariants = true) {
+    const product = makeProduct();
+    product.hasVariants = hasVariants;
+    const repo = makeMockRepo();
+    repo.findById.mockResolvedValue(product);
+    const tx = {
+      $queryRaw: jest
+        .fn<Promise<{ id: string }[]>, [unknown]>()
+        .mockResolvedValue([{ id: PRODUCT_ID }]),
+      variant: { count: jest.fn().mockResolvedValue(variantCount) },
+    };
+    const service = createService(repo, tx);
+    jest
+      .spyOn(
+        service as unknown as { buildFullResponse: () => Promise<unknown> },
+        'buildFullResponse',
+      )
+      .mockResolvedValue({});
+    return { service, repo, tx, product };
+  }
+
+  it('rejects disabling variants before any write with the exact domain code/details', async () => {
+    const { service, repo, tx } = fixture(2);
+    const result = service.update(PRODUCT_ID, {
+      hasVariants: false,
+      quantity: 10,
+      useStock: true,
+    });
+    await expect(result).rejects.toBeInstanceOf(BusinessRuleViolationError);
+    await expect(result).rejects.toMatchObject({
+      code: 'PRODUCT_HAS_VARIANTS',
+      details: { productId: PRODUCT_ID, variantCount: 2 },
+    });
+    expect(repo.save.mock.calls).toHaveLength(0);
+    expect(tx.variant.count).toHaveBeenCalledWith({
+      where: { productId: PRODUCT_ID, tenantId: 'tenant-1' },
+    });
+    const query = tx.$queryRaw.mock.calls[0][0] as {
+      strings: string[];
+      values: unknown[];
+    };
+    expect(query.strings.join(' ')).toContain('FOR UPDATE');
+    expect(query.values).toEqual(['tenant-1', PRODUCT_ID]);
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.variant.count.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('allows disabling variants when the qualified count is zero', async () => {
+    const { service, repo, product } = fixture(0);
+    await service.update(PRODUCT_ID, {
+      hasVariants: false,
+      quantity: 10,
+      useStock: true,
+    });
+    expect(repo.save.mock.calls).toEqual([[product]]);
+    expect(product.quantity).toBe(10);
+    expect(product.hasVariants).toBe(false);
+  });
+
+  it('leaves unrelated updates of a Variant Product unchanged', async () => {
+    const { service, repo, tx, product } = fixture(2);
+    await service.update(PRODUCT_ID, { name: 'Renamed' });
+    expect(repo.save.mock.calls).toEqual([[product]]);
+    expect(product.hasVariants).toBe(true);
+    expect(tx.variant.count).not.toHaveBeenCalled();
+  });
+
+  it('does not check membership when hasVariants is omitted, even on a legacy false flag', async () => {
+    const { service, repo, tx } = fixture(2, false);
+    await service.update(PRODUCT_ID, { quantity: 4 });
+    expect(repo.save.mock.calls).toHaveLength(1);
+    expect(tx.variant.count).not.toHaveBeenCalled();
+  });
+
+  it('preserves true with zero Variants and silently zeros parent quantity', async () => {
+    const { service, product, tx } = fixture(0, false);
+    await service.update(PRODUCT_ID, { hasVariants: true, quantity: 10 });
+    expect(product.hasVariants).toBe(true);
+    expect(product.quantity).toBe(0);
+    expect(tx.variant.count).not.toHaveBeenCalled();
+  });
+});
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -628,7 +733,7 @@ describe('ProductsService — variant naming policy', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     await service.addVariant(PRODUCT_ID, {
       name: 'Legacy Name',
@@ -676,7 +781,7 @@ describe('ProductsService — variant price matrix auto-create', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     await service.addVariant(PRODUCT_ID, { name: 'Rojo' });
 
@@ -818,7 +923,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     const created: any = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
@@ -863,7 +968,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     const created: any = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
@@ -911,7 +1016,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     const created: any = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
@@ -1028,7 +1133,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
     const created = await service.addVariant(PRODUCT_ID, { name: 'Rojo' });
 
     expect(created.purchaseNetCostCents).toBeNull();
@@ -1070,7 +1175,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
     const created = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
       purchaseNetCostCents: 4500,
@@ -2867,7 +2972,7 @@ describe('ProductsService — variant catalog round-trips (F1.WU4d2a)', () => {
       cb(tx),
     );
     const prisma = { $transaction: transaction };
-    const service = createService(
+    const service = createVariantService(
       makeMockRepo({ findById: jest.fn().mockResolvedValue(makeProduct()) }),
       prisma,
     );
@@ -3062,6 +3167,8 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
     remainingCount?: number;
   } = {}) {
     const tenantClient = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]),
+      product: { update: jest.fn().mockResolvedValue(undefined) },
       variant: {
         findFirst: jest.fn().mockResolvedValue(tenantVariantRow),
         delete: jest.fn().mockResolvedValue(tenantVariantRow),
@@ -3122,15 +3229,16 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
     });
     expect(tenantClient.variant.delete).toHaveBeenCalledTimes(1);
     expect(tenantClient.variant.delete).toHaveBeenCalledWith({
-      where: { id: VARIANT_A_ID, tenantId: TENANT_ID },
+      where: { id: VARIANT_A_ID, productId: PRODUCT_ID, tenantId: TENANT_ID },
     });
     expect(tenantClient.variant.count).toHaveBeenCalledWith({
       where: { productId: PRODUCT_ID, tenantId: TENANT_ID },
     });
-    expect(rawPrisma.product.update).toHaveBeenCalledWith({
-      where: { id: PRODUCT_ID },
+    expect(tenantClient.product.update).toHaveBeenCalledWith({
+      where: { id: PRODUCT_ID, tenantId: TENANT_ID },
       data: { hasVariants: false },
     });
+    expect(rawPrisma.product.update).not.toHaveBeenCalled();
     expect(rawPrisma.variant.findFirst).not.toHaveBeenCalled();
     expect(rawPrisma.variant.delete).not.toHaveBeenCalled();
     expect(rawPrisma.variant.count).not.toHaveBeenCalled();
@@ -3144,6 +3252,7 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
     await service.removeVariant(PRODUCT_ID, VARIANT_A_ID);
 
     expect(tenantClient.variant.delete).toHaveBeenCalledTimes(1);
+    expect(tenantClient.product.update).not.toHaveBeenCalled();
     expect(rawPrisma.product.update).not.toHaveBeenCalled();
   });
 
