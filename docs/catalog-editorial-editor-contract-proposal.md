@@ -1,4 +1,4 @@
-# Editorial editor HTTP contract — PROPOSAL v3 (not implemented)
+# Editorial editor HTTP contract — PROPOSAL v3.1 (not implemented)
 
 Status: draft for joint BE/FE review. Nothing here exists yet except the read
 endpoint in §1. Neither side writes code or mocks against §2–§4 until this is
@@ -46,13 +46,18 @@ That is exactly what initialize produces for a product with nothing published
 (`emptyDocument()` in `domain/document.ts`). A product never initialized:
 `{ "cycle": null, "draft": null, "published": null }`.
 
-GET returns the document as stored and does not re-validate it. Every write
-stores the full validated shape, so a stored document always has all five keys;
-there is no legacy `{}` document. GET never returns `warnings`.
+GET returns the document as stored and does not re-validate it. New writes
+through the core validate the full five-key shape. That is NOT a guarantee about
+data stored earlier: a previous handoff conserved a Published `{}` and a legacy
+create path, and no deployed data was inspected. The editor treats a stored
+document that does not match §2.2 as unreadable, without inventing or
+normalizing fields. GET never returns `warnings`.
 
-## 2. Phase A — expose the existing core (no new domain logic)
+## 2. Phase A — expose the existing core, plus the new limits
 
-The core already implements these writes; this phase only adds HTTP. The core
+The core already implements these writes. This phase adds HTTP and the new
+document limits of §2.2, which are decided but NOT enforced today
+(implementation pending). The core
 also has an internal `create(document)`; it is NOT exposed: the editor flow is
 initialize (from published or empty) and then save. CORS already reflects
 requested headers (`enableCors()` defaults), so `Idempotency-Key` passes the
@@ -83,11 +88,23 @@ writes: 1–200 characters, sent as-is (not trimmed).
 - Same key and same body → the RECORDED result of that request, with the same
   status (`201` initialize, `200` save). It is the historical state at the time
   of the original write, not the current state.
-- What a replay re-checks today, for both operations: the actor's current
-  permissions and product visibility, and the recorded state and document
-  against the current vocabulary and media; `warnings` are recomputed against
-  the current vocabulary. So a replay can fail (`403`, `400`) even though the
-  original write succeeded. Nothing else is recalculated.
+- What a replay re-checks is established only by these existing tests, not as
+  a general guarantee. The PostgreSQL ones last ran against disposable targets
+  that are now retired; they were not re-run for this proposal.
+  - Save: `d16-save.integration.spec.ts:145` (a matching replay does not restore
+    a newer draft and rechecks current gates); `isolated-postgres.spec.ts:436`
+    (replay before the revision check, without replacing a newer document);
+    `isolated-postgres.spec.ts:494` (rechecks current private references, keeps
+    media order); `prisma-editorial-write-transaction.spec.ts:715` (keeps an
+    archived assignment on a nonempty save replay; mocked, not SQL).
+  - Initialize: `d16-initialize.integration.spec.ts:42` (copies an archived
+    Published with provenance and warnings; a replay never restores a newer
+    draft).
+  - Both: `isolated-postgres.spec.ts:205` (a mismatched receipt payload or
+    cycle is rejected).
+
+  So a replay can fail (`403`, `400`) even though the original write
+  succeeded. Anything not covered above is not promised.
 
 FE rules:
 
@@ -136,11 +153,18 @@ Rules the backend enforces (FE mirrors them to avoid round trips):
   introduced, moved to another variant, or re-added after removal. Initialize
   from published keeps the published assignments under the same rule. Selectors
   hide archived options for new assignments and still show kept ones.
-- Limits (decided by the user; new, enforced by the backend as `400
-MALFORMED`): `commercialTitle` ≤ 200 characters, `description` ≤ 20 000
-  characters (characters = Unicode code points), `mediaRefs` ≤ 20 entries,
-  `values` ≤ 200 entries. Text values have no limit of their own beyond the
-  body size.
+- Limits (decided by the user; implementation pending, NOT enforced today):
+  `commercialTitle` ≤ 200 characters, `description` ≤ 20 000 characters
+  (characters = Unicode code points), `mediaRefs` ≤ 20 entries, `values` ≤ 200
+  entries. Text values have no limit of their own beyond the body size.
+  Where they will apply: ONLY to the caller's document in a fresh save (a new
+  key), rejecting with `400 MALFORMED` before anything is written. They do NOT
+  apply to GET, to a replay (the recorded acknowledgement is returned as it
+  was), or to the document initialize copies from Published. Nothing is
+  trimmed or normalized. Consequence: a draft initialized from a Published
+  document over the limits can be read, but saving it requires bringing it
+  within the limits. Tests will cover the boundaries, including code points
+  outside the BMP (an emoji counts as one character).
 - Request body ≤ 100 kB of serialized JSON, in bytes (UTF-8). This is the
   existing framework default, not new.
 
@@ -215,7 +239,7 @@ type Vocabulary = {
       owner: 'product' | 'sellable';
       sortOrder: number; // new: order of attributes inside the family
     }>; // may be []
-  }>; // ordered by label
+  }>; // ordered by label, then code
   definitions: Array<
     { id: string; code: string; label: string } & (
       | { type: 'text' }
@@ -246,6 +270,10 @@ type Vocabulary = {
 (decided by the user). Labels come from the backend; the editor does not keep
 its own label map. Archived options are listed with `archived: true` so kept
 values can be shown. There is no vocabulary version field.
+
+Stable order of every array: families by `label`, then `code`; bindings,
+options and units by `sortOrder`, then code (a `null` unit code first);
+definitions by `code`.
 
 Vocabulary content is loaded by a versioned, idempotent seed in the repository
 (decided by the user); changes go through PRs. Running it against any real
@@ -288,8 +316,11 @@ Decided by the user:
 - Vocabulary is loaded by a versioned seed.
 
 Accepted by FE: Q3 (generic `400`, with mirrored client validation and a
-preserved buffer) and Q5 (paths, methods, header, `201`/`200` including replay).
+preserved buffer), Q5 (paths, methods, header, `201`/`200` including replay)
+and §3.1 vocabulary.
 
 Open:
 
+- FE confirmation of §1–§2 after v3.1 (unproven guarantees narrowed, limit
+  semantics fixed).
 - §3.2 media details before mocks.
