@@ -46,3 +46,20 @@ compatibility. U2b2 composition is described in [reference locks](catalog-editor
 this callback alone supplies no SQL, authorization, rollback, or concurrency proof. H1 and public
 core method signatures are unchanged. Revert only U2b1 callback/types, invocation
 sites, added tests and this section; preserve accepted U1/U2a/U3/U4.
+
+## Fresh-save document limits
+
+After matching-receipt replay and stale-state checks, save validates only the
+caller's candidate against title ≤ 200 Unicode code points, description ≤ 20 000
+code points, mediaRefs ≤ 20 entries, and values ≤ 200 entries. Astral characters
+count once; combining marks count separately. Nothing is trimmed or normalized.
+An excess throws `Error('MALFORMED')` before state or receipt writes.
+
+Precedence stays request shape → authorization → key/revision syntax → Product
+lookup → receipt replay/mismatch → state `CONFLICT` → document validation (including
+limits). Thus stale state wins over an over-limit candidate. Limits never apply
+to GET, recorded replay acknowledgements, stored baselines, initialize's Published
+copy, or internal create. An oversized initialized draft must be reduced to save.
+Offline core tests cover exact boundaries, code points, no-write rejection,
+historical replay, initialize, and unchanged internal create; these are not SQL
+rollback or concurrency proofs.

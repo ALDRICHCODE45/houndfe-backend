@@ -288,6 +288,16 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         prepare,
       );
       const { document } = validated;
+      // Fresh-save candidate only: never constrain stored baselines or replay receipts.
+      if (
+        (document.commercialTitle !== null &&
+          [...document.commercialTitle].length > 200) ||
+        (document.description !== null &&
+          [...document.description].length > 20000) ||
+        document.mediaRefs.length > 20 ||
+        document.values.length > 200
+      )
+        throw new Error('MALFORMED');
       const updated = await tx.$executeRaw(Prisma.sql`
         UPDATE "catalog_editorial_states" SET "draftRevision" = "draftRevision" + 1,
           "draftDocument" = CAST(${JSON.stringify(document)} AS JSONB)
