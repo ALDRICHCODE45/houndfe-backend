@@ -62,7 +62,7 @@ The SQL proof uses only the admitted target and synthetic schema; it checks inde
 - `canRead(context)` requires a matching active-member snapshot with exact editorial read permission.
 - Invalid identities, unavailable authority or mismatched actor/tenant/Product snapshots deny access. Role names and wildcard grants are not substitutes.
 
-The context is trusted internal identity, not HTTP authentication. Byte orchestration must derive tenant/Product qualification from the persisted asset before checking access. This observation does not make revocation atomic with a later storage operation.
+The context is trusted internal identity, not HTTP authentication. Read orchestration must derive tenant/Product qualification from the persisted asset before checking access. This observation does not make revocation atomic with a later storage operation.
 
 Run permission tests with real resolver composition and synthetic Prisma responses:
 
@@ -110,6 +110,18 @@ Run simulated upload/read/configuration/removal tests with the clean-child comma
 - SDK and stream errors propagate unchanged. Rejected Node streams are destroyed without replacing the original failure; no partial bytes, retry or automatic deletion is returned or initiated.
 
 The adapter does not authorize users or establish persisted linkage. Those checks belong to the internal orchestration before calling this read method.
+
+## Internal upload orchestration
+
+`PrivateMediaService(access, storage, repository, { maxBytes })` accepts the internal dependencies and snapshots a valid positive cap no greater than 10 MiB. Invalid caps throw before any operation.
+
+- `upload(context, { mimeType, bytes })` validates trusted actor/tenant/Product identity, JPEG/PNG/WebP and a nonempty Buffer within the cap before effects. It copies scope, MIME and bytes before awaiting current upload permission.
+- The service generates new opaque IDs/keys, awaits private upload before creating the qualified asset row, and returns persisted metadata without a storage key or public URL.
+- Invalid input, denied/unavailable authority, upload failure or indeterminate persistence returns `null`. No lookup, deletion or retry is attempted; bytes may remain after an ambiguous write, which is not proof of rollback.
+
+This slice has no mediated-read method or concrete factory yet. Permission observation is not atomic with later storage/persistence, and the service does not activate HTTP.
+
+Run simulated orchestration tests with the clean-child command above and `--config src/private-media/infrastructure/private-media-service.config.cjs`.
 
 ## Evidence boundaries
 
