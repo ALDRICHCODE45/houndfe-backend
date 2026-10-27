@@ -1,4 +1,4 @@
-# Editorial editor HTTP contract — PROPOSAL v3.1 (not implemented)
+# Editorial editor HTTP contract — v3.2 (§1–§2 and §3.1 closed at a36e903; §3.3 added)
 
 Status: draft for joint BE/FE review. Nothing here exists yet except the read
 endpoint in §1. Neither side writes code or mocks against §2–§4 until this is
@@ -295,6 +295,35 @@ Requires wiring private storage configuration (S3/Spaces) for the API, which
 today exists only as an offline factory. That configuration and a privacy proof
 against real storage need their own authorization.
 
+### 3.3 Editorial context (variants)
+
+The product endpoints that list variants require `read:Product`
+(`products.controller.ts:98–99`), which an editorial-only user may not have.
+
+`GET /products/:productId/editorial/context` → `200`. Same authorization as
+§1: exact `ProductEditorialDraft:read`, active user, current tenant membership,
+qualified product; no `manage` fallback and no `read:Product`. Same
+`{ statusCode, error }` envelope, `Cache-Control: no-store`.
+
+```ts
+type EditorialContext = {
+  variants: Array<{ id: string; name: string }>; // complete, ordered by name then id; [] = no variants
+};
+```
+
+- The real variant list decides membership, never the `hasVariants` flag
+  (which can disagree with the actual variants): `variants.length > 0` ⇒
+  `sellable` values need a `variantId` from this list; `[]` ⇒ `variantId: null`.
+  This matches the core rule. The flag is not returned.
+- Complete list, no pagination and no silent truncation. Only `id` and `name`
+  (no SKU, stock or prices). Duplicate names are possible: the editor keys by
+  `id` and may show a short id only as a visual aid.
+- It is a current snapshot, not tied to the draft revision. A value whose
+  `variantId` is no longer in the list is shown as orphaned and kept until the
+  user acts on it; it is never removed silently. This endpoint is not the final
+  authority: save revalidates and rejects with `400` if the orphan is still
+  there.
+
 ## 4. Phase C — publish (later phase)
 
 The core cannot publish: published content only changes through code that does
@@ -306,10 +335,10 @@ decision on what consumes the published document (public catalog, POS, both).
 Decided by the user:
 
 - Publish is a later phase.
-- The tenant admin role gets `ProductEditorialDraft:read` and `:update` by
-  default through the seeder. This is new: today nobody gets them
-  automatically. `manage:all` is still NOT an editorial grant. Running any seed
-  against a real database is a separate authorization.
+- Editorial permissions are granted MANUALLY only, for now: no role gets
+  `ProductEditorialDraft:read` or `:update` automatically (changed from the
+  earlier "tenant admin by seeder" decision: no canonical tenant admin role
+  exists). `manage:all` is still NOT an editorial grant.
 - Images: JPEG, PNG, WebP up to 10 MiB, the limits already in the schema.
 - Explicit document limits as in §2.2.
 - Vocabulary gets `label` and `sortOrder` in the backend.
@@ -319,8 +348,9 @@ Accepted by FE: Q3 (generic `400`, with mirrored client validation and a
 preserved buffer), Q5 (paths, methods, header, `201`/`200` including replay)
 and §3.1 vocabulary.
 
+Closed by FE at a36e903: §1–§2 and §3.1.
+
 Open:
 
-- FE confirmation of §1–§2 after v3.1 (unproven guarantees narrowed, limit
-  semantics fixed).
+- §3.3 editorial context: FE confirmation of v3.2.
 - §3.2 media details before mocks.
