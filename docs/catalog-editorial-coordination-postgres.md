@@ -69,3 +69,22 @@ This does not prove target ownership/consent or prevent same-size concurrent con
 changes by the owning uid; parent must keep the binding private and stable.
 No connection is opened by this slice. Seeds, SQL observations, live smoke and the
 parent-owned container/migration/retirement lifecycle remain U5b2/U5b3 work.
+
+## Seed and observation (U5b2)
+
+`seedEditorialPostgres(client, key)` uses only parameterized SQL tags against the
+complete canonical migration history. Each key is single-use; distinct keys coexist.
+It returns typed `ids`, derived unique `values`, and resolved `permissionIds`.
+Only ProductEditorialDraft read/update permissions are shared: insert on conflict
+(subject, action), then SELECT their real IDs before joining the seed-owned role.
+The fixture includes qualified membership/Product/Variant/prices, selected and
+unrelated private assets/options, archived vocabulary and a foreign-tenant Product.
+No auth bootstrap, password hashing, bytes, service-detail rows, catalog publication
+bindings or global default price-list singleton are created (the price list is nondefault).
+
+`currentBackendPid`, `waitForLockWait`, `readEditorialRows`, `readVariantMembership`
+and `readVariantPrices` accept structural clients/transactions. Use a separate
+admitted observer client for lock polling: bounded to 5000ms, generic errors,
+Lock wait plus nonempty blocking-pid evidence; a timed-out query is not cancelled.
+Readbacks are tenant-qualified, not a cross-query atomic snapshot unless given a tx.
+All verification here is offline; no PostgreSQL seed, lock or rollback proof exists.

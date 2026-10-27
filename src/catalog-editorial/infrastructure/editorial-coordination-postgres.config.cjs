@@ -5,6 +5,7 @@ module.exports = {
   testMatch: [
     '<rootDir>/src/catalog-editorial/infrastructure/editorial-coordination-postgres-harness.spec.ts',
     '<rootDir>/src/catalog-editorial/infrastructure/editorial-coordination-postgres-binding.spec.ts',
+    '<rootDir>/src/catalog-editorial/infrastructure/editorial-coordination-postgres-fixture.spec.ts',
   ],
   transform: {
     '^.+\\.ts$': [
