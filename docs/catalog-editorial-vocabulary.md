@@ -44,3 +44,17 @@ preserves its original timestamp. archived:false does not unarchive. Changing a
 definition type with incompatible children fails existing foreign-key constraints
 and rolls back; plan such content transitions explicitly. No version field is
 added to the future HTTP contract.
+
+## Endpoints
+
+`GET /catalog-editorial/vocabulary` returns the closed §3.1 Vocabulary shape.
+JWT and tenant guards require a concrete principal tenant; current active user,
+qualified membership and exact `ProductEditorialDraft:read` are checked afresh.
+There is no `manage` fallback or product lookup: content is company-wide.
+Families sort by label/code; definitions by code; bindings/options/units by
+sortOrder/code (null unit code first). Empty collections remain arrays; archived
+options remain listed. Labels and nullable unit labels come from storage.
+Success and editorial `{statusCode,error}` failures carry `Cache-Control: no-store`.
+Query strings are rejected with `400 MALFORMED`. No pagination or version field.
+This endpoint requires the separately authorized U4a migration before deployment;
+mocked tests do not execute SQL or validate database collation.
