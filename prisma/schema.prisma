@@ -661,6 +661,7 @@ model CatalogEditorialSaveReceipt {
 
 // Company-wide editorial vocabulary; SQL migration owns type/owner CHECK constraints.
 model EditorialFamily {
+  label    String
   id       String @id
   code     String @unique
   bindings EditorialBinding[]
@@ -669,6 +670,7 @@ model EditorialFamily {
 }
 
 model EditorialDefinition {
+  label    String
   id       String @id
   code     String @unique
   type     String
@@ -681,6 +683,8 @@ model EditorialDefinition {
 }
 
 model EditorialOption {
+  label          String
+  sortOrder      Int
   definitionId   String
   definitionType String
   code           String
@@ -692,6 +696,8 @@ model EditorialOption {
 }
 
 model EditorialUnit {
+  label          String?
+  sortOrder      Int
   id             String @id
   definitionId   String
   definitionType String @default("number")
@@ -704,6 +710,7 @@ model EditorialUnit {
 }
 
 model EditorialBinding {
+  sortOrder    Int
   familyId     String
   definitionId String
   owner        String
