@@ -17,8 +17,15 @@ function deferred<T>() {
 }
 function fixture(maxBytes = 4) {
   const rows: PrivateMediaAsset[] = [];
-  const access = { canUpload: jest.fn(() => Promise.resolve(true)) };
-  const storage = { put: jest.fn(() => Promise.resolve()), remove: jest.fn() };
+  const access = {
+    canUpload: jest.fn(() => Promise.resolve(true)),
+    canRead: jest.fn(() => Promise.resolve(true)),
+  };
+  const storage = {
+    put: jest.fn(() => Promise.resolve()),
+    read: jest.fn(() => Promise.resolve(Buffer.from([1, 2]))),
+    remove: jest.fn(),
+  };
   const repository = {
     create: jest.fn(
       (asset: PrivateMediaAsset): Promise<PrivateMediaAsset | null> => {
@@ -26,7 +33,9 @@ function fixture(maxBytes = 4) {
         return Promise.resolve({ ...asset, createdAt: new Date(1234) });
       },
     ),
-    find: jest.fn(() => Promise.resolve(null)),
+    find: jest.fn(
+      (): Promise<PrivateMediaAsset | null> => Promise.resolve(null),
+    ),
   };
   const config = { maxBytes };
   const service = new PrivateMediaService(access, storage, repository, config);
@@ -248,4 +257,109 @@ describe('PrivateMediaService upload', () => {
       f.unchanged();
     },
   );
+});
+
+describe('PrivateMediaService read', () => {
+  const asset = (): PrivateMediaAsset => ({
+    id: 'asset',
+    tenantId: 'tenant',
+    productId: 'product',
+    storageKey: 'persisted-key',
+    mimeType: 'image/png',
+    sizeBytes: 2,
+    createdAt: new Date(1234),
+  });
+  it('orders qualified lookup, current authority and bytes with immutable scope/metadata', async () => {
+    const f = fixture();
+    const lookup = deferred<PrivateMediaAsset | null>();
+    const authority = deferred<boolean>();
+    f.repository.find.mockReturnValueOnce(lookup.promise);
+    f.access.canRead.mockReturnValueOnce(authority.promise);
+    const scope = context();
+    const row = asset();
+    const attempt = f.service.read(scope, row.id);
+    expect(f.repository.find).toHaveBeenCalledWith({
+      id: 'asset',
+      tenantId: 'tenant',
+      productId: 'product',
+    });
+    expect(f.access.canRead).not.toHaveBeenCalled();
+    expect(f.storage.read).not.toHaveBeenCalled();
+    Object.assign(scope, {
+      actorId: 'other',
+      tenantId: 'foreign',
+      productId: 'other',
+    });
+    lookup.resolve(row);
+    await Promise.resolve();
+    expect(f.access.canRead).toHaveBeenCalledWith(context());
+    expect(f.storage.read).not.toHaveBeenCalled();
+    Object.assign(row, {
+      storageKey: 'changed',
+      mimeType: 'image/webp',
+      sizeBytes: 4,
+    });
+    authority.resolve(true);
+    expect(await attempt).toEqual(Buffer.from([1, 2]));
+    expect(f.storage.read).toHaveBeenCalledWith({
+      storageKey: 'persisted-key',
+      mimeType: 'image/png',
+      sizeBytes: 2,
+    });
+    f.repository.find.mockResolvedValue(asset());
+    f.access.canRead.mockResolvedValue(false);
+    expect(await f.service.read(context(), 'asset')).toBeNull();
+    expect(f.repository.find).toHaveBeenCalledTimes(2);
+    expect(f.access.canRead).toHaveBeenCalledTimes(2);
+    expect(f.storage.read).toHaveBeenCalledTimes(1);
+    f.unchanged();
+  });
+
+  it.each(['actorId', 'tenantId', 'productId', 'assetId'])(
+    'rejects invalid %s without effects',
+    async (field) => {
+      for (const value of ['', ' ', null, 7]) {
+        const f = fixture();
+        const scope = { ...context(), [field]: value };
+        const id = field === 'assetId' ? (value as string) : 'asset';
+        expect(await f.service.read(scope, id)).toBeNull();
+        expect(f.repository.find).not.toHaveBeenCalled();
+        expect(f.access.canRead).not.toHaveBeenCalled();
+        expect(f.storage.read).not.toHaveBeenCalled();
+        f.unchanged();
+      }
+    },
+  );
+
+  it.each([
+    'missing',
+    'id',
+    'tenantId',
+    'productId',
+    'cap',
+    'repository',
+    'denied',
+    'authority',
+    'storage',
+  ])('discloses no bytes on %s', async (mode) => {
+    const f = fixture();
+    const row = asset();
+    if (['id', 'tenantId', 'productId'].includes(mode))
+      Object.assign(row, { [mode]: 'foreign' });
+    if (mode === 'cap') row.sizeBytes = 5;
+    f.repository.find.mockResolvedValue(mode === 'missing' ? null : row);
+    if (mode === 'repository')
+      f.repository.find.mockRejectedValue(new Error('lookup'));
+    if (mode === 'denied') f.access.canRead.mockResolvedValue(false);
+    if (mode === 'authority')
+      f.access.canRead.mockRejectedValue(new Error('authority'));
+    if (mode === 'storage') f.storage.read.mockRejectedValue(new Error('read'));
+    expect(await f.service.read(context(), 'asset')).toBeNull();
+    expect(f.repository.find).toHaveBeenCalledTimes(1);
+    expect(f.access.canRead).toHaveBeenCalledTimes(
+      ['denied', 'authority', 'storage'].includes(mode) ? 1 : 0,
+    );
+    expect(f.storage.read).toHaveBeenCalledTimes(mode === 'storage' ? 1 : 0);
+    f.unchanged();
+  });
 });

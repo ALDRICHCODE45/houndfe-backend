@@ -119,9 +119,19 @@ The adapter does not authorize users or establish persisted linkage. Those check
 - The service generates new opaque IDs/keys, awaits private upload before creating the qualified asset row, and returns persisted metadata without a storage key or public URL.
 - Invalid input, denied/unavailable authority, upload failure or indeterminate persistence returns `null`. No lookup, deletion or retry is attempted; bytes may remain after an ambiguous write, which is not proof of rollback.
 
-This slice has no mediated-read method or concrete factory yet. Permission observation is not atomic with later storage/persistence, and the service does not activate HTTP.
+Concrete factory composition remains pending. Permission observation is not atomic with later storage/persistence, and the service does not activate HTTP.
 
 Run simulated orchestration tests with the clean-child command above and `--config src/private-media/infrastructure/private-media-service.config.cjs`.
+
+## Internal mediated reads
+
+`read(context, assetId)` snapshots trusted actor/tenant/Product qualification before lookup. The repository query includes the asset ID, tenant and Product; a missing or mismatched row cannot reach storage.
+
+- Current read permission is resolved against the persisted asset's tenant/Product and original actor before requesting bytes. Grants are not cached between calls.
+- Persisted key/MIME/size are copied before the permission await. Assets above the current service cap are rejected; the SDK adapter enforces complete, bounded byte delivery.
+- Invalid qualification, absent/foreign assets, denial or dependency failure returns `null`. Reads never create linkage, upload, delete or retry.
+
+Success returns only the complete Buffer, not a storage key or public URL. These orchestration tests use injected dependencies; concrete factory and composed-flow verification remain separate.
 
 ## Evidence boundaries
 
