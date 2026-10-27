@@ -236,11 +236,15 @@ describe('authenticated editorial read HTTP', () => {
     await rejected(get(), 500, 'INTERNAL_ERROR');
     expect(raw).not.toHaveBeenCalled();
   });
-  test.each(['post', 'put'] as const)(
-    'does not register %s writes',
-    async (method) => {
+  test.each([
+    ['post', '/draft'],
+    ['patch', '/draft'],
+    ['delete', '/draft/initialize'],
+  ] as const)(
+    'does not register unlisted %s %s writes',
+    async (method, suffix) => {
       const response = await request(app.getHttpServer())
-        [method](path + (method === 'post' ? '/draft/initialize' : '/draft'))
+        [method](path + suffix)
         .set('Authorization', 'Bearer synthetic')
         .send({});
       expect(response.status).toBe(404);
