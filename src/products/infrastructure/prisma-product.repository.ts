@@ -555,9 +555,12 @@ export class PrismaProductRepository implements IProductRepository {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.tenantPrisma.getTenantId();
 
-    for (const adjustment of adjustments) {
-      if (adjustment.quantity <= 0) continue;
-
+    const ordered = await this.lockStockAdjustments(
+      prisma,
+      tenantId,
+      adjustments,
+    );
+    for (const { adjustment } of ordered) {
       if (adjustment.variantId) {
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
         const variantRows = (await prisma.$queryRaw`

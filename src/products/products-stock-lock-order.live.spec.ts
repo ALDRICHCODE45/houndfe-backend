@@ -44,7 +44,7 @@ function postgresSqlState(error: unknown): string | undefined {
   return /PostgresError \{ code: "([0-9A-Z]{5})"/.exec(String(e?.message))?.[1];
 }
 
-describe('live charge stock lock ordering', () => {
+describe('live charge/restock stock lock ordering', () => {
   const opened: PrismaClient[] = [];
   let observer: PrismaClient;
   let charge: (
@@ -52,6 +52,7 @@ describe('live charge stock lock ordering', () => {
     seed: EditorialFixture,
     items: Parameters<PrismaProductRepository['decrementStockForCharge']>[0],
   ) => Promise<unknown>;
+  let restock: typeof charge;
   const open = async () => {
     const client = await loadEditorialPostgresClient();
     opened.push(client);
@@ -63,45 +64,57 @@ describe('live charge stock lock ordering', () => {
       await import('./infrastructure/prisma-product.repository');
     const { TenantPrismaService } =
       await import('../shared/prisma/tenant-prisma.service');
+    const { PrismaStockAlertStateRepository } =
+      await import('../stock-alerts/infrastructure/prisma-stock-alert-state.repository');
     const { ClsService } = await import('nestjs-cls');
     const cls = new ClsService<TenantClsStore>(
       new AsyncLocalStorage<TenantClsStore>(),
     );
-    charge = (client, seed, items) => {
-      const tenant = new TenantPrismaService(
-        client as ConstructorParameters<typeof TenantPrismaService>[0],
-        cls,
-      );
-      // Thresholds stay at zero: any alert/outbox access is an unexpected failure.
-      const unused = new Proxy(
-        {},
-        {
-          get() {
-            throw new Error('Unexpected alert collaborator');
+    const runner =
+      (restocking: boolean): typeof charge =>
+      (client, seed, items) => {
+        const tenant = new TenantPrismaService(
+          client as ConstructorParameters<typeof TenantPrismaService>[0],
+          cls,
+        );
+        // Thresholds stay at zero: no charge crossing/outbox; restock uses real rearm.
+        const unused = new Proxy(
+          {},
+          {
+            get() {
+              throw new Error('Unexpected alert collaborator');
+            },
           },
-        },
-      );
-      const repo = new PrismaProductRepository(
-        tenant,
-        unused as never,
-        unused as never,
-      );
-      return cls.runWith(
-        {
-          tenantId: seed.ids.tenantId,
-          userId: seed.ids.userId,
-          isSuperAdmin: false,
-        },
-        () =>
-          tenant.runInTransaction(() => repo.decrementStockForCharge(items)),
-      );
-    };
+        );
+        const repo = new PrismaProductRepository(
+          tenant,
+          unused as never,
+          new PrismaStockAlertStateRepository(),
+        );
+        return cls.runWith(
+          {
+            tenantId: seed.ids.tenantId,
+            userId: seed.ids.userId,
+            isSuperAdmin: false,
+          },
+          () =>
+            tenant.runInTransaction<unknown>(() =>
+              restocking
+                ? repo.incrementStockForRestock(items)
+                : repo.decrementStockForCharge(items),
+            ),
+        );
+      };
+    charge = runner(false);
+    restock = runner(true);
   });
   afterAll(async () => {
     await Promise.allSettled(opened.map((client) => client.$disconnect()));
   });
 
-  it('commits charges with opposite Product input orders without a deadlock', async () => {
+  // Each case uses the identical scheduler witness and exact readback contract.
+  async function oppositeProducts(kind: 'charge' | 'restock') {
+    const run = kind === 'charge' ? charge : restock;
     const seed = await seedEditorialPostgres(observer, randomUUID());
     const otherId = randomUUID();
     await observer.$executeRaw`UPDATE "products" SET "quantity" = ${10} WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
@@ -114,31 +127,82 @@ describe('live charge stock lock ordering', () => {
     const items = [seed.ids.productId, otherId]
       .sort()
       .map((productId) => ({ productId, quantity: 1 }));
-    const first = charge(held.client, seed, items);
+    const first = run(held.client, seed, items);
     let second: Promise<unknown> | undefined;
     try {
       await held.reached;
-      second = charge(secondClient, seed, [...items].reverse());
+      second = run(secondClient, seed, [...items].reverse());
       expect(await waitForLockWait(observer, secondPid)).toContain(firstPid);
     } finally {
       held.release();
       await Promise.allSettled([first, second]);
     }
     const outcomes = await Promise.allSettled([first, second]);
-    process.stdout.write(
-      `opposite charges pids=${firstPid},${secondPid} SQLSTATEs=${JSON.stringify(
-        outcomes.map((o) =>
-          o.status === 'rejected' ? postgresSqlState(o.reason) : null,
-        ),
-      )}\n`,
+    const states = outcomes.map((o) =>
+      o.status === 'rejected' ? postgresSqlState(o.reason) : null,
     );
+    process.stdout.write(
+      `opposite ${kind} pids=${firstPid},${secondPid} SQLSTATEs=${JSON.stringify(states)}\n`,
+    );
+    expect(states).toEqual([null, null]);
     expect(outcomes.map((o) => o.status)).toEqual(['fulfilled', 'fulfilled']);
     const rows = await observer.$queryRaw<
       { id: string; quantity: number }[]
     >`SELECT "id", "quantity" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId} ORDER BY "id"`;
     expect(rows).toEqual(
-      items.map(({ productId }) => ({ id: productId, quantity: 8 })),
+      items.map(({ productId }) => ({
+        id: productId,
+        quantity: kind === 'charge' ? 8 : 12,
+      })),
     );
+  }
+  it.each(['charge', 'restock'] as const)(
+    'commits opposite-order Product %s batches without a deadlock',
+    oppositeProducts,
+  );
+
+  it('serializes a Variant-first mixed restock before a parent-first mixed charge', async () => {
+    const seed = await seedEditorialPostgres(observer, randomUUID());
+    await observer.$executeRaw`UPDATE "products" SET "quantity" = ${10} WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
+    const restockBase = await open();
+    const held = holdFirstUpdate(restockBase);
+    const chargeClient = await open();
+    const restockPid = await currentBackendPid(restockBase);
+    const chargePid = await currentBackendPid(chargeClient);
+    const parent = { productId: seed.ids.productId, quantity: 2 };
+    const variant = { ...parent, variantId: seed.ids.variantId };
+    // Before the fix, restock holds V while charge takes P and then waits for V.
+    // After the fix, restock already holds P before its first stock UPDATE.
+    const restocking = restock(held.client, seed, [variant, parent]);
+    let charging: Promise<unknown> | undefined;
+    try {
+      await held.reached;
+      charging = charge(chargeClient, seed, [
+        { ...parent, quantity: 1 },
+        { ...variant, quantity: 1 },
+      ]);
+      expect(await waitForLockWait(observer, chargePid)).toContain(restockPid);
+    } finally {
+      held.release();
+      await Promise.allSettled([restocking, charging]);
+    }
+    const outcomes = await Promise.allSettled([restocking, charging]);
+    const states = outcomes.map((o) =>
+      o.status === 'rejected' ? postgresSqlState(o.reason) : null,
+    );
+    process.stdout.write(
+      `mixed restock/charge pids=${restockPid},${chargePid} SQLSTATEs=${JSON.stringify(states)}\n`,
+    );
+    expect(states).toEqual([null, null]);
+    expect(outcomes.map((o) => o.status)).toEqual(['fulfilled', 'fulfilled']);
+    const products = await observer.$queryRaw<
+      { quantity: number }[]
+    >`SELECT "quantity" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
+    const variants = await observer.$queryRaw<
+      { quantity: number }[]
+    >`SELECT "quantity" FROM "variants" WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.variantId}`;
+    expect(products).toEqual([{ quantity: 11 }]);
+    expect(variants).toEqual([{ quantity: 11 }]);
   });
 
   it('keeps sibling Variant charges concurrent while the first holds its locks', async () => {

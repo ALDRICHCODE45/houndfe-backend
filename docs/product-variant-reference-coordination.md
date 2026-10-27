@@ -87,15 +87,27 @@ would avoid that wait (inference, not separately tested). T7 found this state
 reachable through cancellation/restock of an old parent sale after adding Variants;
 PATCH can also diverge flags and membership. It is not an unreachable invariant.
 
-Charges now lock distinct qualified parents in one ascending-id sequence: UPDATE
+Charges and restocks now lock distinct qualified parents in one ascending-id sequence: UPDATE
 for parent-row adjustments, KEY SHARE for Variant-only parents. Mixed modes cannot
 be split into two ordered groups without risking inversion. KEY SHARE protects
 membership without serializing sibling Variant charges. Stock and alert/outbox keys
 then follow Product id, parent row first, Variant id; crossings retain input order.
-The new live spec proves opposite-order charges commit (exact quantities 8/8), and
+The live spec proves opposite-order charges commit (exact quantities 8/8), and
 sibling charges finish while one is paused holding locks, with no observed blockers.
 
-Restock ordering remains unchanged, pending T8b; charge/restock deadlocks are not
-claimed fixed yet. Restock into a now-variant parent, bot parent+variant validation,
-and PATCH flag/member divergence remain open product decisions. No retry policy,
-HTTP/runtime activation, external-writer, trigger or DDL guarantee is introduced.
+T8b reuses the unchanged lock helper for restocks, including deterministic rearm
+ordering. RED reproduced exact SQLSTATE `40P01` for opposite-order restocks and a
+Variant-first mixed restock versus a parent-first mixed charge. GREEN commits both
+actors in each case: opposite restocks persist 12/12; mixed restock (+2) then charge
+(-1) persists parent and Variant quantities 11/11. Each witness pauses after the
+first stock UPDATE and observes the second backend waiting before release.
+Restock still skips nonpositive/no-match entries, guards Product `useStock`, and
+rearms only strictly above the minimum; no crossing/outbox contract changes.
+
+Ordering convention: the helper uses JavaScript code-unit string comparison (`<`
+and `>`), not locale/collation order. Future multi-Product lockers must use this
+same ordering. These live cases exercise stock-row contention and real rearm calls,
+not competing alert-state rows or alert-contention behavior. Restock into a
+now-variant parent, bot parent+variant validation, and PATCH flag/member divergence
+remain open product decisions. No retry policy, HTTP/runtime activation,
+external-writer, trigger or DDL guarantee is introduced.
