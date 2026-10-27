@@ -125,6 +125,26 @@ function createService(
   );
 }
 
+// Legacy add fixtures expose their tx through $transaction. Adapt only those
+// fixtures to the ambient client contract used by addVariant.
+function createVariantService(repo: IProductRepository, prisma: any) {
+  const service = createService(repo, prisma);
+  const tenant = (service as any).tenantPrisma;
+  tenant.runInTransaction.mockImplementation(
+    async (work: () => Promise<unknown>) =>
+      prisma.$transaction(async (tx: any) => {
+        tx.$queryRaw = jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]);
+        tenant.getClient.mockReturnValue(tx);
+        try {
+          return await work();
+        } finally {
+          tenant.getClient.mockReturnValue(prisma);
+        }
+      }),
+  );
+  return service;
+}
+
 function makeNoopSatCatalog() {
   return {
     assertExists: jest.fn().mockResolvedValue(undefined),
@@ -628,7 +648,7 @@ describe('ProductsService — variant naming policy', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     await service.addVariant(PRODUCT_ID, {
       name: 'Legacy Name',
@@ -676,7 +696,7 @@ describe('ProductsService — variant price matrix auto-create', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     await service.addVariant(PRODUCT_ID, { name: 'Rojo' });
 
@@ -818,7 +838,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     const created: any = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
@@ -863,7 +883,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     const created: any = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
@@ -911,7 +931,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     const created: any = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
@@ -1028,7 +1048,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
     const created = await service.addVariant(PRODUCT_ID, { name: 'Rojo' });
 
     expect(created.purchaseNetCostCents).toBeNull();
@@ -1070,7 +1090,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
     const created = await service.addVariant(PRODUCT_ID, {
       name: 'Rojo',
       purchaseNetCostCents: 4500,
@@ -2867,7 +2887,7 @@ describe('ProductsService — variant catalog round-trips (F1.WU4d2a)', () => {
       cb(tx),
     );
     const prisma = { $transaction: transaction };
-    const service = createService(
+    const service = createVariantService(
       makeMockRepo({ findById: jest.fn().mockResolvedValue(makeProduct()) }),
       prisma,
     );

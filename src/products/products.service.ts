@@ -1117,27 +1117,33 @@ export class ProductsService {
 
   async addVariant(productId: string, dto: CreateVariantDto) {
     const tenantId = this.tenantPrisma.getTenantId();
-    const product = await this.productRepo.findById(productId);
-    if (!product) throw new EntityNotFoundError('Product', productId);
+    return this.tenantPrisma
+      .runInTransaction(async () => {
+        const tx = this.tenantPrisma.getClient();
+        // Serialize membership changes with qualified editorial Product readers.
+        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+            AND "id" = ${productId} FOR UPDATE
+        `);
+        if (products.length !== 1) {
+          throw new EntityNotFoundError('Product', productId);
+        }
+        const product = await this.productRepo.findById(productId);
+        if (!product) throw new EntityNotFoundError('Product', productId);
 
-    if (dto.sku) {
-      const taken = await this.productRepo.isSkuTaken(dto.sku);
-      if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
-    }
-    if (dto.barcode) {
-      const taken = await this.productRepo.isBarcodeTaken(dto.barcode);
-      if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
-    }
-
-    const resolvedName = this.resolveVariantName(
-      dto.name,
-      dto.option,
-      dto.value,
-    );
-
-    const variant = await this.tenantPrisma
-      .getClient()
-      .$transaction(async (tx) => {
+        if (dto.sku) {
+          const taken = await this.productRepo.isSkuTaken(dto.sku);
+          if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
+        }
+        if (dto.barcode) {
+          const taken = await this.productRepo.isBarcodeTaken(dto.barcode);
+          if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
+        }
+        const resolvedName = this.resolveVariantName(
+          dto.name,
+          dto.option,
+          dto.value,
+        );
         const createdVariant = await tx.variant.create({
           data: {
             productId,
@@ -1189,9 +1195,8 @@ export class ProductsService {
         }
 
         return createdVariant;
-      });
-
-    return this.enrichVariantCostResponse(variant);
+      })
+      .then((variant) => this.enrichVariantCostResponse(variant));
   }
 
   async getVariants(productId: string) {
