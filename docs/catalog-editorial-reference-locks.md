@@ -60,3 +60,31 @@ Offline public-core tests cover source failures, empty operations, nonempty
 selection, missing assets, archived creation denial and nonempty archived-option
 save replay. These are not PostgreSQL lock/rollback witnesses or a universal
 replay guarantee. T4 still requires a new SQL target grant.
+
+## Live evidence (U6)
+
+The separately authorized disposable PostgreSQL run passed three real coordinated
+`PrismaCatalogEditorial.create` cases (asset, option, late-failure rollback).
+Each actor had its own admitted client. A raw transaction locked an existing empty
+state row; the editorial transaction reached its later UPSERT and waited on that
+backend, after acquiring its reference locks. Bounded `waitForLockWait` observations
+then named the editorial backend in the selected writer's `pg_blocking_pids`.
+
+- Selected private-asset DELETE and selected active-option archival UPDATE waited.
+  The corresponding unrelated asset of the same Product / option of the same
+  definition changed successfully before release, with persisted readbacks.
+- After release, editorial committed cycle 2, draft and create receipt containing
+  the validated selected asset/option. The selected DELETE / archival then
+  **succeeded**, affecting one row; readbacks confirmed deletion / archival.
+- For rollback, the gate committed a conflicting raw create receipt. Editorial's
+  later receipt INSERT failed with Prisma P2010 / PostgreSQL 23505. Its state
+  UPSERT rolled back to the exact empty baseline; only the raw gate receipt
+  remained, with no editorial receipt or save receipt. The blocked asset DELETE
+  proceeded successfully, proving reference-lock release on failure.
+
+This proves these create paths and positive selected-row edges, not every save,
+initialize, asset UPDATE or vocabulary mutation. It establishes no permanent
+postcommit integrity, historical replay guarantee, byte availability or permission
+revocation atomicity. External writers are outside the coordinated-writer protocol;
+the raw writers here are adversarial probes, not a supported integration contract.
+No production/module/HTTP activation or fixture/harness change is included.
