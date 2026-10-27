@@ -1038,6 +1038,30 @@ export class ProductsService {
     // INSIDE the wrap so the rearm method's ambient-tx guard sees an
     // active tx and the rearm SELECT commits with the writes.
     await this.tenantPrisma.runInTransaction(async () => {
+      if (dto.hasVariants === false) {
+        const tx = this.tenantPrisma.getClient();
+        const tenantId = this.tenantPrisma.getTenantId();
+        // Match add/remove's qualified Product gate before observing membership.
+        // Hold it through save so a concurrent add cannot invalidate the count.
+        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+            AND "id" = ${id} FOR UPDATE
+        `);
+        if (products.length !== 1) {
+          throw new EntityNotFoundError('Product', id);
+        }
+        const variantCount = await tx.variant.count({
+          where: { tenantId, productId: id },
+        });
+        if (variantCount > 0) {
+          throw new BusinessRuleViolationError(
+            'Cannot disable variants while the Product still has Variants',
+            'PRODUCT_HAS_VARIANTS',
+            { productId: id, variantCount },
+          );
+        }
+      }
+
       // 1. priceList write — re-routed through the tx client so it
       //    joins the wrap.
       if (dto.priceCents !== undefined && defaultGlobalListId) {

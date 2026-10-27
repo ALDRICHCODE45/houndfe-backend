@@ -201,6 +201,91 @@ function makePersistenceProduct(
   };
 }
 
+describe('ProductsService — PATCH Variant membership invariant', () => {
+  function fixture(variantCount: number, hasVariants = true) {
+    const product = makeProduct();
+    product.hasVariants = hasVariants;
+    const repo = makeMockRepo();
+    repo.findById.mockResolvedValue(product);
+    const tx = {
+      $queryRaw: jest
+        .fn<Promise<{ id: string }[]>, [unknown]>()
+        .mockResolvedValue([{ id: PRODUCT_ID }]),
+      variant: { count: jest.fn().mockResolvedValue(variantCount) },
+    };
+    const service = createService(repo, tx);
+    jest
+      .spyOn(
+        service as unknown as { buildFullResponse: () => Promise<unknown> },
+        'buildFullResponse',
+      )
+      .mockResolvedValue({});
+    return { service, repo, tx, product };
+  }
+
+  it('rejects disabling variants before any write with the exact domain code/details', async () => {
+    const { service, repo, tx } = fixture(2);
+    const result = service.update(PRODUCT_ID, {
+      hasVariants: false,
+      quantity: 10,
+      useStock: true,
+    });
+    await expect(result).rejects.toBeInstanceOf(BusinessRuleViolationError);
+    await expect(result).rejects.toMatchObject({
+      code: 'PRODUCT_HAS_VARIANTS',
+      details: { productId: PRODUCT_ID, variantCount: 2 },
+    });
+    expect(repo.save.mock.calls).toHaveLength(0);
+    expect(tx.variant.count).toHaveBeenCalledWith({
+      where: { productId: PRODUCT_ID, tenantId: 'tenant-1' },
+    });
+    const query = tx.$queryRaw.mock.calls[0][0] as {
+      strings: string[];
+      values: unknown[];
+    };
+    expect(query.strings.join(' ')).toContain('FOR UPDATE');
+    expect(query.values).toEqual(['tenant-1', PRODUCT_ID]);
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.variant.count.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('allows disabling variants when the qualified count is zero', async () => {
+    const { service, repo, product } = fixture(0);
+    await service.update(PRODUCT_ID, {
+      hasVariants: false,
+      quantity: 10,
+      useStock: true,
+    });
+    expect(repo.save.mock.calls).toEqual([[product]]);
+    expect(product.quantity).toBe(10);
+    expect(product.hasVariants).toBe(false);
+  });
+
+  it('leaves unrelated updates of a Variant Product unchanged', async () => {
+    const { service, repo, tx, product } = fixture(2);
+    await service.update(PRODUCT_ID, { name: 'Renamed' });
+    expect(repo.save.mock.calls).toEqual([[product]]);
+    expect(product.hasVariants).toBe(true);
+    expect(tx.variant.count).not.toHaveBeenCalled();
+  });
+
+  it('does not check membership when hasVariants is omitted, even on a legacy false flag', async () => {
+    const { service, repo, tx } = fixture(2, false);
+    await service.update(PRODUCT_ID, { quantity: 4 });
+    expect(repo.save.mock.calls).toHaveLength(1);
+    expect(tx.variant.count).not.toHaveBeenCalled();
+  });
+
+  it('preserves true with zero Variants and silently zeros parent quantity', async () => {
+    const { service, product, tx } = fixture(0, false);
+    await service.update(PRODUCT_ID, { hasVariants: true, quantity: 10 });
+    expect(product.hasVariants).toBe(true);
+    expect(product.quantity).toBe(0);
+    expect(tx.variant.count).not.toHaveBeenCalled();
+  });
+});
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 describe('ProductsService — updateVariant uniqueness', () => {
