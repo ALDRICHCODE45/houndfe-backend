@@ -9,7 +9,23 @@ it('standalone seed excludes only exact editorial autogrants, preserving existin
   const source = readFileSync(join(__dirname, 'seed.ts'), 'utf8');
   const ast = ts.createSourceFile('seed.ts', source, ts.ScriptTarget.Latest, true);
   const loops: ts.ForOfStatement[] = [];
+  const definitionLoops: ts.ForOfStatement[] = [];
+  const roleLists: ts.VariableDeclaration[] = [];
   function visit(node: ts.Node) {
+    if (
+      ts.isForOfStatement(node) &&
+      node.expression.getText(ast) === 'allPermissionDefinitions'
+    ) {
+      definitionLoops.push(node);
+    }
+    if (
+      ts.isVariableDeclaration(node) &&
+      ['managerPermissionKeys', 'cashierPermissionKeys'].includes(
+        node.name.getText(ast),
+      )
+    ) {
+      roleLists.push(node);
+    }
     if (
       ts.isForOfStatement(node) &&
       node.expression.getText(ast) === 'permissions.values()'
@@ -20,6 +36,33 @@ it('standalone seed excludes only exact editorial autogrants, preserving existin
   }
   visit(ast);
   expect(loops).toHaveLength(1);
+  expect(definitionLoops).toHaveLength(1);
+  expect(roleLists).toHaveLength(2);
+  for (const list of roleLists) {
+    expect(list.initializer!.getText(ast)).not.toContain('ProductEditorialDraft');
+  }
+  const definitions = ts.transpileModule(definitionLoops[0].getText(ast), {
+    compilerOptions: { target: ts.ScriptTarget.ES2023 },
+  }).outputText;
+  const permissionUpsert = jest.fn(async ({ create }) => ({ ...create, id: 'id' }));
+  const seedDefinitions = new Function(
+    'tx', 'allPermissionDefinitions', 'permissions', 'permissionKey',
+    `return (async () => { ${definitions} })();`,
+  ) as (...args: unknown[]) => Promise<void>;
+  await seedDefinitions(
+    { permission: { upsert: permissionUpsert } },
+    PERMISSION_REGISTRY,
+    new Map(),
+    (subject: string, action: string) => `${subject}:${action}`,
+  );
+  expect(permissionUpsert).toHaveBeenCalledWith(
+    expect.objectContaining({
+      create: expect.objectContaining({
+        subject: 'ProductEditorialDraft',
+        action: 'publish',
+      }),
+    }),
+  );
   const loop = ts.transpileModule(loops[0].getText(ast), {
     compilerOptions: { target: ts.ScriptTarget.ES2023 },
   }).outputText;
@@ -28,6 +71,10 @@ it('standalone seed excludes only exact editorial autogrants, preserving existin
     { subject: 'ProductEditorialDraft', action: 'manage' },
     { subject: 'FutureResource', action: 'update' },
   ].map((p, index) => ({ ...p, id: String(index) }));
+  const existingPublishGrant = inputs.find(
+    (p) => p.subject === 'ProductEditorialDraft' && p.action === 'publish',
+  );
+  expect(existingPublishGrant).toBeDefined();
   const links = new Set(['existing-editorial-grant']);
   const upsert = jest.fn((args: { create: { permissionId: string } }) => {
     links.add(args.create.permissionId);
@@ -46,8 +93,17 @@ it('standalone seed excludes only exact editorial autogrants, preserving existin
   expect(excluded.map(({ subject, action }) => ({ subject, action }))).toEqual([
     { subject: 'ProductEditorialDraft', action: 'read' },
     { subject: 'ProductEditorialDraft', action: 'update' },
+    { subject: 'ProductEditorialDraft', action: 'publish' },
   ]);
-  expect(upsert).toHaveBeenCalledTimes(inputs.length - 2);
+  expect(upsert).toHaveBeenCalledTimes(inputs.length - 3);
+  links.add(existingPublishGrant!.id);
+  await run(
+    { rolePermission: { upsert } },
+    new Map(inputs.map((p) => [p.id, p])),
+    { id: 'super-admin' },
+    isEditorialPermission,
+  );
+  expect(links.has(existingPublishGrant!.id)).toBe(true);
   expect(links.has('existing-editorial-grant')).toBe(true);
   expect(
     source.includes(

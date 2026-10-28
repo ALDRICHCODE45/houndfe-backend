@@ -5,6 +5,22 @@ concurrency/rollback proof. U5b/U6/U7 remain separate. Existing core/services an
 root guards are unchanged. Rollback boundary: remove these four new harness,
 unit-spec, focused-config and documentation files; no production registration exists.
 
+## Choose the test lane
+
+| Command | Selection | Target/environment contract |
+| --- | --- | --- |
+| `pnpm test` / `pnpm test:unit` | Offline specs under `src/` and `prisma/`; excludes integration, live and legacy DB specs | No dotenv or integration setup hooks |
+| `pnpm test:integration` | Existing integration and legacy DB specs only | Existing guarded integration environment/setup/migration lifecycle; not the live harness |
+| `pnpm test:live` | Only `*.live.spec.ts` under `src/` and `prisma/`, serial | Explicit `EDITORIAL_COORDINATION_PG_BINDING`; no dotenv or integration setup hooks |
+
+The root `jest.live.config.js` reuses offline settings and exclusions, removing
+only the live exclusion and narrowing discovery to live specs. Missing binding
+fails closed, never skips; an unbound failure is not PostgreSQL runtime proof.
+Do not run this lane against an ambient database URL or an existing target.
+Authorization, fresh target inspection, binding and cleanup remain parent-owned
+as described below. The focused editorial config remains available for its
+narrower selection; the root live lane selects all five current live suites.
+
 ## Operator contract
 
 Parent alone must create a NEW disposable target from the authorized cached image
@@ -93,7 +109,8 @@ All verification here is offline; no PostgreSQL seed, lock or rollback proof exi
 
 The separate `editorial-coordination-live.config.cjs` discovers only editorial and
 Products live specs, with one worker, no cache/setup hooks, ts-jest diagnostics and
-30-second test/hook timeouts. It is not included in the offline unit config.
+30-second test/hook timeouts. Live specs are excluded from the offline unit config and are also selected by
+the explicit root `jest.live.config.js` / `pnpm test:live` lane.
 The smoke fails when unbound (never skips), awaits the guarded client before any
 application imports, uses a fresh random seed per test and disconnects in afterAll.
 It checks seeded membership/prices, actual coordinated create with selected private

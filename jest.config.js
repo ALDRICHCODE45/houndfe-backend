@@ -3,6 +3,7 @@
  *
  * Excludes everything that touches a real DB:
  *   - All `*.integration.spec.ts` files (the naming convention).
+ *   - All `*.live.spec.ts` files (explicit disposable-target binding only).
  *   - DB-hitting specs under `prisma/` that don't follow the
  *     `.integration.spec.ts` suffix (e4-concurrent-stock-alert, the
  *     promotions migration up/down). The `SKIP_DB_INTEGRATION` guard
@@ -14,11 +15,12 @@
  *     also the primary smoke-test for the CLS tenant-scoping factory;
  *     keeping it out of the unit run is mandatory.
  *
- * The integration config (`jest.integration.config.js`) is its mirror
- * image: it accepts ONLY those excluded files plus the globalSetup +
- * setupFile chain in `test/integration/setup/`. Result: `pnpm test`
- * never reaches the dev DB, and `pnpm test:integration` is the only
- * path that can.
+ * The integration config (`jest.integration.config.js`) accepts ONLY
+ * integration/legacy DB specs, not live specs, with the globalSetup +
+ * setupFile chain in `test/integration/setup/`. `pnpm test` stays offline;
+ * `pnpm test:integration` retains its guarded integration setup. `pnpm test:live` uses `jest.live.config.js` separately:
+ * no dotenv/setup hooks, and missing EDITORIAL_COORDINATION_PG_BINDING fails
+ * closed. Live target authorization and lifecycle remain operator-owned.
  */
 module.exports = {
   moduleFileExtensions: ['js', 'json', 'ts', 'tsx'],
@@ -32,6 +34,8 @@ module.exports = {
   testEnvironment: 'node',
   testPathIgnorePatterns: [
     '/node_modules/',
+    // Live specs require explicit binding; never run in the offline suite.
+    '\\.live\\.spec\\.ts$',
     // Integration-spec naming convention.
     '\\.integration\\.spec\\.ts$',
     // DB-hitting specs without the integration suffix.

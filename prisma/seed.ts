@@ -1187,6 +1187,7 @@ async function main() {
   console.log('Seeding multi-tenant database...\n');
 
   await prisma.$transaction(async (tx) => {
+    // Upsert every identity, including publish; editorial grants remain manual.
     const allPermissionDefinitions = [...PERMISSION_REGISTRY];
 
     const permissions = new Map<SeedPermissionKey, Permission>();
@@ -1274,6 +1275,7 @@ async function main() {
     const cashierUser = await upsertUser(tx, USERS.cashier);
 
     for (const permission of permissions.values()) {
+      // Exact read/update/publish rows are excluded without revoking existing links.
       if (isEditorialPermission(permission)) continue;
       await tx.rolePermission.upsert({
         where: {

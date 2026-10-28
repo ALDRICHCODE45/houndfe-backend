@@ -18,6 +18,7 @@ export type AppActions =
   | 'create'
   | 'read'
   | 'update'
+  | 'publish'
   | 'delete'
   | 'batch_delete'
   | 'manage';
@@ -124,6 +125,10 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   {
     ...EDITORIAL_PERMISSIONS.update,
     description: 'Create and save product editorial drafts',
+  },
+  {
+    ...EDITORIAL_PERMISSIONS.publish,
+    description: 'Publish product editorial drafts',
   },
 
   // Order permissions

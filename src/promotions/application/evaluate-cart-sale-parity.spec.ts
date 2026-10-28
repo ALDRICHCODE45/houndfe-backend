@@ -123,6 +123,46 @@ function harness(
   const addressFindUnique = jest
     .fn()
     .mockResolvedValue({ id: 'address', customerId: 'customer' });
+  // Each harness owns a consistent catalog; variant fixtures opt in explicitly.
+  const catalog = new Map<string, string[]>([
+    ['prod-1', []],
+    ['prod-2', []],
+    ['prod-3', []],
+  ]);
+  const prismaMock = {
+    product: {
+      findUnique: jest.fn(
+        ({ where }: { where: { id: string; tenantId: string } }) => {
+          const variants = catalog.get(where.id);
+          return Promise.resolve(
+            where.tenantId === 'tenant' && variants
+              ? { hasVariants: variants.length > 0 }
+              : null,
+          );
+        },
+      ),
+    },
+    variant: {
+      findFirst: jest.fn(
+        ({
+          where,
+        }: {
+          where: { id: string; productId: string; tenantId: string };
+        }) =>
+          Promise.resolve(
+            where.tenantId === 'tenant' &&
+              catalog.get(where.productId)?.includes(where.id)
+              ? { id: where.id }
+              : null,
+          ),
+      ),
+    },
+    customer: { findUnique: customerFindUnique },
+    customerAddress: { findUnique: addressFindUnique },
+    globalPriceList: {
+      findFirst: jest.fn().mockResolvedValue({ id: 'public' }),
+    },
+  };
   const outbox = { publish: jest.fn() };
   const usage = { claimForSale: jest.fn() };
   const service = new SalesService(
@@ -132,15 +172,7 @@ function harness(
     outbox as unknown as Dependencies[3],
     {
       getTenantId: () => 'tenant',
-      getClient: () => ({
-        customer: { findUnique: customerFindUnique },
-        customerAddress: {
-          findUnique: addressFindUnique,
-        },
-        globalPriceList: {
-          findFirst: jest.fn().mockResolvedValue({ id: 'public' }),
-        },
-      }),
+      getClient: () => prismaMock,
     } as unknown as Dependencies[4],
     {} as Dependencies[5],
     engine,
@@ -157,6 +189,8 @@ function harness(
     findAll,
     customerFindUnique,
     addressFindUnique,
+    catalog,
+    prismaMock,
     engine,
   };
 }
@@ -305,6 +339,8 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
       },
     ])('$name', async (testCase) => {
       const h = harness(null, 40);
+      h.catalog.set('prod-1', ['variant-1']);
+      h.catalog.set('prod-2', ['variant-2']);
       h.promo.targetItems[0].targetId = 'prod-2';
       const targetType = testCase.targetType ?? 'PRODUCTS';
       const advanced = Promotion.create({
@@ -548,6 +584,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
       },
     ])('$name', async (testCase) => {
       const h = harness(null, testCase.productPercent ?? 0);
+      h.catalog.set('prod-1', ['variant-1']);
       const bxgy = Promotion.create({
         id: 'bxgy',
         title: 'Buy X get Y',
@@ -942,6 +979,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
         customerScope: 'REGISTERED_ONLY',
       });
       const productId = '10000000-0000-4000-8000-000000000001';
+      h.catalog.set(productId, []);
       const cashierUserId = '20000000-0000-4000-8000-000000000001';
       const customer = {
         id: '30000000-0000-4000-8000-000000000001',
@@ -1194,6 +1232,11 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
     'quotes and charges the same eligible %s discount only on matching lines',
     async (appliesTo) => {
       const h = harness(null, 20, false, appliesTo);
+      h.catalog.set(
+        'prod-1',
+        appliesTo === 'VARIANTS' ? ['variant-1', 'variant-2'] : ['variant-1'],
+      );
+      if (appliesTo !== 'VARIANTS') h.catalog.set('prod-2', ['variant-2']);
       const preview = await h.service.previewBotPricing({
         customerId: 'customer',
         items: [

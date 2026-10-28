@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { DocumentAuthority, EditorialDocument } from '../domain/document';
 import { validateContextualDocument } from '../domain/contextual-document';
 import { readLockedEditorialDefinitions } from './prisma-locked-editorial-definitions';
+import { readLockedEditorialReferences } from './prisma-locked-editorial-references';
 import {
   closedObject,
   emptyDocument,
@@ -18,6 +19,7 @@ import type {
   EditorialReadResult,
   EditorialSaveAuthority,
   EditorialSaveRequest,
+  EditorialTransitionRequest,
 } from '../application/catalog-editorial-core';
 
 import type {
@@ -204,8 +206,174 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
     return {
       createAuthority: this.createAuthority,
       saveAuthority: this.saveAuthority,
+      publishAuthority: undefined,
+      discardAuthority: undefined,
       prepareDocuments: undefined,
     };
+  }
+  publish(context: EditorialContext, request: EditorialTransitionRequest) {
+    return this.consumeDraft(context, request, 'publish');
+  }
+  discard(context: EditorialContext, request: EditorialTransitionRequest) {
+    return this.consumeDraft(context, request, 'discard');
+  }
+  private async consumeDraft(
+    context: EditorialContext,
+    request: EditorialTransitionRequest,
+    operation: 'publish' | 'discard',
+  ): Promise<EditorialReadResult> {
+    const scope = { ...context };
+    closedObject(request, ['expectedCycle', 'expectedRevision', 'idempotencyKey']);
+    const input = { ...request };
+    const work = async (tx: Prisma.TransactionClient) => {
+      const authority = await this.writeAuthority(tx);
+      const port =
+        operation === 'publish'
+          ? authority?.publishAuthority
+          : authority?.discardAuthority;
+      const access = await port?.resolve({ ...scope }).catch(() => null);
+      if (
+        access?.activeMember !== true ||
+        access.canRead !== true ||
+        (operation === 'publish' ? access.canPublish : access.canDiscard) !==
+          true ||
+        access.actorId !== scope.actorId ||
+        access.tenantId !== scope.tenantId ||
+        access.productId !== scope.productId
+      )
+        throw new Error('FORBIDDEN');
+      if (
+        typeof input.idempotencyKey !== 'string' ||
+        input.idempotencyKey.length < 1 ||
+        input.idempotencyKey.length > 200 ||
+        [input.expectedCycle, input.expectedRevision].some(
+          (v) => !Number.isInteger(v) || v < 1,
+        )
+      )
+        throw new Error('MALFORMED');
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${scope.tenantId}
+          AND "id" = ${scope.productId} FOR UPDATE
+      `);
+      if (products.length !== 1) throw new Error('NOT_FOUND');
+      // Identifiers are selected exclusively from these two static operation names.
+      const receiptTable =
+        operation === 'publish'
+          ? Prisma.sql`"catalog_editorial_publish_receipts"`
+          : Prisma.sql`"catalog_editorial_discard_receipts"`;
+      const requestJson = JSON.stringify({
+        expectedCycle: input.expectedCycle,
+        expectedRevision: input.expectedRevision,
+      });
+      const receipts = await tx.$queryRaw<
+        { matches: boolean; result: EditorialReadResult }[]
+      >(Prisma.sql`
+        SELECT ("request" = CAST(${requestJson} AS JSONB)) AS matches, "result"
+        FROM ${receiptTable}
+        WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
+          AND "actorId" = ${scope.actorId} AND "idempotencyKey" = ${input.idempotencyKey}
+      `);
+      if (receipts[0]) {
+        if (!receipts[0].matches) throw new Error('CONFLICT');
+        return receipts[0].result;
+      }
+      const states = await tx.$queryRaw<EditorialReadResult[]>(Prisma.sql`
+        SELECT "cycle", CASE WHEN "draftRevision" IS NULL THEN NULL ELSE jsonb_build_object(
+          'revision', "draftRevision", 'basePublishedRevision', "basePublishedRevision",
+          'document', "draftDocument") END AS "draft",
+          CASE WHEN "publishedRevision" IS NULL THEN NULL ELSE jsonb_build_object(
+          'revision', "publishedRevision", 'document', "publishedDocument") END AS "published"
+        FROM "catalog_editorial_states"
+        WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
+      `);
+      const state = states[0];
+      if (
+        state?.cycle !== input.expectedCycle ||
+        state.draft?.revision !== input.expectedRevision
+      )
+        throw new Error('CONFLICT');
+      let published = state.published;
+      if (operation === 'publish') {
+        const document = state.draft.document;
+        const documents = [document, ...(published ? [published.document] : [])];
+        const selectedAssets = documents.flatMap((d) =>
+          Array.isArray(d?.mediaRefs)
+            ? d.mediaRefs.filter((id) => typeof id === 'string')
+            : [],
+        );
+        const references = await readLockedEditorialReferences(
+          tx,
+          scope,
+          selectedAssets,
+        );
+        const definitions = await readLockedEditorialDefinitions(tx, documents, 1);
+        let baseline: EditorialDocument | null = null;
+        if (published) {
+          try {
+            baseline = validateContextualDocument(
+              published.document,
+              references,
+              definitions,
+              published.document,
+            ).document;
+          } catch (error) {
+            // Only invalid Published loses conservation authority; SQL/authority errors propagate.
+            if (!(error instanceof Error) || error.message !== 'MALFORMED')
+              throw error;
+          }
+        }
+        const validated = validateContextualDocument(
+          document,
+          references,
+          definitions,
+          baseline,
+        ).document;
+        if (
+          validated.commercialTitle === null ||
+          validated.commercialTitle.trim() === '' ||
+          [...validated.commercialTitle].length > 200 ||
+          (validated.description !== null &&
+            [...validated.description].length > 20000) ||
+          validated.mediaRefs.length !== 0 ||
+          validated.values.length > 200
+        )
+          throw new Error('MALFORMED');
+        const revision = (published?.revision ?? 0) + 1;
+        if (!positiveRevision(revision)) throw new Error('CONFLICT');
+        published = { revision, document };
+      }
+      const updated =
+        operation === 'publish'
+          ? await tx.$executeRaw(Prisma.sql`
+          UPDATE "catalog_editorial_states" SET
+            "publishedRevision" = ${published!.revision}, "publishedDocument" = "draftDocument",
+            "draftRevision" = NULL, "draftDocument" = NULL, "basePublishedRevision" = NULL
+          WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
+            AND "cycle" = ${input.expectedCycle} AND "draftRevision" = ${input.expectedRevision}
+        `)
+          : await tx.$executeRaw(Prisma.sql`
+          UPDATE "catalog_editorial_states" SET
+            "draftRevision" = NULL, "draftDocument" = NULL, "basePublishedRevision" = NULL
+          WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
+            AND "cycle" = ${input.expectedCycle} AND "draftRevision" = ${input.expectedRevision}
+        `);
+      if (updated !== 1) throw new Error('CONFLICT');
+      const result: EditorialReadResult = {
+        cycle: state.cycle,
+        draft: null,
+        published,
+      };
+      await tx.$executeRaw(Prisma.sql`
+        INSERT INTO ${receiptTable}
+          ("tenantId", "productId", "actorId", "idempotencyKey", "request", "result")
+        VALUES (${scope.tenantId}, ${scope.productId}, ${scope.actorId}, ${input.idempotencyKey},
+          CAST(${requestJson} AS JSONB), CAST(${JSON.stringify(result)} AS JSONB))
+      `);
+      return result;
+    };
+    return this.prisma.$transaction(work, {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    });
   }
   async save(
     context: EditorialContext,

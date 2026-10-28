@@ -3,6 +3,7 @@ import type {
   EditorialContext,
   EditorialCreateAuthority,
   EditorialSaveAuthority,
+  EditorialTransitionAuthority,
 } from '../application/catalog-editorial-core';
 import {
   PrismaEditorialAuthority,
@@ -25,6 +26,8 @@ export type EditorialDocumentPreparation = (
 interface EditorialWriteAuthorities {
   createAuthority: EditorialCreateAuthority;
   saveAuthority: EditorialSaveAuthority;
+  publishAuthority?: EditorialTransitionAuthority;
+  discardAuthority?: EditorialTransitionAuthority;
   prepareDocuments?: EditorialDocumentPreparation;
 }
 export type EditorialWriteAuthorityFactory = (
@@ -40,8 +43,11 @@ export function createPrismaEditorialWriteAuthority(
   documents: (
     tx: Prisma.TransactionClient,
   ) => EditorialDocumentAuthorityProvider,
-): PrismaEditorialAuthority {
-  return new PrismaEditorialAuthority(tx, {
+): PrismaEditorialAuthority & {
+  publishAuthority: EditorialTransitionAuthority;
+  discardAuthority: EditorialTransitionAuthority;
+} {
+  const authority = new PrismaEditorialAuthority(tx, {
     resolve: async (scope) => {
       // PrismaEditorialAuthority checks exact capabilities before invoking this port.
       const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
@@ -52,5 +58,14 @@ export function createPrismaEditorialWriteAuthority(
         return null;
       return documents(tx).resolve({ ...scope });
     },
+  });
+  // Transitions need fresh capabilities, not save's read+update document port.
+  // The core takes the Product gate before any document/reference reads.
+  const transitionAuthority: EditorialTransitionAuthority = {
+    resolve: (scope) => authority.resolve(scope),
+  };
+  return Object.assign(authority, {
+    publishAuthority: transitionAuthority,
+    discardAuthority: transitionAuthority,
   });
 }

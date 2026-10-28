@@ -17,6 +17,8 @@ export interface EditorialDocumentAuthorityProvider {
 export interface EditorialCapabilitySnapshot extends ReadAuthoritySnapshot {
   canCreate: boolean;
   canSave: boolean;
+  canDiscard: boolean;
+  canPublish: boolean;
 }
 
 /** Internal trusted-principal boundary; does not verify HTTP/JWT context. */
@@ -112,6 +114,8 @@ export class PrismaEditorialAuthority implements EditorialReadAuthority {
         canRead,
         canCreate: canEdit,
         canSave: canEdit,
+        canDiscard: canEdit,
+        canPublish: canRead && has(EDITORIAL_PERMISSIONS.publish),
       };
     } catch {
       // Unavailable authority never becomes an effective grant or leaks errors.

@@ -60,8 +60,27 @@ export interface EditorialSaveRequest extends EditorialCreateRequest {
   expectedCycle: number;
   expectedRevision: number;
 }
+export interface EditorialTransitionRequest {
+  expectedCycle: number;
+  expectedRevision: number;
+  idempotencyKey: string;
+}
+export interface EditorialTransitionAuthority {
+  resolve(context: EditorialContext): Promise<
+    | (ReadAuthoritySnapshot & { canPublish: boolean; canDiscard: boolean })
+    | null
+  >;
+}
 /** Internal callable boundary only; no transport or effective grants. */
 export interface CatalogEditorialCore {
+  publish(
+    context: EditorialContext,
+    request: EditorialTransitionRequest,
+  ): Promise<EditorialReadResult>;
+  discard(
+    context: EditorialContext,
+    request: EditorialTransitionRequest,
+  ): Promise<EditorialReadResult>;
   initialize(
     context: EditorialContext,
     request: EditorialInitializeRequest,
