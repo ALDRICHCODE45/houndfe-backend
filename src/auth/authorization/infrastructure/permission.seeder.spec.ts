@@ -126,7 +126,7 @@ describe('PermissionSeeder — NotificationConfig idempotency (A.2)', () => {
           (c) => c.where.subject_action.subject === 'ProductEditorialDraft',
         )
         .map((c) => c.where.subject_action.action),
-    ).toEqual(['read', 'update', 'read', 'update']);
+    ).toEqual(['read', 'update', 'publish', 'read', 'update', 'publish']);
     const api = prisma.rolePermission as unknown as { upsert: jest.Mock };
     expect(api.upsert).toHaveBeenCalledTimes(2);
     expect(

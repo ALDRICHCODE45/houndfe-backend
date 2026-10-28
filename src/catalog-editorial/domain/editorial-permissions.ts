@@ -2,6 +2,7 @@
 export const EDITORIAL_PERMISSIONS = {
   read: { subject: 'ProductEditorialDraft', action: 'read' },
   update: { subject: 'ProductEditorialDraft', action: 'update' },
+  publish: { subject: 'ProductEditorialDraft', action: 'publish' },
 } as const;
 
 /** Provisioning exclusion only; does not revoke or grant runtime access. */

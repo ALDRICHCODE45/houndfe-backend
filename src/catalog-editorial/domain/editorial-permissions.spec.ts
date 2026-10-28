@@ -5,25 +5,33 @@ import {
 } from './editorial-permissions';
 
 describe('exact editorial permission identities', () => {
-  it('registers exactly read/update ProductEditorialDraft', () => {
+  it('registers exactly read/update/publish ProductEditorialDraft', () => {
     expect(EDITORIAL_PERMISSIONS).toEqual({
       read: { subject: 'ProductEditorialDraft', action: 'read' },
       update: { subject: 'ProductEditorialDraft', action: 'update' },
+      publish: { subject: 'ProductEditorialDraft', action: 'publish' },
     });
     expect(PERMISSION_REGISTRY.filter(isEditorialPermission)).toEqual([
       expect.objectContaining(EDITORIAL_PERMISSIONS.read),
       expect.objectContaining(EDITORIAL_PERMISSIONS.update),
+      expect.objectContaining({
+        subject: 'ProductEditorialDraft',
+        action: 'publish',
+      }),
     ]);
     expect(
       PERMISSION_REGISTRY.filter((p) => p.subject === 'ProductEditorialDraft'),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
   });
 
-  it.each(['read', 'update'])('recognizes exact %s identity', (action) => {
-    expect(
-      isEditorialPermission({ subject: 'ProductEditorialDraft', action }),
-    ).toBe(true);
-  });
+  it.each(['read', 'update', 'publish'])(
+    'recognizes exact %s identity',
+    (action) => {
+      expect(
+        isEditorialPermission({ subject: 'ProductEditorialDraft', action }),
+      ).toBe(true);
+    },
+  );
 
   it.each([
     ['all', 'manage'],

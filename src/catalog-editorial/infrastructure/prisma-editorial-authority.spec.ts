@@ -42,34 +42,71 @@ function fixture(documents?: EditorialDocumentAuthorityProvider) {
 
 describe('current Prisma editorial capability/read authority', () => {
   it.each([
-    [[], false, false],
-    [[grants.read], true, false],
-    [[grants.update], false, false],
-    [[grants.read, grants.update], true, true],
-    [[{ subject: 'all', action: 'manage' }], false, false],
-    [[{ subject: 'Product', action: 'manage' }], false, false],
-    [[{ subject: 'ProductEditorialDraft', action: 'manage' }], false, false],
-    [[{ subject: 'ProductEditorialDraft', action: 'create' }], false, false],
-  ])('maps only exact rows %j', async (permissions, canRead, canEdit) => {
-    const f = fixture();
-    f.members.mockResolvedValue([membership(permissions)]);
-    const input = {
-      ...scope,
-      isSuperAdmin: true,
-      canRead: true,
-      canSave: true,
-    };
-    expect(await f.authority.resolve(input)).toEqual({
-      ...scope,
-      activeMember: true,
-      canRead,
-      canCreate: canEdit,
-      canSave: canEdit,
-    });
-    if (!canRead) await expect(f.core.read(input)).rejects.toThrow('FORBIDDEN');
-    expect(f.query).not.toHaveBeenCalled();
-    expect(f.write).not.toHaveBeenCalled();
-  });
+    [[], false, false, false],
+    [[grants.read], true, false, false],
+    [[grants.update], false, false, false],
+    [[grants.read, grants.update], true, true, false],
+    [
+      [grants.read, { subject: 'ProductEditorialDraft', action: 'publish' }],
+      true,
+      false,
+      true,
+    ],
+    [
+      [{ subject: 'ProductEditorialDraft', action: 'publish' }],
+      false,
+      false,
+      false,
+    ],
+    [[{ subject: 'all', action: 'manage' }], false, false, false],
+    [[{ subject: 'Product', action: 'manage' }], false, false, false],
+    [
+      [{ subject: 'ProductEditorialDraft', action: 'manage' }],
+      false,
+      false,
+      false,
+    ],
+    [
+      [{ subject: 'ProductEditorialDraft', action: 'create' }],
+      false,
+      false,
+      false,
+    ],
+    [[grants.read, { subject: 'all', action: 'manage' }], true, false, false],
+    [
+      [grants.read, { subject: 'ProductEditorialDraft', action: 'manage' }],
+      true,
+      false,
+      false,
+    ],
+  ])(
+    'maps only exact rows %j',
+    async (permissions, canRead, canEdit, canPublish) => {
+      const f = fixture();
+      f.members.mockResolvedValue([membership(permissions)]);
+      const input = {
+        ...scope,
+        isSuperAdmin: true,
+        canRead: true,
+        canSave: true,
+        canDiscard: true,
+        canPublish: true,
+      };
+      expect(await f.authority.resolve(input)).toEqual({
+        ...scope,
+        activeMember: true,
+        canRead,
+        canCreate: canEdit,
+        canSave: canEdit,
+        canDiscard: canEdit,
+        canPublish,
+      });
+      if (!canRead)
+        await expect(f.core.read(input)).rejects.toThrow('FORBIDDEN');
+      expect(f.query).not.toHaveBeenCalled();
+      expect(f.write).not.toHaveBeenCalled();
+    },
+  );
 
   it('unions roles and uses narrowly qualified queries', async () => {
     const f = fixture();
@@ -83,6 +120,8 @@ describe('current Prisma editorial capability/read authority', () => {
       canRead: true,
       canCreate: true,
       canSave: true,
+      canDiscard: true,
+      canPublish: false,
     });
     expect(f.user).toHaveBeenCalledWith({
       where: { id: scope.actorId },
