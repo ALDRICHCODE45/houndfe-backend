@@ -98,16 +98,16 @@ export async function seedEditorialPostgres(
   for (const asset of [i.assetId, i.unrelatedAssetId])
     await client.$executeRaw`INSERT INTO "private_media_assets" ("id", "tenantId", "productId", "storageKey", "mimeType", "sizeBytes")
       VALUES (${asset}, ${i.tenantId}, ${i.productId}, ${`editorial-test/${asset}`}, ${'image/png'}, ${1})`;
-  await client.$executeRaw`INSERT INTO "editorial_families" ("id", "code") VALUES (${i.familyId}, ${i.familyId})`;
-  await client.$executeRaw`INSERT INTO "editorial_definitions" ("id", "code", "type") VALUES (${i.definitionId}, ${i.definitionId}, ${'single'})`;
-  await client.$executeRaw`INSERT INTO "editorial_bindings" ("familyId", "definitionId", "owner") VALUES (${i.familyId}, ${i.definitionId}, ${'product'})`;
+  await client.$executeRaw`INSERT INTO "editorial_families" ("id", "code", "label") VALUES (${i.familyId}, ${i.familyId}, ${i.familyId})`;
+  await client.$executeRaw`INSERT INTO "editorial_definitions" ("id", "code", "type", "label") VALUES (${i.definitionId}, ${i.definitionId}, ${'single'}, ${i.definitionId})`;
+  await client.$executeRaw`INSERT INTO "editorial_bindings" ("familyId", "definitionId", "owner", "sortOrder") VALUES (${i.familyId}, ${i.definitionId}, ${'product'}, ${0})`;
   for (const code of [
     v.activeOptionCode,
     v.archivedOptionCode,
     v.unrelatedOptionCode,
   ])
-    await client.$executeRaw`INSERT INTO "editorial_options" ("definitionId", "definitionType", "code", "archivedAt")
-      VALUES (${i.definitionId}, ${'single'}, ${code}, ${code === v.archivedOptionCode ? new Date('2020-01-01T00:00:00Z') : null})`;
+    await client.$executeRaw`INSERT INTO "editorial_options" ("definitionId", "definitionType", "code", "archivedAt", "label", "sortOrder")
+      VALUES (${i.definitionId}, ${'single'}, ${code}, ${code === v.archivedOptionCode ? new Date('2020-01-01T00:00:00Z') : null}, ${code}, ${0})`;
   return { ...fixture, permissionIds };
 }
 

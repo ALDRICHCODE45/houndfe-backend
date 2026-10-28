@@ -57,6 +57,62 @@ describe('canonical offline seed', () => {
     expect(owned(a).filter((value) => owned(b).includes(value))).toEqual([]);
     expect(a.permissionIds).toEqual(b.permissionIds);
   });
+  it.each(['families', 'definitions', 'bindings', 'options'] as const)(
+    'emits canonical required vocabulary columns and bound values for %s',
+    async (table) => {
+      const f = fake();
+      const { ids: i, values: v } = await seedEditorialPostgres(
+        f.client,
+        'canonical-vocabulary',
+      );
+      // 20261027080000_editorial_vocabulary requires these columns, no defaults.
+      const expected = {
+        families: {
+          columns: '"id", "code", "label"',
+          values: [[i.familyId, i.familyId, i.familyId]],
+        },
+        definitions: {
+          columns: '"id", "code", "type", "label"',
+          values: [[i.definitionId, i.definitionId, 'single', i.definitionId]],
+        },
+        bindings: {
+          columns: '"familyId", "definitionId", "owner", "sortOrder"',
+          values: [[i.familyId, i.definitionId, 'product', 0]],
+        },
+        options: {
+          columns:
+            '"definitionId", "definitionType", "code", "archivedAt", "label", "sortOrder"',
+          values: [
+            v.activeOptionCode,
+            v.archivedOptionCode,
+            v.unrelatedOptionCode,
+          ].map((code) => [
+            i.definitionId,
+            'single',
+            code,
+            code === v.archivedOptionCode
+              ? new Date('2020-01-01T00:00:00Z')
+              : null,
+            code,
+            0,
+          ]),
+        },
+      }[table];
+      const inserts = f.calls.filter((call) =>
+        call.sql.startsWith(`INSERT INTO "editorial_${table}"`),
+      );
+      const placeholders = expected.values[0].map(() => '?').join(', ');
+      expect(
+        inserts.map((call) => call.sql.replace(/\s+/g, ' ').trim()),
+      ).toEqual(
+        expected.values.map(
+          () =>
+            `INSERT INTO "editorial_${table}" (${expected.columns}) VALUES (${placeholders})`,
+        ),
+      );
+      expect(inserts.map((call) => call.values)).toEqual(expected.values);
+    },
+  );
   it('binds values, resolves shared permissions and respects declared FKs', async () => {
     const f = fake();
     const seed = await seedEditorialPostgres(f.client, "hostile-key' SQL");
