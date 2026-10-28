@@ -1,4 +1,4 @@
-# Editorial publish and discard HTTP contract — v0.1 (C3.2, proposal)
+# Editorial publish and discard HTTP contract — v0.2 (C3.2, proposal)
 
 Status: draft for joint BE/FE review. Nothing here exists yet. Neither side
 writes code or mocks against it until it is closed.
@@ -32,8 +32,13 @@ contract). Draft and Published live in one state row per product, so:
 - Discard removes the draft (`draft: null`). Published is unchanged. `cycle` is
   kept.
 - After either, the next `initialize` uses `expectedCycle` equal to the current
-  `cycle`, as today. A stale request from the consumed draft cannot match a
-  later draft because initialize increments the cycle.
+  `cycle`, as today, and creates the new draft with `cycle + 1` and revision 1
+  (`prisma-catalog-editorial.ts:542`). So a `(cycle, revision)` pair is never
+  reused: a stale tab holding `{ expectedCycle: N, expectedRevision: r }` gets
+  `409 CONFLICT` against the new draft of cycle `N + 1`, for save, publish and
+  discard alike. Required test: publish or discard, initialize, then a stale
+  save, publish and discard with the old pair each return `409` and change
+  nothing.
 - Only the latest Published document is kept. There is no publication history
   endpoint in this phase.
 
@@ -60,7 +65,15 @@ type PublishBody = { expectedCycle: number; expectedRevision: number };
   identical assignment is already in the current Published document (the same
   conservation rule as save, with Published as the baseline). Publishing never
   introduces a new archived value.
-- Completeness: see open item Q1.
+- Completeness (interim): the draft title must be non-empty after trimming,
+  else `400 MALFORMED`. This is an interim minimum until the per-family
+  publication minimums approved as D14 exist in the real vocabulary (today only
+  `starter.general`); it is not the final rule.
+- Media: until the media slice exists, a draft with a non-empty `mediaRefs` is
+  rejected with `400 MALFORMED`. Published never carries media refs in this
+  phase.
+- Revalidation and the copy to Published run under the same Product lock and
+  in the same transaction, like save (§4): no validate–delete–publish race.
 
 ### 2.2 Discard
 
@@ -85,6 +98,10 @@ type DiscardBody = { expectedCycle: number; expectedRevision: number };
 | No active draft; stale `expectedCycle` or `expectedRevision`   | `409 CONFLICT`     |
 | Same `Idempotency-Key` with a different body                   | `409 CONFLICT`     |
 
+The envelope is exactly `{ statusCode, error }`, no extra fields. A publish
+`400` does not say what is missing; the editor prevalidates with the same
+rules.
+
 ### 2.4 Idempotency and replay
 
 - Each operation has its own receipt namespace, keyed by tenant, product,
@@ -97,7 +114,9 @@ type DiscardBody = { expectedCycle: number; expectedRevision: number };
 
 - Publish: new exact permission `ProductEditorialDraft:publish`, plus
   `ProductEditorialDraft:read`. It does not require `update`, so a reviewer who
-  publishes but does not edit is possible. See Q2.
+  publishes but does not edit is possible, and an editor without `publish` can
+  save but not publish. Permission code as returned to the FE (the existing
+  `action:subject` format): `publish:ProductEditorialDraft`.
 - Discard: `ProductEditorialDraft:read` + `:update`, like save.
 - Granted manually only, like the existing editorial permissions. `manage:all`
   and Product permissions are not editorial grants.
@@ -109,14 +128,15 @@ serialization point, then receipts and state, in one ReadCommitted
 transaction. Publish additionally reads variants, vocabulary and selected
 assets with the existing locked readers before validating.
 
-## 5. Open items
+## 5. Decisions
 
-- **Q1 (product decision): what must a draft contain to be published?** Today
-  an incomplete document is valid capture data (null title, null description,
-  null family, no attributes). Options: (a) no extra rule, a valid draft can be
-  published as is; (b) require a non-empty title; (c) require title and family.
-  Proposal: (b).
-- **Q2 (product decision): who may publish?** Proposal: a separate `publish`
-  permission (§3). Alternative: anyone with `update` can publish.
-- **Q3 (FE):** confirm paths, bodies, `200` responses and that both operations
-  returning `draft: null` fits the editor flow.
+- Q1 (user): interim minimum is a non-empty title (§2.1); D14 per-family
+  minimums replace it when those families exist.
+- Q2 (user, matches the approved acceptance scenario): separate `publish`
+  permission (§3).
+- Q3 (FE): paths, bodies, `200` responses and `draft: null` accepted.
+- B1 (FE): no `(cycle, revision)` reuse, by the existing cycle increment on
+  initialize, pinned by the stale-tab test (§1).
+- O2 (FE): archived option conserved in the draft but absent from the current
+  Published can be saved and cannot be published.
+- O3 (FE): non-empty `mediaRefs` rejected on publish until the media slice.
