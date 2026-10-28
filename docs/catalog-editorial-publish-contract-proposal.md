@@ -1,7 +1,7 @@
-# Editorial publish and discard HTTP contract — v0.2 (C3.2, proposal)
+# Editorial publish and discard HTTP contract — v0.3 (C3.2, closed)
 
-Status: draft for joint BE/FE review. Nothing here exists yet. Neither side
-writes code or mocks against it until it is closed.
+Status: closed by BE and FE (v0.2 aca9fbb plus the exact title rule in §2.1).
+Nothing here is implemented yet; FE may mock exactly this contract.
 
 Scope: publish and discard of the editorial draft. Out of scope: product media
 (§3.2 of `catalog-editorial-editor-contract-proposal.md`) and how the public
@@ -65,8 +65,11 @@ type PublishBody = { expectedCycle: number; expectedRevision: number };
   identical assignment is already in the current Published document (the same
   conservation rule as save, with Published as the baseline). Publishing never
   introduces a new archived value.
-- Completeness (interim): the draft title must be non-empty after trimming,
-  else `400 MALFORMED`. This is an interim minimum until the per-family
+- Completeness (interim): publish is rejected with `400 MALFORMED` when
+  `commercialTitle` is `null` or when `commercialTitle.trim() === ''`
+  (ECMAScript `String.prototype.trim`: Unicode white space and line
+  terminators, the same set as `\s`). So `null`, `""` and `"   "` are
+  rejected. The document is published exactly as stored, never trimmed. This is an interim minimum until the per-family
   publication minimums approved as D14 exist in the real vocabulary (today only
   `starter.general`); it is not the final rule.
 - Media: until the media slice exists, a draft with a non-empty `mediaRefs` is
