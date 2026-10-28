@@ -107,3 +107,14 @@ Both persist the result receipt atomically with the state change and keep cycle.
 The next initialize increments cycle and starts revision 1, so stale
 `(cycle, revision)` pairs are never reused by save, publish or discard. These
 HTTP/core tests are offline evidence, not a live SQL concurrency proof.
+
+A separate real PostgreSQL run of `editorial-publish-discard.live.spec.ts` passed
+seven cases after applying the complete canonical migration history to a fresh
+disposable target. It witnessed both publish/discard Product-lock winner orders,
+selected-option archival blocking while unrelated archival progressed, and exact
+state rollback for both operations after a late receipt `P2010/23505` failure.
+It also verified recorded-result replay without state restoration, independent
+receipt namespaces, and stale save/publish/discard rejection after initialize.
+The target and private binding were removed after execution. This proves those
+cases only, not every variant/asset/unit lock path or postcommit integrity.
+See `docs/catalog-editorial-coordination-postgres.md` for the guarded run procedure.
