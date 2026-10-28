@@ -16,6 +16,7 @@
     "test": "jest --config jest.config.js",
     "test:unit": "jest --config jest.config.js",
     "test:integration": "jest --config jest.integration.config.js --runInBand",
+    "test:live": "jest --config jest.live.config.js --runInBand",
     "test:watch": "jest --config jest.config.js --watch",
     "test:cov": "jest --config jest.config.js --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --config jest.config.js --runInBand",
