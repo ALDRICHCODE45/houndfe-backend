@@ -627,6 +627,8 @@ model CatalogEditorialState {
   publishedDocument Json?
   createReceipts CatalogEditorialCreateReceipt[]
   saveReceipts CatalogEditorialSaveReceipt[]
+  publishReceipts CatalogEditorialPublishReceipt[]
+  discardReceipts CatalogEditorialDiscardReceipt[]
   product Product @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
 
   @@id([tenantId, productId])
@@ -657,6 +659,32 @@ model CatalogEditorialSaveReceipt {
 
   @@id([tenantId, productId, actorId, idempotencyKey])
   @@map("catalog_editorial_save_receipts")
+}
+
+model CatalogEditorialPublishReceipt {
+  tenantId String
+  productId String
+  actorId String
+  idempotencyKey String
+  request Json
+  result Json
+  state CatalogEditorialState @relation(fields: [tenantId, productId], references: [tenantId, productId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId, actorId, idempotencyKey])
+  @@map("catalog_editorial_publish_receipts")
+}
+
+model CatalogEditorialDiscardReceipt {
+  tenantId String
+  productId String
+  actorId String
+  idempotencyKey String
+  request Json
+  result Json
+  state CatalogEditorialState @relation(fields: [tenantId, productId], references: [tenantId, productId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId, actorId, idempotencyKey])
+  @@map("catalog_editorial_discard_receipts")
 }
 
 // Company-wide editorial vocabulary; SQL migration owns type/owner CHECK constraints.

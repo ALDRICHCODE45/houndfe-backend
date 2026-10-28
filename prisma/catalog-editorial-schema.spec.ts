@@ -44,6 +44,31 @@ describe('additive editorial state artifact', () => {
     expect(save).toContain('REFERENCES "catalog_editorial_states" ("tenantId", "productId")');
     expect(save).not.toMatch(/INSERT INTO|UPDATE "|DELETE FROM|DROP TABLE/i);
   });
+  it.each(['Publish', 'Discard'])('adds an analogous %s receipt namespace', (operation) => {
+    const table = `catalog_editorial_${operation.toLowerCase()}_receipts`;
+    const model = `CatalogEditorial${operation}Receipt`;
+    const modelBody = schema.match(new RegExp(`model ${model} \\{([^}]+)\\}`))?.[1];
+    const saveBody = schema.match(/model CatalogEditorialSaveReceipt \{([^}]+)\}/)?.[1];
+    expect(modelBody).toBeDefined();
+    expect(modelBody?.replace(table, 'catalog_editorial_save_receipts')).toBe(saveBody);
+    const stateBody = schema.match(/model CatalogEditorialState \{([^}]+)\}/)?.[1];
+    expect(stateBody).toContain(`${operation.toLowerCase()}Receipts ${model}[]`);
+
+    const migration = readFileSync(
+      join(__dirname, 'migrations/20261028010000_catalog_editorial_publish_discard/migration.sql'),
+      'utf8',
+    );
+    const save = readFileSync(
+      join(__dirname, 'migrations/20261026040000_catalog_editorial_save/migration.sql'),
+      'utf8',
+    );
+    const withoutComments = (value: string) => value.replace(/--[^\n]*/g, '').trim();
+    const statements = withoutComments(migration).split(';').map((value) => value.trim()).filter(Boolean);
+    expect(statements).toHaveLength(2);
+    expect(statements).toContain(
+      withoutComments(save).replace('catalog_editorial_save_receipts', table).replace(/;$/, ''),
+    );
+  });
   it('contains no data migration or future lifecycle tables', () => {
     expect(sql).not.toMatch(/INSERT INTO|UPDATE "|DELETE FROM|DROP TABLE|receipt/i);
   });
