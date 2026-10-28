@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import type { PrismaClient } from '@prisma/client';
 import type { ClsService } from 'nestjs-cls';
 import {
@@ -335,4 +336,37 @@ describe('TenantPrismaService.runInTransaction isolation level', () => {
     expect(extendedRoot.$transaction).toHaveBeenCalledTimes(1);
     expect(service.isInTransaction()).toBe(false);
   });
+});
+
+describe('TenantPrismaService.getTenantId', () => {
+  it('returns the tenant id from CLS', () => {
+    const { cls } = makeCls();
+    cls.set('tenantId', 'tenant-a');
+    const service = makeService({}, cls);
+
+    expect(service.getTenantId()).toBe('tenant-a');
+  });
+
+  it.each([null, undefined])(
+    'rejects a missing tenant (%s) with 403, not a 500',
+    (tenantId) => {
+      const { cls } = makeCls();
+      cls.set('isSuperAdmin', true);
+      cls.set('tenantId', tenantId);
+      const service = makeService({}, cls);
+
+      let thrown: unknown;
+      try {
+        service.getTenantId();
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(ForbiddenException);
+      expect((thrown as ForbiddenException).getStatus()).toBe(403);
+      expect((thrown as ForbiddenException).message).toBe(
+        'Tenant context required',
+      );
+    },
+  );
 });

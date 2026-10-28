@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../tenant/tenant-cls-store.interface';
@@ -130,7 +130,9 @@ export class TenantPrismaService {
   getTenantId(): string {
     const tenantId = this.cls.get('tenantId');
     if (!tenantId) {
-      throw new Error('Tenant context required');
+      // A super admin passes TenantContextGuard without a tenant, so this is a
+      // client error (select a tenant first), not a server failure.
+      throw new ForbiddenException('Tenant context required');
     }
     return tenantId;
   }
