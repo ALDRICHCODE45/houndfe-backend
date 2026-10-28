@@ -689,6 +689,7 @@ model CatalogEditorialDiscardReceipt {
 
 // Company-wide editorial vocabulary; SQL migration owns type/owner CHECK constraints.
 model EditorialFamily {
+  minimumContractVersion Int @default(1)
   label    String
   id       String @id
   code     String @unique
@@ -698,6 +699,8 @@ model EditorialFamily {
 }
 
 model EditorialDefinition {
+  numericPolicy Json?
+  groups   EditorialGroup[]
   label    String
   id       String @id
   code     String @unique
@@ -717,6 +720,8 @@ model EditorialOption {
   definitionType String
   code           String
   archivedAt     DateTime? @db.Timestamp(3)
+  groupMembers   EditorialGroupMember[]
+  aliases        EditorialAlias[]
   definition     EditorialDefinition @relation(fields: [definitionId, definitionType], references: [id, type], onDelete: Restrict, onUpdate: Restrict)
 
   @@id([definitionId, code])
@@ -738,6 +743,10 @@ model EditorialUnit {
 }
 
 model EditorialBinding {
+  exposure     String @default("INTERNAL")
+  searchable   Boolean @default(false)
+  publicationCheck String?
+  policy       Json?
   sortOrder    Int
   familyId     String
   definitionId String
@@ -747,6 +756,46 @@ model EditorialBinding {
 
   @@id([familyId, definitionId])
   @@map("editorial_bindings")
+}
+
+model EditorialGroup {
+  definitionId   String
+  definitionType String
+  code           String
+  label          String
+  definition     EditorialDefinition @relation(fields: [definitionId, definitionType], references: [id, type], onDelete: Restrict, onUpdate: Restrict)
+  members        EditorialGroupMember[]
+
+  @@id([definitionId, code])
+  @@map("editorial_groups")
+}
+
+model EditorialGroupMember {
+  definitionId String
+  groupCode    String
+  optionCode   String
+  group        EditorialGroup @relation(fields: [definitionId, groupCode], references: [definitionId, code], onDelete: Restrict, onUpdate: Restrict)
+  option       EditorialOption @relation(fields: [definitionId, optionCode], references: [definitionId, code], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([definitionId, groupCode, optionCode])
+  @@map("editorial_group_members")
+}
+
+model EditorialAlias {
+  definitionId String
+  label        String
+  optionCode   String
+  option       EditorialOption @relation(fields: [definitionId, optionCode], references: [definitionId, code], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([definitionId, label])
+  @@map("editorial_aliases")
+}
+
+model EditorialVocabularyMetadata {
+  id               String @id @default("global")
+  semanticsVersion String
+
+  @@map("editorial_vocabulary_metadata")
 }
 
 model ServiceDetail {
