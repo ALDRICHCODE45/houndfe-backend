@@ -81,3 +81,29 @@ recheck path. Product gate and lock order, idempotency, conflict precedence,
 permissions, error envelope and GET are unchanged. Offline regressions cover
 deleted variants, unresolved definitions, missing assets, unbound assignments,
 archived conservation and replay rejection; no live database proof is claimed.
+
+## Publish and discard transactions
+
+Publish/discard resolve their transaction-scoped authority (read + publish or
+read + update respectively), then take the tenant-qualified Product `FOR UPDATE`
+gate before reading receipts and state, all in one ReadCommitted transaction.
+Their own receipt tables are `catalog_editorial_publish_receipts` and
+`catalog_editorial_discard_receipts`, keyed by tenant, product, actor and
+idempotency key. Matching body replay returns the recorded result after authority
+and Product checks, without changing state; a different body conflicts.
+
+After matching the active draft's cycle and revision, publish uses the locked
+reference and definition readers to revalidate against current variants,
+vocabulary and selected assets. Current Published is the archived-option
+conservation baseline, not the draft; an invalid Published supplies no baseline.
+The candidate obeys fresh-save limits plus the interim nonblank title rule
+(`commercialTitle !== null` and `commercialTitle.trim() !== ''`) and rejection
+of any nonempty `mediaRefs`. Validation and copy share the Product lock and
+transaction. The stored document is copied unchanged, never trimmed, to the next
+Published revision; draft is cleared. Discard skips document validation, clears
+draft and leaves Published unchanged, allowing recovery from an invalid draft.
+Both persist the result receipt atomically with the state change and keep cycle.
+
+The next initialize increments cycle and starts revision 1, so stale
+`(cycle, revision)` pairs are never reused by save, publish or discard. These
+HTTP/core tests are offline evidence, not a live SQL concurrency proof.

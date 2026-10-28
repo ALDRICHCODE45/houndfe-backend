@@ -1,7 +1,7 @@
 # Editorial publish and discard HTTP contract — v0.3 (C3.2, closed)
 
-Status: closed by BE and FE (v0.2 aca9fbb plus the exact title rule in §2.1).
-Nothing here is implemented yet; FE may mock exactly this contract.
+Status: closed by BE and FE (v0.2 aca9fbb plus the exact title rule in §2.1),
+implemented on branch `feat/editorial-publish-discard`.
 
 Scope: publish and discard of the editorial draft. Out of scope: product media
 (§3.2 of `catalog-editorial-editor-contract-proposal.md`) and how the public
@@ -92,14 +92,13 @@ type DiscardBody = { expectedCycle: number; expectedRevision: number };
 
 ### 2.3 Errors (both)
 
-| Case                                                           | Response           |
-| -------------------------------------------------------------- | ------------------ |
-| Malformed body, header or `productId`; invalid draft (publish) | `400 MALFORMED`    |
-| Missing or invalid token                                       | `401 UNAUTHORIZED` |
-| Missing permission (§3), inactive user, no membership          | `403 FORBIDDEN`    |
-| Product not found in the current tenant                        | `404 NOT_FOUND`    |
-| No active draft; stale `expectedCycle` or `expectedRevision`   | `409 CONFLICT`     |
-| Same `Idempotency-Key` with a different body                   | `409 CONFLICT`     |
+- Malformed body, header or `productId`; invalid draft (publish) → `400 MALFORMED`.
+- Missing or invalid token → `401 UNAUTHORIZED`.
+- Missing permission (§3), inactive user, no membership → `403 FORBIDDEN`.
+- Unavailable or foreign Product (authority failure) → `403 FORBIDDEN`.
+- Product disappears after authorization → `404 NOT_FOUND`.
+- No active draft; stale `expectedCycle` or `expectedRevision` → `409 CONFLICT`.
+- Same `Idempotency-Key` with a different body → `409 CONFLICT`.
 
 The envelope is exactly `{ statusCode, error }`, no extra fields. A publish
 `400` does not say what is missing; the editor prevalidates with the same
@@ -132,6 +131,8 @@ transaction. Publish additionally reads variants, vocabulary and selected
 assets with the existing locked readers before validating.
 
 ## 5. Decisions
+
+- Correction (implementation): unavailable or foreign Product → `403 FORBIDDEN` (no cross-tenant existence oracle); `404 NOT_FOUND` only if Product disappears after authorization.
 
 - Q1 (user): interim minimum is a non-empty title (§2.1); D14 per-family
   minimums replace it when those families exist.

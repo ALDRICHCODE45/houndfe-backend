@@ -3,6 +3,7 @@ import {
   Controller,
   ForbiddenException,
   Header,
+  HttpCode,
   Inject,
   Param,
   ParseUUIDPipe,
@@ -27,17 +28,27 @@ import { idempotencyKey } from './idempotency-key';
 export class EditorialWriteController {
   constructor(
     @Inject(EDITORIAL_READER)
-    private readonly core: Pick<CatalogEditorialCore, 'initialize' | 'save'>,
+    private readonly core: Pick<
+      CatalogEditorialCore,
+      'initialize' | 'save' | 'publish' | 'discard'
+    >,
   ) {}
 
-  private input(request: Request, productId: string, saving: boolean) {
+  private input(
+    request: Request,
+    productId: string,
+    operation: 'initialize' | 'save' | 'transition',
+  ) {
     const user = request.user as AuthenticatedUser | undefined;
     if (!user?.userId?.trim() || !user.tenantId?.trim())
       throw new ForbiddenException();
     const body: unknown = request.body;
-    const keys = saving
-      ? ['expectedCycle', 'expectedRevision', 'document']
-      : ['expectedCycle'];
+    const initializing = operation === 'initialize';
+    const keys = initializing
+      ? ['expectedCycle']
+      : operation === 'save'
+        ? ['expectedCycle', 'expectedRevision', 'document']
+        : ['expectedCycle', 'expectedRevision'];
     if (
       Object.keys(request.query).length ||
       !body ||
@@ -53,9 +64,9 @@ export class EditorialWriteController {
     if (
       !(
         positive(input.expectedCycle) ||
-        (!saving && input.expectedCycle === null)
+        (initializing && input.expectedCycle === null)
       ) ||
-      (saving && !positive(input.expectedRevision))
+      (!initializing && !positive(input.expectedRevision))
     )
       throw new BadRequestException();
     return {
@@ -71,9 +82,51 @@ export class EditorialWriteController {
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
   ) {
-    const { context, input, key } = this.input(request, productId, false);
+    const { context, input, key } = this.input(
+      request,
+      productId,
+      'initialize',
+    );
     return this.core.initialize(context, {
       expectedCycle: input.expectedCycle as number | null,
+      idempotencyKey: key,
+    });
+  }
+
+  @Post('publish')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  publish(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Req() request: Request,
+  ) {
+    const { context, input, key } = this.input(
+      request,
+      productId,
+      'transition',
+    );
+    return this.core.publish(context, {
+      expectedCycle: input.expectedCycle as number,
+      expectedRevision: input.expectedRevision as number,
+      idempotencyKey: key,
+    });
+  }
+
+  @Post('discard')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  discard(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Req() request: Request,
+  ) {
+    const { context, input, key } = this.input(
+      request,
+      productId,
+      'transition',
+    );
+    return this.core.discard(context, {
+      expectedCycle: input.expectedCycle as number,
+      expectedRevision: input.expectedRevision as number,
       idempotencyKey: key,
     });
   }
@@ -84,7 +137,7 @@ export class EditorialWriteController {
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
   ) {
-    const { context, input, key } = this.input(request, productId, true);
+    const { context, input, key } = this.input(request, productId, 'save');
     return this.core.save(context, {
       expectedCycle: input.expectedCycle as number,
       expectedRevision: input.expectedRevision as number,

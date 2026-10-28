@@ -17,7 +17,13 @@ const productId = '11111111-1111-4111-8111-111111111111';
 const tenantId = '22222222-2222-4222-8222-222222222222';
 const actorId = '33333333-3333-4333-8333-333333333333';
 const path = `/products/${productId}/editorial/draft`;
-const core = { initialize: jest.fn(), save: jest.fn() };
+const core = {
+  initialize: jest.fn(),
+  save: jest.fn(),
+  publish: jest.fn(),
+  discard: jest.fn(),
+};
+type Operation = keyof typeof core;
 const db = { $transaction: jest.fn() };
 const raw = jest.fn();
 const tx = {
@@ -149,16 +155,18 @@ describe('editorial write HTTP', () => {
     tenant = tenantId;
     core.initialize.mockResolvedValue(state);
     core.save.mockResolvedValue(state);
+    core.publish.mockResolvedValue({
+      cycle: 1,
+      draft: null,
+      published: { revision: 1, document: emptyDocument() },
+    });
+    core.discard.mockResolvedValue({ cycle: 1, draft: null, published: null });
   });
-  const send = (
-    operation: 'initialize' | 'save',
-    body: object,
-    key = 'key',
-  ) => {
+  const send = (operation: Operation, body: object, key = 'key') => {
     const req =
-      operation === 'initialize'
-        ? request(app.getHttpServer() as Server).post(path + '/initialize')
-        : request(app.getHttpServer() as Server).put(path);
+      operation === 'save'
+        ? request(app.getHttpServer() as Server).put(path)
+        : request(app.getHttpServer() as Server).post(path + '/' + operation);
     return req
       .set('Authorization', 'Bearer synthetic')
       .set('Idempotency-Key', key)
@@ -174,11 +182,18 @@ describe('editorial write HTTP', () => {
     expect(result.body).toEqual({ statusCode: status, error });
     expect(result.headers['cache-control']).toBe('no-store');
   };
-  for (const operation of ['initialize', 'save'] as const) {
+  for (const operation of [
+    'initialize',
+    'save',
+    'publish',
+    'discard',
+  ] as const) {
     const body =
       operation === 'initialize'
         ? { expectedCycle: null }
-        : { expectedCycle: 1, expectedRevision: 1, document: emptyDocument() };
+        : operation === 'save'
+          ? { expectedCycle: 1, expectedRevision: 1, document: emptyDocument() }
+          : { expectedCycle: 1, expectedRevision: 1 };
     test(`${operation} returns state and replay status using principal scope`, async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const response = await send(operation, body).set(
@@ -186,7 +201,17 @@ describe('editorial write HTTP', () => {
           'foreign',
         );
         expect(response.status).toBe(operation === 'initialize' ? 201 : 200);
-        expect(response.body).toEqual(state);
+        expect(response.body).toEqual(
+          operation === 'publish'
+            ? {
+                cycle: 1,
+                draft: null,
+                published: { revision: 1, document: emptyDocument() },
+              }
+            : operation === 'discard'
+              ? { cycle: 1, draft: null, published: null }
+              : state,
+        );
         expect(response.headers['cache-control']).toBe('no-store');
       }
       expect(core[operation]).toHaveBeenCalledTimes(2);
@@ -267,12 +292,12 @@ describe('editorial write HTTP', () => {
         'MALFORMED',
       );
       const req =
-        operation === 'initialize'
-          ? request(app.getHttpServer() as Server).post(
-              '/products/bad/editorial/draft/initialize',
-            )
-          : request(app.getHttpServer() as Server).put(
+        operation === 'save'
+          ? request(app.getHttpServer() as Server).put(
               '/products/bad/editorial/draft',
+            )
+          : request(app.getHttpServer() as Server).post(
+              '/products/bad/editorial/draft/' + operation,
             );
       await rejected(
         req
@@ -282,6 +307,28 @@ describe('editorial write HTTP', () => {
         400,
         'MALFORMED',
       );
+      expect(core[operation]).not.toHaveBeenCalled();
+    });
+  }
+  for (const operation of ['publish', 'discard'] as const) {
+    test.each([null, 0, 1.5, '1', undefined])(
+      `${operation} rejects invalid or missing revision %p`,
+      async (expectedRevision) => {
+        await rejected(
+          send(operation, { expectedCycle: 1, expectedRevision }),
+          400,
+          'MALFORMED',
+        );
+        expect(core[operation]).not.toHaveBeenCalled();
+      },
+    );
+    test(`${operation} rejects null or missing cycle`, async () => {
+      for (const body of [
+        { expectedRevision: 1 },
+        { expectedCycle: null, expectedRevision: 1 },
+      ]) {
+        await rejected(send(operation, body), 400, 'MALFORMED');
+      }
       expect(core[operation]).not.toHaveBeenCalled();
     });
   }
