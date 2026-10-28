@@ -96,6 +96,7 @@ async function validateStoredSave(
   candidate: unknown,
   authority: DocumentAuthority,
   prepare?: (documents: readonly unknown[]) => Promise<DocumentAuthority>,
+  mode: 'replay' | 'save' | 'initialize' = 'replay',
 ) {
   const extra =
     stored && typeof stored === 'object' && Object.hasOwn(stored, 'warnings')
@@ -125,7 +126,11 @@ async function validateStoredSave(
     ...(published ? [published.document] : []),
   ];
   const preparedAuthority = prepare ? await prepare(documents) : authority;
-  const definitions = await readLockedEditorialDefinitions(tx, documents);
+  const definitions = await readLockedEditorialDefinitions(
+    tx,
+    documents,
+    mode === 'replay' ? documents.length : mode === 'save' ? 1 : 0,
+  );
   // These baselines come only from the scoped stored state or exactly matched receipt.
   // The strict validator checks each document before inspecting conservation membership.
   const check = (document: unknown) =>
@@ -135,24 +140,44 @@ async function validateStoredSave(
       definitions,
       document as EditorialDocument,
     ).document;
-  const baseline = check(draft.document);
-  const validated = validateContextualDocument(
-    candidate,
-    preparedAuthority,
-    definitions,
-    baseline,
-  );
+  // Only stored validation failures are recoverable, never authority/SQL failures.
+  const storedBaseline = (document: unknown) => {
+    try {
+      return check(document);
+    } catch (error) {
+      if (
+        mode === 'replay' ||
+        !(error instanceof Error) ||
+        error.message !== 'MALFORMED'
+      )
+        throw error;
+      return null;
+    }
+  };
+  const baseline = storedBaseline(draft.document);
+  const validated =
+    mode === 'initialize' && baseline === null
+      ? { document: candidate as EditorialDocument, warnings: [] }
+      : validateContextualDocument(
+          candidate,
+          preparedAuthority,
+          definitions,
+          baseline,
+        );
   const state: EditorialReadResult = {
     cycle: raw.cycle,
     draft: {
       revision: draft.revision,
       basePublishedRevision: draft.basePublishedRevision,
-      document: baseline,
+      document: baseline ?? (draft.document as EditorialDocument),
     },
     published: published
       ? {
           revision: published.revision as number,
-          document: check(published.document),
+          document:
+            mode === 'replay'
+              ? check(published.document)
+              : (published.document as EditorialDocument),
         }
       : null,
     ...(validated.warnings.length ? { warnings: validated.warnings } : {}),
@@ -286,6 +311,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
         input.document,
         access.documentAuthority,
         prepare,
+        'save',
       );
       const { document } = validated;
       // Fresh-save candidate only: never constrain stored baselines or replay receipts.
@@ -434,7 +460,10 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
               ? await prepare([input.document], 'create')
               : access.documentAuthority,
           );
-      const validateInitialization = async (result: EditorialReadResult) => {
+      const validateInitialization = async (
+        result: EditorialReadResult,
+        mode: 'replay' | 'initialize' = 'replay',
+      ) => {
         const candidate =
           result?.published === null
             ? emptyDocument()
@@ -445,6 +474,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
           candidate,
           access.documentAuthority,
           prepare ? (documents) => prepare(documents, 'stored') : undefined,
+          mode,
         );
         const { state } = validated;
         if (
@@ -532,7 +562,7 @@ export class PrismaCatalogEditorial implements CatalogEditorialCore {
               },
       };
       if (fromPublished) {
-        result = await validateInitialization(result);
+        result = await validateInitialization(result, 'initialize');
         document = result.draft!.document;
       }
       await tx.$executeRaw(Prisma.sql`

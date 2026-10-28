@@ -63,3 +63,21 @@ copy, or internal create. An oversized initialized draft must be reduced to save
 Offline core tests cover exact boundaries, code points, no-write rejection,
 historical replay, initialize, and unchanged internal create; these are not SQL
 rollback or concurrency proofs.
+
+## Invalid stored baseline recovery — Implemented: S1–S7
+
+Fresh save validates the candidate strictly, including existing limits. Stored
+draft/published selections share the same ordered reference/vocabulary locking
+reads, but unresolved stored codes are not lockable and no longer deny the write.
+Only a currently valid stored draft authorizes archived-option conservation;
+an invalid draft is no baseline, not a source to repair or normalize. Save returns
+the candidate as draft and Published exactly as stored, with warnings only from
+valid conservation. Initialize copies an invalid Published unchanged and emits
+no warnings from it; valid Published behavior is unchanged.
+
+Only stored-document validation failures are recoverable. Authority and SQL
+errors still propagate. Matching-receipt save/initialize take the original strict
+recheck path. Product gate and lock order, idempotency, conflict precedence,
+permissions, error envelope and GET are unchanged. Offline regressions cover
+deleted variants, unresolved definitions, missing assets, unbound assignments,
+archived conservation and replay rejection; no live database proof is claimed.
