@@ -53,58 +53,80 @@ function capture(value: unknown, ancestors = new Set<object>()): CapturedJson {
 const either = (predicates: Prisma.Sql[]) =>
   predicates.length ? Prisma.join(predicates, ' OR ') : Prisma.sql`FALSE`;
 
-/** Caller must validate the same captured documents and retain this transaction through its write. */
+/**
+ * Caller validates these captured documents and retains the transaction through writing.
+ * Only the leading strictDocumentCount documents require every selection to resolve;
+ * stored selections still lock whatever resolves. Default keeps replay/create strict.
+ */
 export async function readLockedEditorialDefinitions(
   tx: Prisma.TransactionClient,
   documents: readonly unknown[],
+  strictDocumentCount = documents.length,
 ): Promise<EditorialDefinitionsSnapshot> {
   // Capture JSON data descriptors without executing getters or toJSON methods.
   const captured = capture(documents);
   if (!Array.isArray(captured)) return fail('MALFORMED');
-  const docs = captured.map((input) =>
-    closedObject(input, [
-      'commercialTitle',
-      'description',
-      'mediaRefs',
-      'familyCode',
-      'values',
-    ]),
-  );
   const familyCodes: string[] = [];
-  const selectors = docs.flatMap((d) => {
-    if (
-      !Array.isArray(d.values) ||
-      (d.familyCode !== null && typeof d.familyCode !== 'string')
-    )
-      return fail('MALFORMED');
-    const familyCode = d.familyCode;
-    if (familyCode === null) {
-      if (d.values.length) fail('MALFORMED');
-      return [];
-    }
-    familyCodes.push(familyCode);
-    return d.values.map((raw: unknown) => {
-      if (!raw || typeof raw !== 'object') return fail('MALFORMED');
-      const v = raw as Record<string, unknown>;
+  const strictFamilies = new Set<string>();
+  const strictDefinitions = new Set<string>();
+  const selectors = captured.flatMap((input, index) => {
+    const strict = index < strictDocumentCount;
+    try {
+      const d = closedObject(input, [
+        'commercialTitle',
+        'description',
+        'mediaRefs',
+        'familyCode',
+        'values',
+      ]);
       if (
-        typeof v.code !== 'string' ||
-        typeof v.type !== 'string' ||
-        !['text', 'boolean', 'number', 'single', 'multi'].includes(v.type)
+        !Array.isArray(d.values) ||
+        (d.familyCode !== null && typeof d.familyCode !== 'string')
       )
         return fail('MALFORMED');
-      const options =
-        v.type === 'single' ? [v.value] : v.type === 'multi' ? v.value : [];
-      if (!Array.isArray(options) || options.some((o) => typeof o !== 'string'))
-        return fail('MALFORMED');
-      if (v.type === 'number' && v.unit !== null && typeof v.unit !== 'string')
-        return fail('MALFORMED');
-      return {
-        familyCode,
-        code: v.code,
-        options: options as string[],
-        units: v.type === 'number' ? [v.unit as string | null] : [],
-      };
-    });
+      const familyCode = d.familyCode;
+      if (familyCode === null) {
+        if (d.values.length) fail('MALFORMED');
+        return [];
+      }
+      familyCodes.push(familyCode);
+      if (strict) strictFamilies.add(familyCode);
+      return d.values.map((raw: unknown) => {
+        if (!raw || typeof raw !== 'object') return fail('MALFORMED');
+        const v = raw as Record<string, unknown>;
+        if (
+          typeof v.code !== 'string' ||
+          typeof v.type !== 'string' ||
+          !['text', 'boolean', 'number', 'single', 'multi'].includes(v.type)
+        )
+          return fail('MALFORMED');
+        const options =
+          v.type === 'single' ? [v.value] : v.type === 'multi' ? v.value : [];
+        if (
+          !Array.isArray(options) ||
+          options.some((o) => typeof o !== 'string')
+        )
+          return fail('MALFORMED');
+        if (
+          v.type === 'number' &&
+          v.unit !== null &&
+          typeof v.unit !== 'string'
+        )
+          return fail('MALFORMED');
+        if (strict) strictDefinitions.add(v.code);
+        return {
+          strict,
+          familyCode,
+          code: v.code,
+          options: options as string[],
+          units: v.type === 'number' ? [v.unit as string | null] : [],
+        };
+      });
+    } catch (error) {
+      if (strict || !(error instanceof Error) || error.message !== 'MALFORMED')
+        throw error;
+      return [];
+    }
   });
   const families = await tx.$queryRaw<
     { id: string; code: string }[]
@@ -115,15 +137,22 @@ export async function readLockedEditorialDefinitions(
   >(Prisma.sql`
     SELECT id, code, type FROM editorial_definitions WHERE ${either(selectors.map((s) => Prisma.sql`code = ${s.code}`))} ORDER BY id FOR SHARE`);
   if (
-    families.length !== new Set(familyCodes).size ||
-    definitions.length !== new Set(selectors.map((s) => s.code)).size
+    [...strictFamilies].some(
+      (code) => !families.some((f) => f.code === code),
+    ) ||
+    [...strictDefinitions].some(
+      (code) => !definitions.some((d) => d.code === code),
+    )
   )
     fail('MALFORMED');
-  const selected = selectors.map((s) => {
+  const selected = selectors.flatMap((s) => {
     const family = families.find((f) => f.code === s.familyCode);
     const definition = definitions.find((d) => d.code === s.code);
-    if (!family || !definition) return fail('MALFORMED');
-    return { ...s, familyId: family.id, definitionId: definition.id };
+    if (!family || !definition) {
+      if (s.strict) fail('MALFORMED');
+      return [];
+    }
+    return [{ ...s, familyId: family.id, definitionId: definition.id }];
   });
   const bindings = await tx.$queryRaw<
     { familyId: string; definitionId: string; owner: Owner }[]
@@ -145,21 +174,22 @@ export async function readLockedEditorialDefinitions(
     ORDER BY id FOR SHARE`);
   for (const s of selected) {
     if (
-      !bindings.some(
+      s.strict &&
+      (!bindings.some(
         (b) => b.familyId === s.familyId && b.definitionId === s.definitionId,
       ) ||
-      s.options.some(
-        (code) =>
-          !options.some(
-            (o) => o.definitionId === s.definitionId && o.code === code,
-          ),
-      ) ||
-      s.units.some(
-        (unit) =>
-          !units.some(
-            (u) => u.definitionId === s.definitionId && u.unitCode === unit,
-          ),
-      )
+        s.options.some(
+          (code) =>
+            !options.some(
+              (o) => o.definitionId === s.definitionId && o.code === code,
+            ),
+        ) ||
+        s.units.some(
+          (unit) =>
+            !units.some(
+              (u) => u.definitionId === s.definitionId && u.unitCode === unit,
+            ),
+        ))
     )
       fail('MALFORMED');
   }

@@ -816,6 +816,166 @@ const selectedDocument = () => ({
   ],
 });
 
+describe('invalid stored document recovery', () => {
+  const invalidDocuments = () => {
+    const variant = selectedDocument();
+    variant.values[0].variantId = 'deleted' as never;
+    const code = selectedDocument();
+    code.values[0].code = 'unresolved';
+    const asset = selectedDocument();
+    asset.mediaRefs = ['missing'];
+    const unbound = selectedDocument();
+    unbound.values[0].owner = 'product' as never;
+    return [variant, code, asset, unbound];
+  };
+  const save = (
+    f: ReturnType<typeof coordinatedFixture>,
+    document = emptyDocument(),
+  ) =>
+    f.core.save(scope, {
+      expectedCycle: 1,
+      expectedRevision: 1,
+      idempotencyKey: 'recovery',
+      document,
+    });
+
+  it.each([0, 1, 2, 3])(
+    'saves a corrected candidate despite invalid draft case %i',
+    async (index) => {
+      const f = coordinatedFixture('save');
+      const stored = invalidDocuments()[index];
+      f.persistence.state!.draft.document = stored;
+      const before = structuredClone(stored);
+      await expect(save(f)).resolves.toMatchObject({
+        draft: { document: emptyDocument() },
+      });
+      expect(stored).toEqual(before);
+      expect(f.write).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([0, 1, 2, 3])(
+    'returns invalid published case %i exactly as stored on save',
+    async (index) => {
+      const f = coordinatedFixture('save');
+      const published = { revision: 1, document: invalidDocuments()[index] };
+      f.persistence.state!.published = published as never;
+      const result = await save(f);
+      expect(result.published).toEqual(published);
+      expect(result.warnings).toBeUndefined();
+    },
+  );
+
+  it.each([0, 1, 2, 3])(
+    'copies invalid published case %i unchanged on initialize',
+    async (index) => {
+      const f = coordinatedFixture('initialize', true);
+      const document = invalidDocuments()[index];
+      const query = f.query.getMockImplementation()!;
+      f.query.mockImplementation((sql) =>
+        sql.sql.includes('FROM "catalog_editorial_states"')
+          ? [
+              {
+                cycle: 1,
+                draftRevision: null,
+                publishedRevision: 1,
+                publishedDocument: document,
+              },
+            ]
+          : query(sql),
+      );
+      const result = await f.core.initialize(scope, {
+        expectedCycle: 1,
+        idempotencyKey: 'copy',
+      });
+      expect(result.draft?.document).toEqual(document);
+      expect(result.published?.document).toEqual(document);
+      expect(result.warnings).toBeUndefined();
+      expect((f.write.mock.calls[0] as [Prisma.Sql])[0].values).toContain(
+        JSON.stringify(document),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'archived retention requires a valid baseline: invalid=%s',
+    async (invalid) => {
+      const f = coordinatedFixture('save', true);
+      const stored = selectedDocument();
+      if (invalid) stored.mediaRefs = ['missing'];
+      f.persistence.state!.draft.document = stored;
+      const attempt = save(f, selectedDocument());
+      if (invalid) {
+        await expect(attempt).rejects.toThrow('MALFORMED');
+        expect(f.write).not.toHaveBeenCalled();
+      } else {
+        const result = await attempt;
+        expect(result.warnings).toHaveLength(1);
+      }
+    },
+  );
+
+  it.each([0, 1, 2, 3])(
+    'still rejects invalid candidate case %i',
+    async (index) => {
+      const f = coordinatedFixture('save');
+      await expect(save(f, invalidDocuments()[index])).rejects.toThrow(
+        'MALFORMED',
+      );
+      expect(f.write).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not swallow SQL failures while resolving stored selections', async () => {
+    const f = coordinatedFixture('save');
+    f.persistence.state!.draft.document = selectedDocument();
+    const query = f.query.getMockImplementation()!;
+    const error = new Error('MALFORMED');
+    f.query.mockImplementation((sql) => {
+      if (
+        sql.sql.includes('FROM editorial_definitions') &&
+        !sql.sql.includes('FALSE')
+      )
+        throw error;
+      return query(sql);
+    });
+    await expect(save(f)).rejects.toBe(error);
+    expect(f.write).not.toHaveBeenCalled();
+  });
+
+  it.each(['save', 'initialize'] as const)(
+    'still rechecks invalid %s receipt',
+    async (operation) => {
+      const f = coordinatedFixture(operation);
+      const document = invalidDocuments()[0];
+      const receipt = {
+        cycle: operation === 'save' ? 1 : 2,
+        draft: {
+          revision: operation === 'save' ? 2 : 1,
+          basePublishedRevision: 1,
+          document,
+        },
+        published: { revision: 1, document },
+      };
+      const query = f.query.getMockImplementation()!;
+      f.query.mockImplementation((sql) =>
+        sql.sql.includes('receipts')
+          ? [{ matches: true, result: receipt }]
+          : query(sql),
+      );
+      await expect(
+        operation === 'save'
+          ? save(f, document)
+          : f.core.initialize(scope, {
+              expectedCycle: 1,
+              idempotencyKey: 'copy',
+            }),
+      ).rejects.toThrow('MALFORMED');
+      expect(f.write).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('coordinated reference composition', () => {
   it.each(operations)(
     'observes every real source for empty %s',

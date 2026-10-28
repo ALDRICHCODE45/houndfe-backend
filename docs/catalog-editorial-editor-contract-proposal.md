@@ -56,8 +56,7 @@ normalizing fields. GET never returns `warnings`.
 ## 2. Phase A — expose the existing core, plus the new limits
 
 The core already implements these writes. This phase adds HTTP and the new
-document limits of §2.2, which are decided but NOT enforced today
-(implementation pending). The core
+document limits of §2.2 (implemented in 5c3228e). The core
 also has an internal `create(document)`; it is NOT exposed: the editor flow is
 initialize (from published or empty) and then save. CORS already reflects
 requested headers (`enableCors()` defaults), so `Idempotency-Key` passes the
@@ -153,7 +152,7 @@ Rules the backend enforces (FE mirrors them to avoid round trips):
   introduced, moved to another variant, or re-added after removal. Initialize
   from published keeps the published assignments under the same rule. Selectors
   hide archived options for new assignments and still show kept ones.
-- Limits (decided by the user; implementation pending, NOT enforced today):
+- Limits (decided by the user; enforced since 5c3228e):
   `commercialTitle` ≤ 200 characters, `description` ≤ 20 000 characters
   (characters = Unicode code points), `mediaRefs` ≤ 20 entries, `values` ≤ 200
   entries. Text values have no limit of their own beyond the body size.
@@ -167,6 +166,16 @@ Rules the backend enforces (FE mirrors them to avoid round trips):
   outside the BMP (an emoji counts as one character).
 - Request body ≤ 100 kB of serialized JSON, in bytes (UTF-8). This is the
   existing framework default, not new.
+
+**Implemented: S1–S7** (invalid stored baseline recovery, FE-confirmed).
+Fresh-save candidates still undergo full validation and limits. A stored draft
+that fails current-context validation neither blocks saving nor authorizes any
+archived-option conservation; it is not normalized or rewritten as a baseline.
+Save returns the saved candidate and Published exactly as stored. Initialize
+copies even an invalid Published unchanged, without warnings from that invalid
+source. Warnings come only from a valid conservation source. Matching-receipt
+rechecks, lock coordination, idempotency, conflict precedence, errors, permissions
+and GET are unchanged.
 
 ### 2.3 Warnings
 
@@ -323,6 +332,11 @@ type EditorialContext = {
   user acts on it; it is never removed silently. This endpoint is not the final
   authority: save revalidates and rejects with `400` if the orphan is still
   there.
+
+**Implemented: S1–S7** (§2.2): an orphan in the stored draft no longer blocks
+a corrected fresh-save candidate. An orphan still present in the candidate is
+rejected. Invalid stored history is never silently normalized; replay retains
+its existing rechecks.
 
 ## 4. Phase C — publish (later phase)
 
