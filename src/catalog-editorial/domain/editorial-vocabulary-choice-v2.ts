@@ -1,4 +1,5 @@
 import { canonicalEditorialJson } from './editorial-canonical-json';
+import { editorialAliasComparisonKeyV1 as comparisonKey } from './editorial-alias-comparison-v1';
 
 export type OptionV2 = {
   code: string;
@@ -47,7 +48,8 @@ function unique(code: string, seen: Set<string>): string {
 
 /**
  * Closed shape and local-reference parser, NOT full admission.
- * Alias namespace collisions (S11/S12) and exact duplicate alias labels await C2.
+ * Alias namespace collisions (S11/S12) and duplicate alias labels are NOT checked.
+ * Use validateChoiceDefinitionV2 for definition-local namespace admission.
  * No runtime activation or assignment validation.
  */
 export function parseChoiceDefinitionShapeV2(
@@ -126,4 +128,34 @@ export function parseChoiceDefinitionShapeV2(
     groups,
     aliases,
   };
+}
+
+/** Dormant definition-local admission; no transport or assignment validation. */
+export function validateChoiceDefinitionV2(input: unknown): ChoiceDefinitionV2 {
+  const definition = parseChoiceDefinitionShapeV2(input);
+  const labels = new Set<string>();
+  const namespace = new Map<string, Set<string>>();
+  const index = (label: string, optionCode: string): string => {
+    // Deliberately outside the shape guard's catch: runtime errors must propagate.
+    const key = comparisonKey(label);
+    const targets = namespace.get(key) ?? new Set<string>();
+    targets.add(optionCode);
+    namespace.set(key, targets);
+    return key;
+  };
+  for (const option of definition.options) {
+    index(option.code, option.code);
+    index(option.label, option.code);
+  }
+  const aliasKeys = definition.aliases.map((alias) => {
+    unique(alias.label, labels);
+    return index(alias.label, alias.optionCode);
+  });
+  // Check only after indexing every alias, so submission order cannot hide conflicts.
+  definition.aliases.forEach((alias, i) => {
+    const targets = namespace.get(aliasKeys[i])!;
+    if (Array.from(targets).some((code) => code !== alias.optionCode))
+      invalid();
+  });
+  return definition;
 }

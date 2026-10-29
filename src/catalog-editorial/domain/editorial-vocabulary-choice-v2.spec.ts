@@ -1,4 +1,8 @@
-import { parseChoiceDefinitionShapeV2 as parse } from './editorial-vocabulary-choice-v2';
+import {
+  parseChoiceDefinitionShapeV2 as parse,
+  validateChoiceDefinitionV2 as validate,
+} from './editorial-vocabulary-choice-v2';
+import { editorialAliasComparisonKeyV1 } from './editorial-alias-comparison-v1';
 
 const option = (code = 'a', label = 'Café') => ({
   code,
@@ -239,5 +243,105 @@ it.each(['cycle', 'surrogate', 'nonfinite'])(
     if (kind === 'surrogate') input.label = '\ud800';
     if (kind === 'nonfinite') first(input, 'options').sortOrder = Infinity;
     expect(() => parse(input)).toThrow(TypeError);
+  },
+);
+
+describe.each(['single', 'multi'] as const)(
+  '%s choice namespace admission',
+  (type) => {
+    it('delegates shape checks and returns the same detached metadata as C1', () => {
+      const input = fixture(type);
+      expect(validate(input)).toEqual(parse(input));
+      const output = validate(input);
+      expect(output).not.toBe(input);
+      expect(output.options[0]).not.toBe(input.options[0]);
+      expect(output.groups[0].optionCodes).not.toBe(
+        input.groups[0].optionCodes,
+      );
+      expect(output.aliases[0]).not.toBe(input.aliases[0]);
+      expect(() => validate({ ...input, extra: true })).toThrow(
+        new TypeError('Expected a choice definition V2'),
+      );
+    });
+
+    it.each(['a', 'b'])(
+      'permits homonyms but rejects alias to %s',
+      (target) => {
+        const input = fixture(type);
+        input.options = [option('a', 'Adulto'), option('b', 'Adulto')];
+        input.aliases = [];
+        expect(validate(input)).toEqual(input);
+        input.aliases = [{ label: 'ADULTO', optionCode: target }];
+        expect(() => validate(input)).toThrow(TypeError);
+      },
+    );
+
+    it.each(['code', 'label', 'alias'] as const)(
+      'blocks other-target %s collisions in either order',
+      (source) => {
+        const input = fixture(type);
+        input.aliases = [{ label: 'conflict', optionCode: 'a' }];
+        if (source === 'alias')
+          input.aliases.push({ label: 'CONFLICT', optionCode: 'b' });
+        else input.options[0][source] = 'CONFLICT';
+        input.groups = [];
+        expect(() => validate(input)).toThrow(TypeError);
+        input.options.reverse();
+        input.aliases.reverse();
+        expect(() => validate(input)).toThrow(TypeError);
+      },
+    );
+
+    it('allows equivalent same-target spellings, not exact duplicate aliases', () => {
+      const input = fixture(type);
+      input.aliases = ['café', 'CAFE'].map((label) => ({
+        label,
+        optionCode: 'a',
+      }));
+      expect(validate(input)).toEqual(input);
+      input.aliases.reverse();
+      expect(validate(input)).toEqual(input);
+      input.aliases.push({ label: 'café', optionCode: 'a' });
+      expect(() => validate(input)).toThrow(TypeError);
+    });
+
+    it('applies ordinary collision rules to empty comparison keys', () => {
+      const input = fixture(type);
+      input.aliases = [{ label: '\u0301', optionCode: 'a' }];
+      expect(validate(input)).toEqual(input);
+      input.options[0].label = '\u0300';
+      expect(() => validate(input)).toThrow(TypeError);
+    });
+
+    it('excludes group labels and codes from the namespace', () => {
+      const input = fixture(type);
+      input.groups[0].label = 'CAFE';
+      input.groups[0].code = 'café';
+      expect(validate(input)).toEqual(input);
+    });
+
+    it('propagates the unsupported Unicode runtime error unchanged', () => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        process.versions,
+        'unicode',
+      )!;
+      try {
+        Object.defineProperty(process.versions, 'unicode', {
+          ...descriptor,
+          value: '16.0',
+        });
+        let expected: unknown;
+        try {
+          editorialAliasComparisonKeyV1('CAFE');
+        } catch (error) {
+          expected = error;
+        }
+        expect(expected).toBeInstanceOf(Error);
+        expect(() => validate(fixture(type))).toThrow(expected as Error);
+        expect(() => validate(fixture(type))).not.toThrow(TypeError);
+      } finally {
+        Object.defineProperty(process.versions, 'unicode', descriptor);
+      }
+    });
   },
 );
