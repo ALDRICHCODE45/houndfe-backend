@@ -1,7 +1,9 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
+
 export type EvidenceV2 = { sourceRef: string; verifiedOn: string };
 
 function invalid(): never {
-  throw new TypeError('Expected an evidence shape V2');
+  throw new EditorialDocumentShapeError('Expected an evidence shape V2');
 }
 
 /** Primitive pre-receipt shape only; fresh capture bounds are separate. */

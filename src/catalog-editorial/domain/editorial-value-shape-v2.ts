@@ -1,3 +1,4 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
 import {
   parseKnownPayloadShapeV2,
   type KnownPayloadV2,
@@ -17,7 +18,7 @@ export type ValueV2 = Key &
   );
 
 function invalid(): never {
-  throw new TypeError('Expected a value shape V2');
+  throw new EditorialDocumentShapeError('Expected a value shape V2');
 }
 
 /** Closed pre-receipt shape only, not relational or fresh admission. */

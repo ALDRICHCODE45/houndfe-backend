@@ -1,3 +1,4 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
 import { parseEvidenceShapeV2, type EvidenceV2 } from './editorial-evidence-v2';
 
 export type CareRequirementV2 = {
@@ -17,7 +18,7 @@ export type CareWarningV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a care entry shape V2');
+  throw new EditorialDocumentShapeError('Expected a care entry shape V2');
 }
 
 function fields(input: unknown, keys: string[]): Record<string, unknown> {

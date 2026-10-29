@@ -1,3 +1,4 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
 import { parseValueShapeV2, type ValueV2 } from './editorial-value-shape-v2';
 import {
   parseSellableFactsShapeV2,
@@ -15,7 +16,7 @@ export type DocumentShapeV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a document shape V2');
+  throw new EditorialDocumentShapeError('Expected a document shape V2');
 }
 
 function array<T>(input: unknown, parse: (item: unknown) => T): T[] {

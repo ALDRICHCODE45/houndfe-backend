@@ -1,3 +1,4 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
 import { parseEvidenceShapeV2, type EvidenceV2 } from './editorial-evidence-v2';
 
 type DeclarationValues = {
@@ -27,7 +28,7 @@ export type DeclarationShapeV2 = {
 }[keyof DeclarationValues];
 
 function invalid(): never {
-  throw new TypeError('Expected a declaration shape V2');
+  throw new EditorialDocumentShapeError('Expected a declaration shape V2');
 }
 
 function record(input: unknown, keys: string[]): Record<string, unknown> {

@@ -1,3 +1,4 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
 import {
   parseCareCaptureShapeV2,
   type CareReviewCaptureV2,
@@ -15,7 +16,7 @@ export type SellableFactsShapeV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a sellable facts shape V2');
+  throw new EditorialDocumentShapeError('Expected a sellable facts shape V2');
 }
 
 function declarations(input: unknown): DeclarationShapeV2[] {

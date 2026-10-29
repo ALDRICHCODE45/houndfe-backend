@@ -1,3 +1,5 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
+
 export type KnownPayloadV2 =
   | { type: 'text'; value: string }
   | { type: 'single'; value: string }
@@ -9,7 +11,7 @@ export type KnownPayloadV2 =
 type Data = Record<string, { value: unknown }>;
 
 function invalid(): never {
-  throw new TypeError('Expected a known payload shape V2');
+  throw new EditorialDocumentShapeError('Expected a known payload shape V2');
 }
 
 // Inspect all descriptors before reading submitted values; no getter execution.

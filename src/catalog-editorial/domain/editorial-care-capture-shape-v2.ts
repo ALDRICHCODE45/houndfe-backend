@@ -1,3 +1,4 @@
+import { EditorialDocumentShapeError } from './editorial-document-shape-error';
 import {
   parseCareRequirementShapeV2,
   parseCareWarningShapeV2,
@@ -20,7 +21,7 @@ export type CareReviewCaptureV2 =
     };
 
 function invalid(): never {
-  throw new TypeError('Expected a care capture shape V2');
+  throw new EditorialDocumentShapeError('Expected a care capture shape V2');
 }
 
 function array<T>(input: unknown, parse: (item: unknown) => T): T[] {
