@@ -1,3 +1,5 @@
+import { indexVocabularyV1Bindings } from './editorial-vocabulary-selection-v1';
+
 type DefinitionIdentity = { id: string; code: string; label: string };
 type UnitV1 = { code: string | null; label: string | null; sortOrder: number };
 type OptionV1 = {
@@ -69,15 +71,9 @@ export type VocabularyReadSnapshot = {
 export function projectVocabularyV1(
   snapshot: VocabularyReadSnapshot,
 ): VocabularyV1 {
-  const originallyBound = new Set<string>();
-  const retained = new Set<string>();
-  for (const family of snapshot.families) {
-    for (const binding of family.bindings) {
-      originallyBound.add(binding.definitionId);
-      if (family.minimumContractVersion === 1)
-        retained.add(binding.definitionId);
-    }
-  }
+  const { originallyBound, retained } = indexVocabularyV1Bindings(
+    snapshot.families,
+  );
   const families = snapshot.families
     .filter((family) => family.minimumContractVersion === 1)
     .map(({ id, code, label, bindings }) => ({
