@@ -1,8 +1,15 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 
+/** Intentional invalid-tree rejection, distinct from unexpected runtime failures. */
+export class CanonicalEditorialJsonError extends TypeError {
+  constructor() {
+    super('Expected a finite, acyclic JSON data tree');
+  }
+}
+
 function invalid(): never {
-  throw new TypeError('Expected a finite, acyclic JSON data tree');
+  throw new CanonicalEditorialJsonError();
 }
 
 function quoted(value: string): string {

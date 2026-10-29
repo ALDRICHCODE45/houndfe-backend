@@ -1,10 +1,62 @@
 import { Buffer } from 'node:buffer';
 import {
+  CanonicalEditorialJsonError,
   canonicalEditorialJson,
   hashEditorialJson,
 } from './editorial-canonical-json';
 
 const invalid = 'Expected a finite, acyclic JSON data tree';
+
+const encoders = [canonicalEditorialJson, hashEditorialJson];
+
+describe.each(encoders)('%p error boundary', (serialize) => {
+  it.each([
+    ['invalid scalar', NaN],
+    ['nested invalid tree', { nested: [undefined] }],
+  ])('classifies %s while retaining the TypeError contract', (_, value) => {
+    let caught: unknown;
+    try {
+      serialize(value);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CanonicalEditorialJsonError);
+    expect(caught).toBeInstanceOf(TypeError);
+    expect(caught).toHaveProperty('name', 'TypeError');
+    expect(caught).toHaveProperty('message', invalid);
+  });
+
+  it.each([
+    ['Error', new Error('unexpected reflection failure')],
+    ['TypeError', new TypeError(invalid)],
+    ['RangeError', new RangeError('unexpected reflection failure')],
+    ['non-Error sentinel', Object.freeze({ unexpected: true })],
+  ])(
+    'propagates unexpected %s by identity without classification',
+    (_, sentinel) => {
+      const getter = jest.fn(() => 1);
+      const target = Object.defineProperty({}, 'value', {
+        enumerable: true,
+        get: getter,
+      });
+      const input = new Proxy(target, {
+        ownKeys() {
+          // eslint-disable-next-line @typescript-eslint/only-throw-error -- public reflection may throw any value
+          throw sentinel;
+        },
+      });
+      let caught: unknown;
+      try {
+        serialize(input);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(sentinel);
+      expect(caught).not.toBeInstanceOf(CanonicalEditorialJsonError);
+      expect(getter).not.toHaveBeenCalled();
+    },
+  );
+});
 // Literal preimages were independently hashed with Python hashlib.sha256, not
 // generated with the implementation under test. Keep these digest constants.
 const vectors: [unknown, string, string][] = [
