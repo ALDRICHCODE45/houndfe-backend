@@ -1,0 +1,129 @@
+import { canonicalEditorialJson } from './editorial-canonical-json';
+
+export type OptionV2 = {
+  code: string;
+  label: string;
+  archived: boolean;
+  sortOrder: number;
+};
+export type GroupV2 = { code: string; label: string; optionCodes: string[] };
+export type AliasV2 = { label: string; optionCode: string };
+export type ChoiceDefinitionV2 = {
+  id: string;
+  code: string;
+  label: string;
+  type: 'single' | 'multi';
+  options: OptionV2[];
+  groups: GroupV2[];
+  aliases: AliasV2[];
+};
+
+function invalid(): never {
+  throw new TypeError('Expected a choice definition V2');
+}
+function closed(value: unknown, keys: string[]): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    invalid();
+  }
+  const record = value as Record<string, unknown>;
+  const actual = Object.keys(record);
+  if (
+    actual.length !== keys.length ||
+    keys.some((key) => !actual.includes(key))
+  ) {
+    invalid();
+  }
+  return record;
+}
+function text(value: unknown): string {
+  if (typeof value !== 'string' || value.trim().length === 0) invalid();
+  return value;
+}
+function unique(code: string, seen: Set<string>): string {
+  if (seen.has(code)) invalid();
+  seen.add(code);
+  return code;
+}
+
+/**
+ * Closed shape and local-reference parser, NOT full admission.
+ * Alias namespace collisions (S11/S12) and exact duplicate alias labels await C2.
+ * No runtime activation or assignment validation.
+ */
+export function parseChoiceDefinitionShapeV2(
+  input: unknown,
+): ChoiceDefinitionV2 {
+  // Guard the entire tree before reading any submitted property.
+  try {
+    canonicalEditorialJson(input);
+  } catch {
+    invalid();
+  }
+  const d = closed(input, [
+    'id',
+    'code',
+    'label',
+    'type',
+    'options',
+    'groups',
+    'aliases',
+  ]);
+  if (d.type !== 'single' && d.type !== 'multi') invalid();
+  if (
+    !Array.isArray(d.options) ||
+    !Array.isArray(d.groups) ||
+    !Array.isArray(d.aliases)
+  ) {
+    invalid();
+  }
+  const optionCodes = new Set<string>();
+  const options = d.options.map((value: unknown): OptionV2 => {
+    const o = closed(value, ['code', 'label', 'archived', 'sortOrder']);
+    const code = unique(text(o.code), optionCodes);
+    if (
+      typeof o.archived !== 'boolean' ||
+      typeof o.sortOrder !== 'number' ||
+      !Number.isSafeInteger(o.sortOrder)
+    ) {
+      invalid();
+    }
+    return {
+      code,
+      label: text(o.label),
+      archived: o.archived,
+      sortOrder: o.sortOrder,
+    };
+  });
+  const reference = (value: unknown): string => {
+    const code = text(value);
+    if (!optionCodes.has(code)) invalid();
+    return code;
+  };
+  const groupCodes = new Set<string>();
+  const groups = d.groups.map((value: unknown): GroupV2 => {
+    const g = closed(value, ['code', 'label', 'optionCodes']);
+    const code = unique(text(g.code), groupCodes);
+    if (!Array.isArray(g.optionCodes)) invalid();
+    const members = new Set<string>();
+    return {
+      code,
+      label: text(g.label),
+      optionCodes: g.optionCodes.map((member: unknown) =>
+        unique(reference(member), members),
+      ),
+    };
+  });
+  const aliases = d.aliases.map((value: unknown): AliasV2 => {
+    const a = closed(value, ['label', 'optionCode']);
+    return { label: text(a.label), optionCode: reference(a.optionCode) };
+  });
+  return {
+    id: text(d.id),
+    code: text(d.code),
+    label: text(d.label),
+    type: d.type,
+    options,
+    groups,
+    aliases,
+  };
+}
