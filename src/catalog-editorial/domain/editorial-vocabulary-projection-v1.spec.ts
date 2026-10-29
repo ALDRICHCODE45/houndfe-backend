@@ -12,7 +12,7 @@ const text = (id: string): VocabularyReadDefinition => ({
 });
 const binding = (
   definitionId: string,
-  owner: 'PRODUCT' | 'VARIANT' = 'PRODUCT',
+  owner: 'product' | 'sellable' = 'product',
 ) => ({
   definitionId,
   definitionCode: definitionId,
@@ -191,7 +191,7 @@ describe('projectVocabularyV1 (T3c S2/S18/S19)', () => {
           ...family('legacy', 1, []),
           exposure: 'INTERNAL',
           bindings: [
-            { ...binding('s', 'VARIANT'), policy: null, searchable: false },
+            { ...binding('s', 'sellable'), policy: null, searchable: false },
             ...['n', 'b', 't', 'm'].map((id) => binding(id)),
           ],
         },
@@ -209,7 +209,7 @@ describe('projectVocabularyV1 (T3c S2/S18/S19)', () => {
           code: 'legacy',
           label: '',
           bindings: [
-            binding('s', 'VARIANT'),
+            binding('s', 'sellable'),
             ...['n', 'b', 't', 'm'].map((id) => binding(id)),
           ],
         },

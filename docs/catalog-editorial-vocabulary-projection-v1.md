@@ -12,4 +12,6 @@ Contradictory declarations are not repaired, pruned or promoted. A retained rang
 
 All original binding IDs are recorded before filtering. Whole version-1 families retain every binding; their referenced definitions appear once in original definition order, including shared definitions. Definitions bound only to omitted families are excluded, even text. Genuinely originally-unbound definitions retain the five legacy types, excluding ranges and resolved numbers; absent/null/pending persisted numeric policies retain numbers. The nullable JSONB status shape follows `schema.prisma` and migration `20261028120000_editorial_production_metadata`, without invented defaults or numeric-domain validation.
 
+Binding owners remain the persisted `product | sellable` values, exactly as the existing SQL reader emits them; no uppercase owner translation is performed.
+
 Explicit field copies strip other metadata and deeply detach every output object/array. Labels (including blanks), independently nullable unit codes/labels, empty arrays, option archives, owners, sortOrder and array order remain exact: no sorting, trimming or normalization. No reader, SQL, HTTP, database, adoption, publication or V2 activation changes are included; historical admission and coherent-loader integration remain separate proof obligations.

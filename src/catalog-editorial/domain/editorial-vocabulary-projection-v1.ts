@@ -9,7 +9,7 @@ type OptionV1 = {
 type BindingV1 = {
   definitionId: string;
   definitionCode: string;
-  owner: 'PRODUCT' | 'VARIANT';
+  owner: 'product' | 'sellable';
   sortOrder: number;
 };
 type FamilyV1 = {
