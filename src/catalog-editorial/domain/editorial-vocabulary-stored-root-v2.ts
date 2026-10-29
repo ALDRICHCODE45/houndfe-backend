@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import { validateVocabularyConsistencyV2 } from './editorial-vocabulary-consistency-v2';
 import type { VocabularyV2 } from './editorial-vocabulary-shape-v2';
 import { materializeStoredChoiceDefinitionV2 } from './editorial-vocabulary-stored-choice-v2';
@@ -6,7 +10,9 @@ import { materializeStoredFamilyV2 } from './editorial-vocabulary-stored-family-
 import { materializeStoredScalarDefinitionV2 } from './editorial-vocabulary-stored-scalar-v2';
 
 function invalid(): never {
-  throw new TypeError('Expected a representable stored vocabulary V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a representable stored vocabulary V2',
+  );
 }
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -24,8 +30,9 @@ export function materializeStoredVocabularyV2(input: unknown): VocabularyV2 {
   // Guard the entire tree, including discarded storage fields, before reads.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   const root = record(input);
   const metadata = record(root.metadata);

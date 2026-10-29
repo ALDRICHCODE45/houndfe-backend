@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 
 export type UnitV2 = {
   code: string | null;
@@ -26,7 +30,9 @@ export type NumericDefinitionV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a numeric definition V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a numeric definition V2',
+  );
 }
 
 function closed(value: unknown, keys?: string[]): Record<string, unknown> {
@@ -102,8 +108,9 @@ export function validateNumericDefinitionV2(
   // Guard descriptors and the entire tree before reading any submitted property.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   const d = closed(input, [
     'id',

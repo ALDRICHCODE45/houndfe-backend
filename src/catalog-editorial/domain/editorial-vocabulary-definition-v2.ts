@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   ChoiceDefinitionV2,
   validateChoiceDefinitionV2,
@@ -18,7 +22,7 @@ export type DefinitionV2 =
   | ChoiceDefinitionV2;
 
 function invalid(): never {
-  throw new TypeError('Expected a definition V2');
+  throw new EditorialVocabularyRepresentationError('Expected a definition V2');
 }
 
 /** Dormant metadata admission only; no whole-vocabulary or assignment validation. */
@@ -26,8 +30,9 @@ export function validateDefinitionV2(input: unknown): DefinitionV2 {
   // Guard the entire tree before reading the submitted discriminant.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     invalid();

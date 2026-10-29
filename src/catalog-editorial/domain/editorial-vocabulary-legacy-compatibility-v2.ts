@@ -1,3 +1,4 @@
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import type { DefinitionV2 } from './editorial-vocabulary-definition-v2';
 import type { FamilyV2 } from './editorial-vocabulary-family-shape-v2';
 
@@ -20,7 +21,9 @@ export function assertFamilyLegacyCompatibilityV2(
       (definition.type === 'number' &&
         definition.numericPolicy.status !== 'pending')
     ) {
-      throw new TypeError('Expected a legacy-compatible family V2');
+      throw new EditorialVocabularyRepresentationError(
+        'Expected a legacy-compatible family V2',
+      );
     }
   }
 }

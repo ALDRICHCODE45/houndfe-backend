@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   parseBindingPolicyShapeV2,
   type BindingPolicy,
@@ -23,7 +27,9 @@ export type FamilyV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a family shape V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a family shape V2',
+  );
 }
 function closed(value: unknown, keys: string[]): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -90,8 +96,9 @@ export function parseFamilyShapeV2(input: unknown): FamilyV2 {
   // Guard the entire submitted tree before reading any submitted property.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   const f = closed(input, [
     'id',

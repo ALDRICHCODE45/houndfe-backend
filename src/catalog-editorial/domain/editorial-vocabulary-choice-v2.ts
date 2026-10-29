@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import { editorialAliasComparisonKeyV1 as comparisonKey } from './editorial-alias-comparison-v1';
 
 export type OptionV2 = {
@@ -20,7 +24,9 @@ export type ChoiceDefinitionV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a choice definition V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a choice definition V2',
+  );
 }
 function closed(value: unknown, keys: string[]): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -58,8 +64,9 @@ export function parseChoiceDefinitionShapeV2(
   // Guard the entire tree before reading any submitted property.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   const d = closed(input, [
     'id',

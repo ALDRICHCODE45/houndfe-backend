@@ -1,3 +1,4 @@
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import type { FamilyV2 } from './editorial-vocabulary-family-shape-v2';
 
 /** Trusted parsed input only; dormant metadata assertion, not admission. */
@@ -10,7 +11,9 @@ export function assertFamilyPolicyConsistencyV2(family: FamilyV2): void {
         (policyCase.applicability !== 'applicable' ||
           binding.publicationCheck !== 'always')
       ) {
-        throw new TypeError('Inconsistent family policy V2');
+        throw new EditorialVocabularyRepresentationError(
+          'Inconsistent family policy V2',
+        );
       }
     }
   }

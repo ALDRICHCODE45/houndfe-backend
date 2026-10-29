@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   NumericDefinitionV2,
   validateNumericDefinitionV2,
@@ -9,7 +13,9 @@ import {
 } from './editorial-vocabulary-simple-v2';
 
 function invalid(): never {
-  throw new TypeError('Expected a representable stored scalar definition V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a representable stored scalar definition V2',
+  );
 }
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -29,8 +35,9 @@ export function materializeStoredScalarDefinitionV2(
   // Guard all descriptors before reads, without closing future storage columns.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   const d = record(input);
   for (const key of ['options', 'groups', 'aliases']) {

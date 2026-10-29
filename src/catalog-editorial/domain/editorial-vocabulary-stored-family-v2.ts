@@ -1,11 +1,17 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   type FamilyV2,
   parseFamilyShapeV2,
 } from './editorial-vocabulary-family-shape-v2';
 
 function invalid(): never {
-  throw new TypeError('Expected a representable stored family V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a representable stored family V2',
+  );
 }
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -19,8 +25,9 @@ export function materializeStoredFamilyV2(input: unknown): FamilyV2 {
   // Guard all descriptors before reads; future storage columns remain open.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   const f = record(input);
   if (!Array.isArray(f.bindings)) invalid();

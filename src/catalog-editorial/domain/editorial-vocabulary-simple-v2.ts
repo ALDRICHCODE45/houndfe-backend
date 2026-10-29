@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 
 export type SimpleDefinitionV2 = {
   id: string;
@@ -8,7 +12,9 @@ export type SimpleDefinitionV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a simple definition V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a simple definition V2',
+  );
 }
 
 function text(value: unknown): string {
@@ -21,8 +27,9 @@ export function validateSimpleDefinitionV2(input: unknown): SimpleDefinitionV2 {
   // Guard descriptors and the entire tree before reading any submitted property.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     invalid();

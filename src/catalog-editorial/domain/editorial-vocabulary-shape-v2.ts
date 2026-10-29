@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   validateDefinitionV2,
   type DefinitionV2,
@@ -15,7 +19,9 @@ export type VocabularyV2 = {
 };
 
 function invalid(): never {
-  throw new TypeError('Expected a vocabulary shape V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a vocabulary shape V2',
+  );
 }
 
 function unique<T extends { id: string; code: string }>(values: T[]): T[] {
@@ -34,8 +40,9 @@ export function parseVocabularyShapeV2(input: unknown): VocabularyV2 {
   // Guard the entire tree before reading submitted properties or invoking leaves.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   if (input === null || typeof input !== 'object' || Array.isArray(input))
     invalid();

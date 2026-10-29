@@ -19,11 +19,11 @@ This is a prerequisite for precise error classification, not V2 transport wiring
 
 ## Remaining limitation
 
-Existing V2 canonical guard catches are still broad and may translate unrelated
-failures. This slice does **not** narrow them, implement S27's HTTP 500
-`EDITORIAL_VOCABULARY_UNREPRESENTABLE` mapping, or integrate S23's whole-response
-failure into the current reader. Those are dependent, separately reviewed work.
-V1, validators, readers, HTTP behavior and V2 activation remain unchanged here.
+The eleven V2 read-chain guards now translate only this deliberate rejection
+into `EditorialVocabularyRepresentationError`; unexpected failures propagate
+unchanged. See [the covered boundary](catalog-editorial-vocabulary-representation-errors.md).
+S27's HTTP 500 `EDITORIAL_VOCABULARY_UNREPRESENTABLE` mapping and current-reader
+integration remain unimplemented. V1, HTTP behavior and V2 activation are unchanged.
 
 ## Verification boundary
 

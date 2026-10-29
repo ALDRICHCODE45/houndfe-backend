@@ -1,8 +1,11 @@
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import type { DefinitionV2 } from './editorial-vocabulary-definition-v2';
 import type { FamilyV2 } from './editorial-vocabulary-family-shape-v2';
 
 function invalid(): never {
-  throw new TypeError('Expected valid family references V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected valid family references V2',
+  );
 }
 
 type Node = {

@@ -1,4 +1,8 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   isProductionDefinitionCode,
   isProductionFamily,
@@ -35,7 +39,9 @@ export type BindingPolicy =
   | { route: 'fact_rule'; rule: FactRule };
 
 function invalid(): never {
-  throw new TypeError('Expected a binding policy shape V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a binding policy shape V2',
+  );
 }
 function closed(value: unknown, keys: string[]): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -124,8 +130,9 @@ export function parseBindingPolicyShapeV2(input: unknown): BindingPolicy {
   // Guard the entire tree before reading any submitted property.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   if (input === null || typeof input !== 'object' || Array.isArray(input))
     invalid();

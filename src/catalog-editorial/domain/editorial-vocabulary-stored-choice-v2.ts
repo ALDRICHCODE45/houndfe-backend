@@ -1,11 +1,17 @@
-import { canonicalEditorialJson } from './editorial-canonical-json';
+import {
+  canonicalEditorialJson,
+  CanonicalEditorialJsonError,
+} from './editorial-canonical-json';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   ChoiceDefinitionV2,
   validateChoiceDefinitionV2,
 } from './editorial-vocabulary-choice-v2';
 
 function invalid(): never {
-  throw new TypeError('Expected a representable stored choice definition V2');
+  throw new EditorialVocabularyRepresentationError(
+    'Expected a representable stored choice definition V2',
+  );
 }
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -26,8 +32,9 @@ export function materializeStoredChoiceDefinitionV2(
   // This guard permits future storage columns; it does not close row keys.
   try {
     canonicalEditorialJson(input);
-  } catch {
-    invalid();
+  } catch (error) {
+    if (error instanceof CanonicalEditorialJsonError) invalid();
+    throw error;
   }
   const d = record(input);
   if (d.type !== 'single' && d.type !== 'multi') invalid();

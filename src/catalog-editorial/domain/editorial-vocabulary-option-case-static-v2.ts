@@ -1,9 +1,12 @@
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import type { DefinitionV2 } from './editorial-vocabulary-definition-v2';
 import type { FamilyV2 } from './editorial-vocabulary-family-shape-v2';
 import type { OptionTest } from './editorial-vocabulary-policy-shape-v2';
 
 function invalid(reason: string): never {
-  throw new TypeError(`Invalid family option cases V2: ${reason}`);
+  throw new EditorialVocabularyRepresentationError(
+    `Invalid family option cases V2: ${reason}`,
+  );
 }
 function sharedValuePossible(
   a: OptionTest,
