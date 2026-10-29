@@ -20,7 +20,7 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** Dormant raw-row boundary, not reference or minimum-version admission. */
+/** Dormant raw-row boundary, not reference or production admission. */
 export function materializeStoredFamilyV2(input: unknown): FamilyV2 {
   // Guard all descriptors before reads; future storage columns remain open.
   try {
@@ -55,7 +55,6 @@ export function materializeStoredFamilyV2(input: unknown): FamilyV2 {
     id: f.id,
     code: f.code,
     label: f.label,
-    minimumContractVersion: f.minimumContractVersion,
     bindings,
   });
 }

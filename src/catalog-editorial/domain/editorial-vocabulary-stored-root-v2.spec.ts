@@ -124,7 +124,7 @@ describe('dormant stored root V2 materialization', () => {
         scalar.materializeStoredScalarDefinitionV2,
       ),
     });
-    expect(output.families[0].minimumContractVersion).toBe(1);
+    expect(output.families[0]).not.toHaveProperty('minimumContractVersion');
   });
 
   it.each([
@@ -329,7 +329,7 @@ describe('dormant stored root V2 materialization', () => {
     const before = JSON.stringify(row);
     freeze(row);
     const output = materialize(row);
-    expect(output.families[0].minimumContractVersion).toBe(1);
+    expect(output.families[0]).not.toHaveProperty('minimumContractVersion');
     expect(output.definitions[0]).toMatchObject({
       numericPolicy: row.definitions[0].numericPolicy,
     });

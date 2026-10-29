@@ -1,3 +1,4 @@
+import { createVocabularyResponseV2 } from './editorial-vocabulary-canonical-v2';
 import * as familyParser from './editorial-vocabulary-family-shape-v2';
 import type { BindingPolicy } from './editorial-vocabulary-policy-shape-v2';
 import { materializeStoredFamilyV2 as materialize } from './editorial-vocabulary-stored-family-v2';
@@ -52,7 +53,9 @@ const policies: BindingPolicy[] = [
 ];
 function wire(row: Row): Row {
   return {
-    ...row,
+    id: row.id,
+    code: row.code,
+    label: row.label,
     bindings: (row.bindings as Row[]).map((b) => ({
       definitionId: b.definitionId,
       definitionCode: b.definitionCode,
@@ -75,9 +78,36 @@ function freeze(value: unknown): void {
 describe('dormant stored family V2 materialization', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it.each([1, 2])('preserves empty families at version %s', (version) => {
+  it.each([1, 2])('omits storage version %s from empty families', (version) => {
     const row = { ...fixture(), minimumContractVersion: version, bindings: [] };
-    expect(materialize(row)).toEqual(row);
+    expect(materialize(row)).toEqual(wire(row));
+  });
+
+  it('maps stored columns 1 and 2 to the same DTO and R without mutation', () => {
+    const rows = [1, 2].map((minimumContractVersion) => ({
+      ...fixture(),
+      minimumContractVersion,
+    }));
+    const before = structuredClone(rows);
+    freeze(rows);
+    const results = rows.map((row) =>
+      createVocabularyResponseV2({
+        semanticsVersion: 'editorial-production-1',
+        families: [materialize(row)],
+        definitions: [
+          {
+            id: ' unresolved-id ',
+            code: ' custom.code ',
+            label: 'Custom',
+            type: 'text',
+          },
+        ],
+      }),
+    );
+    expect(materialize(rows[0])).toEqual(materialize(rows[1]));
+    expect(materialize(rows[0])).not.toHaveProperty('minimumContractVersion');
+    expect(results[0]).toEqual(results[1]);
+    expect(rows).toEqual(before);
   });
 
   it.each(policies)(
@@ -120,7 +150,6 @@ describe('dormant stored family V2 materialization', () => {
       id: row.id,
       code: row.code,
       label: row.label,
-      minimumContractVersion: 1,
       bindings: wire(row).bindings,
     });
     expect(JSON.stringify(row)).toBe(before);
@@ -188,6 +217,7 @@ describe('dormant stored family V2 materialization', () => {
   ] as const)('requires every mapped %s field', (_, select) => {
     for (const key of Object.keys(select(fixture()))) {
       const row = fixture();
+      if (key === 'minimumContractVersion') continue;
       delete select(row)[key];
       expect(() => materialize(row)).toThrow(TypeError);
     }
@@ -195,7 +225,6 @@ describe('dormant stored family V2 materialization', () => {
 
   it.each([
     ['id', ' '],
-    ['minimumContractVersion', 3],
     ['label', null],
   ])('delegates invalid family %s', (key, value) => {
     expect(() => materialize({ ...fixture(), [key]: value })).toThrow(

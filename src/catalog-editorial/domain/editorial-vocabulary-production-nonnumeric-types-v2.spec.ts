@@ -72,7 +72,8 @@ function fixture(code = 'food') {
   const ids = new Map(definitions.map((d) => [d.code, d.id]));
   const source = manifest.families.find((f) => f.code === code)!;
   const family = parseFamilyShapeV2({
-    ...source,
+    code: source.code,
+    label: source.label,
     id: 'actual-family',
     bindings: source.bindings.map((b) => ({
       ...b,
@@ -216,7 +217,6 @@ describe('fresh production nonnumeric definition types V2', () => {
     (type) => {
       const { family, byId } = fixture();
       family.code = 'custom';
-      family.minimumContractVersion = 1;
       family.bindings = family.bindings.filter(
         (b) => b.definitionCode === 'animal.target',
       );

@@ -44,7 +44,6 @@ function fixture(): VocabularyV2 {
         id: 'opaque/family',
         code: 'custom',
         label: ' Original ',
-        minimumContractVersion: 1,
         bindings,
       },
     ],

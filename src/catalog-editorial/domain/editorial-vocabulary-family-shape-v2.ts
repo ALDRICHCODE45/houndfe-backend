@@ -22,7 +22,6 @@ export type FamilyV2 = {
   id: string;
   code: string;
   label: string;
-  minimumContractVersion: 1 | 2;
   bindings: BindingV2[];
 };
 
@@ -100,15 +99,7 @@ export function parseFamilyShapeV2(input: unknown): FamilyV2 {
     if (error instanceof CanonicalEditorialJsonError) invalid();
     throw error;
   }
-  const f = closed(input, [
-    'id',
-    'code',
-    'label',
-    'minimumContractVersion',
-    'bindings',
-  ]);
-  if (f.minimumContractVersion !== 1 && f.minimumContractVersion !== 2)
-    invalid();
+  const f = closed(input, ['id', 'code', 'label', 'bindings']);
   if (!Array.isArray(f.bindings)) invalid();
   const ids = new Set<string>();
   const codes = new Set<string>();
@@ -116,7 +107,6 @@ export function parseFamilyShapeV2(input: unknown): FamilyV2 {
     id: text(f.id),
     code: text(f.code),
     label: text(f.label),
-    minimumContractVersion: f.minimumContractVersion,
     bindings: f.bindings.map((value: unknown) =>
       parseBinding(value, ids, codes),
     ),

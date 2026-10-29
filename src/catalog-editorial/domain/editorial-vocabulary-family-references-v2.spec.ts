@@ -82,7 +82,6 @@ function fixture(
       id: 'opaque-family',
       code: 'legacy',
       label: 'Legacy',
-      minimumContractVersion: 2,
       bindings,
     }),
     definitionsById: new Map(definitions.map((d) => [d.id, d])),

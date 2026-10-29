@@ -105,7 +105,6 @@ const vocabulary = {
       id: 'f',
       code: 'custom.f',
       label: ' Family ñ ',
-      minimumContractVersion: 1,
       bindings: [
         {
           definitionId: 'd',
@@ -168,13 +167,14 @@ describe('dormant editorial vocabulary read', () => {
     },
   );
 
-  it.each(['contradictory V1', 'unrepresentable metadata'])(
+  it.each(['policy extra field', 'unrepresentable metadata'])(
     'rejects the whole V2 response for %s without mutation',
     async (kind) => {
       const input = fixture();
-      if (kind === 'contradictory V1') {
+      if (kind === 'policy extra field') {
         input.families[0].bindings[0].policy = {
           route: 'option_cases',
+          extra: true,
           cases: [
             {
               code: 'case',

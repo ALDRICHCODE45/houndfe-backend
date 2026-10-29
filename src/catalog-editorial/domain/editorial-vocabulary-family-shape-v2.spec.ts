@@ -18,7 +18,6 @@ const fixture = (): FamilyV2 => ({
   id: ' family-id ',
   code: ' custom.nonproduction ',
   label: ' Café familiar ',
-  minimumContractVersion: 1,
   bindings: [binding()],
 });
 type Wire = Record<string, unknown>;
@@ -26,13 +25,26 @@ const at = (d: Wire): Wire => (d.bindings as Wire[])[0];
 const error = 'Expected a family shape V2';
 
 describe('dormant family shape V2 (not full admission)', () => {
-  it('accepts generic families, both versions and empty bindings without compatibility inference', () => {
-    for (const minimumContractVersion of [1, 2] as const) {
-      const input = { ...fixture(), minimumContractVersion };
-      expect(parse(input)).toEqual(input);
-      expect(parse({ ...input, bindings: [] }).bindings).toEqual([]);
-    }
+  it('accepts exactly four family keys and empty bindings', () => {
+    const input = fixture();
+    expect(parse(input)).toEqual(input);
+    expect(Object.keys(parse(input)).sort()).toEqual([
+      'bindings',
+      'code',
+      'id',
+      'label',
+    ]);
+    expect(parse({ ...input, bindings: [] }).bindings).toEqual([]);
   });
+
+  it.each([1, 2, 3, null])(
+    'rejects the obsolete family field even at %p',
+    (version) => {
+      expect(() =>
+        parse({ ...fixture(), minimumContractVersion: version }),
+      ).toThrow(error);
+    },
+  );
 
   it('accepts all binding enums, true booleans and signed safe integer orders', () => {
     for (const owner of ['product', 'sellable'] as const) {
@@ -75,12 +87,6 @@ describe('dormant family shape V2 (not full admission)', () => {
     ['family', (d: Wire) => d, 'id', ['', ' \t', 1, null]],
     ['family', (d: Wire) => d, 'code', ['', '\n', false]],
     ['family', (d: Wire) => d, 'label', ['', ' ', []]],
-    [
-      'family',
-      (d: Wire) => d,
-      'minimumContractVersion',
-      [0, 3, '1', true, null],
-    ],
     ['family', (d: Wire) => d, 'bindings', [null, {}, false, [null], [[]]]],
     ['binding', at, 'definitionId', ['', ' ', 1]],
     ['binding', at, 'definitionCode', ['', '\t', null]],

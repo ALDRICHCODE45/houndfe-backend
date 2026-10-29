@@ -70,7 +70,6 @@ function fixture(type: 'single' | 'multi', conditions: OptionTest[][]) {
     id: 'custom-id',
     code: 'custom-family',
     label: 'Custom',
-    minimumContractVersion: 2,
     bindings: definitions.map((d, sortOrder) => ({
       definitionId: d.id,
       definitionCode: d.code,

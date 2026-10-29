@@ -94,11 +94,7 @@ export function assertProductionBindingPoliciesV2(family: FamilyV2): void {
     if (family.bindings.some((b) => b.policy.route === 'fact_rule')) invalid();
     return;
   }
-  if (
-    family.minimumContractVersion !== 2 ||
-    family.bindings.length !== expected.size
-  )
-    invalid();
+  if (family.bindings.length !== expected.size) invalid();
   // Local code uniqueness is a parsed-family precondition: size + membership is set equality.
   for (const b of family.bindings) {
     const target = expected.get(b.definitionCode);

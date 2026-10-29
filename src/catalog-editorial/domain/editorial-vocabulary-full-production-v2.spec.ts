@@ -6,14 +6,12 @@ import * as generic from './editorial-vocabulary-consistency-v2';
 import type { DefinitionV2 } from './editorial-vocabulary-definition-v2';
 import type { FamilyV2 } from './editorial-vocabulary-family-shape-v2';
 import { validateFullProductionVocabularyV2 as validate } from './editorial-vocabulary-full-production-v2';
-import * as legacy from './editorial-vocabulary-legacy-compatibility-v2';
 import type { NumericDefinitionV2 } from './editorial-vocabulary-numeric-v2';
 import * as aliases from './editorial-vocabulary-production-alias-coverage-v2';
 import * as numeric from './editorial-vocabulary-production-numeric-v2';
 import type { VocabularyV2 } from './editorial-vocabulary-shape-v2';
 
 const incomplete = 'Expected a full production vocabulary V2';
-const legacyError = 'Expected a legacy-compatible family V2';
 function fixture(): VocabularyV2 {
   const manifest = buildProductionVocabularyManifest();
   const definitions = manifest.definitions.map((d, i) => ({
@@ -24,7 +22,8 @@ function fixture(): VocabularyV2 {
     semanticsVersion: 'editorial-production-1',
     definitions,
     families: manifest.families.map((f, i) => ({
-      ...f,
+      code: f.code,
+      label: f.label,
       id: `opaque/family/${i}`,
       bindings: f.bindings.map((b) => ({
         ...b,
@@ -46,7 +45,6 @@ function custom(v: VocabularyV2, d?: DefinitionV2) {
     ...v.families[0],
     id: 'opaque/custom',
     code: 'custom',
-    minimumContractVersion: 1 as 1 | 2,
     bindings: d
       ? [
           {
@@ -210,7 +208,6 @@ describe('validateFullProductionVocabularyV2 (dormant candidate composition)', (
       'custom fact_rule',
       (v) => {
         const f = custom(v, animal(v));
-        f.minimumContractVersion = 2;
         f.bindings[0].policy = v.families[0].bindings[0].policy;
       },
     ],
@@ -225,7 +222,7 @@ describe('validateFullProductionVocabularyV2 (dormant candidate composition)', (
   );
 
   it.each(['policy', 'range', 'resolved number'] as const)(
-    'requires V2 for custom %s, but accepts its explicit V2 declaration',
+    'accepts custom %s without a version declaration',
     (kind) => {
       const v = fixture();
       const d: DefinitionV2 =
@@ -242,13 +239,11 @@ describe('validateFullProductionVocabularyV2 (dormant candidate composition)', (
       if (kind === 'policy')
         f.bindings[0].policy = { route: 'option_cases', cases: [] };
       expect(generic.validateVocabularyConsistencyV2(v)).toEqual(v);
-      rejects(JSON.parse(JSON.stringify(v)) as VocabularyV2, legacyError);
-      f.minimumContractVersion = 2;
       expect(validate(v)).toEqual(v);
     },
   );
 
-  it('accepts a custom V1 pending number without imposing production numeric domains', () => {
+  it('accepts a custom pending number without imposing production numeric domains', () => {
     const v = fixture();
     const d: DefinitionV2 = {
       ...number(v),
@@ -262,16 +257,15 @@ describe('validateFullProductionVocabularyV2 (dormant candidate composition)', (
     expect(validate(v)).toEqual(v);
   });
 
-  it('rejects a V1 custom binding sharing a production resolved number', () => {
+  it('accepts a custom binding sharing a production resolved number', () => {
     const v = fixture();
     custom(v, number(v));
-    rejects(v, legacyError);
+    expect(validate(v)).toEqual(v);
   });
 
   it('runs custom static option-case consistency before production admission', () => {
     const v = fixture();
     const f = custom(v, animal(v));
-    f.minimumContractVersion = 2;
     const c = {
       code: 'a',
       when: [],
@@ -289,26 +283,26 @@ describe('validateFullProductionVocabularyV2 (dormant candidate composition)', (
   });
 
   it.each([false, true])(
-    'finishes S18 before production checks (custom first: %s)',
+    'retains production checks beside resolved custom metadata (custom first: %s)',
     (first) => {
       const v = fixture();
       v.families[0].bindings[0].exposure = 'INTERNAL';
       const f = custom(v, number(v));
       if (first) v.families = [f, ...v.families.slice(0, -1)];
       const spy = jest.spyOn(numeric, 'assertProductionNumericDefinitionsV2');
-      rejects(v, legacyError);
-      expect(spy).not.toHaveBeenCalled();
+      rejects(v, 'Expected production binding policies V2');
+      expect(spy).toHaveBeenCalled();
     },
   );
 
-  it('checks S18 even before root completeness', () => {
+  it('retains root completeness beside resolved custom metadata', () => {
     const v = fixture();
     const f = custom(v, number(v));
     v.families = [f];
-    rejects(v, legacyError);
+    rejects(v, incomplete);
   });
 
-  it('calls generic, all S18, then numeric/alias per family including custom, by actual IDs', () => {
+  it('calls generic then numeric/alias per family including custom, by actual IDs', () => {
     const v = fixture();
     custom(v, animal(v));
     const order: string[] = [];
@@ -319,20 +313,13 @@ describe('validateFullProductionVocabularyV2 (dormant candidate composition)', (
         order.push('generic');
         return original(input);
       });
-    const s18 = legacy.assertFamilyLegacyCompatibilityV2;
-    jest
-      .spyOn(legacy, 'assertFamilyLegacyCompatibilityV2')
-      .mockImplementation((f, map) => {
-        order.push(`legacy:${f.code}`);
-        expect(map.get(v.definitions[0].id)).toEqual(v.definitions[0]);
-        expect(map.has(v.definitions[0].code)).toBe(false);
-        s18(f, map);
-      });
     const checkNumeric = numeric.assertProductionNumericDefinitionsV2;
     jest
       .spyOn(numeric, 'assertProductionNumericDefinitionsV2')
       .mockImplementation((f, map) => {
         order.push(`numeric:${f.code}`);
+        expect(map.get(v.definitions[0].id)).toEqual(v.definitions[0]);
+        expect(map.has(v.definitions[0].code)).toBe(false);
         checkNumeric(f, map);
       });
     const checkAliases = aliases.assertProductionAliasCoverageV2;
@@ -345,7 +332,6 @@ describe('validateFullProductionVocabularyV2 (dormant candidate composition)', (
     validate(v);
     expect(order).toEqual([
       'generic',
-      ...v.families.map((f) => `legacy:${f.code}`),
       ...v.families.flatMap((f) => [`numeric:${f.code}`, `alias:${f.code}`]),
     ]);
   });

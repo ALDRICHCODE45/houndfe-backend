@@ -1,6 +1,5 @@
 import { FAMILY_CODES } from './editorial-production-vocabulary-catalog';
 import { validateVocabularyConsistencyV2 } from './editorial-vocabulary-consistency-v2';
-import { assertFamilyLegacyCompatibilityV2 } from './editorial-vocabulary-legacy-compatibility-v2';
 import { assertProductionAliasCoverageV2 } from './editorial-vocabulary-production-alias-coverage-v2';
 import { assertProductionNumericDefinitionsV2 } from './editorial-vocabulary-production-numeric-v2';
 import type { VocabularyV2 } from './editorial-vocabulary-shape-v2';
@@ -11,10 +10,6 @@ export function validateFullProductionVocabularyV2(
 ): VocabularyV2 {
   const parsed = validateVocabularyConsistencyV2(input);
   const definitionsById = new Map(parsed.definitions.map((d) => [d.id, d]));
-  // Finish declaration checks for ALL families before any production checks.
-  for (const family of parsed.families) {
-    assertFamilyLegacyCompatibilityV2(family, definitionsById);
-  }
   const familyCodes = new Set(parsed.families.map((family) => family.code));
   if (FAMILY_CODES.some((code) => !familyCodes.has(code))) {
     throw new TypeError('Expected a full production vocabulary V2');

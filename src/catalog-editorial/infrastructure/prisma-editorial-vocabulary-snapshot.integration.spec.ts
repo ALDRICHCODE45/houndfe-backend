@@ -396,7 +396,6 @@ realTest(
               id: 'f',
               code: 'custom.f',
               label: ' Family ñ ',
-              minimumContractVersion: 1,
               bindings: [
                 {
                   ...binding,
@@ -437,8 +436,10 @@ realTest(
         db.sql(
           `UPDATE editorial_bindings SET policy = '${JSON.stringify(resolvedPolicy)}'::jsonb WHERE "familyId" = 'f'`,
         );
-        await expectUnrepresentable();
-        expect(await reader.read()).toMatchObject({
+        const beforeLegacyColumnRead = await reader.read();
+        const legacyColumnResponse = await readOnce(2);
+        expect(await reader.read()).toEqual(beforeLegacyColumnRead);
+        expect(beforeLegacyColumnRead).toMatchObject({
           families: [{ minimumContractVersion: 1 }],
         });
         db.sql(
@@ -449,7 +450,6 @@ realTest(
           families: [
             {
               ...vocabulary.families[0],
-              minimumContractVersion: 2,
               bindings: [
                 {
                   ...vocabulary.families[0].bindings[0],
@@ -460,6 +460,10 @@ realTest(
           ],
         };
         const beforeAdvancedRead = await reader.read();
+        expect(beforeAdvancedRead).toMatchObject({
+          families: [{ minimumContractVersion: 2 }],
+        });
+        expect(await readOnce(2)).toEqual(legacyColumnResponse);
         expect(await readOnce(2)).toEqual({
           contractVersion: 2,
           vocabularyRevision: `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary: advanced })}`,

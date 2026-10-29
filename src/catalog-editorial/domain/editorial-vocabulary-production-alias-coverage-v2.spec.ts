@@ -15,7 +15,8 @@ function fixture(familyCode = 'hygiene') {
   const byId = new Map(definitions.map((d) => [d.id, d]));
   const source = manifest.families.find((f) => f.code === familyCode)!;
   const family = parseFamilyShapeV2({
-    ...source,
+    code: source.code,
+    label: source.label,
     id: 'actual-family',
     bindings: source.bindings.map((b) => ({
       ...b,
@@ -154,7 +155,6 @@ describe('assertProductionAliasCoverageV2 (trusted candidates only)', () => {
     f.family = parseFamilyShapeV2({
       ...f.family,
       code: 'custom.family',
-      minimumContractVersion: 1,
       bindings: f.family.bindings.map((b) => ({
         ...b,
         policy: { route: 'pending' },

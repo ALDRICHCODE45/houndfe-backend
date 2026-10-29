@@ -51,7 +51,8 @@ function fixture(familyCode = 'accessory') {
   const ids = new Map(definitions.map((d) => [d.code, d.id]));
   const source = manifest.families.find((f) => f.code === familyCode)!;
   const family = parseFamilyShapeV2({
-    ...source,
+    code: source.code,
+    label: source.label,
     id: 'actual-family-id',
     bindings: source.bindings.map((b) => ({
       ...b,
@@ -222,7 +223,6 @@ describe('fresh production numeric definitions V2', () => {
   it('leaves generic pending/null-unit semantics in custom families alone', () => {
     const { family, byId } = fixture();
     family.code = 'custom';
-    family.minimumContractVersion = 1;
     family.bindings = family.bindings.filter(
       (b) => b.definitionCode === 'measure.net_mass',
     );

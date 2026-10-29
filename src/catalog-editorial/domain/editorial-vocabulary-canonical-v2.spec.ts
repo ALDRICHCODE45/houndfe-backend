@@ -52,19 +52,17 @@ function fixture(): VocabularyV2 {
   return {
     semanticsVersion: 'editorial-production-1',
     families: [
-      { id: '1', code: 'a', label: 'A', minimumContractVersion: 1, bindings },
+      { id: '1', code: 'a', label: 'A', bindings },
       {
         id: '2',
         code: 'b',
         label: 'A',
-        minimumContractVersion: 2,
         bindings: [],
       },
       {
         id: '3',
         code: 'c',
         label: 'Z',
-        minimumContractVersion: 2,
         bindings: [],
       },
     ],
@@ -216,6 +214,27 @@ describe('generic V2 canonical arrays and content R (T3c S2/S19)', () => {
     expect(json.canonicalEditorialJson(spy.mock.calls[0][0])).toEqual(bytes);
   });
 
+  it('hashes a nonempty four-key Family using independent literal bytes', () => {
+    const input = {
+      semanticsVersion: 'editorial-production-1',
+      definitions: [],
+      families: [{ id: 'f', code: 'custom', label: 'Café', bindings: [] }],
+    };
+    const bytes = Buffer.from(
+      '{"contractVersion":2,"vocabulary":{"definitions":[],"families":[{"bindings":[],"code":"custom","id":"f","label":"Café"}],"semanticsVersion":"editorial-production-1"}}',
+      'utf8',
+    );
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const result = respond(input);
+    expect(result.vocabularyRevision).toBe(`ev2-sha256-${digest}`);
+    expect(
+      json.canonicalEditorialJson({
+        contractVersion: 2,
+        vocabulary: result.vocabulary,
+      }),
+    ).toEqual(bytes);
+  });
+
   it('validates once and deeply detaches frozen metadata without mutating its input', () => {
     const input = fixture();
     const before = JSON.parse(JSON.stringify(input)) as VocabularyV2;
@@ -243,7 +262,6 @@ describe('generic V2 canonical arrays and content R (T3c S2/S19)', () => {
   it.each([
     ['families.0.id', 'other'],
     ['families.0.label', 'Changed'],
-    ['families.0.minimumContractVersion', 2],
     ['families.0.bindings.0.owner', 'sellable'],
     ['families.0.bindings.0.exposure', 'FACET'],
     ['families.0.bindings.0.searchable', true],
@@ -277,7 +295,7 @@ describe('generic V2 canonical arrays and content R (T3c S2/S19)', () => {
 
   it('accepts empty/custom/unbound generic metadata without S18 or seven-family admission', () => {
     const input = fixture();
-    expect(respond(input).vocabulary).toEqual(input); // V1 declaration with resolved policy is deliberately generic.
+    expect(respond(input).vocabulary).toEqual(input); // Resolved policies are generic metadata.
     input.families = [];
     expect(canonicalize(input)).toEqual(input);
     input.definitions = [];
@@ -290,6 +308,8 @@ describe('generic V2 canonical arrays and content R (T3c S2/S19)', () => {
     ['vocabularyRevision', 'R'],
     ['definitions.0.extra', true],
     ['families.0.bindings.0.extra', true],
+    ['families.0.minimumContractVersion', 1],
+    ['families.0.minimumContractVersion', 2],
     ['definitions.1.id', 'a'],
     ['definitions.1.code', 'a'],
     ['families.1.id', '1'],

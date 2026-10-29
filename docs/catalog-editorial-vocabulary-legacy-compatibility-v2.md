@@ -1,5 +1,10 @@
 # Conservative declared-V1 family compatibility
 
+**Historical, superseded by S35/S36.** The single-contract Family has no version
+field; full-production and stored-response composition no longer invoke this gate.
+The declaration rules below record the retired policy, not current authority.
+See [single-contract §§1/5/6](catalog-editorial-single-contract.md).
+
 `assertFamilyLegacyCompatibilityV2(family, definitionsById): void` is a dormant
 trusted-input assertion implementing S18. It rejects contradictory new V1
 candidates without promoting the family or pruning bindings. Nothing invokes it

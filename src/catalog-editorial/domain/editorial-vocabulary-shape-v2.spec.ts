@@ -14,7 +14,6 @@ const family = (): families.FamilyV2 => ({
   id: ' family ',
   code: 'custom',
   label: ' Original ',
-  minimumContractVersion: 2,
   bindings: [
     {
       definitionId: 'missing',
@@ -91,14 +90,10 @@ function detached(output: unknown, input: unknown): void {
 describe('dormant vocabulary root shape V2', () => {
   it('accepts an empty root', () => expect(parse(empty())).toEqual(empty()));
 
-  it.each([1, 2] as const)(
-    'accepts custom families at version %i and unresolved references',
-    (version) => {
-      const input = fixture();
-      input.families[0].minimumContractVersion = version;
-      expect(parse(input)).toEqual(input);
-    },
-  );
+  it('accepts custom families and unresolved references', () => {
+    const input = fixture();
+    expect(parse(input)).toEqual(input);
+  });
 
   it('composes all six public definition parsers without changing text, order, nulls or archives', () => {
     const input = fixture();

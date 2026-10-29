@@ -16,7 +16,6 @@ import {
 import { assertFamilyReferencesV2 } from './editorial-vocabulary-family-references-v2';
 import { assertFamilyPolicyConsistencyV2 } from './editorial-vocabulary-family-consistency-v2';
 import { assertFamilyOptionCaseStaticV2 } from './editorial-vocabulary-option-case-static-v2';
-import { assertFamilyLegacyCompatibilityV2 } from './editorial-vocabulary-legacy-compatibility-v2';
 import { materializeHistoricalVocabularyResponseV2 } from './editorial-vocabulary-historical-v2';
 
 function thrown(run: () => unknown): unknown {
@@ -103,7 +102,7 @@ describe.each(guards)('%s canonical guard', (_name, parse, expected) => {
   );
 });
 
-function graph(cases: PolicyCase[], minimumContractVersion = 2) {
+function graph(cases: PolicyCase[]) {
   const definitions = [
     validateDefinitionV2({
       id: 'selector-id',
@@ -130,7 +129,6 @@ function graph(cases: PolicyCase[], minimumContractVersion = 2) {
     id: 'custom-id',
     code: 'custom',
     label: 'Custom',
-    minimumContractVersion,
     bindings: definitions.map((definition, index) => ({
       definitionId: definition.id,
       definitionCode: definition.code,
@@ -197,17 +195,6 @@ describe('trusted parsed graph assertions', () => {
       );
     },
   );
-
-  it('classifies S29 declared-V1 rejection after generic checks', () => {
-    const { family, definitions } = graph([policyCase('resolved')], 1);
-    assertFamilyReferencesV2(family, definitions);
-    assertFamilyPolicyConsistencyV2(family);
-    assertFamilyOptionCaseStaticV2(family, definitions);
-    expectRepresentation(
-      () => assertFamilyLegacyCompatibilityV2(family, definitions),
-      'Expected a legacy-compatible family V2',
-    );
-  });
 });
 
 it.each(sentinels)(

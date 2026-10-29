@@ -17,7 +17,7 @@ const ids = new Map(definitions.map((d) => [d.code, d.id]));
 function candidate(code = 'food'): FamilyV2 {
   const source = manifest.families.find((f) => f.code === code)!;
   return parseFamilyShapeV2({
-    ...source,
+    code: source.code,
     id: 'opaque-family-id',
     label: 'Etiqueta propia',
     bindings: source.bindings.map((b) => ({
@@ -131,13 +131,12 @@ describe('fresh production candidate binding policies V2', () => {
     },
   );
 
-  it.each(['owner', 'version', 'exposure', 'searchable', 'publicationCheck'])(
+  it.each(['owner', 'exposure', 'searchable', 'publicationCheck'])(
     'rejects %s mismatch, including restrictive FACET to INTERNAL',
     (field) => {
       const family = candidate();
       const b = binding(family);
       if (field === 'owner') b.owner = 'product';
-      if (field === 'version') family.minimumContractVersion = 1;
       if (field === 'exposure') b.exposure = 'INTERNAL';
       if (field === 'searchable') b.searchable = true;
       if (field === 'publicationCheck') b.publicationCheck = 'when_asserted';
@@ -183,7 +182,6 @@ describe('fresh production candidate binding policies V2', () => {
     (route) => {
       const family = candidate();
       family.code = 'food.extension';
-      family.minimumContractVersion = 1;
       family.bindings = [binding(family)];
       const b = family.bindings[0];
       b.owner = 'product';

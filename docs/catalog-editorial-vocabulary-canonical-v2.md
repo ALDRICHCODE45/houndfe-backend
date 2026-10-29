@@ -17,4 +17,9 @@ All explicit metadata, nulls, empty arrays and Unicode spelling survive unchange
 
 Hash exactly `{contractVersion:2,vocabulary}` through `hashEditorialJson`, then prefix its lowercase SHA-256 with `ev2-sha256-`. The existing serializer owns canonical object keys, string escaping and finite-number spelling. Never hash R itself, envelope extras, headers, facts or DB fields. Permuting sortable arrays preserves output/R; changing explicit metadata changes content identity without Unicode normalization.
 
-This is generic representation, not S18 new-candidate admission or full-production validation (S19). Empty/custom/unbound vocabularies remain valid. R is scoped content identity, not tenant identity, authorization, adoption, publication or activation authority. Coherent snapshots, negotiated transport and runtime consumption remain separate work.
+S35/S36 removes `minimumContractVersion` from the closed Family DTO and therefore
+from the canonical preimage. The serializer is unchanged; nonempty Family vectors
+change R, while the empty-vocabulary vector is unchanged. The single-contract
+[§§5–6](catalog-editorial-single-contract.md) supersedes the older field/classification.
+
+This is generic representation, not full-production validation (S19). Empty/custom/unbound vocabularies remain valid. R is scoped content identity, not tenant identity, authorization, adoption, publication or activation authority. Coherent snapshots, negotiated transport and runtime consumption remain separate work.

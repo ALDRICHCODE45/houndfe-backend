@@ -96,8 +96,10 @@ describe('dormant editorial vocabulary response descriptions', () => {
       const body: unknown = await spy.mock.results[0].value;
       const vocabulary = {
         semanticsVersion: 'editorial-production-1',
-        families: raw.families.map(({ bindings, ...family }) => ({
-          ...family,
+        families: raw.families.map(({ id, code, label, bindings }) => ({
+          id,
+          code,
+          label,
           bindings: bindings.map(({ familyId, ...binding }) => {
             void familyId;
             return binding;
@@ -240,16 +242,17 @@ describe('dormant editorial vocabulary response descriptions', () => {
     expect(source.read).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['missing metadata', 'declared V1 contradiction'])(
+  it.each(['missing metadata', 'policy extra field'])(
     'maps real %s to S27 only for V2',
     async (kind) => {
       const raw = fixture();
       const input =
         kind === 'missing metadata' ? { ...raw, metadata: null } : raw;
-      if (kind === 'declared V1 contradiction') {
+      if (kind === 'policy extra field') {
         Object.assign(raw.families[0].bindings[0], {
           policy: {
             route: 'option_cases',
+            extra: true,
             cases: [
               {
                 code: 'case',

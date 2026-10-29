@@ -41,7 +41,6 @@ function family(bindings: BindingV2[]) {
     id: 'family',
     code: 'legacy',
     label: 'Legacy',
-    minimumContractVersion: 2,
     bindings,
   });
 }

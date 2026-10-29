@@ -19,7 +19,8 @@ const vocabulary = validateFullProductionVocabularyV2({
   semanticsVersion: manifest.semanticsVersion,
   definitions,
   families: manifest.families.map((f, i) => ({
-    ...f,
+    code: f.code,
+    label: f.label,
     id: `family/${i}`,
     bindings: f.bindings.map((b) => ({
       ...b,
@@ -28,7 +29,7 @@ const vocabulary = validateFullProductionVocabularyV2({
   })),
 });
 const byId = new Map(vocabulary.definitions.map((d) => [d.id, d]));
-// Custom V1 uses pending numeric metadata and no range bindings (S18).
+// Alternate custom numeric metadata stays independent of production constraints.
 const customById = new Map(
   vocabulary.definitions.map((d) => [
     d.id,
@@ -69,15 +70,14 @@ function check(declaration: DeclarationShapeV2, f = family('accessory')) {
 function reject(declaration: DeclarationShapeV2, f = family('accessory')) {
   expect(() => check(declaration, f)).toThrow(new Error('MALFORMED'));
 }
-function custom(version: 1 | 2 = 2): FamilyV2 {
+function custom(includeRanges = true): FamilyV2 {
   const f = family('hygiene');
   return {
     ...f,
     code: 'custom',
-    minimumContractVersion: version,
     bindings: f.bindings
       .filter(
-        (b) => version === 2 || byId.get(b.definitionId)!.type !== 'range',
+        (b) => includeRanges || byId.get(b.definitionId)!.type !== 'range',
       )
       .map((b) => ({ ...b, policy: { route: 'pending' } })),
   };
@@ -303,10 +303,10 @@ describe('fresh facts references (T3d S2/S34)', () => {
       }
     }
   });
-  it.each([1, 2] as const)(
-    'custom minimum version %s confers only S34 permissions',
-    (version) => {
-      const f = custom(version);
+  it.each([false, true])(
+    'custom range bindings %s confer only S34 permissions',
+    (includeRanges) => {
+      const f = custom(includeRanges);
       for (const magnitude of ['mass', 'volume', 'count', 'length', 'area'])
         check(known('contentMagnitude', magnitude), f);
       check({ key: 'contentMagnitude', state: 'unknown', evidence: null }, f);

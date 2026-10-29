@@ -8,7 +8,7 @@ message, `name: TypeError` and TypeError ancestry.
 
 The converted modules are stored-root/choice/scalar/family, simple, numeric,
 choice, definition, shape, family-shape, policy-shape, family-references,
-family-consistency, option-case-static and legacy-compatibility (all
+family-consistency and option-case-static (all
 `editorial-vocabulary-*-v2.ts`). Composition inherits their errors unchanged.
 Production-only assertion helpers are intentionally not blanket converted.
 
@@ -23,4 +23,5 @@ This class prepares precise S23/S27 whole-response failure classification; it
 adds no HTTP mapping, reader wiring, V1 changes, activation or storage rewrites.
 Future transport may map this class to the approved HTTP 500
 `EDITORIAL_VOCABULARY_UNREPRESENTABLE`, never blanket-map arbitrary TypeErrors.
-S29 declared-V1 compatibility rules are unchanged.
+S35/S36 supersedes and removes S29 declared-V1 compatibility rejection; generic
+shape/reference/policy/static checks and unexpected-error identity remain.

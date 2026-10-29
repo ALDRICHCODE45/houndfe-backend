@@ -41,7 +41,6 @@ const vocabulary = validateVocabularyConsistencyV2({
       id: 'db-family-56',
       code: 'custom.family',
       label: 'Custom',
-      minimumContractVersion: 2,
       bindings: definitions.map((definition) => ({
         definitionId: definition.id,
         definitionCode: definition.code,

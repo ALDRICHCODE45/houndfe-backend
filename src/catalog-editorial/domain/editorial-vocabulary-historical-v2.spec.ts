@@ -1,7 +1,6 @@
 import { hashEditorialJson } from './editorial-canonical-json';
 import * as canonical from './editorial-vocabulary-canonical-v2';
 import { materializeHistoricalVocabularyResponseV2 as materialize } from './editorial-vocabulary-historical-v2';
-import * as compatibility from './editorial-vocabulary-legacy-compatibility-v2';
 import type { BindingPolicy } from './editorial-vocabulary-policy-shape-v2';
 import * as stored from './editorial-vocabulary-stored-root-v2';
 
@@ -105,7 +104,7 @@ describe('dormant historical V2 response', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it.each(advanced)(
-    'rejects the whole response for declared V1 %s',
+    'preserves generic-valid %s regardless of stored legacy column',
     (_, change) => {
       const input = fixture();
       change(input);
@@ -113,11 +112,17 @@ describe('dormant historical V2 response', () => {
       input.definitions.push(definition('sibling'));
       const before = structuredClone(input);
       freeze(input);
-      const builder = jest.spyOn(canonical, 'createVocabularyResponseV2');
-      expect(() => materialize(input)).toThrow(
-        'Expected a legacy-compatible family V2',
+      const result = materialize(input);
+      expect(result.vocabulary).toEqual(
+        canonical.canonicalizeVocabularyV2(
+          stored.materializeStoredVocabularyV2(input),
+        ),
       );
-      expect(builder).not.toHaveBeenCalled();
+      expect(
+        result.vocabulary.families.every(
+          (f) => !('minimumContractVersion' in f),
+        ),
+      ).toBe(true);
       expect(input).toEqual(before);
     },
   );
@@ -137,13 +142,11 @@ describe('dormant historical V2 response', () => {
     expect(result.vocabulary.definitions[0]).not.toBe(input.definitions[0]);
   });
 
-  it('does not let a shared definition bypass a later V1 gate', () => {
+  it('preserves shared resolved definitions without storage-version classification', () => {
     const input = fixture();
     input.definitions[0].numericPolicy = resolved;
     input.families.unshift(family('advanced', 'd', 2));
-    expect(() => materialize(input)).toThrow(
-      'Expected a legacy-compatible family V2',
-    );
+    expect(materialize(input).vocabulary.definitions).toHaveLength(1);
   });
 
   it('allows originally unbound advanced definitions beside pending legacy metadata', () => {
@@ -153,9 +156,9 @@ describe('dormant historical V2 response', () => {
       numericPolicy: resolved,
     });
     expect(materialize(input).vocabulary.definitions).toHaveLength(2);
-    expect(
-      materialize(input).vocabulary.families[0].minimumContractVersion,
-    ).toBe(1);
+    expect(materialize(input).vocabulary.families[0]).not.toHaveProperty(
+      'minimumContractVersion',
+    );
   });
 
   it('allows empty vocabulary and empty custom families without production admission', () => {
@@ -172,19 +175,14 @@ describe('dormant historical V2 response', () => {
   });
 
   it.each(['shape', 'reference'])(
-    'rejects generic %s before compatibility or canonical construction',
+    'rejects generic %s before canonical construction',
     (kind) => {
       const input = fixture();
       if (kind === 'shape') input.definitions[0].type = 'unsupported';
       else input.families[0].bindings[0].definitionId = 'missing';
-      const gate = jest.spyOn(
-        compatibility,
-        'assertFamilyLegacyCompatibilityV2',
-      );
       const builder = jest.spyOn(canonical, 'createVocabularyResponseV2');
       freeze(input);
       expect(() => materialize(input)).toThrow(TypeError);
-      expect(gate).not.toHaveBeenCalled();
       expect(builder).not.toHaveBeenCalled();
     },
   );
@@ -192,19 +190,16 @@ describe('dormant historical V2 response', () => {
   it('uses actual IDs for every family and passes only validated data to the builder', () => {
     const input = fixture();
     input.families.push(family('second', 'd', 2));
-    const gate = jest.spyOn(compatibility, 'assertFamilyLegacyCompatibilityV2');
     const root = jest.spyOn(stored, 'materializeStoredVocabularyV2');
     const builder = jest.spyOn(canonical, 'createVocabularyResponseV2');
     const result = materialize(input);
     const validated = root.mock.results[0].value as ReturnType<
       typeof stored.materializeStoredVocabularyV2
     >;
-    expect(gate).toHaveBeenCalledTimes(2);
-    validated.families.forEach((item, index) => {
-      expect(gate.mock.calls[index][0]).toBe(item);
-      expect(gate.mock.calls[index][1].get('d')).toBe(validated.definitions[0]);
-      expect(gate.mock.calls[index][1].has('custom.d')).toBe(false);
-    });
+    expect(validated.families.map((f) => f.bindings[0].definitionId)).toEqual([
+      'd',
+      'd',
+    ]);
     expect(builder).toHaveBeenCalledWith(validated);
     expect(result).toBe(builder.mock.results[0].value);
   });
@@ -221,7 +216,6 @@ describe('dormant historical V2 response', () => {
         id,
         code: `custom.${id}`,
         label: ` Family ${id} `,
-        minimumContractVersion: 1,
         bindings: [
           {
             definitionId: id,
@@ -255,7 +249,7 @@ describe('dormant historical V2 response', () => {
     expect(input).toEqual(before);
   });
 
-  it.each(['stored', 'compatibility', 'canonical'] as const)(
+  it.each(['stored', 'canonical'] as const)(
     'propagates %s sentinel errors by identity',
     (seam) => {
       const sentinel = new Error('Unicode/runtime/dependency sentinel');
@@ -265,10 +259,6 @@ describe('dormant historical V2 response', () => {
       if (seam === 'stored')
         jest
           .spyOn(stored, 'materializeStoredVocabularyV2')
-          .mockImplementation(fail);
-      if (seam === 'compatibility')
-        jest
-          .spyOn(compatibility, 'assertFamilyLegacyCompatibilityV2')
           .mockImplementation(fail);
       if (seam === 'canonical')
         jest
