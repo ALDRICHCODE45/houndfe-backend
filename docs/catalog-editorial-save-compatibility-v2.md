@@ -32,5 +32,5 @@ conflicts remain untouched; passing is not fresh candidate validity.
 No conversion, clone, candidate validation, metadata/current revision lookup,
 Published lookup, permissions, receipts, HTTP or storage behavior is implemented.
 The existing HTTP filter does not map the upgrade code: this gate does not
-activate transport behavior or promise an HTTP status. Publish error contracts
-remain unresolved and publish/V1 gates are deliberately excluded.
+activate transport behavior or promise an HTTP status. Publish errors are specified
+separately in the production contract §5; publish/V1 gates are excluded here.

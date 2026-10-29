@@ -147,8 +147,8 @@ No schemaVersion/evidence injection, fresh limits or D14 checks on that copy. Ex
 
 Cycle overflow/stale expectedCycle retains 409; null expectedCycle is only for absent state. Receipt replay precedes this table.
 V2 save requires an active recognizable legacy or production Draft; unsupported or unrepresentable legacy Draft refuses 409 `EDITORIAL_CLIENT_UPGRADE_REQUIRED`. Server independently runs the recognition gate below; a client header alone cannot authorize dropping history.
-V2 publish refuses if Draft **or current Published** is unsupported, even when the other is supported; never silently overwrite a future Published format.
-Supported history still undergoes publish's fresh validation/D14; legacy history must first be explicitly adopted by save. Discard accepts any Draft mode under existing read+update authority/CAS, removes only Draft and leaves unsupported Published byte-independent JSON values untouched.
+V2 publish refuses with 409 `EDITORIAL_CLIENT_UPGRADE_REQUIRED` if Draft **or current Published** is unsupported, even when the other is supported; never silently overwrite a future Published format. This check precedes the legacy-Draft adoption check.
+Otherwise a legacy Draft refuses V2 publish with 409 `EDITORIAL_ADOPTION_REQUIRED`: it must first be explicitly adopted by save. Supported history still undergoes publish's fresh validation/D14; a legacy Published alone does not require adoption. Discard accepts any Draft mode under existing read+update authority/CAS, removes only Draft and leaves unsupported Published byte-independent JSON values untouched.
 No extra recovery permission, raw-write route or automatic server conversion is introduced.
 
 **One adoption mechanism:** V2 save requires `Editorial-Adoption: legacy-to-v2` exactly when the locked source Draft is legacy; it is forbidden for a production Draft, and never permits editing an unsupported Draft.
