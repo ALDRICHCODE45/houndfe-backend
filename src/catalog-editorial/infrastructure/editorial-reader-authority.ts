@@ -12,10 +12,13 @@ export class EditorialReaderAuthority {
       EditorialAdministratorClient,
   ) {}
 
-  async permits(actorId: string, tenantId: string): Promise<boolean> {
+  async permits(actorId: string, tenantId: string | null): Promise<boolean> {
     try {
       if (
-        [actorId, tenantId].some((id) => typeof id !== 'string' || !id.trim())
+        typeof actorId !== 'string' ||
+        !actorId.trim() ||
+        (tenantId !== null &&
+          (typeof tenantId !== 'string' || !tenantId.trim()))
       )
         return false;
       const actor = await this.prisma.user.findUnique({
@@ -27,6 +30,7 @@ export class EditorialReaderAuthority {
         this.prisma,
         actorId,
       );
+      if (tenantId === null) return globalAdministrator;
       const memberships = await this.prisma.tenantMembership.findMany({
         where: { userId: actorId, tenantId },
         include: {

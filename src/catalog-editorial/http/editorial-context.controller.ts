@@ -17,6 +17,7 @@ import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-authority';
 import { PrismaEditorialContext } from '../infrastructure/prisma-editorial-context';
 import { EditorialHttpFilter } from './editorial-http.filter';
+import { EditorialHttpScope } from '../infrastructure/editorial-http-scope';
 
 @Controller('products/:productId/editorial/context')
 @UseFilters(EditorialHttpFilter)
@@ -25,6 +26,7 @@ export class EditorialContextController {
   constructor(
     private readonly authority: PrismaEditorialAuthority,
     private readonly context: PrismaEditorialContext,
+    private readonly httpScope: EditorialHttpScope,
   ) {}
 
   @Get()
@@ -33,9 +35,9 @@ export class EditorialContextController {
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
   ) {
-    const user = request.user as AuthenticatedUser | undefined;
-    if (!user?.userId?.trim() || !user.tenantId?.trim())
-      throw new ForbiddenException();
+    const user = this.httpScope.principal(
+      request.user as AuthenticatedUser | undefined,
+    );
     const body: unknown = request.body;
     if (
       Object.keys(request.query).length ||
@@ -46,7 +48,7 @@ export class EditorialContextController {
           Object.keys(body).length))
     )
       throw new BadRequestException();
-    const scope = { actorId: user.userId, tenantId: user.tenantId, productId };
+    const scope = await this.httpScope.product(user, productId);
     const access = await this.authority.resolve({ ...scope }).catch(() => null);
     if (
       access?.activeMember !== true ||

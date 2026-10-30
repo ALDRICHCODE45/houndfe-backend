@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Controller,
-  ForbiddenException,
   Header,
   HttpCode,
   Inject,
@@ -21,6 +20,7 @@ import type { CatalogEditorialCore } from '../application/catalog-editorial-core
 import { EditorialHttpFilter } from './editorial-http.filter';
 import { EDITORIAL_READER } from './editorial-read.controller';
 import { idempotencyKey } from './idempotency-key';
+import { EditorialHttpScope } from '../infrastructure/editorial-http-scope';
 
 @Controller('products/:productId/editorial/draft')
 @UseFilters(EditorialHttpFilter)
@@ -32,16 +32,17 @@ export class EditorialWriteController {
       CatalogEditorialCore,
       'initialize' | 'save' | 'publish' | 'discard'
     >,
+    private readonly scope: EditorialHttpScope,
   ) {}
 
-  private input(
+  private async input(
     request: Request,
     productId: string,
     operation: 'initialize' | 'save' | 'transition',
   ) {
-    const user = request.user as AuthenticatedUser | undefined;
-    if (!user?.userId?.trim() || !user.tenantId?.trim())
-      throw new ForbiddenException();
+    const user = this.scope.principal(
+      request.user as AuthenticatedUser | undefined,
+    );
     const body: unknown = request.body;
     const initializing = operation === 'initialize';
     const keys = initializing
@@ -69,20 +70,21 @@ export class EditorialWriteController {
       (!initializing && !positive(input.expectedRevision))
     )
       throw new BadRequestException();
+    const key = idempotencyKey(request.headers['idempotency-key']);
     return {
-      context: { actorId: user.userId, tenantId: user.tenantId, productId },
+      context: await this.scope.product(user, productId),
       input,
-      key: idempotencyKey(request.headers['idempotency-key']),
+      key,
     };
   }
 
   @Post('initialize')
   @Header('Cache-Control', 'no-store')
-  initialize(
+  async initialize(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
   ) {
-    const { context, input, key } = this.input(
+    const { context, input, key } = await this.input(
       request,
       productId,
       'initialize',
@@ -96,11 +98,11 @@ export class EditorialWriteController {
   @Post('publish')
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
-  publish(
+  async publish(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
   ) {
-    const { context, input, key } = this.input(
+    const { context, input, key } = await this.input(
       request,
       productId,
       'transition',
@@ -115,11 +117,11 @@ export class EditorialWriteController {
   @Post('discard')
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
-  discard(
+  async discard(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
   ) {
-    const { context, input, key } = this.input(
+    const { context, input, key } = await this.input(
       request,
       productId,
       'transition',
@@ -133,11 +135,15 @@ export class EditorialWriteController {
 
   @Put()
   @Header('Cache-Control', 'no-store')
-  save(
+  async save(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
   ) {
-    const { context, input, key } = this.input(request, productId, 'save');
+    const { context, input, key } = await this.input(
+      request,
+      productId,
+      'save',
+    );
     return this.core.save(context, {
       expectedCycle: input.expectedCycle as number,
       expectedRevision: input.expectedRevision as number,

@@ -1,4 +1,4 @@
-# Editorial administrator capability policy (T48a)
+# Editorial administrator access (T48a/T48b)
 
 S53/S54 apply only to editorial ficha/publication authority, not private media.
 For a concrete tenant scope, both editorial authorities recheck the active actor
@@ -31,12 +31,27 @@ writes and unchanged state/counters; unavailable document sources still deny acc
 These are Prisma-mocked tests with an overridden JWT guard, not live DB/JWT proof.
 They do not establish complete administrator coverage across all seven endpoints.
 
-## Integration still pending (T48b)
+## Global HTTP scope (T48b)
 
-This unit does not adapt the four HTTP controllers or DI. Global/null HTTP mode is
-not yet supported by this change. T48b must resolve the persisted Product tenant
-server-side for global mode, keep global administrators confined to a selected
-tenant until switching/returning global, and cover vocabulary/document/context/
-initialize/save/publish/discard. Never accept a caller tenant override.
-S55 permits up to 525 authored lines for T48a only; later units retain 400.
-This does not authorize stored-grant changes, deployment or data operations.
+Both registered modules explicitly inject `EditorialHttpScope` from their supplied
+PrismaService. Null tenant mode requires the existing JWT global flag, then fresh
+active-actor and persisted global-role proof. Only after that proof may an id-only
+Product lookup resolve its actual tenant. The concrete actor/tenant/Product scope
+continues through existing core authorization, including transaction-client write
+checks. Blank actor/tenant values are not global mode; lookup/proof outages deny.
+A selected tenant is never inferred or switched, even for a global administrator.
+Vocabulary has no Product: null mode checks persisted global authority without
+inventing a tenant or membership. Query/body tenant overrides fail; tenant headers
+are ignored. Existing shape/idempotency admission precedes global Product lookup.
+
+The new registered-module matrix covers vocabulary, document, context, initialize,
+save, publish and discard: global/null success, selected confinement, ordinary and
+tenant-wildcard boundaries, stale/inactive/missing/lookalike proof, outages, blank
+identities, lookup failures and caller overrides. It uses synthetic authentication
+and mocked persistence. Its business core is mocked and delegates real capability
+checks: this proves routing/qualification, not transactional publication, CAS,
+receipt replay or live database/JWT role semantics. Existing coordinated-write
+HTTP tests retain initialize/save admission and invalid-document checks unchanged.
+Private-media policy and all downstream business/transaction code are unchanged.
+S56 authorizes550 authored lines for T48b only; later units retain400. No stored
+permission, database, activation, deployment or push operation is authorized.

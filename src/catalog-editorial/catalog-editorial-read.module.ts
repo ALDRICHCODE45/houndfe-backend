@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { EditorialHttpScope } from './infrastructure/editorial-http-scope';
 import { createCoordinatedEditorialWriteAuthority } from './infrastructure/prisma-coordinated-editorial-authority';
 import { EditorialWriteController } from './http/editorial-write.controller';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -17,6 +18,11 @@ import {
   providers: [
     JwtAuthGuard,
     TenantContextGuard,
+    {
+      provide: EditorialHttpScope,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) => new EditorialHttpScope(prisma),
+    },
     {
       provide: EDITORIAL_READER,
       inject: [PrismaService],
