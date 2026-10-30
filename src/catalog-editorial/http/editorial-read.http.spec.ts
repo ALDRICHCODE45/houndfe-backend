@@ -1,6 +1,9 @@
 import { Global, Module, UnauthorizedException } from '@nestjs/common';
 import type { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import type { Prisma } from '@prisma/client';
+import type { Request } from 'express';
+import type { Server } from 'node:http';
 import { ClsModule } from 'nestjs-cls';
 import request from 'supertest';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -13,7 +16,7 @@ const productId = '11111111-1111-4111-8111-111111111111';
 const tenantId = '22222222-2222-4222-8222-222222222222';
 const actorId = '33333333-3333-4333-8333-333333333333';
 const path = '/products/' + productId + '/editorial';
-const raw = jest.fn();
+const raw = jest.fn<Promise<unknown[]>, [Prisma.Sql]>();
 const write = jest.fn();
 const db = {
   user: { findUnique: jest.fn() },
@@ -49,7 +52,7 @@ describe('authenticated editorial read HTTP', () => {
       .overrideGuard(JwtAuthGuard)
       .useValue({
         canActivate(context: ExecutionContext) {
-          const req = context.switchToHttp().getRequest();
+          const req = context.switchToHttp().getRequest<Request>();
           if (req.headers.authorization !== 'Bearer synthetic')
             throw new UnauthorizedException();
           req.user = { ...principal };
@@ -95,7 +98,7 @@ describe('authenticated editorial read HTTP', () => {
     expect(write).not.toHaveBeenCalled();
   });
   const get = (url = path) =>
-    request(app.getHttpServer())
+    request(app.getHttpServer() as Server)
       .get(url)
       .set('Authorization', 'Bearer synthetic');
   const rejected = async (
@@ -153,7 +156,7 @@ describe('authenticated editorial read HTTP', () => {
   test.each([undefined, 'Bearer invalid'])(
     'unauthenticated request %s is rejected before persistence',
     async (token) => {
-      const req = request(app.getHttpServer()).get(path);
+      const req = request(app.getHttpServer() as Server).get(path);
       if (token) req.set('Authorization', token);
       await rejected(req, 401, 'UNAUTHORIZED');
       expect(db.$transaction).not.toHaveBeenCalled();
@@ -188,7 +191,7 @@ describe('authenticated editorial read HTTP', () => {
     'wildcard',
     'update-only',
     'foreign-product',
-  ])('current authority denies %s without state disclosure', async (kind) => {
+  ])('current authority handles %s safely', async (kind) => {
     if (kind === 'inactive')
       db.user.findUnique.mockResolvedValue({ isActive: false });
     if (kind === 'nonmember')
@@ -215,8 +218,22 @@ describe('authenticated editorial read HTTP', () => {
           },
         },
       ]);
-    await rejected(get(), 403, 'FORBIDDEN');
-    expect(raw).not.toHaveBeenCalled();
+    if (kind === 'wildcard') {
+      const response = await get();
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        cycle: null,
+        draft: null,
+        published: null,
+      });
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(raw).toHaveBeenCalledTimes(2);
+      for (const [sql] of raw.mock.calls)
+        expect(sql.values).toEqual([tenantId, productId]);
+    } else {
+      await rejected(get(), 403, 'FORBIDDEN');
+      expect(raw).not.toHaveBeenCalled();
+    }
   });
   test('rechecks membership on the next read after revocation', async () => {
     expect((await get()).status).toBe(200);
@@ -243,7 +260,7 @@ describe('authenticated editorial read HTTP', () => {
   ] as const)(
     'does not register unlisted %s %s writes',
     async (method, suffix) => {
-      const response = await request(app.getHttpServer())
+      const response = await request(app.getHttpServer() as Server)
         [method](path + suffix)
         .set('Authorization', 'Bearer synthetic')
         .send({});

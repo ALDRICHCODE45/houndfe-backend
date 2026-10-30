@@ -11,7 +11,11 @@ export class PrivateMediaAccess {
   constructor(
     prisma: Pick<PrismaClient, 'user' | 'tenantMembership' | 'product'>,
   ) {
-    this.authority = new PrismaEditorialAuthority(prisma);
+    this.authority = new PrismaEditorialAuthority(
+      prisma,
+      undefined,
+      'exact-grants',
+    );
   }
   canUpload(context: PrivateMediaContext): Promise<boolean> {
     return this.permits(context, true);

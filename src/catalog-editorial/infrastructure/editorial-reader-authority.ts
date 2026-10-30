@@ -1,10 +1,15 @@
 import type { PrismaClient } from '@prisma/client';
+import {
+  hasGlobalEditorialAdministrator,
+  type EditorialAdministratorClient,
+} from './editorial-administrator-authority';
 import { EDITORIAL_PERMISSIONS } from '../domain/editorial-permissions';
 
 /** Product-less H1 membership/permission checks; never a synthetic Product grant. */
 export class EditorialReaderAuthority {
   constructor(
-    private readonly prisma: Pick<PrismaClient, 'user' | 'tenantMembership'>,
+    private readonly prisma: Pick<PrismaClient, 'user' | 'tenantMembership'> &
+      EditorialAdministratorClient,
   ) {}
 
   async permits(actorId: string, tenantId: string): Promise<boolean> {
@@ -18,6 +23,10 @@ export class EditorialReaderAuthority {
         select: { isActive: true },
       });
       if (actor?.isActive !== true) return false;
+      const globalAdministrator = await hasGlobalEditorialAdministrator(
+        this.prisma,
+        actorId,
+      );
       const memberships = await this.prisma.tenantMembership.findMany({
         where: { userId: actorId, tenantId },
         include: {
@@ -25,17 +34,19 @@ export class EditorialReaderAuthority {
         },
       });
       return (
-        memberships.length > 0 &&
+        (globalAdministrator || memberships.length > 0) &&
         memberships.every(
           (m) => m.userId === actorId && m.tenantId === tenantId,
         ) &&
-        memberships.some((m) =>
-          m.role.permissions.some(
-            ({ permission: p }) =>
-              p.subject === EDITORIAL_PERMISSIONS.read.subject &&
-              p.action === EDITORIAL_PERMISSIONS.read.action,
-          ),
-        )
+        (globalAdministrator ||
+          memberships.some((m) =>
+            m.role.permissions.some(
+              ({ permission: p }) =>
+                (p.subject === 'all' && p.action === 'manage') ||
+                (p.subject === EDITORIAL_PERMISSIONS.read.subject &&
+                  p.action === EDITORIAL_PERMISSIONS.read.action),
+            ),
+          ))
       );
     } catch {
       return false;

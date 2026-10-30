@@ -102,11 +102,26 @@ test.each(['actorId', 'tenantId', 'productId'] as const)(
         canRead: true,
         canSave: true,
         canCreate: true,
+        canDiscard: true,
+        canPublish: true,
       });
     expect(await access.canUpload(context)).toBe(false);
     expect(await access.canRead(context)).toBe(false);
   },
 );
+test('persisted global administrator proof does not grant media access', async () => {
+  const role = { findFirst: jest.fn().mockResolvedValue({ id: 'global' }) };
+  const media = new PrivateMediaAccess({
+    user,
+    tenantMembership,
+    product,
+    role,
+  } as unknown as PrismaClient);
+  tenantMembership.findMany.mockResolvedValue([]);
+  expect(await media.canRead(context)).toBe(false);
+  expect(await media.canUpload(context)).toBe(false);
+  expect(role.findFirst).not.toHaveBeenCalled();
+});
 test('resolver rejection denies both operations', async () => {
   jest
     .spyOn(PrismaEditorialAuthority.prototype, 'resolve')

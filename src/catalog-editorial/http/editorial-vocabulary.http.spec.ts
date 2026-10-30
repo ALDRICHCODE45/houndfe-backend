@@ -182,7 +182,15 @@ describe('vocabulary HTTP', () => {
     };
     const [status, error] = errors[mode] ?? [403, 'FORBIDDEN'];
     const req = mode === 'query' ? get().query({ tenantId: 'foreign' }) : get();
-    await check(req, status, { statusCode: status, error });
-    if (mode !== 'readFailure') expect(db.$queryRaw).not.toHaveBeenCalled();
+    await check(
+      req,
+      mode === 'manage' ? 200 : status,
+      mode === 'manage'
+        ? { families: [], definitions: [] }
+        : { statusCode: status, error },
+    );
+    if (mode === 'manage') expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    else if (mode !== 'readFailure')
+      expect(db.$queryRaw).not.toHaveBeenCalled();
   });
 });

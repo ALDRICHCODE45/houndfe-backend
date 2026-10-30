@@ -31,6 +31,7 @@ const tx = {
   tenantMembership: { findMany: jest.fn() },
   product: { findFirst: jest.fn() },
   $queryRaw: raw,
+  $executeRaw: jest.fn().mockResolvedValue(1),
 };
 let tenant: string | null;
 const state = {
@@ -91,9 +92,15 @@ describe('coordinated write wiring', () => {
   afterAll(async () => {
     await app?.close();
   });
-  test.each(['read', 'update', 'manage', 'both'])(
-    'both operations use exact transaction-scoped capabilities: %s',
-    async (grant) => {
+  test.each([
+    ...['read', 'update', 'manage', 'both'].flatMap((grant) =>
+      [false, true].map((available) => ({ grant, available, invalid: false })),
+    ),
+    { grant: 'manage', available: true, invalid: true },
+    { grant: 'both', available: true, invalid: true },
+  ])(
+    'transaction-scoped $grant: sources=$available, invalid document=$invalid',
+    async ({ grant, available, invalid }) => {
       tenant = tenantId;
       tx.user.findUnique.mockResolvedValue({ isActive: true });
       tx.product.findFirst.mockResolvedValue({ id: productId, tenantId });
@@ -116,7 +123,20 @@ describe('coordinated write wiring', () => {
         work(tx),
       );
       for (const operation of ['initialize', 'save'] as const) {
-        raw.mockReset().mockRejectedValue(new Error('gate unavailable'));
+        if (invalid && operation === 'initialize') continue;
+        const before = structuredClone(state);
+        tx.$executeRaw.mockClear();
+        raw.mockReset().mockImplementation((sql: { sql: string }) => {
+          if (!available) return Promise.reject(new Error('gate unavailable'));
+          return Promise.resolve(
+            sql.sql.includes('FROM "products"')
+              ? [{ id: productId }]
+              : operation === 'save' &&
+                  sql.sql.includes('FROM "catalog_editorial_states"')
+                ? [state]
+                : [],
+          );
+        });
         const req =
           operation === 'initialize'
             ? request(app.getHttpServer() as Server).post(path + '/initialize')
@@ -127,15 +147,56 @@ describe('coordinated write wiring', () => {
             : {
                 expectedCycle: 1,
                 expectedRevision: 1,
-                document: emptyDocument(),
+                document: {
+                  ...emptyDocument(),
+                  mediaRefs: invalid ? ['unowned-asset'] : [],
+                },
               };
         const response = await req
           .set('Authorization', 'Bearer synthetic')
           .set('Idempotency-Key', 'key')
           .send(body);
-        expect(response.status).toBe(403);
-        expect(response.body).toEqual({ statusCode: 403, error: 'FORBIDDEN' });
-        expect(raw).toHaveBeenCalledTimes(grant === 'both' ? 1 : 0);
+        const authorized = grant === 'both' || grant === 'manage';
+        const admitted = authorized && available;
+        const success = admitted && !invalid;
+        const status = admitted
+          ? invalid
+            ? 400
+            : operation === 'initialize'
+              ? 201
+              : 200
+          : 403;
+        expect(response.status).toBe(status);
+        expect(response.body).toEqual(
+          success
+            ? {
+                cycle: 1,
+                draft: {
+                  revision: operation === 'initialize' ? 1 : 2,
+                  basePublishedRevision: null,
+                  document: emptyDocument(),
+                },
+                published: null,
+              }
+            : {
+                statusCode: status,
+                error: invalid ? 'MALFORMED' : 'FORBIDDEN',
+              },
+        );
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(success ? 2 : 0);
+        if (!admitted) expect(raw).toHaveBeenCalledTimes(authorized ? 1 : 0);
+        if (invalid) {
+          expect(state).toEqual(before);
+          expect(raw).toHaveBeenCalledWith(
+            expect.objectContaining({
+              sql: expect.stringContaining(
+                'FROM private_media_assets',
+              ) as unknown,
+              values: [tenantId, productId, 'unowned-asset'],
+            }),
+          );
+        }
       }
       expect(tx.user.findUnique).toHaveBeenCalled();
     },

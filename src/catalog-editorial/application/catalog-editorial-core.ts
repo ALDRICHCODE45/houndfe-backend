@@ -7,7 +7,7 @@ export interface EditorialContext {
   productId: string;
 }
 export interface ReadAuthoritySnapshot extends EditorialContext {
-  /** True only for an active actor with current tenant membership. */
+  /** Active actor qualified by tenant membership or verified global authority. */
   activeMember: boolean;
   canRead: boolean;
 }
@@ -66,7 +66,9 @@ export interface EditorialTransitionRequest {
   idempotencyKey: string;
 }
 export interface EditorialTransitionAuthority {
-  resolve(context: EditorialContext): Promise<
+  resolve(
+    context: EditorialContext,
+  ): Promise<
     | (ReadAuthoritySnapshot & { canPublish: boolean; canDiscard: boolean })
     | null
   >;

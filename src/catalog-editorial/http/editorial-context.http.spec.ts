@@ -182,8 +182,18 @@ describe('editorial context HTTP', () => {
     const [status, error] = errors[mode] ?? [403, 'FORBIDDEN'];
     let req = get(mode === 'uuid' ? path.replace(productId, 'invalid') : path);
     if (mode === 'query') req = req.query({ productId: 'foreign' });
-    await check(req, status, { statusCode: status, error });
-    if (!['vanished', 'readFailure'].includes(mode))
+    await check(
+      req,
+      mode === 'manage' ? 200 : status,
+      mode === 'manage' ? { variants: [] } : { statusCode: status, error },
+    );
+    if (mode === 'manage') {
+      expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(db.$queryRaw).toHaveBeenCalledWith(
+        expect.objectContaining({ values: [tenantId, productId] }),
+      );
+    }
+    if (!['manage', 'vanished', 'readFailure'].includes(mode))
       expect(db.$queryRaw).not.toHaveBeenCalled();
     if (['uuid', 'query'].includes(mode))
       expect(db.user.findUnique).not.toHaveBeenCalled();

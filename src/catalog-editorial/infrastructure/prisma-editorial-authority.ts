@@ -1,4 +1,8 @@
 import type { PrismaClient } from '@prisma/client';
+import {
+  hasGlobalEditorialAdministrator,
+  type EditorialAdministratorClient,
+} from './editorial-administrator-authority';
 import type {
   EditorialContext,
   EditorialCreateAuthority,
@@ -34,8 +38,12 @@ export class PrismaEditorialAuthority implements EditorialReadAuthority {
     private readonly prisma: Pick<
       PrismaClient,
       'user' | 'tenantMembership' | 'product'
-    >,
+    > &
+      EditorialAdministratorClient,
     private readonly documents?: EditorialDocumentAuthorityProvider,
+    private readonly policy:
+      | 'editorial-administrators'
+      | 'exact-grants' = 'editorial-administrators',
   ) {}
 
   private async resolveWrite(
@@ -80,6 +88,9 @@ export class PrismaEditorialAuthority implements EditorialReadAuthority {
         select: { isActive: true },
       });
       if (actor?.isActive !== true) return null;
+      const globalAdministrator =
+        this.policy === 'editorial-administrators' &&
+        (await hasGlobalEditorialAdministrator(this.prisma, actorId));
       const memberships = await this.prisma.tenantMembership.findMany({
         where: { userId: actorId, tenantId },
         include: {
@@ -87,7 +98,7 @@ export class PrismaEditorialAuthority implements EditorialReadAuthority {
         },
       });
       if (
-        memberships.length === 0 ||
+        (!globalAdministrator && memberships.length === 0) ||
         memberships.some((m) => m.userId !== actorId || m.tenantId !== tenantId)
       )
         return null;
@@ -104,8 +115,13 @@ export class PrismaEditorialAuthority implements EditorialReadAuthority {
         permissions.some(
           (p) => p.subject === identity.subject && p.action === identity.action,
         );
-      const canRead = has(EDITORIAL_PERMISSIONS.read);
-      const canEdit = canRead && has(EDITORIAL_PERMISSIONS.update);
+      const administrator =
+        globalAdministrator ||
+        (this.policy === 'editorial-administrators' &&
+          has({ subject: 'all', action: 'manage' }));
+      const canRead = administrator || has(EDITORIAL_PERMISSIONS.read);
+      const canEdit =
+        canRead && (administrator || has(EDITORIAL_PERMISSIONS.update));
       return {
         actorId,
         tenantId,
@@ -115,7 +131,8 @@ export class PrismaEditorialAuthority implements EditorialReadAuthority {
         canCreate: canEdit,
         canSave: canEdit,
         canDiscard: canEdit,
-        canPublish: canRead && has(EDITORIAL_PERMISSIONS.publish),
+        canPublish:
+          canRead && (administrator || has(EDITORIAL_PERMISSIONS.publish)),
       };
     } catch {
       // Unavailable authority never becomes an effective grant or leaks errors.

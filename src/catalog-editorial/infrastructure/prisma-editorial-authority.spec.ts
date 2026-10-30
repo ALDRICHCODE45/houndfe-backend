@@ -58,7 +58,7 @@ describe('current Prisma editorial capability/read authority', () => {
       false,
       false,
     ],
-    [[{ subject: 'all', action: 'manage' }], false, false, false],
+    [[{ subject: 'all', action: 'manage' }], true, true, true],
     [[{ subject: 'Product', action: 'manage' }], false, false, false],
     [
       [{ subject: 'ProductEditorialDraft', action: 'manage' }],
@@ -72,7 +72,7 @@ describe('current Prisma editorial capability/read authority', () => {
       false,
       false,
     ],
-    [[grants.read, { subject: 'all', action: 'manage' }], true, false, false],
+    [[grants.read, { subject: 'all', action: 'manage' }], true, true, true],
     [
       [grants.read, { subject: 'ProductEditorialDraft', action: 'manage' }],
       true,
@@ -80,7 +80,7 @@ describe('current Prisma editorial capability/read authority', () => {
       false,
     ],
   ])(
-    'maps only exact rows %j',
+    'maps exact rows and tenant administrator %j',
     async (permissions, canRead, canEdit, canPublish) => {
       const f = fixture();
       f.members.mockResolvedValue([membership(permissions)]);
@@ -233,6 +233,10 @@ describe('current Prisma editorial capability/read authority', () => {
 describe.each(['create', 'save'] as const)(
   'guarded %s authority',
   (operation) => {
+    const permissionSets = [
+      [grants.read, grants.update],
+      [{ subject: 'all', action: 'manage' }],
+    ];
     function setup(withProvider = true) {
       // Test-only authoritative source; no fixture provider is registered at runtime.
       const document = {
@@ -264,7 +268,6 @@ describe.each(['create', 'save'] as const)(
       [],
       [grants.read],
       [grants.update],
-      [{ subject: 'all', action: 'manage' }],
       [{ subject: 'Product', action: 'manage' }],
       [{ subject: 'ProductEditorialDraft', action: 'manage' }],
     ])('requires both explicit permissions, not %j', async (...permissions) => {
@@ -276,10 +279,15 @@ describe.each(['create', 'save'] as const)(
       expect(f.write).not.toHaveBeenCalled();
     });
 
-    it.each(['absent', 'null', 'unavailable', 'tenant', 'product'])(
-      'denies %s document provider before receipt/state/write',
-      async (reason) => {
+    it.each(
+      ['absent', 'null', 'unavailable', 'tenant', 'product'].flatMap((reason) =>
+        permissionSets.map((permissions) => ({ reason, permissions })),
+      ),
+    )(
+      'denies $reason document provider with $permissions before receipt/state/write',
+      async ({ reason, permissions }) => {
         const f = setup(reason !== 'absent');
+        f.members.mockResolvedValue([membership(permissions)]);
         if (reason === 'null') f.provider.resolve.mockResolvedValue(null);
         if (reason === 'unavailable')
           f.provider.resolve.mockRejectedValue(new Error('private detail'));
@@ -291,8 +299,9 @@ describe.each(['create', 'save'] as const)(
       },
     );
 
-    it('captures caller scope and detaches returned document authority from provider mutation', async () => {
+    it.each(permissionSets)('detaches authority for %j', async (...rows) => {
       const f = setup();
+      f.members.mockResolvedValue([membership(rows)]);
       f.provider.resolve.mockImplementation((input: typeof scope) => {
         expect(input).toEqual(scope);
         input.actorId = input.tenantId = input.productId = 'other';
