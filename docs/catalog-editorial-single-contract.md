@@ -526,6 +526,15 @@ extra universal minima. Optional nonpertinence cannot waive required/conditional
 routes. Content.kind, if asserted, must agree; pack_count is not content. Evidence
 for facts never substitutes for compatibility/stage/composition/declared-value evidence.
 
+S52: a known canonical `content.kind` assertion requires a known matching
+`contentMagnitude`, even in an otherwise optional context: `content.kind.mass`→mass,
+`content.kind.volume`→volume, `content.kind.count`→count,
+`content.kind.length`→length and `content.kind.area`→area. The same canonical
+meaning applies in custom families. Unmapped extra options block publication
+until explicitly mapped; labels, aliases and prefixes do not establish agreement.
+Absent/unknown/NA kind skips this comparison; explicit-NA admission remains
+independent. This agreement does not select owners/subjects or infer aggregation.
+
 S46: accessory `optional_equipment` returns O when `electricalApplies` is missing
 or unknown, even for a known equipment value with valid evidence. Unknown electrical
 relevance alone does not block that optional assertion; all other checks remain.
