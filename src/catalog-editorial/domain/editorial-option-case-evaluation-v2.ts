@@ -10,13 +10,30 @@ export type RuleResultV2 = Pick<
   'applicability' | 'required' | 'allowNA' | 'evidenceRequired' | 'documentary'
 >;
 
-/** Admitted, stable metadata/values only; selection is not publication admission. */
+export type OptionCaseSelectionV2 = {
+  caseCode: string;
+  result: RuleResultV2;
+};
+
+/** Compatibility projection: exactly five fields, never case identity. */
 export function evaluateOptionCasesV2(
   policy: Extract<BindingPolicy, { route: 'option_cases' }>,
   family: FamilyV2,
   values: readonly ValueV2[],
   subjectVariantId: string | null,
 ): RuleResultV2 | null {
+  return (
+    selectOptionCaseV2(policy, family, values, subjectVariantId)?.result ?? null
+  );
+}
+
+/** Admitted, stable metadata/values only; selection is not publication admission. */
+export function selectOptionCaseV2(
+  policy: Extract<BindingPolicy, { route: 'option_cases' }>,
+  family: FamilyV2,
+  values: readonly ValueV2[],
+  subjectVariantId: string | null,
+): OptionCaseSelectionV2 | null {
   let selected: PolicyCase | null = null;
   for (const candidate of policy.cases) {
     const matches = candidate.when.every((test) => {
@@ -51,10 +68,13 @@ export function evaluateOptionCasesV2(
   }
   if (selected === null) return null;
   return {
-    applicability: selected.applicability,
-    required: selected.required,
-    allowNA: selected.allowNA,
-    evidenceRequired: selected.evidenceRequired,
-    documentary: selected.documentary,
+    caseCode: selected.code,
+    result: {
+      applicability: selected.applicability,
+      required: selected.required,
+      allowNA: selected.allowNA,
+      evidenceRequired: selected.evidenceRequired,
+      documentary: selected.documentary,
+    },
   };
 }

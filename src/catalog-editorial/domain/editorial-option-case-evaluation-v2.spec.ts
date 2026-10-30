@@ -1,5 +1,6 @@
 import {
   evaluateOptionCasesV2,
+  selectOptionCaseV2,
   type RuleResultV2,
 } from './editorial-option-case-evaluation-v2';
 import type {
@@ -89,6 +90,177 @@ function select(
     expect(input).toEqual(before);
   }
 }
+
+describe('selected option-case identity', () => {
+  function identify(
+    cases: PolicyCase[],
+    values: ValueV2[] = [],
+    subject: string | null = 'v1',
+  ) {
+    const policy = { route: 'option_cases' as const, cases };
+    const input = { policy, family: family(policy), values };
+    const before = structuredClone(input);
+    freeze(input);
+    try {
+      const selection = selectOptionCaseV2(
+        policy,
+        input.family,
+        values,
+        subject,
+      );
+      expect(
+        evaluateOptionCasesV2(policy, input.family, values, subject),
+      ).toEqual(selection?.result ?? null);
+      return selection;
+    } finally {
+      expect(input).toEqual(before);
+    }
+  }
+
+  it('distinguishes disjoint cases with identical results and own dependencies', () => {
+    const cases = [
+      rule(
+        [test('equals_set', ['b']), test('equals_set', ['p'], 'product')],
+        'unselected',
+      ),
+      rule([test()], 'selected'),
+    ];
+    const actual = identify(cases, [known(['a'])]);
+    expect(actual).toEqual({ caseCode: 'selected', result });
+    expect(cases.find((item) => item.code === actual!.caseCode)?.when).toEqual([
+      test(),
+    ]);
+  });
+
+  it.each([
+    { cases: [] },
+    { cases: [rule()] },
+    { cases: [rule([], 'first'), rule([], 'second')] },
+  ])('has no identity for zero or multiple matches: %j', ({ cases }) =>
+    expect(identify(cases)).toBeNull(),
+  );
+
+  it('preserves unresolved fields on a selected unconditional case', () => {
+    const unresolved: RuleResultV2 = {
+      ...result,
+      applicability: 'unresolved',
+      required: false,
+      documentary: 'unresolved',
+    };
+    expect(identify([{ ...rule([], 'unconditional'), ...unresolved }])).toEqual(
+      {
+        caseCode: 'unconditional',
+        result: unresolved,
+      },
+    );
+  });
+
+  it.each(['equals_set', 'contains_all', 'intersects'] as const)(
+    '%s retains identity and single/multi matching behavior',
+    (operator) => {
+      for (const type of ['single', 'multi'] as const) {
+        expect(
+          identify([rule([test(operator)])], [known(['a'], type)]),
+        ).toEqual({
+          caseCode: 'case',
+          result,
+        });
+        expect(
+          identify([rule([test(operator)])], [known(['b'], type)]),
+        ).toBeNull();
+      }
+    },
+  );
+
+  it('keeps product selectors at null and sellable selectors on the subject', () => {
+    const cases = [rule([test(), test('equals_set', ['p'], 'product')])];
+    const product = known(['p'], 'single', null, 'product');
+    const values = [known(['a'], 'single', 'v2'), product];
+    expect(identify(cases, values)).toBeNull();
+    expect(identify(cases, values, 'v2')).toEqual({ caseCode: 'case', result });
+    expect(
+      identify(cases, [known(['a'], 'single', null), product], null),
+    ).toEqual({
+      caseCode: 'case',
+      result,
+    });
+    expect(
+      identify(cases, [known(['a']), { ...product, variantId: 'v1' }]),
+    ).toBeNull();
+  });
+
+  it.each(['unknown', 'not_applicable'] as const)(
+    '%s does not acquire an identity',
+    (state) => {
+      const value: ValueV2 = {
+        code: 'choice',
+        owner: 'sellable',
+        variantId: 'v1',
+        state,
+        evidence: null,
+      };
+      expect(identify([rule()], [value])).toBeNull();
+    },
+  );
+
+  it('returns fresh detached identity and result without widening the old API', () => {
+    const candidate = rule([], 'original');
+    const first = identify([candidate])!;
+    const second = identify([candidate])!;
+    expect(first).toEqual({ caseCode: 'original', result });
+    expect(first).not.toBe(second);
+    expect(first.result).not.toBe(second.result);
+    first.caseCode = 'changed';
+    first.result.required = false;
+    expect(second).toEqual({ caseCode: 'original', result });
+    expect(candidate).toEqual(rule([], 'original'));
+    expect(select([candidate])).toEqual(result);
+  });
+
+  it.each([evaluateOptionCasesV2, selectOptionCaseV2])(
+    'preserves encountered input errors through %p',
+    (evaluate) => {
+      const invalid: ValueV2 = {
+        ...known(['a']),
+        state: 'known',
+        payload: { type: 'text', value: 'a' },
+        evidence: null,
+      };
+      const policy = { route: 'option_cases' as const, cases: [rule()] };
+      expect(() => evaluate(policy, family(policy), [invalid], 'v1')).toThrow(
+        new TypeError('Expected admitted option-case inputs'),
+      );
+      const unbound = {
+        route: 'option_cases' as const,
+        cases: [rule([test('equals_set', ['a'], 'unbound')])],
+      };
+      expect(() => evaluate(unbound, family(unbound), [], 'v1')).toThrow(
+        new TypeError('Expected admitted option-case inputs'),
+      );
+    },
+  );
+
+  it.each([evaluateOptionCasesV2, selectOptionCaseV2])(
+    'preserves unexpected error identity through %p',
+    (evaluate) => {
+      const policy = { route: 'option_cases' as const, cases: [rule()] };
+      const metadata = family(policy);
+      const sentinel = new Error('metadata access failed');
+      Object.defineProperty(metadata, 'bindings', {
+        get() {
+          throw sentinel;
+        },
+      });
+      let caught: unknown;
+      try {
+        evaluate(policy, metadata, [], 'v1');
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(sentinel);
+    },
+  );
+});
 
 describe('runtime option-case selection', () => {
   it.each<['equals_set' | 'contains_all' | 'intersects', string[], boolean]>([

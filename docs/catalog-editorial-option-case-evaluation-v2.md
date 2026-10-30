@@ -6,6 +6,23 @@ option-case selection from the single-contract target §7. It returns a fresh
 documentary, or `null` when zero or multiple cases match (even equal results).
 A selected unresolved field remains unresolved; selection is not readiness.
 
+## Selected case identity
+
+`selectOptionCaseV2(policy, family, values, subjectVariantId)` uses the same single
+matching implementation and returns `{ caseCode, result }`, or `null` for zero or
+multiple matches. Both the envelope and its five-field result are fresh, detached
+objects. Unresolved result fields do not erase a uniquely selected case identity.
+
+A caller may resolve `caseCode` against the same stable admitted policy to inspect
+only that case's `when` dependencies. Do not infer identity from result equality:
+distinct cases can produce identical results. An unconditional case has no selector
+dependencies. This API does not traverse dependencies or construct an evaluation
+set; callers still own subject scheduling and publication admission.
+
+The existing `evaluateOptionCasesV2` projects only `result`, preserving its exact
+five-field contract, matching behavior and error propagation. Neither API adds
+metadata validation or permission to publish.
+
 ## Caller preconditions
 
 Supply the `option_cases` branch belonging to the given family, coherent admitted
