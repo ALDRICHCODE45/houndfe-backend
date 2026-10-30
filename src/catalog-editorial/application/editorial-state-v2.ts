@@ -1,23 +1,16 @@
 import type { ArchivedOptionWarning } from '../domain/contextual-document';
-import {
-  classifyEditorialDocumentMode,
-  type EditorialDocumentJson,
-} from '../domain/editorial-document-mode';
+import type { EditorialDocumentJson } from '../domain/editorial-document-mode';
+import { isRecognizableDocumentV2 } from '../domain/editorial-document-recognition-v2';
 import type { DocumentShapeV2 } from '../domain/editorial-document-shape-v2';
-
-export type DocumentViewV2 =
-  | { mode: 'legacy'; document: EditorialDocumentJson }
-  | { mode: 'production-v2'; document: DocumentShapeV2 }
-  | { mode: 'unsupported'; document: EditorialDocumentJson };
 
 export type EditorialStateV2 = {
   cycle: number | null;
   draft: {
     revision: number;
     basePublishedRevision: number | null;
-    document: DocumentViewV2;
+    document: DocumentShapeV2;
   } | null;
-  published: { revision: number; document: DocumentViewV2 } | null;
+  published: { revision: number; document: DocumentShapeV2 } | null;
   warnings?: ArchivedOptionWarning[];
 };
 
@@ -47,14 +40,11 @@ function copyJson(value: EditorialDocumentJson): EditorialDocumentJson {
   );
 }
 
-function documentView(document: EditorialDocumentJson): DocumentViewV2 {
-  const mode = classifyEditorialDocumentMode(document);
-  const copy = copyJson(document);
-  if (mode === 'production-v2') {
-    // The real classifier established this shape; copyJson preserves it verbatim.
-    return { mode, document: copy as DocumentShapeV2 };
-  }
-  return { mode, document: copy };
+function copyDocument(document: EditorialDocumentJson): DocumentShapeV2 {
+  if (!isRecognizableDocumentV2(document))
+    throw new TypeError('Expected an editorial document V2');
+  // Recognition establishes the shape; copy rather than reconstruct historical data.
+  return copyJson(document) as DocumentShapeV2;
 }
 
 /** Fresh response composition only; vocabularyRevision is already admitted. */
@@ -70,14 +60,14 @@ export function createEditorialStateV2(
         : {
             revision: input.draft.revision,
             basePublishedRevision: input.draft.basePublishedRevision,
-            document: documentView(input.draft.document),
+            document: copyDocument(input.draft.document),
           },
     published:
       input.published === null
         ? null
         : {
             revision: input.published.revision,
-            document: documentView(input.published.document),
+            document: copyDocument(input.published.document),
           },
   };
   if (input.warnings?.length) {

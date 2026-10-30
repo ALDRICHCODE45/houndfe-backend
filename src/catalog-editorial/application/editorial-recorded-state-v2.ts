@@ -1,11 +1,8 @@
 import type { ArchivedOptionWarning } from '../domain/contextual-document';
 import type { EditorialDocumentJson } from '../domain/editorial-document-mode';
 import { isRecognizableDocumentV2 } from '../domain/editorial-document-recognition-v2';
-import type {
-  DocumentViewV2,
-  EditorialStateV2,
-  StateV2,
-} from './editorial-state-v2';
+import type { DocumentShapeV2 } from '../domain/editorial-document-shape-v2';
+import type { EditorialStateV2, StateV2 } from './editorial-state-v2';
 
 function invalid(): never {
   throw new TypeError('Expected a recorded editorial state V2');
@@ -96,18 +93,11 @@ function copyJson(
   ancestors.delete(input);
   return result;
 }
-function view(input: unknown): DocumentViewV2 {
-  const row = closed(input, ['mode', 'document']);
-  const mode = row.mode;
-  if (mode !== 'legacy' && mode !== 'unsupported' && mode !== 'production-v2')
-    invalid();
-  // Guard and detach before recognition, including cyclic production-looking input.
-  const document = copyJson(row.document);
-  if (mode === 'production-v2') {
-    if (!isRecognizableDocumentV2(document)) invalid();
-    return { mode, document };
-  }
-  return { mode, document };
+function document(input: unknown): DocumentShapeV2 {
+  // Guard and detach before recognition, including cyclic current-looking input.
+  const copy = copyJson(input);
+  if (!isRecognizableDocumentV2(copy)) invalid();
+  return copy;
 }
 function warning(input: unknown): ArchivedOptionWarning {
   const row = closed(input, [
@@ -158,7 +148,7 @@ export function decodeRecordedEditorialStateV2(input: unknown): StateV2 {
     draft = {
       revision: counter(slot.revision),
       basePublishedRevision: nullableCounter(slot.basePublishedRevision),
-      document: view(slot.document),
+      document: document(slot.document),
     };
   }
   let published: EditorialStateV2['published'] = null;
@@ -166,7 +156,7 @@ export function decodeRecordedEditorialStateV2(input: unknown): StateV2 {
     const slot = closed(row.published, ['revision', 'document']);
     published = {
       revision: counter(slot.revision),
-      document: view(slot.document),
+      document: document(slot.document),
     };
   }
   const state: EditorialStateV2 = {

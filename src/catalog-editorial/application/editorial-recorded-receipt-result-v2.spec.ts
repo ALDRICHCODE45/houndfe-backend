@@ -33,8 +33,22 @@ function fixture() {
         published: {
           revision: 11,
           document: {
-            mode: 'unsupported',
-            document: { schemaVersion: 99, audit: ['\ud800', -0] },
+            schemaVersion: 2,
+            commercialTitle: '\ud800',
+            description: '',
+            mediaRefs: ['second', 'first'],
+            familyCode: null,
+            values: [
+              {
+                code: 'historical',
+                owner: 'product',
+                variantId: 'old',
+                state: 'known',
+                payload: { type: 'range', min: 9, max: -0, unit: '' },
+                evidence: { sourceRef: '', verifiedOn: 'old date' },
+              },
+            ],
+            facts: [],
           },
         },
         warnings: [],
@@ -286,8 +300,8 @@ describe('recorded receipt V2 (S2, contract §4/facts §3)', () => {
     expect(result).toEqual(value);
     expect(result).not.toBe(value);
     expect(result.headers).not.toBe(value.headers);
-    expect(result.body.state.published?.document.document).not.toBe(
-      value.body.state.published.document.document,
+    expect(result.body.state.published?.document).not.toBe(
+      value.body.state.published.document,
     );
     expect(result.careAttestation?.subjects[0]).not.toBe(
       value.careAttestation.subjects[0],

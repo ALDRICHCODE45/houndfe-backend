@@ -75,123 +75,124 @@ describe('createEditorialStateV2 fresh response', () => {
     });
   });
 
-  it.each<[string, EditorialDocumentJson, string]>([
-    ['empty legacy', {}, 'legacy'],
-    ['full legacy', legacy, 'legacy'],
-    ['historical V2 relational conflict', production, 'production-v2'],
-    ['future version', { schemaVersion: 3, future: ['retain'] }, 'unsupported'],
-    ['malformed V2', { schemaVersion: 2, facts: [] }, 'unsupported'],
-    ['string JSON', '\ud800', 'legacy'],
-    ['number JSON', -0, 'legacy'],
-    ['boolean JSON', false, 'legacy'],
-    ['null JSON', null, 'legacy'],
-    ['array JSON', [null, { schemaVersion: 99 }], 'legacy'],
+  it.each<[string, EditorialDocumentJson]>([
+    ['empty current document', { ...production, values: [] }],
+    ['historical relational conflicts', production],
+    ['raw strings', { ...production, commercialTitle: '\ud800' }],
   ])(
-    'classifies and copies %s in both present slots',
-    (_name, document, mode) => {
+    'copies direct %s into both slots without fresh admission',
+    (_name, document) => {
       freezeJson(document);
-      const result = createEditorialStateV2(revision, {
+      const input = {
         cycle: 7,
         draft: { revision: 11, basePublishedRevision: 5, document },
         published: { revision: 5, document },
-      });
-      expect(result.state).toStrictEqual({
-        cycle: 7,
-        draft: {
-          revision: 11,
-          basePublishedRevision: 5,
-          document: { mode, document },
-        },
-        published: { revision: 5, document: { mode, document } },
-      });
-      expectDetached(result.state.draft!.document.document, document);
-      expectDetached(result.state.published!.document.document, document);
-      if (document !== null && typeof document === 'object') {
-        expect(result.state.draft!.document.document).not.toBe(
-          result.state.published!.document.document,
+      };
+      const result = createEditorialStateV2(revision, input);
+      expect(result.state).toStrictEqual(input);
+      expectDetached(result.state.draft!.document, document);
+      expectDetached(result.state.published!.document, document);
+      expect(result.state.draft!.document).not.toBe(
+        result.state.published!.document,
+      );
+    },
+  );
+
+  it('keeps distinct documents and nullable base without counter arithmetic', () => {
+    const input = {
+      cycle: 3,
+      draft: { revision: 4, basePublishedRevision: null, document: production },
+      published: {
+        revision: 9,
+        document: { ...production, commercialTitle: 'Other' },
+      },
+    };
+    expect(createEditorialStateV2(revision, input).state).toStrictEqual(input);
+  });
+
+  it.each(['draft', 'published'] as const)(
+    'rejects obsolete or malformed %s documents rather than wrapping or omitting',
+    (slot) => {
+      const invalidDocuments: EditorialDocumentJson[] = [
+        {},
+        legacy,
+        { schemaVersion: 3, future: ['retain'] },
+        { schemaVersion: 2, facts: [] },
+        '\ud800',
+        -0,
+        false,
+        null,
+        [null, { schemaVersion: 99 }],
+        ...['legacy', 'unsupported', 'production-v2'].map((mode) => ({
+          mode,
+          document: production,
+        })),
+        { ...production, unknown: { nested: [true, null] } },
+        Object.fromEntries<EditorialDocumentJson>([
+          ...Object.entries(production),
+          ['__proto__', { extra: -0 }],
+        ]),
+      ];
+      for (const document of invalidDocuments) {
+        freezeJson(document);
+        const input = {
+          ...absent,
+          cycle: 1,
+          ...(slot === 'draft'
+            ? { draft: { revision: 1, basePublishedRevision: null, document } }
+            : { published: { revision: 1, document } }),
+        };
+        Object.freeze(input);
+        expect(() => createEditorialStateV2(revision, input)).toThrow(
+          new TypeError('Expected an editorial document V2'),
         );
+        expect(input[slot]?.document).toBe(document);
+        expect(input[slot === 'draft' ? 'published' : 'draft']).toBeNull();
       }
     },
   );
 
-  it.each<[string, EditorialDocumentJson, string, EditorialDocumentJson]>([
-    ['legacy', legacy, 'unsupported', { schemaVersion: 8 }],
-    ['unsupported', { schemaVersion: 8 }, 'production-v2', production],
-    ['production-v2', production, 'legacy', {}],
-  ])(
-    'keeps independent draft mode %s with a different published mode',
-    (draftMode, draftDocument, publishedMode, publishedDocument) => {
-      const result = createEditorialStateV2(revision, {
-        cycle: 3,
-        draft: {
-          revision: 4,
-          basePublishedRevision: null,
-          document: draftDocument,
-        },
-        published: { revision: 9, document: publishedDocument },
-      });
-      expect(result.state.draft?.document.mode).toBe(draftMode);
-      expect(result.state.published?.document.mode).toBe(publishedMode);
-      expect(result.state.draft?.basePublishedRevision).toBeNull();
-    },
-  );
+  it('preserves shared current children, strings, negative zero and array order independently', () => {
+    const document = {
+      ...production,
+      values: [production.values[0], production.values[0]],
+    };
+    freezeJson(document);
+    const result = createEditorialStateV2(revision, {
+      ...absent,
+      published: { revision: 13, document },
+    });
+    const copy = result.state.published!.document;
+    expectDetached(copy, document);
+    expect(copy.values[0]).not.toBe(copy.values[1]);
+    copy.mediaRefs.push('response-only');
+    expect(document.mediaRefs).toStrictEqual(['second', 'first']);
+    const value = copy.values[0];
+    expect(
+      value.state === 'known' &&
+        value.payload.type === 'range' &&
+        Object.is(value.payload.max, -0),
+    ).toBe(true);
+  });
 
-  it.each(['draft', 'published'] as const)(
-    'distinguishes an absent %s slot from a present null document',
-    (slot) => {
-      const result = createEditorialStateV2(revision, {
+  it('propagates unexpected recognition failures by identity', () => {
+    const sentinel = new TypeError('Expected an editorial document V2');
+    const document = new Proxy(production, {
+      ownKeys() {
+        throw sentinel;
+      },
+    });
+    let caught: unknown;
+    try {
+      createEditorialStateV2(revision, {
         ...absent,
-        cycle: 1,
-        ...(slot === 'draft'
-          ? {
-              draft: {
-                revision: 1,
-                basePublishedRevision: null,
-                document: null,
-              },
-            }
-          : { published: { revision: 1, document: null } }),
+        published: { revision: 1, document },
       });
-      expect(result.state[slot]?.document).toStrictEqual({
-        mode: 'legacy',
-        document: null,
-      });
-      expect(result.state[slot === 'draft' ? 'published' : 'draft']).toBeNull();
-    },
-  );
-
-  it.each(['legacy', 'unsupported'] as const)(
-    'preserves %s unknown keys, __proto__, strings, -0 and array order',
-    (mode) => {
-      const raw = Object.fromEntries<EditorialDocumentJson>([
-        ['__proto__', { untouched: ['\ud800', -0, ' second ', 'first'] }],
-        ['unknown', { nested: [true, null, { extra: 'retain' }] }],
-      ]);
-      if (mode === 'unsupported') raw.schemaVersion = 88;
-      freezeJson(raw);
-      const result = createEditorialStateV2(revision, {
-        ...absent,
-        published: { revision: 13, document: raw },
-      });
-      const view = result.state.published!.document;
-      expect(view.mode).toBe(mode);
-      expectDetached(view.document, raw);
-      const proto = Object.getOwnPropertyDescriptor(view.document, '__proto__');
-      expect(proto?.enumerable).toBe(true);
-      expect(Object.getPrototypeOf(view.document)).toBe(Object.prototype);
-      const copied = proto?.value as { untouched: EditorialDocumentJson[] };
-      expect(Object.is(copied.untouched[1], -0)).toBe(true);
-      copied.untouched.push('response-only');
-      const original = Object.getOwnPropertyDescriptor(raw, '__proto__')
-        ?.value as { untouched: EditorialDocumentJson[] };
-      expect(original.untouched).toStrictEqual([
-        '\ud800',
-        -0,
-        ' second ',
-        'first',
-      ]);
-    },
-  );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(sentinel);
+  });
 
   it('copies nonempty warnings exactly, in order, without recomputing', () => {
     const warnings: ArchivedOptionWarning[] = [

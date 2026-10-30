@@ -27,7 +27,8 @@ const production = () => ({
   ],
   facts: [],
 });
-function envelope(document: unknown = null, mode = 'legacy') {
+function envelope(...documents: [] | [unknown]) {
+  const document = documents.length ? documents[0] : production();
   return {
     contractVersion: 2,
     vocabularyRevision: R,
@@ -36,7 +37,7 @@ function envelope(document: unknown = null, mode = 'legacy') {
       draft: {
         revision: 1,
         basePublishedRevision: null,
-        document: { mode, document },
+        document,
       },
       published: null,
     },
@@ -68,7 +69,7 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
         draft: null,
         published: {
           revision: 2147483647,
-          document: { mode: 'legacy', document: null },
+          document: production(),
         },
       },
     };
@@ -86,34 +87,43 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
     expect(decode(unrelatedCounters)).toEqual(unrelatedCounters);
   });
 
-  it.each(['legacy', 'unsupported'])(
-    'does not recompute recorded %s mode',
-    (mode) => {
+  it.each(['draft', 'published'] as const)(
+    'rejects legacy, unsupported and wrapped documents in %s',
+    (slot) => {
       for (const document of [
-        production(),
+        null,
+        {},
         { schemaVersion: 99, extra: [-0, '\ud800', true] },
+        ...['legacy', 'unsupported', 'production-v2'].map((mode) => ({
+          mode,
+          document: production(),
+        })),
       ]) {
-        const input = envelope(document, mode);
-        expect(decode(input)).toEqual(input);
+        const input = envelope();
+        rejected({
+          ...input,
+          state: {
+            ...input.state,
+            [slot]:
+              slot === 'draft'
+                ? { ...input.state.draft, document }
+                : { revision: 1, document },
+          },
+        });
       }
     },
   );
 
-  it('keeps historical production conflicts and raw strings, not parser reconstruction', () => {
-    const input = envelope(production(), 'production-v2');
+  it('keeps direct historical conflicts and raw strings, not parser reconstruction', () => {
+    const input = envelope(production());
     expect(decode(input)).toEqual(input);
     const output = decode(input).state.draft!.document;
-    expect(output.mode).toBe('production-v2');
-    if (output.mode === 'production-v2') {
-      expect(
-        Object.is(
-          output.document.values[0].state === 'known' &&
-            output.document.values[0].payload.type === 'range' &&
-            output.document.values[0].payload.max,
-          -0,
-        ),
-      ).toBe(true);
-    }
+    const value = output.values[0];
+    expect(
+      value.state === 'known' &&
+        value.payload.type === 'range' &&
+        Object.is(value.payload.max, -0),
+    ).toBe(true);
   });
 
   it.each(['missing facts', 'wrong static axis'])(
@@ -138,7 +148,7 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
             ],
           },
         ];
-      rejected(envelope(document, 'production-v2'));
+      rejected(envelope(document));
     },
   );
 
@@ -164,8 +174,8 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
       input,
       input.state,
       input.state.draft,
-      input.state.draft.document,
-      { revision: 1, document: { mode: 'legacy', document: null } },
+      production(),
+      { revision: 1, document: production() },
       warning,
     ];
     const wrap = (index: number, value: unknown): unknown => {
@@ -173,7 +183,7 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
       if (index === 1) return { ...input, state: value };
       if (index === 2)
         return { ...input, state: { ...input.state, draft: value } };
-      if (index === 3) return envelopeWithView(value);
+      if (index === 3) return envelope(value);
       return {
         ...input,
         state: {
@@ -188,8 +198,7 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
         const missing: Record<string, unknown> = { ...container };
         delete missing[key];
         rejected(wrap(index, missing));
-        if (index !== 3 || key !== 'document')
-          rejected(wrap(index, { ...container, [key]: false }));
+        rejected(wrap(index, { ...container, [key]: false }));
       }
     });
     for (const vocabularyRevision of [
@@ -224,8 +233,8 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
       Object.defineProperty({}, 'hidden', { value: 1 }),
       { [Symbol()]: 1 },
     ])
-      rejected(envelopeWithView({ mode: 'legacy', document }));
-    rejected(envelope(cyclic, 'production-v2'));
+      rejected(envelope(document));
+    rejected(envelope({ ...production(), values: arrayCycle }));
   });
 
   it('rejects accessors/hidden/symbol fields without calling getters in records and arrays', () => {
@@ -272,7 +281,7 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
       for (const input of [
         proxy,
         envelope(proxy),
-        envelope(proxy, 'production-v2'),
+        envelope({ ...production(), values: [proxy] }),
       ]) {
         try {
           decode(input);
@@ -284,51 +293,48 @@ describe('recorded editorial state V2 (S2, contract §§4–5)', () => {
     }
   });
 
-  it('detaches shared acyclic children independently and safely preserves __proto__', () => {
-    const shared = { nested: [-0, '\ud800'] };
-    const document = Object.fromEntries([
-      ['__proto__', shared],
-      ['a', shared],
-    ]);
+  it('detaches shared current children independently without invoking prototype setters', () => {
+    const shared = production().values[0];
+    shared.code = '__proto__';
+    const document = { ...production(), values: [shared, shared] };
     const input = {
       ...envelope(document),
       state: { ...envelope(document).state, warnings: [warning] },
     };
     const output = decode(input);
     expect(output).toEqual(input);
-    const copied = output.state.draft!.document.document as Record<
-      string,
-      { nested: unknown[] }
-    >;
-    expect(Object.hasOwn(copied, '__proto__')).toBe(true);
-    expect(copied.a).not.toBe(copied.__proto__);
-    copied.a.nested.push('changed');
+    const copied = output.state.draft!.document;
+    expect(copied.values[0]).not.toBe(copied.values[1]);
+    expect(copied.values[0]).not.toBe(shared);
+    expect(Object.getPrototypeOf(copied)).toBe(Object.prototype);
+    copied.values[0].code = 'changed';
     output.state.warnings![0].optionCode = 'changed';
-    expect(shared.nested).toEqual([-0, '\ud800']);
-    expect(copied.__proto__.nested).toEqual([-0, '\ud800']);
+    expect(shared.code).toBe('__proto__');
+    expect(copied.values[1].code).toBe('__proto__');
     expect(warning.optionCode).toBe('');
-    expect(Object.is(copied.a.nested[0], -0)).toBe(true);
+    const value = copied.values[0];
+    expect(
+      value.state === 'known' &&
+        value.payload.type === 'range' &&
+        Object.is(value.payload.max, -0),
+    ).toBe(true);
+    rejected(
+      envelope(
+        Object.fromEntries<unknown>([
+          ...Object.entries(document),
+          ['__proto__', shared],
+        ]),
+      ),
+    );
   });
 
   it('accepts null-prototype records and dense arrays with alternate prototypes', () => {
-    const input = envelope(
-      Object.assign(Object.create(null) as object, { x: 1 }),
-    );
+    const document = production();
+    Object.setPrototypeOf(document, null);
+    const input = envelope(document);
     Object.setPrototypeOf(input.state, null);
     expect(decode(input)).toEqual(input);
-    const array = [1, null];
-    Object.setPrototypeOf(array, null);
-    expect(decode(envelope(array)).state.draft!.document.document).toEqual([
-      1,
-      null,
-    ]);
+    Object.setPrototypeOf(document.mediaRefs, null);
+    expect(decode(input).state.draft!.document.mediaRefs).toEqual(['x', 'x']);
   });
 });
-
-function envelopeWithView(view: unknown): unknown {
-  const input = envelope();
-  return {
-    ...input,
-    state: { ...input.state, draft: { ...input.state.draft, document: view } },
-  };
-}

@@ -1,14 +1,16 @@
 # Recorded receipt result V2
 
 Dormant `decodeRecordedReceiptResultV2(operation, request, input)` implements the
-recorded shape boundary in contract §4 and private facts §3.
+recorded shape boundary in the single editorial contract S35 §§8–9.
 The request is already admitted and corresponds to the supplied write operation.
 This is not a request parser or a fresh-state validator.
 
 The closed internal result retains status, recorded StateV2, semantic headers and
 private care attestation. It is **not an HTTP DTO**; never expose the attestation.
-Body decoding delegates unchanged to the recorded-state decoder, preserving modes,
-raw history and warning presence. Nested and unexpected errors must propagate.
+Body decoding delegates to the recorded-state decoder: present slots contain direct
+current-contract documents, not historical mode wrappers. Historical field contents
+and warning presence survive without fresh policy checks. Nested and unexpected
+errors must propagate; obsolete wrappers are rejected, not converted.
 
 Attestation is required only for confirmed publish, otherwise null. Its syntax and
 request/body revision coherence do not prove digest truth, subject E coverage,
