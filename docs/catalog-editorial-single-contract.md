@@ -487,6 +487,9 @@ single/text/multi must be nonempty (ECMAScript trim only to test text emptiness)
 valid boolean/number/range can satisfy required. Optional known false/empty remains
 a known assertion. Policy `documentary` is readiness metadata, never product legal
 compliance or evidence. Product-owned rules evaluate once, not once per variant.
+S50: even when E is empty, product-owned always bindings and known/NA assertions
+are evaluated once. This adds no sellable subject or null identity to E and does
+not waive any other publication gate.
 
 Production route results have exact five-field values in order
 (applicability, required, allowNA, evidenceRequired, documentary):
