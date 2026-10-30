@@ -1,6 +1,5 @@
 import { hashEditorialJson } from '../domain/editorial-canonical-json';
 import * as unicode from '../domain/editorial-alias-comparison-v1';
-import * as historicalV1 from '../domain/editorial-vocabulary-historical-v1';
 import * as historicalV2 from '../domain/editorial-vocabulary-historical-v2';
 import { EditorialVocabularyRepresentationError } from '../domain/editorial-vocabulary-representation-error';
 import { PrismaEditorialVocabularySnapshot } from '../infrastructure/prisma-editorial-vocabulary-snapshot';
@@ -68,7 +67,6 @@ function adapter(input: unknown) {
 }
 function projectors() {
   return {
-    v1: jest.spyOn(historicalV1, 'projectHistoricalVocabularyV1'),
     v2: jest.spyOn(historicalV2, 'materializeHistoricalVocabularyResponseV2'),
   };
 }
@@ -128,7 +126,6 @@ describe('dormant editorial vocabulary read', () => {
       expect($queryRaw).toHaveBeenCalledTimes(1);
       expect(spies.v2).toHaveBeenCalledTimes(1);
       expect(spies.v2.mock.calls[0][0]).toBe(input);
-      expect(spies.v1).not.toHaveBeenCalled();
       expect(result).toBe(spies.v2.mock.results[0].value);
       expect(result).toEqual({
         contractVersion: 2,
@@ -179,7 +176,6 @@ describe('dormant editorial vocabulary read', () => {
       expect(translated.cause).toBe(spies.v2.mock.results[0].value);
       expect(translated).not.toBe(translated.cause);
       expect($queryRaw).toHaveBeenCalledTimes(1);
-      expect(spies.v1).not.toHaveBeenCalled();
       expect(input).toEqual(before);
     },
   );
@@ -206,7 +202,6 @@ describe('dormant editorial vocabulary read', () => {
       );
       await expect(pending).rejects.toBe(original);
       expect($queryRaw).toHaveBeenCalledTimes(1);
-      expect(spies.v1).not.toHaveBeenCalled();
       expect(spies.v2).not.toHaveBeenCalled();
     },
   );
@@ -288,7 +283,6 @@ describe('dormant editorial vocabulary read', () => {
     const result = await pending;
     expect(result).toBe(spies.v2.mock.results[0].value);
     expect(spies.v2).toHaveBeenCalledTimes(1);
-    expect(spies.v1).not.toHaveBeenCalled();
     expect(source.read).toHaveBeenCalledTimes(1);
   });
 });
