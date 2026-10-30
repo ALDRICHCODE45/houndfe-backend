@@ -262,7 +262,7 @@ describe('generic V2 canonical arrays and content R (T3c S2/S19)', () => {
   it.each([
     ['families.0.id', 'other'],
     ['families.0.label', 'Changed'],
-    ['families.0.bindings.0.owner', 'sellable'],
+    ['families.0.bindings.2.owner', 'sellable'],
     ['families.0.bindings.0.exposure', 'FACET'],
     ['families.0.bindings.0.searchable', true],
     ['families.0.bindings.0.sortOrder', -4],
@@ -315,6 +315,7 @@ describe('generic V2 canonical arrays and content R (T3c S2/S19)', () => {
     ['families.1.id', '1'],
     ['families.1.code', 'a'],
     ['families.0.bindings.0.definitionId', 'missing'],
+    ['families.0.bindings.0.owner', 'sellable'],
     ['definitions.0.groups.0.optionCodes', ['missing']],
     ['definitions.0.aliases.1.label', 'Alias A'],
     ['families.0.bindings.2.policy.cases.1', policyCase('z', 'a')],

@@ -228,6 +228,8 @@ describe('assertFamilyOptionCaseStaticV2', () => {
 
   it('keeps archived extras, mixed owners, pending roots and conditional chains', () => {
     const f = fixture('single', [[test('equals_set', ['b'])]]);
+    // Product-owned intermediate selectors can depend only on product selectors.
+    f.family.bindings[2].owner = 'product';
     f.family.bindings[1].policy = {
       route: 'option_cases',
       cases: [policyCase([test('intersects', ['extra'], 'other')])],

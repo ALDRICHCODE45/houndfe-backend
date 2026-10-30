@@ -9,6 +9,7 @@ function invalid(): never {
 }
 
 type Node = {
+  owner: 'product' | 'sellable';
   definition: DefinitionV2;
   dependencies: Set<string>;
   incoming: number;
@@ -32,6 +33,7 @@ export function assertFamilyReferencesV2(
     const definition = definitionsById.get(binding.definitionId);
     if (!definition || definition.code !== binding.definitionCode) invalid();
     nodes.set(binding.definitionCode, {
+      owner: binding.owner,
       definition,
       dependencies: new Set(),
       incoming: 0,
@@ -46,6 +48,8 @@ export function assertFamilyReferencesV2(
       for (const test of policyCase.when) {
         const selector = nodes.get(test.definitionCode);
         if (!selector) invalid();
+        if (binding.owner === 'product' && selector.owner === 'sellable')
+          invalid();
         const definition = selector.definition;
         if (definition.type !== 'single' && definition.type !== 'multi') {
           invalid();

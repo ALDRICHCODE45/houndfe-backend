@@ -3,6 +3,7 @@ import {
   validateDefinitionV2,
 } from './editorial-vocabulary-definition-v2';
 import { assertFamilyReferencesV2 } from './editorial-vocabulary-family-references-v2';
+import { EditorialVocabularyRepresentationError } from './editorial-vocabulary-representation-error';
 import {
   type BindingV2,
   parseFamilyShapeV2,
@@ -191,7 +192,41 @@ describe('assertFamilyReferencesV2 trusted-input reference assertion', () => {
     expect(() => check(f)).toThrow(TypeError);
   });
 
-  it('allows cross-owner selectors, pending roots and fact rules without triple evaluation', () => {
+  it.each([
+    ['product', 'product', false],
+    ['product', 'sellable', true],
+    ['sellable', 'product', false],
+    ['sellable', 'sellable', false],
+  ] as const)(
+    'admits owner edge %s → %s with rejection=%s without mutation',
+    (targetOwner, selectorOwner, rejects) => {
+      const f = fixture([
+        { ...binding('d', cases([['s']])), owner: targetOwner },
+        { ...binding('s'), owner: selectorOwner },
+      ]);
+      const before = JSON.stringify([f.family, [...f.definitionsById]]);
+      freezeTree(f.family);
+      for (const definition of f.definitionsById.values())
+        freezeTree(definition);
+      Object.freeze(f.definitionsById);
+      if (rejects) {
+        expect(() => check(f)).toThrow(EditorialVocabularyRepresentationError);
+        expect(() => check(f)).toThrow('Expected valid family references V2');
+      } else expect(check(f)).toBeUndefined();
+      expect(JSON.stringify([f.family, [...f.definitionsById]])).toBe(before);
+    },
+  );
+
+  it('rejects a sellable selector in a later case of a product target', () => {
+    const f = fixture([
+      { ...binding('d', cases([['p'], ['p', 's']])), owner: 'product' },
+      { ...binding('p'), owner: 'product' },
+      binding('s'),
+    ]);
+    expect(() => check(f)).toThrow(EditorialVocabularyRepresentationError);
+  });
+
+  it('allows sellable-to-product selectors, pending roots and fact rules without triple evaluation', () => {
     const selector = binding('s', fact);
     selector.owner = 'product';
     expect(

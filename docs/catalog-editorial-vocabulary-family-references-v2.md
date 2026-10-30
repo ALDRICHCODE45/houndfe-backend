@@ -15,7 +15,7 @@ This is **not an unknown-input parser or full vocabulary/publication admission**
 | Area                  | Assertion                                                                                                                                       |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | All bindings          | Resolve definitionId and require the exact matching definitionCode, including pending and fact_rule routes.                                     |
-| Option-case selectors | Require a binding in this same family and its resolved single/multi definition; cross-owner dependencies are allowed.                           |
+| Option-case selectors | Require a same-family binding and its resolved single/multi definition. Reject product→sellable; preserve the other three owner pairs (S44).                           |
 | Expected options      | Every code belongs exactly to the selector's options; archived options are accepted. No trimming, case folding, alias or group expansion.       |
 | Dependency graph      | Union dependent→tested-binding edges across all cases; deduplicate pairs. Reject self-dependencies and cycles in any component.                 |
 | Valid graphs          | Empty families, chains, diamonds and repeated dependencies are accepted. Iterative cycle detection avoids recursive stack growth on large DAGs. |
