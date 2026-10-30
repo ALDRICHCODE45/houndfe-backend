@@ -591,7 +591,11 @@ pre-lookup safe-integer or storage-bound wire rule.
 Archived assignments conserve only identical family/definition/owner/variant/type/
 option identity: save baseline is stored Draft; publish baseline current Published
 (null→empty), initialize source Published. No new/moved/re-added archived option.
-Invalid baseline grants no conservation; corrected fresh candidates remain possible.
+S42: a structurally or context/reference-invalid baseline grants no conservation
+as a whole, not per surviving row. Do not disqualify a baseline solely for unrelated
+new evidence, numeric-policy or facts validation failures. The fresh candidate
+still passes every applicable fresh check; corrected fresh candidates remain possible.
+Media ownership remains a server-side check; baseline presence is not ownership proof.
 Valid conservation warnings use exact IDs/fields above; fresh empty warning array
 omitted, GET does not fabricate warnings from invalid history. Recorded warnings
 are preserved exactly, including ordering/presence, never rebuilt on replay.
