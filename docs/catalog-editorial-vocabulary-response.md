@@ -4,12 +4,12 @@
 
 ## Response contract
 
-- Every descriptor sends `Cache-Control: no-store`.
-- Success preserves the read result by identity: V1 is unwrapped with version `1` and no revision; V2 sends version `2` and the exact envelope revision.
-- Header admission failures prevent reads. Typed header errors select 400/406 and their known version; programmer input failures select generic 500 without a version.
-- After negotiation, errors retain the known version. Only the typed application unrepresentable error on V2 selects S27's `EDITORIAL_VOCABULARY_UNREPRESENTABLE`; all other read failures select `INTERNAL_ERROR`, including source-thrown header errors and V1-injected V2 errors.
+- Every call creates its own headers with `Cache-Control: no-store` and informational `Editorial-Contract-Version: 2` before parsing, including internal-input failures.
+- Headerless requests explicitly call `readEditorialVocabulary(source, 2)` once and await it. Success preserves the full canonical envelope by identity and sends its exact revision.
+- Any occurrence of the five prohibited request headers selects `400 MALFORMED` before reading; internal raw-pair input failures select `500 INTERNAL_ERROR`. No negotiation or 406 remains.
+- Only the typed application unrepresentable error selects `500 EDITORIAL_VOCABULARY_UNREPRESENTABLE`; other read failures select `500 INTERNAL_ERROR`, including source-thrown header/representation errors.
 - Error bodies contain exactly `{statusCode,error}`. No error revision, document, exception message or cause is exposed. This outward translation intentionally differs from application-layer identity propagation.
 
 ## Proof limits
 
-Tests cover S2/S23/S27/S29 dormant composition, exact descriptors, success identity, admission ordering, secrecy and call-local state. They do not prove registered HTTP, CORS or activation. Existing controllers, filters and authentication remain unchanged; storage, adoption and full-production admission are outside this unit.
+Tests cover S35/S37 dormant composition, exact descriptors, success identity, admission ordering, secrecy, frozen inputs and interleaved call-local headers. They do not prove registered HTTP, CORS or activation. Existing controllers, filters and authentication remain unchanged; storage and full-production admission are outside this unit. The application-layer V1 branch remains unused by this helper pending separate retirement; this is not full V1 cleanup. See [target contract §2](catalog-editorial-single-contract.md#2-http-surface-and-authority).

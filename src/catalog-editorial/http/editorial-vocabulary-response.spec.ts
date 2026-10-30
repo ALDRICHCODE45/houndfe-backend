@@ -5,6 +5,10 @@ import { EditorialVocabularyHeaderError } from './editorial-vocabulary-headers';
 import { createEditorialVocabularyHttpResponse as respond } from './editorial-vocabulary-response';
 
 const version2 = ['Editorial-Contract-Version', '2'];
+const acceptedHeaders = [
+  { rawHeaders: [] },
+  { rawHeaders: ['X-Unrelated', 'a,b', 'X-Unrelated', ''] },
+];
 const fixture = () => ({
   metadata: { id: 'global', semanticsVersion: 'editorial-production-1' },
   families: [
@@ -68,25 +72,22 @@ function freeze(value: unknown): void {
     Object.freeze(value);
   }
 }
-function headers(version?: 1 | 2) {
+function headers() {
   return {
     'Cache-Control': 'no-store',
-    ...(version === undefined
-      ? {}
-      : { 'Editorial-Contract-Version': String(version) }),
+    'Editorial-Contract-Version': '2',
   };
 }
-function failure(statusCode: number, error: string, version?: 1 | 2) {
-  return { statusCode, headers: headers(version), body: { statusCode, error } };
+function failure(statusCode: number, error: string) {
+  return { statusCode, headers: headers(), body: { statusCode, error } };
 }
 afterEach(() => jest.restoreAllMocks());
 
 describe('dormant editorial vocabulary response descriptions', () => {
-  it.each([1, 2] as const)(
-    'composes real custom V%s without mutation or DTO reconstruction',
-    async (version) => {
+  it.each(acceptedHeaders)(
+    'composes canonical body without mutation or DTO reconstruction',
+    async ({ rawHeaders }) => {
       const raw = fixture();
-      const rawHeaders = ['EDITORIAL-CONTRACT-VERSION', String(version)];
       const before = JSON.stringify({ raw, rawHeaders });
       freeze(raw);
       freeze(rawHeaders);
@@ -108,62 +109,50 @@ describe('dormant editorial vocabulary response descriptions', () => {
         definitions: legacy.definitions,
       };
       const revision = `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary })}`;
-      const expectedBody =
-        version === 1
-          ? legacy
-          : {
-              contractVersion: 2,
-              vocabularyRevision: `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary })}`,
-              vocabulary,
-            };
+      const expectedBody = {
+        contractVersion: 2,
+        vocabularyRevision: revision,
+        vocabulary,
+      };
       expect(response).toEqual({
         statusCode: 200,
         headers: {
-          ...headers(version),
-          ...(version === 2
-            ? {
-                'Editorial-Vocabulary-Revision': revision,
-              }
-            : {}),
+          ...headers(),
+          'Editorial-Vocabulary-Revision': revision,
         },
         body: expectedBody,
       });
       expect(response.body).toBe(body);
-      expect(spy).toHaveBeenCalledWith(source, version);
+      expect(spy).toHaveBeenCalledWith(source, 2);
       expect(source.read).toHaveBeenCalledTimes(1);
       expect(JSON.stringify({ raw, rawHeaders })).toBe(before);
     },
   );
 
-  it.each([1, 2] as const)(
-    'returns the exact empty V%s descriptor',
-    async (version) => {
+  it.each(acceptedHeaders)(
+    'returns the exact empty canonical descriptor',
+    async ({ rawHeaders }) => {
       const vocabulary = {
         semanticsVersion: 'editorial-production-1',
         families: [],
         definitions: [],
       };
       const revision = `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary })}`;
-      const body =
-        version === 1
-          ? { families: [], definitions: [] }
-          : {
-              contractVersion: 2,
-              vocabularyRevision: `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary })}`,
-              vocabulary,
-            };
+      const body = {
+        contractVersion: 2,
+        vocabularyRevision: revision,
+        vocabulary,
+      };
       const source = {
         read: jest
           .fn()
           .mockResolvedValue({ ...fixture(), families: [], definitions: [] }),
       };
-      expect(await respond(source, version === 1 ? [] : version2)).toEqual({
+      expect(await respond(source, rawHeaders)).toEqual({
         statusCode: 200,
         headers: {
-          ...headers(version),
-          ...(version === 2
-            ? { 'Editorial-Vocabulary-Revision': revision }
-            : {}),
+          ...headers(),
+          'Editorial-Vocabulary-Revision': revision,
         },
         body,
       });
@@ -172,78 +161,44 @@ describe('dormant editorial vocabulary response descriptions', () => {
   );
 
   it.each([
-    [
-      'duplicate',
-      [...version2, ...version2],
-      406,
-      'UNSUPPORTED_EDITORIAL_CONTRACT',
-      undefined,
-    ],
-    [
-      'list',
-      ['Editorial-Contract-Version', '1,2'],
-      406,
-      'UNSUPPORTED_EDITORIAL_CONTRACT',
-      undefined,
-    ],
-    [
-      'unsupported',
-      ['Editorial-Contract-Version', '3'],
-      406,
-      'UNSUPPORTED_EDITORIAL_CONTRACT',
-      undefined,
-    ],
-    [
-      'prohibited',
-      [...version2, 'Editorial-Vocabulary-Revision', ''],
-      400,
-      'MALFORMED',
-      2,
-    ],
-    [
-      'programmer shape',
-      ['Editorial-Contract-Version'],
-      500,
-      'INTERNAL_ERROR',
-      undefined,
-    ],
+    ['version 1', ['Editorial-Contract-Version', '1'], 400, 'MALFORMED'],
+    ['version 2', version2, 400, 'MALFORMED'],
+    ['duplicate', [...version2, ...version2], 400, 'MALFORMED'],
+    ['list', ['Editorial-Contract-Version', '1,2'], 400, 'MALFORMED'],
+    ['malformed', ['Editorial-Contract-Version', '02'], 400, 'MALFORMED'],
+    ['empty', ['Editorial-Contract-Version', ''], 400, 'MALFORMED'],
+    ['programmer shape', ['Editorial-Contract-Version'], 500, 'INTERNAL_ERROR'],
+    ['programmer array', null, 500, 'INTERNAL_ERROR'],
+    ['programmer value', ['X', 2], 500, 'INTERNAL_ERROR'],
   ] as const)(
     'rejects %s before reading with exact secret-free output',
-    async (_name, raw, status, code, version) => {
+    async (_name, raw, status, code) => {
       const source = { read: jest.fn().mockResolvedValue(fixture()) };
       freeze(raw);
       const before = JSON.stringify(raw);
-      expect(await respond(source, raw)).toEqual(
-        failure(status, code, version),
+      expect(await respond(source, raw as readonly string[])).toEqual(
+        failure(status, code),
       );
       expect(source.read).not.toHaveBeenCalled();
       expect(JSON.stringify(raw)).toBe(before);
     },
   );
 
-  it('ignores legacy extras without enabling V2', async () => {
+  it.each([
+    'Editorial-Adoption',
+    'Idempotency-Key',
+    'Editorial-Vocabulary-Revision',
+    'Editorial-Care-Confirmation',
+  ])('rejects formerly ignored %s before reading', async (name) => {
     const source = { read: jest.fn().mockResolvedValue(fixture()) };
-    expect(
-      await respond(source, [
-        'Editorial-Adoption',
-        'secret',
-        'Idempotency-Key',
-        '',
-        'Editorial-Vocabulary-Revision',
-        'old',
-        'Editorial-Care-Confirmation',
-        'x',
-      ]),
-    ).toEqual({
-      statusCode: 200,
-      headers: headers(1),
-      body: legacy,
-    });
-    expect(source.read).toHaveBeenCalledTimes(1);
+    expect(await respond(source, [name, 'secret'])).toEqual(
+      failure(400, 'MALFORMED'),
+    );
+    expect(source.read).not.toHaveBeenCalled();
   });
 
   it.each(['missing metadata', 'policy extra field'])(
-    'maps real %s to S27 only for V2',
+    'maps real %s to S27',
     async (kind) => {
       const raw = fixture();
       const input =
@@ -268,8 +223,8 @@ describe('dormant editorial vocabulary response descriptions', () => {
         });
       }
       const source = { read: jest.fn().mockResolvedValue(input) };
-      expect(await respond(source, version2)).toEqual(
-        failure(500, 'EDITORIAL_VOCABULARY_UNREPRESENTABLE', 2),
+      expect(await respond(source, [])).toEqual(
+        failure(500, 'EDITORIAL_VOCABULARY_UNREPRESENTABLE'),
       );
       expect(source.read).toHaveBeenCalledTimes(1);
     },
@@ -285,37 +240,30 @@ describe('dormant editorial vocabulary response descriptions', () => {
     { code: 'EDITORIAL_VOCABULARY_UNREPRESENTABLE', cause: 'secret' },
     'secret',
     null,
-    new EditorialVocabularyHeaderError('MALFORMED', 400, 2),
-    new EditorialVocabularyHeaderError(
-      'UNSUPPORTED_EDITORIAL_CONTRACT',
-      406,
-      undefined,
-    ),
-  ])('hides unexpected source failure %# after negotiation', async (error) => {
+    new EditorialVocabularyHeaderError(),
+  ])('hides unexpected source failure %#', async (error) => {
     const source = { read: jest.fn().mockRejectedValue(error) };
-    expect(await respond(source, version2)).toEqual(
-      failure(500, 'INTERNAL_ERROR', 2),
-    );
+    expect(await respond(source, [])).toEqual(failure(500, 'INTERNAL_ERROR'));
     expect(source.read).toHaveBeenCalledTimes(1);
   });
 
-  it.each([1, 2] as const)(
-    'hides a source decoding malformed-shape TypeError in V%s',
-    async (version) => {
+  it.each(acceptedHeaders)(
+    'hides a source decoding malformed-shape TypeError',
+    async ({ rawHeaders }) => {
       const source = {
         read: jest.fn(async () => {
           const malformed: unknown = await Promise.resolve(null);
           return (malformed as { snapshot: unknown }).snapshot;
         }),
       };
-      expect(
-        await respond(source, ['Editorial-Contract-Version', String(version)]),
-      ).toEqual(failure(500, 'INTERNAL_ERROR', version));
+      expect(await respond(source, rawHeaders)).toEqual(
+        failure(500, 'INTERNAL_ERROR'),
+      );
       expect(source.read).toHaveBeenCalledTimes(1);
     },
   );
 
-  it('does not let an injected typed V2 error opt V1 into S27', async () => {
+  it('maps the typed application error without leaking its private cause', async () => {
     const source = {
       read: jest
         .fn()
@@ -326,26 +274,42 @@ describe('dormant editorial vocabulary response descriptions', () => {
         ),
     };
     expect(await respond(source, [])).toEqual(
-      failure(500, 'INTERNAL_ERROR', 1),
+      failure(500, 'EDITORIAL_VOCABULARY_UNREPRESENTABLE'),
     );
     expect(source.read).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps version and revision state local across repeated calls', async () => {
-    const source = { read: jest.fn().mockResolvedValue(fixture()) };
-    await respond(source, version2);
-    expect(
-      await respond(source, ['Editorial-Contract-Version', 'secret']),
-    ).toEqual(failure(406, 'UNSUPPORTED_EDITORIAL_CONTRACT'));
-    source.read.mockRejectedValueOnce(new Error('secret'));
-    expect(await respond(source, [])).toEqual(
-      failure(500, 'INTERNAL_ERROR', 1),
+  it('keeps headers local across interleaved success and failure calls', async () => {
+    let complete!: (value: unknown) => void;
+    const source = {
+      read: jest.fn(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      ),
+    };
+    const pending = respond(source, []);
+    const rejectedSource = { read: jest.fn().mockResolvedValue(fixture()) };
+    const rejected = await respond(rejectedSource, version2);
+    expect(rejected).toEqual(failure(400, 'MALFORMED'));
+    const failed = await respond(
+      { read: jest.fn().mockRejectedValue('secret') },
+      [],
     );
-    expect(await respond(source, [])).toEqual({
-      statusCode: 200,
-      headers: headers(1),
-      body: legacy,
-    });
-    expect(source.read).toHaveBeenCalledTimes(3);
+    expect(failed).toEqual(failure(500, 'INTERNAL_ERROR'));
+    complete(fixture());
+    const success = await pending;
+    expect(success.statusCode).toBe(200);
+    expect(success.headers['Editorial-Vocabulary-Revision']).toBe(
+      (success.body as { vocabularyRevision: string }).vocabularyRevision,
+    );
+    expect(success.headers).not.toBe(rejected.headers);
+    expect(success.headers).not.toBe(failed.headers);
+    success.headers['Editorial-Vocabulary-Revision'] = 'changed';
+    expect(rejected).toEqual(failure(400, 'MALFORMED'));
+    expect(failed).toEqual(failure(500, 'INTERNAL_ERROR'));
+    expect(source.read).toHaveBeenCalledTimes(1);
+    expect(rejectedSource.read).not.toHaveBeenCalled();
   });
 });

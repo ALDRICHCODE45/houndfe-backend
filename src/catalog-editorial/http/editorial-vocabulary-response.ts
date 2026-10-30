@@ -12,27 +12,25 @@ export async function createEditorialVocabularyHttpResponse(
   source: { read(): Promise<unknown> },
   rawHeaders: readonly string[],
 ) {
-  const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
+  const headers: Record<string, string> = {
+    'Cache-Control': 'no-store',
+    'Editorial-Contract-Version': '2',
+  };
   const failure = (statusCode: number, error: string) => ({
     statusCode,
     headers,
     body: { statusCode, error },
   });
-  let version: 1 | 2;
   try {
-    version = parseEditorialVocabularyHeaders(rawHeaders);
+    parseEditorialVocabularyHeaders(rawHeaders);
   } catch (error) {
     if (error instanceof EditorialVocabularyHeaderError) {
-      if (error.normalizedVersion !== undefined) {
-        headers['Editorial-Contract-Version'] = String(error.normalizedVersion);
-      }
       return failure(error.statusCode, error.code);
     }
     return failure(500, 'INTERNAL_ERROR');
   }
-  headers['Editorial-Contract-Version'] = String(version);
   try {
-    const body = await readEditorialVocabulary(source, version);
+    const body = await readEditorialVocabulary(source, 2);
     if ('vocabularyRevision' in body) {
       headers['Editorial-Vocabulary-Revision'] = body.vocabularyRevision;
     }
@@ -40,7 +38,7 @@ export async function createEditorialVocabularyHttpResponse(
   } catch (error) {
     return failure(
       500,
-      version === 2 && error instanceof EditorialVocabularyUnrepresentableError
+      error instanceof EditorialVocabularyUnrepresentableError
         ? 'EDITORIAL_VOCABULARY_UNREPRESENTABLE'
         : 'INTERNAL_ERROR',
     );
