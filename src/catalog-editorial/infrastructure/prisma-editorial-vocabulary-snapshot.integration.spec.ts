@@ -278,7 +278,7 @@ realTest(
 );
 
 realTest(
-  'composes exact SQL snapshots into versioned responses without changing storage',
+  'composes exact SQL snapshots into the single canonical response without changing storage',
   async () => {
     let container = '';
     try {
@@ -311,10 +311,10 @@ realTest(
         const reader = new PrismaEditorialVocabularySnapshot({
           $queryRaw: bridge,
         } as unknown as Pick<PrismaClient, '$queryRaw'>);
-        const readOnce = async (version: 1 | 2) => {
+        const readOnce = async () => {
           const before = bridge.mock.calls.length;
           try {
-            return await readEditorialVocabulary(reader, version);
+            return await readEditorialVocabulary(reader);
           } finally {
             expect(bridge.mock.calls.length - before).toBe(1);
           }
@@ -323,7 +323,7 @@ realTest(
           const before = await reader.read();
           let failure: unknown;
           try {
-            await readOnce(2);
+            await readOnce();
           } catch (error) {
             failure = error;
           }
@@ -345,7 +345,6 @@ realTest(
           definitions: [],
         });
         await expectUnrepresentable();
-        expect(await readOnce(1)).toEqual({ families: [], definitions: [] });
         expect(await reader.read()).toEqual(empty);
 
         db.sql(`
@@ -378,17 +377,6 @@ realTest(
           type: 'single',
           options,
         };
-        const legacy = {
-          families: [
-            {
-              id: 'f',
-              code: 'custom.f',
-              label: ' Family ñ ',
-              bindings: [binding],
-            },
-          ],
-          definitions: [definition],
-        };
         const vocabulary = {
           semanticsVersion: 'editorial-production-1',
           families: [
@@ -410,8 +398,7 @@ realTest(
           definitions: [{ ...definition, groups: [], aliases: [] }],
         };
         const beforeReads = await reader.read();
-        expect(await readOnce(1)).toEqual(legacy);
-        expect(await readOnce(2)).toEqual({
+        expect(await readOnce()).toEqual({
           contractVersion: 2,
           vocabularyRevision: `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary })}`,
           vocabulary,
@@ -437,7 +424,7 @@ realTest(
           `UPDATE editorial_bindings SET policy = '${JSON.stringify(resolvedPolicy)}'::jsonb WHERE "familyId" = 'f'`,
         );
         const beforeLegacyColumnRead = await reader.read();
-        const legacyColumnResponse = await readOnce(2);
+        const legacyColumnResponse = await readOnce();
         expect(await reader.read()).toEqual(beforeLegacyColumnRead);
         expect(beforeLegacyColumnRead).toMatchObject({
           families: [{ minimumContractVersion: 1 }],
@@ -463,8 +450,8 @@ realTest(
         expect(beforeAdvancedRead).toMatchObject({
           families: [{ minimumContractVersion: 2 }],
         });
-        expect(await readOnce(2)).toEqual(legacyColumnResponse);
-        expect(await readOnce(2)).toEqual({
+        expect(await readOnce()).toEqual(legacyColumnResponse);
+        expect(await readOnce()).toEqual({
           contractVersion: 2,
           vocabularyRevision: `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary: advanced })}`,
           vocabulary: advanced,

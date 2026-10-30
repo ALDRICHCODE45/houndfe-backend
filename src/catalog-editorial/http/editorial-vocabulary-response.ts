@@ -30,10 +30,8 @@ export async function createEditorialVocabularyHttpResponse(
     return failure(500, 'INTERNAL_ERROR');
   }
   try {
-    const body = await readEditorialVocabulary(source, 2);
-    if ('vocabularyRevision' in body) {
-      headers['Editorial-Vocabulary-Revision'] = body.vocabularyRevision;
-    }
+    const body = await readEditorialVocabulary(source);
+    headers['Editorial-Vocabulary-Revision'] = body.vocabularyRevision;
     return { statusCode: 200, headers, body };
   } catch (error) {
     return failure(

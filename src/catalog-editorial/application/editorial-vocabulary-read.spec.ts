@@ -78,26 +78,6 @@ const options = ['z', 'a'].map((code) => ({
   sortOrder: 3,
   archived: code === 'z',
 }));
-const v1Expected = {
-  families: [
-    {
-      id: 'f',
-      code: 'custom.f',
-      label: ' Family ñ ',
-      bindings: [
-        {
-          definitionId: 'd',
-          definitionCode: 'custom.d',
-          owner: 'sellable',
-          sortOrder: -2,
-        },
-      ],
-    },
-  ],
-  definitions: [
-    { id: 'd', code: 'custom.d', label: ' Label ñ ', type: 'single', options },
-  ],
-};
 const vocabulary = {
   semanticsVersion: 'editorial-production-1',
   families: [
@@ -136,31 +116,26 @@ describe('dormant editorial vocabulary read', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it.each([1, 2] as const)(
-    'reads one raw Prisma snapshot and returns exact V%s output',
-    async (version) => {
+    'reads one raw Prisma snapshot with stored column %s into the exact canonical output',
+    async (minimumContractVersion) => {
       const input = fixture();
+      input.families[0].minimumContractVersion = minimumContractVersion;
       const before = structuredClone(input);
       freeze(input);
       const { source, $queryRaw } = adapter(input);
       const spies = projectors();
-      const result = await read(source, version);
+      const result = await read(source);
       expect($queryRaw).toHaveBeenCalledTimes(1);
-      const chosen = version === 1 ? spies.v1 : spies.v2;
-      const other = version === 1 ? spies.v2 : spies.v1;
-      expect(chosen).toHaveBeenCalledTimes(1);
-      expect(chosen.mock.calls[0][0]).toBe(input);
-      expect(other).not.toHaveBeenCalled();
-      expect(result).toBe(chosen.mock.results[0].value);
-      expect(result).toEqual(
-        version === 1
-          ? v1Expected
-          : {
-              contractVersion: 2,
-              vocabularyRevision: `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary })}`,
-              vocabulary,
-            },
-      );
-      const detached = 'vocabulary' in result ? result.vocabulary : result;
+      expect(spies.v2).toHaveBeenCalledTimes(1);
+      expect(spies.v2.mock.calls[0][0]).toBe(input);
+      expect(spies.v1).not.toHaveBeenCalled();
+      expect(result).toBe(spies.v2.mock.results[0].value);
+      expect(result).toEqual({
+        contractVersion: 2,
+        vocabularyRevision: `ev2-sha256-${hashEditorialJson({ contractVersion: 2, vocabulary })}`,
+        vocabulary,
+      });
+      const detached = result.vocabulary;
       detached.definitions[0].label = 'changed';
       detached.families[0].bindings[0].sortOrder = 99;
       expect(input).toEqual(before);
@@ -192,7 +167,7 @@ describe('dormant editorial vocabulary read', () => {
       freeze(input);
       const { source, $queryRaw } = adapter(input);
       const spies = projectors();
-      const error: unknown = await read(source, 2).catch(
+      const error: unknown = await read(source).catch(
         (error: unknown) => error,
       );
       expect(error).toBeInstanceOf(EditorialVocabularyUnrepresentableError);
@@ -209,37 +184,18 @@ describe('dormant editorial vocabulary read', () => {
     },
   );
 
-  it.each([
-    new TypeError('V1 leaf'),
-    new EditorialVocabularyRepresentationError('injected V1'),
-  ])('preserves V1 projector failure %s', async (sentinel) => {
-    const spies = projectors();
-    spies.v1.mockImplementation(() => {
-      throw sentinel;
-    });
-    const { source, $queryRaw } = adapter(fixture());
-    await expect(read(source, 1)).rejects.toBe(sentinel);
-    expect($queryRaw).toHaveBeenCalledTimes(1);
-    expect(spies.v2).not.toHaveBeenCalled();
-  });
-
-  it.each([1, 2] as const)(
-    'keeps V%s snapshot failures outside translation',
-    async (version) => {
+  it.each([new Error('DB'), new EditorialVocabularyRepresentationError('DB')])(
+    'keeps snapshot failure %s outside translation',
+    async (sentinel) => {
       const spies = projectors();
-      for (const sentinel of [
-        new Error('DB'),
-        new EditorialVocabularyRepresentationError('DB'),
-      ]) {
-        const { source, $queryRaw } = adapter(fixture());
-        $queryRaw.mockRejectedValue(sentinel);
-        await expect(read(source, version)).rejects.toBe(sentinel);
-        expect($queryRaw).toHaveBeenCalledTimes(1);
-      }
+      const rejected = adapter(fixture());
+      rejected.$queryRaw.mockRejectedValue(sentinel);
+      await expect(read(rejected.source)).rejects.toBe(sentinel);
+      expect(rejected.$queryRaw).toHaveBeenCalledTimes(1);
       const { source, $queryRaw } = adapter(fixture());
       $queryRaw.mockResolvedValue([]);
       const observed = jest.spyOn(source, 'read');
-      const pending = read(source, version);
+      const pending = read(source);
       const snapshotRead = observed.mock.results[0].value as Promise<unknown>;
       const original: unknown = await snapshotRead.catch(
         (error: unknown) => error,
@@ -279,7 +235,7 @@ describe('dormant editorial vocabulary read', () => {
         },
       );
       const source = { read: jest.fn().mockResolvedValue(raw) };
-      await expect(read(source, 2)).rejects.toBe(sentinel);
+      await expect(read(source)).rejects.toBe(sentinel);
       expect(source.read).toHaveBeenCalledTimes(1);
       expect(getter).not.toHaveBeenCalled();
     },
@@ -293,19 +249,20 @@ describe('dormant editorial vocabulary read', () => {
         throw sentinel;
       });
     const { source } = adapter(fixture());
-    await expect(read(source, 2)).rejects.toBe(sentinel);
+    await expect(read(source)).rejects.toBe(sentinel);
   });
 
   it.each([1, 2] as const)(
-    'allows empty/custom V%s without full-production admission',
-    async (version) => {
+    'allows empty/custom metadata with stored column %s without full-production admission',
+    async (minimumContractVersion) => {
       const input = fixture();
+      input.families[0].minimumContractVersion = minimumContractVersion;
       input.families[0].bindings = [];
       input.definitions = [];
       freeze(input);
       const { source } = adapter(input);
-      const result = await read(source, version);
-      const output = 'vocabulary' in result ? result.vocabulary : result;
+      const result = await read(source);
+      const output = result.vocabulary;
       expect(output.families).toHaveLength(1);
       expect(output.definitions).toEqual([]);
       const empty = adapter({
@@ -313,26 +270,25 @@ describe('dormant editorial vocabulary read', () => {
         families: [],
         definitions: [],
       });
-      const emptyResult = await read(empty.source, version);
-      expect(
-        'vocabulary' in emptyResult
-          ? emptyResult.vocabulary.families
-          : emptyResult.families,
-      ).toEqual([]);
+      const emptyResult = await read(empty.source);
+      expect(emptyResult.vocabulary.families).toEqual([]);
     },
   );
 
-  it.each([undefined, null, 0, 3, '2'])(
-    'rejects invalid runtime version %s before reading',
-    async (version) => {
-      const source = { read: jest.fn() };
-      const spies = projectors();
-      await expect(read(source, version as 1 | 2)).rejects.toBeInstanceOf(
-        TypeError,
-      );
-      expect(source.read).not.toHaveBeenCalled();
-      expect(spies.v1).not.toHaveBeenCalled();
-      expect(spies.v2).not.toHaveBeenCalled();
-    },
-  );
+  it('awaits a deferred snapshot exactly once before materializing', async () => {
+    let complete!: (value: unknown) => void;
+    const source = {
+      read: jest.fn(() => new Promise((resolve) => (complete = resolve))),
+    };
+    const spies = projectors();
+    const pending = read(source);
+    expect(source.read).toHaveBeenCalledTimes(1);
+    expect(spies.v2).not.toHaveBeenCalled();
+    complete(fixture());
+    const result = await pending;
+    expect(result).toBe(spies.v2.mock.results[0].value);
+    expect(spies.v2).toHaveBeenCalledTimes(1);
+    expect(spies.v1).not.toHaveBeenCalled();
+    expect(source.read).toHaveBeenCalledTimes(1);
+  });
 });

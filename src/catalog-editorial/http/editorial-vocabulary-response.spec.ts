@@ -123,7 +123,7 @@ describe('dormant editorial vocabulary response descriptions', () => {
         body: expectedBody,
       });
       expect(response.body).toBe(body);
-      expect(spy).toHaveBeenCalledWith(source, 2);
+      expect(spy).toHaveBeenCalledWith(source);
       expect(source.read).toHaveBeenCalledTimes(1);
       expect(JSON.stringify({ raw, rawHeaders })).toBe(before);
     },
