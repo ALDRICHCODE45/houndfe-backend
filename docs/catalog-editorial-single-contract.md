@@ -471,6 +471,9 @@ members, intersects means any common member; order ignored. Expected sets nonemp
 missing/unknown/NA never match. No aliases/groups/evidence prerequisite for matching.
 Exactly one case must match; zero/multiple/pending fails closed as unresolved. Static
 checks reject contradictory/overlapping custom cases and selector dependency cycles.
+S44: reject policy metadata where a product-owned target tests a sellable-owned
+selector. Product→product, sellable→product and sellable→sellable dependencies
+remain allowed; no cross-variant aggregation is inferred.
 
 For every E subject evaluate always bindings, including absent assignments, plus
 when_asserted bindings with known/NA assertion and selected option-case dependencies.
