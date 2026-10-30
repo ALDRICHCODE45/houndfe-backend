@@ -523,6 +523,10 @@ extra universal minima. Optional nonpertinence cannot waive required/conditional
 routes. Content.kind, if asserted, must agree; pack_count is not content. Evidence
 for facts never substitutes for compatibility/stage/composition/declared-value evidence.
 
+S46: accessory `optional_equipment` returns O when `electricalApplies` is missing
+or unknown, even for a known equipment value with valid evidence. Unknown electrical
+relevance alone does not block that optional assertion; all other checks remain.
+
 Care publication requires one prepared valid review for each E subject, scoped to
 presentation/jurisdiction/use, nonblank basis and ≥1 review evidence. Identified
 requires ≥1 requirement; satisfied/NA requirements need evidence/basis; unresolved
