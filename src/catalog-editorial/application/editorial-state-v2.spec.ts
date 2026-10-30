@@ -1,5 +1,5 @@
 import type { ArchivedOptionWarning } from '../domain/contextual-document';
-import type { EditorialDocumentJson } from '../domain/editorial-document-mode';
+import type { EditorialDocumentJson } from '../domain/editorial-document-json';
 import {
   createEditorialStateV2,
   type RawStoredEditorialStateV2,

@@ -1,5 +1,5 @@
 import type { ArchivedOptionWarning } from '../domain/contextual-document';
-import type { EditorialDocumentJson } from '../domain/editorial-document-mode';
+import type { EditorialDocumentJson } from '../domain/editorial-document-json';
 import { isRecognizableDocumentV2 } from '../domain/editorial-document-recognition-v2';
 import type { DocumentShapeV2 } from '../domain/editorial-document-shape-v2';
 import type { EditorialStateV2, StateV2 } from './editorial-state-v2';
