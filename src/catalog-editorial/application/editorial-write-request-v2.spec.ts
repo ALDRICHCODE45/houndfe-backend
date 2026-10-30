@@ -8,7 +8,6 @@ import { EditorialDocumentShapeError } from '../domain/editorial-document-shape-
 const revision = `ev2-sha256-${'a'.repeat(64)}`;
 const headers = () => ({
   vocabularyRevision: revision,
-  adoption: null,
   careConfirmation: null,
 });
 const transition = () => ({ expectedCycle: 1, expectedRevision: 2 });
@@ -97,22 +96,21 @@ describe('editorial write request V2 (S2, contract §§3–4)', () => {
   });
 
   it.each([
-    ['save', 'legacy-to-v2', null],
-    ['save', null, null],
-    ['publish', null, 'review-v1'],
-    ['publish', null, null],
-    ['initialize', null, null],
-    ['discard', null, null],
+    ['save', null],
+    ['publish', 'review-v1'],
+    ['publish', null],
+    ['initialize', null],
+    ['discard', null],
   ] as const)(
-    'retains permitted %s header values %s/%s',
-    (operation, adoption, careConfirmation) => {
+    'retains permitted %s confirmation %s',
+    (operation, careConfirmation) => {
       const body =
         operation === 'initialize'
           ? { expectedCycle: null }
           : operation === 'save'
             ? { ...transition(), document: document() }
             : transition();
-      const h = { ...headers(), adoption, careConfirmation };
+      const h = { ...headers(), careConfirmation };
       expect(create(operation, h, body)).toStrictEqual({
         receiptVersion: 2,
         contractVersion: 2,
@@ -138,9 +136,6 @@ describe('editorial write request V2 (S2, contract §§3–4)', () => {
   });
 
   it.each([
-    { ...headers(), adoption: '' },
-    { ...headers(), adoption: true },
-    { ...headers(), adoption: 'legacy-to-v2 ' },
     { ...headers(), careConfirmation: 'review-v2' },
     { ...headers(), careConfirmation: 1 },
     { ...headers(), extra: null },
@@ -173,14 +168,23 @@ describe('editorial write request V2 (S2, contract §§3–4)', () => {
       );
     },
   );
-  it.each(['initialize', 'publish', 'discard'] as const)(
-    'forbids adoption on %s',
+  it.each(['initialize', 'save', 'publish', 'discard'] as const)(
+    'rejects every obsolete adoption key on %s without mutating input',
     (operation) => {
-      reject(
-        operation,
-        { ...headers(), adoption: 'legacy-to-v2' },
-        operation === 'initialize' ? { expectedCycle: null } : transition(),
-      );
+      const body =
+        operation === 'initialize'
+          ? { expectedCycle: null }
+          : operation === 'save'
+            ? { ...transition(), document: document() }
+            : transition();
+      for (const adoption of [null, 'legacy-to-v2', undefined, '', true]) {
+        const h = { ...headers(), adoption };
+        const before = structuredClone({ h, body });
+        freezeTree(h);
+        freezeTree(body);
+        reject(operation, h, body);
+        expect({ h, body }).toEqual(before);
+      }
     },
   );
 
@@ -258,13 +262,11 @@ describe('editorial write request V2 (S2, contract §§3–4)', () => {
         {
           ...headers(),
           vocabularyRevision: `ev2-sha256-${'b'.repeat(64)}`,
-          adoption: 'legacy-to-v2',
         },
         body,
       ),
     ).toMatchObject({
       vocabularyRevision: `ev2-sha256-${'b'.repeat(64)}`,
-      adoption: 'legacy-to-v2',
       body,
     });
     expect(

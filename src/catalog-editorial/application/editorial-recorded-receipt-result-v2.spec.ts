@@ -17,7 +17,6 @@ const request: ReceiptRequestV2 = {
   receiptVersion: 2,
   contractVersion: 2,
   vocabularyRevision: R,
-  adoption: null,
   careConfirmation: 'review-v1',
   body: { expectedCycle: 3, expectedRevision: 7 },
 };

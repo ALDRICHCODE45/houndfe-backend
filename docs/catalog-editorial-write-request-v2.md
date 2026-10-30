@@ -2,14 +2,16 @@
 
 `createEditorialWriteRequestV2(operation, headers, body)` constructs the detached
 closed `ReceiptRequestV2` from normalized semantic headers and a closed wire body.
-It records receipt/contract version 2, exact vocabulary revision, adoption,
-care confirmation and body. Operation/tenant/product/actor/key scope stays outside.
+It records receipt/contract version 2, exact vocabulary revision, care confirmation
+and body. Adoption is not part of this identity. Operation/tenant/product/actor/key
+scope stays outside.
 
-All three header keys are required; null means absent adoption/confirmation.
-Revision is exactly `ev2-sha256-` plus 64 lowercase hex digits (74 characters).
-Adoption is null or `legacy-to-v2` on save only; confirmation is null or `review-v1`
-on publish only. Conditional requiredness/forbiddenness depending on state waits
-until receipt miss and CAS; this helper accepts null on save and publish.
+Exactly two normalized header keys are required: `vocabularyRevision` and
+`careConfirmation`. An `adoption` key is rejected on every operation, even when
+null; no legacy token is accepted. Revision is exactly `ev2-sha256-` plus 64
+lowercase hex digits (74 characters). Confirmation is null or `review-v1` on
+publish only; null means absent. Conditional care requiredness/forbiddenness waits
+until receipt miss and CAS; this helper accepts null on publish.
 
 Initialize accepts a null or positive integer cycle. Other bodies require positive
 integer cycle/revision; save additionally delegates its document to the unchanged

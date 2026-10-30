@@ -13,7 +13,6 @@ export type ReceiptRequestV2 = {
   receiptVersion: 2;
   contractVersion: 2;
   vocabularyRevision: string;
-  adoption: 'legacy-to-v2' | null;
   careConfirmation: 'review-v1' | null;
   body:
     | { expectedCycle: number | null }
@@ -58,18 +57,15 @@ export function createEditorialWriteRequestV2(
     operation !== 'discard'
   )
     invalid();
-  const { vocabularyRevision, adoption, careConfirmation } = record(headers, [
+  const { vocabularyRevision, careConfirmation } = record(headers, [
     'vocabularyRevision',
-    'adoption',
     'careConfirmation',
   ]);
   if (
     typeof vocabularyRevision !== 'string' ||
     vocabularyRevision.length !== 'ev2-sha256-'.length + 64 ||
     !/^ev2-sha256-[0-9a-f]{64}$/.test(vocabularyRevision) ||
-    (adoption !== null && adoption !== 'legacy-to-v2') ||
     (careConfirmation !== null && careConfirmation !== 'review-v1') ||
-    (adoption !== null && operation !== 'save') ||
     (careConfirmation !== null && operation !== 'publish')
   )
     invalid();
@@ -98,7 +94,6 @@ export function createEditorialWriteRequestV2(
     receiptVersion: 2,
     contractVersion: 2,
     vocabularyRevision,
-    adoption,
     careConfirmation,
     body: detachedBody,
   };
