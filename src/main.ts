@@ -9,6 +9,7 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { editorialCors } from './catalog-editorial/http/editorial-cors';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
 import { createAppValidationPipe } from './shared/listing/app-validation.pipe';
@@ -40,12 +41,12 @@ async function bootstrap() {
     .filter(Boolean);
 
   if (corsOrigins.length > 0) {
-    app.enableCors({ origin: corsOrigins, credentials: true });
+    app.enableCors(editorialCors({ origin: corsOrigins, credentials: true }));
   } else {
     logger.warn(
       'CORS_ORIGINS no definido — CORS abierto a cualquier origen (solo para desarrollo)',
     );
-    app.enableCors();
+    app.enableCors(editorialCors());
   }
 
   // HD-04d2a — sanitize malformed/primitive bodies on the `/human-decisions`

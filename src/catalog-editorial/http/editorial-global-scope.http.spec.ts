@@ -178,6 +178,8 @@ describe('registered seven-route global editorial scope', () => {
               : 'FORBIDDEN',
       });
       expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.headers['editorial-contract-version']).toBe('2');
+      expect(response.headers['editorial-vocabulary-revision']).toBeUndefined();
       expect(dataRead).not.toHaveBeenCalled();
       expect(db.$queryRaw).not.toHaveBeenCalled();
       expect(state).toEqual(before);

@@ -9,6 +9,7 @@ import request from 'supertest';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { CatalogEditorialVocabularyModule } from '../catalog-editorial-vocabulary.module';
+import { editorialCors } from './editorial-cors';
 
 const binding = {
   definitionId: 'd',
@@ -119,6 +120,7 @@ describe('registered vocabulary composition with synthetic Prisma I/O and JWT', 
       })
       .compile();
     app = module.createNestApplication();
+    app.enableCors(editorialCors());
     await app.init();
   });
   afterAll(async () => {
@@ -131,11 +133,17 @@ describe('registered vocabulary composition with synthetic Prisma I/O and JWT', 
     db.$queryRaw.mockResolvedValue([{ snapshot: stored() }]);
   });
   const get = () =>
-    request(app.getHttpServer() as Server).get('/catalog-editorial/vocabulary');
+    request(app.getHttpServer() as Server)
+      .get('/catalog-editorial/vocabulary')
+      .set('Origin', 'https://editor.test');
   function check(response: request.Response, status: number, body: unknown) {
     expect(response.status).toBe(status);
     expect(response.body).toEqual(body);
     expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['access-control-allow-origin']).toBe('*');
+    expect(response.headers['access-control-expose-headers']).toBe(
+      'Editorial-Contract-Version,Editorial-Vocabulary-Revision',
+    );
     expect(response.headers['editorial-contract-version']).toBe('2');
     expect(response.headers['editorial-vocabulary-revision']).toBe(
       status === 200 ? revision : undefined,

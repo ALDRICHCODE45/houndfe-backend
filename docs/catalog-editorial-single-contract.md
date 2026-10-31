@@ -40,15 +40,19 @@ Document/context GET reject nonempty decoded bodies; GETs take no input document
 | Publish    | `POST /products/:productId/editorial/draft/publish`    | `200 StateResponse`      |
 | Discard    | `POST /products/:productId/editorial/draft/discard`    | `200 StateResponse`      |
 
-Bearer JWT → tenant guard; actor/tenant derive only from the principal. Recheck
-active user, current membership, exact permission and tenant-qualified Product.
-No superadmin, `manage:all`, wildcard or operational Product permission bypass.
-Vocabulary is existing global metadata under authenticated editorial read authority,
-not a new company-scoped store. Permissions remain manually granted:
+Bearer JWT → tenant guard; actor/tenant derive only from the principal. S53/S54
+retain active persisted global Super Admin or global `manage:all` authority without
+individual editorial grants; a JWT flag alone is not proof. A selected tenant
+remains binding, including for global administrators. In global/null mode only
+verified global administrators may resolve a Product's persisted tenant.
+Tenant-local `manage:all` applies only within current active membership; ordinary
+users retain exact editorial grants. Operational Product permissions do not suffice.
+Vocabulary is global metadata under editorial read authority, not a tenant store.
+For ordinary exact-grant access:
 
-- Vocabulary/document/context: exact `ProductEditorialDraft:read`.
-- Initialize/save/discard: exact `:read` + `:update`.
-- Publish: exact `:read` + `:publish`; update is not required.
+- Vocabulary/document/context: `ProductEditorialDraft:read`.
+- Initialize/save/discard: `:read` + `:update`.
+- Publish: `:read` + `:publish`; update is not required.
 - Unavailable/foreign Product normally fails authority with 403; 404 is possible
   when Product disappears after authorization, not a universal existence promise.
 
@@ -698,10 +702,20 @@ hints/document/R. The complete target error enum is:
 | 500    | EDITORIAL_VOCABULARY_UNREPRESENTABLE | Whole metadata response cannot be represented; never omit/prune  |
 | 500    | INTERNAL_ERROR                       | Sanitized unexpected failure                                     |
 
-No 406, unsupported, adoption or upgrade errors. Current live filter maps the six
-original error codes; R/representation errors are approved retained target additions,
-not evidence they are registered. Framework invalid JSON/413/unmatched-route errors
-remain outside this local envelope; FE handles non-envelope failures generically.
+No 406, unsupported, adoption or upgrade errors. The registered editorial filter
+maps the original codes plus deliberate `VOCABULARY_CHANGED` and typed vocabulary
+representation failures; arbitrary same-message representation errors stay internal.
+Errors carry version2/no-store and remove any stale revision header. Framework
+invalid JSON/413/unmatched-route errors remain outside this local envelope; FE
+handles non-envelope failures generically.
+
+Bootstrap CORS specializes only the seven editorial routes and their preflights,
+including Express case/trailing-slash aliases and malformed Product IDs. Original
+origin/credentials policy and unrelated routes' reflected headers stay unchanged.
+HTTP tests use real Nest/Express CORS with synthetic JWT/Prisma I/O or error probes;
+this is not live database/browser or complete document/write integration proof.
+CORS exclusions are not direct-request header admission; remaining lifecycle
+header validation belongs to the coordinated document/write integration.
 
 FE installs vocabulary/document only with equal R and API/account/product scope.
 If requests race metadata changes, discard the incoherent pair and reload explicitly;

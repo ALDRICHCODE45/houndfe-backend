@@ -1,6 +1,7 @@
 import { ArgumentsHost, Catch, HttpException } from '@nestjs/common';
 import type { ExceptionFilter } from '@nestjs/common';
 import type { Response } from 'express';
+import { EditorialVocabularyUnrepresentableError } from '../application/editorial-vocabulary-read';
 
 const statuses: Record<string, number> = {
   MALFORMED: 400,
@@ -9,12 +10,15 @@ const statuses: Record<string, number> = {
   NOT_FOUND: 404,
   CONFLICT: 409,
   INTERNAL_ERROR: 500,
+  VOCABULARY_CHANGED: 409,
 };
 @Catch()
 export class EditorialHttpFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     let error = 'INTERNAL_ERROR';
-    if (exception instanceof HttpException) {
+    if (exception instanceof EditorialVocabularyUnrepresentableError) {
+      error = 'EDITORIAL_VOCABULARY_UNREPRESENTABLE';
+    } else if (exception instanceof HttpException) {
       error =
         Object.keys(statuses).find(
           (key) => statuses[key] === exception.getStatus(),
@@ -25,9 +29,11 @@ export class EditorialHttpFilter implements ExceptionFilter {
     ) {
       error = exception.message;
     }
-    const statusCode = statuses[error];
+    const statusCode = statuses[error] ?? 500;
     const response = host.switchToHttp().getResponse<Response>();
     response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('Editorial-Contract-Version', '2');
+    response.removeHeader('Editorial-Vocabulary-Revision');
     response.status(statusCode).json({ statusCode, error });
   }
 }
