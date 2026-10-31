@@ -37,6 +37,7 @@ import { createAppValidationPipe } from '../../shared/listing/app-validation.pip
 import { CatalogEditorialReadModule } from '../catalog-editorial-read.module';
 import { emptyDocument } from '../domain/document';
 import { EDITORIAL_READER } from './editorial-read.controller';
+import { EDITORIAL_SAVE_WRITER } from '../application/editorial-save-writer';
 import { EDITORIAL_INITIALIZE_WRITER } from '../application/editorial-initialize-writer';
 import { EDITORIAL_DISCARD_WRITER } from '../application/editorial-discard-writer';
 import type { EditorialContext } from '../application/catalog-editorial-core';
@@ -114,6 +115,26 @@ async function application(mockCore: boolean) {
         });
         return {
           status: 201,
+          body: { contractVersion: 2, vocabularyRevision: revision, state },
+          headers: {
+            'Editorial-Contract-Version': '2',
+            'Editorial-Vocabulary-Revision': revision,
+          },
+        };
+      },
+    });
+    builder.overrideProvider(EDITORIAL_SAVE_WRITER).useValue({
+      async save(
+        context: EditorialContext,
+        key: string,
+        intent: ReceiptRequestV2,
+      ) {
+        const state: unknown = await core.save(context, {
+          ...intent.body,
+          idempotencyKey: key,
+        });
+        return {
+          status: 200,
           body: { contractVersion: 2, vocabularyRevision: revision, state },
           headers: {
             'Editorial-Contract-Version': '2',
@@ -214,7 +235,15 @@ describe('coordinated write wiring', () => {
                 ? [{ id: productId }]
                 : operation === 'save' &&
                     query.sql.includes('FROM "catalog_editorial_states"')
-                  ? [state]
+                  ? [
+                      {
+                        cycle: 1,
+                        draftRevision: 1,
+                        basePublishedRevision: null,
+                        draftDocument: emptyV2,
+                        published: null,
+                      },
+                    ]
                   : [],
             );
           });
@@ -229,12 +258,11 @@ describe('coordinated write wiring', () => {
                 expectedCycle: 1,
                 expectedRevision: 1,
                 document: {
-                  ...emptyDocument(),
+                  ...emptyV2,
                   mediaRefs: invalid ? ['unowned-asset'] : [],
                 },
               };
-        if (operation === 'initialize')
-          req.set('Editorial-Vocabulary-Revision', currentR);
+        req.set('Editorial-Vocabulary-Revision', currentR);
         const response = await req
           .set('Authorization', 'Bearer synthetic')
           .set('Idempotency-Key', 'key')
@@ -248,7 +276,7 @@ describe('coordinated write wiring', () => {
             : operation === 'initialize'
               ? 201
               : 200
-          : operation === 'initialize' && authorized
+          : authorized
             ? 500
             : 403;
         expect(response.status).toBe(status);
@@ -269,13 +297,17 @@ describe('coordinated write wiring', () => {
                   },
                 }
               : {
-                  cycle: 1,
-                  draft: {
-                    revision: 2,
-                    basePublishedRevision: null,
-                    document: emptyDocument(),
+                  contractVersion: 2,
+                  vocabularyRevision: currentR,
+                  state: {
+                    cycle: 1,
+                    draft: {
+                      revision: 2,
+                      basePublishedRevision: null,
+                      document: emptyV2,
+                    },
+                    published: null,
                   },
-                  published: null,
                 }
             : {
                 statusCode: status,
@@ -288,7 +320,7 @@ describe('coordinated write wiring', () => {
         );
         expect(response.headers['cache-control']).toBe('no-store');
         expect(tx.$executeRaw).toHaveBeenCalledTimes(
-          success ? (operation === 'initialize' ? 3 : 2) : 0,
+          success ? 3 : invalid ? 1 : 0,
         );
         if (!admitted) expect(raw).toHaveBeenCalledTimes(authorized ? 1 : 0);
         if (invalid) {
@@ -346,7 +378,7 @@ describe('editorial write HTTP', () => {
       operation === 'save'
         ? request(app.getHttpServer() as Server).put(path)
         : request(app.getHttpServer() as Server).post(path + '/' + operation);
-    if (operation === 'discard' || operation === 'initialize')
+    if (operation !== 'publish')
       req.set('Editorial-Vocabulary-Revision', revision);
     return req
       .set('Authorization', 'Bearer synthetic')
@@ -373,7 +405,7 @@ describe('editorial write HTTP', () => {
       operation === 'initialize'
         ? { expectedCycle: null }
         : operation === 'save'
-          ? { expectedCycle: 1, expectedRevision: 1, document: emptyDocument() }
+          ? { expectedCycle: 1, expectedRevision: 1, document: emptyV2 }
           : { expectedCycle: 1, expectedRevision: 1 };
     test(`${operation} returns state and replay status using principal scope`, async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -395,9 +427,7 @@ describe('editorial write HTTP', () => {
                   vocabularyRevision: revision,
                   state: { cycle: 1, draft: null, published: null },
                 }
-              : operation === 'initialize'
-                ? { contractVersion: 2, vocabularyRevision: revision, state }
-                : state,
+              : { contractVersion: 2, vocabularyRevision: revision, state },
         );
         expect(response.headers['cache-control']).toBe('no-store');
       }
@@ -530,13 +560,23 @@ describe('editorial write HTTP', () => {
       expect(core.save).not.toHaveBeenCalled();
     },
   );
-  test('save requires document but passes it through without HTTP limits', async () => {
+  test('save requires a closed V2 shape but leaves fresh limits to the writer', async () => {
     await rejected(
       send('save', { expectedCycle: 1, expectedRevision: 1 }),
       400,
       'MALFORMED',
     );
-    const document = { untouched: 'x'.repeat(201) };
+    await rejected(
+      send('save', {
+        expectedCycle: 1,
+        expectedRevision: 1,
+        document: { untouched: 'x' },
+      }),
+      400,
+      'MALFORMED',
+    );
+    expect(core.save).not.toHaveBeenCalled();
+    const document = { ...emptyV2, commercialTitle: 'x'.repeat(201) };
     const response = await send('save', {
       expectedCycle: 1,
       expectedRevision: 1,

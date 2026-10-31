@@ -13,6 +13,7 @@ import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-aut
 import type { EditorialContext } from '../application/catalog-editorial-core';
 import { EDITORIAL_READER } from './editorial-read.controller';
 import { EDITORIAL_DOCUMENT_READER } from '../application/editorial-document-reader';
+import { EDITORIAL_SAVE_WRITER } from '../application/editorial-save-writer';
 import { EDITORIAL_INITIALIZE_WRITER } from '../application/editorial-initialize-writer';
 import { EDITORIAL_DISCARD_WRITER } from '../application/editorial-discard-writer';
 import type { ReceiptRequestV2 } from '../application/editorial-write-request-v2';
@@ -120,6 +121,31 @@ describe('registered seven-route global editorial scope', () => {
           };
         },
       })
+      .overrideProvider(EDITORIAL_SAVE_WRITER)
+      .useValue({
+        async save(
+          context: EditorialContext,
+          key: string,
+          intent: ReceiptRequestV2,
+        ) {
+          const value: unknown = await core.save(context, {
+            ...intent.body,
+            idempotencyKey: key,
+          });
+          return {
+            status: 200,
+            body: {
+              contractVersion: 2,
+              vocabularyRevision: revision,
+              state: value,
+            },
+            headers: {
+              'Editorial-Contract-Version': '2',
+              'Editorial-Vocabulary-Revision': revision,
+            },
+          };
+        },
+      })
       .overrideProvider(EDITORIAL_DISCARD_WRITER)
       .useValue({
         async discard(
@@ -209,7 +235,19 @@ describe('registered seven-route global editorial scope', () => {
       operation: 'save',
       method: 'put',
       url: base + '/draft',
-      body: { expectedCycle: 1, expectedRevision: 1, document: {} },
+      body: {
+        expectedCycle: 1,
+        expectedRevision: 1,
+        document: {
+          schemaVersion: 2,
+          commercialTitle: null,
+          description: null,
+          mediaRefs: [],
+          familyCode: null,
+          values: [],
+          facts: [],
+        },
+      },
     },
     {
       operation: 'publish',
@@ -233,7 +271,11 @@ describe('registered seven-route global editorial scope', () => {
         req.set('Editorial-Vocabulary-Revision', revision);
       else if (route.operation !== 'vocabulary')
         req.set('Idempotency-Key', 'key');
-      if (route.operation === 'discard' || route.operation === 'initialize')
+      if (
+        route.operation === 'discard' ||
+        route.operation === 'initialize' ||
+        route.operation === 'save'
+      )
         req.set('Editorial-Vocabulary-Revision', revision);
       return body === undefined ? req : req.send(body);
     };
@@ -279,7 +321,8 @@ describe('registered seven-route global editorial scope', () => {
             ? { variants: [] }
             : route.operation === 'read' ||
                 route.operation === 'discard' ||
-                route.operation === 'initialize'
+                route.operation === 'initialize' ||
+                route.operation === 'save'
               ? { contractVersion: 2, vocabularyRevision: revision, state }
               : state,
       );
@@ -408,7 +451,8 @@ describe('registered seven-route global editorial scope', () => {
       if (
         route.operation === 'read' ||
         route.operation === 'discard' ||
-        route.operation === 'initialize'
+        route.operation === 'initialize' ||
+        route.operation === 'save'
       ) {
         expect(db.product.findFirst).toHaveBeenCalled();
         expect(db.user.findUnique).toHaveBeenCalled();
@@ -421,7 +465,11 @@ describe('registered seven-route global editorial scope', () => {
     if (route.body)
       test(`${route.operation}: malformed key preserves operation-specific authority precedence`, async () => {
         await deny(send().unset('Idempotency-Key'), 400);
-        if (route.operation === 'discard' || route.operation === 'initialize') {
+        if (
+          route.operation === 'discard' ||
+          route.operation === 'initialize' ||
+          route.operation === 'save'
+        ) {
           expect(db.user.findUnique).toHaveBeenCalled();
           expect(db.product.findFirst).toHaveBeenCalled();
         } else {

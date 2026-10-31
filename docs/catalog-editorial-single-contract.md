@@ -146,10 +146,36 @@ Malformed recorded structure/relationships fail as INTERNAL_ERROR.
 Mock composition covers these paths, not database JSONB equality, rollback, writer
 coordination or lock privileges. The operational prerequisites below still apply.
 
+### Registered save implementation boundary
+
+SAVE uses a dedicated V2 writer. Persisted read/update authority precedes wire
+admission and is rechecked transactionally. Closed document shape errors are 400;
+unexpected parser failures and malformed recorded data remain sanitized 500.
+Product locking and namespaced JSONB receipt identity precede locked cycle/revision
+CAS and increment overflow checks. Nine-table SHARE locking and a subsequent
+same-transaction ReadCommitted snapshot supply complete current R on a miss.
+
+Fresh candidates pass references, limits, supplied evidence/numerics, facts/care
+capture and exact-subject NA admission in save mode, not publication readiness.
+Stored Draft alone supplies conservation provenance; whole-baseline S42 eligibility
+is distinct from fresh qualification. Candidate and baseline media selections are
+observed together. Invalid old Draft permits correction but grants no archived
+options. Published is structurally decoded, never freshly/contextually qualified.
+The conditional UPDATE replaces Draft and increments its revision, preserving
+cycle, base Published revision and Published. A complete 200 receipt is atomic.
+
+Replay requires recorded cycle, next Draft revision and exact request-document
+identity, then current reference/conservation gates on recorded Draft and Published.
+It does not read current state, compare current R or apply fresh admission. Recorded
+warning presence/order, body and R survive unchanged. Success follows transaction
+completion; no retries or fallback are added. Mocked HTTP tests establish composition
+and failure propagation, not database locking, JSONB equality, rollback or privileges.
+Internal create and completed initialize/discard remain unchanged.
+
 ### Registered discard implementation boundary
 
-Initialize and discard use dedicated V2 writers; save/publish retain their
-existing providers. Current persisted read/update authority precedes semantic
+Initialize, save and discard use dedicated V2 writers; publish retains its
+existing provider. Current persisted read/update authority precedes semantic
 admission and is rechecked inside the transaction. Raw duplicate/list headers,
 missing R/key, prohibited care/version/adoption headers and nonclosed bodies fail.
 Matching namespaced receipt intent replays the decoded recorded acknowledgement
