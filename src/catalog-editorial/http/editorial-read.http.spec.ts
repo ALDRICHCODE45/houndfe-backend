@@ -10,7 +10,34 @@ import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { createAppValidationPipe } from '../../shared/listing/app-validation.pipe';
 import { CatalogEditorialReadModule } from '../catalog-editorial-read.module';
-import { emptyDocument } from '../domain/document';
+import { createHash } from 'node:crypto';
+
+const snapshot = {
+  metadata: { id: 'global', semanticsVersion: 'editorial-production-1' },
+  families: [],
+  definitions: [],
+};
+const revision =
+  'ev2-sha256-' +
+  createHash('sha256')
+    .update(
+      '{"contractVersion":2,"vocabulary":{"definitions":[],"families":[],"semanticsVersion":"editorial-production-1"}}',
+    )
+    .digest('hex');
+const document = () => ({
+  schemaVersion: 2,
+  commercialTitle: null,
+  description: null,
+  mediaRefs: [],
+  familyCode: null,
+  values: [],
+  facts: [],
+});
+const envelope = (state: unknown) => ({
+  contractVersion: 2,
+  vocabularyRevision: revision,
+  state,
+});
 
 const productId = '11111111-1111-4111-8111-111111111111';
 const tenantId = '22222222-2222-4222-8222-222222222222';
@@ -23,6 +50,7 @@ const db = {
   tenantMembership: { findMany: jest.fn() },
   product: { findFirst: jest.fn() },
   $transaction: jest.fn(),
+  $queryRaw: jest.fn(),
 };
 let principal: {
   userId: string;
@@ -87,20 +115,30 @@ describe('authenticated editorial read HTTP', () => {
       },
     ]);
     db.product.findFirst.mockResolvedValue({ id: productId, tenantId });
-    raw.mockImplementation((sql: { sql: string }) =>
-      Promise.resolve(sql.sql.includes('FROM "products"') ? products : states),
-    );
+    db.$queryRaw.mockRejectedValue(new Error('Root metadata must not be read'));
+    raw.mockImplementation((sql: Prisma.Sql | readonly string[]) => {
+      const text = Array.isArray(sql) ? sql.join('') : (sql as Prisma.Sql).sql;
+      return Promise.resolve(
+        text.includes('editorial_vocabulary_metadata')
+          ? [{ snapshot }]
+          : text.includes('FROM "products"')
+            ? products
+            : states,
+      );
+    });
     db.$transaction.mockImplementation((work: (tx: unknown) => unknown) =>
       work({ $queryRaw: raw, $executeRaw: write }),
     );
   });
   afterEach(() => {
     expect(write).not.toHaveBeenCalled();
+    expect(db.$queryRaw).not.toHaveBeenCalled();
   });
   const get = (url = path) =>
     request(app.getHttpServer() as Server)
       .get(url)
-      .set('Authorization', 'Bearer synthetic');
+      .set('Authorization', 'Bearer synthetic')
+      .set('Editorial-Vocabulary-Revision', revision);
   const rejected = async (
     response: PromiseLike<request.Response>,
     status: number,
@@ -110,16 +148,18 @@ describe('authenticated editorial read HTTP', () => {
     expect(result.status).toBe(status);
     expect(result.body).toEqual({ statusCode: status, error });
     expect(result.headers['cache-control']).toBe('no-store');
+    expect(result.headers['editorial-contract-version']).toBe('2');
+    expect(result.headers['editorial-vocabulary-revision']).toBeUndefined();
   };
 
   test('authorized empty state uses only principal scope and returns triple null', async () => {
     const response = await get().set('x-tenant-id', 'foreign');
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({
-      cycle: null,
-      draft: null,
-      published: null,
-    });
+    expect(response.body).toEqual(
+      envelope({ cycle: null, draft: null, published: null }),
+    );
+    expect(response.headers['editorial-contract-version']).toBe('2');
+    expect(response.headers['editorial-vocabulary-revision']).toBe(revision);
     expect(response.headers['cache-control']).toBe('no-store');
     expect(db.user.findUnique).toHaveBeenCalledWith({
       where: { id: actorId },
@@ -129,9 +169,14 @@ describe('authenticated editorial read HTTP', () => {
       where: { id: productId, tenantId },
       select: { id: true, tenantId: true },
     });
-    expect(raw).toHaveBeenCalledTimes(2);
-    for (const [sql] of raw.mock.calls)
+    expect(raw).toHaveBeenCalledTimes(3);
+    for (const [sql] of raw.mock.calls.filter(
+      ([query]) => !Array.isArray(query),
+    ))
       expect(sql.values).toEqual([tenantId, productId]);
+    expect(db.user.findUnique.mock.invocationCallOrder[0]).toBeLessThan(
+      db.$transaction.mock.invocationCallOrder[0],
+    );
     expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), {
       isolationLevel: 'RepeatableRead',
     });
@@ -142,15 +187,20 @@ describe('authenticated editorial read HTTP', () => {
       draft: {
         revision: 3,
         basePublishedRevision: 1,
-        document: emptyDocument(),
+        document: document(),
       },
-      published: { revision: 1, document: {} },
+      published: {
+        revision: 1,
+        document: { ...document(), commercialTitle: 'Published' },
+      },
     };
     states = [state];
     const response = await get();
     expect(response.status).toBe(200);
-    expect(response.body).toEqual(state);
-    expect(response.body).not.toHaveProperty('warnings');
+    expect(response.body).toEqual(envelope(state));
+    expect((response.body as { state: object }).state).not.toHaveProperty(
+      'warnings',
+    );
     expect(states).toEqual([state]);
   });
   test.each([undefined, 'Bearer invalid'])(
@@ -221,14 +271,14 @@ describe('authenticated editorial read HTTP', () => {
     if (kind === 'wildcard') {
       const response = await get();
       expect(response.status).toBe(200);
-      expect(response.body).toEqual({
-        cycle: null,
-        draft: null,
-        published: null,
-      });
+      expect(response.body).toEqual(
+        envelope({ cycle: null, draft: null, published: null }),
+      );
       expect(response.headers['cache-control']).toBe('no-store');
-      expect(raw).toHaveBeenCalledTimes(2);
-      for (const [sql] of raw.mock.calls)
+      expect(raw).toHaveBeenCalledTimes(3);
+      for (const [sql] of raw.mock.calls.filter(
+        ([query]) => !Array.isArray(query),
+      ))
         expect(sql.values).toEqual([tenantId, productId]);
     } else {
       await rejected(get(), 403, 'FORBIDDEN');
@@ -240,7 +290,7 @@ describe('authenticated editorial read HTTP', () => {
     db.tenantMembership.findMany.mockResolvedValue([]);
     await rejected(get(), 403, 'FORBIDDEN');
     expect(db.user.findUnique).toHaveBeenCalledTimes(2);
-    expect(raw).toHaveBeenCalledTimes(2);
+    expect(raw).toHaveBeenCalledTimes(3);
     expect(states).toEqual([]);
   });
   test('Product disappearing after authority yields localized NOT_FOUND', async () => {
@@ -268,6 +318,139 @@ describe('authenticated editorial read HTTP', () => {
       expect(db.$transaction).not.toHaveBeenCalled();
     },
   );
+  test.each([
+    undefined,
+    '',
+    'bad',
+    revision.toUpperCase(),
+    revision.slice(0, 12) + ' ' + revision.slice(12),
+    revision + ',' + revision,
+  ])('rejects invalid R %s before transaction', async (value) => {
+    const req = get().unset('Editorial-Vocabulary-Revision');
+    if (value !== undefined) req.set('Editorial-Vocabulary-Revision', value);
+    await rejected(req, 400, 'MALFORMED');
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+  test.each([
+    'Idempotency-Key',
+    'Editorial-Care-Confirmation',
+    'Editorial-Contract-Version',
+    'Editorial-Adoption',
+  ])('rejects prohibited %s even empty', async (header) => {
+    await rejected(get().set(header, ''), 400, 'MALFORMED');
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+  test('rejects duplicate raw revision occurrences', async () => {
+    await rejected(
+      get().set('Editorial-Vocabulary-Revision', [
+        revision,
+        revision,
+      ] as unknown as string),
+      400,
+      'MALFORMED',
+    );
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+  test('authority takes precedence over query/body/header admission', async () => {
+    db.tenantMembership.findMany.mockResolvedValue([]);
+    await rejected(
+      get()
+        .query({ tenantId: 'foreign' })
+        .send({ extra: true })
+        .set('Editorial-Adoption', ''),
+      403,
+      'FORBIDDEN',
+    );
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+  test('compares actual snapshot R before reading state', async () => {
+    await rejected(
+      get().set(
+        'Editorial-Vocabulary-Revision',
+        'ev2-sha256-' + 'a'.repeat(64),
+      ),
+      409,
+      'VOCABULARY_CHANGED',
+    );
+    expect(raw).toHaveBeenCalledTimes(2);
+  });
+  test.each(['draft', 'published'])(
+    'rejects invalid %s documents without leaking either slot',
+    async (slot) => {
+      for (const bad of [
+        {},
+        { ...document(), schemaVersion: 3 },
+        { ...document(), facts: null },
+      ]) {
+        states = [
+          {
+            cycle: 1,
+            draft: {
+              revision: 1,
+              basePublishedRevision: null,
+              document: document(),
+            },
+            published: { revision: 1, document: document() },
+          },
+        ];
+        (states[0] as Record<string, { document: unknown }>)[slot].document =
+          bad;
+        const before = structuredClone(states);
+        await rejected(get(), 500, 'INTERNAL_ERROR');
+        expect(states).toEqual(before);
+      }
+    },
+  );
+  test.each([0, -1, 1.5, 2147483648, '1'])(
+    'rejects corrupt stored counter %s',
+    async (cycle) => {
+      states = [{ cycle, draft: null, published: null }];
+      await rejected(get(), 500, 'INTERNAL_ERROR');
+    },
+  );
+  test('retains recognizable historical conflicts without fresh qualification', async () => {
+    const value = {
+      code: 'orphan',
+      owner: 'sellable',
+      variantId: 'gone',
+      state: 'known',
+      payload: { type: 'range', min: 5, max: 1, unit: 'x' },
+      evidence: null,
+    };
+    const historical = {
+      ...document(),
+      commercialTitle: 'x'.repeat(501),
+      values: [value, value],
+    };
+    const state = {
+      cycle: 1,
+      draft: { revision: 1, basePublishedRevision: null, document: historical },
+      published: null,
+    };
+    states = [state];
+    const before = structuredClone(state);
+    expect((await get()).body).toEqual(envelope(before));
+    expect(states).toEqual([before]);
+  });
+  test('does not treat a malformed present row as absent state', async () => {
+    states = [null];
+    await rejected(get(), 500, 'INTERNAL_ERROR');
+    expect(states).toEqual([null]);
+  });
+  test('transaction metadata failure stays sanitized and never reads state', async () => {
+    raw
+      .mockResolvedValueOnce(products)
+      .mockRejectedValueOnce(new Error('private snapshot failure'));
+    await rejected(get(), 500, 'INTERNAL_ERROR');
+    expect(raw).toHaveBeenCalledTimes(2);
+  });
+  test('unrepresentable snapshot is a typed whole-response failure', async () => {
+    raw
+      .mockResolvedValueOnce(products)
+      .mockResolvedValueOnce([{ snapshot: { ...snapshot, metadata: null } }]);
+    await rejected(get(), 500, 'EDITORIAL_VOCABULARY_UNREPRESENTABLE');
+    expect(raw).toHaveBeenCalledTimes(2);
+  });
   test('does not register definitions', async () => {
     expect((await get(path + '/definitions')).status).toBe(404);
     expect(db.$transaction).not.toHaveBeenCalled();

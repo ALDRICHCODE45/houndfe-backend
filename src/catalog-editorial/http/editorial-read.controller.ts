@@ -2,6 +2,8 @@ import {
   BadRequestException,
   Controller,
   Get,
+  ForbiddenException,
+  Res,
   Header,
   Inject,
   Param,
@@ -12,9 +14,13 @@ import {
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
-import type { CatalogEditorialCore } from '../application/catalog-editorial-core';
+import {
+  EDITORIAL_DOCUMENT_READER,
+  type EditorialDocumentReader,
+} from '../application/editorial-document-reader';
+import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-authority';
 import { EditorialHttpFilter } from './editorial-http.filter';
 import { EditorialHttpScope } from '../infrastructure/editorial-http-scope';
 
@@ -25,9 +31,10 @@ export const EDITORIAL_READER = Symbol('EDITORIAL_READER');
 @UseGuards(JwtAuthGuard, TenantContextGuard)
 export class EditorialReadController {
   constructor(
-    @Inject(EDITORIAL_READER)
-    private readonly reader: Pick<CatalogEditorialCore, 'read'>,
+    @Inject(EDITORIAL_DOCUMENT_READER)
+    private readonly reader: EditorialDocumentReader,
     private readonly scope: EditorialHttpScope,
+    private readonly authority: PrismaEditorialAuthority,
   ) {}
 
   @Get()
@@ -35,10 +42,21 @@ export class EditorialReadController {
   async read(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
   ) {
     const user = this.scope.principal(
       request.user as AuthenticatedUser | undefined,
     );
+    const scope = await this.scope.product(user, productId);
+    const access = await this.authority.resolve(scope).catch(() => null);
+    if (
+      access?.activeMember !== true ||
+      access.canRead !== true ||
+      access.actorId !== scope.actorId ||
+      access.tenantId !== scope.tenantId ||
+      access.productId !== scope.productId
+    )
+      throw new ForbiddenException();
     const body: unknown = request.body;
     if (
       Object.keys(request.query).length ||
@@ -49,6 +67,33 @@ export class EditorialReadController {
           Object.keys(body).length))
     )
       throw new BadRequestException();
-    return this.reader.read(await this.scope.product(user, productId));
+    const revisions: string[] = [];
+    for (let i = 0; i < request.rawHeaders.length; i += 2) {
+      const name = request.rawHeaders[i].toLowerCase();
+      if (
+        [
+          'idempotency-key',
+          'editorial-care-confirmation',
+          'editorial-contract-version',
+          'editorial-adoption',
+        ].includes(name)
+      )
+        throw new BadRequestException();
+      if (name === 'editorial-vocabulary-revision')
+        revisions.push(request.rawHeaders[i + 1]);
+    }
+    if (
+      revisions.length !== 1 ||
+      revisions[0].length !== 75 ||
+      !/^ev2-sha256-[0-9a-f]{64}$/.test(revisions[0])
+    )
+      throw new BadRequestException();
+    const result = await this.reader.read(scope, revisions[0]);
+    response.setHeader('Editorial-Contract-Version', '2');
+    response.setHeader(
+      'Editorial-Vocabulary-Revision',
+      result.vocabularyRevision,
+    );
+    return result;
   }
 }

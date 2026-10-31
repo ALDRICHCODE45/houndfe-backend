@@ -109,6 +109,19 @@ Plain transport rules:
   version/adoption headers are not supported CORS inputs.
 - Dynamic Date/request IDs and JSON byte layout are not replay guarantees.
 
+### Registered document GET implementation boundary
+
+The dedicated document reader admits current authority before query/body/raw-header
+validation, then reads qualified Product existence, complete metadata and state in
+one RepeatableRead transaction. Authority is a separate current observation, not
+part of that data snapshot. Actual canonical R must equal the single requested R.
+Stored documents/counters pass structural decoding only: legacy/future/malformed
+slots reject the whole response as INTERNAL_ERROR; recognizable historical conflicts
+remain unchanged for correction. No fresh qualification or fabricated warnings.
+The old writer provider remains separate; this does not activate V2 writes/replay.
+Registered HTTP tests substitute JWT/Prisma I/O; transaction-client provenance is
+composition evidence, not real PostgreSQL concurrency or browser proof.
+
 ## 3. Document, values and evidence
 
 ```ts

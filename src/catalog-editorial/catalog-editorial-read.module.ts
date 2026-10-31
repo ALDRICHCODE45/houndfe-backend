@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { EDITORIAL_DOCUMENT_READER } from './application/editorial-document-reader';
+import { PrismaEditorialDocumentReader } from './infrastructure/prisma-editorial-document-reader';
 import { EditorialHttpScope } from './infrastructure/editorial-http-scope';
 import { createCoordinatedEditorialWriteAuthority } from './infrastructure/prisma-coordinated-editorial-authority';
 import { EditorialWriteController } from './http/editorial-write.controller';
@@ -22,6 +24,18 @@ import {
       provide: EditorialHttpScope,
       inject: [PrismaService],
       useFactory: (prisma: PrismaService) => new EditorialHttpScope(prisma),
+    },
+    {
+      provide: PrismaEditorialAuthority,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) =>
+        new PrismaEditorialAuthority(prisma),
+    },
+    {
+      provide: EDITORIAL_DOCUMENT_READER,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) =>
+        new PrismaEditorialDocumentReader(prisma),
     },
     {
       provide: EDITORIAL_READER,

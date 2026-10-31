@@ -12,6 +12,8 @@ import { CatalogEditorialVocabularyModule } from '../catalog-editorial-vocabular
 import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-authority';
 import type { EditorialContext } from '../application/catalog-editorial-core';
 import { EDITORIAL_READER } from './editorial-read.controller';
+import { EDITORIAL_DOCUMENT_READER } from '../application/editorial-document-reader';
+const revision = 'ev2-sha256-' + 'a'.repeat(64);
 
 const productId = '11111111-1111-4111-8111-111111111111';
 const selected = 'selected';
@@ -52,6 +54,15 @@ const core = Object.fromEntries(
     }),
   ]),
 );
+const documentReader = {
+  read: jest.fn(
+    async (context: EditorialContext, vocabularyRevision: string) => ({
+      contractVersion: 2,
+      vocabularyRevision,
+      state: await core.read(context),
+    }),
+  ),
+};
 let principal: {
   userId: string;
   tenantId: string | null;
@@ -79,6 +90,8 @@ describe('registered seven-route global editorial scope', () => {
     })
       .overrideProvider(EDITORIAL_READER)
       .useValue(core)
+      .overrideProvider(EDITORIAL_DOCUMENT_READER)
+      .useValue(documentReader)
       .overrideGuard(JwtAuthGuard)
       .useValue({
         canActivate(context: ExecutionContext) {
@@ -161,7 +174,10 @@ describe('registered seven-route global editorial scope', () => {
       const req = request(app.getHttpServer() as Server)
         [route.method](route.url)
         .set('x-tenant-id', 'untrusted');
-      if (route.operation !== 'vocabulary') req.set('Idempotency-Key', 'key');
+      if (route.operation === 'read')
+        req.set('Editorial-Vocabulary-Revision', revision);
+      else if (route.operation !== 'vocabulary')
+        req.set('Idempotency-Key', 'key');
       return body === undefined ? req : req.send(body);
     };
     const deny = async (req: PromiseLike<request.Response>, status = 403) => {
@@ -204,7 +220,9 @@ describe('registered seven-route global editorial scope', () => {
             }
           : route.operation === 'context'
             ? { variants: [] }
-            : state,
+            : route.operation === 'read'
+              ? { contractVersion: 2, vocabularyRevision: revision, state }
+              : state,
       );
       expect(response.headers['cache-control']).toBe('no-store');
       expect(db.role.findFirst).toHaveBeenCalledWith({
@@ -241,7 +259,10 @@ describe('registered seven-route global editorial scope', () => {
               ...route.body,
               idempotencyKey: 'key',
             });
-          else expect(core[route.operation]).toHaveBeenCalledWith(context);
+          else {
+            expect(core[route.operation]).toHaveBeenCalledWith(context);
+            expect(documentReader.read).toHaveBeenCalledWith(context, revision);
+          }
         }
       }
     });
@@ -325,8 +346,14 @@ describe('registered seven-route global editorial scope', () => {
     test(`${route.operation}: tenant query/body cannot override verified global scope`, async () => {
       await deny(send().query({ tenantId: selected }), 400);
       await deny(send({ ...(route.body ?? {}), tenantId: selected }), 400);
-      expect(db.product.findFirst).not.toHaveBeenCalled();
-      expect(db.user.findUnique).not.toHaveBeenCalled();
+      if (route.operation === 'read') {
+        expect(db.product.findFirst).toHaveBeenCalled();
+        expect(db.user.findUnique).toHaveBeenCalled();
+        expect(documentReader.read).not.toHaveBeenCalled();
+      } else {
+        expect(db.product.findFirst).not.toHaveBeenCalled();
+        expect(db.user.findUnique).not.toHaveBeenCalled();
+      }
     });
     if (route.body)
       test(`${route.operation}: malformed key precedes global lookup`, async () => {
