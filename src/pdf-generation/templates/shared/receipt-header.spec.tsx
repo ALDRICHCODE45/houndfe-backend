@@ -56,7 +56,7 @@ describe('ReceiptHeader', () => {
       <Document>
         <Page size="A4">
           <ReceiptHeader
-            logoUrl="https://example.com/logo.png"
+            logoUrl="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
             companyName="HoundFe"
             address="Av. Reforma 123, CDMX"
             phone="+52 55 1234 5678"

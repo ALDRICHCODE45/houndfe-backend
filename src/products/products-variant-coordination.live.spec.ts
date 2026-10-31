@@ -346,6 +346,159 @@ describe('live Variant membership and stock coordination', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('waits before price-list observation and computes margins from fresh cost', async () => {
+    const seed = await freshSeed();
+    const other = await freshSeed();
+    const base = await open();
+    const held = latch(
+      base,
+      (_sql, model, operation) =>
+        model === 'PriceList' && operation === 'update',
+    );
+    const holderPid = await currentBackendPid(base);
+    const updater = actor(await open());
+    const updaterPid = await currentBackendPid(updater.client);
+    const unrelated = actor(await open());
+    const holding = held.client.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId}
+        AND "id" = ${seed.ids.productId} FOR UPDATE`;
+      await tx.product.update({
+        where: { id: seed.ids.productId },
+        data: { purchaseNetCostCents: 500 },
+      });
+      await tx.priceList.update({
+        where: { id: seed.ids.priceListId },
+        data: { priceCents: 1500 },
+      });
+    });
+    let update: ReturnType<ProductsService['updatePriceList']> | undefined;
+    try {
+      await held.reached;
+      update = updater.run(seed, (p) =>
+        p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {}),
+      );
+      expect(await waitForLockWait(observer, updaterPid)).toContain(holderPid);
+      await expect(
+        unrelated.run(other, (p) =>
+          p.updatePriceList(other.ids.productId, other.ids.priceListId, {
+            priceCents: 0,
+          }),
+        ),
+      ).resolves.toMatchObject({ priceCents: 0 });
+    } finally {
+      held.release();
+      await Promise.allSettled([holding, update]);
+    }
+    await expect(holding).resolves.toBeUndefined();
+    await expect(update).resolves.toMatchObject({
+      priceCents: 1500,
+      margin: { amountCents: 1000, percent: 67 },
+    });
+  });
+
+  it('rolls back price and tier replacement in an ambient transaction and releases the gate', async () => {
+    const seed = await freshSeed();
+    const base = await open();
+    let gates = 0;
+    const held = latch(
+      base,
+      (sql) =>
+        sql.includes('FROM "products"') &&
+        sql.includes('FOR UPDATE') &&
+        ++gates === 2,
+    );
+    const writer = actor(held.client);
+    const writerPid = await currentBackendPid(base);
+    const waiter = actor(await open());
+    const waiterPid = await currentBackendPid(waiter.client);
+    const where = { id: seed.ids.priceListId, tenantId: seed.ids.tenantId };
+    const before = await observer.priceList.findFirstOrThrow({
+      where,
+      include: { tierPrices: true },
+    });
+    const write = writer.run(seed, (p) =>
+      writer.inTransaction(async () => {
+        await p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {
+          priceCents: 0,
+          tierPrices: [{ minQuantity: 0, priceCents: 0 }],
+        });
+        await p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {
+          priceCents: 900,
+        });
+      }),
+    );
+    const outcome = write.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    let update: ReturnType<ProductsService['updatePriceList']> | undefined;
+    try {
+      await held.reached;
+      update = waiter.run(seed, (p) =>
+        p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {}),
+      );
+      expect(await waitForLockWait(observer, waiterPid)).toContain(writerPid);
+    } finally {
+      held.release(new Error('late price failure'));
+      await Promise.allSettled([outcome, update]);
+    }
+    await expect(outcome).resolves.toEqual(new Error('late price failure'));
+    await expect(update).resolves.toMatchObject({
+      priceCents: before.priceCents,
+      tierPrices: before.tierPrices,
+    });
+    const after = await observer.priceList.findFirstOrThrow({
+      where,
+      include: { tierPrices: true },
+    });
+    expect(after).toEqual({ ...before, updatedAt: after.updatedAt });
+  });
+
+  it('observes a cooperating price-list deletion after waiting on the Product gate', async () => {
+    const seed = await freshSeed();
+    const base = await open();
+    const held = latch(
+      base,
+      (_sql, model, operation) =>
+        model === 'PriceList' && operation === 'delete',
+    );
+    const holderPid = await currentBackendPid(base);
+    const updater = actor(await open());
+    const updaterPid = await currentBackendPid(updater.client);
+    // Explicit cooperating deletion, not a claim about global-list lifecycle writers.
+    const deletion = held.client.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId}
+        AND "id" = ${seed.ids.productId} FOR UPDATE`;
+      await tx.priceList.delete({ where: { id: seed.ids.priceListId } });
+    });
+    let outcome: Promise<unknown> | undefined;
+    try {
+      await held.reached;
+      outcome = updater
+        .run(seed, (p) =>
+          p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {
+            priceCents: 0,
+          }),
+        )
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(await waitForLockWait(observer, updaterPid)).toContain(holderPid);
+    } finally {
+      held.release();
+      await Promise.allSettled([deletion, outcome]);
+    }
+    await expect(deletion).resolves.toBeUndefined();
+    await expect(outcome).resolves.toMatchObject({
+      code: 'ENTITY_NOT_FOUND',
+      message: `PriceList with id "${seed.ids.priceListId}" not found`,
+    });
+    await expect(
+      observer.priceList.findFirst({ where: { id: seed.ids.priceListId } }),
+    ).resolves.toBeNull();
+  });
+
   it('waits before updateVariant observation while another Product proceeds', async () => {
     const seed = await freshSeed();
     const other = await freshSeed();

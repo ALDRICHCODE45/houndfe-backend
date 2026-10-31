@@ -1779,44 +1779,56 @@ export class ProductsService {
     dto: UpdatePriceListDto,
   ) {
     const tenantId = this.tenantPrisma.getTenantId();
-    const product = await this.productRepo.findById(productId);
-    if (!product) throw new EntityNotFoundError('Product', productId);
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      // Join the existing Product-first protocol without replacing ambient isolation.
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      if (products.length !== 1)
+        throw new EntityNotFoundError('Product', productId);
+      const product = await this.productRepo.findById(productId);
+      if (!product) throw new EntityNotFoundError('Product', productId);
 
-    const priceList = await this.prisma.priceList.findFirst({
-      where: { id: priceListId, productId },
+      const priceList = await tx.priceList.findFirst({
+        where: { id: priceListId, productId, tenantId },
+      });
+      if (!priceList) throw new EntityNotFoundError('PriceList', priceListId);
+
+      // Validate tier prices if provided
+      if (dto.tierPrices?.length) {
+        this.validateTierPrices(dto.tierPrices);
+      }
+
+      // Update price and replace tiers if provided
+      const updated = await tx.priceList.update({
+        where: { id: priceListId, productId, tenantId },
+        data: {
+          ...(dto.priceCents !== undefined
+            ? { priceCents: dto.priceCents }
+            : {}),
+          ...(dto.tierPrices !== undefined
+            ? {
+                tierPrices: {
+                  deleteMany: {},
+                  create: dto.tierPrices.map((t) => ({
+                    minQuantity: t.minQuantity,
+                    priceCents: t.priceCents,
+                    tenantId,
+                  })) as Prisma.TierPriceUncheckedCreateWithoutPriceListInput[],
+                },
+              }
+            : {}),
+        },
+        include: {
+          tierPrices: { orderBy: { minQuantity: 'asc' } },
+          globalPriceList: { select: { name: true } },
+        },
+      });
+
+      return this.enrichPriceListResponse(updated, product);
     });
-    if (!priceList) throw new EntityNotFoundError('PriceList', priceListId);
-
-    // Validate tier prices if provided
-    if (dto.tierPrices?.length) {
-      this.validateTierPrices(dto.tierPrices);
-    }
-
-    // Update price and replace tiers if provided
-    const updated = await this.prisma.priceList.update({
-      where: { id: priceListId },
-      data: {
-        ...(dto.priceCents !== undefined ? { priceCents: dto.priceCents } : {}),
-        ...(dto.tierPrices !== undefined
-          ? {
-              tierPrices: {
-                deleteMany: {},
-                create: dto.tierPrices.map((t) => ({
-                  minQuantity: t.minQuantity,
-                  priceCents: t.priceCents,
-                  tenantId,
-                })) as Prisma.TierPriceUncheckedCreateWithoutPriceListInput[],
-              },
-            }
-          : {}),
-      },
-      include: {
-        tierPrices: { orderBy: { minQuantity: 'asc' } },
-        globalPriceList: { select: { name: true } },
-      },
-    });
-
-    return this.enrichPriceListResponse(updated, product);
   }
 
   // ==================== Images ====================
