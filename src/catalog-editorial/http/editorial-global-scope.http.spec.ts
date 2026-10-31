@@ -13,6 +13,7 @@ import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-aut
 import type { EditorialContext } from '../application/catalog-editorial-core';
 import { EDITORIAL_READER } from './editorial-read.controller';
 import { EDITORIAL_DOCUMENT_READER } from '../application/editorial-document-reader';
+import { EDITORIAL_INITIALIZE_WRITER } from '../application/editorial-initialize-writer';
 import { EDITORIAL_DISCARD_WRITER } from '../application/editorial-discard-writer';
 import type { ReceiptRequestV2 } from '../application/editorial-write-request-v2';
 const revision = 'ev2-sha256-' + 'a'.repeat(64);
@@ -94,6 +95,31 @@ describe('registered seven-route global editorial scope', () => {
     })
       .overrideProvider(EDITORIAL_READER)
       .useValue(core)
+      .overrideProvider(EDITORIAL_INITIALIZE_WRITER)
+      .useValue({
+        async initialize(
+          context: EditorialContext,
+          key: string,
+          intent: ReceiptRequestV2,
+        ) {
+          const value: unknown = await core.initialize(context, {
+            ...intent.body,
+            idempotencyKey: key,
+          });
+          return {
+            status: 201,
+            body: {
+              contractVersion: 2,
+              vocabularyRevision: revision,
+              state: value,
+            },
+            headers: {
+              'Editorial-Contract-Version': '2',
+              'Editorial-Vocabulary-Revision': revision,
+            },
+          };
+        },
+      })
       .overrideProvider(EDITORIAL_DISCARD_WRITER)
       .useValue({
         async discard(
@@ -207,7 +233,7 @@ describe('registered seven-route global editorial scope', () => {
         req.set('Editorial-Vocabulary-Revision', revision);
       else if (route.operation !== 'vocabulary')
         req.set('Idempotency-Key', 'key');
-      if (route.operation === 'discard')
+      if (route.operation === 'discard' || route.operation === 'initialize')
         req.set('Editorial-Vocabulary-Revision', revision);
       return body === undefined ? req : req.send(body);
     };
@@ -251,7 +277,9 @@ describe('registered seven-route global editorial scope', () => {
             }
           : route.operation === 'context'
             ? { variants: [] }
-            : route.operation === 'read' || route.operation === 'discard'
+            : route.operation === 'read' ||
+                route.operation === 'discard' ||
+                route.operation === 'initialize'
               ? { contractVersion: 2, vocabularyRevision: revision, state }
               : state,
       );
@@ -377,7 +405,11 @@ describe('registered seven-route global editorial scope', () => {
     test(`${route.operation}: tenant query/body cannot override verified global scope`, async () => {
       await deny(send().query({ tenantId: selected }), 400);
       await deny(send({ ...(route.body ?? {}), tenantId: selected }), 400);
-      if (route.operation === 'read' || route.operation === 'discard') {
+      if (
+        route.operation === 'read' ||
+        route.operation === 'discard' ||
+        route.operation === 'initialize'
+      ) {
         expect(db.product.findFirst).toHaveBeenCalled();
         expect(db.user.findUnique).toHaveBeenCalled();
         expect(documentReader.read).not.toHaveBeenCalled();
@@ -389,7 +421,7 @@ describe('registered seven-route global editorial scope', () => {
     if (route.body)
       test(`${route.operation}: malformed key preserves operation-specific authority precedence`, async () => {
         await deny(send().unset('Idempotency-Key'), 400);
-        if (route.operation === 'discard') {
+        if (route.operation === 'discard' || route.operation === 'initialize') {
           expect(db.user.findUnique).toHaveBeenCalled();
           expect(db.product.findFirst).toHaveBeenCalled();
         } else {

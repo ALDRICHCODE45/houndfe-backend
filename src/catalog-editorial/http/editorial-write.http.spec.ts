@@ -1,6 +1,31 @@
 import { Global, Module, UnauthorizedException } from '@nestjs/common';
 import type { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { createHash } from 'node:crypto';
+const emptyV2 = {
+  schemaVersion: 2,
+  commercialTitle: null,
+  description: null,
+  mediaRefs: [],
+  familyCode: null,
+  values: [],
+  facts: [],
+};
+const metadata = { id: 'global', semanticsVersion: 'editorial-production-1' };
+const currentR =
+  'ev2-sha256-' +
+  createHash('sha256')
+    .update(
+      JSON.stringify({
+        contractVersion: 2,
+        vocabulary: {
+          definitions: [],
+          families: [],
+          semanticsVersion: metadata.semanticsVersion,
+        },
+      }),
+    )
+    .digest('hex');
 import { ClsModule } from 'nestjs-cls';
 import request from 'supertest';
 import type { Request } from 'express';
@@ -12,6 +37,7 @@ import { createAppValidationPipe } from '../../shared/listing/app-validation.pip
 import { CatalogEditorialReadModule } from '../catalog-editorial-read.module';
 import { emptyDocument } from '../domain/document';
 import { EDITORIAL_READER } from './editorial-read.controller';
+import { EDITORIAL_INITIALIZE_WRITER } from '../application/editorial-initialize-writer';
 import { EDITORIAL_DISCARD_WRITER } from '../application/editorial-discard-writer';
 import type { EditorialContext } from '../application/catalog-editorial-core';
 import type { ReceiptRequestV2 } from '../application/editorial-write-request-v2';
@@ -76,6 +102,26 @@ async function application(mockCore: boolean) {
     });
   if (mockCore) {
     builder.overrideProvider(EDITORIAL_READER).useValue(core);
+    builder.overrideProvider(EDITORIAL_INITIALIZE_WRITER).useValue({
+      async initialize(
+        context: EditorialContext,
+        key: string,
+        intent: ReceiptRequestV2,
+      ) {
+        const state: unknown = await core.initialize(context, {
+          ...intent.body,
+          idempotencyKey: key,
+        });
+        return {
+          status: 201,
+          body: { contractVersion: 2, vocabularyRevision: revision, state },
+          headers: {
+            'Editorial-Contract-Version': '2',
+            'Editorial-Vocabulary-Revision': revision,
+          },
+        };
+      },
+    });
     builder.overrideProvider(EDITORIAL_DISCARD_WRITER).useValue({
       async discard(
         context: EditorialContext,
@@ -153,17 +199,25 @@ describe('coordinated write wiring', () => {
         if (invalid && operation === 'initialize') continue;
         const before = structuredClone(state);
         tx.$executeRaw.mockClear();
-        raw.mockReset().mockImplementation((sql: { sql: string }) => {
-          if (!available) return Promise.reject(new Error('gate unavailable'));
-          return Promise.resolve(
-            sql.sql.includes('FROM "products"')
-              ? [{ id: productId }]
-              : operation === 'save' &&
-                  sql.sql.includes('FROM "catalog_editorial_states"')
-                ? [state]
-                : [],
-          );
-        });
+        raw
+          .mockReset()
+          .mockImplementation((sql: { sql: string } | readonly string[]) => {
+            if (!available)
+              return Promise.reject(new Error('gate unavailable'));
+            if (Array.isArray(sql))
+              return Promise.resolve([
+                { snapshot: { metadata, families: [], definitions: [] } },
+              ]);
+            const query = sql as { sql: string };
+            return Promise.resolve(
+              query.sql.includes('FROM "products"')
+                ? [{ id: productId }]
+                : operation === 'save' &&
+                    query.sql.includes('FROM "catalog_editorial_states"')
+                  ? [state]
+                  : [],
+            );
+          });
         const req =
           operation === 'initialize'
             ? request(app.getHttpServer() as Server).post(path + '/initialize')
@@ -179,6 +233,8 @@ describe('coordinated write wiring', () => {
                   mediaRefs: invalid ? ['unowned-asset'] : [],
                 },
               };
+        if (operation === 'initialize')
+          req.set('Editorial-Vocabulary-Revision', currentR);
         const response = await req
           .set('Authorization', 'Bearer synthetic')
           .set('Idempotency-Key', 'key')
@@ -192,26 +248,48 @@ describe('coordinated write wiring', () => {
             : operation === 'initialize'
               ? 201
               : 200
-          : 403;
+          : operation === 'initialize' && authorized
+            ? 500
+            : 403;
         expect(response.status).toBe(status);
         expect(response.body).toEqual(
           success
-            ? {
-                cycle: 1,
-                draft: {
-                  revision: operation === 'initialize' ? 1 : 2,
-                  basePublishedRevision: null,
-                  document: emptyDocument(),
-                },
-                published: null,
-              }
+            ? operation === 'initialize'
+              ? {
+                  contractVersion: 2,
+                  vocabularyRevision: currentR,
+                  state: {
+                    cycle: 1,
+                    draft: {
+                      revision: 1,
+                      basePublishedRevision: null,
+                      document: emptyV2,
+                    },
+                    published: null,
+                  },
+                }
+              : {
+                  cycle: 1,
+                  draft: {
+                    revision: 2,
+                    basePublishedRevision: null,
+                    document: emptyDocument(),
+                  },
+                  published: null,
+                }
             : {
                 statusCode: status,
-                error: invalid ? 'MALFORMED' : 'FORBIDDEN',
+                error: invalid
+                  ? 'MALFORMED'
+                  : status === 500
+                    ? 'INTERNAL_ERROR'
+                    : 'FORBIDDEN',
               },
         );
         expect(response.headers['cache-control']).toBe('no-store');
-        expect(tx.$executeRaw).toHaveBeenCalledTimes(success ? 2 : 0);
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(
+          success ? (operation === 'initialize' ? 3 : 2) : 0,
+        );
         if (!admitted) expect(raw).toHaveBeenCalledTimes(authorized ? 1 : 0);
         if (invalid) {
           expect(state).toEqual(before);
@@ -268,7 +346,7 @@ describe('editorial write HTTP', () => {
       operation === 'save'
         ? request(app.getHttpServer() as Server).put(path)
         : request(app.getHttpServer() as Server).post(path + '/' + operation);
-    if (operation === 'discard')
+    if (operation === 'discard' || operation === 'initialize')
       req.set('Editorial-Vocabulary-Revision', revision);
     return req
       .set('Authorization', 'Bearer synthetic')
@@ -317,7 +395,9 @@ describe('editorial write HTTP', () => {
                   vocabularyRevision: revision,
                   state: { cycle: 1, draft: null, published: null },
                 }
-              : state,
+              : operation === 'initialize'
+                ? { contractVersion: 2, vocabularyRevision: revision, state }
+                : state,
         );
         expect(response.headers['cache-control']).toBe('no-store');
       }

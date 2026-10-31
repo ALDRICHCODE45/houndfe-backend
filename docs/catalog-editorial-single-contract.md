@@ -122,9 +122,33 @@ The old writer provider remains separate; GET itself does not activate V2 writes
 Registered HTTP tests substitute JWT/Prisma I/O; transaction-client provenance is
 composition evidence, not real PostgreSQL concurrency or browser proof.
 
+### Registered initialize implementation boundary
+
+Initialize uses current persisted read/update authority before semantic admission,
+then rechecks authority in its ReadCommitted transaction. Product locking and
+namespaced JSONB receipt identity precede absent/exact-cycle CAS, no-active-Draft
+and int32 increment gates. Complete metadata locks and a fresh snapshot precede
+current-R comparison, reference observations, mutation and the atomic 201 receipt.
+
+Fresh initialization creates the exact empty V2 document or copies recognizable
+Published unchanged. It never applies fresh bounds, evidence, numeric or facts
+qualification to that copy. Whole-source S42 eligibility controls conservation
+warnings: an ineligible historical source is still copied, without warnings.
+Actual qualified variant/private-media sources are observed even for empty copies;
+source outages propagate. Internal create and its shared legacy helper are unchanged.
+
+Replay validates the recorded initialization relationships (cycle increment, draft
+revision1, base Published revision, and exact Published/empty document copy).
+Current reference/conservation gates remain side-effect-free; reference loss can
+reject replay. No current-state CAS or current-R equality is applied; recorded
+status/body/R and warning presence/order are returned without rebuilding them.
+Malformed recorded structure/relationships fail as INTERNAL_ERROR.
+Mock composition covers these paths, not database JSONB equality, rollback, writer
+coordination or lock privileges. The operational prerequisites below still apply.
+
 ### Registered discard implementation boundary
 
-Discard alone uses a dedicated V2 writer; initialize/save/publish retain their
+Initialize and discard use dedicated V2 writers; save/publish retain their
 existing providers. Current persisted read/update authority precedes semantic
 admission and is rechecked inside the transaction. Raw duplicate/list headers,
 missing R/key, prohibited care/version/adoption headers and nonclosed bodies fail.
