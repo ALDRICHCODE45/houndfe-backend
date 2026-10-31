@@ -5,17 +5,19 @@ import {
   Get,
   Header,
   Req,
+  Res,
   UseFilters,
   UseGuards,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { EditorialReaderAuthority } from '../infrastructure/editorial-reader-authority';
-import { PrismaEditorialVocabulary } from '../infrastructure/prisma-editorial-vocabulary';
+import { PrismaEditorialVocabularySnapshot } from '../infrastructure/prisma-editorial-vocabulary-snapshot';
 import { EditorialHttpFilter } from './editorial-http.filter';
 import { EditorialHttpScope } from '../infrastructure/editorial-http-scope';
+import { createEditorialVocabularyHttpResponse } from './editorial-vocabulary-response';
 
 @Controller('catalog-editorial/vocabulary')
 @UseFilters(EditorialHttpFilter)
@@ -23,13 +25,13 @@ import { EditorialHttpScope } from '../infrastructure/editorial-http-scope';
 export class EditorialVocabularyController {
   constructor(
     private readonly authority: EditorialReaderAuthority,
-    private readonly vocabulary: PrismaEditorialVocabulary,
+    private readonly vocabulary: PrismaEditorialVocabularySnapshot,
     private readonly scope: EditorialHttpScope,
   ) {}
 
   @Get()
   @Header('Cache-Control', 'no-store')
-  async read(@Req() request: Request) {
+  async read(@Req() request: Request, @Res() response: Response) {
     const user = this.scope.principal(
       request.user as AuthenticatedUser | undefined,
     );
@@ -45,6 +47,10 @@ export class EditorialVocabularyController {
       throw new BadRequestException();
     if (!(await this.authority.permits(user.userId, user.tenantId)))
       throw new ForbiddenException();
-    return this.vocabulary.read();
+    const result = await createEditorialVocabularyHttpResponse(
+      this.vocabulary,
+      request.rawHeaders,
+    );
+    response.set(result.headers).status(result.statusCode).json(result.body);
   }
 }

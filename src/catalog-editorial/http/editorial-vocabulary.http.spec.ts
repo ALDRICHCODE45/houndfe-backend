@@ -10,6 +10,14 @@ import { PrismaService } from '../../shared/prisma/prisma.service';
 import { CatalogEditorialVocabularyModule } from '../catalog-editorial-vocabulary.module';
 
 const path = '/catalog-editorial/vocabulary';
+const metadata = { id: 'global', semanticsVersion: 'editorial-production-1' };
+const envelope = (vocabulary: object) => ({
+  contractVersion: 2,
+  vocabularyRevision: expect.stringMatching(
+    /^ev2-sha256-[0-9a-f]{64}$/,
+  ) as string,
+  vocabulary: { semanticsVersion: metadata.semanticsVersion, ...vocabulary },
+});
 const grant = { subject: 'ProductEditorialDraft', action: 'read' };
 const member = (permission = grant, tenantId = 'tenant') => ({
   userId: 'actor',
@@ -61,7 +69,7 @@ describe('vocabulary HTTP', () => {
     db.user.findUnique.mockResolvedValue({ isActive: true });
     db.tenantMembership.findMany.mockResolvedValue([member()]);
     db.$queryRaw.mockResolvedValue([
-      { snapshot: { families: [], definitions: [] } },
+      { snapshot: { metadata, families: [], definitions: [] } },
     ]);
   });
   const get = () =>
@@ -79,10 +87,14 @@ describe('vocabulary HTTP', () => {
     expect(result.headers['cache-control']).toBe('no-store');
   };
   it('returns empty company vocabulary using only principal scope', async () => {
-    await check(get().set('x-tenant-id', 'foreign'), 200, {
-      families: [],
-      definitions: [],
-    });
+    await check(
+      get().set('x-tenant-id', 'foreign'),
+      200,
+      envelope({
+        families: [],
+        definitions: [],
+      }),
+    );
     expect(db.tenantMembership.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { userId: 'actor', tenantId: 'tenant' },
@@ -102,8 +114,16 @@ describe('vocabulary HTTP', () => {
       definitionCode: code,
       owner: 'product',
       sortOrder: 0,
+      exposure: 'INTERNAL',
+      searchable: false,
+      publicationCheck: 'when_asserted',
+      policy: { route: 'pending' },
     });
-    const unit = (code: string | null) => ({ code, label: code, sortOrder: 0 });
+    const unit = (code: string | null) => ({
+      code,
+      label: code,
+      sortOrder: 0,
+    });
     const option = (code: string, archived: boolean) => ({
       code,
       label: code,
@@ -120,15 +140,58 @@ describe('vocabulary HTTP', () => {
       definitions: [
         definition('a', 'text'),
         definition('b', 'boolean'),
-        definition('c', 'number', { units: [unit(null), unit('kg')] }),
+        definition('c', 'number', {
+          numericPolicy: { status: 'pending' },
+          units: [unit(null), unit('kg')],
+        }),
         definition('d', 'single', {
           options: [option('a', true), option('b', false)],
+          groups: [],
+          aliases: [],
         }),
-        definition('e', 'multi', { options: [] }),
+        definition('e', 'multi', { options: [], groups: [], aliases: [] }),
       ],
     };
-    db.$queryRaw.mockResolvedValue([{ snapshot }]);
-    await check(get(), 200, snapshot);
+    const rows = snapshot.definitions.map((d) => {
+      const value = d as typeof d & {
+        numericPolicy?: object;
+        units?: ReturnType<typeof unit>[];
+        options?: ReturnType<typeof option>[];
+      };
+      return {
+        ...d,
+        numericPolicy: value.numericPolicy ?? null,
+        groups: [],
+        aliases: [],
+        units: (value.units ?? []).map((u, i) => ({
+          id: `${d.id}-${i}`,
+          definitionId: d.id,
+          definitionType: d.type,
+          unitCode: u.code,
+          label: u.label,
+          sortOrder: u.sortOrder,
+        })),
+        options: (value.options ?? []).map(({ archived, ...o }) => ({
+          ...o,
+          definitionId: d.id,
+          definitionType: d.type,
+          archivedAt: archived ? '2026-01-01T00:00:00.000Z' : null,
+        })),
+      };
+    });
+    db.$queryRaw.mockResolvedValue([
+      {
+        snapshot: {
+          metadata,
+          definitions: rows,
+          families: snapshot.families.map((f) => ({
+            ...f,
+            bindings: f.bindings.map((b) => ({ ...b, familyId: f.id })),
+          })),
+        },
+      },
+    ]);
+    await check(get(), 200, envelope(snapshot));
   });
   it.each([undefined, 'Bearer invalid'])('rejects token %s', async (token) => {
     const req = request(app.getHttpServer() as Server).get(path);
@@ -186,7 +249,7 @@ describe('vocabulary HTTP', () => {
       req,
       mode === 'manage' ? 200 : status,
       mode === 'manage'
-        ? { families: [], definitions: [] }
+        ? envelope({ families: [], definitions: [] })
         : { statusCode: status, error },
     );
     if (mode === 'manage') expect(db.$queryRaw).toHaveBeenCalledTimes(1);

@@ -7,7 +7,7 @@ import {
   parseEditorialVocabularyHeaders,
 } from './editorial-vocabulary-headers';
 
-/** Dormant descriptor only; callers must complete current auth/authority first. */
+/** Response descriptor; callers must complete current auth/authority first. */
 export async function createEditorialVocabularyHttpResponse(
   source: { read(): Promise<unknown> },
   rawHeaders: readonly string[],

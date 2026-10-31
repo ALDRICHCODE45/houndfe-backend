@@ -104,7 +104,16 @@ describe('registered seven-route global editorial scope', () => {
       Promise.resolve([
         sql.sql?.includes('FROM products p')
           ? { variants: [] }
-          : { snapshot: { families: [], definitions: [] } },
+          : {
+              snapshot: {
+                metadata: {
+                  id: 'global',
+                  semanticsVersion: 'editorial-production-1',
+                },
+                families: [],
+                definitions: [],
+              },
+            },
       ]),
     );
   });
@@ -151,8 +160,8 @@ describe('registered seven-route global editorial scope', () => {
     const send = (body: object | undefined = route.body) => {
       const req = request(app.getHttpServer() as Server)
         [route.method](route.url)
-        .set('Idempotency-Key', 'key')
         .set('x-tenant-id', 'untrusted');
+      if (route.operation !== 'vocabulary') req.set('Idempotency-Key', 'key');
       return body === undefined ? req : req.send(body);
     };
     const deny = async (req: PromiseLike<request.Response>, status = 403) => {
@@ -180,7 +189,17 @@ describe('registered seven-route global editorial scope', () => {
       );
       expect(response.body).toEqual(
         route.operation === 'vocabulary'
-          ? { families: [], definitions: [] }
+          ? {
+              contractVersion: 2,
+              vocabularyRevision: expect.stringMatching(
+                /^ev2-sha256-[0-9a-f]{64}$/,
+              ) as string,
+              vocabulary: {
+                semanticsVersion: 'editorial-production-1',
+                families: [],
+                definitions: [],
+              },
+            }
           : route.operation === 'context'
             ? { variants: [] }
             : state,

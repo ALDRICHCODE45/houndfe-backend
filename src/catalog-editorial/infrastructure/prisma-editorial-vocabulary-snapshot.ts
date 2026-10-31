@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 
-/** Dormant raw observation; not a validated transport snapshot. */
+/** Single-statement raw observation; the HTTP read composition validates it. */
 export class PrismaEditorialVocabularySnapshot {
   constructor(private readonly prisma: Pick<PrismaClient, '$queryRaw'>) {}
 

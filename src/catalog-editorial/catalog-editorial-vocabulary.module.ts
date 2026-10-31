@@ -8,7 +8,7 @@ import { EditorialContextController } from './http/editorial-context.controller'
 import { PrismaEditorialAuthority } from './infrastructure/prisma-editorial-authority';
 import { PrismaEditorialContext } from './infrastructure/prisma-editorial-context';
 import { EditorialReaderAuthority } from './infrastructure/editorial-reader-authority';
-import { PrismaEditorialVocabulary } from './infrastructure/prisma-editorial-vocabulary';
+import { PrismaEditorialVocabularySnapshot } from './infrastructure/prisma-editorial-vocabulary-snapshot';
 
 // Root supplies Prisma/CLS/JWT; Product context uses a separate unchanged H1 authority.
 @Module({
@@ -39,10 +39,10 @@ import { PrismaEditorialVocabulary } from './infrastructure/prisma-editorial-voc
         new EditorialReaderAuthority(prisma),
     },
     {
-      provide: PrismaEditorialVocabulary,
+      provide: PrismaEditorialVocabularySnapshot,
       inject: [PrismaService],
       useFactory: (prisma: PrismaService) =>
-        new PrismaEditorialVocabulary(prisma),
+        new PrismaEditorialVocabularySnapshot(prisma),
     },
   ],
 })
