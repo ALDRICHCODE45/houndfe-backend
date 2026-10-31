@@ -1459,17 +1459,23 @@ export class ProductsService {
     dto: UpsertVariantPriceDto,
   ) {
     const tenantId = this.tenantPrisma.getTenantId();
-    const { product, variant } = await this.ensureProductAndVariant(
-      productId,
-      variantId,
-    );
-    await this.ensurePriceList(productId, priceListId);
-
-    if (dto.tierPrices?.length) {
-      this.validateTierPrices(dto.tierPrices);
-    }
-
-    await this.tenantPrisma.getClient().$transaction(async (tx) => {
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      if (products.length !== 1)
+        throw new EntityNotFoundError('Product', productId);
+      const { product, variant } = await this.ensureProductAndVariant(
+        productId,
+        variantId,
+      );
+      await this.ensurePriceList(productId, priceListId, {
+        client: tx,
+        tenantId,
+      });
+      if (dto.tierPrices?.length) this.validateTierPrices(dto.tierPrices);
       const variantPrice = await tx.variantPrice.upsert({
         where: {
           tenantId_variantId_priceListId: {
@@ -1489,7 +1495,7 @@ export class ProductsService {
 
       if (dto.tierPrices !== undefined) {
         await tx.variantTierPrice.deleteMany({
-          where: { variantPriceId: variantPrice.id },
+          where: { variantPriceId: variantPrice.id, tenantId },
         });
 
         if (dto.tierPrices.length) {
@@ -1503,11 +1509,8 @@ export class ProductsService {
           });
         }
       }
-    });
 
-    const updated = await this.tenantPrisma
-      .getClient()
-      .variantPrice.findUnique({
+      const updated = await tx.variantPrice.findUnique({
         where: {
           tenantId_variantId_priceListId: {
             tenantId,
@@ -1523,18 +1526,18 @@ export class ProductsService {
         },
       });
 
-    if (!updated) {
-      throw new EntityNotFoundError(
-        'VariantPrice',
-        `${variantId}:${priceListId}`,
+      if (!updated) {
+        throw new EntityNotFoundError(
+          'VariantPrice',
+          `${variantId}:${priceListId}`,
+        );
+      }
+      return this.enrichVariantPriceResponse(
+        updated,
+        product,
+        variant.purchaseNetCostCents,
       );
-    }
-
-    return this.enrichVariantPriceResponse(
-      updated,
-      product,
-      variant.purchaseNetCostCents,
-    );
+    });
   }
 
   async bulkUpsertVariantPrices(

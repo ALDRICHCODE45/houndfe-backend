@@ -1363,7 +1363,9 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
           globalPriceList: { isDefault: false },
         }),
       },
+      variantTierPrice: tx.variantTierPrice,
       variantPrice: {
+        upsert: tx.variantPrice.upsert,
         findUnique: jest.fn().mockResolvedValue({
           id: 'vp-1',
           variantId: VARIANT_A_ID,
@@ -1399,7 +1401,7 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
     });
 
     expect(tx.variantTierPrice.deleteMany).toHaveBeenCalledWith({
-      where: { variantPriceId: 'vp-1' },
+      where: { variantPriceId: 'vp-1', tenantId: 'tenant-1' },
     });
     expect(tx.variantTierPrice.createMany).not.toHaveBeenCalled();
   });
@@ -1416,7 +1418,7 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
     });
 
     expect(tx.variantTierPrice.deleteMany).toHaveBeenCalledWith({
-      where: { variantPriceId: 'vp-1' },
+      where: { variantPriceId: 'vp-1', tenantId: 'tenant-1' },
     });
     expect(tx.variantTierPrice.createMany).toHaveBeenCalledWith({
       data: [
