@@ -346,6 +346,282 @@ describe('live Variant membership and stock coordination', () => {
     ).resolves.toBeUndefined();
   });
 
+  async function bulkContexts(seed: EditorialFixture) {
+    const ids: string[] = [];
+    for (const name of ['Bulk new', 'Bulk untouched']) {
+      const global = await observer.globalPriceList.create({
+        data: { name: `${name}-${seed.ids.productId}` },
+      });
+      const list = await observer.priceList.create({
+        data: {
+          tenantId: seed.ids.tenantId,
+          productId: seed.ids.productId,
+          globalPriceListId: global.id,
+          priceCents: 200,
+        },
+      });
+      ids.push(list.id);
+    }
+    await observer.variantPrice.create({
+      data: {
+        tenantId: seed.ids.tenantId,
+        variantId: seed.ids.variantId,
+        priceListId: ids[1],
+        priceCents: 200,
+      },
+    });
+    return ids;
+  }
+
+  it('gates bulk fresh costs, duplicate writes and the complete multi-list response', async () => {
+    const seed = await freshSeed();
+    const other = await freshSeed();
+    const [newList, untouched] = await bulkContexts(seed);
+    const base = await open();
+    const held = latch(
+      base,
+      (_sql, model, operation) => model === 'Variant' && operation === 'update',
+    );
+    const holderPid = await currentBackendPid(base);
+    const updaterBase = await open();
+    const response = latch(
+      updaterBase,
+      (_sql, model, operation) =>
+        model === 'VariantPrice' && operation === 'findMany',
+    );
+    const updater = actor(response.client);
+    const updaterPid = await currentBackendPid(updaterBase);
+    const waiter = actor(await open());
+    const waiterPid = await currentBackendPid(waiter.client);
+    const unrelated = actor(await open());
+    const holding = held.client.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId}
+        AND "id" = ${seed.ids.productId} FOR UPDATE`;
+      await tx.variant.update({
+        where: { id: seed.ids.variantId },
+        data: { purchaseNetCostCents: 333 },
+      });
+    });
+    let update:
+      | ReturnType<ProductsService['bulkUpsertVariantPrices']>
+      | undefined;
+    let waiting: ReturnType<ProductsService['updatePriceList']> | undefined;
+    try {
+      await held.reached;
+      update = updater.run(seed, (p) =>
+        p.bulkUpsertVariantPrices(seed.ids.productId, seed.ids.variantId, {
+          prices: [
+            {
+              priceListId: seed.ids.priceListId,
+              priceCents: 1000,
+              tierPrices: [{ minQuantity: 2, priceCents: 500 }],
+            },
+            { priceListId: newList, priceCents: 900 },
+            { priceListId: seed.ids.priceListId, priceCents: 700 },
+          ],
+        }),
+      );
+      expect(await waitForLockWait(observer, updaterPid)).toContain(holderPid);
+      await expect(
+        unrelated.run(other, (p) =>
+          p.bulkUpsertVariantPrices(other.ids.productId, other.ids.variantId, {
+            prices: [{ priceListId: other.ids.priceListId, priceCents: 0 }],
+          }),
+        ),
+      ).resolves.toEqual([expect.objectContaining({ priceCents: 0 })]);
+      held.release();
+      await response.reached;
+      waiting = waiter.run(seed, (p) =>
+        p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {}),
+      );
+      expect(await waitForLockWait(observer, waiterPid)).toContain(updaterPid);
+    } finally {
+      held.release();
+      response.release();
+      await Promise.allSettled([holding, update, waiting]);
+    }
+    await expect(holding).resolves.toBeUndefined();
+    await expect(waiting).resolves.toMatchObject({ id: seed.ids.priceListId });
+    const result = await update;
+    expect(result?.map((r) => r.priceListId).sort()).toEqual(
+      [seed.ids.priceListId, newList, untouched].sort(),
+    );
+    expect(
+      result?.find((r) => r.priceListId === seed.ids.priceListId),
+    ).toMatchObject({
+      priceCents: 700,
+      margin: { amountCents: 367 },
+      tierPrices: [
+        { minQuantity: 2, priceCents: 500, margin: { amountCents: 167 } },
+      ],
+    });
+    expect(result?.find((r) => r.priceListId === newList)).toMatchObject({
+      priceCents: 900,
+      tierPrices: [],
+    });
+    expect(result?.find((r) => r.priceListId === untouched)).toMatchObject({
+      priceCents: 200,
+    });
+    const persisted = await observer.variantPrice.findMany({
+      where: { tenantId: seed.ids.tenantId, variantId: seed.ids.variantId },
+      include: { tierPrices: true },
+    });
+    expect(persisted).toHaveLength(3);
+    expect(
+      persisted.find((r) => r.priceListId === seed.ids.priceListId),
+    ).toMatchObject({
+      priceCents: 700,
+      tierPrices: [{ minQuantity: 2, priceCents: 500 }],
+    });
+    expect(persisted.find((r) => r.priceListId === newList)).toMatchObject({
+      priceCents: 900,
+    });
+    expect(persisted.find((r) => r.priceListId === untouched)).toMatchObject({
+      priceCents: 200,
+    });
+  });
+
+  it.each(['later-item', 'response', 'ambient'])(
+    'rolls back the entire bulk batch on %s failure and releases the gate',
+    async (stage) => {
+      const seed = await freshSeed();
+      const [newList] = await bulkContexts(seed);
+      const query = {
+        where: { tenantId: seed.ids.tenantId, variantId: seed.ids.variantId },
+        include: { tierPrices: true },
+        orderBy: { priceListId: 'asc' as const },
+      };
+      const before = await observer.variantPrice.findMany(query);
+      const base = await open();
+      let writes = 0;
+      let gates = 0;
+      const held = latch(base, (sql, model, operation) => {
+        if (stage === 'later-item')
+          return (
+            model === 'VariantPrice' && operation === 'upsert' && ++writes === 2
+          );
+        if (stage === 'response')
+          return model === 'VariantPrice' && operation === 'findMany';
+        return (
+          sql.includes('FROM "products"') &&
+          sql.includes('FOR UPDATE') &&
+          ++gates === 2
+        );
+      });
+      const writer = actor(held.client);
+      const writerPid = await currentBackendPid(base);
+      const waiter = actor(await open());
+      const waiterPid = await currentBackendPid(waiter.client);
+      const write = writer.run(seed, (p) =>
+        writer.inTransaction(async () => {
+          await p.bulkUpsertVariantPrices(
+            seed.ids.productId,
+            seed.ids.variantId,
+            {
+              prices: [
+                {
+                  priceListId: newList,
+                  priceCents: 0,
+                  tierPrices: [{ minQuantity: 0, priceCents: 0 }],
+                },
+                {
+                  priceListId: seed.ids.priceListId,
+                  priceCents: 1,
+                  tierPrices: [{ minQuantity: 2, priceCents: 1 }],
+                },
+              ],
+            },
+          );
+          if (stage === 'ambient')
+            await p.bulkUpsertVariantPrices(
+              seed.ids.productId,
+              seed.ids.variantId,
+              { prices: [] },
+            );
+        }),
+      );
+      const outcome = write.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      let waiting: ReturnType<ProductsService['updatePriceList']> | undefined;
+      try {
+        await held.reached;
+        waiting = waiter.run(seed, (p) =>
+          p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {}),
+        );
+        expect(await waitForLockWait(observer, waiterPid)).toContain(writerPid);
+      } finally {
+        held.release(new Error('bulk failure'));
+        await Promise.allSettled([outcome, waiting]);
+      }
+      await expect(outcome).resolves.toEqual(new Error('bulk failure'));
+      await expect(waiting).resolves.toMatchObject({
+        id: seed.ids.priceListId,
+      });
+      await expect(observer.variantPrice.findMany(query)).resolves.toEqual(
+        before,
+      );
+      await expect(
+        waiter.run(seed, (p) =>
+          p.bulkUpsertVariantPrices(seed.ids.productId, seed.ids.variantId, {
+            prices: [],
+          }),
+        ),
+      ).resolves.toHaveLength(2);
+    },
+  );
+
+  it.each(['Variant', 'PriceList'])(
+    'bulk observes cooperating %s disappearance after waiting',
+    async (entity) => {
+      const seed = await freshSeed();
+      const base = await open();
+      const held = latch(
+        base,
+        (_sql, model, operation) => model === entity && operation === 'delete',
+      );
+      const holderPid = await currentBackendPid(base);
+      const updater = actor(await open());
+      const updaterPid = await currentBackendPid(updater.client);
+      const holding = held.client.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId}
+        AND "id" = ${seed.ids.productId} FOR UPDATE`;
+        if (entity === 'Variant')
+          await tx.variant.delete({ where: { id: seed.ids.variantId } });
+        else await tx.priceList.delete({ where: { id: seed.ids.priceListId } });
+      });
+      let outcome: Promise<unknown> | undefined;
+      try {
+        await held.reached;
+        outcome = updater
+          .run(seed, (p) =>
+            p.bulkUpsertVariantPrices(seed.ids.productId, seed.ids.variantId, {
+              prices: [{ priceListId: seed.ids.priceListId, priceCents: 0 }],
+            }),
+          )
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+        expect(await waitForLockWait(observer, updaterPid)).toContain(
+          holderPid,
+        );
+      } finally {
+        held.release();
+        await Promise.allSettled([holding, outcome]);
+      }
+      await expect(holding).resolves.toBeUndefined();
+      await expect(outcome).resolves.toMatchObject({
+        code: 'ENTITY_NOT_FOUND',
+        message: `${entity} with id "${entity === 'Variant' ? seed.ids.variantId : seed.ids.priceListId}" not found`,
+      });
+      await expect(
+        readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
+      ).resolves.toEqual([]);
+    },
+  );
+
   it.each([null, 250])(
     'keeps single-upsert observation and response gated with Variant cost=%s',
     async (variantCost) => {

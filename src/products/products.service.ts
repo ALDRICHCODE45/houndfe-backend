@@ -1426,14 +1426,24 @@ export class ProductsService {
     });
   }
 
-  async getVariantPrices(productId: string, variantId: string) {
+  async getVariantPrices(
+    productId: string,
+    variantId: string,
+    scope?: {
+      client: ReturnType<TenantPrismaService['getClient']>;
+      tenantId: string;
+    },
+  ) {
     const { product, variant } = await this.ensureProductAndVariant(
       productId,
       variantId,
     );
 
-    const prices = await this.prisma.variantPrice.findMany({
-      where: { variantId: variant.id },
+    const query = {
+      where: {
+        variantId: variant.id,
+        ...(scope ? { tenantId: scope.tenantId } : {}),
+      },
       include: {
         priceList: {
           select: { id: true, globalPriceList: { select: { name: true } } },
@@ -1441,7 +1451,10 @@ export class ProductsService {
         tierPrices: { orderBy: { minQuantity: 'asc' } },
       },
       orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
-    });
+    } as const;
+    const prices = scope
+      ? await scope.client.variantPrice.findMany(query)
+      : await this.prisma.variantPrice.findMany(query);
 
     return prices.map((price) =>
       this.enrichVariantPriceResponse(
@@ -1546,40 +1559,47 @@ export class ProductsService {
     dto: BulkUpsertVariantPricesDto,
   ) {
     const tenantId = this.tenantPrisma.getTenantId();
-    const { variant } = await this.ensureProductAndVariant(
-      productId,
-      variantId,
-    );
-
-    const requestedPriceListIds = dto.prices.map((p) => p.priceListId);
-    const uniquePriceListIds = [...new Set(requestedPriceListIds)];
-
-    const priceLists = await this.prisma.priceList.findMany({
-      where: { id: { in: uniquePriceListIds } },
-      select: { id: true, productId: true },
-    });
-
-    if (priceLists.length !== uniquePriceListIds.length) {
-      const existingIds = new Set(priceLists.map((pl) => pl.id));
-      const missing = uniquePriceListIds.find((id) => !existingIds.has(id));
-      throw new EntityNotFoundError('PriceList', missing ?? 'unknown');
-    }
-
-    const mismatch = priceLists.find((pl) => pl.productId !== productId);
-    if (mismatch) {
-      throw new BusinessRuleViolationError(
-        'Price list does not belong to the product',
-        'PRICE_LIST_PRODUCT_MISMATCH',
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      if (products.length !== 1)
+        throw new EntityNotFoundError('Product', productId);
+      const { variant } = await this.ensureProductAndVariant(
+        productId,
+        variantId,
       );
-    }
 
-    for (const price of dto.prices) {
-      if (price.tierPrices?.length) {
-        this.validateTierPrices(price.tierPrices);
+      const requestedPriceListIds = dto.prices.map((p) => p.priceListId);
+      const uniquePriceListIds = [...new Set(requestedPriceListIds)];
+
+      const priceLists = await tx.priceList.findMany({
+        where: { id: { in: uniquePriceListIds }, tenantId },
+        select: { id: true, productId: true },
+      });
+
+      if (priceLists.length !== uniquePriceListIds.length) {
+        const existingIds = new Set(priceLists.map((pl) => pl.id));
+        const missing = uniquePriceListIds.find((id) => !existingIds.has(id));
+        throw new EntityNotFoundError('PriceList', missing ?? 'unknown');
       }
-    }
 
-    await this.tenantPrisma.getClient().$transaction(async (tx) => {
+      const mismatch = priceLists.find((pl) => pl.productId !== productId);
+      if (mismatch) {
+        throw new BusinessRuleViolationError(
+          'Price list does not belong to the product',
+          'PRICE_LIST_PRODUCT_MISMATCH',
+        );
+      }
+
+      for (const price of dto.prices) {
+        if (price.tierPrices?.length) {
+          this.validateTierPrices(price.tierPrices);
+        }
+      }
+
       for (const item of dto.prices) {
         const variantPrice = await tx.variantPrice.upsert({
           where: {
@@ -1600,7 +1620,7 @@ export class ProductsService {
 
         if (item.tierPrices !== undefined) {
           await tx.variantTierPrice.deleteMany({
-            where: { variantPriceId: variantPrice.id },
+            where: { variantPriceId: variantPrice.id, tenantId },
           });
 
           if (item.tierPrices.length) {
@@ -1615,9 +1635,11 @@ export class ProductsService {
           }
         }
       }
+      return this.getVariantPrices(productId, variantId, {
+        client: tx,
+        tenantId,
+      });
     });
-
-    return this.getVariantPrices(productId, variantId);
   }
 
   async removeVariantPrice(
