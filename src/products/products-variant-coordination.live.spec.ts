@@ -499,6 +499,163 @@ describe('live Variant membership and stock coordination', () => {
     ).resolves.toBeNull();
   });
 
+  it.each([false, true])(
+    'waits before price deletion and retains default protection=%s',
+    async (isDefault) => {
+      const seed = await freshSeed();
+      const other = await freshSeed();
+      await observer.globalPriceList.update({
+        where: { id: seed.ids.globalPriceListId },
+        data: { isDefault },
+      });
+      const base = await open();
+      const held = latch(
+        base,
+        (_sql, model, operation) =>
+          model === 'VariantPrice' && operation === 'delete',
+      );
+      const holderPid = await currentBackendPid(base);
+      const remover = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const unrelated = actor(await open());
+      const holding = held.client.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId}
+        AND "id" = ${seed.ids.productId} FOR UPDATE`;
+        await tx.variantPrice.delete({
+          where: { id: seed.ids.variantPriceId },
+        });
+      });
+      let outcome: Promise<unknown> | undefined;
+      try {
+        await held.reached;
+        outcome = remover
+          .run(seed, (p) =>
+            p.removeVariantPrice(
+              seed.ids.productId,
+              seed.ids.variantId,
+              seed.ids.priceListId,
+            ),
+          )
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+        expect(await waitForLockWait(observer, removerPid)).toContain(
+          holderPid,
+        );
+        await expect(
+          unrelated.run(other, (p) =>
+            p.removeVariantPrice(
+              other.ids.productId,
+              other.ids.variantId,
+              other.ids.priceListId,
+            ),
+          ),
+        ).resolves.toBeUndefined();
+        await expect(
+          readVariantPrices(observer, other.ids.tenantId, other.ids.variantId),
+        ).resolves.toEqual([]);
+      } finally {
+        held.release();
+        await Promise.allSettled([holding, outcome]);
+      }
+      await expect(holding).resolves.toBeUndefined();
+      await expect(outcome).resolves.toMatchObject(
+        isDefault
+          ? {
+              code: 'DEFAULT_PRICE_LIST_PROTECTED',
+              message: 'Cannot delete the default PUBLICO price list',
+            }
+          : {
+              code: 'ENTITY_NOT_FOUND',
+              message: `VariantPrice with id "${seed.ids.variantId}:${seed.ids.priceListId}" not found`,
+            },
+      );
+      await expect(
+        readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
+      ).resolves.toEqual([]);
+    },
+  );
+
+  it('restores a deleted price and tiers after ambient rollback and releases the gate', async () => {
+    const seed = await freshSeed();
+    const where = { id: seed.ids.variantPriceId, tenantId: seed.ids.tenantId };
+    const before = await observer.variantPrice.update({
+      where,
+      data: {
+        tierPrices: {
+          create: {
+            tenantId: seed.ids.tenantId,
+            minQuantity: 2,
+            priceCents: 900,
+          },
+        },
+      },
+      include: { tierPrices: true },
+    });
+    const base = await open();
+    let gates = 0;
+    const held = latch(
+      base,
+      (sql) =>
+        sql.includes('FROM "products"') &&
+        sql.includes('FOR UPDATE') &&
+        ++gates === 2,
+    );
+    const writer = actor(held.client);
+    const writerPid = await currentBackendPid(base);
+    const waiter = actor(await open());
+    const waiterPid = await currentBackendPid(waiter.client);
+    const write = writer.run(seed, (p) =>
+      writer.inTransaction(async () => {
+        await p.removeVariantPrice(
+          seed.ids.productId,
+          seed.ids.variantId,
+          seed.ids.priceListId,
+        );
+        await p.removeVariantPrice(
+          seed.ids.productId,
+          seed.ids.variantId,
+          seed.ids.priceListId,
+        );
+      }),
+    );
+    const outcome = write.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    let update: ReturnType<ProductsService['updatePriceList']> | undefined;
+    try {
+      await held.reached;
+      update = waiter.run(seed, (p) =>
+        p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {}),
+      );
+      expect(await waitForLockWait(observer, waiterPid)).toContain(writerPid);
+    } finally {
+      held.release(new Error('late deletion failure'));
+      await Promise.allSettled([outcome, update]);
+    }
+    await expect(outcome).resolves.toEqual(new Error('late deletion failure'));
+    await expect(update).resolves.toMatchObject({ id: seed.ids.priceListId });
+    await expect(
+      observer.variantPrice.findFirst({ where, include: { tierPrices: true } }),
+    ).resolves.toEqual(before);
+    await expect(
+      waiter.run(seed, (p) =>
+        p.removeVariantPrice(
+          seed.ids.productId,
+          seed.ids.variantId,
+          seed.ids.priceListId,
+        ),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      observer.variantTierPrice.findMany({
+        where: { variantPriceId: seed.ids.variantPriceId },
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it('waits before updateVariant observation while another Product proceeds', async () => {
     const seed = await freshSeed();
     const other = await freshSeed();

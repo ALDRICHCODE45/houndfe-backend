@@ -1623,22 +1623,29 @@ export class ProductsService {
     priceListId: string,
   ): Promise<void> {
     const tenantId = this.tenantPrisma.getTenantId();
-    const { variant } = await this.ensureProductAndVariant(
-      productId,
-      variantId,
-    );
-    const priceList = await this.ensurePriceList(productId, priceListId);
-
-    if (priceList.globalPriceList.isDefault) {
-      throw new BusinessRuleViolationError(
-        'Cannot delete the default PUBLICO price list',
-        'DEFAULT_PRICE_LIST_PROTECTED',
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      if (products.length !== 1)
+        throw new EntityNotFoundError('Product', productId);
+      const { variant } = await this.ensureProductAndVariant(
+        productId,
+        variantId,
       );
-    }
-
-    const variantPrice = await this.tenantPrisma
-      .getClient()
-      .variantPrice.findUnique({
+      const priceList = await this.ensurePriceList(productId, priceListId, {
+        client: tx,
+        tenantId,
+      });
+      if (priceList.globalPriceList.isDefault) {
+        throw new BusinessRuleViolationError(
+          'Cannot delete the default PUBLICO price list',
+          'DEFAULT_PRICE_LIST_PROTECTED',
+        );
+      }
+      const variantPrice = await tx.variantPrice.findUnique({
         where: {
           tenantId_variantId_priceListId: {
             tenantId,
@@ -1648,15 +1655,21 @@ export class ProductsService {
         },
         select: { id: true },
       });
-
-    if (!variantPrice) {
-      throw new EntityNotFoundError(
-        'VariantPrice',
-        `${variantId}:${priceListId}`,
-      );
-    }
-
-    await this.prisma.variantPrice.delete({ where: { id: variantPrice.id } });
+      if (!variantPrice) {
+        throw new EntityNotFoundError(
+          'VariantPrice',
+          `${variantId}:${priceListId}`,
+        );
+      }
+      await tx.variantPrice.delete({
+        where: {
+          id: variantPrice.id,
+          tenantId,
+          variantId: variant.id,
+          priceListId,
+        },
+      });
+    });
   }
 
   // ==================== Lots ====================
@@ -2131,15 +2144,29 @@ export class ProductsService {
     return { product, variant };
   }
 
-  private async ensurePriceList(productId: string, priceListId: string) {
-    const priceList = await this.prisma.priceList.findUnique({
-      where: { id: priceListId },
+  private async ensurePriceList(
+    productId: string,
+    priceListId: string,
+    scope?: {
+      client: ReturnType<TenantPrismaService['getClient']>;
+      tenantId: string;
+    },
+  ) {
+    const query = {
+      // Keep ownership outside the predicate to retain same-tenant mismatch errors.
+      where: {
+        id: priceListId,
+        ...(scope ? { tenantId: scope.tenantId } : {}),
+      },
       select: {
         id: true,
         productId: true,
         globalPriceList: { select: { isDefault: true } },
       },
-    });
+    } as const;
+    const priceList = scope
+      ? await scope.client.priceList.findUnique(query)
+      : await this.prisma.priceList.findUnique(query);
     if (!priceList) throw new EntityNotFoundError('PriceList', priceListId);
 
     if (priceList.productId !== productId) {
