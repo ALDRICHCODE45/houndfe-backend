@@ -118,9 +118,37 @@ part of that data snapshot. Actual canonical R must equal the single requested R
 Stored documents/counters pass structural decoding only: legacy/future/malformed
 slots reject the whole response as INTERNAL_ERROR; recognizable historical conflicts
 remain unchanged for correction. No fresh qualification or fabricated warnings.
-The old writer provider remains separate; this does not activate V2 writes/replay.
+The old writer provider remains separate; GET itself does not activate V2 writes/replay.
 Registered HTTP tests substitute JWT/Prisma I/O; transaction-client provenance is
 composition evidence, not real PostgreSQL concurrency or browser proof.
+
+### Registered discard implementation boundary
+
+Discard alone uses a dedicated V2 writer; initialize/save/publish retain their
+existing providers. Current persisted read/update authority precedes semantic
+admission and is rechecked inside the transaction. Raw duplicate/list headers,
+missing R/key, prohibited care/version/adoption headers and nonclosed bodies fail.
+Matching namespaced receipt intent replays the decoded recorded acknowledgement
+before CAS, current metadata or fresh validation; changed same-key intent conflicts.
+
+On a miss, the qualified Product lock and state CAS precede table SHARE locks:
+families, definitions, bindings, options, units, groups, group members, aliases,
+then vocabulary metadata. This order matches the inspected seed's families-first
+ordering. A separate, awaited ReadCommitted snapshot on the same transaction
+supplies current R after acquisition, including metadata unrelated to this Product.
+Only Draft fields are cleared; cycle and Published stay unchanged. The discarded
+document is not read or validated. Surviving Published is decoded structurally,
+not freshly qualified. State mutation and the complete V2 receipt share one
+transaction; success is emitted only after commit. No automatic retries or
+unlocked fallback are provided; unexpected database errors are sanitized.
+
+**Operational prerequisites remain unproved:** SHARE requires ownership or
+UPDATE/DELETE/TRUNCATE privilege on every metadata table; SELECT-only is not
+enough. No grants are added. Default Prisma transaction bounds remain unchanged.
+Mocked HTTP composition verifies SQL ordering, parameters and failure propagation,
+not PostgreSQL blocking, fresh snapshots after waiting, rollback or deployed role
+privileges. External metadata-to-Product lock orders may deadlock and fail closed.
+Real isolated-DB proof and service activation require separate authorization.
 
 ## 3. Document, values and evidence
 

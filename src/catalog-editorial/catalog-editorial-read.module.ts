@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { EDITORIAL_DISCARD_WRITER } from './application/editorial-discard-writer';
+import { PrismaEditorialDiscardWriter } from './infrastructure/prisma-editorial-discard-writer';
 import { EDITORIAL_DOCUMENT_READER } from './application/editorial-document-reader';
 import { PrismaEditorialDocumentReader } from './infrastructure/prisma-editorial-document-reader';
 import { EditorialHttpScope } from './infrastructure/editorial-http-scope';
@@ -36,6 +38,12 @@ import {
       inject: [PrismaService],
       useFactory: (prisma: PrismaService) =>
         new PrismaEditorialDocumentReader(prisma),
+    },
+    {
+      provide: EDITORIAL_DISCARD_WRITER,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) =>
+        new PrismaEditorialDiscardWriter(prisma),
     },
     {
       provide: EDITORIAL_READER,

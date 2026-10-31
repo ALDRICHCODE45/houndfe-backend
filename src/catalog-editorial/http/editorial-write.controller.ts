@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  ForbiddenException,
+  Res,
   Controller,
   Header,
   HttpCode,
@@ -12,7 +14,13 @@ import {
   UseFilters,
   UseGuards,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
+import {
+  EDITORIAL_DISCARD_WRITER,
+  type EditorialDiscardWriter,
+} from '../application/editorial-discard-writer';
+import { createEditorialWriteRequestV2 } from '../application/editorial-write-request-v2';
+import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-authority';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
@@ -33,6 +41,9 @@ export class EditorialWriteController {
       'initialize' | 'save' | 'publish' | 'discard'
     >,
     private readonly scope: EditorialHttpScope,
+    @Inject(EDITORIAL_DISCARD_WRITER)
+    private readonly discardWriter: EditorialDiscardWriter,
+    private readonly authority: PrismaEditorialAuthority,
   ) {}
 
   private async input(
@@ -120,17 +131,65 @@ export class EditorialWriteController {
   async discard(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    const { context, input, key } = await this.input(
-      request,
-      productId,
-      'transition',
+    const user = this.scope.principal(
+      request.user as AuthenticatedUser | undefined,
     );
-    return this.core.discard(context, {
-      expectedCycle: input.expectedCycle as number,
-      expectedRevision: input.expectedRevision as number,
-      idempotencyKey: key,
-    });
+    const context = await this.scope.product(user, productId);
+    const access = await this.authority.resolve(context);
+    if (
+      access?.activeMember !== true ||
+      access.canRead !== true ||
+      access.canDiscard !== true ||
+      access.actorId !== context.actorId ||
+      access.tenantId !== context.tenantId ||
+      access.productId !== context.productId
+    )
+      throw new ForbiddenException();
+    if (Object.keys(request.query).length) throw new BadRequestException();
+    const revisions: string[] = [];
+    const keys: string[] = [];
+    for (let i = 0; i < request.rawHeaders.length; i += 2) {
+      const name = request.rawHeaders[i].toLowerCase();
+      if (
+        [
+          'editorial-care-confirmation',
+          'editorial-contract-version',
+          'editorial-adoption',
+        ].includes(name)
+      )
+        throw new BadRequestException();
+      if (name === 'editorial-vocabulary-revision')
+        revisions.push(request.rawHeaders[i + 1]);
+      if (name === 'idempotency-key') keys.push(request.rawHeaders[i + 1]);
+    }
+    if (revisions.length !== 1 || keys.length !== 1 || keys[0].includes(','))
+      throw new BadRequestException();
+    const key = idempotencyKey(keys[0]);
+    let intent: ReturnType<typeof createEditorialWriteRequestV2>;
+    try {
+      intent = createEditorialWriteRequestV2(
+        'discard',
+        {
+          vocabularyRevision: revisions[0],
+          careConfirmation: null,
+        },
+        request.body,
+      );
+    } catch (error) {
+      if (
+        error instanceof TypeError &&
+        error.message === 'Expected an editorial write request V2'
+      )
+        throw new BadRequestException();
+      throw error;
+    }
+    const result = await this.discardWriter.discard(context, key, intent);
+    response.status(result.status);
+    for (const [name, value] of Object.entries(result.headers))
+      response.setHeader(name, value);
+    return result.body;
   }
 
   @Put()

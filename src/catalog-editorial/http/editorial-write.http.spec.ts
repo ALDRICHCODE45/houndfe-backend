@@ -12,6 +12,10 @@ import { createAppValidationPipe } from '../../shared/listing/app-validation.pip
 import { CatalogEditorialReadModule } from '../catalog-editorial-read.module';
 import { emptyDocument } from '../domain/document';
 import { EDITORIAL_READER } from './editorial-read.controller';
+import { EDITORIAL_DISCARD_WRITER } from '../application/editorial-discard-writer';
+import type { EditorialContext } from '../application/catalog-editorial-core';
+import type { ReceiptRequestV2 } from '../application/editorial-write-request-v2';
+const revision = 'ev2-sha256-' + 'a'.repeat(64);
 
 const productId = '11111111-1111-4111-8111-111111111111';
 const tenantId = '22222222-2222-4222-8222-222222222222';
@@ -33,6 +37,7 @@ const tx = {
   $queryRaw: raw,
   $executeRaw: jest.fn().mockResolvedValue(1),
 };
+Object.assign(db, tx);
 let tenant: string | null;
 const state = {
   cycle: 1,
@@ -69,7 +74,29 @@ async function application(mockCore: boolean) {
         return true;
       },
     });
-  if (mockCore) builder.overrideProvider(EDITORIAL_READER).useValue(core);
+  if (mockCore) {
+    builder.overrideProvider(EDITORIAL_READER).useValue(core);
+    builder.overrideProvider(EDITORIAL_DISCARD_WRITER).useValue({
+      async discard(
+        context: EditorialContext,
+        key: string,
+        intent: ReceiptRequestV2,
+      ) {
+        const state: unknown = await core.discard(context, {
+          ...intent.body,
+          idempotencyKey: key,
+        });
+        return {
+          status: 200,
+          body: { contractVersion: 2, vocabularyRevision: revision, state },
+          headers: {
+            'Editorial-Contract-Version': '2',
+            'Editorial-Vocabulary-Revision': revision,
+          },
+        };
+      },
+    });
+  }
   const module = await builder.compile();
   const app = module.createNestApplication();
   app.useGlobalPipes(createAppValidationPipe());
@@ -214,6 +241,19 @@ describe('editorial write HTTP', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     tenant = tenantId;
+    tx.user.findUnique.mockResolvedValue({ isActive: true });
+    tx.product.findFirst.mockResolvedValue({ id: productId, tenantId });
+    tx.tenantMembership.findMany.mockResolvedValue([
+      {
+        userId: actorId,
+        tenantId,
+        role: {
+          permissions: ['read', 'update'].map((action) => ({
+            permission: { subject: 'ProductEditorialDraft', action },
+          })),
+        },
+      },
+    ]);
     core.initialize.mockResolvedValue(state);
     core.save.mockResolvedValue(state);
     core.publish.mockResolvedValue({
@@ -228,6 +268,8 @@ describe('editorial write HTTP', () => {
       operation === 'save'
         ? request(app.getHttpServer() as Server).put(path)
         : request(app.getHttpServer() as Server).post(path + '/' + operation);
+    if (operation === 'discard')
+      req.set('Editorial-Vocabulary-Revision', revision);
     return req
       .set('Authorization', 'Bearer synthetic')
       .set('Idempotency-Key', key)
@@ -270,7 +312,11 @@ describe('editorial write HTTP', () => {
                 published: { revision: 1, document: emptyDocument() },
               }
             : operation === 'discard'
-              ? { cycle: 1, draft: null, published: null }
+              ? {
+                  contractVersion: 2,
+                  vocabularyRevision: revision,
+                  state: { cycle: 1, draft: null, published: null },
+                }
               : state,
         );
         expect(response.headers['cache-control']).toBe('no-store');
