@@ -116,6 +116,10 @@ function createService(
   (prisma as any).lot = (prisma as any).lot ?? {
     count: jest.fn().mockResolvedValue(0),
   };
+  // Existing update fixtures now participate in the qualified Product gate.
+  (prisma as { $queryRaw?: jest.Mock }).$queryRaw ??= jest
+    .fn()
+    .mockResolvedValue([{ id: PRODUCT_ID }]);
   return new ProductsService(
     repo,
     prisma,
@@ -2336,8 +2340,9 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     });
 
     const txClient = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]),
       variant: {
-        // F1.WU4d2 — the pre-read is routed through the tenant client.
+        // The fresh read is routed through the transaction client after its gate.
         findFirst: jest.fn().mockResolvedValue(variantRow),
         update: jest.fn().mockImplementation((args: any) => {
           recordCall('txClient.variant.update');

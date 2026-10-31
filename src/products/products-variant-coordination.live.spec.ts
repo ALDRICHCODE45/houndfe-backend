@@ -346,6 +346,173 @@ describe('live Variant membership and stock coordination', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('waits before updateVariant observation while another Product proceeds', async () => {
+    const seed = await freshSeed();
+    const other = await freshSeed();
+    const base = await open();
+    const held = latch(
+      base,
+      (_sql, model, operation) => model === 'Variant' && operation === 'update',
+    );
+    const holderPid = await currentBackendPid(base);
+    const updater = actor(await open());
+    const updaterPid = await currentBackendPid(updater.client);
+    const unrelated = actor(await open());
+    // Explicit parent gate: this scenario does not use or certify a V2 publisher.
+    const holding = held.client.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId}
+        AND "id" = ${seed.ids.productId} FOR UPDATE`;
+      await tx.variant.update({
+        where: {
+          id: seed.ids.variantId,
+          tenantId: seed.ids.tenantId,
+          productId: seed.ids.productId,
+        },
+        data: {
+          onlineStockPresentation: 'CUSTOM_QUANTITY',
+          onlineStockPresentationCustomQty: 7,
+        },
+      });
+    });
+    let update: ReturnType<ProductsService['updateVariant']> | undefined;
+    try {
+      await held.reached;
+      update = updater.run(seed, (p) =>
+        p.updateVariant(seed.ids.productId, seed.ids.variantId, {
+          onlineStockPresentationCustomQty: 9,
+        }),
+      );
+      // A pre-gate read would see null presentation and reject instead of waiting.
+      expect(await waitForLockWait(observer, updaterPid)).toContain(holderPid);
+      await expect(
+        unrelated.run(other, (p) =>
+          p.updateVariant(other.ids.productId, other.ids.variantId, {
+            name: 'Unrelated',
+          }),
+        ),
+      ).resolves.toMatchObject({ name: 'Unrelated' });
+    } finally {
+      held.release();
+      await Promise.allSettled([holding, update]);
+    }
+    await expect(holding).resolves.toBeUndefined();
+    await expect(update).resolves.toMatchObject({
+      onlineStockPresentation: 'CUSTOM_QUANTITY',
+      onlineStockPresentationCustomQty: 9,
+    });
+    await expect(
+      observer.variant.findFirst({
+        where: { id: seed.ids.variantId, tenantId: seed.ids.tenantId },
+      }),
+    ).resolves.toMatchObject({
+      onlineStockPresentation: 'CUSTOM_QUANTITY',
+      onlineStockPresentationCustomQty: 9,
+    });
+  });
+
+  it('rolls back an executed update in an ambient transaction and releases its gate', async () => {
+    const seed = await freshSeed();
+    const base = await open();
+    let gates = 0;
+    const held = latch(
+      base,
+      (sql) =>
+        sql.includes('FROM "products"') &&
+        sql.includes('FOR UPDATE') &&
+        ++gates === 2,
+    );
+    const writer = actor(held.client);
+    const writerPid = await currentBackendPid(base);
+    const waiter = actor(await open());
+    const waiterPid = await currentBackendPid(waiter.client);
+    const before = await observer.variant.findFirstOrThrow({
+      where: { id: seed.ids.variantId, tenantId: seed.ids.tenantId },
+    });
+    const write = writer.run(seed, (p) =>
+      writer.inTransaction(async () => {
+        await p.updateVariant(seed.ids.productId, seed.ids.variantId, {
+          catalogPublishMode: 'OFF',
+          name: 'Rolled back',
+        });
+        await p.updateVariant(seed.ids.productId, seed.ids.variantId, {
+          name: 'Never committed',
+        });
+      }),
+    );
+    // Attach rejection handling immediately; the injected late failure is expected.
+    const outcome = write.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    let update: ReturnType<ProductsService['updateVariant']> | undefined;
+    try {
+      await held.reached;
+      update = waiter.run(seed, (p) =>
+        p.updateVariant(seed.ids.productId, seed.ids.variantId, {
+          name: 'After rollback',
+        }),
+      );
+      expect(await waitForLockWait(observer, waiterPid)).toContain(writerPid);
+    } finally {
+      held.release(new Error('late update failure'));
+      await Promise.allSettled([outcome, update]);
+    }
+    await expect(outcome).resolves.toEqual(new Error('late update failure'));
+    await expect(update).resolves.toMatchObject({
+      name: 'After rollback',
+      catalogPublishMode: before.catalogPublishMode,
+    });
+    const after = await observer.variant.findFirstOrThrow({
+      where: { id: seed.ids.variantId, tenantId: seed.ids.tenantId },
+    });
+    expect(after).toEqual({
+      ...before,
+      name: 'After rollback',
+      updatedAt: after.updatedAt,
+    });
+  });
+
+  it('serializes updateVariant before removeVariant without retaining a stale child', async () => {
+    const seed = await freshSeed();
+    const base = await open();
+    const held = latch(
+      base,
+      (_sql, model, operation) => model === 'Variant' && operation === 'update',
+    );
+    const updater = actor(held.client);
+    const updaterPid = await currentBackendPid(base);
+    const remover = actor(await open());
+    const removerPid = await currentBackendPid(remover.client);
+    const update = updater.run(seed, (p) =>
+      p.updateVariant(seed.ids.productId, seed.ids.variantId, {
+        catalogPublishMode: 'OFF',
+      }),
+    );
+    let removal: Promise<void> | undefined;
+    try {
+      await held.reached;
+      removal = remover.run(seed, (p) =>
+        p.removeVariant(seed.ids.productId, seed.ids.variantId),
+      );
+      expect(await waitForLockWait(observer, removerPid)).toContain(updaterPid);
+    } finally {
+      held.release();
+      await Promise.allSettled([update, removal]);
+    }
+    await expect(update).resolves.toMatchObject({ catalogPublishMode: 'OFF' });
+    await expect(removal).resolves.toBeUndefined();
+    const membership = await readVariantMembership(
+      observer,
+      seed.ids.tenantId,
+      seed.ids.productId,
+    );
+    expect(membership.variants).toEqual([]);
+    expect(membership.products[0]).toMatchObject({ hasVariants: false });
+    await expect(
+      readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
+    ).resolves.toEqual([]);
+  });
+
   it('serializes a mixed stock charge before removal without a deadlock', async () => {
     const seed = await freshSeed();
     // Parent stock for the Product branch; thresholds avoid low-stock crossings/outbox.
