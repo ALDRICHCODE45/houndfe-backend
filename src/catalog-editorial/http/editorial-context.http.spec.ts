@@ -81,6 +81,49 @@ describe('editorial context HTTP', () => {
     expect(result.body).toEqual(body);
     expect(result.headers['cache-control']).toBe('no-store');
   };
+  describe.each([
+    'Editorial-Contract-Version',
+    'eDiToRiAl-CoNtRaCt-VeRsIoN',
+    'Editorial-Adoption',
+    'eDiToRiAl-AdOpTiOn',
+  ])('obsolete request header %s', (header) => {
+    it.each([
+      { value: '' },
+      { value: '2' },
+      { value: 'legacy,2' },
+      { value: ['', 'legacy'] },
+    ])(
+      'rejects occurrence $value before context observation',
+      async ({ value }) => {
+        const result = await get().set({ [header]: value });
+        await check(Promise.resolve(result), 400, {
+          statusCode: 400,
+          error: 'MALFORMED',
+        });
+        expect(result.headers['editorial-contract-version']).toBe('2');
+        expect(result.headers['editorial-vocabulary-revision']).toBeUndefined();
+        expect(db.$queryRaw).not.toHaveBeenCalled();
+      },
+    );
+    it('preserves authorization denial before header rejection', async () => {
+      db.tenantMembership.findMany.mockResolvedValue([]);
+      await check(get().set(header, 'legacy'), 403, {
+        statusCode: 403,
+        error: 'FORBIDDEN',
+      });
+      expect(db.$queryRaw).not.toHaveBeenCalled();
+    });
+  });
+  it('preserves unpinned context success and existing nonobsolete headers', async () => {
+    const result = await get()
+      .set('Editorial-Vocabulary-Revision', 'not-a-pin')
+      .set('Idempotency-Key', 'ignored')
+      .set('Editorial-Care-Confirmation', 'ignored');
+    await check(Promise.resolve(result), 200, { variants: [] });
+    expect(result.headers['editorial-contract-version']).toBeUndefined();
+    expect(result.headers['editorial-vocabulary-revision']).toBeUndefined();
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+  });
   it('returns [] using principal scope, ignoring the hasVariants flag', async () => {
     db.product.findFirst.mockResolvedValue({
       id: productId,

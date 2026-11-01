@@ -58,6 +58,14 @@ export class EditorialContextController {
       access.productId !== scope.productId
     )
       throw new ForbiddenException();
+    for (let i = 0; i < request.rawHeaders.length; i += 2) {
+      const name = request.rawHeaders[i].toLowerCase();
+      if (
+        name === 'editorial-contract-version' ||
+        name === 'editorial-adoption'
+      )
+        throw new BadRequestException();
+    }
     return this.context.read(scope);
   }
 }

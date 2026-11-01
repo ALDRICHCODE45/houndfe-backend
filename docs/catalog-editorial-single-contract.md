@@ -90,7 +90,7 @@ R syntax: `ev2-sha256-` followed by 64 lowercase hex digits. Write keys retain t
 existing 1–200 character, untrimmed contract. Context retains existing header
 behavior; do not attach new pinning/idempotency requirements to it. The obsolete
 **request** headers `Editorial-Contract-Version` and `Editorial-Adoption` are
-forbidden on this editorial surface and produce `400 MALFORMED`.
+forbidden on this editorial surface, including Context, and produce `400 MALFORMED`.
 Publish parses a supplied confirmation token before lookup. After receipt miss
 and locked CAS, fresh care publish requires it; fresh non-care publish forbids it.
 The identical token/null belongs to receipt intent, never an implicit UI default.
