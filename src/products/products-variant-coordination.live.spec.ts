@@ -256,6 +256,300 @@ describe('live Variant membership and stock coordination', () => {
     return { seed, name };
   }
 
+  async function bulkLifecycleSeed() {
+    const { seed, name } = await upsertSeed();
+    const [added, untouched] = await bulkContexts(seed);
+    const query = {
+      where: { tenantId: seed.ids.tenantId, variantId: seed.ids.variantId },
+      include: { tierPrices: { orderBy: { minQuantity: 'asc' as const } } },
+      orderBy: { priceListId: 'asc' as const },
+    };
+    const before = await observer.variantPrice.findMany(query);
+    const names = await observer.priceList.findMany({
+      where: { id: { in: [added, untouched] } },
+      include: { globalPriceList: true },
+    });
+    const prices = [
+      {
+        priceListId: seed.ids.priceListId,
+        priceCents: 1000,
+        tierPrices: lifecycleTiers,
+      },
+      { priceListId: added, priceCents: 900 },
+      { priceListId: seed.ids.priceListId, priceCents: 700 },
+    ];
+    const expected = (price = 700) =>
+      [
+        upsertResponse(seed, name, price),
+        ...[added, untouched].map((id) => ({
+          ...upsertResponse(
+            seed,
+            names.find((l) => l.id === id)!.globalPriceList.name,
+            id === added ? 900 : 200,
+          ),
+          id:
+            id === added
+              ? (expect.any(String) as unknown)
+              : before.find((r) => r.priceListId === id)!.id,
+          priceListId: id,
+          tierPrices: [],
+        })),
+      ].sort((a, b) => a.priceListName.localeCompare(b.priceListName));
+    return { seed, added, untouched, query, before, prices, expected };
+  }
+
+  it.each([false, true])(
+    'bulk waits for actual global deletion rollback=%s',
+    async (rollback) => {
+      const c = await bulkLifecycleSeed();
+      const { seed } = c;
+      const remover = actor(await open());
+      const endpoint = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const endpointPid = await currentBackendPid(endpoint.client);
+      const reached = signal();
+      const release = signal();
+      const abort = new Error('rollback global deletion before bulk');
+      const deletion = remover
+        .run(seed, (_p, lists) =>
+          remover.inTransaction(async () => {
+            await lists.remove(seed.ids.globalPriceListId);
+            reached.resolve();
+            await release.promise;
+            if (rollback) throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      let result: Promise<unknown> | undefined;
+      try {
+        await Promise.race([
+          reached.promise,
+          deletion.then((cause) => {
+            throw new Error('Deletion ended before bulk checkpoint', { cause });
+          }),
+        ]);
+        result = endpoint
+          .run(seed, (p) =>
+            p.bulkUpsertVariantPrices(seed.ids.productId, seed.ids.variantId, {
+              prices: c.prices,
+            }),
+          )
+          .then(
+            (value) => value,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(endpointPid, removerPid, 'ShareLock');
+        const locks = await observer.$queryRaw<{ mode: string }[]>`
+        SELECT mode FROM pg_locks WHERE pid = ${endpointPid}
+          AND relation = 'products'::regclass AND granted`;
+        expect(locks).toEqual([]);
+      } finally {
+        release.resolve();
+        await Promise.allSettled([deletion, result]);
+      }
+      await expect(deletion).resolves.toBe(rollback ? abort : undefined);
+      const after = await observer.variantPrice.findMany(c.query);
+      if (rollback) {
+        await expect(result).resolves.toEqual(c.expected());
+        expect(after).toHaveLength(3);
+        expect(
+          after.find((r) => r.priceListId === seed.ids.priceListId),
+        ).toMatchObject({
+          id: seed.ids.variantPriceId,
+          priceCents: 700,
+          tierPrices: lifecycleTiers,
+        });
+        expect(
+          after.find((r) => r.priceListId === seed.ids.priceListId)?.tierPrices,
+        ).toHaveLength(2);
+        expect(after.find((r) => r.priceListId === c.added)).toMatchObject({
+          priceCents: 900,
+          tierPrices: [],
+        });
+      } else {
+        await expect(result).resolves.toMatchObject({
+          code: 'ENTITY_NOT_FOUND',
+          message: `PriceList with id "${seed.ids.priceListId}" not found`,
+        });
+        expect(after).toEqual(
+          c.before.filter((r) => r.priceListId !== seed.ids.priceListId),
+        );
+      }
+      expect(after.find((r) => r.priceListId === c.untouched)).toEqual(
+        c.before.find((r) => r.priceListId === c.untouched),
+      );
+      await expect(
+        observer.variantTierPrice.count({
+          where: { variantPriceId: seed.ids.variantPriceId },
+        }),
+      ).resolves.toBe(rollback ? 2 : 0);
+      await expect(
+        observer.globalPriceList.count({
+          where: { id: seed.ids.globalPriceListId },
+        }),
+      ).resolves.toBe(rollback ? 1 : 0);
+      await expect(
+        endpoint.run(seed, (p) =>
+          p.bulkUpsertVariantPrices(seed.ids.productId, seed.ids.variantId, {
+            prices: [],
+          }),
+        ),
+      ).resolves.toEqual(
+        rollback
+          ? c.expected()
+          : c.expected().filter((r) => r.priceListId === c.untouched),
+      );
+    },
+  );
+
+  it.each(['commit', 'rollback', 'result'])(
+    'retains bulk lifecycle through %s',
+    async (stage) => {
+      const c = await bulkLifecycleSeed();
+      const { seed } = c;
+      const other = await upsertSeed();
+      const base = await open();
+      const held = latch(
+        base,
+        (_sql, model, operation) =>
+          model === 'VariantPrice' && operation === 'findMany',
+      );
+      const endpoint = actor(held.client);
+      const endpointPid = await currentBackendPid(base);
+      const remover = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const unrelated = actor(await open());
+      const responded = signal();
+      const repeat = signal();
+      const repeated = signal();
+      const release = signal();
+      const abort = new Error('bulk response or outer failure');
+      const globalAbort = new Error('rollback following bulk deletion');
+      let second:
+        | Awaited<ReturnType<ProductsService['bulkUpsertVariantPrices']>>
+        | undefined;
+      const writing = endpoint
+        .run(seed, (p) =>
+          endpoint.inTransaction(async () => {
+            const first = await p.bulkUpsertVariantPrices(
+              seed.ids.productId,
+              seed.ids.variantId,
+              { prices: c.prices },
+            );
+            expect(first).toEqual(c.expected());
+            responded.resolve();
+            await repeat.promise;
+            second = await p.bulkUpsertVariantPrices(
+              seed.ids.productId,
+              seed.ids.variantId,
+              {
+                prices: [
+                  { priceListId: seed.ids.priceListId, priceCents: 800 },
+                ],
+              },
+            );
+            expect(second).toEqual(c.expected(800));
+            expect(second.map((r) => [r.id, r.tierPrices])).toEqual(
+              first.map((r) => [r.id, r.tierPrices]),
+            );
+            repeated.resolve();
+            await release.promise;
+            if (stage === 'rollback') throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      const ended = writing.then((cause) => {
+        throw new Error('Bulk ended before checkpoint', { cause });
+      });
+      let deletion: Promise<unknown> | undefined;
+      try {
+        await Promise.race([held.reached, ended]);
+        await expect(
+          unrelated.run(other.seed, (p) =>
+            p.upsertVariantPrice(
+              other.seed.ids.productId,
+              other.seed.ids.variantId,
+              other.seed.ids.priceListId,
+              { priceCents: 1000, tierPrices: lifecycleTiers },
+            ),
+          ),
+        ).resolves.toEqual(upsertResponse(other.seed, other.name, 1000));
+        deletion = remover
+          .run(seed, (_p, lists) =>
+            remover.inTransaction(async () => {
+              await lists.remove(seed.ids.globalPriceListId);
+              throw globalAbort;
+            }),
+          )
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+        held.release(stage === 'result' ? abort : undefined);
+        if (stage !== 'result') {
+          await Promise.race([responded.promise, ended]);
+          await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+          repeat.resolve();
+          await Promise.race([repeated.promise, ended]);
+          await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+        }
+      } finally {
+        held.release();
+        repeat.resolve();
+        release.resolve();
+        await Promise.allSettled([writing, deletion, ended]);
+      }
+      await expect(writing).resolves.toBe(
+        stage === 'commit' ? undefined : abort,
+      );
+      await expect(deletion).resolves.toBe(globalAbort);
+      const after = await observer.variantPrice.findMany(c.query);
+      if (stage === 'commit') {
+        expect(after).toHaveLength(3);
+        for (const row of second!) {
+          const stored = after.find((r) => r.priceListId === row.priceListId)!;
+          expect(stored).toMatchObject({
+            id: row.id,
+            priceCents: row.priceCents,
+            variantId: row.variantId,
+            tenantId: seed.ids.tenantId,
+            priceListId: row.priceListId,
+          });
+          expect(
+            stored.tierPrices.map(({ id, minQuantity, priceCents }) => ({
+              id,
+              minQuantity,
+              priceCents,
+            })),
+          ).toEqual(
+            row.tierPrices.map(({ id, minQuantity, priceCents }) => ({
+              id,
+              minQuantity,
+              priceCents,
+            })),
+          );
+        }
+      } else expect(after).toEqual(c.before);
+      expect(after.find((r) => r.priceListId === c.untouched)).toEqual(
+        c.before.find((r) => r.priceListId === c.untouched),
+      );
+      await expect(
+        endpoint.run(seed, (p) =>
+          p.bulkUpsertVariantPrices(seed.ids.productId, seed.ids.variantId, {
+            prices: c.prices,
+          }),
+        ),
+      ).resolves.toEqual(c.expected());
+    },
+  );
+
   it.each([false, true])(
     'upserts after global deletion rollback=%s',
     async (rollback) => {

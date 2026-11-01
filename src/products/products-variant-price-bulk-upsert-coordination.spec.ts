@@ -117,6 +117,10 @@ function setup() {
     },
   );
   const tx = {
+    $executeRaw: jest.fn<Promise<number>, [TemplateStringsArray]>(() => {
+      record('lifecycle');
+      return Promise.resolve(0);
+    }),
     $queryRaw: jest.fn<Promise<{ id: string }[]>, [Prisma.Sql]>(() => {
       record('gate');
       return Promise.resolve([{ id: 'product' }]);
@@ -259,6 +263,7 @@ function setup() {
       allowRoot = true;
       return service.getVariantPrices('product', 'variant');
     },
+    lists,
     snapshot: () => structuredClone([...rows.values()]),
     clear: () => rows.clear(),
     costs: (parent: number, child: number | null) => {
@@ -307,6 +312,7 @@ it('gates before every read, validates unique IDs and retains full response insi
   const result = await s.bulk(batch);
   expect(s.events).toEqual([
     'begin',
+    'tx:lifecycle',
     'tx:gate',
     'tx:product',
     'tx:variant',
@@ -324,6 +330,11 @@ it('gates before every read, validates unique IDs and retains full response insi
     'tx:enrich',
     'commit',
   ]);
+  expect(s.tx.$executeRaw).toHaveBeenCalledTimes(1);
+  expect(s.tx.$executeRaw.mock.calls[0][0].join('')).toBe(
+    'LOCK TABLE "global_price_lists" IN SHARE MODE',
+  );
+  expect(s.tx.$executeRaw.mock.calls[0]).toHaveLength(1);
   const gate = s.tx.$queryRaw.mock.calls[0][0];
   expect(gate.sql.replace(/\s+/g, ' ').trim()).toBe(
     'SELECT "id" FROM "products" WHERE "tenantId" = ? AND "id" = ? FOR UPDATE',
@@ -393,6 +404,8 @@ it.each([false, true])(
         100,
       ),
     );
+    expect(s.events.slice(0, 3)).toEqual(['begin', 'tx:lifecycle', 'tx:gate']);
+    expect(s.tx.$executeRaw).toHaveBeenCalledTimes(1);
     expect(s.repo.findById).toHaveBeenCalledTimes(2);
     expect(s.tx.variantPrice.upsert).not.toHaveBeenCalled();
     expect(s.snapshot()).toEqual(before);
@@ -563,6 +576,7 @@ it.each([
   },
 );
 it.each([
+  'lifecycle',
   'gate',
   'product',
   'variant',
@@ -577,6 +591,7 @@ it.each([
   const before = s.snapshot();
   const error = new Error('sentinel');
   const methods = {
+    lifecycle: s.tx.$executeRaw,
     gate: s.tx.$queryRaw,
     product: s.repo.findById,
     variant: s.tx.variant.findFirst,
@@ -597,6 +612,12 @@ it.each([
   await expect(s.bulk(batch)).rejects.toBe(error);
   expect(s.snapshot()).toEqual(before);
   expect(s.events.at(-1)).toBe('rollback');
+  if (stage === 'lifecycle') {
+    expect(s.events).toEqual(['begin', 'rollback']);
+    expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+    expect(s.repo.findById).not.toHaveBeenCalled();
+    expect(s.tx.variantPrice.upsert).not.toHaveBeenCalled();
+  }
 });
 it.each(['upsert', 'clear', 'tiers'])(
   'rolls back earlier inserts and updates on a later %s failure',
@@ -638,7 +659,22 @@ it('joins ambient ownership and restores every row on outer failure', async () =
   const error = new Error('outer');
   await expect(
     s.transaction(async () => {
-      await s.bulk(batch);
+      const first = await s.bulk(batch);
+      const second = await s.bulk([{ priceListId: 'A', priceCents: 800 }]);
+      expect(second).toEqual([
+        {
+          ...first[0],
+          priceCents: 800,
+          priceDecimal: 8,
+          margin: { amountCents: 700, amountDecimal: 7, percent: 88 },
+        },
+        ...first.slice(1),
+      ]);
+      expect(s.tx.$executeRaw.mock.calls.map(([sql]) => sql.join(''))).toEqual([
+        'LOCK TABLE "global_price_lists" IN SHARE MODE',
+        'LOCK TABLE "global_price_lists" IN SHARE MODE',
+      ]);
+      expect(s.events).not.toContain('commit');
       expect(s.snapshot()).not.toEqual(before);
       throw error;
     }),
@@ -662,10 +698,64 @@ it('preserves the ordinary GET root query, complete response and lack of transac
   );
   expect(s.rootFind.mock.calls[0][0].where).toEqual({ variantId: 'variant' });
   expect(s.rootFind).toHaveBeenCalledTimes(1);
+  expect(s.tx.$executeRaw).not.toHaveBeenCalled();
   expect(s.tx.variantPrice.findMany).not.toHaveBeenCalled();
   expect(s.tenant.runInTransaction).not.toHaveBeenCalled();
   expect(s.snapshot()).toEqual(before);
 });
+it.each([false, true])(
+  'waits for lifecycle before any observation, vanished=%s',
+  async (vanished) => {
+    const s = setup();
+    const before = s.snapshot();
+    let release!: () => void;
+    s.tx.$executeRaw.mockImplementation(() => {
+      s.events.push('tx:lifecycle');
+      return new Promise<number>((resolve) => (release = () => resolve(0)));
+    });
+    const pending = s.bulk(batch).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    try {
+      expect(s.events).toEqual(['begin', 'tx:lifecycle']);
+      expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+      expect(s.repo.findById).not.toHaveBeenCalled();
+      expect(s.tx.variant.findFirst).not.toHaveBeenCalled();
+      expect(s.tx.priceList.findMany).not.toHaveBeenCalled();
+      expect(s.tx.variantPrice.upsert).not.toHaveBeenCalled();
+      expect(s.snapshot()).toEqual(before);
+      s.costs(333, 200);
+      if (vanished)
+        s.lists.splice(
+          s.lists.findIndex((l) => l.id === 'B'),
+          1,
+        );
+    } finally {
+      release?.();
+      await pending;
+    }
+    if (vanished) {
+      await expect(pending).resolves.toEqual(
+        new EntityNotFoundError('PriceList', 'B'),
+      );
+      expect(s.tx.variantPrice.upsert).not.toHaveBeenCalled();
+      expect(s.snapshot()).toEqual(before);
+      expect(s.events.at(-1)).toBe('rollback');
+    } else {
+      await expect(pending).resolves.toEqual(
+        response(
+          s
+            .snapshot()
+            .filter((r) => r.tenantId === 'tenant')
+            .sort((a, b) => a.priceListId.localeCompare(b.priceListId)),
+          200,
+        ),
+      );
+      expect(s.events.at(-1)).toBe('commit');
+    }
+  },
+);
 it('preserves ordinary GET failure identity without starting a transaction', async () => {
   const s = setup();
   const before = s.snapshot();
