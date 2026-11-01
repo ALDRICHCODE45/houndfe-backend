@@ -1475,6 +1475,8 @@ export class ProductsService {
     const tenantId = this.tenantPrisma.getTenantId();
     return this.tenantPrisma.runInTransaction(async () => {
       const tx = this.tenantPrisma.getClient();
+      // Ambient callers must own lifecycle before any earlier row locks.
+      await lockCatalogLifecycle(tx, 'shared');
       const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
         SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
           AND "id" = ${productId} FOR UPDATE

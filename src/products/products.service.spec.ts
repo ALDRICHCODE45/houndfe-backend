@@ -1363,6 +1363,7 @@ describe('ProductsService — variant tier upsert 3-state semantics', () => {
           globalPriceList: { isDefault: false },
         }),
       },
+      $executeRaw: jest.fn().mockResolvedValue(0),
       variantTierPrice: tx.variantTierPrice,
       variantPrice: {
         upsert: tx.variantPrice.upsert,

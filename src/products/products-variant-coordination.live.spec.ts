@@ -210,6 +210,261 @@ describe('live Variant membership and stock coordination', () => {
     expect(locks).toEqual([{ mode }]);
   }
 
+  const lifecycleTiers = [
+    { minQuantity: 2, priceCents: 500 },
+    { minQuantity: 5, priceCents: 300 },
+  ];
+  function upsertResponse(seed: EditorialFixture, name: string, price: number) {
+    const margin = (value: number) => ({
+      amountCents: value - 100,
+      amountDecimal: (value - 100) / 100,
+      percent: Math.round(((value - 100) / value) * 100),
+    });
+    return {
+      id: seed.ids.variantPriceId,
+      variantId: seed.ids.variantId,
+      priceListId: seed.ids.priceListId,
+      priceListName: name,
+      priceCents: price,
+      priceDecimal: price / 100,
+      margin: margin(price),
+      tierPrices: lifecycleTiers.map((tier) => ({
+        id: expect.any(String) as unknown,
+        ...tier,
+        priceDecimal: tier.priceCents / 100,
+        margin: margin(tier.priceCents),
+      })),
+    };
+  }
+  async function upsertSeed() {
+    const seed = await freshSeed();
+    await observer.variant.update({
+      where: { id: seed.ids.variantId },
+      data: { purchaseNetCostCents: 100 },
+    });
+    await observer.variantTierPrice.create({
+      data: {
+        tenantId: seed.ids.tenantId,
+        variantPriceId: seed.ids.variantPriceId,
+        minQuantity: 3,
+        priceCents: 400,
+      },
+    });
+    const { name } = await observer.globalPriceList.findUniqueOrThrow({
+      where: { id: seed.ids.globalPriceListId },
+    });
+    return { seed, name };
+  }
+
+  it.each([false, true])(
+    'upserts after global deletion rollback=%s',
+    async (rollback) => {
+      const { seed, name } = await upsertSeed();
+      const remover = actor(await open());
+      const endpoint = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const endpointPid = await currentBackendPid(endpoint.client);
+      const reached = signal();
+      const release = signal();
+      const abort = new Error('rollback global deletion');
+      const deletion = remover
+        .run(seed, (_p, lists) =>
+          remover.inTransaction(async () => {
+            await lists.remove(seed.ids.globalPriceListId);
+            reached.resolve();
+            await release.promise;
+            if (rollback) throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      let result: Promise<unknown> | undefined;
+      try {
+        await Promise.race([
+          reached.promise,
+          deletion.then((cause) => {
+            throw new Error('Deletion ended before checkpoint', { cause });
+          }),
+        ]);
+        result = endpoint
+          .run(seed, (p) =>
+            p.upsertVariantPrice(
+              seed.ids.productId,
+              seed.ids.variantId,
+              seed.ids.priceListId,
+              { priceCents: 1000, tierPrices: lifecycleTiers },
+            ),
+          )
+          .then(
+            (value) => value,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(endpointPid, removerPid, 'ShareLock');
+      } finally {
+        release.resolve();
+        await Promise.allSettled([deletion, result]);
+      }
+      await expect(deletion).resolves.toBe(rollback ? abort : undefined);
+      if (rollback) {
+        await expect(result).resolves.toEqual(upsertResponse(seed, name, 1000));
+        await expect(
+          observer.variantPrice.findUniqueOrThrow({
+            where: { id: seed.ids.variantPriceId },
+            include: { tierPrices: { orderBy: { minQuantity: 'asc' } } },
+          }),
+        ).resolves.toMatchObject({
+          priceCents: 1000,
+          tierPrices: lifecycleTiers,
+        });
+      } else {
+        await expect(result).resolves.toMatchObject({
+          code: 'ENTITY_NOT_FOUND',
+          message: `PriceList with id "${seed.ids.priceListId}" not found`,
+        });
+        await expect(
+          observer.variantPrice.count({
+            where: { id: seed.ids.variantPriceId },
+          }),
+        ).resolves.toBe(0);
+      }
+      await expect(
+        observer.variantTierPrice.count({
+          where: { variantPriceId: seed.ids.variantPriceId },
+        }),
+      ).resolves.toBe(rollback ? 2 : 0);
+      await expect(
+        observer.globalPriceList.count({
+          where: { id: seed.ids.globalPriceListId },
+        }),
+      ).resolves.toBe(rollback ? 1 : 0);
+    },
+  );
+
+  it.each(['commit', 'rollback', 'result'])(
+    'retains upsert lifecycle through %s',
+    async (stage) => {
+      const { seed, name } = await upsertSeed();
+      const other = await upsertSeed();
+      const query = {
+        where: { id: seed.ids.variantPriceId },
+        include: { tierPrices: { orderBy: { minQuantity: 'asc' as const } } },
+      };
+      const before = await observer.variantPrice.findUniqueOrThrow(query);
+      const base = await open();
+      const held = latch(
+        base,
+        (_sql, model, operation) =>
+          model === 'VariantPrice' && operation === 'findUnique',
+      );
+      const endpoint = actor(held.client);
+      const endpointPid = await currentBackendPid(base);
+      const remover = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const unrelated = actor(await open());
+      const responded = signal();
+      const repeat = signal();
+      const repeated = signal();
+      const release = signal();
+      const abort = new Error('upsert failure');
+      const globalAbort = new Error('rollback following deletion');
+      const writing = endpoint
+        .run(seed, (p) =>
+          endpoint.inTransaction(async () => {
+            const first = await p.upsertVariantPrice(
+              seed.ids.productId,
+              seed.ids.variantId,
+              seed.ids.priceListId,
+              { priceCents: 1000, tierPrices: lifecycleTiers },
+            );
+            expect(first).toEqual(upsertResponse(seed, name, 1000));
+            responded.resolve();
+            await repeat.promise;
+            const second = await p.upsertVariantPrice(
+              seed.ids.productId,
+              seed.ids.variantId,
+              seed.ids.priceListId,
+              { priceCents: 700 },
+            );
+            expect(second).toEqual(upsertResponse(seed, name, 700));
+            expect(second.tierPrices).toEqual(first.tierPrices);
+            repeated.resolve();
+            await release.promise;
+            if (stage === 'rollback') throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      const ended = writing.then((cause) => {
+        throw new Error('Upsert ended before checkpoint', { cause });
+      });
+      let deletion: Promise<unknown> | undefined;
+      try {
+        await Promise.race([held.reached, ended]);
+        await expect(
+          unrelated.run(other.seed, (p) =>
+            p.upsertVariantPrice(
+              other.seed.ids.productId,
+              other.seed.ids.variantId,
+              other.seed.ids.priceListId,
+              { priceCents: 1000, tierPrices: lifecycleTiers },
+            ),
+          ),
+        ).resolves.toEqual(upsertResponse(other.seed, other.name, 1000));
+        deletion = remover
+          .run(seed, (_p, lists) =>
+            remover.inTransaction(async () => {
+              await lists.remove(seed.ids.globalPriceListId);
+              throw globalAbort;
+            }),
+          )
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+        held.release(stage === 'result' ? abort : undefined);
+        if (stage !== 'result') {
+          await Promise.race([responded.promise, ended]);
+          await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+          repeat.resolve();
+          await Promise.race([repeated.promise, ended]);
+          await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+        }
+      } finally {
+        held.release();
+        repeat.resolve();
+        release.resolve();
+        await Promise.allSettled([writing, deletion, ended]);
+      }
+      await expect(writing).resolves.toBe(
+        stage === 'commit' ? undefined : abort,
+      );
+      await expect(deletion).resolves.toBe(globalAbort);
+      const after = await observer.variantPrice.findUniqueOrThrow(query);
+      if (stage === 'commit') {
+        expect(after).toMatchObject({
+          priceCents: 700,
+          tierPrices: lifecycleTiers,
+        });
+        expect(after.tierPrices).toHaveLength(2);
+      } else expect(after).toEqual(before);
+      await expect(
+        endpoint.run(seed, (p) =>
+          p.upsertVariantPrice(
+            seed.ids.productId,
+            seed.ids.variantId,
+            seed.ids.priceListId,
+            { priceCents: 1000, tierPrices: lifecycleTiers },
+          ),
+        ),
+      ).resolves.toEqual(upsertResponse(seed, name, 1000));
+    },
+  );
+
   it.each([false, true])(
     'deletes a variant price after global lifecycle rollback=%s',
     async (rollback) => {

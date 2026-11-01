@@ -46,6 +46,10 @@ function setup(existing = true) {
     }),
   };
   const tx = {
+    $executeRaw: jest.fn<Promise<number>, [TemplateStringsArray]>(() => {
+      record('lifecycle');
+      return Promise.resolve(0);
+    }),
     $queryRaw: jest.fn<Promise<{ id: string }[]>, [Prisma.Sql]>(() => {
       record('gate');
       return Promise.resolve([{ id: 'product' }]);
@@ -223,6 +227,7 @@ it('gates every observation and retains the transaction through response enrichm
   });
   expect(s.events).toEqual([
     'begin',
+    'lifecycle',
     'gate',
     'product',
     'variant',
@@ -233,6 +238,9 @@ it('gates every observation and retains the transaction through response enrichm
     'result',
     'enrich',
     'commit',
+  ]);
+  expect(s.tx.$executeRaw.mock.calls.map(([sql]) => sql.join(''))).toEqual([
+    'LOCK TABLE "global_price_lists" IN SHARE MODE',
   ]);
   const query = s.tx.$queryRaw.mock.calls[0][0];
   expect(query.sql.replace(/\s+/g, ' ').trim()).toBe(
@@ -471,6 +479,7 @@ it.each([false, true])(
 );
 
 it.each([
+  'lifecycle',
   'gate',
   'product',
   'variant',
@@ -485,6 +494,7 @@ it.each([
   const before = s.snapshot();
   const error = new Error('sentinel');
   const methods = {
+    lifecycle: s.tx.$executeRaw,
     gate: s.tx.$queryRaw,
     product: s.repo.findById,
     variant: s.tx.variant.findFirst,
@@ -503,6 +513,11 @@ it.each([
     }),
   ).rejects.toBe(error);
   expect(s.snapshot()).toEqual(before);
+  if (stage === 'lifecycle') {
+    expect(s.events).toEqual(['begin', 'rollback']);
+    expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+    expect(s.tx.variantPrice.upsert).not.toHaveBeenCalled();
+  }
   expect(s.events.at(-1)).toBe('rollback');
   expect(s.events).not.toContain('commit');
 });
@@ -522,4 +537,106 @@ it('joins ambient ownership and restores price and tiers on late failure', async
   expect(s.events.filter((e) => e === 'begin')).toHaveLength(1);
   expect(s.events.at(-1)).toBe('rollback');
   expect(s.tenant.runInTransaction).toHaveBeenCalledWith(expect.any(Function));
+});
+
+it.each([false, true])(
+  'awaits lifecycle and reads fresh list/cost, vanished=%s',
+  async (vanished) => {
+    const s = setup();
+    const before = s.snapshot();
+    let release!: () => void;
+    const gate = new Promise<number>((resolve) => (release = () => resolve(0)));
+    s.tx.$executeRaw.mockImplementation(() => {
+      s.events.push('lifecycle');
+      return gate;
+    });
+    const pending = s.upsert().then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    try {
+      await Promise.resolve();
+      expect(s.events).toEqual(['begin', 'lifecycle']);
+      expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+      expect(s.repo.findById).not.toHaveBeenCalled();
+      expect(s.tx.variant.findFirst).not.toHaveBeenCalled();
+      expect(s.tx.priceList.findUnique).not.toHaveBeenCalled();
+      expect(s.tx.variantPrice.upsert).not.toHaveBeenCalled();
+      expect(s.tx.variantTierPrice.deleteMany).not.toHaveBeenCalled();
+      expect(s.tx.variantTierPrice.createMany).not.toHaveBeenCalled();
+      expect(s.tx.variantPrice.findUnique).not.toHaveBeenCalled();
+      expect(s.snapshot()).toEqual(before);
+      s.costs(250, null);
+      if (vanished) s.tx.priceList.findUnique.mockResolvedValue(null);
+    } finally {
+      release();
+      await pending;
+    }
+    if (vanished) {
+      await expect(pending).resolves.toEqual(
+        new EntityNotFoundError('PriceList', 'list'),
+      );
+      expect(s.snapshot()).toEqual(before);
+      expect(s.tx.variantPrice.upsert).not.toHaveBeenCalled();
+    } else
+      await expect(pending).resolves.toEqual({
+        id: 'price',
+        variantId: 'variant',
+        priceListId: 'list',
+        priceListName: 'PUBLICO',
+        priceCents: 1000,
+        priceDecimal: 10,
+        margin: { amountCents: 750, amountDecimal: 7.5, percent: 75 },
+        tierPrices: [
+          {
+            id: 'old',
+            minQuantity: 3,
+            priceCents: 400,
+            priceDecimal: 4,
+            margin: { amountCents: 150, amountDecimal: 1.5, percent: 38 },
+          },
+        ],
+      });
+    expect(s.rootAccess).not.toHaveBeenCalled();
+  },
+);
+
+it('reacquires shared ownership and preserves tiers in repeated ambient upserts', async () => {
+  const s = setup();
+  await s.transaction(async () => {
+    const first = await s.upsert({ priceCents: 1000 });
+    s.costs(200, 0);
+    const second = await s.upsert({ priceCents: 500 });
+    expect(second).toEqual({
+      ...first,
+      priceCents: 500,
+      priceDecimal: 5,
+      margin: { amountCents: 500, amountDecimal: 5, percent: 100 },
+      tierPrices: [
+        {
+          id: 'old',
+          minQuantity: 3,
+          priceCents: 400,
+          priceDecimal: 4,
+          margin: { amountCents: 400, amountDecimal: 4, percent: 100 },
+        },
+      ],
+    });
+    expect(s.events).not.toContain('commit');
+    expect(s.tx.$executeRaw.mock.calls.map(([sql]) => sql.join(''))).toEqual([
+      'LOCK TABLE "global_price_lists" IN SHARE MODE',
+      'LOCK TABLE "global_price_lists" IN SHARE MODE',
+    ]);
+    expect(s.snapshot()).toEqual({
+      priceCents: 500,
+      tiers: [{ id: 'old', minQuantity: 3, priceCents: 400 }],
+    });
+  });
+  expect(s.events.filter((event) => event === 'begin')).toHaveLength(1);
+  expect(s.events.filter((event) => event === 'commit')).toHaveLength(1);
+  expect(s.tx.variantTierPrice.deleteMany).not.toHaveBeenCalled();
+  s.tenant.runInTransaction.mock.calls.forEach((args) =>
+    expect(args).toEqual([expect.any(Function)]),
+  );
+  expect(s.rootAccess).not.toHaveBeenCalled();
 });
