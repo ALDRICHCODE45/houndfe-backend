@@ -210,6 +210,269 @@ describe('live Variant membership and stock coordination', () => {
     expect(locks).toEqual([{ mode }]);
   }
 
+  describe('complete Product PATCH coordination', () => {
+    async function snapshot(seed: EditorialFixture) {
+      const { tenantId, productId } = seed.ids;
+      return {
+        product: await observer.product.findUnique({
+          where: { id: productId },
+          include: { catalogPriceLists: true, serviceDetail: true },
+        }),
+        prices: await observer.priceList.findMany({
+          where: { tenantId, productId },
+          orderBy: { id: 'asc' },
+        }),
+        membership: await readVariantMembership(observer, tenantId, productId),
+      };
+    }
+
+    it.each(['lifecycle', 'tenant', 'product'])(
+      'waits at the %s gate and merges the post-wait state',
+      async (gateName) => {
+        const seed = await freshSeed();
+        const owner = await open();
+        const waiterClient = await open();
+        const ownerPid = await currentBackendPid(owner);
+        const waiterPid = await currentBackendPid(waiterClient);
+        const waiter = actor(waiterClient);
+        const reached = signal();
+        const release = signal();
+        const holding = owner
+          .$transaction(async (tx) => {
+            if (gateName === 'lifecycle')
+              await tx.$executeRaw`LOCK TABLE "global_price_lists" IN SHARE ROW EXCLUSIVE MODE`;
+            else
+              await tx.$executeRaw`LOCK TABLE "global_price_lists" IN SHARE MODE`;
+            if (gateName === 'product') {
+              await tx.$queryRaw`SELECT id FROM "tenants" WHERE id = ${seed.ids.tenantId} FOR SHARE`;
+            } else {
+              await tx.$queryRaw`SELECT id FROM "tenants" WHERE id = ${seed.ids.tenantId} FOR UPDATE`;
+            }
+            await tx.$queryRaw`SELECT id FROM "products" WHERE "tenantId" = ${seed.ids.tenantId} AND id = ${seed.ids.productId} FOR UPDATE`;
+            await tx.product.update({
+              where: { id: seed.ids.productId },
+              data: { requiresPrescription: true },
+            });
+            if (gateName === 'tenant') {
+              await tx.tenantCatalogPriceList.create({
+                data: {
+                  tenantId: seed.ids.tenantId,
+                  globalPriceListId: seed.ids.globalPriceListId,
+                },
+              });
+            }
+            reached.resolve();
+            await release.promise;
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        let updating: ReturnType<ProductsService['update']> | undefined;
+        try {
+          await Promise.race([
+            reached.promise,
+            holding.then((cause) => {
+              throw new Error('Owner ended before checkpoint', { cause });
+            }),
+          ]);
+          updating = waiter.run(seed, (products) =>
+            products.update(seed.ids.productId, {
+              name: 'After wait',
+              ...(gateName === 'tenant'
+                ? { supportedCatalogPriceListIds: [seed.ids.globalPriceListId] }
+                : {}),
+            }),
+          );
+          expect(await waitForLockWait(observer, waiterPid)).toContain(
+            ownerPid,
+          );
+          if (gateName === 'lifecycle') {
+            await lifecycleWait(waiterPid, ownerPid, 'ShareLock');
+            const locks = await observer.$queryRaw<
+              { relation: string }[]
+            >`SELECT relation::regclass::text AS relation FROM pg_locks WHERE pid = ${waiterPid} AND relation IN ('tenants'::regclass, 'products'::regclass)`;
+            expect(locks).toEqual([]);
+          }
+        } finally {
+          release.resolve();
+          await Promise.allSettled([holding, updating]);
+        }
+        await expect(holding).resolves.toBeUndefined();
+        await expect(updating).resolves.toMatchObject({
+          name: 'After wait',
+          requiresPrescription: true,
+        });
+        const after = await snapshot(seed);
+        expect(after.product).toMatchObject({
+          name: 'After wait',
+          requiresPrescription: true,
+        });
+        if (gateName === 'tenant')
+          expect(
+            after.product?.catalogPriceLists.map(
+              (row) => row.globalPriceListId,
+            ),
+          ).toEqual([seed.ids.globalPriceListId]);
+      },
+    );
+
+    it.each([false, true])(
+      'keeps full response under the gates and restores mixed state on response failure=%s',
+      async (failResponse) => {
+        const seed = await freshSeed();
+        const before = await snapshot(seed);
+        const firstClient = await open();
+        const firstPid = await currentBackendPid(firstClient);
+        const checkpoint = latch(
+          firstClient,
+          (_sql, model, operation) =>
+            model === 'ProductImage' && operation === 'findMany',
+        );
+        const first = actor(checkpoint.client);
+        const otherClient = await open();
+        const otherPid = await currentBackendPid(otherClient);
+        const other = actor(otherClient);
+        const error = new Error('synthetic Product PATCH response failure');
+        const updating = first.run(seed, (products) =>
+          products.update(seed.ids.productId, {
+            name: 'Mixed',
+            supportedCatalogPriceListIds: [],
+            useStock: false,
+          }),
+        );
+        const settled = updating.then(
+          (value) => value,
+          (failure: unknown) => failure,
+        );
+        let competing: ReturnType<ProductsService['update']> | undefined;
+        try {
+          await Promise.race([
+            checkpoint.reached,
+            settled.then((cause) => {
+              throw new Error('PATCH ended before response checkpoint', {
+                cause,
+              });
+            }),
+          ]);
+          expect(await snapshot(seed)).toEqual(before);
+          competing = other.run(seed, (products) =>
+            products.update(seed.ids.productId, {
+              description: 'Second writer',
+            }),
+          );
+          expect(await waitForLockWait(observer, otherPid)).toContain(firstPid);
+        } finally {
+          checkpoint.release(failResponse ? error : undefined);
+          await Promise.allSettled([settled, competing]);
+        }
+        await expect(competing).resolves.toMatchObject({
+          description: 'Second writer',
+        });
+        if (failResponse) {
+          await expect(updating).rejects.toThrow(
+            'synthetic Product PATCH response failure',
+          );
+          const after = await snapshot(seed);
+          expect(after.product?.name).toBe(before.product?.name);
+          expect(after.product?.useStock).toBe(before.product?.useStock);
+          expect(after.product?.catalogPriceLists).toEqual(
+            before.product?.catalogPriceLists,
+          );
+          expect(after.prices).toEqual(before.prices);
+          expect(after.membership.variants).toEqual(before.membership.variants);
+        } else {
+          await expect(updating).resolves.toMatchObject({
+            name: 'Mixed',
+            useStock: false,
+          });
+          expect(
+            (await snapshot(seed)).membership.variants.every(
+              (row) => row.minQuantity === 0,
+            ),
+          ).toBe(true);
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'holds Product until outer completion, allows unrelated progress, rollback=%s',
+      async (rollback) => {
+        const seed = await freshSeed();
+        const before = await snapshot(seed);
+        const unrelated = await observer.product.create({
+          data: {
+            tenantId: seed.ids.tenantId,
+            name: 'Unrelated',
+            sku: `${seed.ids.productId}-unrelated`,
+          },
+        });
+        const ownerClient = await open();
+        const ownerPid = await currentBackendPid(ownerClient);
+        const waiterClient = await open();
+        const waiterPid = await currentBackendPid(waiterClient);
+        const owner = actor(ownerClient);
+        const waiter = actor(waiterClient);
+        const independent = actor(await open());
+        const reached = signal();
+        const release = signal();
+        const error = new Error('synthetic Product PATCH outer rollback');
+        const holding = owner
+          .run(seed, (products) =>
+            owner.inTransaction(async () => {
+              await products.update(seed.ids.productId, {
+                name: 'First writer',
+              });
+              reached.resolve();
+              await release.promise;
+              if (rollback) throw error;
+            }),
+          )
+          .then(
+            () => undefined,
+            (failure: unknown) => failure,
+          );
+        let competing: ReturnType<ProductsService['update']> | undefined;
+        try {
+          await Promise.race([
+            reached.promise,
+            holding.then((cause) => {
+              throw new Error('Owner ended before checkpoint', { cause });
+            }),
+          ]);
+          expect(await snapshot(seed)).toEqual(before);
+          competing = waiter.run(seed, (products) =>
+            products.update(seed.ids.productId, {
+              description: 'Waiting writer',
+            }),
+          );
+          expect(await waitForLockWait(observer, waiterPid)).toContain(
+            ownerPid,
+          );
+          await expect(
+            independent.run(seed, (products) =>
+              products.update(unrelated.id, { name: 'Unrelated completed' }),
+            ),
+          ).resolves.toMatchObject({ name: 'Unrelated completed' });
+        } finally {
+          release.resolve();
+          await Promise.allSettled([holding, competing]);
+        }
+        await expect(holding).resolves.toBe(rollback ? error : undefined);
+        await expect(competing).resolves.toMatchObject({
+          name: rollback ? before.product?.name : 'First writer',
+          description: 'Waiting writer',
+        });
+        const after = await snapshot(seed);
+        expect(after.product?.name).toBe(
+          rollback ? before.product?.name : 'First writer',
+        );
+        expect(after.prices).toEqual(before.prices);
+        expect(after.membership.variants).toEqual(before.membership.variants);
+      },
+    );
+  });
+
   const lifecycleTiers = [
     { minQuantity: 2, priceCents: 500 },
     { minQuantity: 5, priceCents: 300 },

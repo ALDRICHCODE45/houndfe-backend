@@ -249,13 +249,13 @@ describe('ProductsService — PATCH Variant membership invariant', () => {
     expect(tx.variant.count).toHaveBeenCalledWith({
       where: { productId: PRODUCT_ID, tenantId: 'tenant-1' },
     });
-    const query = tx.$queryRaw.mock.calls[0][0] as {
+    const query = tx.$queryRaw.mock.calls[1][0] as {
       strings: string[];
       values: unknown[];
     };
     expect(query.strings.join(' ')).toContain('FOR UPDATE');
     expect(query.values).toEqual(['tenant-1', PRODUCT_ID]);
-    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
       tx.variant.count.mock.invocationCallOrder[0],
     );
   });
@@ -1941,7 +1941,17 @@ describe('ProductsService — update() edit-path re-arm', () => {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
       lot: { count: jest.fn().mockResolvedValue(0) },
-      $queryRaw: jest.fn().mockResolvedValue([{ q: 10, m: 3 }]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn(
+        (query: { strings: readonly string[] } | TemplateStringsArray) =>
+          Promise.resolve(
+            /FOR (SHARE|UPDATE)/.test(
+              ('strings' in query ? query.strings : query).join(' '),
+            )
+              ? [{ id: PRODUCT_ID }]
+              : [{ q: 10, m: 3 }],
+          ),
+      ),
     };
 
     const tenantPrisma = {
@@ -2032,6 +2042,11 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // captures the writes routed through it (priceList, variant,
     // save's underlying upsert).
     const txClient = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]),
+      globalPriceList: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'gl-publico' }),
+      },
       priceList: {
         updateMany: jest.fn().mockImplementation(() => {
           recordCall('txClient.priceList.updateMany');
@@ -2067,11 +2082,12 @@ describe('ProductsService — update() edit-path re-arm', () => {
       isInTransaction: jest.fn().mockReturnValue(false),
       runInTransaction: jest.fn(
         async (work: (client: typeof txClient) => Promise<unknown>) => {
+          const previous = txState.insideTx;
           txState.insideTx = true;
           try {
             return await work(txClient);
           } finally {
-            txState.insideTx = false;
+            txState.insideTx = previous;
           }
         },
       ),
@@ -2104,14 +2120,14 @@ describe('ProductsService — update() edit-path re-arm', () => {
     };
   }
 
-  it('wraps save + rearm in ONE runInTransaction when quantity is provided — Sc.1', async () => {
+  it('keeps save + rearm within the outer transaction and tail join when quantity is provided — Sc.1', async () => {
     const { service, repo, tenantPrisma, txClient, prisma, txCaptures } =
       setupService();
 
     await service.update(PRODUCT_ID, { quantity: 10 });
 
-    // Single runInTransaction wrap.
-    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    // Outer operation and persistence tail join the same transaction.
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(2);
     // priceList UPDATE is conditional on dto.priceCents and was not
     // provided → no call (raw OR tx).
     expect(txClient.priceList.updateMany).not.toHaveBeenCalled();
@@ -2141,7 +2157,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
 
     await service.update(PRODUCT_ID, { priceCents: 50000, quantity: 10 });
 
-    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(2);
     // priceList UPDATE was routed through the tx client, not the raw
     // prisma.
     expect(txClient.priceList.updateMany).toHaveBeenCalledWith({
@@ -2174,7 +2190,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
 
     await service.update(PRODUCT_ID, { minQuantity: 1 });
 
-    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(2);
     expect(txClient.priceList.updateMany).not.toHaveBeenCalled();
     expect(repo.save).toHaveBeenCalled();
     expect(repo.rearmAlertAfterEdit).toHaveBeenCalledWith({
@@ -2203,7 +2219,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // save ran.
     expect(repo.save).toHaveBeenCalled();
     // Wrap still ran exactly once (persistence is atomic).
-    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(2);
 
     // ── W-2 containment proof: save happened inside the wrap; rearm
     //    was correctly gated out (and therefore not called at all).
@@ -2281,7 +2297,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // force the transition.
     await service.update(PRODUCT_ID, { useStock: false });
 
-    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(2);
     // variant cascade was routed through the tx client.
     expect(txClient.variant.updateMany).toHaveBeenCalledWith({
       where: { productId: PRODUCT_ID },

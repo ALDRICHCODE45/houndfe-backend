@@ -49,6 +49,8 @@ function harness(
     }),
   });
   const tx = {
+    $executeRaw: jest.fn().mockResolvedValue(0),
+    $queryRaw: jest.fn().mockResolvedValue([{ id: 'product-1' }]),
     product: productDelegate(() => working),
     productCatalogPriceList: {
       deleteMany: jest.fn(() => {
@@ -91,6 +93,12 @@ function harness(
     priceList: { findMany: jest.fn(() => Promise.resolve([])) },
     productImage: { findMany: jest.fn(() => Promise.resolve([])) },
   };
+  Object.assign(tx, {
+    tenantCatalogPriceList: root.tenantCatalogPriceList,
+    globalPriceList: root.globalPriceList,
+    priceList: root.priceList,
+    productImage: root.productImage,
+  });
   const tenantPrisma = {
     getTenantId: jest.fn(() => TENANT),
     getClient: jest.fn(() => (ambient ? tx : root)),
@@ -144,7 +152,7 @@ function expectGeneric(error: unknown) {
 }
 
 describe('ProductsService PATCH catalog allowlist (F1.WU4c3)', () => {
-  it('normalizes and validates a non-empty replacement before the one physical transaction', async () => {
+  it('normalizes and validates a non-empty replacement inside the one physical transaction', async () => {
     const h = harness({ bound: [LIST_A, LIST_B] });
 
     const response = await h.service.update('product-1', {
@@ -171,11 +179,11 @@ describe('ProductsService PATCH catalog allowlist (F1.WU4c3)', () => {
       expect.arrayContaining([LIST_A, LIST_B]),
     );
     expect(response.supportedCatalogPriceListIds).toHaveLength(2);
-    expect(h.events.indexOf('binding-query')).toBeLessThan(
+    expect(h.events.indexOf('binding-query')).toBeGreaterThan(
       h.events.indexOf('tx:logical'),
     );
     expect(h.physicalTransactions()).toBe(1);
-    expect(h.events.filter((event) => event === 'tx:logical')).toHaveLength(2);
+    expect(h.events.filter((event) => event === 'tx:logical')).toHaveLength(3);
   });
 
   it('clears on explicit [] and returns all-public semantics', async () => {
@@ -269,7 +277,7 @@ describe('ProductsService PATCH catalog allowlist (F1.WU4c3)', () => {
       expect(h.root.globalPriceList.findFirst).not.toHaveBeenCalled();
       expect(h.root.globalPriceList.findMany).not.toHaveBeenCalled();
       expect(h.tx.product.upsert).not.toHaveBeenCalled();
-      expect(h.physicalTransactions()).toBe(0);
+      expect(h.physicalTransactions()).toBe(1);
       expect(h.committed()).toMatchObject({
         product: { name: 'Old name' },
         joins: [STALE],

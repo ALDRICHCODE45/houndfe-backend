@@ -53,6 +53,8 @@ function makePrisma() {
   };
   return {
     prisma: {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]),
       product: {
         create: jest.fn().mockImplementation(() => {
           track('product.create');
@@ -116,8 +118,7 @@ function makeService(
     getClient: jest.fn().mockReturnValue(prismaMock),
     isInTransaction: jest.fn().mockReturnValue(false),
     runInTransaction: jest.fn(
-      async (work: (client: unknown) => Promise<unknown>) =>
-        work(prismaMock),
+      async (work: (client: unknown) => Promise<unknown>) => work(prismaMock),
     ),
   } as any;
   const filesService = { uploadAndRegister: jest.fn() } as any;
@@ -462,9 +463,7 @@ describe('ProductsService — findAll() type filter (R8)', () => {
   it('forwards ?type=SERVICE to Prisma', async () => {
     const repo = makeRepo();
     const { prisma } = makePrisma();
-    (prisma.product.findMany as jest.Mock) = jest
-      .fn()
-      .mockResolvedValue([]);
+    (prisma.product.findMany as jest.Mock) = jest.fn().mockResolvedValue([]);
     prisma.product.findMany = prisma.product.findMany;
     const service = makeService(repo, prisma);
 
@@ -477,9 +476,7 @@ describe('ProductsService — findAll() type filter (R8)', () => {
   it('forwards ?type=PRODUCT to Prisma', async () => {
     const repo = makeRepo();
     const { prisma } = makePrisma();
-    (prisma.product.findMany as jest.Mock) = jest
-      .fn()
-      .mockResolvedValue([]);
+    (prisma.product.findMany as jest.Mock) = jest.fn().mockResolvedValue([]);
     prisma.product.findMany = prisma.product.findMany;
     const service = makeService(repo, prisma);
 
@@ -492,9 +489,7 @@ describe('ProductsService — findAll() type filter (R8)', () => {
   it('does not apply a type filter when omitted', async () => {
     const repo = makeRepo();
     const { prisma } = makePrisma();
-    (prisma.product.findMany as jest.Mock) = jest
-      .fn()
-      .mockResolvedValue([]);
+    (prisma.product.findMany as jest.Mock) = jest.fn().mockResolvedValue([]);
     prisma.product.findMany = prisma.product.findMany;
     const service = makeService(repo, prisma);
 
@@ -507,9 +502,7 @@ describe('ProductsService — findAll() type filter (R8)', () => {
   it('combines search and type filters with AND', async () => {
     const repo = makeRepo();
     const { prisma } = makePrisma();
-    (prisma.product.findMany as jest.Mock) = jest
-      .fn()
-      .mockResolvedValue([]);
+    (prisma.product.findMany as jest.Mock) = jest.fn().mockResolvedValue([]);
     prisma.product.findMany = prisma.product.findMany;
     const service = makeService(repo, prisma);
 

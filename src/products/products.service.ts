@@ -800,6 +800,35 @@ export class ProductsService {
       }
     }
 
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      const tenantId = this.tenantPrisma.getTenantId();
+      await lockCatalogLifecycle(tx, 'shared');
+      const tenants = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "tenants" WHERE "id" = ${tenantId} FOR SHARE
+      `);
+      if (tenants.length !== 1) throw new EntityNotFoundError('Product', id);
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${id} FOR UPDATE
+      `);
+      if (products.length !== 1) throw new EntityNotFoundError('Product', id);
+      return this.updateCoordinated(
+        id,
+        dto,
+        replacesCatalogAllowlist,
+        supportedCatalogPriceListIds,
+      );
+    });
+  }
+
+  /** Requires the outer lifecycle/Tenant/Product gates and ambient transaction. */
+  private async updateCoordinated(
+    id: string,
+    dto: UpdateProductDto,
+    replacesCatalogAllowlist: boolean,
+    supportedCatalogPriceListIds: string[] | undefined,
+  ) {
     const product = await this.productRepo.findById(id);
     if (!product) throw new EntityNotFoundError('Product', id);
 
@@ -1008,15 +1037,15 @@ export class ProductsService {
       );
     }
 
-    // Resolve the default global price-list id OUTSIDE the wrap.
-    // It is a static config lookup, not a write; pulling it inside
-    // the tx would just hold a connection longer than necessary.
+    // Resolve the default after lifecycle coordination on the ambient client.
     let defaultGlobalListId: string | null = null;
     if (dto.priceCents !== undefined) {
-      const defaultGlobalList = await this.prisma.globalPriceList.findFirst({
-        where: { isDefault: true },
-        select: { id: true },
-      });
+      const defaultGlobalList = await this.tenantPrisma
+        .getClient()
+        .globalPriceList.findFirst({
+          where: { isDefault: true },
+          select: { id: true },
+        });
       defaultGlobalListId = defaultGlobalList?.id ?? null;
     }
 
@@ -1030,27 +1059,13 @@ export class ProductsService {
 
     product.updatedAt = new Date();
 
-    // Persistence tail + rearm MUST commit atomically. The
-    // `runInTransaction` boundary sets the CLS slot that
-    // `tenantPrisma.getClient()` reads; routing the raw
-    // `this.prisma.*` writes through `getClient()` joins them to the
-    // same tx as `productRepo.save` (which already uses `getClient()`)
-    // and the new rearm call. The change-gate (above) is applied
-    // INSIDE the wrap so the rearm method's ambient-tx guard sees an
-    // active tx and the rearm SELECT commits with the writes.
+    // This tail joins the operation's ambient transaction, as repository.save
+    // also does. Its completion is not a commit; the outer callback still owns
+    // response enrichment and any caller-owned ambient transaction remains open.
     await this.tenantPrisma.runInTransaction(async () => {
       if (dto.hasVariants === false) {
         const tx = this.tenantPrisma.getClient();
         const tenantId = this.tenantPrisma.getTenantId();
-        // Match add/remove's qualified Product gate before observing membership.
-        // Hold it through save so a concurrent add cannot invalidate the count.
-        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-          SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
-            AND "id" = ${id} FOR UPDATE
-        `);
-        if (products.length !== 1) {
-          throw new EntityNotFoundError('Product', id);
-        }
         const variantCount = await tx.variant.count({
           where: { tenantId, productId: id },
         });
