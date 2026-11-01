@@ -33,10 +33,16 @@ function setup() {
     product: { useStock: true },
   };
   let inside = false;
+  let rearms = 0;
   const events: string[] = [];
   const record = (name: string) =>
     events.push(`${inside ? 'tx' : 'root'}:${name}`);
   const tx = {
+    $executeRaw: jest.fn<Promise<number>, [TemplateStringsArray]>(() => {
+      record('lifecycle');
+      expect(inside).toBe(true);
+      return Promise.resolve(0);
+    }),
     $queryRaw: jest.fn<Promise<{ id: string }[]>, [Prisma.Sql]>(() => {
       record('gate');
       return Promise.resolve([{ id: productId }]);
@@ -48,7 +54,8 @@ function setup() {
       }),
       update: jest.fn(({ data }: { data: object; where: object }) => {
         record('update');
-        return Promise.resolve({ ...row, ...data });
+        Object.assign(row, data);
+        return Promise.resolve({ ...row });
       }),
     },
   };
@@ -71,6 +78,7 @@ function setup() {
     }),
     rearmAlertAfterEdit: jest.fn<Promise<void>, [object]>(() => {
       record('rearm');
+      rearms++;
       return Promise.resolve();
     }),
   };
@@ -78,6 +86,9 @@ function setup() {
     getTenantId: () => tenantId,
     getClient: () => (inside ? tx : root),
     runInTransaction: jest.fn(async (work: () => Promise<unknown>) => {
+      if (inside) return work();
+      const before = structuredClone(row);
+      const oldRearms = rearms;
       events.push('begin');
       inside = true;
       try {
@@ -85,6 +96,8 @@ function setup() {
         events.push('commit');
         return result;
       } catch (error) {
+        Object.assign(row, before);
+        rearms = oldRearms;
         events.push('rollback');
         throw error;
       } finally {
@@ -100,7 +113,27 @@ function setup() {
     tenant as unknown as Args[3],
     {} as Args[4],
   );
-  return { service, row, tx, root, repo, tenant, events };
+  const responseOwner = service as unknown as {
+    enrichVariantCostResponse: (value: typeof row) => typeof row;
+  };
+  const original = responseOwner.enrichVariantCostResponse;
+  const enrich = jest
+    .spyOn(responseOwner, 'enrichVariantCostResponse')
+    .mockImplementation((value) => {
+      record('enrich');
+      return original(value);
+    });
+  return {
+    service,
+    row,
+    tx,
+    root,
+    repo,
+    tenant,
+    events,
+    enrich,
+    snapshot: () => ({ row: structuredClone(row), rearms }),
+  };
 }
 
 it('takes the qualified parent gate before any read, uniqueness check, update or rearm', async () => {
@@ -112,14 +145,21 @@ it('takes the qualified parent gate before any read, uniqueness check, update or
   });
   expect(s.events).toEqual([
     'begin',
+    'tx:lifecycle',
     'tx:gate',
     'tx:read',
     'tx:sku',
     'tx:barcode',
     'tx:update',
     'tx:rearm',
+    'tx:enrich',
     'commit',
   ]);
+  expect(s.tx.$executeRaw).toHaveBeenCalledTimes(1);
+  expect(s.tx.$executeRaw.mock.calls[0]).toHaveLength(1);
+  expect(s.tx.$executeRaw.mock.calls[0][0].join('')).toBe(
+    'LOCK TABLE "global_price_lists" IN SHARE MODE',
+  );
   const query = s.tx.$queryRaw.mock.calls[0][0];
   expect(query.sql.replace(/\s+/g, ' ').trim()).toBe(
     'SELECT "id" FROM "products" WHERE "tenantId" = ? AND "id" = ? FOR UPDATE',
@@ -177,12 +217,23 @@ it.each([
   expect(s.events.at(-1)).toBe('rollback');
 });
 
-it.each(['gate', 'read', 'sku', 'barcode', 'update', 'rearm'])(
+it.each([
+  'lifecycle',
+  'gate',
+  'read',
+  'sku',
+  'barcode',
+  'update',
+  'rearm',
+  'enrich',
+])(
   'propagates %s failure and prevents subsequent operations',
   async (stage) => {
     const s = setup();
+    const before = s.snapshot();
     const error = new Error(`${stage} failed`);
     const method = {
+      lifecycle: s.tx.$executeRaw,
       gate: s.tx.$queryRaw,
       read: s.tx.variant.findFirst,
       sku: s.repo.isSkuTaken,
@@ -190,7 +241,11 @@ it.each(['gate', 'read', 'sku', 'barcode', 'update', 'rearm'])(
       update: s.tx.variant.update,
       rearm: s.repo.rearmAlertAfterEdit,
     }[stage]!;
-    method.mockRejectedValue(error);
+    if (stage === 'enrich')
+      s.enrich.mockImplementationOnce(() => {
+        throw error;
+      });
+    else method.mockRejectedValue(error);
     await expect(
       s.service.updateVariant(productId, variantId, {
         sku: 'SKU',
@@ -198,13 +253,19 @@ it.each(['gate', 'read', 'sku', 'barcode', 'update', 'rearm'])(
         quantity: 9,
       }),
     ).rejects.toBe(error);
+    expect(s.snapshot()).toEqual(before);
     expect(s.events.at(-1)).toBe('rollback');
     expect(s.events).not.toContain('commit');
+    if (stage === 'lifecycle') {
+      expect(s.events).toEqual(['begin', 'rollback']);
+      expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+      expect(s.enrich).not.toHaveBeenCalled();
+    }
     expect(s.tx.variant.update).toHaveBeenCalledTimes(
-      ['update', 'rearm'].includes(stage) ? 1 : 0,
+      ['update', 'rearm', 'enrich'].includes(stage) ? 1 : 0,
     );
     expect(s.repo.rearmAlertAfterEdit).toHaveBeenCalledTimes(
-      stage === 'rearm' ? 1 : 0,
+      ['rearm', 'enrich'].includes(stage) ? 1 : 0,
     );
   },
 );
@@ -222,7 +283,12 @@ it.each(['sku', 'barcode'] as const)(
     ).rejects.toEqual(
       new EntityAlreadyExistsError(key === 'sku' ? 'SKU' : 'Barcode', 'TAKEN'),
     );
-    expect(s.events.slice(0, 3)).toEqual(['begin', 'tx:gate', 'tx:read']);
+    expect(s.events.slice(0, 4)).toEqual([
+      'begin',
+      'tx:lifecycle',
+      'tx:gate',
+      'tx:read',
+    ]);
     expect(s.tx.variant.update).not.toHaveBeenCalled();
     expect(s.repo.rearmAlertAfterEdit).not.toHaveBeenCalled();
   },
@@ -259,7 +325,13 @@ it('rejects freshly invalid merged presentation without writes or rearm', async 
       onlineStockPresentationCustomQty: 5,
     }),
   ).rejects.toBeInstanceOf(InvalidArgumentError);
-  expect(s.events).toEqual(['begin', 'tx:gate', 'tx:read', 'rollback']);
+  expect(s.events).toEqual([
+    'begin',
+    'tx:lifecycle',
+    'tx:gate',
+    'tx:read',
+    'rollback',
+  ]);
   expect(s.tx.variant.update).not.toHaveBeenCalled();
   expect(s.repo.rearmAlertAfterEdit).not.toHaveBeenCalled();
 });
@@ -285,10 +357,12 @@ it.each([
   });
   expect(s.events).toEqual([
     'begin',
+    'tx:lifecycle',
     'tx:gate',
     'tx:read',
     'tx:update',
     'tx:rearm',
+    'tx:enrich',
     'commit',
   ]);
   expect(
@@ -324,13 +398,109 @@ it.each([null, 0, 1234])(
     });
     expect(s.events).toEqual([
       'begin',
+      'tx:lifecycle',
       'tx:gate',
       'tx:read',
       'tx:update',
+      'tx:enrich',
       'commit',
     ]);
     expect(s.repo.isSkuTaken).not.toHaveBeenCalled();
     expect(s.repo.isBarcodeTaken).not.toHaveBeenCalled();
     expect(s.repo.rearmAlertAfterEdit).not.toHaveBeenCalled();
+  },
+);
+
+it('awaits lifecycle before observations and merges fresh released state', async () => {
+  const s = setup();
+  let release!: () => void;
+  s.tx.$executeRaw.mockImplementation(
+    () =>
+      new Promise<number>((resolve) => {
+        s.events.push('tx:lifecycle');
+        release = () => resolve(0);
+      }),
+  );
+  const before = s.snapshot();
+  const result = s.service.updateVariant(productId, variantId, {
+    value: ' Large ',
+  });
+  try {
+    expect(s.events).toEqual(['begin', 'tx:lifecycle']);
+    expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+    expect(s.tx.variant.findFirst).not.toHaveBeenCalled();
+    expect(s.repo.isSkuTaken).not.toHaveBeenCalled();
+    expect(s.repo.isBarcodeTaken).not.toHaveBeenCalled();
+    expect(s.tx.variant.update).not.toHaveBeenCalled();
+    expect(s.repo.rearmAlertAfterEdit).not.toHaveBeenCalled();
+    expect(s.enrich).not.toHaveBeenCalled();
+    expect(s.snapshot()).toEqual(before);
+    Object.assign(s.row, { option: 'Size', purchaseNetCostCents: 1234 });
+  } finally {
+    release?.();
+    await result;
+  }
+  await expect(result).resolves.toEqual({
+    ...before.row,
+    option: 'Size',
+    value: 'Large',
+    name: 'Large',
+    purchaseNetCostCents: 1234,
+    purchaseNetCostDecimal: 12.34,
+  });
+  expect(s.events.slice(-2)).toEqual(['tx:enrich', 'commit']);
+});
+it.each([false, true])(
+  'keeps repeated updates under ambient ownership, rollback=%s',
+  async (rollback) => {
+    const s = setup();
+    const before = s.snapshot();
+    const abort = new Error('outer');
+    const result = s.tenant.runInTransaction(async () => {
+      await expect(
+        s.service.updateVariant(productId, variantId, {
+          quantity: 7,
+          purchaseNetCostCents: 0,
+        }),
+      ).resolves.toEqual({
+        ...before.row,
+        quantity: 7,
+        purchaseNetCostCents: 0,
+        purchaseNetCostDecimal: 0,
+      });
+      await expect(
+        s.service.updateVariant(productId, variantId, { name: 'Next' }),
+      ).resolves.toEqual({
+        ...before.row,
+        name: 'Next',
+        quantity: 7,
+        purchaseNetCostCents: 0,
+        purchaseNetCostDecimal: 0,
+      });
+      expect(s.tx.$executeRaw.mock.calls.map(([sql]) => sql.join(''))).toEqual([
+        'LOCK TABLE "global_price_lists" IN SHARE MODE',
+        'LOCK TABLE "global_price_lists" IN SHARE MODE',
+      ]);
+      expect(s.events.filter((e) => e === 'begin')).toHaveLength(1);
+      expect(s.events).not.toContain('commit');
+      expect(s.events.filter((e) => e === 'tx:enrich')).toHaveLength(2);
+      expect(s.snapshot().rearms).toBe(1);
+      if (rollback) throw abort;
+    });
+    if (rollback) {
+      await expect(result).rejects.toBe(abort);
+      expect(s.snapshot()).toEqual(before);
+    } else {
+      await expect(result).resolves.toBeUndefined();
+      expect(s.snapshot()).toEqual({
+        row: {
+          ...before.row,
+          name: 'Next',
+          quantity: 7,
+          purchaseNetCostCents: 0,
+        },
+        rearms: 1,
+      });
+    }
   },
 );

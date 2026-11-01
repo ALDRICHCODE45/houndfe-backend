@@ -1257,142 +1257,141 @@ export class ProductsService {
     dto: UpdateVariantDto,
   ) {
     const tenantId = this.tenantPrisma.getTenantId();
-    return this.tenantPrisma
-      .runInTransaction(async () => {
-        const tx = this.tenantPrisma.getClient();
-        // Cooperate with editorial and membership writers; join an ambient tx.
-        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      await lockCatalogLifecycle(tx, 'shared');
+      // Cooperate with editorial and membership writers; join an ambient tx.
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
           SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
             AND "id" = ${productId} FOR UPDATE
         `);
-        if (products.length !== 1) {
-          throw new EntityNotFoundError('Variant', variantId);
-        }
-        // Observe and validate fresh state only after the qualified parent gate.
-        const variant = await tx.variant.findFirst({
-          where: {
-            id: variantId,
-            productId,
-            tenantId,
-          },
-          include: {
-            product: { select: { useStock: true } },
-          },
+      if (products.length !== 1) {
+        throw new EntityNotFoundError('Variant', variantId);
+      }
+      // Observe and validate fresh state only after the qualified parent gate.
+      const variant = await tx.variant.findFirst({
+        where: {
+          id: variantId,
+          productId,
+          tenantId,
+        },
+        include: {
+          product: { select: { useStock: true } },
+        },
+      });
+      if (!variant) throw new EntityNotFoundError('Variant', variantId);
+
+      // F1.WU4d2 — merged-state gate runs BEFORE any mutation/write.
+      const incomingMode = dto.onlineStockPresentation;
+      const incomingQty = dto.onlineStockPresentationCustomQty;
+      const effectiveMode =
+        incomingMode !== undefined
+          ? incomingMode
+          : (variant.onlineStockPresentation ?? null);
+      let effectiveQty: number | null;
+      if (incomingQty !== undefined) {
+        effectiveQty = incomingQty;
+      } else if (
+        incomingMode !== undefined &&
+        incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
+      ) {
+        effectiveQty = null;
+      } else {
+        effectiveQty = variant.onlineStockPresentationCustomQty ?? null;
+      }
+      this.assertMergedOnlineStockState(effectiveMode, effectiveQty);
+
+      // Exclude only THIS variant — must still reject sibling variants and parent product
+      if (dto.sku !== undefined && dto.sku !== null) {
+        const taken = await this.productRepo.isSkuTaken(dto.sku, {
+          variantId,
         });
-        if (!variant) throw new EntityNotFoundError('Variant', variantId);
-
-        // F1.WU4d2 — merged-state gate runs BEFORE any mutation/write.
-        const incomingMode = dto.onlineStockPresentation;
-        const incomingQty = dto.onlineStockPresentationCustomQty;
-        const effectiveMode =
-          incomingMode !== undefined
-            ? incomingMode
-            : (variant.onlineStockPresentation ?? null);
-        let effectiveQty: number | null;
-        if (incomingQty !== undefined) {
-          effectiveQty = incomingQty;
-        } else if (
-          incomingMode !== undefined &&
-          incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
-        ) {
-          effectiveQty = null;
-        } else {
-          effectiveQty = variant.onlineStockPresentationCustomQty ?? null;
-        }
-        this.assertMergedOnlineStockState(effectiveMode, effectiveQty);
-
-        // Exclude only THIS variant — must still reject sibling variants and parent product
-        if (dto.sku !== undefined && dto.sku !== null) {
-          const taken = await this.productRepo.isSkuTaken(dto.sku, {
-            variantId,
-          });
-          if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
-        }
-        if (dto.barcode !== undefined && dto.barcode !== null) {
-          const taken = await this.productRepo.isBarcodeTaken(dto.barcode, {
-            variantId,
-          });
-          if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
-        }
-
-        const variantUsesStock = variant.product?.useStock ?? true;
-
-        // Edit-path re-arm gate: a name/sku/barcode/purchaseNetCostCents
-        // edit does not change the resulting `(quantity, minQuantity)`
-        // pair and MUST NOT trigger a rearm call (waste, and would
-        // touch the alert state machine on a non-stock edit).
-        const rearmEligible =
-          dto.quantity !== undefined || dto.minQuantity !== undefined;
-
-        const updatedVariant = await tx.variant.update({
-          where: {
-            id: variantId,
-            productId,
-            tenantId,
-          },
-          data: {
-            ...(dto.name !== undefined ||
-            dto.option !== undefined ||
-            dto.value !== undefined
-              ? {
-                  name: this.resolveVariantName(
-                    dto.name ?? variant.name,
-                    dto.option !== undefined ? dto.option : variant.option,
-                    dto.value !== undefined ? dto.value : variant.value,
-                  ),
-                }
-              : {}),
-            ...(dto.option !== undefined
-              ? { option: dto.option?.trim() || null }
-              : {}),
-            ...(dto.value !== undefined
-              ? { value: dto.value?.trim() || null }
-              : {}),
-            ...(dto.sku !== undefined
-              ? { sku: dto.sku?.trim().toUpperCase() || null }
-              : {}),
-            ...(dto.barcode !== undefined
-              ? { barcode: dto.barcode?.trim() || null }
-              : {}),
-            ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
-            ...(variantUsesStock
-              ? dto.minQuantity !== undefined
-                ? { minQuantity: dto.minQuantity }
-                : {}
-              : { minQuantity: 0 }),
-            ...(dto.purchaseNetCostCents !== undefined
-              ? { purchaseNetCostCents: dto.purchaseNetCostCents }
-              : {}),
-            // F1.WU4d2 — persist the catalog DTO fields; a switch away
-            // from CUSTOM_QUANTITY clears the stale stored quantity.
-            ...(dto.catalogPublishMode !== undefined
-              ? { catalogPublishMode: dto.catalogPublishMode }
-              : {}),
-            ...(dto.onlineStockPresentation !== undefined
-              ? { onlineStockPresentation: dto.onlineStockPresentation }
-              : {}),
-            ...(dto.onlineStockPresentationCustomQty !== undefined
-              ? {
-                  onlineStockPresentationCustomQty:
-                    dto.onlineStockPresentationCustomQty,
-                }
-              : incomingMode !== undefined &&
-                  incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
-                ? { onlineStockPresentationCustomQty: null }
-                : {}),
-          },
+        if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
+      }
+      if (dto.barcode !== undefined && dto.barcode !== null) {
+        const taken = await this.productRepo.isBarcodeTaken(dto.barcode, {
+          variantId,
         });
+        if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
+      }
 
-        if (rearmEligible) {
-          await this.productRepo.rearmAlertAfterEdit({
-            productId,
-            variantId,
-          });
-        }
+      const variantUsesStock = variant.product?.useStock ?? true;
 
-        return updatedVariant;
-      })
-      .then((updatedVariant) => this.enrichVariantCostResponse(updatedVariant));
+      // Edit-path re-arm gate: a name/sku/barcode/purchaseNetCostCents
+      // edit does not change the resulting `(quantity, minQuantity)`
+      // pair and MUST NOT trigger a rearm call (waste, and would
+      // touch the alert state machine on a non-stock edit).
+      const rearmEligible =
+        dto.quantity !== undefined || dto.minQuantity !== undefined;
+
+      const updatedVariant = await tx.variant.update({
+        where: {
+          id: variantId,
+          productId,
+          tenantId,
+        },
+        data: {
+          ...(dto.name !== undefined ||
+          dto.option !== undefined ||
+          dto.value !== undefined
+            ? {
+                name: this.resolveVariantName(
+                  dto.name ?? variant.name,
+                  dto.option !== undefined ? dto.option : variant.option,
+                  dto.value !== undefined ? dto.value : variant.value,
+                ),
+              }
+            : {}),
+          ...(dto.option !== undefined
+            ? { option: dto.option?.trim() || null }
+            : {}),
+          ...(dto.value !== undefined
+            ? { value: dto.value?.trim() || null }
+            : {}),
+          ...(dto.sku !== undefined
+            ? { sku: dto.sku?.trim().toUpperCase() || null }
+            : {}),
+          ...(dto.barcode !== undefined
+            ? { barcode: dto.barcode?.trim() || null }
+            : {}),
+          ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
+          ...(variantUsesStock
+            ? dto.minQuantity !== undefined
+              ? { minQuantity: dto.minQuantity }
+              : {}
+            : { minQuantity: 0 }),
+          ...(dto.purchaseNetCostCents !== undefined
+            ? { purchaseNetCostCents: dto.purchaseNetCostCents }
+            : {}),
+          // F1.WU4d2 — persist the catalog DTO fields; a switch away
+          // from CUSTOM_QUANTITY clears the stale stored quantity.
+          ...(dto.catalogPublishMode !== undefined
+            ? { catalogPublishMode: dto.catalogPublishMode }
+            : {}),
+          ...(dto.onlineStockPresentation !== undefined
+            ? { onlineStockPresentation: dto.onlineStockPresentation }
+            : {}),
+          ...(dto.onlineStockPresentationCustomQty !== undefined
+            ? {
+                onlineStockPresentationCustomQty:
+                  dto.onlineStockPresentationCustomQty,
+              }
+            : incomingMode !== undefined &&
+                incomingMode !== CatalogStockPresentation.CUSTOM_QUANTITY
+              ? { onlineStockPresentationCustomQty: null }
+              : {}),
+        },
+      });
+
+      if (rearmEligible) {
+        await this.productRepo.rearmAlertAfterEdit({
+          productId,
+          variantId,
+        });
+      }
+
+      return this.enrichVariantCostResponse(updatedVariant);
+    });
   }
 
   async removeVariant(productId: string, variantId: string) {
