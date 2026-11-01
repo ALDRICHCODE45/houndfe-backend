@@ -602,6 +602,10 @@ context. Retain hidden-price/prescription exceptions. Validate/attest each ident
 once; no generated subject or sibling fallback. All captured rows undergo reference
 checks, but incomplete inactive rows do not add publication gates.
 
+S78: available contexts for editorial E are all configured tenant catalog bindings,
+independent of Tenant `isActive` or `catalogPublished`. This permits preparation
+before public activation; it neither activates visibility nor waives other gates.
+
 | Family    | Retained per-E minima / determinations                                                                                    |
 | --------- | ------------------------------------------------------------------------------------------------------------------------- |
 | food      | animal.target + food.format; known bound content magnitude/measure                                                        |
