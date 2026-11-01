@@ -140,6 +140,9 @@ function createVariantService(repo: IProductRepository, prisma: any) {
   tenant.runInTransaction.mockImplementation(
     async (work: () => Promise<unknown>) =>
       prisma.$transaction(async (tx: any) => {
+        (tx as { $executeRaw?: jest.Mock }).$executeRaw = jest
+          .fn()
+          .mockResolvedValue(0);
         tx.$queryRaw = jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]);
         tenant.getClient.mockReturnValue(tx);
         try {

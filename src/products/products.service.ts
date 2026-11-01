@@ -1142,86 +1142,85 @@ export class ProductsService {
 
   async addVariant(productId: string, dto: CreateVariantDto) {
     const tenantId = this.tenantPrisma.getTenantId();
-    return this.tenantPrisma
-      .runInTransaction(async () => {
-        const tx = this.tenantPrisma.getClient();
-        // Serialize membership changes with qualified editorial Product readers.
-        const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      await lockCatalogLifecycle(tx, 'shared');
+      // Serialize membership changes with qualified editorial Product readers.
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
           SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
             AND "id" = ${productId} FOR UPDATE
         `);
-        if (products.length !== 1) {
-          throw new EntityNotFoundError('Product', productId);
-        }
-        const product = await this.productRepo.findById(productId);
-        if (!product) throw new EntityNotFoundError('Product', productId);
+      if (products.length !== 1) {
+        throw new EntityNotFoundError('Product', productId);
+      }
+      const product = await this.productRepo.findById(productId);
+      if (!product) throw new EntityNotFoundError('Product', productId);
 
-        if (dto.sku) {
-          const taken = await this.productRepo.isSkuTaken(dto.sku);
-          if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
-        }
-        if (dto.barcode) {
-          const taken = await this.productRepo.isBarcodeTaken(dto.barcode);
-          if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
-        }
-        const resolvedName = this.resolveVariantName(
-          dto.name,
-          dto.option,
-          dto.value,
-        );
-        const createdVariant = await tx.variant.create({
-          data: {
-            productId,
-            name: resolvedName,
-            option: dto.option?.trim() || null,
-            value: dto.value?.trim() || null,
-            sku: dto.sku?.trim().toUpperCase() || null,
-            barcode: dto.barcode?.trim() || null,
-            quantity: dto.quantity ?? 0,
-            minQuantity: this.normalizeVariantMinQuantity(
-              product.useStock,
-              dto.minQuantity,
-            ),
-            purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
-            // F1.WU4d2 — variants always start in full inheritance.
-            catalogPublishMode: CatalogPublishMode.INHERIT,
-            onlineStockPresentation: null,
-            onlineStockPresentationCustomQty: null,
+      if (dto.sku) {
+        const taken = await this.productRepo.isSkuTaken(dto.sku);
+        if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
+      }
+      if (dto.barcode) {
+        const taken = await this.productRepo.isBarcodeTaken(dto.barcode);
+        if (taken) throw new EntityAlreadyExistsError('Barcode', dto.barcode);
+      }
+      const resolvedName = this.resolveVariantName(
+        dto.name,
+        dto.option,
+        dto.value,
+      );
+      const createdVariant = await tx.variant.create({
+        data: {
+          productId,
+          name: resolvedName,
+          option: dto.option?.trim() || null,
+          value: dto.value?.trim() || null,
+          sku: dto.sku?.trim().toUpperCase() || null,
+          barcode: dto.barcode?.trim() || null,
+          quantity: dto.quantity ?? 0,
+          minQuantity: this.normalizeVariantMinQuantity(
+            product.useStock,
+            dto.minQuantity,
+          ),
+          purchaseNetCostCents: dto.purchaseNetCostCents ?? null,
+          // F1.WU4d2 — variants always start in full inheritance.
+          catalogPublishMode: CatalogPublishMode.INHERIT,
+          onlineStockPresentation: null,
+          onlineStockPresentationCustomQty: null,
+          tenantId,
+        } as Prisma.VariantUncheckedCreateInput,
+      });
+
+      const priceLists = await tx.priceList.findMany({
+        where: { productId },
+        select: { id: true },
+      });
+
+      if (priceLists.length) {
+        await tx.variantPrice.createMany({
+          data: priceLists.map((pl) => ({
+            variantId: createdVariant.id,
+            priceListId: pl.id,
+            priceCents: 0,
             tenantId,
-          } as Prisma.VariantUncheckedCreateInput,
+          })) as Prisma.VariantPriceCreateManyInput[],
         });
+      }
 
-        const priceLists = await tx.priceList.findMany({
-          where: { productId },
-          select: { id: true },
+      if (!product.hasVariants) {
+        await tx.product.update({
+          where: { id: productId },
+          data: {
+            hasVariants: true,
+            useLotsAndExpirations: false,
+            quantity: 0,
+            minQuantity: 0,
+          },
         });
+      }
 
-        if (priceLists.length) {
-          await tx.variantPrice.createMany({
-            data: priceLists.map((pl) => ({
-              variantId: createdVariant.id,
-              priceListId: pl.id,
-              priceCents: 0,
-              tenantId,
-            })) as Prisma.VariantPriceCreateManyInput[],
-          });
-        }
-
-        if (!product.hasVariants) {
-          await tx.product.update({
-            where: { id: productId },
-            data: {
-              hasVariants: true,
-              useLotsAndExpirations: false,
-              quantity: 0,
-              minQuantity: 0,
-            },
-          });
-        }
-
-        return createdVariant;
-      })
-      .then((variant) => this.enrichVariantCostResponse(variant));
+      return this.enrichVariantCostResponse(createdVariant);
+    });
   }
 
   async getVariants(productId: string) {

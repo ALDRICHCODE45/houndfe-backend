@@ -256,6 +256,313 @@ describe('live Variant membership and stock coordination', () => {
     return { seed, name };
   }
 
+  async function addState(seed: EditorialFixture) {
+    const where = {
+      tenantId: seed.ids.tenantId,
+      productId: seed.ids.productId,
+    };
+    return {
+      membership: await readVariantMembership(
+        observer,
+        seed.ids.tenantId,
+        seed.ids.productId,
+      ),
+      variants: await observer.variant.findMany({
+        where,
+        orderBy: { id: 'asc' },
+      }),
+      prices: await observer.variantPrice.findMany({
+        where: {
+          tenantId: seed.ids.tenantId,
+          variant: { productId: seed.ids.productId },
+        },
+        include: { tierPrices: true },
+        orderBy: { id: 'asc' },
+      }),
+    };
+  }
+  async function assertAdded(
+    seed: EditorialFixture,
+    result: Awaited<ReturnType<ProductsService['addVariant']>>,
+  ) {
+    const row = await observer.variant.findUniqueOrThrow({
+      where: { id: result.id },
+    });
+    expect(result).toEqual({
+      ...row,
+      purchaseNetCostDecimal:
+        row.purchaseNetCostCents == null
+          ? null
+          : row.purchaseNetCostCents / 100,
+    });
+    expect(row).toMatchObject({
+      tenantId: seed.ids.tenantId,
+      productId: seed.ids.productId,
+      catalogPublishMode: 'INHERIT',
+      onlineStockPresentation: null,
+      onlineStockPresentationCustomQty: null,
+    });
+    const lists = await observer.priceList.findMany({
+      where: { productId: seed.ids.productId },
+      orderBy: { id: 'asc' },
+    });
+    const prices = await observer.variantPrice.findMany({
+      where: { variantId: row.id },
+      orderBy: { priceListId: 'asc' },
+      include: { tierPrices: true },
+    });
+    expect(
+      prices.map(
+        ({ variantId, priceListId, tenantId, priceCents, tierPrices }) => ({
+          variantId,
+          priceListId,
+          tenantId,
+          priceCents,
+          tierPrices,
+        }),
+      ),
+    ).toEqual(
+      lists.map(({ id }) => ({
+        variantId: row.id,
+        priceListId: id,
+        tenantId: seed.ids.tenantId,
+        priceCents: 0,
+        tierPrices: [],
+      })),
+    );
+  }
+
+  it.each([false, true])(
+    'adds after actual global deletion rollback=%s',
+    async (rollback) => {
+      const { seed } = await upsertSeed();
+      const before = await addState(seed);
+      const remover = actor(await open());
+      const endpoint = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const endpointPid = await currentBackendPid(endpoint.client);
+      const reached = signal();
+      const release = signal();
+      const abort = new Error('delete before add rollback');
+      const deletion = remover
+        .run(seed, (_p, lists) =>
+          remover.inTransaction(async () => {
+            await lists.remove(seed.ids.globalPriceListId);
+            reached.resolve();
+            await release.promise;
+            if (rollback) throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      let result:
+        | Awaited<ReturnType<ProductsService['addVariant']>>
+        | undefined;
+      let adding: Promise<unknown> | undefined;
+      try {
+        await Promise.race([
+          reached.promise,
+          deletion.then((cause) => {
+            throw new Error('Deletion ended before add checkpoint', { cause });
+          }),
+        ]);
+        adding = endpoint
+          .run(seed, async (p) => {
+            result = await p.addVariant(seed.ids.productId, {
+              name: 'Added',
+              purchaseNetCostCents: 1234,
+            });
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(endpointPid, removerPid, 'ShareLock');
+        const locks = await observer.$queryRaw<{ mode: string }[]>`
+        SELECT mode FROM pg_locks WHERE pid = ${endpointPid}
+          AND relation = 'products'::regclass AND granted`;
+        expect(locks).toEqual([]);
+      } finally {
+        release.resolve();
+        await Promise.allSettled([deletion, adding]);
+      }
+      await expect(deletion).resolves.toBe(rollback ? abort : undefined);
+      await expect(adding).resolves.toBeUndefined();
+      expect(result).toBeDefined();
+      await assertAdded(seed, result!);
+      const after = await addState(seed);
+      expect(after.variants.filter((row) => row.id !== result!.id)).toEqual(
+        before.variants,
+      );
+      expect(
+        after.prices.filter((row) => row.variantId !== result!.id),
+      ).toEqual(rollback ? before.prices : []);
+      await expect(
+        observer.globalPriceList.count({
+          where: { id: seed.ids.globalPriceListId },
+        }),
+      ).resolves.toBe(rollback ? 1 : 0);
+      await expect(
+        observer.variantTierPrice.count({
+          where: { variantPriceId: seed.ids.variantPriceId },
+        }),
+      ).resolves.toBe(rollback ? 1 : 0);
+    },
+  );
+
+  it.each(['commit', 'rollback', 'enrich'])(
+    'retains add lifecycle through %s',
+    async (stage) => {
+      const { seed } = await upsertSeed();
+      const { seed: other } = await upsertSeed();
+      // Exercise the parent-flag branch and prove it is rolled back with creation.
+      await observer.product.update({
+        where: { id: seed.ids.productId },
+        data: { hasVariants: false, quantity: 7, minQuantity: 2 },
+      });
+      const before = await addState(seed);
+      const base = await open();
+      const held = latch(
+        base,
+        (_sql, model, operation) =>
+          model === 'Variant' && operation === 'create',
+      );
+      const endpoint = actor(held.client);
+      const endpointPid = await currentBackendPid(base);
+      const remover = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const unrelated = actor(await open());
+      const responded = signal();
+      const repeat = signal();
+      const repeated = signal();
+      const release = signal();
+      const abort = new Error('add enrichment or outer abort');
+      const globalAbort = new Error('delete rollback after add');
+      const results: Awaited<ReturnType<ProductsService['addVariant']>>[] = [];
+      const writing = endpoint
+        .run(seed, (p) =>
+          endpoint.inTransaction(async () => {
+            if (stage === 'enrich') {
+              jest
+                .spyOn(
+                  p as unknown as {
+                    enrichVariantCostResponse: (value: Variant) => unknown;
+                  },
+                  'enrichVariantCostResponse',
+                )
+                .mockImplementationOnce(() => {
+                  throw abort;
+                });
+            }
+            results.push(
+              await p.addVariant(seed.ids.productId, {
+                name: 'First',
+                purchaseNetCostCents: 1234,
+              }),
+            );
+            expect(results[0].purchaseNetCostDecimal).toBe(12.34);
+            responded.resolve();
+            await repeat.promise;
+            results.push(
+              await p.addVariant(seed.ids.productId, {
+                name: 'Second',
+                purchaseNetCostCents: 0,
+              }),
+            );
+            expect(results[1].purchaseNetCostDecimal).toBe(0);
+            repeated.resolve();
+            await release.promise;
+            if (stage === 'rollback') throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      const ended = writing.then((cause) => {
+        throw new Error('Add ended before checkpoint', { cause });
+      });
+      let deletion: Promise<unknown> | undefined;
+      try {
+        await Promise.race([held.reached, ended]);
+        const independent = await unrelated.run(other, (p) =>
+          p.addVariant(other.ids.productId, { name: 'Independent' }),
+        );
+        await assertAdded(other, independent);
+        deletion = remover
+          .run(seed, (_p, lists) =>
+            remover.inTransaction(async () => {
+              await lists.remove(seed.ids.globalPriceListId);
+              throw globalAbort;
+            }),
+          )
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+        held.release();
+        if (stage !== 'enrich') {
+          await Promise.race([responded.promise, ended]);
+          await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+          repeat.resolve();
+          await Promise.race([repeated.promise, ended]);
+          await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+          await expect(addState(seed)).resolves.toEqual(before);
+        }
+      } finally {
+        held.release();
+        repeat.resolve();
+        release.resolve();
+        await Promise.allSettled([writing, deletion, ended]);
+      }
+      await expect(writing).resolves.toBe(
+        stage === 'commit' ? undefined : abort,
+      );
+      await expect(deletion).resolves.toBe(globalAbort);
+      const after = await addState(seed);
+      if (stage === 'commit') {
+        expect(results).toHaveLength(2);
+        for (const result of results) await assertAdded(seed, result);
+        expect(
+          after.variants.filter((row) => !results.some((r) => r.id === row.id)),
+        ).toEqual(before.variants);
+        expect(
+          after.prices.filter(
+            (row) => !results.some((r) => r.id === row.variantId),
+          ),
+        ).toEqual(before.prices);
+        await expect(
+          observer.product.findUniqueOrThrow({
+            where: { id: seed.ids.productId },
+            select: {
+              hasVariants: true,
+              useLotsAndExpirations: true,
+              quantity: true,
+              minQuantity: true,
+            },
+          }),
+        ).resolves.toEqual({
+          hasVariants: true,
+          useLotsAndExpirations: false,
+          quantity: 0,
+          minQuantity: 0,
+        });
+      } else expect(after).toEqual(before);
+      await expect(
+        observer.globalPriceList.count({
+          where: { id: seed.ids.globalPriceListId },
+        }),
+      ).resolves.toBe(1);
+      const progress = await endpoint.run(seed, (p) =>
+        p.addVariant(seed.ids.productId, { name: 'Progress' }),
+      );
+      await assertAdded(seed, progress);
+    },
+  );
+
   function updateResponse(before: Variant, name: string, cost: number) {
     return {
       ...before,
