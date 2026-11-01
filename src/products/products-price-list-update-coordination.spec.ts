@@ -37,6 +37,10 @@ function setup() {
     }),
   };
   const tx = {
+    $executeRaw: jest.fn<Promise<number>, [TemplateStringsArray]>(() => {
+      record('lifecycle');
+      return Promise.resolve(0);
+    }),
     $queryRaw: jest.fn<Promise<{ id: string }[]>, [Prisma.Sql]>(() => {
       record('gate');
       return Promise.resolve([{ id: productId }]);
@@ -76,6 +80,7 @@ function setup() {
     getTenantId: () => tenantId,
     getClient: () => (inside ? tx : root),
     runInTransaction: jest.fn(async (work: () => Promise<unknown>) => {
+      if (inside) return work();
       events.push('begin');
       inside = true;
       try {
@@ -124,6 +129,7 @@ it('gates before every read and keeps mutation and enrichment in the ambient bou
   });
   expect(s.events).toEqual([
     'begin',
+    'tx:lifecycle',
     'tx:gate',
     'tx:product',
     'tx:list',
@@ -131,6 +137,10 @@ it('gates before every read and keeps mutation and enrichment in the ambient bou
     'tx:cost',
     'commit',
   ]);
+  expect(s.tx.$executeRaw.mock.calls).toHaveLength(1);
+  expect(s.tx.$executeRaw.mock.calls[0][0].join('')).toBe(
+    'LOCK TABLE "global_price_lists" IN SHARE MODE',
+  );
   const query = s.tx.$queryRaw.mock.calls[0][0];
   expect(query.sql.replace(/\s+/g, ' ').trim()).toBe(
     'SELECT "id" FROM "products" WHERE "tenantId" = ? AND "id" = ? FOR UPDATE',
@@ -190,12 +200,13 @@ it.each(['gate', 'product', 'list', 'wrong-product', 'foreign-tenant'])(
   },
 );
 
-it.each(['gate', 'product', 'list', 'update'] as const)(
+it.each(['lifecycle', 'gate', 'product', 'list', 'update'] as const)(
   'propagates %s failures without later mutation',
   async (stage) => {
     const s = setup();
     const error = new Error('sentinel');
     const method = {
+      lifecycle: s.tx.$executeRaw,
       gate: s.tx.$queryRaw,
       product: s.repo.findById,
       list: s.tx.priceList.findFirst,
@@ -208,6 +219,12 @@ it.each(['gate', 'product', 'list', 'update'] as const)(
     expect(s.tx.priceList.update).toHaveBeenCalledTimes(
       stage === 'update' ? 1 : 0,
     );
+    if (stage === 'lifecycle') {
+      expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+      expect(s.repo.findById).not.toHaveBeenCalled();
+      expect(s.tx.priceList.findFirst).not.toHaveBeenCalled();
+      expect(s.events).toEqual(['begin', 'rollback']);
+    }
     expect(s.events.at(-1)).toBe('rollback');
     expect(s.events).not.toContain('commit');
     expect(s.stored.priceCents).toBe(1000);
@@ -240,6 +257,7 @@ it.each([
   ).rejects.toThrow(message);
   expect(s.events).toEqual([
     'begin',
+    'tx:lifecycle',
     'tx:gate',
     'tx:product',
     'tx:list',
@@ -315,3 +333,54 @@ it.each([undefined, 0, 1500])(
     }
   },
 );
+
+it('awaits lifecycle before Product queries and all later work', async () => {
+  const s = setup();
+  let release!: () => void;
+  const gate = new Promise<number>((resolve) => (release = () => resolve(0)));
+  s.tx.$executeRaw.mockImplementation(() => {
+    s.events.push('tx:lifecycle');
+    return gate;
+  });
+  const pending = s.service.updatePriceList(productId, listId, {});
+  try {
+    await Promise.resolve();
+    expect(s.events).toEqual(['begin', 'tx:lifecycle']);
+    expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+    expect(s.repo.findById).not.toHaveBeenCalled();
+    expect(s.tx.priceList.findFirst).not.toHaveBeenCalled();
+    expect(s.tx.priceList.update).not.toHaveBeenCalled();
+    expect(s.stored.priceCents).toBe(1000);
+    expect(s.stored.tierPrices).toEqual([
+      { id: 'old', minQuantity: 3, priceCents: 900 },
+    ]);
+  } finally {
+    release();
+    await pending;
+  }
+  expect(s.events.at(-1)).toBe('commit');
+  expect(s.rootAccess).not.toHaveBeenCalled();
+});
+
+it('reuses ambient ownership for repeated same-mode acquisitions', async () => {
+  const s = setup();
+  await s.tenant.runInTransaction(async () => {
+    for (let i = 0; i < 2; i++) {
+      await expect(
+        s.service.updatePriceList(productId, listId, { priceCents: 0 }),
+      ).resolves.toMatchObject({ id: listId, priceCents: 0 });
+      expect(s.events).not.toContain('commit');
+    }
+  });
+  expect(s.events.filter((event) => event === 'begin')).toHaveLength(1);
+  expect(s.events.filter((event) => event === 'commit')).toHaveLength(1);
+  expect(s.tx.$executeRaw.mock.calls.map(([sql]) => sql.join(''))).toEqual([
+    'LOCK TABLE "global_price_lists" IN SHARE MODE',
+    'LOCK TABLE "global_price_lists" IN SHARE MODE',
+  ]);
+  expect(s.tenant.runInTransaction.mock.calls).toHaveLength(3);
+  s.tenant.runInTransaction.mock.calls.forEach((args) =>
+    expect(args).toEqual([expect.any(Function)]),
+  );
+  expect(s.rootAccess).not.toHaveBeenCalled();
+});

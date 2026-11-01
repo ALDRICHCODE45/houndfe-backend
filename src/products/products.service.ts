@@ -30,6 +30,7 @@ import {
 } from '../shared/domain/domain-error';
 import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import { lockCatalogLifecycle } from '../catalog-editorial/infrastructure/prisma-catalog-lifecycle-gate';
 import type { IvaRateValue } from './domain/value-objects/iva-rate.value-object';
 import type { IepsRateValue } from './domain/value-objects/ieps-rate.value-object';
 import type { PurchaseCostModeValue } from './domain/value-objects/purchase-cost.value-object';
@@ -1819,7 +1820,8 @@ export class ProductsService {
     const tenantId = this.tenantPrisma.getTenantId();
     return this.tenantPrisma.runInTransaction(async () => {
       const tx = this.tenantPrisma.getClient();
-      // Join the existing Product-first protocol without replacing ambient isolation.
+      // Ambient callers must already own lifecycle before any earlier row locks.
+      await lockCatalogLifecycle(tx, 'shared');
       const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
         SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
           AND "id" = ${productId} FOR UPDATE

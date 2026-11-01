@@ -3,6 +3,7 @@ import type { PrismaClient } from '@prisma/client';
 import type { CatalogEditorialCore } from '../catalog-editorial/application/catalog-editorial-core';
 import type { EditorialDocument } from '../catalog-editorial/domain/document';
 import type { ProductsService } from './products.service';
+import type { PriceListsService } from '../price-lists/price-lists.service';
 import type { CreateVariantDto } from './dto/variant.dto';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
 import { loadEditorialPostgresClient } from '../catalog-editorial/infrastructure/editorial-coordination-postgres-binding';
@@ -20,7 +21,7 @@ type Actor = {
   inTransaction: <T>(work: () => Promise<T>) => Promise<T>;
   run: <T>(
     seed: EditorialFixture,
-    work: (products: ProductsService) => Promise<T>,
+    work: (products: ProductsService, lists: PriceListsService) => Promise<T>,
   ) => Promise<T>;
 };
 type Latch = {
@@ -138,6 +139,8 @@ describe('live Variant membership and stock coordination', () => {
     const { createCoordinatedEditorialWriteAuthority } =
       await import('../catalog-editorial/infrastructure/prisma-coordinated-editorial-authority');
     const { ProductsService } = await import('./products.service');
+    const { PriceListsService } =
+      await import('../price-lists/price-lists.service');
     const { PrismaProductRepository } =
       await import('./infrastructure/prisma-product.repository');
     const { TenantPrismaService } =
@@ -174,6 +177,7 @@ describe('live Variant membership and stock coordination', () => {
         tenant,
         unused('SatCatalogService'),
       );
+      const lists = new PriceListsService(unused('global root'), tenant);
       return {
         client,
         inTransaction: (work) => tenant.runInTransaction(work),
@@ -184,13 +188,231 @@ describe('live Variant membership and stock coordination', () => {
               userId: seed.ids.userId,
               isSuperAdmin: false,
             },
-            () => work(products),
+            () => work(products, lists),
           ),
       };
     };
   });
   afterAll(async () => {
     await Promise.allSettled(opened.map((client) => client.$disconnect()));
+  });
+
+  function signal() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+  async function lifecycleWait(pid: number, holder: number, mode: string) {
+    expect(await waitForLockWait(observer, pid)).toContain(holder);
+    const locks = await observer.$queryRaw<{ mode: string }[]>`
+      SELECT mode FROM pg_locks WHERE pid = ${pid} AND NOT granted
+        AND relation = 'global_price_lists'::regclass`;
+    expect(locks).toEqual([{ mode }]);
+  }
+
+  it.each([false, true])(
+    'observes actual global deletion after lifecycle wait, rollback=%s',
+    async (rollback) => {
+      const seed = await freshSeed();
+      const remover = actor(await open());
+      const updater = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const updaterPid = await currentBackendPid(updater.client);
+      const reached = signal();
+      const release = signal();
+      const abort = new Error('rollback global deletion');
+      const where = { id: seed.ids.priceListId };
+      const before = await observer.priceList.findUniqueOrThrow({
+        where,
+        include: { tierPrices: true },
+      });
+      const deletion = remover
+        .run(seed, (_p, lists) =>
+          remover.inTransaction(async () => {
+            await lists.remove(seed.ids.globalPriceListId);
+            reached.resolve();
+            await release.promise;
+            if (rollback) throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      let update: Promise<unknown> | undefined;
+      try {
+        await Promise.race([
+          reached.promise,
+          deletion.then((e) => {
+            if (e)
+              throw new Error('Deletion failed before checkpoint', {
+                cause: e,
+              });
+          }),
+        ]);
+        update = updater
+          .run(seed, (p) =>
+            p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {}),
+          )
+          .then(
+            (result) => result,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(updaterPid, removerPid, 'ShareLock');
+      } finally {
+        release.resolve();
+        await Promise.allSettled([deletion, update]);
+      }
+      await expect(deletion).resolves.toBe(rollback ? abort : undefined);
+      if (rollback) {
+        await expect(update).resolves.toMatchObject({
+          id: seed.ids.priceListId,
+          priceCents: before.priceCents,
+          tierPrices: before.tierPrices,
+        });
+        const after = await observer.priceList.findUniqueOrThrow({
+          where,
+          include: { tierPrices: true },
+        });
+        expect(after).toEqual({ ...before, updatedAt: after.updatedAt });
+      } else {
+        await expect(update).resolves.toMatchObject({
+          code: 'ENTITY_NOT_FOUND',
+          message: `PriceList with id "${seed.ids.priceListId}" not found`,
+        });
+        await expect(
+          observer.priceList.findUnique({ where }),
+        ).resolves.toBeNull();
+      }
+      await expect(
+        observer.globalPriceList.count({
+          where: { id: seed.ids.globalPriceListId },
+        }),
+      ).resolves.toBe(rollback ? 1 : 0);
+    },
+  );
+
+  it('holds lifecycle through response and ambient rollback, with shared progress and queued deletion', async () => {
+    const seed = await freshSeed();
+    const other = await freshSeed();
+    const base = await open();
+    const held = latch(
+      base,
+      (_sql, model, operation) =>
+        model === 'PriceList' && operation === 'update',
+    );
+    const writer = actor(held.client);
+    const writerPid = await currentBackendPid(base);
+    const remover = actor(await open());
+    const removerPid = await currentBackendPid(remover.client);
+    const unrelated = actor(await open());
+    const responded = signal();
+    const repeat = signal();
+    const repeated = signal();
+    const release = signal();
+    const abort = new Error('rollback update');
+    const removeAbort = new Error('rollback following deletion');
+    const where = { id: seed.ids.priceListId };
+    const before = await observer.priceList.findUniqueOrThrow({
+      where,
+      include: { tierPrices: true },
+    });
+    const writing = writer
+      .run(seed, (p) =>
+        writer.inTransaction(async () => {
+          await expect(
+            p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {
+              priceCents: 0,
+              tierPrices: [{ minQuantity: 0, priceCents: 0 }],
+            }),
+          ).resolves.toMatchObject({
+            priceCents: 0,
+            tierPrices: [{ minQuantity: 0, priceCents: 0 }],
+          });
+          responded.resolve();
+          await repeat.promise;
+          await expect(
+            p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {
+              priceCents: 900,
+            }),
+          ).resolves.toMatchObject({ priceCents: 900 });
+          repeated.resolve();
+          await release.promise;
+          throw abort;
+        }),
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    let deletion: Promise<unknown> | undefined;
+    try {
+      await Promise.race([
+        held.reached,
+        writing.then((e) => {
+          throw e;
+        }),
+      ]);
+      // Shared writers progress before an exclusive waiter enters the queue.
+      await expect(
+        unrelated.run(other, (p) =>
+          p.updatePriceList(other.ids.productId, other.ids.priceListId, {
+            priceCents: 0,
+          }),
+        ),
+      ).resolves.toMatchObject({ priceCents: 0 });
+      deletion = remover
+        .run(seed, (_p, lists) =>
+          remover.inTransaction(async () => {
+            await lists.remove(seed.ids.globalPriceListId);
+            throw removeAbort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      await lifecycleWait(removerPid, writerPid, 'ShareRowExclusiveLock');
+      held.release();
+      await Promise.race([
+        responded.promise,
+        writing.then((e) => {
+          throw e;
+        }),
+      ]);
+      await lifecycleWait(removerPid, writerPid, 'ShareRowExclusiveLock');
+      repeat.resolve();
+      await Promise.race([
+        repeated.promise,
+        writing.then((e) => {
+          throw e;
+        }),
+      ]);
+      await lifecycleWait(removerPid, writerPid, 'ShareRowExclusiveLock');
+    } finally {
+      held.release();
+      repeat.resolve();
+      release.resolve();
+      await Promise.allSettled([writing, deletion]);
+    }
+    await expect(writing).resolves.toBe(abort);
+    await expect(deletion).resolves.toBe(removeAbort);
+    await expect(
+      observer.priceList.findUniqueOrThrow({
+        where,
+        include: { tierPrices: true },
+      }),
+    ).resolves.toEqual(before);
+    await expect(
+      observer.globalPriceList.count({
+        where: { id: seed.ids.globalPriceListId },
+      }),
+    ).resolves.toBe(1);
+    await expect(
+      writer.run(seed, (p) =>
+        p.updatePriceList(seed.ids.productId, seed.ids.priceListId, {}),
+      ),
+    ).resolves.toMatchObject({ priceCents: before.priceCents });
   });
 
   it('serializes add/remove behind an open editorial write and leaves other Products free', async () => {
