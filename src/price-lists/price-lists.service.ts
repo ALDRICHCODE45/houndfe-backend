@@ -32,17 +32,17 @@ export class PriceListsService {
       throw new InvalidArgumentError('Price list name cannot be empty');
     }
 
-    const existing = await this.prisma.globalPriceList.findUnique({
-      where: { name },
-      select: { id: true },
-    });
-    if (existing) {
-      throw new EntityAlreadyExistsError('GlobalPriceList', name);
-    }
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      await lockCatalogLifecycle(tx, 'exclusive');
+      const existing = await tx.globalPriceList.findUnique({
+        where: { name },
+        select: { id: true },
+      });
+      if (existing) {
+        throw new EntityAlreadyExistsError('GlobalPriceList', name);
+      }
 
-    // Use base prisma for the transaction — GlobalPriceList is global,
-    // but PriceList/VariantPrice are tenant-scoped and need explicit tenantId.
-    return this.prisma.$transaction(async (tx) => {
       const createdGlobalList = await tx.globalPriceList.create({
         data: { name },
       });

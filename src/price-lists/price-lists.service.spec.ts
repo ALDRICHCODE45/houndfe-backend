@@ -12,6 +12,39 @@ function makeService(prisma: any, tenantPrisma?: any) {
   );
 }
 
+type CreateFixture = {
+  globalPriceList: { findUnique: jest.Mock };
+  $executeRaw?: jest.Mock;
+  $transaction?: (
+    work: (tx: CreateFixture) => Promise<unknown>,
+  ) => Promise<unknown>;
+};
+function makeCreateService(prisma: CreateFixture) {
+  let current = prisma;
+  const tenant = {
+    getTenantId: () => 'tenant-1',
+    getClient: () => current,
+    runInTransaction: async (work: () => Promise<unknown>) => {
+      const run = async (tx: CreateFixture) => {
+        tx.$executeRaw = jest.fn().mockResolvedValue(0);
+        tx.globalPriceList.findUnique = prisma.globalPriceList.findUnique;
+        current = tx;
+        try {
+          return await work();
+        } finally {
+          current = prisma;
+        }
+      };
+      return prisma.$transaction ? prisma.$transaction(run) : run(prisma);
+    },
+  };
+  type Args = ConstructorParameters<typeof PriceListsService>;
+  return new PriceListsService(
+    prisma as unknown as Args[0],
+    tenant as unknown as Args[1],
+  );
+}
+
 describe('PriceListsService', () => {
   it('findAll should return all global price lists (no tenant filter)', async () => {
     const prisma = {
@@ -72,7 +105,7 @@ describe('PriceListsService', () => {
       $transaction: jest.fn(async (cb: any) => cb(tx)),
     } as any;
 
-    const service = makeService(prisma);
+    const service = makeCreateService(prisma as CreateFixture);
     const created = await service.create({ name: '  Mayorista  ' });
 
     expect(created.name).toBe('Mayorista');
@@ -136,7 +169,7 @@ describe('PriceListsService', () => {
       $transaction: jest.fn(async (cb: any) => cb(tx)),
     } as any;
 
-    const service = makeService(prisma);
+    const service = makeCreateService(prisma as CreateFixture);
     await service.create({ name: 'VIP' });
 
     expect(tx.product.findMany).toHaveBeenCalledWith({
@@ -152,7 +185,7 @@ describe('PriceListsService', () => {
       },
     } as any;
 
-    const service = makeService(prisma);
+    const service = makeCreateService(prisma as CreateFixture);
 
     await expect(service.create({ name: 'PUBLICO' })).rejects.toThrow(
       EntityAlreadyExistsError,
