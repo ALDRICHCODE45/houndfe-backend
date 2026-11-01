@@ -1,4 +1,11 @@
 import { UpdateCatalogSettingsUseCase } from './update-catalog-settings.use-case';
+import type { CatalogSettingsTransaction } from './catalog-settings-transaction';
+
+const transaction = (
+  repository: ICatalogSettingsRepository,
+): CatalogSettingsTransaction => ({
+  run: (_tenantId, work) => work(repository),
+});
 import { CatalogSettingsNotFoundError } from './get-catalog-settings.use-case';
 import {
   CATALOG_SETTINGS_UPDATED,
@@ -81,7 +88,7 @@ const run = (
     r,
     emit,
     emitter: { emit } as unknown as EventEmitter2,
-    promise: new UpdateCatalogSettingsUseCase(r, {
+    promise: new UpdateCatalogSettingsUseCase(transaction(r), {
       emit,
     } as unknown as EventEmitter2).execute(input),
   };
@@ -100,7 +107,7 @@ describe('UpdateCatalogSettingsUseCase', () => {
     const r = repo();
     r.findByTenantId.mockResolvedValue(null);
     const emit = jest.fn();
-    const error = await new UpdateCatalogSettingsUseCase(r, {
+    const error = await new UpdateCatalogSettingsUseCase(transaction(r), {
       emit,
     } as unknown as EventEmitter2)
       .execute({ tenantId: 't1', actorUserId: 'actor-1', data: {} })

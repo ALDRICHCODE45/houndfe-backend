@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ICatalogSettingsRepository } from '../domain/catalog-settings.repository';
@@ -13,7 +13,13 @@ import {
 
 @Injectable()
 export class PrismaCatalogSettingsRepository implements ICatalogSettingsRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    @Inject(TenantPrismaService)
+    private readonly tenantPrisma: Pick<
+      TenantPrismaService,
+      'getClient' | 'runInTransaction'
+    >,
+  ) {}
 
   async findByTenantId(
     tenantId: string,

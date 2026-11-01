@@ -27,6 +27,8 @@ import { UpdateCatalogSettingsUseCase } from './application/update-catalog-setti
 import { CatalogSettingsEventListener } from './listeners/catalog-settings-event.listener';
 import { PrismaCatalogSettingsRepository } from './infrastructure/prisma-catalog-settings.repository';
 import { CATALOG_SETTINGS_REPOSITORY } from './domain/catalog-settings.repository';
+import { CATALOG_SETTINGS_TRANSACTION } from './application/catalog-settings-transaction';
+import { PrismaCatalogSettingsTransaction } from './infrastructure/prisma-catalog-settings-transaction';
 
 @Module({
   imports: [DatabaseModule, AuthModule],
@@ -35,6 +37,10 @@ import { CATALOG_SETTINGS_REPOSITORY } from './domain/catalog-settings.repositor
     GetCatalogSettingsUseCase,
     UpdateCatalogSettingsUseCase,
     CatalogSettingsEventListener,
+    {
+      provide: CATALOG_SETTINGS_TRANSACTION,
+      useClass: PrismaCatalogSettingsTransaction,
+    },
     {
       provide: CATALOG_SETTINGS_REPOSITORY,
       useClass: PrismaCatalogSettingsRepository,

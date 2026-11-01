@@ -1,9 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
-  CATALOG_SETTINGS_REPOSITORY,
-  ICatalogSettingsRepository,
-} from '../domain/catalog-settings.repository';
+  CATALOG_SETTINGS_TRANSACTION,
+  type CatalogSettingsTransaction,
+} from './catalog-settings-transaction';
+import { ICatalogSettingsRepository } from '../domain/catalog-settings.repository';
 import {
   CatalogSettingsInvariantError,
   TenantCatalogSettings,
@@ -35,8 +36,8 @@ export interface UpdateCatalogSettingsInput {
 @Injectable()
 export class UpdateCatalogSettingsUseCase {
   constructor(
-    @Inject(CATALOG_SETTINGS_REPOSITORY)
-    private readonly repository: ICatalogSettingsRepository,
+    @Inject(CATALOG_SETTINGS_TRANSACTION)
+    private readonly transaction: CatalogSettingsTransaction,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -52,12 +53,21 @@ export class UpdateCatalogSettingsUseCase {
    * reloaded aggregate is mapped with the GET mapper (coverage warnings
    * included) so the response matches GET.
    */
-  async execute({
-    tenantId,
-    actorUserId,
-    data,
-  }: UpdateCatalogSettingsInput): Promise<CatalogSettingsResponseDto> {
-    const current = await this.repository.findByTenantId(tenantId);
+  async execute(
+    input: UpdateCatalogSettingsInput,
+  ): Promise<CatalogSettingsResponseDto> {
+    const response = await this.transaction.run(input.tenantId, (repository) =>
+      this.executeWithinTransaction(input, repository),
+    );
+    this.emitUpdatedAudit(input.tenantId, input.actorUserId, input.data);
+    return response;
+  }
+
+  private async executeWithinTransaction(
+    { tenantId, actorUserId, data }: UpdateCatalogSettingsInput,
+    repository: ICatalogSettingsRepository,
+  ): Promise<CatalogSettingsResponseDto> {
+    const current = await repository.findByTenantId(tenantId);
     if (!current) throw new CatalogSettingsNotFoundError(tenantId);
 
     const desiredPublicIds =
@@ -66,7 +76,7 @@ export class UpdateCatalogSettingsUseCase {
     const globalListsById = new Map<string, { id: string; name: string }>();
     if (data.publicPriceListIds !== undefined && desiredPublicIds.length > 0) {
       const found =
-        await this.repository.findGlobalPriceListsByIds(desiredPublicIds);
+        await repository.findGlobalPriceListsByIds(desiredPublicIds);
       for (const list of found) globalListsById.set(list.id, list);
       const missing = desiredPublicIds.filter((id) => !globalListsById.has(id));
       if (missing.length > 0)
@@ -102,20 +112,19 @@ export class UpdateCatalogSettingsUseCase {
     );
     const defaultBinding = updated.defaultBinding;
     const defaultContextProductCount = defaultBinding
-      ? await this.repository.countDefaultContextCoverage(
+      ? await repository.countDefaultContextCoverage(
           tenantId,
           defaultBinding.globalPriceListId,
         )
       : null;
-    const saved = await this.repository.replace(updated, actorUserId);
-    this.emitUpdatedAudit(tenantId, actorUserId, data);
+    const saved = await repository.replace(updated, actorUserId);
     return toCatalogSettingsResponseDto(saved.toInternalResult(), {
       defaultContextProductCount,
     });
   }
 
   /**
-   * Best-effort audit (WU3B3): emitted only AFTER `replace` resolves, so a
+   * Best-effort audit (WU3B3): emitted only AFTER the owned transaction commits, so a
    * failed validation, coverage lookup, or write never produces an event.
    * Any emission failure is swallowed here — an already-committed PATCH
    * must never reject because auditing could not run. The payload is the
