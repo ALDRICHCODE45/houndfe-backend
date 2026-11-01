@@ -169,7 +169,13 @@ describe('PriceListsService', () => {
       },
     } as any;
 
-    const service = makeService(prisma);
+    const service = makeService(prisma, {
+      getClient: () => ({
+        ...(prisma as object),
+        $executeRaw: jest.fn().mockResolvedValue(0),
+      }),
+      runInTransaction: (work: () => Promise<unknown>) => work(),
+    });
     await service.remove('gl-2');
 
     expect(prisma.globalPriceList.delete).toHaveBeenCalledWith({
@@ -187,7 +193,13 @@ describe('PriceListsService', () => {
       },
     } as any;
 
-    const service = makeService(prisma);
+    const service = makeService(prisma, {
+      getClient: () => ({
+        ...(prisma as object),
+        $executeRaw: jest.fn().mockResolvedValue(0),
+      }),
+      runInTransaction: (work: () => Promise<unknown>) => work(),
+    });
 
     await expect(service.remove('gl-publico')).rejects.toThrow(
       BusinessRuleViolationError,

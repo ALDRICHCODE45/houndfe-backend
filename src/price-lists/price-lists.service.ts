@@ -10,6 +10,7 @@ import {
 import { CreatePriceListDto } from './dto/create-price-list.dto';
 import { UpdatePriceListDto } from './dto/update-price-list.dto';
 import { Prisma } from '@prisma/client';
+import { lockCatalogLifecycle } from '../catalog-editorial/infrastructure/prisma-catalog-lifecycle-gate';
 
 @Injectable()
 export class PriceListsService {
@@ -158,21 +159,25 @@ export class PriceListsService {
   }
 
   async remove(id: string): Promise<void> {
-    const globalPriceList = await this.prisma.globalPriceList.findUnique({
-      where: { id },
-      select: { id: true, isDefault: true },
+    await this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      await lockCatalogLifecycle(tx, 'exclusive');
+      const globalPriceList = await tx.globalPriceList.findUnique({
+        where: { id },
+        select: { id: true, isDefault: true },
+      });
+      if (!globalPriceList) {
+        throw new EntityNotFoundError('GlobalPriceList', id);
+      }
+
+      if (globalPriceList.isDefault) {
+        throw new BusinessRuleViolationError(
+          'Cannot delete the default PUBLICO price list',
+          'DEFAULT_PRICE_LIST_PROTECTED',
+        );
+      }
+
+      await tx.globalPriceList.delete({ where: { id } });
     });
-    if (!globalPriceList) {
-      throw new EntityNotFoundError('GlobalPriceList', id);
-    }
-
-    if (globalPriceList.isDefault) {
-      throw new BusinessRuleViolationError(
-        'Cannot delete the default PUBLICO price list',
-        'DEFAULT_PRICE_LIST_PROTECTED',
-      );
-    }
-
-    await this.prisma.globalPriceList.delete({ where: { id } });
   }
 }

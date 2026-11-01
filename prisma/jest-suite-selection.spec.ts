@@ -42,7 +42,13 @@ describe('public Jest suite selection', () => {
   it('selects exactly the live suites excluded from offline discovery', () => {
     const live = listTests('jest.live.config.js');
     const offline = listTests('jest.config.js');
-    expect(live).toHaveLength(5);
+    expect(live).toHaveLength(6);
+    expect(live).toContain(
+      resolve(
+        root,
+        'src/price-lists/price-lists-delete-coordination.live.spec.ts',
+      ),
+    );
     expect(live.every((path) => path.endsWith('.live.spec.ts'))).toBe(true);
     expect(live.every((path) => !offline.includes(path))).toBe(true);
     expect(live.every((path) => /\/(src|prisma)\//.test(path.slice(root.length)))).toBe(true);
