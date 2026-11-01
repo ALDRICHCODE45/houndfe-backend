@@ -24,6 +24,10 @@ function setup() {
     }),
   };
   const tx = {
+    $executeRaw: jest.fn<Promise<number>, [TemplateStringsArray]>(() => {
+      record('lifecycle');
+      return Promise.resolve(0);
+    }),
     $queryRaw: jest.fn<Promise<{ id: string }[]>, [Prisma.Sql]>(() => {
       record('gate');
       return Promise.resolve([{ id: 'product' }]);
@@ -113,6 +117,7 @@ it('gates before all reads and deletes only the selected tenant price', async ()
   await expect(s.remove()).resolves.toBeUndefined();
   expect(s.events).toEqual([
     'begin',
+    'lifecycle',
     'gate',
     'product',
     'variant',
@@ -120,6 +125,9 @@ it('gates before all reads and deletes only the selected tenant price', async ()
     'price',
     'delete',
     'commit',
+  ]);
+  expect(s.tx.$executeRaw.mock.calls.map(([sql]) => sql.join(''))).toEqual([
+    'LOCK TABLE "global_price_lists" IN SHARE MODE',
   ]);
   const query = s.tx.$queryRaw.mock.calls[0][0];
   expect(query.sql.replace(/\s+/g, ' ').trim()).toBe(
@@ -217,12 +225,13 @@ it.each(['variant', 'list', 'default'])(
   },
 );
 
-it.each(['gate', 'product', 'variant', 'list', 'price', 'delete'])(
+it.each(['lifecycle', 'gate', 'product', 'variant', 'list', 'price', 'delete'])(
   'propagates %s failure without committed mutation',
   async (stage) => {
     const s = setup();
     const error = new Error('sentinel');
     const methods = {
+      lifecycle: s.tx.$executeRaw,
       gate: s.tx.$queryRaw,
       product: s.repo.findById,
       variant: s.tx.variant.findFirst,
@@ -232,6 +241,15 @@ it.each(['gate', 'product', 'variant', 'list', 'price', 'delete'])(
     };
     methods[stage as keyof typeof methods].mockRejectedValue(error);
     await expect(s.remove()).rejects.toBe(error);
+    if (stage === 'lifecycle') {
+      expect(s.events).toEqual(['begin', 'rollback']);
+      expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+      expect(s.repo.findById).not.toHaveBeenCalled();
+      expect(s.tx.variant.findFirst).not.toHaveBeenCalled();
+      expect(s.tx.priceList.findUnique).not.toHaveBeenCalled();
+      expect(s.tx.variantPrice.findUnique).not.toHaveBeenCalled();
+      expect(s.tx.variantPrice.delete).not.toHaveBeenCalled();
+    }
     expect(s.events.at(-1)).toBe('rollback');
     expect(s.events).not.toContain('commit');
     expect(s.present()).toBe(true);
@@ -267,4 +285,59 @@ it('uses disappearance observed after the gate rather than a prior snapshot', as
   expect(s.events.indexOf('gate')).toBeLessThan(s.events.indexOf('product'));
   expect(s.tx.variantPrice.delete).not.toHaveBeenCalled();
   expect(s.present()).toBe(true);
+});
+
+it('awaits lifecycle before all reads and observes a list removed during the wait', async () => {
+  const s = setup();
+  let release!: () => void;
+  const gate = new Promise<number>((resolve) => (release = () => resolve(0)));
+  s.tx.$executeRaw.mockImplementation(() => {
+    s.events.push('lifecycle');
+    return gate;
+  });
+  const result = s.remove().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  try {
+    await Promise.resolve();
+    expect(s.events).toEqual(['begin', 'lifecycle']);
+    expect(s.tx.$queryRaw).not.toHaveBeenCalled();
+    expect(s.repo.findById).not.toHaveBeenCalled();
+    expect(s.tx.variant.findFirst).not.toHaveBeenCalled();
+    expect(s.tx.priceList.findUnique).not.toHaveBeenCalled();
+    expect(s.tx.variantPrice.findUnique).not.toHaveBeenCalled();
+    expect(s.tx.variantPrice.delete).not.toHaveBeenCalled();
+    expect(s.present()).toBe(true);
+    s.tx.priceList.findUnique.mockResolvedValue(null);
+  } finally {
+    release();
+    await result;
+  }
+  await expect(result).resolves.toEqual(
+    new EntityNotFoundError('PriceList', 'list'),
+  );
+  expect(s.tx.variantPrice.findUnique).not.toHaveBeenCalled();
+  expect(s.present()).toBe(true);
+  expect(s.rootAccess).not.toHaveBeenCalled();
+});
+
+it('reacquires shared mode inside the same outer owner without committing', async () => {
+  const s = setup();
+  await s.transaction(async () => {
+    await expect(s.remove()).resolves.toBeUndefined();
+    await expect(s.remove()).rejects.toEqual(
+      new EntityNotFoundError('VariantPrice', 'variant:list'),
+    );
+    expect(s.events).not.toContain('commit');
+    expect(s.tx.$executeRaw.mock.calls.map(([sql]) => sql.join(''))).toEqual([
+      'LOCK TABLE "global_price_lists" IN SHARE MODE',
+      'LOCK TABLE "global_price_lists" IN SHARE MODE',
+    ]);
+  });
+  expect(s.events.filter((e) => e === 'begin')).toHaveLength(1);
+  expect(s.events.filter((e) => e === 'commit')).toHaveLength(1);
+  expect(s.tx.variantPrice.delete).toHaveBeenCalledTimes(1);
+  expect(s.present()).toBe(false);
+  expect(s.rootAccess).not.toHaveBeenCalled();
 });

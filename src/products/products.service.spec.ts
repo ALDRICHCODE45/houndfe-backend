@@ -1446,6 +1446,7 @@ describe('ProductsService — variant price delete protection', () => {
     });
 
     const prisma = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
       variant: {
         // F1.WU4d2b — ensureProductAndVariant reads via the tenant client.
         findFirst: jest
