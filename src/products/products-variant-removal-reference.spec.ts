@@ -19,6 +19,7 @@ function fixture(sibling = false) {
   let persisted = structuredClone(initial);
   let pending = structuredClone(initial);
   let active = false;
+  let completionFailure: Error | undefined;
   const root = {
     product: {
       update: jest.fn(() => {
@@ -27,6 +28,11 @@ function fixture(sibling = false) {
     },
   };
   const tx = {
+    $executeRaw: jest.fn<Promise<number>, [TemplateStringsArray]>(() => {
+      events.push('lifecycle');
+      expect(active).toBe(true);
+      return Promise.resolve(0);
+    }),
     $queryRaw: jest.fn(() => {
       events.push('gate');
       expect(active).toBe(true);
@@ -60,10 +66,12 @@ function fixture(sibling = false) {
     getTenantId: jest.fn(() => tenantId),
     getClient: jest.fn(() => (active ? tx : root)),
     runInTransaction: jest.fn(async (work: () => Promise<unknown>) => {
+      if (active) return work();
       active = true;
       pending = structuredClone(persisted);
       try {
         const result = await work();
+        if (completionFailure) throw completionFailure;
         persisted = structuredClone(pending);
         return result;
       } finally {
@@ -86,6 +94,7 @@ function fixture(sibling = false) {
     events,
     initial,
     effects: () => persisted,
+    failCompletion: (error: Error) => (completionFailure = error),
   };
 }
 
@@ -99,9 +108,14 @@ describe('removeVariant Product-first atomic membership (S3/S5)', () => {
       ).resolves.toBeUndefined();
       expect(f.events).toEqual(
         sibling
-          ? ['gate', 'read', 'delete', 'count']
-          : ['gate', 'read', 'delete', 'count', 'flag'],
+          ? ['lifecycle', 'gate', 'read', 'delete', 'count']
+          : ['lifecycle', 'gate', 'read', 'delete', 'count', 'flag'],
       );
+      expect(f.tx.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(f.tx.$executeRaw.mock.calls[0][0].join('')).toBe(
+        'LOCK TABLE "global_price_lists" IN SHARE MODE',
+      );
+      expect(f.tx.$executeRaw.mock.calls[0]).toHaveLength(1);
       const [query] = f.tx.$queryRaw.mock.calls[0] as unknown as [
         { strings: string[]; values: unknown[] },
       ];
@@ -166,6 +180,80 @@ describe('removeVariant Product-first atomic membership (S3/S5)', () => {
       expect(f.effects()).toEqual(f.initial);
     },
   );
+
+  it.each(['lifecycle', 'read', 'delete', 'completion'])(
+    'retains error identity and state on %s failure',
+    async (stage) => {
+      const f = fixture();
+      const error = new Error(stage);
+      if (stage === 'lifecycle') f.tx.$executeRaw.mockRejectedValueOnce(error);
+      if (stage === 'read') f.tx.variant.findFirst.mockRejectedValueOnce(error);
+      if (stage === 'delete') f.tx.variant.delete.mockRejectedValueOnce(error);
+      if (stage === 'completion') f.failCompletion(error);
+      await expect(f.service.removeVariant(productId, variantId)).rejects.toBe(
+        error,
+      );
+      expect(f.effects()).toEqual(f.initial);
+      expect(f.tenant.runInTransaction).toHaveBeenCalledTimes(1);
+      if (stage === 'lifecycle') expect(f.events).toEqual([]);
+      if (stage === 'read') expect(f.events).toEqual(['lifecycle', 'gate']);
+      if (stage === 'delete')
+        expect(f.events).toEqual(['lifecycle', 'gate', 'read']);
+      if (stage !== 'completion') {
+        expect(f.tx.variant.count).not.toHaveBeenCalled();
+        expect(f.tx.product.update).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('awaits lifecycle before Product, reads or effects', async () => {
+    const f = fixture();
+    let release!: () => void;
+    f.tx.$executeRaw.mockImplementation(
+      () =>
+        new Promise<number>((resolve) => {
+          f.events.push('waiting');
+          release = () => resolve(0);
+        }),
+    );
+    const removal = f.service.removeVariant(productId, variantId);
+    try {
+      expect(f.events).toEqual(['waiting']);
+      expect(f.tx.$queryRaw).not.toHaveBeenCalled();
+      expect(f.tx.variant.findFirst).not.toHaveBeenCalled();
+      expect(f.tx.variant.delete).not.toHaveBeenCalled();
+      expect(f.tx.variant.count).not.toHaveBeenCalled();
+      expect(f.tx.product.update).not.toHaveBeenCalled();
+      expect(f.effects()).toEqual(f.initial);
+    } finally {
+      release?.();
+      await removal;
+    }
+    await expect(removal).resolves.toBeUndefined();
+    expect(f.effects()).toEqual({ variants: [], hasVariants: false });
+  });
+
+  it('reenters ambient ownership without committing removal before outer failure', async () => {
+    const f = fixture();
+    const abort = new Error('outer');
+    await expect(
+      f.tenant.runInTransaction(async () => {
+        await expect(
+          f.service.removeVariant(productId, variantId),
+        ).resolves.toBeUndefined();
+        f.tx.variant.findFirst.mockResolvedValueOnce(null);
+        await expect(
+          f.service.removeVariant(productId, variantId),
+        ).rejects.toEqual(new EntityNotFoundError('Variant', variantId));
+        expect(f.tx.$executeRaw).toHaveBeenCalledTimes(2);
+        expect(f.tx.$queryRaw).toHaveBeenCalledTimes(2);
+        expect(f.effects()).toEqual(f.initial);
+        throw abort;
+      }),
+    ).rejects.toBe(abort);
+    expect(f.effects()).toEqual(f.initial);
+    expect(f.tx.variant.delete).toHaveBeenCalledTimes(1);
+  });
 
   it.each(['count', 'flag'])(
     'propagates late %s failure and discards staged effects without retry',

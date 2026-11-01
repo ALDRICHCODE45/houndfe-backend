@@ -1399,7 +1399,8 @@ export class ProductsService {
     const tenantId = this.tenantPrisma.getTenantId();
     await this.tenantPrisma.runInTransaction(async () => {
       const tx = this.tenantPrisma.getClient();
-      // Match addVariant's qualified Product-first membership gate.
+      // Lifecycle precedes the qualified Product membership gate.
+      await lockCatalogLifecycle(tx, 'shared');
       const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
         SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
           AND "id" = ${productId} FOR UPDATE

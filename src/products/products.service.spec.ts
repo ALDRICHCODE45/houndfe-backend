@@ -3176,6 +3176,7 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
     remainingCount?: number;
   } = {}) {
     const tenantClient = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
       $queryRaw: jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]),
       product: { update: jest.fn().mockResolvedValue(undefined) },
       variant: {

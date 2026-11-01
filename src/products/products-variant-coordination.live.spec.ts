@@ -760,6 +760,228 @@ describe('live Variant membership and stock coordination', () => {
   );
 
   it.each([false, true])(
+    'removes variant membership after global lifecycle rollback=%s',
+    async (rollback) => {
+      const seed = await freshSeed();
+      const remover = actor(await open());
+      const endpoint = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const endpointPid = await currentBackendPid(endpoint.client);
+      await observer.variantTierPrice.create({
+        data: {
+          tenantId: seed.ids.tenantId,
+          variantPriceId: seed.ids.variantPriceId,
+          minQuantity: 2,
+          priceCents: 700,
+        },
+      });
+      const reached = signal();
+      const release = signal();
+      const abort = new Error('rollback global deletion');
+      const deletion = remover
+        .run(seed, (_p, lists) =>
+          remover.inTransaction(async () => {
+            await lists.remove(seed.ids.globalPriceListId);
+            reached.resolve();
+            await release.promise;
+            if (rollback) throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      let result: Promise<unknown> | undefined;
+      try {
+        await Promise.race([
+          reached.promise,
+          deletion.then((cause) => {
+            throw new Error('Deletion ended before checkpoint', { cause });
+          }),
+        ]);
+        result = endpoint
+          .run(seed, (p) =>
+            p.removeVariant(seed.ids.productId, seed.ids.variantId),
+          )
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(endpointPid, removerPid, 'ShareLock');
+        const locks = await observer.$queryRaw<{ mode: string }[]>`
+          SELECT mode FROM pg_locks WHERE pid = ${endpointPid}
+            AND relation = 'products'::regclass AND granted`;
+        expect(locks).toEqual([]);
+      } finally {
+        release.resolve();
+        await Promise.allSettled([deletion, result]);
+      }
+      await expect(deletion).resolves.toBe(rollback ? abort : undefined);
+      await expect(result).resolves.toBeUndefined();
+      await expect(
+        observer.variant.count({ where: { id: seed.ids.variantId } }),
+      ).resolves.toBe(0);
+      await expect(
+        observer.product.findUniqueOrThrow({
+          where: { id: seed.ids.productId },
+          select: { hasVariants: true },
+        }),
+      ).resolves.toEqual({ hasVariants: false });
+      await expect(
+        observer.globalPriceList.count({
+          where: { id: seed.ids.globalPriceListId },
+        }),
+      ).resolves.toBe(rollback ? 1 : 0);
+      await expect(
+        observer.variantPrice.count({
+          where: { id: seed.ids.variantPriceId },
+        }),
+      ).resolves.toBe(0);
+      await expect(
+        observer.variantTierPrice.count({
+          where: { variantPriceId: seed.ids.variantPriceId },
+        }),
+      ).resolves.toBe(0);
+    },
+  );
+
+  it.each([false, true])(
+    'retains membership lifecycle through ambient rollback=%s',
+    async (rollback) => {
+      const seed = await freshSeed();
+      const other = await freshSeed();
+      await observer.variantTierPrice.create({
+        data: {
+          tenantId: seed.ids.tenantId,
+          variantPriceId: seed.ids.variantPriceId,
+          minQuantity: 2,
+          priceCents: 700,
+        },
+      });
+      const query = {
+        where: { id: seed.ids.variantPriceId },
+        include: { tierPrices: true },
+      };
+      const before = await observer.variantPrice.findUniqueOrThrow(query);
+      const membership = () =>
+        readVariantMembership(observer, seed.ids.tenantId, seed.ids.productId);
+      const beforeMembership = await membership();
+      const base = await open();
+      const held = latch(
+        base,
+        (_sql, model, operation) =>
+          model === 'Variant' && operation === 'delete',
+      );
+      const endpoint = actor(held.client);
+      const endpointPid = await currentBackendPid(base);
+      const remover = actor(await open());
+      const removerPid = await currentBackendPid(remover.client);
+      const unrelated = actor(await open());
+      const responded = signal();
+      const repeat = signal();
+      const repeated = signal();
+      const release = signal();
+      const abort = new Error('rollback variant deletion');
+      const globalAbort = new Error('rollback following global deletion');
+      const writing = endpoint
+        .run(seed, (p) =>
+          endpoint.inTransaction(async () => {
+            await expect(
+              p.removeVariant(seed.ids.productId, seed.ids.variantId),
+            ).resolves.toBeUndefined();
+            responded.resolve();
+            await repeat.promise;
+            await expect(
+              p.removeVariant(seed.ids.productId, seed.ids.variantId),
+            ).rejects.toMatchObject({
+              code: 'ENTITY_NOT_FOUND',
+              message: `Variant with id "${seed.ids.variantId}" not found`,
+            });
+            repeated.resolve();
+            await release.promise;
+            if (rollback) throw abort;
+          }),
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      const ended = writing.then((cause) => {
+        throw new Error('Endpoint ended before checkpoint', { cause });
+      });
+      let deletion: Promise<unknown> | undefined;
+      try {
+        await Promise.race([held.reached, ended]);
+        await expect(
+          unrelated.run(other, (p) =>
+            p.removeVariant(other.ids.productId, other.ids.variantId),
+          ),
+        ).resolves.toBeUndefined();
+        deletion = remover
+          .run(seed, (_p, lists) =>
+            remover.inTransaction(async () => {
+              await lists.remove(seed.ids.globalPriceListId);
+              throw globalAbort;
+            }),
+          )
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+        held.release();
+        await Promise.race([responded.promise, ended]);
+        await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+        repeat.resolve();
+        await Promise.race([repeated.promise, ended]);
+        await lifecycleWait(removerPid, endpointPid, 'ShareRowExclusiveLock');
+      } finally {
+        held.release();
+        repeat.resolve();
+        release.resolve();
+        await Promise.allSettled([writing, deletion, ended]);
+      }
+      await expect(writing).resolves.toBe(rollback ? abort : undefined);
+      await expect(deletion).resolves.toBe(globalAbort);
+      if (rollback)
+        await expect(membership()).resolves.toEqual(beforeMembership);
+      else {
+        await expect(
+          observer.variant.count({ where: { id: seed.ids.variantId } }),
+        ).resolves.toBe(0);
+        await expect(
+          observer.product.findUniqueOrThrow({
+            where: { id: seed.ids.productId },
+            select: { hasVariants: true },
+          }),
+        ).resolves.toEqual({ hasVariants: false });
+      }
+      await expect(observer.variantPrice.findUnique(query)).resolves.toEqual(
+        rollback ? before : null,
+      );
+      await expect(
+        observer.variantTierPrice.count({
+          where: { variantPriceId: seed.ids.variantPriceId },
+        }),
+      ).resolves.toBe(rollback ? before.tierPrices.length : 0);
+      await expect(
+        observer.globalPriceList.count({
+          where: { id: seed.ids.globalPriceListId },
+        }),
+      ).resolves.toBe(1);
+      const progress = endpoint.run(seed, (p) =>
+        p.removeVariant(seed.ids.productId, seed.ids.variantId),
+      );
+      if (rollback) await expect(progress).resolves.toBeUndefined();
+      else
+        await expect(progress).rejects.toMatchObject({
+          code: 'ENTITY_NOT_FOUND',
+          message: `Variant with id "${seed.ids.variantId}" not found`,
+        });
+    },
+  );
+
+  it.each([false, true])(
     'deletes a variant price after global lifecycle rollback=%s',
     async (rollback) => {
       const seed = await freshSeed();
