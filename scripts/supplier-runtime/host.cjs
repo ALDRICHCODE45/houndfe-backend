@@ -133,7 +133,8 @@ async function main() {
   const allowed = [
     /^(POST|OPTIONS) \/auth\/(login|logout|refresh)$/,
     /^(GET|OPTIONS) \/auth\/me(\/permissions)?$/,
-    /^[A-Z]+ \/procurement\/suppliers(\/[^/]*)?$/,
+    // Express routing is case-insensitive and non-strict (trailing slash).
+    /^[A-Z]+ \/procurement\/suppliers(\/[^/]*)?\/?$/i,
   ];
   app.use((req, res, next) => {
     if (!allowed.some((rule) => rule.test(`${req.method} ${req.path}`)))

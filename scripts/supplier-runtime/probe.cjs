@@ -155,7 +155,11 @@ async function list(query, actor = 'manager') {
   );
   for (const item of page.items) {
     supplier(item);
-    assert(owned.has(item.id));
+    // The shared runtime tenant may hold other runs' or FE suppliers; only
+    // this run's unique prefix scopes ownership. The foreign tenant never shows.
+    assert.notEqual(item.displayName, 'Foreign tenant supplier');
+    if (query.search?.trim().toLowerCase().startsWith(prefix.toLowerCase()))
+      assert(owned.has(item.id));
   }
   return page;
 }
@@ -218,8 +222,8 @@ async function main() {
   }
   // Never send mutations anonymously after a failed login.
   assert(Object.keys(tokens).length === 3);
-  await check('initial-tenant-empty', ['S2', 'S3', 'S4'], async () => {
-    const page = await list({ status: 'ALL' });
+  await check('initial-run-scope-empty', ['S2', 'S3', 'S4'], async () => {
+    const page = await list({ status: 'ALL', search: prefix });
     assert.deepEqual(page, { items: [], nextCursor: null });
   });
   let current;
@@ -296,7 +300,7 @@ async function main() {
         ['ARCHIVED', 1],
         ['ALL', 4],
       ]) {
-        const page = await list({ status });
+        const page = await list({ status, search: prefix });
         assert.equal(page.items.length, count);
         assert.equal(page.nextCursor, null);
         if (status !== 'ALL')
@@ -458,7 +462,7 @@ async function main() {
   });
   await check('reader-list-detail', ['S2', 'S3'], async () => {
     assert.equal(
-      (await list({ status: 'ALL' }, 'reader')).items.length,
+      (await list({ status: 'ALL', search: prefix }, 'reader')).items.length,
       owned.size,
     );
     assert.deepEqual(
@@ -554,7 +558,7 @@ async function main() {
     'final-isolation-and-denials-no-write',
     ['S2', 'S3', 'S4'],
     async () => {
-      const page = await list({ status: 'ALL' });
+      const page = await list({ status: 'ALL', search: prefix });
       assert.deepEqual(
         page.items.map((item) => item.id).sort(),
         [...owned].sort(),
