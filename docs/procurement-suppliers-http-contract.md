@@ -1,7 +1,20 @@
-# Supplier wire foundation (O3a A2, first subunit)
+# Supplier HTTP contract (O3a A2–A3)
 
-Pure exported functions in `src/procurement/suppliers/supplier-contract.ts` only.
-**No supplier route/API availability, authority, database execution or replay guarantee is asserted by this unit.** Future controllers must call these parsers before using their results; no shared editorial/human-decisions helpers were changed.
+`SuppliersModule` registers the four supplier routes in the normal `AppModule`.
+This is source-level integration, **not a runtime/API-ready claim**: disposable SQL proof, isolated runtime and FE E2E remain parent-owned gates. The closed parsers live in `src/procurement/suppliers/supplier-contract.ts`; no shared editorial/human-decisions helpers were changed.
+
+## Routes and authority
+
+| Route | Persisted permission | Success |
+| --- | --- | --- |
+| `GET /procurement/suppliers?status=…` | `read:ProcurementSupplier` | `200 SupplierPage` |
+| `POST /procurement/suppliers` | `create:ProcurementSupplier` only | original `201 Supplier` |
+| `GET /procurement/suppliers/:supplierId` | `read:ProcurementSupplier` | `200 Supplier` |
+| `PATCH /procurement/suppliers/:supplierId` | `read:ProcurementSupplier` + `update:ProcurementSupplier` | original `200 Supplier` |
+
+No history, delete, purchase-order or stock routes. Archive/reactivate use PATCH. No default human-role grants. Ordinary JWT → tenant CLS → PermissionsGuard conventions apply; actor/tenant never come from caller body/query. Current persisted active tenant/user, membership and grants are additionally checked on each query/command, under the feature-owned lifecycle → Tenant SHARE → user/grant-edge SHARE lock order. JWT claims, super-admin claims and cached abilities do not replace that check. Existing `manage:all` CASL implication is preserved. Details return tenant-qualified 404 only after authority; archived detail remains readable.
+
+Queries perform bounded SELECTs only: no version changes, receipt/audit creation, stock, payment, CxP or outbox effects. Commands retain the previously implemented atomic CAS/audit/receipt protocol and original-response replay after current authority. No backend resubmit or hidden retry. HTTP 401 refresh/recovery is external FE behavior; preserve the same exact key/body for deliberate recovery, never automatically refresh CAS.
 
 ## Bodies and responses
 
@@ -17,19 +30,21 @@ Pure exported functions in `src/procurement/suppliers/supplier-contract.ts` only
 
 `parseSupplierListQuery` accepts only required `status=ACTIVE|ARCHIVED|ALL`, optional `search`, `limit`, `cursor`. Unknown keys and repeated scalar arrays/objects are rejected; callers must pass uncoerced framework query values, not collapse duplicates first.
 
-Search trims edges only; blank means no filter. The effective term is at most 200 Unicode codepoints; NUL and lone surrogates are rejected before trimming. Case and interior whitespace are preserved. The future reader must implement **literal case-insensitive name contains**, including escaping SQL LIKE `%`, `_` and `\` as needed; this pure parser does not execute search.
+Search trims edges only; blank means no filter. The effective term is at most 200 Unicode codepoints; NUL and lone surrogates are rejected before trimming. Case and interior whitespace are preserved. The reader implements **literal case-insensitive name contains** using parameterized PostgreSQL ILIKE with explicit escape handling for `%`, `_` and `\`. Unicode case behavior follows the database collation; no Unicode normalization is performed.
 
-Limit defaults to 25 only when omitted. Supplied limits must be decimal strings `1`–`100`, without sign, leading zeros, whitespace, exponents or coercion. Cursor must be a nonempty string and is otherwise passed through opaquely. Later reader work must decode/validate tenant/resource/search/status binding, descending `(createdAt,id)` pagination and invalid cursor errors; this function cannot authorize a cursor.
+Limit defaults to 25 only when omitted. Supplied limits must be decimal strings `1`–`100`, without sign, leading zeros, whitespace, exponents or coercion. Cursor must be a nonempty string and is otherwise passed through opaquely. The reader validates tenant/resource/effective-search/status binding, then applies descending `(createdAt,id)` keyset pagination. It fetches at most `limit+1`, returns at most `limit` items and uses the last returned position for `nextCursor` only when another row was observed; no COUNT or inferred totals. Changing limit is permitted. Pages are not a snapshot: concurrent edits can change filter membership. No synthetic pagination fields are returned.
+
+Cursors use a versioned, canonical base64url payload and domain-separated HMAC-SHA256 using the existing `JWT_SECRET` configuration, with no new secret. They bind the exact trimmed search (including case), tenant, supplier resource and status; they are neither credentials nor encrypted data. Invalid encoding, signature, timestamp/UUID, version or scope is `400 MALFORMED`. Secret rotation invalidates outstanding cursors; restart listing explicitly. Clients must treat the value as opaque.
 
 ## Idempotency key and canonical hash
 
-`parseSupplierIdempotencyKey(rawHeaders)` requires exactly one case-insensitive `Idempotency-Key` name/value pair, 1–200 characters, for future POST/PATCH callers. Duplicate pairs are rejected even if identical. Do not use a joined headers lookup. Commas are valid content, not a duplicate delimiter.
+`parseSupplierIdempotencyKey(rawHeaders)` requires exactly one case-insensitive `Idempotency-Key` name/value pair, 1–200 characters, for POST/PATCH callers. Duplicate pairs are rejected even if identical. Do not use a joined headers lookup. Commas are valid content, not a duplicate delimiter.
 
 Policy evidence: `src/catalog-editorial/http/idempotency-key.ts` preserves decoded whitespace with no UUID grammar. Supplier parsing additionally uses Node's `node:http.validateHeaderValue`: HTAB, space, visible ASCII and Latin-1 U+0080–U+00FF are accepted; other C0, DEL, CR/LF and characters above U+00FF are rejected. No trimming, case folding or UUID restriction. These are decoded Node header values, not original socket bytes; transport intermediaries may remove surrounding whitespace before admission. FE should use a transport-stable opaque key and reuse the exact same value/body only for deliberate recovery, never automatic retries.
 
-`hashSupplierBody('create'|'update', unknown)` first parses the appropriate closed body, then hashes UTF-8 `JSON.stringify` bytes with SHA-256 (lowercase 64 hex digits). Fixed schema field order: input/patch `displayName`, `termsText`, `status`; update `expectedVersion`, `changes`. Omitted patch keys stay absent. This is independent of incoming object key order and preserves exact string content, omission versus null, and CAS. No Unicode normalization. Idempotency keys are not part of the body hash and are not normalized. The future receipt namespace must separately bind tenant, actor, operation, target and key; a body hash alone provides no authority or replay protocol.
+`hashSupplierBody('create'|'update', unknown)` first parses the appropriate closed body, then hashes UTF-8 `JSON.stringify` bytes with SHA-256 (lowercase 64 hex digits). Fixed schema field order: input/patch `displayName`, `termsText`, `status`; update `expectedVersion`, `changes`. Omitted patch keys stay absent. This is independent of incoming object key order and preserves exact string content, omission versus null, and CAS. No Unicode normalization. Idempotency keys are not part of the body hash and are not normalized. The command receipt namespace separately binds tenant, actor, operation, target and key; a body hash alone provides no authority or replay protocol.
 
-## Errors and later HTTP obligations
+## Errors and transport admission
 
 `SupplierContractError` and `supplierErrorEnvelope` provide exactly `{ statusCode, error }`, never raw values/driver errors. Parser failures become `400 MALFORMED`; unexpected errors map to `500 INTERNAL_ERROR`.
 
@@ -42,4 +57,8 @@ Policy evidence: `src/catalog-editorial/http/idempotency-key.ts` preserves decod
 | 409    | SUPPLIER_VERSION_CONFLICT, IDEMPOTENCY_KEY_CONFLICT, IDEMPOTENCY_KEY_IN_FLIGHT |
 | 500    | INTERNAL_ERROR                                                                 |
 
-No purchase-order eligibility errors. Future HTTP integration owns authentication/current authority, no-store on success/errors, status codes (create 201; update/detail/list 200), and sanitized filter mapping. There are no controller/service/permission edits, timing protocol, stock, money or CxP effects in this foundation.
+No purchase-order eligibility errors. Supplier responses use `Cache-Control: no-store`, including guard denials, malformed admission and unexpected failures. The feature filter maps guard errors to this closed vocabulary and never emits messages, driver details or rejected values.
+
+GET accepts no body; detail and mutation queries must be empty. POST/PATCH admit uncoerced closed bodies and a single raw Idempotency-Key before calling commands. Primitive JSON, malformed syntax/encoding, oversized bodies and invalid encoded path parameters return `400 MALFORMED`, not a new 413 vocabulary. The supplier-only parser is installed after CORS and before Nest initialization; early failures retain CORS headers. It matches the actual Express case-insensitive/optional-trailing-slash collection GET/POST and detail GET/PATCH paths (including automatic HEAD-for-GET semantics), not nearby siblings/history/other verbs. Other routes keep their existing parsers. Parser failures precede guards, as in Nest's default transport; successfully decoded requests still pass all guards. No broad DTO coercion or global parser/filter/CORS policy change.
+
+See [verification evidence and remaining gates](procurement-suppliers-api-verification.md).
