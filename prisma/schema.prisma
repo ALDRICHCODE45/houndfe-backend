@@ -391,6 +391,9 @@ model Tenant {
   catalogStockPresentationDefault          CatalogStockPresentation @default(SYSTEM_STATUS)
   catalogStockPresentationDefaultCustomQty Int?
 
+  procurementSuppliers      ProcurementSupplier[]
+  procurementSupplierAudits ProcurementSupplierAudit[]
+  procurementSupplierReceipts ProcurementSupplierReceipt[]
   memberships               TenantMembership[]
   roles                     Role[]
   products                  Product[]
@@ -613,6 +616,76 @@ model PrivateMediaAsset {
 
   @@index([tenantId, productId])
   @@map("private_media_assets")
+}
+
+// Supplier intent-only storage; no inventory or financial effects.
+enum ProcurementSupplierStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// Archive/reactivate are UPDATE commands through PATCH, not separate namespaces.
+enum ProcurementSupplierOperation {
+  CREATE
+  UPDATE
+}
+
+model ProcurementSupplier {
+  id          String @id @default(uuid())
+  tenantId    String
+  displayName String
+  termsText   String?
+  status      ProcurementSupplierStatus
+  version     Int @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_tenant_fk")
+  audits      ProcurementSupplierAudit[]
+  receipts    ProcurementSupplierReceipt[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([tenantId, status, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("procurement_suppliers")
+}
+
+// Actor identity is historical scalar data, not a cascading User relation.
+// Append-only through the future feature API; not SQL-tamperproof.
+model ProcurementSupplierAudit {
+  id              String @id @default(uuid())
+  tenantId        String
+  supplierId      String
+  actorId         String
+  operation       ProcurementSupplierOperation
+  supplierVersion Int
+  snapshot        Json
+  createdAt       DateTime @default(now())
+  tenant          Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_audit_tenant_fk")
+  supplier        ProcurementSupplier @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_audit_supplier_fk")
+
+  @@unique([tenantId, supplierId, supplierVersion], map: "supplier_audit_version_key")
+  @@map("procurement_supplier_audits")
+}
+
+// Applied receipts only. target = collection on CREATE, supplierId on UPDATE.
+// responseBody is the original wire response, never a join to mutable state.
+model ProcurementSupplierReceipt {
+  tenantId       String
+  actorId        String
+  operation      ProcurementSupplierOperation
+  target         String
+  idempotencyKey String
+  supplierId     String
+  requestHash    String
+  statusCode     Int
+  responseBody   Json
+  createdAt      DateTime @default(now())
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_receipt_tenant_fk")
+  supplier       ProcurementSupplier @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_receipt_supplier_fk")
+
+  @@id([tenantId, actorId, operation, target, idempotencyKey], map: "supplier_receipt_namespace_pk")
+  @@index([tenantId, supplierId])
+  @@map("procurement_supplier_receipts")
 }
 
 // Private descriptive state. B1 exposes read only; no lifecycle writes.
