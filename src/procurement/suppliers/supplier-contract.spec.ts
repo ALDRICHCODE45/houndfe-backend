@@ -1,3 +1,5 @@
+import { Prisma } from '@prisma/client';
+import { requireSupplierAuthority } from './supplier-authority';
 import {
   hashSupplierBody,
   parseSupplierInput,
@@ -8,6 +10,42 @@ import {
   SupplierContractError,
   supplierErrorEnvelope,
 } from './supplier-contract';
+
+describe('shared supplier authority command regression and READ extension', () => {
+  it.each([
+    ['CREATE', ['create'], true],
+    ['CREATE', ['read'], false],
+    ['UPDATE', ['update'], false],
+    ['UPDATE', ['read'], false],
+    ['UPDATE', ['read', 'update'], true],
+    ['READ', ['read'], true],
+    ['READ', ['create'], false],
+    ['READ', ['update'], false],
+  ] as const)(
+    '%s with %j grants admits=%s',
+    async (
+      operation: 'CREATE' | 'UPDATE' | 'READ',
+      actions: readonly string[],
+      allowed: boolean,
+    ) => {
+      const query = jest
+        .fn<Promise<unknown>, [Prisma.Sql]>()
+        .mockResolvedValueOnce([{ id: 'actor', isActive: true }])
+        .mockResolvedValueOnce(
+          actions.map((action) => ({ action, subject: 'ProcurementSupplier' })),
+        );
+      const result = requireSupplierAuthority(
+        { $queryRaw: query } as unknown as Prisma.TransactionClient,
+        { actorId: 'actor', tenantId: 'tenant' },
+        operation,
+      );
+      if (allowed) await expect(result).resolves.toBeUndefined();
+      else await expect(result).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      expect(query.mock.calls[1][0].values).toEqual(['tenant', 'actor']);
+      expect(query.mock.calls[1][0].sql).toContain('FOR SHARE OF m, r, rp, p');
+    },
+  );
+});
 
 const input = { displayName: ' Supplier ', termsText: null, status: 'ACTIVE' };
 const update = { expectedVersion: 1, changes: { termsText: null } };

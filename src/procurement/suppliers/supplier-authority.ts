@@ -8,11 +8,11 @@ export interface SupplierPrincipal {
   tenantId: string;
 }
 
-/** Only called on the command's owned transaction, after lifecycle and Tenant locks. */
+/** Called on the feature's owned transaction, after lifecycle and Tenant locks. */
 export async function requireSupplierAuthority(
   tx: Prisma.TransactionClient,
   scope: SupplierPrincipal,
-  operation: 'CREATE' | 'UPDATE',
+  operation: 'CREATE' | 'UPDATE' | 'READ',
 ): Promise<void> {
   const actors = await tx.$queryRaw<
     { id: string; isActive: boolean }[]
@@ -49,7 +49,11 @@ export async function requireSupplierAuthority(
   );
   if (
     !ability.can(
-      operation === 'CREATE' ? 'create' : 'update',
+      operation === 'CREATE'
+        ? 'create'
+        : operation === 'READ'
+          ? 'read'
+          : 'update',
       'ProcurementSupplier',
     ) ||
     (operation === 'UPDATE' && !ability.can('read', 'ProcurementSupplier'))
