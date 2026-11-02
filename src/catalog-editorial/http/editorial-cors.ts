@@ -33,6 +33,8 @@ export function editorialCors(
             allowedHeaders: [
               'Authorization',
               'Content-Type',
+              'Cache-Control',
+              'Pragma',
               'Editorial-Vocabulary-Revision',
               'Idempotency-Key',
               'Editorial-Care-Confirmation',

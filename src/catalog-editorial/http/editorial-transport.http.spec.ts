@@ -18,7 +18,7 @@ class Probe {
   }
 }
 const allowed =
-  'Authorization,Content-Type,Editorial-Vocabulary-Revision,Idempotency-Key,Editorial-Care-Confirmation';
+  'Authorization,Content-Type,Cache-Control,Pragma,Editorial-Vocabulary-Revision,Idempotency-Key,Editorial-Care-Confirmation';
 const exposed = 'Editorial-Contract-Version,Editorial-Vocabulary-Revision';
 const routes = [
   ['GET', '/catalog-editorial/vocabulary'],
@@ -79,6 +79,32 @@ describe.each([false, true])('editorial CORS configured=%s', (configured) => {
         'Access-Control-Request-Headers',
         'Authorization,Editorial-Contract-Version,Editorial-Adoption,X-Custom',
       );
+  test.each([
+    '/catalog-editorial/vocabulary',
+    '/products/id/editorial',
+    '/products/id/editorial/context',
+  ])('allows authenticated browser cache headers for %s', async (path) => {
+    const response = await request(app.getHttpServer() as Server)
+      .options(path)
+      .set('Origin', 'https://allowed.test')
+      .set('Access-Control-Request-Method', 'GET')
+      .set(
+        'Access-Control-Request-Headers',
+        'authorization,cache-control,pragma,editorial-vocabulary-revision',
+      );
+    expect(response.status).toBe(204);
+    expect(response.text).toBe('');
+    expect(response.headers['access-control-allow-headers']).toBe(
+      'Authorization,Content-Type,Cache-Control,Pragma,Editorial-Vocabulary-Revision,Idempotency-Key,Editorial-Care-Confirmation',
+    );
+    expect(response.headers['access-control-allow-origin']).toBe(
+      configured ? 'https://allowed.test' : '*',
+    );
+    expect(response.headers['access-control-allow-credentials']).toBe(
+      configured ? 'true' : undefined,
+    );
+    expect(response.headers['access-control-expose-headers']).toBe(exposed);
+  });
   test.each(routes)(
     '%s %s uses exact editorial headers',
     async (method, path) => {

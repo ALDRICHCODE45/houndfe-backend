@@ -103,8 +103,8 @@ Plain transport rules:
 - Context: unchanged `{variants}` response; no semantic revision/version envelope.
 - Target editorial errors: informational `Editorial-Contract-Version: 2`, no
   `Editorial-Vocabulary-Revision`, no document or vocabulary in error body.
-- CORS allows `Authorization`, `Content-Type`, `Editorial-Vocabulary-Revision`,
-  `Idempotency-Key`, `Editorial-Care-Confirmation`; exposes
+- CORS allows `Authorization`, `Content-Type`, `Cache-Control`, `Pragma`,
+  `Editorial-Vocabulary-Revision`, `Idempotency-Key`, `Editorial-Care-Confirmation`; exposes
   `Editorial-Contract-Version` and `Editorial-Vocabulary-Revision`. Obsolete request
   version/adoption headers are not supported CORS inputs.
 - Dynamic Date/request IDs and JSON byte layout are not replay guarantees.
