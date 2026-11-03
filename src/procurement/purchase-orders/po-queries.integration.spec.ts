@@ -179,6 +179,70 @@ describeDb('PO PostgreSQL query boundary', () => {
     expect(await evidence(f.tenantId)).toEqual(before);
   });
 
+  it('searches CURRENT supplier OR note literally, including supplierless drafts, ANDs supplierId and binds pagination', async () => {
+    const f = await fixture();
+    const term = 'É_%\\';
+    await db.procurementSupplier.update({
+      where: { id: f.supplier.id },
+      data: { displayName: `Renamed ${term}` },
+    });
+    await db.procurementPurchaseOrder.update({
+      where: { id: f.ids[0] },
+      data: { note: 'OnlyNote' },
+    });
+    await db.procurementPurchaseOrder.update({
+      where: { id: f.ids[2] },
+      data: { note: `Supplierless ${term}` },
+    });
+    await db.procurementPurchaseOrder.update({
+      where: { id: f.foreign.id },
+      data: { note: term },
+    });
+    await db.procurementPurchaseOrder.create({
+      data: {
+        tenantId: f.tenantId,
+        locationTenantName: 'Owned decoy',
+        note: 'Plain wildcard decoy',
+      },
+    });
+    const list = (search: string, supplierId?: string) =>
+      f.run(() =>
+        f.service.listDrafts({ search, ...(supplierId ? { supplierId } : {}) }),
+      );
+    for (const search of ['  é_%\\  ', '%', '_', '\\'])
+      expect((await list(search)).items.map((item) => item.id)).toEqual(f.ids);
+    expect((await list('OnlyNote')).items.map((item) => item.id)).toEqual([
+      f.ids[0],
+    ]);
+    expect(
+      (await list(term, f.supplier.id)).items.map((item) => item.id),
+    ).toEqual(f.ids.slice(0, 2));
+    expect((await list('Saved supplier')).items).toEqual([]);
+    expect((await list("' OR 1=1 --")).items).toEqual([]);
+    const first = await f.run(() =>
+      f.service.listDrafts({ search: ` ${term} `, limit: '1' }),
+    );
+    const second = await f.run(() =>
+      f.service.listDrafts({
+        search: term,
+        limit: '2',
+        cursor: first.nextCursor,
+      }),
+    );
+    expect(first.items.map((item) => item.id)).toEqual([f.ids[0]]);
+    expect(second.items.map((item) => item.id)).toEqual(f.ids.slice(1));
+    expect(second.nextCursor).toBeNull();
+    for (const search of [undefined, 'other', term.toLowerCase()])
+      await expect(
+        f.run(() =>
+          f.service.listDrafts({
+            ...(search ? { search } : {}),
+            cursor: first.nextCursor,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'MALFORMED' });
+  });
+
   it('recomputes diagnostics after catalog/supplier drift without changing stored draft', async () => {
     const f = await fixture();
     await db.product.update({

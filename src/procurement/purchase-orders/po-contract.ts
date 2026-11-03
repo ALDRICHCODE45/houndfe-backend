@@ -51,6 +51,7 @@ export interface PurchaseOrderDelete {
 }
 export interface PurchaseOrderListQuery {
   supplierId?: string;
+  search?: string;
   limit: number;
   cursor?: string;
 }
@@ -309,8 +310,14 @@ export function parsePurchaseOrderListQuery(
   value: unknown,
 ): PurchaseOrderListQuery {
   return parse(() => {
-    const data = fields(value, ['supplierId', 'limit', 'cursor'], []);
+    const data = fields(value, ['supplierId', 'search', 'limit', 'cursor'], []);
     const result: PurchaseOrderListQuery = { limit: 25 };
+    if (Object.hasOwn(data, 'search')) {
+      // Reject invalid Unicode/NUL before trimming; bound the effective term.
+      const search = text(data.search, Infinity).trim();
+      text(search, 200);
+      if (search) result.search = search;
+    }
     if (Object.hasOwn(data, 'supplierId'))
       result.supplierId = parseSupplierId(data.supplierId);
     if (Object.hasOwn(data, 'limit')) {

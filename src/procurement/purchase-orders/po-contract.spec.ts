@@ -263,6 +263,33 @@ describe('purchase-order closed admission', () => {
     ])
       expect(() => parsePurchaseOrderListQuery(query)).toThrow('MALFORMED');
   });
+  it('normalizes search edges only and bounds effective Unicode codepoints', () => {
+    expect(
+      parsePurchaseOrderListQuery({ search: '  É  Supplier%_\\\\  ' }),
+    ).toEqual({
+      limit: 25,
+      search: 'É  Supplier%_\\\\',
+    });
+    for (const search of ['', ' \t\n ', ' '.repeat(1000)])
+      expect(parsePurchaseOrderListQuery({ search })).toEqual({ limit: 25 });
+    expect(
+      parsePurchaseOrderListQuery({ search: `  ${'😀'.repeat(200)}  ` }),
+    ).toEqual({ limit: 25, search: '😀'.repeat(200) });
+  });
+  it.each([
+    '😀'.repeat(201),
+    '\0 term ',
+    ' term\0 ',
+    '\ud800 term ',
+    ' term\udfff ',
+    ['term', 'term'],
+    { value: 'term' },
+    null,
+    1,
+    undefined,
+  ])('rejects invalid raw search %#', (search) => {
+    expect(() => parsePurchaseOrderListQuery({ search })).toThrow('MALFORMED');
+  });
   it('hashes in schema order, preserving CAS and strings', () => {
     const body = order();
     expect(hashPurchaseOrderBody('create', body)).toBe(

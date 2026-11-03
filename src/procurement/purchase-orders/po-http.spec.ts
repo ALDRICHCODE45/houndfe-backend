@@ -385,6 +385,20 @@ describe('PO HTTP boundary (offline; real JWT/CLS/permission guards)', () => {
     );
     expect(commands.replaceDraft).toHaveBeenCalledTimes(1);
   });
+  it('admits uncoerced server search and closes repeated/invalid terms', async () => {
+    expect(
+      (await http('get', `${base}?search=%20É%20%20note%25%20`)).status,
+    ).toBe(200);
+    expect(queries.listDrafts).toHaveBeenCalledWith({ search: ' É  note% ' });
+    queries.listDrafts.mockClear();
+    for (const query of [
+      'search=a&search=b',
+      `search=${encodeURIComponent('😀'.repeat(201))}`,
+      'search=%00term',
+    ])
+      closed(await http('get', `${base}?${query}`), 400, 'MALFORMED');
+    noCalls();
+  });
   it('sanitizes unexpected errors', async () => {
     queries.getDraft.mockRejectedValueOnce(
       new Error('private database details'),

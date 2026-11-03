@@ -312,6 +312,61 @@ describe('purchase-order read boundary', () => {
       { path: '/lines', code: 'LINES_REQUIRED' },
     ]);
   });
+  it('searches live tenant-qualified supplier OR note with escaped literal ILIKE and supplier AND', async () => {
+    const h = harness();
+    h.rows([row, row]);
+    const first = await h.service.listDrafts({
+      supplierId,
+      search: '  É_%\\\\  ',
+      limit: '1',
+    });
+    const sql = h.sqls[3];
+    expect(sql.sql).toContain('LEFT JOIN "procurement_suppliers" s');
+    expect(sql.sql).toContain('s."tenantId" = o."tenantId"');
+    expect(sql.sql).toContain('s."id" = o."supplierId"');
+    expect(sql.sql).toContain('AND o."supplierId" =');
+    expect(sql.sql).toMatch(
+      /AND \(s\."displayName" ILIKE .* OR o\."note" ILIKE /s,
+    );
+    expect(sql.sql).toContain('ESCAPE chr(92)');
+    expect(sql.sql).not.toMatch(/COUNT\(|supplierDisplaySnapshot.*ILIKE/);
+    expect(sql.values).toEqual([
+      'tenant-a',
+      supplierId,
+      '%É\\_\\%\\\\\\\\%',
+      '%É\\_\\%\\\\\\\\%',
+      2,
+    ]);
+    h.rows([]);
+    await h.service.listDrafts({
+      supplierId,
+      search: 'É_%\\\\',
+      cursor: first.nextCursor,
+    });
+    expect(h.sqls[10].sql).toContain('(o."createdAt", o."id") <');
+    await expect(
+      h.service.listDrafts({
+        supplierId,
+        search: 'é_%\\\\',
+        cursor: first.nextCursor,
+      }),
+    ).rejects.toMatchObject({ code: 'MALFORMED' });
+    await expect(
+      h.service.listDrafts({ supplierId, cursor: first.nextCursor }),
+    ).rejects.toMatchObject({ code: 'MALFORMED' });
+  });
+  it('treats blank search as absent and rejects arrays before DB', async () => {
+    const h = harness();
+    h.rows([]);
+    await h.service.listDrafts({ search: '   ' });
+    expect(h.sqls[3].values).toEqual(['tenant-a', 26]);
+    expect(h.sqls[3].sql).not.toContain('ILIKE');
+    const before = h.sqls.length;
+    await expect(
+      h.service.listDrafts({ search: ['term'] }),
+    ).rejects.toMatchObject({ code: 'MALFORMED' });
+    expect(h.sqls).toHaveLength(before);
+  });
   it('defaults to 25, null cursor for empty page, no reference queries', async () => {
     const h = harness();
     h.rows([]);

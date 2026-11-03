@@ -223,14 +223,19 @@ export class PurchaseOrderQueries {
         const binding = {
           tenantId: scope.tenantId,
           supplierId: query.supplierId,
+          search: query.search,
         };
         const after = query.cursor
           ? this.cursor.decode(query.cursor, binding)
           : undefined;
+        const pattern = query.search?.replace(/[\\%_]/g, '\\$&');
         const rows = await tx.$queryRaw<StoredOrder[]>(Prisma.sql`
           SELECT ${projection} FROM "procurement_purchase_orders" o
+          LEFT JOIN "procurement_suppliers" s
+            ON s."tenantId" = o."tenantId" AND s."id" = o."supplierId"
           WHERE o."tenantId" = ${scope.tenantId} AND o."status" = 'DRAFT'
           ${query.supplierId ? Prisma.sql`AND o."supplierId" = ${query.supplierId}` : Prisma.empty}
+          ${pattern === undefined ? Prisma.empty : Prisma.sql`AND (s."displayName" ILIKE ${`%${pattern}%`} ESCAPE chr(92) OR o."note" ILIKE ${`%${pattern}%`} ESCAPE chr(92))`}
           ${after ? Prisma.sql`AND (o."createdAt", o."id") < (${new Date(after.createdAt)}, ${after.id})` : Prisma.empty}
           ORDER BY o."createdAt" DESC, o."id" DESC LIMIT ${query.limit + 1}`);
         const orders = await resolvePage(

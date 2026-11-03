@@ -25,6 +25,21 @@ describe('pure purchase-order cursor', () => {
       }),
     ).toEqual(position);
   });
+  it('binds exact effective search, including case and interior whitespace', () => {
+    const searched = { ...scope, search: 'É  supplier%_\\\\' };
+    const encoded = cursor.encode(searched, position);
+    expect(cursor.decode(encoded, searched)).toEqual(position);
+    for (const other of [
+      scope,
+      { ...searched, search: 'é  supplier%_\\\\' },
+      { ...searched, search: 'É supplier%_\\\\' },
+      { ...searched, search: 'other' },
+    ])
+      expect(() => cursor.decode(encoded, other)).toThrow('MALFORMED');
+    expect(() =>
+      cursor.decode(cursor.encode(scope, position), searched),
+    ).toThrow('MALFORMED');
+  });
   it('rejects tenant, filter, resource, key and signature changes', () => {
     const encoded = cursor.encode(scope, position);
     for (const other of [
