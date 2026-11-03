@@ -1,5 +1,7 @@
 # Disposable supplier HTTP probe
 
+For the **opt-in purchase-order + product-selector runtime**, use [po-runtime/README.md](../po-runtime/README.md). This document and the original supplier host invocation remain supplier-only: its reader keeps read:ProcurementSupplier. PO mode has a separate fresh RUN and a reader with **only** read:ProcurementPurchaseOrder.
+
 ## Parent-only runtime invocation (D3)
 
 No runtime was executed for this source change. The parent must first refresh its Docker ownership guard for the **new owned migrated disposable target**, supply the guarded `DATABASE_URL` explicitly (never source `.env` or reuse inherited credentials), and prepare a fresh owner-only `.tmp/supplier-runtime.<unique>` RUN. Do not reuse the old A4 runtime/database or its credentials.

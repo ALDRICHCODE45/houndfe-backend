@@ -10,6 +10,7 @@ import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { installSupplierBodyParser } from './procurement/suppliers/supplier-http.filter';
+import { installPurchaseOrderBodyParser } from './procurement/purchase-orders/po-body-parser';
 import { editorialCors } from './catalog-editorial/http/editorial-cors';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
@@ -70,6 +71,7 @@ async function bootstrap() {
   // Supplier-only transport admission; after CORS and before Nest's default
   // parsers mount at initialization. Other routes retain their existing policy.
   installSupplierBodyParser(app);
+  installPurchaseOrderBodyParser(app);
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);
