@@ -1,4 +1,18 @@
-# Supplier storage boundary (O3a A1)
+# Supplier storage boundary (O3a A1, D1 deletion)
+
+## D1 forward deletion change — SQL execution pending
+
+S5/S6 explicitly authorize relaxing the two live-supplier FKs, superseding A1's deletion prohibition below. The old additive migration is unchanged. New forward migrations are split: `20261103010000_supplier_delete_operation` adds the DELETE enum value; `20261103010100_supplier_delete_evidence` uses it only after the enum migration commits. The second migration drops only `supplier_audit_supplier_fk` and `supplier_receipt_supplier_fk`, replacing the receipt namespace/status CHECKs with CREATE/UPDATE's unchanged branches plus DELETE (`target=supplierId`, status204, JSON null response). No existing data is rewritten or removed.
+
+All tenant FKs remain restrictive; positive versions, audit version uniqueness, receipt namespace primary key, key/hash checks and old snapshots remain intact. Historical `supplierId` is now intentionally a scalar, not a live supplier relation. Consequently raw SQL no longer checks whether an audit/receipt scalar supplierId currently exists or belongs to that tenant. Feature commands establish provenance with authenticated tenant-qualified writes/locks, never caller-provided evidence writes. SQL is not RLS or tamperproof auditing.
+
+Deletion removes only `ProcurementSupplier`. CREATE/UPDATE audit snapshots retain their original wire shape. A DELETE audit snapshot uses that same shape with **prior** id/displayName/termsText/status/createdAt/updatedAt and **deletion event version** `previous+1`. The retained prior `updatedAt` is not a claimed deletion time: audit `createdAt` is the event timestamp, `actorId` the historical actor, and `operation=DELETE` distinguishes removal from a live row update. Receipt `responseBody` is JSON null (`Prisma.JsonNull`, never SQL NULL), while the HTTP response has no bytes. No evidence expiry/update/delete API is added.
+
+There is no purchase-order table, eligibility query or reference-coverage proof. `409 SUPPLIER_HAS_PURCHASE_ORDERS` remains reserved for O3b. Before orders exist, O3b must introduce a tenant-qualified restrictive order→supplier FK and deliberate eligibility/error mapping, so history retention does not become permission to orphan orders.
+
+D1 SQL specs are **authored, not executed by the writer**. They now expect live-row deletion to retain all prior audit/receipt values and scalar IDs, reject missing evidence tenants even after relaxing the supplier FKs, and prevent tenant deletion after removing its live supplier. DELETE namespace/status/null negative cases supplement all prior name/terms/version/key/hash checks. Parent D2 must apply forward migrations to its newly owned disposable target, verify pre-existing evidence across migration, and execute the SQL suite; no existing database/migration execution is authorized here.
+
+## A1 historical evidence (before the D1 extension)
 
 **Storage unit verified.** Parent disposable migration and SQL checks passed
 (9 offline tests and 18 PostgreSQL tests). Independent A1 review found no blockers:
@@ -25,11 +39,9 @@ Archive/reactivate are UPDATE/PATCH with status changes, not separate commands.
 The same key can be used by another actor/tenant/target/operation without replaying
 someone else's response. Keys retain whitespace; SQL limits them to 1–200 codepoints.
 CREATE receipts require 201; UPDATE requires 200. `supplierId` always identifies the
-resulting supplier, including CREATE, and has a tenant-qualified FK.
+resulting supplier, including CREATE, and originally had a tenant-qualified live-supplier FK (removed by D1 above).
 
-All new FKs use RESTRICT on delete/update. Tenant identity cannot cascade away and
-supplier evidence prevents supplier deletion; cross-tenant audit/receipt references
-are rejected. Actor IDs deliberately have no mutable User/membership relation.
+A1 originally used RESTRICT on all FKs and prevented supplier deletion. D1 removes only the two live-supplier FKs; tenant identity still cannot cascade away. Historical scalar supplier IDs are retained rather than joined to live suppliers. Actor IDs deliberately have no mutable User/membership relation.
 These tables are registered individually in `TENANT_SCOPED_MODELS`; tenant injection
 is application defense, **not PostgreSQL RLS**. Direct/raw clients must qualify tenant.
 

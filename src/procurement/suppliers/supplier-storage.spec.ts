@@ -5,7 +5,10 @@ import ts from 'typescript';
 import { createTenantScopedPrisma } from '../../shared/prisma/tenant-prisma.factory';
 import { TENANT_SCOPED_MODELS } from '../../shared/tenant/tenant-scoped-models.constant';
 
-const schema = readFileSync(join(process.cwd(), 'prisma/schema.prisma'), 'utf8');
+const schema = readFileSync(
+  join(process.cwd(), 'prisma/schema.prisma'),
+  'utf8',
+);
 const models = [
   'ProcurementSupplier',
   'ProcurementSupplierAudit',
@@ -76,8 +79,56 @@ describe('supplier storage contract (offline drift checks)', () => {
     },
   );
 
+  it('allows retained scalar evidence after hard deletion, with tenant FKs intact', () => {
+    for (const name of [
+      'ProcurementSupplierAudit',
+      'ProcurementSupplierReceipt',
+    ]) {
+      expect(model(name)).not.toMatch(
+        /supplier\s+ProcurementSupplier\s+@relation/,
+      );
+      expect(model(name)).toMatch(/supplierId\s+String/);
+      expect(model(name)).toMatch(/tenant\s+Tenant\s+@relation/);
+    }
+    expect(schema).toMatch(/enum ProcurementSupplierOperation\s*\{[^}]*DELETE/);
+  });
+
+  it('separates enum addition from value use, drops only live-supplier FKs and retains receipt checks', () => {
+    const operation = readFileSync(
+      join(
+        process.cwd(),
+        'prisma/migrations/20261103010000_supplier_delete_operation/migration.sql',
+      ),
+      'utf8',
+    );
+    const evidence = readFileSync(
+      join(
+        process.cwd(),
+        'prisma/migrations/20261103010100_supplier_delete_evidence/migration.sql',
+      ),
+      'utf8',
+    );
+    expect(operation).toContain(
+      'ALTER TYPE "ProcurementSupplierOperation" ADD VALUE \'DELETE\'',
+    );
+    expect(evidence).not.toContain('ALTER TYPE');
+    expect(
+      evidence.match(/DROP CONSTRAINT "supplier_\w+_supplier_fk"/g),
+    ).toHaveLength(2);
+    expect(evidence).not.toMatch(/DROP CONSTRAINT "supplier_\w+_tenant_fk"/);
+    expect(evidence).toContain(
+      '"operation" IN (\'UPDATE\', \'DELETE\') AND "target" = "supplierId"',
+    );
+    expect(evidence).toContain(
+      '"statusCode" = 204 AND "responseBody" = \'null\'::jsonb',
+    );
+    expect(evidence).not.toMatch(/^\s*(DELETE|TRUNCATE|UPDATE|INSERT)\b/m);
+  });
+
   it('keeps mutable supplier state separate from historical evidence', () => {
-    expect(model('ProcurementSupplier')).toMatch(/version\s+Int\s+@default\(1\)/);
+    expect(model('ProcurementSupplier')).toMatch(
+      /version\s+Int\s+@default\(1\)/,
+    );
     expect(model('ProcurementSupplier')).toMatch(/termsText\s+String\?/);
     expect(model('ProcurementSupplierAudit')).toContain(
       '@@unique([tenantId, supplierId, supplierVersion]',
@@ -104,9 +155,11 @@ describe('supplier storage contract (offline drift checks)', () => {
         types: ['jest', 'node'],
       },
     );
-    const errors = ts.getPreEmitDiagnostics(program).map((diagnostic) =>
-      ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
-    );
+    const errors = ts
+      .getPreEmitDiagnostics(program)
+      .map((diagnostic) =>
+        ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
+      );
     expect(errors).toEqual([]);
   });
 
@@ -118,7 +171,9 @@ describe('supplier storage contract (offline drift checks)', () => {
       ),
       'utf8',
     );
-    expect(sql).not.toMatch(/^\s*(DROP|DELETE|TRUNCATE|UPDATE|INSERT|ALTER)\b/m);
+    expect(sql).not.toMatch(
+      /^\s*(DROP|DELETE|TRUNCATE|UPDATE|INSERT|ALTER)\b/m,
+    );
     expect(sql.match(/CREATE TABLE/g)).toHaveLength(3);
     for (const check of [
       'supplier_name_check',

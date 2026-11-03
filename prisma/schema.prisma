@@ -628,6 +628,7 @@ enum ProcurementSupplierStatus {
 enum ProcurementSupplierOperation {
   CREATE
   UPDATE
+  DELETE
 }
 
 model ProcurementSupplier {
@@ -640,8 +641,6 @@ model ProcurementSupplier {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_tenant_fk")
-  audits      ProcurementSupplierAudit[]
-  receipts    ProcurementSupplierReceipt[]
 
   @@unique([tenantId, id])
   @@index([tenantId, createdAt(sort: Desc), id(sort: Desc)])
@@ -661,13 +660,13 @@ model ProcurementSupplierAudit {
   snapshot        Json
   createdAt       DateTime @default(now())
   tenant          Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_audit_tenant_fk")
-  supplier        ProcurementSupplier @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_audit_supplier_fk")
 
   @@unique([tenantId, supplierId, supplierVersion], map: "supplier_audit_version_key")
   @@map("procurement_supplier_audits")
 }
 
-// Applied receipts only. target = collection on CREATE, supplierId on UPDATE.
+// Historical supplierId is scalar: hard deletion must retain all evidence.
+// Applied receipts only. target = collection on CREATE, supplierId on UPDATE/DELETE.
 // responseBody is the original wire response, never a join to mutable state.
 model ProcurementSupplierReceipt {
   tenantId       String
@@ -681,7 +680,6 @@ model ProcurementSupplierReceipt {
   responseBody   Json
   createdAt      DateTime @default(now())
   tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_receipt_tenant_fk")
-  supplier       ProcurementSupplier @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: Restrict, onUpdate: Restrict, map: "supplier_receipt_supplier_fk")
 
   @@id([tenantId, actorId, operation, target, idempotencyKey], map: "supplier_receipt_namespace_pk")
   @@index([tenantId, supplierId])

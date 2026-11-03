@@ -75,8 +75,12 @@ describeDb('supplier storage PostgreSQL constraints', () => {
     // Setup/missing-migration errors must not masquerade as constraint proof.
     expect(fixtureReady).toBe(true);
     expect(await db.procurementSupplier.count({ where: { tenantId } })).toBe(0);
-    expect(await db.procurementSupplierAudit.count({ where: { tenantId } })).toBe(0);
-    expect(await db.procurementSupplierReceipt.count({ where: { tenantId } })).toBe(0);
+    expect(
+      await db.procurementSupplierAudit.count({ where: { tenantId } }),
+    ).toBe(0);
+    expect(
+      await db.procurementSupplierReceipt.count({ where: { tenantId } }),
+    ).toBe(0);
     expect(await db.tenant.count({ where: { id: tenantId } })).toBe(0);
   }
 
@@ -177,34 +181,32 @@ describeDb('supplier storage PostgreSQL constraints', () => {
     ['wrong create target', { target: 'not-collection' }],
     ['wrong HTTP status', { idempotencyKey: 'other', statusCode: 200 }],
     ['wrong update target', { operation: 'UPDATE', statusCode: 200 }],
-  ] satisfies Array<[
-    string,
-    Partial<Prisma.ProcurementSupplierReceiptUncheckedCreateInput>,
-  ]>)(
-    '%s rejects and conserves all tables',
-    async (_name, changes) => {
+  ] satisfies Array<
+    [string, Partial<Prisma.ProcurementSupplierReceiptUncheckedCreateInput>]
+  >)('%s rejects and conserves all tables', async (_name, changes) => {
+    await rejected((tx, f) =>
+      tx.procurementSupplierReceipt.create({
+        data: { ...f.receipt, ...changes },
+      }),
+    );
+  });
+
+  it.each([1, -1])(
+    'audit version %s rejects duplicate/nonpositive writes',
+    async (supplierVersion) => {
       await rejected((tx, f) =>
-        tx.procurementSupplierReceipt.create({
-          data: { ...f.receipt, ...changes },
+        tx.procurementSupplierAudit.create({
+          data: { ...f.audit, supplierVersion },
         }),
       );
     },
   );
 
-  it.each([1, -1])('audit version %s rejects duplicate/nonpositive writes', async (supplierVersion) => {
-    await rejected((tx, f) =>
-      tx.procurementSupplierAudit.create({
-        data: { ...f.audit, supplierVersion },
-      }),
-    );
-  });
-
   it.each(['audit', 'receipt'] as const)(
-    '%s rejects cross-tenant supplier references',
+    '%s retains its restrictive tenant FK even without a live supplier FK',
     async (kind) => {
       await rejected(async (tx, f) => {
-        const other = await fixture(tx, randomUUID());
-        const tenantId = other.supplier.tenantId;
+        const tenantId = randomUUID(); // nonexistent tenant, not a live-supplier relation
         return kind === 'audit'
           ? tx.procurementSupplierAudit.create({
               data: { ...f.audit, tenantId },
@@ -216,14 +218,108 @@ describeDb('supplier storage PostgreSQL constraints', () => {
     },
   );
 
-  it.each(['supplier', 'tenant'] as const)(
-    '%s deletion cannot erase evidence',
-    async (kind) => {
-      await rejected((tx, f) =>
-        kind === 'supplier'
-          ? tx.procurementSupplier.delete({ where: { id: f.supplier.id } })
-          : tx.tenant.delete({ where: { id: f.supplier.tenantId } }),
-      );
-    },
-  );
+  it('tenant deletion cannot erase evidence', async () => {
+    await rejected(async (tx, f) => {
+      await tx.procurementSupplier.deleteMany({
+        where: { tenantId: f.supplier.tenantId, id: f.supplier.id },
+      });
+      return tx.tenant.delete({ where: { id: f.supplier.tenantId } });
+    });
+  });
+
+  it('hard deletion preserves scalar IDs, all snapshots/receipts and tenant restrictions', async () => {
+    await expect(
+      db.$transaction(async (tx) => {
+        const tenantId = randomUUID();
+        const f = await fixture(tx, tenantId);
+        const audits = await tx.procurementSupplierAudit.findMany({
+          where: { tenantId },
+        });
+        const receipts = await tx.procurementSupplierReceipt.findMany({
+          where: { tenantId },
+        });
+        await tx.procurementSupplier.deleteMany({
+          where: { tenantId, id: f.supplier.id, version: 1 },
+        });
+        expect(
+          await tx.procurementSupplier.count({ where: { tenantId } }),
+        ).toBe(0);
+        expect(
+          await tx.procurementSupplierAudit.findMany({ where: { tenantId } }),
+        ).toEqual(audits);
+        expect(
+          await tx.procurementSupplierReceipt.findMany({ where: { tenantId } }),
+        ).toEqual(receipts);
+        await tx.procurementSupplierReceipt.create({
+          data: {
+            ...f.receipt,
+            operation: 'DELETE',
+            target: f.supplier.id,
+            statusCode: 204,
+            responseBody: Prisma.JsonNull,
+          },
+        });
+        expect(
+          (
+            await tx.procurementSupplierReceipt.findFirstOrThrow({
+              where: { tenantId, operation: 'DELETE' },
+            })
+          ).responseBody,
+        ).toBeNull();
+        const constraints = await tx.$queryRaw<
+          { conname: string }[]
+        >`SELECT conname FROM pg_constraint WHERE conname IN ('supplier_audit_tenant_fk', 'supplier_receipt_tenant_fk', 'supplier_audit_supplier_fk', 'supplier_receipt_supplier_fk')`;
+        expect(constraints.map((c) => c.conname).sort()).toEqual([
+          'supplier_audit_tenant_fk',
+          'supplier_receipt_tenant_fk',
+        ]);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+  });
+
+  it.each([
+    [
+      'wrong delete target',
+      {
+        operation: 'DELETE',
+        target: 'collection',
+        statusCode: 204,
+        responseBody: Prisma.JsonNull,
+      },
+    ],
+    [
+      'wrong delete status',
+      {
+        operation: 'DELETE',
+        target: 'same-as-supplier',
+        statusCode: 200,
+        responseBody: Prisma.JsonNull,
+      },
+    ],
+    [
+      'nonempty delete response',
+      {
+        operation: 'DELETE',
+        target: 'same-as-supplier',
+        statusCode: 204,
+        responseBody: {},
+      },
+    ],
+  ] satisfies Array<
+    [string, Partial<Prisma.ProcurementSupplierReceiptUncheckedCreateInput>]
+  >)('%s rejects atomically', async (_name, changes) => {
+    await rejected((tx, f) =>
+      tx.procurementSupplierReceipt.create({
+        data: {
+          ...f.receipt,
+          ...changes,
+          target:
+            changes.target === 'same-as-supplier'
+              ? f.supplier.id
+              : f.receipt.target,
+        },
+      }),
+    );
+  });
 });
