@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, '../..');
 let run;
 let feOrigin;
 let target;
+let poMode = false;
 function validatePrivatePath(input, real, stat, uid, mode) {
   assert.equal(input, real);
   assert(!stat.isSymbolicLink());
@@ -55,24 +56,53 @@ function validateTarget(identity, text) {
   assert(!url.search || url.search === '?schema=public');
   return identity;
 }
-function routeAllowed(method, route) {
+function routeAllowed(method, route, po = false) {
+  const extra = po
+    ? [
+        /^(GET|HEAD|POST|OPTIONS) \/procurement\/purchase-orders\/?$/i,
+        /^(GET|HEAD|DELETE|OPTIONS) \/procurement\/purchase-orders\/[^/]+\/?$/i,
+        /^(PUT|OPTIONS) \/procurement\/purchase-orders\/[^/]+\/draft\/?$/i,
+        /^(GET|HEAD|OPTIONS) \/products\/?$/i,
+        /^(GET|HEAD|OPTIONS) \/products\/[^/]+\/variants\/?$/i,
+      ]
+    : [];
   return [
+    ...extra,
     /^(POST|OPTIONS) \/auth\/(login|logout|refresh)\/?$/i,
     /^(GET|HEAD|OPTIONS) \/auth\/me(\/permissions)?\/?$/i,
     /^(GET|HEAD|POST|OPTIONS) \/procurement\/suppliers\/?$/i,
     /^(GET|HEAD|PATCH|DELETE|OPTIONS) \/procurement\/suppliers\/[^/]+\/?$/i,
   ].some((rule) => rule.test(`${method} ${route}`));
 }
+function selectorQueryAllowed(route, query) {
+  if (/^\/products\/?$/i.test(route))
+    return Object.entries(query).every(
+      ([name, value]) =>
+        ['search', 'type', 'page', 'limit'].includes(name) &&
+        typeof value === 'string',
+    );
+  if (/^\/products\/[^/]+\/variants\/?$/i.test(route))
+    return Object.keys(query).length === 0;
+  return true;
+}
 function configure() {
   run = privatePath(process.argv[2], 0o700);
   try {
-    feOrigin = new URL(process.argv[3]).origin;
+    feOrigin = new URL(
+      process.argv[3] || (poMode ? 'http://127.0.0.1:43179' : ''),
+    ).origin;
   } catch {
     throw new Error('Usage: host.cjs <RUN> <feOrigin URL>');
   }
-  assert.equal(feOrigin, 'http://127.0.0.1:43179');
+  if (!poMode) assert.equal(feOrigin, 'http://127.0.0.1:43179');
+  else assert.match(feOrigin, /^https?:\/\//);
   assert.equal(path.dirname(run), path.join(root, '.tmp'));
-  assert(path.basename(run).startsWith('supplier-runtime.'));
+  assert(
+    path.basename(run).startsWith(poMode ? 'po-runtime.' : 'supplier-runtime.'),
+  );
+  if (poMode)
+    for (const file of ['.env', '.env.test', 'prisma/.env'])
+      assert(!fs.existsSync(path.join(root, file)));
   const manifest = privatePath(path.join(run, 'target-identity.json'), 0o600);
   let identity;
   try {
@@ -84,6 +114,15 @@ function configure() {
 }
 
 const compiled = (file) => require(path.join(root, 'dist', file));
+function installParsers(app, po, load = compiled) {
+  load('procurement/suppliers/supplier-http.filter').installSupplierBodyParser(
+    app,
+  );
+  if (po)
+    load(
+      'procurement/purchase-orders/po-body-parser',
+    ).installPurchaseOrderBodyParser(app);
+}
 const record = (name, value) =>
   fs.writeFileSync(path.join(run, name), JSON.stringify(value, null, 2), {
     mode: 0o600,
@@ -93,14 +132,27 @@ const secret = () => crypto.randomBytes(32).toString('base64url');
 let app;
 let closing;
 
+function fixtureGrants(label, po = false) {
+  if (label === 'noaccess') return [];
+  if (label === 'reader')
+    return [[po ? 'ProcurementPurchaseOrder' : 'ProcurementSupplier', 'read']];
+  assert.equal(label, 'manager');
+  const subjects = po
+    ? ['ProcurementSupplier', 'ProcurementPurchaseOrder']
+    : ['ProcurementSupplier'];
+  const grants = subjects.flatMap((subject) =>
+    ['create', 'read', 'update', 'delete'].map((action) => [subject, action]),
+  );
+  return po ? [...grants, ['Product', 'read']] : grants;
+}
 async function seed(db, password) {
   const hash = await require('bcrypt').hash(password, 12);
-  const permission = async (action) =>
+  const permission = async (action, subject = 'ProcurementSupplier') =>
     (await db.permission.findUnique({
-      where: { subject_action: { subject: 'ProcurementSupplier', action } },
+      where: { subject_action: { subject, action } },
     })) ??
     (await db.permission.create({
-      data: { subject: 'ProcurementSupplier', action },
+      data: { subject, action },
     }));
   const tenantId = crypto.randomUUID();
   const otherTenantId = crypto.randomUUID();
@@ -118,11 +170,7 @@ async function seed(db, password) {
     },
   });
   const users = {};
-  for (const [label, actions] of [
-    ['manager', ['create', 'read', 'update', 'delete']],
-    ['reader', ['read']],
-    ['noaccess', []],
-  ]) {
+  for (const label of ['manager', 'reader', 'noaccess']) {
     const userId = crypto.randomUUID();
     const roleId = crypto.randomUUID();
     const email = `${label}-${userId.slice(0, 8)}@supplier-runtime.invalid`;
@@ -141,23 +189,88 @@ async function seed(db, password) {
         name: `Supplier runtime ${label} ${roleId}`,
       },
     });
-    for (const action of actions)
+    for (const [subject, action] of fixtureGrants(label, poMode))
       await db.rolePermission.create({
-        data: { roleId, permissionId: (await permission(action)).id },
+        data: { roleId, permissionId: (await permission(action, subject)).id },
       });
     await db.tenantMembership.create({ data: { tenantId, userId, roleId } });
     users[label] = { email, userId };
   }
-  return { tenantId, otherTenantId, users };
+  const catalog = poMode
+    ? await seedCatalog(db, tenantId, otherTenantId)
+    : undefined;
+  return { tenantId, otherTenantId, users, ...(catalog ? { catalog } : {}) };
 }
 
-async function main() {
+async function seedCatalog(db, tenantId, otherTenantId) {
+  const prefix = `PO-${crypto.randomUUID()}`;
+  const catalog = { prefix };
+  for (const [label, unit, type, useStock, hasVariants] of [
+    ['unidad', 'UNIDAD', 'PRODUCT', true, false],
+    ['kilogramo', 'KILOGRAMO', 'PRODUCT', true, false],
+    ['caja', 'CAJA', 'PRODUCT', true, true],
+    ['unidadVariants', 'UNIDAD', 'PRODUCT', true, true],
+    ['noStock', 'UNIDAD', 'PRODUCT', false, false],
+    ['service', 'HORA', 'SERVICE', false, false],
+    ['foreign', 'UNIDAD', 'PRODUCT', false, false],
+  ]) {
+    const product = await db.product.create({
+      data: {
+        tenantId: label === 'foreign' ? otherTenantId : tenantId,
+        name: `${prefix}-${label}`,
+        unit,
+        type,
+        useStock,
+        hasVariants,
+      },
+    });
+    catalog[label] = { id: product.id, name: product.name, unit };
+    if (hasVariants) {
+      catalog[label].variants = [];
+      for (const name of ['Small', 'Large']) {
+        const variant = await db.variant.create({
+          data: {
+            tenantId,
+            productId: product.id,
+            name: `${prefix}-${name}`,
+          },
+        });
+        catalog[label].variants.push({ id: variant.id, name: variant.name });
+      }
+    }
+  }
+  for (const status of ['ACTIVE', 'ARCHIVED']) {
+    const supplier = await db.procurementSupplier.create({
+      data: {
+        tenantId,
+        displayName: `${prefix}-${status}`,
+        status,
+      },
+    });
+    catalog[status.toLowerCase()] = {
+      id: supplier.id,
+      displayName: supplier.displayName,
+      version: supplier.version,
+    };
+  }
+  return catalog;
+}
+
+async function main(options = {}) {
+  poMode = options.po === true;
   configure();
+  if (poMode)
+    process.env = {
+      DATABASE_URL: process.env.DATABASE_URL,
+      NODE_ENV: 'development',
+      COREPACK_ENABLE_NETWORK: '0',
+      PRISMA_GENERATE_SKIP_AUTOINSTALL: 'true',
+    };
   record('host-started.json', { pid: process.pid });
   const { Test } = require('@nestjs/testing');
   const { ConfigModule } = require('@nestjs/config');
   const { ClsModule } = require('nestjs-cls');
-  const module = await Test.createTestingModule({
+  const builder = Test.createTestingModule({
     imports: [
       ConfigModule.forRoot({
         isGlobal: true,
@@ -168,15 +281,41 @@ async function main() {
             NODE_ENV: 'development',
             JWT_SECRET: secret(),
             JWT_REFRESH_SECRET: secret(),
+            ...(poMode
+              ? {
+                  SPACES_ENDPOINT: 'http://127.0.0.1:1',
+                  SPACES_REGION: 'disposable',
+                  SPACES_ACCESS_KEY_ID: 'disposable',
+                  SPACES_SECRET_ACCESS_KEY: 'disposable',
+                  SPACES_BUCKET: 'disposable',
+                  SPACES_PUBLIC_BASE_URL: 'http://127.0.0.1:1',
+                }
+              : {}),
           }),
         ],
       }),
       ClsModule.forRoot({ global: true, middleware: { mount: true } }),
       compiled('auth/auth.module').AuthModule,
       compiled('procurement/suppliers/suppliers.module').SuppliersModule,
+      ...(poMode
+        ? [
+            compiled('procurement/purchase-orders/purchase-orders.module')
+              .PurchaseOrdersModule,
+            compiled('products/products.module').ProductsModule,
+          ]
+        : []),
     ],
-  }).compile();
-  app = module.createNestApplication({ logger: ['error', 'warn'] });
+  });
+  if (poMode)
+    builder
+      .overrideProvider(
+        compiled('shared/outbox/outbox-poller.service').OutboxPollerService,
+      )
+      .useValue({});
+  const module = await builder.compile();
+  app = module.createNestApplication({
+    logger: poMode ? false : ['error', 'warn'],
+  });
   app.useGlobalPipes(
     compiled('shared/listing/app-validation.pipe').createAppValidationPipe(),
   );
@@ -195,11 +334,12 @@ async function main() {
     }),
   );
   // Same order as main.ts: supplier admission after CORS, before init.
-  compiled(
-    'procurement/suppliers/supplier-http.filter',
-  ).installSupplierBodyParser(app);
+  installParsers(app, poMode);
   app.use((req, res, next) => {
-    if (!routeAllowed(req.method, req.path))
+    if (
+      !routeAllowed(req.method, req.path, poMode) ||
+      (poMode && !selectorQueryAllowed(req.path, req.query))
+    )
       return res.status(403).json({ error: 'OUTSIDE_DISPOSABLE_SCOPE' });
     next();
   });
@@ -237,7 +377,26 @@ async function close(code) {
     process.exit(code);
   }
 }
-module.exports = { validateTarget, validatePrivatePath, routeAllowed };
+function start(options) {
+  process.once('SIGTERM', () => void close(0));
+  process.once('SIGINT', () => void close(0));
+  main(options).catch(async () => {
+    console.error(
+      'Disposable host failed; private target or runtime check failed',
+    );
+    await close(1);
+  });
+}
+module.exports = {
+  validateTarget,
+  validatePrivatePath,
+  routeAllowed,
+  selectorQueryAllowed,
+  seedCatalog,
+  fixtureGrants,
+  installParsers,
+  start,
+};
 if (require.main === module) process.once('SIGTERM', () => void close(0));
 if (require.main === module) process.once('SIGINT', () => void close(0));
 const execution = require.main === module ? main() : null;

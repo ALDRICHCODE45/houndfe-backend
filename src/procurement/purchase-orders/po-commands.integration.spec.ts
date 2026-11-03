@@ -235,9 +235,10 @@ describeDb('purchase-order command PostgreSQL protocol', () => {
       .readBigInt64BE(0);
     const before = await evidence(f.tenantId);
     await db.$transaction(async (tx) => {
-      await tx.$queryRaw(Prisma.sql`
-        SELECT pg_advisory_xact_lock(${gate}::bigint)
-      `);
+      // pg_advisory_xact_lock returns void, which $queryRaw cannot decode.
+      await tx.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(${gate}::bigint)`,
+      );
       await expect(
         f.run(() => f.commands.createDraft('held', empty)),
       ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_IN_FLIGHT' });

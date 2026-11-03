@@ -29,17 +29,19 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-floating-promises': 'warn',
       '@typescript-eslint/no-unsafe-argument': 'warn',
-      "prettier/prettier": ["error", { endOfLine: "auto" }],
+      'prettier/prettier': ['error', { endOfLine: 'auto' }],
     },
   },
   {
-    // Standalone Node scripts are JavaScript, outside the TypeScript project.
+    // Standalone supplier/PO runtime scripts are outside the TypeScript project.
     ...tseslint.configs.disableTypeChecked,
-    files: ['scripts/supplier-runtime/*.cjs'],
+    files: ['scripts/supplier-runtime/*.cjs', 'scripts/po-runtime/*.cjs'],
     languageOptions: {
       ...tseslint.configs.disableTypeChecked.languageOptions,
       globals: {
-        ...Object.fromEntries(Object.keys(globals.jest).map((name) => [name, 'off'])),
+        ...Object.fromEntries(
+          Object.keys(globals.jest).map((name) => [name, 'off']),
+        ),
         crypto: 'off',
       },
     },
