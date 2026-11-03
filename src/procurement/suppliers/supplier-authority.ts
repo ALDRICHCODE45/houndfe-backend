@@ -12,7 +12,7 @@ export interface SupplierPrincipal {
 export async function requireSupplierAuthority(
   tx: Prisma.TransactionClient,
   scope: SupplierPrincipal,
-  operation: 'CREATE' | 'UPDATE' | 'READ',
+  operation: 'CREATE' | 'UPDATE' | 'READ' | 'DELETE',
 ): Promise<void> {
   const actors = await tx.$queryRaw<
     { id: string; isActive: boolean }[]
@@ -53,10 +53,13 @@ export async function requireSupplierAuthority(
         ? 'create'
         : operation === 'READ'
           ? 'read'
-          : 'update',
+          : operation === 'DELETE'
+            ? 'delete'
+            : 'update',
       'ProcurementSupplier',
     ) ||
-    (operation === 'UPDATE' && !ability.can('read', 'ProcurementSupplier'))
+    ((operation === 'UPDATE' || operation === 'DELETE') &&
+      !ability.can('read', 'ProcurementSupplier'))
   )
     throw new SupplierContractError('FORBIDDEN');
 }

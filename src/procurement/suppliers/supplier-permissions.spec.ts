@@ -2,12 +2,13 @@ import { createHash } from 'node:crypto';
 import { PERMISSION_REGISTRY } from '../../auth/authorization/domain/permission';
 
 describe('supplier permission registry', () => {
-  it('adds exactly create/read/update, without removing or changing prior permissions', () => {
+  it('adds exactly create/read/update/delete, without changing prior permissions', () => {
     const suppliers = PERMISSION_REGISTRY.filter(
       (p) => String(p.subject) === 'ProcurementSupplier',
     );
     expect(suppliers.map((p) => p.action).sort()).toEqual([
       'create',
+      'delete',
       'read',
       'update',
     ]);

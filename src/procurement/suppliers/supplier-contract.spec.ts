@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { requireSupplierAuthority } from './supplier-authority';
 import {
   hashSupplierBody,
+  parseSupplierDelete as parseDelete,
   parseSupplierInput,
   parseSupplierUpdate,
   parseSupplierListQuery,
@@ -10,6 +11,34 @@ import {
   SupplierContractError,
   supplierErrorEnvelope,
 } from './supplier-contract';
+describe('closed supplier deletion body', () => {
+  it('accepts positive safe versions only and canonicalizes without extra fields', () => {
+    expect(parseDelete({ expectedVersion: Number.MAX_SAFE_INTEGER })).toEqual({
+      expectedVersion: Number.MAX_SAFE_INTEGER,
+    });
+    expect(hashSupplierBody('delete', { expectedVersion: 1 })).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+    expect(hashSupplierBody('delete', { expectedVersion: 1 })).not.toBe(
+      hashSupplierBody('delete', { expectedVersion: 2 }),
+    );
+  });
+  it.each([
+    null,
+    [],
+    {},
+    { expectedVersion: 0 },
+    { expectedVersion: -1 },
+    { expectedVersion: 1.5 },
+    { expectedVersion: Infinity },
+    { expectedVersion: Number.MAX_SAFE_INTEGER + 1 },
+    { expectedVersion: '1' },
+    { expectedVersion: 1, changes: {} },
+    { expectedVersion: [1, 1] },
+  ])('rejects invalid delete %#', (value) => {
+    expect(() => parseDelete(value)).toThrow('MALFORMED');
+  });
+});
 
 describe('shared supplier authority command regression and READ extension', () => {
   it.each([
@@ -21,10 +50,14 @@ describe('shared supplier authority command regression and READ extension', () =
     ['READ', ['read'], true],
     ['READ', ['create'], false],
     ['READ', ['update'], false],
+    ['DELETE', ['read', 'delete'], true],
+    ['DELETE', ['read'], false],
+    ['DELETE', ['delete'], false],
+    ['DELETE', ['manage'], true],
   ] as const)(
     '%s with %j grants admits=%s',
     async (
-      operation: 'CREATE' | 'UPDATE' | 'READ',
+      operation: 'CREATE' | 'UPDATE' | 'READ' | 'DELETE',
       actions: readonly string[],
       allowed: boolean,
     ) => {

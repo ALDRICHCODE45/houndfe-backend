@@ -54,7 +54,7 @@ function isSupplierRoute(request: Request): boolean {
     ((request.method === 'GET' || request.method === 'HEAD') &&
       (collection || detail)) ||
     (request.method === 'POST' && collection) ||
-    (request.method === 'PATCH' && detail)
+    ((request.method === 'PATCH' || request.method === 'DELETE') && detail)
   );
 }
 function malformed(response: Response): void {
@@ -73,7 +73,31 @@ function malformed(response: Response): void {
  * a command. CORS headers already present are preserved.
  */
 export function installSupplierBodyParser(app: INestApplication): void {
-  const json = express.json({ strict: false });
+  const json = express.json({
+    strict: false,
+    verify(request, _response, buffer, encoding) {
+      if (request.method !== 'DELETE') return;
+      // DELETE has a flat, closed body. Inspect string tokens BEFORE decoding
+      // loses duplicate members, including escaped spellings of the same key.
+      // Syntax and non-flat/unknown fields are still rejected by normal parsers.
+      const tokens =
+        buffer
+          .toString(encoding as BufferEncoding)
+          .match(/"(?:\\.|[^"\\])*"|[{}:]/g) ?? [];
+      const keys = new Set<string>();
+      for (let i = 0; i < tokens.length - 1; i++) {
+        if (!tokens[i].startsWith('"') || tokens[i + 1] !== ':') continue;
+        let key: string;
+        try {
+          key = JSON.parse(tokens[i]) as string;
+        } catch {
+          throw new SupplierContractError('MALFORMED');
+        }
+        if (keys.has(key)) throw new SupplierContractError('MALFORMED');
+        keys.add(key);
+      }
+    },
+  });
   const form = express.urlencoded({ extended: true });
   const scopedJson: RequestHandler = (request, response, next) => {
     if (!isSupplierRoute(request)) return next();

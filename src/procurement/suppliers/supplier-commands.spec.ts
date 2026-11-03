@@ -38,7 +38,7 @@ function harness() {
     failReceipt: false,
     casLost: false,
   };
-  let permissions = ['create', 'read', 'update'].map((action) => ({
+  let permissions = ['create', 'read', 'update', 'delete'].map((action) => ({
     action,
     subject: 'ProcurementSupplier',
   }));
@@ -111,6 +111,25 @@ function harness() {
           return { count: 1 };
         },
       ),
+      deleteMany: jest.fn(
+        async ({
+          where,
+        }: {
+          where: { tenantId: string; id: string; version: number };
+        }) => {
+          const before = rows.length;
+          if (!flags.casLost)
+            rows = rows.filter(
+              (r) =>
+                !(
+                  r.tenantId === where.tenantId &&
+                  r.id === where.id &&
+                  r.version === where.version
+                ),
+            );
+          return { count: before - rows.length };
+        },
+      ),
       findFirstOrThrow: jest.fn(
         async ({ where }: { where: { tenantId: string; id: string } }) => {
           const row = rows.find(
@@ -181,6 +200,142 @@ function harness() {
     state: () => ({ rows, receipts, audits }),
   };
 }
+
+describe('SupplierCommands hard deletion', () => {
+  const remove = (
+    h: ReturnType<typeof harness>,
+    key = 'd',
+    expectedVersion = 1,
+  ) => h.service.delete(id, key, { expectedVersion });
+
+  it.each(['ACTIVE', 'ARCHIVED'])(
+    'permanently removes %s but preserves evidence and all historical replays',
+    async (status) => {
+      const h = harness();
+      const original = await h.service.create('c', { ...input, status });
+      const patch = { expectedVersion: 1, changes: { termsText: null } };
+      const edited = await h.service.update(id, 'u', patch);
+      const before = structuredClone(h.state());
+      expect(await remove(h, 'd', 2)).toEqual({ statusCode: 204, body: null });
+      expect(h.state().rows).toEqual([]);
+      expect(h.tx.procurementSupplier.deleteMany).toHaveBeenCalledWith({
+        where: { tenantId, id, version: 2 },
+      });
+      expect(
+        h.tx.procurementSupplierReceipt.create.mock.calls.at(-1)?.[0].data,
+      ).toMatchObject({
+        tenantId,
+        actorId,
+        operation: 'DELETE',
+        target: id,
+        supplierId: id,
+        idempotencyKey: 'd',
+        requestHash: hashSupplierBody('delete', { expectedVersion: 2 }),
+        statusCode: 204,
+        responseBody: Prisma.JsonNull,
+      });
+      expect(h.state().audits.slice(0, 2)).toEqual(before.audits);
+      expect(h.state().receipts.slice(0, 2)).toEqual(before.receipts);
+      expect(h.state().audits[2]).toMatchObject({
+        actorId,
+        tenantId,
+        supplierId: id,
+        operation: 'DELETE',
+        supplierVersion: 3,
+        snapshot: { ...edited.body, version: 3 },
+      });
+      expect(await remove(h, 'd', 2)).toEqual({ statusCode: 204, body: null });
+      expect(await h.service.create('c', { ...input, status })).toEqual(
+        original,
+      );
+      expect(await h.service.update(id, 'u', patch)).toEqual(edited);
+      await expect(remove(h, 'new', 2)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+      await expect(remove(h, 'd', 3)).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+      });
+      expect(h.state().audits).toHaveLength(3);
+      expect(h.state().receipts).toHaveLength(3);
+    },
+  );
+  it.each([['read'], ['delete'], ['create', 'update']])(
+    'requires read AND delete: %j',
+    async (...actions) => {
+      const h = harness();
+      await h.service.create('c', input);
+      h.setPermissions(
+        actions.map((action) => ({ action, subject: 'ProcurementSupplier' })),
+      );
+      await expect(remove(h)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      expect(h.state().rows).toHaveLength(1);
+    },
+  );
+  it.each(['active', 'tenantActive', 'member'] as const)(
+    'checks persisted %s before deleted replay',
+    async (flag) => {
+      const h = harness();
+      await h.service.create('c', input);
+      await remove(h);
+      h.flags[flag] = false;
+      await expect(remove(h)).rejects.toMatchObject({
+        code: flag === 'active' ? 'UNAUTHORIZED' : 'FORBIDDEN',
+      });
+    },
+  );
+  it.each(['stale', 'overflow', 'casLost', 'gate', 'foreign'] as const)(
+    'rejects %s without effects',
+    async (kind) => {
+      const h = harness();
+      await h.service.create('c', input);
+      if (kind === 'overflow') h.state().rows[0].version = 2147483647;
+      if (kind === 'casLost') h.flags.casLost = true;
+      if (kind === 'gate') h.flags.gate = false;
+      if (kind === 'foreign') h.context.tenantId = 'other';
+      const before = structuredClone(h.state());
+      await expect(
+        remove(
+          h,
+          'd',
+          kind === 'overflow' ? 2147483647 : kind === 'stale' ? 2 : 1,
+        ),
+      ).rejects.toMatchObject({
+        code:
+          kind === 'gate'
+            ? 'IDEMPOTENCY_KEY_IN_FLIGHT'
+            : kind === 'foreign'
+              ? 'NOT_FOUND'
+              : 'SUPPLIER_VERSION_CONFLICT',
+      });
+      expect(h.state()).toEqual(before);
+    },
+  );
+  it('permits the last representable deletion event version without overflow', async () => {
+    const h = harness();
+    await h.service.create('c', input);
+    h.state().rows[0].version = 2147483646;
+    expect(await remove(h, 'd', 2147483646)).toEqual({
+      statusCode: 204,
+      body: null,
+    });
+    expect(h.state().rows).toEqual([]);
+    expect(h.state().audits[1]).toMatchObject({
+      supplierVersion: 2147483647,
+      snapshot: { version: 2147483647 },
+    });
+  });
+  it.each(['failAudit', 'failReceipt'] as const)(
+    'rolls deletion back on %s',
+    async (flag) => {
+      const h = harness();
+      await h.service.create('c', input);
+      const before = structuredClone(h.state());
+      h.flags[flag] = true;
+      await expect(remove(h)).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+      expect(h.state()).toEqual(before);
+    },
+  );
+});
 
 describe('SupplierCommands public interface', () => {
   it('does not flatten real transaction clients in integration interception fixtures (offline drift guard)', () => {

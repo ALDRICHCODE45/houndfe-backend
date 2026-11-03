@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Req,
   Res,
   Header,
@@ -22,6 +23,7 @@ import {
   parseSupplierIdempotencyKey,
   parseSupplierInput,
   parseSupplierUpdate,
+  parseSupplierDelete,
   parseSupplierListQuery,
   SupplierContractError,
 } from './supplier-contract';
@@ -83,6 +85,26 @@ export class SuppliersController {
     const result = await this.commands.create(key, body);
     response.status(result.statusCode);
     return result.body;
+  }
+
+  @Delete(':supplierId')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(
+    ['read', 'ProcurementSupplier'],
+    ['delete', 'ProcurementSupplier'],
+  )
+  async delete(
+    @Req() request: Request,
+    @Res() response: Response,
+  ): Promise<void> {
+    noQuery(request);
+    if (!request.is('application/json'))
+      throw new SupplierContractError('MALFORMED');
+    const id = parseSupplierId(request.params.supplierId);
+    const key = parseSupplierIdempotencyKey(request.rawHeaders);
+    const body = parseSupplierDelete(request.body);
+    const result = await this.commands.delete(id, key, body);
+    response.status(result.statusCode).end();
   }
 
   @Patch(':supplierId')

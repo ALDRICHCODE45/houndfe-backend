@@ -12,6 +12,8 @@ import {
   parseSupplierIdempotencyKey,
   parseSupplierInput,
   parseSupplierUpdate,
+  parseSupplierDelete,
+  type SupplierDelete,
   SupplierContractError,
   type Supplier,
   type SupplierInput,
@@ -21,6 +23,11 @@ import {
 export interface SupplierCommandResult {
   statusCode: 201 | 200;
   body: Supplier;
+}
+
+export interface SupplierDeleteResult {
+  statusCode: 204;
+  body: null;
 }
 
 function wire(row: ProcurementSupplier): Supplier {
@@ -64,9 +71,22 @@ export class SupplierCommands {
     );
   }
 
-  private async sanitized(
-    work: () => Promise<SupplierCommandResult>,
-  ): Promise<SupplierCommandResult> {
+  async delete(
+    id: unknown,
+    key: unknown,
+    body: unknown,
+  ): Promise<SupplierDeleteResult> {
+    return this.sanitized(() =>
+      this.execute(
+        'DELETE',
+        parseSupplierId(id),
+        key,
+        parseSupplierDelete(body),
+      ),
+    );
+  }
+
+  private async sanitized<T>(work: () => Promise<T>): Promise<T> {
     try {
       return await work();
     } catch (error) {
@@ -75,12 +95,24 @@ export class SupplierCommands {
     }
   }
 
-  private async execute(
+  private execute(
     operation: 'CREATE' | 'UPDATE',
     target: string,
     rawKey: unknown,
     input: SupplierInput | SupplierUpdate,
-  ): Promise<SupplierCommandResult> {
+  ): Promise<SupplierCommandResult>;
+  private execute(
+    operation: 'DELETE',
+    target: string,
+    rawKey: unknown,
+    input: SupplierDelete,
+  ): Promise<SupplierDeleteResult>;
+  private async execute(
+    operation: 'CREATE' | 'UPDATE' | 'DELETE',
+    target: string,
+    rawKey: unknown,
+    input: SupplierInput | SupplierUpdate | SupplierDelete,
+  ): Promise<SupplierCommandResult | SupplierDeleteResult> {
     // Snapshot all admission/context before the first await. Reuse the exact
     // header-value policy even for non-HTTP callers; duplicate header checking
     // remains the future route's rawHeaders responsibility.
@@ -103,7 +135,11 @@ export class SupplierCommands {
     const scope = { actorId, tenantId };
     const namespace = { ...scope, operation, target, idempotencyKey };
     const requestHash = hashSupplierBody(
-      operation === 'CREATE' ? 'create' : 'update',
+      operation === 'CREATE'
+        ? 'create'
+        : operation === 'DELETE'
+          ? 'delete'
+          : 'update',
       input,
     );
     // Length-delimited JSON tuple, not ambiguous string concatenation. The
@@ -146,6 +182,7 @@ export class SupplierCommands {
       if (receipt) {
         if (receipt.requestHash !== requestHash)
           throw new SupplierContractError('IDEMPOTENCY_KEY_CONFLICT');
+        if (operation === 'DELETE') return { statusCode: 204, body: null };
         return {
           statusCode: receipt.statusCode as 200 | 201,
           // SAFETY: this feature writes only persisted wire(row) snapshots;
@@ -170,19 +207,31 @@ export class SupplierCommands {
           rows[0].version >= 2147483647
         )
           throw new SupplierContractError('SUPPLIER_VERSION_CONFLICT');
-        const changed = await tx.procurementSupplier.updateMany({
-          where: { tenantId, id: target, version: update.expectedVersion },
-          data: { ...update.changes, version: { increment: 1 } },
-        });
-        if (changed.count !== 1)
-          throw new SupplierContractError('SUPPLIER_VERSION_CONFLICT');
-        row = await tx.procurementSupplier.findFirstOrThrow({
-          where: { tenantId, id: target },
-        });
+        if (operation === 'DELETE') {
+          const deleted = await tx.procurementSupplier.deleteMany({
+            where: { tenantId, id: target, version: update.expectedVersion },
+          });
+          if (deleted.count !== 1)
+            throw new SupplierContractError('SUPPLIER_VERSION_CONFLICT');
+          // Prior fields/timestamps, with the deletion event version.
+          // Audit.createdAt is the deletion timestamp, not snapshot.updatedAt.
+          row = { ...rows[0], version: rows[0].version + 1 };
+        } else {
+          const changed = await tx.procurementSupplier.updateMany({
+            where: { tenantId, id: target, version: update.expectedVersion },
+            data: { ...update.changes, version: { increment: 1 } },
+          });
+          if (changed.count !== 1)
+            throw new SupplierContractError('SUPPLIER_VERSION_CONFLICT');
+          row = await tx.procurementSupplier.findFirstOrThrow({
+            where: { tenantId, id: target },
+          });
+        }
       }
       const body = wire(row);
       const snapshot: Prisma.InputJsonObject = { ...body };
-      const statusCode = operation === 'CREATE' ? 201 : 200;
+      const statusCode =
+        operation === 'CREATE' ? 201 : operation === 'DELETE' ? 204 : 200;
       await tx.procurementSupplierAudit.create({
         data: {
           ...scope,
@@ -198,10 +247,11 @@ export class SupplierCommands {
           supplierId: row.id,
           requestHash,
           statusCode,
-          responseBody: snapshot,
+          responseBody: operation === 'DELETE' ? Prisma.JsonNull : snapshot,
         },
       });
-      return { statusCode, body };
+      if (operation === 'DELETE') return { statusCode: 204, body: null };
+      return { statusCode: statusCode as 200 | 201, body };
     }, Prisma.TransactionIsolationLevel.ReadCommitted);
   }
 }

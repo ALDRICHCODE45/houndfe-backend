@@ -1,4 +1,16 @@
-# Supplier commands (O3a A2 command subunit)
+# Supplier commands (O3a A2, D1 deletion)
+
+## D1 permanent deletion extension
+
+The commands are now wired through the A3 controller. D1 adds `SupplierCommands.delete(id,key,{expectedVersion})` returning `{statusCode:204,body:null}` internally; HTTP ends the response with zero bytes. The new closed parser/hash branch accepts only a positive safe-integer expectedVersion. Inputs/context are captured before await as before. No default role assignments: the registry adds only `delete:ProcurementSupplier`. Fresh execution and replay require current persisted read+delete (ordinary manage/all implication retained).
+
+DELETE reuses the existing owned ReadCommitted transaction and exact lifecycle→tenant→user/grant edges→advisory namespace gate→receipt→supplier FOR UPDATE order. Same-key same-body replay occurs after current authority and before any live-row/CAS lookup, so removed suppliers still acknowledge 204; mismatched body conflicts. A new key against missing/foreign supplier yields 404. CREATE/UPDATE historical replay is unchanged, including after deletion. Receipts are still keyed by all tenant/actor/operation/target/key fields; DELETE target is normalized supplier UUID.
+
+Fresh DELETE accepts ACTIVE or ARCHIVED, checks CAS and SQL INTEGER ceiling2147483647, then conditionally deletes only that tenant/id/version. Count!=1 conflicts. Its audit stores the previous fields/timestamps with deletion version previous+1; audit.createdAt is the deletion event time, not snapshot.updatedAt. Audit and 204/JSON-null receipt commit with the deletion; failure rolls all three back. Prior evidence is never mutated. No stock, money, CxP or outbox path is added. See the storage document for removed live-supplier FKs, retained tenant constraints and the future order FK obligation; no fictional order query exists.
+
+D1 offline evidence, SQL execution limits and review slices are in `procurement-suppliers-api-verification.md`. The following A2 section is historical evidence, not a claim that DELETE existed or SQL D1 passed then.
+
+## A2 original command unit (historical)
 
 **Unwired service, not an available API.** No controller, module registration,
 list/detail reader, history endpoint or automatic role grant is added. A3 owns
@@ -22,7 +34,7 @@ Archived suppliers remain editable. Each fresh accepted update, including an
 explicit same-value patch, consumes one version; there is no inferred transition.
 
 Registry adds exactly create/read/update on `ProcurementSupplier`; no role grants,
-default assignments, delete/manage row or purchase-order subject. Creation requires
+default assignments, manage row or purchase-order subject in A2. D1 adds the delete registry row only. Creation requires
 create only; update requires read AND update. CASL retains ordinary manage/all
 implication. A global super-admin claim or global role without selected-tenant
 membership is not a bypass. No editorial administrator exception is copied.

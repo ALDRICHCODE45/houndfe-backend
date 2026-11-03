@@ -8,6 +8,9 @@ export interface SupplierInput {
   status: SupplierStatus;
 }
 export type SupplierPatch = Partial<SupplierInput>;
+export interface SupplierDelete {
+  expectedVersion: number;
+}
 export interface SupplierUpdate {
   expectedVersion: number;
   changes: SupplierPatch;
@@ -157,6 +160,20 @@ export function parseSupplierUpdate(value: unknown): SupplierUpdate {
   });
 }
 
+export function parseSupplierDelete(value: unknown): SupplierDelete {
+  return parse(() => {
+    const data = fields(value, ['expectedVersion'], ['expectedVersion']);
+    const version = data.expectedVersion;
+    if (
+      typeof version !== 'number' ||
+      !Number.isSafeInteger(version) ||
+      version < 1
+    )
+      malformed();
+    return { expectedVersion: version };
+  });
+}
+
 /** Query parser receives scalars without framework coercion; arrays are rejected. */
 export function parseSupplierListQuery(value: unknown): SupplierListQuery {
   return parse(() => {
@@ -229,14 +246,21 @@ export function parseSupplierIdempotencyKey(rawHeaders: unknown): string {
 
 /** SHA-256 of UTF-8 JSON of the closed body in fixed schema order; includes CAS. */
 export function hashSupplierBody(
-  operation: 'create' | 'update',
+  operation: 'create' | 'update' | 'delete',
   value: unknown,
 ): string {
-  if (operation !== 'create' && operation !== 'update') malformed();
+  if (
+    operation !== 'create' &&
+    operation !== 'update' &&
+    operation !== 'delete'
+  )
+    malformed();
   const body =
     operation === 'create'
       ? parseSupplierInput(value)
-      : parseSupplierUpdate(value);
+      : operation === 'delete'
+        ? parseSupplierDelete(value)
+        : parseSupplierUpdate(value);
   return createHash('sha256')
     .update(JSON.stringify(body), 'utf8')
     .digest('hex');

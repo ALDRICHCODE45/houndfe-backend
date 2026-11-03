@@ -52,7 +52,7 @@ describe('supplier public HTTP boundary (offline mocks; actual JWT/CLS/RBAC guar
   let token: string;
   let cls: ClsService;
   let permissions: string[];
-  const commands = { create: jest.fn(), update: jest.fn() };
+  const commands = { create: jest.fn(), update: jest.fn(), delete: jest.fn() };
   const queries = { list: jest.fn(), detail: jest.fn() };
   beforeAll(async () => {
     const module = await Test.createTestingModule({
@@ -110,14 +110,15 @@ describe('supplier public HTTP boundary (offline mocks; actual JWT/CLS/RBAC guar
   });
   beforeEach(() => {
     jest.clearAllMocks();
-    permissions = ['read', 'create', 'update'];
+    permissions = ['read', 'create', 'update', 'delete'];
+    commands.delete.mockResolvedValue({ statusCode: 204, body: null });
     commands.create.mockResolvedValue({ statusCode: 201, body: supplier });
     commands.update.mockResolvedValue({ statusCode: 200, body: supplier });
     queries.list.mockResolvedValue({ items: [supplier], nextCursor: null });
     queries.detail.mockResolvedValue(supplier);
   });
   function http(
-    method: 'get' | 'post' | 'patch',
+    method: 'get' | 'post' | 'patch' | 'delete',
     path = '/procurement/suppliers',
     authenticated = true,
   ) {
@@ -183,6 +184,165 @@ describe('supplier public HTTP boundary (offline mocks; actual JWT/CLS/RBAC guar
       'authorization,content-type,idempotency-key',
     );
     noCalls();
+  });
+  it('DELETE returns genuinely empty 204/no-store and forwards closed JSON', async () => {
+    const response = await http('delete', `/procurement/suppliers/${id}`)
+      .set('Idempotency-Key', key)
+      .send({ expectedVersion: 1 });
+    expect(response.status).toBe(204);
+    expect(response.text).toBe('');
+    expect(response.headers['content-type']).toBeUndefined();
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['access-control-allow-origin']).toBe(
+      'https://offline.example',
+    );
+    expect(commands.delete).toHaveBeenCalledWith(id, key, {
+      expectedVersion: 1,
+    });
+    expect(commands.create).not.toHaveBeenCalled();
+    expect(commands.update).not.toHaveBeenCalled();
+    expect(queries.list).not.toHaveBeenCalled();
+    expect(queries.detail).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['query', '?x=1', '{"expectedVersion":1}'],
+    ['repeated query', '?x=1&x=2', '{"expectedVersion":1}'],
+    ['unknown body', '', '{"expectedVersion":1,"x":2}'],
+    ['repeated JSON key', '', '{"expectedVersion":1,"expectedVersion":1}'],
+    ['malformed JSON', '', '{'],
+    ['missing', '', '{}'],
+    ['zero', '', '{"expectedVersion":0}'],
+    ['unsafe', '', '{"expectedVersion":9007199254740992}'],
+    ['fraction', '', '{"expectedVersion":1.5}'],
+    ['string', '', '{"expectedVersion":"1"}'],
+    ['null', '', 'null'],
+  ])('DELETE rejects %s before boundaries', async (_kind, query, raw) => {
+    closed(
+      await http('delete', `/procurement/suppliers/${id}${query}`)
+        .set('Idempotency-Key', key)
+        .set('Content-Type', 'application/json')
+        .send(raw),
+      400,
+      'MALFORMED',
+    );
+    noCalls();
+  });
+  it.each(['/PROCUREMENT/SUPPLIERS/', '/procurement/suppliers/'])(
+    'DELETE equivalent route %s keeps early failures closed',
+    async (prefix) => {
+      closed(
+        await http('delete', `${prefix}${id}/`)
+          .set('Content-Type', 'application/json')
+          .send('{'),
+        400,
+        'MALFORMED',
+      );
+      noCalls();
+    },
+  );
+  it.each([
+    'text/plain',
+    'application/x-www-form-urlencoded',
+    'application/octet-stream',
+  ])('DELETE rejects %s rather than coercing it', async (type) => {
+    closed(
+      await http('delete', `/procurement/suppliers/${id}`)
+        .set('Idempotency-Key', key)
+        .set('Content-Type', type)
+        .send(
+          type === 'application/octet-stream'
+            ? Buffer.from('{"expectedVersion":1}')
+            : '{"expectedVersion":1}',
+        ),
+      400,
+      'MALFORMED',
+    );
+    noCalls();
+  });
+  it.each([
+    '{"expectedVersion":1,"\\u0065xpectedVersion":2}',
+    '{"expectedVersion":1,"expectedVersion":2}',
+    '{"expectedVersion":1,"x":1,"x":2}',
+  ])('DELETE rejects duplicate raw members %#', async (raw) => {
+    closed(
+      await http('delete', `/procurement/suppliers/${id}`)
+        .set('Idempotency-Key', key)
+        .set('Content-Type', 'application/json')
+        .send(raw),
+      400,
+      'MALFORMED',
+    );
+    noCalls();
+  });
+  it('DELETE accepts a single escaped member name without false duplication', async () => {
+    const result = await http('delete', `/procurement/suppliers/${id}`)
+      .set('Idempotency-Key', key)
+      .set('Content-Type', 'application/json')
+      .send('{"\\u0065xpectedVersion":1}');
+    expect(result.status).toBe(204);
+    expect(commands.delete).toHaveBeenCalledWith(id, key, {
+      expectedVersion: 1,
+    });
+  });
+  it.each(['bad-id', '%E0%A4%A'])(
+    'DELETE rejects invalid path %s',
+    async (path) => {
+      closed(
+        await http('delete', `/procurement/suppliers/${path}`)
+          .set('Idempotency-Key', key)
+          .send({ expectedVersion: 1 }),
+        400,
+        'MALFORMED',
+      );
+      noCalls();
+    },
+  );
+  it.each(['missing', 'duplicate'])('DELETE rejects %s key', async (kind) => {
+    const call = http('delete', `/procurement/suppliers/${id}`);
+    if (kind === 'duplicate')
+      call.set('Idempotency-Key', ['a', 'b'] as unknown as string);
+    closed(await call.send({ expectedVersion: 1 }), 400, 'MALFORMED');
+    noCalls();
+  });
+  it.each([[], ['read'], ['delete']])(
+    'DELETE denies permissions %j',
+    async (...actions) => {
+      permissions = actions;
+      closed(
+        await http('delete', `/procurement/suppliers/${id}`)
+          .set('Idempotency-Key', key)
+          .send({ expectedVersion: 1 }),
+        403,
+        'FORBIDDEN',
+      );
+      noCalls();
+    },
+  );
+  it('DELETE denies anonymous before boundary', async () => {
+    closed(
+      await http('delete', `/procurement/suppliers/${id}`, false)
+        .set('Idempotency-Key', key)
+        .send({ expectedVersion: 1 }),
+      401,
+      'UNAUTHORIZED',
+    );
+    noCalls();
+  });
+  it.each([
+    ['NOT_FOUND', 404],
+    ['SUPPLIER_VERSION_CONFLICT', 409],
+    ['IDEMPOTENCY_KEY_CONFLICT', 409],
+    ['IDEMPOTENCY_KEY_IN_FLIGHT', 409],
+    ['INTERNAL_ERROR', 500],
+  ] as const)('DELETE maps %s without leaking values', async (code, status) => {
+    commands.delete.mockRejectedValue(new SupplierContractError(code));
+    closed(
+      await http('delete', `/procurement/suppliers/${id}`)
+        .set('Idempotency-Key', key)
+        .send({ expectedVersion: 1 }),
+      status,
+      code,
+    );
   });
   it('lists the exact page without totals and forwards uncoerced query', async () => {
     const response = await http(
@@ -544,7 +704,7 @@ describe('supplier public HTTP boundary (offline mocks; actual JWT/CLS/RBAC guar
   });
   it.each([
     ['post', `/procurement/suppliers/${id}/history`],
-    ['delete', `/procurement/suppliers/${id}`],
+    ['delete', '/procurement/suppliers'],
   ] as const)(
     'keeps default parsers on unsupported %s %s',
     async (method, path) => {
@@ -558,14 +718,14 @@ describe('supplier public HTTP boundary (offline mocks; actual JWT/CLS/RBAC guar
       noCalls();
     },
   );
-  it('does not expose history or delete routes', async () => {
+  it('does not expose history or collection deletion routes', async () => {
     expect(
       (await http('get', `/procurement/suppliers/${id}/history`)).status,
     ).toBe(404);
     expect(
       (
         await request(app.getHttpServer() as Server).delete(
-          `/procurement/suppliers/${id}`,
+          '/procurement/suppliers',
         )
       ).status,
     ).toBe(404);

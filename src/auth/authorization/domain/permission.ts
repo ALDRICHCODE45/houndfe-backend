@@ -119,6 +119,11 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     action: 'update',
     description: 'Edit, archive and reactivate suppliers',
   },
+  {
+    subject: 'ProcurementSupplier',
+    action: 'delete',
+    description: 'Permanently delete suppliers',
+  },
 
   // Product permissions
   {

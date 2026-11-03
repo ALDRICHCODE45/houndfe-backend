@@ -92,7 +92,7 @@ describeDb('supplier commands PostgreSQL transaction boundary', () => {
       await tx.role.create({
         data: { id: roleId, tenantId, name: `Owned supplier ${roleId}` },
       });
-      for (const action of ['create', 'read', 'update']) {
+      for (const action of ['create', 'read', 'update', 'delete']) {
         const permission =
           (await tx.permission.findUnique({
             where: {
@@ -132,6 +132,322 @@ describeDb('supplier commands PostgreSQL transaction boundary', () => {
       db.outboxEvent.count({ where }),
     ]);
   }
+
+  it.each(['ACTIVE', 'ARCHIVED'])(
+    'hard deletes %s, retains all evidence and replays original create/update/delete responses',
+    async (status) => {
+      const f = await fixture();
+      const created = await f.run(() =>
+        f.service.create('c', { ...input, status }),
+      );
+      const id = created.body.id;
+      const patch = { expectedVersion: 1, changes: { termsText: null } };
+      const edited = await f.run(() => f.service.update(id, 'u', patch));
+      const where = { tenantId: f.tenantId, supplierId: id };
+      const auditsBefore = await db.procurementSupplierAudit.findMany({
+        where,
+        orderBy: { supplierVersion: 'asc' },
+      });
+      const receiptsBefore = await db.procurementSupplierReceipt.findMany({
+        where,
+        orderBy: { operation: 'asc' },
+      });
+      const body = { expectedVersion: 2 };
+      const earliest = new Date();
+      expect(await f.run(() => f.service.delete(id, 'd', body))).toEqual({
+        statusCode: 204,
+        body: null,
+      });
+      expect(
+        await db.procurementSupplier.count({
+          where: { tenantId: f.tenantId, id },
+        }),
+      ).toBe(0);
+      const audits = await db.procurementSupplierAudit.findMany({
+        where,
+        orderBy: { supplierVersion: 'asc' },
+      });
+      expect(audits.slice(0, 2)).toEqual(auditsBefore);
+      expect(audits[2]).toMatchObject({
+        actorId: f.actorId,
+        operation: 'DELETE',
+        supplierVersion: 3,
+        snapshot: { ...edited.body, version: 3 },
+      });
+      expect(audits[2].createdAt.getTime()).toBeGreaterThanOrEqual(
+        earliest.getTime() - 1,
+      );
+      const receipts = await db.procurementSupplierReceipt.findMany({
+        where,
+        orderBy: { operation: 'asc' },
+      });
+      expect(receipts.filter((r) => r.operation !== 'DELETE')).toEqual(
+        receiptsBefore,
+      );
+      expect(receipts.find((r) => r.operation === 'DELETE')).toMatchObject({
+        target: id,
+        statusCode: 204,
+        responseBody: null,
+      });
+      expect(await f.run(() => f.service.delete(id, 'd', body))).toEqual({
+        statusCode: 204,
+        body: null,
+      });
+      expect(
+        await f.run(() => f.service.create('c', { ...input, status })),
+      ).toEqual(created);
+      expect(await f.run(() => f.service.update(id, 'u', patch))).toEqual(
+        edited,
+      );
+      await expect(
+        f.run(() => f.service.delete(id, 'new', body)),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      await expect(
+        f.run(() => f.service.delete(id, 'd', { expectedVersion: 3 })),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+      expect(await db.procurementSupplierAudit.count({ where })).toBe(3);
+      expect(await db.procurementSupplierReceipt.count({ where })).toBe(3);
+      expect(await effects(f.tenantId)).toEqual([0, 0, 0, 0]);
+    },
+  );
+
+  it.each(['read', 'delete'])(
+    'revoked %s grant denies replay after deletion',
+    async (action) => {
+      const f = await fixture();
+      const {
+        body: { id },
+      } = await f.run(() => f.service.create('c', input));
+      await f.run(() => f.service.delete(id, 'd', { expectedVersion: 1 }));
+      const grant = await db.rolePermission.findFirstOrThrow({
+        where: {
+          roleId: f.roleId,
+          permission: { action, subject: 'ProcurementSupplier' },
+        },
+      });
+      const unrelated = await db.permission.create({
+        data: { action: 'read', subject: `Owned-proof-${randomUUID()}` },
+      });
+      await db.rolePermission.update({
+        where: { id: grant.id },
+        data: { permissionId: unrelated.id },
+      });
+      await expect(
+        f.run(() => f.service.delete(id, 'd', { expectedVersion: 1 })),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      expect(
+        await db.procurementSupplierAudit.count({
+          where: { tenantId: f.tenantId },
+        }),
+      ).toBe(2);
+      expect(await effects(f.tenantId)).toEqual([0, 0, 0, 0]);
+    },
+  );
+
+  it.each(['delete/delete', 'update/delete'])(
+    'serializes concurrent %s with exactly one committed event',
+    async (kind) => {
+      const f = await fixture();
+      const {
+        body: { id },
+      } = await f.run(() => f.service.create('c', input));
+      const results = await Promise.allSettled([
+        f.run(() =>
+          kind === 'delete/delete'
+            ? f.service.delete(id, 'a', { expectedVersion: 1 })
+            : f.service.update(id, 'a', {
+                expectedVersion: 1,
+                changes: { termsText: null },
+              }),
+        ),
+        f.run(() => f.service.delete(id, 'b', { expectedVersion: 1 })),
+      ]);
+      const successes = results.filter((r) => r.status === 'fulfilled');
+      expect(successes).toHaveLength(1);
+      const failure = results.find((r) => r.status === 'rejected');
+      const deleted = successes[0].value.statusCode === 204;
+      expect(failure).toMatchObject({
+        reason: { code: deleted ? 'NOT_FOUND' : 'SUPPLIER_VERSION_CONFLICT' },
+      });
+      expect(
+        await db.procurementSupplier.count({
+          where: { tenantId: f.tenantId, id },
+        }),
+      ).toBe(deleted ? 0 : 1);
+      const audits = await db.procurementSupplierAudit.findMany({
+        where: { tenantId: f.tenantId },
+        orderBy: { supplierVersion: 'asc' },
+      });
+      expect(audits.map((a) => a.supplierVersion)).toEqual([1, 2]);
+      expect(audits[1].operation).toBe(deleted ? 'DELETE' : 'UPDATE');
+      expect(
+        await db.procurementSupplierReceipt.count({
+          where: { tenantId: f.tenantId },
+        }),
+      ).toBe(2);
+      expect(await effects(f.tenantId)).toEqual([0, 0, 0, 0]);
+    },
+  );
+
+  it.each(['procurementSupplierAudit', 'procurementSupplierReceipt'] as const)(
+    'rolls real deletion back after injected %s failure',
+    async (delegate) => {
+      const f = await fixture();
+      const created = await f.run(() => f.service.create('c', input));
+      const id = created.body.id;
+      const where = { tenantId: f.tenantId };
+      const before = {
+        supplier: await db.procurementSupplier.findFirstOrThrow({
+          where: { ...where, id },
+        }),
+        audits: await db.procurementSupplierAudit.findMany({ where }),
+        receipts: await db.procurementSupplierReceipt.findMany({ where }),
+      };
+      let observedDeletion = false;
+      const spy = jest.spyOn(f.tenantDb, 'getClient').mockImplementation(() => {
+        spy.mockRestore();
+        const tx = f.tenantDb.getClient();
+        return interceptSupplierFixture(tx, delegate, 'create', async () => {
+          expect(
+            await tx.procurementSupplier.count({ where: { ...where, id } }),
+          ).toBe(0);
+          observedDeletion = true;
+          throw new Error('injected private failure after DELETE');
+        });
+      });
+      try {
+        await expect(
+          f.run(() => f.service.delete(id, 'd', { expectedVersion: 1 })),
+        ).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(observedDeletion).toBe(true);
+      expect(
+        await db.procurementSupplier.findFirstOrThrow({
+          where: { ...where, id },
+        }),
+      ).toEqual(before.supplier);
+      expect(await db.procurementSupplierAudit.findMany({ where })).toEqual(
+        before.audits,
+      );
+      expect(await db.procurementSupplierReceipt.findMany({ where })).toEqual(
+        before.receipts,
+      );
+      expect(await effects(f.tenantId)).toEqual([0, 0, 0, 0]);
+    },
+  );
+
+  it('DELETE gate contention returns IN_FLIGHT then succeeds and replays without new effects', async () => {
+    const f = await fixture();
+    const {
+      body: { id },
+    } = await f.run(() => f.service.create('c', input));
+    const gate = createHash('sha256')
+      .update(
+        JSON.stringify([
+          'procurement-supplier-command-v1',
+          f.tenantId,
+          f.actorId,
+          'DELETE',
+          id,
+          'd',
+        ]),
+      )
+      .digest()
+      .readBigInt64BE(0);
+    const locked = deferred();
+    const release = deferred();
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(${gate}::bigint)`,
+      );
+      locked.resolve();
+      await release.promise;
+    });
+    try {
+      await Promise.race([locked.promise, holder]);
+      await expect(
+        f.run(() => f.service.delete(id, 'd', { expectedVersion: 1 })),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_IN_FLIGHT' });
+      expect(
+        await db.procurementSupplier.count({
+          where: { tenantId: f.tenantId, id },
+        }),
+      ).toBe(1);
+      expect(
+        await db.procurementSupplierAudit.count({
+          where: { tenantId: f.tenantId },
+        }),
+      ).toBe(1);
+    } finally {
+      release.resolve();
+      await holder;
+    }
+    expect(
+      await f.run(() => f.service.delete(id, 'd', { expectedVersion: 1 })),
+    ).toEqual({ statusCode: 204, body: null });
+    expect(
+      await f.run(() => f.service.delete(id, 'd', { expectedVersion: 1 })),
+    ).toEqual({ statusCode: 204, body: null });
+    expect(
+      await db.procurementSupplierAudit.count({
+        where: { tenantId: f.tenantId },
+      }),
+    ).toBe(2);
+    expect(
+      await db.procurementSupplierReceipt.count({
+        where: { tenantId: f.tenantId },
+      }),
+    ).toBe(2);
+    expect(await effects(f.tenantId)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('DELETE qualifies tenant, rejects stale/overflow versions, and changes no evidence on failure', async () => {
+    const f = await fixture();
+    const other = await fixture();
+    const {
+      body: { id },
+    } = await f.run(() => f.service.create('c', input));
+    await expect(
+      other.run(() =>
+        other.service.delete(id, 'foreign', { expectedVersion: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      f.run(() => f.service.delete(id, 'stale', { expectedVersion: 2 })),
+    ).rejects.toMatchObject({ code: 'SUPPLIER_VERSION_CONFLICT' });
+    await db.procurementSupplier.update({
+      where: { tenantId: f.tenantId, id },
+      data: { version: 2147483647 },
+    });
+    await expect(
+      f.run(() =>
+        f.service.delete(id, 'overflow', { expectedVersion: 2147483647 }),
+      ),
+    ).rejects.toMatchObject({ code: 'SUPPLIER_VERSION_CONFLICT' });
+    expect(
+      await db.procurementSupplier.count({
+        where: { tenantId: f.tenantId, id },
+      }),
+    ).toBe(1);
+    expect(
+      await db.procurementSupplierAudit.count({
+        where: { tenantId: f.tenantId },
+      }),
+    ).toBe(1);
+    expect(
+      await db.procurementSupplierReceipt.count({
+        where: { tenantId: f.tenantId },
+      }),
+    ).toBe(1);
+    expect(
+      await db.procurementSupplierAudit.count({
+        where: { tenantId: other.tenantId },
+      }),
+    ).toBe(0);
+    expect(await effects(f.tenantId)).toEqual([0, 0, 0, 0]);
+  });
 
   it('create/edit/archive/reactivate persists audit and immutable original replay with zero business effects', async () => {
     const f = await fixture();
