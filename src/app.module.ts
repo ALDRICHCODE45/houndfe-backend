@@ -94,6 +94,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { CatalogEditorialReadModule } from './catalog-editorial/catalog-editorial-read.module';
 import { CatalogEditorialVocabularyModule } from './catalog-editorial/catalog-editorial-vocabulary.module';
 import { SuppliersModule } from './procurement/suppliers/suppliers.module';
+import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-orders.module';
 
 @Module({
   imports: [
@@ -198,6 +199,7 @@ import { SuppliersModule } from './procurement/suppliers/suppliers.module';
     CatalogEditorialReadModule,
     CatalogEditorialVocabularyModule,
     SuppliersModule,
+    PurchaseOrdersModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
