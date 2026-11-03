@@ -334,6 +334,7 @@ describe('supplier public HTTP boundary (offline mocks; actual JWT/CLS/RBAC guar
     ['IDEMPOTENCY_KEY_CONFLICT', 409],
     ['IDEMPOTENCY_KEY_IN_FLIGHT', 409],
     ['INTERNAL_ERROR', 500],
+    ['SUPPLIER_HAS_PURCHASE_ORDERS', 409],
   ] as const)('DELETE maps %s without leaking values', async (code, status) => {
     commands.delete.mockRejectedValue(new SupplierContractError(code));
     closed(

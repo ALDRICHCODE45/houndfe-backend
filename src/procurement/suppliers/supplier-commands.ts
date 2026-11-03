@@ -208,9 +208,30 @@ export class SupplierCommands {
         )
           throw new SupplierContractError('SUPPLIER_VERSION_CONFLICT');
         if (operation === 'DELETE') {
-          const deleted = await tx.procurementSupplier.deleteMany({
-            where: { tenantId, id: target, version: update.expectedVersion },
+          // Read references WITHOUT locking orders: PO writers lock order ->
+          // supplier, so supplier writers must never acquire order row locks.
+          const referenced = await tx.procurementPurchaseOrder.findFirst({
+            where: { tenantId, supplierId: target },
+            select: { id: true },
           });
+          if (referenced)
+            throw new SupplierContractError('SUPPLIER_HAS_PURCHASE_ORDERS');
+          let deleted: { count: number };
+          try {
+            deleted = await tx.procurementSupplier.deleteMany({
+              where: { tenantId, id: target, version: update.expectedVersion },
+            });
+          } catch (error) {
+            // Defense for non-cooperating FK writers; do not mask unrelated FKs.
+            if (
+              error instanceof Prisma.PrismaClientKnownRequestError &&
+              error.code === 'P2003' &&
+              typeof error.meta?.field_name === 'string' &&
+              error.meta.field_name.startsWith('po_supplier_fk')
+            )
+              throw new SupplierContractError('SUPPLIER_HAS_PURCHASE_ORDERS');
+            throw error;
+          }
           if (deleted.count !== 1)
             throw new SupplierContractError('SUPPLIER_VERSION_CONFLICT');
           // Prior fields/timestamps, with the deletion event version.

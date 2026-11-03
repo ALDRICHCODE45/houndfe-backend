@@ -6,7 +6,7 @@ import type { ClsService } from 'nestjs-cls';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { SupplierCommands } from './supplier-commands';
-import { hashSupplierBody } from './supplier-contract';
+import { hashSupplierBody, supplierErrorEnvelope } from './supplier-contract';
 
 const tenantId = 'tenant-proof';
 const actorId = 'actor-proof';
@@ -37,6 +37,8 @@ function harness() {
     failAudit: false,
     failReceipt: false,
     casLost: false,
+    referenced: false,
+    fkRestrict: false,
   };
   let permissions = ['create', 'read', 'update', 'delete'].map((action) => ({
     action,
@@ -117,6 +119,12 @@ function harness() {
         }: {
           where: { tenantId: string; id: string; version: number };
         }) => {
+          if (flags.fkRestrict)
+            throw new Prisma.PrismaClientKnownRequestError('private FK', {
+              code: 'P2003',
+              clientVersion: '6.19.2',
+              meta: { field_name: 'po_supplier_fk (index)' },
+            });
           const before = rows.length;
           if (!flags.casLost)
             rows = rows.filter(
@@ -138,6 +146,11 @@ function harness() {
           if (!row) throw new Error('Missing persisted row');
           return row;
         },
+      ),
+    },
+    procurementPurchaseOrder: {
+      findFirst: jest.fn(async () =>
+        flags.referenced ? { id: 'referencing-order' } : null,
       ),
     },
     procurementSupplierReceipt: {
@@ -200,6 +213,52 @@ function harness() {
     state: () => ({ rows, receipts, audits }),
   };
 }
+
+describe('SupplierCommands purchase-order restrict guard', () => {
+  it.each(['referenced', 'fkRestrict'] as const)(
+    'maps %s to exact 409 and keeps supplier/evidence unchanged',
+    async (flag) => {
+      const h = harness();
+      await h.service.create('c', input);
+      const before = structuredClone(h.state());
+      h.flags[flag] = true;
+      const failure = await h.service
+        .delete(id, 'd', { expectedVersion: 1 })
+        .catch((error: unknown) => error);
+      expect(supplierErrorEnvelope(failure)).toEqual({
+        statusCode: 409,
+        error: 'SUPPLIER_HAS_PURCHASE_ORDERS',
+      });
+      expect(h.state()).toEqual(before);
+      expect(h.tx.procurementSupplierAudit.create).toHaveBeenCalledTimes(1);
+      expect(h.tx.procurementSupplierReceipt.create).toHaveBeenCalledTimes(1);
+      if (flag === 'referenced')
+        expect(h.tx.procurementSupplier.deleteMany).not.toHaveBeenCalled();
+      expect(h.tx.procurementPurchaseOrder.findFirst).toHaveBeenCalledWith({
+        where: { tenantId, supplierId: id },
+        select: { id: true },
+      });
+    },
+  );
+  it('checks authority/replay/CAS before querying referencing orders', async () => {
+    const h = harness();
+    await h.service.create('c', input);
+    h.flags.referenced = true;
+    await expect(
+      h.service.delete(id, 'stale', { expectedVersion: 2 }),
+    ).rejects.toMatchObject({ code: 'SUPPLIER_VERSION_CONFLICT' });
+    expect(h.tx.procurementPurchaseOrder.findFirst).not.toHaveBeenCalled();
+    h.flags.referenced = false;
+    await h.service.delete(id, 'd', { expectedVersion: 1 });
+    h.tx.procurementPurchaseOrder.findFirst.mockClear();
+    h.flags.referenced = true;
+    expect(await h.service.delete(id, 'd', { expectedVersion: 1 })).toEqual({
+      statusCode: 204,
+      body: null,
+    });
+    expect(h.tx.procurementPurchaseOrder.findFirst).not.toHaveBeenCalled();
+  });
+});
 
 describe('SupplierCommands hard deletion', () => {
   const remove = (
@@ -393,6 +452,7 @@ describe('SupplierCommands public interface', () => {
     expect(Object.keys(h.tx).sort()).toEqual([
       '$executeRaw',
       '$queryRaw',
+      'procurementPurchaseOrder',
       'procurementSupplier',
       'procurementSupplierAudit',
       'procurementSupplierReceipt',
