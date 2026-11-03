@@ -782,6 +782,27 @@ describe('PurchaseOrderCommands', () => {
     expect(corrected.body.validation.issues).toEqual([]);
     expect(corrected.body.lineDisplaySnapshots[0].unit).toBe('UNIDAD');
   });
+  it('rejects a changed fractional quantity on a retained line with a valid integer unit', async () => {
+    const h = harness();
+    h.products[0].unit = 'CAJA';
+    const order = copyOrder();
+    order.lines[0].orderedQuantity = '2';
+    order.lines[0].informedUnitCost!.unit = 'CAJA';
+    await h.service.createDraft('c', order);
+    order.lines[0].orderedQuantity = '1.5';
+    await rejected(h, () => replace(h, order), 400, 'MALFORMED');
+  });
+  it('rejects changing a drift-retained fraction to another fraction', async () => {
+    const h = harness();
+    h.products[0].unit = 'KILOGRAMO';
+    const order = copyOrder();
+    order.lines[0].orderedQuantity = '1.5';
+    order.lines[0].informedUnitCost!.unit = 'KILOGRAMO';
+    await h.service.createDraft('c', order);
+    h.products[0].unit = 'UNIDAD';
+    order.lines[0].orderedQuantity = '2.5';
+    await rejected(h, () => replace(h, order), 400, 'MALFORMED');
+  });
   it('validates retained syntax, identity and ambient transaction before work', async () => {
     const h = harness();
     await h.service.createDraft('c', selected);

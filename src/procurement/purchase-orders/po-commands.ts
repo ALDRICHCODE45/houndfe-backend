@@ -88,14 +88,25 @@ function admit(
             !isQuantityAllowedForUnit(line.orderedQuantity, product.unit)))
       )
         throw new PurchaseOrderContractError('MALFORMED');
-    } else if (
-      line.informedUnitCost?.unit != null &&
-      line.informedUnitCost.unit !== old.informedUnitCost?.unit
-    ) {
-      // Clearing a unit is allowed; a new non-null unit needs a live compatible
-      // reference, not the historical label/unit of a missing row.
-      if (!validReference || line.informedUnitCost.unit !== product.unit)
+    } else {
+      // Retention only excuses catalog drift on the unchanged baseline
+      // quantity; a new or changed quantity must fit the live product unit.
+      if (
+        validProduct &&
+        line.orderedQuantity !== null &&
+        line.orderedQuantity !== old.orderedQuantity &&
+        !isQuantityAllowedForUnit(line.orderedQuantity, product.unit)
+      )
         throw new PurchaseOrderContractError('MALFORMED');
+      if (
+        line.informedUnitCost?.unit != null &&
+        line.informedUnitCost.unit !== old.informedUnitCost?.unit
+      ) {
+        // Clearing a unit is allowed; a new non-null unit needs a live compatible
+        // reference, not the historical label/unit of a missing row.
+        if (!validReference || line.informedUnitCost.unit !== product.unit)
+          throw new PurchaseOrderContractError('MALFORMED');
+      }
     }
   }
 }
