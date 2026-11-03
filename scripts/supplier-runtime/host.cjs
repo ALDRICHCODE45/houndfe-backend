@@ -5,17 +5,84 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '../..');
-const run = fs.realpathSync(process.argv[2]);
+let run;
 let feOrigin;
-try {
-  feOrigin = new URL(process.argv[3]).origin;
-} catch {
-  throw new Error('Usage: host.cjs <RUN> <feOrigin URL>');
+let target;
+function validatePrivatePath(input, real, stat, uid, mode) {
+  assert.equal(input, real);
+  assert(!stat.isSymbolicLink());
+  assert(mode === 0o700 ? stat.isDirectory() : stat.isFile());
+  assert.equal(stat.uid, uid);
+  assert.equal(stat.mode & 0o7777, mode);
 }
-assert.equal(path.dirname(run), path.join(root, '.tmp'));
-assert(path.basename(run).startsWith('supplier-runtime.'));
-assert.equal(fs.statSync(run).mode & 0o777, 0o700);
-assert(/@172\.\d+\.\d+\.\d+:5432\//.test(process.env.DATABASE_URL ?? ''));
+function privatePath(input, mode) {
+  const resolved = path.resolve(input);
+  validatePrivatePath(
+    resolved,
+    fs.realpathSync(resolved),
+    fs.lstatSync(resolved),
+    process.getuid(),
+    mode,
+  );
+  return resolved;
+}
+function validateTarget(identity, text) {
+  assert.deepEqual(Object.keys(identity).sort(), [
+    'database',
+    'ip',
+    'username',
+  ]);
+  assert.equal(identity.database, 'nest-practice-test');
+  assert.match(identity.username, /^[a-z][a-z0-9_]+$/);
+  assert.notEqual(identity.username, 'postgres');
+  assert.equal(require('node:net').isIP(identity.ip), 4);
+  const octets = identity.ip.split('.').map(Number);
+  assert(octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+  assert.equal(typeof text, 'string');
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new Error('Invalid target URL');
+  }
+  assert(['postgres:', 'postgresql:'].includes(url.protocol));
+  assert.equal(url.hostname, identity.ip);
+  assert.equal(url.port, '5432');
+  assert.equal(decodeURIComponent(url.username), identity.username);
+  assert.equal(decodeURIComponent(url.pathname), `/${identity.database}`);
+  assert(url.password && !url.hash);
+  // Only Prisma's usual public schema parameter is admitted; no target overrides.
+  assert(!url.search || url.search === '?schema=public');
+  return identity;
+}
+function routeAllowed(method, route) {
+  return [
+    /^(POST|OPTIONS) \/auth\/(login|logout|refresh)\/?$/i,
+    /^(GET|HEAD|OPTIONS) \/auth\/me(\/permissions)?\/?$/i,
+    /^(GET|HEAD|POST|OPTIONS) \/procurement\/suppliers\/?$/i,
+    /^(GET|HEAD|PATCH|DELETE|OPTIONS) \/procurement\/suppliers\/[^/]+\/?$/i,
+  ].some((rule) => rule.test(`${method} ${route}`));
+}
+function configure() {
+  run = privatePath(process.argv[2], 0o700);
+  try {
+    feOrigin = new URL(process.argv[3]).origin;
+  } catch {
+    throw new Error('Usage: host.cjs <RUN> <feOrigin URL>');
+  }
+  assert.equal(feOrigin, 'http://127.0.0.1:43179');
+  assert.equal(path.dirname(run), path.join(root, '.tmp'));
+  assert(path.basename(run).startsWith('supplier-runtime.'));
+  const manifest = privatePath(path.join(run, 'target-identity.json'), 0o600);
+  let identity;
+  try {
+    identity = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+  } catch {
+    throw new Error('Invalid private identity manifest');
+  }
+  target = validateTarget(identity, process.env.DATABASE_URL);
+}
+
 const compiled = (file) => require(path.join(root, 'dist', file));
 const record = (name, value) =>
   fs.writeFileSync(path.join(run, name), JSON.stringify(value, null, 2), {
@@ -52,7 +119,7 @@ async function seed(db, password) {
   });
   const users = {};
   for (const [label, actions] of [
-    ['manager', ['create', 'read', 'update']],
+    ['manager', ['create', 'read', 'update', 'delete']],
     ['reader', ['read']],
     ['noaccess', []],
   ]) {
@@ -85,6 +152,7 @@ async function seed(db, password) {
 }
 
 async function main() {
+  configure();
   record('host-started.json', { pid: process.pid });
   const { Test } = require('@nestjs/testing');
   const { ConfigModule } = require('@nestjs/config');
@@ -130,22 +198,20 @@ async function main() {
   compiled(
     'procurement/suppliers/supplier-http.filter',
   ).installSupplierBodyParser(app);
-  const allowed = [
-    /^(POST|OPTIONS) \/auth\/(login|logout|refresh)$/,
-    /^(GET|OPTIONS) \/auth\/me(\/permissions)?$/,
-    // Express routing is case-insensitive and non-strict (trailing slash).
-    /^[A-Z]+ \/procurement\/suppliers(\/[^/]*)?\/?$/i,
-  ];
   app.use((req, res, next) => {
-    if (!allowed.some((rule) => rule.test(`${req.method} ${req.path}`)))
+    if (!routeAllowed(req.method, req.path))
       return res.status(403).json({ error: 'OUTSIDE_DISPOSABLE_SCOPE' });
     next();
   });
   await app.init();
   const db = app.get(compiled('shared/prisma/prisma.service').PrismaService);
   const [identity] =
-    await db.$queryRaw`SELECT current_database() AS db, current_user AS usr`;
-  assert.deepEqual(identity, { db: 'nest-practice-test', usr: 'o3a_test' });
+    await db.$queryRaw`SELECT current_database() AS db, current_user AS usr, host(inet_server_addr()) AS ip`;
+  assert.deepEqual(identity, {
+    db: target.database,
+    usr: target.username,
+    ip: target.ip,
+  });
   const password = secret();
   const fixture = await seed(db, password);
   await app.listen(0, '127.0.0.1');
@@ -171,12 +237,11 @@ async function close(code) {
     process.exit(code);
   }
 }
-process.once('SIGTERM', () => void close(0));
-process.once('SIGINT', () => void close(0));
-main().catch(async (error) => {
-  fs.writeFileSync(path.join(run, 'host-error.txt'), String(error?.stack), {
-    mode: 0o600,
-  });
-  console.error('Supplier host failed; diagnostic in private run directory');
+module.exports = { validateTarget, validatePrivatePath, routeAllowed };
+if (require.main === module) process.once('SIGTERM', () => void close(0));
+if (require.main === module) process.once('SIGINT', () => void close(0));
+const execution = require.main === module ? main() : null;
+execution?.catch(async () => {
+  console.error('Supplier host failed; private target or runtime check failed');
   await close(1);
 });

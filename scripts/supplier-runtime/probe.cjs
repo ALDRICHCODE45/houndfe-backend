@@ -34,6 +34,14 @@ function parseUrl(text) {
   }
 }
 
+function decodeBody(status, text) {
+  if (status === 204) {
+    assert.equal(text, '');
+    return undefined;
+  }
+  return parseJson(text);
+}
+
 async function check(name, specs, action) {
   statuses = [];
   try {
@@ -51,7 +59,14 @@ async function check(name, specs, action) {
 async function request(
   method,
   route,
-  { actor = 'manager', body, raw, idempotencyKey, getBody = false } = {},
+  {
+    actor = 'manager',
+    body,
+    raw,
+    idempotencyKey,
+    getBody = false,
+    contentType,
+  } = {},
 ) {
   const headers = { Origin: origin };
   if (tokens[actor]) headers.Authorization = `Bearer ${tokens[actor]}`;
@@ -59,7 +74,8 @@ async function request(
   let payload = raw;
   if (body !== undefined) payload = JSON.stringify(body);
   if (payload !== undefined)
-    headers['Content-Type'] = getBody ? 'text/plain' : 'application/json';
+    headers['Content-Type'] =
+      contentType ?? (getBody ? 'text/plain' : 'application/json');
   let response;
   if (getBody) {
     // Fetch forbids GET bodies; node:http exercises actual transport admission.
@@ -100,7 +116,7 @@ async function request(
     };
   }
   statuses.push(response.status);
-  response.body = parseJson(response.text);
+  response.body = decodeBody(response.status, response.text);
   return response;
 }
 
@@ -112,6 +128,7 @@ function expect(response, status, error) {
     response.headers.get('access-control-allow-credentials'),
     'true',
   );
+  if (status === 204) assert.equal(response.text, '');
   if (error) assert.deepEqual(response.body, { statusCode: status, error });
   return response.body;
 }
@@ -229,6 +246,9 @@ async function main() {
   let current;
   let original;
   const createKey = key();
+  const updateKey = key();
+  let updateBody;
+  let updateOriginal;
   const input = {
     displayName: `${prefix}-Alpha`,
     termsText: 'Net 30',
@@ -379,9 +399,20 @@ async function main() {
   });
   await check('patch-omission-preserves', ['S1', 'S2', 'S3'], async () => {
     const previous = current;
+    updateBody = {
+      expectedVersion: current.version,
+      changes: { displayName: `${prefix}-Updated` },
+    };
     current = supplier(
-      expect(await patch(current, { displayName: `${prefix}-Updated` }), 200),
+      expect(
+        await request('PATCH', `${collection}/${current.id}`, {
+          body: updateBody,
+          idempotencyKey: updateKey,
+        }),
+        200,
+      ),
     );
+    updateOriginal = current;
     assert.equal(current.version, previous.version + 1);
     assert.equal(current.displayName, `${prefix}-Updated`);
     assert.equal(current.termsText, previous.termsText);
@@ -569,10 +600,194 @@ async function main() {
       );
     },
   );
+
+  await check('case-and-trailing-slash-reads', ['S3', 'S7'], async () => {
+    const page = expect(
+      await request(
+        'GET',
+        `/PrOcUrEmEnT/SuPpLiErS/?status=ALL&search=${prefix}`,
+      ),
+      200,
+    );
+    assert.deepEqual(
+      page.items.map((item) => item.id).sort(),
+      [...owned].sort(),
+    );
+    assert.deepEqual(
+      expect(
+        await request('GET', `/PROCUREMENT/SUPPLIERS/${current.id}/`),
+        200,
+      ),
+      current,
+    );
+  });
+  const unchanged = async () => {
+    assert.deepEqual(
+      expect(await request('GET', `${collection}/${current.id}`), 200),
+      current,
+    );
+    const page = await list({ status: 'ALL', search: prefix });
+    assert.deepEqual(
+      page.items.map((item) => item.id).sort(),
+      [...owned].sort(),
+    );
+  };
+  for (const actor of ['reader', 'noaccess'])
+    await check(
+      `${actor}-delete-denied-no-write`,
+      ['S2', 'S6', 'S7'],
+      async () => {
+        expect(
+          await request('DELETE', `${collection}/${current.id}`, {
+            actor,
+            body: { expectedVersion: current.version },
+            idempotencyKey: key(),
+          }),
+          403,
+          'FORBIDDEN',
+        );
+        await unchanged();
+      },
+    );
+  for (const [name, options] of [
+    ['missing-key', { body: { expectedVersion: current.version } }],
+    ['missing-version', { body: {}, idempotencyKey: key() }],
+    [
+      'unknown-field',
+      {
+        body: { expectedVersion: current.version, unknown: true },
+        idempotencyKey: key(),
+      },
+    ],
+    [
+      'invalid-version',
+      { body: { expectedVersion: '1' }, idempotencyKey: key() },
+    ],
+    ['invalid-JSON', { raw: '{', idempotencyKey: key() }],
+    [
+      'invalid-media',
+      {
+        body: { expectedVersion: current.version },
+        contentType: 'text/plain',
+        idempotencyKey: key(),
+      },
+    ],
+  ])
+    await check(`delete-malformed-${name}-no-write`, ['S3', 'S6'], async () => {
+      expect(
+        await request(
+          'DELETE',
+          `/PrOcUrEmEnT/SuPpLiErS/${current.id}/`,
+          options,
+        ),
+        400,
+        'MALFORMED',
+      );
+      await unchanged();
+    });
+  await check('delete-stale-version-no-write', ['S2', 'S6'], async () => {
+    expect(
+      await request('DELETE', `${collection}/${current.id}`, {
+        body: { expectedVersion: original.version },
+        idempotencyKey: key(),
+      }),
+      409,
+      'SUPPLIER_VERSION_CONFLICT',
+    );
+    await unchanged();
+  });
+  const deletedId = current.id;
+  for (const status of ['ACTIVE', 'ARCHIVED'])
+    await check(
+      `delete-${status}-replay-and-absence`,
+      ['S2', 'S3', 'S5', 'S6', 'S7'],
+      async () => {
+        const item =
+          status === 'ACTIVE'
+            ? current
+            : (await list({ status: 'ARCHIVED', search: prefix })).items[0];
+        assert(item && owned.has(item.id) && item.status === status);
+        const route = `/PrOcUrEmEnT/SuPpLiErS/${item.id}/`;
+        const deleteKey = key();
+        const body = { expectedVersion: item.version };
+        expect(
+          await request('DELETE', route, { body, idempotencyKey: deleteKey }),
+          204,
+        );
+        owned.delete(item.id);
+        if (status === 'ACTIVE') current = undefined;
+        expect(
+          await request('GET', `${collection}/${item.id}`),
+          404,
+          'NOT_FOUND',
+        );
+        const page = await list({ status: 'ALL', search: prefix });
+        assert.deepEqual(
+          page.items.map((value) => value.id).sort(),
+          [...owned].sort(),
+        );
+        expect(
+          await request('DELETE', route, { body, idempotencyKey: key() }),
+          404,
+          'NOT_FOUND',
+        );
+        expect(
+          await request('DELETE', route, { body, idempotencyKey: deleteKey }),
+          204,
+        );
+        expect(
+          await request('DELETE', route, {
+            body: { expectedVersion: item.version + 1 },
+            idempotencyKey: deleteKey,
+          }),
+          409,
+          'IDEMPOTENCY_KEY_CONFLICT',
+        );
+      },
+    );
+  await check(
+    'deleted-create-and-update-historical-replay',
+    ['S2', 'S6'],
+    async () => {
+      assert(!owned.has(deletedId));
+      assert.deepEqual(
+        expect(
+          await request('POST', collection, {
+            body: input,
+            idempotencyKey: createKey,
+          }),
+          201,
+        ),
+        original,
+      );
+      assert.deepEqual(
+        expect(
+          await request('PATCH', `${collection}/${deletedId}`, {
+            body: updateBody,
+            idempotencyKey: updateKey,
+          }),
+          200,
+        ),
+        updateOriginal,
+      );
+      expect(
+        await request('GET', `${collection}/${deletedId}`),
+        404,
+        'NOT_FOUND',
+      );
+      const page = await list({ status: 'ALL', search: prefix });
+      assert.deepEqual(
+        page.items.map((item) => item.id).sort(),
+        [...owned].sort(),
+      );
+    },
+  );
 }
 
-main()
-  .catch(() => {
+module.exports = { decodeBody, expect };
+const execution = require.main === module ? main() : null;
+execution
+  ?.catch(() => {
     results.push({
       check: 'setup-or-prerequisite',
       specs: ['S4'],
