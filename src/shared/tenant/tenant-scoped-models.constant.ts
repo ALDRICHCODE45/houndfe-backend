@@ -1,4 +1,8 @@
 export const TENANT_SCOPED_MODELS = new Set([
+  // Supplier state and durable evidence must all receive tenant injection.
+  'ProcurementSupplier',
+  'ProcurementSupplierAudit',
+  'ProcurementSupplierReceipt',
   'Product',
   'Variant',
   'Lot',

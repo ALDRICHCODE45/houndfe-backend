@@ -26,6 +26,7 @@ export type AppActions =
 /** All possible subjects (resources) in the application. */
 export type AppSubjects =
   | 'Product'
+  | 'ProcurementSupplier'
   | 'ProductEditorialDraft'
   | 'Order'
   | 'Sale'
@@ -101,6 +102,28 @@ export interface PermissionDefinition {
 export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
   // Super admin permission
   { subject: 'all', action: 'manage', description: 'Full system access' },
+
+  // Supplier management only; no default role assignment or broad manage row.
+  {
+    subject: 'ProcurementSupplier',
+    action: 'create',
+    description: 'Create suppliers',
+  },
+  {
+    subject: 'ProcurementSupplier',
+    action: 'read',
+    description: 'View suppliers',
+  },
+  {
+    subject: 'ProcurementSupplier',
+    action: 'update',
+    description: 'Edit, archive and reactivate suppliers',
+  },
+  {
+    subject: 'ProcurementSupplier',
+    action: 'delete',
+    description: 'Permanently delete suppliers',
+  },
 
   // Product permissions
   {

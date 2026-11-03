@@ -32,4 +32,20 @@ export default tseslint.config(
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
+  {
+    // Standalone Node scripts are JavaScript, outside the TypeScript project.
+    ...tseslint.configs.disableTypeChecked,
+    files: ['scripts/supplier-runtime/*.cjs'],
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: {
+        ...Object.fromEntries(Object.keys(globals.jest).map((name) => [name, 'off'])),
+        crypto: 'off',
+      },
+    },
+    rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
 );

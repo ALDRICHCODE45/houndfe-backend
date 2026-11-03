@@ -93,6 +93,7 @@ import { PromotionExpiryInngestRegistrar } from './promotions/inngest/promotion-
 import { AnalyticsModule } from './analytics/analytics.module';
 import { CatalogEditorialReadModule } from './catalog-editorial/catalog-editorial-read.module';
 import { CatalogEditorialVocabularyModule } from './catalog-editorial/catalog-editorial-vocabulary.module';
+import { SuppliersModule } from './procurement/suppliers/suppliers.module';
 
 @Module({
   imports: [
@@ -196,6 +197,7 @@ import { CatalogEditorialVocabularyModule } from './catalog-editorial/catalog-ed
     AnalyticsModule,
     CatalogEditorialReadModule,
     CatalogEditorialVocabularyModule,
+    SuppliersModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +

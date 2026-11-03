@@ -75,20 +75,31 @@ export default async function globalSetup(): Promise<void> {
   console.log('[global-setup] Test database target validated and normalized.');
   console.log('[global-setup] Applying Prisma migrations to test DB…');
 
-  // Run prisma migrate deploy. Force the env on the child so a stale
-  // shell DATABASE_URL can't sneak in. The child is a fresh process
-  // so its bundled dotenv starts unset — our override is the only
-  // DATABASE_URL it sees (besides any `prisma/.env` we don't have).
+  // Use only the installed CLI with the current Node executable. A package
+  // manager/Corepack fallback can download/install dependencies even when
+  // npm_config_offline is set. Missing CLI must fail before spawn or seed.
+  let prismaCli: string;
+  try {
+    prismaCli = require.resolve('prisma/build/index.js');
+    if (!fs.existsSync(prismaCli)) throw new Error('Missing CLI');
+  } catch {
+    throw new Error('[global-setup] Installed Prisma CLI unavailable.');
+  }
+  // Preserve explicit normalized binding for both migration and seed.
   const migrateResult = spawnSync(
-    'pnpm',
-    ['exec', 'prisma', 'migrate', 'deploy'],
+    process.execPath,
+    [prismaCli, 'migrate', 'deploy'],
     {
       cwd: process.cwd(),
       stdio: 'inherit',
       env: { ...process.env, DATABASE_URL: databaseUrl },
     },
   );
-  if (migrateResult.status !== 0) {
+  if (
+    migrateResult.error ||
+    migrateResult.signal ||
+    migrateResult.status !== 0
+  ) {
     throw new Error(
       `[global-setup] prisma migrate deploy failed (exit ${migrateResult.status}). ` +
         `Is the test DB container up? Run \`pnpm run test:db:up\`. ` +
