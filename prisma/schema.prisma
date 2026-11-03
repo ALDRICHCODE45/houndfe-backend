@@ -391,6 +391,10 @@ model Tenant {
   catalogStockPresentationDefault          CatalogStockPresentation @default(SYSTEM_STATUS)
   catalogStockPresentationDefaultCustomQty Int?
 
+  procurementPurchaseOrders ProcurementPurchaseOrder[]
+  procurementPurchaseOrderLines ProcurementPurchaseOrderLine[]
+  procurementPurchaseOrderAudits ProcurementPurchaseOrderAudit[]
+  procurementPurchaseOrderReceipts ProcurementPurchaseOrderReceipt[]
   procurementSuppliers      ProcurementSupplier[]
   procurementSupplierAudits ProcurementSupplierAudit[]
   procurementSupplierReceipts ProcurementSupplierReceipt[]
@@ -618,6 +622,104 @@ model PrivateMediaAsset {
   @@map("private_media_assets")
 }
 
+// Draft intent only. Canonical decimal text preserves exact wire values.
+enum ProcurementPurchaseOrderStatus {
+  DRAFT
+}
+
+enum ProcurementPurchaseOrderOperation {
+  CREATE
+  REPLACE
+  DELETE
+}
+
+enum ProcurementPurchaseOrderTaxBasis {
+  INCLUDES_TAX
+  EXCLUDES_TAX
+}
+
+model ProcurementPurchaseOrder {
+  id String @id @default(uuid())
+  tenantId String
+  supplierId String?
+  status ProcurementPurchaseOrderStatus @default(DRAFT)
+  version Int @default(1)
+  note String?
+  locationDetail String?
+  locationTenantName String
+  supplierDisplaySnapshot Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "po_tenant_fk")
+  supplier ProcurementSupplier? @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: Restrict, onUpdate: Restrict, map: "po_supplier_fk")
+  lines ProcurementPurchaseOrderLine[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([tenantId, supplierId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("procurement_purchase_orders")
+}
+
+model ProcurementPurchaseOrderLine {
+  tenantId String
+  orderId String
+  lineId String
+  position Int
+  productId String?
+  variantId String?
+  orderedQuantity String?
+  informedUnitCostPresent Boolean @default(false)
+  costAmount String?
+  currency String?
+  costUnit UnitOfMeasure?
+  taxBasis ProcurementPurchaseOrderTaxBasis?
+  productName String?
+  variantName String?
+  unitSnapshot UnitOfMeasure?
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "po_line_tenant_fk")
+  order ProcurementPurchaseOrder @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Cascade, onUpdate: Restrict, map: "po_line_order_fk")
+
+  @@id([tenantId, orderId, lineId], map: "po_line_identity_pk")
+  @@unique([tenantId, orderId, position], map: "po_line_position_key")
+  @@map("procurement_purchase_order_lines")
+}
+
+// Historical order and actor IDs deliberately have no live-row relations.
+model ProcurementPurchaseOrderAudit {
+  id String @id @default(uuid())
+  tenantId String
+  orderId String
+  actorId String
+  operation ProcurementPurchaseOrderOperation
+  orderVersion Int
+  beforeSnapshot Json?
+  afterSnapshot Json?
+  createdAt DateTime @default(now())
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "po_audit_tenant_fk")
+
+  @@unique([tenantId, orderId, orderVersion], map: "po_audit_version_key")
+  @@map("procurement_purchase_order_audits")
+}
+
+// Applied responses only; DELETE uses JSON null, not SQL NULL.
+model ProcurementPurchaseOrderReceipt {
+  tenantId String
+  actorId String
+  operation ProcurementPurchaseOrderOperation
+  target String
+  idempotencyKey String
+  orderId String
+  requestHash String
+  statusCode Int
+  responseBody Json
+  createdAt DateTime @default(now())
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "po_receipt_tenant_fk")
+
+  @@id([tenantId, actorId, operation, target, idempotencyKey], map: "po_receipt_namespace_pk")
+  @@index([tenantId, orderId])
+  @@map("procurement_purchase_order_receipts")
+}
+
 // Supplier intent-only storage; no inventory or financial effects.
 enum ProcurementSupplierStatus {
   ACTIVE
@@ -637,6 +739,7 @@ model ProcurementSupplier {
   displayName String
   termsText   String?
   status      ProcurementSupplierStatus
+  purchaseOrders ProcurementPurchaseOrder[]
   version     Int @default(1)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

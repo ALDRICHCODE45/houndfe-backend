@@ -27,6 +27,7 @@ export type AppActions =
 export type AppSubjects =
   | 'Product'
   | 'ProcurementSupplier'
+  | 'ProcurementPurchaseOrder'
   | 'ProductEditorialDraft'
   | 'Order'
   | 'Sale'
@@ -123,6 +124,28 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'ProcurementSupplier',
     action: 'delete',
     description: 'Permanently delete suppliers',
+  },
+
+  // Draft procurement only; ordinary roles require explicit grants.
+  {
+    subject: 'ProcurementPurchaseOrder',
+    action: 'create',
+    description: 'Create purchase-order drafts',
+  },
+  {
+    subject: 'ProcurementPurchaseOrder',
+    action: 'read',
+    description: 'View purchase-order drafts',
+  },
+  {
+    subject: 'ProcurementPurchaseOrder',
+    action: 'update',
+    description: 'Replace purchase-order drafts',
+  },
+  {
+    subject: 'ProcurementPurchaseOrder',
+    action: 'delete',
+    description: 'Discard purchase-order drafts',
   },
 
   // Product permissions

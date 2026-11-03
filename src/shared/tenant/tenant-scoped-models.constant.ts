@@ -1,4 +1,9 @@
 export const TENANT_SCOPED_MODELS = new Set([
+  // Draft headers, lines and durable evidence all require tenant injection.
+  'ProcurementPurchaseOrder',
+  'ProcurementPurchaseOrderLine',
+  'ProcurementPurchaseOrderAudit',
+  'ProcurementPurchaseOrderReceipt',
   // Supplier state and durable evidence must all receive tenant injection.
   'ProcurementSupplier',
   'ProcurementSupplierAudit',
