@@ -57,7 +57,19 @@ node scripts/po-runtime/host.cjs "$RUN" http://127.0.0.1:43179
 
 `RUN/target-identity.json` must contain exactly `{ "database": "nest-practice-test", "username": "<generated user>", "ip": "<owned172.16–31IPv4>" }`, current uid, mode0600, real nonsymlink path, with RUN mode0700. User/IP/database/port5432 must exactly match DATABASE_URL (no query override; only absent query or `?schema=public`). SQL identity is pinned again **before seeding**. This does not replace the Docker guard.
 
-The opt-in wrapper reuses `scripts/supplier-runtime/host.cjs`; its original supplier-only invocation and grants stay unchanged. PO mode imports real AuthModule, SuppliersModule, PurchaseOrdersModule and ProductsModule, not AppModule. It ignores env-file/config-env inheritance, uses fresh JWT secrets and disables the transitive outbox poller. Files-module configuration uses inert loopback-port1 storage values, never real credentials; no file routes are admitted. Only real product-selector reads are reachable. Production parser/filter/CORS order is retained.
+The opt-in wrapper reuses `scripts/supplier-runtime/host.cjs`; its original supplier-only invocation and grants stay unchanged. PO mode imports real AuthModule, SuppliersModule, PurchaseOrdersModule and ProductsModule, not AppModule. It ignores env-file/config-env inheritance and uses fresh JWT secrets. PO mode registers EventEmitterModule.forRoot() so FilesService can receive its EventEmitter2 dependency. It still disables both the transitive outbox poller and dispatcher, plus Auth's PermissionSeeder bootstrap hook. This prevents bootstrap permission/global-role writes before the SQL identity pin; only explicit fixture grants are seeded afterwards. Nest compile-time logging is muted as well as application logging. Supplier-only invocation keeps its existing providers. Files-module configuration uses inert loopback-port1 storage values, never real credentials; no file routes are admitted. Only real product-selector reads are reachable. Production parser/filter/CORS order is retained.
+
+### Bounded startup failure diagnostic
+
+Once a private RUN is trusted, startup failures attempt an exclusive mode0600 `RUN/host-error.json` **before shutdown**. The first failure is retained; no append/overwrite/retry or raw-error fallback is allowed. An invalid RUN or unwritable/existing diagnostic may prevent recording; stderr remains generic.
+
+Only these keys can appear: `stage`, `errorName`, optional `prismaCode`/`pgCode`/`nodeCode`, optional `constraint`/`modelName`, and `diMessage` **only for UnknownDependenciesException**. The DI summary contains only allowlisted class/token names from the host graph, capped at256 characters and restricted to `[A-Za-z0-9_ ,.?()'\-:]`. It examines at most4096 message characters, never copies free-form prose, and uses UnknownProvider when no known token appears. Stages are fixed step names (e.g. `build-module`, `compile-module`, `initialize-application`, `identity-pin`, `seed-catalog-products`, `listen`, `credentials-record`). Error/constraint/model names are allowlisted; unfamiliar names become fixed UnknownError/UnknownConstraint/UnknownModel labels. Code fields accept only bounded Prisma codes or known PG/Node codes. No message, stack, URL, credential, SQL, cause, request values or arbitrary metadata is copied, and getters/toJSON are never invoked.
+
+Offline reproduction of the remaining compile failure: **FilesService cannot resolve EventEmitter at constructor index2 in FilesModule**. ProductsModule also imports FilesModule; disabling the outbox dispatcher did not satisfy this second consumer. PO mode now imports the same EventEmitterModule.forRoot() registration normally supplied by the root application. No src/dist, fixture, identity or bind changes were needed. All host-targeted compiled files remain under `dist/<module>`, not `dist/src`.
+
+`compile.test.cjs` calls the **shared host builder** with real dist imports for both modes, but replaces every PrismaService registration with a fail-closed stub. It clears inherited credentials, refuses present env files, forbids Prisma/lifecycle access and Socket.connect, and stops after Nest compile (never app.init/listen). Both supplier-only and PO compiles pass with **zero Prisma/lifecycle calls and zero socket calls**. The initial PO compile observed the FilesService/EventEmitter failure before the registration fix. This proves DI composition only; actual initialized startup remains parent-owned.
+
+Reinvoke the launcher only when parent-authorized, using the existing **successful** PROOF. It refreshes ownership checks and creates a new RUN; never overwrite/reuse the failed RUN or rerun the SQL proof to diagnose host startup. No recompilation is required for script-only changes when dist is already current.
 
 Host route boundary is case-insensitive with one optional trailing slash:
 
@@ -92,6 +104,7 @@ Output contains only static check names, S# tags, PASS/FAIL and statuses; result
 ## Offline gates (no main execution)
 
 ```sh
+node --test scripts/po-runtime/compile.test.cjs
 node --test scripts/po-runtime/verify-po-migration.test.cjs
 node --test scripts/po-runtime/host.test.cjs
 node --test scripts/po-runtime/probe.test.cjs
@@ -104,4 +117,4 @@ node node_modules/prettier/bin/prettier.cjs --check scripts/po-runtime/*.cjs scr
 git diff --check -- scripts/po-runtime scripts/supplier-runtime/host.cjs scripts/supplier-runtime/README.md eslint.config.mjs
 ```
 
-Imports are inert. Offline tests use fake DB/HTTP adapters, never sockets/process children. They protect guards, exact constraint-code assertions, sanitized output, fixture grants, route/query boundaries, and the complete probe sequence (including deliberate rounded-subtotal rejection). They do **not** establish real PostgreSQL, routing/authorization or FE visual readiness. The ESLint semantic delta only extends the existing standalone CJS override to `scripts/po-runtime/*.cjs`; the affected config also receives Prettier-only formatting.
+Imports of executable host/proof/probe modules are inert. Most offline tests use fake DB/HTTP adapters; the compile test requires existing dist artifacts and compiles real Nest modules with the database provider replaced and sockets blocked, without initialization or listeners. They protect guards, exact constraint-code assertions, sanitized output, fixture grants, route/query boundaries, and the complete probe sequence (including deliberate rounded-subtotal rejection). They do **not** establish real PostgreSQL, routing/authorization or FE visual readiness. The ESLint semantic delta only extends the existing standalone CJS override to `scripts/po-runtime/*.cjs`; the affected config also receives Prettier-only formatting.

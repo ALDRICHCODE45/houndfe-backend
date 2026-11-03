@@ -7,7 +7,65 @@ const {
   seedCatalog,
   fixtureGrants,
   installParsers,
+  isolatePoProviders,
 } = require('./host.cjs');
+test('PO runtime isolates dispatcher DI and disables bootstrap writes before identity pin', () => {
+  const tokens = {
+    'shared/outbox/outbox-poller.service': {
+      OutboxPollerService: Symbol('poller'),
+    },
+    'shared/outbox/outbox-dispatcher.service': {
+      OutboxDispatcherService: Symbol('dispatcher'),
+    },
+    'auth/authorization/infrastructure/permission.seeder': {
+      PermissionSeeder: Symbol('seeder'),
+    },
+  };
+  const overrides = [];
+  let logger;
+  const builder = {
+    setLogger: (value) => {
+      logger = value;
+    },
+    overrideProvider: (token) => ({
+      useValue: (value) => overrides.push({ token, value }),
+    }),
+  };
+  isolatePoProviders(builder, false, () => {
+    throw new Error('supplier-only host must not load PO overrides');
+  });
+  assert.deepEqual(overrides, []);
+  assert.equal(logger, undefined);
+  isolatePoProviders(builder, true, (file) => {
+    assert(Object.hasOwn(tokens, file));
+    return tokens[file];
+  });
+  assert.deepEqual(Object.keys(logger).sort(), [
+    'debug',
+    'error',
+    'fatal',
+    'log',
+    'verbose',
+    'warn',
+  ]);
+  for (const method of Object.values(logger))
+    assert.equal(method('private error context'), undefined);
+  assert.deepEqual(
+    overrides,
+    Object.values(tokens).map((entry) => ({
+      token: Object.values(entry)[0],
+      value: {},
+    })),
+  );
+  assert(
+    overrides.every(
+      ({ value }) =>
+        !('onApplicationBootstrap' in value) &&
+        !('poll' in value) &&
+        !('dispatch' in value),
+    ),
+  );
+});
 test('host installs the actual production PO body-parser module only in PO mode', () => {
   for (const po of [false, true]) {
     const calls = [];
