@@ -123,7 +123,11 @@ function harness() {
             throw new Prisma.PrismaClientKnownRequestError('private FK', {
               code: 'P2003',
               clientVersion: '6.19.2',
-              meta: { field_name: 'po_supplier_fk (index)' },
+              // Shape observed on PostgreSQL with Prisma 6.19.2 (O3b T5 proof).
+              meta: {
+                modelName: 'ProcurementSupplier',
+                constraint: 'po_supplier_fk',
+              },
             });
           const before = rows.length;
           if (!flags.casLost)

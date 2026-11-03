@@ -223,11 +223,11 @@ export class SupplierCommands {
             });
           } catch (error) {
             // Defense for non-cooperating FK writers; do not mask unrelated FKs.
+            // Prisma 6.19 reports the violated constraint as meta.constraint.
             if (
               error instanceof Prisma.PrismaClientKnownRequestError &&
               error.code === 'P2003' &&
-              typeof error.meta?.field_name === 'string' &&
-              error.meta.field_name.startsWith('po_supplier_fk')
+              error.meta?.constraint === 'po_supplier_fk'
             )
               throw new SupplierContractError('SUPPLIER_HAS_PURCHASE_ORDERS');
             throw error;
