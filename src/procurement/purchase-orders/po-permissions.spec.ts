@@ -16,7 +16,9 @@ describe('purchase-order permission registry', () => {
     ]);
     const prior = PERMISSION_REGISTRY.filter(
       (p) =>
-        !['ProcurementSupplier', 'ProcurementPurchaseOrder'].includes(p.subject),
+        !['ProcurementSupplier', 'ProcurementPurchaseOrder'].includes(
+          p.subject,
+        ),
     );
     expect(
       createHash('sha256').update(JSON.stringify(prior)).digest('hex'),
