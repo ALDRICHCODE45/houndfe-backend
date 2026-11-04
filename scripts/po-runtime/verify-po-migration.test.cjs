@@ -5,6 +5,7 @@ const {
   splitMigrations,
   verifyAdditive,
   verifyO3cDelta,
+  captureTables,
   seedO3bDrafts,
   o3cProof,
   expectSqlError,
@@ -590,4 +591,37 @@ test('O3c SQL proof fails closed when a constraint is missing, wrong, or reports
     }),
   );
   assert.deepEqual(writes, []);
+});
+
+// Observed in .tmp/po-migration-proof.L9vfrR: node-pg does not parse array_agg(name[])
+// and returned the PostgreSQL literal '{DRAFT}' as a string, which the delta then
+// spread into characters. Labels must be real arrays, or capture must fail closed.
+test('enum label capture asks PostgreSQL for text[] and yields arrays; a raw array literal fails closed', async () => {
+  const catalogRows = (labels) => ({
+    rows: [{ name: 'ProcurementPurchaseOrderStatus', labels }],
+  });
+  const fake = (labels) => ({
+    queries: [],
+    async query(sql) {
+      this.queries.push(sql);
+      if (sql.includes('pg_enum')) return catalogRows(labels);
+      return { rows: [] };
+    },
+  });
+  const ok = fake(['DRAFT']);
+  const state = await captureTables(ok, [], {});
+  assert.deepEqual(state.enums, { ProcurementPurchaseOrderStatus: ['DRAFT'] });
+  assert(
+    ok.queries.some((q) => /array_agg\(e\.enumlabel::text\b/.test(q)),
+    'enumlabel is type name; without ::text pg returns an unparsed string',
+  );
+  await assert.rejects(() => captureTables(fake('{DRAFT}'), [], {}));
+});
+test('O3c delta rejects enum labels that are not arrays (observed raw literal shape)', () => {
+  const raw = (state) => {
+    for (const [name, labels] of Object.entries(state.enums))
+      state.enums[name] = `{${labels.join(',')}}`;
+    return state;
+  };
+  assert.throws(() => verifyO3cDelta(raw(o3bState()), raw(o3cState())));
 });

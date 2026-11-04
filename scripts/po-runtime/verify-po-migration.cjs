@@ -308,15 +308,22 @@ async function captureTables(db, tables, hidden = {}) {
     };
   }
   const enums = {};
-  for (const row of (
+  const enumRows = (
     await db.query(
-      `SELECT t.typname AS name, array_agg(e.enumlabel ORDER BY e.enumsortorder) AS labels
+      `SELECT t.typname AS name, array_agg(e.enumlabel::text ORDER BY e.enumsortorder) AS labels
        FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid
        JOIN pg_namespace n ON n.oid = t.typnamespace AND n.nspname = 'public'
        GROUP BY t.typname ORDER BY t.typname`,
     )
-  ).rows)
+  ).rows;
+  for (const row of enumRows) {
+    // pg parses text[] but not name[]; a raw '{A,B}' literal must never pass as labels.
+    check(
+      Array.isArray(row.labels) &&
+        row.labels.every((label) => typeof label === 'string'),
+    );
     enums[row.name] = row.labels;
+  }
   return { tables: tableState, enums };
 }
 // O3c delta rule over two captureTables() results (same table list, hidden columns applied).
@@ -363,11 +370,13 @@ function verifyO3cDelta(before, after) {
     Object.keys(after.enums).sort(),
     Object.keys(before.enums).sort(),
   );
-  for (const [name, labels] of Object.entries(before.enums))
+  for (const [name, labels] of Object.entries(before.enums)) {
+    assert(Array.isArray(labels) && Array.isArray(after.enums[name]), name);
     assert.deepEqual(after.enums[name], [
       ...labels,
       ...(NEW_ENUM_LABELS[name] ?? []),
     ]);
+  }
 }
 const NAMES = {
   tenant: 'Mascotas y Alimentos El Roble',
