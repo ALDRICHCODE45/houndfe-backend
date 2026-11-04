@@ -223,6 +223,9 @@ async function main() {
       );
     }
     report.cleanup = await cleanupGarbage(prisma);
+    // The showcase logs in several demo users per run; reset the login rate
+    // buckets (dev only: assertSafeTarget already refused other databases).
+    await prisma.authRateBucket.deleteMany({});
     app = await startApp();
     const ctx = {
       prisma,
