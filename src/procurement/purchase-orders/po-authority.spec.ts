@@ -63,4 +63,74 @@ describe('purchase-order current persisted authority', () => {
       requirePurchaseOrderAuthority(tx, scope, 'READ'),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
+
+  const confirmGrants = [
+    poRead,
+    { action: 'create', subject: 'ProcurementOrderConfirmation' },
+  ];
+  const cancelGrants = [
+    poRead,
+    { action: 'create', subject: 'ProcurementOrderCancellation' },
+  ];
+  function authorityTx(grants: Array<{ action: string; subject: string }>) {
+    const query = jest.fn(async (sql: Prisma.Sql) =>
+      sql.sql.includes('FROM "users"')
+        ? [{ id: scope.actorId, isActive: true, name: 'Ana Compradora' }]
+        : grants,
+    );
+    // SAFETY: authority uses only this query interface on its caller's transaction.
+    return {
+      query,
+      tx: { $queryRaw: query } as unknown as Prisma.TransactionClient,
+    };
+  }
+
+  it.each([
+    ['CONFIRM', confirmGrants],
+    ['CANCEL', cancelGrants],
+  ] as const)(
+    '%s needs only its own create grant plus PO read, no edit or catalog grants',
+    async (operation, grants) => {
+      const { tx, query } = authorityTx(grants);
+      await expect(
+        requirePurchaseOrderAuthority(tx, scope, operation),
+      ).resolves.toEqual({ displayName: 'Ana Compradora' });
+      expect(query.mock.calls[0][0].sql).toContain('u."name"');
+    },
+  );
+
+  it.each([
+    ['CONFIRM', confirmGrants],
+    ['CANCEL', cancelGrants],
+  ] as const)(
+    '%s rejects each missing required grant',
+    async (operation, grants) => {
+      for (const missing of grants) {
+        const { tx } = authorityTx(grants.filter((grant) => grant !== missing));
+        await expect(
+          requirePurchaseOrderAuthority(tx, scope, operation),
+        ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      }
+    },
+  );
+
+  it('does not accept the other transition grant, nor PO update/delete, as authority', async () => {
+    for (const [operation, grants] of [
+      ['CONFIRM', cancelGrants],
+      ['CANCEL', confirmGrants],
+      [
+        'CONFIRM',
+        [
+          poRead,
+          { action: 'update', subject: 'ProcurementPurchaseOrder' },
+          { action: 'delete', subject: 'ProcurementPurchaseOrder' },
+        ],
+      ],
+    ] as const) {
+      const { tx } = authorityTx([...grants]);
+      await expect(
+        requirePurchaseOrderAuthority(tx, scope, operation),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    }
+  });
 });

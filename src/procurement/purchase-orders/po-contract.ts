@@ -49,6 +49,14 @@ export interface PurchaseOrderReplace {
 export interface PurchaseOrderDelete {
   expectedVersion: number;
 }
+export interface PurchaseOrderConfirm {
+  expectedVersion: number;
+  expectedSupplierVersion: number | null;
+  expectedReferenceToken: string | null;
+}
+export interface PurchaseOrderCancel {
+  expectedVersion: number;
+}
 export const PURCHASE_ORDER_STATUSES = [
   'DRAFT',
   'CONFIRMED',
@@ -320,6 +328,30 @@ export function parsePurchaseOrderDelete(value: unknown): PurchaseOrderDelete {
     return { expectedVersion: version(data.expectedVersion) };
   });
 }
+export function parsePurchaseOrderConfirm(
+  value: unknown,
+): PurchaseOrderConfirm {
+  return parse(() => {
+    const data = fields(value, [
+      'expectedVersion',
+      'expectedSupplierVersion',
+      'expectedReferenceToken',
+    ]);
+    return {
+      expectedVersion: version(data.expectedVersion),
+      expectedSupplierVersion: nullable(data.expectedSupplierVersion, version),
+      expectedReferenceToken: nullable(data.expectedReferenceToken, (value) =>
+        text(value, 200),
+      ),
+    };
+  });
+}
+export function parsePurchaseOrderCancel(value: unknown): PurchaseOrderCancel {
+  return parse(() => {
+    const data = fields(value, ['expectedVersion']);
+    return { expectedVersion: version(data.expectedVersion) };
+  });
+}
 export function parsePurchaseOrderId(value: unknown): string {
   return parse(() => parseSupplierId(value));
 }
@@ -364,21 +396,18 @@ export function parsePurchaseOrderListQuery(
 }
 /** Fixed schema-order UTF-8 JSON with CAS; operation/target namespace is receipt-owned. */
 export function hashPurchaseOrderBody(
-  operation: 'create' | 'replace' | 'delete',
+  operation: 'create' | 'replace' | 'delete' | 'confirm' | 'cancel',
   value: unknown,
 ): string {
-  if (
-    operation !== 'create' &&
-    operation !== 'replace' &&
-    operation !== 'delete'
-  )
-    malformed();
-  const body =
-    operation === 'create'
-      ? parseOrderInput(value)
-      : operation === 'replace'
-        ? parsePurchaseOrderReplace(value)
-        : parsePurchaseOrderDelete(value);
+  const parsers = {
+    create: parseOrderInput,
+    replace: parsePurchaseOrderReplace,
+    delete: parsePurchaseOrderDelete,
+    confirm: parsePurchaseOrderConfirm,
+    cancel: parsePurchaseOrderCancel,
+  };
+  if (!Object.hasOwn(parsers, operation)) malformed();
+  const body = parsers[operation](value);
   return createHash('sha256')
     .update(JSON.stringify(body), 'utf8')
     .digest('hex');

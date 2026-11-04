@@ -8,16 +8,17 @@ export interface PurchaseOrderPrincipal {
   tenantId: string;
 }
 
-/** Owned transaction only, after lifecycle and Tenant SHARE locks. */
+/** Owned transaction only, after lifecycle and Tenant SHARE locks. Returns the
+ * actor's name as read under the same lock, for confirm/cancel snapshots. */
 export async function requirePurchaseOrderAuthority(
   tx: Prisma.TransactionClient,
   scope: PurchaseOrderPrincipal,
-  operation: 'CREATE' | 'REPLACE' | 'DELETE' | 'READ',
-): Promise<void> {
+  operation: 'CREATE' | 'REPLACE' | 'DELETE' | 'CONFIRM' | 'CANCEL' | 'READ',
+): Promise<{ displayName: string }> {
   const actors = await tx.$queryRaw<
-    { id: string; isActive: boolean }[]
+    { id: string; isActive: boolean; name: string }[]
   >(Prisma.sql`
-    SELECT u."id", u."isActive" FROM "users" u
+    SELECT u."id", u."isActive", u."name" FROM "users" u
     WHERE u."id" = ${scope.actorId} FOR SHARE OF u
   `);
   if (actors[0]?.id !== scope.actorId || actors[0].isActive !== true)
@@ -41,6 +42,20 @@ export async function requirePurchaseOrderAuthority(
       subject: subject as AppAbility['rules'][number]['subject'],
     })),
   );
+  if (operation === 'CONFIRM' || operation === 'CANCEL') {
+    // Own create subject plus PO read; edit and catalog grants are not needed.
+    if (
+      !ability.can('read', 'ProcurementPurchaseOrder') ||
+      !ability.can(
+        'create',
+        operation === 'CONFIRM'
+          ? 'ProcurementOrderConfirmation'
+          : 'ProcurementOrderCancellation',
+      )
+    )
+      throw new PurchaseOrderContractError('FORBIDDEN');
+    return { displayName: actors[0].name };
+  }
   const action =
     operation === 'CREATE'
       ? 'create'
@@ -58,4 +73,5 @@ export async function requirePurchaseOrderAuthority(
         !ability.can('read', 'Product')))
   )
     throw new PurchaseOrderContractError('FORBIDDEN');
+  return { displayName: actors[0].name };
 }

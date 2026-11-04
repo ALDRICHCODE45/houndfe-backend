@@ -13,6 +13,8 @@ import { requirePurchaseOrderAuthority } from './po-authority';
 import {
   hashPurchaseOrderBody,
   parseOrderInput,
+  parsePurchaseOrderCancel,
+  parsePurchaseOrderConfirm,
   parsePurchaseOrderDelete,
   parsePurchaseOrderId,
   parsePurchaseOrderIdempotencyKey,
@@ -20,10 +22,13 @@ import {
   PurchaseOrderContractError,
   type OrderInput,
   type PurchaseOrder,
+  type PurchaseOrderCancel,
+  type PurchaseOrderConfirm,
   type PurchaseOrderDelete,
   type PurchaseOrderReplace,
 } from './po-contract';
 import { buildPurchaseOrder } from './po-response';
+import { cancelPurchaseOrder, confirmPurchaseOrder } from './po-transitions';
 import { isQuantityAllowedForUnit } from './po-decimal';
 import {
   readPurchaseOrderReferences,
@@ -186,6 +191,36 @@ export class PurchaseOrderCommands {
     );
   }
 
+  async confirm(
+    id: unknown,
+    key: unknown,
+    body: unknown,
+  ): Promise<PurchaseOrderCommandResult> {
+    return this.sanitized(() =>
+      this.execute(
+        'CONFIRM',
+        parsePurchaseOrderId(id),
+        key,
+        parsePurchaseOrderConfirm(body),
+      ),
+    );
+  }
+
+  async cancel(
+    id: unknown,
+    key: unknown,
+    body: unknown,
+  ): Promise<PurchaseOrderCommandResult> {
+    return this.sanitized(() =>
+      this.execute(
+        'CANCEL',
+        parsePurchaseOrderId(id),
+        key,
+        parsePurchaseOrderCancel(body),
+      ),
+    );
+  }
+
   private async sanitized<T>(work: () => Promise<T>): Promise<T> {
     try {
       return await work();
@@ -196,10 +231,14 @@ export class PurchaseOrderCommands {
   }
 
   private execute(
-    operation: 'CREATE' | 'REPLACE',
+    operation: 'CREATE' | 'REPLACE' | 'CONFIRM' | 'CANCEL',
     target: string,
     rawKey: unknown,
-    input: OrderInput | PurchaseOrderReplace,
+    input:
+      | OrderInput
+      | PurchaseOrderReplace
+      | PurchaseOrderConfirm
+      | PurchaseOrderCancel,
   ): Promise<PurchaseOrderCommandResult>;
   private execute(
     operation: 'DELETE',
@@ -208,10 +247,15 @@ export class PurchaseOrderCommands {
     input: PurchaseOrderDelete,
   ): Promise<PurchaseOrderDeleteResult>;
   private async execute(
-    operation: 'CREATE' | 'REPLACE' | 'DELETE',
+    operation: 'CREATE' | 'REPLACE' | 'DELETE' | 'CONFIRM' | 'CANCEL',
     target: string,
     rawKey: unknown,
-    input: OrderInput | PurchaseOrderReplace | PurchaseOrderDelete,
+    input:
+      | OrderInput
+      | PurchaseOrderReplace
+      | PurchaseOrderDelete
+      | PurchaseOrderConfirm
+      | PurchaseOrderCancel,
   ): Promise<PurchaseOrderCommandResult | PurchaseOrderDeleteResult> {
     const idempotencyKey = parsePurchaseOrderIdempotencyKey([
       'Idempotency-Key',
@@ -236,9 +280,14 @@ export class PurchaseOrderCommands {
         ? 'create'
         : operation === 'REPLACE'
           ? 'replace'
-          : 'delete',
+          : operation === 'DELETE'
+            ? 'delete'
+            : operation === 'CONFIRM'
+              ? 'confirm'
+              : 'cancel',
       input,
     );
+    const transition = operation === 'CONFIRM' || operation === 'CANCEL';
     const gate = createHash('sha256')
       .update(
         JSON.stringify([
@@ -264,7 +313,7 @@ export class PurchaseOrderCommands {
       `);
       if (tenants[0]?.id !== tenantId || tenants[0].isActive !== true)
         throw new PurchaseOrderContractError('FORBIDDEN');
-      await requirePurchaseOrderAuthority(tx, scope, operation);
+      const actor = await requirePurchaseOrderAuthority(tx, scope, operation);
       const gates = await tx.$queryRaw<{ acquired: boolean }[]>(Prisma.sql`
         SELECT pg_try_advisory_xact_lock(${gate}::bigint) AS acquired
       `);
@@ -287,6 +336,7 @@ export class PurchaseOrderCommands {
       }
       let baseline: PurchaseOrder | null = null;
       let row: ProcurementPurchaseOrder;
+      let stored: ProcurementPurchaseOrderLine[] = [];
       if (operation !== 'CREATE') {
         const rows = await tx.$queryRaw<ProcurementPurchaseOrder[]>(Prisma.sql`
           SELECT o.* FROM "procurement_purchase_orders" o
@@ -299,10 +349,19 @@ export class PurchaseOrderCommands {
         ).expectedVersion;
         if (row.version !== expectedVersion || row.version >= 2147483647)
           throw new PurchaseOrderContractError('ORDER_VERSION_CONFLICT');
+        // S4/S5/S6: only DRAFT orders are edited, deleted or confirmed; cancel
+        // accepts DRAFT and CONFIRMED. Always after the version CAS.
+        if (
+          operation === 'CANCEL'
+            ? row.status === 'CANCELLED'
+            : row.status !== 'DRAFT'
+        )
+          throw new PurchaseOrderContractError('ORDER_STATE_CONFLICT');
         const lines = await tx.procurementPurchaseOrderLine.findMany({
           where: { tenantId, orderId: target },
           orderBy: { position: 'asc' },
         });
+        stored = lines;
         // The matching successful audit preserves exact saved diagnostics for
         // beforeSnapshot. Admission identities/content come from header + lines,
         // never a receipt or rejected request.
@@ -311,48 +370,72 @@ export class PurchaseOrderCommands {
         });
         // SAFETY: matching successful audit contains the saved wire object.
         const snapshot = saved.afterSnapshot as unknown as PurchaseOrder;
-        baseline = {
-          ...snapshot,
-          id: row.id,
-          version: row.version,
-          status: 'DRAFT',
-          supplierId: row.supplierId,
-          note: row.note,
-          location: { detail: row.locationDetail },
-          createdAt: row.createdAt.toISOString(),
-          updatedAt: row.updatedAt.toISOString(),
-          // SAFETY: server writes only supplier display objects or SQL NULL.
-          supplierDisplaySnapshot:
-            row.supplierDisplaySnapshot as unknown as PurchaseOrder['supplierDisplaySnapshot'],
-          lines: lines.map((line) => ({
-            lineId: line.lineId,
-            productId: line.productId,
-            variantId: line.variantId,
-            orderedQuantity: line.orderedQuantity,
-            informedUnitCost: line.informedUnitCostPresent
-              ? {
-                  amount: line.costAmount,
-                  currency: line.currency as 'MXN' | null,
-                  unit: line.costUnit,
-                  taxBasis: line.taxBasis,
-                }
-              : null,
-          })),
-          lineDisplaySnapshots: lines.map((line) => ({
-            lineId: line.lineId,
-            productName: line.productName,
-            variantName: line.variantName,
-            unit: line.unitSnapshot,
-          })),
-          locationSnapshot: {
-            tenantId,
-            tenantName: row.locationTenantName,
-            detail: row.locationDetail,
-          },
-        };
+        baseline = transition
+          ? snapshot
+          : {
+              ...snapshot,
+              id: row.id,
+              version: row.version,
+              status: 'DRAFT',
+              supplierId: row.supplierId,
+              note: row.note,
+              location: { detail: row.locationDetail },
+              createdAt: row.createdAt.toISOString(),
+              updatedAt: row.updatedAt.toISOString(),
+              // SAFETY: server writes only supplier display objects or SQL NULL.
+              supplierDisplaySnapshot:
+                row.supplierDisplaySnapshot as unknown as PurchaseOrder['supplierDisplaySnapshot'],
+              lines: lines.map((line) => ({
+                lineId: line.lineId,
+                productId: line.productId,
+                variantId: line.variantId,
+                orderedQuantity: line.orderedQuantity,
+                informedUnitCost: line.informedUnitCostPresent
+                  ? {
+                      amount: line.costAmount,
+                      currency: line.currency as 'MXN' | null,
+                      unit: line.costUnit,
+                      taxBasis: line.taxBasis,
+                    }
+                  : null,
+              })),
+              lineDisplaySnapshots: lines.map((line) => ({
+                lineId: line.lineId,
+                productName: line.productName,
+                variantName: line.variantName,
+                unit: line.unitSnapshot,
+              })),
+              locationSnapshot: {
+                tenantId,
+                tenantName: row.locationTenantName,
+                detail: row.locationDetail,
+              },
+            };
       }
       let body: PurchaseOrder | null = null;
-      if (operation === 'DELETE') {
+      if (transition) {
+        const stage = {
+          tenantId,
+          tenantName: tenants[0].name,
+          actorName: actor.displayName,
+        };
+        body =
+          operation === 'CONFIRM'
+            ? await confirmPurchaseOrder(
+                tx,
+                stage,
+                row!,
+                stored,
+                input as PurchaseOrderConfirm,
+              )
+            : await cancelPurchaseOrder(
+                tx,
+                stage,
+                row!,
+                stored,
+                input as PurchaseOrderCancel,
+              );
+      } else if (operation === 'DELETE') {
         const deleted = await tx.procurementPurchaseOrder.deleteMany({
           where: {
             tenantId,
@@ -447,7 +530,7 @@ export class PurchaseOrderCommands {
       }
       const orderId = body?.id ?? target;
       const statusCode =
-        operation === 'CREATE' ? 201 : operation === 'REPLACE' ? 200 : 204;
+        operation === 'CREATE' ? 201 : operation === 'DELETE' ? 204 : 200;
       await tx.procurementPurchaseOrderAudit.create({
         data: {
           ...scope,

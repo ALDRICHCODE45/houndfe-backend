@@ -2,6 +2,8 @@ import {
   hashPurchaseOrderBody,
   parseOrderInput,
   parsePurchaseOrderReplace,
+  parsePurchaseOrderCancel,
+  parsePurchaseOrderConfirm,
   parsePurchaseOrderDelete,
   parsePurchaseOrderListQuery,
   parsePurchaseOrderId,
@@ -404,5 +406,85 @@ describe('purchase-order closed admission', () => {
         error: 'MALFORMED',
       });
     }
+  });
+  describe('confirm/cancel bodies', () => {
+    const confirm = {
+      expectedVersion: 2,
+      expectedSupplierVersion: 3,
+      expectedReferenceToken: `prt1.${'A'.repeat(43)}`,
+    };
+    it('parses closed confirm bodies, allowing null supplier version/token', () => {
+      expect(parsePurchaseOrderConfirm(confirm)).toEqual(confirm);
+      const nulls = {
+        expectedVersion: 1,
+        expectedSupplierVersion: null,
+        expectedReferenceToken: null,
+      };
+      expect(parsePurchaseOrderConfirm(nulls)).toEqual(nulls);
+    });
+    it.each([
+      ['missing version', { ...confirm, expectedVersion: undefined }],
+      [
+        'missing supplier version',
+        { ...confirm, expectedSupplierVersion: undefined },
+      ],
+      ['missing token', { ...confirm, expectedReferenceToken: undefined }],
+      ['extra key', { ...confirm, extra: true }],
+      ['zero version', { ...confirm, expectedVersion: 0 }],
+      ['fractional version', { ...confirm, expectedVersion: 1.5 }],
+      ['string version', { ...confirm, expectedVersion: '1' }],
+      ['null version', { ...confirm, expectedVersion: null }],
+      ['zero supplier version', { ...confirm, expectedSupplierVersion: 0 }],
+      ['string supplier version', { ...confirm, expectedSupplierVersion: '3' }],
+      [
+        'unsafe supplier version',
+        { ...confirm, expectedSupplierVersion: 2 ** 53 },
+      ],
+      ['numeric token', { ...confirm, expectedReferenceToken: 1 }],
+      [
+        'oversized token',
+        { ...confirm, expectedReferenceToken: 'x'.repeat(201) },
+      ],
+      ['NUL token', { ...confirm, expectedReferenceToken: 'a\0b' }],
+      ['array', [confirm]],
+      ['null', null],
+    ])('rejects confirm %s', (_name, body) => {
+      expect(() => parsePurchaseOrderConfirm(body)).toThrow('MALFORMED');
+    });
+    it('parses closed cancel bodies', () => {
+      expect(parsePurchaseOrderCancel({ expectedVersion: 4 })).toEqual({
+        expectedVersion: 4,
+      });
+      for (const body of [
+        {},
+        { expectedVersion: 0 },
+        { expectedVersion: 1, reason: 'x' },
+        { expectedVersion: '1' },
+        null,
+      ])
+        expect(() => parsePurchaseOrderCancel(body)).toThrow('MALFORMED');
+    });
+    it('hashes confirm/cancel bodies by value, schema order and operation', () => {
+      const reordered = {
+        expectedReferenceToken: confirm.expectedReferenceToken,
+        expectedSupplierVersion: 3,
+        expectedVersion: 2,
+      };
+      expect(hashPurchaseOrderBody('confirm', confirm)).toBe(
+        hashPurchaseOrderBody('confirm', reordered),
+      );
+      expect(hashPurchaseOrderBody('confirm', confirm)).not.toBe(
+        hashPurchaseOrderBody('confirm', {
+          ...confirm,
+          expectedReferenceToken: null,
+        }),
+      );
+      expect(hashPurchaseOrderBody('cancel', { expectedVersion: 1 })).toMatch(
+        /^[a-f0-9]{64}$/,
+      );
+      expect(() =>
+        hashPurchaseOrderBody('cancel', { expectedVersion: 1, extra: 1 }),
+      ).toThrow('MALFORMED');
+    });
   });
 });
