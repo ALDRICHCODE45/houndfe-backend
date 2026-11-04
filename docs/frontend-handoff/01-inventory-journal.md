@@ -1,6 +1,6 @@
 # O1 — Inventory journal (kardex, adjustments, FEFO)
 
-**Status: implemented** on backend branch `feat/inventory-journal-o1` (not merged to `main` yet). Every stock change is now an immutable **movement**. Stock can no longer be typed into the product, variant or lot forms. It changes only through:
+**Status: implemented** and merged to local `main`. Every stock change is now an immutable **movement**. Stock can no longer be typed into the product, variant or lot forms. It changes only through:
 
 - an adjustment with a reason,
 - a sale or a sale cancellation,
