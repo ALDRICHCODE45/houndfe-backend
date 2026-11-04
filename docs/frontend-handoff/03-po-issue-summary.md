@@ -1,6 +1,6 @@
 # Purchase orders — checklist issue summary
 
-**Status: implemented** on backend branch `fix/inventory-o1-review-followups` (not merged to `main` yet). The change is additive: `issueCount` and `validation.issues` are unchanged.
+**Status: implemented** and merged to local `main`. The change is additive: `issueCount` and `validation.issues` are unchanged.
 
 The contract was agreed with the FE (its checklist lives in `src/features/procurement/purchase-orders/utils/order-checklist.ts`).
 
