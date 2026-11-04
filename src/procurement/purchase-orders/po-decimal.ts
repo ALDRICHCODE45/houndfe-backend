@@ -24,25 +24,36 @@ export function isQuantityAllowedForUnit(
   );
 }
 
-/** Exact unsigned decimal multiplication. Callers normally supply parsed wire values. */
-export function multiplyDecimals(left: string, right: string): string {
-  function scaled(value: string): { coefficient: bigint; scale: number } {
-    if (!/^(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(value))
-      throw new PurchaseOrderContractError('MALFORMED');
-    const [integer, fraction = ''] = value.split('.');
-    return {
-      coefficient: BigInt(integer + fraction),
-      scale: fraction.length,
-    };
-  }
-  const a = scaled(left);
-  const b = scaled(right);
-  const product = a.coefficient * b.coefficient;
-  if (product === BigInt(0)) return '0';
-  const scale = a.scale + b.scale;
-  const digits = product.toString().padStart(scale + 1, '0');
+function scaled(value: string): { coefficient: bigint; scale: number } {
+  if (!/^(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(value))
+    throw new PurchaseOrderContractError('MALFORMED');
+  const [integer, fraction = ''] = value.split('.');
+  return { coefficient: BigInt(integer + fraction), scale: fraction.length };
+}
+
+/** Canonical rendering: no leading/trailing zeros, "0" for zero. */
+function render(coefficient: bigint, scale: number): string {
+  if (coefficient === BigInt(0)) return '0';
+  const digits = coefficient.toString().padStart(scale + 1, '0');
   if (!scale) return digits;
   return `${digits.slice(0, -scale)}.${digits.slice(-scale)}`
     .replace(/0+$/, '')
     .replace(/\.$/, '');
+}
+
+/** Exact unsigned decimal multiplication. Callers normally supply parsed wire values. */
+export function multiplyDecimals(left: string, right: string): string {
+  const a = scaled(left);
+  const b = scaled(right);
+  return render(a.coefficient * b.coefficient, a.scale + b.scale);
+}
+
+/** Exact unsigned decimal addition; the result is canonical like multiplyDecimals. */
+export function addDecimals(left: string, right: string): string {
+  const a = scaled(left);
+  const b = scaled(right);
+  const scale = Math.max(a.scale, b.scale);
+  const lift = (value: typeof a) =>
+    value.coefficient * BigInt(10) ** BigInt(scale - value.scale);
+  return render(lift(a) + lift(b), scale);
 }

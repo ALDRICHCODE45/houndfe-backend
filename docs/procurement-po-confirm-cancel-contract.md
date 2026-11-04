@@ -67,6 +67,26 @@ The server recomputes the token under locks (order `FOR UPDATE`, supplier `FOR U
 - The summary's `status` is widened to the three values; nothing else changes and there are no counts. GET detail returns orders in every status.
 - `search` matches the **live** supplier name for DRAFT orders and the **frozen** supplier name for CONFIRMED and CANCELLED orders, plus the note for all. A renamed supplier therefore finds its drafts under the new name and its closed orders only under the name they were confirmed with.
 
+## List totals per tax basis
+
+Contract agreed with the frontend session (request 1850b3cf, proposal 191304d0, OK 2f685837); task `odd/tasks/procurement-po-list-totals.md`. Each item of `GET /procurement/purchase-orders` gains an additive field. The detail `PurchaseOrder` is unchanged and carries no total.
+
+```ts
+totals: Array<{
+  amount: string;
+  currency: 'MXN';
+  taxBasis: 'EXCLUDES_TAX' | 'INCLUDES_TAX';
+}> | null;
+```
+
+- One entry when every line shares the same tax basis; two entries when the bases are mixed, always ordered `EXCLUDES_TAX` then `INCLUDES_TAX`. Amounts of different bases are never added together, and no tax is calculated.
+- `amount` is the exact decimal sum of that basis's line subtotals, in the same canonical form as `lineSubtotals`: no rounding, no trailing zeros (`0.1 + 0.2` is `"0.3"`, `0.25 + 0.75` is `"1"`).
+- `totals` is `null` when the order has zero lines or when any line subtotal is `null`. That covers incomplete drafts, drafts with invalid references and orders cancelled from DRAFT.
+- Sources: a DRAFT uses the same live-validated subtotals as its detail. CONFIRMED and CANCELLED-from-CONFIRMED use the frozen `lineSubtotalsSnapshot`, so later catalog or supplier changes never alter them. The FE only displays these values and never sums.
+- Computed from the rows already read for the page: no extra query, no lock and no per-order read.
+
+Example (mixed bases): `"totals": [{"amount": "2797.1", "currency": "MXN", "taxBasis": "EXCLUDES_TAX"}, {"amount": "2088", "currency": "MXN", "taxBasis": "INCLUDES_TAX"}]`.
+
 ## Errors (S8)
 
 The envelope stays `{ statusCode, error }` and carries no values, so `ORDER_NOT_READY` does not include `validation.issues`; the FE reads the issues from the order it already holds.

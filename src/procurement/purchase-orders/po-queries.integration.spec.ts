@@ -310,6 +310,76 @@ describeDb('PO PostgreSQL query boundary', () => {
     expect(await evidence(f.tenantId)).toEqual(before);
   });
 
+  it('lists per-tax-basis totals: live mixed DRAFT, frozen CONFIRMED, null for CANCELLED-from-DRAFT', async () => {
+    const f = await fixture();
+    await db.procurementPurchaseOrderLine.create({
+      data: {
+        tenantId: f.tenantId,
+        orderId: f.ids[0],
+        lineId: randomUUID(),
+        position: 1,
+        productId: f.product.id,
+        orderedQuantity: '1',
+        informedUnitCostPresent: true,
+        costAmount: '116',
+        currency: 'MXN',
+        costUnit: 'KILOGRAMO',
+        taxBasis: 'INCLUDES_TAX',
+        productName: 'Saved product',
+        unitSnapshot: 'KILOGRAMO',
+      },
+    });
+    const confirmedLine =
+      await db.procurementPurchaseOrderLine.findFirstOrThrow({
+        where: { tenantId: f.tenantId, orderId: f.ids[1] },
+      });
+    await db.procurementPurchaseOrder.update({
+      where: { id: f.ids[1] },
+      data: {
+        status: 'CONFIRMED',
+        confirmedAt: new Date('2026-01-03T00:00:00.000Z'),
+        confirmedByDisplayName: 'Ana Compras',
+        lineSubtotalsSnapshot: [
+          {
+            lineId: confirmedLine.lineId,
+            subtotal: {
+              amount: '7',
+              currency: 'MXN',
+              taxBasis: 'INCLUDES_TAX',
+            },
+          },
+        ],
+      },
+    });
+    await db.procurementPurchaseOrder.update({
+      where: { id: f.ids[2] },
+      data: {
+        status: 'CANCELLED',
+        cancelledAt: new Date('2026-01-03T00:00:00.000Z'),
+        cancelledByDisplayName: 'Luis Gerente',
+      },
+    });
+    // Live catalog drift must not touch the frozen CONFIRMED total.
+    await db.product.update({
+      where: { id: f.product.id },
+      data: { name: 'Renamed product' },
+    });
+    const before = await evidence(f.tenantId);
+    const page = await f.run(() => f.service.listDrafts({}));
+    expect(page.items.map((item) => item.id)).toEqual(f.ids);
+    expect(page.items.map((item) => item.totals)).toEqual([
+      [
+        { amount: '10', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+        { amount: '116', currency: 'MXN', taxBasis: 'INCLUDES_TAX' },
+      ],
+      [{ amount: '7', currency: 'MXN', taxBasis: 'INCLUDES_TAX' }],
+      null,
+    ]);
+    const detail = await f.run(() => f.service.getDraft(f.ids[0]));
+    expect(detail).not.toHaveProperty('totals');
+    expect(await evidence(f.tenantId)).toEqual(before);
+  });
+
   it('checks persisted authority before missing/foreign detail even after prior successful read', async () => {
     const f = await fixture();
     await f.run(() => f.service.getDraft(f.ids[0]));

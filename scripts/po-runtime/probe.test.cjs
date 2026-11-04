@@ -7,6 +7,8 @@ const {
   expectResponse,
   detail,
   summary,
+  totalsShape,
+  expectedTotals,
   scenario,
   closeScenario,
 } = require('./probe.cjs');
@@ -214,6 +216,42 @@ function fixture({ poison = false, bugs = [] } = {}) {
       })),
     };
   };
+  // Faithful list totals: exact per basis, EXCLUDES_TAX first, null on zero lines or any
+  // null subtotal. The defects each break exactly one rule the probe must notice.
+  const totalsOf = (lineSubtotals) => {
+    if (!lineSubtotals.length || lineSubtotals.some((v) => v.subtotal === null))
+      return null;
+    const places = 7;
+    const units = (amount) => {
+      const [whole, fraction = ''] = amount.split('.');
+      return BigInt(whole + fraction.padEnd(places, '0'));
+    };
+    const render = (sum) => {
+      const text = sum.toString().padStart(places + 1, '0');
+      return `${text.slice(0, -places)}.${text.slice(-places)}`
+        .replace(/0+$/, '')
+        .replace(/\.$/, '');
+    };
+    const sums = new Map();
+    for (const { subtotal } of lineSubtotals) {
+      const basis = bug('totals-sum-across-bases')
+        ? 'EXCLUDES_TAX'
+        : subtotal.taxBasis;
+      sums.set(basis, (sums.get(basis) ?? 0n) + units(subtotal.amount));
+    }
+    const order = bug('totals-wrong-order')
+      ? ['INCLUDES_TAX', 'EXCLUDES_TAX']
+      : ['EXCLUDES_TAX', 'INCLUDES_TAX'];
+    return order
+      .filter((basis) => sums.has(basis))
+      .map((taxBasis) => ({
+        amount: bug('totals-float')
+          ? String(Number(render(sums.get(taxBasis))) + 1e-16 * 3)
+          : render(sums.get(taxBasis)),
+        currency: 'MXN',
+        taxBasis,
+      }));
+  };
   const view = (record) => {
     const { input } = record;
     const supplier = suppliers.get(input.supplierId);
@@ -360,6 +398,7 @@ function fixture({ poison = false, bugs = [] } = {}) {
         supplierDisplaySnapshot: v.supplierDisplaySnapshot,
         lineCount: v.lines.length,
         issueCount: v.validation.issues.length,
+        totals: totalsOf(v.lineSubtotals),
         note: v.note,
         locationDetail: v.location.detail,
         createdAt: v.createdAt,
@@ -553,6 +592,7 @@ test('O3c close scenario passes against a faithful transport and keeps its data 
     'cancel-from-confirmed-keeps-frozen-data',
     'frozen-names-survive-rename-archive-and-search',
     'status-filter-and-cursor-binding',
+    'list-totals-per-tax-basis',
     'discard-empty-draft-still-allowed',
   ]);
   // Human rule: probe data lives in the FE's database too, so it reads like a business.
@@ -609,6 +649,9 @@ test('probe notices each deliberate server defect in the O3c contract', async ()
       'live-name-search-on-closed',
       'frozen-names-survive-rename-archive-and-search',
     ],
+    ['totals-sum-across-bases', 'list-totals-per-tax-basis'],
+    ['totals-wrong-order', 'list-totals-per-tax-basis'],
+    ['totals-float', 'list-totals-per-tax-basis'],
   ]) {
     const f = fixture({ bugs: [bug] }),
       failed = [];
@@ -711,6 +754,7 @@ test('summary accepts all three statuses and nothing else', () => {
     supplierDisplaySnapshot: null,
     lineCount: 0,
     issueCount: 0,
+    totals: null,
     note: null,
     locationDetail: null,
     createdAt: 'a',
@@ -720,4 +764,60 @@ test('summary accepts all three statuses and nothing else', () => {
     assert.doesNotThrow(() => summary(item(status)));
   assert.throws(() => summary(item('SENT')));
   assert.throws(() => summary({ ...item('DRAFT'), counts: {} }));
+  const { totals, ...withoutTotals } = item('DRAFT');
+  assert(totals === null);
+  assert.throws(() => summary(withoutTotals));
+});
+const total = (amount, taxBasis, currency = 'MXN') => ({
+  amount,
+  currency,
+  taxBasis,
+});
+test('totals shape accepts null, one basis or both in order, and rejects anything else', () => {
+  assert.doesNotThrow(() => totalsShape(null));
+  assert.doesNotThrow(() => totalsShape([total('0.3', 'INCLUDES_TAX')]));
+  assert.doesNotThrow(() =>
+    totalsShape([total('12.5', 'EXCLUDES_TAX'), total('116', 'INCLUDES_TAX')]),
+  );
+  for (const bad of [
+    undefined,
+    [],
+    [total('1', 'INCLUDES_TAX'), total('2', 'EXCLUDES_TAX')],
+    [total('1', 'EXCLUDES_TAX'), total('2', 'EXCLUDES_TAX')],
+    [total('1', 'EXCLUDES_TAX'), total('2', 'INCLUDES_TAX'), total('3', 'X')],
+    [total('1.0', 'EXCLUDES_TAX')],
+    [total('1.50', 'EXCLUDES_TAX')],
+    [total('01', 'EXCLUDES_TAX')],
+    [total('1e3', 'EXCLUDES_TAX')],
+    [total('-1', 'EXCLUDES_TAX')],
+    [total('1', 'EXCLUDES_TAX', 'USD')],
+    [{ ...total('1', 'EXCLUDES_TAX'), tax: '0' }],
+    [{ amount: '1', currency: 'MXN', taxBasis: 'MIXED' }],
+  ])
+    assert.throws(() => totalsShape(bad), JSON.stringify(bad));
+});
+test('expectedTotals sums exactly per basis and is null for zero or missing subtotals', () => {
+  const sub = (amount, taxBasis) => ({
+    lineId: randomUUID(),
+    subtotal: total(amount, taxBasis),
+  });
+  assert.equal(expectedTotals([]), null);
+  assert.equal(
+    expectedTotals([sub('1', 'EXCLUDES_TAX'), { lineId: 'x', subtotal: null }]),
+    null,
+  );
+  assert.deepEqual(
+    expectedTotals([sub('0.1', 'EXCLUDES_TAX'), sub('0.2', 'EXCLUDES_TAX')]),
+    [total('0.3', 'EXCLUDES_TAX')],
+  );
+  assert.deepEqual(
+    expectedTotals([
+      sub('116', 'INCLUDES_TAX'),
+      sub('10', 'EXCLUDES_TAX'),
+      sub('2.5', 'EXCLUDES_TAX'),
+      sub('0.25', 'INCLUDES_TAX'),
+      sub('0.75', 'INCLUDES_TAX'),
+    ]),
+    [total('12.5', 'EXCLUDES_TAX'), total('117', 'INCLUDES_TAX')],
+  );
 });

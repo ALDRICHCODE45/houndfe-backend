@@ -8,8 +8,10 @@ import type {
   PurchaseOrder,
   PurchaseOrderIssue,
   PurchaseOrderStatus,
+  PurchaseOrderTotal,
   SupplierDisplaySnapshot,
 } from './po-contract';
+import { addDecimals } from './po-decimal';
 import { computePurchaseOrderReferenceToken } from './po-reference-token';
 import {
   buildPurchaseOrderDiagnostics,
@@ -53,6 +55,32 @@ export function canConfirmPurchaseOrder(input: {
     input.supplierCurrentVersion !== null &&
     input.supplierStatus === 'ACTIVE'
   );
+}
+
+const TOTAL_BASES = ['EXCLUDES_TAX', 'INCLUDES_TAX'] as const;
+
+/**
+ * List-only summary: one exact sum per tax basis, never across bases and never
+ * with tax computed. Null for zero lines or any missing subtotal.
+ */
+export function computePurchaseOrderTotals(
+  lineSubtotals: readonly LineSubtotal[],
+): PurchaseOrderTotal[] | null {
+  if (!lineSubtotals.length) return null;
+  const sums = new Map<string, string>();
+  for (const { subtotal } of lineSubtotals) {
+    if (!subtotal) return null;
+    sums.set(
+      subtotal.taxBasis,
+      addDecimals(sums.get(subtotal.taxBasis) ?? '0', subtotal.amount),
+    );
+  }
+  return TOTAL_BASES.flatMap((taxBasis) => {
+    const amount = sums.get(taxBasis);
+    return amount === undefined
+      ? []
+      : [{ amount, currency: 'MXN' as const, taxBasis }];
+  });
 }
 
 export function storedOrderInput(

@@ -4,6 +4,7 @@ import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.serv
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { PurchaseOrderQueries } from './po-queries';
 import { PurchaseOrderCursor } from './po-cursor';
+import { computePurchaseOrderTotals } from './po-response';
 
 const id = '10000000-0000-4000-8000-000000000001';
 const supplierId = '20000000-0000-4000-8000-000000000001';
@@ -258,6 +259,7 @@ describe('purchase-order read boundary', () => {
       },
       lineCount: 1,
       issueCount: 0,
+      totals: [{ amount: '10', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' }],
       note: ' note ',
       locationDetail: ' detail ',
       createdAt: time.toISOString(),
@@ -650,5 +652,163 @@ describe('purchase-order read boundary', () => {
       code: 'MALFORMED',
     });
     expect(h.sqls).toHaveLength(0);
+  });
+
+  describe('list totals per tax basis', () => {
+    const secondLineId = '50000000-0000-4000-8000-000000000002';
+    const secondLine = {
+      ...line,
+      lineId: secondLineId,
+      position: 1,
+      orderedQuantity: '1',
+      costAmount: '116',
+      taxBasis: 'INCLUDES_TAX',
+    };
+    const frozen = (amount: string, taxBasis: string, id = lineId) => ({
+      lineId: id,
+      subtotal: { amount, currency: 'MXN', taxBasis },
+    });
+    it('DRAFT uses the live-validated subtotals the detail returns (single and mixed)', async () => {
+      const h = harness();
+      h.rows([
+        row,
+        {
+          ...row,
+          id: '10000000-0000-4000-8000-000000000002',
+          lines: [line, secondLine],
+        },
+      ]);
+      const page = await h.service.listDrafts({});
+      expect(page.items.map((item) => item.totals)).toEqual([
+        [{ amount: '10', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' }],
+        [
+          { amount: '10', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+          { amount: '116', currency: 'MXN', taxBasis: 'INCLUDES_TAX' },
+        ],
+      ]);
+      h.rows([{ ...row, lines: [line, secondLine] }]);
+      const detail = await h.service.getDraft(id);
+      expect(computePurchaseOrderTotals(detail.lineSubtotals)).toEqual(
+        (await h.service.listDrafts({})).items[0].totals,
+      );
+    });
+    it('DRAFT totals are null for zero lines, incomplete lines and invalid references', async () => {
+      const h = harness();
+      h.rows([
+        { ...row, lines: [] },
+        { ...row, lines: [{ ...line, informedUnitCostPresent: false }] },
+        { ...row, lines: [line, { ...secondLine, orderedQuantity: null }] },
+      ] as unknown as (typeof row)[]);
+      expect(
+        (await h.service.listDrafts({})).items.map((item) => item.totals),
+      ).toEqual([null, null, null]);
+      h.rows([row]);
+      h.products([]);
+      expect((await h.service.listDrafts({})).items[0].totals).toBeNull();
+    });
+    it('CONFIRMED uses the frozen snapshot only, never drifted live data', async () => {
+      const h = harness();
+      h.rows([
+        {
+          ...row,
+          status: 'CONFIRMED',
+          lines: [line, secondLine],
+          lineSubtotalsSnapshot: [
+            frozen('0.1', 'EXCLUDES_TAX'),
+            frozen('0.2', 'EXCLUDES_TAX', secondLineId),
+          ],
+        },
+        {
+          ...row,
+          id: '10000000-0000-4000-8000-000000000002',
+          status: 'CONFIRMED',
+          lines: [line, secondLine],
+          lineSubtotalsSnapshot: [
+            frozen('99', 'INCLUDES_TAX'),
+            frozen('1.5', 'EXCLUDES_TAX', secondLineId),
+          ],
+        },
+      ]);
+      h.products([]);
+      h.variants([]);
+      const page = await h.service.listDrafts({});
+      expect(page.items.map((item) => item.totals)).toEqual([
+        [{ amount: '0.3', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' }],
+        [
+          { amount: '1.5', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+          { amount: '99', currency: 'MXN', taxBasis: 'INCLUDES_TAX' },
+        ],
+      ]);
+      const business = h.sqls.slice(3).map((sql) => sql.sql);
+      expect(business.some((sql) => sql.includes('FROM "products"'))).toBe(
+        false,
+      );
+    });
+    it('CANCELLED-from-CONFIRMED keeps the snapshot total; CANCELLED-from-DRAFT is null', async () => {
+      const h = harness();
+      h.rows([
+        {
+          ...row,
+          status: 'CANCELLED',
+          lineSubtotalsSnapshot: [frozen('10', 'EXCLUDES_TAX')],
+        },
+        { ...row, status: 'CANCELLED', lineSubtotalsSnapshot: null },
+        {
+          ...row,
+          status: 'CONFIRMED',
+          lineSubtotalsSnapshot: [] as unknown,
+        },
+      ]);
+      expect(
+        (await h.service.listDrafts({})).items.map((item) => item.totals),
+      ).toEqual([
+        [{ amount: '10', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' }],
+        null,
+        null,
+      ]);
+    });
+    it('adds no per-order queries and no locks; the detail has no totals', async () => {
+      const h = harness();
+      h.rows([
+        row,
+        { ...row, id: '10000000-0000-4000-8000-000000000002' },
+        { ...row, id: '10000000-0000-4000-8000-000000000003' },
+      ]);
+      await h.service.listDrafts({});
+      const business = h.sqls.slice(3);
+      expect(business).toHaveLength(4);
+      expect(
+        business.every(
+          (sql) => !/FOR UPDATE|FOR SHARE|INSERT|DELETE|UPDATE/.test(sql.sql),
+        ),
+      ).toBe(true);
+      const detail = await h.service.getDraft(id);
+      expect(detail).not.toHaveProperty('totals');
+      expect(Object.keys(detail).sort()).toEqual(
+        [
+          'id',
+          'version',
+          'status',
+          'supplierId',
+          'note',
+          'location',
+          'createdAt',
+          'updatedAt',
+          'lines',
+          'supplierDisplaySnapshot',
+          'lineDisplaySnapshots',
+          'lineSubtotals',
+          'locationSnapshot',
+          'validation',
+          'supplierCurrentVersion',
+          'referenceToken',
+          'canConfirm',
+          'confirmedAt',
+          'confirmedBy',
+          'cancelledAt',
+          'cancelledBy',
+        ].sort(),
+      );
+    });
   });
 });

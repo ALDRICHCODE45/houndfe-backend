@@ -180,6 +180,38 @@ describe('PO HTTP boundary (offline; real JWT/CLS/permission guards)', () => {
         ? replace
         : { expectedVersion: 1 };
   }
+  it('serves list items with additive totals verbatim and the detail without them', async () => {
+    const summary = {
+      id,
+      version: 1,
+      status: 'DRAFT',
+      supplierDisplaySnapshot: null,
+      lineCount: 2,
+      issueCount: 0,
+      note: null,
+      locationDetail: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const items = [
+      {
+        ...summary,
+        totals: [
+          { amount: '12.5', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+          { amount: '116', currency: 'MXN', taxBasis: 'INCLUDES_TAX' },
+        ],
+      },
+      { ...summary, totals: null },
+    ];
+    queries.listDrafts.mockResolvedValueOnce({ items, nextCursor: null });
+    const listed = await http('get');
+    expect(listed.status).toBe(200);
+    expect(listed.body).toEqual({ items, nextCursor: null });
+    expect(listed.headers['cache-control']).toBe('no-store');
+    const detail = await http('get', `${base}/${id}`);
+    expect(detail.body).toEqual(order);
+    expect(detail.body).not.toHaveProperty('totals');
+  });
   it('forwards routes, raw query and exact acknowledgements; DELETE has zero bytes', async () => {
     expect((await http('get', `${base}?limit=1`)).body).toEqual({
       items: [],

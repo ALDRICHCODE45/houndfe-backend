@@ -1,4 +1,5 @@
 import {
+  addDecimals,
   DECIMAL_UNITS,
   isQuantityAllowedForUnit,
   multiplyDecimals,
@@ -40,6 +41,23 @@ describe('exact PO decimals', () => {
     'rejects invalid decimal %s without float coercion',
     (value) => {
       expect(() => multiplyDecimals(value, '1')).toThrow('MALFORMED');
+    },
+  );
+  it.each([
+    ['0.1', '0.2', '0.3'],
+    ['1.50', '1.5', '3'],
+    ['0', '0', '0'],
+    ['0.5', '0.5', '1'],
+    ['10', '0.001', '10.001'],
+    ['999999999999999999.9999', '0.0001', '1000000000000000000'],
+  ])('%s + %s = %s exactly, canonical', (a, b, result) => {
+    expect(addDecimals(a, b)).toBe(result);
+  });
+  it.each(['-1', '1e3', '01', '', '.2', '1\n'])(
+    'addition rejects invalid decimal %s',
+    (value) => {
+      expect(() => addDecimals(value, '1')).toThrow('MALFORMED');
+      expect(() => addDecimals('1', value)).toThrow('MALFORMED');
     },
   );
 });

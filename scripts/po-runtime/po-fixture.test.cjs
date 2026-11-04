@@ -346,7 +346,14 @@ function fakeApi({ breakAt } = {}) {
     }
     throw new Error('Unexpected fake request');
   };
-  return { transport, calls, fixture: fx, orders, suppliers };
+  return {
+    transport,
+    calls,
+    fixture: fx,
+    orders,
+    suppliers,
+    canConfirm: (order) => view(order).canConfirm,
+  };
 }
 test('orders are made through real commands by the intended actors; every mutation is idempotent-keyed', async () => {
   const api = fakeApi();
@@ -360,11 +367,13 @@ test('orders are made through real commands by the intended actors; every mutati
     'readyToConfirm',
     'readyToConfirm2',
     'readyToConfirm3',
+    'mixedTaxBasis',
     'incompleteCost',
     'archivedSupplierDraft',
     'confirmed',
     'confirmed2',
     'confirmed3',
+    'confirmedMixedTaxBasis',
     'cancelledFromDraft',
     'cancelledFromConfirmed',
   ]);
@@ -376,11 +385,13 @@ test('orders are made through real commands by the intended actors; every mutati
       readyToConfirm: 'DRAFT',
       readyToConfirm2: 'DRAFT',
       readyToConfirm3: 'DRAFT',
+      mixedTaxBasis: 'DRAFT',
       incompleteCost: 'DRAFT',
       archivedSupplierDraft: 'DRAFT',
       confirmed: 'CONFIRMED',
       confirmed2: 'CONFIRMED',
       confirmed3: 'CONFIRMED',
+      confirmedMixedTaxBasis: 'CONFIRMED',
       cancelledFromDraft: 'CANCELLED',
       cancelledFromConfirmed: 'CANCELLED',
     },
@@ -420,9 +431,24 @@ test('orders are made through real commands by the intended actors; every mutati
     'readyToConfirm',
     'readyToConfirm2',
     'readyToConfirm3',
+    'mixedTaxBasis',
     'incompleteCost',
   ])
     assert.equal(byNote(result.orders[key].note).version, 1);
+  // both mixed orders carry lines on both tax bases; the draft is ready to confirm
+  for (const key of ['mixedTaxBasis', 'confirmedMixedTaxBasis']) {
+    const order = byNote(result.orders[key].note);
+    assert.deepEqual(
+      [...new Set(order.lines.map((l) => l.informedUnitCost.taxBasis))].sort(),
+      ['EXCLUDES_TAX', 'INCLUDES_TAX'],
+    );
+    assert(order.lines.length >= 2);
+  }
+  assert.equal(
+    byNote(result.orders.confirmedMixedTaxBasis.note).confirmedBy.displayName,
+    'María González',
+  );
+  assert.equal(api.canConfirm(byNote(result.orders.mixedTaxBasis.note)), true);
   // every showcase order has its own readable note, so the UI can tell them apart
   const notes = Object.values(result.orders).map((order) => order.note);
   assert.equal(new Set(notes).size, notes.length);
