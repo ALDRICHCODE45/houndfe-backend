@@ -17,11 +17,11 @@ Request relayed by the FE session (2026-11-04 19:29Z), human words in L1.
 
 | ID | Specs | Route | Commit |
 | --- | --- | --- | --- |
-| T1 orchestrator, guard, base check, cleanup, README | S1 S5 S6 | inline | |
-| T2 org + catalog + inventory + public catalog | S2 S3 S4 | worker | |
-| T3 commerce: customers, sales, quotations, promotions, cash | S2 S3 S4 | worker | |
-| T4 ops: routes, human decisions, procurement, HR, admin, system config | S2 S3 S4 | worker | |
-| T5 run on dev, idempotence re-run, per-screen verification | S6 S7 | inline | |
+| T1 orchestrator, guard, base check, cleanup, README | S1 S5 S6 | inline | 3f12590, 913759c, 9599921 |
+| T2 org + catalog + inventory + public catalog | S2 S3 S4 | worker | 1b40946, 0e3516b |
+| T3 commerce: customers, sales, quotations, promotions, cash | S2 S3 S4 | worker | c12dd05 |
+| T4 ops: routes, human decisions, procurement, HR, admin, system config | S2 S3 S4 | worker | cdd4e33 |
+| T5 run on dev, idempotence re-run, per-screen verification | S6 S7 | inline | runs 3+4 identical counts on 26 tables; garbage 0 |
 
 ## Log
 
