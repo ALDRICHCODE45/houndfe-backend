@@ -8,6 +8,8 @@ Backend contracts for the frontend, **in implementation order**. Each file cover
 | 2 | O2 Lots on variants | **Paper proposal only**, not implemented | [02-variant-lots-o2-proposal.md](02-variant-lots-o2-proposal.md) |
 | 3 | O4 Receipts against a confirmed purchase order (10 ordered, 6 accepted → +6, 4 pending) | Not started; depends on O1 and O2 | — |
 
+Operations: [deploy/inventory-journal-o1-rollout.md](../deploy/inventory-journal-o1-rollout.md) is the rollout runbook for the O1 migration (stop writers, pre-flight queries, rollback, permissions). It is for whoever deploys, not for the FE.
+
 Already delivered before this index (O3, implemented by the FE): suppliers, purchase-order drafts, confirm/cancel, and per-tax-basis list totals.
 
 ## Conventions shared by every feature

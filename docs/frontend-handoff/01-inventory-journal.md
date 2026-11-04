@@ -60,6 +60,22 @@ Two notes on versions:
 - A lot movement bumps only that lot's version, never the untracked version.
 - Versions start at 0.
 
+Every stock write bumps the version of the bucket it touches, with no exception: that includes cancelling a sale charged before the journal existed (it is written as `SALE_CANCELLATION` rows like any other cancellation, so a stale `expectedVersion` is rejected with `409 STOCK_VERSION_CONFLICT`).
+
+**`stockVersion` in product responses.** Lot and variant rows returned by the products endpoints carry a `stockVersion` field. It is the same number as the `version` of that bucket in §3.1. The endpoints are:
+
+- `GET /products/:id/lots`
+- `PATCH /products/:id/lots/:lotId`
+- `POST /products/:id/lots` (`addLot`)
+- `POST /products/:id/variants`
+- `PATCH /products/:id/variants/:variantId`
+
+Treat it as read-only information. The FE may ignore it, or use it as the `expectedVersion` right after one of those calls. Any later movement makes it stale, so before an adjustment read the buckets again with §3.1 and use that `version`.
+
+### Opening («Apertura»)
+
+When the journal was switched on, the migration wrote one `OPENING` movement (actor `Sistema`) for every non-variant product, variant and lot with a quantity other than 0. **[BE decision]** One adjustment came with it: for a product with lots, the invariant is `product.quantity >= sum(lot.quantity)`. Where the stored lot sum was larger than the product quantity, the migration **raised `product.quantity` to the lot sum**, and the `OPENING` rows reflect the raised value. So after the switch-on a product's total can be higher than what the old screen showed. The untracked portion (`quantity − sum(lots)`) is never negative.
+
 ### Movement types
 
 | `type` | Produced by | `delta` |
@@ -310,6 +326,8 @@ Charging a sale (`POST /sales/drafts/:id/charge`) and confirming a bot sale cons
 
 Show «Stock insuficiente» and reload the cart availability.
 
+**Fail-closed code `SALE_STOCK_UNAVAILABLE`.** If the sales service were ever running without the stock journal wired in, charging, confirming a bot sale and cancelling would be refused with this code (the generic business-rule error body, `422`) instead of touching stock without a movement. In a deployed build the journal is always wired, so the FE should never see it: treat it as an unexpected server fault, show a generic error and do not retry.
+
 The draft availability check (`POST /sales/drafts/:id/items` and `PATCH …/items/:itemId`) keeps the sales error body, not the 409 above. A quantity above the sellable stock answers `422 { "statusCode": 422, "error": "BUSINESS_RULE_VIOLATION", "message": "Insufficient stock for product …. Available: 62, Requested: 63" }`.
 
 Cancelling a sale (`POST /sales/:id/cancel`) restores exactly the buckets the sale consumed, as `SALE_CANCELLATION` movements:
@@ -319,7 +337,7 @@ Cancelling a sale (`POST /sales/:id/cancel`) restores exactly the buckets the sa
 
 Three edge cases:
 
-- Sales charged before the journal existed restore to the product or variant as before.
+- Sales confirmed before the journal was switched on have no `SALE` rows. Cancelling one restores its lines to the product (untracked portion) or variant, and it is now journaled too: `SALE_CANCELLATION` rows with `group: { type: "SALE", id }`, a running balance, and a version bump. A line whose product no longer tracks stock (`useStock: false` or a service) or no longer exists is skipped. A sale confirmed after the switch-on that consumed nothing from the journal (all its lines were `useStock: false` or services) restores nothing: the backend tells the two cases apart by the confirmation date, not by the absence of `SALE` rows.
 - Cancelling twice never restores twice. The second call answers `200` again and writes no rows.
 - A POS sale is charged as `DELIVERED` by default, and a delivered sale cannot be cancelled: `409 SALE_DELIVERED_CANNOT_CANCEL`. Only sales charged with `delivery: true` (they stay `PENDING` until delivered) can be cancelled, so the restock on cancellation applies to those sales only. This is existing behavior on `main`, unchanged by O1: only where the stock goes back changed.
 
