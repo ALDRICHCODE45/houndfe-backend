@@ -699,9 +699,12 @@ export class ChatbotApiService {
    * The cashierUserId must match the sale's original creator (userId FK).
    */
   async cancelBotSale(input: CancelBotSaleInput) {
-    return this.salesService.cancelSale(input.saleId, input.cashierUserId, {
-      reason: input.reason,
-    });
+    return this.salesService.cancelSale(
+      input.saleId,
+      input.cashierUserId,
+      { reason: input.reason },
+      { origin: 'bot' },
+    );
   }
 
   /**

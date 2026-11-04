@@ -217,6 +217,15 @@ function createService(
     posEvaluateUseCase as any,
     paymentMethodResolver as any,
     promotionUsageRepo,
+    undefined,
+    // O1 / T4 — the journal facade: `charge` is observed through the legacy
+    // stock mock (args/order/rejections), `reverse` reports a pre-journal sale.
+    {
+      charge: jest.fn(({ items }: { items: unknown[] }) =>
+        productsService.decrementStockForCharge(items),
+      ),
+      reverse: jest.fn().mockResolvedValue({ status: 'LEGACY', movements: [] }),
+    } as any,
   );
 }
 
@@ -3863,6 +3872,38 @@ describe('SalesService', () => {
       ]);
     });
 
+    it('charges the POS sale through the journal with the sale id and the authenticated user as actor (O1 / T4)', async () => {
+      const sale = buildDraftSaleWithMultipleItems('sale-t4-pos');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockImplementation(
+        async (productId: string) => ({
+          unitPriceCents: productId === 'prod-2' ? 2500 : 1000,
+        }),
+      );
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000051');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      const charge = jest.fn().mockResolvedValue([]);
+      Object.assign(service, { saleStock: { charge } });
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 4500 },
+        'idem-t4-pos',
+      );
+
+      expect(charge).toHaveBeenCalledTimes(1);
+      expect(charge).toHaveBeenCalledWith({
+        saleId: 'sale-t4-pos',
+        items: [
+          { productId: 'prod-1', variantId: null, quantity: 2 },
+          { productId: 'prod-2', variantId: 'var-1', quantity: 1 },
+        ],
+        actor: { kind: 'user', userId: 'user-1' },
+      });
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+    });
+
     it('runs decrementStockForCharge INSIDE runInTransaction (no in-tx network call escapes the tx boundary)', async () => {
       const sale = buildDraftSaleWithMultipleItems('sale-e3-in-tx');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
@@ -4437,6 +4478,90 @@ describe('SalesService', () => {
       ).toHaveBeenCalledWith('cancel-idem-token', sale.id, result);
     });
 
+    describe('stock journal reversal (O1 / T4)', () => {
+      const journaled = (
+        status: 'REVERSED' | 'LEGACY' | 'ALREADY_REVERSED',
+      ) => {
+        const reverse = jest.fn().mockResolvedValue({ status, movements: [] });
+        Object.assign(service, { saleStock: { reverse } });
+        return reverse;
+      };
+
+      it('restores through the journal only: no legacy restock when the sale was journaled', async () => {
+        const reverse = journaled('REVERSED');
+        const sale = buildConfirmedSaleForCancel('sale-j-1', 'CREDIT');
+        saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+        const result = await service.cancelSale('sale-j-1', 'user-1', {
+          reason: 'ORDER_ERROR',
+        });
+
+        expect(result.status).toBe('CANCELED');
+        expect(reverse).toHaveBeenCalledWith({
+          saleId: 'sale-j-1',
+          actor: { kind: 'user', userId: 'user-1' },
+        });
+        expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
+        expect(saleRepo.persistCancellation).toHaveBeenCalledTimes(1);
+      });
+
+      it('never restocks twice when the journal already holds the reversal', async () => {
+        journaled('ALREADY_REVERSED');
+        const sale = buildConfirmedSaleForCancel('sale-j-2', 'CREDIT');
+        saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+        await service.cancelSale('sale-j-2', 'user-1', {
+          reason: 'ORDER_ERROR',
+        });
+
+        expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
+      });
+
+      it('falls back to the legacy product/variant restock for pre-journal sales', async () => {
+        journaled('LEGACY');
+        const sale = buildConfirmedSaleForCancel('sale-j-3', 'CREDIT');
+        saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+        await service.cancelSale('sale-j-3', 'user-1', {
+          reason: 'ORDER_ERROR',
+        });
+
+        expect(productsService.incrementStockForRestock).toHaveBeenCalledWith([
+          { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+        ]);
+      });
+
+      it('stamps bot-origin cancellations with the bot actor', async () => {
+        const reverse = journaled('REVERSED');
+        const sale = buildConfirmedSaleForCancel('sale-j-4', 'CREDIT');
+        saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+        await service.cancelSale(
+          'sale-j-4',
+          'user-1',
+          { reason: 'ORDER_ERROR' },
+          { origin: 'bot' },
+        );
+
+        expect(reverse).toHaveBeenCalledWith(
+          expect.objectContaining({ actor: { kind: 'bot', userId: 'user-1' } }),
+        );
+      });
+
+      it('rolls the cancellation back when the journal reversal fails', async () => {
+        const reverse = journaled('REVERSED');
+        reverse.mockRejectedValue(new Error('journal down'));
+        const sale = buildConfirmedSaleForCancel('sale-j-5', 'CREDIT');
+        saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+
+        await expect(
+          service.cancelSale('sale-j-5', 'user-1', { reason: 'ORDER_ERROR' }),
+        ).rejects.toThrow('journal down');
+        expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
+        expect(outboxWriter.publish).not.toHaveBeenCalled();
+      });
+    });
+
     it('cancels credit sales with zero refund rows and no payment detail lookup', async () => {
       const sale = buildConfirmedSaleForCancel('sale-cancel-credit', 'CREDIT');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
@@ -4800,6 +4925,45 @@ describe('SalesService', () => {
       expect(products.decrementStockForCharge.mock.calls).toHaveLength(0);
       expect(saleRepo.allocateNextFolio.mock.calls).toHaveLength(0);
       expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(0);
+      expect(outboxWriter.publish).not.toHaveBeenCalled();
+    });
+
+    it('charges the bot sale through the journal as the Bot actor, once, before the folio', async () => {
+      setupConfirmBotSaleHappyPath();
+      const charge = jest.fn().mockResolvedValue([]);
+      Object.assign(service, { saleStock: { charge } });
+
+      const result = await service.confirmBotSale(botSaleInput);
+
+      expect(charge).toHaveBeenCalledTimes(1);
+      expect(charge).toHaveBeenCalledWith({
+        saleId: result.saleId,
+        items: [{ productId: 'prod-1', variantId: 'var-1', quantity: 2 }],
+        actor: { kind: 'bot', userId: 'user-bot-cashier' },
+      });
+      expect(charge.mock.invocationCallOrder[0]).toBeLessThan(
+        saleRepo.allocateNextFolio.mock.invocationCallOrder[0],
+      );
+      expect(productsService.decrementStockForCharge).not.toHaveBeenCalled();
+    });
+
+    it('keeps insufficient stock at 409 STOCK_INSUFFICIENT_AT_CONFIRM and persists nothing', async () => {
+      setupConfirmBotSaleHappyPath();
+      const charge = jest
+        .fn()
+        .mockRejectedValue(
+          new BusinessRuleViolationError(
+            'STOCK_INSUFFICIENT_AT_CONFIRM',
+            'STOCK_INSUFFICIENT_AT_CONFIRM',
+          ),
+        );
+      Object.assign(service, { saleStock: { charge } });
+
+      await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
+        code: 'STOCK_INSUFFICIENT_AT_CONFIRM',
+      });
+      expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+      expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
       expect(outboxWriter.publish).not.toHaveBeenCalled();
     });
 
