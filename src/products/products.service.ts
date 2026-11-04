@@ -31,6 +31,12 @@ import {
 import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { lockCatalogLifecycle } from '../catalog-editorial/infrastructure/prisma-catalog-lifecycle-gate';
+import type { StockChange } from '../inventory/domain/stock-journal.types';
+import { ProductStockJournal } from './infrastructure/product-stock-journal';
+import {
+  assertNoDirectQuantityEdit,
+  LotHasStockError,
+} from './domain/product-stock.errors';
 import type { IvaRateValue } from './domain/value-objects/iva-rate.value-object';
 import type { IepsRateValue } from './domain/value-objects/ieps-rate.value-object';
 import type { PurchaseCostModeValue } from './domain/value-objects/purchase-cost.value-object';
@@ -100,6 +106,7 @@ export class ProductsService {
     private readonly filesService: FilesService,
     private readonly tenantPrisma: TenantPrismaService,
     private readonly satCatalog: SatCatalogService,
+    private readonly stockJournal: ProductStockJournal,
   ) {}
 
   async decrementStockForCharge(
@@ -379,7 +386,10 @@ export class ProductsService {
     const productId = product.id;
     const p = product.toPersistence();
 
-    await this.tenantPrisma.getClient().$transaction(async (tx) => {
+    await this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      // Initial stock is journaled (INITIAL) once every bucket row exists.
+      const initialStock: StockChange[] = [];
       if (supportedCatalogPriceListIds.length) {
         const bindings = await tx.tenantCatalogPriceList.findMany({
           where: {
@@ -425,7 +435,7 @@ export class ProductsService {
           purchaseGrossCostCents: p.purchaseGrossCostCents,
           useStock: p.useStock,
           useLotsAndExpirations: p.useLotsAndExpirations,
-          quantity: p.quantity,
+          quantity: 0,
           minQuantity: p.minQuantity,
           hasVariants: p.hasVariants,
           hidePriceInOnlineCatalog: p.hidePriceInOnlineCatalog,
@@ -434,6 +444,12 @@ export class ProductsService {
           tenantId,
         } as Prisma.ProductUncheckedCreateInput,
       });
+      if (p.quantity > 0) {
+        initialStock.push({
+          bucket: { kind: 'PRODUCT_UNTRACKED', productId },
+          delta: p.quantity,
+        });
+      }
 
       // 2. Create default price lists for all global price lists
       const globalLists = await tx.globalPriceList.findMany({
@@ -473,7 +489,7 @@ export class ProductsService {
               value: variantDto.value?.trim() || null,
               sku: variantDto.sku?.trim().toUpperCase() || null,
               barcode: variantDto.barcode?.trim() || null,
-              quantity: variantDto.quantity ?? 0,
+              quantity: 0,
               minQuantity: this.normalizeVariantMinQuantity(
                 product.useStock,
                 variantDto.minQuantity,
@@ -486,6 +502,17 @@ export class ProductsService {
               tenantId,
             } as Prisma.VariantUncheckedCreateInput,
           });
+
+          if ((variantDto.quantity ?? 0) > 0) {
+            initialStock.push({
+              bucket: {
+                kind: 'VARIANT',
+                productId,
+                variantId: createdVariant.id,
+              },
+              delta: variantDto.quantity as number,
+            });
+          }
 
           // Create variant price entries for each product price list
           if (priceLists.length) {
@@ -503,11 +530,13 @@ export class ProductsService {
 
       // 4. Create inline lots (if provided)
       if (dto.lots?.length) {
+        const lotIds = dto.lots.map(() => crypto.randomUUID());
         await tx.lot.createMany({
-          data: dto.lots.map((lotDto) => ({
+          data: dto.lots.map((lotDto, index) => ({
+            id: lotIds[index],
             productId,
             lotNumber: lotDto.lotNumber.trim(),
-            quantity: lotDto.quantity ?? 0,
+            quantity: 0,
             manufactureDate: lotDto.manufactureDate
               ? new Date(lotDto.manufactureDate)
               : null,
@@ -515,7 +544,17 @@ export class ProductsService {
             tenantId,
           })) as Prisma.LotCreateManyInput[],
         });
+        dto.lots.forEach((lotDto, index) => {
+          if ((lotDto.quantity ?? 0) > 0) {
+            initialStock.push({
+              bucket: { kind: 'LOT', productId, lotId: lotIds[index] },
+              delta: lotDto.quantity as number,
+            });
+          }
+        });
       }
+
+      await this.stockJournal.recordInitial(productId, initialStock);
 
       // 5. Apply inline price list overrides (if provided)
       if (dto.priceLists?.length) {
@@ -770,6 +809,7 @@ export class ProductsService {
   }
 
   async update(id: string, dto: UpdateProductDto) {
+    assertNoDirectQuantityEdit(dto, 'product');
     const replacesCatalogAllowlist =
       dto.supportedCatalogPriceListIds !== undefined;
     let supportedCatalogPriceListIds: string[] | undefined;
@@ -912,6 +952,12 @@ export class ProductsService {
           .getClient()
           .lot.count({ where: { productId: id, quantity: { gt: 0 } } });
         Product.assertTypeChangeAllowed(product, dto.type, activeLotCount);
+        // The guard above leaves nothing to remove; journal defensively so a
+        // conversion can never drop stock without a REMOVAL movement (S8).
+        await this.stockJournal.removeProductStock(
+          id,
+          'PRODUCT_CONVERTED_TO_SERVICE',
+        );
         // R1: SERVICE normalization also applies on the update path.
         // Force-clear inventory fields the moment we commit the change.
         product.sku = null;
@@ -936,7 +982,6 @@ export class ProductsService {
         // SERVICE_FORCED_DEFAULTS.
         product.useStock = dto.useStock ?? true;
         product.useLotsAndExpirations = dto.useLotsAndExpirations ?? false;
-        product.quantity = dto.quantity ?? 0;
         product.minQuantity = dto.minQuantity ?? 0;
         if (dto.brandId !== undefined) product.brandId = dto.brandId || null;
       }
@@ -991,9 +1036,14 @@ export class ProductsService {
     if (dto.useStock !== undefined) product.useStock = dto.useStock;
     if (dto.useLotsAndExpirations !== undefined)
       product.useLotsAndExpirations = dto.useLotsAndExpirations;
-    if (dto.quantity !== undefined) product.quantity = dto.quantity;
     if (dto.minQuantity !== undefined) product.minQuantity = dto.minQuantity;
-    if (dto.hasVariants !== undefined) product.hasVariants = dto.hasVariants;
+    if (dto.hasVariants !== undefined) {
+      // Enabling variants zeroes the parent's own stock: journal it first (S8).
+      if (dto.hasVariants && !product.hasVariants) {
+        await this.stockJournal.removeProductStock(id, 'FIRST_VARIANT_ZEROING');
+      }
+      product.hasVariants = dto.hasVariants;
+    }
 
     // Scalar catalog fields — omitted fields preserve stored state.
     // Merged-state validation above already ran before any mutation.
@@ -1050,12 +1100,11 @@ export class ProductsService {
     }
 
     // Edit-path re-arm gate: the rearm is meaningful only when
-    // `quantity` or `minQuantity` is part of this edit. Without this
+    // `minQuantity` is part of this edit (quantity is no longer editable). Without this
     // gate a `name`-only edit would still hit the rearm SELECT and
     // call `rearm`, which is wasteful (and would rearm on a non-stock
     // change in some edge cases).
-    const rearmEligible =
-      dto.quantity !== undefined || dto.minQuantity !== undefined;
+    const rearmEligible = dto.minQuantity !== undefined;
 
     product.updatedAt = new Date();
 
@@ -1150,7 +1199,11 @@ export class ProductsService {
   async remove(id: string): Promise<void> {
     const product = await this.productRepo.findById(id);
     if (!product) throw new EntityNotFoundError('Product', id);
-    await this.productRepo.delete(id);
+    await this.tenantPrisma.runInTransaction(async () => {
+      // Stock leaves through REMOVAL movements; the journal outlives the rows.
+      await this.stockJournal.removeProductStock(id, 'PRODUCT_DELETED');
+      await this.productRepo.delete(id);
+    });
   }
 
   // ==================== Variants ====================
@@ -1192,7 +1245,7 @@ export class ProductsService {
           value: dto.value?.trim() || null,
           sku: dto.sku?.trim().toUpperCase() || null,
           barcode: dto.barcode?.trim() || null,
-          quantity: dto.quantity ?? 0,
+          quantity: 0,
           minQuantity: this.normalizeVariantMinQuantity(
             product.useStock,
             dto.minQuantity,
@@ -1223,6 +1276,11 @@ export class ProductsService {
       }
 
       if (!product.hasVariants) {
+        // The parent's own stock (lots + untracked) is zeroed: journal it first.
+        await this.stockJournal.removeProductStock(
+          productId,
+          'FIRST_VARIANT_ZEROING',
+        );
         await tx.product.update({
           where: { id: productId },
           data: {
@@ -1234,7 +1292,24 @@ export class ProductsService {
         });
       }
 
-      return this.enrichVariantCostResponse(createdVariant);
+      let storedVariant = createdVariant;
+      if ((dto.quantity ?? 0) > 0) {
+        await this.stockJournal.recordInitial(productId, [
+          {
+            bucket: {
+              kind: 'VARIANT',
+              productId,
+              variantId: createdVariant.id,
+            },
+            delta: dto.quantity as number,
+          },
+        ]);
+        storedVariant = await tx.variant.findFirstOrThrow({
+          where: { id: createdVariant.id, tenantId },
+        });
+      }
+
+      return this.enrichVariantCostResponse(storedVariant);
     });
   }
 
@@ -1270,6 +1345,7 @@ export class ProductsService {
     variantId: string,
     dto: UpdateVariantDto,
   ) {
+    assertNoDirectQuantityEdit(dto, 'variant');
     const tenantId = this.tenantPrisma.getTenantId();
     return this.tenantPrisma.runInTransaction(async () => {
       const tx = this.tenantPrisma.getClient();
@@ -1335,8 +1411,7 @@ export class ProductsService {
       // edit does not change the resulting `(quantity, minQuantity)`
       // pair and MUST NOT trigger a rearm call (waste, and would
       // touch the alert state machine on a non-stock edit).
-      const rearmEligible =
-        dto.quantity !== undefined || dto.minQuantity !== undefined;
+      const rearmEligible = dto.minQuantity !== undefined;
 
       const updatedVariant = await tx.variant.update({
         where: {
@@ -1368,7 +1443,6 @@ export class ProductsService {
           ...(dto.barcode !== undefined
             ? { barcode: dto.barcode?.trim() || null }
             : {}),
-          ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
           ...(variantUsesStock
             ? dto.minQuantity !== undefined
               ? { minQuantity: dto.minQuantity }
@@ -1426,6 +1500,11 @@ export class ProductsService {
       });
       if (!variant) throw new EntityNotFoundError('Variant', variantId);
 
+      await this.stockJournal.removeVariantStock(
+        productId,
+        variantId,
+        'VARIANT_DELETED',
+      );
       await tx.variant.delete({
         where: { id: variantId, productId, tenantId },
       });
@@ -1721,53 +1800,72 @@ export class ProductsService {
 
   async addLot(productId: string, dto: CreateLotDto) {
     const tenantId = this.tenantPrisma.getTenantId();
-    const product = await this.productRepo.findById(productId);
-    if (!product) throw new EntityNotFoundError('Product', productId);
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      const products = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      if (products.length !== 1) {
+        throw new EntityNotFoundError('Product', productId);
+      }
+      const product = await this.productRepo.findById(productId);
+      if (!product) throw new EntityNotFoundError('Product', productId);
 
-    // R2 — SERVICE products cannot have lots. Returns 400 to the
-    // client before the business-rule gate runs.
-    if (product.type === 'SERVICE') {
-      throw new BusinessRuleViolationError(
-        'Lots are not allowed on service products',
-        'LOTS_NOT_ALLOWED_ON_SERVICE',
-      );
-    }
+      // R2 — SERVICE products cannot have lots. Returns 400 to the
+      // client before the business-rule gate runs.
+      if (product.type === 'SERVICE') {
+        throw new BusinessRuleViolationError(
+          'Lots are not allowed on service products',
+          'LOTS_NOT_ALLOWED_ON_SERVICE',
+        );
+      }
 
-    if (!product.useLotsAndExpirations) {
-      throw new BusinessRuleViolationError(
-        'Product does not use lots and expirations',
-        'LOTS_NOT_ENABLED',
-      );
-    }
+      if (!product.useLotsAndExpirations) {
+        throw new BusinessRuleViolationError(
+          'Product does not use lots and expirations',
+          'LOTS_NOT_ENABLED',
+        );
+      }
 
-    if (product.hasVariants) {
-      throw new BusinessRuleViolationError(
-        'Products with variants cannot have lots',
-        'PRODUCT_HAS_VARIANTS',
-      );
-    }
+      if (product.hasVariants) {
+        throw new BusinessRuleViolationError(
+          'Products with variants cannot have lots',
+          'PRODUCT_HAS_VARIANTS',
+        );
+      }
 
-    // Check unique lot number per product
-    const existing = await this.prisma.lot.findUnique({
-      where: {
-        productId_lotNumber: { productId, lotNumber: dto.lotNumber.trim() },
-      },
-    });
-    if (existing) {
-      throw new EntityAlreadyExistsError('Lot', dto.lotNumber);
-    }
+      // Check unique lot number per product
+      const existing = await tx.lot.findFirst({
+        where: { productId, tenantId, lotNumber: dto.lotNumber.trim() },
+        select: { id: true },
+      });
+      if (existing) {
+        throw new EntityAlreadyExistsError('Lot', dto.lotNumber);
+      }
 
-    return this.prisma.lot.create({
-      data: {
-        productId,
-        lotNumber: dto.lotNumber.trim(),
-        quantity: dto.quantity ?? 0,
-        manufactureDate: dto.manufactureDate
-          ? new Date(dto.manufactureDate)
-          : null,
-        expirationDate: new Date(dto.expirationDate),
-        tenantId,
-      } as Prisma.LotUncheckedCreateInput,
+      // The lot starts empty; its initial stock is an INITIAL movement that
+      // also raises Product.quantity (quantity >= sum(lots)).
+      const lot = await tx.lot.create({
+        data: {
+          productId,
+          lotNumber: dto.lotNumber.trim(),
+          quantity: 0,
+          manufactureDate: dto.manufactureDate
+            ? new Date(dto.manufactureDate)
+            : null,
+          expirationDate: new Date(dto.expirationDate),
+          tenantId,
+        } as Prisma.LotUncheckedCreateInput,
+      });
+      if ((dto.quantity ?? 0) <= 0) return lot;
+      await this.stockJournal.recordInitial(productId, [
+        {
+          bucket: { kind: 'LOT', productId, lotId: lot.id },
+          delta: dto.quantity as number,
+        },
+      ]);
+      return tx.lot.findFirstOrThrow({ where: { id: lot.id, tenantId } });
     });
   }
 
@@ -1775,42 +1873,59 @@ export class ProductsService {
     const product = await this.productRepo.findById(productId);
     if (!product) throw new EntityNotFoundError('Product', productId);
 
-    return this.prisma.lot.findMany({
-      where: { productId },
+    return this.tenantPrisma.getClient().lot.findMany({
+      where: { productId, tenantId: this.tenantPrisma.getTenantId() },
       orderBy: { expirationDate: 'asc' },
     });
   }
 
   async updateLot(productId: string, lotId: string, dto: UpdateLotDto) {
-    const lot = await this.prisma.lot.findFirst({
-      where: { id: lotId, productId },
-    });
-    if (!lot) throw new EntityNotFoundError('Lot', lotId);
+    assertNoDirectQuantityEdit(dto, 'lot');
+    const tenantId = this.tenantPrisma.getTenantId();
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      const lot = await tx.lot.findFirst({
+        where: { id: lotId, productId, tenantId },
+        select: { id: true },
+      });
+      if (!lot) throw new EntityNotFoundError('Lot', lotId);
 
-    return this.prisma.lot.update({
-      where: { id: lotId },
-      data: {
-        ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
-        ...(dto.manufactureDate !== undefined
-          ? {
-              manufactureDate: dto.manufactureDate
-                ? new Date(dto.manufactureDate)
-                : null,
-            }
-          : {}),
-        ...(dto.expirationDate !== undefined
-          ? { expirationDate: new Date(dto.expirationDate) }
-          : {}),
-      },
+      return tx.lot.update({
+        where: { id: lotId, tenantId },
+        data: {
+          ...(dto.manufactureDate !== undefined
+            ? {
+                manufactureDate: dto.manufactureDate
+                  ? new Date(dto.manufactureDate)
+                  : null,
+              }
+            : {}),
+          ...(dto.expirationDate !== undefined
+            ? { expirationDate: new Date(dto.expirationDate) }
+            : {}),
+        },
+      });
     });
   }
 
   async removeLot(productId: string, lotId: string) {
-    const lot = await this.prisma.lot.findFirst({
-      where: { id: lotId, productId },
+    const tenantId = this.tenantPrisma.getTenantId();
+    await this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      // Product first (journal lock order), then the lot, so a concurrent
+      // sale or adjustment settles before the stock check below.
+      await tx.$queryRaw(Prisma.sql`
+        SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId}
+          AND "id" = ${productId} FOR UPDATE
+      `);
+      const lot = await tx.lot.findFirst({
+        where: { id: lotId, productId, tenantId },
+        select: { id: true, quantity: true },
+      });
+      if (!lot) throw new EntityNotFoundError('Lot', lotId);
+      if (lot.quantity > 0) throw new LotHasStockError(lotId, lot.quantity);
+      await tx.lot.delete({ where: { id: lotId, tenantId } });
     });
-    if (!lot) throw new EntityNotFoundError('Lot', lotId);
-    await this.prisma.lot.delete({ where: { id: lotId } });
   }
 
   // ==================== Price Lists ====================
@@ -3187,7 +3302,8 @@ export class ProductsService {
 
   /**
    * Check stock availability for a product/variant
-   * Returns availability status and current stock level.
+   * Returns availability status and the SELLABLE stock level (stock held in
+   * expired lots excluded).
    *
    * Note: This is a READ-ONLY check, it does NOT reserve stock.
    *
@@ -3237,8 +3353,13 @@ export class ProductsService {
       };
     }
 
-    // No variants - check product stock
-    const currentStock = product.quantity ?? 0;
+    // No variants - check product stock. Units in expired lots are never
+    // sellable (S6), matching the journal's charge guard.
+    const currentStock = Math.max(
+      (product.quantity ?? 0) -
+        (await this.stockJournal.expiredLotQuantity(productId)),
+      0,
+    );
     return {
       available: currentStock >= requestedQuantity,
       currentStock,

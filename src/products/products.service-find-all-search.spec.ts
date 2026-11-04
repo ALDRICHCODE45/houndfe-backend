@@ -16,6 +16,7 @@
  */
 import { ProductsService } from './products.service';
 import type { IProductRepository } from './domain/product.repository';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 // ── Test fixtures ──────────────────────────────────────────────────────
 
@@ -82,6 +83,7 @@ function createService(prisma: any) {
     makeMockFilesService(),
     makeTenantPrisma(prisma),
     makeNoopSatCatalog(),
+    makeStockJournalStub(),
   );
 }
 

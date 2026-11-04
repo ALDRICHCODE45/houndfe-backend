@@ -1,5 +1,6 @@
 import { Product } from './domain/product.entity';
 import { ProductsService } from './products.service';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const LIST_A = '550e8400-e29b-41d4-a716-446655440000';
@@ -79,9 +80,22 @@ function createHarness(
       },
     ),
   };
+  // create() runs on the ambient client: the transaction callback client
+  // is what `getClient()` returns while `work` runs.
+  let ambient: unknown = root;
   const tenantPrisma = {
     getTenantId: jest.fn(() => TENANT_ID),
-    getClient: jest.fn(() => root),
+    getClient: jest.fn(() => ambient),
+    runInTransaction: jest.fn((work: () => Promise<unknown>) =>
+      root.$transaction(async (client) => {
+        ambient = client;
+        try {
+          return await work();
+        } finally {
+          ambient = root;
+        }
+      }),
+    ),
   };
   const service = new ProductsService(
     {
@@ -92,6 +106,7 @@ function createHarness(
     {} as never,
     tenantPrisma as never,
     { assertExists: jest.fn(() => Promise.resolve(undefined)) } as never,
+    makeStockJournalStub(),
   );
   const buildFullResponse = jest
     .spyOn(

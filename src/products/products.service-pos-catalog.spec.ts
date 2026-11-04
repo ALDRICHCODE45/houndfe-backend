@@ -5,6 +5,7 @@
  */
 import { ProductsService } from './products.service';
 import type { IProductRepository } from './domain/product.repository';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ function createService(
       search: jest.fn(),
       findByKey: jest.fn(),
     } as any,
+    makeStockJournalStub(),
   );
 }
 
@@ -145,6 +147,7 @@ describe('ProductsService — searchForPOS', () => {
         search: jest.fn(),
         findByKey: jest.fn(),
       } as any,
+      makeStockJournalStub(),
     );
 
     await serviceWithTenantSpy.searchForPOS({ limit: 25, offset: 0 });
@@ -418,6 +421,7 @@ describe('ProductsService — findOneForPOS', () => {
         search: jest.fn(),
         findByKey: jest.fn(),
       } as any,
+      makeStockJournalStub(),
     );
 
     await serviceWithTenantSpy.findOneForPOS('prod-1');

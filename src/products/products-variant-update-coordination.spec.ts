@@ -10,6 +10,7 @@ import {
   EntityNotFoundError,
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const productId = 'product';
 const variantId = 'variant';
@@ -112,6 +113,7 @@ function setup() {
     {} as Args[2],
     tenant as unknown as Args[3],
     {} as Args[4],
+    makeStockJournalStub(),
   );
   const responseOwner = service as unknown as {
     enrichVariantCostResponse: (value: typeof row) => typeof row;
@@ -141,7 +143,7 @@ it('takes the qualified parent gate before any read, uniqueness check, update or
   const result = await s.service.updateVariant(productId, variantId, {
     sku: ' sku ',
     barcode: ' bar ',
-    quantity: 9,
+    minQuantity: 9,
   });
   expect(s.events).toEqual([
     'begin',
@@ -171,7 +173,7 @@ it('takes the qualified parent gate before any read, uniqueness check, update or
   });
   expect(s.tx.variant.update).toHaveBeenCalledWith({
     where: { id: variantId, productId, tenantId },
-    data: { sku: 'SKU', barcode: 'bar', quantity: 9 },
+    data: { sku: 'SKU', barcode: 'bar', minQuantity: 9 },
   });
   expect(s.repo.isSkuTaken).toHaveBeenCalledWith(' sku ', { variantId });
   expect(s.repo.isBarcodeTaken).toHaveBeenCalledWith(' bar ', { variantId });
@@ -185,7 +187,7 @@ it('takes the qualified parent gate before any read, uniqueness check, update or
     ...s.row,
     sku: 'SKU',
     barcode: 'bar',
-    quantity: 9,
+    minQuantity: 9,
     purchaseNetCostDecimal: null,
   });
 });
@@ -201,7 +203,7 @@ it.each([
   else s.tx.variant.findFirst.mockResolvedValue(null);
   const target = mode.startsWith('foreign') ? 'foreign-product' : productId;
   await expect(
-    s.service.updateVariant(target, variantId, { quantity: 2 }),
+    s.service.updateVariant(target, variantId, { minQuantity: 2 }),
   ).rejects.toEqual(new EntityNotFoundError('Variant', variantId));
   expect(s.tx.$queryRaw.mock.calls[0][0].values).toEqual([tenantId, target]);
   if (mode.endsWith('parent'))
@@ -250,7 +252,7 @@ it.each([
       s.service.updateVariant(productId, variantId, {
         sku: 'SKU',
         barcode: 'BAR',
-        quantity: 9,
+        minQuantity: 9,
       }),
     ).rejects.toBe(error);
     expect(s.snapshot()).toEqual(before);
@@ -344,7 +346,6 @@ it.each([
 ])('coordinates mode %p with mixed stock edits', async (catalogPublishMode) => {
   const s = setup();
   const dto: UpdateVariantDto = {
-    quantity: 6,
     minQuantity: 1,
     catalogPublishMode,
   };
@@ -352,7 +353,6 @@ it.each([
     await s.service.updateVariant(productId, variantId, dto),
   ).toMatchObject({
     catalogPublishMode: catalogPublishMode ?? CatalogPublishMode.INHERIT,
-    quantity: 6,
     minQuantity: 1,
   });
   expect(s.events).toEqual([
@@ -459,12 +459,12 @@ it.each([false, true])(
     const result = s.tenant.runInTransaction(async () => {
       await expect(
         s.service.updateVariant(productId, variantId, {
-          quantity: 7,
+          minQuantity: 7,
           purchaseNetCostCents: 0,
         }),
       ).resolves.toEqual({
         ...before.row,
-        quantity: 7,
+        minQuantity: 7,
         purchaseNetCostCents: 0,
         purchaseNetCostDecimal: 0,
       });
@@ -473,7 +473,7 @@ it.each([false, true])(
       ).resolves.toEqual({
         ...before.row,
         name: 'Next',
-        quantity: 7,
+        minQuantity: 7,
         purchaseNetCostCents: 0,
         purchaseNetCostDecimal: 0,
       });
@@ -496,7 +496,7 @@ it.each([false, true])(
         row: {
           ...before.row,
           name: 'Next',
-          quantity: 7,
+          minQuantity: 7,
           purchaseNetCostCents: 0,
         },
         rearms: 1,

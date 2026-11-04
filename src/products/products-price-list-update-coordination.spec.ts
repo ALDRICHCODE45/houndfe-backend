@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { ProductsService } from './products.service';
 import type { Product } from './domain/product.entity';
 import { EntityNotFoundError } from '../shared/domain/domain-error';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const tenantId = 'tenant';
 const productId = 'product';
@@ -102,6 +103,7 @@ function setup() {
     {} as Args[2],
     tenant as unknown as Args[3],
     {} as Args[4],
+    makeStockJournalStub(),
   );
   return {
     service,

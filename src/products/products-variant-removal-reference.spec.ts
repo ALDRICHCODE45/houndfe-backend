@@ -5,6 +5,7 @@ import type { PrismaService } from '../shared/prisma/prisma.service';
 import type { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type { FilesService } from '../files/files.service';
 import type { SatCatalogService } from '../sat-catalog/sat-catalog.service';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const tenantId = 'tenant-1';
 const productId = 'product-1';
@@ -85,6 +86,7 @@ function fixture(sibling = false) {
     {} as FilesService,
     tenant as unknown as TenantPrismaService,
     {} as SatCatalogService,
+    makeStockJournalStub(),
   );
   return {
     service,
