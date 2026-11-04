@@ -1,0 +1,40 @@
+# O1 — Inventory journal (diario de inventario)
+
+Branch `feat/inventory-journal-o1` (worktree `.tmp/inventory-journal-o1`, base main `cdc6afd`). Single stock authority: every stock change becomes an immutable movement; FEFO lot consumption on sale; FE handoff docs for O1 and paper contract for O2.
+Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock stays per tenant: a sucursal IS a tenant (S1=A).
+
+## Specs
+
+- **S1 Opening.** P1=A: «Convertir el stock actual en un movimiento «Apertura» automático por producto/variante/lote al activar el diario». The migration inserts one `OPENING` movement per Product (no variants) / Variant / Lot with quantity ≠ 0, actor display name `Sistema`. Invariant established at opening: for a product with lots, `Product.quantity >= sum(Lot.quantity)`; when the stored sum is larger, the opening raises `Product.quantity` to the lot sum (documented). The current DB is disposable: «La DB actual ES la de prueba y es completamente desechable».
+- **S2 No direct quantity edits.** P2=A: «Bloquearla. El stock solo cambia con un ajuste con motivo, ventas y, más adelante, recepciones». `PATCH` of product / variant / lot rejects a body containing `quantity` with 400 code `STOCK_QUANTITY_READ_ONLY` and changes nothing. Saving a product never rewrites quantity from the in-memory aggregate. Create (product, inline variants/lots, add variant, add lot) may carry an initial quantity, recorded as an `INITIAL` movement.
+- **S3 Adjustment reasons.** P3=A: «Lista fija: Conteo físico, Merma/daño, Caducado, Robo/pérdida, Corrección de captura, Otro (con nota obligatoria)». Codes `PHYSICAL_COUNT`, `DAMAGE`, `EXPIRED`, `THEFT_LOSS`, `DATA_ENTRY_CORRECTION`, `OTHER`; `OTHER` requires a non-blank note (≤ 500 chars); other reasons accept an optional note.
+- **S4 No negatives.** P4=A: «No, se rechaza». An adjustment that would leave any bucket (untracked portion, lot, variant) or the product total below 0 is rejected with 409 `INSUFFICIENT_STOCK` and changes nothing. Delta 0 is 400 `MALFORMED`.
+- **S5 Stock per sucursal = per tenant.** S1=A: «cada sucursal es un tenant, como hoy». No branch model; everything is tenant-scoped from the authenticated context, never the body.
+- **S6 FEFO on sale.** P7=B: «ya en O1 la venta descuenta automáticamente del lote que vence primero (FEFO). Documentá en el handoff qué pasa si el lote no alcanza (si reparte entre lotes), los productos sin lotes, y cómo se ve en el kardex.» Rules: a product with lots consumes non-expired lots by `expirationDate` asc, then `id` asc, splitting across lots; the remainder comes from the untracked portion (`Product.quantity − sum(lots)`). Expired lots are never sold (§1 accepted rule «vencidos nunca se venden»): a lot is expired when its expiration calendar date is before today in the business timezone (`PROMOTIONS_BUSINESS_TIMEZONE`, default `America/Mexico_City`); the charge guard is `quantity − expiredLotQuantity >= n`. Products without lots and variants (lots are not allowed on variant products until O2) behave as today. Each consumed bucket is its own `SALE` movement row sharing the sale as `groupId`.
+- **S7 Cancellation reversal.** Cancelling a sale restores exactly the buckets its `SALE` movements consumed (same lots; a lot deleted since → untracked portion) as `SALE_CANCELLATION` movements; sales charged before the journal restore to product/variant as today. Existing cancel idempotency and errors stay.
+- **S8 Removal.** Deleting a variant or product with stock, and PRODUCT→SERVICE / first-variant zeroing, write `REMOVAL` movements (cause recorded) so history survives; movements keep scalar ids + label snapshots, no cascading FK. Deleting a lot with quantity > 0 is 409 `LOT_HAS_STOCK` (adjust to 0 first). Lot update/delete become tenant-scoped and transactional.
+- **S9 Retire `/orders`.** P8=A, FE verified: «el FE NO usa POST /orders ni PATCH /orders/:id/cancel … Retiralo en O1». Remove the routes, module wiring, listener and the compat `decreaseStock`/`increaseStock` helpers; keep the Prisma model/table (no destructive migration).
+- **S10 Inventory HTTP (conventions agreed, L2).** Reuse O3: `Page<T> {items,nextCursor}` with signed cursor, newest-first, `limit` default 25 max 100; `Idempotency-Key` with receipt replay / `IDEMPOTENCY_KEY_CONFLICT` / `IDEMPOTENCY_KEY_IN_FLIGHT`; `expectedVersion` CAS against the stock bucket (`STOCK_VERSION_CONFLICT` 409); envelope `{statusCode, error: CODE}` with `Cache-Control: no-store`; new granular permission subjects (journal read, adjustment create), no inheritance from sales/products, no second approval; actor stored as display-name snapshot. Every movement row carries signed `delta` and `balanceAfter` of its bucket plus `productBalanceAfter`. Routes: `GET /inventory/products/:productId/stock` (buckets with `version`, lots with `expired`, untracked, sellable), `GET /inventory/movements?productId=&variantId=&lotId=&cursor=&limit=`, `POST /inventory/adjustments`.
+- **S11 Handoff docs.** «me dejás documentación completa para implementarlas en el FE a la mañana: contratos, endpoints, request/response con ejemplos, errores, permisos, reglas de negocio, estados y transiciones, y los datos de prueba disponibles. Dejala en tu repo (por ejemplo docs/frontend-handoff/<feature>.md) con un índice ordenado según el orden de implementación.» Files: `docs/frontend-handoff/README.md` (index), `01-inventory-journal.md`, `02-variant-lots-o2-proposal.md` (paper only, P6=A «O1 implementado completo + documentación de O1, y el contrato propuesto de O2 solo en papel»).
+- **S12 Runtime proof.** Prove S1–S10 against the current dev DB (disposable; «no hace falta armar bases de datos de prueba a cada rato») over real HTTP.
+
+## Tasks
+
+| ID | Specs | Route | Commit |
+| --- | --- | --- | --- |
+| T1 storage: movement table, bucket versions, opening migration, permission subjects | S1 S5 S8 S10 | worker | |
+| T2 journal core: bucket writer, locks, FEFO allocator, reversal | S4 S6 S7 | worker (with T1) | |
+| T3 product-side writers through journal | S2 S8 | worker | |
+| T4 sale charge/bot/cancel through journal | S6 S7 | worker | |
+| T5 inventory HTTP (stock, movements, adjustments) | S3 S4 S10 | worker | |
+| T6 retire /orders + compat helpers | S9 | worker (with T5) | |
+| T7 frontend handoff docs | S11 | inline | |
+| T8 runtime proof on dev DB | S12 | inline | |
+
+## Log
+
+- L1 (FE relay of the human plan, 2026-11-04 06:29Z): «BE (vos) esta noche: avanzás con las próximas funcionalidades del plan y, a la vez, me dejás documentación completa para implementarlas en el FE a la mañana: contratos, endpoints, request/response con ejemplos, errores, permisos, reglas de negocio, estados y transiciones, y los datos de prueba disponibles. Dejala en tu repo (por ejemplo docs/frontend-handoff/<feature>.md) con un índice ordenado según el orden de implementación. … no hace falta armar bases de datos de prueba a cada rato. La DB actual ES la de prueba y es completamente desechable, no se preocupen por perder datos.»
+- L2 (06:32Z): «P1 A (apertura automática), P2 A (bloquear la edición directa de cantidad), P3 A (lista fija de motivos, con «Otro» y nota obligatoria), P4 A (no se permite negativo), P6 A (O1 completo y contrato de O2 en papel).» Conventions (b) accepted: «Tus convenciones (b) me sirven: las tomo como acordadas.»
+- L3 (06:34Z): «S1 = A: cada sucursal es un tenant, como hoy.» «P7 = B: ya en O1 la venta descuenta automáticamente del lote que vence primero (FEFO).» «el FE NO usa POST /orders ni PATCH /orders/:id/cancel … Retiralo en O1 (P8 A).»
+- L4 (BE decisions, user asleep; flag in handoff): invariant `quantity >= sum(lots)` with untracked portion; expired = date before today in business tz; adjustment input is a signed `delta` + CAS; delete-lot-with-stock 409; movements survive deletes.
+- L5 Stock-writer inventory (explore, 2026-11-04): W1–W14; gaps: lots never decremented by sales, absolute sets without CAS, `/orders` bypass, lot update/delete not tenant-filtered (Engram `odd/inventory-journal-o1/writers`).
