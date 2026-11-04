@@ -7,7 +7,6 @@
  * - EventEmitterModule: NestJS event bus for domain events
  * - DatabaseModule: Global Prisma connection
  * - ProductsModule: Products bounded context
- * - OrdersModule: Orders bounded context
  * - AuthModule: Authentication bounded context
  * - PromotionsModule: Promotions bounded context
  * - PdfGenerationModule: PDF receipts/tickets (WU5)
@@ -22,7 +21,6 @@ import { DatabaseModule } from './shared/prisma/prisma.module';
 import { ProductsModule } from './products/products.module';
 import { CategoriesModule } from './categories/categories.module';
 import { BrandsModule } from './brands/brands.module';
-import { OrdersModule } from './orders/orders.module';
 import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { PriceListsModule } from './price-lists/price-lists.module';
@@ -123,7 +121,6 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     ProductsModule,
     CategoriesModule,
     BrandsModule,
-    OrdersModule,
     AuthModule,
     AdminModule,
     PriceListsModule,
