@@ -10,6 +10,11 @@ import {
   ProductionDefinitionCode,
 } from '../src/catalog-editorial/domain/editorial-production-vocabulary-catalog';
 import {
+  DEFINITION_LABELS,
+  FAMILY_LABELS,
+  UNIT_LABELS,
+} from '../src/catalog-editorial/domain/editorial-production-vocabulary-labels';
+import {
   INVENTORY,
   OVERLAY,
   ALIASES,
@@ -123,7 +128,12 @@ function publicationCheck(
 export function buildProductionVocabularyManifest(): ProductionVocabularyManifest {
   const definitions: ProductionDefinition[] = [];
   const families: ProductionVocabularyManifest['families'] = FAMILY_CODES.map(
-    (code) => ({ code, label: code, minimumContractVersion: 2, bindings: [] }),
+    (code) => ({
+      code,
+      label: FAMILY_LABELS[code],
+      minimumContractVersion: 2,
+      bindings: [],
+    }),
   );
   const add = (
     definition: ProductionDefinition,
@@ -187,17 +197,23 @@ export function buildProductionVocabularyManifest(): ProductionVocabularyManifes
       code === 'animal.target'
         ? ALIASES.map(([label, optionCode]) => ({ label, optionCode }))
         : [];
-    add({ code, label: code, type, options, groups, aliases }, exposure, spec);
+    add(
+      { code, label: DEFINITION_LABELS[code], type, options, groups, aliases },
+      exposure,
+      spec,
+    );
   }
   for (const [code, type, units, exposure, domain, spec] of NUMBERS) {
     add(
       {
         code,
-        label: code,
+        label: DEFINITION_LABELS[code],
         type,
-        units: units
-          .split(',')
-          .map((unit, sortOrder) => ({ code: unit, label: unit, sortOrder })),
+        units: units.split(',').map((unit, sortOrder) => ({
+          code: unit,
+          label: UNIT_LABELS[unit] ?? unit,
+          sortOrder,
+        })),
         numericPolicy: {
           status: 'resolved',
           magnitude: code,
@@ -214,7 +230,7 @@ export function buildProductionVocabularyManifest(): ProductionVocabularyManifes
   }
   for (const [code, type, familySpec, exposure] of OTHER) {
     add(
-      { code, label: code, type },
+      { code, label: DEFINITION_LABELS[code], type },
       exposure,
       expandFamilies(familySpec)
         .map((f) => `${f}:optional`)
