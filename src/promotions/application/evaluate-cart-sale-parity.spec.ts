@@ -178,6 +178,12 @@ function harness(
     engine,
     {} as Dependencies[7],
     usage as unknown as Dependencies[8],
+    undefined,
+    {
+      charge: jest.fn(({ items }: { items: unknown[] }) =>
+        products.decrementStockForCharge(items),
+      ),
+    } as unknown as Dependencies[10],
   );
   return {
     service,
