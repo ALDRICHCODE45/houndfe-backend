@@ -156,7 +156,11 @@ export class ProductStockJournal {
       removalCause,
       actor: await this.actor(),
     });
-    await this.crossing.record(movements);
+    // A deleted product or variant must not raise a low-stock alert for
+    // itself; only zeroing that keeps the product alive is a real crossing.
+    if (removalCause === 'FIRST_VARIANT_ZEROING') {
+      await this.crossing.record(movements);
+    }
   }
 
   /** Product row `FOR UPDATE` first (journal lock order), then its stocked lots/variants. */

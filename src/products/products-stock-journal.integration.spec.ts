@@ -504,7 +504,7 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
       expect(state.alerted).toBe(false);
     });
 
-    it('REMOVAL of a variant that held stock above min flags that variant once', async () => {
+    it('REMOVAL of a deleted variant that held stock above min writes no alert', async () => {
       const product = await seedProduct({ hasVariants: true });
       const variant = await seedVariant(product.id, 'M', 7);
       await db().variant.update({
@@ -514,15 +514,14 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
 
       await asTenant(() => service.removeVariant(product.id, variant.id));
 
-      const rows = await lowStockRows();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        aggregateId: `${product.id}:${variant.id}`,
-        payload: expect.objectContaining({
-          variantId: variant.id,
-          newQuantity: 0,
-          minQuantity: 2,
-        }) as unknown,
+      expect(await lowStockRows()).toHaveLength(0);
+      const removal = await db().stockMovement.findFirstOrThrow({
+        where: { tenantId: TENANT, variantId: variant.id, type: 'REMOVAL' },
+      });
+      expect(removal).toMatchObject({
+        removalCause: 'VARIANT_DELETED',
+        delta: -7,
+        balanceAfter: 0,
       });
     });
 
