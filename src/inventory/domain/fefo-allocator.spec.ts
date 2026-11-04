@@ -93,6 +93,28 @@ describe('allocateFefo', () => {
     ).toThrow(InsufficientStockError);
   });
 
+  it('names the product whose sellable stock is short', () => {
+    let thrown: unknown;
+    try {
+      allocateFefo({
+        productId: 'p-croquetas',
+        quantity: 10,
+        untrackedAvailable: 2,
+        today,
+        lots: [lot('a', 3, '2026-11-10')],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: 'INSUFFICIENT_STOCK',
+      bucketKind: 'PRODUCT',
+      bucketId: 'p-croquetas',
+      available: 5,
+      requested: 10,
+    });
+  });
+
   it('rejects a non-positive quantity', () => {
     expect(() =>
       allocateFefo({ quantity: 0, untrackedAvailable: 5, today, lots: [] }),

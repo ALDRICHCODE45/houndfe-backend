@@ -36,6 +36,8 @@ export function isLotExpired(expirationDate: Date, today: string): boolean {
  * asc, remainder from the untracked portion. Throws when they cannot cover it.
  */
 export function allocateFefo(input: {
+  /** Names the product in the insufficient-stock error. */
+  productId?: string;
   quantity: number;
   untrackedAvailable: number;
   lots: FefoLotInput[];
@@ -69,7 +71,7 @@ export function allocateFefo(input: {
         Math.max(untrackedAvailable, 0);
       throw new InsufficientStockError(
         'PRODUCT',
-        'sellable',
+        input.productId ?? 'sellable',
         sellableTotal,
         quantity,
       );
