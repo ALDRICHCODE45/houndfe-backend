@@ -17,7 +17,6 @@ import {
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
-  UseFilters,
   UseGuards,
   UseInterceptors,
   UploadedFile,
@@ -30,7 +29,6 @@ import { RequirePermissions } from '../auth/authorization/decorators/require-per
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { ProductsService } from './products.service';
-import { ProductsStockExceptionFilter } from './http/products-stock-exception.filter';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
@@ -44,7 +42,6 @@ import {
 } from './dto/variant-price.dto';
 
 @Controller('products')
-@UseFilters(ProductsStockExceptionFilter)
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}

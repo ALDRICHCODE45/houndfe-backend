@@ -163,6 +163,18 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception.code === 'PRICE_CONTEXT_NOT_AVAILABLE')
       return HttpStatus.NOT_FOUND;
 
+    // ── O1 inventory journal stock guards ──
+    // Extra fields (`lotId`, `quantity`, `productId`) ride on `details`.
+    if (
+      exception.code === 'INSUFFICIENT_STOCK' ||
+      exception.code === 'STOCK_VERSION_CONFLICT' ||
+      exception.code === 'LOT_HAS_STOCK' ||
+      exception.code === 'STOCK_TRACKING_HAS_STOCK'
+    )
+      return HttpStatus.CONFLICT;
+    if (exception.code === 'STOCK_QUANTITY_READ_ONLY')
+      return HttpStatus.BAD_REQUEST;
+
     // ── batch-delete ──
     if (exception.code === 'BATCH_DELETE_NOT_FOUND')
       return HttpStatus.NOT_FOUND;
