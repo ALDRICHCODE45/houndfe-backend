@@ -175,15 +175,14 @@ export class StockJournalWriter {
     group: { tenantId: string; groupType: 'SALE'; groupId: string },
     now: Date,
   ): Promise<SaleReversalOutcome> {
-    const lines = sale.lines ?? [];
-    if (lines.length === 0) {
+    const lines = (sale.lines ?? []).filter((line) => line.quantity > 0);
+    // Without a confirmation time a sale cannot be proven pre-journal: fail
+    // closed rather than restore stock it may never have decremented.
+    if (lines.length === 0 || !sale.confirmedAt) {
       return { status: 'NOTHING_TO_RESTORE', movements: [] };
     }
     const activatedAt = await this.journalActivatedAt();
-    if (
-      sale.confirmedAt &&
-      sale.confirmedAt.getTime() >= activatedAt.getTime()
-    ) {
+    if (sale.confirmedAt.getTime() >= activatedAt.getTime()) {
       return { status: 'NOTHING_TO_RESTORE', movements: [] };
     }
 
