@@ -75,3 +75,6 @@ docs/email-preview.html
 
 # Produccion — NO commitear nunca (secretos reales)
 .env.production
+
+# Private local dev catalog seed manifest (local DB ids)
+prisma/.dev-catalog-seed.manifest.json
