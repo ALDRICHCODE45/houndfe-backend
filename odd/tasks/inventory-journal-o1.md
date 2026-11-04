@@ -29,8 +29,8 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 | T5 inventory HTTP (stock, movements, adjustments) | S3 S4 S10 | worker | 1fa5617, 5b96df8, e183145, 0658af5, 6f2a1ad (merge b869bf9) |
 | T6 retire /orders + compat helpers | S9 | worker (with T5) | 78aeea6 |
 | T6b consolidation: dead compat/charge helpers, single low-stock crossing, useStock-off guard, global error mapping, spec arity | S2 S4 S6 S9 | worker | aac681f, 945d2c7, f2516be, 22937a3, 4fe3100, d9ee6f0, 35877db, 5471035 |
-| T7 frontend handoff docs | S11 | inline | 5d21cd2, 24c0736 (test data pending T8) |
-| T8 runtime proof on dev DB | S12 | inline | |
+| T7 frontend handoff docs | S11 | inline | 5d21cd2, 24c0736 , 8525136 |
+| T8 runtime proof on dev DB | S12 | worker | 596376b, 8525136 (fix 6b612b0) |
 
 ## Log
 
@@ -44,3 +44,4 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 - L8 (parent, user asleep): T3 found `PATCH useStock:false` on a product with stock silently hides it. Decision (consistent with LOT_HAS_STOCK, flag in handoff): reject with 409 `STOCK_TRACKING_HAS_STOCK` until adjusted to 0. INITIAL/REMOVAL/ADJUSTMENT must also flag/rearm low-stock alerts through one shared crossing helper.
 - L9 (parent): T6b done. Full unit 13457 pass; integration serial 41 pass, 19 env-gated (D16/definitions container selection, private-media admission, human-decisions need `nest-practice-restock-test`). Parent fix 5471035: REMOVAL for PRODUCT_DELETED/VARIANT_DELETED no longer raises low-stock alerts (only FIRST_VARIANT_ZEROING). Live-only lock-order tests replaced by integration tests d9ee6f0 (sibling variant charges now serialise per product by design).
 - L10 (T8 runtime): critical S2 defect found over real HTTP — every PATCH product/variant/lot returned 400 STOCK_QUANTITY_READ_ONLY because ES2023 class fields make `quantity` an own undefined property on ValidationPipe DTO instances. Fixed 6b612b0 (value check) with a pipe-level regression spec (RED 3/6 → GREEN 6/6). Lesson: unit tests with plain objects missed it; runtime proof caught it.
+- L11 (T8): probe 85/85 over real HTTP on dev DB, S1–S10 proven (tenant Sucursal Centro, manager@houndfe.com; cashier for 403). Left 4 throwaway sale-probe products (cannot delete products with sale history). Permission rows for the new subjects are created from PERMISSION_REGISTRY by the seed; deploys must run it before admins can grant them.
