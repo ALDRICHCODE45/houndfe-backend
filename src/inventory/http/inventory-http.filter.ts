@@ -2,9 +2,10 @@ import {
   ArgumentsHost,
   Catch,
   HttpException,
+  Logger,
   type ExceptionFilter,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { InsufficientPermissionsError } from '../../shared/domain/domain-error';
 import {
   InventoryContractError,
@@ -14,6 +15,8 @@ import {
 /** Every failure leaves as `{statusCode, error: CODE}` with `no-store`. */
 @Catch()
 export class InventoryHttpFilter implements ExceptionFilter {
+  private readonly logger = new Logger(InventoryHttpFilter.name);
+
   catch(exception: unknown, host: ArgumentsHost): void {
     let error = exception;
     if (exception instanceof InsufficientPermissionsError)
@@ -33,8 +36,20 @@ export class InventoryHttpFilter implements ExceptionFilter {
       );
     }
     const body = inventoryErrorEnvelope(error);
+    if (body.statusCode >= 500) this.logUnexpected(exception, host);
     const response = host.switchToHttp().getResponse<Response>();
     response.setHeader('Cache-Control', 'no-store');
     response.status(body.statusCode).json(body);
+  }
+
+  /** Route and error only: request bodies may carry notes and are never logged. */
+  private logUnexpected(exception: unknown, host: ArgumentsHost): void {
+    const request = host.switchToHttp().getRequest<Request>();
+    const error =
+      exception instanceof Error ? exception : new Error(String(exception));
+    this.logger.error(
+      `${request.method} ${request.url} failed: ${error.name}: ${error.message}`,
+      error.stack,
+    );
   }
 }
