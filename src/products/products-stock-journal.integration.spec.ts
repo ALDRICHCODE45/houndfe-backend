@@ -561,6 +561,49 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
       );
     });
 
+    it('serialises a variant charge with the variant removal: no deadlock, history sums to the removed stock', async () => {
+      const rounds: PromiseSettledResult<unknown>[] = [];
+      for (let round = 0; round < 6; round += 1) {
+        const product = await seedProduct({ hasVariants: true });
+        const variant = await seedVariant(product.id, 'M', 5);
+        const [charge, removal] = await Promise.allSettled([
+          as(TENANT, () =>
+            tenantPrisma.runInTransaction(() =>
+              writer.charge(
+                [
+                  {
+                    productId: product.id,
+                    variantId: variant.id,
+                    quantity: 1,
+                  },
+                ],
+                {
+                  saleId: `race-${round}`,
+                  actor: { id: null, displayName: 'T' },
+                },
+              ),
+            ),
+          ),
+          asTenant(() => service.removeVariant(product.id, variant.id)),
+        ]);
+        rounds.push(charge, removal);
+        expect(removal.status).toBe('fulfilled');
+        expect(await db().variant.count({ where: { id: variant.id } })).toBe(0);
+        // SALE -1 then REMOVAL -4, or REMOVAL -5 with the charge refused.
+        const deltas = (await movements(product.id)).map((m) => m.delta);
+        expect(deltas.reduce((a, b) => a + b, 0)).toBe(-5);
+      }
+      expect(
+        rounds.filter(
+          (r) =>
+            r.status === 'rejected' &&
+            /deadlock|40P01/i.test(
+              String((r.reason as Error)?.message ?? r.reason),
+            ),
+        ),
+      ).toEqual([]);
+    });
+
     it('removeVariant of an empty variant writes no movement', async () => {
       const product = await seedProduct({ hasVariants: true });
       const variant = await seedVariant(product.id, 'M', 0);

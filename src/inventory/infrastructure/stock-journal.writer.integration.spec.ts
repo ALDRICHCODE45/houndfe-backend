@@ -18,6 +18,8 @@ import {
   InsufficientStockError,
   StockVersionConflictError,
 } from '../domain/stock-journal.errors';
+import { PrismaProductRepository } from '../../products/infrastructure/prisma-product.repository';
+import { PrismaStockAlertStateRepository } from '../../stock-alerts/infrastructure/prisma-stock-alert-state.repository';
 import { StockJournalWriter } from './stock-journal.writer';
 
 const SKIP =
@@ -53,6 +55,19 @@ describeIfDb('StockJournalWriter (PostgreSQL integration)', () => {
         ['isSuperAdmin', false],
       ]),
       () => tenantPrisma.runInTransaction(work),
+    );
+
+  const legacyRepo = new PrismaProductRepository(
+    tenantPrisma,
+    new PrismaStockAlertStateRepository(),
+  );
+  const deadlocks = (results: PromiseSettledResult<unknown>[]) =>
+    results.filter(
+      (r) =>
+        r.status === 'rejected' &&
+        /deadlock|40P01/i.test(
+          String((r.reason as Error)?.message ?? r.reason),
+        ),
     );
 
   const cleanup = async () => {
@@ -343,5 +358,131 @@ describeIfDb('StockJournalWriter (PostgreSQL integration)', () => {
         variantLabel: 'M',
       }),
     );
+  });
+  // Replace the live lock-order scenarios of the retired repository charge:
+  // the journal locks product rows in id order, then lots/variants.
+  describe('lock ordering under concurrency', () => {
+    const ROUNDS = 8;
+
+    it('commits opposite-order multi-product charges without a deadlock', async () => {
+      const [p1, p2] = await Promise.all(
+        ['Uno', 'Dos'].map((name) =>
+          db().product.create({
+            data: { name, tenantId: TENANT, quantity: 10 * ROUNDS },
+          }),
+        ),
+      );
+      const charge = (saleId: string, ids: string[]) =>
+        tx(() =>
+          writer.charge(
+            ids.map((productId) => ({ productId, quantity: 1 })),
+            { saleId, actor: ACTOR },
+            NOW,
+          ),
+        );
+      const results: PromiseSettledResult<unknown>[] = [];
+      for (let round = 0; round < ROUNDS; round += 1) {
+        results.push(
+          ...(await Promise.allSettled([
+            charge(`fwd-${round}`, [p1.id, p2.id]),
+            charge(`rev-${round}`, [p2.id, p1.id]),
+          ])),
+        );
+      }
+      expect(deadlocks(results)).toEqual([]);
+      expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+      const rows = await db().product.findMany({
+        where: { id: { in: [p1.id, p2.id] } },
+        orderBy: { id: 'asc' },
+      });
+      expect(rows.map((r) => r.quantity)).toEqual([
+        10 * ROUNDS - 2 * ROUNDS,
+        10 * ROUNDS - 2 * ROUNDS,
+      ]);
+    });
+
+    it('lets two sibling-variant charges of one product both commit', async () => {
+      const product = await db().product.create({
+        data: { name: 'Hermanas', tenantId: TENANT, hasVariants: true },
+      });
+      const [m, l] = await Promise.all(
+        ['M', 'L'].map((name) =>
+          db().variant.create({
+            data: {
+              productId: product.id,
+              tenantId: TENANT,
+              name,
+              quantity: 10,
+            },
+          }),
+        ),
+      );
+      const results = await Promise.allSettled(
+        [m, l].map((variant, index) =>
+          tx(() =>
+            writer.charge(
+              [
+                {
+                  productId: product.id,
+                  variantId: variant.id,
+                  quantity: 1,
+                },
+              ],
+              { saleId: `sib-${index}`, actor: ACTOR },
+              NOW,
+            ),
+          ),
+        ),
+      );
+      expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+      const rows = await db().variant.findMany({
+        where: { productId: product.id },
+      });
+      expect(rows.map((r) => r.quantity)).toEqual([9, 9]);
+    });
+
+    it('serialises a mixed variant+parent charge with a legacy mixed restock without a deadlock', async () => {
+      const product = await db().product.create({
+        data: { name: 'Mixto', tenantId: TENANT, quantity: 10 },
+      });
+      const variant = await db().variant.create({
+        data: {
+          productId: product.id,
+          tenantId: TENANT,
+          name: 'V',
+          quantity: 10,
+        },
+      });
+      const results: PromiseSettledResult<unknown>[] = [];
+      for (let round = 0; round < ROUNDS; round += 1) {
+        results.push(
+          ...(await Promise.allSettled([
+            tx(() =>
+              legacyRepo.incrementStockForRestock([
+                { productId: product.id, variantId: variant.id, quantity: 2 },
+                { productId: product.id, quantity: 2 },
+              ]),
+            ),
+            tx(() =>
+              writer.charge(
+                [
+                  { productId: product.id, quantity: 1 },
+                  { productId: product.id, variantId: variant.id, quantity: 1 },
+                ],
+                { saleId: `mix-${round}`, actor: ACTOR },
+                NOW,
+              ),
+            ),
+          ])),
+        );
+      }
+      expect(deadlocks(results)).toEqual([]);
+      expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+      const [p, v] = await Promise.all([
+        db().product.findUniqueOrThrow({ where: { id: product.id } }),
+        db().variant.findUniqueOrThrow({ where: { id: variant.id } }),
+      ]);
+      expect([p.quantity, v.quantity]).toEqual([10 + ROUNDS, 10 + ROUNDS]);
+    });
   });
 });
