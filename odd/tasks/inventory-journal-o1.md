@@ -28,8 +28,8 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 | T4 sale charge/bot/cancel through journal | S6 S7 | worker | 0309d20, 242ca54 (merge 1e2d5ac) |
 | T5 inventory HTTP (stock, movements, adjustments) | S3 S4 S10 | worker | 1fa5617, 5b96df8, e183145, 0658af5, 6f2a1ad (merge b869bf9) |
 | T6 retire /orders + compat helpers | S9 | worker (with T5) | 78aeea6 |
-| T6b consolidation: dead compat/charge helpers, single low-stock crossing, useStock-off guard, global error mapping, spec arity | S2 S4 S6 S9 | worker | |
-| T7 frontend handoff docs | S11 | inline | |
+| T6b consolidation: dead compat/charge helpers, single low-stock crossing, useStock-off guard, global error mapping, spec arity | S2 S4 S6 S9 | worker | aac681f, 945d2c7, f2516be, 22937a3, 4fe3100, d9ee6f0, 35877db, 5471035 |
+| T7 frontend handoff docs | S11 | inline | 5d21cd2, 24c0736 (test data pending T8) |
 | T8 runtime proof on dev DB | S12 | inline | |
 
 ## Log
@@ -42,3 +42,4 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 - L6 (parent): T1/T2 done (42c16a6, fa8a655, 54aa532, ce99df7); migration `20261104020000_inventory_journal_storage` applied to dev DB via migrate deploy (migrate dev wants reset due to pre-existing checksum drift on `20260929000200_human_decisions_expiration_persistence`). T3/T4/T5+T6 run in parallel worktrees `.tmp/ij-t3|t4|t5` on branches `feat/inventory-journal-o1-t3|t4|t5`, merged back here by the parent. O2 paper doc 5d21cd2. Slice boundaries = one commit per task unit (T2 split in three).
 - L7 (parent): T4 contract change measured by worker: `STOCK_INSUFFICIENT_AT_CONFIRM` was 500 (POS `{"statusCode":500,"message":"Internal server error"}`, bot `CHECKOUT_CREATE_FAILED`), now 409 `{"statusCode":409,"error":"STOCK_INSUFFICIENT_AT_CONFIRM"}`. Expired-lot stock is no longer sellable at charge. Low-stock crossing logic duplicated in `src/sales/sale-stock.service.ts` (flagLowStock/rearmAlerts) vs `PrismaProductRepository` — consolidate after T3. T3 also asked to make `checkStockAvailability` exclude expired lots.
 - L8 (parent, user asleep): T3 found `PATCH useStock:false` on a product with stock silently hides it. Decision (consistent with LOT_HAS_STOCK, flag in handoff): reject with 409 `STOCK_TRACKING_HAS_STOCK` until adjusted to 0. INITIAL/REMOVAL/ADJUSTMENT must also flag/rearm low-stock alerts through one shared crossing helper.
+- L9 (parent): T6b done. Full unit 13457 pass; integration serial 41 pass, 19 env-gated (D16/definitions container selection, private-media admission, human-decisions need `nest-practice-restock-test`). Parent fix 5471035: REMOVAL for PRODUCT_DELETED/VARIANT_DELETED no longer raises low-stock alerts (only FIRST_VARIANT_ZEROING). Live-only lock-order tests replaced by integration tests d9ee6f0 (sibling variant charges now serialise per product by design).
