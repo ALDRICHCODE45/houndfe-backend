@@ -182,7 +182,7 @@ export class PurchaseOrderQueries {
           WHERE o."tenantId" = ${scope.tenantId}
           ${query.status ? Prisma.sql`AND o."status" = ${query.status}::"ProcurementPurchaseOrderStatus"` : Prisma.empty}
           ${query.supplierId ? Prisma.sql`AND o."supplierId" = ${query.supplierId}` : Prisma.empty}
-          ${pattern === undefined ? Prisma.empty : Prisma.sql`AND (s."displayName" ILIKE ${`%${pattern}%`} ESCAPE chr(92) OR o."note" ILIKE ${`%${pattern}%`} ESCAPE chr(92))`}
+          ${pattern === undefined ? Prisma.empty : Prisma.sql`AND ((CASE WHEN o."status" = 'DRAFT' THEN s."displayName" ELSE o."supplierDisplaySnapshot"->>'displayName' END) ILIKE ${`%${pattern}%`} ESCAPE chr(92) OR o."note" ILIKE ${`%${pattern}%`} ESCAPE chr(92))`}
           ${after ? Prisma.sql`AND (o."createdAt", o."id") < (${new Date(after.createdAt)}, ${after.id})` : Prisma.empty}
           ORDER BY o."createdAt" DESC, o."id" DESC LIMIT ${query.limit + 1}`);
         const orders = await resolvePage(

@@ -29,6 +29,8 @@ describe('PO early parser exact admission scope', () => {
     ['HEAD', '/PROCUREMENT/PURCHASE-ORDERS/%E0%A4%A/'],
     ['DELETE', '/procurement/purchase-orders/%E0%A4%A'],
     ['PUT', '/Procurement/Purchase-Orders/%E0%A4%A/draft/'],
+    ['POST', '/procurement/purchase-orders/%E0%A4%A/confirm'],
+    ['POST', '/Procurement/Purchase-Orders/%E0%A4%A/cancel/'],
   ])('closes invalid encoded parameter on %s %s', (method, path) => {
     const h = harness();
     h.run(method, path);
@@ -50,6 +52,10 @@ describe('PO early parser exact admission scope', () => {
     ['PUT', '/procurement/purchase-orders'],
     ['GET', '/procurement/purchase-orders/%E0%A4%A/history'],
     ['PUT', '/procurement/purchase-orders/%E0%A4%A/draft-extra'],
+    ['PUT', '/procurement/purchase-orders/%E0%A4%A/confirm'],
+    ['GET', '/procurement/purchase-orders/%E0%A4%A/cancel'],
+    ['POST', '/procurement/purchase-orders/%E0%A4%A/confirm-extra'],
+    ['POST', '/procurement/purchase-orders/%E0%A4%A/history'],
     ['GET', '/procurement/purchase-orders-extra/%E0%A4%A'],
     ['GET', '/procurement/suppliers/%E0%A4%A'],
     ['POST', '/unrelated/%E0%A4%A'],

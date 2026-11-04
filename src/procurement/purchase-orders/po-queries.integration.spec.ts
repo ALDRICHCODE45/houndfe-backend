@@ -243,6 +243,47 @@ describeDb('PO PostgreSQL query boundary', () => {
       ).rejects.toMatchObject({ code: 'MALFORMED' });
   });
 
+  it('searches the live supplier name for drafts and the frozen snapshot name for closed orders', async () => {
+    const f = await fixture();
+    await db.procurementSupplier.update({
+      where: { id: f.supplier.id },
+      data: { displayName: 'Renamed live' },
+    });
+    await db.procurementPurchaseOrder.update({
+      where: { id: f.ids[1] },
+      data: {
+        status: 'CONFIRMED',
+        confirmedAt: new Date(),
+        confirmedByDisplayName: 'Owned reader',
+        lineSubtotalsSnapshot: [],
+      },
+    });
+    await db.procurementPurchaseOrder.update({
+      where: { id: f.ids[2] },
+      data: {
+        status: 'CANCELLED',
+        cancelledAt: new Date(),
+        cancelledByDisplayName: 'Owned reader',
+        supplierDisplaySnapshot: {
+          id: f.supplier.id,
+          displayName: 'Frozen cancelled',
+          status: 'ACTIVE',
+        },
+      },
+    });
+    const ids = async (search: string) =>
+      (await f.run(() => f.service.listDrafts({ search }))).items.map(
+        (item) => item.id,
+      );
+    expect(await ids('Renamed live')).toEqual([f.ids[0]]);
+    expect(await ids('Saved supplier')).toEqual([f.ids[1]]);
+    expect(await ids('Frozen cancelled')).toEqual([f.ids[2]]);
+    const confirmedOnly = await f.run(() =>
+      f.service.listDrafts({ search: 'Saved supplier', status: 'CONFIRMED' }),
+    );
+    expect(confirmedOnly.items.map((item) => item.id)).toEqual([f.ids[1]]);
+  });
+
   it('recomputes diagnostics after catalog/supplier drift without changing stored draft', async () => {
     const f = await fixture();
     await db.product.update({

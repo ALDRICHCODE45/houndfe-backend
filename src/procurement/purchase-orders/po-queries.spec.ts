@@ -337,7 +337,7 @@ describe('purchase-order read boundary', () => {
       { path: '/lines', code: 'LINES_REQUIRED' },
     ]);
   });
-  it('searches live tenant-qualified supplier OR note with escaped literal ILIKE and supplier AND', async () => {
+  it('searches the live supplier name for DRAFT and the frozen snapshot name for closed orders, OR note, with escaped literal ILIKE and supplier AND', async () => {
     const h = harness();
     h.rows([row, row]);
     const first = await h.service.listDrafts({
@@ -351,10 +351,10 @@ describe('purchase-order read boundary', () => {
     expect(sql.sql).toContain('s."id" = o."supplierId"');
     expect(sql.sql).toContain('AND o."supplierId" =');
     expect(sql.sql).toMatch(
-      /AND \(s\."displayName" ILIKE .* OR o\."note" ILIKE /s,
+      /AND \(\(CASE WHEN o\."status" = 'DRAFT' THEN s\."displayName" ELSE o\."supplierDisplaySnapshot"->>'displayName' END\) ILIKE .* OR o\."note" ILIKE /s,
     );
     expect(sql.sql).toContain('ESCAPE chr(92)');
-    expect(sql.sql).not.toMatch(/COUNT\(|supplierDisplaySnapshot.*ILIKE/);
+    expect(sql.sql).not.toMatch(/COUNT\(/);
     expect(sql.values).toEqual([
       'tenant-a',
       supplierId,

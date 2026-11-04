@@ -35,6 +35,12 @@ const input = {
 };
 const order = { ...input, id, version: 1, status: 'DRAFT' };
 const replace = { expectedVersion: 1, order: input };
+const confirmBody = {
+  expectedVersion: 1,
+  expectedSupplierVersion: 3,
+  expectedReferenceToken: 'prt1.opaque',
+};
+const cancelBody = { expectedVersion: 1 };
 const key = 'Opaque,Key';
 
 @Controller('unrelated-parser-proof')
@@ -54,6 +60,8 @@ describe('PO HTTP boundary (offline; real JWT/CLS/permission guards)', () => {
     createDraft: jest.fn(),
     replaceDraft: jest.fn(),
     deleteDraft: jest.fn(),
+    confirm: jest.fn(),
+    cancel: jest.fn(),
   };
   const queries = { getDraft: jest.fn(), listDrafts: jest.fn() };
   const supplierCommands = { create: jest.fn(), delete: jest.fn() };
@@ -123,6 +131,14 @@ describe('PO HTTP boundary (offline; real JWT/CLS/permission guards)', () => {
     commands.createDraft.mockResolvedValue({ statusCode: 201, body: order });
     commands.replaceDraft.mockResolvedValue({ statusCode: 200, body: order });
     commands.deleteDraft.mockResolvedValue({ statusCode: 204, body: null });
+    commands.confirm.mockResolvedValue({
+      statusCode: 200,
+      body: { ...order, status: 'CONFIRMED' },
+    });
+    commands.cancel.mockResolvedValue({
+      statusCode: 200,
+      body: { ...order, status: 'CANCELLED' },
+    });
     queries.getDraft.mockResolvedValue(order);
     queries.listDrafts.mockResolvedValue({ items: [], nextCursor: null });
     supplierCommands.create.mockResolvedValue({ statusCode: 201, body: {} });
@@ -478,9 +494,175 @@ describe('PO HTTP boundary (offline; real JWT/CLS/permission guards)', () => {
     }
     noCalls();
   });
-  it('has no confirm/cancel/history endpoints', async () => {
-    for (const suffix of ['confirm', 'cancel', 'history'])
-      expect((await http('post', `${base}/${id}/${suffix}`)).status).toBe(404);
+  it('has no history endpoint', async () => {
+    expect((await http('post', `${base}/${id}/history`)).status).toBe(404);
+    expect((await http('get', `${base}/${id}/history`)).status).toBe(404);
     noCalls();
+  });
+  describe.each([
+    ['confirm', 'confirm', confirmBody, 'ProcurementOrderConfirmation'],
+    ['cancel', 'cancel', cancelBody, 'ProcurementOrderCancellation'],
+  ] as const)('POST /:orderId/%s', (name, command, body, subject) => {
+    const path = `${base}/${id}/${name}`;
+    beforeEach(() => {
+      permissions = [
+        { action: 'read', subject: 'ProcurementPurchaseOrder' },
+        { action: 'create', subject },
+      ];
+    });
+    it('answers 200 no-store with the command body, raw key and parsed id', async () => {
+      commands[command].mockImplementationOnce(() => {
+        expect(cls.get('userId')).toBe('actor');
+        return Promise.resolve({ statusCode: 200, body: { ...order, name } });
+      });
+      const response = await http('post', path)
+        .set('Idempotency-Key', key)
+        .send(body);
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ ...order, name });
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(commands[command]).toHaveBeenCalledWith(id, key, body);
+    });
+    it('needs only read PO + its own create subject (no edit/catalog grants)', async () => {
+      expect(
+        (await http('post', path).set('Idempotency-Key', key).send(body))
+          .status,
+      ).toBe(200);
+    });
+    it.each([
+      ['read', 'ProcurementPurchaseOrder'],
+      ['create', subject],
+    ])('requires %s:%s', async (action, missing) => {
+      permissions = permissions.filter(
+        (grant) => grant.action !== action || grant.subject !== missing,
+      );
+      closed(
+        await http('post', path).set('Idempotency-Key', key).send(body),
+        403,
+        'FORBIDDEN',
+      );
+      noCalls();
+    });
+    it('does not accept the other transition subject or PO update/delete', async () => {
+      permissions = [
+        { action: 'read', subject: 'ProcurementPurchaseOrder' },
+        { action: 'update', subject: 'ProcurementPurchaseOrder' },
+        { action: 'delete', subject: 'ProcurementPurchaseOrder' },
+        {
+          action: 'create',
+          subject:
+            subject === 'ProcurementOrderConfirmation'
+              ? 'ProcurementOrderCancellation'
+              : 'ProcurementOrderConfirmation',
+        },
+      ];
+      closed(
+        await http('post', path).set('Idempotency-Key', key).send(body),
+        403,
+        'FORBIDDEN',
+      );
+      noCalls();
+    });
+    it('denies anonymous callers with the closed envelope', async () => {
+      closed(
+        await http('post', path, false).set('Idempotency-Key', key).send(body),
+        401,
+        'UNAUTHORIZED',
+      );
+      noCalls();
+    });
+    it('requires JSON, one raw key, no query and a parseable body', async () => {
+      closed(await http('post', path).send(body), 400, 'MALFORMED');
+      closed(
+        await http('post', path)
+          .set('Idempotency-Key', ['a', 'b'] as unknown as string)
+          .send(body),
+        400,
+        'MALFORMED',
+      );
+      closed(
+        await http('post', path)
+          .set('Idempotency-Key', key)
+          .set('Content-Type', 'text/plain')
+          .send(JSON.stringify(body)),
+        400,
+        'MALFORMED',
+      );
+      closed(
+        await http('post', `${path}?x=1`)
+          .set('Idempotency-Key', key)
+          .send(body),
+        400,
+        'MALFORMED',
+      );
+      for (const raw of ['{', 'null', '1', '[]', '{}'])
+        closed(
+          await http('post', path)
+            .set('Idempotency-Key', key)
+            .set('Content-Type', 'application/json')
+            .send(raw),
+          400,
+          'MALFORMED',
+        );
+      noCalls();
+    });
+    it('rejects unknown members and duplicate decoded member names before commands', async () => {
+      closed(
+        await http('post', path)
+          .set('Idempotency-Key', key)
+          .send({ ...body, reason: 'x' }),
+        400,
+        'MALFORMED',
+      );
+      closed(
+        await http('post', path)
+          .set('Idempotency-Key', key)
+          .set('Content-Type', 'application/json')
+          .send('{"expectedVersion":1,"\\u0065xpectedVersion":2}'),
+        400,
+        'MALFORMED',
+      );
+      noCalls();
+    });
+    it.each([
+      ['ORDER_VERSION_CONFLICT', 409],
+      ['ORDER_STATE_CONFLICT', 409],
+      ['ORDER_NOT_READY', 409],
+      ['SUPPLIER_VERSION_CONFLICT', 409],
+      ['SUPPLIER_ARCHIVED', 409],
+      ['ELIGIBILITY_CHANGED', 409],
+      ['IDEMPOTENCY_KEY_CONFLICT', 409],
+      ['IDEMPOTENCY_KEY_IN_FLIGHT', 409],
+      ['NOT_FOUND', 404],
+      ['FORBIDDEN', 403],
+      ['INTERNAL_ERROR', 500],
+    ] as const)('maps %s to the value-free envelope', async (code, status) => {
+      commands[command].mockRejectedValueOnce(
+        new PurchaseOrderContractError(code),
+      );
+      closed(
+        await http('post', path).set('Idempotency-Key', key).send(body),
+        status,
+        code,
+      );
+      expect(commands[command]).toHaveBeenCalledTimes(1);
+    });
+    it('rejects an invalid order id before commands', async () => {
+      closed(
+        await http('post', `${base}/not-an-id/${name}`)
+          .set('Idempotency-Key', key)
+          .send(body),
+        400,
+        'MALFORMED',
+      );
+      closed(
+        await http('post', `${base}/%E0%A4%A/${name}`)
+          .set('Idempotency-Key', key)
+          .send(body),
+        400,
+        'MALFORMED',
+      );
+      noCalls();
+    });
   });
 });
