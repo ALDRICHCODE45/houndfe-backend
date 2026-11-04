@@ -203,6 +203,8 @@ export class PurchaseOrderQueries {
             supplierDisplaySnapshot: order.supplierDisplaySnapshot,
             lineCount: order.lines.length,
             issueCount: order.validation.issues.length,
+            issueSummary: order.issueSummary,
+            checklistItemCount: order.checklistItemCount,
             totals: computePurchaseOrderTotals(order.lineSubtotals),
             note: order.note,
             locationDetail: order.location.detail,

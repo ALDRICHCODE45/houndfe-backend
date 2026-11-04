@@ -62,6 +62,7 @@ export class StockPlan {
     const product = this.requireProduct(item.productId, 'PRODUCT_UNTRACKED');
     if (!product.useStock) return;
     const allocations = allocateFefo({
+      productId: item.productId,
       quantity: item.quantity,
       untrackedAvailable: this.untracked(product),
       lots: product.lots,

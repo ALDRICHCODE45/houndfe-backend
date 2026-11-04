@@ -260,6 +260,58 @@ describeIfDb('StockJournalWriter (PostgreSQL integration)', () => {
     });
   });
 
+  it('never restores a legacy-looking sale without a confirmation time', async () => {
+    const product = await db().product.create({
+      data: { name: 'Arena 5 kg', tenantId: TENANT, quantity: 4 },
+    });
+    const outcome = await tx(() =>
+      writer.reverseSale(
+        {
+          saleId: 'no-confirmed-at',
+          actor: ACTOR,
+          confirmedAt: null,
+          lines: [{ productId: product.id, quantity: 3 }],
+        },
+        NOW,
+      ),
+    );
+    expect(outcome).toEqual({ status: 'NOTHING_TO_RESTORE', movements: [] });
+    const p = await db().product.findUniqueOrThrow({
+      where: { id: product.id },
+    });
+    expect([p.quantity, p.stockVersion]).toEqual([4, 0]);
+    expect(
+      await db().stockMovement.count({ where: { groupId: 'no-confirmed-at' } }),
+    ).toBe(0);
+  });
+
+  it('skips non-positive legacy line quantities', async () => {
+    const product = await db().product.create({
+      data: { name: 'Shampoo 1 l', tenantId: TENANT, quantity: 4 },
+    });
+    const outcome = await tx(() =>
+      writer.reverseSale(
+        {
+          saleId: 'legacy-zero-lines',
+          actor: ACTOR,
+          confirmedAt: new Date('2020-01-01T00:00:00.000Z'),
+          lines: [
+            { productId: product.id, quantity: 0 },
+            { productId: product.id, quantity: -2 },
+            { productId: product.id, quantity: 3 },
+          ],
+        },
+        NOW,
+      ),
+    );
+    if (outcome.status !== 'REVERSED') throw new Error(outcome.status);
+    expect(outcome.movements.map((m) => m.delta)).toEqual([3]);
+    const p = await db().product.findUniqueOrThrow({
+      where: { id: product.id },
+    });
+    expect(p.quantity).toBe(7);
+  });
+
   it('applies adjustments with bucket CAS and variant product balances', async () => {
     const product = await db().product.create({
       data: { name: 'Camisa', tenantId: TENANT, hasVariants: true },

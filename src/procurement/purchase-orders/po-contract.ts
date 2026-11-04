@@ -1,3 +1,4 @@
+import type { PurchaseOrderIssueSummary } from './po-issue-summary';
 import { createHash } from 'node:crypto';
 import {
   parseSupplierId,
@@ -118,6 +119,10 @@ export interface PurchaseOrder extends OrderInput {
     detail: string | null;
   };
   validation: { issues: PurchaseOrderIssue[] };
+  /** Checklist grouping of `validation.issues` (lines per family + order-level codes). */
+  issueSummary: PurchaseOrderIssueSummary;
+  /** Checklist items the FE shows as «N avisos»; 0 when the order has no issues. */
+  checklistItemCount: number;
   /** Live supplier version (tenant-qualified); null without a supplier row. */
   supplierCurrentVersion: number | null;
   /** Opaque; null means the references are incomplete or invalid. */
@@ -140,6 +145,8 @@ export interface PurchaseOrderSummary {
   supplierDisplaySnapshot: SupplierDisplaySnapshot | null;
   lineCount: number;
   issueCount: number;
+  issueSummary: PurchaseOrderIssueSummary;
+  checklistItemCount: number;
   /** One exact sum per tax basis (EXCLUDES_TAX, then INCLUDES_TAX); never mixed. */
   totals: PurchaseOrderTotal[] | null;
   note: string | null;

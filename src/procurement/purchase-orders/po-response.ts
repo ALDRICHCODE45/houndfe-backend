@@ -1,3 +1,4 @@
+import { summarizePurchaseOrderIssues } from './po-issue-summary';
 import type {
   ProcurementPurchaseOrder,
   ProcurementPurchaseOrderLine,
@@ -169,6 +170,7 @@ export function buildPurchaseOrder(
         detail: order.location.detail,
       },
       validation: { issues: diagnostics.issues },
+      ...summarizePurchaseOrderIssues(diagnostics.issues),
       referenceToken,
       canConfirm: canConfirmPurchaseOrder({
         status: row.status,
@@ -212,6 +214,7 @@ export function buildPurchaseOrder(
       detail: row.locationDetail,
     },
     validation: { issues: [] },
+    ...summarizePurchaseOrderIssues([]),
     referenceToken: null,
     canConfirm: false,
   };
