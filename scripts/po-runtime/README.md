@@ -110,15 +110,15 @@ Suppliers: `active` «Distribuidora Veterinaria del Norte» and `archived` «Ali
 
 Showcase orders (`credentials.orders`, made by real commands, so audits, receipts and frozen snapshots are genuine; the host never edits or deletes them afterwards):
 
-| Key                            | Status / what it shows                                                                    | Made by                                                 |
-| ------------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `readyToConfirm`               | DRAFT, `canConfirm: true`, three lines (bolsa, collar «Chico · Azul», granel)             | María González                                          |
-| `readyToConfirmSpare`          | DRAFT, `canConfirm: true` (spare for a second confirm/cancel demo)                        | María González                                          |
-| `incompleteCost`               | DRAFT, missing cost → issues, `canConfirm: false` (confirm would be `ORDER_NOT_READY`)    | María González                                          |
-| `archivedSupplierDraft`        | DRAFT whose supplier was archived after saving → `SUPPLIER_ARCHIVED`, `canConfirm: false` | María González                                          |
-| `confirmed` / `confirmedSpare` | CONFIRMED (spare to demo cancel-from-confirmed)                                           | confirmed by María González                             |
-| `cancelledFromDraft`           | CANCELLED, never confirmed                                                                | cancelled by Jorge Martínez                             |
-| `cancelledFromConfirmed`       | CANCELLED after CONFIRMED (both actor snapshots)                                          | confirmed by Sofía Ramírez, cancelled by Jorge Martínez |
+| Key                                       | Status / what it shows                                                                    | Made by                                                 |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `readyToConfirm`                          | DRAFT, `canConfirm: true`, three lines (bolsa, collar «Chico · Azul», granel)             | María González                                          |
+| `readyToConfirm2` / `readyToConfirm3`     | DRAFT, `canConfirm: true` (spares for more confirm/cancel demos)                          | María González                                          |
+| `incompleteCost`                          | DRAFT, missing cost → issues, `canConfirm: false` (confirm would be `ORDER_NOT_READY`)    | María González                                          |
+| `archivedSupplierDraft`                   | DRAFT whose supplier was archived after saving → `SUPPLIER_ARCHIVED`, `canConfirm: false` | María González                                          |
+| `confirmed` / `confirmed2` / `confirmed3` | CONFIRMED (spares to demo cancel-from-confirmed)                                          | María González; `confirmed3` by Sofía Ramírez           |
+| `cancelledFromDraft`                      | CANCELLED, never confirmed                                                                | cancelled by Jorge Martínez                             |
+| `cancelledFromConfirmed`                  | CANCELLED after CONFIRMED (both actor snapshots)                                          | confirmed by Sofía Ramírez, cancelled by Jorge Martínez |
 
 No human/default role is changed.
 

@@ -358,11 +358,13 @@ test('orders are made through real commands by the intended actors; every mutati
   });
   assert.deepEqual(Object.keys(result.orders), [
     'readyToConfirm',
-    'readyToConfirmSpare',
+    'readyToConfirm2',
+    'readyToConfirm3',
     'incompleteCost',
     'archivedSupplierDraft',
     'confirmed',
-    'confirmedSpare',
+    'confirmed2',
+    'confirmed3',
     'cancelledFromDraft',
     'cancelledFromConfirmed',
   ]);
@@ -372,11 +374,13 @@ test('orders are made through real commands by the intended actors; every mutati
     ),
     {
       readyToConfirm: 'DRAFT',
-      readyToConfirmSpare: 'DRAFT',
+      readyToConfirm2: 'DRAFT',
+      readyToConfirm3: 'DRAFT',
       incompleteCost: 'DRAFT',
       archivedSupplierDraft: 'DRAFT',
       confirmed: 'CONFIRMED',
-      confirmedSpare: 'CONFIRMED',
+      confirmed2: 'CONFIRMED',
+      confirmed3: 'CONFIRMED',
       cancelledFromDraft: 'CANCELLED',
       cancelledFromConfirmed: 'CANCELLED',
     },
@@ -412,8 +416,16 @@ test('orders are made through real commands by the intended actors; every mutati
     'María González',
   );
   // showcase drafts stay untouched: never confirmed, cancelled, replaced or deleted
-  for (const key of ['readyToConfirm', 'readyToConfirmSpare', 'incompleteCost'])
+  for (const key of [
+    'readyToConfirm',
+    'readyToConfirm2',
+    'readyToConfirm3',
+    'incompleteCost',
+  ])
     assert.equal(byNote(result.orders[key].note).version, 1);
+  // every showcase order has its own readable note, so the UI can tell them apart
+  const notes = Object.values(result.orders).map((order) => order.note);
+  assert.equal(new Set(notes).size, notes.length);
   assert(!api.calls.some((c) => ['PUT', 'DELETE'].includes(c.method)));
   // the draft whose supplier was archived after saving
   const archived = result.suppliers.archivedAfterDraft;

@@ -332,7 +332,7 @@ async function seedOrders({ apiOrigin, password, fixture, transport }) {
       ),
     ),
   );
-  result.readyToConfirmSpare = ready(
+  result.readyToConfirm2 = ready(
     await create(
       input(
         accesorios,
@@ -342,6 +342,16 @@ async function seedOrders({ apiOrigin, password, fixture, transport }) {
           line(collar, '10', cost(collar, '92.5', 'INCLUDES_TAX'), grandeRojo),
           line(catalog.unidad, '30', cost(catalog.unidad, '45')),
         ],
+      ),
+    ),
+  );
+  result.readyToConfirm3 = ready(
+    await create(
+      input(
+        norte,
+        'Croquetas a granel para el área de adopciones',
+        'Bodega principal, andén 3',
+        [line(catalog.kilogramo, '40', cost(catalog.kilogramo, '29.75'))],
       ),
     ),
   );
@@ -409,7 +419,7 @@ async function seedOrders({ apiOrigin, password, fixture, transport }) {
     'manager',
     users.manager.displayName,
   );
-  result.confirmedSpare = await closed(
+  result.confirmed2 = await closed(
     input(
       accesorios,
       'Orden confirmada: juguetes para cachorro',
@@ -418,6 +428,19 @@ async function seedOrders({ apiOrigin, password, fixture, transport }) {
     ),
     'manager',
     users.manager.displayName,
+  );
+  result.confirmed3 = await closed(
+    input(
+      norte,
+      'Orden confirmada: collares para la feria de adopción',
+      'Mostrador de accesorios',
+      [
+        line(collar, '18', cost(collar, '88', 'INCLUDES_TAX'), chicoAzul),
+        line(collar, '12', cost(collar, '88', 'INCLUDES_TAX'), grandeRojo),
+      ],
+    ),
+    'confirmer',
+    users.confirmer.displayName,
   );
   const draftToCancel = ready(
     await create(
