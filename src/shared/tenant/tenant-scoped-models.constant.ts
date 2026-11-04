@@ -108,4 +108,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   'CashHandover',
   'CashClosing',
   'CashCommand',
+  // Inventory journal (O1 / T5). Same fail-open allowlist semantics: without
+  // these entries movement reads and adjustment-receipt replays would not
+  // auto-inject `tenantId`, so another tenant's kardex or cached adjustment
+  // response could leak through TenantPrismaService.
+  'StockMovement',
+  'InventoryAdjustmentReceipt',
 ]);

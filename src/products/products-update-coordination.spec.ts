@@ -4,6 +4,7 @@ import { Product } from './domain/product.entity';
 import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
 import { ProductsService } from './products.service';
 import type { UpdateProductDto } from './dto/update-product.dto';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const tenantId = 'tenant';
 const productId = 'product';
@@ -155,6 +156,7 @@ function fixture(flags: Row = {}) {
       }),
     },
     variant: {
+      aggregate: jest.fn(() => Promise.resolve({ _sum: { quantity: null } })),
       updateMany: jest.fn(() => {
         record('cascade');
         working.minimum = 0;
@@ -228,7 +230,6 @@ function fixture(flags: Row = {}) {
   // SAFETY: the real repository consumes these instrumented delegate/alert surfaces only.
   const repo = new PrismaProductRepository(
     tenant as never,
-    { publish: jest.fn() } as never,
     { rearm, seedAndFlip: jest.fn() } as never,
   );
   const rootDefault = jest.fn(() => {
@@ -241,6 +242,7 @@ function fixture(flags: Row = {}) {
     {} as never,
     tenant as never,
     { assertExists: jest.fn() } as never,
+    makeStockJournalStub(),
   );
   const update = (
     dto: UpdateProductDto = {
@@ -527,11 +529,11 @@ it('restores service detail and stock-alert effects on outer rollback', async ()
   ).rejects.toBe(error);
   expect(f.tx.serviceDetail.upsert).toHaveBeenCalled();
   expect(f.snapshot()).toEqual(before);
-  const stock = fixture({ quantity: 1, minQuantity: 5, useStock: true });
+  const stock = fixture({ quantity: 10, minQuantity: 5, useStock: true });
   const stockBefore = stock.snapshot();
   await expect(
     stock.run(async () => {
-      await stock.update({ quantity: 10 });
+      await stock.update({ minQuantity: 2 });
       throw error;
     }),
   ).rejects.toBe(error);

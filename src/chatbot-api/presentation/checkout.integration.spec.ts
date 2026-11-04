@@ -8,7 +8,8 @@ import { plainToInstance } from 'class-transformer';
 import { CheckoutRequestDto } from './dto/checkout.request';
 import { computeCheckoutRequestHash } from '../application/checkout.service';
 import { PrismaPromotionUsageRepository } from '../../promotions/infrastructure/prisma-promotion-usage.repository';
-import { PrismaProductRepository } from '../../products/infrastructure/prisma-product.repository';
+import { StockJournalWriter } from '../../inventory/infrastructure/stock-journal.writer';
+import { SaleStockService } from '../../sales/sale-stock.service';
 import { PrismaStockAlertStateRepository } from '../../stock-alerts/infrastructure/prisma-stock-alert-state.repository';
 import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import { ClsService } from 'nestjs-cls';
@@ -170,22 +171,27 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
             throw new Error('driver error phone 5512345678 Private Street');
         },
       );
-    const products = new PrismaProductRepository(
+    const alertState = new PrismaStockAlertStateRepository();
+    // O1 / T4 — the real journal writer + sale facade replace the legacy
+    // product-repository decrement (same tx, same alert/outbox behavior).
+    const saleStock = new SaleStockService(
+      new StockJournalWriter(
+        tenant,
+        new ConfigService({
+          PROMOTIONS_BUSINESS_TIMEZONE: 'America/Mexico_City',
+        }),
+      ),
       tenant,
       outbox,
-      new PrismaStockAlertStateRepository(),
+      alertState,
     );
     Object.assign(sales, {
       tenantPrisma: tenant,
       saleRepo: repo,
       productsService: {
         getApplicablePrices: async () => [{ priceCents: 10000 }],
-        decrementStockForCharge: (
-          items: Parameters<
-            PrismaProductRepository['decrementStockForCharge']
-          >[0],
-        ) => products.decrementStockForCharge(items),
       },
+      saleStock,
       recomputePricingAndPromotions: async () => ({
         promotionCapacityDemands: capacityDemands,
       }),

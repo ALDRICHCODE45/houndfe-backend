@@ -9,9 +9,10 @@
  *   - AND the other sees `count === 0` and emits nothing
  *
  * This is the real-DB integration variant of the spec. It exercises the
- * FULL production code path:
- *   PrismaProductRepository.decrementStockForCharge
- *     → flipAndOutbox
+ * FULL production code path (O1 stock journal):
+ *   SaleStockService.charge
+ *     → StockJournalWriter.charge            (FEFO charge + SALE movement)
+ *     → LowStockCrossing.record
  *       → PrismaStockAlertStateRepository.seedAndFlip  (INSERT seed + UPDATE flip)
  *       → OutboxWriterService.publish (INSERT INTO outbox_events)
  *
@@ -20,7 +21,7 @@
  *
  * Concurrency model: both transactions start in `Promise.all`, each wrapped
  * in `TenantPrismaService.runInTransaction` so the CLS tx client is set
- * before `decrementStockForCharge` reads it. Postgres row-locks on the
+ * before the journal writer reads it. Postgres row-locks on the
  * `products` row serialize the two UPDATEs; whichever transaction commits
  * first releases the lock, the second re-reads qty at READ COMMITTED and
  * continues. The conditional `UPDATE stock_alert_states SET alerted=true
@@ -53,12 +54,14 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ClsService } from 'nestjs-cls';
+import { ConfigService } from '@nestjs/config';
 import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../src/shared/prisma/prisma.service';
 import { TenantPrismaService } from '../src/shared/prisma/tenant-prisma.service';
-import { PrismaProductRepository } from '../src/products/infrastructure/prisma-product.repository';
+import { StockJournalWriter } from '../src/inventory/infrastructure/stock-journal.writer';
+import { SaleStockService } from '../src/sales/sale-stock.service';
 import { PrismaStockAlertStateRepository } from '../src/stock-alerts/infrastructure/prisma-stock-alert-state.repository';
 import { OutboxWriterService } from '../src/shared/outbox/outbox-writer.service';
 import type { TenantClsStore } from '../src/shared/tenant/tenant-cls-store.interface';
@@ -74,7 +77,7 @@ describeIfDb(
     let prisma: PrismaClient;
     let cls: ClsService<TenantClsStore>;
     let tenantPrisma: TenantPrismaService;
-    let productRepo: PrismaProductRepository;
+    let saleStock: SaleStockService;
     let tenantId: string;
     let productId: string;
 
@@ -99,10 +102,9 @@ describeIfDb(
       );
       const alertState = new PrismaStockAlertStateRepository();
       const outbox = new OutboxWriterService();
-      productRepo = new PrismaProductRepository(
-        tenantPrisma as unknown as ConstructorParameters<
-          typeof PrismaProductRepository
-        >[0],
+      saleStock = new SaleStockService(
+        new StockJournalWriter(tenantPrisma, new ConfigService()),
+        tenantPrisma,
         outbox,
         alertState,
       );
@@ -173,10 +175,12 @@ describeIfDb(
           cls.run(async () => {
             cls.set('tenantId', tenantId);
             return tenantPrisma.runInTransaction(async () =>
-              productRepo.decrementStockForCharge([
-                { productId, quantity: 5 },
-              ]),
-            ).then((crossings) => ({ correlationId, crossings }));
+              saleStock.charge({
+                saleId: `e4-sale-${correlationId}`,
+                items: [{ productId, quantity: 5 }],
+                actor: { kind: 'bot', userId: 'e4-bot' },
+              }),
+            ).then((movements) => ({ correlationId, movements }));
           });
 
         const [resultA, resultB] = await Promise.all([
@@ -185,9 +189,9 @@ describeIfDb(
         ]);
 
         // ── Spec outcome assertions ──────────────────────────────────
-        const totalCrossings =
-          resultA.crossings.length + resultB.crossings.length;
-        expect(totalCrossings).toBe(1);
+        // Both sales journaled their SALE movement; only one owns the alert.
+        expect(resultA.movements).toHaveLength(1);
+        expect(resultB.movements).toHaveLength(1);
 
         const outboxRows = await prisma.outboxEvent.findMany({
           where: {

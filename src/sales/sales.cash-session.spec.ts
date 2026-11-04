@@ -211,11 +211,10 @@ function buildHarness(options: { withoutLedger?: boolean } = {}) {
       (): Promise<Map<string, Map<number, number>>> =>
         Promise.resolve(new Map()),
     ),
-    decrementStockForCharge: jest.fn((): Promise<unknown[]> => {
+    chargeStock: jest.fn((): Promise<unknown[]> => {
       record('stock');
       return Promise.resolve([]);
     }),
-    incrementStockForRestock: jest.fn((): Promise<void> => Promise.resolve()),
   };
 
   const eventEmitter = { emit: jest.fn() };
@@ -268,6 +267,13 @@ function buildHarness(options: { withoutLedger?: boolean } = {}) {
     paymentMethodResolver as never,
     promotionUsageRepo as unknown as IPromotionUsageRepository,
     options.withoutLedger ? undefined : (ledger as unknown as ICashLedger),
+    // O1 / T4 — the journal charge is observed through the stock mock.
+    {
+      charge: jest.fn(({ items }: { items: unknown[] }) =>
+        products.chargeStock(items),
+      ),
+      reverse: jest.fn(() => Promise.resolve({ status: 'NOTHING_TO_RESTORE' })),
+    } as never,
   );
 
   const lockSale = (sale: Sale): void => {
@@ -461,7 +467,7 @@ describe('SalesService — cash session binding (T4)', () => {
 
       expect(h.events).toContain('assert:open@tx');
       expect(h.events).not.toContain('lock:sale@tx');
-      expect(h.products.decrementStockForCharge).not.toHaveBeenCalled();
+      expect(h.products.chargeStock).not.toHaveBeenCalled();
       expect(h.saleRepo.allocateNextFolio).not.toHaveBeenCalled();
       expect(h.saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
       expect(h.saleRepo.markChargeIdempotencySucceeded).not.toHaveBeenCalled();
@@ -605,7 +611,7 @@ describe('SalesService — cash session binding (T4)', () => {
       expect(h.ledger.recordPayments).toHaveBeenCalledWith(
         expect.objectContaining({ payments: [], changeDueCents: 0 }),
       );
-      expect(h.products.decrementStockForCharge).toHaveBeenCalled();
+      expect(h.products.chargeStock).toHaveBeenCalled();
     });
 
     it('propagates a ledger write failure to the caller', async () => {

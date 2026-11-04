@@ -9,6 +9,7 @@ import {
   EntityNotFoundError,
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 type Tier = { id: string; minQuantity: number; priceCents: number };
 type Stored = { priceCents: number; tiers: Tier[] } | null;
@@ -193,6 +194,7 @@ function setup(existing = true) {
     {} as Args[2],
     tenant as unknown as Args[3],
     {} as Args[4],
+    makeStockJournalStub(),
   );
   return {
     tx,

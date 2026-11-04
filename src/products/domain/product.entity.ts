@@ -248,7 +248,9 @@ export class Product {
       iepsRate.multiplier,
     );
 
-    const quantity = isService
+    // A lots product starts empty: its stock arrives through its lots (INITIAL).
+    const startsEmpty = isService || params.useLotsAndExpirations === true;
+    const quantity = startsEmpty
       ? SERVICE_FORCED_DEFAULTS.quantity
       : (params.quantity ?? 0);
     const minQuantity = isService
@@ -274,7 +276,9 @@ export class Product {
       unit,
       satKey: params.satKey ?? null,
       categoryId: params.categoryId ?? null,
-      brandId: isService ? SERVICE_FORCED_DEFAULTS.brandId : (params.brandId ?? null),
+      brandId: isService
+        ? SERVICE_FORCED_DEFAULTS.brandId
+        : (params.brandId ?? null),
       sellInPos: params.sellInPos ?? true,
       includeInOnlineCatalog: params.includeInOnlineCatalog ?? true,
       requiresPrescription: params.requiresPrescription ?? false,
@@ -327,14 +331,14 @@ export class Product {
     useStock: boolean;
     useLotsAndExpirations: boolean;
     quantity: number;
-     minQuantity: number;
-     hasVariants: boolean;
-     serviceDetail?: ProductServiceDetail | null;
+    minQuantity: number;
+    hasVariants: boolean;
+    serviceDetail?: ProductServiceDetail | null;
     hidePriceInOnlineCatalog?: boolean;
     onlineStockPresentation?: CatalogStockPresentation | null;
     onlineStockPresentationCustomQty?: number | null;
     supportedCatalogPriceListIds?: string[];
-     createdAt: Date;
+    createdAt: Date;
     updatedAt: Date;
   }): Product {
     return new Product({
@@ -363,9 +367,9 @@ export class Product {
       useStock: data.useStock,
       useLotsAndExpirations: data.useLotsAndExpirations,
       quantity: data.quantity,
-       minQuantity: data.minQuantity,
-       hasVariants: data.hasVariants,
-       serviceDetail: data.serviceDetail ?? null,
+      minQuantity: data.minQuantity,
+      hasVariants: data.hasVariants,
+      serviceDetail: data.serviceDetail ?? null,
       hidePriceInOnlineCatalog: data.hidePriceInOnlineCatalog ?? false,
       onlineStockPresentation: data.onlineStockPresentation ?? null,
       onlineStockPresentationCustomQty:
@@ -373,7 +377,7 @@ export class Product {
       supportedCatalogPriceListIds: [
         ...(data.supportedCatalogPriceListIds ?? []),
       ],
-       createdAt: new Date(data.createdAt),
+      createdAt: new Date(data.createdAt),
       updatedAt: new Date(data.updatedAt),
     });
   }
@@ -392,10 +396,8 @@ export class Product {
       this.minQuantity = 0;
       return;
     }
-
-    if (this.useLotsAndExpirations) {
-      this.quantity = 0;
-    }
+    // O1: a lots product keeps its stored total (untracked + lots); only the
+    // stock journal changes it, so normalization must not zero it here.
   }
 
   static assertTypeChangeAllowed(
@@ -416,36 +418,6 @@ export class Product {
   }
 
   // ==================== Behavior ====================
-
-  decreaseStock(qty: number): void {
-    if (this.hasVariants) {
-      throw new BusinessRuleViolationError(
-        'Cannot modify stock directly on product with variants',
-        'PRODUCT_HAS_VARIANTS',
-      );
-    }
-    if (qty <= 0) throw new InvalidArgumentError('Quantity must be positive');
-    if (this.quantity < qty) {
-      throw new BusinessRuleViolationError(
-        `Insufficient stock for "${this.name.productName}". Available: ${this.quantity}, requested: ${qty}`,
-        'INSUFFICIENT_STOCK',
-      );
-    }
-    this.quantity -= qty;
-    this.updatedAt = new Date();
-  }
-
-  increaseStock(qty: number): void {
-    if (this.hasVariants) {
-      throw new BusinessRuleViolationError(
-        'Cannot modify stock directly on product with variants',
-        'PRODUCT_HAS_VARIANTS',
-      );
-    }
-    if (qty <= 0) throw new InvalidArgumentError('Quantity must be positive');
-    this.quantity += qty;
-    this.updatedAt = new Date();
-  }
 
   updateName(newName: string): void {
     this.name = ProductName.create(newName);
@@ -527,21 +499,21 @@ export class Product {
       useStock: this.useStock,
       useLotsAndExpirations: this.useLotsAndExpirations,
       quantity: this.quantity,
-       minQuantity: this.minQuantity,
-       hasVariants: this.hasVariants,
+      minQuantity: this.minQuantity,
+      hasVariants: this.hasVariants,
       hidePriceInOnlineCatalog: this.hidePriceInOnlineCatalog,
       onlineStockPresentation: this.onlineStockPresentation,
       onlineStockPresentationCustomQty: this.onlineStockPresentationCustomQty,
       supportedCatalogPriceListIds: [...this.supportedCatalogPriceListIds],
       supportsAllCatalogPriceLists:
         this.supportedCatalogPriceListIds.length === 0,
-       serviceDetail: this.serviceDetail
-         ? {
-             capacity: this.serviceDetail.capacity,
-             notes: this.serviceDetail.notes,
-           }
-         : null,
-       createdAt: this.createdAt.toISOString(),
+      serviceDetail: this.serviceDetail
+        ? {
+            capacity: this.serviceDetail.capacity,
+            notes: this.serviceDetail.notes,
+          }
+        : null,
+      createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
     };
   }

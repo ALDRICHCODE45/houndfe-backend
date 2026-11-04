@@ -10,6 +10,7 @@
  */
 import { ProductsService } from './products.service';
 import type { IProductRepository } from './domain/product.repository';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 function makeMockRepo(): jest.Mocked<IProductRepository> {
   return {
@@ -19,8 +20,6 @@ function makeMockRepo(): jest.Mocked<IProductRepository> {
     findAll: jest.fn(),
     save: jest.fn(),
     delete: jest.fn(),
-    decrementStockForCharge: jest.fn(),
-    incrementStockForRestock: jest.fn(),
     rearmAlertAfterEdit: jest.fn().mockResolvedValue(undefined),
     isSkuTaken: jest.fn().mockResolvedValue(false),
     isBarcodeTaken: jest.fn().mockResolvedValue(false),
@@ -53,6 +52,7 @@ function makeService(prisma: ReturnType<typeof makeMockPrisma>) {
       {} as any,
       tenantPrisma,
       {} as any,
+      makeStockJournalStub(),
     ),
   };
 }

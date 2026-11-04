@@ -90,7 +90,6 @@ describe('live editorial coordination foundation', () => {
     );
     const repository = new PrismaProductRepository(
       tenant,
-      unused('OutboxWriterService'),
       unused('IStockAlertStateRepository'),
     );
     const products = new ProductsService(
@@ -99,6 +98,7 @@ describe('live editorial coordination foundation', () => {
       unused('FilesService'),
       tenant,
       unused('SatCatalogService'),
+      unused('ProductStockJournal'),
     );
     freshSeed = () => seedEditorialPostgres(client, randomUUID());
     readProduct = (seed) =>

@@ -114,8 +114,8 @@ function harness(
         ['prod-2', { categoryId: 'category-2', brandId: 'brand-2' }],
       ]),
     ),
-    decrementStockForCharge: jest.fn().mockResolvedValue([]),
   };
+  const stockCharge = jest.fn().mockResolvedValue([]);
   const customerFindUnique = jest.fn().mockResolvedValue({
     id: 'customer',
     globalPriceListId: customerList,
@@ -178,12 +178,17 @@ function harness(
     engine,
     {} as Dependencies[7],
     usage as unknown as Dependencies[8],
+    undefined,
+    {
+      charge: stockCharge,
+    } as unknown as Dependencies[10],
   );
   return {
     service,
     promo,
     saleRepo,
     products,
+    stockCharge,
     outbox,
     usage,
     findAll,
@@ -1186,7 +1191,7 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
       h.saleRepo.allocateNextFolio,
       h.saleRepo.persistChargeConfirmation,
       h.products.getApplicablePrices,
-      h.products.decrementStockForCharge,
+      h.stockCharge,
       h.usage.claimForSale,
       h.outbox.publish,
     ]) {

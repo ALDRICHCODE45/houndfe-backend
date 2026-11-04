@@ -25,6 +25,8 @@ import { FilesModule } from '../files/files.module';
 import { SatCatalogModule } from '../sat-catalog/sat-catalog.module';
 import { StockAlertsModule } from '../stock-alerts/stock-alerts.module';
 import { OutboxModule } from '../shared/outbox/outbox.module';
+import { InventoryModule } from '../inventory/inventory.module';
+import { ProductStockJournal } from './infrastructure/product-stock-journal';
 
 @Module({
   imports: [
@@ -33,10 +35,12 @@ import { OutboxModule } from '../shared/outbox/outbox.module';
     SatCatalogModule,
     StockAlertsModule,
     OutboxModule,
+    InventoryModule,
   ],
   controllers: [ProductsController],
   providers: [
     ProductsService,
+    ProductStockJournal,
     {
       provide: PRODUCT_REPOSITORY,
       useClass: PrismaProductRepository,

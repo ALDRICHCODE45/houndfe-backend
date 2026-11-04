@@ -4,6 +4,7 @@ import {
   BusinessRuleViolationError,
   EntityNotFoundError,
 } from '../shared/domain/domain-error';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 function setup() {
   let inside = false;
@@ -99,6 +100,7 @@ function setup() {
     {} as Args[2],
     tenant as unknown as Args[3],
     {} as Args[4],
+    makeStockJournalStub(),
   );
   return {
     tx,

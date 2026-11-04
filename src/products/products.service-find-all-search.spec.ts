@@ -16,6 +16,7 @@
  */
 import { ProductsService } from './products.service';
 import type { IProductRepository } from './domain/product.repository';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 // ── Test fixtures ──────────────────────────────────────────────────────
 
@@ -31,8 +32,6 @@ function makeMockRepo() {
     findAll: jest.fn(),
     save: jest.fn(),
     delete: jest.fn(),
-    decrementStockForCharge: jest.fn(),
-    incrementStockForRestock: jest.fn(),
     rearmAlertAfterEdit: jest
       .fn<Promise<void>, any>()
       .mockResolvedValue(undefined),
@@ -82,6 +81,7 @@ function createService(prisma: any) {
     makeMockFilesService(),
     makeTenantPrisma(prisma),
     makeNoopSatCatalog(),
+    makeStockJournalStub(),
   );
 }
 

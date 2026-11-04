@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { ConfigService } from '@nestjs/config';
 import type { PrismaClient, Variant } from '@prisma/client';
 import type { CatalogEditorialCore } from '../catalog-editorial/application/catalog-editorial-core';
 import type { EditorialDocument } from '../catalog-editorial/domain/document';
@@ -139,6 +140,10 @@ describe('live Variant membership and stock coordination', () => {
     const { createCoordinatedEditorialWriteAuthority } =
       await import('../catalog-editorial/infrastructure/prisma-coordinated-editorial-authority');
     const { ProductsService } = await import('./products.service');
+    const { ProductStockJournal } =
+      await import('./infrastructure/product-stock-journal');
+    const { StockJournalWriter } =
+      await import('../inventory/infrastructure/stock-journal.writer');
     const { PriceListsService } =
       await import('../price-lists/price-lists.service');
     const { PrismaProductRepository } =
@@ -167,15 +172,26 @@ describe('live Variant membership and stock coordination', () => {
       );
       const repository = new PrismaProductRepository(
         tenant,
-        unused('OutboxWriterService'),
         unused('IStockAlertStateRepository'),
       );
+      const config = {
+        get: (_key: string, fallback: string) => fallback,
+      } as unknown as ConfigService;
       const products = new ProductsService(
         repository,
         unused('ProductsService root PrismaService'),
         unused('FilesService'),
         tenant,
         unused('SatCatalogService'),
+        new ProductStockJournal(
+          new StockJournalWriter(tenant, config),
+          tenant,
+          { user: { findUnique: () => Promise.resolve(null) } } as never,
+          cls,
+          // Alert edge is out of scope for the lock-coordination scenarios.
+          { record: () => Promise.resolve() } as never,
+          config,
+        ),
       );
       const lists = new PriceListsService(unused('global root'), tenant);
       return {
@@ -3351,70 +3367,6 @@ describe('live Variant membership and stock coordination', () => {
     );
     expect(membership.variants).toEqual([]);
     expect(membership.products[0]).toMatchObject({ hasVariants: false });
-    await expect(
-      readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
-    ).resolves.toEqual([]);
-  });
-
-  it('serializes a mixed stock charge before removal without a deadlock', async () => {
-    const seed = await freshSeed();
-    // Parent stock for the Product branch; thresholds avoid low-stock crossings/outbox.
-    await observer.$executeRaw`UPDATE "products" SET "quantity" = ${10}, "minQuantity" = ${0}
-      WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
-    const batchBase = await open();
-    // Pause before the first stock UPDATE: fixed code already holds its parent gate.
-    const paused = latch(batchBase, (sql) => sql.includes('UPDATE "products"'));
-    const batch = actor(paused.client);
-    const remover = actor(await open());
-    const batchPid = await currentBackendPid(batchBase);
-    const removerPid = await currentBackendPid(remover.client);
-
-    const charge = batch.run(seed, (p) =>
-      // decrementStockForCharge requires an ambient transaction (repository guard).
-      batch.inTransaction(() =>
-        p.decrementStockForCharge([
-          {
-            productId: seed.ids.productId,
-            variantId: seed.ids.variantId,
-            quantity: 1,
-          },
-          { productId: seed.ids.productId, quantity: 1 },
-        ]),
-      ),
-    );
-    let removal: Promise<void> | undefined;
-    try {
-      await paused.reached;
-      removal = remover.run(seed, (p) =>
-        p.removeVariant(seed.ids.productId, seed.ids.variantId),
-      );
-      // Removal must wait on the charge's parent gate, before reading/deleting the child.
-      expect(await waitForLockWait(observer, removerPid)).toContain(batchPid);
-    } finally {
-      paused.release();
-      await Promise.allSettled([charge, removal]);
-    }
-    const [charged, removed] = await Promise.allSettled([charge, removal]);
-    process.stdout.write(
-      `mixed charge/removal pids=${batchPid},${removerPid} SQLSTATEs=${JSON.stringify(
-        [charged, removed].map((o) =>
-          o.status === 'rejected' ? postgresSqlState(o.reason) : null,
-        ),
-      )}\n`,
-    );
-    expect(charged.status).toBe('fulfilled');
-    expect(removed.status).toBe('fulfilled');
-
-    const membership = await readVariantMembership(
-      observer,
-      seed.ids.tenantId,
-      seed.ids.productId,
-    );
-    expect(membership.variants).toEqual([]);
-    expect(membership.products[0]).toMatchObject({
-      hasVariants: false,
-      quantity: 9,
-    });
     await expect(
       readVariantPrices(observer, seed.ids.tenantId, seed.ids.variantId),
     ).resolves.toEqual([]);
