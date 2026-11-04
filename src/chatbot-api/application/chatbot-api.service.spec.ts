@@ -585,7 +585,7 @@ describe('ChatbotApiService', () => {
   let customerRepository: jest.Mocked<ICustomerRepository>;
   let evaluateCartPromotionsUseCase: jest.Mocked<IEvaluateCartPromotionsUseCase>;
   let salesService: jest.Mocked<
-    Pick<SalesService, 'confirmBotSale' | 'previewBotPricing'>
+    Pick<SalesService, 'confirmBotSale' | 'previewBotPricing' | 'cancelSale'>
   >;
   // Q3 / WU2 — mock the atomic idempotency port so `registerBotSale` can
   // exercise the four outcomes (acquired / replay / conflict / in_flight)
@@ -629,6 +629,7 @@ describe('ChatbotApiService', () => {
     salesService = {
       confirmBotSale: jest.fn(),
       previewBotPricing: jest.fn(),
+      cancelSale: jest.fn(),
     };
     saleRepository = {
       acquireSaleRegistrationIdempotency: jest.fn<
@@ -2061,6 +2062,27 @@ describe('ChatbotApiService', () => {
 
       expect(client.sale.findMany).not.toHaveBeenCalled();
       expect(result).toEqual([]);
+    });
+  });
+
+  describe('cancelBotSale', () => {
+    it('cancels as bot origin so the stock reversal is journaled as "Bot" (O1 / T4)', async () => {
+      const canceled = { saleId: 'sale-1', status: 'CANCELED' as const };
+      salesService.cancelSale.mockResolvedValue(canceled as never);
+
+      const result = await service.cancelBotSale({
+        saleId: 'sale-1',
+        cashierUserId: 'cashier-1',
+        reason: 'ORDER_ERROR',
+      } as never);
+
+      expect(result).toBe(canceled);
+      expect(salesService.cancelSale).toHaveBeenCalledWith(
+        'sale-1',
+        'cashier-1',
+        { reason: 'ORDER_ERROR' },
+        { origin: 'bot' },
+      );
     });
   });
 

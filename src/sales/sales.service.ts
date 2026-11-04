@@ -84,6 +84,7 @@ import type {
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from './domain/sale.repository';
+import { SaleStockService } from './sale-stock.service';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
@@ -599,7 +600,22 @@ export class SalesService {
     @Optional()
     @Inject(CASH_LEDGER)
     private readonly cashLedger?: ICashLedger,
+    // O1 / T4 — sale charge and cancel restock go through the stock journal.
+    // Optional like the ledger so unrelated constructors stay unchanged; the
+    // stock paths fail closed when it is not wired.
+    @Optional()
+    private readonly saleStock?: SaleStockService,
   ) {}
+
+  private requireSaleStock(): SaleStockService {
+    if (!this.saleStock) {
+      throw new BusinessRuleViolationError(
+        'SALE_STOCK_UNAVAILABLE',
+        'SALE_STOCK_UNAVAILABLE',
+      );
+    }
+    return this.saleStock;
+  }
 
   /**
    * Cash-register closing / T4 — the optional ledger must never silently
@@ -3110,20 +3126,18 @@ export class SalesService {
         promotionCapacityDemands,
       );
 
-      const stockAdjustments = sale.items.map((item) => ({
-        productId: item.productId,
-        variantId: item.variantId,
-        quantity: item.quantity,
-      }));
-      // Slice E.3 — crossings return value is currently UNUSED at this
-      // call site. `decrementStockForCharge` writes the durable
-      // `stock.low.detected` outbox rows IN THE SAME transaction
-      // (inserted via `OutboxWriterService.publish` inside
-      // `PrismaProductRepository`). Slice F consumes those rows from
-      // `OutboxEvent`. The returned `StockCrossing[]` is intentionally
-      // discarded here — there is no post-commit work in this method
-      // that consumes it.
-      await this.productsService.decrementStockForCharge(stockAdjustments);
+      // O1 / T4 — FEFO charge through the stock journal, in this same
+      // transaction. The low-stock `stock.low.detected` outbox rows are
+      // written by `SaleStockService` with the same edge gate as before.
+      await this.requireSaleStock().charge({
+        saleId: sale.id,
+        items: sale.items.map((item) => ({
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+        })),
+        actor: { kind: 'user', userId: actorId },
+      });
 
       const confirmedAt = new Date();
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
@@ -3252,6 +3266,7 @@ export class SalesService {
     saleId: string,
     actorId: string,
     dto: CancelSaleDto,
+    options: { origin?: 'bot' } = {},
   ): Promise<CancelSaleResult> {
     const idempotencyKey = `sale:cancel:${saleId}`;
     const requestHash = createHash('sha256')
@@ -3335,7 +3350,19 @@ export class SalesService {
         actorId,
       });
 
-      await this.productsService.incrementStockForRestock(restockedItems);
+      // O1 / T4 — restore exactly what the journal consumed. Sales charged
+      // before the journal (LEGACY) restock product/variant as before; a
+      // replayed cancellation (ALREADY_REVERSED) must not restock twice.
+      const reversal = await this.requireSaleStock().reverse({
+        saleId,
+        actor: {
+          kind: options.origin === 'bot' ? 'bot' : 'user',
+          userId: actorId,
+        },
+      });
+      if (reversal.status === 'LEGACY') {
+        await this.productsService.incrementStockForRestock(restockedItems);
+      }
 
       const detail =
         refundedCents === 0
@@ -3820,20 +3847,17 @@ export class SalesService {
       const paidCents = 0 as const;
       const debtCents = totalCents;
 
-      // Slice E.3 — crossings return value is currently UNUSED at this
-      // call site. The product repository writes the durable
-      // `stock.low.detected` outbox rows IN THE SAME transaction
-      // (inserted via `OutboxWriterService.publish` inside
-      // `PrismaProductRepository`). Slice F consumes those rows from
-      // `OutboxEvent`. The returned `StockCrossing[]` is intentionally
-      // discarded here — this method does not consume it.
-      await this.productsService.decrementStockForCharge(
-        input.items.map((item) => ({
+      // O1 / T4 — FEFO charge through the stock journal (actor "Bot"), in
+      // this same transaction; low-stock outbox rows as for the POS charge.
+      await this.requireSaleStock().charge({
+        saleId: sale.id,
+        items: input.items.map((item) => ({
           productId: item.productId,
           variantId: item.variantId ?? null,
           quantity: item.quantity,
         })),
-      );
+        actor: { kind: 'bot', userId: input.cashierUserId },
+      });
 
       const confirmedAt = new Date();
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);

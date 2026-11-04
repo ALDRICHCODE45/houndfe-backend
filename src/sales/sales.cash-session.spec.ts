@@ -268,6 +268,13 @@ function buildHarness(options: { withoutLedger?: boolean } = {}) {
     paymentMethodResolver as never,
     promotionUsageRepo as unknown as IPromotionUsageRepository,
     options.withoutLedger ? undefined : (ledger as unknown as ICashLedger),
+    // O1 / T4 — the journal charge is observed through the legacy stock mock.
+    {
+      charge: jest.fn(({ items }: { items: unknown[] }) =>
+        products.decrementStockForCharge(items),
+      ),
+      reverse: jest.fn(() => Promise.resolve({ status: 'LEGACY' })),
+    } as never,
   );
 
   const lockSale = (sale: Sale): void => {
