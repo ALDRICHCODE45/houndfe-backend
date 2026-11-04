@@ -622,15 +622,19 @@ model PrivateMediaAsset {
   @@map("private_media_assets")
 }
 
-// Draft intent only. Canonical decimal text preserves exact wire values.
+// Intent only: CONFIRMED is not received. Canonical decimal text preserves exact wire values.
 enum ProcurementPurchaseOrderStatus {
   DRAFT
+  CONFIRMED
+  CANCELLED
 }
 
 enum ProcurementPurchaseOrderOperation {
   CREATE
   REPLACE
   DELETE
+  CONFIRM
+  CANCEL
 }
 
 enum ProcurementPurchaseOrderTaxBasis {
@@ -648,6 +652,13 @@ model ProcurementPurchaseOrder {
   locationDetail String?
   locationTenantName String
   supplierDisplaySnapshot Json?
+  // Actor display names are snapshots taken at transition time; no actor ids.
+  confirmedAt DateTime?
+  confirmedByDisplayName String?
+  cancelledAt DateTime?
+  cancelledByDisplayName String?
+  // Per-line subtotals frozen at confirm; null while DRAFT.
+  lineSubtotalsSnapshot Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "po_tenant_fk")

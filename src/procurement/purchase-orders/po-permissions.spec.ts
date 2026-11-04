@@ -16,9 +16,12 @@ describe('purchase-order permission registry', () => {
     ]);
     const prior = PERMISSION_REGISTRY.filter(
       (p) =>
-        !['ProcurementSupplier', 'ProcurementPurchaseOrder'].includes(
-          p.subject,
-        ),
+        ![
+          'ProcurementSupplier',
+          'ProcurementPurchaseOrder',
+          'ProcurementOrderConfirmation',
+          'ProcurementOrderCancellation',
+        ].includes(p.subject),
     );
     expect(
       createHash('sha256').update(JSON.stringify(prior)).digest('hex'),
@@ -28,6 +31,27 @@ describe('purchase-order permission registry', () => {
       action: 'manage',
       description: 'Full system access',
     });
+  });
+
+  it.each([
+    ['ProcurementOrderConfirmation', 'Confirm purchase orders'],
+    ['ProcurementOrderCancellation', 'Cancel purchase orders'],
+  ])(
+    'adds configurable %s with only the create action',
+    (subject, description) => {
+      expect(
+        PERMISSION_REGISTRY.filter((p) => String(p.subject) === subject),
+      ).toEqual([{ subject, action: 'create', description }]);
+    },
+  );
+
+  it('keeps the purchase-order read permission that confirm and cancel also require', () => {
+    expect(PERMISSION_REGISTRY).toContainEqual(
+      expect.objectContaining({
+        subject: 'ProcurementPurchaseOrder',
+        action: 'read',
+      }),
+    );
   });
 
   it.each(['manager', 'cashier'])(
@@ -41,6 +65,8 @@ describe('purchase-order permission registry', () => {
       );
       expect(keys).not.toBeNull();
       expect(keys![1]).not.toContain('ProcurementPurchaseOrder');
+      expect(keys![1]).not.toContain('ProcurementOrderConfirmation');
+      expect(keys![1]).not.toContain('ProcurementOrderCancellation');
     },
   );
 
@@ -53,6 +79,7 @@ describe('purchase-order permission registry', () => {
       'utf8',
     );
     expect(seed).not.toContain('ProcurementPurchaseOrder');
+    expect(seed).not.toContain('ProcurementOrder');
     expect(seed).toContain("p.subject === 'all' && p.action === 'manage'");
     expect(seed.match(/rolePermission\.upsert/g)).toHaveLength(1);
     expect(seed).toContain('permissionId: manageAllPermission.id');
