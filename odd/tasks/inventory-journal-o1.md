@@ -31,7 +31,7 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 | T6b consolidation: dead compat/charge helpers, single low-stock crossing, useStock-off guard, global error mapping, spec arity | S2 S4 S6 S9 | worker | aac681f, 945d2c7, f2516be, 22937a3, 4fe3100, d9ee6f0, 35877db, 5471035 |
 | T7 frontend handoff docs | S11 | inline | 5d21cd2, 24c0736 , 8525136 |
 | T8 runtime proof on dev DB | S12 | worker | 596376b, 8525136 (fix 6b612b0) |
-| T9 verify fixes: legacy cancel restore through the journal (F1), deploy/rollout note (F2), doc gaps (F4) | S1 S7 S11 | worker | |
+| T9 verify fixes: legacy cancel restore through the journal (F1), deploy/rollout note (F2), doc gaps (F4) | S1 S7 S11 | worker | f7f6375, ddaaaf7 |
 
 ## Log
 
@@ -47,3 +47,4 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 - L10 (T8 runtime): critical S2 defect found over real HTTP — every PATCH product/variant/lot returned 400 STOCK_QUANTITY_READ_ONLY because ES2023 class fields make `quantity` an own undefined property on ValidationPipe DTO instances. Fixed 6b612b0 (value check) with a pipe-level regression spec (RED 3/6 → GREEN 6/6). Lesson: unit tests with plain objects missed it; runtime proof caught it.
 - L11 (T8): probe 85/85 over real HTTP on dev DB, S1–S10 proven (tenant Sucursal Centro, manager@houndfe.com; cashier for 403). Left 4 throwaway sale-probe products (cannot delete products with sale history). Permission rows for the new subjects are upserted from PERMISSION_REGISTRY by PermissionSeeder on every app boot (auth.module.ts:65), same as procurement; no deploy step needed (corrected by verify F3).
 - L12 (verify mw1v2z0o): 10/12 PASS, S7 PARTIAL, S12 not re-run. F1 MEDIUM: pre-journal cancel restore (`incrementStockForRestock`) writes stock without movement/stockVersion bump, and "legacy" = no SALE rows also matches post-journal all-useStock=false sales. F2: rollout note missing (stop writers during migrate, no rollback without re-opening, lots on variant products skipped). F4: undocumented stockVersion on lot/variant rows, SALE_STOCK_UNAVAILABLE, opening lot-sum raise. Routed to T9.
+- L13 (T9): F1 fixed f7f6375 — legacy = confirmedAt < `_prisma_migrations.finished_at` of the journal migration (only CONFIRMED sales are cancellable); legacy restore journaled as SALE_CANCELLATION with version bump; post-journal no-SALE-rows sale restores nothing; `incrementStockForRestock`/`lockStockAdjustments` removed. Edge change: a legacy line whose product later gained variants is skipped instead of throwing RESTOCK_TARGET_HAS_VARIANTS. F2 runbook docs/deploy/inventory-journal-o1-rollout.md, F4 doc gaps ddaaaf7. Live lock-order spec rewritten but unrun (needs EDITORIAL_COORDINATION_PG_BINDING).
