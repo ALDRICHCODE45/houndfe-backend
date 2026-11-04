@@ -22,8 +22,8 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 
 | ID | Specs | Route | Commit |
 | --- | --- | --- | --- |
-| T1 storage: movement table, bucket versions, opening migration, permission subjects | S1 S5 S8 S10 | worker | |
-| T2 journal core: bucket writer, locks, FEFO allocator, reversal | S4 S6 S7 | worker (with T1) | |
+| T1 storage: movement table, bucket versions, opening migration, permission subjects | S1 S5 S8 S10 | worker | 42c16a6 |
+| T2 journal core: bucket writer, locks, FEFO allocator, reversal | S4 S6 S7 | worker (with T1) | fa8a655, 54aa532, ce99df7 |
 | T3 product-side writers through journal | S2 S8 | worker | |
 | T4 sale charge/bot/cancel through journal | S6 S7 | worker | |
 | T5 inventory HTTP (stock, movements, adjustments) | S3 S4 S10 | worker | |
