@@ -11,7 +11,7 @@ export interface PurchaseOrderCursorPosition {
 }
 export type PurchaseOrderCursorScope = Pick<
   PurchaseOrderListQuery,
-  'supplierId' | 'search'
+  'supplierId' | 'status' | 'search'
 > & { tenantId: string };
 const DOMAIN = 'procurement-purchase-orders-cursor-v1';
 function binding(scope: PurchaseOrderCursorScope): string {
@@ -22,6 +22,7 @@ function binding(scope: PurchaseOrderCursorScope): string {
         'purchase-order',
         scope.tenantId,
         scope.supplierId ?? null,
+        scope.status ?? null,
         scope.search ?? null,
       ]),
     )

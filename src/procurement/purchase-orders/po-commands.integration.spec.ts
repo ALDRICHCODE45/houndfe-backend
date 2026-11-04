@@ -66,6 +66,19 @@ describeDb('purchase-order command PostgreSQL protocol', () => {
           });
         }
       }
+      for (const subject of [
+        'ProcurementOrderConfirmation',
+        'ProcurementOrderCancellation',
+      ]) {
+        const permission = await tx.permission.upsert({
+          where: { subject_action: { subject, action: 'create' } },
+          create: { subject, action: 'create' },
+          update: {},
+        });
+        await tx.rolePermission.create({
+          data: { roleId, permissionId: permission.id },
+        });
+      }
       await tx.tenantMembership.create({
         data: { tenantId, userId: actorId, roleId },
       });
@@ -375,4 +388,219 @@ describeDb('purchase-order command PostgreSQL protocol', () => {
       expect(await evidence(f.tenantId)).toEqual(before);
     },
   );
+
+  const confirmBody = (order: {
+    version: number;
+    supplierCurrentVersion: number | null;
+    referenceToken: string | null;
+  }) => ({
+    expectedVersion: order.version,
+    expectedSupplierVersion: order.supplierCurrentVersion,
+    expectedReferenceToken: order.referenceToken,
+  });
+
+  it('confirms, freezes snapshots under real locks, cancels, replays, and writes only procurement evidence', async () => {
+    const f = await fixture();
+    const created = await f.run(() => f.commands.createDraft('c', f.order));
+    const id = created.body.id;
+    const before = await evidence(f.tenantId);
+    await db.procurementSupplier.update({
+      where: { id: f.supplierId },
+      data: { displayName: 'Renamed before confirm' },
+    });
+    await db.tenant.update({
+      where: { id: f.tenantId },
+      data: { name: 'Renamed branch' },
+    });
+    const body = confirmBody(
+      (
+        await f.run(() =>
+          f.commands.replaceDraft(id, 'r', {
+            expectedVersion: 1,
+            order: f.order,
+          }),
+        )
+      ).body,
+    );
+    const confirmed = await f.run(() => f.commands.confirm(id, 'k', body));
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.body).toMatchObject({
+      status: 'CONFIRMED',
+      version: 3,
+      canConfirm: false,
+      referenceToken: null,
+      confirmedBy: { displayName: 'Owned proof actor' },
+      supplierDisplaySnapshot: { displayName: 'Renamed before confirm' },
+      locationSnapshot: { tenantName: 'Renamed branch' },
+      lineSubtotals: [{ subtotal: { amount: '2.5' } }],
+      lineDisplaySnapshots: [{ productName: 'Owned boxes', unit: 'CAJA' }],
+    });
+    const stored = await db.procurementPurchaseOrder.findUniqueOrThrow({
+      where: { id },
+    });
+    expect(stored.lineSubtotalsSnapshot).toEqual(confirmed.body.lineSubtotals);
+    await db.procurementSupplier.update({
+      where: { id: f.supplierId },
+      data: { displayName: 'Renamed after confirm' },
+    });
+    expect(await f.run(() => f.commands.confirm(id, 'k', body))).toEqual(
+      confirmed,
+    );
+    await expect(
+      f.run(() =>
+        f.commands.replaceDraft(id, 'late', {
+          expectedVersion: 3,
+          order: f.order,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'ORDER_STATE_CONFLICT' });
+    await expect(
+      f.run(() => f.commands.deleteDraft(id, 'late-d', { expectedVersion: 3 })),
+    ).rejects.toMatchObject({ code: 'ORDER_STATE_CONFLICT' });
+    const cancelled = await f.run(() =>
+      f.commands.cancel(id, 'x', { expectedVersion: 3 }),
+    );
+    expect(cancelled.body).toMatchObject({
+      status: 'CANCELLED',
+      version: 4,
+      confirmedAt: confirmed.body.confirmedAt,
+      supplierDisplaySnapshot: { displayName: 'Renamed before confirm' },
+      lineSubtotals: confirmed.body.lineSubtotals,
+    });
+    expect(
+      await f.run(() => f.commands.cancel(id, 'x', { expectedVersion: 3 })),
+    ).toEqual(cancelled);
+    await expect(
+      f.run(() => f.commands.cancel(id, 'again', { expectedVersion: 4 })),
+    ).rejects.toMatchObject({ code: 'ORDER_STATE_CONFLICT' });
+    const audits = await db.procurementPurchaseOrderAudit.findMany({
+      where: { tenantId: f.tenantId, orderId: id },
+      orderBy: { orderVersion: 'asc' },
+    });
+    expect(audits.map((a) => a.operation)).toEqual([
+      'CREATE',
+      'REPLACE',
+      'CONFIRM',
+      'CANCEL',
+    ]);
+    expect(audits[2]).toMatchObject({
+      beforeSnapshot: expect.objectContaining({ status: 'DRAFT' }) as unknown,
+      afterSnapshot: confirmed.body,
+    });
+    const receipts = await db.procurementPurchaseOrderReceipt.findMany({
+      where: { tenantId: f.tenantId, orderId: id },
+    });
+    expect(receipts.map((r) => r.operation).sort()).toEqual([
+      'CANCEL',
+      'CONFIRM',
+      'CREATE',
+      'REPLACE',
+    ]);
+    const after = await evidence(f.tenantId);
+    // Sale, payment, outbox counts and products stay untouched (S1).
+    expect(after.slice(4)).toEqual(before.slice(4));
+  });
+
+  it('answers each rejection in S4 order against real rows without writing', async () => {
+    const f = await fixture();
+    const created = await f.run(() => f.commands.createDraft('c', f.order));
+    const id = created.body.id;
+    const body = confirmBody(created.body);
+    const attempt = (key: string, change: Partial<typeof body>) =>
+      f.run(() => f.commands.confirm(id, key, { ...body, ...change }));
+    const before = await evidence(f.tenantId);
+    await expect(attempt('v', { expectedVersion: 9 })).rejects.toMatchObject({
+      code: 'ORDER_VERSION_CONFLICT',
+    });
+    await expect(
+      attempt('s1', { expectedSupplierVersion: null }),
+    ).rejects.toMatchObject({ code: 'SUPPLIER_VERSION_CONFLICT' });
+    await expect(
+      attempt('t1', { expectedReferenceToken: null }),
+    ).rejects.toMatchObject({ code: 'ELIGIBILITY_CHANGED' });
+    await db.procurementSupplier.update({
+      where: { id: f.supplierId },
+      data: { status: 'ARCHIVED', version: { increment: 1 } },
+    });
+    await expect(attempt('a0', {})).rejects.toMatchObject({
+      code: 'SUPPLIER_VERSION_CONFLICT',
+    });
+    await expect(
+      attempt('a1', { expectedSupplierVersion: 2 }),
+    ).rejects.toMatchObject({ code: 'SUPPLIER_ARCHIVED' });
+    await db.procurementSupplier.update({
+      where: { id: f.supplierId },
+      data: { status: 'ACTIVE' },
+    });
+    await db.product.updateMany({
+      where: { tenantId: f.tenantId },
+      data: { type: 'SERVICE' },
+    });
+    await expect(
+      attempt('n1', {
+        expectedSupplierVersion: 2,
+        expectedReferenceToken: null,
+      }),
+    ).rejects.toMatchObject({ code: 'ORDER_NOT_READY' });
+    // Rejected confirms write nothing; the test only edits supplier/product rows.
+    expect((await evidence(f.tenantId)).slice(0, 7)).toEqual(
+      before.slice(0, 7),
+    );
+    expect(
+      await db.procurementPurchaseOrder.count({
+        where: { tenantId: f.tenantId, status: 'DRAFT', version: 1 },
+      }),
+    ).toBe(1);
+  });
+
+  it('serializes confirm against a concurrent supplier PATCH and product update: never a mixed snapshot', async () => {
+    const f = await fixture();
+    const created = await f.run(() => f.commands.createDraft('c', f.order));
+    const id = created.body.id;
+    const [confirmed, patched, edited] = await Promise.allSettled([
+      f.run(() => f.commands.confirm(id, 'k', confirmBody(created.body))),
+      f.run(() =>
+        f.suppliers.update(f.supplierId, 'u', {
+          expectedVersion: 1,
+          changes: { displayName: 'Patched concurrently' },
+        }),
+      ),
+      db.product.updateMany({
+        where: { tenantId: f.tenantId },
+        data: { unit: 'UNIDAD' },
+      }),
+    ]);
+    expect(patched.status).toBe('fulfilled');
+    expect(edited.status).toBe('fulfilled');
+    if (confirmed.status === 'fulfilled') {
+      // Confirm ran before both writers: it froze the pre-write references.
+      expect(confirmed.value.body.supplierDisplaySnapshot?.displayName).toBe(
+        'Owned supplier',
+      );
+      expect(confirmed.value.body.lineDisplaySnapshots[0].unit).toBe('CAJA');
+    } else {
+      expect(confirmed.reason).toMatchObject({
+        code: expect.stringMatching(
+          /^(SUPPLIER_VERSION_CONFLICT|ORDER_NOT_READY|ELIGIBILITY_CHANGED)$/,
+        ) as unknown,
+      });
+      expect(
+        await db.procurementPurchaseOrder.findUniqueOrThrow({ where: { id } }),
+      ).toMatchObject({ status: 'DRAFT', version: 1 });
+    }
+  });
+
+  it('cancel takes only the order lock: it succeeds with the supplier locked by another transaction', async () => {
+    const f = await fixture();
+    const created = await f.run(() => f.commands.createDraft('c', f.order));
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`
+        SELECT s."id" FROM "procurement_suppliers" s
+        WHERE s."id" = ${f.supplierId} FOR UPDATE`);
+      const cancelled = await f.run(() =>
+        f.commands.cancel(created.body.id, 'x', { expectedVersion: 1 }),
+      );
+      expect(cancelled.body.status).toBe('CANCELLED');
+    });
+  });
 });

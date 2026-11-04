@@ -28,6 +28,8 @@ export type AppSubjects =
   | 'Product'
   | 'ProcurementSupplier'
   | 'ProcurementPurchaseOrder'
+  | 'ProcurementOrderConfirmation'
+  | 'ProcurementOrderCancellation'
   | 'ProductEditorialDraft'
   | 'Order'
   | 'Sale'
@@ -146,6 +148,18 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'ProcurementPurchaseOrder',
     action: 'delete',
     description: 'Discard purchase-order drafts',
+  },
+
+  // Order transitions are configurable actions, not models; no default grants.
+  {
+    subject: 'ProcurementOrderConfirmation',
+    action: 'create',
+    description: 'Confirm purchase orders',
+  },
+  {
+    subject: 'ProcurementOrderCancellation',
+    action: 'create',
+    description: 'Cancel purchase orders',
   },
 
   // Product permissions

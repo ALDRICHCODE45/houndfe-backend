@@ -16,12 +16,28 @@ function isPurchaseOrderRoute(request: Request): boolean {
   const collection = /^\/procurement\/purchase-orders\/?$/i.test(path);
   const detail = /^\/procurement\/purchase-orders\/[^/]+\/?$/i.test(path);
   const draft = /^\/procurement\/purchase-orders\/[^/]+\/draft\/?$/i.test(path);
+  const transition =
+    /^\/procurement\/purchase-orders\/[^/]+\/(?:confirm|cancel)\/?$/i.test(
+      path,
+    );
   return (
     ((request.method === 'GET' || request.method === 'HEAD') &&
       (collection || detail)) ||
-    (request.method === 'POST' && collection) ||
+    (request.method === 'POST' && (collection || transition)) ||
     (request.method === 'PUT' && draft) ||
     (request.method === 'DELETE' && detail)
+  );
+}
+function isFlatBodyRoute(request: {
+  method?: string;
+  url?: string;
+  originalUrl?: string;
+}): boolean {
+  if (request.method === 'DELETE') return true;
+  const path = (request.originalUrl ?? request.url ?? '').split('?')[0];
+  return (
+    request.method === 'POST' &&
+    /^\/procurement\/purchase-orders\/[^/]+\/(?:confirm|cancel)\/?$/i.test(path)
   );
 }
 function malformed(response: Response): void {
@@ -35,13 +51,14 @@ function malformed(response: Response): void {
 
 /** AFTER CORS, BEFORE Nest initialization, like the supplier-only parser.
  * Exact route/method gates preserve every other route's existing admission.
- * DELETE's flat body rejects duplicate decoded member names before JSON parsing.
+ * Flat bodies (DELETE, confirm, cancel) reject duplicate decoded member names
+ * before JSON parsing.
  */
 export function installPurchaseOrderBodyParser(app: INestApplication): void {
   const json = express.json({
     strict: false,
     verify(request, _response, buffer, encoding) {
-      if (request.method !== 'DELETE') return;
+      if (!isFlatBodyRoute(request)) return;
       const tokens =
         buffer
           .toString(encoding as BufferEncoding)

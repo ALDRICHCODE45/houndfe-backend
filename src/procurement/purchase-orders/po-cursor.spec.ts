@@ -40,6 +40,24 @@ describe('pure purchase-order cursor', () => {
       cursor.decode(cursor.encode(scope, position), searched),
     ).toThrow('MALFORMED');
   });
+  it('binds status: omitted, each value and cross-status reuse', () => {
+    const omitted = cursor.encode(scope, position);
+    const confirmed = cursor.encode(
+      { ...scope, status: 'CONFIRMED' },
+      position,
+    );
+    expect(cursor.decode(confirmed, { ...scope, status: 'CONFIRMED' })).toEqual(
+      position,
+    );
+    expect(() => cursor.decode(confirmed, scope)).toThrow('MALFORMED');
+    expect(() => cursor.decode(omitted, { ...scope, status: 'DRAFT' })).toThrow(
+      'MALFORMED',
+    );
+    for (const other of ['DRAFT', 'CANCELLED'] as const)
+      expect(() =>
+        cursor.decode(confirmed, { ...scope, status: other }),
+      ).toThrow('MALFORMED');
+  });
   it('rejects tenant, filter, resource, key and signature changes', () => {
     const encoded = cursor.encode(scope, position);
     for (const other of [

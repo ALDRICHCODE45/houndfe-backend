@@ -11,6 +11,7 @@ const productId = '30000000-0000-4000-8000-000000000001';
 const variantId = '40000000-0000-4000-8000-000000000001';
 const lineId = '50000000-0000-4000-8000-000000000001';
 const time = new Date('2026-01-01T00:00:00.000Z');
+const later = new Date('2026-02-03T04:05:06.007Z');
 const line = {
   tenantId: 'tenant-a',
   orderId: id,
@@ -42,6 +43,11 @@ const row = {
     displayName: 'Saved supplier',
     status: 'ACTIVE',
   },
+  confirmedAt: null as Date | null,
+  confirmedByDisplayName: null as string | null,
+  cancelledAt: null as Date | null,
+  cancelledByDisplayName: null as string | null,
+  lineSubtotalsSnapshot: null as unknown,
   createdAt: time,
   updatedAt: time,
   lines: [line],
@@ -65,7 +71,12 @@ function harness() {
   ];
   let variants = [{ id: variantId, productId, name: 'Current variant' }];
   let suppliers = [
-    { id: supplierId, displayName: 'Current supplier', status: 'ACTIVE' },
+    {
+      id: supplierId,
+      displayName: 'Current supplier',
+      status: 'ACTIVE',
+      version: 4,
+    },
   ];
   const sqls: Prisma.Sql[] = [];
   const tx = {
@@ -181,6 +192,13 @@ describe('purchase-order read boundary', () => {
         detail: ' detail ',
       },
       validation: { issues: [] },
+      supplierCurrentVersion: 4,
+      referenceToken: expect.stringMatching(/^prt1\.[\w-]{43}$/) as unknown,
+      canConfirm: true,
+      confirmedAt: null,
+      confirmedBy: null,
+      cancelledAt: null,
+      cancelledBy: null,
     });
     expect(h.sqls[0].sql).toContain('FOR SHARE');
     expect(h.sqls[3].values).toEqual(['tenant-a', id]);
@@ -203,7 +221,12 @@ describe('purchase-order read boundary', () => {
     h.products([]);
     h.variants([]);
     h.suppliers([
-      { id: supplierId, displayName: 'Archived', status: 'ARCHIVED' },
+      {
+        id: supplierId,
+        displayName: 'Archived',
+        status: 'ARCHIVED',
+        version: 4,
+      },
     ]);
     const detail = await h.service.getDraft(id);
     expect(detail.version).toBe(7);
@@ -216,6 +239,8 @@ describe('purchase-order read boundary', () => {
     ]);
     const page = await h.service.listDrafts({});
     expect(page.items[0].issueCount).toBe(detail.validation.issues.length);
+    expect(detail.referenceToken).toBeNull();
+    expect(detail.canConfirm).toBe(false);
   });
   it('batches references for the returned page, emits exact summary and fetches limit+1 without COUNT', async () => {
     const h = harness();
@@ -312,7 +337,7 @@ describe('purchase-order read boundary', () => {
       { path: '/lines', code: 'LINES_REQUIRED' },
     ]);
   });
-  it('searches live tenant-qualified supplier OR note with escaped literal ILIKE and supplier AND', async () => {
+  it('searches the live supplier name for DRAFT and the frozen snapshot name for closed orders, OR note, with escaped literal ILIKE and supplier AND', async () => {
     const h = harness();
     h.rows([row, row]);
     const first = await h.service.listDrafts({
@@ -326,10 +351,10 @@ describe('purchase-order read boundary', () => {
     expect(sql.sql).toContain('s."id" = o."supplierId"');
     expect(sql.sql).toContain('AND o."supplierId" =');
     expect(sql.sql).toMatch(
-      /AND \(s\."displayName" ILIKE .* OR o\."note" ILIKE /s,
+      /AND \(\(CASE WHEN o\."status" = 'DRAFT' THEN s\."displayName" ELSE o\."supplierDisplaySnapshot"->>'displayName' END\) ILIKE .* OR o\."note" ILIKE /s,
     );
     expect(sql.sql).toContain('ESCAPE chr(92)');
-    expect(sql.sql).not.toMatch(/COUNT\(|supplierDisplaySnapshot.*ILIKE/);
+    expect(sql.sql).not.toMatch(/COUNT\(/);
     expect(sql.values).toEqual([
       'tenant-a',
       supplierId,
@@ -444,5 +469,186 @@ describe('purchase-order read boundary', () => {
     await expect(h.service.getDraft(id)).rejects.toMatchObject({
       message: 'INTERNAL_ERROR',
     });
+  });
+
+  it('archived supplier keeps a token and version but canConfirm is false', async () => {
+    const h = harness();
+    h.suppliers([
+      {
+        id: supplierId,
+        displayName: 'Archived',
+        status: 'ARCHIVED',
+        version: 6,
+      },
+    ]);
+    const detail = await h.service.getDraft(id);
+    expect(detail.supplierCurrentVersion).toBe(6);
+    expect(detail.referenceToken).not.toBeNull();
+    expect(detail.validation.issues).toEqual([
+      { path: '/supplierId', code: 'SUPPLIER_ARCHIVED' },
+    ]);
+    expect(detail.canConfirm).toBe(false);
+  });
+  it('does not leak the supplier version into the supplier snapshot', async () => {
+    const h = harness();
+    const detail = await h.service.getDraft(id);
+    expect(detail.supplierDisplaySnapshot).toEqual({
+      id: supplierId,
+      displayName: 'Current supplier',
+      status: 'ACTIVE',
+    });
+  });
+  it('detail serves every status without a DRAFT-only SQL filter', async () => {
+    const h = harness();
+    await h.service.getDraft(id);
+    expect(h.sqls[3].sql).not.toMatch(/status/);
+  });
+  const confirmedRow = {
+    ...row,
+    status: 'CONFIRMED',
+    version: 8,
+    updatedAt: later,
+    confirmedAt: later,
+    confirmedByDisplayName: 'Ana Compras',
+    lineSubtotalsSnapshot: [
+      {
+        lineId,
+        subtotal: {
+          amount: '10',
+          currency: 'MXN',
+          taxBasis: 'EXCLUDES_TAX',
+        },
+      },
+    ],
+  };
+  it('reads CONFIRMED frozen: stored names/subtotals, no live product/variant/tenant names, no issues', async () => {
+    const h = harness();
+    h.rows([confirmedRow]);
+    // Live data drifted after confirmation.
+    h.products([]);
+    h.variants([]);
+    h.suppliers([
+      {
+        id: supplierId,
+        displayName: 'Renamed later',
+        status: 'ARCHIVED',
+        version: 11,
+      },
+    ]);
+    const detail = await h.service.getDraft(id);
+    expect(detail).toMatchObject({
+      status: 'CONFIRMED',
+      version: 8,
+      supplierDisplaySnapshot: {
+        id: supplierId,
+        displayName: 'Saved supplier',
+        status: 'ACTIVE',
+      },
+      lineDisplaySnapshots: [
+        {
+          lineId,
+          productName: 'Saved product',
+          variantName: 'Saved variant',
+          unit: 'KILOGRAMO',
+        },
+      ],
+      lineSubtotals: [{ lineId, subtotal: { amount: '10' } }],
+      locationSnapshot: { tenantName: 'Saved tenant' },
+      validation: { issues: [] },
+      referenceToken: null,
+      canConfirm: false,
+      supplierCurrentVersion: 11,
+      confirmedAt: later.toISOString(),
+      confirmedBy: { displayName: 'Ana Compras' },
+      cancelledAt: null,
+      cancelledBy: null,
+    });
+    // Only the order and the supplier version are read for a closed order.
+    const business = h.sqls.slice(3).map((sql) => sql.sql);
+    expect(business.some((sql) => sql.includes('FROM "products"'))).toBe(false);
+    expect(business.some((sql) => sql.includes('FROM "variants"'))).toBe(false);
+  });
+  it('reads CANCELLED-from-DRAFT with null subtotals and no supplier read when none is set', async () => {
+    const h = harness();
+    h.rows([
+      {
+        ...row,
+        status: 'CANCELLED',
+        supplierId: null as unknown as string,
+        supplierDisplaySnapshot:
+          null as unknown as typeof row.supplierDisplaySnapshot,
+        cancelledAt: later,
+        cancelledByDisplayName: 'Luis Gerente',
+      },
+    ]);
+    const detail = await h.service.getDraft(id);
+    expect(detail).toMatchObject({
+      status: 'CANCELLED',
+      supplierDisplaySnapshot: null,
+      supplierCurrentVersion: null,
+      lineSubtotals: [{ lineId, subtotal: null }],
+      validation: { issues: [] },
+      canConfirm: false,
+      referenceToken: null,
+      cancelledAt: later.toISOString(),
+      cancelledBy: { displayName: 'Luis Gerente' },
+      confirmedBy: null,
+    });
+    expect(
+      h.sqls
+        .slice(3)
+        .some((sql) => sql.sql.includes('FROM "procurement_suppliers"')),
+    ).toBe(false);
+  });
+  it('lists every status by default, with zero issues for closed orders', async () => {
+    const h = harness();
+    h.rows([
+      row,
+      confirmedRow,
+      { ...confirmedRow, status: 'CANCELLED', cancelledAt: later },
+    ]);
+    const page = await h.service.listDrafts({});
+    expect(page.items.map((item) => item.status)).toEqual([
+      'DRAFT',
+      'CONFIRMED',
+      'CANCELLED',
+    ]);
+    expect(page.items.map((item) => item.issueCount)).toEqual([0, 0, 0]);
+    expect(h.sqls[3].sql).not.toMatch(/"status"/);
+    expect(h.sqls[3].values).toEqual(['tenant-a', 26]);
+  });
+  it('filters by one status as a bound enum parameter and binds the cursor to it', async () => {
+    const h = harness();
+    h.rows([confirmedRow, confirmedRow]);
+    const first = await h.service.listDrafts({
+      status: 'CONFIRMED',
+      limit: '1',
+    });
+    expect(h.sqls[3].sql).toContain('o."status" =');
+    expect(h.sqls[3].sql).toContain('::"ProcurementPurchaseOrderStatus"');
+    expect(h.sqls[3].sql).not.toContain("'DRAFT'");
+    expect(h.sqls[3].values).toEqual(['tenant-a', 'CONFIRMED', 2]);
+    expect(first.nextCursor).not.toBeNull();
+    h.rows([]);
+    await h.service.listDrafts({
+      status: 'CONFIRMED',
+      cursor: first.nextCursor,
+    });
+    for (const other of [{}, { status: 'DRAFT' }, { status: 'CANCELLED' }])
+      await expect(
+        h.service.listDrafts({ ...other, cursor: first.nextCursor }),
+      ).rejects.toMatchObject({ code: 'MALFORMED' });
+  });
+  it.each([
+    { status: 'ALL' },
+    { status: 'draft' },
+    { status: ['DRAFT', 'CONFIRMED'] },
+    { status: '' },
+  ])('rejects status %j before DB', async (query) => {
+    const h = harness();
+    await expect(h.service.listDrafts(query)).rejects.toMatchObject({
+      code: 'MALFORMED',
+    });
+    expect(h.sqls).toHaveLength(0);
   });
 });

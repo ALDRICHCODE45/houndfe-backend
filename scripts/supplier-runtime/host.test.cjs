@@ -6,6 +6,7 @@ const {
   validatePrivatePath,
   hostFailureDiagnostic,
   writeHostError,
+  fixtureHooks,
 } = require('./host.cjs');
 const identity = {
   database: 'nest-practice-test',
@@ -330,4 +331,41 @@ test('route boundary matches case and optional slash but not siblings or extra s
     ['GET', '/procurement/suppliers//'],
   ])
     assert(!routeAllowed(method, route));
+});
+test('confirm/cancel routes exist only in PO mode; supplier-only keeps the scope 403', () => {
+  for (const action of ['confirm', 'cancel'])
+    for (const route of [
+      `/procurement/purchase-orders/abc/${action}`,
+      `/Procurement/Purchase-Orders/abc/${action.toUpperCase()}/`,
+    ]) {
+      assert(routeAllowed('POST', route, true));
+      assert(routeAllowed('OPTIONS', route, true));
+      assert(!routeAllowed('POST', route));
+      assert(!routeAllowed('POST', route, false));
+      for (const method of ['GET', 'PUT', 'PATCH', 'DELETE'])
+        assert(!routeAllowed(method, route, true));
+    }
+  for (const route of [
+    '/procurement/purchase-orders/abc/confirm/extra',
+    '/procurement/purchase-orders/abc/confirmed',
+    '/procurement/purchase-orders/abc/def/cancel',
+    '/procurement/purchase-orders//cancel',
+    '/procurement/purchase-orders/cancel',
+    '/procurement/purchase-orders/abc/reopen',
+  ])
+    assert(!routeAllowed('POST', route, true));
+});
+test('fixture hooks apply only in PO mode and must be well formed', () => {
+  const fixture = { seed: async () => ({}), afterListen: async () => ({}) };
+  assert.equal(fixtureHooks({ po: true, fixture }), fixture);
+  assert.equal(fixtureHooks({ po: true }), undefined);
+  assert.equal(fixtureHooks({}), undefined);
+  assert.equal(fixtureHooks({ po: false, fixture }), undefined);
+  assert.equal(fixtureHooks({ fixture }), undefined);
+  assert.equal(
+    fixtureHooks({ po: true, fixture: { seed: fixture.seed } }).seed,
+    fixture.seed,
+  );
+  for (const invalid of [{}, { seed: 1 }, { seed() {}, afterListen: 1 }, null])
+    assert.throws(() => fixtureHooks({ po: true, fixture: invalid }));
 });

@@ -17,7 +17,9 @@ describe('supplier permission registry', () => {
     const prior = PERMISSION_REGISTRY.filter(
       (p) =>
         String(p.subject) !== 'ProcurementSupplier' &&
-        String(p.subject) !== 'ProcurementPurchaseOrder',
+        String(p.subject) !== 'ProcurementPurchaseOrder' &&
+        String(p.subject) !== 'ProcurementOrderConfirmation' &&
+        String(p.subject) !== 'ProcurementOrderCancellation',
     );
     expect(
       createHash('sha256').update(JSON.stringify(prior)).digest('hex'),

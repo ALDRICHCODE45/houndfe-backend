@@ -20,7 +20,9 @@ describe('tenant-qualified purchase-order reference observation', () => {
   it('locks supplier then sorted unique products then sorted variants, without stock reads', async () => {
     const query = jest.fn(async (sql: Prisma.Sql) => {
       if (sql.sql.includes('procurement_suppliers'))
-        return [{ id: 'supplier', displayName: 'S', status: 'ARCHIVED' }];
+        return [
+          { id: 'supplier', displayName: 'S', status: 'ARCHIVED', version: 7 },
+        ];
       if (sql.sql.includes('FROM "products"'))
         return [
           {
@@ -61,6 +63,13 @@ describe('tenant-qualified purchase-order reference observation', () => {
     expect(sql[2].sql).toContain(
       'ORDER BY v."productId" ASC, v."id" ASC FOR SHARE OF v',
     );
+    expect(sql[0].sql).toContain('s."version"');
+    expect(result.supplierVersion).toBe(7);
+    expect(result.supplierDisplaySnapshot).toEqual({
+      id: 'supplier',
+      displayName: 'S',
+      status: 'ARCHIVED',
+    });
     expect(result.facts).toMatchObject({
       supplier: 'ARCHIVED',
       lines: {
@@ -105,6 +114,7 @@ describe('tenant-qualified purchase-order reference observation', () => {
     expect(result).toEqual({
       tenantName: 'Branch',
       facts: { supplier: 'missing', lines: {} },
+      supplierVersion: null,
       supplierDisplaySnapshot: null,
       lineDisplaySnapshots: [],
     });

@@ -49,8 +49,23 @@ export interface PurchaseOrderReplace {
 export interface PurchaseOrderDelete {
   expectedVersion: number;
 }
+export interface PurchaseOrderConfirm {
+  expectedVersion: number;
+  expectedSupplierVersion: number | null;
+  expectedReferenceToken: string | null;
+}
+export interface PurchaseOrderCancel {
+  expectedVersion: number;
+}
+export const PURCHASE_ORDER_STATUSES = [
+  'DRAFT',
+  'CONFIRMED',
+  'CANCELLED',
+] as const;
+export type PurchaseOrderStatus = (typeof PURCHASE_ORDER_STATUSES)[number];
 export interface PurchaseOrderListQuery {
   supplierId?: string;
+  status?: PurchaseOrderStatus;
   search?: string;
   limit: number;
   cursor?: string;
@@ -86,7 +101,7 @@ export interface PurchaseOrderIssue {
 export interface PurchaseOrder extends OrderInput {
   id: string;
   version: number;
-  status: 'DRAFT';
+  status: PurchaseOrderStatus;
   createdAt: string;
   updatedAt: string;
   supplierDisplaySnapshot: SupplierDisplaySnapshot | null;
@@ -103,11 +118,20 @@ export interface PurchaseOrder extends OrderInput {
     detail: string | null;
   };
   validation: { issues: PurchaseOrderIssue[] };
+  /** Live supplier version (tenant-qualified); null without a supplier row. */
+  supplierCurrentVersion: number | null;
+  /** Opaque; null means the references are incomplete or invalid. */
+  referenceToken: string | null;
+  canConfirm: boolean;
+  confirmedAt: string | null;
+  confirmedBy: { displayName: string } | null;
+  cancelledAt: string | null;
+  cancelledBy: { displayName: string } | null;
 }
 export interface PurchaseOrderSummary {
   id: string;
   version: number;
-  status: 'DRAFT';
+  status: PurchaseOrderStatus;
   supplierDisplaySnapshot: SupplierDisplaySnapshot | null;
   lineCount: number;
   issueCount: number;
@@ -128,6 +152,10 @@ const ERROR_STATUS = {
   NOT_FOUND: 404,
   ORDER_VERSION_CONFLICT: 409,
   SUPPLIER_ARCHIVED: 409,
+  ORDER_NOT_READY: 409,
+  ELIGIBILITY_CHANGED: 409,
+  SUPPLIER_VERSION_CONFLICT: 409,
+  ORDER_STATE_CONFLICT: 409,
   IDEMPOTENCY_KEY_CONFLICT: 409,
   IDEMPOTENCY_KEY_IN_FLIGHT: 409,
   INTERNAL_ERROR: 500,
@@ -300,6 +328,30 @@ export function parsePurchaseOrderDelete(value: unknown): PurchaseOrderDelete {
     return { expectedVersion: version(data.expectedVersion) };
   });
 }
+export function parsePurchaseOrderConfirm(
+  value: unknown,
+): PurchaseOrderConfirm {
+  return parse(() => {
+    const data = fields(value, [
+      'expectedVersion',
+      'expectedSupplierVersion',
+      'expectedReferenceToken',
+    ]);
+    return {
+      expectedVersion: version(data.expectedVersion),
+      expectedSupplierVersion: nullable(data.expectedSupplierVersion, version),
+      expectedReferenceToken: nullable(data.expectedReferenceToken, (value) =>
+        text(value, 200),
+      ),
+    };
+  });
+}
+export function parsePurchaseOrderCancel(value: unknown): PurchaseOrderCancel {
+  return parse(() => {
+    const data = fields(value, ['expectedVersion']);
+    return { expectedVersion: version(data.expectedVersion) };
+  });
+}
 export function parsePurchaseOrderId(value: unknown): string {
   return parse(() => parseSupplierId(value));
 }
@@ -310,7 +362,11 @@ export function parsePurchaseOrderListQuery(
   value: unknown,
 ): PurchaseOrderListQuery {
   return parse(() => {
-    const data = fields(value, ['supplierId', 'search', 'limit', 'cursor'], []);
+    const data = fields(
+      value,
+      ['supplierId', 'status', 'search', 'limit', 'cursor'],
+      [],
+    );
     const result: PurchaseOrderListQuery = { limit: 25 };
     if (Object.hasOwn(data, 'search')) {
       // Reject invalid Unicode/NUL before trimming; bound the effective term.
@@ -320,6 +376,8 @@ export function parsePurchaseOrderListQuery(
     }
     if (Object.hasOwn(data, 'supplierId'))
       result.supplierId = parseSupplierId(data.supplierId);
+    if (Object.hasOwn(data, 'status'))
+      result.status = choice(data.status, PURCHASE_ORDER_STATUSES);
     if (Object.hasOwn(data, 'limit')) {
       if (
         typeof data.limit !== 'string' ||
@@ -338,21 +396,18 @@ export function parsePurchaseOrderListQuery(
 }
 /** Fixed schema-order UTF-8 JSON with CAS; operation/target namespace is receipt-owned. */
 export function hashPurchaseOrderBody(
-  operation: 'create' | 'replace' | 'delete',
+  operation: 'create' | 'replace' | 'delete' | 'confirm' | 'cancel',
   value: unknown,
 ): string {
-  if (
-    operation !== 'create' &&
-    operation !== 'replace' &&
-    operation !== 'delete'
-  )
-    malformed();
-  const body =
-    operation === 'create'
-      ? parseOrderInput(value)
-      : operation === 'replace'
-        ? parsePurchaseOrderReplace(value)
-        : parsePurchaseOrderDelete(value);
+  const parsers = {
+    create: parseOrderInput,
+    replace: parsePurchaseOrderReplace,
+    delete: parsePurchaseOrderDelete,
+    confirm: parsePurchaseOrderConfirm,
+    cancel: parsePurchaseOrderCancel,
+  };
+  if (!Object.hasOwn(parsers, operation)) malformed();
+  const body = parsers[operation](value);
   return createHash('sha256')
     .update(JSON.stringify(body), 'utf8')
     .digest('hex');

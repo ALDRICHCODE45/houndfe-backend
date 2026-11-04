@@ -20,6 +20,8 @@ import { PurchaseOrderQueries } from './po-queries';
 import { PurchaseOrderHttpFilter } from './po-http.filter';
 import {
   parseOrderInput,
+  parsePurchaseOrderCancel,
+  parsePurchaseOrderConfirm,
   parsePurchaseOrderId,
   parsePurchaseOrderIdempotencyKey,
   parsePurchaseOrderReplace,
@@ -130,5 +132,45 @@ export class PurchaseOrdersController {
     const body = parsePurchaseOrderDelete(request.body);
     const result = await this.commands.deleteDraft(id, key, body);
     response.status(result.statusCode).end();
+  }
+
+  @Post(':orderId/confirm')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(
+    ['read', 'ProcurementPurchaseOrder'],
+    ['create', 'ProcurementOrderConfirmation'],
+  )
+  async confirm(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    noQuery(request);
+    jsonBody(request);
+    const id = parsePurchaseOrderId(request.params.orderId);
+    const key = parsePurchaseOrderIdempotencyKey(request.rawHeaders);
+    const body = parsePurchaseOrderConfirm(request.body);
+    const result = await this.commands.confirm(id, key, body);
+    response.status(result.statusCode);
+    return result.body;
+  }
+
+  @Post(':orderId/cancel')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(
+    ['read', 'ProcurementPurchaseOrder'],
+    ['create', 'ProcurementOrderCancellation'],
+  )
+  async cancel(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    noQuery(request);
+    jsonBody(request);
+    const id = parsePurchaseOrderId(request.params.orderId);
+    const key = parsePurchaseOrderIdempotencyKey(request.rawHeaders);
+    const body = parsePurchaseOrderCancel(request.body);
+    const result = await this.commands.cancel(id, key, body);
+    response.status(result.statusCode);
+    return result.body;
   }
 }
