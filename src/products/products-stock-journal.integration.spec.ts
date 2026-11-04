@@ -399,6 +399,74 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
     });
   });
 
+  describe('L8 — turning stock tracking off', () => {
+    it('rejects useStock=false while the product holds units and changes nothing', async () => {
+      const product = await seedProduct({ quantity: 4, minQuantity: 2 });
+      await expect(
+        asTenant(() =>
+          service.update(product.id, { name: 'Renamed', useStock: false }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'STOCK_TRACKING_HAS_STOCK',
+        details: { productId: product.id, quantity: 4 },
+      });
+      const after = await stored(product.id);
+      expect([after.name, after.useStock, after.quantity]).toEqual([
+        'Seed',
+        true,
+        4,
+      ]);
+      expect(await movements(product.id)).toHaveLength(0);
+    });
+
+    it('rejects useStock=false while a variant holds units and keeps variant minQuantity', async () => {
+      const product = await seedProduct({ hasVariants: true });
+      const variant = await seedVariant(product.id, 'M', 3);
+      await db().variant.update({
+        where: { id: variant.id },
+        data: { minQuantity: 1 },
+      });
+      await expect(
+        asTenant(() => service.update(product.id, { useStock: false })),
+      ).rejects.toMatchObject({
+        code: 'STOCK_TRACKING_HAS_STOCK',
+        details: { quantity: 3 },
+      });
+      expect((await stored(product.id)).useStock).toBe(true);
+      const after = await db().variant.findUniqueOrThrow({
+        where: { id: variant.id },
+      });
+      expect([after.quantity, after.minQuantity]).toEqual([3, 1]);
+    });
+
+    it('turns tracking off once the stock is at zero', async () => {
+      const product = await seedProduct({ quantity: 0 });
+      await asTenant(() => service.update(product.id, { useStock: false }));
+      expect((await stored(product.id)).useStock).toBe(false);
+    });
+
+    it('turns tracking off for a variant product whose variants are all at zero', async () => {
+      const product = await seedProduct({ hasVariants: true });
+      await seedVariant(product.id, 'M', 0);
+      await asTenant(() => service.update(product.id, { useStock: false }));
+      expect((await stored(product.id)).useStock).toBe(false);
+    });
+
+    it('does not block a product that already has tracking off', async () => {
+      const product = await seedProduct({ useStock: false, quantity: 4 });
+      await asTenant(() =>
+        service.update(product.id, { name: 'Same', useStock: false }),
+      );
+      expect((await stored(product.id)).name).toBe('Same');
+    });
+
+    it('lets useStock=true keep stock untouched', async () => {
+      const product = await seedProduct({ quantity: 4 });
+      await asTenant(() => service.update(product.id, { useStock: true }));
+      expect((await stored(product.id)).quantity).toBe(4);
+    });
+  });
+
   describe('L8 — low-stock edge on product-side writers', () => {
     const lowStockRows = () =>
       db().outboxEvent.findMany({

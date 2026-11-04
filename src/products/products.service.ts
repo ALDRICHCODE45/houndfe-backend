@@ -36,6 +36,7 @@ import { ProductStockJournal } from './infrastructure/product-stock-journal';
 import {
   assertNoDirectQuantityEdit,
   LotHasStockError,
+  StockTrackingHasStockError,
 } from './domain/product-stock.errors';
 import type { IvaRateValue } from './domain/value-objects/iva-rate.value-object';
 import type { IepsRateValue } from './domain/value-objects/ieps-rate.value-object';
@@ -922,6 +923,17 @@ export class ProductsService {
 
     const previousUseStock = product.useStock;
     const previousType = product.type;
+
+    // L8 — tracking cannot be switched off while units remain: the stock
+    // would silently disappear from the journal's view. A PRODUCT→SERVICE
+    // conversion keeps its own PRODUCT_TYPE_CHANGE_BLOCKED guard below.
+    if (
+      dto.useStock === false &&
+      previousUseStock &&
+      !(previousType === 'PRODUCT' && dto.type === 'SERVICE')
+    ) {
+      await this.assertNoStockToUntrack(id, product.quantity);
+    }
 
     // R5 — Type-change protection. Block PRODUCT→SERVICE when stock or
     // active lots remain. SERVICE→PRODUCT is always allowed; the
@@ -2221,6 +2233,19 @@ export class ProductsService {
   }
 
   // ==================== Helpers ====================
+
+  /** Product plus variant units; the product row is already locked by the caller. */
+  private async assertNoStockToUntrack(
+    productId: string,
+    productQuantity: number,
+  ): Promise<void> {
+    const variants = await this.tenantPrisma.getClient().variant.aggregate({
+      where: { tenantId: this.tenantPrisma.getTenantId(), productId },
+      _sum: { quantity: true },
+    });
+    const quantity = productQuantity + (variants._sum.quantity ?? 0);
+    if (quantity > 0) throw new StockTrackingHasStockError(productId, quantity);
+  }
 
   private resolveVariantName(
     fallbackName?: string | null,

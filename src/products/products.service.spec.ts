@@ -1119,6 +1119,7 @@ describe('ProductsService — variant minQuantity and purchase cost', () => {
 
     const prisma = {
       variant: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { quantity: null } }),
         updateMany: jest.fn().mockResolvedValue({ count: 2 }),
       },
     } as any;
@@ -2081,6 +2082,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
         }),
       },
       variant: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { quantity: null } }),
         updateMany: jest.fn().mockImplementation(() => {
           recordCall('txClient.variant.updateMany');
           return Promise.resolve({ count: 0 });
@@ -2314,7 +2316,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
       product: makePersistenceProductWithStock({
         useStock: true,
         previousUseStock: true, // matches persisted value → transition triggers
-        quantity: 5,
+        quantity: 0, // tracking can only go off at zero stock (L8)
         minQuantity: 3,
       }),
     });

@@ -156,6 +156,7 @@ function fixture(flags: Row = {}) {
       }),
     },
     variant: {
+      aggregate: jest.fn(() => Promise.resolve({ _sum: { quantity: null } })),
       updateMany: jest.fn(() => {
         record('cascade');
         working.minimum = 0;
