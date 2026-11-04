@@ -123,7 +123,6 @@ function makeMockProductsService() {
       .fn()
       .mockResolvedValue(new Map<string, Map<number, number>>()),
     chargeStock: jest.fn(),
-    incrementStockForRestock: jest.fn(),
   } as any;
 }
 
@@ -224,7 +223,9 @@ function createService(
       charge: jest.fn(({ items }: { items: unknown[] }) =>
         productsService.chargeStock(items),
       ),
-      reverse: jest.fn().mockResolvedValue({ status: 'LEGACY', movements: [] }),
+      reverse: jest
+        .fn()
+        .mockResolvedValue({ status: 'NOTHING_TO_RESTORE', movements: [] }),
     } as any,
   );
 }
@@ -310,7 +311,6 @@ describe('SalesService', () => {
       paymentStatus: 'PARTIAL',
       totalCents: 5000,
     });
-    productsService.incrementStockForRestock.mockResolvedValue(undefined);
     outboxWriter.publish.mockResolvedValue(undefined);
   });
 
@@ -4228,9 +4228,6 @@ describe('SalesService', () => {
           canceledAt: expect.any(String),
         }),
       );
-      expect(productsService.incrementStockForRestock).toHaveBeenCalledWith([
-        { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
-      ]);
       expect(saleRepo.persistCancellation).toHaveBeenCalledWith(
         expect.objectContaining({
           id: sale.id,
@@ -4438,7 +4435,6 @@ describe('SalesService', () => {
         canceledAt: '2026-06-23T12:00:00.000Z',
       });
       expect(saleRepo.findByIdForUpdate).not.toHaveBeenCalled();
-      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
       expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
@@ -4466,7 +4462,6 @@ describe('SalesService', () => {
         ],
         canceledAt: '2026-06-23T12:00:00.000Z',
       });
-      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
       expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
@@ -4477,14 +4472,14 @@ describe('SalesService', () => {
 
     describe('stock journal reversal (O1 / T4)', () => {
       const journaled = (
-        status: 'REVERSED' | 'LEGACY' | 'ALREADY_REVERSED',
+        status: 'REVERSED' | 'NOTHING_TO_RESTORE' | 'ALREADY_REVERSED',
       ) => {
         const reverse = jest.fn().mockResolvedValue({ status, movements: [] });
         Object.assign(service, { saleStock: { reverse } });
         return reverse;
       };
 
-      it('restores through the journal only: no legacy restock when the sale was journaled', async () => {
+      it('restores through the journal only, handing it the sale lines and confirmation time', async () => {
         const reverse = journaled('REVERSED');
         const sale = buildConfirmedSaleForCancel('sale-j-1', 'CREDIT');
         saleRepo.findByIdForUpdate.mockResolvedValue(sale);
@@ -4497,8 +4492,9 @@ describe('SalesService', () => {
         expect(reverse).toHaveBeenCalledWith({
           saleId: 'sale-j-1',
           actor: { kind: 'user', userId: 'user-1' },
+          lines: [{ productId: 'prod-1', variantId: 'var-1', quantity: 2 }],
+          confirmedAt: new Date('2026-06-23T10:00:00.000Z'),
         });
-        expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
         expect(saleRepo.persistCancellation).toHaveBeenCalledTimes(1);
       });
 
@@ -4510,22 +4506,20 @@ describe('SalesService', () => {
         await service.cancelSale('sale-j-2', 'user-1', {
           reason: 'ORDER_ERROR',
         });
-
-        expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       });
 
-      it('falls back to the legacy product/variant restock for pre-journal sales', async () => {
-        journaled('LEGACY');
+      it('leaves the restore decision to the journal when it finds nothing to restore', async () => {
+        const reverse = journaled('NOTHING_TO_RESTORE');
         const sale = buildConfirmedSaleForCancel('sale-j-3', 'CREDIT');
         saleRepo.findByIdForUpdate.mockResolvedValue(sale);
 
-        await service.cancelSale('sale-j-3', 'user-1', {
+        const result = await service.cancelSale('sale-j-3', 'user-1', {
           reason: 'ORDER_ERROR',
         });
 
-        expect(productsService.incrementStockForRestock).toHaveBeenCalledWith([
-          { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
-        ]);
+        expect(result.status).toBe('CANCELED');
+        expect(reverse).toHaveBeenCalledTimes(1);
+        expect(saleRepo.persistCancellation).toHaveBeenCalledTimes(1);
       });
 
       it('stamps bot-origin cancellations with the bot actor', async () => {
@@ -4612,7 +4606,6 @@ describe('SalesService', () => {
         service.cancelSale(sale.id, 'user-1', { reason: 'ORDER_ERROR' }),
       ).rejects.toThrow('SALE_DELIVERED_CANNOT_CANCEL');
 
-      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
       expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
@@ -4630,7 +4623,6 @@ describe('SalesService', () => {
         service.cancelSale(sale.id, 'user-1', { reason: 'ORDER_ERROR' }),
       ).rejects.toThrow('SALE_DELIVERED_CANNOT_CANCEL');
 
-      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
       expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
       expect(outboxWriter.publish).not.toHaveBeenCalled();
@@ -4650,9 +4642,6 @@ describe('SalesService', () => {
       });
 
       expect(result).toMatchObject({ saleId: sale.id, status: 'CANCELED' });
-      expect(productsService.incrementStockForRestock).toHaveBeenCalledWith([
-        { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
-      ]);
       expect(saleRepo.persistCancellation).toHaveBeenCalled();
     });
 
@@ -4667,7 +4656,6 @@ describe('SalesService', () => {
         }),
       ).rejects.toThrow('SALE_NOT_FOUND');
 
-      expect(productsService.incrementStockForRestock).not.toHaveBeenCalled();
       expect(saleRepo.persistCancellation).not.toHaveBeenCalled();
       expect(promotionUsageRepo.restoreForSale.mock.calls).toEqual([]);
     });

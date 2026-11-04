@@ -134,7 +134,11 @@ export interface SaleMovementRecord {
 
 export type SaleReversalOutcome =
   | { status: 'REVERSED'; movements: AppliedStockMovement[]; skipped: number }
-  /** No SALE movements: sale charged before the journal; caller restores as before. */
-  | { status: 'LEGACY'; movements: [] }
+  /**
+   * No `SALE` movements and the sale was confirmed after the journal went live
+   * (or no lines were supplied): it consumed nothing journaled, so nothing is
+   * restored.
+   */
+  | { status: 'NOTHING_TO_RESTORE'; movements: [] }
   /** SALE_CANCELLATION rows already exist for this sale; nothing written. */
   | { status: 'ALREADY_REVERSED'; movements: [] };

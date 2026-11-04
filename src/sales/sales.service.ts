@@ -3350,19 +3350,18 @@ export class SalesService {
         actorId,
       });
 
-      // O1 / T4 — restore exactly what the journal consumed. Sales charged
-      // before the journal (LEGACY) restock product/variant as before; a
-      // replayed cancellation (ALREADY_REVERSED) must not restock twice.
-      const reversal = await this.requireSaleStock().reverse({
+      // O1 — restore exactly what the journal consumed. A sale confirmed
+      // before the journal went live is restored from its lines through the
+      // journal too; a replayed cancellation restores nothing twice.
+      await this.requireSaleStock().reverse({
         saleId,
         actor: {
           kind: options.origin === 'bot' ? 'bot' : 'user',
           userId: actorId,
         },
+        lines: restockedItems,
+        confirmedAt: sale.confirmedAt,
       });
-      if (reversal.status === 'LEGACY') {
-        await this.productsService.incrementStockForRestock(restockedItems);
-      }
 
       const detail =
         refundedCents === 0

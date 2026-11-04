@@ -87,17 +87,25 @@ export class SaleStockService {
   }
 
   /**
-   * Restores exactly what the sale consumed. `LEGACY` (sale charged before the
-   * journal) is returned untouched so the caller restocks the old way.
+   * Restores exactly what the sale consumed. A sale confirmed before the
+   * journal (no `SALE` rows) is restored from its `lines` through the journal
+   * as well; a post-journal sale without `SALE` rows restores nothing.
    */
   async reverse(input: {
     saleId: string;
     actor: SaleStockActor;
+    lines?: StockChargeItem[];
+    confirmedAt?: Date | null;
     now?: Date;
   }): Promise<SaleReversalOutcome> {
     const actor = await this.resolveActor(input.actor);
     const outcome = await this.journal.reverseSale(
-      { saleId: input.saleId, actor },
+      {
+        saleId: input.saleId,
+        actor,
+        lines: input.lines,
+        confirmedAt: input.confirmedAt,
+      },
       input.now,
     );
     if (outcome.status === 'REVERSED')

@@ -18,8 +18,6 @@ import {
   InsufficientStockError,
   StockVersionConflictError,
 } from '../domain/stock-journal.errors';
-import { PrismaProductRepository } from '../../products/infrastructure/prisma-product.repository';
-import { PrismaStockAlertStateRepository } from '../../stock-alerts/infrastructure/prisma-stock-alert-state.repository';
 import { StockJournalWriter } from './stock-journal.writer';
 
 const SKIP =
@@ -57,10 +55,6 @@ describeIfDb('StockJournalWriter (PostgreSQL integration)', () => {
       () => tenantPrisma.runInTransaction(work),
     );
 
-  const legacyRepo = new PrismaProductRepository(
-    tenantPrisma,
-    new PrismaStockAlertStateRepository(),
-  );
   const deadlocks = (results: PromiseSettledResult<unknown>[]) =>
     results.filter(
       (r) =>
@@ -261,7 +255,7 @@ describeIfDb('StockJournalWriter (PostgreSQL integration)', () => {
         writer.reverseSale({ saleId: 'never-journaled', actor: ACTOR }, NOW),
       ),
     ).toEqual({
-      status: 'LEGACY',
+      status: 'NOTHING_TO_RESTORE',
       movements: [],
     });
   });
@@ -441,7 +435,7 @@ describeIfDb('StockJournalWriter (PostgreSQL integration)', () => {
       expect(rows.map((r) => r.quantity)).toEqual([9, 9]);
     });
 
-    it('serialises a mixed variant+parent charge with a legacy mixed restock without a deadlock', async () => {
+    it('serialises a mixed variant+parent charge with a legacy mixed restore without a deadlock', async () => {
       const product = await db().product.create({
         data: { name: 'Mixto', tenantId: TENANT, quantity: 10 },
       });
@@ -458,10 +452,22 @@ describeIfDb('StockJournalWriter (PostgreSQL integration)', () => {
         results.push(
           ...(await Promise.allSettled([
             tx(() =>
-              legacyRepo.incrementStockForRestock([
-                { productId: product.id, variantId: variant.id, quantity: 2 },
-                { productId: product.id, quantity: 2 },
-              ]),
+              writer.reverseSale(
+                {
+                  saleId: `legacy-${round}`,
+                  actor: ACTOR,
+                  confirmedAt: new Date('2020-01-01T00:00:00.000Z'),
+                  lines: [
+                    {
+                      productId: product.id,
+                      variantId: variant.id,
+                      quantity: 2,
+                    },
+                    { productId: product.id, quantity: 2 },
+                  ],
+                },
+                NOW,
+              ),
             ),
             tx(() =>
               writer.charge(

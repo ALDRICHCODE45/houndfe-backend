@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
-import type { PrismaProductRepository } from './infrastructure/prisma-product.repository';
+import type { StockChargeItem } from '../inventory/domain/stock-journal.types';
 import { loadEditorialPostgresClient } from '../catalog-editorial/infrastructure/editorial-coordination-postgres-binding';
 import {
   currentBackendPid,
@@ -11,7 +11,7 @@ import {
   type EditorialFixture,
 } from '../catalog-editorial/infrastructure/editorial-coordination-postgres-fixture';
 
-// Pause AFTER the first stock UPDATE: both old and fixed code hold a real row lock.
+// Pause AFTER the first product row lock: the holder owns a real row lock.
 function holdFirstUpdate(base: PrismaClient) {
   let reach!: () => void;
   let release!: () => void;
@@ -25,7 +25,7 @@ function holdFirstUpdate(base: PrismaClient) {
         const sql = args as { strings?: string[] };
         if (
           armed &&
-          /UPDATE "(?:products|variants)"/.test(sql.strings?.join('?') ?? '')
+          /FROM "products"[\s\S]*FOR UPDATE/.test(sql.strings?.join('?') ?? '')
         ) {
           armed = false;
           reach();
@@ -44,13 +44,13 @@ function postgresSqlState(error: unknown): string | undefined {
   return /PostgresError \{ code: "([0-9A-Z]{5})"/.exec(String(e?.message))?.[1];
 }
 
-describe('live restock stock lock ordering', () => {
+describe('live legacy-restore stock lock ordering', () => {
   const opened: PrismaClient[] = [];
   let observer: PrismaClient;
   let restock: (
     client: PrismaClient,
     seed: EditorialFixture,
-    items: Parameters<PrismaProductRepository['incrementStockForRestock']>[0],
+    lines: StockChargeItem[],
   ) => Promise<unknown>;
   const open = async () => {
     const client = await loadEditorialPostgresClient();
@@ -59,25 +59,22 @@ describe('live restock stock lock ordering', () => {
   };
   beforeAll(async () => {
     observer = await open(); // Guarded client BEFORE application imports.
-    const { PrismaProductRepository } =
-      await import('./infrastructure/prisma-product.repository');
+    const { StockJournalWriter } =
+      await import('../inventory/infrastructure/stock-journal.writer');
     const { TenantPrismaService } =
       await import('../shared/prisma/tenant-prisma.service');
-    const { PrismaStockAlertStateRepository } =
-      await import('../stock-alerts/infrastructure/prisma-stock-alert-state.repository');
     const { ClsService } = await import('nestjs-cls');
     const cls = new ClsService<TenantClsStore>(
       new AsyncLocalStorage<TenantClsStore>(),
     );
-    restock = (client, seed, items) => {
+    restock = (client, seed, lines) => {
       const tenant = new TenantPrismaService(
         client as ConstructorParameters<typeof TenantPrismaService>[0],
         cls,
       );
-      const repo = new PrismaProductRepository(
-        tenant,
-        new PrismaStockAlertStateRepository(),
-      );
+      const writer = new StockJournalWriter(tenant, {
+        get: (_key: string, fallback: string) => fallback,
+      } as never);
       return cls.runWith(
         {
           tenantId: seed.ids.tenantId,
@@ -86,7 +83,12 @@ describe('live restock stock lock ordering', () => {
         },
         () =>
           tenant.runInTransaction<unknown>(() =>
-            repo.incrementStockForRestock(items),
+            writer.reverseSale({
+              saleId: randomUUID(),
+              actor: { id: null, displayName: 'Sistema' },
+              confirmedAt: new Date('2020-01-01T00:00:00.000Z'),
+              lines,
+            }),
           ),
       );
     };
@@ -95,7 +97,7 @@ describe('live restock stock lock ordering', () => {
     await Promise.allSettled(opened.map((client) => client.$disconnect()));
   });
 
-  // Identical scheduler witness and exact readback contract for the restock path.
+  // Scheduler witness and exact readback contract for the legacy restore path.
   async function oppositeProducts() {
     const run = restock;
     const seed = await seedEditorialPostgres(observer, randomUUID());
@@ -125,7 +127,7 @@ describe('live restock stock lock ordering', () => {
       o.status === 'rejected' ? postgresSqlState(o.reason) : null,
     );
     process.stdout.write(
-      `opposite restock pids=${firstPid},${secondPid} SQLSTATEs=${JSON.stringify(states)}\n`,
+      `opposite legacy-restore pids=${firstPid},${secondPid} SQLSTATEs=${JSON.stringify(states)}\n`,
     );
     expect(states).toEqual([null, null]);
     expect(outcomes.map((o) => o.status)).toEqual(['fulfilled', 'fulfilled']);
@@ -140,7 +142,7 @@ describe('live restock stock lock ordering', () => {
     );
   }
   it(
-    'commits opposite-order Product restock batches without a deadlock',
+    'commits opposite-order legacy sale restores without a deadlock',
     oppositeProducts,
   );
 });

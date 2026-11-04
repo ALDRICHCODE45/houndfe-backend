@@ -28,14 +28,6 @@ export interface IProductRepository {
     exclude?: { productId?: string; variantId?: string },
   ): Promise<boolean>;
 
-  incrementStockForRestock(
-    adjustments: Array<{
-      productId: string;
-      variantId?: string | null;
-      quantity: number;
-    }>,
-  ): Promise<void>;
-
   /**
    * Edit-path re-arm contract. After a direct product/variant edit
    * (`update` / `updateVariant`) raises the resulting `quantity` strictly
@@ -45,7 +37,7 @@ export interface IProductRepository {
    *   - variant (`variantId` provided): key = `variantId`
    *
    * The implementation MUST:
-   *   - Assert the ambient-tx guard (mirror of `incrementStockForRestock`).
+   *   - Assert the ambient-tx guard (`rearmAlertAfterEdit` must run inside the edit transaction).
    *     Calling this outside `tenantPrisma.runInTransaction(...)` throws —
    *     partial commits would block the next alert forever.
    *   - Re-read the CURRENT persisted `quantity`/`minQuantity` inside the

@@ -215,7 +215,6 @@ function buildHarness(options: { withoutLedger?: boolean } = {}) {
       record('stock');
       return Promise.resolve([]);
     }),
-    incrementStockForRestock: jest.fn((): Promise<void> => Promise.resolve()),
   };
 
   const eventEmitter = { emit: jest.fn() };
@@ -273,7 +272,7 @@ function buildHarness(options: { withoutLedger?: boolean } = {}) {
       charge: jest.fn(({ items }: { items: unknown[] }) =>
         products.chargeStock(items),
       ),
-      reverse: jest.fn(() => Promise.resolve({ status: 'LEGACY' })),
+      reverse: jest.fn(() => Promise.resolve({ status: 'NOTHING_TO_RESTORE' })),
     } as never,
   );
 

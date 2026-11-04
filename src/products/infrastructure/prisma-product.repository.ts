@@ -6,7 +6,6 @@
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
-import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import { Product } from '../domain/product.entity';
 import type { IProductRepository } from '../domain/product.repository';
 import {
@@ -24,17 +23,6 @@ import {
 } from '../../stock-alerts/domain/stock-alert-state.repository';
 
 type RawCall = { sql: string };
-type TxClient = {
-  $queryRaw: (
-    strings: TemplateStringsArray,
-    ...values: unknown[]
-  ) => Promise<unknown>;
-  // OutboxWriterService.publish expects Prisma.TransactionClient; the
-  // tenant-scoped client (and the tx client it surfaces inside
-  // `runInTransaction`) is structurally compatible but not nominally,
-  // so we cast through `unknown`.
-  [key: string]: unknown;
-};
 
 /**
  * Relation payload — included on every product read so
@@ -260,152 +248,9 @@ export class PrismaProductRepository implements IProductRepository {
     return !!variantMatch;
   }
 
-  private async lockStockAdjustments(
-    tx: TxClient,
-    tenantId: string,
-    adjustments: Array<{
-      productId: string;
-      variantId?: string | null;
-      quantity: number;
-    }>,
-  ) {
-    const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-    const ordered = adjustments
-      .map((adjustment, index) => ({ adjustment: { ...adjustment }, index }))
-      .filter(({ adjustment }) => adjustment.quantity > 0)
-      .sort(
-        (a, b) =>
-          compare(a.adjustment.productId, b.adjustment.productId) ||
-          compare(a.adjustment.variantId || '', b.adjustment.variantId || ''),
-      );
-    const parents = new Map<string, boolean>();
-    for (const { adjustment } of ordered) {
-      parents.set(
-        adjustment.productId,
-        (parents.get(adjustment.productId) ?? false) || !adjustment.variantId,
-      );
-    }
-    // One global id sequence, not separate mode groups (which can invert ids).
-    // A single FOR UPDATE over the mixed set would over-lock sibling charges.
-    // KEY SHARE conflicts with membership/editorial FOR UPDATE, but not another
-    // charge's non-key UPDATE (FOR NO KEY UPDATE), keeping siblings concurrent.
-    for (const [productId, updatesParent] of parents) {
-      if (updatesParent) {
-        await tx.$queryRaw`SELECT "id" FROM "products"
-          WHERE "id" = ${productId} AND "tenantId" = ${tenantId} FOR UPDATE`;
-      } else {
-        await tx.$queryRaw`SELECT "id" FROM "products"
-          WHERE "id" = ${productId} AND "tenantId" = ${tenantId} FOR KEY SHARE`;
-      }
-    }
-    return ordered;
-  }
-
   /**
-   * Slice E.2 — re-arm on restock, with STRICT `newQuantity > minQuantity`
-   * precondition (design Decision 6). The `stock_alert_states` row stays
-   * (alertEpoch preserved); only `alerted` flips back to false.
-   */
-  async incrementStockForRestock(
-    adjustments: Array<{
-      productId: string;
-      variantId?: string | null;
-      quantity: number;
-    }>,
-  ): Promise<void> {
-    // Slice E — ambient-tx guard.
-    // Restock + rearm happen in the same tx as the underlying stock update;
-    // running outside a tx would leave the product decremented without
-    // the alerted=false rearm, blocking the next alert forever.
-    if (!this.tenantPrisma.isInTransaction()) {
-      throw new Error(
-        'incrementStockForRestock must be called inside TenantPrismaService.runInTransaction',
-      );
-    }
-
-    const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
-
-    const ordered = await this.lockStockAdjustments(
-      prisma,
-      tenantId,
-      adjustments,
-    );
-    for (const { adjustment } of ordered) {
-      if (adjustment.variantId) {
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-        const variantRows = (await prisma.$queryRaw`
-          UPDATE "variants"
-             SET "quantity" = "quantity" + ${adjustment.quantity},
-                 "updatedAt" = NOW()
-           WHERE "id" = ${adjustment.variantId}
-             AND "productId" = ${adjustment.productId}
-             AND "tenantId" = ${tenantId}
-           RETURNING "quantity"::int AS "newQuantity",
-                     "minQuantity"::int AS "minQuantity"
-        `) as Array<{ newQuantity: number; minQuantity: number }>;
-
-        if (variantRows.length !== 1) continue;
-
-        const { newQuantity, minQuantity } = variantRows[0];
-        if (newQuantity > minQuantity) {
-          await this.alertState.rearm({
-            tx: prisma,
-            tenantId,
-            productId: adjustment.productId,
-            variantId: adjustment.variantId,
-          });
-        }
-        continue;
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-      const productRows = (await prisma.$queryRaw`
-        UPDATE "products"
-           SET "quantity" = "quantity" + ${adjustment.quantity},
-               "updatedAt" = NOW()
-         WHERE "id" = ${adjustment.productId}
-           AND "tenantId" = ${tenantId}
-           AND "useStock" = true
-           AND "hasVariants" = false
-         RETURNING "quantity"::int AS "newQuantity",
-                   "minQuantity"::int AS "minQuantity"
-      `) as Array<{ newQuantity: number; minQuantity: number }>;
-
-      if (productRows.length !== 1) {
-        // The sorted parent FOR UPDATE lock remains held through this read.
-        // Missing/non-stock Products retain their silent-skip behavior.
-        const products = await prisma.$queryRaw<
-          Array<{ name: string; useStock: boolean; hasVariants: boolean }>
-        >`
-          SELECT "name", "useStock", "hasVariants" FROM "products"
-           WHERE "id" = ${adjustment.productId} AND "tenantId" = ${tenantId}
-        `;
-        if (products[0]?.useStock && products[0].hasVariants) {
-          throw new BusinessRuleViolationError(
-            `Cannot restock Product "${products[0].name}" without a Variant because it now has Variants`,
-            'RESTOCK_TARGET_HAS_VARIANTS',
-            { productId: adjustment.productId },
-          );
-        }
-        continue;
-      }
-
-      const { newQuantity, minQuantity } = productRows[0];
-      if (newQuantity > minQuantity) {
-        await this.alertState.rearm({
-          tx: prisma,
-          tenantId,
-          productId: adjustment.productId,
-          variantId: null,
-        });
-      }
-    }
-  }
-
-  /**
-   * Edit-path re-arm. Mirrors the ambient-tx guard + STRICT `>` gate of
-   * `incrementStockForRestock`, but does NOT touch the stock columns
+   * Edit-path re-arm. Asserts the ambient-tx guard and a STRICT `>` gate,
+   * but does NOT touch the stock columns
    * itself — the edit write lives in the service layer. This method only
    * re-reads the RESULTING `(quantity, minQuantity)` inside the same
    * transaction (read-your-own-writes under READ COMMITTED) and, when

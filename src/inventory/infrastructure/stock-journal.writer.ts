@@ -10,6 +10,7 @@ import type {
   ProductStockState,
   SaleReversalOutcome,
   StockActor,
+  StockBucketRef,
   StockChange,
   StockChargeItem,
   StockJournalContext,
@@ -26,9 +27,13 @@ import type {
  * locking serialises journal writes per product, which keeps the
  * `balanceAfter` / `productBalanceAfter` chain exact.
  */
+/** Migration whose completion marks the moment the journal went live. */
+const JOURNAL_MIGRATION = '20261104020000_inventory_journal_storage';
+
 @Injectable()
 export class StockJournalWriter {
   private readonly businessTimezone: string;
+  private activatedAt: Date | null = null;
 
   constructor(
     private readonly tenantPrisma: TenantPrismaService,
@@ -82,12 +87,21 @@ export class StockJournalWriter {
   }
 
   /**
-   * Reverses a sale (S7). `LEGACY` means the sale has no `SALE` movements
-   * (charged before the journal) and the caller must restore stock as before;
-   * `ALREADY_REVERSED` means cancellation rows exist and nothing was written.
+   * Reverses a sale (S7). A sale with `SALE` movements restores exactly those
+   * buckets. A sale without them restores nothing unless it was confirmed
+   * before the journal went live (`confirmedAt` earlier than the activation
+   * marker) — then its `lines` are restored through the journal as
+   * `SALE_CANCELLATION` rows, with the same versioning and locking as any
+   * other write. `ALREADY_REVERSED` means cancellation rows exist and nothing
+   * was written.
    */
   async reverseSale(
-    sale: { saleId: string; actor: StockActor },
+    sale: {
+      saleId: string;
+      actor: StockActor;
+      lines?: StockChargeItem[];
+      confirmedAt?: Date | null;
+    },
     now: Date = new Date(),
   ): Promise<SaleReversalOutcome> {
     const tenantId = this.requireTx();
@@ -101,7 +115,9 @@ export class StockJournalWriter {
       where: { ...group, type: 'SALE' },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    if (consumed.length === 0) return { status: 'LEGACY', movements: [] };
+    if (consumed.length === 0) {
+      return this.reverseLegacySale(sale, group, now);
+    }
 
     const plan = await this.lockAndPlan(
       consumed.map((m) => m.productId),
@@ -142,6 +158,97 @@ export class StockJournalWriter {
       now,
     );
     return { status: 'REVERSED', movements, skipped };
+  }
+
+  /**
+   * Sales confirmed before the journal have no `SALE` rows: their lines are
+   * restored to the product (untracked portion) or variant they decremented.
+   * Lines of products that no longer track stock (or are gone) are skipped.
+   */
+  private async reverseLegacySale(
+    sale: {
+      saleId: string;
+      actor: StockActor;
+      lines?: StockChargeItem[];
+      confirmedAt?: Date | null;
+    },
+    group: { tenantId: string; groupType: 'SALE'; groupId: string },
+    now: Date,
+  ): Promise<SaleReversalOutcome> {
+    const lines = sale.lines ?? [];
+    if (lines.length === 0) {
+      return { status: 'NOTHING_TO_RESTORE', movements: [] };
+    }
+    const activatedAt = await this.journalActivatedAt();
+    if (
+      sale.confirmedAt &&
+      sale.confirmedAt.getTime() >= activatedAt.getTime()
+    ) {
+      return { status: 'NOTHING_TO_RESTORE', movements: [] };
+    }
+
+    const db = this.tenantPrisma.getClient();
+    const plan = await this.lockAndPlan(
+      lines.map((l) => l.productId),
+      now,
+    );
+    // Re-check under the product locks: a concurrent cancel committed first.
+    const reversed = await db.stockMovement.count({
+      where: { ...group, type: 'SALE_CANCELLATION' },
+    });
+    if (reversed > 0) return { status: 'ALREADY_REVERSED', movements: [] };
+
+    let skipped = 0;
+    for (const line of lines) {
+      const bucket: StockBucketRef = line.variantId
+        ? {
+            kind: 'VARIANT',
+            productId: line.productId,
+            variantId: line.variantId,
+          }
+        : { kind: 'PRODUCT_UNTRACKED', productId: line.productId };
+      if (!plan.has(bucket) || !plan.tracksStock(line.productId)) {
+        skipped += 1; // deleted, or no stock tracking (useStock=false / service)
+        continue;
+      }
+      plan.apply({ bucket, delta: line.quantity });
+    }
+    const movements = await this.persist(
+      plan,
+      {
+        type: 'SALE_CANCELLATION',
+        groupType: 'SALE',
+        groupId: sale.saleId,
+        actor: sale.actor,
+      },
+      now,
+    );
+    return { status: 'REVERSED', movements, skipped };
+  }
+
+  /**
+   * Instant the journal went live: `finished_at` of the storage migration
+   * (it also inserts the OPENING movements). Stock writers are stopped while
+   * it runs, so a sale confirmed earlier decremented stock without a `SALE`
+   * row. Immutable once set, hence cached. Fails closed when the marker is
+   * missing: without it a pre-journal sale cannot be told from a post-journal
+   * one that consumed nothing.
+   */
+  private async journalActivatedAt(): Promise<Date> {
+    if (this.activatedAt) return this.activatedAt;
+    const rows = await this.tenantPrisma.getClient().$queryRaw<
+      Array<{ finishedAt: Date }>
+    >`SELECT "finished_at" AS "finishedAt" FROM "_prisma_migrations"
+      WHERE "migration_name" = ${JOURNAL_MIGRATION}
+        AND "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL
+      ORDER BY "finished_at" DESC LIMIT 1`;
+    if (rows.length === 0) {
+      throw new Error(
+        `Inventory journal activation marker (migration ${JOURNAL_MIGRATION}) not found`,
+      );
+    }
+    this.activatedAt = rows[0].finishedAt;
+    return this.activatedAt;
   }
 
   private requireTx(): string {

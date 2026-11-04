@@ -18,6 +18,7 @@ import {
   disconnectIntegrationPrisma,
   integrationPrisma,
 } from '../../test/integration/reset-db';
+import { StockVersionConflictError } from '../inventory/domain/stock-journal.errors';
 import { SaleStockService } from './sale-stock.service';
 
 const SKIP =
@@ -407,20 +408,212 @@ describeIfDb('SaleStockService (PostgreSQL integration)', () => {
       ]);
     });
 
-    it('reports LEGACY (nothing written) for a sale charged before the journal', async () => {
+    it('reports NOTHING_TO_RESTORE for an unknown sale without lines', async () => {
       const product = await seedProduct(5);
       const outcome = await tx(() =>
         service.reverse({
-          saleId: 'sale-legacy',
+          saleId: 'sale-unknown',
           actor: { kind: 'user', userId },
           now: NOW,
         }),
       );
-      expect(outcome.status).toBe('LEGACY');
+      expect(outcome.status).toBe('NOTHING_TO_RESTORE');
       expect(
         (await db().product.findUniqueOrThrow({ where: { id: product.id } }))
           .quantity,
       ).toBe(5);
+      expect(
+        await db().stockMovement.count({ where: { tenantId: TENANT } }),
+      ).toBe(0);
+    });
+  });
+
+  // F1 — a sale confirmed before the journal was activated has no SALE rows;
+  // restoring it must still be a journaled, versioned write.
+  describe('reverse legacy sales (F1)', () => {
+    const PRE_JOURNAL = new Date('2020-01-01T00:00:00.000Z');
+    const actor = () => ({ kind: 'user' as const, userId });
+    const cancellations = (saleId: string) =>
+      db().stockMovement.findMany({
+        where: { tenantId: TENANT, groupId: saleId, type: 'SALE_CANCELLATION' },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+
+    it('journals the restore as SALE_CANCELLATION rows with a balance chain and bumps stockVersion', async () => {
+      const plain = await seedProduct(7); // 10 before a pre-journal sale of 3
+      const shirt = await db().product.create({
+        data: { name: 'Camisa', tenantId: TENANT, hasVariants: true },
+      });
+      const variant = await db().variant.create({
+        data: {
+          productId: shirt.id,
+          tenantId: TENANT,
+          name: 'M',
+          quantity: 4,
+        },
+      });
+
+      const outcome = await tx(() =>
+        service.reverse({
+          saleId: 'sale-old',
+          actor: actor(),
+          confirmedAt: PRE_JOURNAL,
+          lines: [
+            { productId: plain.id, quantity: 3 },
+            { productId: shirt.id, variantId: variant.id, quantity: 2 },
+            { productId: shirt.id, variantId: variant.id, quantity: 1 },
+          ],
+          now: NOW,
+        }),
+      );
+
+      expect(outcome.status).toBe('REVERSED');
+      const rows = await cancellations('sale-old');
+      expect(
+        rows.map((r) => [
+          r.bucketKind,
+          r.productId,
+          r.variantId,
+          r.delta,
+          r.balanceAfter,
+          r.groupType,
+          r.actorDisplayName,
+        ]),
+      ).toEqual([
+        ['PRODUCT_UNTRACKED', plain.id, null, 3, 10, 'SALE', 'Cajera Uno'],
+        ['VARIANT', shirt.id, variant.id, 2, 6, 'SALE', 'Cajera Uno'],
+        ['VARIANT', shirt.id, variant.id, 1, 7, 'SALE', 'Cajera Uno'],
+      ]);
+      const [p, v] = await Promise.all([
+        db().product.findUniqueOrThrow({ where: { id: plain.id } }),
+        db().variant.findUniqueOrThrow({ where: { id: variant.id } }),
+      ]);
+      expect([p.quantity, p.stockVersion, v.quantity]).toEqual([10, 1, 7]);
+      expect(v.stockVersion).toBe(1);
+
+      // A reader holding the pre-restore version must be rejected.
+      const stale = await tx(() =>
+        journal.apply(
+          [
+            {
+              bucket: { kind: 'PRODUCT_UNTRACKED', productId: plain.id },
+              delta: -1,
+              expectedVersion: 0,
+            },
+          ],
+          {
+            type: 'ADJUSTMENT',
+            groupType: 'ADJUSTMENT',
+            groupId: 'adj-stale',
+            actor: { id: userId, displayName: 'Cajera Uno' },
+            reason: 'PHYSICAL_COUNT',
+          },
+          NOW,
+        ),
+      ).catch((e: unknown) => e);
+      expect(stale).toBeInstanceOf(StockVersionConflictError);
+    });
+
+    it('skips useStock=false and deleted products without failing', async () => {
+      const service_ = await db().product.create({
+        data: { name: 'Corte', tenantId: TENANT, useStock: false, quantity: 0 },
+      });
+      const outcome = await tx(() =>
+        service.reverse({
+          saleId: 'sale-old-skip',
+          actor: actor(),
+          confirmedAt: PRE_JOURNAL,
+          lines: [
+            { productId: service_.id, quantity: 2 },
+            { productId: randomUUID(), quantity: 1 },
+          ],
+          now: NOW,
+        }),
+      );
+      expect(outcome.status).not.toBe('ALREADY_REVERSED');
+      expect(
+        (await db().product.findUniqueOrThrow({ where: { id: service_.id } }))
+          .quantity,
+      ).toBe(0);
+      expect(
+        await db().stockMovement.count({ where: { tenantId: TENANT } }),
+      ).toBe(0);
+    });
+
+    it('restores once: a second cancel finds the SALE_CANCELLATION rows and writes nothing', async () => {
+      const product = await seedProduct(7);
+      const input = {
+        saleId: 'sale-old-twice',
+        actor: actor(),
+        confirmedAt: PRE_JOURNAL,
+        lines: [{ productId: product.id, quantity: 3 }],
+        now: NOW,
+      };
+      const first = await tx(() => service.reverse(input));
+      const second = await tx(() => service.reverse(input));
+
+      expect([first.status, second.status]).toEqual([
+        'REVERSED',
+        'ALREADY_REVERSED',
+      ]);
+      expect(
+        (await db().product.findUniqueOrThrow({ where: { id: product.id } }))
+          .quantity,
+      ).toBe(10);
+      expect(await cancellations('sale-old-twice')).toHaveLength(1);
+    });
+
+    it('re-arms the low-stock alert through the shared crossing', async () => {
+      const product = await seedProduct(5, 3);
+      await tx(() =>
+        service.charge({
+          saleId: 'sale-cross-old',
+          items: [{ productId: product.id, quantity: 3 }], // 5 -> 2 <= 3: alerted
+          actor: actor(),
+          now: NOW,
+        }),
+      );
+      await tx(() =>
+        service.reverse({
+          saleId: 'sale-old-rearm',
+          actor: actor(),
+          confirmedAt: PRE_JOURNAL,
+          lines: [{ productId: product.id, quantity: 3 }], // 2 -> 5 > 3
+          now: NOW,
+        }),
+      );
+      expect(
+        (
+          await db().stockAlertState.findFirstOrThrow({
+            where: { tenantId: TENANT, productId: product.id },
+          })
+        ).alerted,
+      ).toBe(false);
+    });
+
+    it('restores nothing for a post-journal sale that wrote no SALE rows (useStock=false lines)', async () => {
+      const untracked = await db().product.create({
+        data: { name: 'Servicio', tenantId: TENANT, useStock: false },
+      });
+      const stocked = await seedProduct(4);
+      const outcome = await tx(() =>
+        service.reverse({
+          saleId: 'sale-new-untracked',
+          actor: actor(),
+          confirmedAt: new Date(), // after the migration ran
+          lines: [
+            { productId: untracked.id, quantity: 2 },
+            { productId: stocked.id, quantity: 9 },
+          ],
+          now: NOW,
+        }),
+      );
+
+      expect(outcome.status).toBe('NOTHING_TO_RESTORE');
+      expect(
+        (await db().product.findUniqueOrThrow({ where: { id: stocked.id } }))
+          .quantity,
+      ).toBe(4);
       expect(
         await db().stockMovement.count({ where: { tenantId: TENANT } }),
       ).toBe(0);

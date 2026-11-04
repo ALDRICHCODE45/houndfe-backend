@@ -106,6 +106,11 @@ export class StockPlan {
     }
   }
 
+  /** Whether the product exists and tracks stock (`useStock`); false for services. */
+  tracksStock(productId: string): boolean {
+    return this.products.get(productId)?.useStock ?? false;
+  }
+
   /** Current in-plan quantity of a product (non-variant products only). */
   productQuantity(productId: string): number | undefined {
     return this.products.get(productId)?.quantity;
