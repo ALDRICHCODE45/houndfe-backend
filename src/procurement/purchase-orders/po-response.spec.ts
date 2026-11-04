@@ -2,10 +2,11 @@ import type {
   ProcurementPurchaseOrder,
   ProcurementPurchaseOrderLine,
 } from '@prisma/client';
-import type { OrderInput } from './po-contract';
+import type { LineSubtotal, OrderInput } from './po-contract';
 import {
   buildPurchaseOrder,
   canConfirmPurchaseOrder,
+  computePurchaseOrderTotals,
   storedOrderInput,
 } from './po-response';
 import type { PurchaseOrderReferenceFacts } from './po-validation';
@@ -366,5 +367,86 @@ describe('shared purchase-order response builder (closed orders)', () => {
       lineDisplaySnapshots: [],
       supplierCurrentVersion: null,
     });
+  });
+});
+
+describe('computePurchaseOrderTotals', () => {
+  const sub = (
+    amount: string,
+    taxBasis: 'EXCLUDES_TAX' | 'INCLUDES_TAX',
+    n = 1,
+  ): LineSubtotal => ({
+    lineId: `50000000-0000-4000-8000-00000000000${n}`,
+    subtotal: { amount, currency: 'MXN', taxBasis },
+  });
+  const empty = (n = 9): LineSubtotal => ({
+    lineId: `50000000-0000-4000-8000-00000000000${n}`,
+    subtotal: null,
+  });
+  it('returns one entry when every line shares a basis', () => {
+    expect(
+      computePurchaseOrderTotals([
+        sub('10', 'INCLUDES_TAX', 1),
+        sub('5.5', 'INCLUDES_TAX', 2),
+      ]),
+    ).toEqual([{ amount: '15.5', currency: 'MXN', taxBasis: 'INCLUDES_TAX' }]);
+    expect(computePurchaseOrderTotals([sub('10', 'EXCLUDES_TAX')])).toEqual([
+      { amount: '10', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+    ]);
+  });
+  it('never sums across bases and always orders EXCLUDES_TAX then INCLUDES_TAX', () => {
+    expect(
+      computePurchaseOrderTotals([
+        sub('100', 'INCLUDES_TAX', 1),
+        sub('10', 'EXCLUDES_TAX', 2),
+        sub('16', 'INCLUDES_TAX', 3),
+        sub('2.5', 'EXCLUDES_TAX', 4),
+      ]),
+    ).toEqual([
+      { amount: '12.5', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+      { amount: '116', currency: 'MXN', taxBasis: 'INCLUDES_TAX' },
+    ]);
+    expect(
+      computePurchaseOrderTotals([
+        sub('10', 'EXCLUDES_TAX', 1),
+        sub('100', 'INCLUDES_TAX', 2),
+      ])?.map((entry) => entry.taxBasis),
+    ).toEqual(['EXCLUDES_TAX', 'INCLUDES_TAX']);
+  });
+  it('is null for zero lines or when any subtotal is null', () => {
+    expect(computePurchaseOrderTotals([])).toBeNull();
+    expect(computePurchaseOrderTotals([empty()])).toBeNull();
+    expect(
+      computePurchaseOrderTotals([sub('10', 'EXCLUDES_TAX'), empty()]),
+    ).toBeNull();
+    expect(
+      computePurchaseOrderTotals([empty(), sub('10', 'INCLUDES_TAX')]),
+    ).toBeNull();
+  });
+  it('sums exact decimals without floats or trailing zeros', () => {
+    expect(
+      computePurchaseOrderTotals([
+        sub('0.1', 'EXCLUDES_TAX', 1),
+        sub('0.2', 'EXCLUDES_TAX', 2),
+      ]),
+    ).toEqual([{ amount: '0.3', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' }]);
+    expect(
+      computePurchaseOrderTotals([
+        sub('0.25', 'INCLUDES_TAX', 1),
+        sub('0.75', 'INCLUDES_TAX', 2),
+      ]),
+    ).toEqual([{ amount: '1', currency: 'MXN', taxBasis: 'INCLUDES_TAX' }]);
+    expect(
+      computePurchaseOrderTotals([
+        sub('0.0000001', 'INCLUDES_TAX', 1),
+        sub('999999999998999900000', 'INCLUDES_TAX', 2),
+      ]),
+    ).toEqual([
+      {
+        amount: '999999999998999900000.0000001',
+        currency: 'MXN',
+        taxBasis: 'INCLUDES_TAX',
+      },
+    ]);
   });
 });

@@ -27,7 +27,11 @@ import {
   type ReferenceProduct,
   type ReferenceVariant,
 } from './po-references';
-import { buildPurchaseOrder, storedOrderInput } from './po-response';
+import {
+  buildPurchaseOrder,
+  computePurchaseOrderTotals,
+  storedOrderInput,
+} from './po-response';
 
 type StoredOrder = ProcurementPurchaseOrder & {
   lines: ProcurementPurchaseOrderLine[];
@@ -199,6 +203,7 @@ export class PurchaseOrderQueries {
             supplierDisplaySnapshot: order.supplierDisplaySnapshot,
             lineCount: order.lines.length,
             issueCount: order.validation.issues.length,
+            totals: computePurchaseOrderTotals(order.lineSubtotals),
             note: order.note,
             locationDetail: order.location.detail,
             createdAt: order.createdAt,

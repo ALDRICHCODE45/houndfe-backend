@@ -128,6 +128,11 @@ export interface PurchaseOrder extends OrderInput {
   cancelledAt: string | null;
   cancelledBy: { displayName: string } | null;
 }
+export interface PurchaseOrderTotal {
+  amount: string;
+  currency: 'MXN';
+  taxBasis: TaxBasis;
+}
 export interface PurchaseOrderSummary {
   id: string;
   version: number;
@@ -135,6 +140,8 @@ export interface PurchaseOrderSummary {
   supplierDisplaySnapshot: SupplierDisplaySnapshot | null;
   lineCount: number;
   issueCount: number;
+  /** One exact sum per tax basis (EXCLUDES_TAX, then INCLUDES_TAX); never mixed. */
+  totals: PurchaseOrderTotal[] | null;
   note: string | null;
   locationDetail: string | null;
   createdAt: string;
