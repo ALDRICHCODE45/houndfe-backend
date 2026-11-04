@@ -177,6 +177,11 @@ test('seed links each readable user to a role with exactly its grants', async ()
     f.rows.tenant.map((t) => t.name),
     [names.TENANT_NAME, names.FOREIGN_TENANT_NAME],
   );
+  // The FE shell shows the tenant slug under its name: readable, no ids.
+  assert.deepEqual(
+    f.rows.tenant.map((t) => t.slug),
+    ['mascotas-el-roble', 'veterinaria-central-del-sur'],
+  );
   for (const user of USERS) {
     const created = f.rows.user.find((row) => row.name === user.displayName);
     assert.equal(result.users[user.label].displayName, user.displayName);

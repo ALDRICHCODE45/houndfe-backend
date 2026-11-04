@@ -174,13 +174,12 @@ async function seed({ db, password, setStage = () => {} }) {
   const tenantId = crypto.randomUUID();
   const otherTenantId = crypto.randomUUID();
   setStage('seed-tenants');
-  for (const [id, name] of [
-    [tenantId, TENANT_NAME],
-    [otherTenantId, FOREIGN_TENANT_NAME],
+  // The FE shell shows the slug under the tenant name: keep it readable.
+  for (const [id, name, slug] of [
+    [tenantId, TENANT_NAME, 'mascotas-el-roble'],
+    [otherTenantId, FOREIGN_TENANT_NAME, 'veterinaria-central-del-sur'],
   ])
-    await db.tenant.create({
-      data: { id, name, slug: `o3c-${id}` },
-    });
+    await db.tenant.create({ data: { id, name, slug } });
   setStage('seed-foreign-supplier');
   await db.procurementSupplier.create({
     data: {
