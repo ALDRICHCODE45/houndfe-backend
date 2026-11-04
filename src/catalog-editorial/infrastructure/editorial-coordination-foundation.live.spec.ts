@@ -98,6 +98,7 @@ describe('live editorial coordination foundation', () => {
       unused('FilesService'),
       tenant,
       unused('SatCatalogService'),
+      unused('ProductStockJournal'),
     );
     freshSeed = () => seedEditorialPostgres(client, randomUUID());
     readProduct = (seed) =>

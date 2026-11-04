@@ -638,6 +638,7 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
         getTenantId: () => guideTenant.id,
       } as never,
       {} as never,
+      {} as never,
     ).getVariants('prod-admin-1');
     expect(variants[0]).toMatchObject({
       catalogPublishMode: 'ON',

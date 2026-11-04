@@ -79,6 +79,7 @@ describe('live global price-list lifecycle deletion', () => {
         unused as ProductArgs[2],
         tenant,
         unused as ProductArgs[4],
+        unused as ProductArgs[5],
       );
       return {
         run: (work) =>
