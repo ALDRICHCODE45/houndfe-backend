@@ -30,6 +30,8 @@ export type AppSubjects =
   | 'ProcurementPurchaseOrder'
   | 'ProcurementOrderConfirmation'
   | 'ProcurementOrderCancellation'
+  | 'InventoryJournal'
+  | 'InventoryAdjustment'
   | 'ProductEditorialDraft'
   | 'Order'
   | 'Sale'
@@ -160,6 +162,19 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'ProcurementOrderCancellation',
     action: 'create',
     description: 'Cancel purchase orders',
+  },
+
+  // Inventory journal (O1): granular, no inheritance from Product/Sale and no
+  // default role grants; stock adjustments need no second approval.
+  {
+    subject: 'InventoryJournal',
+    action: 'read',
+    description: 'View product stock and the inventory journal',
+  },
+  {
+    subject: 'InventoryAdjustment',
+    action: 'create',
+    description: 'Create stock adjustments',
   },
 
   // Product permissions
