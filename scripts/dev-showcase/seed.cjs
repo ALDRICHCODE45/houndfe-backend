@@ -17,6 +17,7 @@ const MODULES = ['org', 'catalog', 'commerce', 'ops'];
 // Leftovers from earlier runtime probes on the disposable dev DB.
 const GARBAGE_PRODUCT_PREFIXES = ['Prueba T8', 'zz sale probe'];
 const GARBAGE_PRICE_LIST_NAMES = ['Online (dev)'];
+const GARBAGE_ROUTE_NOTES = ['Lleva cambio por fvor.'];
 
 function loadEnv() {
   const file = path.join(ROOT, '.env');
@@ -50,6 +51,14 @@ function devPasswords() {
   const pattern = /email:\s*'([^']+)'[\s\S]{0,200}?password:\s*'([^']+)'/g;
   for (const [, email, password] of source.matchAll(pattern)) {
     passwords.set(email, password);
+  }
+  // Users created by the org module share its demo password.
+  const org = path.join(__dirname, 'org.cjs');
+  if (fs.existsSync(org)) {
+    const { DEMO_USERS = [], DEMO_PASSWORD } = require(org);
+    for (const user of DEMO_USERS) {
+      if (!passwords.has(user.email)) passwords.set(user.email, DEMO_PASSWORD);
+    }
   }
   return passwords;
 }
@@ -156,7 +165,12 @@ function makeApi(baseUrl, passwords) {
 
 /** Removes probe leftovers. Products with sales cannot be deleted by API. */
 async function cleanupGarbage(prisma) {
-  const removed = { products: 0, priceLists: 0 };
+  const removed = { products: 0, priceLists: 0, routes: 0 };
+  removed.routes = (
+    await prisma.deliveryRoute.deleteMany({
+      where: { notes: { in: GARBAGE_ROUTE_NOTES } },
+    })
+  ).count;
   const products = await prisma.product.findMany({
     where: {
       OR: GARBAGE_PRODUCT_PREFIXES.map((prefix) => ({
