@@ -146,6 +146,7 @@ function summary(value) {
       'supplierDisplaySnapshot',
       'lineCount',
       'issueCount',
+      'totals',
       'note',
       'locationDetail',
       'createdAt',
@@ -155,6 +156,55 @@ function summary(value) {
   assert(STATUSES.includes(value.status));
   assert(Number.isSafeInteger(value.lineCount) && value.lineCount >= 0);
   assert(Number.isSafeInteger(value.issueCount) && value.issueCount >= 0);
+  totalsShape(value.totals);
+}
+// Per-basis totals: null, or one entry per basis ordered EXCLUDES_TAX then INCLUDES_TAX,
+// each a canonical decimal (no float notation, no trailing zeros), never summed across bases.
+const TOTAL_BASES = ['EXCLUDES_TAX', 'INCLUDES_TAX'];
+function totalsShape(totals) {
+  if (totals === null) return;
+  assert(Array.isArray(totals) && totals.length >= 1 && totals.length <= 2);
+  const bases = totals.map((entry) => entry.taxBasis);
+  assert.deepEqual(
+    bases,
+    TOTAL_BASES.filter((basis) => bases.includes(basis)),
+  );
+  for (const entry of totals) {
+    assert.deepEqual(Object.keys(entry).sort(), [
+      'amount',
+      'currency',
+      'taxBasis',
+    ]);
+    assert.equal(entry.currency, 'MXN');
+    assert(/^(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$/.test(entry.amount));
+  }
+}
+// Independent exact sum (BigInt) of a detail's line subtotals, mirroring the S2/S3 rules.
+function expectedTotals(lineSubtotals) {
+  if (!lineSubtotals.length || lineSubtotals.some((v) => v.subtotal === null))
+    return null;
+  const scale = (amount) => (amount.split('.')[1] ?? '').length;
+  const digits = (amount, places) =>
+    BigInt(amount.replace('.', '')) * 10n ** BigInt(places - scale(amount));
+  return TOTAL_BASES.flatMap((taxBasis) => {
+    const amounts = lineSubtotals
+      .map((v) => v.subtotal)
+      .filter((subtotal) => subtotal.taxBasis === taxBasis)
+      .map((subtotal) => subtotal.amount);
+    if (!amounts.length) return [];
+    const places = Math.max(...amounts.map(scale));
+    const sum = amounts.reduce(
+      (acc, amount) => acc + digits(amount, places),
+      0n,
+    );
+    const text = sum.toString().padStart(places + 1, '0');
+    const amount = places
+      ? `${text.slice(0, -places)}.${text.slice(-places)}`
+          .replace(/0+$/, '')
+          .replace(/\.$/, '')
+      : text;
+    return [{ amount, currency: 'MXN', taxBasis }];
+  });
 }
 // Injectable transport/check runner gives offline coverage without binding a socket.
 async function scenario(request, check, catalog, origin, tenantId) {
@@ -1011,6 +1061,76 @@ async function closeScenario(request, check, catalog, origin, users) {
     );
     assert.equal(second.nextCursor, null);
   });
+  await check('list-totals-per-tax-basis', ['S2', 'S3', 'S5'], async () => {
+    const totalsTag = 'Pedido de totales por base fiscal';
+    const seller = await supplierOf(
+      'Comercializadora de Alimentos del Sureste',
+    );
+    const line = (product, quantity, amount, taxBasis) => ({
+      lineId: key(),
+      productId: product.id,
+      variantId: null,
+      orderedQuantity: quantity,
+      informedUnitCost:
+        amount === null
+          ? null
+          : {
+              amount,
+              currency: 'MXN',
+              unit: product === catalog.unidad ? 'UNIDAD' : 'KILOGRAMO',
+              taxBasis,
+            },
+    });
+    const kgLine = (quantity, amount, taxBasis = 'EXCLUDES_TAX') =>
+      line(catalog.kilogramo, quantity, amount, taxBasis);
+    const unitLine = (quantity, amount, taxBasis = 'INCLUDES_TAX') =>
+      line(catalog.unidad, quantity, amount, taxBasis);
+    const made = {};
+    for (const [label, note, lines] of [
+      [
+        'single',
+        'forraje a granel con precio sin IVA',
+        [kgLine('0.1', '1'), kgLine('0.2', '1')],
+      ],
+      [
+        'mixed',
+        'forraje sin IVA y juguetes con IVA incluido',
+        [kgLine('2.5', '4'), unitLine('10', '11.6'), kgLine('1', '2.5')],
+      ],
+      [
+        'missing',
+        'juguetes con costo pendiente de capturar',
+        [unitLine('3', '11.6'), kgLine('5', null)],
+      ],
+    ])
+      made[label] = await draft(`${totalsTag} · ${note}`, seller.id, lines);
+    const page = await list({ search: totalsTag });
+    const totalsOf = (order) =>
+      page.items.find((item) => item.id === order.id).totals;
+    assert.equal(page.items.length, 3);
+    assert.deepEqual(totalsOf(made.single), [
+      { amount: '0.3', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+    ]);
+    assert.deepEqual(totalsOf(made.mixed), [
+      { amount: '12.5', currency: 'MXN', taxBasis: 'EXCLUDES_TAX' },
+      { amount: '116', currency: 'MXN', taxBasis: 'INCLUDES_TAX' },
+    ]);
+    assert.equal(totalsOf(made.missing), null);
+    // The list agrees with the sum of the line subtotals each detail reports.
+    for (const order of Object.values(made))
+      assert.deepEqual(
+        totalsOf(order),
+        expectedTotals((await read(order)).lineSubtotals),
+      );
+    for (const order of Object.values(made))
+      expect(
+        await request('DELETE', `${collection}/${order.id}`, {
+          body: { expectedVersion: order.version },
+          idempotencyKey: key(),
+        }),
+        204,
+      );
+  });
   await check('discard-empty-draft-still-allowed', ['S6'], async () => {
     expect(
       await request('DELETE', `${collection}/${noSupplier.id}`, {
@@ -1155,6 +1275,8 @@ module.exports = {
   expectResponse,
   detail,
   summary,
+  totalsShape,
+  expectedTotals,
   scenario,
   closeScenario,
 };

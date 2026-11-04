@@ -355,6 +355,39 @@ async function seedOrders({ apiOrigin, password, fixture, transport }) {
       ),
     ),
   );
+  // Mixed tax bases on purpose: the list shows one total per basis and never sums them.
+  const mixed = (order) => {
+    assert.deepEqual(
+      [...new Set(order.lines.map((l) => l.informedUnitCost.taxBasis))].sort(),
+      ['EXCLUDES_TAX', 'INCLUDES_TAX'],
+    );
+    return order;
+  };
+  result.mixedTaxBasis = mixed(
+    ready(
+      await create(
+        input(
+          accesorios,
+          'Surtido mixto: alimento húmedo sin IVA y juguetes con IVA incluido',
+          'Bodega de refrigerados',
+          [
+            line(
+              catalog.caja,
+              '4',
+              cost(catalog.caja, '612.4'),
+              catalog.caja.variants[1],
+            ),
+            line(
+              catalog.unidad,
+              '36',
+              cost(catalog.unidad, '58', 'INCLUDES_TAX'),
+            ),
+            line(catalog.kilogramo, '12.5', cost(catalog.kilogramo, '27.8')),
+          ],
+        ),
+      ),
+    ),
+  );
   result.incompleteCost = await create(
     input(norte, 'Pedido pendiente: falta capturar el costo', null, [
       line(croquetas, '8', null),
@@ -442,6 +475,21 @@ async function seedOrders({ apiOrigin, password, fixture, transport }) {
     'confirmer',
     users.confirmer.displayName,
   );
+  result.confirmedMixedTaxBasis = await closed(
+    input(
+      norte,
+      'Orden confirmada: granel sin IVA y collares con IVA incluido',
+      'Bodega principal, andén 1',
+      [
+        line(catalog.kilogramo, '30', cost(catalog.kilogramo, '31.2')),
+        line(croquetas, '6', cost(croquetas, '780.5')),
+        line(collar, '15', cost(collar, '85.5', 'INCLUDES_TAX'), chicoAzul),
+      ],
+    ),
+    'manager',
+    users.manager.displayName,
+  );
+  mixed(result.confirmedMixedTaxBasis);
   const draftToCancel = ready(
     await create(
       input(

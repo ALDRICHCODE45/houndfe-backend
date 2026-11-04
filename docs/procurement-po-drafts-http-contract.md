@@ -61,7 +61,7 @@ Search follows supplier admission exactly: reject NUL/lone surrogates before tri
 
 The result is `{items, nextCursor}` with exact summaries:
 
-`{id, version, status, supplierDisplaySnapshot, lineCount, issueCount, note, locationDetail, createdAt, updatedAt}`.
+`{id, version, status, supplierDisplaySnapshot, lineCount, issueCount, totals, note, locationDetail, createdAt, updatedAt}`; `totals` is the per-tax-basis list total described in the [confirm/cancel contract](procurement-po-confirm-cancel-contract.md#list-totals-per-tax-basis).
 
 `issueCount` is the full detail diagnostic count, including current catalog/supplier drift, not a persisted stale count. The returned page's supplier/product/variant IDs are deduplicated and resolved in bounded queries (no per-order N+1). Lookahead rows are not reference-resolved. Header/line projection plus up to three reference queries is constant in page size; no COUNT or totals query is issued.
 
