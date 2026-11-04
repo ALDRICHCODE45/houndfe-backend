@@ -25,9 +25,9 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 | T1 storage: movement table, bucket versions, opening migration, permission subjects | S1 S5 S8 S10 | worker | 42c16a6 |
 | T2 journal core: bucket writer, locks, FEFO allocator, reversal | S4 S6 S7 | worker (with T1) | fa8a655, 54aa532, ce99df7 |
 | T3 product-side writers through journal | S2 S8 | worker | |
-| T4 sale charge/bot/cancel through journal | S6 S7 | worker | |
-| T5 inventory HTTP (stock, movements, adjustments) | S3 S4 S10 | worker | |
-| T6 retire /orders + compat helpers | S9 | worker (with T5) | |
+| T4 sale charge/bot/cancel through journal | S6 S7 | worker | 0309d20, 242ca54 (merge 1e2d5ac) |
+| T5 inventory HTTP (stock, movements, adjustments) | S3 S4 S10 | worker | 1fa5617, 5b96df8, e183145, 0658af5, 6f2a1ad (merge b869bf9) |
+| T6 retire /orders + compat helpers | S9 | worker (with T5) | 78aeea6 |
 | T7 frontend handoff docs | S11 | inline | |
 | T8 runtime proof on dev DB | S12 | inline | |
 
@@ -39,3 +39,4 @@ Human answers relayed by FE session 01a1a538 (2026-11-04, Log L1–L4). Stock st
 - L4 (BE decisions, user asleep; flag in handoff): invariant `quantity >= sum(lots)` with untracked portion; expired = date before today in business tz; adjustment input is a signed `delta` + CAS; delete-lot-with-stock 409; movements survive deletes.
 - L5 Stock-writer inventory (explore, 2026-11-04): W1–W14; gaps: lots never decremented by sales, absolute sets without CAS, `/orders` bypass, lot update/delete not tenant-filtered (Engram `odd/inventory-journal-o1/writers`).
 - L6 (parent): T1/T2 done (42c16a6, fa8a655, 54aa532, ce99df7); migration `20261104020000_inventory_journal_storage` applied to dev DB via migrate deploy (migrate dev wants reset due to pre-existing checksum drift on `20260929000200_human_decisions_expiration_persistence`). T3/T4/T5+T6 run in parallel worktrees `.tmp/ij-t3|t4|t5` on branches `feat/inventory-journal-o1-t3|t4|t5`, merged back here by the parent. O2 paper doc 5d21cd2. Slice boundaries = one commit per task unit (T2 split in three).
+- L7 (parent): T4 contract change measured by worker: `STOCK_INSUFFICIENT_AT_CONFIRM` was 500 (POS `{"statusCode":500,"message":"Internal server error"}`, bot `CHECKOUT_CREATE_FAILED`), now 409 `{"statusCode":409,"error":"STOCK_INSUFFICIENT_AT_CONFIRM"}`. Expired-lot stock is no longer sellable at charge. Low-stock crossing logic duplicated in `src/sales/sale-stock.service.ts` (flagLowStock/rearmAlerts) vs `PrismaProductRepository` — consolidate after T3. T3 also asked to make `checkStockAvailability` exclude expired lots.
