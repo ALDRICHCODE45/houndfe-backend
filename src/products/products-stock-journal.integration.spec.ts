@@ -16,6 +16,9 @@ import {
   disconnectIntegrationPrisma,
   integrationPrisma,
 } from '../../test/integration/reset-db';
+import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
+import { PrismaStockAlertStateRepository } from '../stock-alerts/infrastructure/prisma-stock-alert-state.repository';
+import { LowStockCrossing } from '../stock-alerts/infrastructure/low-stock-crossing.service';
 import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
 import { ProductStockJournal } from './infrastructure/product-stock-journal';
 import { ProductsService } from './products.service';
@@ -62,9 +65,20 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
     unused('FilesService') as never,
     tenantPrisma,
     unused('SatCatalogService') as never,
-    new ProductStockJournal(writer, tenantPrisma, prismaService, cls, {
-      get: (_key: string, fallback: string) => fallback,
-    } as unknown as ConfigService),
+    new ProductStockJournal(
+      writer,
+      tenantPrisma,
+      prismaService,
+      cls,
+      new LowStockCrossing(
+        tenantPrisma,
+        new OutboxWriterService(),
+        new PrismaStockAlertStateRepository(),
+      ),
+      {
+        get: (_key: string, fallback: string) => fallback,
+      } as unknown as ConfigService,
+    ),
   );
   const as = <T>(tenantId: string, work: () => Promise<T>) =>
     als.run(
@@ -104,6 +118,12 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
     });
 
   const cleanup = async () => {
+    await db().outboxEvent.deleteMany({
+      where: { tenantId: { in: [TENANT, OTHER_TENANT] } },
+    });
+    await db().stockAlertState.deleteMany({
+      where: { tenantId: { in: [TENANT, OTHER_TENANT] } },
+    });
     await db().stockMovement.deleteMany({
       where: { tenantId: { in: [TENANT, OTHER_TENANT] } },
     });
@@ -376,6 +396,79 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
       expect(rows.map((r) => [r.type, r.removalCause, r.delta])).toEqual([
         ['REMOVAL', 'FIRST_VARIANT_ZEROING', -6],
       ]);
+    });
+  });
+
+  describe('L8 — low-stock edge on product-side writers', () => {
+    const lowStockRows = () =>
+      db().outboxEvent.findMany({
+        where: { tenantId: TENANT, eventType: 'stock.low.detected' },
+      });
+
+    it('INITIAL stock above min writes no alert and re-arms an alerted product', async () => {
+      const product = await seedProduct({
+        useLotsAndExpirations: true,
+        quantity: 3,
+        minQuantity: 5,
+      });
+      await db().stockAlertState.create({
+        data: {
+          tenantId: TENANT,
+          productId: product.id,
+          variantKey: '__PRODUCT__',
+          alerted: true,
+          alertEpoch: 1,
+        },
+      });
+
+      await asTenant(() =>
+        service.addLot(product.id, {
+          lotNumber: 'N1',
+          quantity: 5, // 3 -> 8, strictly above min 5
+          expirationDate: '2027-03-01',
+        }),
+      );
+
+      expect(await lowStockRows()).toHaveLength(0);
+      const state = await db().stockAlertState.findFirstOrThrow({
+        where: { tenantId: TENANT, productId: product.id },
+      });
+      expect(state.alerted).toBe(false);
+    });
+
+    it('REMOVAL of a variant that held stock above min flags that variant once', async () => {
+      const product = await seedProduct({ hasVariants: true });
+      const variant = await seedVariant(product.id, 'M', 7);
+      await db().variant.update({
+        where: { id: variant.id },
+        data: { minQuantity: 2 },
+      });
+
+      await asTenant(() => service.removeVariant(product.id, variant.id));
+
+      const rows = await lowStockRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        aggregateId: `${product.id}:${variant.id}`,
+        payload: expect.objectContaining({
+          variantId: variant.id,
+          newQuantity: 0,
+          minQuantity: 2,
+        }) as unknown,
+      });
+    });
+
+    it('REMOVAL of a variant already at or below its min writes no alert', async () => {
+      const product = await seedProduct({ hasVariants: true });
+      const variant = await seedVariant(product.id, 'M', 2);
+      await db().variant.update({
+        where: { id: variant.id },
+        data: { minQuantity: 2 },
+      });
+
+      await asTenant(() => service.removeVariant(product.id, variant.id));
+
+      expect(await lowStockRows()).toHaveLength(0);
     });
   });
 

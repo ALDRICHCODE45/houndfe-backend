@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import { LowStockCrossing } from '../../stock-alerts/infrastructure/low-stock-crossing.service';
 import {
   InsufficientStockError,
   StockBucketNotFoundError,
@@ -73,6 +74,7 @@ export class InventoryCommands {
     private readonly cls: ClsService<TenantClsStore>,
     private readonly writer: StockJournalWriter,
     private readonly stock: InventoryStockReader,
+    private readonly crossing: LowStockCrossing,
   ) {}
 
   async adjust(
@@ -173,6 +175,7 @@ export class InventoryCommands {
         },
         now,
       );
+      await this.crossing.record(movements);
       const stored = await db.stockMovement.findFirstOrThrow({
         where: { tenantId, id: movements[0].id },
       });

@@ -12,6 +12,9 @@ import { ClsService } from 'nestjs-cls';
 import type { PrismaService } from '../../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
+import { PrismaStockAlertStateRepository } from '../../stock-alerts/infrastructure/prisma-stock-alert-state.repository';
+import { LowStockCrossing } from '../../stock-alerts/infrastructure/low-stock-crossing.service';
 import { normalizeTestDatabaseUrl } from '../../../test/integration/setup/test-database-url';
 import { StockJournalWriter } from '../infrastructure/stock-journal.writer';
 import { InventoryCommands } from './inventory-commands';
@@ -33,6 +36,10 @@ describeDb('inventory HTTP commands and queries (PostgreSQL)', () => {
     db = new PrismaClient();
   });
   afterAll(async () => {
+    await db.outboxEvent.deleteMany({ where: { tenantId: { in: tenants } } });
+    await db.stockAlertState.deleteMany({
+      where: { tenantId: { in: tenants } },
+    });
     await db.product.deleteMany({ where: { tenantId: { in: tenants } } });
     await db.tenant.deleteMany({ where: { id: { in: tenants } } });
     await db.user.deleteMany({ where: { id: { in: users } } });
@@ -91,7 +98,18 @@ describeDb('inventory HTTP commands and queries (PostgreSQL)', () => {
     } as unknown as ConfigService;
     const writer = new StockJournalWriter(tenantDb, config);
     const reader = new InventoryStockReader(tenantDb, config);
-    const commands = new InventoryCommands(tenantDb, cls, writer, reader);
+    const crossing = new LowStockCrossing(
+      tenantDb,
+      new OutboxWriterService(),
+      new PrismaStockAlertStateRepository(),
+    );
+    const commands = new InventoryCommands(
+      tenantDb,
+      cls,
+      writer,
+      reader,
+      crossing,
+    );
     const queries = new InventoryQueries(
       tenantDb,
       cls,
@@ -185,6 +203,88 @@ describeDb('inventory HTTP commands and queries (PostgreSQL)', () => {
     });
     expect([stored.quantity, stored.stockVersion]).toEqual([16, 1]);
     expect(await counts(f.tenantId)).toEqual({ movements: 1, receipts: 1 });
+  });
+
+  it('flags one low-stock outbox row when an adjustment crosses minQuantity and re-arms above it', async () => {
+    const f = await fixture();
+    const plain = await db.product.create({
+      data: {
+        tenantId: f.tenantId,
+        name: 'Arroz',
+        quantity: 20,
+        minQuantity: 10,
+      },
+    });
+    let version = 0;
+    const adjust = async (key: string, delta: number) => {
+      await f.run(() =>
+        f.commands.adjust(key, body({ productId: plain.id }, version, delta)),
+      );
+      version += 1;
+    };
+    const alerts = () =>
+      db.outboxEvent.findMany({
+        where: { tenantId: f.tenantId, eventType: 'stock.low.detected' },
+        orderBy: { createdAt: 'asc' },
+      });
+    const alerted = async () =>
+      (
+        await db.stockAlertState.findFirstOrThrow({
+          where: { tenantId: f.tenantId, productId: plain.id },
+        })
+      ).alerted;
+
+    await adjust('k1', -4); // 16: still above min
+    expect(await alerts()).toHaveLength(0);
+
+    await adjust('k2', -6); // 10: lands on min => crossing
+    const [first] = await alerts();
+    expect(first).toMatchObject({
+      aggregateId: `${plain.id}:__PRODUCT__`,
+      payload: expect.objectContaining({
+        productId: plain.id,
+        variantId: null,
+        newQuantity: 10,
+        minQuantity: 10,
+        alertEpoch: 1,
+      }) as unknown,
+    });
+    expect(await alerted()).toBe(true);
+
+    await adjust('k3', -1); // 9: already alerted => no second row
+    expect(await alerts()).toHaveLength(1);
+
+    await adjust('k4', 1); // back to min: equality does not re-arm
+    expect(await alerted()).toBe(true);
+
+    await adjust('k5', 5); // 15: strictly above min => re-armed
+    expect(await alerted()).toBe(false);
+
+    await adjust('k6', -6); // 9: second genuine crossing
+    const second = await alerts();
+    expect(second).toHaveLength(2);
+    expect(second[1].payload).toMatchObject({
+      newQuantity: 9,
+      alertEpoch: 2,
+    });
+  });
+
+  it('never alerts for a lot-tracked product when an adjustment drops it below min', async () => {
+    const f = await fixture();
+    await db.product.update({
+      where: { id: f.product.id },
+      data: { minQuantity: 18 },
+    });
+
+    await f.run(() =>
+      f.commands.adjust('k-lots', body({ productId: f.product.id }, 0, -5)),
+    );
+
+    expect(
+      await db.outboxEvent.count({
+        where: { tenantId: f.tenantId, eventType: 'stock.low.detected' },
+      }),
+    ).toBe(0);
   });
 
   it('replays the same key and body with the stored response and writes once', async () => {

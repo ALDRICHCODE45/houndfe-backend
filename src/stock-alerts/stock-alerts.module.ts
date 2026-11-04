@@ -23,9 +23,11 @@ import { PrismaStockAlertStateRepository } from './infrastructure/prisma-stock-a
 import { STOCK_ALERT_STATE_REPOSITORY } from './domain/stock-alert-state.repository';
 import { USER_EMAIL_LOOKUP } from './domain/user-email-lookup.repository';
 import { PrismaUserEmailLookupRepository } from './infrastructure/prisma-user-email-lookup.repository';
+import { LowStockCrossing } from './infrastructure/low-stock-crossing.service';
+import { OutboxModule } from '../shared/outbox/outbox.module';
 
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, OutboxModule],
   controllers: [],
   providers: [
     {
@@ -36,8 +38,9 @@ import { PrismaUserEmailLookupRepository } from './infrastructure/prisma-user-em
       provide: USER_EMAIL_LOOKUP,
       useClass: PrismaUserEmailLookupRepository,
     },
+    LowStockCrossing,
   ],
-  exports: [STOCK_ALERT_STATE_REPOSITORY, USER_EMAIL_LOOKUP],
+  exports: [STOCK_ALERT_STATE_REPOSITORY, USER_EMAIL_LOOKUP, LowStockCrossing],
 })
 export class StockAlertsModule {
   static readonly repository: symbol = STOCK_ALERT_STATE_REPOSITORY;

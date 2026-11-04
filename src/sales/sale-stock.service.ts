@@ -17,6 +17,7 @@ import {
   STOCK_ALERT_STATE_REPOSITORY,
   type IStockAlertStateRepository,
 } from '../stock-alerts/domain/stock-alert-state.repository';
+import { LowStockCrossing } from '../stock-alerts/infrastructure/low-stock-crossing.service';
 
 /** Journal actor name for bot-originated sale movements. */
 export const BOT_STOCK_ACTOR_NAME = 'Bot';
@@ -32,28 +33,24 @@ export interface SaleStockActor {
 
 export const STOCK_INSUFFICIENT_AT_CONFIRM = 'STOCK_INSUFFICIENT_AT_CONFIRM';
 
-interface BalanceChange {
-  productId: string;
-  variantId: string | null;
-  before: number;
-  after: number;
-}
-
 /**
  * Sale-side facade over the O1 stock journal (T4): FEFO charge on confirm,
- * exact reversal on cancel, plus the low-stock alert edge that used to live in
- * `PrismaProductRepository.decrementStockForCharge` / `incrementStockForRestock`.
- * Must run inside the sale's ambient `TenantPrismaService.runInTransaction`.
+ * exact reversal on cancel, each followed by the shared low-stock edge
+ * (`LowStockCrossing`). Must run inside the sale's ambient `TenantPrismaService.runInTransaction`.
  */
 @Injectable()
 export class SaleStockService {
+  private readonly crossing: LowStockCrossing;
+
   constructor(
     private readonly journal: StockJournalWriter,
     private readonly tenantPrisma: TenantPrismaService,
-    private readonly outbox: OutboxWriterService,
+    outbox: OutboxWriterService,
     @Inject(STOCK_ALERT_STATE_REPOSITORY)
-    private readonly alertState: IStockAlertStateRepository,
-  ) {}
+    alertState: IStockAlertStateRepository,
+  ) {
+    this.crossing = new LowStockCrossing(tenantPrisma, outbox, alertState);
+  }
 
   /**
    * Charges the sale lines through the journal. Insufficient (or missing)
@@ -85,7 +82,7 @@ export class SaleStockService {
       }
       throw error;
     }
-    await this.flagLowStock(movements);
+    await this.crossing.record(movements);
     return movements;
   }
 
@@ -104,7 +101,7 @@ export class SaleStockService {
       input.now,
     );
     if (outcome.status === 'REVERSED')
-      await this.rearmAlerts(outcome.movements);
+      await this.crossing.record(outcome.movements);
     return outcome;
   }
 
@@ -116,134 +113,5 @@ export class SaleStockService {
       .getClient()
       .user.findUnique({ where: { id: actor.userId }, select: { name: true } });
     return { id: actor.userId, displayName: user?.name ?? UNKNOWN_USER_NAME };
-  }
-
-  /**
-   * One entry per product (non-variant lines) or variant: the balance before
-   * and after the call, read off the journal rows.
-   */
-  private balanceChanges(movements: AppliedStockMovement[]): BalanceChange[] {
-    const byKey = new Map<string, BalanceChange>();
-    for (const m of movements) {
-      const variantId = m.variantId;
-      const after = variantId ? m.balanceAfter : m.productBalanceAfter;
-      const key = `${m.productId}:${variantId ?? ''}`;
-      const current = byKey.get(key);
-      byKey.set(key, {
-        productId: m.productId,
-        variantId,
-        before: current ? current.before : after - m.delta,
-        after,
-      });
-    }
-    return [...byKey.values()];
-  }
-
-  private async alertThresholds(changes: BalanceChange[]) {
-    const db = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
-    const [products, variants] = await Promise.all([
-      db.product.findMany({
-        where: { id: { in: changes.map((c) => c.productId) }, tenantId },
-        select: { id: true, minQuantity: true, useLotsAndExpirations: true },
-      }),
-      db.variant.findMany({
-        where: {
-          id: {
-            in: changes.flatMap((c) => (c.variantId ? [c.variantId] : [])),
-          },
-          tenantId,
-        },
-        select: { id: true, minQuantity: true },
-      }),
-    ]);
-    return {
-      product: new Map(products.map((p) => [p.id, p])),
-      variant: new Map(variants.map((v) => [v.id, v])),
-    };
-  }
-
-  /**
-   * Low-stock edge (same gate as `PrismaProductRepository`): crossed from
-   * above `minQuantity` to at/below it, product-level lines only when the
-   * product does not use lots. The flip winner writes the durable outbox row.
-   */
-  private async flagLowStock(movements: AppliedStockMovement[]): Promise<void> {
-    const changes = this.balanceChanges(movements);
-    if (changes.length === 0) return;
-    const { product, variant } = await this.alertThresholds(changes);
-    const db = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
-
-    for (const change of changes) {
-      const minQuantity = change.variantId
-        ? variant.get(change.variantId)?.minQuantity
-        : product.get(change.productId)?.minQuantity;
-      const usesLots =
-        !change.variantId &&
-        (product.get(change.productId)?.useLotsAndExpirations ?? false);
-      if (
-        minQuantity === undefined ||
-        usesLots ||
-        !(change.before > minQuantity && change.after <= minQuantity)
-      ) {
-        continue;
-      }
-      const alertEpoch = await this.alertState.seedAndFlip({
-        tx: db,
-        tenantId,
-        productId: change.productId,
-        variantId: change.variantId,
-      });
-      if (alertEpoch === null) continue; // a concurrent tx owns this crossing
-      const variantKey = change.variantId ?? '__PRODUCT__';
-      // SAFETY: the tenant client (or its tx surrogate) is structurally a
-      // Prisma.TransactionClient; same cast as PrismaProductRepository.
-      await this.outbox.publish(
-        db as unknown as Parameters<OutboxWriterService['publish']>[0],
-        tenantId,
-        'StockAlert',
-        `${change.productId}:${variantKey}`,
-        'stock.low.detected',
-        {
-          tenantId,
-          productId: change.productId,
-          variantId: change.variantId,
-          variantKey,
-          alertEpoch,
-          newQuantity: change.after,
-          minQuantity,
-          // Enriched by the dispatcher right before send (keeps the hot path cheap).
-          productName: '',
-          variantDescription: null,
-          sku: null,
-          category: null,
-          deepLink: '',
-          occurredAt: new Date().toISOString(),
-        },
-      );
-    }
-  }
-
-  /** Restock re-arm: strictly above `minQuantity` again (no lot gate, as before). */
-  private async rearmAlerts(movements: AppliedStockMovement[]): Promise<void> {
-    const changes = this.balanceChanges(movements);
-    if (changes.length === 0) return;
-    const { product, variant } = await this.alertThresholds(changes);
-    const db = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
-
-    for (const change of changes) {
-      const minQuantity = change.variantId
-        ? variant.get(change.variantId)?.minQuantity
-        : product.get(change.productId)?.minQuantity;
-      if (minQuantity === undefined || change.after <= minQuantity) continue;
-      await this.alertState.rearm({
-        tx: db,
-        tenantId,
-        productId: change.productId,
-        variantId: change.variantId,
-      });
-    }
   }
 }

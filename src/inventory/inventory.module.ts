@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthModule } from '../auth/auth.module';
+import { StockAlertsModule } from '../stock-alerts/stock-alerts.module';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { InventoryCommands } from './http/inventory-commands';
 import { InventoryCursor } from './http/inventory-cursor';
@@ -11,7 +12,7 @@ import { StockJournalWriter } from './infrastructure/stock-journal.writer';
 
 /** Inventory journal: single stock writer plus the stock/movements/adjustments HTTP surface. */
 @Module({
-  imports: [AuthModule, ConfigModule],
+  imports: [AuthModule, ConfigModule, StockAlertsModule],
   controllers: [InventoryController],
   providers: [
     StockJournalWriter,

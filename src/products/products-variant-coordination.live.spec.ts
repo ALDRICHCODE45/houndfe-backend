@@ -188,6 +188,8 @@ describe('live Variant membership and stock coordination', () => {
           tenant,
           { user: { findUnique: () => Promise.resolve(null) } } as never,
           cls,
+          // Alert edge is out of scope for the lock-coordination scenarios.
+          { record: () => Promise.resolve() } as never,
           config,
         ),
       );

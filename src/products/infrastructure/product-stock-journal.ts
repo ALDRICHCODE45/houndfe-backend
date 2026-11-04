@@ -15,6 +15,7 @@ import type {
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import { LowStockCrossing } from '../../stock-alerts/infrastructure/low-stock-crossing.service';
 
 const SYSTEM_ACTOR: StockActor = { id: null, displayName: 'Sistema' };
 
@@ -33,6 +34,7 @@ export class ProductStockJournal {
     private readonly tenantPrisma: TenantPrismaService,
     private readonly prisma: PrismaService,
     private readonly cls: ClsService<TenantClsStore>,
+    private readonly crossing: LowStockCrossing,
     config: ConfigService,
   ) {
     this.businessTimezone = config.get<string>(
@@ -70,12 +72,13 @@ export class ProductStockJournal {
   ): Promise<void> {
     const initial = changes.filter((change) => change.delta > 0);
     if (initial.length === 0) return;
-    await this.writer.apply(initial, {
+    const movements = await this.writer.apply(initial, {
       type: 'INITIAL',
       groupType: 'PRODUCT',
       groupId: productId,
       actor: await this.actor(),
     });
+    await this.crossing.record(movements);
   }
 
   /**
@@ -146,13 +149,14 @@ export class ProductStockJournal {
   ): Promise<void> {
     const removable = changes.filter((change) => change.delta < 0);
     if (removable.length === 0) return;
-    await this.writer.apply(removable, {
+    const movements = await this.writer.apply(removable, {
       type: 'REMOVAL',
       groupType: 'PRODUCT',
       groupId: productId,
       removalCause,
       actor: await this.actor(),
     });
+    await this.crossing.record(movements);
   }
 
   /** Product row `FOR UPDATE` first (journal lock order), then its stocked lots/variants. */
