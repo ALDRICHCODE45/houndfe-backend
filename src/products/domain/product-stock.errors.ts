@@ -17,12 +17,16 @@ export class StockQuantityReadOnlyError extends InvalidArgumentError {
   }
 }
 
-/** Rejects a PATCH body that carries a `quantity` key (even `null`/`0`). */
+/**
+ * Rejects a PATCH body that carries `quantity` (even `null`/`0`). Checks the
+ * value, not key presence: DTO instances from the ValidationPipe declare the
+ * optional field as an own `undefined` property, and JSON cannot send undefined.
+ */
 export function assertNoDirectQuantityEdit(
-  dto: object | null | undefined,
+  dto: { quantity?: unknown } | null | undefined,
   resource: 'product' | 'variant' | 'lot',
 ): void {
-  if (dto && Object.prototype.hasOwnProperty.call(dto, 'quantity')) {
+  if (dto && dto.quantity !== undefined) {
     throw new StockQuantityReadOnlyError(resource);
   }
 }
