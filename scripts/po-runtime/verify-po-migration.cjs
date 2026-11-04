@@ -17,7 +17,38 @@ const {
 const {
   validateTarget: validateManifest,
 } = require('../supplier-runtime/host.cjs');
+// FORWARD is the O3b draft migration; O3C are applied afterwards, over seeded O3b data.
 const FORWARD = '20261104010000_procurement_purchase_order_drafts';
+const O3C = [
+  '20261104010100_procurement_po_confirm_cancel_enums',
+  '20261104010200_procurement_po_confirm_cancel_storage',
+];
+const ORDERS = 'procurement_purchase_orders';
+const LINES = 'procurement_purchase_order_lines';
+const AUDITS = 'procurement_purchase_order_audits';
+const RECEIPTS = 'procurement_purchase_order_receipts';
+const PO_TABLES = [ORDERS, LINES, AUDITS, RECEIPTS];
+// What O3c may change, exactly: anything else about any pre-existing table is a defect.
+const NEW_COLUMNS = {
+  [ORDERS]: [
+    'confirmedAt',
+    'confirmedByDisplayName',
+    'cancelledAt',
+    'cancelledByDisplayName',
+    'lineSubtotalsSnapshot',
+  ],
+};
+const NEW_CHECKS = {
+  [ORDERS]: ['po_frozen_subtotals_check', 'po_status_transition_check'],
+};
+const WIDENED_CHECKS = {
+  [AUDITS]: ['po_audit_snapshots_check'],
+  [RECEIPTS]: ['po_receipt_http_check', 'po_receipt_namespace_check'],
+};
+const NEW_ENUM_LABELS = {
+  ProcurementPurchaseOrderStatus: ['CONFIRMED', 'CANCELLED'],
+  ProcurementPurchaseOrderOperation: ['CONFIRM', 'CANCEL'],
+};
 const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const check = (condition) => assert(condition, 'Safety precondition rejected');
 function redact(output, secrets = []) {
@@ -36,14 +67,20 @@ function splitMigrations(files) {
         file,
       ),
     );
-  const forward = `prisma/migrations/${FORWARD}/migration.sql`;
-  check(files.includes(forward));
-  check(
-    files
-      .filter((f) => f.endsWith('/migration.sql'))
-      .every((f) => f <= forward),
-  );
-  return { baseline: files.filter((f) => f !== forward), forward };
+  const path = (name) => `prisma/migrations/${name}/migration.sql`;
+  const forward = path(FORWARD);
+  const o3c = O3C.map(path);
+  check(files.includes(forward) && o3c.every((f) => files.includes(f)));
+  check(o3c[0] < o3c[1] && forward < o3c[0]);
+  // Nothing may sort after the O3c migrations, and nothing unknown between them.
+  const migrations = files.filter((f) => f.endsWith('/migration.sql'));
+  check(migrations.every((f) => f <= o3c[1]));
+  check(migrations.filter((f) => f > forward).every((f) => o3c.includes(f)));
+  return {
+    baseline: files.filter((f) => f !== forward && !o3c.includes(f)),
+    forward,
+    o3c,
+  };
 }
 function verifyAdditive(before, after) {
   // These are catalog/data projections of EVERY pre-existing public table.
@@ -228,6 +265,476 @@ async function directProof(db, prisma, pin, observe = () => {}) {
     lineCascade: true,
     evidencePreserved: true,
     tenantRestrict: true,
+  };
+}
+// Catalog + data projection of public tables. `hidden` lists columns O3c added: they are
+// stripped from the row hash so only the pre-existing part of each row is compared.
+async function captureTables(db, tables, hidden = {}) {
+  const tableState = {};
+  for (const table of tables) {
+    check(/^[a-zA-Z0-9_]+$/.test(table));
+    // PostgreSQL quotes the catalog-derived identifier with %I; values stay bound.
+    const statement = (
+      await db.query('SELECT format($1::text, $2::text) AS sql', [
+        'SELECT (to_jsonb(t) - $1::text[])::text AS record FROM %I t ORDER BY 1',
+        table,
+      ])
+    ).rows[0].sql;
+    const data = (await db.query(statement, [hidden[table] ?? []])).rows;
+    const columns = (
+      await db.query(
+        "SELECT column_name,data_type,udt_name,is_nullable,column_default FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position",
+        [table],
+      )
+    ).rows;
+    const constraints = (
+      await db.query(
+        `SELECT conname,contype,convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid=$1::regclass ORDER BY conname`,
+        [table],
+      )
+    ).rows;
+    const indexes = (
+      await db.query(
+        "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='public' AND tablename=$1 ORDER BY indexname",
+        [table],
+      )
+    ).rows;
+    tableState[table] = {
+      count: data.length,
+      dataHash: sha(JSON.stringify(data)),
+      columns,
+      constraints,
+      indexes,
+    };
+  }
+  const enums = {};
+  for (const row of (
+    await db.query(
+      `SELECT t.typname AS name, array_agg(e.enumlabel ORDER BY e.enumsortorder) AS labels
+       FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid
+       JOIN pg_namespace n ON n.oid = t.typnamespace AND n.nspname = 'public'
+       GROUP BY t.typname ORDER BY t.typname`,
+    )
+  ).rows)
+    enums[row.name] = row.labels;
+  return { tables: tableState, enums };
+}
+// O3c delta rule over two captureTables() results (same table list, hidden columns applied).
+function verifyO3cDelta(before, after) {
+  assert.deepEqual(Object.keys(after.tables), Object.keys(before.tables));
+  for (const [table, old] of Object.entries(before.tables)) {
+    const next = after.tables[table];
+    assert.equal(next.count, old.count);
+    assert.equal(next.dataHash, old.dataHash);
+    assert.deepEqual(next.indexes, old.indexes);
+    const added = NEW_COLUMNS[table] ?? [];
+    // New columns are appended, nullable, with no default, so old rows stay NULL there.
+    assert.deepEqual(next.columns.slice(0, old.columns.length), old.columns);
+    assert.deepEqual(
+      next.columns.slice(old.columns.length).map((c) => c.column_name),
+      added,
+    );
+    for (const column of next.columns.slice(old.columns.length)) {
+      assert.equal(column.is_nullable, 'YES');
+      assert.equal(column.column_default, null);
+    }
+    const byName = (list) => new Map(list.map((c) => [c.conname, c]));
+    const was = byName(old.constraints);
+    const now = byName(next.constraints);
+    const widened = WIDENED_CHECKS[table] ?? [];
+    const created = NEW_CHECKS[table] ?? [];
+    assert.deepEqual(
+      [...now.keys()].sort(),
+      [...was.keys(), ...created].sort(),
+    );
+    for (const [name, constraint] of now) {
+      assert.equal(constraint.convalidated, true, name);
+      if (created.includes(name)) continue;
+      if (widened.includes(name))
+        assert.notDeepEqual(constraint, was.get(name));
+      else assert.deepEqual(constraint, was.get(name), name);
+    }
+    for (const name of widened) {
+      assert.equal(was.get(name).contype, 'c');
+      assert.equal(now.get(name).contype, 'c');
+    }
+  }
+  assert.deepEqual(
+    Object.keys(after.enums).sort(),
+    Object.keys(before.enums).sort(),
+  );
+  for (const [name, labels] of Object.entries(before.enums))
+    assert.deepEqual(after.enums[name], [
+      ...labels,
+      ...(NEW_ENUM_LABELS[name] ?? []),
+    ]);
+}
+const NAMES = {
+  tenant: 'Mascotas y Alimentos El Roble',
+  active: 'Distribuidora Veterinaria del Norte',
+  archived: 'Alimentos Balanceados del Bajío (archivado)',
+  product: 'Croquetas Adulto 15 kg',
+  manager: 'María González',
+  canceller: 'Jorge Martínez',
+};
+// Realistic O3b-era rows (DRAFT only, including discarded-order evidence) that O3c must
+// carry forward untouched. Written under the O3b schema, so no O3c column is mentioned.
+async function seedO3bDrafts(db, pin) {
+  await pin();
+  const id = () => crypto.randomUUID();
+  const ids = {
+    tenant: id(),
+    active: id(),
+    archived: id(),
+    product: id(),
+    orderOne: id(),
+    orderTwo: id(),
+    orderThree: id(),
+    discarded: id(),
+  };
+  const actor = id();
+  const hash = (label) => sha(label);
+  await db.query(
+    'INSERT INTO tenants (id,name,slug,"updatedAt") VALUES ($1,$2,$1,now())',
+    [ids.tenant, NAMES.tenant],
+  );
+  for (const [supplier, name, status] of [
+    [ids.active, NAMES.active, 'ACTIVE'],
+    [ids.archived, NAMES.archived, 'ARCHIVED'],
+  ])
+    await db.query(
+      'INSERT INTO procurement_suppliers (id,"tenantId","displayName",status,"updatedAt") VALUES ($1,$2,$3,$4,now())',
+      [supplier, ids.tenant, name, status],
+    );
+  await db.query(
+    'INSERT INTO products (id,"tenantId",name,"updatedAt") VALUES ($1,$2,$3,now())',
+    [ids.product, ids.tenant, NAMES.product],
+  );
+  const snapshot = (supplier, name, status) =>
+    JSON.stringify({ id: supplier, displayName: name, status });
+  const order = `INSERT INTO procurement_purchase_orders
+    (id,"tenantId","supplierId",version,note,"locationDetail","locationTenantName","supplierDisplaySnapshot","updatedAt")
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,now())`;
+  for (const values of [
+    [
+      ids.orderOne,
+      ids.tenant,
+      ids.active,
+      2,
+      'Reposición mensual de croquetas',
+      'Bodega principal, andén 2',
+      NAMES.tenant,
+      snapshot(ids.active, NAMES.active, 'ACTIVE'),
+    ],
+    [ids.orderTwo, ids.tenant, null, 1, null, null, NAMES.tenant, null],
+    [
+      ids.orderThree,
+      ids.tenant,
+      ids.archived,
+      1,
+      'Pedido guardado antes de archivar al proveedor',
+      null,
+      NAMES.tenant,
+      snapshot(ids.archived, NAMES.archived, 'ARCHIVED'),
+    ],
+  ])
+    await db.query(order, values);
+  const line = `INSERT INTO procurement_purchase_order_lines
+    ("tenantId","orderId","lineId",position,"productId","orderedQuantity","informedUnitCostPresent","costAmount",currency,"costUnit","taxBasis","productName","unitSnapshot")
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`;
+  for (const values of [
+    [
+      ids.tenant,
+      ids.orderOne,
+      id(),
+      0,
+      ids.product,
+      '12',
+      true,
+      '780.5',
+      'MXN',
+      'BOLSA',
+      'EXCLUDES_TAX',
+      NAMES.product,
+      'BOLSA',
+    ],
+    [
+      ids.tenant,
+      ids.orderOne,
+      id(),
+      1,
+      null,
+      null,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ],
+    [
+      ids.tenant,
+      ids.orderThree,
+      id(),
+      0,
+      ids.product,
+      '3.5',
+      true,
+      '31.2',
+      'MXN',
+      'KILOGRAMO',
+      'INCLUDES_TAX',
+      NAMES.product,
+      'KILOGRAMO',
+    ],
+  ])
+    await db.query(line, values);
+  const audit = `INSERT INTO procurement_purchase_order_audits
+    (id,"tenantId","orderId","actorId",operation,"orderVersion","beforeSnapshot","afterSnapshot")
+    VALUES ($1,$2,$3,$4,$5::"ProcurementPurchaseOrderOperation",$6,$7::jsonb,$8::jsonb)`;
+  const body = (orderId, note) =>
+    JSON.stringify({ id: orderId, status: 'DRAFT', note });
+  for (const [orderId, operation, version, before, after] of [
+    [ids.orderOne, 'CREATE', 1, null, body(ids.orderOne, null)],
+    [
+      ids.orderOne,
+      'REPLACE',
+      2,
+      body(ids.orderOne, null),
+      body(ids.orderOne, 'Reposición mensual de croquetas'),
+    ],
+    [
+      ids.discarded,
+      'CREATE',
+      1,
+      null,
+      body(ids.discarded, 'Pedido de prueba descartado'),
+    ],
+    [
+      ids.discarded,
+      'DELETE',
+      2,
+      body(ids.discarded, 'Pedido de prueba descartado'),
+      null,
+    ],
+  ])
+    await db.query(audit, [
+      id(),
+      ids.tenant,
+      orderId,
+      actor,
+      operation,
+      version,
+      before,
+      after,
+    ]);
+  const receipt = `INSERT INTO procurement_purchase_order_receipts
+    ("tenantId","actorId",operation,target,"idempotencyKey","orderId","requestHash","statusCode","responseBody")
+    VALUES ($1,$2,$3::"ProcurementPurchaseOrderOperation",$4,$5,$6,$7,$8,$9::jsonb)`;
+  for (const [operation, target, orderId, status, response] of [
+    ['CREATE', 'collection', ids.orderOne, 201, body(ids.orderOne, null)],
+    [
+      'REPLACE',
+      ids.orderOne,
+      ids.orderOne,
+      200,
+      body(ids.orderOne, 'Reposición mensual de croquetas'),
+    ],
+    ['DELETE', ids.discarded, ids.discarded, 204, 'null'],
+  ])
+    await db.query(receipt, [
+      ids.tenant,
+      actor,
+      operation,
+      target,
+      `solicitud-${operation.toLowerCase()}`,
+      orderId,
+      hash(operation),
+      status,
+      response,
+    ]);
+  return { orders: 3, lines: 3, audits: 4, receipts: 3 };
+}
+// Direct SQL against the final schema: widened CHECKs accept CONFIRM/CANCEL evidence and
+// closed-order rows, and every bad combination fails with its own named constraint.
+// PostgreSQL evaluates CHECKs by name, so each rejected row is otherwise valid for the
+// constraints that sort before the one under test.
+async function o3cProof(db, pin) {
+  await pin();
+  const tenant = crypto.randomUUID(),
+    supplier = crypto.randomUUID(),
+    actor = crypto.randomUUID();
+  await db.query(
+    'INSERT INTO tenants (id,name,slug,"updatedAt") VALUES ($1,$2,$1,now())',
+    [tenant, NAMES.tenant],
+  );
+  await db.query(
+    'INSERT INTO procurement_suppliers (id,"tenantId","displayName",status,"updatedAt") VALUES ($1,$2,$3,\'ACTIVE\',now())',
+    [supplier, tenant, NAMES.active],
+  );
+  const at = '2026-11-04T16:30:00.000Z';
+  const array = '[{"lineId":"renglon-1","subtotal":null}]';
+  const orderSql = `INSERT INTO procurement_purchase_orders
+    (id,"tenantId","supplierId",status,"locationTenantName","confirmedAt","confirmedByDisplayName","cancelledAt","cancelledByDisplayName","lineSubtotalsSnapshot","updatedAt")
+    VALUES ($1,$2,$3,$4::"ProcurementPurchaseOrderStatus",$5,$6,$7,$8,$9,$10::jsonb,now())`;
+  // mode: true = both fields of the pair, 'at-only' / 'name-only' = half a pair.
+  const pair = (mode, name) => [
+    mode === true || mode === 'at-only' ? at : null,
+    mode === true || mode === 'name-only' ? name : null,
+  ];
+  const order = (status, confirmed, cancelled, subtotals) => [
+    crypto.randomUUID(),
+    tenant,
+    supplier,
+    status,
+    NAMES.tenant,
+    ...pair(confirmed, NAMES.manager),
+    ...pair(cancelled, NAMES.canceller),
+    subtotals,
+  ];
+  // [status, confirmedAt/By, cancelledAt/By, subtotals]; true = pair set.
+  const accepted = [
+    ['DRAFT', false, false, null],
+    ['CONFIRMED', true, false, '[]'],
+    ['CONFIRMED', true, false, array],
+    ['CANCELLED', false, true, null],
+    ['CANCELLED', false, true, array],
+    ['CANCELLED', true, true, array],
+  ];
+  for (const [status, c, x, subtotals] of accepted)
+    await db.query(orderSql, order(status, c, x, subtotals));
+  const errors = [];
+  const reject = async (sql, values, constraint) =>
+    errors.push(await expectSqlError(db, sql, values, '23514', constraint));
+  const nameOnly = 'name-only';
+  const atOnly = 'at-only';
+  const transition = 'po_status_transition_check';
+  for (const [status, c, x, subtotals] of [
+    ['DRAFT', true, false, null],
+    ['DRAFT', nameOnly, false, null],
+    ['DRAFT', false, true, null],
+    ['DRAFT', false, atOnly, null],
+    ['CONFIRMED', false, false, array],
+    ['CONFIRMED', atOnly, false, array],
+    ['CONFIRMED', nameOnly, false, array],
+    ['CONFIRMED', true, true, array],
+    ['CANCELLED', false, false, null],
+    ['CANCELLED', false, atOnly, null],
+    ['CANCELLED', false, nameOnly, null],
+    ['CANCELLED', atOnly, true, array],
+    ['CANCELLED', nameOnly, true, array],
+  ])
+    await reject(orderSql, order(status, c, x, subtotals), transition);
+  const frozen = 'po_frozen_subtotals_check';
+  for (const [status, c, x, subtotals] of [
+    ['DRAFT', false, false, '[]'],
+    ['CONFIRMED', true, false, null],
+    ['CONFIRMED', true, false, '{}'],
+    ['CONFIRMED', true, false, '"importe"'],
+    ['CANCELLED', false, true, '{}'],
+    ['CANCELLED', true, true, '"importe"'],
+  ])
+    await reject(orderSql, order(status, c, x, subtotals), frozen);
+  const auditSql = `INSERT INTO procurement_purchase_order_audits
+    (id,"tenantId","orderId","actorId",operation,"orderVersion","beforeSnapshot","afterSnapshot")
+    VALUES ($1,$2,$3,$4,$5::"ProcurementPurchaseOrderOperation",$6,$7::jsonb,$8::jsonb)`;
+  const audit = (operation, version, before, after) => [
+    crypto.randomUUID(),
+    tenant,
+    'orden-de-prueba',
+    actor,
+    operation,
+    version,
+    before,
+    after,
+  ];
+  const object = '{"status":"DRAFT"}';
+  for (const [operation, version] of [
+    ['CONFIRM', 2],
+    ['CANCEL', 3],
+  ])
+    await db.query(auditSql, audit(operation, version, object, object));
+  const auditCheck = 'po_audit_snapshots_check';
+  let version = 10;
+  for (const [operation, before, after] of [
+    ['CONFIRM', null, object],
+    ['CONFIRM', object, null],
+    ['CONFIRM', '[]', object],
+    ['CANCEL', object, '"cancelada"'],
+    ['CANCEL', null, null],
+    ['CREATE', object, object],
+    ['REPLACE', null, object],
+    ['DELETE', object, object],
+  ])
+    await reject(
+      auditSql,
+      audit(operation, version++, before, after),
+      auditCheck,
+    );
+  const receiptSql = `INSERT INTO procurement_purchase_order_receipts
+    ("tenantId","actorId",operation,target,"idempotencyKey","orderId","requestHash","statusCode","responseBody")
+    VALUES ($1,$2,$3::"ProcurementPurchaseOrderOperation",$4,$5,$6,$7,$8,$9::jsonb)`;
+  const orderId = 'orden-de-prueba';
+  let key = 0;
+  const receipt = (operation, target, status, response = '{}') => [
+    tenant,
+    actor,
+    operation,
+    target,
+    `solicitud-${key++}`,
+    orderId,
+    'b'.repeat(64),
+    status,
+    response,
+  ];
+  for (const [operation, status] of [
+    ['CONFIRM', 200],
+    ['CANCEL', 200],
+  ])
+    await db.query(receiptSql, receipt(operation, orderId, status));
+  for (const [operation, target, status, response, constraint] of [
+    ['CONFIRM', 'collection', 200, '{}', 'po_receipt_namespace_check'],
+    ['CANCEL', 'otra-orden', 200, '{}', 'po_receipt_namespace_check'],
+    ['CREATE', orderId, 201, '{}', 'po_receipt_namespace_check'],
+    ['CONFIRM', orderId, 201, '{}', 'po_receipt_http_check'],
+    ['CANCEL', orderId, 204, 'null', 'po_receipt_http_check'],
+    ['DELETE', orderId, 200, '{}', 'po_receipt_http_check'],
+    ['CREATE', 'collection', 200, '{}', 'po_receipt_http_check'],
+  ])
+    await reject(
+      receiptSql,
+      receipt(operation, target, status, response),
+      constraint,
+    );
+  const count = async (table) =>
+    (
+      await db.query(
+        `SELECT count(*)::int AS n FROM ${PO_TABLES.find((t) => t === table)} WHERE "tenantId"=$1`,
+        [tenant],
+      )
+    ).rows[0].n;
+  assert.equal(await count(ORDERS), accepted.length);
+  assert.equal(await count(AUDITS), 2);
+  assert.equal(await count(RECEIPTS), 2);
+  const states = (
+    await db.query(
+      `SELECT status::text AS status, count(*)::int AS n FROM ${ORDERS} WHERE "tenantId"=$1 GROUP BY status ORDER BY status`,
+      [tenant],
+    )
+  ).rows;
+  assert.deepEqual(states, [
+    { status: 'CANCELLED', n: 3 },
+    { status: 'CONFIRMED', n: 2 },
+    { status: 'DRAFT', n: 1 },
+  ]);
+  return {
+    accepted: {
+      orders: accepted.length,
+      audits: 2,
+      receipts: 2,
+    },
+    errors,
   };
 }
 async function main() {
@@ -415,7 +922,7 @@ async function main() {
       '--',
       'prisma/migrations',
     ]).split('\n');
-    const { baseline, forward } = splitMigrations(files);
+    const { baseline, forward, o3c } = splitMigrations(files);
     assert.deepEqual(
       fs.readdirSync(path.join(ROOT, 'prisma/migrations')).sort(),
       [
@@ -485,47 +992,8 @@ async function main() {
       'INSERT INTO products (id,"tenantId",name,"updatedAt") VALUES ($1,$2,$1,now())',
       [product, tenant],
     );
-    const snapshot = async () => {
-      const rows = {};
-      for (const table of tables) {
-        check(/^[a-zA-Z0-9_]+$/.test(table));
-        // PostgreSQL quotes the catalog-derived identifier with %I; values stay bound.
-        const statement = (
-          await db.query('SELECT format($1::text, $2::text) AS sql', [
-            'SELECT to_jsonb(t)::text AS record FROM %I t ORDER BY to_jsonb(t)::text',
-            table,
-          ])
-        ).rows[0].sql;
-        const data = (await db.query(statement)).rows;
-        const columns = (
-          await db.query(
-            "SELECT column_name,data_type,is_nullable,column_default FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position",
-            [table],
-          )
-        ).rows;
-        const constraints = (
-          await db.query(
-            `SELECT conname,contype,convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid=$1::regclass ORDER BY conname`,
-            [table],
-          )
-        ).rows;
-        const indexes = (
-          await db.query(
-            "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='public' AND tablename=$1 ORDER BY indexname",
-            [table],
-          )
-        ).rows;
-        rows[table] = {
-          count: data.length,
-          dataHash: sha(JSON.stringify(data)),
-          columns,
-          constraints,
-          indexes,
-        };
-      }
-      return rows;
-    };
-    const before = await snapshot();
+    const snapshot = () => captureTables(db, tables);
+    const before = (await snapshot()).tables;
     save('before.json', before);
     const ledger = async () =>
       (
@@ -537,15 +1005,56 @@ async function main() {
     copy(forward);
     result.state = 'forward';
     await deploy();
-    const after = await snapshot();
+    const after = (await snapshot()).tables;
     save('after.json', after);
     verifyAdditive(before, after);
+    const forwardLedger = await ledger();
+    assert.deepEqual(
+      forwardLedger.filter((r) => r.migration_name !== FORWARD),
+      baselineLedger,
+    );
+    result.preservation = true;
+    // O3c: seed realistic O3b DRAFT rows, apply both O3c migrations over them, and
+    // require the exact additive delta with every pre-existing row unchanged.
+    result.state = 'o3c-seed';
+    result.o3cSeeded = await seedO3bDrafts(db, pin);
+    const o3bTableNames = (
+      await db.query(
+        `SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename <> '_prisma_migrations' ORDER BY tablename`,
+      )
+    ).rows.map((r) => r.tablename);
+    check(PO_TABLES.every((table) => o3bTableNames.includes(table)));
+    const hidden = NEW_COLUMNS;
+    const o3bState = await captureTables(db, o3bTableNames, hidden);
+    save('o3c-before.json', o3bState);
+    for (const file of o3c) copy(file);
+    result.state = 'o3c-forward';
+    await deploy();
+    result.state = 'o3c-preservation';
+    const o3cState = await captureTables(db, o3bTableNames, hidden);
+    save('o3c-after.json', o3cState);
+    verifyO3cDelta(o3bState, o3cState);
+    const survivors = (
+      await db.query(
+        `SELECT count(*)::int AS total,
+           (count(*) FILTER (WHERE status = 'DRAFT'
+             AND "confirmedAt" IS NULL AND "confirmedByDisplayName" IS NULL
+             AND "cancelledAt" IS NULL AND "cancelledByDisplayName" IS NULL
+             AND "lineSubtotalsSnapshot" IS NULL))::int AS untouched
+         FROM ${ORDERS}`,
+      )
+    ).rows[0];
+    assert.deepEqual(survivors, {
+      total: result.o3cSeeded.orders,
+      untouched: result.o3cSeeded.orders,
+    });
+    result.o3cPreservation = true;
     const finalLedger = await ledger();
     save('ledger.json', finalLedger);
     save('hashes.json', hashes);
     assert.deepEqual(
-      finalLedger.filter((r) => r.migration_name !== FORWARD),
-      baselineLedger,
+      finalLedger.filter((r) => !o3c.some((f) => f.includes(r.migration_name))),
+      forwardLedger,
     );
     check(
       finalLedger.length ===
@@ -560,7 +1069,6 @@ async function main() {
             hashes[`prisma/migrations/${r.migration_name}/migration.sql`],
       ),
     );
-    result.preservation = true;
     result.state = 'sql-constraints';
     prisma = new (require('@prisma/client').PrismaClient)({
       datasources: { db: { url } },
@@ -570,6 +1078,8 @@ async function main() {
     );
     await prisma.$disconnect();
     prisma = null;
+    result.state = 'o3c-sql-constraints';
+    result.o3cConstraints = await o3cProof(db, pin);
     result.state = 'integration';
     const specs = ['purchase-orders', 'suppliers'].flatMap((folder) =>
       fs
@@ -614,10 +1124,15 @@ async function main() {
 module.exports = {
   splitMigrations,
   verifyAdditive,
+  verifyO3cDelta,
+  captureTables,
+  seedO3bDrafts,
+  o3cProof,
   expectSqlError,
   directProof,
   redact,
   FORWARD,
+  O3C,
 };
 if (require.main === module)
   main().catch(() => {

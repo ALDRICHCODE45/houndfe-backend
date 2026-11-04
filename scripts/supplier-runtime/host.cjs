@@ -32,6 +32,7 @@ const STAGES = new Set([
   'seed-catalog-products',
   'seed-catalog-variants',
   'seed-catalog-suppliers',
+  'seed-purchase-orders',
   'listen',
   'credentials-record',
   'ready-record',
@@ -350,6 +351,7 @@ function routeAllowed(method, route, po = false) {
         /^(GET|HEAD|POST|OPTIONS) \/procurement\/purchase-orders\/?$/i,
         /^(GET|HEAD|DELETE|OPTIONS) \/procurement\/purchase-orders\/[^/]+\/?$/i,
         /^(PUT|OPTIONS) \/procurement\/purchase-orders\/[^/]+\/draft\/?$/i,
+        /^(POST|OPTIONS) \/procurement\/purchase-orders\/[^/]+\/(confirm|cancel)\/?$/i,
         /^(GET|HEAD|OPTIONS) \/products\/?$/i,
         /^(GET|HEAD|OPTIONS) \/products\/[^/]+\/variants\/?$/i,
       ]
@@ -361,6 +363,16 @@ function routeAllowed(method, route, po = false) {
     /^(GET|HEAD|POST|OPTIONS) \/procurement\/suppliers\/?$/i,
     /^(GET|HEAD|PATCH|DELETE|OPTIONS) \/procurement\/suppliers\/[^/]+\/?$/i,
   ].some((rule) => rule.test(`${method} ${route}`));
+}
+// PO mode may swap in its own seed (and post-listen seeding through the real HTTP
+// commands); supplier-only mode always ignores a fixture.
+function fixtureHooks(options) {
+  if (options.po !== true || options.fixture === undefined) return undefined;
+  const fixture = options.fixture;
+  assert.equal(typeof fixture?.seed, 'function');
+  if (fixture.afterListen !== undefined)
+    assert.equal(typeof fixture.afterListen, 'function');
+  return fixture;
 }
 function selectorQueryAllowed(route, query) {
   if (/^\/products\/?$/i.test(route))
@@ -626,6 +638,7 @@ function createHostBuilder(po) {
 
 async function main(options = {}) {
   poMode = options.po === true;
+  const hooks = fixtureHooks(options);
   stage = 'configure';
   configure();
   stage = 'isolate-environment';
@@ -686,14 +699,28 @@ async function main(options = {}) {
     ip: target.ip,
   });
   const password = secret();
-  const fixture = await seed(db, password);
+  const fixture = hooks
+    ? await hooks.seed({
+        db,
+        password,
+        setStage: (name) => {
+          assert(STAGES.has(name));
+          stage = name;
+        },
+      })
+    : await seed(db, password);
   stage = 'listen';
   await app.listen(0, '127.0.0.1');
   const port = app.getHttpServer().address().port;
   assert.notEqual(port, 3000);
   const apiOrigin = `http://127.0.0.1:${port}`;
+  let seeded = {};
+  if (hooks?.afterListen) {
+    stage = 'seed-purchase-orders';
+    seeded = await hooks.afterListen({ apiOrigin, password, fixture });
+  }
   stage = 'credentials-record';
-  record('credentials.json', { apiOrigin, password, ...fixture });
+  record('credentials.json', { apiOrigin, password, ...fixture, ...seeded });
   stage = 'ready-record';
   record('ready.json', { apiOrigin, feOrigin, pid: process.pid });
   stage = 'ready';
@@ -733,6 +760,7 @@ module.exports = {
   selectorQueryAllowed,
   seedCatalog,
   fixtureGrants,
+  fixtureHooks,
   installParsers,
   isolatePoProviders,
   createHostBuilder,
