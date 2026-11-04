@@ -216,6 +216,30 @@ describe('Product Entity', () => {
       });
     });
 
+    it('keeps the stored stock total of a lots product (O1: quantity = untracked + lots)', () => {
+      const reconstructed = Product.fromPersistence({
+        ...Product.create(validParams).toPersistence(),
+        useStock: true,
+        useLotsAndExpirations: true,
+        hasVariants: false,
+        quantity: 72,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      expect(reconstructed.quantity).toBe(72);
+      expect(reconstructed.toResponse().quantity).toBe(72);
+    });
+
+    it('still ignores a top-level quantity when creating a lots product', () => {
+      const created = Product.create({
+        ...validParams,
+        useStock: true,
+        useLotsAndExpirations: true,
+        quantity: 10,
+      });
+      expect(created.quantity).toBe(0);
+    });
+
     it('reconstructs catalog fields and preserves relation IDs (F1.WU4a)', () => {
       const sourceIds = ['pl-a', 'pl-b'];
       const reconstructed = Product.fromPersistence({

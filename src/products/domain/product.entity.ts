@@ -248,7 +248,9 @@ export class Product {
       iepsRate.multiplier,
     );
 
-    const quantity = isService
+    // A lots product starts empty: its stock arrives through its lots (INITIAL).
+    const startsEmpty = isService || params.useLotsAndExpirations === true;
+    const quantity = startsEmpty
       ? SERVICE_FORCED_DEFAULTS.quantity
       : (params.quantity ?? 0);
     const minQuantity = isService
@@ -394,10 +396,8 @@ export class Product {
       this.minQuantity = 0;
       return;
     }
-
-    if (this.useLotsAndExpirations) {
-      this.quantity = 0;
-    }
+    // O1: a lots product keeps its stored total (untracked + lots); only the
+    // stock journal changes it, so normalization must not zero it here.
   }
 
   static assertTypeChangeAllowed(
