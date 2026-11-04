@@ -387,4 +387,4 @@ See §7 of [README.md](README.md): tenant, login, granted permissions and the sh
 
 - Lots on products **with variants** are not supported until O2 ([02-variant-lots-o2-proposal.md](02-variant-lots-o2-proposal.md)).
 - Transfers between sucursales (tenants) do not exist. Use an adjustment out in one sucursal and an adjustment in in the other, with a reason.
-- Public catalog and POS catalog lists still show `quantity`, which includes expired lots. Only the charge and the draft availability check use «sellable».
+- `GET /products` and `GET /products/:id` return `quantity` = product total (untracked + lots, expired lots included). Use it with `minQuantity` for list badges. Public catalog and POS catalog lists show the same `quantity`. Only the stock view (`sellable`), the charge and the draft availability check exclude expired lots.
