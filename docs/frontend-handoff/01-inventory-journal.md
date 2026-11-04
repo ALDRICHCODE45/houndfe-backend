@@ -156,7 +156,7 @@ Query parameters:
 | `productId` | Required. |
 | `variantId` or `lotId` | Optional, mutually exclusive. Sending both is `400 MALFORMED`. |
 | `cursor` | Optional. Opaque, signed, and bound to tenant, product, variant and lot. |
-| `limit` | Default 25, maximum 100. |
+| `limit` | Default 25, maximum 100. A larger value is `400 MALFORMED`. |
 
 The response is a `Page<Movement>` ordered **newest first**:
 
@@ -196,7 +196,7 @@ Each field means:
   - `ADJUSTMENT` with the adjustment id;
   - `PRODUCT` with the product id, for `INITIAL` and `REMOVAL`.
 - `nextCursor: null` means this is the last page.
-- An unknown or deleted product returns an **empty page**, not a 404, because history outlives deleted rows.
+- An unknown product, or a product of another tenant, returns an **empty page**, not a 404. A deleted product still returns its full history (including the `REMOVAL` rows), because history outlives deleted rows.
 
 Suggested kardex UI:
 
@@ -242,7 +242,7 @@ Success is `201 { "movement": Movement, "stock": <same shape as §3.1> }`. A rep
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `MALFORMED` | Invalid JSON, unknown keys, missing or invalid fields, `delta` 0, `OTHER` without a note, `variantId` together with `lotId`. |
+| 400 | `MALFORMED` | Invalid JSON, unknown keys (including `tenantId`), missing or invalid fields, a missing `Idempotency-Key` header, `delta` 0, `OTHER` without a note (or with a blank one, or one over 500 characters), `variantId` together with `lotId`. |
 | 401 | `UNAUTHORIZED` | No session, or an inactive user. |
 | 403 | `FORBIDDEN` | A permission is missing. |
 | 404 | `NOT_FOUND` | The product, lot or variant does not exist, belongs to another tenant, or does not match the target. |
@@ -273,7 +273,7 @@ In the FE:
 - Show the stock as read-only, with an «Ajustar stock» action that opens the adjustment form (§3.3).
 - Saving a product never changes its stock.
 
-The create endpoints still accept an initial `quantity`, recorded as an `INITIAL` movement:
+The create endpoints still accept an initial `quantity`, recorded as an `INITIAL` movement. One exception: when `useLotsAndExpirations` is `true`, the top-level `quantity` of `POST /products` is ignored, because the lots hold the stock (existing product rule). Send `quantity` on each inline lot instead. Units that belong to no lot can only be added afterwards with an adjustment that targets `{ productId }`.
 
 - `POST /products`, including inline variants and lots
 - `POST /products/:id/variants`
@@ -286,6 +286,7 @@ Other rules on these endpoints:
 - `DELETE /products/:id/lots/:lotId` on a lot with quantity > 0 returns `409 LOT_HAS_STOCK`, with `lotId` and `quantity` in the body. Adjust the lot to 0 first.
 - Deleting a variant or a product with stock is allowed. It writes `REMOVAL` movements, and the history stays readable.
 - Creating the first variant of a product that has stock zeroes the product stock with `REMOVAL FIRST_VARIANT_ZEROING`. This is the same behavior as before, now recorded. Warn the user before they do it.
+- `PATCH /products/:id` with `type: "SERVICE"` while the product has stock or active lots returns `422 PRODUCT_TYPE_CHANGE_BLOCKED` (existing rule). Adjust the stock to 0 first.
 - **[BE decision]** `PATCH /products/:id` with `useStock: false` while the product or a variant has stock returns `409 STOCK_TRACKING_HAS_STOCK`. Adjust the stock to 0 first. Before, the stock silently stayed hidden.
 
 ### 4.2 Sales (POS and bot)
@@ -309,15 +310,18 @@ Charging a sale (`POST /sales/drafts/:id/charge`) and confirming a bot sale cons
 
 Show «Stock insuficiente» and reload the cart availability.
 
+The draft availability check (`POST /sales/drafts/:id/items` and `PATCH …/items/:itemId`) keeps the sales error body, not the 409 above. A quantity above the sellable stock answers `422 { "statusCode": 422, "error": "BUSINESS_RULE_VIOLATION", "message": "Insufficient stock for product …. Available: 62, Requested: 63" }`.
+
 Cancelling a sale (`POST /sales/:id/cancel`) restores exactly the buckets the sale consumed, as `SALE_CANCELLATION` movements:
 
 - the same lots, even if they have expired since;
 - the untracked portion when a lot was deleted.
 
-Two edge cases:
+Three edge cases:
 
 - Sales charged before the journal existed restore to the product or variant as before.
-- Cancelling twice never restores twice.
+- Cancelling twice never restores twice. The second call answers `200` again and writes no rows.
+- A POS sale is charged as `DELIVERED` by default, and a delivered sale cannot be cancelled: `409 SALE_DELIVERED_CANNOT_CANCEL`. Only sales charged with `delivery: true` (they stay `PENDING` until delivered) can be cancelled, so the restock on cancellation applies to those sales only.
 
 The movement actor is the cashier's name for POS sales and `Bot` for bot sales.
 
@@ -331,7 +335,7 @@ Example: a product with lot A (expires 2026-12-01, 3 units), lot B (expires 2027
 | LOT | B | −10 | 0 | 5 |
 | PRODUCT_UNTRACKED | — | −2 | 3 | 3 |
 
-Rows of one group come out newest first. Render them as one operation, «Venta #…, −15», that can be expanded to show the split.
+Rows of one group come out newest first, so the untracked row of the example above is listed before the lot rows. Render them as one operation, «Venta #…, −15», that can be expanded to show the split.
 
 When the sale is cancelled, three `SALE_CANCELLATION` rows (+3 A, +10 B, +2 untracked) appear under the same sale id.
 
@@ -359,7 +363,7 @@ If the sellable stock does not cover the line, the whole charge fails with `409 
 
 ## 6. Test data
 
-See §7 of [README.md](README.md). The backend fills it after the runtime proof on the dev DB.
+See §7 of [README.md](README.md): tenant, login, granted permissions and the showcase products with ids, buckets, quantities and versions.
 
 ## 7. Known limits (O1)
 
