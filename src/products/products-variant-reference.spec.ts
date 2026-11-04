@@ -5,6 +5,7 @@ import type { PrismaService } from '../shared/prisma/prisma.service';
 import type { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type { FilesService } from '../files/files.service';
 import type { SatCatalogService } from '../sat-catalog/sat-catalog.service';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const productId = 'product-1';
 const tenantId = 'tenant-1';
@@ -35,6 +36,12 @@ function fixture() {
       return Promise.resolve([{ id: productId }]);
     }),
     variant: {
+      findFirstOrThrow: jest.fn(({ where }: { where: { id: string } }) => {
+        events.push('reload');
+        return Promise.resolve({
+          ...pending.variants.find((row) => row.id === where.id),
+        });
+      }),
       create: jest.fn(({ data }: { data: Record<string, unknown> }) => {
         events.push('insert');
         const row = { id: `variant-${pending.variants.length + 1}`, ...data };
@@ -106,12 +113,26 @@ function fixture() {
       return Promise.resolve(false);
     }),
   };
+  // INITIAL stock lands on the pending variant row, like the real journal.
+  const stockJournal = makeStockJournalStub();
+  stockJournal.recordInitial.mockImplementation((_productId, changes) => {
+    events.push('initial');
+    for (const change of changes) {
+      const row = pending.variants.find(
+        (v) =>
+          change.bucket.kind === 'VARIANT' && v.id === change.bucket.variantId,
+      );
+      if (row) row.quantity = (row.quantity as number) + change.delta;
+    }
+    return Promise.resolve();
+  });
   const service = new ProductsService(
     repo as unknown as IProductRepository,
     root as unknown as PrismaService,
     {} as FilesService,
     tenant as unknown as TenantPrismaService,
     {} as SatCatalogService,
+    stockJournal,
   );
   const responseOwner = service as unknown as {
     enrichVariantCostResponse: (

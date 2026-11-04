@@ -135,7 +135,8 @@ export class PrismaProductRepository implements IProductRepository {
         purchaseGrossCostCents: p.purchaseGrossCostCents,
         useStock: p.useStock,
         useLotsAndExpirations: p.useLotsAndExpirations,
-        quantity: p.quantity,
+        // `quantity` is deliberately absent: stock only moves through the
+        // inventory journal, so saving the aggregate never rewrites it (S2).
         minQuantity: p.minQuantity,
         hasVariants: p.hasVariants,
         hidePriceInOnlineCatalog: p.hidePriceInOnlineCatalog,

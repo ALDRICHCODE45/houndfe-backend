@@ -1,4 +1,5 @@
 import {
+  Allow,
   IsString,
   IsOptional,
   IsNumber,
@@ -24,10 +25,12 @@ export class CreateLotDto {
 }
 
 export class UpdateLotDto {
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  quantity?: number;
+  /**
+   * Not editable (O1/S2): declared without validation so the whitelist lets
+   * the key through and the service answers 400 `STOCK_QUANTITY_READ_ONLY`.
+   */
+  @Allow()
+  quantity?: unknown;
 
   @IsOptional()
   @IsDateString()

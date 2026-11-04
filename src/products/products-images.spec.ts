@@ -13,6 +13,7 @@ import { FilesService } from '../files/files.service';
 import { FileObject } from '../files/domain/file-object.entity';
 import { EntityNotFoundError } from '../shared/domain/domain-error';
 import { Product } from './domain/product.entity';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -92,6 +93,7 @@ describe('ProductsService — Product Image Upload', () => {
         search: jest.fn(),
         findByKey: jest.fn(),
       } as any,
+      makeStockJournalStub(),
     );
   });
 

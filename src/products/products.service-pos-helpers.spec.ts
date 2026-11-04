@@ -11,6 +11,7 @@ import {
   BusinessRuleViolationError,
 } from '../shared/domain/domain-error';
 import { Product } from './domain/product.entity';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -63,6 +64,7 @@ function makeMockFilesService() {
 function createService(
   repo: IProductRepository,
   prisma: ReturnType<typeof makeMockPrisma>,
+  stockJournal = makeStockJournalStub(),
 ) {
   return new ProductsService(
     repo,
@@ -77,6 +79,7 @@ function createService(
       search: jest.fn(),
       findByKey: jest.fn(),
     } as any,
+    stockJournal,
   );
 }
 
@@ -118,6 +121,7 @@ describe('ProductsService — POS Helpers', () => {
           search: jest.fn(),
           findByKey: jest.fn(),
         } as any,
+        makeStockJournalStub(),
       );
 
       await serviceWithTenantSpy.getProductInfoForSale('prod-tenant', null);
@@ -431,6 +435,58 @@ describe('ProductsService — POS Helpers', () => {
   });
 
   describe('checkStockAvailability', () => {
+    it('excludes stock held in expired lots from the sellable stock (S6)', async () => {
+      const journal = makeStockJournalStub();
+      journal.expiredLotQuantity.mockResolvedValue(12);
+      const expiryAware = createService(repo, prisma, journal);
+      prisma.product.findUnique.mockResolvedValue({
+        id: 'prod-lots',
+        useStock: true,
+        hasVariants: false,
+        quantity: 30,
+      });
+
+      await expect(
+        expiryAware.checkStockAvailability('prod-lots', null, 18),
+      ).resolves.toEqual({ available: true, currentStock: 18 });
+      await expect(
+        expiryAware.checkStockAvailability('prod-lots', null, 19),
+      ).resolves.toEqual({ available: false, currentStock: 18 });
+      expect(journal.expiredLotQuantity).toHaveBeenCalledWith('prod-lots');
+    });
+
+    it('never reports negative sellable stock', async () => {
+      const journal = makeStockJournalStub();
+      journal.expiredLotQuantity.mockResolvedValue(40);
+      const expiryAware = createService(repo, prisma, journal);
+      prisma.product.findUnique.mockResolvedValue({
+        id: 'prod-lots',
+        useStock: true,
+        hasVariants: false,
+        quantity: 30,
+      });
+
+      await expect(
+        expiryAware.checkStockAvailability('prod-lots', null, 1),
+      ).resolves.toEqual({ available: false, currentStock: 0 });
+    });
+
+    it('does not look at lots for products that do not use stock or for variants', async () => {
+      const journal = makeStockJournalStub();
+      const expiryAware = createService(repo, prisma, journal);
+      prisma.product.findUnique.mockResolvedValue({
+        id: 'prod-v',
+        useStock: true,
+        hasVariants: true,
+      });
+      prisma.variant.findFirst.mockResolvedValue({ quantity: 5 });
+
+      await expect(
+        expiryAware.checkStockAvailability('prod-v', 'var-1', 5),
+      ).resolves.toEqual({ available: true, currentStock: 5 });
+      expect(journal.expiredLotQuantity).not.toHaveBeenCalled();
+    });
+
     it('should return available=true when product does not use stock', async () => {
       const mockProduct = {
         id: 'prod-7',

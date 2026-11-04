@@ -26,6 +26,7 @@
  */
 import { ProductsService } from './products.service';
 import type { IProductRepository } from './domain/product.repository';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 function makeMockRepo(): jest.Mocked<IProductRepository> {
   return {
@@ -69,6 +70,7 @@ function makeService(prisma: ReturnType<typeof makeMockPrisma>) {
       {} as any,
       tenantPrisma,
       {} as any,
+      makeStockJournalStub(),
     ),
   };
 }

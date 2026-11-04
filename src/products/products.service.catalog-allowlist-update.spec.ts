@@ -1,6 +1,7 @@
 import { Product } from './domain/product.entity';
 import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
 import { ProductsService } from './products.service';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const LIST_A = '550e8400-e29b-41d4-a716-446655440000';
@@ -131,6 +132,7 @@ function harness(
     {} as never,
     tenantPrisma as never,
     { assertExists: jest.fn() } as never,
+    makeStockJournalStub(),
   );
   return {
     service,

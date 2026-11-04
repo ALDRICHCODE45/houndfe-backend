@@ -17,6 +17,8 @@ import { Product } from './domain/product.entity';
 import { BadRequestException } from '@nestjs/common';
 import { PrismaProductRepository } from './infrastructure/prisma-product.repository';
 import type { IStockAlertStateRepository } from '../stock-alerts/domain/stock-alert-state.repository';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
+import type { ProductStockJournal } from './infrastructure/product-stock-journal';
 
 // ── Minimal mocks ──────────────────────────────────────────────────────
 
@@ -129,13 +131,19 @@ function createService(
     filesService ?? makeMockFilesService(),
     tenantPrisma,
     satCatalog ?? makeNoopSatCatalog(),
+    makeStockJournalStub(),
   );
 }
 
 // Legacy add fixtures expose their tx through $transaction. Adapt only those
 // fixtures to the ambient client contract used by addVariant.
-function createVariantService(repo: IProductRepository, prisma: any) {
-  const service = createService(repo, prisma);
+function createVariantService(
+  repo: IProductRepository,
+  prisma: any,
+  filesService?: ReturnType<typeof makeMockFilesService>,
+  satCatalog?: any,
+) {
+  const service = createService(repo, prisma, filesService, satCatalog);
   const tenant = (service as any).tenantPrisma;
   tenant.runInTransaction.mockImplementation(
     async (work: () => Promise<unknown>) =>
@@ -237,7 +245,6 @@ describe('ProductsService — PATCH Variant membership invariant', () => {
     const { service, repo, tx } = fixture(2);
     const result = service.update(PRODUCT_ID, {
       hasVariants: false,
-      quantity: 10,
       useStock: true,
     });
     await expect(result).rejects.toBeInstanceOf(BusinessRuleViolationError);
@@ -264,11 +271,9 @@ describe('ProductsService — PATCH Variant membership invariant', () => {
     const { service, repo, product } = fixture(0);
     await service.update(PRODUCT_ID, {
       hasVariants: false,
-      quantity: 10,
       useStock: true,
     });
     expect(repo.save.mock.calls).toEqual([[product]]);
-    expect(product.quantity).toBe(10);
     expect(product.hasVariants).toBe(false);
   });
 
@@ -282,18 +287,41 @@ describe('ProductsService — PATCH Variant membership invariant', () => {
 
   it('does not check membership when hasVariants is omitted, even on a legacy false flag', async () => {
     const { service, repo, tx } = fixture(2, false);
-    await service.update(PRODUCT_ID, { quantity: 4 });
+    await service.update(PRODUCT_ID, { name: 'Renamed' });
     expect(repo.save.mock.calls).toHaveLength(1);
     expect(tx.variant.count).not.toHaveBeenCalled();
   });
 
-  it('preserves true with zero Variants and silently zeros parent quantity', async () => {
+  it('journals the parent stock zeroing when enabling variants with zero Variants', async () => {
     const { service, product, tx } = fixture(0, false);
-    await service.update(PRODUCT_ID, { hasVariants: true, quantity: 10 });
+    await service.update(PRODUCT_ID, { hasVariants: true });
     expect(product.hasVariants).toBe(true);
     expect(product.quantity).toBe(0);
     expect(tx.variant.count).not.toHaveBeenCalled();
+    const journal = (
+      service as unknown as { stockJournal: ProductStockJournal }
+    ).stockJournal;
+    expect(journal.removeProductStock).toHaveBeenCalledWith(
+      PRODUCT_ID,
+      'FIRST_VARIANT_ZEROING',
+    );
   });
+
+  it.each([10, 0, null])(
+    'rejects a PATCH carrying quantity %p with STOCK_QUANTITY_READ_ONLY before any write',
+    async (quantity) => {
+      const { service, repo, tx } = fixture(0, false);
+      await expect(
+        service.update(PRODUCT_ID, { name: 'Renamed', quantity } as never),
+      ).rejects.toMatchObject({
+        code: 'STOCK_QUANTITY_READ_ONLY',
+        name: 'StockQuantityReadOnlyError',
+      });
+      expect(repo.findById).not.toHaveBeenCalled();
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(tx.$queryRaw).not.toHaveBeenCalled();
+    },
+  );
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -444,6 +472,7 @@ describe('ProductsService — findAll variant aggregates', () => {
       makeMockFilesService(),
       tenantPrisma,
       makeNoopSatCatalog(),
+      makeStockJournalStub(),
     );
 
     await service.findAll();
@@ -835,7 +864,7 @@ describe('ProductsService — variant price matrix auto-create', () => {
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
     jest
       .spyOn(service as any, 'buildFullResponse')
       .mockResolvedValue({ id: PRODUCT_ID });
@@ -1519,6 +1548,7 @@ describe('ProductsService - Image deletion with file storage', () => {
         getClient: jest.fn().mockReturnValue(prisma),
       } as any,
       makeNoopSatCatalog(),
+      makeStockJournalStub(),
     );
 
     // Act
@@ -1562,6 +1592,7 @@ describe('ProductsService - Image deletion with file storage', () => {
         getClient: jest.fn().mockReturnValue(prisma),
       } as any,
       makeNoopSatCatalog(),
+      makeStockJournalStub(),
     );
 
     // Act
@@ -1626,7 +1657,7 @@ describe('ProductsService - tenant-scoped create contract', () => {
       },
     } as any;
 
-    const service = createService(repo, prisma);
+    const service = createVariantService(repo, prisma);
 
     await service.create({
       name: 'Sin Tenant ID',
@@ -1688,7 +1719,7 @@ describe('ProductsService — SAT catalog validation (Slice D)', () => {
     it('accepts a satKey that exists in the catalog (D.2.1)', async () => {
       const { repo, prisma } = setupCreateMocks();
       const satCatalog = makeSpySatCatalog({ exists: true });
-      const service = createService(repo, prisma, undefined, satCatalog);
+      const service = createVariantService(repo, prisma, undefined, satCatalog);
       jest
         .spyOn(service as any, 'buildFullResponse')
         .mockResolvedValue({ id: PRODUCT_ID });
@@ -1722,7 +1753,7 @@ describe('ProductsService — SAT catalog validation (Slice D)', () => {
     it('succeeds with satKey=null and skips catalog lookup when the field is omitted (D.2.1)', async () => {
       const { repo, prisma } = setupCreateMocks();
       const satCatalog = makeSpySatCatalog({ exists: false });
-      const service = createService(repo, prisma, undefined, satCatalog);
+      const service = createVariantService(repo, prisma, undefined, satCatalog);
       jest
         .spyOn(service as any, 'buildFullResponse')
         .mockResolvedValue({ id: PRODUCT_ID });
@@ -2120,11 +2151,11 @@ describe('ProductsService — update() edit-path re-arm', () => {
     };
   }
 
-  it('keeps save + rearm within the outer transaction and tail join when quantity is provided — Sc.1', async () => {
+  it('keeps save + rearm within the outer transaction and tail join when minQuantity is provided — Sc.1', async () => {
     const { service, repo, tenantPrisma, txClient, prisma, txCaptures } =
       setupService();
 
-    await service.update(PRODUCT_ID, { quantity: 10 });
+    await service.update(PRODUCT_ID, { minQuantity: 10 });
 
     // Outer operation and persistence tail join the same transaction.
     expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(2);
@@ -2155,7 +2186,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
     const { service, tenantPrisma, txClient, prisma, txCaptures } =
       setupService();
 
-    await service.update(PRODUCT_ID, { priceCents: 50000, quantity: 10 });
+    await service.update(PRODUCT_ID, { priceCents: 50000, minQuantity: 10 });
 
     expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(2);
     // priceList UPDATE was routed through the tx client, not the raw
@@ -2252,10 +2283,10 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // Downward edit (would falsely fire on the old path) — the
     // service still calls the adapter (its job is qty/min
     // change-detection); the adapter's STRICT > gate decides.
-    await service.update(PRODUCT_ID, { quantity: 1, minQuantity: 10 });
+    await service.update(PRODUCT_ID, { minQuantity: 10 });
     // Upward edit (the happy path) — rearm is the only alert
     // primitive.
-    await service.update(PRODUCT_ID, { quantity: 10, minQuantity: 3 });
+    await service.update(PRODUCT_ID, { minQuantity: 3 });
     // Field-only edit.
     await service.update(PRODUCT_ID, { name: 'X' });
 
@@ -2419,12 +2450,12 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
     return { service, repo, tenantPrisma, txClient, prisma, txCaptures };
   }
 
-  it('wraps variant.update + rearm in ONE runInTransaction when quantity is provided — Sc.2', async () => {
+  it('wraps variant.update + rearm in ONE runInTransaction when minQuantity is provided — Sc.2', async () => {
     const { service, repo, tenantPrisma, txClient, prisma, txCaptures } =
       setupService();
 
     const updated = await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, {
-      quantity: 10,
+      minQuantity: 10,
     });
 
     expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
@@ -2436,7 +2467,7 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
           productId: PRODUCT_ID,
           tenantId: 'tenant-1',
         },
-        data: expect.objectContaining({ quantity: 10 }),
+        data: expect.objectContaining({ minQuantity: 10 }),
       }),
     );
     // raw prisma.variant.update was NOT called.
@@ -2526,7 +2557,7 @@ describe('ProductsService — updateVariant() edit-path re-arm', () => {
       product: { useStock: false, quantity: 0, minQuantity: 0 },
     });
 
-    await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { quantity: 5 });
+    await service.updateVariant(PRODUCT_ID, VARIANT_A_ID, { minQuantity: 5 });
 
     expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
     expect(repo.rearmAlertAfterEdit).toHaveBeenCalledWith({
@@ -2613,7 +2644,7 @@ describe('ProductsService — online catalog scalar fields (WU4b2)', () => {
       ),
       ...makeUpdatePrisma(),
     };
-    const service = createService(
+    const service = createVariantService(
       makeMockRepo({
         findById: jest.fn().mockResolvedValue(makeProduct('prod-created')),
       }),

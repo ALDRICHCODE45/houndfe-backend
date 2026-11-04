@@ -21,6 +21,7 @@ import {
   BusinessRuleViolationError,
   InvalidArgumentError,
 } from '../shared/domain/domain-error';
+import { makeStockJournalStub } from './infrastructure/product-stock-journal.test-support';
 
 const PRODUCT_ID = 'prod-service-1';
 const TENANT_ID = 'tenant-1';
@@ -112,13 +113,25 @@ function makePrisma() {
 function makeService(
   repo: IProductRepository,
   prismaMock: ReturnType<typeof makePrisma>['prisma'],
+  // create() runs on the ambient client; its fixture exposes it via `$transaction`.
+  ambientTx = false,
 ) {
   const tenantPrisma = {
     getTenantId: jest.fn().mockReturnValue(TENANT_ID),
     getClient: jest.fn().mockReturnValue(prismaMock),
     isInTransaction: jest.fn().mockReturnValue(false),
     runInTransaction: jest.fn(
-      async (work: (client: unknown) => Promise<unknown>) => work(prismaMock),
+      async (work: (client: unknown) => Promise<unknown>) =>
+        ambientTx
+          ? (prismaMock as any).$transaction(async (tx: unknown) => {
+              tenantPrisma.getClient.mockReturnValue(tx);
+              try {
+                return await work(tx);
+              } finally {
+                tenantPrisma.getClient.mockReturnValue(prismaMock);
+              }
+            })
+          : work(prismaMock),
     ),
   } as any;
   const filesService = { uploadAndRegister: jest.fn() } as any;
@@ -131,6 +144,7 @@ function makeService(
     filesService,
     tenantPrisma,
     satCatalog,
+    makeStockJournalStub(),
   );
   jest
     .spyOn(service as any, 'buildFullResponse')
@@ -204,7 +218,7 @@ describe('ProductsService — create() SERVICE rules (R1, R2, R4)', () => {
   it('upserts a ServiceDetail row in the same tx (R4)', async () => {
     const repo = makeRepo();
     const { prisma, calls } = makePrisma();
-    const service = makeService(repo, prisma);
+    const service = makeService(repo, prisma, true);
 
     await service.create({
       name: 'Paseo de perros',
@@ -219,7 +233,7 @@ describe('ProductsService — create() SERVICE rules (R1, R2, R4)', () => {
   it('does NOT create ServiceDetail for type=PRODUCT (R4)', async () => {
     const repo = makeRepo();
     const { prisma, calls } = makePrisma();
-    const service = makeService(repo, prisma);
+    const service = makeService(repo, prisma, true);
 
     await service.create({
       name: 'Croqueta',
@@ -448,6 +462,9 @@ describe('ProductsService — addLot() rejects SERVICE (R2)', () => {
     });
     const repo = makeRepo({ findById: jest.fn().mockResolvedValue(product) });
     const { prisma } = makePrisma();
+    (prisma as any).$queryRaw = jest
+      .fn()
+      .mockResolvedValue([{ id: PRODUCT_ID }]);
     const service = makeService(repo, prisma);
 
     await expect(

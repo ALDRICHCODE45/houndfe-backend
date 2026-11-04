@@ -1,5 +1,11 @@
 import { OmitType, PartialType } from '@nestjs/mapped-types';
-import { ArrayUnique, IsArray, IsUUID, ValidateIf } from 'class-validator';
+import {
+  Allow,
+  ArrayUnique,
+  IsArray,
+  IsUUID,
+  ValidateIf,
+} from 'class-validator';
 import {
   catalogPriceListIdUniquenessKey,
   CreateProductDto,
@@ -20,10 +26,18 @@ import { OnlineStockPatchDefersModeQuantityRule } from './catalog-stock-custom-q
  * an omitted field accepted while every defined value — including `null`
  * — is validated and rejected unless it is a UUID v4 array that is
  * unique case-insensitively, exactly matching create.
+ *
+ * `quantity` is no longer editable (O1/S2). It stays declared, with no value
+ * validation, only so the global whitelist lets the key reach the service,
+ * which answers 400 `STOCK_QUANTITY_READ_ONLY` instead of a generic
+ * "property should not exist".
  */
 @OnlineStockPatchDefersModeQuantityRule()
 export class UpdateProductDto extends PartialType(
-  OmitType(CreateProductDto, ['supportedCatalogPriceListIds'] as const),
+  OmitType(CreateProductDto, [
+    'supportedCatalogPriceListIds',
+    'quantity',
+  ] as const),
 ) {
   @ValidateIf(
     (o: { supportedCatalogPriceListIds?: unknown }) =>
@@ -33,4 +47,7 @@ export class UpdateProductDto extends PartialType(
   @ArrayUnique(catalogPriceListIdUniquenessKey)
   @IsUUID('4', { each: true })
   supportedCatalogPriceListIds?: string[];
+
+  @Allow()
+  quantity?: unknown;
 }

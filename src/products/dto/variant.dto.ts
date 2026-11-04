@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { Transform } from 'class-transformer';
 import { CatalogPublishMode, CatalogStockPresentation } from '@prisma/client';
 import {
+  Allow,
   IsString,
   IsOptional,
   IsNumber,
@@ -99,10 +100,12 @@ export class UpdateVariantDto {
   @IsString()
   barcode?: string;
 
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  quantity?: number;
+  /**
+   * Not editable (O1/S2): declared without validation so the whitelist lets
+   * the key through and the service answers 400 `STOCK_QUANTITY_READ_ONLY`.
+   */
+  @Allow()
+  quantity?: unknown;
 
   @IsOptional()
   @IsNumber()
