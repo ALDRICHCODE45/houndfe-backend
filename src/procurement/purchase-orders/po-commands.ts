@@ -23,7 +23,7 @@ import {
   type PurchaseOrderDelete,
   type PurchaseOrderReplace,
 } from './po-contract';
-import { buildPurchaseOrderDiagnostics } from './po-validation';
+import { buildPurchaseOrder } from './po-response';
 import { isQuantityAllowedForUnit } from './po-decimal';
 import {
   readPurchaseOrderReferences,
@@ -111,58 +111,31 @@ function admit(
   }
 }
 
-function response(
-  row: ProcurementPurchaseOrder,
+/** Labels refreshed from locked references; invalidated lines keep saved ones. */
+function displays(
   order: OrderInput,
   refs: PurchaseOrderReferences,
   baseline: PurchaseOrder | null,
-): PurchaseOrder {
-  const diagnostics = buildPurchaseOrderDiagnostics(order, refs.facts);
-  const invalidPaths = new Set(
-    diagnostics.issues
-      .filter((issue) =>
-        [
-          'REFERENCE_UNAVAILABLE',
-          'REFERENCE_INCOMPATIBLE',
-          'UNIT_MISMATCH',
-          'QUANTITY_FRACTION_NOT_ALLOWED',
-        ].includes(issue.code),
-      )
-      .map((issue) => issue.path.split('/').slice(0, 3).join('/')),
-  );
+  invalidLines: ReadonlySet<number>,
+): Pick<PurchaseOrder, 'supplierDisplaySnapshot' | 'lineDisplaySnapshots'> {
   const previous = new Map(
     baseline?.lineDisplaySnapshots.map((line) => [line.lineId, line]),
   );
   return {
-    ...order,
-    id: row.id,
-    version: row.version,
-    status: 'DRAFT',
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
     supplierDisplaySnapshot:
-      order.supplierId === null
-        ? null
-        : (refs.supplierDisplaySnapshot ??
-          (baseline?.supplierId === order.supplierId
-            ? baseline.supplierDisplaySnapshot
-            : null)),
+      refs.supplierDisplaySnapshot ??
+      (baseline?.supplierId === order.supplierId
+        ? baseline.supplierDisplaySnapshot
+        : null),
     lineDisplaySnapshots: refs.lineDisplaySnapshots.map((line, index) => {
       const prior = baseline?.lines.find((old) => old.lineId === line.lineId);
       const current = order.lines[index];
-      return invalidPaths.has(`/lines/${index}`) &&
+      return invalidLines.has(index) &&
         prior?.productId === current.productId &&
         prior?.variantId === current.variantId
         ? (previous.get(line.lineId) ?? line)
         : line;
     }),
-    lineSubtotals: diagnostics.lineSubtotals,
-    locationSnapshot: {
-      tenantId: row.tenantId,
-      tenantName: refs.tenantName,
-      detail: order.location.detail,
-    },
-    validation: { issues: diagnostics.issues },
   };
 }
 
@@ -438,7 +411,13 @@ export class PurchaseOrderCommands {
             where: { tenantId, orderId: target },
           });
         }
-        body = response(row!, order, refs, baseline);
+        body = buildPurchaseOrder(row!, refs.supplierVersion, {
+          order,
+          facts: refs.facts,
+          tenantName: refs.tenantName,
+          displays: (invalidLines) =>
+            displays(order, refs, baseline, invalidLines),
+        });
         if (order.lines.length) {
           const orderId = body.id;
           const displays = new Map(

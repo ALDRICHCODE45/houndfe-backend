@@ -8,9 +8,50 @@ import type { PurchaseOrderReferenceFacts } from './po-validation';
 
 export interface PurchaseOrderReferences {
   facts: PurchaseOrderReferenceFacts;
+  /** Live supplier.version read under the same lock; null when absent. */
+  supplierVersion: number | null;
   supplierDisplaySnapshot: SupplierDisplaySnapshot | null;
   lineDisplaySnapshots: PurchaseOrder['lineDisplaySnapshots'];
   tenantName: string;
+}
+
+export type ReferenceProduct = Pick<
+  Product,
+  'id' | 'name' | 'type' | 'unit' | 'hasVariants'
+>;
+export type ReferenceVariant = Pick<Variant, 'id' | 'name' | 'productId'>;
+
+/** Pure: shared by the locking command reader and the lock-free query reader. */
+export function deriveReferenceFacts(
+  order: OrderInput,
+  supplier: SupplierDisplaySnapshot['status'] | undefined,
+  productById: ReadonlyMap<string, ReferenceProduct>,
+  variantById: ReadonlyMap<string, ReferenceVariant>,
+): PurchaseOrderReferenceFacts {
+  return {
+    supplier: supplier ?? 'missing',
+    lines: Object.fromEntries(
+      order.lines.map((line) => {
+        const product = productById.get(line.productId ?? '');
+        const variant = variantById.get(line.variantId ?? '');
+        return [
+          line.lineId,
+          {
+            product: product
+              ? {
+                  type: product.type,
+                  unit: product.unit,
+                  hasVariants: product.hasVariants,
+                }
+              : 'missing',
+            variant: variant
+              ? { belongsToProduct: variant.productId === line.productId }
+              : 'missing',
+          },
+        ];
+      }),
+    ),
+  };
 }
 
 /**
@@ -27,8 +68,10 @@ export async function readPurchaseOrderReferences(
   const suppliers =
     order.supplierId === null
       ? []
-      : await tx.$queryRaw<SupplierDisplaySnapshot[]>(Prisma.sql`
-    SELECT s."id", s."displayName", s."status" FROM "procurement_suppliers" s
+      : await tx.$queryRaw<
+          Array<SupplierDisplaySnapshot & { version: number }>
+        >(Prisma.sql`
+    SELECT s."id", s."displayName", s."status", s."version" FROM "procurement_suppliers" s
     WHERE s."tenantId" = ${tenantId} AND s."id" = ${order.supplierId}
     FOR UPDATE OF s
   `);
@@ -71,32 +114,15 @@ export async function readPurchaseOrderReferences(
   `);
   const productById = new Map(products.map((product) => [product.id, product]));
   const variantById = new Map(variants.map((variant) => [variant.id, variant]));
-  const facts: PurchaseOrderReferenceFacts = {
-    supplier: suppliers[0]?.status ?? 'missing',
-    lines: Object.fromEntries(
-      order.lines.map((line) => {
-        const product = productById.get(line.productId ?? '');
-        const variant = variantById.get(line.variantId ?? '');
-        return [
-          line.lineId,
-          {
-            product: product
-              ? {
-                  type: product.type,
-                  unit: product.unit,
-                  hasVariants: product.hasVariants,
-                }
-              : 'missing',
-            variant: variant
-              ? { belongsToProduct: variant.productId === line.productId }
-              : 'missing',
-          },
-        ];
-      }),
-    ),
-  };
+  const facts = deriveReferenceFacts(
+    order,
+    suppliers[0]?.status,
+    productById,
+    variantById,
+  );
   return {
     facts,
+    supplierVersion: suppliers[0]?.version ?? null,
     tenantName,
     supplierDisplaySnapshot: suppliers[0]
       ? {

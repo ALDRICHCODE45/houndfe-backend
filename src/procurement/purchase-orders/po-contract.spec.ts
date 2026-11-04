@@ -251,6 +251,24 @@ describe('purchase-order closed admission', () => {
         cursor: 'opaque+/=',
       }),
     ).toEqual({ supplierId: id, limit: 100, cursor: 'opaque+/=' });
+    for (const status of ['DRAFT', 'CONFIRMED', 'CANCELLED'])
+      expect(parsePurchaseOrderListQuery({ status })).toEqual({
+        limit: 25,
+        status,
+      });
+    for (const status of [
+      '',
+      'draft',
+      'ALL',
+      'DRAFT,CONFIRMED',
+      ['DRAFT', 'CONFIRMED'],
+      ['DRAFT'],
+      null,
+      1,
+    ])
+      expect(() => parsePurchaseOrderListQuery({ status })).toThrow(
+        'MALFORMED',
+      );
     for (const query of [
       { limit: '01' },
       { limit: '101' },
@@ -364,6 +382,15 @@ describe('purchase-order closed admission', () => {
         new PurchaseOrderContractError('ORDER_VERSION_CONFLICT'),
       ),
     ).toEqual({ statusCode: 409, error: 'ORDER_VERSION_CONFLICT' });
+    for (const code of [
+      'ORDER_NOT_READY',
+      'ELIGIBILITY_CHANGED',
+      'SUPPLIER_VERSION_CONFLICT',
+      'ORDER_STATE_CONFLICT',
+    ] as const)
+      expect(
+        purchaseOrderErrorEnvelope(new PurchaseOrderContractError(code)),
+      ).toEqual({ statusCode: 409, error: code });
     expect(purchaseOrderErrorEnvelope(new Error('private'))).toEqual({
       statusCode: 500,
       error: 'INTERNAL_ERROR',

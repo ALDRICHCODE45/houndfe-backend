@@ -369,6 +369,10 @@ describe('PO HTTP boundary (offline; real JWT/CLS/permission guards)', () => {
     ['NOT_FOUND', 404],
     ['ORDER_VERSION_CONFLICT', 409],
     ['SUPPLIER_ARCHIVED', 409],
+    ['ORDER_NOT_READY', 409],
+    ['ELIGIBILITY_CHANGED', 409],
+    ['SUPPLIER_VERSION_CONFLICT', 409],
+    ['ORDER_STATE_CONFLICT', 409],
     ['IDEMPOTENCY_KEY_CONFLICT', 409],
     ['IDEMPOTENCY_KEY_IN_FLIGHT', 409],
     ['INTERNAL_ERROR', 500],
@@ -395,6 +399,20 @@ describe('PO HTTP boundary (offline; real JWT/CLS/permission guards)', () => {
       'search=a&search=b',
       `search=${encodeURIComponent('😀'.repeat(201))}`,
       'search=%00term',
+    ])
+      closed(await http('get', `${base}?${query}`), 400, 'MALFORMED');
+    noCalls();
+  });
+  it('admits a single status filter and closes repeated/invalid values', async () => {
+    expect((await http('get', `${base}?status=CONFIRMED`)).status).toBe(200);
+    expect(queries.listDrafts).toHaveBeenCalledWith({ status: 'CONFIRMED' });
+    queries.listDrafts.mockClear();
+    for (const query of [
+      'status=DRAFT&status=CANCELLED',
+      'status=ALL',
+      'status=draft',
+      'status=',
+      'state=DRAFT',
     ])
       closed(await http('get', `${base}?${query}`), 400, 'MALFORMED');
     noCalls();

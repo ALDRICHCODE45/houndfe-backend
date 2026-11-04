@@ -261,6 +261,9 @@ describeDb('PO PostgreSQL query boundary', () => {
     ]);
     expect(detail.lineDisplaySnapshots[0].productName).toBe('Saved product');
     expect(detail.lineSubtotals[0].subtotal).toBeNull();
+    expect(detail.supplierCurrentVersion).toBe(f.supplier.version);
+    expect(detail.referenceToken).toBeNull();
+    expect(detail.canConfirm).toBe(false);
     const page = await f.run(() => f.service.listDrafts({}));
     expect(page.items[0].issueCount).toBe(2);
     expect(await evidence(f.tenantId)).toEqual(before);

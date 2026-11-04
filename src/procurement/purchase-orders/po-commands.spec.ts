@@ -86,7 +86,13 @@ function harness() {
     { action: 'read', subject: 'Product' },
   ];
   const suppliers = [
-    { id: supplierId, tenantId, displayName: 'Supplier', status: 'ACTIVE' },
+    {
+      id: supplierId,
+      tenantId,
+      displayName: 'Supplier',
+      status: 'ACTIVE',
+      version: 3,
+    },
   ];
   const products = [
     {
@@ -156,11 +162,27 @@ function harness() {
         async ({
           data,
         }: {
-          data: Omit<Header, 'id' | 'status' | 'createdAt' | 'updatedAt'>;
+          data: Omit<
+            Header,
+            | 'id'
+            | 'status'
+            | 'createdAt'
+            | 'updatedAt'
+            | 'confirmedAt'
+            | 'confirmedByDisplayName'
+            | 'cancelledAt'
+            | 'cancelledByDisplayName'
+            | 'lineSubtotalsSnapshot'
+          >;
         }) => {
           const row: Header = {
             id,
             status: 'DRAFT',
+            confirmedAt: null,
+            confirmedByDisplayName: null,
+            cancelledAt: null,
+            cancelledByDisplayName: null,
+            lineSubtotalsSnapshot: null,
             createdAt: time,
             updatedAt: time,
             ...data,
@@ -389,6 +411,13 @@ describe('PurchaseOrderCommands', () => {
         ],
         locationSnapshot: { tenantId, tenantName: 'Branch', detail: null },
         validation: { issues: [] },
+        supplierCurrentVersion: 3,
+        referenceToken: expect.stringMatching(/^prt1\.[\w-]{43}$/) as unknown,
+        canConfirm: true,
+        confirmedAt: null,
+        confirmedBy: null,
+        cancelledAt: null,
+        cancelledBy: null,
       },
     });
     expect(h.state().audits[0]).toMatchObject({
@@ -670,6 +699,37 @@ describe('PurchaseOrderCommands', () => {
       409,
       'IDEMPOTENCY_KEY_CONFLICT',
     );
+  });
+  it('PUT returns the same extended shape: token stable across quantity/cost edits, live supplier version, canConfirm false for an archived retained supplier', async () => {
+    const h = harness();
+    const created = await h.service.createDraft('c', selected);
+    const edited = copyOrder();
+    edited.lines[0].orderedQuantity = '9';
+    edited.lines[0].informedUnitCost!.amount = '77';
+    const replaced = await replace(h, edited);
+    expect(Object.keys(replaced.body).sort()).toEqual(
+      Object.keys(created.body).sort(),
+    );
+    expect(replaced.body.referenceToken).toBe(created.body.referenceToken);
+    expect(replaced.body).toMatchObject({
+      supplierCurrentVersion: 3,
+      canConfirm: true,
+    });
+    h.suppliers[0].status = 'ARCHIVED';
+    h.suppliers[0].version = 5;
+    const archived = await replace(h, edited, 2, 'r2');
+    expect(archived.body).toMatchObject({
+      supplierCurrentVersion: 5,
+      canConfirm: false,
+      validation: { issues: [{ code: 'SUPPLIER_ARCHIVED' }] },
+    });
+    expect(archived.body.referenceToken).not.toBeNull();
+    const incomplete = await h.service.createDraft('i', empty);
+    expect(incomplete.body).toMatchObject({
+      supplierCurrentVersion: null,
+      referenceToken: null,
+      canConfirm: false,
+    });
   });
   it.each(['active', 'tenantActive', 'permissions'])(
     'checks revoked %s before replay',
