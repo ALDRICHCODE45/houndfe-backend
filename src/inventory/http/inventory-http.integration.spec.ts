@@ -118,7 +118,7 @@ describeDb('inventory HTTP commands and queries (PostgreSQL)', () => {
     );
     const run = <T>(work: () => T): T =>
       cls.runWith({ tenantId, userId: actorId, isSuperAdmin: false }, work);
-    return { commands, queries, run };
+    return { commands, queries, run, reader, tenantDb };
   }
 
   async function fixture(grants?: [string, string][]) {
@@ -163,6 +163,25 @@ describeDb('inventory HTTP commands and queries (PostgreSQL)', () => {
     receipts: await db.inventoryAdjustmentReceipt.count({
       where: { tenantId },
     }),
+  });
+
+  it('reads stock from one snapshot: writers wait until the read transaction ends', async () => {
+    const f = await fixture();
+    let writerBlocked: unknown = null;
+    await f.run(() =>
+      f.tenantDb.runInTransaction(async () => {
+        const snapshot = await f.reader.read(f.tenantId, f.product.id);
+        expect(snapshot?.product.quantity).toBe(20);
+        // A journal writer locks the product FOR UPDATE first; while the read
+        // transaction is open it must not be able to change the buckets.
+        writerBlocked =
+          await db.$executeRaw`SELECT 1 FROM "products" WHERE "id" = ${f.product.id} FOR UPDATE NOWAIT`.then(
+            () => null,
+            (failure: unknown) => failure,
+          );
+      }),
+    );
+    expect(String(writerBlocked)).toContain('55P03');
   });
 
   it('adjusts the untracked portion: 201 body, journal row, CAS bump, users.name snapshot', async () => {

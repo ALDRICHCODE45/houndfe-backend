@@ -27,6 +27,11 @@ export class InventoryStockReader {
     now: Date = new Date(),
   ): Promise<StockSnapshot | null> {
     const db = this.db.getClient();
+    // Journal writers lock the product row FOR UPDATE before touching its
+    // buckets; holding it FOR SHARE first keeps product, lots and variants
+    // from changing between the reads below (one consistent snapshot).
+    await db.$queryRaw`SELECT 1 FROM "products"
+      WHERE "id" = ${productId} AND "tenantId" = ${tenantId} FOR SHARE`;
     const product = await db.product.findFirst({
       where: { id: productId, tenantId },
       select: {
