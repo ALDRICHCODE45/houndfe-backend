@@ -321,7 +321,7 @@ Three edge cases:
 
 - Sales charged before the journal existed restore to the product or variant as before.
 - Cancelling twice never restores twice. The second call answers `200` again and writes no rows.
-- A POS sale is charged as `DELIVERED` by default, and a delivered sale cannot be cancelled: `409 SALE_DELIVERED_CANNOT_CANCEL`. Only sales charged with `delivery: true` (they stay `PENDING` until delivered) can be cancelled, so the restock on cancellation applies to those sales only.
+- A POS sale is charged as `DELIVERED` by default, and a delivered sale cannot be cancelled: `409 SALE_DELIVERED_CANNOT_CANCEL`. Only sales charged with `delivery: true` (they stay `PENDING` until delivered) can be cancelled, so the restock on cancellation applies to those sales only. This is existing behavior on `main`, unchanged by O1: only where the stock goes back changed.
 
 The movement actor is the cashier's name for POS sales and `Bot` for bot sales.
 
