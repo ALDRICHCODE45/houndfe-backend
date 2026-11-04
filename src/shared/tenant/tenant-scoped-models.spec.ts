@@ -147,3 +147,14 @@ describe('TENANT_SCOPED_MODELS — human-decisions-restock-v1 registration (HD-0
     expect(occurrences).toEqual([...REQUIRED]);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — inventory journal registration (O1 / T5)', () => {
+  const REQUIRED = ['StockMovement', 'InventoryAdjustmentReceipt'] as const;
+
+  it.each(REQUIRED)(
+    'registers %s so tenant-scoped reads inject where.tenantId',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+});
