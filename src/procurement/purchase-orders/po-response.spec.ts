@@ -121,6 +121,8 @@ describe('shared purchase-order response builder (DRAFT)', () => {
       cancelledAt: null,
       cancelledBy: null,
       validation: { issues: [] },
+      issueSummary: { cost: 0, quantity: 0, reference: 0, order: [] },
+      checklistItemCount: 0,
       supplierDisplaySnapshot: { displayName: 'Live supplier' },
       locationSnapshot: { tenantId, tenantName: 'Live branch', detail: null },
     });
@@ -299,6 +301,8 @@ describe('shared purchase-order response builder (closed orders)', () => {
         detail: null,
       },
       validation: { issues: [] },
+      issueSummary: { cost: 0, quantity: 0, reference: 0, order: [] },
+      checklistItemCount: 0,
       supplierCurrentVersion: 9,
       referenceToken: null,
       canConfirm: false,
