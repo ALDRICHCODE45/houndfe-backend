@@ -34,7 +34,6 @@ function makeRepo(overrides: Partial<IProductRepository> = {}) {
     findAll: jest.fn(),
     save: jest.fn(),
     delete: jest.fn(),
-    decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
     rearmAlertAfterEdit: jest
       .fn<Promise<void>, any>()

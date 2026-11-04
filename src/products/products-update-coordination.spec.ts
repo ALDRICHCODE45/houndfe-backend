@@ -229,7 +229,6 @@ function fixture(flags: Row = {}) {
   // SAFETY: the real repository consumes these instrumented delegate/alert surfaces only.
   const repo = new PrismaProductRepository(
     tenant as never,
-    { publish: jest.fn() } as never,
     { rearm, seedAndFlip: jest.fn() } as never,
   );
   const rootDefault = jest.fn(() => {

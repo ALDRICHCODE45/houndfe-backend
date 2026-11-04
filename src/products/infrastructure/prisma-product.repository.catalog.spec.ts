@@ -5,7 +5,6 @@
  * per save(), ambient reuse, tx-client delegates, failure propagation.
  */
 import { PrismaProductRepository } from './prisma-product.repository';
-import type { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import type { IStockAlertStateRepository } from '../../stock-alerts/domain/stock-alert-state.repository';
 import { Product } from '../domain/product.entity';
 
@@ -78,7 +77,6 @@ function makeHarness(
   };
   const repo = new PrismaProductRepository(
     tenantPrisma as never,
-    { publish: jest.fn() } as unknown as OutboxWriterService,
     {
       seedAndFlip: jest.fn(),
       rearm: jest.fn(),

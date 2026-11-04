@@ -109,23 +109,6 @@ export class ProductsService {
     private readonly stockJournal: ProductStockJournal,
   ) {}
 
-  async decrementStockForCharge(
-    adjustments: Array<{
-      productId: string;
-      variantId?: string | null;
-      quantity: number;
-    }>,
-  ): Promise<
-    Array<{
-      productId: string;
-      variantId: string | null;
-      newQuantity: number;
-      minQuantity: number;
-    }>
-  > {
-    return this.productRepo.decrementStockForCharge(adjustments);
-  }
-
   async incrementStockForRestock(
     adjustments: Array<{
       productId: string;
@@ -2235,24 +2218,6 @@ export class ProductsService {
       sortOrder: productImage.sortOrder,
       variantId: productImage.variantId,
     };
-  }
-
-  // ==================== Stock operations (backward compat) ====================
-
-  async decreaseStock(productId: string, quantity: number): Promise<Product> {
-    const product = await this.productRepo.findById(productId);
-    if (!product) throw new EntityNotFoundError('Product', productId);
-
-    product.decreaseStock(quantity);
-    return this.productRepo.save(product);
-  }
-
-  async increaseStock(productId: string, quantity: number): Promise<Product> {
-    const product = await this.productRepo.findById(productId);
-    if (!product) throw new EntityNotFoundError('Product', productId);
-
-    product.increaseStock(quantity);
-    return this.productRepo.save(product);
   }
 
   // ==================== Helpers ====================

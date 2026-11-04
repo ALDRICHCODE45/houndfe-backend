@@ -1,25 +1,15 @@
 /**
  * PrismaProductRepository — adapter tests.
  *
- * Slice E.2 — stock crossing detection. The decrement path is rewritten
- * to use raw `$queryRaw` `UPDATE ... RETURNING` so the new post-decrement
- * quantity (and the cross-tenant guard) is available atomically; the
- * `StockCrossing[]` return type lets the sales orchestrator dispatch
- * low-stock events after commit.
+ * Legacy restock fallback (`incrementStockForRestock`) and the edit-path
+ * re-arm (`rearmAlertAfterEdit`). Charging moved to the stock journal (O1).
  *
  * Spec coverage:
- *   - specs/sales/spec.md — "Stock Decrement Returns Threshold Crossings"
- *     + "Stock-guard failure semantics unchanged"
  *   - specs/stock-alerts/spec.md — "One-Shot Edge Trigger At Or Below Min Quantity"
- *     + "Lots/expiration products excluded" + "Boundary inclusive at minQuantity"
- *   - design.md — Decision 5 (PRE-gate), Decision 6 (strict `>` re-arm),
- *     finding #3 (raw tenant guard), finding #7 (non-stock skip),
- *     finding #8 (PRE-gate no false fire), finding #9 (variant path
- *     has no useStock/useLots columns)
+ *   - design.md — Decision 6 (strict `>` re-arm)
  */
 import { PrismaProductRepository } from './prisma-product.repository';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
-import type { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import type { IStockAlertStateRepository } from '../../stock-alerts/domain/stock-alert-state.repository';
 
 // ── Tx-aware $queryRaw mock ────────────────────────────────────────────
@@ -92,12 +82,6 @@ function makeTenantPrismaForTx(tx: ReturnType<typeof makeTxMock>) {
   };
 }
 
-function makeOutboxWriter(): jest.Mocked<OutboxWriterService> {
-  return {
-    publish: jest.fn().mockResolvedValue(undefined),
-  } as any;
-}
-
 function makeStockAlertRepo(): jest.Mocked<IStockAlertStateRepository> {
   return {
     seedAndFlip: jest.fn(),
@@ -106,522 +90,6 @@ function makeStockAlertRepo(): jest.Mocked<IStockAlertStateRepository> {
 }
 
 const TENANT = 'tenant-1';
-
-describe('charge global ordering', () => {
-  it('locks mixed parents once in id order, processes row/alert keys in order, returns input-order crossings', async () => {
-    const tx = makeTxMock();
-    tx.setResponses(
-      Array.from({ length: 5 }, () => [
-        { newQuantity: 0, minQuantity: 0, useLotsAndExpirations: false },
-      ]),
-    );
-    const alerts = makeStockAlertRepo();
-    alerts.seedAndFlip.mockResolvedValue(1);
-    const outbox = makeOutboxWriter();
-    const repo = new PrismaProductRepository(
-      makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
-        typeof PrismaProductRepository
-      >[0],
-      outbox,
-      alerts,
-    );
-    const items = [
-      { productId: 'z', quantity: 1 },
-      { productId: 'm', variantId: 'v2', quantity: 1 },
-      { productId: 'a', variantId: 'v1', quantity: 1 },
-      { productId: 'm', quantity: 1 },
-      { productId: 'm', variantId: 'v1', quantity: 1 },
-      { productId: 'ignored', quantity: 0 },
-      { productId: 'negative', quantity: -1 },
-    ];
-    const result = await repo.decrementStockForCharge(items);
-    const locks = tx.calls.slice(0, 3);
-    expect(locks.map((c) => c.values)).toEqual([
-      ['a', TENANT],
-      ['m', TENANT],
-      ['z', TENANT],
-    ]);
-    expect(
-      locks.map((c) => c.sql.match(/FOR (UPDATE|KEY SHARE)/)?.[1]),
-    ).toEqual(['KEY SHARE', 'UPDATE', 'UPDATE']);
-    for (const lock of locks) {
-      expect(lock.sql).toMatch(/FROM "products"/);
-      expect(lock.sql).toMatch(/"id" = \$1 AND "tenantId" = \$2/);
-    }
-    const order = [
-      ['a', 'v1'],
-      ['m', null],
-      ['m', 'v1'],
-      ['m', 'v2'],
-      ['z', null],
-    ];
-    expect(
-      alerts.seedAndFlip.mock.calls.map(([c]) => [c.productId, c.variantId]),
-    ).toEqual(order);
-    expect(outbox.publish.mock.calls.map((c) => c[3])).toEqual(
-      order.map(([p, v]) => `${p}:${v ?? '__PRODUCT__'}`),
-    );
-    expect(tx.calls.slice(3).map((c) => c.values.slice(0, 3))).toEqual([
-      [1, 'v1', 'a'],
-      [1, 'm', TENANT],
-      [1, 'v1', 'm'],
-      [1, 'v2', 'm'],
-      [1, 'z', TENANT],
-    ]);
-    expect(result.map((c) => [c.productId, c.variantId])).toEqual(
-      items.slice(0, 5).map((c) => [c.productId, c.variantId ?? null]),
-    );
-  });
-});
-
-describe('charge duplicate Variant entries', () => {
-  it('keeps separate decrements in stable input order for the same Variant', async () => {
-    const tx = makeTxMock();
-    tx.setResponses([
-      [{ newQuantity: 8, minQuantity: 3 }],
-      [{ newQuantity: 3, minQuantity: 3 }],
-    ]);
-    const alerts = makeStockAlertRepo();
-    alerts.seedAndFlip.mockResolvedValue(1);
-    const outbox = makeOutboxWriter();
-    // SAFETY: the fixture supplies the exact tenant/transaction port used here.
-    const repo = new PrismaProductRepository(
-      makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
-        typeof PrismaProductRepository
-      >[0],
-      outbox,
-      alerts,
-    );
-    await expect(
-      repo.decrementStockForCharge([
-        { productId: 'p', variantId: 'v', quantity: 2 },
-        { productId: 'p', variantId: 'v', quantity: 5 },
-      ]),
-    ).resolves.toEqual([
-      { productId: 'p', variantId: 'v', newQuantity: 3, minQuantity: 3 },
-    ]);
-    expect(tx.calls).toHaveLength(3); // one parent lock, two distinct UPDATEs
-    expect(tx.calls[0].sql).toMatch(/FOR KEY SHARE/);
-    expect(tx.calls.slice(1).map((c) => c.values)).toEqual([
-      [2, 'v', 'p', TENANT, 2],
-      [5, 'v', 'p', TENANT, 5],
-    ]);
-    expect(alerts.seedAndFlip.mock.calls).toHaveLength(1);
-    expect(outbox.publish.mock.calls).toHaveLength(1);
-  });
-});
-
-// ── Original contract — Stock-guard failure semantics unchanged ────────
-
-describe('PrismaProductRepository.decrementStockForCharge (E.2)', () => {
-  it('throws STOCK_INSUFFICIENT_AT_CONFIRM when the guarded UPDATE matches zero rows on a useStock product', async () => {
-    const tx = makeTxMock();
-    // 1) UPDATE products ... — zero rows (insufficient stock)
-    // 2) SELECT fallback for useStock=false — empty (the product IS a
-    //    useStock product but its stock is insufficient; throw).
-    tx.setResponses([[], []]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    await expect(
-      repo.decrementStockForCharge([{ productId: 'prod-1', quantity: 5 }]),
-    ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
-
-    // SELECT issued AFTER UPDATE matched zero rows; finds NO useStock=false
-    // row ⇒ throw, no flip, no outbox.
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-
-  it('skips a non-stock (useStock=false) product silently without throwing or crossing', async () => {
-    const tx = makeTxMock();
-    tx.setResponses([
-      [], // UPDATE products ... — zero rows (useStock=false excluded)
-      [{ id: 'prod-service' }], // SELECT confirms non-stock row exists
-    ]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    await expect(
-      repo.decrementStockForCharge([
-        { productId: 'prod-service', quantity: 1 },
-      ]),
-    ).resolves.toEqual([]);
-
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-});
-
-// ── E.2 NEW BEHAVIOR — crossings + return type ─────────────────────────
-
-describe('PrismaProductRepository.decrementStockForCharge — crossings (E.2)', () => {
-  it('returns an empty array when the post-decrement quantity stays above minQuantity (no crossing)', async () => {
-    const tx = makeTxMock();
-    // Pre=10, qty=2, min=3 → new=8, pre=10 > 3 AND newQty=8 > min=3
-    // → PRE-gate fails, no flip, no outbox.
-    tx.setResponses([
-      [{ newQuantity: 8, minQuantity: 3, useLotsAndExpirations: false }],
-    ]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-1', quantity: 2 },
-    ]);
-
-    expect(result).toEqual([]);
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-
-  it('returns a StockCrossing when a downward crossing wins the flip (the happy-path edge trigger)', async () => {
-    const tx = makeTxMock();
-    // Pre=5, qty=2, min=3 → new=3, pre=5 > 3 AND newQty=3 <= 3
-    // → PRE-gate fires, flip wins.
-    tx.setResponses([
-      [{ newQuantity: 3, minQuantity: 3, useLotsAndExpirations: false }],
-    ]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-    alertState.seedAndFlip.mockResolvedValue(1); // flip won, new epoch = 1
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-1', quantity: 2 },
-    ]);
-
-    expect(result).toEqual([
-      { productId: 'prod-1', variantId: null, newQuantity: 3, minQuantity: 3 },
-    ]);
-    expect(alertState.seedAndFlip).toHaveBeenCalledTimes(1);
-    expect(alertState.seedAndFlip).toHaveBeenCalledWith({
-      tx: tx as any,
-      tenantId: TENANT,
-      productId: 'prod-1',
-      variantId: null,
-    });
-    // Outbox row is written IN THE SAME TRANSACTION as the decrement + flip.
-    expect(outbox.publish).toHaveBeenCalledTimes(1);
-    const publishArgs = outbox.publish.mock.calls[0];
-    expect(publishArgs[0]).toBe(tx); // tx client
-    expect(publishArgs[1]).toBe(TENANT); // tenantId
-    expect(publishArgs[2]).toBe('StockAlert'); // aggregateType
-    expect(publishArgs[3]).toBe('prod-1:__PRODUCT__'); // aggregateId
-    expect(publishArgs[4]).toBe('stock.low.detected'); // eventType
-    expect(publishArgs[5]).toEqual(
-      expect.objectContaining({
-        tenantId: TENANT,
-        productId: 'prod-1',
-        variantId: null,
-        variantKey: '__PRODUCT__',
-        alertEpoch: 1,
-        newQuantity: 3,
-        minQuantity: 3,
-        occurredAt: expect.any(String),
-      }),
-    );
-  });
-
-  it('does NOT fire when an item is already created below min (no false-fire on PRE-gate)', async () => {
-    const tx = makeTxMock();
-    // Pre=2 (already low), qty=1, min=3 → new=1, pre=2 NOT > 3
-    // → PRE-gate fails even though newQty=1 <= 3.
-    tx.setResponses([
-      [{ newQuantity: 1, minQuantity: 3, useLotsAndExpirations: false }],
-    ]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-low', quantity: 1 },
-    ]);
-
-    expect(result).toEqual([]);
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-
-  it('does NOT fire on lots/expiration products even when newQty <= minQty (design Decision 5)', async () => {
-    const tx = makeTxMock();
-    // Pre=10, qty=7, min=3, useLotsAndExpirations=true → new=3, but lots
-    // exclude → PRE-gate fails.
-    tx.setResponses([
-      [{ newQuantity: 3, minQuantity: 3, useLotsAndExpirations: true }],
-    ]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-lots', quantity: 7 },
-    ]);
-
-    expect(result).toEqual([]);
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-
-  it('returns empty array when the flip LOSES — concurrent tx already alerted (spec: already-alerted not re-reported)', async () => {
-    const tx = makeTxMock();
-    tx.setResponses([
-      [{ newQuantity: 3, minQuantity: 3, useLotsAndExpirations: false }],
-    ]);
-    // seedAndFlip returns null when the conditional UPDATE matches 0 rows
-    // (another tx already flipped this item).
-    const alertState = makeStockAlertRepo();
-    alertState.seedAndFlip.mockResolvedValue(null);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-1', quantity: 2 },
-    ]);
-
-    // Spec "already-alerted item is not re-reported" — the loser of the
-    // concurrent flip observes an alerted=true row and does NOT add a
-    // crossing to its return array. The winning tx already alerted
-    // and will dispatch.
-    expect(result).toEqual([]);
-    expect(alertState.seedAndFlip).toHaveBeenCalledTimes(1);
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-
-  it('variant path: returns a StockCrossing with the variant id (no useStock/useLots columns)', async () => {
-    const tx = makeTxMock();
-    tx.setResponses([
-      [{ newQuantity: 3, minQuantity: 3 }], // variants table has no useLotsAndExpirations
-    ]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-    alertState.seedAndFlip.mockResolvedValue(5); // flip wins, epoch 5
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
-    ]);
-
-    expect(result).toEqual([
-      {
-        productId: 'prod-1',
-        variantId: 'var-1',
-        newQuantity: 3,
-        minQuantity: 3,
-      },
-    ]);
-
-    // UPDATE variants — no useStock, no useLotsAndExpirations
-    const updateCall = tx.calls[1];
-    expect(updateCall.sql).toMatch(/UPDATE "variants"/);
-    expect(updateCall.sql).not.toMatch(/"useStock"/);
-    expect(updateCall.sql).not.toMatch(/"useLotsAndExpirations"/);
-    expect(updateCall.sql).toMatch(/"tenantId" = \$/);
-    expect(updateCall.sql).toMatch(/"id" = \$/);
-    expect(updateCall.sql).toMatch(/"productId" = \$/);
-
-    expect(alertState.seedAndFlip).toHaveBeenCalledWith({
-      tx: tx as any,
-      tenantId: TENANT,
-      productId: 'prod-1',
-      variantId: 'var-1',
-    });
-    expect(outbox.publish).toHaveBeenCalledWith(
-      tx,
-      TENANT,
-      'StockAlert',
-      'prod-1:var-1',
-      'stock.low.detected',
-      expect.objectContaining({
-        variantId: 'var-1',
-        variantKey: 'var-1',
-      }),
-    );
-  });
-
-  it('variant path: zero rows from UPDATE throws STOCK_INSUFFICIENT_AT_CONFIRM (variants have no non-stock fallback)', async () => {
-    const tx = makeTxMock();
-    tx.setResponses([[]]); // UPDATE variants — zero rows
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    await expect(
-      repo.decrementStockForCharge([
-        { productId: 'prod-1', variantId: 'var-1', quantity: 5 },
-      ]),
-    ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
-
-    // No SELECT fallback for variants (design Decision 5, finding #9).
-    expect(tx.calls).toHaveLength(2); // qualified parent lock + Variant UPDATE
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-
-  it('cross-tenant raw WHERE: zero rows when productId belongs to a different tenant (no useStock check, raw carries "tenantId")', async () => {
-    const tx = makeTxMock();
-    tx.setResponses([[]]); // raw UPDATE — zero rows for cross-tenant productId
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    await expect(
-      repo.decrementStockForCharge([
-        { productId: 'prod-other-tenant', quantity: 1 },
-      ]),
-    ).rejects.toThrow('STOCK_INSUFFICIENT_AT_CONFIRM');
-
-    const updateCall = tx.calls[1];
-    expect(updateCall.sql).toMatch(/"tenantId" = \$/);
-    expect(updateCall.values).toContain(TENANT);
-  });
-
-  it('processes multiple adjustments independently — returns ALL crossings (one per item that crossed)', async () => {
-    const tx = makeTxMock();
-    // Adjustment A: crosses (new=3, min=3, not lots) → flip wins
-    // Adjustment B: stays above min (new=10, min=3) → no flip
-    // Adjustment C: variant crosses (new=2, min=2) → flip wins
-    tx.setResponses([
-      [{ newQuantity: 3, minQuantity: 3, useLotsAndExpirations: false }],
-      [{ newQuantity: 10, minQuantity: 3, useLotsAndExpirations: false }],
-      [{ newQuantity: 2, minQuantity: 2 }],
-    ]);
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-    // Each flip returns a distinct epoch so both crossings are added.
-    alertState.seedAndFlip
-      .mockResolvedValueOnce(1) // prod-A
-      .mockResolvedValueOnce(2); // var-C
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-A', quantity: 7 },
-      { productId: 'prod-B', quantity: 1 },
-      { productId: 'prod-C', variantId: 'var-C', quantity: 8 },
-    ]);
-
-    expect(result).toHaveLength(2);
-    expect(result[0]).toEqual({
-      productId: 'prod-A',
-      variantId: null,
-      newQuantity: 3,
-      minQuantity: 3,
-    });
-    expect(result[1]).toEqual({
-      productId: 'prod-C',
-      variantId: 'var-C',
-      newQuantity: 2,
-      minQuantity: 2,
-    });
-
-    expect(alertState.seedAndFlip).toHaveBeenCalledTimes(2);
-    expect(outbox.publish).toHaveBeenCalledTimes(2);
-  });
-
-  it('skips adjustments with quantity <= 0 (mirrors pre-E behavior)', async () => {
-    const tx = makeTxMock();
-    tx.setResponses([]); // no calls expected
-
-    const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    const result = await repo.decrementStockForCharge([
-      { productId: 'prod-skip', quantity: 0 },
-      { productId: 'prod-skip-2', quantity: -1 },
-    ]);
-
-    expect(result).toEqual([]);
-    expect(tx.calls).toHaveLength(0);
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-});
 
 // ── E.2 NEW BEHAVIOR — incrementStockForRestock with strict > re-arm ──
 
@@ -636,12 +104,10 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
         [{ name: 'Converted product', hasVariants: true, useStock: true }],
       ]);
       const alerts = makeStockAlertRepo();
-      const outbox = makeOutboxWriter();
       const repo = new PrismaProductRepository(
         makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
           typeof PrismaProductRepository
         >[0],
-        outbox,
         alerts,
       );
       const result = repo.incrementStockForRestock([
@@ -667,7 +133,6 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
         hasEarlierItem ? ['a'] : [],
       );
       expect(alerts.seedAndFlip.mock.calls).toEqual([]);
-      expect(outbox.publish.mock.calls).toEqual([]);
     },
   );
 
@@ -679,12 +144,10 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
       [{ newQuantity: 5, minQuantity: 0 }],
     ]);
     const alerts = makeStockAlertRepo();
-    const outbox = makeOutboxWriter();
     const repo = new PrismaProductRepository(
       makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
         typeof PrismaProductRepository
       >[0],
-      outbox,
       alerts,
     );
     await expect(
@@ -700,7 +163,6 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
       [{ tx, tenantId: TENANT, productId: 'b', variantId: 'v' }],
     ]);
     expect(alerts.seedAndFlip.mock.calls).toEqual([]);
-    expect(outbox.publish.mock.calls).toEqual([]);
   });
   it('locks mixed parents once in global id order and restocks/rearms in row order', async () => {
     const tx = makeTxMock();
@@ -708,13 +170,11 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
       Array.from({ length: 5 }, () => [{ newQuantity: 5, minQuantity: 0 }]),
     );
     const alerts = makeStockAlertRepo();
-    const outbox = makeOutboxWriter();
     // SAFETY: the fixture supplies the exact tenant/transaction port used here.
     const repo = new PrismaProductRepository(
       makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
         typeof PrismaProductRepository
       >[0],
-      outbox,
       alerts,
     );
     await expect(
@@ -756,20 +216,17 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
       ['z', null],
     ]);
     expect(alerts.seedAndFlip.mock.calls).toEqual([]);
-    expect(outbox.publish.mock.calls).toEqual([]);
   });
 
   it('skips nonpositive entries and preserves no-match/useStock and Variant rearm boundaries', async () => {
     const tx = makeTxMock();
     tx.setResponses([[], [], [], [{ newQuantity: 2, minQuantity: 3 }]]);
     const alerts = makeStockAlertRepo();
-    const outbox = makeOutboxWriter();
     // SAFETY: the fixture supplies the exact tenant/transaction port used here.
     const repo = new PrismaProductRepository(
       makeTenantPrismaForTx(tx) as unknown as ConstructorParameters<
         typeof PrismaProductRepository
       >[0],
-      outbox,
       alerts,
     );
     await expect(
@@ -789,7 +246,6 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
     expect(tx.calls[2].sql).toMatch(/AND "useStock" = true/);
     expect(alerts.rearm.mock.calls).toEqual([]);
     expect(alerts.seedAndFlip.mock.calls).toEqual([]);
-    expect(outbox.publish.mock.calls).toEqual([]);
   });
 
   it('does NOT re-arm when newQuantity === minQuantity (strict boundary)', async () => {
@@ -798,14 +254,9 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
     tx.setResponses([[{ newQuantity: 3, minQuantity: 3 }]]);
 
     const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await repo.incrementStockForRestock([{ productId: 'prod-1', quantity: 1 }]);
 
@@ -818,14 +269,9 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
     tx.setResponses([[{ newQuantity: 5, minQuantity: 3 }]]);
 
     const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await repo.incrementStockForRestock([{ productId: 'prod-1', quantity: 3 }]);
 
@@ -841,41 +287,6 @@ describe('PrismaProductRepository.incrementStockForRestock — strict > re-arm (
 // ── WARNING 1 — Ambient-transaction guard (Slice E reliability) ────────
 
 describe('PrismaProductRepository — ambient-tx guard (R1 fix)', () => {
-  it('decrementStockForCharge THROWS when called outside an ambient transaction (silent-fallback foot-gun)', async () => {
-    // tenantPrisma.isInTransaction() === false → repo MUST throw BEFORE
-    // touching the underlying client (no auto-commit, no outbox write,
-    // no decrement). Without this guard, getClient() would silently
-    // return a non-tx client and each statement would commit
-    // independently, leaving the outbox inconsistent with the
-    // products row.
-    const tx = makeTxMock();
-    const tenantPrisma = {
-      getClient: jest.fn().mockReturnValue(tx),
-      getTenantId: jest.fn().mockReturnValue(TENANT),
-      isInTransaction: jest.fn().mockReturnValue(false),
-    };
-    const outbox = makeOutboxWriter();
-    const alertState = makeStockAlertRepo();
-
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
-
-    await expect(
-      repo.decrementStockForCharge([{ productId: 'prod-1', quantity: 5 }]),
-    ).rejects.toThrow(
-      /must be called inside TenantPrismaService\.runInTransaction/,
-    );
-
-    // NO statements ran against the client — guard fires before
-    // getClient() is even consumed.
-    expect(tx.calls).toHaveLength(0);
-    expect(alertState.seedAndFlip).not.toHaveBeenCalled();
-    expect(outbox.publish).not.toHaveBeenCalled();
-  });
-
   it('incrementStockForRestock THROWS when called outside an ambient transaction', async () => {
     // Mirror guard for the restock path — leaving the rearm dangling
     // would block the next alert forever.
@@ -885,14 +296,9 @@ describe('PrismaProductRepository — ambient-tx guard (R1 fix)', () => {
       getTenantId: jest.fn().mockReturnValue(TENANT),
       isInTransaction: jest.fn().mockReturnValue(false),
     };
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await expect(
       repo.incrementStockForRestock([{ productId: 'prod-1', quantity: 3 }]),
@@ -918,14 +324,9 @@ describe('PrismaProductRepository.rearmAlertAfterEdit — ambient-tx guard', () 
       getTenantId: jest.fn().mockReturnValue(TENANT),
       isInTransaction: jest.fn().mockReturnValue(false),
     };
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await expect(
       repo.rearmAlertAfterEdit({ productId: 'prod-1' }),
@@ -947,14 +348,9 @@ describe('PrismaProductRepository.rearmAlertAfterEdit — product path', () => {
     tx.setResponses([[{ q: 10, m: 3 }]]);
 
     const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await repo.rearmAlertAfterEdit({ productId: 'prod-1' });
 
@@ -985,14 +381,9 @@ describe('PrismaProductRepository.rearmAlertAfterEdit — product path', () => {
     tx.setResponses([[{ q: 3, m: 3 }]]);
 
     const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await repo.rearmAlertAfterEdit({ productId: 'prod-1' });
 
@@ -1010,14 +401,9 @@ describe('PrismaProductRepository.rearmAlertAfterEdit — product path', () => {
     tx.setResponses([[]]);
 
     const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await expect(
       repo.rearmAlertAfterEdit({ productId: 'prod-1' }),
@@ -1037,14 +423,9 @@ describe('PrismaProductRepository.rearmAlertAfterEdit — variant path', () => {
     tx.setResponses([[{ q: 10, m: 3 }]]);
 
     const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await repo.rearmAlertAfterEdit({
       productId: 'prod-1',
@@ -1081,14 +462,9 @@ describe('PrismaProductRepository.rearmAlertAfterEdit — variant path', () => {
     tx.setResponses([[]]);
 
     const tenantPrisma = makeTenantPrismaForTx(tx);
-    const outbox = makeOutboxWriter();
     const alertState = makeStockAlertRepo();
 
-    const repo = new PrismaProductRepository(
-      tenantPrisma as any,
-      outbox,
-      alertState,
-    );
+    const repo = new PrismaProductRepository(tenantPrisma as any, alertState);
 
     await expect(
       repo.rearmAlertAfterEdit({

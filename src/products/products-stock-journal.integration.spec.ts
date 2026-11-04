@@ -56,7 +56,6 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
   const service = new ProductsService(
     new PrismaProductRepository(
       tenantPrisma,
-      unused('OutboxWriterService') as never,
       unused('IStockAlertStateRepository') as never,
     ),
     prismaService,

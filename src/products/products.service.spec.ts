@@ -34,7 +34,6 @@ function makeMockRepo(overrides: Partial<IProductRepository> = {}) {
     findAll: jest.fn(),
     save: jest.fn(),
     delete: jest.fn(),
-    decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
     rearmAlertAfterEdit: jest
       .fn<Promise<void>, any>()
@@ -1998,11 +1997,8 @@ describe('ProductsService — update() edit-path re-arm', () => {
       ),
     };
 
-    const outbox = { publish: jest.fn().mockResolvedValue(undefined) };
-
     const realRepo = new PrismaProductRepository(
       tenantPrisma as any,
-      outbox as any,
       alertStateMock,
     );
 
@@ -2300,7 +2296,7 @@ describe('ProductsService — update() edit-path re-arm', () => {
     // rearmAlertAfterEdit is the only edit-path primitive). The
     // alertStateMock is wired through the real PrismaProductRepository,
     // so any production code path that called alertState.seedAndFlip
-    // (directly, or by routing the edit through decrementStockForCharge
+    // (directly, or by routing the edit through charge-time
     // semantics) would be observed here and FAIL this test.
     expect(alertStateMock.seedAndFlip).not.toHaveBeenCalled();
     // Rearm did fire on the qty/min edits — the production adapter's

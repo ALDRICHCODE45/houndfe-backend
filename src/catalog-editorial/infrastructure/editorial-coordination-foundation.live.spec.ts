@@ -90,7 +90,6 @@ describe('live editorial coordination foundation', () => {
     );
     const repository = new PrismaProductRepository(
       tenant,
-      unused('OutboxWriterService'),
       unused('IStockAlertStateRepository'),
     );
     const products = new ProductsService(

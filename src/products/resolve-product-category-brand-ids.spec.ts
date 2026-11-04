@@ -36,7 +36,6 @@ function makeMockRepo(): jest.Mocked<IProductRepository> {
     findAll: jest.fn(),
     save: jest.fn(),
     delete: jest.fn(),
-    decrementStockForCharge: jest.fn(),
     incrementStockForRestock: jest.fn(),
     rearmAlertAfterEdit: jest.fn().mockResolvedValue(undefined),
     isSkuTaken: jest.fn().mockResolvedValue(false),

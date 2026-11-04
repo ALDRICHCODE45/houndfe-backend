@@ -71,7 +71,6 @@ describe('live global price-list lifecycle deletion', () => {
       const repository = new PrismaProductRepository(
         tenant,
         unused as RepositoryArgs[1],
-        unused as RepositoryArgs[2],
       );
       type ProductArgs = ConstructorParameters<typeof ProductsService>;
       const products = new ProductsService(

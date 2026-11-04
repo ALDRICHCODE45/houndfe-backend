@@ -69,7 +69,6 @@ function fixture() {
     }),
     productsService: {
       getApplicablePrices: jest.fn().mockResolvedValue([{ priceCents: 1000 }]),
-      decrementStockForCharge: jest.fn(),
     },
     saleStock: { charge: jest.fn(), reverse: jest.fn() },
     promotionUsageRepo: { claimForSale: jest.fn() },

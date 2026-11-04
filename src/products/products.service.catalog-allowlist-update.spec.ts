@@ -123,7 +123,6 @@ function harness(
   };
   const repo = new PrismaProductRepository(
     tenantPrisma as never,
-    { publish: jest.fn() } as never,
     { seedAndFlip: jest.fn(), rearm: jest.fn() } as never,
   );
   const service = new ProductsService(

@@ -44,15 +44,14 @@ function postgresSqlState(error: unknown): string | undefined {
   return /PostgresError \{ code: "([0-9A-Z]{5})"/.exec(String(e?.message))?.[1];
 }
 
-describe('live charge/restock stock lock ordering', () => {
+describe('live restock stock lock ordering', () => {
   const opened: PrismaClient[] = [];
   let observer: PrismaClient;
-  let charge: (
+  let restock: (
     client: PrismaClient,
     seed: EditorialFixture,
-    items: Parameters<PrismaProductRepository['decrementStockForCharge']>[0],
+    items: Parameters<PrismaProductRepository['incrementStockForRestock']>[0],
   ) => Promise<unknown>;
-  let restock: typeof charge;
   const open = async () => {
     const client = await loadEditorialPostgresClient();
     opened.push(client);
@@ -70,51 +69,35 @@ describe('live charge/restock stock lock ordering', () => {
     const cls = new ClsService<TenantClsStore>(
       new AsyncLocalStorage<TenantClsStore>(),
     );
-    const runner =
-      (restocking: boolean): typeof charge =>
-      (client, seed, items) => {
-        const tenant = new TenantPrismaService(
-          client as ConstructorParameters<typeof TenantPrismaService>[0],
-          cls,
-        );
-        // Thresholds stay at zero: no charge crossing/outbox; restock uses real rearm.
-        const unused = new Proxy(
-          {},
-          {
-            get() {
-              throw new Error('Unexpected alert collaborator');
-            },
-          },
-        );
-        const repo = new PrismaProductRepository(
-          tenant,
-          unused as never,
-          new PrismaStockAlertStateRepository(),
-        );
-        return cls.runWith(
-          {
-            tenantId: seed.ids.tenantId,
-            userId: seed.ids.userId,
-            isSuperAdmin: false,
-          },
-          () =>
-            tenant.runInTransaction<unknown>(() =>
-              restocking
-                ? repo.incrementStockForRestock(items)
-                : repo.decrementStockForCharge(items),
-            ),
-        );
-      };
-    charge = runner(false);
-    restock = runner(true);
+    restock = (client, seed, items) => {
+      const tenant = new TenantPrismaService(
+        client as ConstructorParameters<typeof TenantPrismaService>[0],
+        cls,
+      );
+      const repo = new PrismaProductRepository(
+        tenant,
+        new PrismaStockAlertStateRepository(),
+      );
+      return cls.runWith(
+        {
+          tenantId: seed.ids.tenantId,
+          userId: seed.ids.userId,
+          isSuperAdmin: false,
+        },
+        () =>
+          tenant.runInTransaction<unknown>(() =>
+            repo.incrementStockForRestock(items),
+          ),
+      );
+    };
   });
   afterAll(async () => {
     await Promise.allSettled(opened.map((client) => client.$disconnect()));
   });
 
-  // Each case uses the identical scheduler witness and exact readback contract.
-  async function oppositeProducts(kind: 'charge' | 'restock') {
-    const run = kind === 'charge' ? charge : restock;
+  // Identical scheduler witness and exact readback contract for the restock path.
+  async function oppositeProducts() {
+    const run = restock;
     const seed = await seedEditorialPostgres(observer, randomUUID());
     const otherId = randomUUID();
     await observer.$executeRaw`UPDATE "products" SET "quantity" = ${10} WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
@@ -142,7 +125,7 @@ describe('live charge/restock stock lock ordering', () => {
       o.status === 'rejected' ? postgresSqlState(o.reason) : null,
     );
     process.stdout.write(
-      `opposite ${kind} pids=${firstPid},${secondPid} SQLSTATEs=${JSON.stringify(states)}\n`,
+      `opposite restock pids=${firstPid},${secondPid} SQLSTATEs=${JSON.stringify(states)}\n`,
     );
     expect(states).toEqual([null, null]);
     expect(outcomes.map((o) => o.status)).toEqual(['fulfilled', 'fulfilled']);
@@ -152,110 +135,12 @@ describe('live charge/restock stock lock ordering', () => {
     expect(rows).toEqual(
       items.map(({ productId }) => ({
         id: productId,
-        quantity: kind === 'charge' ? 8 : 12,
+        quantity: 12,
       })),
     );
   }
-  it.each(['charge', 'restock'] as const)(
-    'commits opposite-order Product %s batches without a deadlock',
+  it(
+    'commits opposite-order Product restock batches without a deadlock',
     oppositeProducts,
   );
-
-  it('serializes a Variant-first mixed restock before a parent-first mixed charge', async () => {
-    const seed = await seedEditorialPostgres(observer, randomUUID());
-    await observer.$executeRaw`UPDATE "products" SET "quantity" = ${10} WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
-    const restockBase = await open();
-    const held = holdFirstUpdate(restockBase);
-    const chargeClient = await open();
-    const restockPid = await currentBackendPid(restockBase);
-    const chargePid = await currentBackendPid(chargeClient);
-    const parent = { productId: seed.ids.productId, quantity: 2 };
-    const variant = { ...parent, variantId: seed.ids.variantId };
-    // Before the fix, restock holds V while charge takes P and then waits for V.
-    // After the fix, restock already holds P before its first stock UPDATE.
-    const restocking = restock(held.client, seed, [variant, parent]);
-    let charging: Promise<unknown> | undefined;
-    try {
-      await held.reached;
-      charging = charge(chargeClient, seed, [
-        { ...parent, quantity: 1 },
-        { ...variant, quantity: 1 },
-      ]);
-      expect(await waitForLockWait(observer, chargePid)).toContain(restockPid);
-    } finally {
-      held.release();
-      await Promise.allSettled([restocking, charging]);
-    }
-    const outcomes = await Promise.allSettled([restocking, charging]);
-    const states = outcomes.map((o) =>
-      o.status === 'rejected' ? postgresSqlState(o.reason) : null,
-    );
-    process.stdout.write(
-      `mixed restock/charge pids=${restockPid},${chargePid} SQLSTATEs=${JSON.stringify(states)}\n`,
-    );
-    expect(states).toEqual([null, null]);
-    expect(outcomes.map((o) => o.status)).toEqual(['fulfilled', 'fulfilled']);
-    const products = await observer.$queryRaw<
-      { quantity: number }[]
-    >`SELECT "quantity" FROM "products" WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.productId}`;
-    const variants = await observer.$queryRaw<
-      { quantity: number }[]
-    >`SELECT "quantity" FROM "variants" WHERE "tenantId" = ${seed.ids.tenantId} AND "id" = ${seed.ids.variantId}`;
-    expect(products).toEqual([{ quantity: 11 }]);
-    expect(variants).toEqual([{ quantity: 11 }]);
-  });
-
-  it('keeps sibling Variant charges concurrent while the first holds its locks', async () => {
-    const seed = await seedEditorialPostgres(observer, randomUUID());
-    const siblingId = randomUUID();
-    await observer.$executeRaw`INSERT INTO "variants" ("id", "tenantId", "productId", "name", "quantity", "updatedAt") VALUES (${siblingId}, ${seed.ids.tenantId}, ${seed.ids.productId}, ${siblingId}, ${10}, NOW())`;
-    const firstBase = await open();
-    const held = holdFirstUpdate(firstBase);
-    const secondClient = await open();
-    const firstPid = await currentBackendPid(firstBase);
-    const secondPid = await currentBackendPid(secondClient);
-    const first = charge(held.client, seed, [
-      {
-        productId: seed.ids.productId,
-        variantId: seed.ids.variantId,
-        quantity: 1,
-      },
-    ]);
-    let second: Promise<unknown> | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await held.reached;
-      second = charge(secondClient, seed, [
-        { productId: seed.ids.productId, variantId: siblingId, quantity: 1 },
-      ]);
-      // Completion before release proves no blocking dependency on the held actor.
-      await Promise.race([
-        second,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error('Sibling charge waited')),
-            1500,
-          );
-        }),
-      ]);
-      const rows = await observer.$queryRaw<
-        { blockers: number[] }[]
-      >`SELECT pg_blocking_pids(${secondPid}::int) AS blockers`;
-      expect(rows[0].blockers).toEqual([]);
-      process.stdout.write(
-        `sibling charges pids=${firstPid},${secondPid} completed while first paused; blockers=[]\n`,
-      );
-    } finally {
-      clearTimeout(timer);
-      held.release();
-      await Promise.allSettled([first, second]);
-    }
-    await expect(first).resolves.toEqual([]);
-    await expect(second).resolves.toEqual([]);
-    const rows = await observer.$queryRaw<
-      { quantity: number }[]
-    >`SELECT "quantity" FROM "variants" WHERE "tenantId" = ${seed.ids.tenantId} AND "productId" = ${seed.ids.productId}`;
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.quantity)).toEqual([9, 9]);
-  });
 });

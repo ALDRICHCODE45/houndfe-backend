@@ -145,67 +145,6 @@ describe('Product Entity', () => {
     });
   });
 
-  describe('decreaseStock', () => {
-    it('should decrease stock', () => {
-      const product = Product.create({
-        ...validParams,
-        quantity: 10,
-      });
-      product.decreaseStock(3);
-      expect(product.quantity).toBe(7);
-    });
-
-    it('should throw on insufficient stock', () => {
-      const product = Product.create({
-        ...validParams,
-        quantity: 2,
-      });
-      expect(() => product.decreaseStock(5)).toThrow(
-        BusinessRuleViolationError,
-      );
-    });
-
-    it('should throw when product has variants', () => {
-      const product = Product.create({
-        ...validParams,
-        hasVariants: true,
-      });
-      expect(() => product.decreaseStock(1)).toThrow(
-        BusinessRuleViolationError,
-      );
-    });
-
-    it('should throw on non-positive quantity', () => {
-      const product = Product.create({
-        ...validParams,
-        quantity: 10,
-      });
-      expect(() => product.decreaseStock(0)).toThrow(InvalidArgumentError);
-      expect(() => product.decreaseStock(-1)).toThrow(InvalidArgumentError);
-    });
-  });
-
-  describe('increaseStock', () => {
-    it('should increase stock', () => {
-      const product = Product.create({
-        ...validParams,
-        quantity: 5,
-      });
-      product.increaseStock(3);
-      expect(product.quantity).toBe(8);
-    });
-
-    it('should throw when product has variants', () => {
-      const product = Product.create({
-        ...validParams,
-        hasVariants: true,
-      });
-      expect(() => product.increaseStock(1)).toThrow(
-        BusinessRuleViolationError,
-      );
-    });
-  });
-
   describe('canSell', () => {
     it('should return true when useStock=false', () => {
       const product = Product.create({

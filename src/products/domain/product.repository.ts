@@ -8,14 +8,6 @@ import { Product } from './product.entity';
 
 export type { ProductServiceDetail } from './product.entity';
 
-/**
- * Re-exported for callers that want to declare a return type locally
- * without importing from the stock-alerts bounded context. The shape
- * originates in `src/stock-alerts/domain/stock-crossing.ts` and is the
- * canonical "one-shot per item" record produced by `decrementStockForCharge`.
- */
-export type { StockCrossing } from '../../stock-alerts/domain/stock-crossing';
-
 export interface IProductRepository {
   findById(id: string): Promise<Product | null>;
   findBySku(sku: string): Promise<Product | null>;
@@ -35,39 +27,6 @@ export interface IProductRepository {
     barcode: string,
     exclude?: { productId?: string; variantId?: string },
   ): Promise<boolean>;
-
-  /**
-   * Charge-time stock decrement contract. Returns the list of items that
-   * crossed downward into the alert band (`newQuantity <= minQuantity`)
-   * for the FIRST TIME within the current transaction. Items that were
-   * already alerted, lots/expiration items, and items that did not cross
-   * MUST NOT appear in the returned array.
-   *
-   * Spec coverage:
-   *   - specs/sales/spec.md — "Stock Decrement Returns Threshold Crossings"
-   *   - specs/stock-alerts/spec.md — "One-Shot Edge Trigger At Or Below Min Quantity"
-   *
-   * The implementation MUST:
-   *   - Use a raw `UPDATE ... RETURNING` per item (Prisma Client cannot
-   *     RETURNING from `updateMany`).
-   *   - Carry explicit `"tenantId" = $N` predicates on every raw statement
-   *     (raw SQL bypasses the tenant-id extension).
-   *   - Apply the PRE gate (`pre > minQuantity && newQty <= minQuantity &&
-   *     !useLotsAndExpirations`) BEFORE invoking the flip + outbox write.
-   *   - For non-stock products (`useStock = false`), continue silently —
-   *     do NOT throw, do NOT add to the returned array.
-   *   - Throw `STOCK_INSUFFICIENT_AT_CONFIRM` ONLY when stock is genuinely
-   *     insufficient (no row matched the guarded UPDATE).
-   */
-  decrementStockForCharge(
-    adjustments: Array<{
-      productId: string;
-      variantId?: string | null;
-      quantity: number;
-    }>,
-  ): Promise<
-    import('../../stock-alerts/domain/stock-crossing').StockCrossing[]
-  >;
 
   incrementStockForRestock(
     adjustments: Array<{
