@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { ConfigService } from '@nestjs/config';
 import type { PrismaClient, Variant } from '@prisma/client';
 import type { CatalogEditorialCore } from '../catalog-editorial/application/catalog-editorial-core';
 import type { EditorialDocument } from '../catalog-editorial/domain/document';
@@ -139,6 +140,10 @@ describe('live Variant membership and stock coordination', () => {
     const { createCoordinatedEditorialWriteAuthority } =
       await import('../catalog-editorial/infrastructure/prisma-coordinated-editorial-authority');
     const { ProductsService } = await import('./products.service');
+    const { ProductStockJournal } =
+      await import('./infrastructure/product-stock-journal');
+    const { StockJournalWriter } =
+      await import('../inventory/infrastructure/stock-journal.writer');
     const { PriceListsService } =
       await import('../price-lists/price-lists.service');
     const { PrismaProductRepository } =
@@ -170,12 +175,22 @@ describe('live Variant membership and stock coordination', () => {
         unused('OutboxWriterService'),
         unused('IStockAlertStateRepository'),
       );
+      const config = {
+        get: (_key: string, fallback: string) => fallback,
+      } as unknown as ConfigService;
       const products = new ProductsService(
         repository,
         unused('ProductsService root PrismaService'),
         unused('FilesService'),
         tenant,
         unused('SatCatalogService'),
+        new ProductStockJournal(
+          new StockJournalWriter(tenant, config),
+          tenant,
+          { user: { findUnique: () => Promise.resolve(null) } } as never,
+          cls,
+          config,
+        ),
       );
       const lists = new PriceListsService(unused('global root'), tenant);
       return {
