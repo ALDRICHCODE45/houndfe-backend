@@ -57,6 +57,52 @@ $ pnpm run test:e2e
 $ pnpm run test:cov
 ```
 
+## Demo data (dev showcase)
+
+Varied, readable demo data so every screen of the frontend shows its main cases. It is for local/dev databases only.
+
+```bash
+pnpm prisma migrate deploy   # migrated database
+pnpm seed                    # base seed: tenants, users, products, employees
+pnpm build                   # the showcase drives the real API from dist/
+pnpm seed:showcase           # demo data; safe to run again
+```
+
+How it works:
+
+- `scripts/dev-showcase/seed.cjs` starts the built API on a free local port and runs the modules in order: `org` → `catalog` → `commerce` → `ops`. It stops the API when it ends (log: `.showcase-app.log`).
+- Stateful flows (stock, sales, cancellations, purchase orders, routes, time off) go through the real endpoints, so the inventory kardex stays consistent. Prisma is used only where no endpoint exists (for example backdating sales across the month).
+- It is idempotent: running it again creates nothing new. Dates are relative to today, so a later run moves the demo forward in time.
+- It refuses to run with `NODE_ENV=production` or against a database host that is not local. Set `SHOWCASE_ALLOW=1` only for a disposable remote database.
+- Before seeding it removes leftovers of earlier runtime probes («Prueba T8 …», «zz sale probe», the price list «Online (dev)» and the route «Lleva cambio por fvor.»).
+
+### Demo users
+
+Passwords are not repeated here. Base-seed users use the passwords in `prisma/seed.ts`. Users created by the showcase use `SHOWCASE_DEMO_PASSWORD`, or the default in `scripts/dev-showcase/org.cjs`. In development the login skips the email OTP.
+
+| Email | Name | Sucursal | Role | Use it to see |
+| --- | --- | --- | --- | --- |
+| `admin@houndfe.com` | Super Admin | all | Super Admin | Everything; switch between sucursales |
+| `manager@houndfe.com` | — | Sucursal Centro | Manager (Gerente) | Inventory, purchases, routes, quotations, promotions, cash supervision |
+| `cashier@houndfe.com` | — | Sucursal Centro | Cashier (Cajero) | POS sales, cash sessions and handovers |
+| `repartidor@houndfe.com` | Luis Hernández | Sucursal Centro | repartidor | Delivery routes |
+| `vendedor@houndfe.com` | Sofía Ramírez | Sucursal Centro | Vendedor | Read-only catalog and sales, **no inventory permissions** (403 screens) |
+| `gerente.norte@houndfe.com` | Andrea Torres | Sucursal Norte | Manager | A second sucursal |
+| `cajero.norte@houndfe.com` | Valeria Núñez | Sucursal Norte | Cashier | A second sucursal |
+
+Sucursal Sur has a single member (the super admin). The showcase adds demo permissions to the Centro roles; it only adds grants, never removes them.
+
+### What each module creates (Sucursal Centro)
+
+| Module | Screens and cases |
+| --- | --- |
+| `org` | Sucursales Centro, Norte and Sur with address and phone; Spanish role descriptions; the users above. |
+| `catalog` | 38 products: high, low and zero stock; lots expired, expiring in under 7 days and valid; variants with one at 0; no stock control; services; with and without image; a 98-character name; 8 categories, many brands, 4 price lists. A kardex product («Alimento Premium para Perro Adulto 15 kg») with 30+ movements: opening, initial stock, every adjustment reason, a FEFO sale split across two lots and its cancellation. A variant removal on «Collar Ajustable de Nailon». Public catalog with «Disponible», «Pocas piezas» and «Agotado». |
+| `commerce` | 20 customers (several addresses, outstanding balances, a very long name, a business with billing data); ~57 sales over the last 28 days (paid by cash, card, transfer and mixed; credit, partial, overdue; cancelled with pending and partly settled refunds; delivered and pending delivery; «Público en general»); 9 quotations (draft, sent, expired, cancelled, no expiry, with promotion); 12 promotions (each type active, scheduled and ended; one nearly exhausted, unlimited ones); 5 cash registers (2 inactive), an open session, closed sessions (one with a shortfall) and a pending custody handover. |
+| `ops` | Human decisions pending and resolved (positive and negative); delivery routes draft, active today (delivered, skipped, current and pending stops), completed and cancelled; 5 suppliers (one archived) and 11 purchase orders with 0, 1, 2 and 4 checklist warnings, confirmed and cancelled; employee documents expired and expiring; time off pending (single and multi-day), approved and rejected; payment methods and bank accounts with one inactive each; notification settings with modules on and off; a published catalog with public price lists. |
+
+Cases the domain does not support are not faked: a «vencida» human decision, a route without driver or stops, a «convertida» quotation, and an inactive product flag (shown instead as hidden from POS and the online catalog). Product images are `placehold.co` URLs and need internet access.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

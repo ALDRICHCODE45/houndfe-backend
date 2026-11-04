@@ -25,6 +25,8 @@ Already delivered before this index (O3, implemented by the FE): suppliers, purc
 
 ## 7. Test data (dev DB)
 
+**Full demo data for every screen:** run `pnpm seed:showcase` (see the root `README.md`, section "Demo data (dev showcase)", for what it creates and the demo users). The O1 inventory test data below is still valid.
+
 The dev database is disposable by human decision, so the FE can change this data freely. The data below was created through the real API by `scripts/inventory-runtime/seed.cjs` and checked by the runtime probe on 2026-11-04 (85 probes over real HTTP against the built app, all passing).
 
 ### Who logs in

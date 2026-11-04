@@ -78,3 +78,4 @@ docs/email-preview.html
 
 # Private local dev catalog seed manifest (local DB ids)
 prisma/.dev-catalog-seed.manifest.json
+.showcase-app.log
