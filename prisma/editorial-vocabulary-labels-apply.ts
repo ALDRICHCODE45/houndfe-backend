@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import {
   DEFINITION_LABELS,
   FAMILY_LABELS,
+  SUPERSEDED_DEFINITION_LABELS,
   UNIT_LABELS,
 } from '../src/catalog-editorial/domain/editorial-production-vocabulary-labels';
 
@@ -22,7 +23,8 @@ export interface LabelApplyResult {
 
 /** Labels reach already-installed vocabularies here: the installer and planner
  * preserve stored labels as customization, so only rows whose label still equals
- * their code (never edited) are updated. Idempotent; no inserts, deletes or code changes.
+ * their code, or a superseded shipped label (never edited), are updated. Idempotent;
+ * no inserts, deletes or code changes.
  */
 export async function applyEditorialVocabularyLabels(
   client: LabelClient,
@@ -35,13 +37,19 @@ export async function applyEditorialVocabularyLabels(
         data: { label },
       })
     ).count;
-  for (const [code, label] of Object.entries(DEFINITION_LABELS))
-    result.definitions += (
-      await client.editorialDefinition.updateMany({
-        where: { code, label: code },
-        data: { label },
-      })
-    ).count;
+  for (const [code, label] of Object.entries(DEFINITION_LABELS)) {
+    const previous =
+      SUPERSEDED_DEFINITION_LABELS[
+        code as keyof typeof SUPERSEDED_DEFINITION_LABELS
+      ] ?? [];
+    for (const current of [code, ...previous])
+      result.definitions += (
+        await client.editorialDefinition.updateMany({
+          where: { code, label: current },
+          data: { label },
+        })
+      ).count;
+  }
   for (const [unitCode, label] of Object.entries(UNIT_LABELS))
     result.units += (
       await client.editorialUnit.updateMany({

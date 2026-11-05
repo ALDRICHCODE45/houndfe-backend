@@ -5,6 +5,17 @@ import type { ProductionDefinitionCode } from './editorial-production-vocabulary
 // The column allows 200; the manifest stays well inside it.
 export const DESCRIPTION_MAX_LENGTH = 160;
 
+/**
+ * Texts shipped earlier and later replaced (human decision 2026-11-05). A stored
+ * description still equal to one of these was never customized, so the apply
+ * script may move it to the current text.
+ */
+// prettier-ignore
+export const SUPERSEDED_DEFINITION_DESCRIPTIONS: Readonly<Partial<Record<ProductionDefinitionCode, readonly string[]>>> = Object.freeze({
+  'text.manufacturer_care': ['Cuidados y mantenimiento que indica el fabricante (limpieza, almacenamiento). No es consejo clínico.'],
+  'text.instructions': ['Instrucciones de uso que da el fabricante. Solo indicaciones no clínicas.'],
+});
+
 // prettier-ignore
 export const DEFINITION_DESCRIPTIONS: Readonly<Record<ProductionDefinitionCode, string>> = Object.freeze({
   'animal.target': 'Para qué animales es el producto, según el fabricante; puedes elegir más de uno.',
@@ -67,8 +78,8 @@ export const DEFINITION_DESCRIPTIONS: Readonly<Record<ProductionDefinitionCode, 
   'text.ingredients': 'Lista de ingredientes tal como la declara el fabricante, sin agregar ni deducir nada.',
   'text.protein_origin': 'Origen de la proteína (pollo, pescado, res…) solo si el fabricante lo indica; no lo deduzcas.',
   'text.composition': 'Composición declarada por el fabricante. No incluyas concentraciones clínicas.',
-  'text.manufacturer_care': 'Cuidados y mantenimiento que indica el fabricante (limpieza, almacenamiento). No es consejo clínico.',
-  'text.instructions': 'Instrucciones de uso que da el fabricante. Solo indicaciones no clínicas.',
+  'text.manufacturer_care': 'Cuidados y mantenimiento que indica el fabricante (limpieza, almacenamiento).',
+  'text.instructions': 'Instrucciones de uso que da el fabricante.',
   'text.clinical_analysis': 'Análisis de la etiqueta del fabricante (proteína, grasa, fibra…). Interno, no se publica.',
   'text.concentration': 'Concentración declarada por el fabricante, tal como aparece en la etiqueta. Interno, no se publica.',
   'text.regulatory_warnings': 'Advertencias regulatorias o legales de la etiqueta del fabricante. Interno, no se publica.',

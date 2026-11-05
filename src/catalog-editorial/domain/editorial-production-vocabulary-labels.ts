@@ -15,6 +15,15 @@ export const FAMILY_LABELS: Readonly<Record<ProductionFamily, string>> =
     care: 'Cuidado y salud',
   });
 
+/**
+ * Labels shipped earlier and later replaced (human decision 2026-11-05). A stored
+ * label still equal to one of these was never customized, so the apply script may
+ * move it to the current label.
+ */
+export const SUPERSEDED_DEFINITION_LABELS: Readonly<
+  Partial<Record<ProductionDefinitionCode, readonly string[]>>
+> = Object.freeze({ 'size.animal': ['Tamaño de raza'] });
+
 // prettier-ignore
 export const DEFINITION_LABELS: Readonly<Record<ProductionDefinitionCode, string>> = Object.freeze({
   'animal.target': 'Especie',
@@ -25,7 +34,7 @@ export const DEFINITION_LABELS: Readonly<Record<ProductionDefinitionCode, string
   'material': 'Material',
   'color.base': 'Color',
   'size.label': 'Talla',
-  'size.animal': 'Tamaño de raza',
+  'size.animal': 'Tamaño de mascota',
   'food.format': 'Formato del alimento',
   'food.role': 'Función del alimento',
   'food.process': 'Procesamiento',
