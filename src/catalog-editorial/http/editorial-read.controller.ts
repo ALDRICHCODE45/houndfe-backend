@@ -29,8 +29,6 @@ import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-aut
 import { EditorialHttpFilter } from './editorial-http.filter';
 import { EditorialHttpScope } from '../infrastructure/editorial-http-scope';
 
-export const EDITORIAL_READER = Symbol('EDITORIAL_READER');
-
 @Controller('products/:productId/editorial')
 @UseFilters(EditorialHttpFilter)
 @UseGuards(JwtAuthGuard, TenantContextGuard)
