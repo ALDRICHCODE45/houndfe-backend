@@ -36,10 +36,13 @@ import { PrismaService } from '../../shared/prisma/prisma.service';
 import { createAppValidationPipe } from '../../shared/listing/app-validation.pipe';
 import { CatalogEditorialReadModule } from '../catalog-editorial-read.module';
 import { emptyDocument } from '../domain/document';
-import { EDITORIAL_READER } from './editorial-read.controller';
 import { EDITORIAL_SAVE_WRITER } from '../application/editorial-save-writer';
 import { EDITORIAL_INITIALIZE_WRITER } from '../application/editorial-initialize-writer';
 import { EDITORIAL_DISCARD_WRITER } from '../application/editorial-discard-writer';
+import {
+  EDITORIAL_PUBLISH_WRITER,
+  EditorialPublicationNotReadyError,
+} from '../application/editorial-publish-writer';
 import type { EditorialContext } from '../application/catalog-editorial-core';
 import type { ReceiptRequestV2 } from '../application/editorial-write-request-v2';
 const revision = 'ev2-sha256-' + 'a'.repeat(64);
@@ -55,6 +58,7 @@ const core = {
   discard: jest.fn(),
 };
 type Operation = keyof typeof core;
+const publishIntent = jest.fn();
 const db = { $transaction: jest.fn() };
 const raw = jest.fn();
 const tx = {
@@ -102,7 +106,6 @@ async function application(mockCore: boolean) {
       },
     });
   if (mockCore) {
-    builder.overrideProvider(EDITORIAL_READER).useValue(core);
     builder.overrideProvider(EDITORIAL_INITIALIZE_WRITER).useValue({
       async initialize(
         context: EditorialContext,
@@ -150,6 +153,27 @@ async function application(mockCore: boolean) {
         intent: ReceiptRequestV2,
       ) {
         const state: unknown = await core.discard(context, {
+          ...intent.body,
+          idempotencyKey: key,
+        });
+        return {
+          status: 200,
+          body: { contractVersion: 2, vocabularyRevision: revision, state },
+          headers: {
+            'Editorial-Contract-Version': '2',
+            'Editorial-Vocabulary-Revision': revision,
+          },
+        };
+      },
+    });
+    builder.overrideProvider(EDITORIAL_PUBLISH_WRITER).useValue({
+      async publish(
+        context: EditorialContext,
+        key: string,
+        intent: ReceiptRequestV2,
+      ) {
+        publishIntent(intent);
+        const state: unknown = await core.publish(context, {
           ...intent.body,
           idempotencyKey: key,
         });
@@ -358,7 +382,7 @@ describe('editorial write HTTP', () => {
         userId: actorId,
         tenantId,
         role: {
-          permissions: ['read', 'update'].map((action) => ({
+          permissions: ['read', 'update', 'publish'].map((action) => ({
             permission: { subject: 'ProductEditorialDraft', action },
           })),
         },
@@ -378,9 +402,8 @@ describe('editorial write HTTP', () => {
       operation === 'save'
         ? request(app.getHttpServer() as Server).put(path)
         : request(app.getHttpServer() as Server).post(path + '/' + operation);
-    if (operation !== 'publish')
-      req.set('Editorial-Vocabulary-Revision', revision);
     return req
+      .set('Editorial-Vocabulary-Revision', revision)
       .set('Authorization', 'Bearer synthetic')
       .set('Idempotency-Key', key)
       .send(body);
@@ -417,9 +440,13 @@ describe('editorial write HTTP', () => {
         expect(response.body).toEqual(
           operation === 'publish'
             ? {
-                cycle: 1,
-                draft: null,
-                published: { revision: 1, document: emptyDocument() },
+                contractVersion: 2,
+                vocabularyRevision: revision,
+                state: {
+                  cycle: 1,
+                  draft: null,
+                  published: { revision: 1, document: emptyDocument() },
+                },
               }
             : operation === 'discard'
               ? {
@@ -587,5 +614,115 @@ describe('editorial write HTTP', () => {
       expect.anything(),
       expect.objectContaining({ document }),
     );
+  });
+  const publishing = () =>
+    send('publish', { expectedCycle: 1, expectedRevision: 1 });
+  test('publish returns the readiness items with an unready 400', async () => {
+    const items = [
+      {
+        scope: 'definition',
+        definitionCode: 'measure.net_mass',
+        variantId: null,
+        sectionCode: 'contenido-empaque',
+        problem: 'REQUIRED_MISSING',
+        message: 'Falta el peso neto.',
+      },
+    ];
+    core.publish.mockRejectedValueOnce(
+      new EditorialPublicationNotReadyError({
+        items: items as never,
+        bySection: { 'contenido-empaque': 1 },
+      }),
+    );
+    const response = await publishing();
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      statusCode: 400,
+      error: 'MALFORMED',
+      items,
+      bySection: { 'contenido-empaque': 1 },
+    });
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['editorial-contract-version']).toBe('2');
+    expect(response.headers['editorial-vocabulary-revision']).toBeUndefined();
+  });
+  test('publish carries an exact care confirmation into the intent', async () => {
+    await publishing();
+    expect(publishIntent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ careConfirmation: null }),
+    );
+    expect(
+      (await publishing().set('Editorial-Care-Confirmation', 'review-v1'))
+        .status,
+    ).toBe(200);
+    expect(publishIntent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        careConfirmation: 'review-v1',
+        vocabularyRevision: revision,
+      }),
+    );
+  });
+  test.each(['', 'review-v2', 'review-v1, review-v1'])(
+    'publish rejects care confirmation %p',
+    async (token) => {
+      await rejected(
+        publishing().set('Editorial-Care-Confirmation', token),
+        400,
+        'MALFORMED',
+      );
+      expect(core.publish).not.toHaveBeenCalled();
+    },
+  );
+  test('publish rejects a duplicated care confirmation header', async () => {
+    const req = publishing();
+    req.set('Editorial-Care-Confirmation', 'review-v1');
+    // supertest joins repeated set() values into one raw header per call.
+    await rejected(
+      req.set('editorial-care-confirmation', ['review-v1', 'review-v1']),
+      400,
+      'MALFORMED',
+    );
+    expect(core.publish).not.toHaveBeenCalled();
+  });
+  test.each(['Editorial-Contract-Version', 'Editorial-Adoption'])(
+    'publish rejects obsolete %s',
+    async (name) => {
+      await rejected(publishing().set(name, '2'), 400, 'MALFORMED');
+      expect(core.publish).not.toHaveBeenCalled();
+    },
+  );
+  test('publish requires the vocabulary revision header', async () => {
+    await rejected(
+      publishing().unset('Editorial-Vocabulary-Revision'),
+      400,
+      'MALFORMED',
+    );
+    expect(core.publish).not.toHaveBeenCalled();
+  });
+  test('publish needs the publish grant, not update', async () => {
+    tx.tenantMembership.findMany.mockResolvedValue([
+      {
+        userId: actorId,
+        tenantId,
+        role: {
+          permissions: ['read', 'update'].map((action) => ({
+            permission: { subject: 'ProductEditorialDraft', action },
+          })),
+        },
+      },
+    ]);
+    await rejected(publishing(), 403, 'FORBIDDEN');
+    tx.tenantMembership.findMany.mockResolvedValue([
+      {
+        userId: actorId,
+        tenantId,
+        role: {
+          permissions: ['read', 'publish'].map((action) => ({
+            permission: { subject: 'ProductEditorialDraft', action },
+          })),
+        },
+      },
+    ]);
+    expect((await publishing()).status).toBe(200);
   });
 });
