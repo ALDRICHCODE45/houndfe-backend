@@ -20,6 +20,11 @@ import {
   EDITORIAL_DOCUMENT_READER,
   type EditorialDocumentReader,
 } from '../application/editorial-document-reader';
+import {
+  EDITORIAL_READINESS_READER,
+  type EditorialReadinessReader,
+} from '../application/editorial-readiness-reader';
+import type { EditorialContext } from '../application/catalog-editorial-core';
 import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-authority';
 import { EditorialHttpFilter } from './editorial-http.filter';
 import { EditorialHttpScope } from '../infrastructure/editorial-http-scope';
@@ -33,6 +38,8 @@ export class EditorialReadController {
   constructor(
     @Inject(EDITORIAL_DOCUMENT_READER)
     private readonly reader: EditorialDocumentReader,
+    @Inject(EDITORIAL_READINESS_READER)
+    private readonly readiness: EditorialReadinessReader,
     private readonly scope: EditorialHttpScope,
     private readonly authority: PrismaEditorialAuthority,
   ) {}
@@ -44,6 +51,39 @@ export class EditorialReadController {
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ) {
+    const { scope, revision } = await this.admit(productId, request);
+    const result = await this.reader.read(scope, revision);
+    response.setHeader('Editorial-Contract-Version', '2');
+    response.setHeader(
+      'Editorial-Vocabulary-Revision',
+      result.vocabularyRevision,
+    );
+    return result;
+  }
+
+  /** What blocks publishing the SAVED Draft; read-only, same rules as the read. */
+  @Get('draft/readiness')
+  @Header('Cache-Control', 'no-store')
+  async draftReadiness(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { scope, revision } = await this.admit(productId, request);
+    const result = await this.readiness.read(scope, revision);
+    response.setHeader('Editorial-Contract-Version', '2');
+    response.setHeader(
+      'Editorial-Vocabulary-Revision',
+      result.vocabularyRevision,
+    );
+    return result;
+  }
+
+  /** Current read authority, then closed request admission (no query/body/write headers). */
+  private async admit(
+    productId: string,
+    request: Request,
+  ): Promise<{ scope: EditorialContext; revision: string }> {
     const user = this.scope.principal(
       request.user as AuthenticatedUser | undefined,
     );
@@ -88,12 +128,6 @@ export class EditorialReadController {
       !/^ev2-sha256-[0-9a-f]{64}$/.test(revisions[0])
     )
       throw new BadRequestException();
-    const result = await this.reader.read(scope, revisions[0]);
-    response.setHeader('Editorial-Contract-Version', '2');
-    response.setHeader(
-      'Editorial-Vocabulary-Revision',
-      result.vocabularyRevision,
-    );
-    return result;
+    return { scope, revision: revisions[0] };
   }
 }

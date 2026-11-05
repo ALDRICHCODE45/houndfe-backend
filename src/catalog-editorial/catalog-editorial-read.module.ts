@@ -7,6 +7,8 @@ import { EDITORIAL_DISCARD_WRITER } from './application/editorial-discard-writer
 import { PrismaEditorialDiscardWriter } from './infrastructure/prisma-editorial-discard-writer';
 import { EDITORIAL_DOCUMENT_READER } from './application/editorial-document-reader';
 import { PrismaEditorialDocumentReader } from './infrastructure/prisma-editorial-document-reader';
+import { EDITORIAL_READINESS_READER } from './application/editorial-readiness-reader';
+import { PrismaEditorialReadinessReader } from './infrastructure/prisma-editorial-readiness-reader';
 import { EditorialHttpScope } from './infrastructure/editorial-http-scope';
 import { createCoordinatedEditorialWriteAuthority } from './infrastructure/prisma-coordinated-editorial-authority';
 import { EditorialWriteController } from './http/editorial-write.controller';
@@ -42,6 +44,12 @@ import {
       inject: [PrismaService],
       useFactory: (prisma: PrismaService) =>
         new PrismaEditorialDocumentReader(prisma),
+    },
+    {
+      provide: EDITORIAL_READINESS_READER,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) =>
+        new PrismaEditorialReadinessReader(prisma),
     },
     {
       provide: EDITORIAL_DISCARD_WRITER,
