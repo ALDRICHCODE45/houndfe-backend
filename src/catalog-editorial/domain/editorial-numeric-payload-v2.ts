@@ -1,18 +1,20 @@
 import type { KnownPayloadV2 } from './editorial-known-payload-shape-v2';
 import type { NumericPolicyV2 } from './editorial-vocabulary-numeric-v2';
 
-/** Fresh domain only: parsed finite payload, validated policy and membership. */
-export function assertFreshNumericPayloadV2(
+export type NumericPayloadProblemV2 =
+  | 'INVALID_VALUE'
+  | 'NUMERIC_POLICY_PENDING';
+
+/** The fresh numeric rule: the payload's problem, or null when admitted. */
+export function freshNumericPayloadProblemV2(
   payload: Extract<KnownPayloadV2, { type: 'number' | 'range' }>,
   policy: NumericPolicyV2,
   operation: 'save' | 'publish',
-): void {
+): NumericPayloadProblemV2 | null {
   if (payload.type === 'range' && payload.min > payload.max)
-    throw new Error('MALFORMED');
-  if (policy.status === 'pending') {
-    if (operation === 'publish') throw new Error('MALFORMED');
-    return;
-  }
+    return 'INVALID_VALUE';
+  if (policy.status === 'pending')
+    return operation === 'publish' ? 'NUMERIC_POLICY_PENDING' : null;
   const values =
     payload.type === 'number' ? [payload.value] : [payload.min, payload.max];
   for (const value of values) {
@@ -25,6 +27,17 @@ export function assertFreshNumericPayloadV2(
         (value > policy.upper ||
           (value === policy.upper && !policy.upperInclusive)))
     )
-      throw new Error('MALFORMED');
+      return 'INVALID_VALUE';
   }
+  return null;
+}
+
+/** Fresh domain only: parsed finite payload, validated policy and membership. */
+export function assertFreshNumericPayloadV2(
+  payload: Extract<KnownPayloadV2, { type: 'number' | 'range' }>,
+  policy: NumericPolicyV2,
+  operation: 'save' | 'publish',
+): void {
+  if (freshNumericPayloadProblemV2(payload, policy, operation) !== null)
+    throw new Error('MALFORMED');
 }

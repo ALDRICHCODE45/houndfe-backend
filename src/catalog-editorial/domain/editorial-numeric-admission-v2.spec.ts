@@ -132,7 +132,7 @@ describe.each(['save', 'publish'] as const)(
           f.definition.code,
           type === 'number' ? scalar() : range(),
         );
-        const spy = jest.spyOn(numeric, 'assertFreshNumericPayloadV2');
+        const spy = jest.spyOn(numeric, 'freshNumericPayloadProblemV2');
         expect(
           admit([row], f.family, f.definitions, operation),
         ).toBeUndefined();
@@ -194,7 +194,7 @@ describe.each(['save', 'publish'] as const)(
         value(f.definition.code, scalar(2), 'first'),
         value(f.definition.code, scalar(12), 'later'),
       ];
-      const spy = jest.spyOn(numeric, 'assertFreshNumericPayloadV2');
+      const spy = jest.spyOn(numeric, 'freshNumericPayloadProblemV2');
       expect(() => admit(rows, f.family, f.definitions, operation)).toThrow(
         /^MALFORMED$/,
       );
@@ -242,7 +242,7 @@ describe.each(['save', 'publish'] as const)(
         ...payloads.map((payload, i) => value(`nonnumeric.${i}`, payload)),
       ];
       const lookup = jest.spyOn(f.definitions, 'get');
-      const spy = jest.spyOn(numeric, 'assertFreshNumericPayloadV2');
+      const spy = jest.spyOn(numeric, 'freshNumericPayloadProblemV2');
       expect(admit(rows, f.family, f.definitions, operation)).toBeUndefined();
       expect(admit([], f.family, f.definitions, operation)).toBeUndefined();
       expect(spy).not.toHaveBeenCalled();
@@ -279,7 +279,7 @@ describe.each(['save', 'publish'] as const)(
       const f = fixture();
       const error = new Error('unexpected leaf failure');
       jest
-        .spyOn(numeric, 'assertFreshNumericPayloadV2')
+        .spyOn(numeric, 'freshNumericPayloadProblemV2')
         .mockImplementation(() => {
           throw error;
         });
