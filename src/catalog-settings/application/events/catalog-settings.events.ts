@@ -21,6 +21,7 @@ export type CatalogSettingsUpdatedEventName = typeof CATALOG_SETTINGS_UPDATED;
  */
 export const CATALOG_SETTINGS_CHANGED_FIELDS = [
   'catalogPublished',
+  'catalogRequiresPublishedEditorial',
   'publicPriceListIds',
   'catalogDefaultPriceListId',
   'stockPresentationDefault',

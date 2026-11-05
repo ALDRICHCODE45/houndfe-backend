@@ -36,6 +36,7 @@ const settings = (
       tenantId,
       isActive: true,
       catalogPublished: false,
+      catalogRequiresPublishedEditorial: false,
       catalogStockPresentationDefault: 'SYSTEM_STATUS',
       catalogStockPresentationDefaultCustomQty: null,
       updatedAt: new Date('2024-01-01'),

@@ -74,6 +74,7 @@ const internalResult = (
 ): CatalogSettingsInternalResult => ({
   tenantId,
   catalogPublished: true,
+  catalogRequiresPublishedEditorial: false,
   effectivePublication: true,
   priceContexts: [
     { priceListId: 'pl-1', name: 'Retail', isCatalogDefault: true },

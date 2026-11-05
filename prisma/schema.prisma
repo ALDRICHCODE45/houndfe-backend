@@ -386,6 +386,8 @@ model Tenant {
 
   // M1: explicit opt-in; all existing tenants remain invisible until activated.
   catalogPublished Boolean @default(false)
+  // P4 S1: off = operational public catalog; on = only products with a Published editorial.
+  catalogRequiresPublishedEditorial Boolean @default(false)
 
   // F1.WU1 — tenant stock-presentation default. Product null inherits this.
   catalogStockPresentationDefault          CatalogStockPresentation @default(SYSTEM_STATUS)

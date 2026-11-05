@@ -18,6 +18,7 @@ function configuredResult(
   return {
     tenantId: 'tenant-1',
     catalogPublished: true,
+    catalogRequiresPublishedEditorial: true,
     effectivePublication: true,
     priceContexts: [
       { priceListId: 'pl-b', name: 'Mayoreo', isCatalogDefault: false },
@@ -35,6 +36,7 @@ describe('toCatalogSettingsResponseDto', () => {
       expect(toCatalogSettingsResponseDto(configuredResult())).toEqual({
         tenantId: 'tenant-1',
         catalogPublished: true,
+        catalogRequiresPublishedEditorial: true,
         effectivePublication: true,
         priceContexts: [
           { priceListId: 'pl-b', name: 'Mayoreo', isCatalogDefault: false },

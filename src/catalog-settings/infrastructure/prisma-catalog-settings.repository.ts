@@ -31,6 +31,7 @@ export class PrismaCatalogSettingsRepository implements ICatalogSettingsReposito
         id: true,
         isActive: true,
         catalogPublished: true,
+        catalogRequiresPublishedEditorial: true,
         catalogStockPresentationDefault: true,
         catalogStockPresentationDefaultCustomQty: true,
         updatedAt: true,
@@ -143,6 +144,8 @@ export class PrismaCatalogSettingsRepository implements ICatalogSettingsReposito
         where: { id: tenantId },
         data: {
           catalogPublished: settings.catalogPublished,
+          catalogRequiresPublishedEditorial:
+            settings.catalogRequiresPublishedEditorial,
           catalogStockPresentationDefault: settings.stockPresentationDefault
             .mode as
             | 'SYSTEM_STATUS'
@@ -192,6 +195,8 @@ export class PrismaCatalogSettingsRepository implements ICatalogSettingsReposito
       tenantId: tenant.id,
       isActive: tenant.isActive,
       catalogPublished: tenant.catalogPublished,
+      catalogRequiresPublishedEditorial:
+        tenant.catalogRequiresPublishedEditorial,
       catalogStockPresentationDefault: tenant.catalogStockPresentationDefault,
       catalogStockPresentationDefaultCustomQty:
         tenant.catalogStockPresentationDefaultCustomQty,
@@ -223,6 +228,7 @@ export class PrismaCatalogSettingsRepository implements ICatalogSettingsReposito
         id: true,
         isActive: true,
         catalogPublished: true,
+        catalogRequiresPublishedEditorial: true,
         catalogStockPresentationDefault: true,
         catalogStockPresentationDefaultCustomQty: true,
         updatedAt: true,
