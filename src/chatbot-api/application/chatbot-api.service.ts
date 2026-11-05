@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { Customer } from '../../customers/domain/customer.entity';
 import {
@@ -49,7 +49,6 @@ import type { StockCheckResponse } from '../presentation/dto/stock-check.respons
 import type { CheckoutContextQueryDto } from '../presentation/dto/checkout-context.query';
 import type { CheckoutContextResponse } from '../presentation/dto/checkout-context.response';
 import type { BotSaleResponse } from '../presentation/dto/bot-sale.response';
-import type { AttachReceiptResponse } from '../presentation/dto/attach-receipt.request';
 import type { PaymentDetailResponse } from '../presentation/dto/payment-detail.response';
 import type {
   OrderHistoryItem,
@@ -83,14 +82,6 @@ export type RegisterBotSaleInput = {
   // persists totals. Required whenever `shipping` is provided.
   expectedTotalCents?: number;
   shipping?: { chargeCents: number; approvalId: string; quoteId?: string };
-};
-
-export type AttachReceiptInput = {
-  saleId: string;
-  mediaUrl: string;
-  declaredAmountCents: number;
-  declaredDate?: Date | null;
-  declaredReference?: string | null;
 };
 
 export type SetDeliveryMetadataInput = {
@@ -670,32 +661,6 @@ export class ChatbotApiService {
     );
 
     return response;
-  }
-
-  /**
-   * Attach transfer receipt evidence to a pending sale.
-   * The receipt stays PENDING until a human confirms or rejects it.
-   */
-  async attachReceipt(
-    input: AttachReceiptInput,
-  ): Promise<AttachReceiptResponse> {
-    const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.tenantPrisma.getTenantId();
-
-    const receipt = await prisma.receiptEvidence.create({
-      data: {
-        id: randomUUID(),
-        saleId: input.saleId,
-        tenantId,
-        mediaUrl: input.mediaUrl,
-        declaredAmountCents: input.declaredAmountCents,
-        declaredDate: input.declaredDate ?? null,
-        declaredReference: input.declaredReference ?? null,
-        status: 'PENDING',
-      },
-    });
-
-    return { receiptId: receipt.id, status: 'PENDING' };
   }
 
   /**

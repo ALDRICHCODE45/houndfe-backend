@@ -10,6 +10,7 @@ import request from 'supertest';
 import { CheckoutController } from './checkout.controller';
 import { CheckoutService } from '../application/checkout.service';
 import { ChatbotApiController } from './chatbot-api.controller';
+import { ReceiptUploadService } from '../../receipts/application/receipt-upload.service';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { SalesService } from '../../sales/sales.service';
@@ -221,6 +222,8 @@ describe('Atomic checkout public HTTP contract', () => {
       controllers: [ChatbotApiController, CheckoutController],
       providers: [
         { provide: ChatbotApiService, useValue: f.reads },
+        // The receipt route is not exercised here.
+        { provide: ReceiptUploadService, useValue: {} },
         CheckoutService,
         { provide: TenantPrismaService, useValue: f.tenant },
         { provide: SalesService, useValue: f.sales },
