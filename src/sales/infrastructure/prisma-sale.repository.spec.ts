@@ -951,6 +951,102 @@ describe('PrismaSaleRepository', () => {
     });
   });
 
+  // `pagination.total` for GET /sales must count exactly the rows the
+  // page query can return: same WHERE (tenant client, status override,
+  // folio, ranges, base filters), no paging or sorting.
+  describe('countManyConfirmed', () => {
+    const pageAndCountWhere = async (input: Record<string, unknown>) => {
+      prisma.sale.findMany.mockResolvedValue([]);
+      prisma.sale.count.mockResolvedValue(1);
+
+      await repo.findManyConfirmed({
+        page: 3,
+        limit: 20,
+        sortBy: 'totalCents',
+        sortOrder: 'asc',
+        ...input,
+      } as any);
+      const total = await repo.countManyConfirmed(input as any);
+
+      const findManyArgs = prisma.sale.findMany.mock.calls.at(-1)?.[0];
+      const countArgs = prisma.sale.count.mock.calls.at(-1)?.[0];
+      return { total, findManyArgs, countArgs };
+    };
+
+    it.each([
+      ['no filters', {}],
+      ['status + folio', { status: ['CANCELED'], folio: ['V-0062'] }],
+      [
+        'payment/delivery status + payment method',
+        {
+          paymentStatus: ['PAID'],
+          deliveryStatus: ['PENDING'],
+          paymentMethod: ['CASH'],
+          paymentMethodIncludeNull: true,
+        },
+      ],
+      [
+        'customer + cashier + confirmed dates + search',
+        {
+          q: 'ana',
+          customerId: ['f9d2f368-10be-4f4b-a3cc-0e67735f7f26'],
+          customerIncludeNull: true,
+          cashierUserId: ['0b0b0b0b-0000-4000-8000-000000000001'],
+          confirmedFrom: new Date('2026-05-01T00:00:00.000Z'),
+          confirmedTo: new Date('2026-05-31T23:59:59.999Z'),
+        },
+      ],
+      [
+        'total/debt/due-date ranges',
+        {
+          totalMin: 1000,
+          totalMax: 5000,
+          debtMin: 0,
+          debtMax: 100,
+          dueDateFrom: new Date('2026-06-01T00:00:00.000Z'),
+          dueDateIncludeNull: true,
+        },
+      ],
+    ])('uses the page WHERE for %s', async (_label, input) => {
+      const { total, findManyArgs, countArgs } = await pageAndCountWhere(input);
+
+      expect(total).toBe(1);
+      expect(countArgs).toEqual({ where: findManyArgs.where });
+    });
+
+    it('honors an explicit CANCELED status instead of the CONFIRMED default', async () => {
+      const { countArgs } = await pageAndCountWhere({
+        status: ['CANCELED'],
+        folio: ['V-0062'],
+      });
+
+      expect(countArgs.where.AND).toEqual(
+        expect.arrayContaining([
+          { status: { in: ['CANCELED'] } },
+          { folio: { in: ['V-0062'] } },
+        ]),
+      );
+      expect(countArgs.where.AND[0].status).toBeUndefined();
+    });
+
+    it('keeps the CONFIRMED default when no status filter is given', async () => {
+      const { countArgs } = await pageAndCountWhere({ folio: ['V-0001'] });
+
+      expect(countArgs.where.AND[0]).toEqual(
+        expect.objectContaining({ status: 'CONFIRMED' }),
+      );
+    });
+
+    it('reads through the tenant-scoped client', async () => {
+      prisma.sale.count.mockResolvedValue(0);
+      tenantPrisma.getClient.mockClear();
+
+      await repo.countManyConfirmed({ status: ['CANCELED'] } as any);
+
+      expect(tenantPrisma.getClient).toHaveBeenCalled();
+    });
+  });
+
   // ── Customer sales history — WU backend summary block ────────
   // Single Prisma `aggregate` call replaces the dedicated
   // `countConfirmed` query for the GET /sales summary block:
