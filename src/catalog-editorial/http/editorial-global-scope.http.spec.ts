@@ -11,11 +11,11 @@ import { CatalogEditorialReadModule } from '../catalog-editorial-read.module';
 import { CatalogEditorialVocabularyModule } from '../catalog-editorial-vocabulary.module';
 import { PrismaEditorialAuthority } from '../infrastructure/prisma-editorial-authority';
 import type { EditorialContext } from '../application/catalog-editorial-core';
-import { EDITORIAL_READER } from './editorial-read.controller';
 import { EDITORIAL_DOCUMENT_READER } from '../application/editorial-document-reader';
 import { EDITORIAL_SAVE_WRITER } from '../application/editorial-save-writer';
 import { EDITORIAL_INITIALIZE_WRITER } from '../application/editorial-initialize-writer';
 import { EDITORIAL_DISCARD_WRITER } from '../application/editorial-discard-writer';
+import { EDITORIAL_PUBLISH_WRITER } from '../application/editorial-publish-writer';
 import type { ReceiptRequestV2 } from '../application/editorial-write-request-v2';
 const revision = 'ev2-sha256-' + 'a'.repeat(64);
 
@@ -94,8 +94,6 @@ describe('registered seven-route global editorial scope', () => {
         CatalogEditorialVocabularyModule,
       ],
     })
-      .overrideProvider(EDITORIAL_READER)
-      .useValue(core)
       .overrideProvider(EDITORIAL_INITIALIZE_WRITER)
       .useValue({
         async initialize(
@@ -154,6 +152,31 @@ describe('registered seven-route global editorial scope', () => {
           intent: ReceiptRequestV2,
         ) {
           const value: unknown = await core.discard(context, {
+            ...intent.body,
+            idempotencyKey: key,
+          });
+          return {
+            status: 200,
+            body: {
+              contractVersion: 2,
+              vocabularyRevision: revision,
+              state: value,
+            },
+            headers: {
+              'Editorial-Contract-Version': '2',
+              'Editorial-Vocabulary-Revision': revision,
+            },
+          };
+        },
+      })
+      .overrideProvider(EDITORIAL_PUBLISH_WRITER)
+      .useValue({
+        async publish(
+          context: EditorialContext,
+          key: string,
+          intent: ReceiptRequestV2,
+        ) {
+          const value: unknown = await core.publish(context, {
             ...intent.body,
             idempotencyKey: key,
           });
@@ -273,6 +296,7 @@ describe('registered seven-route global editorial scope', () => {
         req.set('Idempotency-Key', 'key');
       if (
         route.operation === 'discard' ||
+        route.operation === 'publish' ||
         route.operation === 'initialize' ||
         route.operation === 'save'
       )
@@ -321,6 +345,7 @@ describe('registered seven-route global editorial scope', () => {
             ? { variants: [] }
             : route.operation === 'read' ||
                 route.operation === 'discard' ||
+                route.operation === 'publish' ||
                 route.operation === 'initialize' ||
                 route.operation === 'save'
               ? { contractVersion: 2, vocabularyRevision: revision, state }
@@ -451,6 +476,7 @@ describe('registered seven-route global editorial scope', () => {
       if (
         route.operation === 'read' ||
         route.operation === 'discard' ||
+        route.operation === 'publish' ||
         route.operation === 'initialize' ||
         route.operation === 'save'
       ) {
@@ -467,6 +493,7 @@ describe('registered seven-route global editorial scope', () => {
         await deny(send().unset('Idempotency-Key'), 400);
         if (
           route.operation === 'discard' ||
+          route.operation === 'publish' ||
           route.operation === 'initialize' ||
           route.operation === 'save'
         ) {

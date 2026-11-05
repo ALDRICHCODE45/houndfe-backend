@@ -53,8 +53,6 @@ export const createCoordinatedEditorialWriteAuthority: EditorialWriteAuthorityFa
     return {
       createAuthority: authority.createAuthority,
       saveAuthority: authority.saveAuthority,
-      publishAuthority: authority.publishAuthority,
-      discardAuthority: authority.discardAuthority,
       prepareDocuments,
     };
   };

@@ -16,7 +16,7 @@ export function editorialCors(
     const path = request.originalUrl.split('?')[0];
     const editorial =
       ((method === 'GET' || method === 'HEAD') &&
-        /^\/(?:catalog-editorial\/vocabulary|products\/[^/]+\/editorial(?:\/context)?)\/?$/i.test(
+        /^\/(?:catalog-editorial\/vocabulary|products\/[^/]+\/editorial(?:\/context|\/draft\/readiness)?)\/?$/i.test(
           path,
         )) ||
       (method === 'PUT' &&

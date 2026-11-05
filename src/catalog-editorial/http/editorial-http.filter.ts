@@ -1,6 +1,7 @@
 import { ArgumentsHost, Catch, HttpException } from '@nestjs/common';
 import type { ExceptionFilter } from '@nestjs/common';
 import type { Response } from 'express';
+import { EditorialPublicationNotReadyError } from '../application/editorial-publish-writer';
 import { EditorialVocabularyUnrepresentableError } from '../application/editorial-vocabulary-read';
 
 const statuses: Record<string, number> = {
@@ -34,6 +35,17 @@ export class EditorialHttpFilter implements ExceptionFilter {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Editorial-Contract-Version', '2');
     response.removeHeader('Editorial-Vocabulary-Revision');
+    // D2: an unready publish names what blocks it, with the readiness items.
+    if (exception instanceof EditorialPublicationNotReadyError) {
+      const { items, bySection } = exception.readiness;
+      response.status(400).json({
+        statusCode: 400,
+        error: 'MALFORMED',
+        items,
+        bySection,
+      });
+      return;
+    }
     response.status(statusCode).json({ statusCode, error });
   }
 }

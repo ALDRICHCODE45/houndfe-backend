@@ -18,32 +18,51 @@ function hasRequiredPresence(payload: KnownPayloadV2): boolean {
   }
 }
 
-/** Local readiness over a stable admitted selection and matching parsed value. */
-export function assertSelectedBindingReadinessV2(
+export type SelectedBindingProblemV2 =
+  | 'UNRESOLVED'
+  | 'REQUIRED_MISSING'
+  | 'NA_NOT_ALLOWED'
+  | 'NOT_APPLICABLE_VALUE'
+  | 'EVIDENCE_REQUIRED';
+
+/** The local readiness rule: the first problem of one selection, or null when ready. */
+export function selectedBindingProblemV2(
   selected: RuleResultV2 | null,
   value: ValueV2 | undefined,
-): void {
+): SelectedBindingProblemV2 | null {
   if (
     selected === null ||
     selected.applicability === 'unresolved' ||
     selected.documentary === 'unresolved'
   )
-    fail('MALFORMED');
+    return 'UNRESOLVED';
   if (
     selected.required &&
     (selected.applicability !== 'applicable' ||
       value?.state !== 'known' ||
       !hasRequiredPresence(value.payload))
   )
-    fail('MALFORMED');
+    return value?.state === 'not_applicable'
+      ? 'NA_NOT_ALLOWED'
+      : 'REQUIRED_MISSING';
   if (value?.state === 'not_applicable') {
     if (selected.applicability !== 'not_applicable' || !selected.allowNA)
-      fail('MALFORMED');
-    return;
+      return 'NA_NOT_ALLOWED';
+    return null;
   }
-  if (value?.state !== 'known') return;
-  if (selected.applicability === 'not_applicable') fail('MALFORMED');
+  if (value?.state !== 'known') return null;
+  if (selected.applicability === 'not_applicable')
+    return 'NOT_APPLICABLE_VALUE';
   if (value.evidence === null) {
-    if (selected.evidenceRequired) fail('MALFORMED');
-  } else if (!isFreshEvidenceV2(value.evidence)) fail('MALFORMED');
+    if (selected.evidenceRequired) return 'EVIDENCE_REQUIRED';
+  } else if (!isFreshEvidenceV2(value.evidence)) return 'EVIDENCE_REQUIRED';
+  return null;
+}
+
+/** Local readiness over a stable admitted selection and matching parsed value. */
+export function assertSelectedBindingReadinessV2(
+  selected: RuleResultV2 | null,
+  value: ValueV2 | undefined,
+): void {
+  if (selectedBindingProblemV2(selected, value) !== null) fail('MALFORMED');
 }

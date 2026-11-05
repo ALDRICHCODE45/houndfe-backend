@@ -42,7 +42,7 @@ describe('public Jest suite selection', () => {
   it('selects exactly the live suites excluded from offline discovery', () => {
     const live = listTests('jest.live.config.js');
     const offline = listTests('jest.config.js');
-    expect(live).toHaveLength(7);
+    expect(live).toHaveLength(6);
     expect(live).toContain(
       resolve(
         root,

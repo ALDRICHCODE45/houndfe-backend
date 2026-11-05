@@ -4,13 +4,23 @@ import { eligibleConservationBaselineV2 } from './editorial-conservation-baselin
 import type { DocumentShapeV2 } from './editorial-document-shape-v2';
 import type { VocabularyV2 } from './editorial-vocabulary-shape-v2';
 
-/** Reference-admitted candidate; caller owns stored baseline provenance. */
-export function conserveArchivedOptionsV2(
+export type ArchivedOptionProblemV2 = {
+  code: string;
+  variantId: string | null;
+  optionCode: string;
+};
+
+/**
+ * Conservation that collects every archived option the baseline does not retain.
+ * Unbound or unknown options are not collectable: they still throw MALFORMED.
+ */
+export function collectArchivedOptionConservationV2(
   candidate: DocumentShapeV2,
   baselineInput: unknown,
   references: Pick<DocumentAuthority, 'variantIds' | 'assetIds'>,
   vocabulary: Pick<VocabularyV2, 'families' | 'definitions'>,
-): ArchivedOptionWarning[] {
+): { warnings: ArchivedOptionWarning[]; problems: ArchivedOptionProblemV2[] } {
+  const problems: ArchivedOptionProblemV2[] = [];
   const baseline = eligibleConservationBaselineV2(
     baselineInput,
     references,
@@ -60,7 +70,14 @@ export function conserveArchivedOptionsV2(
           ? previous.payload.value === optionCode
           : previous.payload.type === 'multi' &&
             previous.payload.value.includes(optionCode));
-      if (!retained) fail('MALFORMED');
+      if (!retained) {
+        problems.push({
+          code: value.code,
+          variantId: value.variantId,
+          optionCode,
+        });
+        continue;
+      }
       warnings.push({
         code: 'ARCHIVED_OPTION',
         familyId: family.id,
@@ -71,5 +88,22 @@ export function conserveArchivedOptionsV2(
       });
     }
   }
+  return { warnings, problems };
+}
+
+/** Reference-admitted candidate; caller owns stored baseline provenance. */
+export function conserveArchivedOptionsV2(
+  candidate: DocumentShapeV2,
+  baselineInput: unknown,
+  references: Pick<DocumentAuthority, 'variantIds' | 'assetIds'>,
+  vocabulary: Pick<VocabularyV2, 'families' | 'definitions'>,
+): ArchivedOptionWarning[] {
+  const { warnings, problems } = collectArchivedOptionConservationV2(
+    candidate,
+    baselineInput,
+    references,
+    vocabulary,
+  );
+  if (problems.length) fail('MALFORMED');
   return warnings;
 }

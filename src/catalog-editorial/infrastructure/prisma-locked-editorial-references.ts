@@ -7,10 +7,31 @@ import type { DocumentAuthority } from '../domain/document';
  * This read grants no authorization; it neither acquires the gate nor locks
  * child Variant rows. Coordinated membership writers must use that gate too.
  */
-export async function readLockedEditorialReferences(
+export function readLockedEditorialReferences(
   tx: Prisma.TransactionClient,
   scope: Pick<DocumentAuthority, 'tenantId' | 'productId'>,
   selectedAssetIds: readonly string[],
+): Promise<Omit<DocumentAuthority, 'families'>> {
+  return readEditorialReferences(tx, scope, selectedAssetIds, true);
+}
+
+/**
+ * Same observation without row locks, for a read-only snapshot transaction
+ * (PostgreSQL rejects FOR SHARE there). Never a basis for a write decision.
+ */
+export function readEditorialReferencesSnapshot(
+  tx: Prisma.TransactionClient,
+  scope: Pick<DocumentAuthority, 'tenantId' | 'productId'>,
+  selectedAssetIds: readonly string[],
+): Promise<Omit<DocumentAuthority, 'families'>> {
+  return readEditorialReferences(tx, scope, selectedAssetIds, false);
+}
+
+async function readEditorialReferences(
+  tx: Prisma.TransactionClient,
+  scope: Pick<DocumentAuthority, 'tenantId' | 'productId'>,
+  selectedAssetIds: readonly string[],
+  lock: boolean,
 ): Promise<Omit<DocumentAuthority, 'families'>> {
   // Capture caller-owned qualification and the union of document selections
   // before the first await. Invalid internal inputs are not a public API policy.
@@ -40,7 +61,7 @@ export async function readLockedEditorialReferences(
     SELECT id FROM private_media_assets
     WHERE "tenantId" = ${tenantId} AND "productId" = ${productId}
       AND ${membership}
-    ORDER BY id FOR SHARE`);
+    ORDER BY id${lock ? Prisma.sql` FOR SHARE` : Prisma.empty}`);
   return {
     tenantId,
     productId,

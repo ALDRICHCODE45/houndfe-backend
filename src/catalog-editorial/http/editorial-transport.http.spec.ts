@@ -16,6 +16,10 @@ class Probe {
   read() {
     throw failure;
   }
+  @Get('draft/readiness')
+  readiness() {
+    return { ready: true };
+  }
 }
 const allowed =
   'Authorization,Content-Type,Cache-Control,Pragma,Editorial-Vocabulary-Revision,Idempotency-Key,Editorial-Care-Confirmation';
@@ -25,6 +29,8 @@ const routes = [
   ['HEAD', '/catalog-editorial/vocabulary'],
   ['GET', '/products/id/editorial'],
   ['GET', '/products/id/editorial/context'],
+  ['GET', '/products/id/editorial/draft/readiness'],
+  ['HEAD', '/products/id/editorial/draft/readiness'],
   ['PUT', '/products/id/editorial/draft'],
   ...['initialize', 'publish', 'discard'].map((action) => [
     'POST',
@@ -39,6 +45,10 @@ const siblings = [
   ['GET', '/products/id/editorial/context/extra'],
   ['GET', '/products/id/media'],
   ['GET', '/catalog-editorial/vocabulary-extra'],
+  ['GET', '/products/id/editorial/draft'],
+  ['POST', '/products/id/editorial/draft/readiness'],
+  ['GET', '/products/id/editorial/draft/readiness-extra'],
+  ['GET', '/products/id/editorial/draft/readiness/extra'],
   ['GET', '/products/a/b/editorial'],
 ];
 
@@ -83,6 +93,7 @@ describe.each([false, true])('editorial CORS configured=%s', (configured) => {
     '/catalog-editorial/vocabulary',
     '/products/id/editorial',
     '/products/id/editorial/context',
+    '/products/id/editorial/draft/readiness',
   ])('allows authenticated browser cache headers for %s', async (path) => {
     const response = await request(app.getHttpServer() as Server)
       .options(path)
@@ -141,6 +152,16 @@ describe.each([false, true])('editorial CORS configured=%s', (configured) => {
       );
     },
   );
+  it('exposes editorial headers on an actual readiness GET', async () => {
+    const response = await request(app.getHttpServer() as Server)
+      .get('/products/id/editorial/draft/readiness')
+      .set('Origin', 'https://allowed.test');
+    expect(response.status).toBe(200);
+    expect(response.headers['access-control-expose-headers']).toBe(exposed);
+    expect(response.headers['access-control-allow-origin']).toBe(
+      configured ? 'https://allowed.test' : '*',
+    );
+  });
   it('preserves denied-origin behavior', async () => {
     const response = await preflight(
       'GET',

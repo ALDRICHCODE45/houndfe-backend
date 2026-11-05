@@ -63,7 +63,7 @@ it('builds once and forwards each exact result and matching value', () => {
   ];
   const subjects = ['a', 'b'];
   const build = jest.spyOn(builder, 'buildEditorialEvaluationSetV2');
-  const consume = jest.spyOn(readiness, 'assertSelectedBindingReadinessV2');
+  const consume = jest.spyOn(readiness, 'selectedBindingProblemV2');
   expect(admit(f, values, subjects, noFacts)).toBeUndefined();
   expect(build).toHaveBeenCalledTimes(1);
   expect(build.mock.calls[0]).toEqual([f, values, subjects, noFacts]);
@@ -150,7 +150,7 @@ it('checks product bindings once even for empty E, without generating sellable s
   const f = family(binding('product', { owner: 'product' }), binding());
   expect(() => admit(f, [], [], noFacts)).toThrow(/^MALFORMED$/);
   const row = { ...value('product', null), owner: 'product' as const };
-  const consume = jest.spyOn(readiness, 'assertSelectedBindingReadinessV2');
+  const consume = jest.spyOn(readiness, 'selectedBindingProblemV2');
   expect(admit(f, [row], [], noFacts)).toBeUndefined();
   expect(consume).toHaveBeenCalledTimes(1);
   expect(consume.mock.calls[0][1]).toBe(row);
@@ -218,7 +218,7 @@ it.each(['builder', 'consumer'])(
         });
     else
       jest
-        .spyOn(readiness, 'assertSelectedBindingReadinessV2')
+        .spyOn(readiness, 'selectedBindingProblemV2')
         .mockImplementation(() => {
           throw error;
         });
