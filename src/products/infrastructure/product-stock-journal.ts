@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import {
   businessToday,
-  isLotExpired,
+  sumExpiredLotQuantity,
 } from '../../inventory/domain/fefo-allocator';
 import { StockJournalWriter } from '../../inventory/infrastructure/stock-journal.writer';
 import type {
@@ -59,10 +59,10 @@ export class ProductStockJournal {
       },
       select: { quantity: true, expirationDate: true },
     });
-    const today = businessToday(now, this.businessTimezone);
-    return lots
-      .filter((lot) => isLotExpired(lot.expirationDate, today))
-      .reduce((sum, lot) => sum + lot.quantity, 0);
+    return sumExpiredLotQuantity(
+      lots,
+      businessToday(now, this.businessTimezone),
+    );
   }
 
   /** `INITIAL` movements for the strictly positive deltas of one product's new buckets. */

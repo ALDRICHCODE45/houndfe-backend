@@ -1,4 +1,9 @@
-import { allocateFefo, businessToday, isLotExpired } from './fefo-allocator';
+import {
+  allocateFefo,
+  businessToday,
+  isLotExpired,
+  sumExpiredLotQuantity,
+} from './fefo-allocator';
 import { InsufficientStockError } from './stock-journal.errors';
 
 const d = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
@@ -20,6 +25,20 @@ describe('businessToday / isLotExpired', () => {
     expect(isLotExpired(d('2026-11-03'), '2026-11-04')).toBe(true);
     expect(isLotExpired(d('2026-11-04'), '2026-11-04')).toBe(false);
     expect(isLotExpired(d('2026-11-05'), '2026-11-04')).toBe(false);
+  });
+});
+
+describe('sumExpiredLotQuantity', () => {
+  it('sums only the lots whose calendar date is before today', () => {
+    const lots = [
+      lot('a', 4, '2026-11-03'),
+      lot('b', 2, '2026-11-01'),
+      lot('c', 5, '2026-11-04'),
+      lot('d', 9, '2027-01-01'),
+    ];
+    expect(sumExpiredLotQuantity(lots, '2026-11-04')).toBe(6);
+    expect(sumExpiredLotQuantity(lots, '2026-11-01')).toBe(0);
+    expect(sumExpiredLotQuantity([], '2026-11-04')).toBe(0);
   });
 });
 

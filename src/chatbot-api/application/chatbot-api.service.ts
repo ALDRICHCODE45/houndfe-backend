@@ -27,6 +27,10 @@ import {
   BusinessRuleViolationError,
   InvalidArgumentError,
 } from '../../shared/domain/domain-error';
+import {
+  businessToday,
+  sumExpiredLotQuantity,
+} from '../../inventory/domain/fefo-allocator';
 import type {
   ProductDetailWithIncludes,
   ProductWithIncludes,
@@ -154,7 +158,10 @@ export class ChatbotApiService {
       limit: input.limit ?? 10,
     });
 
-    return items.map(toCatalogItemResponse);
+    const expired = await this.expiredLotQuantities(items);
+    return items.map((product) =>
+      toCatalogItemResponse(product, expired.get(product.id) ?? 0),
+    );
   }
 
   async checkStock(productId: string): Promise<StockCheckResponse> {
@@ -165,7 +172,50 @@ export class ChatbotApiService {
       throw new NotFoundException('Product not found');
     }
 
-    return toStockCheckResponse(product);
+    const expired = await this.expiredLotQuantities([product]);
+    return toStockCheckResponse(product, expired.get(product.id) ?? 0);
+  }
+
+  /**
+   * Units in expired lots per product, so the bot reports sellable stock (S6),
+   * the same rule as the sale charge guard. Lots exist only on non-variant
+   * products (O1) and untracked products report no quantity, so only stocked
+   * non-variant products are read.
+   */
+  private async expiredLotQuantities(
+    products: ReadonlyArray<{
+      id: string;
+      useStock: boolean;
+      hasVariants: boolean;
+    }>,
+  ): Promise<Map<string, number>> {
+    const productIds = products
+      .filter((product) => product.useStock && !product.hasVariants)
+      .map((product) => product.id);
+    if (productIds.length === 0) return new Map();
+
+    const lots = await this.tenantPrisma.getClient().lot.findMany({
+      where: {
+        tenantId: this.tenantPrisma.getTenantId(),
+        productId: { in: productIds },
+        quantity: { gt: 0 },
+      },
+      select: { productId: true, quantity: true, expirationDate: true },
+    });
+    const today = businessToday(
+      new Date(),
+      this.configService.get<string>('PROMOTIONS_BUSINESS_TIMEZONE') ??
+        'America/Mexico_City',
+    );
+    return new Map(
+      productIds.map((productId) => [
+        productId,
+        sumExpiredLotQuantity(
+          lots.filter((lot) => lot.productId === productId),
+          today,
+        ),
+      ]),
+    );
   }
 
   async evaluateCart(input: {
@@ -904,7 +954,15 @@ function deriveStockState(
   return 'available';
 }
 
-function deriveAggregateStock(product: ProductWithIncludes): {
+/** Units the product can sell: expired lots never are (S6), never below 0. */
+function sellableQuantity(quantity: number, expiredLotQuantity: number) {
+  return Math.max(quantity - expiredLotQuantity, 0);
+}
+
+function deriveAggregateStock(
+  product: ProductWithIncludes,
+  expiredLotQuantity: number,
+): {
   status: ChatbotStockState;
   quantity: number | null;
 } {
@@ -913,13 +971,10 @@ function deriveAggregateStock(product: ProductWithIncludes): {
   }
 
   if (!product.hasVariants || product.variants.length === 0) {
+    const quantity = sellableQuantity(product.quantity, expiredLotQuantity);
     return {
-      status: deriveStockState(
-        product.useStock,
-        product.quantity,
-        product.minQuantity,
-      ),
-      quantity: product.quantity,
+      status: deriveStockState(product.useStock, quantity, product.minQuantity),
+      quantity,
     };
   }
 
@@ -940,6 +995,7 @@ function deriveAggregateStock(product: ProductWithIncludes): {
 
 function toCatalogItemResponse(
   product: ProductWithIncludes,
+  expiredLotQuantity: number,
 ): CatalogItemResponse {
   return {
     productId: product.id,
@@ -953,7 +1009,7 @@ function toCatalogItemResponse(
       promoPriceCents: null,
       promotionEvaluationStatus: 'needs_human_review',
     },
-    stock: deriveAggregateStock(product),
+    stock: deriveAggregateStock(product, expiredLotQuantity),
     packageInfo: {
       weightGrams: null,
       dimensions: null,
@@ -978,7 +1034,9 @@ function toCatalogItemResponse(
 
 function toStockCheckResponse(
   product: ProductDetailWithIncludes,
+  expiredLotQuantity: number,
 ): StockCheckResponse {
+  const quantity = sellableQuantity(product.quantity, expiredLotQuantity);
   return {
     productId: product.id,
     name: product.name,
@@ -986,10 +1044,10 @@ function toStockCheckResponse(
       ? {
           status: deriveStockState(
             product.useStock,
-            product.quantity,
+            quantity,
             product.minQuantity,
           ),
-          quantity: product.quantity,
+          quantity,
         }
       : { status: 'not_managed', quantity: null },
     variants: product.variants.map((variant) => ({

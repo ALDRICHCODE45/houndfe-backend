@@ -31,6 +31,16 @@ export function isLotExpired(expirationDate: Date, today: string): boolean {
   return expirationDate.toISOString().slice(0, 10) < today;
 }
 
+/** Units sitting in lots expired on `today` (S6): never sellable. */
+export function sumExpiredLotQuantity(
+  lots: readonly { quantity: number; expirationDate: Date }[],
+  today: string,
+): number {
+  return lots
+    .filter((lot) => isLotExpired(lot.expirationDate, today))
+    .reduce((sum, lot) => sum + lot.quantity, 0);
+}
+
 /**
  * FEFO split for one sale line (S6): non-expired lots by expiration asc then id
  * asc, remainder from the untracked portion. Throws when they cannot cover it.
