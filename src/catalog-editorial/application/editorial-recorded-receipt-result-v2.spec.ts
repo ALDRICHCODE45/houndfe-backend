@@ -12,6 +12,7 @@ const operations: EditorialWriteOperationV2[] = [
   'save',
   'publish',
   'discard',
+  'unpublish',
 ];
 const request: ReceiptRequestV2 = {
   receiptVersion: 2,

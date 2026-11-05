@@ -36,6 +36,8 @@ const routes = [
     'POST',
     `/products/id/editorial/draft/${action}`,
   ]),
+  ['POST', '/products/id/editorial/published/unpublish'],
+  ['POST', '/PRODUCTS/id/EDITORIAL/PUBLISHED/UNPUBLISH/'],
   ['GET', '/PRODUCTS/not-a-uuid/EDITORIAL/CONTEXT/?x=1'],
 ];
 const siblings = [
@@ -50,6 +52,10 @@ const siblings = [
   ['GET', '/products/id/editorial/draft/readiness-extra'],
   ['GET', '/products/id/editorial/draft/readiness/extra'],
   ['GET', '/products/a/b/editorial'],
+  ['GET', '/products/id/editorial/published/unpublish'],
+  ['POST', '/products/id/editorial/published'],
+  ['POST', '/products/id/editorial/draft/unpublish'],
+  ['POST', '/products/id/editorial/published/publish'],
 ];
 
 describe.each([false, true])('editorial CORS configured=%s', (configured) => {

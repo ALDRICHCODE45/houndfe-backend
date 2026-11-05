@@ -22,9 +22,12 @@ export function editorialCors(
       (method === 'PUT' &&
         /^\/products\/[^/]+\/editorial\/draft\/?$/i.test(path)) ||
       (method === 'POST' &&
-        /^\/products\/[^/]+\/editorial\/draft\/(?:initialize|publish|discard)\/?$/i.test(
+        (/^\/products\/[^/]+\/editorial\/draft\/(?:initialize|publish|discard)\/?$/i.test(
           path,
-        ));
+        ) ||
+          /^\/products\/[^/]+\/editorial\/published\/unpublish\/?$/i.test(
+            path,
+          )));
     callback(
       null,
       editorial

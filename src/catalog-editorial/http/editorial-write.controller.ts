@@ -27,6 +27,10 @@ import {
   EDITORIAL_PUBLISH_WRITER,
   type EditorialPublishWriter,
 } from '../application/editorial-publish-writer';
+import {
+  EDITORIAL_UNPUBLISH_WRITER,
+  type EditorialUnpublishWriter,
+} from '../application/editorial-unpublish-writer';
 import { createEditorialWriteRequestV2 } from '../application/editorial-write-request-v2';
 import {
   EDITORIAL_SAVE_WRITER,
@@ -319,6 +323,84 @@ export class EditorialWriteController {
       throw error;
     }
     const result = await this.saveWriter.save(context, key, intent);
+    response.status(result.status);
+    for (const [name, value] of Object.entries(result.headers))
+      response.setHeader(name, value);
+    return result.body;
+  }
+}
+
+/** P4 S6: removes Published; same family as publish (read + publish). */
+@Controller('products/:productId/editorial/published')
+@UseFilters(EditorialHttpFilter)
+@UseGuards(JwtAuthGuard, TenantContextGuard)
+export class EditorialPublishedController {
+  constructor(
+    private readonly scope: EditorialHttpScope,
+    private readonly authority: PrismaEditorialAuthority,
+    @Inject(EDITORIAL_UNPUBLISH_WRITER)
+    private readonly unpublishWriter: EditorialUnpublishWriter,
+  ) {}
+
+  @Post('unpublish')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async unpublish(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const user = this.scope.principal(
+      request.user as AuthenticatedUser | undefined,
+    );
+    const context = await this.scope.product(user, productId);
+    const access = await this.authority.resolve(context);
+    if (
+      access?.activeMember !== true ||
+      access.canRead !== true ||
+      access.canPublish !== true ||
+      access.actorId !== context.actorId ||
+      access.tenantId !== context.tenantId ||
+      access.productId !== context.productId
+    )
+      throw new ForbiddenException();
+    if (Object.keys(request.query).length) throw new BadRequestException();
+    const revisions: string[] = [];
+    const keys: string[] = [];
+    for (let i = 0; i < request.rawHeaders.length; i += 2) {
+      const name = request.rawHeaders[i].toLowerCase();
+      if (
+        [
+          'editorial-care-confirmation',
+          'editorial-contract-version',
+          'editorial-adoption',
+        ].includes(name)
+      )
+        throw new BadRequestException();
+      if (name === 'editorial-vocabulary-revision')
+        revisions.push(request.rawHeaders[i + 1]);
+      if (name === 'idempotency-key') keys.push(request.rawHeaders[i + 1]);
+    }
+    if (revisions.length !== 1 || keys.length !== 1 || keys[0].includes(','))
+      throw new BadRequestException();
+    const key = idempotencyKey(keys[0]);
+    let intent: ReturnType<typeof createEditorialWriteRequestV2>;
+    try {
+      // expectedRevision names the Published revision being removed.
+      intent = createEditorialWriteRequestV2(
+        'unpublish',
+        { vocabularyRevision: revisions[0], careConfirmation: null },
+        request.body,
+      );
+    } catch (error) {
+      if (
+        error instanceof TypeError &&
+        error.message === 'Expected an editorial write request V2'
+      )
+        throw new BadRequestException();
+      throw error;
+    }
+    const result = await this.unpublishWriter.unpublish(context, key, intent);
     response.status(result.status);
     for (const [name, value] of Object.entries(result.headers))
       response.setHeader(name, value);

@@ -818,10 +818,13 @@ model CatalogEditorialState {
   publishedDocument Json?
   // P4 S5: offered subjects (variant ids, null = simple presentation) Published covers; SQL CHECK.
   publishedSubjects Json?
+  // P4 S6: last Published revision removed by unpublish; publish numbers past it.
+  unpublishedRevision Int?
   createReceipts CatalogEditorialCreateReceipt[]
   saveReceipts CatalogEditorialSaveReceipt[]
   publishReceipts CatalogEditorialPublishReceipt[]
   discardReceipts CatalogEditorialDiscardReceipt[]
+  unpublishReceipts CatalogEditorialUnpublishReceipt[]
   product Product @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
 
   @@id([tenantId, productId])
@@ -878,6 +881,19 @@ model CatalogEditorialDiscardReceipt {
 
   @@id([tenantId, productId, actorId, idempotencyKey])
   @@map("catalog_editorial_discard_receipts")
+}
+
+model CatalogEditorialUnpublishReceipt {
+  tenantId String
+  productId String
+  actorId String
+  idempotencyKey String
+  request Json
+  result Json
+  state CatalogEditorialState @relation(fields: [tenantId, productId], references: [tenantId, productId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([tenantId, productId, actorId, idempotencyKey])
+  @@map("catalog_editorial_unpublish_receipts")
 }
 
 // Company-wide editorial vocabulary; SQL migration owns type/owner CHECK constraints.
