@@ -896,10 +896,11 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
    * P4 S3 — replaces the raw `editorialState` include with the public
    * projection of each Published document (title, description, FACET/DETAIL
    * attributes with vocabulary labels). The raw document never leaves the
-   * repository. A missing Published document fails the request; one that is
-   * not document shape V2 counts as not published: the item is dropped and
-   * its id added to `invalid` (the SQL readers already exclude the common
-   * case, so this only meets deeper breaches).
+   * repository. A Published document that vanished after coverage was read
+   * (a concurrent unpublish) counts as not published and the item is dropped;
+   * one that is not document shape V2 is dropped too and its id added to
+   * `invalid` (the SQL readers already exclude the common case, so this only
+   * meets deeper breaches).
    */
   private async withEditorial<T extends object>(
     items: T[],
@@ -911,12 +912,11 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       const state = (
         item as { editorialState?: { publishedDocument: unknown } | null }
       ).editorialState;
-      if (!state || state.publishedDocument == null)
-        throw new Error('Expected a Published editorial document');
-      return state.publishedDocument;
+      return state?.publishedDocument ?? null;
     });
     const families = new Set(
       documents.flatMap((document) => {
+        if (document === null) return [];
         const family = (document as { familyCode?: unknown }).familyCode;
         return typeof family === 'string' ? [family] : [];
       }),
@@ -925,6 +925,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       ...families,
     ]);
     return items.flatMap((item, i) => {
+      if (documents[i] === null) return [];
       let editorial: PublicEditorialProjectionV2;
       try {
         editorial = projectPublishedEditorialV2(documents[i], vocabulary);
