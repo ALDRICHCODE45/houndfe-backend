@@ -20,8 +20,8 @@ Branch `feat/editorial-publish-v2` (worktree `.tmp/publish-v2`, base local main 
 | --- | --- | --- | --- |
 | T1 collecting readiness evaluator (domain) | S1 S2 S5 | worker | 043f525 |
 | T2 readiness endpoint | S2 | worker (with T1) | 4ddf0d3, 8d72d17 |
-| T3 V2 publish writer replacing legacy | S3 S4 S5 | worker | |
-| T4 docs + FE handoff | S6 | worker (with T3) | |
+| T3 V2 publish writer replacing legacy | S3 S4 S5 | worker | 8edc519, 7015729 |
+| T4 docs + FE handoff | S6 | worker (with T3) | 959ea76 |
 | T5 runtime proof | S7 | worker | |
 
 ## Log
@@ -31,3 +31,4 @@ Branch `feat/editorial-publish-v2` (worktree `.tmp/publish-v2`, base local main 
 - L3 Code map: Engram `editorial/publication-gaps` (legacy publish `prisma-catalog-editorial.ts:220-381`, V2 discard writer `prisma-editorial-discard-writer.ts:22-126` as pattern, unwired V2 rule modules).
 - L4 Deferred: D3 tenant switch and C3.3 projection (P4), D6 unpublish, D8 accessory per-type defaults («collar, arnés, correa → «No»», editable) — next features.
 - L5 (T1/T2 done): readiness shares rules with publish (asserts delegate to collecting functions). Added problem codes NOT_APPLICABLE_VALUE, INVALID_VALUE, TOY_TYPES_MISMATCH, ARCHIVED_OPTION, FACTS_CONFLICT, MEDIA_NOT_ALLOWED, DRAFT_INVALID, NO_DRAFT. Worker decisions to confirm: a draft without family cannot publish; readiness requires the Editorial-Vocabulary-Revision header (409 VOCABULARY_CHANGED). RISK to close in T3: collecting functions may surface a TypeError on malformed input where MALFORMED used to win — save/initialize/publish must still return 400 MALFORMED, never 500.
+- L6 (T3/T4 done): V2 publish writer, legacy v1 publish/discard and their specs removed (risk mapping in worker report; covered by prisma-editorial-publish-writer.integration.spec.ts, 65 cases). Decisions confirmed against the contract: draft without family cannot publish; readiness requires Editorial-Vocabulary-Revision. L5 risk closed by tests (15 malformed shapes → MALFORMED/items, never TypeError); pre-existing exception: initialize on an unrecognizable stored Published still 500 (unchanged). Care family: readiness 400 first, then Editorial-Care-Confirmation 400.
