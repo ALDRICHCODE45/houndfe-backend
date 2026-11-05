@@ -1,3 +1,4 @@
+import { withDefinitionDescriptions } from '../application/editorial-vocabulary-descriptions';
 import {
   EditorialVocabularyUnrepresentableError,
   readEditorialVocabulary,
@@ -7,9 +8,18 @@ import {
   parseEditorialVocabularyHeaders,
 } from './editorial-vocabulary-headers';
 
-/** Response descriptor; callers must complete current auth/authority first. */
+/** Response descriptor; callers must complete current auth/authority first.
+ * A source that can also report definition descriptions (one observation) gets
+ * them attached after the revision is computed, so they never change it.
+ */
 export async function createEditorialVocabularyHttpResponse(
-  source: { read(): Promise<unknown> },
+  source: {
+    read(): Promise<unknown>;
+    readWithDescriptions?(): Promise<{
+      snapshot: unknown;
+      descriptions: ReadonlyMap<string, string>;
+    }>;
+  },
   rawHeaders: readonly string[],
 ) {
   const headers: Record<string, string> = {
@@ -30,9 +40,18 @@ export async function createEditorialVocabularyHttpResponse(
     return failure(500, 'INTERNAL_ERROR');
   }
   try {
-    const body = await readEditorialVocabulary(source);
+    const observed = await source.readWithDescriptions?.();
+    const body = await readEditorialVocabulary(
+      observed ? { read: () => Promise.resolve(observed.snapshot) } : source,
+    );
     headers['Editorial-Vocabulary-Revision'] = body.vocabularyRevision;
-    return { statusCode: 200, headers, body };
+    return {
+      statusCode: 200,
+      headers,
+      body: observed
+        ? withDefinitionDescriptions(body, observed.descriptions)
+        : body,
+    };
   } catch (error) {
     return failure(
       500,
