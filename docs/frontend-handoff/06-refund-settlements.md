@@ -105,7 +105,31 @@ Response `200` (before the examples below):
 | `status` | Always `"PENDING"`. Do not switch on it. |
 | `createdAt` | When the sale was cancelled (UTC). |
 
-The list has **no folio and no customer**. To show them, read the cancelled sales from `GET /sales?status=CANCELED` and match by `saleId` (the row has `folio`, `customer.name`, `totalCents`, `paymentMethods`). Do **not** use `GET /sales/:id`: it returns `404 "Sale not found"` for cancelled sales (section 9).
+The list has **no folio and no customer**. To show them, read the cancelled sales from `GET /sales?status=CANCELED` and match by `saleId` (the row has `folio`, `customer.name`, `totalCents`, `paymentMethods`). To open one sale, use `GET /sales/:saleId`: it returns `200` for a cancelled sale.
+
+### Cancelled sale detail (`GET /sales/:id`)
+
+The detail returns `CONFIRMED` and `CANCELED` sales of the tenant. A `DRAFT` sale or a sale of another tenant is `404 "Sale not found"`. Every detail response now has four more fields; on a confirmed sale they are `null` and `refunds: []`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `canceledAt` | ISO string \| null | When the sale was cancelled (UTC). |
+| `cancelReason` | `CUSTOMER_REQUEST` \| `ORDER_ERROR` \| `OUT_OF_STOCK` \| `DUPLICATE_SALE` \| `OTHER` \| null | Reason sent to `POST /sales/:id/cancel`. |
+| `canceledBy` | `{ id, name }` \| null | User who cancelled. `null` if that user no longer exists. |
+| `refunds` | array | Refund obligations of the sale, oldest first: `{ id, method, amountCents, settledCents, outstandingCents, reason, status: 'PENDING', createdAt }`. Same values as the pending list, plus refunds already fully returned (`outstandingCents: 0`). |
+
+`status` is `"CANCELED"`. A cancelled sale is read-only:
+
+| Endpoint | Cancelled sale |
+| --- | --- |
+| `PUT /sales/:id/seller`, `DELETE /sales/:id/seller` | `422`, `error: "SALE_CANCELED"`; nothing is changed |
+| `PATCH /sales/:id/due-date` | `422`, `error: "SALE_CANCELED"`; nothing is changed |
+| `POST /sales/:id/payments` | `422 SALE_NOT_CONFIRMABLE_FOR_PAYMENT` (unchanged) |
+| `POST /sales/:id/cancel` | `200` replay of the first cancellation (unchanged) |
+| `GET /sales/:id/pdf` (ticket) | `400 SALE_NOT_CONFIRMED` |
+| `PATCH /sales/:id/payments/:paymentId/reference` | `404` (unchanged) |
+
+Hide the edit actions (seller, due date, payments, ticket) when `status === 'CANCELED'`. Comments stay allowed.
 
 Errors (validation, `400`):
 
@@ -372,6 +396,5 @@ Pending refunds in Sucursal Centro after the captures (2026-11-05), oldest first
 
 ## 9. Known gaps (backend)
 
-- `GET /sales/:id` returns `404 Sale not found` for a cancelled sale, so a refund's sale cannot be opened through the sale detail. Use the `GET /sales?status=CANCELED` list.
 - No endpoint returns one refund or its settlement history (who returned what, when). The FE only has `settledCents` from the list and the response of each settlement it records.
 - No endpoint lists already completed refunds.
