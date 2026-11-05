@@ -130,8 +130,11 @@ definition items per section.
   different R. Single contract §2 pins every document-bearing GET to R, items
   carry vocabulary labels and section codes, and the FE installs vocabulary and
   document only with equal R. The FE reloads the vocabulary and retries once.
-- D9: all production policies set `evidenceRequired: true`, so every known
-  production value needs fresh evidence. Custom option-case policies keep their
-  own `evidenceRequired` flag.
+- D9: all production policies set `evidenceRequired: true`. Missing evidence
+  is checked by binding readiness over the evaluation set, so it is required for
+  known product-level values and known values of offered subjects (E). A value
+  only on a non-offered variant is not checked for missing evidence; evidence
+  that is present must still be fresh on every value (fresh admission). Custom
+  option-case policies keep their own `evidenceRequired` flag.
 - S88 «Es solo equipamiento» (habitat equipment-only exception) is still not
   implemented and stays out of scope.

@@ -258,7 +258,7 @@ An accessory that says «la talla no decide la compra» but lists neck size retu
 
 ## 6. Business rules to know
 
-- Every known value needs its source and date to publish (D9). Product title needs no evidence.
+- Every known value the publish check evaluates needs its source and date (D9): product-level values and the values of each offered presentation. A value saved only on a presentation that is not offered is not checked for missing evidence; if it does carry evidence, that evidence must still be valid. Product title needs no evidence.
 - A product that is not offered on any online price list cannot publish (D10, `NO_OFFERED_PRESENTATION`). Offer comes from the tenant catalog price lists, not stock.
 - Each offered presentation is checked on its own: no values are borrowed from a sibling or aggregated (S89).
 - A draft without a product type (`familyCode: null`) cannot publish.
