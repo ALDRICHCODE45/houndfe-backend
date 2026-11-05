@@ -17,11 +17,11 @@ Branch `feat/public-catalog-published` (worktree `.tmp/public-published`, base m
 
 | ID | Specs | Route | Commit |
 | --- | --- | --- | --- |
-| T1 storage + switch setting + published-subjects snapshot | S1 S5 | worker | |
-| T2 unpublish endpoint + publish records covered subjects | S5 S6 | worker | |
+| T1 storage + switch setting + published-subjects snapshot | S1 S5 | worker | 53c66d9, f1b9e6f |
+| T2 unpublish endpoint + publish records covered subjects | S5 S6 | worker | 196fd7f |
 | T3 public projection: only published, title/description, attributes in detail, variant hiding | S2 S3 S5 | worker | |
 | T4 facet filters + search on published content | S4 | worker | |
-| T5 accessory defaults rule | S7 | worker | |
+| T5 accessory defaults rule | S7 | worker | d6cf6f4 (merged) |
 | T6 docs, FE handoff, runtime proof | S8 | worker | |
 
 ## Log
@@ -29,3 +29,4 @@ Branch `feat/public-catalog-published` (worktree `.tmp/public-published`, base m
 - L1 (human, 2026-11-05, «D. Publicación editorial … ¿Cómo seguimos?»): «Arrancar con tus recomendaciones» — recommendations of `docs/editorial-publication-design-proposal.md` §5: D3 (a) «Per-tenant switch, turned on after publishing the products»; D4 (a) «Title, description and FACET/DETAIL attributes, with editorial title and description replacing the operational ones»; D5 (a) «Hide that variant until republished»; D6 (a) «Yes, a simple unpublish»; D8 (b) «Per accessory type defaults (for example collar, arnés, correa → «No»), editable».
 - L2 (human, 2026-11-05): «Bien, perfecto, vamos haciendo eso por favor» and «adelante con lo recomendado».
 - L3 Context: Engram `editorial/publication-gaps` (public catalog never reads editorial; repository `src/public-catalog/infrastructure/prisma-public-catalog.repository.ts`, mappers `public-product.mapper.ts`; C3.3 notes in `docs/catalog-editorial-single-contract.md` §10), `odd/editorial-publish-v2/tasks`, `editorial/publish-v2-runtime-probe`. FE contract rules: Engram `contracts/fe-strict-decoders`.
+- L4 (T1/T2/T5 done): switch `catalogRequiresPublishedEditorial` on catalog settings (default false); `publishedSubjects` recorded at publish, backfill = all current subjects for already-published products; unpublish route with `unpublishedRevision` so revision numbering never reuses a pair (worker decision, consistent with the contract's no-reuse rule). T5: only capacityDeterminesChoice defaults to «No» for collar/harness/leash (electrical already optional via optional_equipment).
