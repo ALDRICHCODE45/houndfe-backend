@@ -74,6 +74,8 @@ describe('public Jest suite selection', () => {
     }
     expect(integration.setupFiles).toEqual(['<rootDir>/test/integration/setup/load-env.ts']);
     expect(integration.globalSetup).toBe('<rootDir>/test/integration/setup/global-setup.ts');
-    expect(require('../package.json').scripts['test:live']).toBe('jest --config jest.live.config.js --runInBand');
+    // `${RUN_TESTS:-}` routes the run through the machine-wide test queue and
+    // expands to nothing where RUN_TESTS is unset (CI).
+    expect(require('../package.json').scripts['test:live']).toBe('${RUN_TESTS:-} jest --config jest.live.config.js --runInBand');
   });
 });
