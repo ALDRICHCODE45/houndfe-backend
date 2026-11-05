@@ -99,7 +99,7 @@ describe('SettleRefundDto', () => {
 describe('isRefundSettlementResponseDto', () => {
   const validResponse = (): RefundSettlementResponseDto => ({
     settlementId: '11111111-1111-4111-8111-111111111111',
-    refundId: '22222222-2222-4222-8222-222222222222',
+    refundId: 'cmw2izrjw0002r965eh02ytw3',
     saleId: '33333333-3333-4333-8333-333333333333',
     amountCents: 500,
     method: 'card_credit',
@@ -120,10 +120,24 @@ describe('isRefundSettlementResponseDto', () => {
     ).toBe(true);
   });
 
+  it('accepts the id shapes the write path actually persists', () => {
+    // SaleRefund ids come from Prisma `cuid()`; settlement ids are written
+    // with `randomUUID()`. A replay of a real stored payload must pass.
+    expect(isRefundSettlementResponseDto(validResponse())).toBe(true);
+    expect(
+      isRefundSettlementResponseDto({
+        ...validResponse(),
+        refundId: '22222222-2222-4222-8222-222222222222',
+      }),
+    ).toBe(false);
+  });
+
   it.each([
     ['a non-object payload', 'nope'],
     ['a non-UUID settlementId', { settlementId: 'stl-1' }],
-    ['a non-UUID refundId', { refundId: 'rfd-1' }],
+    ['a malformed refundId', { refundId: 'rfd-1' }],
+    ['an over-long refundId', { refundId: 'c'.repeat(33) }],
+    ['a non-UUID saleId', { saleId: 'cmw2izrjw0002r965eh02ytw3' }],
     ['a missing saleId', { saleId: undefined }],
     ['an unsupported method', { method: 'bitcoin' }],
     ['a negative balance', { outstandingCents: -1 }],

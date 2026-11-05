@@ -11864,8 +11864,9 @@ describe('SalesService — listPendingRefunds', () => {
 // ── rfs-3 partial refund settlement orchestration ──────────────────────
 
 describe('SalesService — settleRefund', () => {
-  // UUID-shaped fixtures: replayed payloads are re-validated at runtime.
-  const REFUND_ID = '11111111-1111-4111-8111-111111111111';
+  // Real id shapes (cuid refund, UUID settlement/sale/actor): replayed payloads
+  // are re-validated at runtime.
+  const REFUND_ID = 'cmw2izrjw0002r965eh02ytw3';
   const SALE_ID = '22222222-2222-4222-8222-222222222222';
   const ACTOR_ID = '33333333-3333-4333-8333-333333333333';
   const OTHER_ACTOR_ID = '55555555-5555-4555-8555-555555555555';
@@ -11877,11 +11878,11 @@ describe('SalesService — settleRefund', () => {
 
   /** sha256 over { refundId, actorId, amountCents, method, reference, settledAt }. */
   const HAPPY_PATH_HASH =
-    '31970570aeb3567d800ccabf45343d3900d568569ed88567d1b2930936564d48';
+    'b01d377a3657e822a5ffdb396732673c56d0926e23677901dcdec9102062e54c';
   const NULL_REFERENCE_HASH =
-    '8dfb323954cc0efbdb2c4abdaa0f7335943a645eaa23416233940ec3399708ae';
+    '751f036a7c11dcc2b0d714a5c1c5ac361111f6fbe01161176849bb023e6c4c1b';
   const OTHER_ACTOR_HASH =
-    '5455974d52bbd3869628a30ba9fded9471538600681b0466420fe5e1368298cd';
+    '99008981d5c1d496afed8ee2dd18c15dbcbcbb0ae83a428793fbf05fb9867a85';
 
   let saleRepo: ReturnType<typeof makeMockSaleRepo>;
   let service: SalesService;

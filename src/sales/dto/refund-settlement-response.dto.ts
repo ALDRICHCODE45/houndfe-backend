@@ -1,4 +1,5 @@
 import { isUUID } from 'class-validator';
+import { isCuid } from '../../shared/pipes/parse-cuid.pipe';
 import type { SaleRefundMethod } from '../domain/sale.repository';
 import { MAX_CENTS, SALE_REFUND_METHODS } from './settle-refund.dto';
 
@@ -20,7 +21,11 @@ export interface RefundSettlementResponseDto {
   outstandingCents: number;
 }
 
-/** IDs are UUIDs, so a replay can never smuggle an arbitrary ID string. */
+/**
+ * IDs are shape-checked so a replay can never smuggle an arbitrary ID string:
+ * sale and settlement ids are UUIDs (the repository writes settlements with
+ * `randomUUID()`), while SaleRefund ids are Prisma `cuid()` defaults.
+ */
 const isUuid = (value: unknown): value is string =>
   typeof value === 'string' && isUUID(value);
 
@@ -67,7 +72,7 @@ export function isRefundSettlementResponseDto(
 
   return (
     isUuid(record.settlementId) &&
-    isUuid(record.refundId) &&
+    isCuid(record.refundId) &&
     isUuid(record.saleId) &&
     isInstallmentAmount(amountCents) &&
     isSaleRefundMethod(record.method) &&
