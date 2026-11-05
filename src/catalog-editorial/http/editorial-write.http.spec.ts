@@ -678,7 +678,11 @@ describe('editorial write HTTP', () => {
     req.set('Editorial-Care-Confirmation', 'review-v1');
     // supertest joins repeated set() values into one raw header per call.
     await rejected(
-      req.set('editorial-care-confirmation', ['review-v1', 'review-v1']),
+      req.set(
+        'editorial-care-confirmation',
+        // supertest's typings only allow arrays for Cookie; at runtime any header accepts one.
+        ['review-v1', 'review-v1'] as unknown as string,
+      ),
       400,
       'MALFORMED',
     );
