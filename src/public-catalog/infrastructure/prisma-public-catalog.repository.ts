@@ -18,10 +18,21 @@ import type {
   ProductDetailWithIncludes,
 } from '../application/mappers/public-product.mapper';
 import type { Prisma } from '@prisma/client';
+import { readEditorialPublishedCoverageV2 } from '../../catalog-editorial/infrastructure/prisma-editorial-published-coverage-v2';
 import {
-  readEditorialPublishedCoverageV2,
-  readEditorialTenantPublishedCoverageV2,
-} from '../../catalog-editorial/infrastructure/prisma-editorial-published-coverage-v2';
+  readEditorialPublicFacetVocabularyV2,
+  readEditorialTenantPublishedFacetSourcesV2,
+} from '../../catalog-editorial/infrastructure/prisma-editorial-published-facets-v2';
+import { facetValuesBySubjectV2 } from '../../catalog-editorial/domain/editorial-public-facets-v2';
+import {
+  countFacets,
+  matchFacetSelection,
+  toFacetSelection,
+  unknownFacetSelection,
+  type FacetCandidate,
+} from '../application/services/public-attribute-facets';
+import { AttributeFacetNotAvailableError } from '../domain/errors/attribute-facet-not-available.error';
+import type { PublicCatalogAttributeFacet } from '../application/dto/public-category-facet.dto';
 import { readEditorialPublicVocabularyV2 } from '../../catalog-editorial/infrastructure/prisma-editorial-public-vocabulary-v2';
 import {
   coversPublishedSubjectV2,
@@ -381,12 +392,17 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     total: number;
     excludedCount: number;
     categories: PublicCatalogCategoryFacet[];
+    attributes?: PublicCatalogAttributeFacet[];
   }> {
     const client = this.tenantPrisma.getClient();
     const { tenantId } = params;
-    const scope = params.context.requiresPublishedEditorial
+    // P4 S4/S5 — one read gives coverage and the FACET choice values.
+    const sources = params.context.requiresPublishedEditorial
+      ? await readEditorialTenantPublishedFacetSourcesV2(this.prisma, tenantId)
+      : null;
+    const scope = sources
       ? editorialScope(
-          await readEditorialTenantPublishedCoverageV2(this.prisma, tenantId),
+          new Map([...sources].map(([id, source]) => [id, source.coverage])),
         )
       : null;
     const publicVariant = publicVariantWhere(tenantId, scope);
@@ -419,7 +435,22 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     if (params.filters.categoryId) {
       gatesAnd.push({ categoryId: params.filters.categoryId });
     }
-    if (params.filters.q) {
+    if (params.filters.q && scope) {
+      // P4 S4 — Published title and description only, never operational
+      // names; same case-insensitive contains as the operational search.
+      const text = (field: 'commercialTitle' | 'description') => ({
+        publishedDocument: {
+          path: [field],
+          string_contains: params.filters.q,
+          mode: 'insensitive' as const,
+        },
+      });
+      gatesAnd.push({
+        editorialState: {
+          is: { OR: [text('commercialTitle'), text('description')] },
+        },
+      });
+    } else if (params.filters.q) {
       const ci = {
         contains: params.filters.q,
         mode: 'insensitive' as const,
@@ -439,13 +470,15 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         ],
       });
     }
-    const baseWhere: Prisma.ProductWhereInput = {
+    const baseOf = (gates: Prisma.ProductWhereInput[]) => ({
       tenantId,
       includeInOnlineCatalog: true,
-      type: 'PRODUCT',
-      AND: gatesAnd,
-    };
-    const eligibleWhere: Prisma.ProductWhereInput = {
+      type: 'PRODUCT' as const,
+      AND: [...gates],
+    });
+    const eligibleOf = (
+      baseWhere: Prisma.ProductWhereInput,
+    ): Prisma.ProductWhereInput => ({
       AND: [
         baseWhere,
         {
@@ -500,7 +533,59 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           ],
         },
       ],
-    };
+    });
+
+    // P4 S4 — attribute facets over every other filter: the selection becomes
+    // one `id IN` gate before pagination, so total, excludedCount and the
+    // category facets count the same unique products.
+    let attributes: PublicCatalogAttributeFacet[] | undefined;
+    if (sources) {
+      const vocabulary = await readEditorialPublicFacetVocabularyV2(
+        this.prisma,
+      );
+      const selection = toFacetSelection(params.filters.attributeFacets);
+      const unknown = unknownFacetSelection(selection, vocabulary.definitions);
+      if (unknown !== null) throw new AttributeFacetNotAvailableError(unknown);
+
+      const unfiltered = baseOf(gatesAnd);
+      const facetSelect = {
+        id: true,
+        hasVariants: true,
+        variants: { where: publicVariant, select: { id: true } },
+      } as const;
+      const [eligibleRows, baseRows] = await Promise.all([
+        client.product.findMany({
+          where: eligibleOf(unfiltered),
+          select: facetSelect,
+        }),
+        selection.size > 0
+          ? client.product.findMany({ where: unfiltered, select: facetSelect })
+          : Promise.resolve([]),
+      ]);
+      const candidateOf = (row: (typeof eligibleRows)[number]) => {
+        const source = sources.get(row.id);
+        const values = source
+          ? facetValuesBySubjectV2(source, vocabulary)
+          : () => new Map<string, ReadonlySet<string>>();
+        return {
+          id: row.id,
+          subjects: row.hasVariants
+            ? row.variants.map((v) => values(v.id))
+            : [values(null)],
+        } satisfies FacetCandidate;
+      };
+      attributes = countFacets(
+        eligibleRows.map(candidateOf),
+        selection,
+        vocabulary.definitions,
+      );
+      if (selection.size > 0)
+        gatesAnd.push({
+          id: { in: matchFacetSelection(baseRows.map(candidateOf), selection) },
+        });
+    }
+    const baseWhere = baseOf(gatesAnd);
+    const eligibleWhere = eligibleOf(baseWhere);
 
     const [eligibleTotal, baseTotal, facetGroups] = await Promise.all([
       client.product.count({ where: eligibleWhere }),
@@ -564,6 +649,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       total: eligibleTotal,
       excludedCount: baseTotal - eligibleTotal,
       categories: await this.toCategoryFacets(facetGroups),
+      ...(attributes ? { attributes } : {}),
     };
   }
 
@@ -897,7 +983,18 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     });
 
     // SAFETY: The select shape above matches PublicCartCandidate; this bridges Prisma's conditional query inference.
-    return rows as unknown as PublicCartCandidate[];
+    const candidates = rows as unknown as PublicCartCandidate[];
+    if (!params.context.requiresPublishedEditorial) return candidates;
+    // P4 S2/S5 — the application classifies against the current coverage.
+    const coverage = await readEditorialPublishedCoverageV2(
+      this.prisma,
+      tenantId,
+      candidates.map((c) => c.id),
+    );
+    return candidates.map((c) => ({
+      ...c,
+      publishedCoverage: coverage.get(c.id) ?? null,
+    }));
   }
 
   async findCategoryFacets(params: {

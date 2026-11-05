@@ -3,7 +3,10 @@ import type {
   PublicVariantDto,
 } from './public-product-detail.dto';
 import type { PublicCatalogProductCard } from './public-product-card.dto';
-import type { PublicCatalogCategoryFacet } from './public-category-facet.dto';
+import type {
+  PublicCatalogAttributeFacet,
+  PublicCatalogCategoryFacet,
+} from './public-category-facet.dto';
 import type { PublicStockPresentationDto } from './public-stock-presentation.dto';
 import type { PublicStockStatus } from '../../domain/types';
 import type { PublicProductAttributeDto } from './public-product-attribute.dto';
@@ -117,6 +120,8 @@ export interface PublicCatalogProductListWithContextDto {
   };
   facets: {
     categories: PublicCatalogCategoryFacet[];
+    /** P4 S4 — FACET choice counts; absent when the switch is off. */
+    attributes?: PublicCatalogAttributeFacet[];
   };
   /** Base published/filter-matching count minus eligible count. */
   excludedCount: number;
