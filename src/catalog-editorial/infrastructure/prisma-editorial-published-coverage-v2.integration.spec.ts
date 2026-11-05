@@ -7,12 +7,23 @@ import {
   integrationPrisma,
 } from '../../../test/integration/reset-db';
 import { coversPublishedSubjectV2 } from '../domain/editorial-published-subjects-v2';
-import { readEditorialPublishedCoverageV2 } from './prisma-editorial-published-coverage-v2';
+import {
+  readEditorialPublishedCoverageV2,
+  readEditorialTenantPublishedCoverageV2,
+} from './prisma-editorial-published-coverage-v2';
 
 // Real PostgreSQL: the stored recording, its CHECK and the migration default.
 const tenantId = randomUUID();
 const otherTenantId = randomUUID();
-const document = { schemaVersion: 2 };
+const document = {
+  schemaVersion: 2,
+  commercialTitle: null,
+  description: null,
+  mediaRefs: [],
+  familyCode: null,
+  values: [],
+  facts: [],
+};
 let prisma: PrismaClient;
 
 async function product(
@@ -111,6 +122,56 @@ describe('published subject coverage on PostgreSQL', () => {
     expect(covers(legacy.productId, randomUUID())).toBe(true);
     expect(covers(draftOnly.productId, null)).toBe(false);
     expect(covers(absent.productId, null)).toBe(false);
+  });
+
+  it('a Published row that is not document shape V2 counts as not published and is reported', async () => {
+    const valid = await product(tenantId);
+    const legacy = await product(tenantId);
+    const broken = await product(tenantId);
+    await state(tenantId, valid.productId, { revision: 1, subjects: [null] });
+    for (const [productId, stored] of [
+      // Pre-V2 Published: no schemaVersion/facts, values without payload.
+      [legacy.productId, { commercialTitle: 'Legado', values: [] }],
+      // Top-level V2, but a known value without its payload.
+      [
+        broken.productId,
+        {
+          ...document,
+          values: [
+            { code: 'x', owner: 'sellable', state: 'known', variantId: null },
+          ],
+        },
+      ],
+    ] as const)
+      await prisma.$executeRaw(Prisma.sql`
+        INSERT INTO "catalog_editorial_states"
+          ("tenantId", "productId", "cycle", "publishedRevision", "publishedDocument")
+        VALUES (${tenantId}, ${productId}, 1, 2, CAST(${JSON.stringify(stored)} AS JSONB))`);
+
+    const reported: string[][] = [];
+    const coverage = await readEditorialPublishedCoverageV2(
+      prisma,
+      tenantId,
+      [valid.productId, legacy.productId, broken.productId],
+      { onInvalid: (ids) => reported.push(ids) },
+    );
+    expect([...coverage.keys()]).toEqual([valid.productId]);
+    expect(reported).toHaveLength(1);
+    expect([...reported[0]].sort()).toEqual(
+      [legacy.productId, broken.productId].sort(),
+    );
+
+    const tenantWide: string[][] = [];
+    const all = await readEditorialTenantPublishedCoverageV2(prisma, tenantId, {
+      onInvalid: (ids) => tenantWide.push(ids),
+    });
+    expect(all.has(valid.productId)).toBe(true);
+    expect(all.has(legacy.productId)).toBe(false);
+    expect(all.has(broken.productId)).toBe(false);
+    expect(tenantWide).toHaveLength(1);
+    expect(tenantWide[0]).toEqual(
+      expect.arrayContaining([legacy.productId, broken.productId]),
+    );
   });
 
   it('is tenant-scoped and empty for no products', async () => {

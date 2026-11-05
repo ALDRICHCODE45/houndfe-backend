@@ -1,11 +1,14 @@
 /**
  * INTEGRATION SPEC: facet filters, published search and cart scope over
- * Published editorial (P4 T4: S4, plus S2/S5 for cart validation).
+ * Published editorial (P4 T4: S4, plus S2/S5 for cart validation), and the
+ * public rule that a Published row that is not a valid V2 document counts as
+ * not published.
  *
  * Real PostgreSQL, the real publish writer and the real public use cases over
  * the real repository. The canonical production vocabulary is installed into
  * the empty test vocabulary and truncated afterwards.
  */
+import { Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { ClsService } from 'nestjs-cls';
 import { randomUUID } from 'node:crypto';
@@ -32,6 +35,7 @@ import {
   type ListProductsInput,
 } from '../application/use-cases/list-public-products.use-case';
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
+import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
 import { PrismaPublicCatalogRepository } from './prisma-public-catalog.repository';
 
 const tenantId = randomUUID();
@@ -47,6 +51,7 @@ let revision: string;
 let repo: PrismaPublicCatalogRepository;
 let list: ListPublicProductsUseCase;
 let cart: ValidatePublicCartUseCase;
+let detail: GetPublicProductDetailUseCase;
 
 async function setSwitch(on: boolean) {
   await prisma.tenant.update({
@@ -295,6 +300,7 @@ beforeAll(async () => {
   );
   list = new ListPublicProductsUseCase(repo);
   cart = new ValidatePublicCartUseCase(repo);
+  detail = new GetPublicProductDetailUseCase(repo);
 
   A = await product('Operativo A');
   B = await product('Operativo B');
@@ -619,5 +625,141 @@ describe('public cart validation over Published editorial on PostgreSQL', () => 
       status: 'VALID',
       productName: 'Operativo U',
     });
+  });
+});
+
+describe('a Published row that is not a valid V2 document counts as not published', () => {
+  /** Pre-V2 Published row as found on the dev DB: no schemaVersion/facts, no payload. */
+  const legacyDocument = {
+    commercialTitle: 'Croquetas Legado',
+    description: 'Documento anterior a V2',
+    familyCode: 'food',
+    mediaRefs: [],
+    values: [
+      {
+        code: 'animal.target',
+        type: 'multi',
+        owner: 'sellable',
+        value: ['ani.dom.dog'],
+        variantId: null,
+      },
+    ],
+  };
+  /** Top-level V2 shape, but a value without its payload: fails the deep parse. */
+  const brokenDocument = {
+    schemaVersion: 2,
+    commercialTitle: 'Croquetas Rotas',
+    description: null,
+    familyCode: 'food',
+    mediaRefs: [],
+    values: [
+      {
+        code: 'animal.target',
+        owner: 'sellable',
+        state: 'known',
+        variantId: null,
+      },
+    ],
+    facts: [],
+  };
+
+  async function storePublished(productId: string, document: object) {
+    await prisma.$executeRaw(Prisma.sql`
+      INSERT INTO "catalog_editorial_states"
+        ("tenantId", "productId", "cycle", "publishedRevision", "publishedDocument")
+      VALUES (${tenantId}, ${productId}, 1, 2, CAST(${JSON.stringify(document)} AS JSONB))`);
+  }
+
+  async function detailMiss(productId: string): Promise<unknown> {
+    const error = await detail
+      .executeForContext({ productId, tenant, context: await context() })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(error).toBeInstanceOf(NotFoundException);
+    return (error as NotFoundException).getResponse();
+  }
+
+  let L: string;
+  let K: string;
+  let warn: jest.SpyInstance;
+
+  beforeAll(async () => {
+    L = await product('Operativo Legado');
+    K = await product('Operativo Roto');
+    await storePublished(L, legacyDocument);
+    await storePublished(K, brokenDocument);
+  });
+
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => warn.mockRestore());
+
+  afterAll(async () => {
+    await prisma.$executeRaw(Prisma.sql`
+      DELETE FROM "catalog_editorial_states"
+      WHERE "tenantId" = ${tenantId} AND "productId" IN (${L}, ${K})`);
+    await prisma.priceList.deleteMany({
+      where: { tenantId, productId: { in: [L, K] } },
+    });
+    await prisma.product.deleteMany({ where: { id: { in: [L, K] } } });
+  });
+
+  it('switch on: the list is 200 with only the valid products; a legacy row adds nothing to counts or facets', async () => {
+    const page = await listWith();
+    expect(ids(page)).toEqual([A, B, C, V.productId].sort());
+    expect(page.meta.total).toBe(4);
+    expect(page.excludedCount).toBe(1);
+    expect(counts(page)['animal.target']).toEqual({
+      'ani.dom.dog': 3,
+      'ani.dom.cat': 3,
+    });
+    expect(page.facets.categories).toEqual([
+      expect.objectContaining({ id: categoryId, count: 4 }),
+    ]);
+    expect(ids(await listWith({ attributeFacets: [animal('dog')] }))).toEqual(
+      [A, C, V.productId].sort(),
+    );
+  });
+
+  it('switch on: search never reaches the text of an invalid Published row', async () => {
+    expect((await listWith({ q: 'Legado' })).items).toEqual([]);
+    expect((await listWith({ q: 'Rotas' })).items).toEqual([]);
+  });
+
+  it('switch on: detail of an invalid Published row is the generic 404', async () => {
+    const miss = await detailMiss(randomUUID());
+    expect(await detailMiss(L)).toEqual(miss);
+    expect(await detailMiss(K)).toEqual(miss);
+  });
+
+  it('switch on: cart validation treats an invalid Published row as NOT_IN_CATALOG', async () => {
+    const result = await validate([{ productId: L }, { productId: K }]);
+    for (const item of result.items)
+      expect(item).toMatchObject({
+        status: 'BLOCKED',
+        blockingCodes: ['NOT_IN_CATALOG'],
+        productName: null,
+      });
+  });
+
+  it('logs one warning per request with the product ids, never document contents', async () => {
+    await listWith();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [message] = warn.mock.calls[0] as [string];
+    expect(message).toContain(L);
+    expect(message).toContain(K);
+    for (const text of ['Legado', 'Rotas', 'animal.target'])
+      expect(message).not.toContain(text);
+  });
+
+  it('switch off: both products show exactly like any operational product', async () => {
+    await setSwitch(false);
+    const page = await listWith();
+    expect(ids(page)).toEqual(expect.arrayContaining([L, K]));
+    expect(warn).not.toHaveBeenCalled();
   });
 });

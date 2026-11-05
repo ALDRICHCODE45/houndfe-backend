@@ -1,5 +1,9 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import {
+  publishedDocumentV2Sql,
+  type PublishedReadOptionsV2,
+} from './prisma-editorial-published-coverage-v2';
+import {
   decodePublishedSubjectsV2,
   type PublishedCoverageV2,
 } from '../domain/editorial-published-subjects-v2';
@@ -38,11 +42,14 @@ function choiceOf(input: unknown): PublicFacetSourceV2['choices'][number] {
  * Every current Published version of the tenant with its coverage (P4 S5)
  * and only its `known` single/multi values (P4 S4): code, variantId and
  * option codes. Text, numbers, evidence, facts and every other document
- * field stay in the database. Explicitly tenant-qualified; one snapshot.
+ * field stay in the database. A Published row that is not document shape V2
+ * (`publishedDocumentV2Sql`) counts as not published: it is left out and
+ * reported to `onInvalid`. Explicitly tenant-qualified; one snapshot.
  */
 export async function readEditorialTenantPublishedFacetSourcesV2(
   db: Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient,
   tenantId: string,
+  options: PublishedReadOptionsV2 = {},
 ): Promise<
   Map<string, PublicFacetSourceV2 & { coverage: PublishedCoverageV2 }>
 > {
@@ -55,14 +62,18 @@ export async function readEditorialTenantPublishedFacetSourcesV2(
       publishedSubjects: unknown;
       familyCode: string | null;
       choices: unknown;
+      v2: boolean;
     }[]
   >(Prisma.sql`
     SELECT s."productId", s."publishedRevision", s."publishedSubjects",
       s."publishedDocument"->>'familyCode' AS "familyCode",
+      ${publishedDocumentV2Sql(Prisma.sql`s."publishedDocument"`)} AS "v2",
       COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
           'code', v->'code', 'variantId', v->'variantId', 'payload', v->'payload'))
-        FROM jsonb_array_elements(s."publishedDocument"->'values') AS v
+        FROM jsonb_array_elements(CASE
+          WHEN jsonb_typeof(s."publishedDocument"->'values') = 'array'
+          THEN s."publishedDocument"->'values' ELSE '[]'::jsonb END) AS v
         WHERE v->>'state' = 'known'
           AND v->'payload'->>'type' IN ('single', 'multi')
       ), '[]'::jsonb) AS "choices"
@@ -70,21 +81,25 @@ export async function readEditorialTenantPublishedFacetSourcesV2(
     WHERE s."tenantId" = ${tenantId}
       AND s."publishedRevision" IS NOT NULL
   `);
+  const skipped = rows.filter((row) => !row.v2).map((row) => row.productId);
+  if (skipped.length) options.onInvalid?.(skipped);
   return new Map(
-    rows.map((row) => {
-      if (!Array.isArray(row.choices)) invalid();
-      return [
-        row.productId,
-        {
-          coverage: {
-            publishedRevision: row.publishedRevision,
-            subjects: decodePublishedSubjectsV2(row.publishedSubjects),
+    rows
+      .filter((row) => row.v2)
+      .map((row) => {
+        if (!Array.isArray(row.choices)) invalid();
+        return [
+          row.productId,
+          {
+            coverage: {
+              publishedRevision: row.publishedRevision,
+              subjects: decodePublishedSubjectsV2(row.publishedSubjects),
+            },
+            familyCode: row.familyCode,
+            choices: row.choices.map(choiceOf),
           },
-          familyCode: row.familyCode,
-          choices: row.choices.map(choiceOf),
-        },
-      ];
-    }),
+        ];
+      }),
   );
 }
 
