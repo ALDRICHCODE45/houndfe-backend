@@ -1,4 +1,4 @@
-# Public catalog from Published editorial (P4 T3: S2 S3 S5)
+# Public catalog from Published editorial (P4 T3: S2 S3 S5, T4: S4)
 
 The public catalog (`GET /public/catalog/:tenantSlug/products` and
 `GET /public/catalog/:tenantSlug/products/:productId`) reads the editorial
@@ -163,11 +163,113 @@ A Published document that cannot be read as document shape V2 fails the
 request (generic server error) instead of silently showing operational data;
 publish admits only valid documents, so this is an invariant breach.
 
+## Search (T4, S4)
+
+With the switch on, `q` matches only the Published `commercialTitle` and
+`description` (case-insensitive contains, the same `ILIKE` semantics as the
+operational search, applied in the SQL `where` before pagination). Operational
+product names, brand and variant name/option/value are no longer searched.
+Switch off: unchanged (operational name, brand, variant fields).
+
+As today, `%` and `_` in `q` act as LIKE wildcards (neither the operational
+nor the published search escapes them); pinned by the integration spec.
+
+## Facet filters (T4, S4)
+
+Request, contextual list only, switch on only:
+
+```
+GET /public/catalog/:tenantSlug/products
+  ?facet=animal.target:ani.dom.dog
+  &facet=animal.target:ani.dom.cat
+  &facet=food.format:food.format.pate
+```
+
+- `facet` is repeatable; each value is `<definition code>:<option code>`
+  (`[A-Za-z0-9._-]{1,120}` on each side), at most 50, no duplicates.
+  Malformed → `400` from the validation pipe, like every other list param.
+- Options of one definition are OR'ed; definitions are AND'ed.
+- **Correlated variant matching:** a product matches when ONE covered sellable
+  subject (a non-OFF covered variant, or the simple presentation) satisfies
+  every selected definition. Product-level values (no `variantId`) apply to
+  every variant. `dog` on variant 1 and `pate` on variant 2 is not a match.
+- Values count exactly like the detail `attributes` with `facet: true`: `known`
+  single/multi values whose definition is FACET in the document's family and
+  whose option is in the vocabulary.
+- The selection becomes one `id IN (...)` gate in the same SQL `where` before
+  pagination, so `meta.total`, `totalPages`, `excludedCount` and
+  `facets.categories` all count the same unique products under the filter.
+- Unknown definition, unknown option, a DETAIL/INTERNAL definition, a
+  number/range FACET, or any `facet` while the switch is off →
+  `400 { "error": "FACET_NOT_AVAILABLE", "message": "Facet is not available: <code[:option]>" }`
+  (`InvalidArgumentError` through the domain filter).
+
+**Number/range FACETs are not filterable yet.** `measure.net_mass`,
+dimensions, fit ranges, capacity etc. carry mixed units (mg/g/kg, mm/cm/m)
+that need normalization and a range-overlap rule to be defined first; choice
+facets cover the shopper's main navigation (species, format, type, size,
+life stage). They stay visible in detail `attributes`.
+
+Response, switch on only (additive key; switch off keeps `facets` exactly
+`{ "categories": [...] }`):
+
+```json
+"facets": {
+  "categories": [{ "id": "…", "name": "Alimento", "count": 1 }],
+  "attributes": [
+    {
+      "code": "animal.target",
+      "label": "Especie",
+      "options": [
+        { "code": "ani.dom.cat", "label": "Gato", "count": 3 },
+        { "code": "ani.dom.dog", "label": "Perro", "count": 1 }
+      ]
+    },
+    {
+      "code": "food.format",
+      "label": "Formato del alimento",
+      "options": [
+        { "code": "food.format.kibble", "label": "Croquetas", "count": 2 },
+        { "code": "food.format.pate", "label": "Paté", "count": 1 }
+      ]
+    }
+  ]
+}
+```
+
+- `count` = unique context-eligible products (price/allowlist/q/category
+  applied) with a subject that holds the option and satisfies every OTHER
+  selected definition — a facet's own selection is excluded, so its sibling
+  options keep useful counts.
+- Options with count 0 are omitted unless selected; definitions with no
+  option are omitted. Definitions and options are ordered by es-MX label.
+- Only FACET single/multi definitions appear.
+
+**Cost.** With the switch on a list request adds: one raw read of the
+tenant's Published rows extracting only coverage, family and known choice
+values (`jsonb_array_elements` in SQL; text, numbers, evidence and facts are
+not transferred), one vocabulary read of FACET choice bindings, one
+`id/hasVariants/variant ids` read over eligible products, and — only with a
+selection — the same read over the base scope. Matching and counting run in
+memory, linear in products × subjects. Fine for the current catalog sizes
+(< 10K products per tenant); a materialized facet table would be the next step
+if that grows.
+
+## Cart validation (T4, S2/S5)
+
+`POST /public/catalog/:tenantSlug/cart/validate` applies the same scope when
+the switch is on, with the existing redacted contract:
+
+- no Published version, or a simple product whose presentation is not
+  covered → `NOT_IN_CATALOG`;
+- a variant not covered by the current Published revision →
+  `VARIANT_NOT_IN_CATALOG` (exactly like an OFF variant).
+
+Switch off: unchanged (no editorial read). Product/variant names in valid
+lines are still the operational ones.
+
 ## Not in this slice
 
-- **Search and facet filters (T4).** With the switch on, `q` still matches
-  operational names/brand/variant fields; facet filtering and search on
-  Published title/description are T4. The editorial predicates join the same
-  `AND` list (`EditorialScope` in the repository) so T4 adds to it.
-- **Cart validation** (`POST …/cart/validate`) and the legacy chatbot readers
-  (`findProducts`, `findProductById`) do not apply the switch.
+- The legacy chatbot readers (`findProducts`, `findProductById`,
+  `findCategoryFacets`) do not apply the switch.
+- Number/range facet filters (see above).
