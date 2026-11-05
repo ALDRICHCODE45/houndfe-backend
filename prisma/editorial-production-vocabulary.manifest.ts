@@ -9,6 +9,7 @@ import {
   RuleId,
   ProductionDefinitionCode,
 } from '../src/catalog-editorial/domain/editorial-production-vocabulary-catalog';
+import { DEFINITION_DESCRIPTIONS } from '../src/catalog-editorial/domain/editorial-production-vocabulary-descriptions';
 import {
   DEFINITION_LABELS,
   FAMILY_LABELS,
@@ -95,6 +96,11 @@ export type ProductionVocabularyManifest = {
     bindings: ProductionBinding[];
   }[];
   definitions: ProductionDefinition[];
+  /** es-MX display help by definition code. Deliberately NOT on the definition
+   * objects: those feed closed wire validators and every digest, and help text is
+   * not vocabulary semantics. Only the installer/apply write path reads it.
+   */
+  descriptions: Readonly<Record<ProductionDefinitionCode, string>>;
 };
 
 function expandFamilies(token: string): ProductionFamily[] {
@@ -241,6 +247,7 @@ export function buildProductionVocabularyManifest(): ProductionVocabularyManifes
     semanticsVersion: 'editorial-production-1',
     families,
     definitions,
+    descriptions: { ...DEFINITION_DESCRIPTIONS },
     provenance: {
       source: {
         blob: '9538de694f1125e79e5f2b60e2e4eb49b2e0a05d',

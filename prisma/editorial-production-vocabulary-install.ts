@@ -125,10 +125,11 @@ export async function installProductionVocabulary(
         });
         await tx.editorialDefinition.createMany({
           data: added.definitions.map(
-            ({ id, code, label, type, numericPolicy }) => ({
+            ({ id, code, label, description, type, numericPolicy }) => ({
               id,
               code,
               label,
+              description,
               type,
               numericPolicy: numericPolicy ?? Prisma.DbNull,
             }),

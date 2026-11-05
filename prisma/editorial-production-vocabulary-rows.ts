@@ -37,6 +37,7 @@ export function productionVocabularyRows(
       id,
       code: d.code,
       label: d.label,
+      description: manifest.descriptions[d.code],
       type: d.type,
       numericPolicy: 'numericPolicy' in d ? d.numericPolicy : null,
       units:

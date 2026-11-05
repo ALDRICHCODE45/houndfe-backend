@@ -151,6 +151,14 @@ describe('pure production vocabulary planner', () => {
     expect(result.preservations).toEqual(expect.arrayContaining(snapshot.rows));
   });
 
+  it('preserves a stored description as customization: no conflict, no patch', () => {
+    const snapshot = full();
+    Object.assign(rowOf(snapshot, 'definition').fields, {
+      description: 'Ayuda propia del usuario.',
+    });
+    expectCounts(run(snapshot), 0, snapshot.rows.length);
+  });
+
   it('unions group memberships, retaining an omitted overlapping custom group', () => {
     const snapshot = full();
     const group = rowOf(snapshot, 'group');

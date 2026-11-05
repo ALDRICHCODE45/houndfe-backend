@@ -198,7 +198,14 @@ export function planProductionVocabulary(
       identity: 'semanticsVersion',
       reason: 'incompatible semantics version',
     });
-  const customFields = ['label', 'sortOrder', 'archived', 'archivedAt'];
+  // description is display help: a stored one is customization, never a conflict.
+  const customFields = [
+    'label',
+    'description',
+    'sortOrder',
+    'archived',
+    'archivedAt',
+  ];
   for (const row of desired) {
     const matches = existing.get(identity(row));
     if (matches && matches.length > 1) continue;
