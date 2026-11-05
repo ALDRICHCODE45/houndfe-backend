@@ -47,3 +47,11 @@ when there is no Published version. A malformed stored recording throws a
 
 Proof: `prisma-editorial-published-coverage-v2.integration.spec.ts` (reader,
 tenant scope, CHECK, and the migration backfill statement run and rolled back).
+
+## Public consumers (P4 T3)
+
+`readEditorialTenantPublishedCoverageV2(db, tenantId)` returns the same map for
+every Published product of the tenant (public listings filter before
+pagination); detail uses `readEditorialPublishedCoverageV2` for one product.
+`readEditorialPublicVocabularyV2` and the pure `projectPublishedEditorialV2`
+build the public text and attributes. See `docs/public-catalog-published-projection.md`.
