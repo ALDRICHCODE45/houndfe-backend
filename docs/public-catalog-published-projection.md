@@ -159,9 +159,33 @@ Example: a published simple food product detail (abridged where marked).
 
 ## Failure policy
 
-A Published document that cannot be read as document shape V2 fails the
-request (generic server error) instead of silently showing operational data;
-publish admits only valid documents, so this is an invariant breach.
+A Published row that is not a valid document shape V2 (for example a legacy
+pre-V2 row) **counts as not published** in the public catalog: it is excluded
+from the list, `meta.total`, `excludedCount`, category and attribute facets,
+search and cart validation (`NOT_IN_CATALOG`), and its detail is the generic
+`404`. One bad row never fails the request. Operational data is never shown
+in its place. Each request that meets such rows logs one warning with the
+product ids only (never document contents):
+`Published editorial not readable as document shape V2, treated as not published: <ids>`.
+
+Where it is decided:
+
+- Tenant-wide readers (list, counts, facets, search):
+  `publishedDocumentV2Sql` in the SQL `where` of
+  `readEditorialTenantPublishedFacetSourcesV2` /
+  `readEditorialTenantPublishedCoverageV2` checks the top level (exact keys,
+  `schemaVersion` 2, arrays) and every value element (key set by state,
+  `payload` object for `known`). The documents stay in the database.
+- Per-product reader (detail, cart): `readEditorialPublishedCoverageV2` applies
+  the full `parseDocumentShapeV2`.
+- Page projection: a row that passes the SQL test but fails the full parse
+  (only reachable by direct SQL; publish admits only valid documents) is
+  dropped from the page and logged; the counts of that request may include it.
+
+The editorial store (read, readiness, publish, unpublish) is unchanged.
+Republishing such a product with a V2 draft makes it public again. Proof:
+`prisma-public-catalog-facets.integration.spec.ts` (legacy and broken rows
+next to valid ones) and `prisma-editorial-published-coverage-v2.integration.spec.ts`.
 
 ## Search (T4, S4)
 
@@ -273,3 +297,5 @@ lines are still the operational ones.
 - The legacy chatbot readers (`findProducts`, `findProductById`,
   `findCategoryFacets`) do not apply the switch.
 - Number/range facet filters (see above).
+
+FE handoff: [frontend-handoff/07-public-catalog-published.md](frontend-handoff/07-public-catalog-published.md).
