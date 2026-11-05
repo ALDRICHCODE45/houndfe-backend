@@ -155,6 +155,108 @@ describe('evaluateBindingPolicyV2 exclusive route dispatch (S35/S45)', () => {
     expect(optionSpy).not.toHaveBeenCalled();
   });
 
+  describe('accessory fact rules (S7)', () => {
+    const accessoryPolicy: BindingPolicy = {
+      route: 'fact_rule',
+      rule: {
+        family: 'accessory',
+        ruleId: 'capacity',
+        parameter: 'measure.capacity.container',
+      },
+    };
+    const accessory = (owner: 'product' | 'sellable') =>
+      ({
+        id: 'accessory-id',
+        code: 'accessory',
+        label: 'Accessory',
+        bindings: [{ definitionCode: 'accessory.type', owner }],
+      }) as unknown as FamilyV2;
+    const selection = (
+      owner: 'product' | 'sellable',
+      variantId: string | null,
+      payload: Extract<ValueV2, { state: 'known' }>['payload'],
+    ): ValueV2[] => [
+      {
+        code: 'accessory.type',
+        owner,
+        variantId,
+        state: 'known',
+        payload,
+        evidence: null,
+      },
+    ];
+    const passedTypes = (family: FamilyV2, given: ValueV2[]) => {
+      factSpy.mockClear();
+      evaluateBindingPolicyV2(
+        accessoryPolicy,
+        family,
+        given,
+        'variant-a',
+        facts,
+      );
+      const args = factSpy.mock.calls[0] as unknown[];
+      expect(args[0]).toBe(
+        accessoryPolicy.route === 'fact_rule' ? accessoryPolicy.rule : null,
+      );
+      expect(args[1]).toBe(facts);
+      return args[2];
+    };
+
+    it('passes the subject selection of a sellable-owned accessory.type', () => {
+      const single = {
+        type: 'single',
+        value: 'accessory.type.collar',
+      } as const;
+      expect(
+        passedTypes(
+          accessory('sellable'),
+          selection('sellable', 'variant-a', single),
+        ),
+      ).toEqual(['accessory.type.collar']);
+      // A sibling's selection is never borrowed.
+      expect(
+        passedTypes(
+          accessory('sellable'),
+          selection('sellable', 'variant-b', single),
+        ),
+      ).toEqual([]);
+    });
+
+    it('passes the product selection of a product-owned accessory.type', () => {
+      expect(
+        passedTypes(
+          accessory('product'),
+          selection('product', null, {
+            type: 'multi',
+            value: ['accessory.type.leash', 'accessory.type.bowl'],
+          }),
+        ),
+      ).toEqual(['accessory.type.leash', 'accessory.type.bowl']);
+    });
+
+    it('passes no selection when accessory.type is unknown or unbound', () => {
+      const unknown: ValueV2[] = [
+        {
+          code: 'accessory.type',
+          owner: 'sellable',
+          variantId: 'variant-a',
+          state: 'unknown',
+          evidence: null,
+        },
+      ];
+      expect(passedTypes(accessory('sellable'), unknown)).toEqual([]);
+      expect(
+        passedTypes(
+          { ...accessory('sellable'), bindings: [] },
+          selection('sellable', 'variant-a', {
+            type: 'single',
+            value: 'accessory.type.collar',
+          }),
+        ),
+      ).toEqual([]);
+    });
+  });
+
   it.each([null, unresolved])(
     'preserves option unresolved result %j without fact fallback',
     (result) => {

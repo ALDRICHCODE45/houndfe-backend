@@ -289,6 +289,48 @@ describe('readiness of saved V2 drafts on PostgreSQL', () => {
     expect(result.bySection).toEqual({ medidas: 1 });
   });
 
+  // D8 (b): collar, harness and leash default an unknown capacity to «No».
+  const withoutCapacityOrElectrical = (type: string) => {
+    const draft = readyDrafts.accessory();
+    draft.values = [
+      known('accessory.type', {
+        type: 'single',
+        value: `accessory.type.${type}`,
+      }),
+    ];
+    draft.facts[0].declarations = draft.facts[0].declarations.filter((d) =>
+      ['fitDeterminesChoice', 'relevantFitCodes'].includes(
+        (d as { key: string }).key,
+      ),
+    );
+    return draft;
+  };
+
+  it('accessory: a collar is ready without capacity or electrical declarations', async () => {
+    const draft = withoutCapacityOrElectrical('collar');
+    const productId = await product(draft);
+    expect(await read(productId)).toMatchObject({ ready: true, items: [] });
+    const [{ document }] = await prisma.$queryRaw<{ document: unknown }[]>(
+      Prisma.sql`SELECT "draftDocument" AS document FROM "catalog_editorial_states"
+        WHERE "tenantId" = ${tenantId} AND "productId" = ${productId}`,
+    );
+    expect(document).toEqual(draft);
+  });
+
+  it('accessory: a bowl without the capacity declaration stays unresolved', async () => {
+    const result = await read(
+      await product(withoutCapacityOrElectrical('bowl')),
+    );
+    expect(result.ready).toBe(false);
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        scope: 'definition',
+        definitionCode: 'measure.capacity.container',
+        problem: 'UNRESOLVED',
+      }),
+    ]);
+  });
+
   it('no draft: 200 with a single product item', async () => {
     const result = await read(await product(undefined));
     expect(result).toEqual({
