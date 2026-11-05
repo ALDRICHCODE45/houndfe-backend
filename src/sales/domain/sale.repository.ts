@@ -589,6 +589,21 @@ export interface ISaleRepository {
       paymentMethodName: string | null;
       paymentMethodSubtitle: string | null;
     }>;
+    /** Cancellation facts; null on non-canceled sales. Absent on older repository mocks. */
+    canceledAt?: Date | null;
+    cancelReason?: SaleCancelReason | null;
+    canceledBy?: { id: string; name: string } | null;
+    /** Refund obligations recorded at cancellation, oldest first. */
+    refunds?: Array<{
+      id: string;
+      method: SaleRefundMethod;
+      amountCents: number;
+      settledCents: number;
+      outstandingCents: number;
+      reason: SaleCancelReason;
+      status: 'PENDING';
+      createdAt: Date;
+    }>;
   } | null>;
 }
 

@@ -1,3 +1,6 @@
+import type { SaleCancelReason } from '../domain/sale.entity';
+import type { SaleRefundMethod } from '../domain/sale.repository';
+
 export type SaleTimelineEventType =
   | 'SALE_REGISTERED'
   | 'PAYMENT_RECEIVED'
@@ -107,6 +110,18 @@ export interface SaleDetailPaymentDto {
   paymentMethodSubtitle?: string;
 }
 
+/** Refund obligation recorded when a paid sale was canceled. */
+export interface SaleDetailRefundDto {
+  id: string;
+  method: SaleRefundMethod;
+  amountCents: number;
+  settledCents: number;
+  outstandingCents: number;
+  reason: SaleCancelReason;
+  status: 'PENDING';
+  createdAt: string;
+}
+
 export interface SaleDetailResponseDto {
   id: string;
   folio: string | null;
@@ -131,4 +146,9 @@ export interface SaleDetailResponseDto {
   items: SaleDetailItemDto[];
   payments: SaleDetailPaymentDto[];
   timeline: SaleDetailTimelineEventDto[];
+  /** Cancellation facts; all null and `refunds: []` unless canceled. */
+  canceledAt: string | null;
+  cancelReason: SaleCancelReason | null;
+  canceledBy: { id: string; name: string } | null;
+  refunds: SaleDetailRefundDto[];
 }

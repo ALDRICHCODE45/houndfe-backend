@@ -2059,8 +2059,10 @@ export class PrismaSaleRepository implements ISaleRepository {
   async findOneWithRelations(id: string) {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
+    // The detail is readable for confirmed and canceled sales; drafts stay
+    // private to the POS draft endpoints.
     const sale = await prisma.sale.findFirst({
-      where: { id, tenantId, status: 'CONFIRMED' },
+      where: { id, tenantId, status: { in: ['CONFIRMED', 'CANCELED'] } },
       include: {
         customer: { select: { id: true, firstName: true, lastName: true } },
         user: { select: { id: true, name: true } },
@@ -2118,10 +2120,31 @@ export class PrismaSaleRepository implements ISaleRepository {
           },
           orderBy: { createdAt: 'asc' },
         },
+        refunds: {
+          select: {
+            id: true,
+            method: true,
+            amountCents: true,
+            settledCents: true,
+            reason: true,
+            status: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        },
       },
     });
 
     if (!sale) return null;
+
+    // `canceledByUserId` has no Prisma relation, so the actor is resolved
+    // with its own tenant-client lookup.
+    const canceledBy = sale.canceledByUserId
+      ? await prisma.user.findUnique({
+          where: { id: sale.canceledByUserId },
+          select: { id: true, name: true },
+        })
+      : null;
 
     return {
       id: sale.id,
@@ -2259,6 +2282,19 @@ export class PrismaSaleRepository implements ISaleRepository {
           paymentMethodSubtitle: catalogSnapshot?.subtitle ?? null,
         };
       }),
+      canceledAt: sale.canceledAt,
+      cancelReason: sale.cancelReason,
+      canceledBy,
+      refunds: (sale.refunds ?? []).map((refund) => ({
+        id: refund.id,
+        method: toDomainRefundMethod(refund.method),
+        amountCents: refund.amountCents,
+        settledCents: refund.settledCents,
+        outstandingCents: refund.amountCents - refund.settledCents,
+        reason: refund.reason,
+        status: refund.status,
+        createdAt: refund.createdAt,
+      })),
     };
   }
 

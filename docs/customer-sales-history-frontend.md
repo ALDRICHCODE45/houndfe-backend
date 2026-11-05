@@ -365,6 +365,8 @@ const detail = await saleApi.getById(row.id);
 
 La ruta **`/pos/ventas/:id`** (nombre `pos-sale-detail`) ya existe (se reutiliza — `GET /sales/:id` con permiso `read:Sale`). Backend no requiere cambios. El archivo del composable / store de detalle vive bajo `src/features/POS/sales/**`.
 
+El detalle también abre ventas canceladas (`status: "CANCELED"`, `200`) e incluye `canceledAt`, `cancelReason`, `canceledBy` y `refunds` (en ventas confirmadas: `null` / `[]`). Una venta cancelada es de solo lectura: cambiar vendedor o fecha de vencimiento responde `422 SALE_CANCELED`. Contrato completo en [06-refund-settlements.md](frontend-handoff/06-refund-settlements.md#cancelled-sale-detail-get-salesid). Un borrador sigue respondiendo `404`.
+
 ### 4.7 Evidencia legacy (referencias visuales)
 
 Las siguientes capturas son referencias del producto legacy — la pantalla nueva puede diferir visualmente, pero sirven como punto de partida para entender el flujo:
