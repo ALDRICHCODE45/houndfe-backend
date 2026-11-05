@@ -1507,6 +1507,86 @@ describe('SalesService', () => {
     });
   });
 
+  // GET /sales/:id now reads CANCELED sales, so every mutation reachable
+  // from that screen must reject a canceled sale before writing anything.
+  describe('canceled sale mutations', () => {
+    const makeCanceledSale = () =>
+      Sale.fromPersistence({
+        id: 'sale-canceled-1',
+        userId: 'user-1',
+        status: 'CANCELED',
+        sellerUserId: 'seller-1',
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        dueDate: null,
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+    it('assignSeller rejects with SALE_CANCELED without writing', async () => {
+      const sale = makeCanceledSale();
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        user: { findUnique: jest.fn().mockResolvedValue({ id: 'seller-2' }) },
+      });
+      const detailSpy = jest.spyOn(service, 'getSaleDetail');
+
+      await expect(
+        service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-2' }),
+      ).rejects.toMatchObject({ code: 'SALE_CANCELED' });
+
+      expect(sale.sellerUserId).toBe('seller-1');
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+      expect(detailSpy).not.toHaveBeenCalled();
+    });
+
+    it('clearSeller rejects with SALE_CANCELED without writing', async () => {
+      const sale = makeCanceledSale();
+      saleRepo.findById.mockResolvedValue(sale);
+      const detailSpy = jest.spyOn(service, 'getSaleDetail');
+
+      await expect(
+        service.clearSeller(sale.id, 'actor-1'),
+      ).rejects.toMatchObject({ code: 'SALE_CANCELED' });
+
+      expect(sale.sellerUserId).toBe('seller-1');
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+      expect(detailSpy).not.toHaveBeenCalled();
+    });
+
+    it('setDueDate rejects with SALE_CANCELED without writing', async () => {
+      const sale = makeCanceledSale();
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.setDueDate(sale.id, { dueDate: '2099-01-01T00:00:00.000Z' }),
+      ).rejects.toMatchObject({ code: 'SALE_CANCELED' });
+
+      expect(sale.dueDate).toBeNull();
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('setDueDate keeps SALE_NOT_FOUND for a draft sale', async () => {
+      saleRepo.findById.mockResolvedValue(
+        Sale.fromPersistence({
+          id: 'sale-draft-due',
+          userId: 'user-1',
+          status: 'DRAFT',
+          items: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+      );
+
+      await expect(
+        service.setDueDate('sale-draft-due', { dueDate: null }),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_FOUND' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
   describe('draft customer and shipping address mutations', () => {
     const makeDraftSale = (overrides?: {
       customerId?: string | null;
@@ -7275,6 +7355,113 @@ describe('SalesService', () => {
       await expect(service.getSaleDetail('invalid-id')).rejects.toThrow(
         'Validation failed (uuid is expected)',
       );
+    });
+
+    it('surfaces the cancellation facts and refund obligations of a canceled sale', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'V-0050',
+        status: 'CANCELED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        dueDate: null,
+        subtotalCents: 3000,
+        discountCents: 0,
+        totalCents: 3000,
+        paidCents: 3000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'PENDING',
+        customer: null,
+        cashier: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [],
+        canceledAt: new Date('2026-05-09T09:00:00.000Z'),
+        cancelReason: 'CUSTOMER_REQUEST',
+        canceledBy: { id: 'u2', name: 'Gerente' },
+        refunds: [
+          {
+            id: 'refund-1',
+            method: 'CASH',
+            amountCents: 3000,
+            settledCents: 1000,
+            outstandingCents: 2000,
+            reason: 'CUSTOMER_REQUEST',
+            status: 'PENDING',
+            createdAt: new Date('2026-05-09T09:00:00.000Z'),
+          },
+        ],
+      });
+      saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+
+      const result = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result).toMatchObject({
+        status: 'CANCELED',
+        canceledAt: '2026-05-09T09:00:00.000Z',
+        cancelReason: 'CUSTOMER_REQUEST',
+        canceledBy: { id: 'u2', name: 'Gerente' },
+        refunds: [
+          {
+            id: 'refund-1',
+            method: 'CASH',
+            amountCents: 3000,
+            settledCents: 1000,
+            outstandingCents: 2000,
+            reason: 'CUSTOMER_REQUEST',
+            status: 'PENDING',
+            createdAt: '2026-05-09T09:00:00.000Z',
+          },
+        ],
+      });
+    });
+
+    it('reports empty cancellation facts on a confirmed sale', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'V-0051',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        dueDate: null,
+        subtotalCents: 1000,
+        discountCents: 0,
+        totalCents: 1000,
+        paidCents: 1000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+        customer: null,
+        cashier: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [],
+        canceledAt: null,
+        cancelReason: null,
+        canceledBy: null,
+        refunds: [],
+      });
+      saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+
+      const result = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result).toMatchObject({
+        canceledAt: null,
+        cancelReason: null,
+        canceledBy: null,
+        refunds: [],
+      });
     });
 
     it('throws 404 for missing or cross-tenant sale', async () => {

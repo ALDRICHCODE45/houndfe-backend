@@ -10,6 +10,7 @@ import {
 } from './sale-item.entity';
 import {
   InvalidDueDateError,
+  SaleCanceledError,
   SaleNotCancellableError,
   SaleDeliveredCannotCancelError,
   SaleNotDeliverableError,
@@ -664,6 +665,7 @@ export class Sale {
   }
 
   setDueDate(date: Date | null): void {
+    this.ensureNotCanceled();
     if (
       date !== null &&
       this.confirmedAt !== undefined &&
@@ -716,11 +718,20 @@ export class Sale {
   }
 
   assignSeller(userId: string): void {
+    this.ensureNotCanceled();
     this._sellerUserId = userId;
   }
 
   clearSeller(): void {
+    this.ensureNotCanceled();
     this._sellerUserId = null;
+  }
+
+  /** A canceled sale stays readable but is frozen for edits. */
+  private ensureNotCanceled(): void {
+    if (this.status === 'CANCELED') {
+      throw new SaleCanceledError();
+    }
   }
 
   assignCustomer(customerId: string, shippingAddressId?: string | null): void {

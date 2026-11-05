@@ -89,6 +89,7 @@ import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
   InvalidDueDateError,
+  SaleCanceledError,
   SaleFullyPaidError,
   SellerNotFoundError,
 } from './domain/sale.errors';
@@ -1909,6 +1910,13 @@ export class SalesService {
           author: comment.author,
         })),
       }),
+      canceledAt: sale.canceledAt?.toISOString() ?? null,
+      cancelReason: sale.cancelReason ?? null,
+      canceledBy: sale.canceledBy ?? null,
+      refunds: (sale.refunds ?? []).map((refund) => ({
+        ...refund,
+        createdAt: refund.createdAt.toISOString(),
+      })),
     };
   }
 
@@ -3936,6 +3944,9 @@ export class SalesService {
     dto: UpdateSaleDueDateDto,
   ): Promise<SaleDetailResponseDto> {
     const sale = await this.saleRepo.findById(saleId);
+    if (sale?.status === 'CANCELED') {
+      throw new SaleCanceledError();
+    }
     if (!sale || sale.status !== 'CONFIRMED') {
       throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
     }

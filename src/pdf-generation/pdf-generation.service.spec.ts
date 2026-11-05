@@ -100,6 +100,10 @@ function makeConfirmedSale(
       },
     ],
     timeline: [],
+    canceledAt: null,
+    cancelReason: null,
+    canceledBy: null,
+    refunds: [],
     ...overrides,
   };
 }
@@ -293,6 +297,18 @@ describe('PdfGenerationService', () => {
       // can branch on it.
       expect((err as BadRequestException).message).toBe('SALE_NOT_CONFIRMED');
     }
+  });
+
+  it('rejects a canceled sale with 400 SALE_NOT_CONFIRMED (the detail read now returns it)', async () => {
+    const canceledSale = makeConfirmedSale({ status: 'CANCELED' });
+    salesService.getSaleDetail.mockResolvedValue(canceledSale);
+
+    const error = await service
+      .generateSalePdf(canceledSale.id, 'tenant-1', DEFAULT_FORMAT_KEY)
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).message).toBe('SALE_NOT_CONFIRMED');
   });
 
   it('wraps renderer failures in InternalServerErrorException (PDF_GENERATION_FAILED)', async () => {

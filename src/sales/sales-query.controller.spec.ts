@@ -615,6 +615,50 @@ describe('SalesQueryController HTTP integration', () => {
       .expect(404);
   });
 
+  // A canceled sale is readable but frozen: seller and due-date edits map
+  // the domain SALE_CANCELED error to 422 at the real filter boundary.
+  it.each([
+    [
+      'PUT /sales/:id/seller',
+      () =>
+        request(app.getHttpServer())
+          .put(`/sales/${cancelSaleId}/seller`)
+          .send({ sellerUserId: '0b6b2c1e-8a4f-4f55-9d2a-1f7a3c5e9b10' }),
+      'assignSeller',
+    ],
+    [
+      'DELETE /sales/:id/seller',
+      () =>
+        request(app.getHttpServer()).delete(`/sales/${cancelSaleId}/seller`),
+      'clearSeller',
+    ],
+    [
+      'PATCH /sales/:id/due-date',
+      () =>
+        request(app.getHttpServer())
+          .patch(`/sales/${cancelSaleId}/due-date`)
+          .send({ dueDate: '2099-01-01T00:00:00.000Z' }),
+      'setDueDate',
+    ],
+  ] as const)(
+    '%s returns 422 SALE_CANCELED for a canceled sale',
+    async (_label, send, method) => {
+      (service[method] as jest.Mock).mockRejectedValue(
+        new BusinessRuleViolationError('SALE_CANCELED', 'SALE_CANCELED'),
+      );
+
+      const res = await send()
+        .set('Authorization', 'Bearer tenant-a-read-sale')
+        .expect(422);
+
+      expect(res.body).toMatchObject({
+        statusCode: 422,
+        error: 'SALE_CANCELED',
+        message: 'SALE_CANCELED',
+      });
+    },
+  );
+
   // ── prf-3 pending refund listing HTTP integration tests ─────────────────
 
   const pendingRefundPage: PendingRefundListResponseDto = {
