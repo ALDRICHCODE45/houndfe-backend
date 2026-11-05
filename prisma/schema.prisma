@@ -816,6 +816,8 @@ model CatalogEditorialState {
   draftDocument Json?
   publishedRevision Int?
   publishedDocument Json?
+  // P4 S5: offered subjects (variant ids, null = simple presentation) Published covers; SQL CHECK.
+  publishedSubjects Json?
   createReceipts CatalogEditorialCreateReceipt[]
   saveReceipts CatalogEditorialSaveReceipt[]
   publishReceipts CatalogEditorialPublishReceipt[]
