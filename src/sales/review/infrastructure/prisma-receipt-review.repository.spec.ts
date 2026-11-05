@@ -91,6 +91,43 @@ describe('PrismaReceiptReviewRepository', () => {
     expect(result[0]?.sale.paymentStatus).toBe('PARTIAL');
   });
 
+  it('keeps the queue shape for private uploads without URL or declared amount', async () => {
+    const client = makeMockPrisma();
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(client),
+    } as unknown as TenantPrismaService;
+    const repository = new PrismaReceiptReviewRepository(tenantPrisma);
+    client.receiptEvidence.findFirst.mockResolvedValue({
+      id: 'receipt-2',
+      saleId: 'sale-1',
+      tenantId: 'tenant-1',
+      mediaUrl: null,
+      declaredAmountCents: null,
+      declaredDate: null,
+      declaredReference: null,
+      status: 'PENDING',
+      confirmedByUserId: null,
+      confirmedAt: null,
+      rejectionReason: null,
+      createdAt: new Date('2026-11-05T10:00:00.000Z'),
+      sale: {
+        id: 'sale-1',
+        status: 'CONFIRMED',
+        paymentStatus: 'CREDIT',
+        paidCents: 0,
+        debtCents: 1000,
+        totalCents: 1000,
+        channel: 'ONLINE',
+      },
+    });
+
+    const result = await repository.findById('receipt-2', 'tenant-1');
+
+    // Strict FE decoders expect string/number until T2 adds the private read.
+    expect(result?.mediaUrl).toBe('');
+    expect(result?.declaredAmountCents).toBe(0);
+  });
+
   it('loads one tenant-scoped receipt with sale state for actions', async () => {
     const client = makeMockPrisma();
     const tenantPrisma = {

@@ -180,6 +180,11 @@ enum ReceiptEvidenceStatus {
   REJECTED
 }
 
+enum ReceiptPreviewStatus {
+  READY
+  UNAVAILABLE
+}
+
 enum SaleIdempotencyStatus {
   IN_FLIGHT
   SUCCEEDED
@@ -1649,14 +1654,27 @@ model SaleFolioCounter {
 // RECEIPT EVIDENCE — pending payment proof for bot-created transfer sales
 // ============================================================================
 
+// Legacy rows carry `mediaUrl`; private uploads carry `storageKey` (a CHECK in
+// the migration requires one of them). `mismatch` is the snapshot against the
+// sale debt at upload: { debtCents, declaredDiffCents?, extractedDiffCents?, flagged }.
 model ReceiptEvidence {
   id                  String                @id @default(uuid())
   saleId              String
   tenantId            String
-  mediaUrl            String
-  declaredAmountCents Int
+  mediaUrl            String?
+  declaredAmountCents Int?
   declaredDate        DateTime?
   declaredReference   String?
+  extracted           Json?
+  storageKey          String?
+  mimeType            String?
+  sizeBytes           Int?
+  sha256              String?
+  previewKey          String?
+  previewMimeType     String?
+  previewStatus       ReceiptPreviewStatus?
+  idempotencyKey      String?
+  mismatch            Json?
   status              ReceiptEvidenceStatus @default(PENDING)
   confirmedByUserId   String?
   confirmedAt         DateTime?
@@ -1667,6 +1685,7 @@ model ReceiptEvidence {
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   confirmedBy User?  @relation("ReceiptReviewer", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
 
+  @@unique([tenantId, saleId, idempotencyKey])
   @@index([tenantId, saleId])
   @@index([tenantId, status])
   @@map("receipt_evidences")

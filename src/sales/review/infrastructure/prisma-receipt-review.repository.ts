@@ -22,8 +22,8 @@ type PersistedReceiptReview = {
   id: string;
   saleId: string;
   tenantId: string;
-  mediaUrl: string;
-  declaredAmountCents: number;
+  mediaUrl: string | null;
+  declaredAmountCents: number | null;
   declaredDate: Date | null;
   declaredReference: string | null;
   status: string;
@@ -122,8 +122,11 @@ function mapReceiptReviewRecord(
     id: row.id,
     saleId: row.saleId,
     tenantId: row.tenantId,
-    mediaUrl: row.mediaUrl,
-    declaredAmountCents: row.declaredAmountCents,
+    // Private uploads (storageKey, optional declared amount) keep the strict
+    // review shape until T2 adds the permission-checked file route: '' means
+    // "no public URL" and 0 means "not declared" (declared amounts are >= 1).
+    mediaUrl: row.mediaUrl ?? '',
+    declaredAmountCents: row.declaredAmountCents ?? 0,
     declaredDate: row.declaredDate,
     declaredReference: row.declaredReference,
     status: row.status as ReceiptReviewStatus,
