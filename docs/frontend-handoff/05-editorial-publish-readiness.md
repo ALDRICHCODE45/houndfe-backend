@@ -26,7 +26,7 @@ The rules live in the backend (decision D2). The FE never recomputes publishabil
 | Permission | `ProductEditorialDraft:read` (same as the editorial read) |
 | Request headers | `Authorization`, plus exactly one `Editorial-Vocabulary-Revision: <R>` (the `vocabularyRevision` of the vocabulary you installed). No `Idempotency-Key`, `Editorial-Care-Confirmation`, `Editorial-Contract-Version` or `Editorial-Adoption`. |
 | Query / body | none |
-| Response headers | `Cache-Control: no-store`, `Editorial-Contract-Version: 2`, `Editorial-Vocabulary-Revision: <R>` |
+| Response headers | `Cache-Control: no-store`, `Editorial-Contract-Version: 2`, `Editorial-Vocabulary-Revision: <R>` (both exposed to the browser by CORS, like the other editorial routes) |
 | Writes | none (read-only snapshot) |
 
 Response `200`:

@@ -828,8 +828,9 @@ Errors carry version2/no-store and remove any stale revision header. Framework
 invalid JSON/413/unmatched-route errors remain outside this local envelope; FE
 handles non-envelope failures generically.
 
-Bootstrap CORS specializes only the seven editorial routes and their preflights,
-including Express case/trailing-slash aliases and malformed Product IDs. Original
+Bootstrap CORS specializes only the eight editorial routes (vocabulary, document,
+context, readiness GET; draft PUT; initialize/publish/discard POST) and their
+preflights, including Express case/trailing-slash aliases and malformed Product IDs. Original
 origin/credentials policy and unrelated routes' reflected headers stay unchanged.
 HTTP tests use real Nest/Express CORS with synthetic JWT/Prisma I/O or error probes;
 this is not live database/browser or complete document/write integration proof.
