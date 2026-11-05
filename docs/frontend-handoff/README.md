@@ -8,6 +8,7 @@ Backend contracts for the frontend, **in implementation order**. Each file cover
 | 2 | O2 Lots on variants | **Paper proposal only**, not implemented | [02-variant-lots-o2-proposal.md](02-variant-lots-o2-proposal.md) |
 | 3 | O4 Receipts against a confirmed purchase order (10 ordered, 6 accepted → +6, 4 pending) | Not started; depends on O1 and O2 | — |
 | 4 | Purchase orders: checklist issue summary (`issueSummary`, `checklistItemCount`) | Implemented, merged to local `main` | [03-po-issue-summary.md](03-po-issue-summary.md) |
+| 5 | Refund settlements: pending refunds list, partial and total returns, Idempotency-Key replay | Backend implemented; no FE screen yet | [06-refund-settlements.md](06-refund-settlements.md) |
 
 Operations: [deploy/inventory-journal-o1-rollout.md](../deploy/inventory-journal-o1-rollout.md) is the rollout runbook for the O1 migration (stop writers, pre-flight queries, rollback, permissions). It is for whoever deploys, not for the FE.
 
