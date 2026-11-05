@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { buildProductionVocabularyManifest } from './editorial-production-vocabulary.manifest';
+import {
+  DEFINITION_LABELS,
+  FAMILY_LABELS,
+  UNIT_LABELS,
+} from '../src/catalog-editorial/domain/editorial-production-vocabulary-labels';
 
 const read = (name: string) => readFileSync(`docs/${name}.md`, 'utf8');
 const source = read('editorial-vocabulary-source-snapshot');
@@ -69,7 +74,8 @@ it('exports seven families, 68 definitions, 201 exclusive bindings and 514 + 3 o
   expect(m.families.map((f) => f.code)).toEqual(families);
   expect(
     m.families.every(
-      (f) => f.label === f.code && f.minimumContractVersion === 2,
+      (f) =>
+        f.label === FAMILY_LABELS[f.code] && f.minimumContractVersion === 2,
     ),
   ).toBe(true);
   expect(m.definitions).toHaveLength(68);
@@ -215,7 +221,11 @@ it('emits all exact numeric units and resolved positive/count/unbounded domain p
     for (const code of codes) {
       expect(definition(code)).toMatchObject({
         type: type === 'N' ? 'number' : 'range',
-        units: units.map((u, sortOrder) => ({ code: u, label: u, sortOrder })),
+        units: units.map((u, sortOrder) => ({
+          code: u,
+          label: UNIT_LABELS[u] ?? u,
+          sortOrder,
+        })),
         numericPolicy: {
           status: 'resolved',
           magnitude: code,
@@ -237,7 +247,9 @@ it('uses symbolic canonical references, no fabricated persisted IDs or evidence 
     ...mapping.other.map((r) => r[0]),
   ];
   expect(m.definitions.map((d) => d.code)).toEqual(codes);
-  expect(m.definitions.every((d) => d.label === d.code)).toBe(true);
+  expect(
+    m.definitions.every((d) => d.label === DEFINITION_LABELS[d.code]),
+  ).toBe(true);
   const visit = (v: unknown) => {
     if (v && typeof v === 'object')
       for (const [k, value] of Object.entries(v)) {
@@ -261,4 +273,32 @@ it('returns deterministic fresh nested objects without leaking caller mutations'
   };
   mutate(first);
   expect(buildProductionVocabularyManifest()).toEqual(next);
+});
+
+it('ships a Spanish label for every family, definition and word unit, unique within each family', () => {
+  const m = buildProductionVocabularyManifest();
+  expect(m.families.filter((f) => f.label === f.code)).toEqual([]);
+  expect(m.definitions.filter((d) => d.label === d.code)).toEqual([]);
+  const byCode = new Map(m.definitions.map((d) => [d.code, d.label]));
+  for (const f of m.families) {
+    const labels = f.bindings.map((b) => byCode.get(b.definitionCode)!);
+    expect(new Set(labels).size).toBe(labels.length);
+  }
+  for (const d of m.definitions) {
+    if (!('units' in d)) continue;
+    for (const u of d.units)
+      expect(u.label).toBe(UNIT_LABELS[u.code] ?? u.code);
+  }
+});
+
+it('never emits an option, group or unit label that is empty', () => {
+  const m = buildProductionVocabularyManifest();
+  for (const d of m.definitions) {
+    if ('options' in d) {
+      expect(d.options.every((o) => o.label.trim() !== '')).toBe(true);
+      expect(d.groups.every((g) => g.label.trim() !== '')).toBe(true);
+    }
+    if ('units' in d)
+      expect(d.units.every((u) => u.label.trim() !== '')).toBe(true);
+  }
 });
