@@ -33,8 +33,13 @@ function freeze(input: unknown): void {
     Object.freeze(input);
   }
 }
-function check(r: FactRule, facts: FactInputsV2, outcome: Outcome): void {
-  const input = { r, facts };
+function check(
+  r: FactRule,
+  facts: FactInputsV2,
+  outcome: Outcome,
+  accessoryTypes?: string[],
+): void {
+  const input = { r, facts, accessoryTypes };
   const before = structuredClone(input);
   freeze(input);
   const expected = {
@@ -50,10 +55,10 @@ function check(r: FactRule, facts: FactInputsV2, outcome: Outcome): void {
     documentary: outcome === 'U' ? 'unresolved' : 'resolved',
   };
   try {
-    const actual = evaluateFactRuleV2(r, facts);
+    const actual = evaluateFactRuleV2(r, facts, accessoryTypes);
     expect(actual).toEqual(expected);
     actual.required = !actual.required;
-    expect(evaluateFactRuleV2(r, facts)).toEqual(expected);
+    expect(evaluateFactRuleV2(r, facts, accessoryTypes)).toEqual(expected);
   } finally {
     expect(input).toEqual(before);
   }
@@ -145,6 +150,111 @@ describe('production fact-rule result evaluation', () => {
       }
     },
   );
+
+  describe('accessory per-type defaults (S7)', () => {
+    const r = rule('capacity');
+    const defaulted = [
+      ['accessory.type.collar'],
+      ['accessory.type.harness'],
+      ['accessory.type.leash'],
+      ['accessory.type.collar', 'accessory.type.leash'],
+    ];
+
+    it('an unknown capacity declaration on collar, harness or leash is not applicable', () => {
+      for (const types of defaulted) {
+        for (const axes of [undefined, null, []]) {
+          check(
+            r,
+            { capacityDeterminesChoice: null, relevantCapacityCodes: axes },
+            'N',
+            types,
+          );
+          check(
+            r,
+            axes === undefined ? {} : { relevantCapacityCodes: axes },
+            'N',
+            types,
+          );
+        }
+        // Like a declared «No», a declared nonempty subset stays open.
+        check(r, { relevantCapacityCodes: [r.parameter] }, 'U', types);
+      }
+    });
+
+    it('a known capacity declaration always wins over the default', () => {
+      for (const types of defaulted) {
+        check(
+          r,
+          {
+            capacityDeterminesChoice: true,
+            relevantCapacityCodes: [r.parameter],
+          },
+          'R',
+          types,
+        );
+        check(
+          r,
+          { capacityDeterminesChoice: true, relevantCapacityCodes: ['other'] },
+          'O',
+          types,
+        );
+        check(r, { capacityDeterminesChoice: true }, 'U', types);
+        check(
+          r,
+          { capacityDeterminesChoice: true, relevantCapacityCodes: [] },
+          'U',
+          types,
+        );
+        check(
+          r,
+          { capacityDeterminesChoice: false, relevantCapacityCodes: [] },
+          'N',
+          types,
+        );
+      }
+    });
+
+    it('other or mixed accessory types keep an unknown capacity unresolved', () => {
+      for (const types of [
+        [],
+        ['accessory.type.bowl'],
+        ['accessory.type.collar', 'accessory.type.bowl'],
+        ['collar'],
+      ]) {
+        check(r, {}, 'U', types);
+        check(r, { capacityDeterminesChoice: null }, 'U', types);
+      }
+      check(r, {}, 'U');
+    });
+
+    it('electrical accessory fields stay optional while unknown, for every type', () => {
+      const e = rule('optional_equipment');
+      for (const types of [...defaulted, ['accessory.type.bowl'], []]) {
+        check(e, {}, 'O', types);
+        check(e, { electricalApplies: null }, 'O', types);
+        check(
+          e,
+          { electricalApplies: true, relevantEquipmentCodes: [e.parameter] },
+          'O',
+          types,
+        );
+        check(
+          e,
+          { electricalApplies: false, relevantEquipmentCodes: [] },
+          'N',
+          types,
+        );
+      }
+    });
+
+    it('leaves fit and other families unchanged', () => {
+      const collar = ['accessory.type.collar'];
+      check(rule('fit'), {}, 'U', collar);
+      check(rule('equipment'), {}, 'U', collar);
+      check(rule('space'), {}, 'U', collar);
+      check({ ...r, family: 'habitat' }, {}, 'U', collar);
+    });
+  });
 
   it('selects toy dimension subsets without inferring absence of omitted axes', () => {
     const r = rule('dimensions');

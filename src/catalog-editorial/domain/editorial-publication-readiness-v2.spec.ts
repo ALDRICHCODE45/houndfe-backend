@@ -505,6 +505,57 @@ describe('evaluatePublicationReadinessV2', () => {
     );
   });
 
+  describe('accessory per-type defaults (S7)', () => {
+    const withoutDefaulted = [
+      declaration('fitDeterminesChoice', false),
+      declaration('relevantFitCodes', []),
+    ];
+
+    it.each(['collar', 'harness', 'leash'])(
+      '%s: unknown capacity and electrical declarations do not block',
+      (type) => {
+        expect(
+          expectAgreement(input(accessory(type, withoutDefaulted))),
+        ).toEqual([]);
+      },
+    );
+
+    it('a known «No» electrical declaration still rejects electrical values', () => {
+      const power = known('measure.equipment.power', {
+        type: 'number',
+        value: 5,
+        unit: 'W',
+      });
+      const d = accessory('collar', withoutDefaulted);
+      d.values.push(power);
+      expect(expectAgreement(input(d))).toEqual([]);
+      d.facts[0].declarations.push(
+        declaration('electricalApplies', false),
+        declaration('relevantEquipmentCodes', []),
+      );
+      expect(expectAgreement(input(d))).toEqual([
+        item('NOT_APPLICABLE_VALUE', 'measure.equipment.power'),
+      ]);
+    });
+
+    it('a known capacity declaration wins and requires its value', () => {
+      const d = accessory('collar', [
+        ...withoutDefaulted,
+        declaration('capacityDeterminesChoice', true),
+        declaration('relevantCapacityCodes', ['measure.capacity.container']),
+      ]);
+      expect(expectAgreement(input(d))).toEqual([
+        item('REQUIRED_MISSING', 'measure.capacity.container'),
+      ]);
+    });
+
+    it('another accessory type keeps both declarations unresolved', () => {
+      expect(
+        expectAgreement(input(accessory('bowl', withoutDefaulted))),
+      ).toEqual([item('UNRESOLVED', 'measure.capacity.container')]);
+    });
+  });
+
   it('CARE_REVIEW_INCOMPLETE: missing, unknown and unready reviews', () => {
     for (const review of [null, { state: 'unknown' } as const]) {
       expect(expectAgreement(input(readyCare(review)))).toEqual([
@@ -592,6 +643,29 @@ function firstOption(code: string): string {
   const d = vocabulary().definitions.find((x) => x.code === code);
   if (d?.type !== 'single' && d?.type !== 'multi') throw new Error('fixture');
   return d.options[0].code;
+}
+function accessory(
+  type: string,
+  declarations: DeclarationShapeV2[],
+): DocumentShapeV2 {
+  return {
+    ...readyFood(),
+    familyCode: 'accessory',
+    values: [
+      known('accessory.type', {
+        type: 'single',
+        value: `accessory.type.${type}`,
+      }),
+    ],
+    facts: [
+      {
+        variantId: null,
+        presentation: 'Pieza',
+        declarations,
+        careReview: null,
+      },
+    ],
+  };
 }
 function toy(toyTypes: string[] | null): DocumentShapeV2 {
   return {
