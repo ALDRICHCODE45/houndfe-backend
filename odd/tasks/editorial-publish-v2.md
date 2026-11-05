@@ -23,6 +23,7 @@ Branch `feat/editorial-publish-v2` (worktree `.tmp/publish-v2`, base local main 
 | T3 V2 publish writer replacing legacy | S3 S4 S5 | worker | 8edc519, 7015729 |
 | T4 docs + FE handoff | S6 | worker (with T3) | 959ea76 |
 | T5 runtime proof | S7 | worker | 310d02a |
+| T6 verify fixes: readiness CORS, habitat + DB-level problem coverage, D9 doc scope, dead EDITORIAL_READER | S2 S6 S7 | worker | |
 
 ## Log
 
@@ -33,3 +34,4 @@ Branch `feat/editorial-publish-v2` (worktree `.tmp/publish-v2`, base local main 
 - L5 (T1/T2 done): readiness shares rules with publish (asserts delegate to collecting functions). Added problem codes NOT_APPLICABLE_VALUE, INVALID_VALUE, TOY_TYPES_MISMATCH, ARCHIVED_OPTION, FACTS_CONFLICT, MEDIA_NOT_ALLOWED, DRAFT_INVALID, NO_DRAFT. Worker decisions to confirm: a draft without family cannot publish; readiness requires the Editorial-Vocabulary-Revision header (409 VOCABULARY_CHANGED). RISK to close in T3: collecting functions may surface a TypeError on malformed input where MALFORMED used to win — save/initialize/publish must still return 400 MALFORMED, never 500.
 - L6 (T3/T4 done): V2 publish writer, legacy v1 publish/discard and their specs removed (risk mapping in worker report; covered by prisma-editorial-publish-writer.integration.spec.ts, 65 cases). Decisions confirmed against the contract: draft without family cannot publish; readiness requires Editorial-Vocabulary-Revision. L5 risk closed by tests (15 malformed shapes → MALFORMED/items, never TypeError); pre-existing exception: initialize on an unrecognizable stored Published still 500 (unchanged). Care family: readiness 400 first, then Editorial-Care-Confirmation 400.
 - L7 (T5): probe 30/30 twice over real HTTP on dev (scripts/editorial-publish-runtime/probe.cjs); full unit suite 13589 green. Showcase published: «Croqueta Royal Canin Indoor para gato 1.5 kg» 123d1b11-44a7-4f26-a3c5-168e1e1b22fe, «Shampoo de avena Bio-Groom para perro 355 ml» 618ef15d-fcc1-4797-a3d6-22e5d2763002 (revision 2). No product defects.
+- L8 (independent verify): S1–S6 PASS, S7 PARTIAL. Findings: (1) MEDIUM readiness GET missing from editorial CORS allowlist (http/editorial-cors.ts:18-21) → no exposedHeaders / explicit preflight; (2) no habitat ready/blocked case; (3) UNRESOLVED, ARCHIVED_OPTION, MEDIA_NOT_ALLOWED, NUMERIC_POLICY_PENDING only unit-tested; (4) handoff says «every known value needs source and date» but evidence is only required for offered presentations; (5) dead EDITORIAL_READER export. Routed to T6.
