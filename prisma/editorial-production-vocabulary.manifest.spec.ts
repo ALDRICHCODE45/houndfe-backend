@@ -6,6 +6,10 @@ import {
   FAMILY_LABELS,
   UNIT_LABELS,
 } from '../src/catalog-editorial/domain/editorial-production-vocabulary-labels';
+import {
+  DEFINITION_DESCRIPTIONS,
+  DESCRIPTION_MAX_LENGTH,
+} from '../src/catalog-editorial/domain/editorial-production-vocabulary-descriptions';
 
 const read = (name: string) => readFileSync(`docs/${name}.md`, 'utf8');
 const source = read('editorial-vocabulary-source-snapshot');
@@ -301,4 +305,24 @@ it('never emits an option, group or unit label that is empty', () => {
     if ('units' in d)
       expect(d.units.every((u) => u.label.trim() !== '')).toBe(true);
   }
+});
+
+it('ships a non-empty es-MX description for every production definition, outside the definition objects', () => {
+  const { definitions, descriptions } = buildProductionVocabularyManifest();
+  expect(definitions).toHaveLength(68);
+  expect(Object.keys(descriptions).sort()).toEqual(
+    definitions.map((d) => d.code).sort(),
+  );
+  for (const d of definitions) {
+    // Closed wire validators and every digest see definitions without help text.
+    expect(d).not.toHaveProperty('description');
+    expect(descriptions[d.code]).toBe(DEFINITION_DESCRIPTIONS[d.code]);
+    expect(descriptions[d.code].trim().length).toBeGreaterThan(0);
+    expect(descriptions[d.code].length).toBeLessThanOrEqual(
+      DESCRIPTION_MAX_LENGTH,
+    );
+  }
+  expect(Object.keys(descriptions).some((c) => c.startsWith('starter.'))).toBe(
+    false,
+  );
 });

@@ -12,6 +12,19 @@ bare vocabulary reader is not used by this endpoint; no starter defaults are add
   `Editorial-Vocabulary-Revision`, `Editorial-Contract-Version: 2` and no-store.
 - Any occurrence of the five prohibited request headers fails with 400 MALFORMED
   before snapshot access. Authentication and persisted editorial authority run first.
+- `vocabulary.definitions[].description` is optional es-MX help text for the store
+  user (one line, at most 200 characters; the shipped production texts stay within
+  160). It is **omitted, never `null`**, for definitions without one, so a vocabulary
+  with no descriptions is byte-identical to the previous response. Example:
+  `{"id":"…","code":"text.clinical_analysis","label":"Análisis clínico","type":"text","description":"Análisis de la etiqueta del fabricante (proteína, grasa, fibra…). Interno, no se publica."}`.
+  Clients must treat it as optional and show it only when present.
+- **The revision does not cover descriptions.** `vocabularyRevision` is the digest of
+  the vocabulary without them; descriptions are attached to the body only after the
+  digest is computed, so adding, editing or removing one never changes the revision,
+  the `Editorial-Vocabulary-Revision` header, the raw snapshot or the install
+  before-image. Consequence: a client caching by revision may keep showing stale help
+  text until it reloads the vocabulary, and the body can no longer be re-hashed
+  field-for-field by a client that includes `description`; strip it first.
 - Missing semantic metadata or unrepresentable content fails the whole response
   with 500 EDITORIAL_VOCABULARY_UNREPRESENTABLE. Unexpected read failures return
   500 INTERNAL_ERROR, without messages, causes, partial metadata or revision headers.
@@ -27,6 +40,18 @@ Registered-module tests retain actual authority, snapshot adapter, materializers
 canonical hashing and response composition, substituting only Prisma I/O and JWT
 authentication. An independent JSON/crypto oracle checks the fixture digest.
 Existing authority tests retain tenant boundaries, ordering, archives and null units.
+Description handling has its own real-PostgreSQL proof
+(`prisma-editorial-vocabulary-description.integration.spec.ts`, opt-in like the
+snapshot proof): pre-migration definition rows, raw snapshot sha256 and revision are
+unchanged by the column and by filling it, and the HTTP projection exposes it.
+**Rollout: run `prisma migrate deploy` BEFORE deploying the new code.** The snapshot
+statement selects `editorial_definitions.description`, so new code against an
+unmigrated database fails every vocabulary read and the editorial write paths that
+share it. Older code against a migrated database keeps serving the same revision (it
+ignores the column), but its raw snapshot gains a `description` key, so do not run the
+old production-vocabulary installer after migrating. To fill existing rows run
+`pnpm seed:editorial-descriptions` (sets only NULL descriptions; idempotent; never
+overwrites a customized one; later edits to the shipped text do not propagate).
 This is not live database/JWT or browser proof, seven-family production admission,
 provisioning, or document/write/publication integration. Incomplete stored metadata
 must be reported, not silently repaired. The descriptor also retains its focused

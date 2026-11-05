@@ -51,6 +51,18 @@ describe('applyEditorialVocabularyLabels', () => {
     expect(result).toEqual({ families: 1, definitions: 1, units: 1 });
   });
 
+  it('replaces a label still at a previously shipped default, never a customized one', async () => {
+    const client = fixture();
+    client.editorialDefinition.rows.push(
+      { code: 'size.animal', label: 'Tamaño de raza' },
+      { code: 'food.role', label: 'Uso en la dieta' },
+    );
+    const result = await applyEditorialVocabularyLabels(client);
+    expect(client.editorialDefinition.rows[3].label).toBe('Tamaño de mascota');
+    expect(client.editorialDefinition.rows[4].label).toBe('Uso en la dieta');
+    expect(result.definitions).toBe(2);
+  });
+
   it('never overwrites customized labels, symbolic units or unknown codes', async () => {
     const client = fixture();
     await applyEditorialVocabularyLabels(client);

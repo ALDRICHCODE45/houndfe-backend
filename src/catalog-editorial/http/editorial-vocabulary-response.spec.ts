@@ -129,6 +129,73 @@ describe('dormant editorial vocabulary response descriptions', () => {
     },
   );
 
+  describe('definition descriptions (display help outside the revision)', () => {
+    const plainResponse = () =>
+      respond({ read: jest.fn().mockResolvedValue(fixture()) }, []);
+    const sourceWith = (descriptions: Map<string, string>) => {
+      const snapshot = fixture();
+      return {
+        read: jest.fn().mockResolvedValue(snapshot),
+        readWithDescriptions: jest
+          .fn()
+          .mockResolvedValue({ snapshot, descriptions }),
+      };
+    };
+
+    it('attaches description to the matching definition and keeps the revision byte-identical', async () => {
+      const plain = await plainResponse();
+      const source = sourceWith(
+        new Map([['custom.d', 'Ayuda para el usuario.']]),
+      );
+      const response = await respond(source, []);
+      const body = response.body as {
+        vocabularyRevision: string;
+        vocabulary: { definitions: unknown[] };
+      };
+      expect(body.vocabulary.definitions).toEqual([
+        { ...legacy.definitions[0], description: 'Ayuda para el usuario.' },
+      ]);
+      // Revision/digest unchanged by populating descriptions; header mirrors it.
+      expect(body.vocabularyRevision).toBe(
+        (plain.body as { vocabularyRevision: string }).vocabularyRevision,
+      );
+      expect(response.headers['Editorial-Vocabulary-Revision']).toBe(
+        body.vocabularyRevision,
+      );
+      // Independent oracle: the digest covers the vocabulary WITHOUT descriptions.
+      expect(body.vocabularyRevision).toBe(
+        `ev2-sha256-${hashEditorialJson({
+          contractVersion: 2,
+          vocabulary: (plain.body as { vocabulary: unknown }).vocabulary,
+        })}`,
+      );
+      expect(source.readWithDescriptions).toHaveBeenCalledTimes(1);
+      expect(source.read).not.toHaveBeenCalled();
+    });
+
+    it('serves the plain body when no definition has a description', async () => {
+      const response = await respond(sourceWith(new Map()), []);
+      expect(response).toEqual(await plainResponse());
+      expect(JSON.stringify(response.body)).not.toContain('description');
+    });
+
+    it('hides a failing description read behind INTERNAL_ERROR without a revision header', async () => {
+      const source = {
+        read: jest.fn(),
+        readWithDescriptions: jest.fn().mockRejectedValue(new Error('secret')),
+      };
+      expect(await respond(source, [])).toEqual(failure(500, 'INTERNAL_ERROR'));
+    });
+
+    it('rejects prohibited headers before any description read', async () => {
+      const source = sourceWith(new Map([['custom.d', 'Texto.']]));
+      expect(await respond(source, version2)).toEqual(
+        failure(400, 'MALFORMED'),
+      );
+      expect(source.readWithDescriptions).not.toHaveBeenCalled();
+    });
+  });
+
   it.each(acceptedHeaders)(
     'returns the exact empty canonical descriptor',
     async ({ rawHeaders }) => {

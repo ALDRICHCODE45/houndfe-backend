@@ -8,6 +8,12 @@
 - Complete rows retain keys, parent relations, raw nullable JSON, timestamps and labels. All child branches are arrays, including empty branches. Bindings additionally carry definitionCode; owners remain product/sellable.
 - Existing families, definitions, bindings, units and options use the legacy reader's SQL ordering/collation. Groups use code, members optionCode, aliases label/optionCode. No V2 UTF-8 canonicalization occurs here.
 - Whole-row JSON intentionally includes future storage columns. This private observation must never be exposed directly as a closed transport DTO.
+- Exception: `editorial_definitions.description` (display help) is excluded from the raw
+  definition rows (`to_jsonb(d) - 'description'`) so the root, the install before-image
+  hash and the vocabulary revision stay byte-identical to the pre-column image. The same
+  statement returns it as a sibling `descriptions` column (code → text, only non-NULL);
+  `read()` ignores it and returns the root by identity, `readWithDescriptions()` returns
+  both from one observation. Only the HTTP projection attaches it, after the digest.
 - Only result cardinality and root structure are guarded. No policy defaults, version fabrication, owner translation, adoption or strict V2 validation occurs.
 
 ## Proof and next obligations

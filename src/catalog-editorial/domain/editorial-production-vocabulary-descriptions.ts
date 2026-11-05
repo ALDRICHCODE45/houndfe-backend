@@ -1,0 +1,89 @@
+// Pure es-MX help text for production codes: one line for the store user filling the
+// form. Display help only; it is not vocabulary semantics and never enters a digest.
+import type { ProductionDefinitionCode } from './editorial-production-vocabulary-catalog';
+
+// The column allows 200; the manifest stays well inside it.
+export const DESCRIPTION_MAX_LENGTH = 160;
+
+/**
+ * Texts shipped earlier and later replaced (human decision 2026-11-05). A stored
+ * description still equal to one of these was never customized, so the apply
+ * script may move it to the current text.
+ */
+// prettier-ignore
+export const SUPERSEDED_DEFINITION_DESCRIPTIONS: Readonly<Partial<Record<ProductionDefinitionCode, readonly string[]>>> = Object.freeze({
+  'text.manufacturer_care': ['Cuidados y mantenimiento que indica el fabricante (limpieza, almacenamiento). No es consejo clínico.'],
+  'text.instructions': ['Instrucciones de uso que da el fabricante. Solo indicaciones no clínicas.'],
+});
+
+// prettier-ignore
+export const DEFINITION_DESCRIPTIONS: Readonly<Record<ProductionDefinitionCode, string>> = Object.freeze({
+  'animal.target': 'Para qué animales es el producto, según el fabricante; puedes elegir más de uno.',
+  'life.stage': 'Etapa de vida a la que va dirigido, si el fabricante la indica (cachorro, adulto, sénior…).',
+  'pack.form': 'Cómo viene envasado: bolsa, lata, frasco, caja, a granel…',
+  'pack.sale': 'Cómo se vende: individual, paquete múltiple, kit, par, recarga…',
+  'content.kind': 'Qué mide el contenido: masa, volumen, conteo, longitud o superficie. Debe coincidir con la medida que captures.',
+  'material': 'Material del que está hecho, según el fabricante; puedes elegir varios.',
+  'color.base': 'Color principal del producto tal como se vende; elige varios si trae más de uno.',
+  'size.label': 'Talla comercial del producto (XS, M, L…), ajustable o talla única.',
+  'size.animal': 'Tamaño de la mascota para la que está pensado, de miniatura a gigante, según el fabricante.',
+  'food.format': 'Forma física del alimento: croquetas, paté, hojuelas, polvo, heno, congelado…',
+  'food.role': 'Para qué sirve en la dieta, según el fabricante: completo, complementario, suplemento, forraje…',
+  'food.process': 'Cómo se elabora, si el fabricante lo indica: extruido, horneado, deshidratado, liofilizado…',
+  'food.texture': 'Textura del alimento: seca, húmeda, blanda, crujiente, líquida o gel.',
+  'food.aquatic': 'Solo para alimento acuático: si flota, se hunde lento, va al fondo o queda en suspensión.',
+  'treat.form': 'Forma del premio: bocaditos, galleta, tira, palito, para lamer, pasta…',
+  'treat.base': 'Base del premio, si el fabricante la declara: carne, pescado, vegetal, cereal…',
+  'toy.type': 'Tipo de juego: pelota, mordedor, peluche, túnel, rompecabezas…; puedes elegir varios.',
+  'toy.feature': 'Rasgos que el fabricante declara: con sonido, con cascabel, rellenable, recargable…',
+  'hygiene.type': 'Qué producto de higiene es: champú, toallitas, cepillo, arena sanitaria, pañal…',
+  'hygiene.form': 'Presentación del producto de higiene: líquido, espuma, atomizador, gel, polvo, barra…',
+  'hygiene.litter': 'Material base de la arena o lecho sanitario: bentonita, sílice, papel, madera, maíz…',
+  'hygiene.scent': 'Si el fabricante indica que lleva fragancia, que no la lleva o que no lo especifica.',
+  'accessory.type': 'Tipo de accesorio: collar, arnés, correa, transportadora, comedero, cama…',
+  'accessory.closure': 'Cómo cierra o se sujeta: hebilla, broche, gancho y bucle, cremallera, mosquetón…',
+  'accessory.feature': 'Rasgos que el fabricante declara: ajustable, reflectante, acolchado, plegable…',
+  'habitat.type': 'Tipo de hábitat o equipo: jaula, terrario, acuario, filtro, bomba, calentador, lámpara…',
+  'habitat.environment': 'Entorno para el que está pensado: terrestre, agua dulce, marino, interior, exterior…',
+  'habitat.substrate': 'Material del suelo o sustrato: fibra de coco, corteza, arena, grava, viruta, musgo…',
+  'habitat.component': 'Componentes o equipo del hábitat: percha, escondite, termostato, iluminación, filtración…',
+  'care.type': 'Tipo comercial de producto de cuidado: material de curación, vendajes, suplemento declarado, insumo diagnóstico…',
+  'care.form': 'Presentación cuando es una fórmula (tableta, solución, gotas, gel, crema…); si es un insumo, usa Formato de insumo.',
+  'care.device': 'Formato cuando es un insumo y no una fórmula: gasa, jeringa, gotero, aplicador, guante…',
+  'measure.net_mass': 'Masa del contenido: peso sin envase, en mg, g o kg. Corresponde al tipo de contenido «Masa».',
+  'measure.net_volume': 'Volumen del contenido sin envase, en ml o l. Corresponde al tipo de contenido «Volumen».',
+  'measure.content_count': 'Conteo del contenido: cuántas piezas, dosis, hojas o rollos trae; no es stock. «Dosis» solo cuenta, no indica cuánto dar.',
+  'measure.pack_count': 'Cuántas unidades vienen dentro del paquete (por ejemplo, 3 latas de 85 g); no es stock.',
+  'measure.dimensions.external_length': 'Largo del producto por fuera (mm, cm o m). No sustituye las medidas interiores.',
+  'measure.dimensions.external_width': 'Ancho del producto por fuera (mm, cm o m). No sustituye las medidas interiores.',
+  'measure.dimensions.external_height': 'Alto del producto por fuera (mm, cm o m). No sustituye las medidas interiores.',
+  'measure.dimensions.external_diameter': 'Diámetro del producto por fuera (mm, cm o m). No sustituye las medidas interiores.',
+  'measure.dimensions.internal_length': 'Largo del producto por dentro (mm, cm o m). No sustituye las medidas exteriores.',
+  'measure.dimensions.internal_width': 'Ancho del producto por dentro (mm, cm o m). No sustituye las medidas exteriores.',
+  'measure.dimensions.internal_height': 'Alto del producto por dentro (mm, cm o m). No sustituye las medidas exteriores.',
+  'measure.dimensions.internal_diameter': 'Diámetro del producto por dentro (mm, cm o m). No sustituye las medidas exteriores.',
+  'measure.fit.neck': 'Rango de contorno de cuello al que ajusta (mínimo y máximo, en cm o mm); no reemplaza la talla.',
+  'measure.fit.chest': 'Rango de contorno de pecho al que ajusta (mínimo y máximo, en cm o mm); no reemplaza la talla.',
+  'measure.fit.back_length': 'Rango de largo de espalda al que ajusta (mínimo y máximo, en cm o mm); no reemplaza la talla.',
+  'measure.animal_mass': 'Rango de peso de la mascota para la que está pensado (mínimo y máximo, en g o kg); no define la especie.',
+  'measure.capacity.container': 'Cuánto cabe en el recipiente (ml o l), por ejemplo en un bebedero; no es el contenido neto.',
+  'measure.capacity.habitat_usable_volume': 'Volumen útil del hábitat (ml o l), solo si el fabricante lo indica; no se calcula con las medidas.',
+  'measure.equipment.power': 'Potencia eléctrica del equipo, en W (watts), según su etiqueta.',
+  'measure.equipment.voltage': 'Voltaje del equipo, en V (volts), según su etiqueta.',
+  'measure.equipment.frequency': 'Frecuencia eléctrica del equipo, en Hz (hertz), según su etiqueta.',
+  'measure.equipment.flow': 'Flujo del equipo en litros por hora (l/h), por ejemplo de una bomba o un filtro.',
+  'measure.equipment.temperature': 'Rango de temperatura del equipo (mínima y máxima, en °C); acepta valores negativos.',
+  'measure.coverage.length': 'Longitud que cubre, en metros, por ejemplo de un rollo. Corresponde al tipo de contenido «Longitud».',
+  'measure.coverage.area': 'Superficie que cubre, en m², por ejemplo de un rollo. Corresponde al tipo de contenido «Superficie».',
+  'text.ingredients': 'Lista de ingredientes tal como la declara el fabricante, sin agregar ni deducir nada.',
+  'text.protein_origin': 'Origen de la proteína (pollo, pescado, res…) solo si el fabricante lo indica; no lo deduzcas.',
+  'text.composition': 'Composición declarada por el fabricante. No incluyas concentraciones clínicas.',
+  'text.manufacturer_care': 'Cuidados y mantenimiento que indica el fabricante (limpieza, almacenamiento).',
+  'text.instructions': 'Instrucciones de uso que da el fabricante.',
+  'text.clinical_analysis': 'Análisis de la etiqueta del fabricante (proteína, grasa, fibra…). Interno, no se publica.',
+  'text.concentration': 'Concentración declarada por el fabricante, tal como aparece en la etiqueta. Interno, no se publica.',
+  'text.regulatory_warnings': 'Advertencias regulatorias o legales de la etiqueta del fabricante. Interno, no se publica.',
+  'feature.washable': 'Si el fabricante declara que se puede lavar (sí o no).',
+  'feature.reusable': 'Si el fabricante declara que se puede reutilizar (sí o no).',
+  'feature.waterproof': 'Si el fabricante declara que es impermeable (sí o no).',
+});

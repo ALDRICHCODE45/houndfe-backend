@@ -65,6 +65,18 @@ describe('canonical production storage rows', () => {
     expect(productionVocabularyRows(ids)).toEqual(rows);
   });
 
+  it('carries every definition description into its storage row, outside the wire shape', () => {
+    const rows = productionVocabularyRows(identities());
+    expect(rows.definitions.map((d) => [d.code, d.description])).toEqual(
+      manifest.definitions.map((d) => [d.code, manifest.descriptions[d.code]]),
+    );
+    const wire = validateFullProductionVocabularyV2(
+      materializeStoredVocabularyV2(rows),
+    );
+    for (const d of wire.definitions)
+      expect(d).not.toHaveProperty('description');
+  });
+
   it.each(['families', 'definitions', 'units'] as const)(
     'rejects missing %s identity without mutating input',
     (kind) => {

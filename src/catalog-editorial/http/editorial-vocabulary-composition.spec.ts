@@ -167,6 +167,37 @@ describe('registered vocabulary composition with synthetic Prisma I/O and JWT', 
       db.$queryRaw.mock.invocationCallOrder[0],
     );
   });
+  it('serves definitions[].description from the same single statement without changing the revision', async () => {
+    const [first, ...rest] = vocabulary.definitions;
+    db.$queryRaw.mockResolvedValue([
+      {
+        snapshot: stored(),
+        descriptions: { [first.code]: 'Ayuda para el usuario.' },
+      },
+    ]);
+    check(await get(), 200, {
+      contractVersion: 2,
+      // Same digest as the undescribed vocabulary: descriptions are outside it.
+      vocabularyRevision: revision,
+      vocabulary: {
+        ...vocabulary,
+        definitions: [
+          { ...first, description: 'Ayuda para el usuario.' },
+          ...rest,
+        ],
+      },
+    });
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed, without leaking, when the description column is malformed', async () => {
+    db.$queryRaw.mockResolvedValue([
+      { snapshot: stored(), descriptions: ['not', 'an', 'object'] },
+    ]);
+    check(await get(), 500, { statusCode: 500, error: 'INTERNAL_ERROR' });
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     'Editorial-Contract-Version',
     'Editorial-Adoption',

@@ -1,10 +1,37 @@
 import type { PrismaClient } from '@prisma/client';
 
-/** Single-statement raw observation; the HTTP read composition validates it. */
+/** Single-statement raw observation; the HTTP read composition validates it.
+ * Definition descriptions are display help outside every digest: the raw root
+ * (install before-image, vocabulary revision) never contains them, and they travel
+ * as a sibling column of the same statement.
+ */
 export class PrismaEditorialVocabularySnapshot {
   constructor(private readonly prisma: Pick<PrismaClient, '$queryRaw'>) {}
 
   async read(): Promise<unknown> {
+    return (await this.observe()).snapshot;
+  }
+
+  async readWithDescriptions(): Promise<{
+    snapshot: unknown;
+    descriptions: ReadonlyMap<string, string>;
+  }> {
+    const { snapshot, descriptions } = await this.observe();
+    if (descriptions === undefined || descriptions === null)
+      return { snapshot, descriptions: new Map() };
+    if (typeof descriptions !== 'object' || Array.isArray(descriptions))
+      throw new Error('Invalid vocabulary description result');
+    const entries = Object.entries(descriptions);
+    for (const [, text] of entries)
+      if (typeof text !== 'string')
+        throw new Error('Invalid vocabulary description result');
+    return { snapshot, descriptions: new Map(entries as [string, string][]) };
+  }
+
+  private async observe(): Promise<{
+    snapshot: object;
+    descriptions: unknown;
+  }> {
     const rows: unknown = await this.prisma.$queryRaw`
       SELECT jsonb_build_object(
         'metadata', (SELECT to_jsonb(m) FROM editorial_vocabulary_metadata m WHERE m.id = 'global'),
@@ -15,7 +42,7 @@ export class PrismaEditorialVocabularySnapshot {
             FROM editorial_bindings b JOIN editorial_definitions d ON d.id = b."definitionId"
             WHERE b."familyId" = f.id), '[]'::jsonb)
         ) ORDER BY f.label, f.code) FROM editorial_families f), '[]'::jsonb),
-        'definitions', COALESCE((SELECT jsonb_agg(to_jsonb(d) || jsonb_build_object(
+        'definitions', COALESCE((SELECT jsonb_agg((to_jsonb(d) - 'description') || jsonb_build_object(
           'units', COALESCE((SELECT jsonb_agg(to_jsonb(u)
             ORDER BY u."sortOrder", u."unitCode" NULLS FIRST)
             FROM editorial_units u WHERE u."definitionId" = d.id), '[]'::jsonb),
@@ -29,7 +56,9 @@ export class PrismaEditorialVocabularySnapshot {
           'aliases', COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY a.label, a."optionCode")
             FROM editorial_aliases a WHERE a."definitionId" = d.id), '[]'::jsonb)
         ) ORDER BY d.code) FROM editorial_definitions d), '[]'::jsonb)
-      ) AS snapshot`;
+      ) AS snapshot,
+      COALESCE((SELECT jsonb_object_agg(d.code, d.description)
+        FROM editorial_definitions d WHERE d.description IS NOT NULL), '{}'::jsonb) AS descriptions`;
     if (!Array.isArray(rows) || rows.length !== 1) {
       throw new Error('Invalid vocabulary snapshot result');
     }
@@ -37,6 +66,10 @@ export class PrismaEditorialVocabularySnapshot {
     const snapshot: unknown =
       row && typeof row === 'object' && 'snapshot' in row
         ? row.snapshot
+        : undefined;
+    const descriptions: unknown =
+      row && typeof row === 'object' && 'descriptions' in row
+        ? row.descriptions
         : undefined;
     if (
       !snapshot ||
@@ -53,6 +86,6 @@ export class PrismaEditorialVocabularySnapshot {
     ) {
       throw new Error('Invalid vocabulary snapshot result');
     }
-    return snapshot;
+    return { snapshot, descriptions };
   }
 }

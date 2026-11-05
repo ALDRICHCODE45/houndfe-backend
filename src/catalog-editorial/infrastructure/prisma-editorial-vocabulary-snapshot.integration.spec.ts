@@ -27,6 +27,7 @@ realTest(
           '20261026060000_catalog_editorial_options',
           '20261027080000_editorial_vocabulary',
           '20261028120000_editorial_production_metadata',
+          '20261104030000_editorial_definition_description',
         ]) {
           db.sql(
             readFileSync(
@@ -289,6 +290,7 @@ realTest(
           '20261026060000_catalog_editorial_options',
           '20261027080000_editorial_vocabulary',
           '20261028120000_editorial_production_metadata',
+          '20261104030000_editorial_definition_description',
         ]) {
           db.sql(
             readFileSync(

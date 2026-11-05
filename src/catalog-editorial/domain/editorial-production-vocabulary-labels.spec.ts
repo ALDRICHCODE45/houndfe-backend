@@ -50,7 +50,7 @@ describe('production vocabulary display labels (es-MX)', () => {
     expect(FAMILY_LABELS.food).toBe('Alimento');
     expect(DEFINITION_LABELS['animal.target']).toBe('Especie');
     expect(DEFINITION_LABELS['life.stage']).toBe('Etapa de vida');
-    expect(DEFINITION_LABELS['size.animal']).toBe('Tamaño de raza');
+    expect(DEFINITION_LABELS['size.animal']).toBe('Tamaño de mascota');
     expect(DEFINITION_LABELS['measure.net_mass']).toBe('Peso neto');
   });
 
