@@ -20,7 +20,7 @@ Branch `feat/public-catalog-published` (worktree `.tmp/public-published`, base m
 | T1 storage + switch setting + published-subjects snapshot | S1 S5 | worker | 53c66d9, f1b9e6f |
 | T2 unpublish endpoint + publish records covered subjects | S5 S6 | worker | 196fd7f |
 | T3 public projection: only published, title/description, attributes in detail, variant hiding | S2 S3 S5 | worker | e37234c, 86ee87d |
-| T4 facet filters + search on published content | S4 | worker | |
+| T4 facet filters + search on published content (+ cart scope) | S4 S2 S5 | worker | f614e19, 95240da |
 | T5 accessory defaults rule | S7 | worker | d6cf6f4 (merged) |
 | T6 docs, FE handoff, runtime proof | S8 | worker | |
 
@@ -31,3 +31,4 @@ Branch `feat/public-catalog-published` (worktree `.tmp/public-published`, base m
 - L3 Context: Engram `editorial/publication-gaps` (public catalog never reads editorial; repository `src/public-catalog/infrastructure/prisma-public-catalog.repository.ts`, mappers `public-product.mapper.ts`; C3.3 notes in `docs/catalog-editorial-single-contract.md` §10), `odd/editorial-publish-v2/tasks`, `editorial/publish-v2-runtime-probe`. FE contract rules: Engram `contracts/fe-strict-decoders`.
 - L4 (T1/T2/T5 done): switch `catalogRequiresPublishedEditorial` on catalog settings (default false); `publishedSubjects` recorded at publish, backfill = all current subjects for already-published products; unpublish route with `unpublishedRevision` so revision numbering never reuses a pair (worker decision, consistent with the contract's no-reuse rule). T5: only capacityDeterminesChoice defaults to «No» for collar/harness/leash (electrical already optional via optional_equipment).
 - L5 (T3 done): switch-off responses byte-identical (pinned); switch-on adds detail `attributes` [{code,label,facet,section,value,display}] on product and per variant, name/description from Published. Gaps routed to T4: search `q` still on operational names; public cart validation (`POST …/cart/validate`) ignores the switch, so a hidden or uncovered product/variant can still be validated by id — must apply the same scope (S2/S5).
+- L6 (T4 done): repeatable `facet=<definition>:<option>` (OR within, AND between, correlated per covered variant, counts exclude own selection), `facets.attributes` only with switch on; any facet with switch off → 400 FACET_NOT_AVAILABLE; number/range facets not filterable yet (unit normalization needed). `q` searches only Published title/description (brand no longer matched unless in title). Cart validation rejects unpublished products and uncovered variants. Open: chatbot legacy readers (findProducts/findProductById/findCategoryFacets) ignore the switch; cart lines show operational names.
