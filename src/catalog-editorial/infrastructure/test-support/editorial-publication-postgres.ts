@@ -146,6 +146,36 @@ export const readyDrafts = {
         fact('relevantEquipmentCodes', []),
       ],
     ),
+  // Declared space facts make the three dimensions required; S88 «Es solo
+  // equipamiento» is not implemented and not needed to publish.
+  habitat: () =>
+    draft(
+      'habitat',
+      'Jaula para hámster 60 cm',
+      [
+        single('habitat.type', 'habitat.type.cage'),
+        ...(['length', 'width', 'height'] as const).map((axis) =>
+          known(`measure.dimensions.external_${axis}`, {
+            type: 'number',
+            value: { length: 60, width: 40, height: 45 }[axis],
+            unit: 'cm',
+          }),
+        ),
+      ],
+      [
+        fact('relevantDimensionCodes', {
+          codes: [
+            'measure.dimensions.external_length',
+            'measure.dimensions.external_width',
+            'measure.dimensions.external_height',
+          ],
+          toyTypes: [],
+        }),
+        fact('relevantCapacityCodes', []),
+        fact('electricalApplies', false),
+        fact('relevantEquipmentCodes', []),
+      ],
+    ),
   care: (careReview: unknown = readyCareReview()) =>
     draft(
       'care',

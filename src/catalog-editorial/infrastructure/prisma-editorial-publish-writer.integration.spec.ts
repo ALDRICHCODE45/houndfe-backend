@@ -263,7 +263,7 @@ afterAll(async () => {
 });
 
 describe('V2 publish on PostgreSQL', () => {
-  it.each(['food', 'treat', 'toy', 'hygiene', 'accessory'] as const)(
+  it.each(['food', 'treat', 'toy', 'hygiene', 'accessory', 'habitat'] as const)(
     '%s: a ready draft is published as stored',
     async (family) => {
       const draft = readyDrafts[family]();
@@ -535,7 +535,54 @@ describe('V2 publish on PostgreSQL', () => {
       }),
     ],
     ['DRAFT_INVALID (not a V2 document)', () => ({ legacy: true })],
+    [
+      'REQUIRED_MISSING (habitat dimension)',
+      () => ({
+        ...readyDrafts.habitat(),
+        values: values('habitat').filter(
+          (v) => v.code !== 'measure.dimensions.external_height',
+        ),
+      }),
+    ],
+    [
+      'UNRESOLVED (habitat capacity not declared)',
+      () => {
+        const draft = readyDrafts.habitat();
+        draft.facts[0].declarations = draft.facts[0].declarations.filter(
+          (d) => (d as Draft).key !== 'relevantCapacityCodes',
+        );
+        return draft;
+      },
+    ],
   ];
+  /** Readiness and publish agree on the items, and publish writes nothing. */
+  async function expectBlocked(
+    productId: string,
+    problem: string,
+    vocabularyRevision = revision,
+  ) {
+    const before = await rows(productId);
+    const readiness = await new PrismaEditorialReadinessReader(prisma).read(
+      scopeOf(productId),
+      vocabularyRevision,
+    );
+    expect(readiness.ready).toBe(false);
+    expect(readiness.items.map((i) => i.problem)).toContain(problem);
+    const draft = before.states[0].draftDocument as Draft;
+    const body = await notReady(
+      publish(productId, {
+        vocabularyRevision,
+        careConfirmation: draft.familyCode === 'care' ? 'review-v1' : null,
+      }),
+    );
+    // Same list as the readiness GET: one rule implementation.
+    expect(body).toEqual({
+      items: readiness.items,
+      bySection: readiness.bySection,
+    });
+    expect(await rows(productId)).toEqual(before);
+    return readiness;
+  }
   // Object rows: a short tuple row would make Jest pass `done` as `options`.
   it.each(
     blocked.map(([name, build, options = {}]) => ({ name, build, options })),
@@ -543,29 +590,134 @@ describe('V2 publish on PostgreSQL', () => {
     '$name: 400 with the readiness items and nothing written',
     async ({ name, build, options }) => {
       const draft = JSON.parse(JSON.stringify(build())) as Draft;
-      const productId = await product(draft, options);
-      const before = await rows(productId);
-      const readiness = await new PrismaEditorialReadinessReader(prisma).read(
-        scopeOf(productId),
-        revision,
-      );
-      expect(readiness.ready).toBe(false);
-      expect(readiness.items.map((i) => i.problem)).toContain(
-        name.split(' ')[0],
-      );
-      const body = await notReady(
-        publish(productId, {
-          careConfirmation: draft.familyCode === 'care' ? 'review-v1' : null,
-        }),
-      );
-      // Same list as the readiness GET: one rule implementation.
-      expect(body).toEqual({
-        items: readiness.items,
-        bySection: readiness.bySection,
-      });
-      expect(await rows(productId)).toEqual(before);
+      await expectBlocked(await product(draft, options), name.split(' ')[0]);
     },
   );
+
+  it('MEDIA_NOT_ALLOWED: a selected asset blocks publishing', async () => {
+    const productId = await product(undefined);
+    const assetId = randomUUID();
+    await prisma.privateMediaAsset.create({
+      data: {
+        id: assetId,
+        tenantId,
+        productId,
+        storageKey: 'publish/' + assetId,
+        mimeType: 'image/png',
+        sizeBytes: 1,
+      },
+    });
+    await prisma.$executeRaw(Prisma.sql`
+      INSERT INTO "catalog_editorial_states"
+        ("tenantId", "productId", "cycle", "draftRevision", "draftDocument")
+      VALUES (${tenantId}, ${productId}, 1, 4, CAST(${JSON.stringify({
+        ...readyDrafts.food(),
+        mediaRefs: [assetId],
+      })} AS JSONB))`);
+    const readiness = await expectBlocked(productId, 'MEDIA_NOT_ALLOWED');
+    expect(readiness.items).toEqual([
+      expect.objectContaining({ scope: 'product', sectionCode: null }),
+    ]);
+  });
+
+  /** Mutate the global vocabulary for one test; R changes, so re-read it. */
+  async function withVocabulary(
+    change: Prisma.Sql,
+    restore: Prisma.Sql,
+    work: (vocabularyRevision: string) => Promise<void>,
+  ) {
+    await prisma.$executeRaw(change);
+    try {
+      const changed = (
+        await readEditorialVocabulary(
+          new PrismaEditorialVocabularySnapshot(prisma),
+        )
+      ).vocabularyRevision;
+      expect(changed).not.toBe(revision);
+      await work(changed);
+    } finally {
+      await prisma.$executeRaw(restore);
+    }
+    expect(
+      (
+        await readEditorialVocabulary(
+          new PrismaEditorialVocabularySnapshot(prisma),
+        )
+      ).vocabularyRevision,
+    ).toBe(revision);
+  }
+
+  it('ARCHIVED_OPTION: a newly chosen archived option blocks; a Published one is kept', async () => {
+    const pellet = () => ({
+      ...readyDrafts.food(),
+      values: values('food').map((v) =>
+        v.code === 'food.format'
+          ? known('food.format', {
+              type: 'single',
+              value: 'food.format.pellet',
+            })
+          : v,
+      ),
+    });
+    const fresh = await product(pellet(), { published: readyDrafts.food() });
+    const kept = await product(pellet(), { published: pellet() });
+    await withVocabulary(
+      Prisma.sql`UPDATE "editorial_options" SET "archivedAt" = now()
+        WHERE "code" = 'food.format.pellet'`,
+      Prisma.sql`UPDATE "editorial_options" SET "archivedAt" = NULL
+        WHERE "code" = 'food.format.pellet'`,
+      async (changed) => {
+        const readiness = await expectBlocked(
+          fresh,
+          'ARCHIVED_OPTION',
+          changed,
+        );
+        expect(readiness.items).toEqual([
+          expect.objectContaining({
+            scope: 'definition',
+            definitionCode: 'food.format',
+            sectionCode: 'que-es',
+            problem: 'ARCHIVED_OPTION',
+          }),
+        ]);
+        const result = await publish(kept, { vocabularyRevision: changed });
+        expect(result.body.state.published).toEqual({
+          revision: 2,
+          document: pellet(),
+        });
+      },
+    );
+  });
+
+  it('NUMERIC_POLICY_PENDING: a known number under a pending policy blocks', async () => {
+    const productId = await product(readyDrafts.food());
+    const [{ policy }] = await prisma.$queryRaw<{ policy: string }[]>(
+      Prisma.sql`SELECT "numericPolicy"::text AS policy
+        FROM "editorial_definitions" WHERE "code" = 'measure.net_mass'`,
+    );
+    await withVocabulary(
+      Prisma.sql`UPDATE "editorial_definitions"
+        SET "numericPolicy" = '{"status":"pending"}'::jsonb
+        WHERE "code" = 'measure.net_mass'`,
+      Prisma.sql`UPDATE "editorial_definitions"
+        SET "numericPolicy" = CAST(${policy} AS JSONB)
+        WHERE "code" = 'measure.net_mass'`,
+      async (changed) => {
+        const readiness = await expectBlocked(
+          productId,
+          'NUMERIC_POLICY_PENDING',
+          changed,
+        );
+        expect(readiness.items).toEqual([
+          expect.objectContaining({
+            scope: 'definition',
+            definitionCode: 'measure.net_mass',
+            problem: 'NUMERIC_POLICY_PENDING',
+          }),
+        ]);
+      },
+    );
+  });
 
   it('stale cycle or revision, or no draft, is CONFLICT without effects', async () => {
     const productId = await product(readyDrafts.food());

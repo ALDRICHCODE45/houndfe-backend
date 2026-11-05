@@ -137,4 +137,8 @@ definition items per section.
   that is present must still be fresh on every value (fresh admission). Custom
   option-case policies keep their own `evidenceRequired` flag.
 - S88 «Es solo equipamiento» (habitat equipment-only exception) is still not
-  implemented and stays out of scope.
+  implemented and stays out of scope. It is an extra exception, not a gate:
+  habitat already publishes through its declared facts (`relevantDimensionCodes`,
+  `relevantCapacityCodes`, `electricalApplies`, `relevantEquipmentCodes`).
+  Undeclared space facts leave the space bindings `UNRESOLVED`. Pinned on
+  PostgreSQL by the habitat cases of the readiness and publish integration specs.

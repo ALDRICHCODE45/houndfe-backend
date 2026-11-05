@@ -9,6 +9,7 @@ import { PrismaEditorialReadinessReader } from './prisma-editorial-readiness-rea
 import { PrismaEditorialVocabularySnapshot } from './prisma-editorial-vocabulary-snapshot';
 import {
   installCanonicalVocabulary,
+  readyDrafts,
   uninstallVocabulary,
 } from './test-support/editorial-publication-postgres';
 
@@ -258,6 +259,34 @@ describe('readiness of saved V2 drafts on PostgreSQL', () => {
       warnings: [],
     };
     expect((await read(await product(care(review)))).ready).toBe(true);
+  });
+
+  // S88 «Es solo equipamiento» is not implemented: it is an extra exception,
+  // not a gate, so a habitat with declared space/equipment facts is ready.
+  it('habitat: a complete draft is ready without S88', async () => {
+    expect(await read(await product(readyDrafts.habitat()))).toMatchObject({
+      ready: true,
+      items: [],
+    });
+  });
+
+  it('habitat: a declared dimension without a value is missing', async () => {
+    const draft = readyDrafts.habitat();
+    draft.values = draft.values.filter(
+      (v) => v.code !== 'measure.dimensions.external_height',
+    );
+    const result = await read(await product(draft));
+    expect(result.items).toEqual([
+      {
+        scope: 'definition',
+        definitionCode: 'measure.dimensions.external_height',
+        variantId: null,
+        sectionCode: 'medidas',
+        problem: 'REQUIRED_MISSING',
+        message: 'Falta el alto exterior.',
+      },
+    ]);
+    expect(result.bySection).toEqual({ medidas: 1 });
   });
 
   it('no draft: 200 with a single product item', async () => {

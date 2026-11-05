@@ -264,3 +264,4 @@ An accessory that says «la talla no decide la compra» but lists neck size retu
 - A draft without a product type (`familyCode: null`) cannot publish.
 - Media must be empty to publish, for now.
 - Pending, out of scope: S88 «Es solo equipamiento» for habitat, and D8 per-type defaults for accessories («collar, arnés, correa → No»).
+- Habitat can publish today without S88: declare which dimensions and capacities matter, and whether it is electrical with which equipment measures. Each declared measure then needs its value. Leaving those declarations unanswered gives `UNRESOLVED` items in «Medidas».
