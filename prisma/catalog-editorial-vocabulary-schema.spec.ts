@@ -42,7 +42,15 @@ it('backfills vocabulary before constraints without defaults or destructive SQL'
     )![0];
     if (model !== 'Binding') {
       expect(block).toMatch(/label\s+String/);
-      expect(block.includes('String?')).toBe(model === 'Unit');
+      // Closed: only Unit may be nullable, plus the one optional help text
+      // (EditorialDefinition.description); no other nullable string anywhere.
+      const nullable = Array.from(
+        block.matchAll(/\b(\w+)\s+String\?/g),
+        (match) => match[1],
+      );
+      if (model === 'Unit') expect(nullable.length).toBeGreaterThan(0);
+      else
+        expect(nullable).toEqual(model === 'Definition' ? ['description'] : []);
     }
     if (['Option', 'Unit', 'Binding'].includes(model)) {
       expect(block).toMatch(/sortOrder\s+Int\s/);
