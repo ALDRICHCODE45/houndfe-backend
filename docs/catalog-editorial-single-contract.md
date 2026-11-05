@@ -26,7 +26,8 @@ machine-shape gaps or reintroduce superseded behavior.
 ## 2. HTTP surface and authority
 
 Paths below are controller-relative (retain any existing deployment API prefix).
-All seven paths/statuses are retained; no internal create or media route is added.
+All seven paths/statuses are retained, plus the read-only readiness GET (P2,
+`docs/catalog-editorial-publication-readiness-v2.md`); no internal create or media route is added.
 No query parameters are accepted. Product IDs use the existing UUID validation.
 Document/context GET reject nonempty decoded bodies; GETs take no input document.
 
@@ -37,6 +38,7 @@ Document/context GET reject nonempty decoded bodies; GETs take no input document
 | Context    | `GET /products/:productId/editorial/context`           | `200 Context`            |
 | Initialize | `POST /products/:productId/editorial/draft/initialize` | `201 StateResponse`      |
 | Save       | `PUT /products/:productId/editorial/draft`             | `200 StateResponse`      |
+| Readiness  | `GET /products/:productId/editorial/draft/readiness`   | `200 Readiness`          |
 | Publish    | `POST /products/:productId/editorial/draft/publish`    | `200 StateResponse`      |
 | Discard    | `POST /products/:productId/editorial/draft/discard`    | `200 StateResponse`      |
 
@@ -50,7 +52,7 @@ users retain exact editorial grants. Operational Product permissions do not suff
 Vocabulary is global metadata under editorial read authority, not a tenant store.
 For ordinary exact-grant access:
 
-- Vocabulary/document/context: `ProductEditorialDraft:read`.
+- Vocabulary/document/context/readiness: `ProductEditorialDraft:read`.
 - Initialize/save/discard: `:read` + `:update`.
 - Publish: `:read` + `:publish`; update is not required.
 - Unavailable/foreign Product normally fails authority with 403; 404 is possible
@@ -83,6 +85,7 @@ prohibited header, even empty, fails. No version header is needed on requests.
 | ----------------------- | ------------------------------- | ----------------- | ----------------------------------------- |
 | Vocabulary GET          | Forbidden                       | Forbidden         | Forbidden                                 |
 | Document GET            | Required R                      | Forbidden         | Forbidden                                 |
+| Readiness GET           | Required R                      | Forbidden         | Forbidden                                 |
 | Initialize/save/discard | Required R                      | Required          | Forbidden                                 |
 | Publish                 | Required R                      | Required          | Only exact `review-v1`; conditional below |
 
@@ -94,6 +97,9 @@ forbidden on this editorial surface, including Context, and produce `400 MALFORM
 Publish parses a supplied confirmation token before lookup. After receipt miss
 and locked CAS, fresh care publish requires it; fresh non-care publish forbids it.
 The identical token/null belongs to receipt intent, never an implicit UI default.
+Implemented order (T3): the readiness evaluation runs first, so an unready care
+draft returns the `400` with `items` even without the token; the conditional
+care requiredness is checked only for a ready draft (plain `400 MALFORMED`).
 
 Plain transport rules:
 
@@ -174,8 +180,7 @@ Internal create and completed initialize/discard remain unchanged.
 
 ### Registered discard implementation boundary
 
-Initialize, save and discard use dedicated V2 writers; publish retains its
-existing provider. Current persisted read/update authority precedes semantic
+Initialize, save, discard and publish use dedicated V2 writers. Current persisted read/update authority precedes semantic
 admission and is rechecked inside the transaction. Raw duplicate/list headers,
 missing R/key, prohibited care/version/adoption headers and nonclosed bodies fail.
 Matching namespaced receipt intent replays the decoded recorded acknowledgement
@@ -199,6 +204,23 @@ Mocked HTTP composition verifies SQL ordering, parameters and failure propagatio
 not PostgreSQL blocking, fresh snapshots after waiting, rollback or deployed role
 privileges. External metadata-to-Product lock orders may deadlock and fail closed.
 Real isolated-DB proof and service activation require separate authorization.
+
+### Registered publish implementation boundary
+
+Publish uses `PrismaEditorialPublishWriter`; the legacy v1 publish and discard
+code is removed. Current persisted read+publish authority precedes semantic
+admission and is rechecked in its ReadCommitted transaction. Lock order:
+catalog lifecycle SHARE → actual Tenant SHARE → qualified Product UPDATE →
+receipt lookup (replay returns the recorded acknowledgement and audit, never
+re-evaluates or re-confirms) → state FOR UPDATE and cycle/revision CAS →
+nine vocabulary tables SHARE → fresh current R equal to the pinned R. Then the
+saved-draft readiness of `catalog-editorial-publication-readiness-v2.md` runs
+under these locks (locked references, offered subjects E from the same
+transaction). Not ready: `400` with `items`/`bySection`, nothing written.
+Ready: the fresh care attestation (care only), the stored Draft bytes copied to
+Published at revision + 1, Draft cleared, cycle kept, the complete V2 receipt
+with the private attestation, all atomic. Real-PostgreSQL proof:
+`prisma-editorial-publish-writer.integration.spec.ts`.
 
 ## 3. Document, values and evidence
 
@@ -784,7 +806,9 @@ Failure changes no state and records no successful attestation.
 ## 10. Errors, FE reconciliation and reset boundary
 
 Editorial envelope is exactly `{statusCode,error}`, no message/timestamp/field
-hints/document/R. The complete target error enum is:
+hints/document/R. One exception (D2, 2026-11-05): a publish whose saved Draft is
+not ready returns `{statusCode:400,error:"MALFORMED",items,bySection}` with the
+same `items`/`bySection` as the readiness GET. The complete target error enum is:
 
 | Status | error                                | Meaning                                                          |
 | ------ | ------------------------------------ | ---------------------------------------------------------------- |

@@ -37,10 +37,26 @@ inheritance), toy determination (`toy` family) and care review readiness
 (`care` family). The output is deduplicated and ordered product → care →
 variant → definition, then by E order and binding order.
 
-The publish writer (T3) must call the same function inside its transaction
-after CAS and the R pin, with E from `readEditorialOfferedSubjectsV2` under its
-locks, then `presentPublicationReadinessV2` for the `400` body, and only then
+The readiness GET and the publish writer share one infrastructure step,
+`assessSavedDraftV2` (`prisma-editorial-draft-readiness-v2.ts`): parse the saved
+Draft (unparseable → `DRAFT_INVALID`), read references (snapshot for the GET,
+locked for publish) and E (`readEditorialOfferedSubjectsV2`), evaluate, then
+`presentPublicationReadinessV2`. Publish calls it after CAS and the R pin under
+its locks; a not-ready result is its `400` body, and only a ready draft reaches
 `buildFreshCareAttestationV2`.
+
+## Malformed input never becomes a 500 (L5)
+
+Collecting rules keep running after a collectable problem, where the old
+asserts stopped. Reference admission still runs first and throws `MALFORMED`,
+so every later rule sees reference-admitted values; facts qualification, care
+capture and an unbound NA still throw `MALFORMED`, which readiness turns into
+one `DRAFT_INVALID`. The integration spec proves it on 15 shape-valid malformed
+documents, each alone and combined with collectable problems (over-long title,
+bad evidence, out-of-range number): save → `MALFORMED`, readiness → items,
+publish → `400` with items, never a `TypeError`. No precondition fix was needed.
+Initialize copying a Published that is not a recognizable V2 document is still
+`500` by contract (the recorded-state decoder, as the document GET).
 
 ## Transaction
 
@@ -105,8 +121,15 @@ definition items per section.
 
 ## Decisions and pending
 
-- A draft without a family cannot publish (`REQUIRED_MISSING`, family). The
-  production minima only exist per family.
+- **Confirmed (T3):** a draft without a family cannot publish
+  (`REQUIRED_MISSING`, family). Single contract §7 defines publication minima
+  only per family, and §3 makes a null family carry no values or facts, so a
+  family-less publish would skip every completeness rule.
+- **Confirmed (T3):** readiness requires exactly one
+  `Editorial-Vocabulary-Revision` and answers `409 VOCABULARY_CHANGED` on a
+  different R. Single contract §2 pins every document-bearing GET to R, items
+  carry vocabulary labels and section codes, and the FE installs vocabulary and
+  document only with equal R. The FE reloads the vocabulary and retries once.
 - D9: all production policies set `evidenceRequired: true`, so every known
   production value needs fresh evidence. Custom option-case policies keep their
   own `evidenceRequired` flag.

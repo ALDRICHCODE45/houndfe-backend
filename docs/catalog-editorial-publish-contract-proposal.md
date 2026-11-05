@@ -1,5 +1,14 @@
 # Editorial publish and discard HTTP contract — v0.3 (C3.2, closed)
 
+> **Superseded for publish (2026-11-05, T3).** Publish now runs the V2 writer:
+> V2 headers and receipts, `StateResponse`, readiness-based validation and the
+> `400 {statusCode,error,items,bySection}` body. See
+> [the single contract](catalog-editorial-single-contract.md),
+> [publication readiness](catalog-editorial-publication-readiness-v2.md) and
+> [the FE handoff](frontend-handoff/05-editorial-publish-readiness.md). The
+> state model below (copy, revision + 1, cleared Draft, kept cycle, no pair
+> reuse) still holds.
+
 Status: closed by BE and FE (v0.2 aca9fbb plus the exact title rule in §2.1),
 implemented on branch `feat/editorial-publish-discard`.
 

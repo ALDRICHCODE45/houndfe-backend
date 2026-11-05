@@ -82,39 +82,39 @@ permissions, error envelope and GET are unchanged. Offline regressions cover
 deleted variants, unresolved definitions, missing assets, unbound assignments,
 archived conservation and replay rejection; no live database proof is claimed.
 
-## Publish and discard transactions
+## Publish and discard transactions (V2)
 
-Publish/discard resolve their transaction-scoped authority (read + publish or
-read + update respectively), then take the tenant-qualified Product `FOR UPDATE`
-gate before reading receipts and state, all in one ReadCommitted transaction.
-Their own receipt tables are `catalog_editorial_publish_receipts` and
-`catalog_editorial_discard_receipts`, keyed by tenant, product, actor and
-idempotency key. Matching body replay returns the recorded result after authority
-and Product checks, without changing state; a different body conflicts.
+Both are V2 writers in one ReadCommitted transaction; the legacy v1 path and
+its `editorial-publish-discard.live.spec.ts` are removed.
 
-After matching the active draft's cycle and revision, publish uses the locked
-reference and definition readers to revalidate against current variants,
-vocabulary and selected assets. Current Published is the archived-option
-conservation baseline, not the draft; an invalid Published supplies no baseline.
-The candidate obeys fresh-save limits plus the interim nonblank title rule
-(`commercialTitle !== null` and `commercialTitle.trim() !== ''`) and rejection
-of any nonempty `mediaRefs`. Validation and copy share the Product lock and
-transaction. The stored document is copied unchanged, never trimmed, to the next
-Published revision; draft is cleared. Discard skips document validation, clears
-draft and leaves Published unchanged, allowing recovery from an invalid draft.
-Both persist the result receipt atomically with the state change and keep cycle.
+Publish (`prisma-editorial-publish-writer.ts`): authority read + publish →
+catalog lifecycle SHARE (`global_price_lists`) → actual Tenant `FOR SHARE` →
+qualified Product `FOR UPDATE` → publish receipt lookup (same key + same intent
+replays the recorded result and audit; other intent is `CONFLICT`) → state
+`FOR UPDATE` with cycle/revision CAS (`CONFLICT`, also on Published-revision
+overflow) → nine vocabulary tables `SHARE` → fresh R equals the pinned R
+(`VOCABULARY_CHANGED`) → locked references and offered subjects E →
+`assessSavedDraftV2` (shared with the readiness GET) → not ready:
+`EditorialPublicationNotReadyError` (400 with `items`/`bySection`), nothing
+written → `buildFreshCareAttestationV2` (care requires `review-v1`, others
+forbid it) → `publishedDocument = draftDocument` (stored bytes), revision + 1,
+Draft cleared, cycle kept → receipt with the private attestation. The lifecycle
+→ Tenant → Product order is the one product writers use; save/discard take
+Product first and no lifecycle/Tenant lock, so no cycle exists between them.
 
-The next initialize increments cycle and starts revision 1, so stale
-`(cycle, revision)` pairs are never reused by save, publish or discard. These
-HTTP/core tests are offline evidence, not a live SQL concurrency proof.
+Discard (`prisma-editorial-discard-writer.ts`) is unchanged: Product lock,
+receipt, state CAS, vocabulary SHARE and R pin; it never reads or validates the
+discarded Draft.
 
-A separate real PostgreSQL run of `editorial-publish-discard.live.spec.ts` passed
-seven cases after applying the complete canonical migration history to a fresh
-disposable target. It witnessed both publish/discard Product-lock winner orders,
-selected-option archival blocking while unrelated archival progressed, and exact
-state rollback for both operations after a late receipt `P2010/23505` failure.
-It also verified recorded-result replay without state restoration, independent
-receipt namespaces, and stale save/publish/discard rejection after initialize.
-The target and private binding were removed after execution. This proves those
-cases only, not every variant/asset/unit lock path or postcommit integrity.
-See `docs/catalog-editorial-coordination-postgres.md` for the guarded run procedure.
+`prisma-editorial-publish-writer.integration.spec.ts` (real PostgreSQL, real
+production vocabulary) proves: per-family publish (food, treat, toy, hygiene,
+accessory, care), every blocking problem as 400 with the readiness items and no
+writes, care confirmation rules and the stored attestation, stale CAS, R
+change, replay without state restoration, same-key conflict, independent
+receipt namespaces, stale pairs after initialize, authority (read+publish
+without update publishes; discard needs update; foreign tenant), discard of an
+invalid Draft, publish vs save and vs discard serialized on the Product with
+no deadlock, full rollback after a late receipt `P2010/23505`, vocabulary SHARE
+locks held through validation, and that malformed documents never surface a
+TypeError in save, readiness, publish or initialize (L5).
+

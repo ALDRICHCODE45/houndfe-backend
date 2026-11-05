@@ -31,30 +31,27 @@ Create(document) and media remain unexposed. No deployment or DB execution is im
 
 ## Publish and discard implemented
 
-POST `/products/:productId/editorial/draft/publish` and POST
-`/products/:productId/editorial/draft/discard` both return `200 EditorialState`,
-including replay. Each accepts only `{ expectedCycle, expectedRevision }`, both
-positive integers, with no other body keys or query parameters. Both require the
-untrimmed 1–200 character `Idempotency-Key` header. Actor and tenant come only
-from the principal; JWT and tenant guards, UUID parsing, and
-`Cache-Control: no-store` on success and error match initialize/save.
+Both routes run V2 writers (`PrismaEditorialPublishWriter`,
+`PrismaEditorialDiscardWriter`); the legacy v1 publish/discard path is removed.
+POST `/products/:productId/editorial/draft/publish` and
+`/draft/discard` accept only `{ expectedCycle, expectedRevision }` (positive
+integers), require `Idempotency-Key` (1–200, untrimmed) and exactly one
+`Editorial-Vocabulary-Revision`, and return `200 StateResponse` (V2 envelope,
+also on replay). Publish additionally accepts at most one
+`Editorial-Care-Confirmation: review-v1`; obsolete `Editorial-Contract-Version`
+and `Editorial-Adoption` request headers are `400 MALFORMED`.
 
-Publish requires exact `ProductEditorialDraft:read` + `:publish`, not update;
-discard requires exact `:read` + `:update`. Wildcards and Product permissions do
-not grant either operation. Publish revalidates the stored draft, requires a
-nonblank commercial title and empty mediaRefs, copies it unchanged to Published
-at the next published revision, and clears draft. Discard clears draft without
-document validation and leaves Published unchanged. Both retain cycle.
+Publish requires `ProductEditorialDraft:read` + `:publish` (not update);
+discard requires `:read` + `:update`. Publish runs the saved-draft readiness
+(the same evaluation as `GET …/draft/readiness`) and copies the stored Draft
+unchanged to Published at the next revision. An unready draft is
+`400 { statusCode, error: "MALFORMED", items, bySection }`, the only editorial
+error with a body beyond `{ statusCode, error }` (decision D2).
 
-Errors use exactly `{ statusCode, error }`: `400 MALFORMED` for body/header/UUID
-or invalid draft on publish; `401 UNAUTHORIZED` for authentication;
-`403 FORBIDDEN` for authority failure, including unavailable or foreign Product;
-`404 NOT_FOUND` only if Product disappears after authorization;
-`409 CONFLICT` for no active draft, stale cycle/revision, or key/body mismatch.
-Unexpected errors are sanitized as `500 INTERNAL_ERROR`.
-
-Each operation has its own receipt namespace scoped to tenant, product, actor
-and key. Same key and body return the recorded result without restoring old
-state or republishing; replay still checks authority and Product existence.
-See [the closed contract](catalog-editorial-publish-contract-proposal.md) and
-[transaction details](catalog-editorial-write-transactions.md).
+Errors: `400 MALFORMED` (wire/headers, not-ready draft, care confirmation
+missing on a ready care draft or present on another family); `401`; `403`;
+`404` (Product lost after authorization); `409 CONFLICT` (stale/absent draft,
+same key with another intent); `409 VOCABULARY_CHANGED`; sanitized `500`.
+See [publication readiness](catalog-editorial-publication-readiness-v2.md),
+[the single contract](catalog-editorial-single-contract.md) and the FE handoff
+[05-editorial-publish-readiness.md](frontend-handoff/05-editorial-publish-readiness.md).
