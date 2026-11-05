@@ -9,9 +9,9 @@ In this repository (Jest):
 | Purpose | Command |
 | --- | --- |
 | Offline unit suite (full) | `pnpm test` |
-| Focused unit tests | `pnpm test -- src/path/to/file.spec.ts` or `pnpm test -- --findRelatedTests src/path/to/changed.ts` |
-| PostgreSQL integration specs | `pnpm test:integration -- src/path/to/file.integration.spec.ts` |
-| Live specs (operator-owned binding) | `pnpm test:live -- <path>` |
+| Focused unit tests | `pnpm test src/path/to/file.spec.ts` or `pnpm test --findRelatedTests src/path/to/changed.ts` |
+| PostgreSQL integration specs | `pnpm test:integration src/path/to/file.integration.spec.ts` |
+| Live specs (operator-owned binding) | `pnpm test:live <path>` |
 | Coverage | `pnpm test:cov` |
 
 `pnpm test:watch` and `pnpm test:debug` are interactive and are not routed through the queue; do not use them from agents.

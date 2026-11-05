@@ -134,7 +134,7 @@ Heredada del listado general de ventas (ver `docs/sales-frontend.md` §4). Para 
 
 ```ts
 type SaleListSummary = {
-  salesCount: number; // === pagination.total === counts.all
+  salesCount: number; // === counts.all (base filters); pagination.total counts every filter
   totalSoldCents: number; // suma de totalCents sobre las ventas confirmadas
   outstandingDebtCents: number; // suma de debtCents sobre las mismas ventas
 };
@@ -144,7 +144,7 @@ type SaleListSummary = {
 
 | Garantía                                                 | Verificación                                                                                                                                              |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `summary.salesCount === pagination.total === counts.all` | Por construcción: una sola query de Prisma (`aggregate`) alimenta los tres.                                                                               |
+| `summary.salesCount === counts.all`; `pagination.total` = filas que cumplen todos los filtros | El `aggregate` alimenta KPIs y pestañas (filtros base); el paginador usa un `count` con los mismos filtros que la página (desde 2026-11-05). Sin filtros extendidos los tres coinciden.                                                                               |
 | Confirmadas únicamente                                   | `status: 'CONFIRMED'` en el WHERE base. Borradores y canceladas excluidas.                                                                                |
 | Mismos filtros base que el count existente               | `customerId`, `cashierUserId`, `confirmedFrom/To`, `customerIncludeNull`, `q`.                                                                            |
 | Sin filtros extendidos                                   | `paymentStatus`, `totalMin/Max`, `deliveryStatus`, etc. NO afectan `summary` (consistente con `counts.all` y `pagination.total`).                         |
@@ -474,7 +474,7 @@ Si tu UI permite abrir varios slideovers en paralelo (ej. el usuario navega entr
 ### 10.1 Backend (completado localmente, pendiente de commit/deploy)
 
 - [x] `GET /sales` con `customerId` devuelve el bloque `summary` con `salesCount`, `totalSoldCents`, `outstandingDebtCents`.
-- [x] `summary.salesCount === pagination.total === counts.all` (verificado por tests).
+- [x] `summary.salesCount === counts.all`, y `pagination.total` igual a las filas filtradas (verificado por tests).
 - [x] Una sola query de Prisma (`aggregate`) reemplaza al `count()` previo — no se añadió 5ª query.
 - [x] Null de Prisma normalizado a `0` cuando no hay matches.
 - [x] Tenant-safe: cliente de otro tenant devuelve `summary` en ceros, no `403`.
