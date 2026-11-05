@@ -18,8 +18,8 @@ Branch `feat/editorial-publish-v2` (worktree `.tmp/publish-v2`, base local main 
 
 | ID | Specs | Route | Commit |
 | --- | --- | --- | --- |
-| T1 collecting readiness evaluator (domain) | S1 S2 S5 | worker | |
-| T2 readiness endpoint | S2 | worker (with T1) | |
+| T1 collecting readiness evaluator (domain) | S1 S2 S5 | worker | 043f525 |
+| T2 readiness endpoint | S2 | worker (with T1) | 4ddf0d3, 8d72d17 |
 | T3 V2 publish writer replacing legacy | S3 S4 S5 | worker | |
 | T4 docs + FE handoff | S6 | worker (with T3) | |
 | T5 runtime proof | S7 | worker | |
@@ -30,3 +30,4 @@ Branch `feat/editorial-publish-v2` (worktree `.tmp/publish-v2`, base local main 
 - L2 FE readiness contract (FE session, 2026-11-05 08:13Z): «`message` en cada item: texto para humanos, armado por el BE, en español neutro de México con tú… `scope: "definition" | "variant" | "product" | "care"` y permití `definitionCode: null` y `sectionCode: null`… `draftRevision` (o el cycle/revision) con el que se calculó… El `400 MALFORMED` de publish tiene que devolver el MISMO `items[]`… `variantId` null significa nivel producto… Opcional: `bySection: { [sectionCode]: count }`.»
 - L3 Code map: Engram `editorial/publication-gaps` (legacy publish `prisma-catalog-editorial.ts:220-381`, V2 discard writer `prisma-editorial-discard-writer.ts:22-126` as pattern, unwired V2 rule modules).
 - L4 Deferred: D3 tenant switch and C3.3 projection (P4), D6 unpublish, D8 accessory per-type defaults («collar, arnés, correa → «No»», editable) — next features.
+- L5 (T1/T2 done): readiness shares rules with publish (asserts delegate to collecting functions). Added problem codes NOT_APPLICABLE_VALUE, INVALID_VALUE, TOY_TYPES_MISMATCH, ARCHIVED_OPTION, FACTS_CONFLICT, MEDIA_NOT_ALLOWED, DRAFT_INVALID, NO_DRAFT. Worker decisions to confirm: a draft without family cannot publish; readiness requires the Editorial-Vocabulary-Revision header (409 VOCABULARY_CHANGED). RISK to close in T3: collecting functions may surface a TypeError on malformed input where MALFORMED used to win — save/initialize/publish must still return 400 MALFORMED, never 500.
