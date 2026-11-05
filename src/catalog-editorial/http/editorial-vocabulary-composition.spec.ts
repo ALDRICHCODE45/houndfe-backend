@@ -190,6 +190,58 @@ describe('registered vocabulary composition with synthetic Prisma I/O and JWT', 
     expect(db.$queryRaw).toHaveBeenCalledTimes(1);
   });
 
+  it('serves production family sections without changing the revision', async () => {
+    const food = (raw: ReturnType<typeof stored>) => {
+      raw.families[0].code = 'food';
+      raw.families[0].bindings[0].definitionCode = 'text.instructions';
+      raw.definitions[0].code = 'text.instructions';
+      return raw;
+    };
+    const bare = {
+      ...vocabulary,
+      families: [
+        {
+          ...family,
+          code: 'food',
+          bindings: [{ ...binding, definitionCode: 'text.instructions' }],
+        },
+      ],
+      definitions: [{ ...definition, code: 'text.instructions' }],
+    };
+    // Oracle over the vocabulary WITHOUT sections.
+    const foodRevision =
+      'ev2-sha256-' +
+      createHash('sha256')
+        .update(JSON.stringify({ contractVersion: 2, vocabulary: bare }, keys))
+        .digest('hex');
+    db.$queryRaw.mockResolvedValue([{ snapshot: food(stored()) }]);
+    const response = await get();
+    expect(response.status).toBe(200);
+    expect(response.headers['editorial-vocabulary-revision']).toBe(
+      foodRevision,
+    );
+    expect(response.body).toEqual({
+      contractVersion: 2,
+      vocabularyRevision: foodRevision,
+      vocabulary: {
+        ...bare,
+        families: [
+          {
+            ...bare.families[0],
+            sections: [{ code: 'uso', label: 'Uso', sortOrder: 4 }],
+            bindings: [
+              {
+                ...bare.families[0].bindings[0],
+                sectionCode: 'uso',
+                sectionSortOrder: 0,
+              },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
   it('fails closed, without leaking, when the description column is malformed', async () => {
     db.$queryRaw.mockResolvedValue([
       { snapshot: stored(), descriptions: ['not', 'an', 'object'] },

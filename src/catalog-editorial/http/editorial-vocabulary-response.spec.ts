@@ -187,6 +187,79 @@ describe('dormant editorial vocabulary response descriptions', () => {
       expect(await respond(source, [])).toEqual(failure(500, 'INTERNAL_ERROR'));
     });
 
+    it('attaches production family sections after the revision, alongside descriptions', async () => {
+      const production = () => {
+        const raw = fixture();
+        raw.families[0].code = 'food';
+        raw.families[0].bindings[0].definitionCode = 'life.stage';
+        raw.definitions[0].code = 'life.stage';
+        return raw;
+      };
+      const plain = await respond(
+        { read: jest.fn().mockResolvedValue(production()) },
+        [],
+      );
+      const snapshot = production();
+      const described = await respond(
+        {
+          read: jest.fn(),
+          readWithDescriptions: jest.fn().mockResolvedValue({
+            snapshot,
+            descriptions: new Map([['life.stage', 'Texto.']]),
+          }),
+        },
+        [],
+      );
+      for (const response of [plain, described]) {
+        const body = response.body as {
+          vocabularyRevision: string;
+          vocabulary: {
+            families: { sections?: unknown; bindings: unknown[] }[];
+            definitions: unknown[];
+          };
+        };
+        const [family] = body.vocabulary.families;
+        expect(family.sections).toEqual([
+          { code: 'para-quien', label: 'Para quién', sortOrder: 0 },
+        ]);
+        expect(family.bindings[0]).toMatchObject({
+          definitionCode: 'life.stage',
+          sortOrder: -2,
+          sectionCode: 'para-quien',
+          sectionSortOrder: 1,
+        });
+        // Independent oracle: the digest covers the vocabulary WITHOUT sections.
+        const { sections, ...bare } = family as Record<string, unknown>;
+        void sections;
+        const bindings = family.bindings.map((binding) => {
+          const { sectionCode, sectionSortOrder, ...rest } = binding as Record<
+            string,
+            unknown
+          >;
+          void sectionCode;
+          void sectionSortOrder;
+          return rest;
+        });
+        expect(body.vocabularyRevision).toBe(
+          `ev2-sha256-${hashEditorialJson({
+            contractVersion: 2,
+            vocabulary: {
+              ...body.vocabulary,
+              families: [{ ...bare, bindings }],
+              definitions: [{ ...legacy.definitions[0], code: 'life.stage' }],
+            },
+          })}`,
+        );
+        expect(response.headers['Editorial-Vocabulary-Revision']).toBe(
+          body.vocabularyRevision,
+        );
+      }
+      expect(
+        (described.body as { vocabulary: { definitions: unknown[] } })
+          .vocabulary.definitions[0],
+      ).toMatchObject({ description: 'Texto.' });
+    });
+
     it('rejects prohibited headers before any description read', async () => {
       const source = sourceWith(new Map([['custom.d', 'Texto.']]));
       expect(await respond(source, version2)).toEqual(
