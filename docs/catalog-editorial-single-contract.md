@@ -27,20 +27,22 @@ machine-shape gaps or reintroduce superseded behavior.
 
 Paths below are controller-relative (retain any existing deployment API prefix).
 All seven paths/statuses are retained, plus the read-only readiness GET (P2,
-`docs/catalog-editorial-publication-readiness-v2.md`); no internal create or media route is added.
+`docs/catalog-editorial-publication-readiness-v2.md`) and unpublish (P4 S6); no
+internal create or media route is added.
 No query parameters are accepted. Product IDs use the existing UUID validation.
 Document/context GET reject nonempty decoded bodies; GETs take no input document.
 
-| Operation  | Method and relative path                               | Success / body           |
-| ---------- | ------------------------------------------------------ | ------------------------ |
-| Vocabulary | `GET /catalog-editorial/vocabulary`                    | `200 VocabularyResponse` |
-| Document   | `GET /products/:productId/editorial`                   | `200 StateResponse`      |
-| Context    | `GET /products/:productId/editorial/context`           | `200 Context`            |
-| Initialize | `POST /products/:productId/editorial/draft/initialize` | `201 StateResponse`      |
-| Save       | `PUT /products/:productId/editorial/draft`             | `200 StateResponse`      |
-| Readiness  | `GET /products/:productId/editorial/draft/readiness`   | `200 Readiness`          |
-| Publish    | `POST /products/:productId/editorial/draft/publish`    | `200 StateResponse`      |
-| Discard    | `POST /products/:productId/editorial/draft/discard`    | `200 StateResponse`      |
+| Operation  | Method and relative path                                  | Success / body           |
+| ---------- | --------------------------------------------------------- | ------------------------ |
+| Vocabulary | `GET /catalog-editorial/vocabulary`                       | `200 VocabularyResponse` |
+| Document   | `GET /products/:productId/editorial`                      | `200 StateResponse`      |
+| Context    | `GET /products/:productId/editorial/context`              | `200 Context`            |
+| Initialize | `POST /products/:productId/editorial/draft/initialize`    | `201 StateResponse`      |
+| Save       | `PUT /products/:productId/editorial/draft`                | `200 StateResponse`      |
+| Readiness  | `GET /products/:productId/editorial/draft/readiness`      | `200 Readiness`          |
+| Publish    | `POST /products/:productId/editorial/draft/publish`       | `200 StateResponse`      |
+| Discard    | `POST /products/:productId/editorial/draft/discard`       | `200 StateResponse`      |
+| Unpublish  | `POST /products/:productId/editorial/published/unpublish` | `200 StateResponse`      |
 
 Bearer JWT → tenant guard; actor/tenant derive only from the principal. S53/S54
 retain active persisted global Super Admin or global `manage:all` authority without
@@ -54,7 +56,7 @@ For ordinary exact-grant access:
 
 - Vocabulary/document/context/readiness: `ProductEditorialDraft:read`.
 - Initialize/save/discard: `:read` + `:update`.
-- Publish: `:read` + `:publish`; update is not required.
+- Publish and unpublish: `:read` + `:publish`; update is not required.
 - Unavailable/foreign Product normally fails authority with 403; 404 is possible
   when Product disappears after authorization, not a universal existence promise.
 
@@ -87,6 +89,7 @@ prohibited header, even empty, fails. No version header is needed on requests.
 | Document GET            | Required R                      | Forbidden         | Forbidden                                 |
 | Readiness GET           | Required R                      | Forbidden         | Forbidden                                 |
 | Initialize/save/discard | Required R                      | Required          | Forbidden                                 |
+| Unpublish               | Required R                      | Required          | Forbidden                                 |
 | Publish                 | Required R                      | Required          | Only exact `review-v1`; conditional below |
 
 R syntax: `ev2-sha256-` followed by 64 lowercase hex digits. Write keys retain the
@@ -180,7 +183,7 @@ Internal create and completed initialize/discard remain unchanged.
 
 ### Registered discard implementation boundary
 
-Initialize, save, discard and publish use dedicated V2 writers. Current persisted read/update authority precedes semantic
+Initialize, save, discard, publish and unpublish use dedicated V2 writers. Current persisted read/update authority precedes semantic
 admission and is rechecked inside the transaction. Raw duplicate/list headers,
 missing R/key, prohibited care/version/adoption headers and nonclosed bodies fail.
 Matching namespaced receipt intent replays the decoded recorded acknowledgement
@@ -218,9 +221,41 @@ saved-draft readiness of `catalog-editorial-publication-readiness-v2.md` runs
 under these locks (locked references, offered subjects E from the same
 transaction). Not ready: `400` with `items`/`bySection`, nothing written.
 Ready: the fresh care attestation (care only), the stored Draft bytes copied to
-Published at revision + 1, Draft cleared, cycle kept, the complete V2 receipt
-with the private attestation, all atomic. Real-PostgreSQL proof:
-`prisma-editorial-publish-writer.integration.spec.ts`.
+Published at revision + 1, Draft cleared, cycle kept, the offered subjects E
+recorded as `publishedSubjects` (P4 S5, `catalog-editorial-published-subjects-v2.md`),
+the complete V2 receipt with the private attestation, all atomic. Replay returns
+the recorded acknowledgement and never rewrites the recording. The next revision
+is one past the greater of the current Published revision and the last
+unpublished revision, so no cycle/revision pair is reused after an unpublish.
+Real-PostgreSQL proof: `prisma-editorial-publish-writer.integration.spec.ts`,
+`prisma-editorial-unpublish-writer.integration.spec.ts`.
+
+### Registered unpublish implementation boundary (P4 S6)
+
+`POST /products/:productId/editorial/published/unpublish` uses
+`PrismaEditorialUnpublishWriter` (controller `EditorialPublishedController`).
+Body is the closed `TransitionBody` `{ expectedCycle, expectedRevision }`, where
+`expectedRevision` names the **Published** revision being removed (positive
+integers; anything else is `400 MALFORMED`). Headers as in the table above: R and
+`Idempotency-Key` required; `Editorial-Care-Confirmation` and the obsolete
+version/adoption headers are `400 MALFORMED`. Current persisted read+publish
+authority precedes semantic admission and is rechecked in its ReadCommitted
+transaction. Lock order is publish's: catalog lifecycle SHARE → actual Tenant
+SHARE → qualified Product UPDATE → receipt lookup in
+`catalog_editorial_unpublish_receipts` (same key and intent: recorded V2
+acknowledgement; same key, different intent: `409 CONFLICT`) → state FOR UPDATE
+and CAS (cycle equal, Published present at exactly `expectedRevision`; otherwise
+`409 CONFLICT`, including "nothing published") → nine vocabulary tables SHARE →
+fresh current R equal to the pinned R (`409 VOCABULARY_CHANGED`).
+
+Effect, atomic with the complete V2 receipt (`200`, `careAttestation: null`):
+Published document, revision and `publishedSubjects` are cleared;
+`unpublishedRevision` keeps the removed revision for numbering; the Draft
+(revision, base Published revision, document) and the cycle are unchanged. The
+response is `StateResponse` with `published: null` and the kept Draft as stored
+(base may name the removed revision). The removed Published is not read. With
+the tenant switch on, the product leaves the public catalog with this commit.
+Rejections change no stored row.
 
 ## 3. Document, values and evidence
 
@@ -718,8 +753,9 @@ otherwise exact current cycle; new cycle 1 or prior+1, draft revision1/base curr
 Published revision or null. Existing target Published is copied unchanged into the
 new draft; no conversion, injection, fresh bounds or completeness check on copy.
 Save replaces whole draft and increments revision. Publish revalidates locked draft,
-copies unchanged at Published revision1 or prior+1, clears draft. Discard clears
-only draft without document validation. Publish/discard retain cycle. No pair reuse,
+copies unchanged at Published revision1 or prior+1 (prior counts an unpublished
+revision), clears draft. Discard clears only draft without document validation.
+Unpublish clears only Published (P4 S6). Publish/discard/unpublish retain cycle. No pair reuse,
 publication history API or expectedPublishedRevision. Persisted counters are positive
 int32; attempted counter overflow/stale CAS is 409 CONFLICT, no partial mutation.
 Malformed nonpositive/noninteger request counters are 400; do not invent a new
@@ -828,8 +864,9 @@ Errors carry version2/no-store and remove any stale revision header. Framework
 invalid JSON/413/unmatched-route errors remain outside this local envelope; FE
 handles non-envelope failures generically.
 
-Bootstrap CORS specializes only the eight editorial routes (vocabulary, document,
-context, readiness GET; draft PUT; initialize/publish/discard POST) and their
+Bootstrap CORS specializes only the nine editorial routes (vocabulary, document,
+context, readiness GET; draft PUT; initialize/publish/discard POST; published
+unpublish POST) and their
 preflights, including Express case/trailing-slash aliases and malformed Product IDs. Original
 origin/credentials policy and unrelated routes' reflected headers stay unchanged.
 HTTP tests use real Nest/Express CORS with synthetic JWT/Prisma I/O or error probes;
@@ -849,7 +886,8 @@ attempt uses current CAS/R and a new key, not an automatic renewal by deduction.
 Cutover must retire old test editorial state and all old receipt namespaces so old
 state/receipts cannot remain replayable. This is a separate authorized environment
 operation, not conversion/backfill or permission to execute deletion. Read-only
-schema finding: four editorial receipt tables reference state with FK Restrict;
+schema finding: five editorial receipt tables (create, save, publish, discard,
+unpublish) reference state with FK Restrict;
 selected receipts must precede selected state in the reset proposal. Do not infer
 SQL/environment selector, reset target, Product deletion or operational cascade.
 No operational stock/price/sales/POS data deletion is needed or authorized here.

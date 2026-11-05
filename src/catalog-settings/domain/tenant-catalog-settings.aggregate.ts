@@ -9,6 +9,8 @@ export interface TenantBaseProps {
   tenantId: string;
   isActive: boolean;
   catalogPublished: boolean;
+  /** P4 S1: public catalog shows only products with a Published editorial. */
+  catalogRequiresPublishedEditorial: boolean;
   catalogStockPresentationDefault: CatalogStockPresentationValue;
   catalogStockPresentationDefaultCustomQty: number | null;
   updatedAt: Date;
@@ -20,6 +22,7 @@ export interface FromPersistenceInput {
 export interface CatalogSettingsInternalResult {
   tenantId: string;
   catalogPublished: boolean;
+  catalogRequiresPublishedEditorial: boolean;
   effectivePublication: boolean;
   priceContexts: {
     priceListId: string;
@@ -107,6 +110,9 @@ export class TenantCatalogSettings {
   get catalogPublished() {
     return this.tenant.catalogPublished;
   }
+  get catalogRequiresPublishedEditorial() {
+    return this.tenant.catalogRequiresPublishedEditorial;
+  }
   get effectivePublication() {
     return this.tenant.isActive && this.tenant.catalogPublished;
   }
@@ -126,6 +132,7 @@ export class TenantCatalogSettings {
     return {
       tenantId: this.tenantId,
       catalogPublished: this.catalogPublished,
+      catalogRequiresPublishedEditorial: this.catalogRequiresPublishedEditorial,
       effectivePublication: this.effectivePublication,
       priceContexts: this.bindings.map((b) => ({
         priceListId: b.globalPriceListId,

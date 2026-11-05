@@ -20,6 +20,7 @@ const tenant = (p: Partial<TenantBaseProps> = {}): TenantBaseProps => ({
   tenantId: 't1',
   isActive: true,
   catalogPublished: false,
+  catalogRequiresPublishedEditorial: false,
   catalogStockPresentationDefault: 'SYSTEM_STATUS',
   catalogStockPresentationDefaultCustomQty: null,
   updatedAt: new Date('2024-01-01'),

@@ -28,6 +28,7 @@ interface TenantRow {
   id: string;
   isActive: boolean;
   catalogPublished: boolean;
+  catalogRequiresPublishedEditorial: boolean;
   catalogStockPresentationDefault: CatalogStockMode;
   catalogStockPresentationDefaultCustomQty: number | null;
   updatedAt: Date;
@@ -38,6 +39,7 @@ function tRow(overrides?: Partial<TenantRow>): TenantRow {
     id: T,
     isActive: true,
     catalogPublished: false,
+    catalogRequiresPublishedEditorial: false,
     catalogStockPresentationDefault: 'SYSTEM_STATUS',
     catalogStockPresentationDefaultCustomQty: null,
     updatedAt: new Date(),
@@ -64,6 +66,7 @@ function makeAgg(overrides?: MakeAggOverrides): TenantCatalogSettings {
       tenantId: T,
       isActive: true,
       catalogPublished: false,
+      catalogRequiresPublishedEditorial: false,
       catalogStockPresentationDefault: 'SYSTEM_STATUS',
       catalogStockPresentationDefaultCustomQty: null,
       updatedAt: new Date(),
@@ -86,6 +89,7 @@ function makeAggWithBindings(
       tenantId: T,
       isActive: true,
       catalogPublished,
+      catalogRequiresPublishedEditorial: false,
       catalogStockPresentationDefault: 'SYSTEM_STATUS',
       catalogStockPresentationDefaultCustomQty: null,
       updatedAt: new Date(),

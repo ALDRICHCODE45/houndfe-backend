@@ -10,6 +10,7 @@ Backend contracts for the frontend, **in implementation order**. Each file cover
 | 4 | Purchase orders: checklist issue summary (`issueSummary`, `checklistItemCount`) | Implemented, merged to local `main` | [03-po-issue-summary.md](03-po-issue-summary.md) |
 | 5 | Editorial readiness checklist and «Publicar» (V2 publish, `400` with `items`) | Implemented on `feat/editorial-publish-v2`, not merged | [05-editorial-publish-readiness.md](05-editorial-publish-readiness.md) |
 | 6 | Refund settlements: pending refunds list, partial and total returns, Idempotency-Key replay | Backend implemented; no FE screen yet | [06-refund-settlements.md](06-refund-settlements.md) |
+| 7 | Public catalog from Published editorial: per-tenant switch, Published title/description, detail `attributes`, `facet` filters, Published-only search, cart scope, «Despublicar» | Implemented on `feat/public-catalog-published`, not merged; runtime-proven on the dev DB | [07-public-catalog-published.md](07-public-catalog-published.md) |
 
 Operations: [deploy/inventory-journal-o1-rollout.md](../deploy/inventory-journal-o1-rollout.md) is the rollout runbook for the O1 migration (stop writers, pre-flight queries, rollback, permissions). It is for whoever deploys, not for the FE.
 

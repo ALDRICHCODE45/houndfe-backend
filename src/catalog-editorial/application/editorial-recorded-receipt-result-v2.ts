@@ -150,7 +150,8 @@ export function decodeRecordedReceiptResultV2(
     operation !== 'initialize' &&
     operation !== 'save' &&
     operation !== 'publish' &&
-    operation !== 'discard'
+    operation !== 'discard' &&
+    operation !== 'unpublish'
   )
     invalid();
   const root = closed(input, [

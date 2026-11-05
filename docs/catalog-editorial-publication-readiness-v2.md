@@ -142,3 +142,20 @@ definition items per section.
   `relevantCapacityCodes`, `electricalApplies`, `relevantEquipmentCodes`).
   Undeclared space facts leave the space bindings `UNRESOLVED`. Pinned on
   PostgreSQL by the habitat cases of the readiness and publish integration specs.
+- **D8 (b) accessory per-type defaults (S7).** When every selected
+  `accessory.type` option of the subject is `accessory.type.collar`,
+  `accessory.type.harness` or `accessory.type.leash`, an unknown or omitted
+  `capacityDeterminesChoice` resolves as a declared «No»: the `capacity` rule
+  (`measure.capacity.container`) is `not_applicable` and does not block. A known
+  declaration always wins (`true` with `measure.capacity.container` in
+  `relevantCapacityCodes` makes it required). As with a declared «No», an
+  unknown flag with a nonempty `relevantCapacityCodes` stays `UNRESOLVED`. Any
+  other type, a mix with another type, or an unknown `accessory.type` keeps the
+  previous behavior (`UNRESOLVED`). `electricalApplies` needs no default:
+  accessory equipment bindings use `optional_equipment`, which an unknown
+  declaration already leaves optional (never blocking); defaulting it to «No»
+  would newly reject a known power value as `NOT_APPLICABLE_VALUE`. The rule
+  lives only in the fact-rule evaluation, fed by `evaluateBindingPolicyV2`
+  (which reads the subject's `accessory.type`, product- or sellable-owned), so
+  readiness, NA admission and publish share it. Pinned by the domain specs and
+  the accessory cases of the PostgreSQL readiness integration spec.

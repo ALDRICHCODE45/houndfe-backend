@@ -157,6 +157,7 @@ describeIfDb(
     function mkAggregate(input: {
       tenantId: string;
       catalogPublished: boolean;
+      catalogRequiresPublishedEditorial?: boolean;
       mode: StockMode;
       customQty: number | null;
       bindings: Array<{
@@ -183,6 +184,8 @@ describeIfDb(
           tenantId: input.tenantId,
           isActive: true,
           catalogPublished: input.catalogPublished,
+          catalogRequiresPublishedEditorial:
+            input.catalogRequiresPublishedEditorial ?? false,
           catalogStockPresentationDefault: input.mode,
           catalogStockPresentationDefaultCustomQty: input.customQty,
           updatedAt: now,
@@ -395,5 +398,62 @@ describeIfDb(
         replaced.bindings.map((b) => b.globalPriceList.name),
       );
     });
+
+    // ── T5 — published-editorial switch: default off, persisted on replace ─
+
+    it('T5: the published-editorial switch defaults off and replace persists it', async () => {
+      const prisma = integrationPrisma();
+      const tenantId = await seedTenant();
+      const gD = await seedGlobalPriceList('switch');
+      await seedBinding(tenantId, gD, true);
+      currentTenantId = tenantId;
+      expect(
+        (await repo.findByTenantId(tenantId))!
+          .catalogRequiresPublishedEditorial,
+      ).toBe(false);
+
+      const aggregate = mkAggregate({
+        tenantId,
+        catalogPublished: true,
+        catalogRequiresPublishedEditorial: true,
+        mode: 'SYSTEM_STATUS',
+        customQty: null,
+        bindings: [
+          { globalPriceListId: gD, name: 'D', isCatalogDefault: true },
+        ],
+      });
+      const replaced = await repo.replace(aggregate, 'actor-switch');
+      expect(replaced.catalogRequiresPublishedEditorial).toBe(true);
+      expect(
+        (await repo.findByTenantId(tenantId))!
+          .catalogRequiresPublishedEditorial,
+      ).toBe(true);
+      const row = await prisma.tenant.findUniqueOrThrow({
+        where: { id: tenantId },
+      });
+      expect(row.catalogRequiresPublishedEditorial).toBe(true);
+
+      await repo.replace(
+        mkAggregate({
+          ...aggregateInput(tenantId, gD),
+          catalogPublished: true,
+        }),
+        'actor-switch',
+      );
+      expect(
+        (await repo.findByTenantId(tenantId))!
+          .catalogRequiresPublishedEditorial,
+      ).toBe(false);
+    });
+
+    function aggregateInput(tenantId: string, globalPriceListId: string) {
+      return {
+        tenantId,
+        catalogPublished: false,
+        mode: 'SYSTEM_STATUS' as StockMode,
+        customQty: null,
+        bindings: [{ globalPriceListId, name: 'D', isCatalogDefault: true }],
+      };
+    }
   },
 );

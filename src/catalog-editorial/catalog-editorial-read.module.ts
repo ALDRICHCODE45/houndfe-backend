@@ -12,7 +12,12 @@ import { PrismaEditorialDocumentReader } from './infrastructure/prisma-editorial
 import { EDITORIAL_READINESS_READER } from './application/editorial-readiness-reader';
 import { PrismaEditorialReadinessReader } from './infrastructure/prisma-editorial-readiness-reader';
 import { EditorialHttpScope } from './infrastructure/editorial-http-scope';
-import { EditorialWriteController } from './http/editorial-write.controller';
+import { EDITORIAL_UNPUBLISH_WRITER } from './application/editorial-unpublish-writer';
+import { PrismaEditorialUnpublishWriter } from './infrastructure/prisma-editorial-unpublish-writer';
+import {
+  EditorialPublishedController,
+  EditorialWriteController,
+} from './http/editorial-write.controller';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
@@ -21,7 +26,11 @@ import { EditorialReadController } from './http/editorial-read.controller';
 
 // The root already supplies Prisma/CLS and registers the Passport JWT strategy.
 @Module({
-  controllers: [EditorialReadController, EditorialWriteController],
+  controllers: [
+    EditorialReadController,
+    EditorialWriteController,
+    EditorialPublishedController,
+  ],
   providers: [
     JwtAuthGuard,
     TenantContextGuard,
@@ -71,6 +80,12 @@ import { EditorialReadController } from './http/editorial-read.controller';
       inject: [PrismaService],
       useFactory: (prisma: PrismaService) =>
         new PrismaEditorialPublishWriter(prisma),
+    },
+    {
+      provide: EDITORIAL_UNPUBLISH_WRITER,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) =>
+        new PrismaEditorialUnpublishWriter(prisma),
     },
   ],
 })

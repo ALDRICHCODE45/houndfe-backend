@@ -51,6 +51,7 @@ const settings = (
       tenantId: 't1',
       isActive: true,
       catalogPublished: false,
+      catalogRequiresPublishedEditorial: false,
       catalogStockPresentationDefault: 'SYSTEM_STATUS',
       catalogStockPresentationDefaultCustomQty: null,
       updatedAt: new Date('2024-01-01'),
@@ -230,6 +231,28 @@ describe('UpdateCatalogSettingsUseCase', () => {
       mode: 'HIDDEN',
       customQuantity: null,
     });
+  });
+
+  it('switches the published-editorial requirement; omission keeps it', async () => {
+    const on = run(settings([binding('gpl-1', true)]), {
+      catalogRequiresPublishedEditorial: true,
+    });
+    const response = await on.promise;
+    expect(persisted(on.r)[0].catalogRequiresPublishedEditorial).toBe(true);
+    expect(response.catalogRequiresPublishedEditorial).toBe(true);
+    const [, event] = on.emit.mock.calls[0] as [
+      string,
+      CatalogSettingsUpdatedEvent,
+    ];
+    expect(event.changedFields).toEqual(['catalogRequiresPublishedEditorial']);
+    const kept = run(
+      settings([binding('gpl-1', true)], {
+        catalogRequiresPublishedEditorial: true,
+      }),
+      { catalogPublished: true },
+    );
+    expect((await kept.promise).catalogRequiresPublishedEditorial).toBe(true);
+    expect(persisted(kept.r)[0].catalogRequiresPublishedEditorial).toBe(true);
   });
 
   it('resolves coverage before the write; a coverage read failure prevents replace', async () => {

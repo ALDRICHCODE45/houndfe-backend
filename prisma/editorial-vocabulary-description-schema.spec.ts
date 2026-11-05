@@ -33,10 +33,12 @@ describe('editorial definition description storage', () => {
     );
   });
 
-  it('is the newest migration, so deploy applies it after every existing one', () => {
+  it('deploys after every migration that existed when it was written', () => {
     const names = readdirSync(join(__dirname, 'migrations'))
       .filter((n) => /^\d{14}_/.test(n))
       .sort();
-    expect(names[names.length - 1]).toBe(migrationName);
+    expect(names.indexOf(migrationName)).toBe(
+      names.indexOf('20261104020000_inventory_journal_storage') + 1,
+    );
   });
 });

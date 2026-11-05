@@ -99,6 +99,11 @@ export class UpdateCatalogSettingsDto {
   @IsBoolean()
   catalogPublished?: boolean;
 
+  /** P4 S1: only products with a Published editorial reach the public catalog. */
+  @IsPatchOptional()
+  @IsBoolean()
+  catalogRequiresPublishedEditorial?: boolean;
+
   @IsPatchOptional()
   @IsArray()
   @ArrayUnique()

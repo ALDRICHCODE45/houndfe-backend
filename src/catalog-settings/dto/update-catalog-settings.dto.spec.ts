@@ -77,6 +77,23 @@ describe('UpdateCatalogSettingsDto', () => {
     });
   });
 
+  describe('catalogRequiresPublishedEditorial', () => {
+    it.each([true, false])('accepts %s', async (value) => {
+      const { dto, errors } = await validateDto({
+        catalogRequiresPublishedEditorial: value,
+      });
+      expect(errors).toHaveLength(0);
+      expect(dto.catalogRequiresPublishedEditorial).toBe(value);
+    });
+
+    it.each(['true', 1, null])('rejects non-boolean %p', async (value) => {
+      const { errors } = await validateDto({
+        catalogRequiresPublishedEditorial: value,
+      });
+      expect(errors[0].property).toBe('catalogRequiresPublishedEditorial');
+    });
+  });
+
   describe('publicPriceListIds', () => {
     it('accepts an empty array and unique v4 UUIDs', async () => {
       expect(

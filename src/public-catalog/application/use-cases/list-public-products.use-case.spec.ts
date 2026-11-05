@@ -394,45 +394,48 @@ describe('ListPublicProductsUseCase.executeForContext (F2.WU6 slice 5a — dorma
     },
   );
 
-      it('fails the entire contextual page with a generic 500 — never a 404 or a partial page — when a variant card aggregates invalid participants (F3.WU9 slice 9)', async () => {
-        const error = jest
-          .spyOn(Logger.prototype, 'error')
-          .mockImplementation(() => undefined);
-        seam.mockResolvedValue({
-          items: [
-            { ...makeProduct({ hasVariants: true }), stockPresentationParticipants: [] },
-            { ...makeProduct({ id: 'prod-2' }), stockPresentationParticipants: [] },
-          ],
-          total: 2,
-          excludedCount: 0,
-          categories: [],
-        });
+  it('fails the entire contextual page with a generic 500 — never a 404 or a partial page — when a variant card aggregates invalid participants (F3.WU9 slice 9)', async () => {
+    const error = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    seam.mockResolvedValue({
+      items: [
+        {
+          ...makeProduct({ hasVariants: true }),
+          stockPresentationParticipants: [],
+        },
+        { ...makeProduct({ id: 'prod-2' }), stockPresentationParticipants: [] },
+      ],
+      total: 2,
+      excludedCount: 0,
+      categories: [],
+    });
 
-        let thrown: unknown;
-        try {
-          await useCase.executeForContext(listInput);
-        } catch (e) {
-          thrown = e;
-        }
+    let thrown: unknown;
+    try {
+      await useCase.executeForContext(listInput);
+    } catch (e) {
+      thrown = e;
+    }
 
-        expect(thrown).toBeInstanceOf(InternalServerErrorException);
-        expect((thrown as InternalServerErrorException).getStatus()).toBe(500);
-        expect(thrown).not.toBeInstanceOf(NotFoundException);
-        // One structured internal invariant log, safe for operations: no
-        // operational quantities, thresholds, configuration, or payloads.
-        expect(error).toHaveBeenCalledTimes(1);
-        const logged = JSON.stringify(error.mock.calls);
-        expect(logged).toContain(
-          'public_catalog_list_invalid_stock_presentation_participants',
-        );
-        expect(logged).not.toContain('quantity');
-        expect(logged).not.toContain('minQuantity');
-        expect(logged).not.toContain('prod-1');
-        error.mockRestore();
-      });
+    expect(thrown).toBeInstanceOf(InternalServerErrorException);
+    expect((thrown as InternalServerErrorException).getStatus()).toBe(500);
+    expect(thrown).not.toBeInstanceOf(NotFoundException);
+    // One structured internal invariant log, safe for operations: no
+    // operational quantities, thresholds, configuration, or payloads.
+    expect(error).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(error.mock.calls);
+    expect(logged).toContain(
+      'public_catalog_list_invalid_stock_presentation_participants',
+    );
+    expect(logged).not.toContain('quantity');
+    expect(logged).not.toContain('minQuantity');
+    expect(logged).not.toContain('prod-1');
+    error.mockRestore();
+  });
 
-      it('keeps the active execute path on the default-list resolver + findProducts/findCategoryFacets even when the contextual seam exists, with no stockPresentation on legacy cards', async () => {
-        const result = await useCase.execute(legacyInput);
+  it('keeps the active execute path on the default-list resolver + findProducts/findCategoryFacets even when the contextual seam exists, with no stockPresentation on legacy cards', async () => {
+    const result = await useCase.execute(legacyInput);
 
     expect(resolveDefault).toHaveBeenCalledTimes(1);
     expect(legacyFindProducts).toHaveBeenCalledTimes(1);
@@ -465,3 +468,88 @@ const _nested: PublicCatalogProductListWithContextDto = {
   priceContext: null as unknown as PublicPriceContextDto,
 };
 void _nested;
+
+describe('ListPublicProductsUseCase.executeForContext — attribute facets (P4 S4)', () => {
+  const context = {
+    tenantId: 't1',
+    tenantSlug: 'centro',
+    globalPriceListId: 'gpl-1',
+    name: 'Publico',
+    isCatalogDefault: true,
+    stockPresentationDefaults: {
+      catalogStockPresentationDefault: 'SYSTEM_STATUS' as const,
+      catalogStockPresentationDefaultCustomQty: null,
+    },
+  };
+  const tenant = { id: 't1', slug: 'centro', name: 'Centro' };
+  const selection = [{ code: 'animal.target', options: ['ani.dom.dog'] }];
+  const page = { items: [], total: 0, excludedCount: 0, categories: [] };
+
+  it('switch off: a selection is FACET_NOT_AVAILABLE before any repository read', async () => {
+    const listPublicProducts = jest.fn();
+    const useCase = new ListPublicProductsUseCase({
+      listPublicProducts,
+    } as unknown as IPublicCatalogRepository);
+    await expect(
+      useCase.executeForContext({
+        tenant,
+        context,
+        filters: {
+          sort: 'newest',
+          page: 1,
+          limit: 20,
+          attributeFacets: selection,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'FACET_NOT_AVAILABLE' });
+    expect(listPublicProducts).not.toHaveBeenCalled();
+  });
+
+  it('switch on: threads the selection and returns facets.attributes', async () => {
+    const attributes = [
+      {
+        code: 'animal.target',
+        label: 'Especie',
+        options: [{ code: 'ani.dom.dog', label: 'Perro', count: 1 }],
+      },
+    ];
+    const listPublicProducts = jest
+      .fn()
+      .mockResolvedValue({ ...page, attributes });
+    const useCase = new ListPublicProductsUseCase({
+      listPublicProducts,
+    } as unknown as IPublicCatalogRepository);
+    const result = await useCase.executeForContext({
+      tenant,
+      context: { ...context, requiresPublishedEditorial: true },
+      filters: {
+        sort: 'newest',
+        page: 1,
+        limit: 20,
+        attributeFacets: selection,
+      },
+    });
+    const [[input]] = listPublicProducts.mock.calls as [
+      [{ filters: Record<string, unknown> }],
+    ];
+    expect(input.filters.attributeFacets).toEqual(selection);
+    expect(result.facets).toEqual({ categories: [], attributes });
+  });
+
+  it('switch off: facets keep only categories and filters carry no attributeFacets key', async () => {
+    const listPublicProducts = jest.fn().mockResolvedValue(page);
+    const useCase = new ListPublicProductsUseCase({
+      listPublicProducts,
+    } as unknown as IPublicCatalogRepository);
+    const result = await useCase.executeForContext({
+      tenant,
+      context,
+      filters: { sort: 'newest', page: 1, limit: 20 },
+    });
+    expect(Object.keys(result.facets)).toEqual(['categories']);
+    const [[input]] = listPublicProducts.mock.calls as [
+      [{ filters: Record<string, unknown> }],
+    ];
+    expect(Object.keys(input.filters)).not.toContain('attributeFacets');
+  });
+});

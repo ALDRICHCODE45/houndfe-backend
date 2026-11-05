@@ -186,3 +186,97 @@ describe('ValidatePublicCartUseCase — presentation independence (F3.WU10)', ()
     expect(mockFindCandidates).not.toHaveBeenCalled();
   });
 });
+
+describe('ValidatePublicCartUseCase — Published editorial scope (P4 S2/S5)', () => {
+  const ON = { ...CONTEXT, requiresPublishedEditorial: true };
+  const covered = (subjects: (string | null)[] | null) => ({
+    publishedRevision: 1,
+    subjects,
+  });
+  const variant = (id: string) => ({
+    id,
+    name: id,
+    catalogPublishMode: 'INHERIT',
+    quantity: 50,
+    minQuantity: 5,
+    variantPrices: [{ priceCents: 1000 }],
+  });
+  const run = (
+    candidate: PublicCartCandidate,
+    items: { productId: string; variantId?: string; quantity: number }[],
+    context: ResolvedPublicCatalogContext = ON,
+  ) =>
+    new ValidatePublicCartUseCase({
+      findPublicCartCandidates: jest.fn().mockResolvedValue([candidate]),
+    } as unknown as IPublicCatalogRepository).executeForContext({
+      ...INPUT,
+      context,
+      items,
+    });
+  const line = [{ productId: 'prod-1', quantity: 1 }];
+
+  it('switch on: no Published version is NOT_IN_CATALOG', async () => {
+    const result = await run(
+      makeCandidate({ quantity: 50, publishedCoverage: null }),
+      line,
+    );
+    expect(result.items[0]).toMatchObject({
+      status: 'BLOCKED',
+      blockingCodes: ['NOT_IN_CATALOG'],
+      productName: null,
+    });
+  });
+
+  it('switch on: an uncovered simple presentation is NOT_IN_CATALOG; covered is VALID', async () => {
+    expect(
+      (
+        await run(
+          makeCandidate({ quantity: 50, publishedCoverage: covered(['v']) }),
+          line,
+        )
+      ).items[0].blockingCodes,
+    ).toEqual(['NOT_IN_CATALOG']);
+    expect(
+      (
+        await run(
+          makeCandidate({ quantity: 50, publishedCoverage: covered([null]) }),
+          line,
+        )
+      ).items[0].status,
+    ).toBe('VALID');
+    // An unrecorded publication covers every subject.
+    expect(
+      (
+        await run(
+          makeCandidate({ quantity: 50, publishedCoverage: covered(null) }),
+          line,
+        )
+      ).items[0].status,
+    ).toBe('VALID');
+  });
+
+  it('switch on: an uncovered variant is VARIANT_NOT_IN_CATALOG like an OFF one', async () => {
+    const candidate = makeCandidate({
+      hasVariants: true,
+      variants: [variant('v1'), variant('v2')],
+      publishedCoverage: covered(['v1']),
+    });
+    const result = await run(candidate, [
+      { productId: 'prod-1', variantId: 'v2', quantity: 1 },
+      { productId: 'prod-1', variantId: 'v1', quantity: 1 },
+    ]);
+    expect(result.items.map((i) => i.blockingCodes)).toEqual([
+      ['VARIANT_NOT_IN_CATALOG'],
+      [],
+    ]);
+  });
+
+  it('switch off: coverage is ignored', async () => {
+    const result = await run(
+      makeCandidate({ quantity: 50, publishedCoverage: null }),
+      line,
+      CONTEXT,
+    );
+    expect(result.items[0].status).toBe('VALID');
+  });
+});

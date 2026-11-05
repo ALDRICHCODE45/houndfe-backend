@@ -44,6 +44,7 @@ function makeAggWithBindings(bindings: BindingSpec[]): TenantCatalogSettings {
       tenantId: T,
       isActive: true,
       catalogPublished: false,
+      catalogRequiresPublishedEditorial: false,
       catalogStockPresentationDefault: 'SYSTEM_STATUS',
       catalogStockPresentationDefaultCustomQty: null,
       updatedAt: new Date(),
@@ -97,6 +98,7 @@ interface ReloadTenantRow {
   id: string;
   isActive: boolean;
   catalogPublished: boolean;
+  catalogRequiresPublishedEditorial: boolean;
   catalogStockPresentationDefault:
     | 'SYSTEM_STATUS'
     | 'ABSTRACT_STATUS'
@@ -140,6 +142,7 @@ function reloadTenant(): ReloadTenantRow {
     id: T,
     isActive: true,
     catalogPublished: false,
+    catalogRequiresPublishedEditorial: false,
     catalogStockPresentationDefault: 'SYSTEM_STATUS',
     catalogStockPresentationDefaultCustomQty: null,
     updatedAt: new Date(),

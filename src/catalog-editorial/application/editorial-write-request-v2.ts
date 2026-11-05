@@ -7,7 +7,8 @@ export type EditorialWriteOperationV2 =
   | 'initialize'
   | 'save'
   | 'publish'
-  | 'discard';
+  | 'discard'
+  | 'unpublish';
 type TransitionBody = { expectedCycle: number; expectedRevision: number };
 export type ReceiptRequestV2 = {
   receiptVersion: 2;
@@ -54,7 +55,8 @@ export function createEditorialWriteRequestV2(
     operation !== 'initialize' &&
     operation !== 'save' &&
     operation !== 'publish' &&
-    operation !== 'discard'
+    operation !== 'discard' &&
+    operation !== 'unpublish'
   )
     invalid();
   const { vocabularyRevision, careConfirmation } = record(headers, [

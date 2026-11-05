@@ -1,12 +1,18 @@
 import type { PublicBranchDto } from '../dto/public-branch.dto';
 import type { PublicPriceContextDto } from '../dto/public-price-context.dto';
-import type { PublicCatalogCategoryFacet } from '../dto/public-category-facet.dto';
+import type {
+  PublicAttributeFacetSelection,
+  PublicCatalogAttributeFacet,
+  PublicCatalogCategoryFacet,
+} from '../dto/public-category-facet.dto';
 import type {
   ProductWithIncludes,
   ProductDetailWithIncludes,
   PersistedStockPresentationOverrides,
 } from '../mappers/public-product.mapper';
 import type { CatalogStockPresentationValue } from '../../../catalog-settings/domain/tenant-catalog-settings.aggregate';
+import type { PublicEditorialProjectionV2 } from '../../../catalog-editorial/domain/editorial-public-projection-v2';
+import type { PublishedCoverageV2 } from '../../../catalog-editorial/domain/editorial-published-subjects-v2';
 
 export interface ListProductsParams {
   q?: string;
@@ -16,6 +22,12 @@ export interface ListProductsParams {
   sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
   page: number;
   limit: number;
+  /**
+   * P4 S4 — FACET choice selection (OR within a definition, AND between
+   * definitions, correlated on one covered sellable). Contextual listing
+   * with the switch on only.
+   */
+  attributeFacets?: PublicAttributeFacetSelection[];
   /**
    * F1.WU5b — resolved tenant catalog-default global price-list ID. Public
    * list/detail use cases always thread it after fail-closed resolution;
@@ -41,6 +53,11 @@ export interface ResolvedPublicCatalogContext {
     catalogStockPresentationDefault: CatalogStockPresentationValue;
     catalogStockPresentationDefaultCustomQty: number | null;
   };
+  /**
+   * P4 S2 — the tenant's `catalogRequiresPublishedEditorial` switch, read by
+   * the same one-query lookup. Absent or false: today's catalog, no editorial.
+   */
+  requiresPublishedEditorial?: boolean;
 }
 
 /**
@@ -68,6 +85,11 @@ export interface PublicCartCandidate {
   catalogPriceLists: Array<{ globalPriceListId: string }>;
   /** Exact selected-context positive price; empty = no price in context. */
   priceLists: Array<{ priceCents: number }>;
+  /**
+   * P4 S2/S5 — current Published coverage, present only when the switch is
+   * on (null: no Published version). Classified by the application.
+   */
+  publishedCoverage?: PublishedCoverageV2 | null;
   /** Requested variants only; requested OFF variants are retained. */
   variants: Array<{
     id: string;
@@ -101,6 +123,8 @@ export interface PublicStockPresentationParticipant {
  */
 export interface PublicProductDetailProjection extends ProductDetailWithIncludes {
   stockPresentationParticipants: PublicStockPresentationParticipant[];
+  /** P4 S3 — Published projection; present only when the switch is on. */
+  editorial?: PublicEditorialProjectionV2;
 }
 
 /**
@@ -120,6 +144,8 @@ export interface PublicProductDetailProjection extends ProductDetailWithIncludes
 export interface PublicProductListProjection
   extends ProductWithIncludes, PersistedStockPresentationOverrides {
   stockPresentationParticipants: PublicStockPresentationParticipant[];
+  /** P4 S3 — Published projection; present only when the switch is on. */
+  editorial?: PublicEditorialProjectionV2;
 }
 
 export interface IPublicCatalogRepository {
@@ -195,6 +221,8 @@ export interface IPublicCatalogRepository {
     /** Base published/filter-matching count minus eligible count. */
     excludedCount: number;
     categories: PublicCatalogCategoryFacet[];
+    /** P4 S4 — FACET choice counts; present only when the switch is on. */
+    attributes?: PublicCatalogAttributeFacet[];
   }>;
 
   /**

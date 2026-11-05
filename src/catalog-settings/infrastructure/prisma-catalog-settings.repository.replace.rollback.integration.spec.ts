@@ -177,6 +177,7 @@ describeIfDb(
           tenantId: input.tenantId,
           isActive: true,
           catalogPublished: input.catalogPublished,
+          catalogRequiresPublishedEditorial: false,
           catalogStockPresentationDefault: input.mode,
           catalogStockPresentationDefaultCustomQty: input.customQty,
           updatedAt: now,

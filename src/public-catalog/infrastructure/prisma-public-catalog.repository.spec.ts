@@ -787,6 +787,8 @@ describe('F2.WU6 resolveTenantCatalogContext', () => {
       name: 'Lista Mayoreo',
       isCatalogDefault: true,
       stockPresentationDefaults: STOCK_DEFAULTS,
+      // P4 S2 — the published-editorial switch rides the same lookup.
+      requiresPublishedEditorial: false,
     });
     expect(findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { isCatalogDefault: true } }),
