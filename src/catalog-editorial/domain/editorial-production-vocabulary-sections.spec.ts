@@ -67,7 +67,7 @@ describe('production vocabulary sections (es-MX)', () => {
     ).toEqual([
       [
         'Para quién',
-        ['Especie', 'Etapa de vida', 'Tamaño de raza', 'Peso de la mascota'],
+        ['Especie', 'Etapa de vida', 'Tamaño de mascota', 'Peso de la mascota'],
       ],
       [
         'Qué es',
