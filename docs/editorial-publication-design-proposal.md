@@ -28,22 +28,35 @@ Each slice is a reviewable unit; the order is the dependency order.
 
 ### P2 — Readiness (preview of what blocks publishing)
 
-- `GET products/:id/editorial/draft/readiness` (read-only, no writes): runs the same chain as P1 in collecting mode and returns the missing/invalid items per definition, per offered variant and per section:
+- `GET products/:id/editorial/draft/readiness` (read-only, no writes): runs the same chain as P1 in collecting mode over the **saved** draft and returns every missing or invalid item. Shape agreed with the FE (2026-11-05):
 
 ```json
 {
   "ready": false,
+  "cycle": 3,
+  "draftRevision": 12,
   "vocabularyRevision": "ev2-sha256-…",
   "items": [
-    { "definitionCode": "measure.net_mass", "variantId": null, "sectionCode": "contenido-empaque",
-      "problem": "REQUIRED_MISSING" },
-    { "definitionCode": "animal.target", "variantId": null, "sectionCode": "para-quien",
-      "problem": "EVIDENCE_REQUIRED" }
-  ]
+    { "scope": "definition", "definitionCode": "measure.net_mass", "variantId": null,
+      "sectionCode": "contenido-empaque", "problem": "REQUIRED_MISSING",
+      "message": "Falta el peso neto." },
+    { "scope": "definition", "definitionCode": "animal.target", "variantId": null,
+      "sectionCode": "para-quien", "problem": "EVIDENCE_REQUIRED",
+      "message": "Agrega de dónde sale este dato." },
+    { "scope": "product", "definitionCode": null, "variantId": null, "sectionCode": null,
+      "problem": "NO_OFFERED_PRESENTATION",
+      "message": "El producto no se ofrece en ninguna lista de precios en línea." }
+  ],
+  "bySection": { "contenido-empaque": 1, "para-quien": 1 }
 }
 ```
 
+- `scope`: `definition` (one attribute), `variant` (a whole offered variant), `product`, `care` (the care review). Non-definition items have `definitionCode: null` and `sectionCode: null`; the FE shows them above the section index.
+- `variantId: null` means product level. Variant labels are not repeated (they come in the editorial read).
+- `problem` is the stable code for logic; `message` is human copy built by the backend in neutral Mexican Spanish with «tú».
 - Problems (proposal): `REQUIRED_MISSING`, `UNRESOLVED` (a declaration the rule needs is unknown), `EVIDENCE_REQUIRED`, `NA_NOT_ALLOWED`, `MAGNITUDE_MISMATCH`, `CARE_REVIEW_INCOMPLETE`, `NUMERIC_POLICY_PENDING`, `NO_OFFERED_PRESENTATION`.
+- `cycle`/`draftRevision` say which saved draft was evaluated. There is no dry-run with a body: the FE calls readiness after each save and, with unsaved changes, says «según lo último que guardaste». Live «falta N» while editing is computed by the FE; readiness is the authority for publishing.
+- **Publish failures reuse the same list:** an incomplete draft makes publish return `400` with the same `items[]` (and `bySection`), so the FE shows the same view when someone publishes with a stale readiness.
 - Needs collecting variants of the domain checks (today they throw on the first failure). Depends on decision D2, because it relaxes the "no field hints" rule.
 
 ### P3 — Published vs draft comparison
@@ -63,6 +76,9 @@ Each slice is a reviewable unit; the order is the dependency order.
 - Draft vs published state and the published revision (already in the read).
 - «Cambios frente a lo publicado» (P3).
 - A publish button that is enabled only when readiness is `ready: true` (P1 + P2).
+- The «Publicar» button lives in the new save bar next to «Guardar»: «Guardar» first, then «Publicar» becomes primary when there are no unsaved changes and `ready: true`.
+- With `ready: false`, «Publicar» is disabled and the explanation is the readiness list grouped by section (design-system Issue checklist pattern), not a tooltip.
+- Header state: «Borrador», or «Publicado · 4 nov» plus «Cambios sin publicar» when draft and published differ.
 
 ## 4. Accepted decisions that apply
 
