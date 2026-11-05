@@ -443,6 +443,12 @@ export interface ISaleRepository {
     }>
   >;
 
+  /**
+   * GET /sales `pagination.total`: number of rows `findManyConfirmed` can
+   * return for the same filters (same WHERE, no paging/sorting).
+   */
+  countManyConfirmed(input: SalesListExtendedFilter): Promise<number>;
+
   countConfirmed(input: SalesListBaseFilter): Promise<number>;
 
   /**
@@ -453,8 +459,8 @@ export interface ISaleRepository {
    * (`_sum.debtCents`) in one DB roundtrip — no extra DB query added.
    *
    * Same base filters as `countConfirmed` (confirmed-only, customerId
-   * honored, etc.) so `summary.salesCount === counts.all ===
-   * pagination.total` holds by construction.
+   * honored, etc.) so `summary.salesCount === counts.all` holds by
+   * construction. `pagination.total` uses `countManyConfirmed` instead.
    *
    * The adapter MUST normalize Prisma's null sums (empty match) to 0
    * before returning so the wire shape is `number` (never null).
@@ -582,6 +588,21 @@ export interface ISaleRepository {
       paymentMethodId: string | null;
       paymentMethodName: string | null;
       paymentMethodSubtitle: string | null;
+    }>;
+    /** Cancellation facts; null on non-canceled sales. Absent on older repository mocks. */
+    canceledAt?: Date | null;
+    cancelReason?: SaleCancelReason | null;
+    canceledBy?: { id: string; name: string } | null;
+    /** Refund obligations recorded at cancellation, oldest first. */
+    refunds?: Array<{
+      id: string;
+      method: SaleRefundMethod;
+      amountCents: number;
+      settledCents: number;
+      outstandingCents: number;
+      reason: SaleCancelReason;
+      status: 'PENDING';
+      createdAt: Date;
     }>;
   } | null>;
 }

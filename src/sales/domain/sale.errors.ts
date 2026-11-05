@@ -24,6 +24,18 @@ export class SaleNotCancellableError extends BusinessRuleViolationError {
   }
 }
 
+/**
+ * A canceled sale is readable (GET /sales/:id) but no longer editable:
+ * seller and due-date changes are rejected before any write. Code
+ * `SALE_CANCELED` (HTTP 422 via the DomainExceptionFilter default branch,
+ * same wrong-state precedent as `SALE_NOT_DELIVERABLE`).
+ */
+export class SaleCanceledError extends BusinessRuleViolationError {
+  constructor() {
+    super('SALE_CANCELED', 'SALE_CANCELED');
+  }
+}
+
 export class SaleDeliveredCannotCancelError extends BusinessRuleViolationError {
   constructor() {
     super('SALE_DELIVERED_CANNOT_CANCEL', 'SALE_DELIVERED_CANNOT_CANCEL');

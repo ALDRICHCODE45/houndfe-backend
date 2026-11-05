@@ -1820,6 +1820,17 @@ export class PrismaSaleRepository implements ISaleRepository {
     }));
   }
 
+  /**
+   * GET /sales `pagination.total` — counts with the exact WHERE that
+   * `findManyConfirmed` pages over (`buildExtendedWhere`: base filters,
+   * explicit status override, folio, ranges, payment method), through the
+   * same tenant-scoped client, so the total cannot drift from the rows.
+   */
+  async countManyConfirmed(input: SalesListExtendedFilter): Promise<number> {
+    const prisma = this.tenantPrisma.getClient();
+    return prisma.sale.count({ where: this.buildExtendedWhere(input) });
+  }
+
   async countConfirmed(input: SalesListBaseFilter): Promise<number> {
     const prisma = this.tenantPrisma.getClient();
     return prisma.sale.count({ where: this.buildBaseWhere(input) });
@@ -1834,10 +1845,10 @@ export class PrismaSaleRepository implements ISaleRepository {
    *
    * Same base filters as `countConfirmed` (`buildBaseWhere` — confirmed
    * only, customerId + cashier + date range honored). Extended filters
-   * are intentionally NOT included so `summary.salesCount ===
-   * counts.all === pagination.total` continues to hold (the existing
-   * KPI-count semantics — see the "ignores extended filters for KPI
-   * count methods" regression guard below).
+   * are intentionally NOT included so `summary.salesCount === counts.all`
+   * keeps the KPI-count semantics (see the "ignores extended filters for
+   * KPI count methods" regression guard). `pagination.total` is NOT this
+   * value: it comes from `countManyConfirmed` over the page filters.
    *
    * Null normalization: Prisma returns `_sum: { totalCents: null,
    * debtCents: null }` (NOT zero) when zero rows match the WHERE.
@@ -2048,8 +2059,10 @@ export class PrismaSaleRepository implements ISaleRepository {
   async findOneWithRelations(id: string) {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
+    // The detail is readable for confirmed and canceled sales; drafts stay
+    // private to the POS draft endpoints.
     const sale = await prisma.sale.findFirst({
-      where: { id, tenantId, status: 'CONFIRMED' },
+      where: { id, tenantId, status: { in: ['CONFIRMED', 'CANCELED'] } },
       include: {
         customer: { select: { id: true, firstName: true, lastName: true } },
         user: { select: { id: true, name: true } },
@@ -2107,10 +2120,31 @@ export class PrismaSaleRepository implements ISaleRepository {
           },
           orderBy: { createdAt: 'asc' },
         },
+        refunds: {
+          select: {
+            id: true,
+            method: true,
+            amountCents: true,
+            settledCents: true,
+            reason: true,
+            status: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        },
       },
     });
 
     if (!sale) return null;
+
+    // `canceledByUserId` has no Prisma relation, so the actor is resolved
+    // with its own tenant-client lookup.
+    const canceledBy = sale.canceledByUserId
+      ? await prisma.user.findUnique({
+          where: { id: sale.canceledByUserId },
+          select: { id: true, name: true },
+        })
+      : null;
 
     return {
       id: sale.id,
@@ -2248,6 +2282,19 @@ export class PrismaSaleRepository implements ISaleRepository {
           paymentMethodSubtitle: catalogSnapshot?.subtitle ?? null,
         };
       }),
+      canceledAt: sale.canceledAt,
+      cancelReason: sale.cancelReason,
+      canceledBy,
+      refunds: (sale.refunds ?? []).map((refund) => ({
+        id: refund.id,
+        method: toDomainRefundMethod(refund.method),
+        amountCents: refund.amountCents,
+        settledCents: refund.settledCents,
+        outstandingCents: refund.amountCents - refund.settledCents,
+        reason: refund.reason,
+        status: refund.status,
+        createdAt: refund.createdAt,
+      })),
     };
   }
 

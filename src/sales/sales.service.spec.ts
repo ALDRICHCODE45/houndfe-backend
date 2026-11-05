@@ -81,6 +81,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     persistCollectedPayments: jest.fn(),
     updatePaymentReference: jest.fn(),
     findManyConfirmed: jest.fn(),
+    countManyConfirmed: jest.fn(),
     countConfirmed: jest.fn(),
     aggregateSummaryConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
@@ -1503,6 +1504,86 @@ describe('SalesService', () => {
         'sale.seller.cleared',
         expect.anything(),
       );
+    });
+  });
+
+  // GET /sales/:id now reads CANCELED sales, so every mutation reachable
+  // from that screen must reject a canceled sale before writing anything.
+  describe('canceled sale mutations', () => {
+    const makeCanceledSale = () =>
+      Sale.fromPersistence({
+        id: 'sale-canceled-1',
+        userId: 'user-1',
+        status: 'CANCELED',
+        sellerUserId: 'seller-1',
+        confirmedAt: new Date('2026-05-15T18:00:00.000Z'),
+        dueDate: null,
+        items: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+    it('assignSeller rejects with SALE_CANCELED without writing', async () => {
+      const sale = makeCanceledSale();
+      saleRepo.findById.mockResolvedValue(sale);
+      (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+        user: { findUnique: jest.fn().mockResolvedValue({ id: 'seller-2' }) },
+      });
+      const detailSpy = jest.spyOn(service, 'getSaleDetail');
+
+      await expect(
+        service.assignSeller(sale.id, 'actor-1', { sellerUserId: 'seller-2' }),
+      ).rejects.toMatchObject({ code: 'SALE_CANCELED' });
+
+      expect(sale.sellerUserId).toBe('seller-1');
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+      expect(detailSpy).not.toHaveBeenCalled();
+    });
+
+    it('clearSeller rejects with SALE_CANCELED without writing', async () => {
+      const sale = makeCanceledSale();
+      saleRepo.findById.mockResolvedValue(sale);
+      const detailSpy = jest.spyOn(service, 'getSaleDetail');
+
+      await expect(
+        service.clearSeller(sale.id, 'actor-1'),
+      ).rejects.toMatchObject({ code: 'SALE_CANCELED' });
+
+      expect(sale.sellerUserId).toBe('seller-1');
+      expect(saleRepo.save).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+      expect(detailSpy).not.toHaveBeenCalled();
+    });
+
+    it('setDueDate rejects with SALE_CANCELED without writing', async () => {
+      const sale = makeCanceledSale();
+      saleRepo.findById.mockResolvedValue(sale);
+
+      await expect(
+        service.setDueDate(sale.id, { dueDate: '2099-01-01T00:00:00.000Z' }),
+      ).rejects.toMatchObject({ code: 'SALE_CANCELED' });
+
+      expect(sale.dueDate).toBeNull();
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('setDueDate keeps SALE_NOT_FOUND for a draft sale', async () => {
+      saleRepo.findById.mockResolvedValue(
+        Sale.fromPersistence({
+          id: 'sale-draft-due',
+          userId: 'user-1',
+          status: 'DRAFT',
+          items: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+      );
+
+      await expect(
+        service.setDueDate('sale-draft-due', { dueDate: null }),
+      ).rejects.toMatchObject({ code: 'SALE_NOT_FOUND' });
+      expect(saleRepo.save).not.toHaveBeenCalled();
     });
   });
 
@@ -5609,7 +5690,7 @@ describe('SalesService', () => {
       expect(customerAddressFindUnique).not.toHaveBeenCalled();
       expect(result.folio).toBe('A-2606-000001');
       expect(saleRepo.save).toHaveBeenCalledTimes(1);
-      const persisted = saleRepo.save.mock.calls[0]?.[0] as Sale;
+      const persisted = saleRepo.save.mock.calls[0]?.[0];
       expect(persisted.shippingAddressId).toBeNull();
     });
 
@@ -5625,7 +5706,7 @@ describe('SalesService', () => {
       expect(customerAddressFindUnique).not.toHaveBeenCalled();
       expect(result.folio).toBe('A-2606-000001');
       expect(saleRepo.save).toHaveBeenCalledTimes(1);
-      const persisted = saleRepo.save.mock.calls[0]?.[0] as Sale;
+      const persisted = saleRepo.save.mock.calls[0]?.[0];
       expect(persisted.shippingAddressId).toBeNull();
     });
   });
@@ -6741,6 +6822,7 @@ describe('SalesService', () => {
         { paymentStatus: 'CREDIT', _count: { _all: 1 } },
       ] as any);
       saleRepo.countNotDeliveredConfirmed.mockResolvedValue(3);
+      saleRepo.countManyConfirmed.mockResolvedValue(4);
 
       const result = await service.listSales({
         page: 2,
@@ -6749,11 +6831,12 @@ describe('SalesService', () => {
       } as any);
 
       expect(result.data).toHaveLength(1);
+      // pagination counts the filtered set (4 PAID), not the KPI base (7).
       expect(result.pagination).toEqual({
         page: 2,
         limit: 1,
-        total: 7,
-        totalPages: 7,
+        total: 4,
+        totalPages: 4,
       });
       expect(result.counts).toEqual({
         all: 7,
@@ -6825,8 +6908,8 @@ describe('SalesService', () => {
 
     // ── Customer sales history — WU backend summary block ─────────
     // The additive `summary` block on GET /sales must:
-    //   (a) match `pagination.total` and `counts.all` (same base
-    //       filters as the count query — confirmed-only),
+    //   (a) match `counts.all` (same base filters — confirmed-only),
+    //       and `pagination.total` only when no extended filter applies,
     //   (b) carry totalSoldCents + outstandingDebtCents from the
     //       same aggregate so we don't add a 5th DB query,
     //   (c) propagate the customerId filter (UI sends it to scope
@@ -6834,6 +6917,8 @@ describe('SalesService', () => {
     //   (d) normalize null Prisma sums to zero when no rows match.
     it('returns summary block with salesCount matching counts.all and pagination.total', async () => {
       saleRepo.findManyConfirmed.mockResolvedValue([] as any);
+      // No extended filters: the filtered set IS the base set.
+      saleRepo.countManyConfirmed.mockResolvedValue(7);
       saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
         salesCount: 7,
         totalSoldCents: 12345,
@@ -6905,6 +6990,7 @@ describe('SalesService', () => {
       });
       saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([] as any);
       saleRepo.countNotDeliveredConfirmed.mockResolvedValue(0);
+      saleRepo.countManyConfirmed.mockResolvedValue(0);
 
       const result = await service.listSales({
         customerId: ['00000000-0000-4000-8000-000000000000'],
@@ -6918,6 +7004,110 @@ describe('SalesService', () => {
       expect(result.pagination.total).toBe(0);
       expect(result.pagination.totalPages).toBe(0);
       expect(result.counts.all).toBe(0);
+    });
+    // GET /sales?status=CANCELED&folio=… once reported `total: 62` for a
+    // single matching row: `pagination.total` was the KPI base count. It
+    // must count with exactly the filters that drove the page, while
+    // `counts` and `summary` keep their base-filter KPI semantics.
+    describe('pagination.total follows the page filters', () => {
+      const KPI_SUMMARY = {
+        salesCount: 62,
+        totalSoldCents: 990000,
+        outstandingDebtCents: 1500,
+      };
+
+      beforeEach(() => {
+        saleRepo.findManyConfirmed.mockResolvedValue([] as any);
+        saleRepo.aggregateSummaryConfirmed.mockResolvedValue(KPI_SUMMARY);
+        saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([
+          { paymentStatus: 'PAID', _count: { _all: 60 } },
+          { paymentStatus: 'CREDIT', _count: { _all: 2 } },
+        ] as any);
+        saleRepo.countNotDeliveredConfirmed.mockResolvedValue(5);
+      });
+
+      it.each([
+        ['status + folio', { status: 'CANCELED', folio: 'V-0062' }, 1],
+        [
+          'payment + delivery status',
+          { paymentStatus: 'PAID', deliveryStatus: 'PENDING' },
+          9,
+        ],
+        [
+          'customer + cashier + dates',
+          {
+            customerId: ['f9d2f368-10be-4f4b-a3cc-0e67735f7f26'],
+            cashierUserId: ['0b0b0b0b-0000-4000-8000-000000000001'],
+            confirmedFrom: '2026-05-01T00:00:00.000Z',
+            confirmedTo: '2026-05-31T23:59:59.999Z',
+          },
+          3,
+        ],
+        [
+          'search + ranges + payment method',
+          {
+            q: 'ana',
+            totalMin: 1000,
+            debtMax: 0,
+            paymentMethod: 'CASH',
+          },
+          0,
+        ],
+      ])(
+        'counts the page filter set for %s',
+        async (_label, filters, filteredCount) => {
+          saleRepo.countManyConfirmed.mockResolvedValue(filteredCount);
+
+          const result = await service.listSales({
+            page: 1,
+            limit: 20,
+            sortBy: 'totalCents',
+            sortOrder: 'asc',
+            ...filters,
+          } as any);
+
+          // Same filter object as the page, minus paging/sorting.
+          const pageFilters: Record<string, unknown> = {
+            ...saleRepo.findManyConfirmed.mock.calls[0][0],
+          };
+          for (const key of ['page', 'limit', 'sortBy', 'sortOrder']) {
+            delete pageFilters[key];
+          }
+          expect(saleRepo.countManyConfirmed).toHaveBeenCalledTimes(1);
+          expect(saleRepo.countManyConfirmed).toHaveBeenCalledWith(pageFilters);
+
+          expect(result.pagination).toEqual({
+            page: 1,
+            limit: 20,
+            total: filteredCount,
+            totalPages: filteredCount === 0 ? 0 : 1,
+          });
+          // KPI blocks are unchanged: still the base-filter aggregates.
+          expect(result.counts).toEqual({
+            all: 62,
+            pendingPayments: 2,
+            notDelivered: 5,
+          });
+          expect(result.summary).toEqual(KPI_SUMMARY);
+        },
+      );
+
+      it('derives totalPages from the filtered count', async () => {
+        saleRepo.countManyConfirmed.mockResolvedValue(41);
+
+        const result = await service.listSales({
+          limit: 20,
+          paymentStatus: 'PAID',
+        } as any);
+
+        expect(result.pagination).toEqual({
+          page: 1,
+          limit: 20,
+          total: 41,
+          totalPages: 3,
+        });
+        expect(result.counts.all).toBe(62);
+      });
     });
   });
 
@@ -7165,6 +7355,113 @@ describe('SalesService', () => {
       await expect(service.getSaleDetail('invalid-id')).rejects.toThrow(
         'Validation failed (uuid is expected)',
       );
+    });
+
+    it('surfaces the cancellation facts and refund obligations of a canceled sale', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'V-0050',
+        status: 'CANCELED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        dueDate: null,
+        subtotalCents: 3000,
+        discountCents: 0,
+        totalCents: 3000,
+        paidCents: 3000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'PENDING',
+        customer: null,
+        cashier: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [],
+        canceledAt: new Date('2026-05-09T09:00:00.000Z'),
+        cancelReason: 'CUSTOMER_REQUEST',
+        canceledBy: { id: 'u2', name: 'Gerente' },
+        refunds: [
+          {
+            id: 'refund-1',
+            method: 'CASH',
+            amountCents: 3000,
+            settledCents: 1000,
+            outstandingCents: 2000,
+            reason: 'CUSTOMER_REQUEST',
+            status: 'PENDING',
+            createdAt: new Date('2026-05-09T09:00:00.000Z'),
+          },
+        ],
+      });
+      saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+
+      const result = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result).toMatchObject({
+        status: 'CANCELED',
+        canceledAt: '2026-05-09T09:00:00.000Z',
+        cancelReason: 'CUSTOMER_REQUEST',
+        canceledBy: { id: 'u2', name: 'Gerente' },
+        refunds: [
+          {
+            id: 'refund-1',
+            method: 'CASH',
+            amountCents: 3000,
+            settledCents: 1000,
+            outstandingCents: 2000,
+            reason: 'CUSTOMER_REQUEST',
+            status: 'PENDING',
+            createdAt: '2026-05-09T09:00:00.000Z',
+          },
+        ],
+      });
+    });
+
+    it('reports empty cancellation facts on a confirmed sale', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+        folio: 'V-0051',
+        status: 'CONFIRMED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        dueDate: null,
+        subtotalCents: 1000,
+        discountCents: 0,
+        totalCents: 1000,
+        paidCents: 1000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'DELIVERED',
+        customer: null,
+        cashier: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [],
+        canceledAt: null,
+        cancelReason: null,
+        canceledBy: null,
+        refunds: [],
+      });
+      saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+
+      const result = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578885',
+      );
+
+      expect(result).toMatchObject({
+        canceledAt: null,
+        cancelReason: null,
+        canceledBy: null,
+        refunds: [],
+      });
     });
 
     it('throws 404 for missing or cross-tenant sale', async () => {

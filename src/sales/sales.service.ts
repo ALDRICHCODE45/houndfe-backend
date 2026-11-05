@@ -89,6 +89,7 @@ import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
   InvalidDueDateError,
+  SaleCanceledError,
   SaleFullyPaidError,
   SellerNotFoundError,
 } from './domain/sale.errors';
@@ -1542,11 +1543,12 @@ export class SalesService {
     // `aggregateSummaryConfirmed` call replaces the dedicated
     // `countConfirmed` query for the same base filters; one Prisma
     // `aggregate` returns `salesCount` + `totalSoldCents` +
-    // `outstandingDebtCents` so we do NOT add a 5th DB query to the
-    // parallel block. `summary.salesCount` is then assigned to
-    // `pagination.total` and `counts.all` so all three stay in sync
-    // by construction.
-    const [data, summary, groupedPaymentStatus, notDelivered] =
+    // `outstandingDebtCents`, and `summary.salesCount` doubles as
+    // `counts.all` so the KPI blocks stay in sync by construction.
+    // `pagination.total` is NOT a KPI: it counts with the exact filters
+    // that drove the page (`countManyConfirmed`), so `?status=CANCELED&
+    // folio=…` reports the matching rows instead of the base total.
+    const [data, total, summary, groupedPaymentStatus, notDelivered] =
       await Promise.all([
         this.saleRepo.findManyConfirmed({
           page,
@@ -1555,23 +1557,24 @@ export class SalesService {
           sortOrder: query.sortOrder ?? 'desc',
           ...extendedFilters,
         }),
+        this.saleRepo.countManyConfirmed(extendedFilters),
         this.saleRepo.aggregateSummaryConfirmed(baseFilters),
         this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
         this.saleRepo.countNotDeliveredConfirmed(baseFilters),
       ]);
 
-    const total = summary.salesCount;
+    const kpiTotal = summary.salesCount;
     const paidCount = groupedPaymentStatus
       .filter((item) => item.paymentStatus === 'PAID')
       .reduce((acc, item) => acc + item._count._all, 0);
-    const pendingPayments = Math.max(0, total - paidCount);
+    const pendingPayments = Math.max(0, kpiTotal - paidCount);
     const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
 
     return {
       data,
       pagination: { page, limit, total, totalPages },
       counts: {
-        all: total,
+        all: kpiTotal,
         pendingPayments,
         notDelivered,
       },
@@ -1907,6 +1910,13 @@ export class SalesService {
           author: comment.author,
         })),
       }),
+      canceledAt: sale.canceledAt?.toISOString() ?? null,
+      cancelReason: sale.cancelReason ?? null,
+      canceledBy: sale.canceledBy ?? null,
+      refunds: (sale.refunds ?? []).map((refund) => ({
+        ...refund,
+        createdAt: refund.createdAt.toISOString(),
+      })),
     };
   }
 
@@ -3934,6 +3944,9 @@ export class SalesService {
     dto: UpdateSaleDueDateDto,
   ): Promise<SaleDetailResponseDto> {
     const sale = await this.saleRepo.findById(saleId);
+    if (sale?.status === 'CANCELED') {
+      throw new SaleCanceledError();
+    }
     if (!sale || sale.status !== 'CONFIRMED') {
       throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
     }

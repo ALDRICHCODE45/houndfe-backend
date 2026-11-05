@@ -63,6 +63,9 @@ function makeMockPrisma() {
       updateMany: jest.fn(),
       deleteMany: jest.fn(),
     },
+    user: {
+      findUnique: jest.fn(),
+    },
     // Unit 3 — promotion persistence (sale_promotion_applied + sale_promotion_vetoes)
     salePromotionApplied: {
       deleteMany: jest.fn(),
@@ -951,6 +954,102 @@ describe('PrismaSaleRepository', () => {
     });
   });
 
+  // `pagination.total` for GET /sales must count exactly the rows the
+  // page query can return: same WHERE (tenant client, status override,
+  // folio, ranges, base filters), no paging or sorting.
+  describe('countManyConfirmed', () => {
+    const pageAndCountWhere = async (input: Record<string, unknown>) => {
+      prisma.sale.findMany.mockResolvedValue([]);
+      prisma.sale.count.mockResolvedValue(1);
+
+      await repo.findManyConfirmed({
+        page: 3,
+        limit: 20,
+        sortBy: 'totalCents',
+        sortOrder: 'asc',
+        ...input,
+      } as any);
+      const total = await repo.countManyConfirmed(input as any);
+
+      const findManyArgs = prisma.sale.findMany.mock.calls.at(-1)?.[0];
+      const countArgs = prisma.sale.count.mock.calls.at(-1)?.[0];
+      return { total, findManyArgs, countArgs };
+    };
+
+    it.each([
+      ['no filters', {}],
+      ['status + folio', { status: ['CANCELED'], folio: ['V-0062'] }],
+      [
+        'payment/delivery status + payment method',
+        {
+          paymentStatus: ['PAID'],
+          deliveryStatus: ['PENDING'],
+          paymentMethod: ['CASH'],
+          paymentMethodIncludeNull: true,
+        },
+      ],
+      [
+        'customer + cashier + confirmed dates + search',
+        {
+          q: 'ana',
+          customerId: ['f9d2f368-10be-4f4b-a3cc-0e67735f7f26'],
+          customerIncludeNull: true,
+          cashierUserId: ['0b0b0b0b-0000-4000-8000-000000000001'],
+          confirmedFrom: new Date('2026-05-01T00:00:00.000Z'),
+          confirmedTo: new Date('2026-05-31T23:59:59.999Z'),
+        },
+      ],
+      [
+        'total/debt/due-date ranges',
+        {
+          totalMin: 1000,
+          totalMax: 5000,
+          debtMin: 0,
+          debtMax: 100,
+          dueDateFrom: new Date('2026-06-01T00:00:00.000Z'),
+          dueDateIncludeNull: true,
+        },
+      ],
+    ])('uses the page WHERE for %s', async (_label, input) => {
+      const { total, findManyArgs, countArgs } = await pageAndCountWhere(input);
+
+      expect(total).toBe(1);
+      expect(countArgs).toEqual({ where: findManyArgs.where });
+    });
+
+    it('honors an explicit CANCELED status instead of the CONFIRMED default', async () => {
+      const { countArgs } = await pageAndCountWhere({
+        status: ['CANCELED'],
+        folio: ['V-0062'],
+      });
+
+      expect(countArgs.where.AND).toEqual(
+        expect.arrayContaining([
+          { status: { in: ['CANCELED'] } },
+          { folio: { in: ['V-0062'] } },
+        ]),
+      );
+      expect(countArgs.where.AND[0].status).toBeUndefined();
+    });
+
+    it('keeps the CONFIRMED default when no status filter is given', async () => {
+      const { countArgs } = await pageAndCountWhere({ folio: ['V-0001'] });
+
+      expect(countArgs.where.AND[0]).toEqual(
+        expect.objectContaining({ status: 'CONFIRMED' }),
+      );
+    });
+
+    it('reads through the tenant-scoped client', async () => {
+      prisma.sale.count.mockResolvedValue(0);
+      tenantPrisma.getClient.mockClear();
+
+      await repo.countManyConfirmed({ status: ['CANCELED'] } as any);
+
+      expect(tenantPrisma.getClient).toHaveBeenCalled();
+    });
+  });
+
   // ── Customer sales history — WU backend summary block ────────
   // Single Prisma `aggregate` call replaces the dedicated
   // `countConfirmed` query for the GET /sales summary block:
@@ -1456,7 +1555,7 @@ describe('PrismaSaleRepository', () => {
   });
 
   describe('findOneWithRelations', () => {
-    it('loads detail relations with tenant-safe confirmed filter', async () => {
+    it('loads detail relations with tenant-safe confirmed-or-canceled filter', async () => {
       prisma.sale.findFirst.mockResolvedValue({
         id: 'sale-1',
         folio: 'V-0042',
@@ -1516,7 +1615,11 @@ describe('PrismaSaleRepository', () => {
 
       expect(prisma.sale.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'sale-1', tenantId: 'tenant-1', status: 'CONFIRMED' },
+          where: {
+            id: 'sale-1',
+            tenantId: 'tenant-1',
+            status: { in: ['CONFIRMED', 'CANCELED'] },
+          },
           include: expect.objectContaining({
             customer: { select: { id: true, firstName: true, lastName: true } },
             user: { select: { id: true, name: true } },
@@ -1653,6 +1756,72 @@ describe('PrismaSaleRepository', () => {
 
       expect(result?.items[0].discountCents).toBe(7000);
       expect(result?.items[0].subtotalCents).toBe(126000);
+    });
+
+    it('maps cancellation facts, the canceling actor and refund obligations', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        id: 'sale-canceled',
+        folio: 'V-0050',
+        status: 'CANCELED',
+        channel: 'POS',
+        register: 'Principal',
+        confirmedAt: new Date('2026-05-08T11:00:00.000Z'),
+        dueDate: null,
+        createdAt: new Date('2026-05-08T10:00:00.000Z'),
+        subtotalCents: 3000,
+        discountCents: 0,
+        totalCents: 3000,
+        paidCents: 3000,
+        debtCents: 0,
+        changeDueCents: 0,
+        paymentStatus: 'PAID',
+        deliveryStatus: 'PENDING',
+        canceledAt: new Date('2026-05-09T09:00:00.000Z'),
+        cancelReason: 'CUSTOMER_REQUEST',
+        canceledByUserId: 'u2',
+        customer: null,
+        user: { id: 'u1', name: 'Caja 1' },
+        seller: null,
+        items: [],
+        payments: [],
+        refunds: [
+          {
+            id: 'refund-1',
+            method: 'CASH',
+            amountCents: 3000,
+            settledCents: 1000,
+            reason: 'CUSTOMER_REQUEST',
+            status: 'PENDING',
+            createdAt: new Date('2026-05-09T09:00:00.000Z'),
+          },
+        ],
+      });
+      prisma.user.findUnique.mockResolvedValue({ id: 'u2', name: 'Gerente' });
+
+      const result = await repo.findOneWithRelations('sale-canceled');
+
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { id: 'u2' },
+        select: { id: true, name: true },
+      });
+      expect(result).toMatchObject({
+        status: 'CANCELED',
+        canceledAt: new Date('2026-05-09T09:00:00.000Z'),
+        cancelReason: 'CUSTOMER_REQUEST',
+        canceledBy: { id: 'u2', name: 'Gerente' },
+        refunds: [
+          {
+            id: 'refund-1',
+            method: 'cash',
+            amountCents: 3000,
+            settledCents: 1000,
+            outstandingCents: 2000,
+            reason: 'CUSTOMER_REQUEST',
+            status: 'PENDING',
+            createdAt: new Date('2026-05-09T09:00:00.000Z'),
+          },
+        ],
+      });
     });
 
     it('returns null when no tenant-visible sale exists', async () => {
