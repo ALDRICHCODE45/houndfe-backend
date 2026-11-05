@@ -25,6 +25,25 @@ bare vocabulary reader is not used by this endpoint; no starter defaults are add
   before-image. Consequence: a client caching by revision may keep showing stale help
   text until it reloads the vocabulary, and the body can no longer be re-hashed
   field-for-field by a client that includes `description`; strip it first.
+- **Form sections (presentation metadata, pure code).** Each production family
+  (`food`, `treat`, `toy`, `hygiene`, `accessory`, `habitat`, `care`) may carry
+  `vocabulary.families[].sections: [{code,label,sortOrder}]`, and each of its
+  bindings `sectionCode` and `sectionSortOrder` (0-based position inside the
+  section). `sectionSortOrder` is used because `bindings[].sortOrder` already
+  exists (binding order) and is unchanged. Labels are es-MX sentence case; codes are
+  stable kebab-case and mean the same in every family (`para-quien`, `que-es`,
+  `caracteristicas`, `formula`, `medidas-ajuste`, `medidas`, `equipo-electrico`,
+  `contenido-empaque`, `uso`). Section `sortOrder` is the section's fixed position
+  in its family and may have gaps: only sections with at least one bound definition
+  are listed. Keys are **omitted, never `null`**, for non-production (starter)
+  families and for bindings outside every section; clients show those under their
+  own fallback group. Example:
+  `{"code":"food","label":"Alimento","sections":[{"code":"para-quien","label":"Para quién","sortOrder":0},…],"bindings":[{"definitionCode":"animal.target","sortOrder":0,…,"sectionCode":"para-quien","sectionSortOrder":0},…]}`.
+  The map lives in `src/catalog-editorial/domain/editorial-production-vocabulary-sections.ts`;
+  nothing is stored, so no migration, seed or apply command exists or is needed.
+- **The revision does not cover sections either.** Like descriptions, they are
+  attached after the digest; strip `sections`, `sectionCode` and `sectionSortOrder`
+  before re-hashing the body.
 - Missing semantic metadata or unrepresentable content fails the whole response
   with 500 EDITORIAL_VOCABULARY_UNREPRESENTABLE. Unexpected read failures return
   500 INTERNAL_ERROR, without messages, causes, partial metadata or revision headers.

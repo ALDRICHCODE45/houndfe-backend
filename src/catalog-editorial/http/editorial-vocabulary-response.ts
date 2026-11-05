@@ -1,4 +1,5 @@
 import { withDefinitionDescriptions } from '../application/editorial-vocabulary-descriptions';
+import { withFamilySections } from '../application/editorial-vocabulary-sections';
 import {
   EditorialVocabularyUnrepresentableError,
   readEditorialVocabulary,
@@ -11,6 +12,8 @@ import {
 /** Response descriptor; callers must complete current auth/authority first.
  * A source that can also report definition descriptions (one observation) gets
  * them attached after the revision is computed, so they never change it.
+ * Production family sections (static presentation metadata) are attached the
+ * same way, after the revision.
  */
 export async function createEditorialVocabularyHttpResponse(
   source: {
@@ -48,9 +51,11 @@ export async function createEditorialVocabularyHttpResponse(
     return {
       statusCode: 200,
       headers,
-      body: observed
-        ? withDefinitionDescriptions(body, observed.descriptions)
-        : body,
+      body: withFamilySections(
+        observed
+          ? withDefinitionDescriptions(body, observed.descriptions)
+          : body,
+      ),
     };
   } catch (error) {
     return failure(
