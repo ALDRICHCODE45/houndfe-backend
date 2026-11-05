@@ -18,6 +18,19 @@ import type {
   ProductDetailWithIncludes,
 } from '../application/mappers/public-product.mapper';
 import type { Prisma } from '@prisma/client';
+import {
+  readEditorialPublishedCoverageV2,
+  readEditorialTenantPublishedCoverageV2,
+} from '../../catalog-editorial/infrastructure/prisma-editorial-published-coverage-v2';
+import { readEditorialPublicVocabularyV2 } from '../../catalog-editorial/infrastructure/prisma-editorial-public-vocabulary-v2';
+import {
+  coversPublishedSubjectV2,
+  type PublishedCoverageV2,
+} from '../../catalog-editorial/domain/editorial-published-subjects-v2';
+import {
+  projectPublishedEditorialV2,
+  type PublicEditorialProjectionV2,
+} from '../../catalog-editorial/domain/editorial-public-projection-v2';
 
 /**
  * F1.WU5c1 — single publication-survivorship predicate. A product survives
@@ -31,6 +44,58 @@ const PUBLICATION_SURVIVORSHIP: Prisma.ProductWhereInput = {
     { variants: { some: { catalogPublishMode: { not: 'OFF' } } } },
   ],
 };
+
+/**
+ * P4 S2/S5 — Published editorial scope, applied in the `where` before
+ * pagination when the tenant switch is on. A product needs a current
+ * Published version; a variant must be a subject that version covered (an
+ * unrecorded publication covers all), so an uncovered variant is treated
+ * exactly like an OFF one; a simple product needs its presentation covered.
+ * T4 facet/search predicates join the same `AND` list.
+ */
+type EditorialScope = {
+  products: Prisma.ProductWhereInput;
+  variants: Prisma.VariantWhereInput;
+};
+
+function editorialScope(
+  coverage: ReadonlyMap<string, PublishedCoverageV2>,
+): EditorialScope {
+  const simple: string[] = [];
+  const unrecorded: string[] = [];
+  const covered: string[] = [];
+  for (const [productId, { subjects }] of coverage) {
+    if (coversPublishedSubjectV2(coverage.get(productId), null))
+      simple.push(productId);
+    if (subjects === null) unrecorded.push(productId);
+    else for (const s of subjects) if (s !== null) covered.push(s);
+  }
+  return {
+    products: {
+      OR: [
+        { hasVariants: false, id: { in: simple } },
+        { hasVariants: true, id: { in: [...coverage.keys()] } },
+      ],
+    },
+    variants: {
+      OR: [{ productId: { in: unrecorded } }, { id: { in: covered } }],
+    },
+  };
+}
+
+/** Same-tenant non-OFF variants, narrowed to covered subjects when scoped. */
+function publicVariantWhere(
+  tenantId: string,
+  scope: EditorialScope | null,
+): Prisma.VariantWhereInput {
+  return scope
+    ? { tenantId, catalogPublishMode: { not: 'OFF' }, AND: [scope.variants] }
+    : { tenantId, catalogPublishMode: { not: 'OFF' } };
+}
+
+const PUBLISHED_DOCUMENT_INCLUDE = {
+  editorialState: { select: { publishedDocument: true } },
+} as const;
 
 @Injectable()
 export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
@@ -135,6 +200,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
             // same one-query lookup; no second query, no fallback.
             catalogStockPresentationDefault: true,
             catalogStockPresentationDefaultCustomQty: true,
+            catalogRequiresPublishedEditorial: true,
           },
         },
       },
@@ -158,6 +224,8 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         catalogStockPresentationDefaultCustomQty:
           binding.tenant.catalogStockPresentationDefaultCustomQty,
       },
+      requiresPublishedEditorial:
+        binding.tenant.catalogRequiresPublishedEditorial === true,
     };
   }
 
@@ -316,6 +384,12 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
   }> {
     const client = this.tenantPrisma.getClient();
     const { tenantId } = params;
+    const scope = params.context.requiresPublishedEditorial
+      ? editorialScope(
+          await readEditorialTenantPublishedCoverageV2(this.prisma, tenantId),
+        )
+      : null;
+    const publicVariant = publicVariantWhere(tenantId, scope);
 
     const { globalPriceListId } = params.context;
     // F2 exact-context only: the selected global list, positive prices, no
@@ -338,16 +412,10 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       PUBLICATION_SURVIVORSHIP,
       // Same-tenant survivorship: variant must be tenant-owned non-OFF.
       {
-        OR: [
-          { hasVariants: false },
-          {
-            variants: {
-              some: { tenantId, catalogPublishMode: { not: 'OFF' } },
-            },
-          },
-        ],
+        OR: [{ hasVariants: false }, { variants: { some: publicVariant } }],
       },
     ];
+    if (scope) gatesAnd.push(scope.products);
     if (params.filters.categoryId) {
       gatesAnd.push({ categoryId: params.filters.categoryId });
     }
@@ -363,8 +431,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           {
             variants: {
               some: {
-                tenantId,
-                catalogPublishMode: { not: 'OFF' },
+                ...publicVariant,
                 OR: [{ name: ci }, { option: ci }, { value: ci }],
               },
             },
@@ -421,8 +488,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
                       priceLists: { some: priceListWhere },
                       variants: {
                         some: {
-                          tenantId,
-                          catalogPublishMode: { not: 'OFF' },
+                          ...publicVariant,
                           variantPrices: { some: variantPriceWhere },
                         },
                       },
@@ -466,7 +532,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           take: 1,
         },
         variants: {
-          where: { tenantId, catalogPublishMode: { not: 'OFF' } },
+          where: publicVariant,
           select: {
             id: true,
             name: true,
@@ -482,6 +548,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
             },
           },
         },
+        ...(scope ? PUBLISHED_DOCUMENT_INCLUDE : {}),
       },
     });
 
@@ -491,8 +558,9 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       params.filters.sort,
     );
 
+    const participating = this.withStockPresentationParticipants(sorted);
     return {
-      items: this.withStockPresentationParticipants(sorted),
+      items: scope ? await this.withEditorial(participating) : participating,
       total: eligibleTotal,
       excludedCount: baseTotal - eligibleTotal,
       categories: await this.toCategoryFacets(facetGroups),
@@ -546,6 +614,22 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     const { tenantId, productId } = params;
     const { globalPriceListId } = params.context;
 
+    // P4 S2/S5 — with the switch on, no Published version is a generic miss
+    // and only covered subjects survive, exactly like the list.
+    let coverage: PublishedCoverageV2 | undefined;
+    if (params.context.requiresPublishedEditorial) {
+      coverage = (
+        await readEditorialPublishedCoverageV2(this.prisma, tenantId, [
+          productId,
+        ])
+      ).get(productId);
+      if (!coverage) return null;
+    }
+    const scope = coverage
+      ? editorialScope(new Map([[productId, coverage]]))
+      : null;
+    const publicVariant = publicVariantWhere(tenantId, scope);
+
     // F2 exact-context only: selected global list, positive prices, no
     // default/alternate-list fallback.
     const priceListWhere: Prisma.PriceListWhereInput = {
@@ -568,15 +652,9 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         AND: [
           // Same-tenant publication survivorship (never bypassed).
           {
-            OR: [
-              { hasVariants: false },
-              {
-                variants: {
-                  some: { tenantId, catalogPublishMode: { not: 'OFF' } },
-                },
-              },
-            ],
+            OR: [{ hasVariants: false }, { variants: { some: publicVariant } }],
           },
+          ...(scope ? [scope.products] : []),
           {
             OR: [
               // Hidden-price precedence: bypass allowlist and price gates;
@@ -616,8 +694,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
                         priceLists: { some: priceListWhere },
                         variants: {
                           some: {
-                            tenantId,
-                            catalogPublishMode: { not: 'OFF' },
+                            ...publicVariant,
                             variantPrices: { some: variantPriceWhere },
                           },
                         },
@@ -644,7 +721,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
           take: 1,
         },
         variants: {
-          where: { tenantId, catalogPublishMode: { not: 'OFF' } },
+          where: publicVariant,
           include: {
             images: {
               orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
@@ -658,10 +735,16 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
             },
           },
         },
+        ...(scope ? PUBLISHED_DOCUMENT_INCLUDE : {}),
       },
     });
 
     if (!product) return null;
+    // Defensive boundary, like the mapper's OFF filter: never an uncovered subject.
+    if (coverage)
+      product.variants = product.variants.filter((v) =>
+        coversPublishedSubjectV2(coverage, v.id),
+      );
 
     // F3.WU9 slice 4 — independent participant snapshot from every
     // same-tenant non-OFF variant returned by the publication-gated
@@ -689,11 +772,49 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       );
     }
 
+    const projection = { ...product, stockPresentationParticipants };
     // SAFETY: The include shape above matches ProductDetailWithIncludes; this bridges Prisma's conditional query inference.
-    return {
-      ...product,
-      stockPresentationParticipants,
-    } as unknown as PublicProductDetailProjection;
+    return (scope
+      ? (await this.withEditorial([projection]))[0]
+      : projection) as unknown as PublicProductDetailProjection;
+  }
+
+  /**
+   * P4 S3 — replaces the raw `editorialState` include with the public
+   * projection of each Published document (title, description, FACET/DETAIL
+   * attributes with vocabulary labels). The raw document never leaves the
+   * repository. A missing or unreadable Published document fails the request.
+   */
+  private async withEditorial<T extends object>(
+    items: T[],
+  ): Promise<
+    (Omit<T, 'editorialState'> & { editorial: PublicEditorialProjectionV2 })[]
+  > {
+    const documents = items.map((item) => {
+      const state = (
+        item as { editorialState?: { publishedDocument: unknown } | null }
+      ).editorialState;
+      if (!state || state.publishedDocument == null)
+        throw new Error('Expected a Published editorial document');
+      return state.publishedDocument;
+    });
+    const families = new Set(
+      documents.flatMap((document) => {
+        const family = (document as { familyCode?: unknown }).familyCode;
+        return typeof family === 'string' ? [family] : [];
+      }),
+    );
+    const vocabulary = await readEditorialPublicVocabularyV2(this.prisma, [
+      ...families,
+    ]);
+    return items.map((item, i) => {
+      const rest: T & { editorialState?: unknown } = { ...item };
+      delete rest.editorialState;
+      return {
+        ...(rest as Omit<T, 'editorialState'>),
+        editorial: projectPublishedEditorialV2(documents[i], vocabulary),
+      };
+    });
   }
 
   /**

@@ -18,6 +18,31 @@ export async function readEditorialPublishedCoverageV2(
   if (typeof tenantId !== 'string' || tenantId.trim().length === 0)
     throw new TypeError('Invalid editorial published coverage scope');
   if (productIds.length === 0) return new Map();
+  return read(
+    db,
+    tenantId,
+    Prisma.sql`AND "productId" = ANY(CAST(${[...productIds]} AS TEXT[]))`,
+  );
+}
+
+/**
+ * Same as `readEditorialPublishedCoverageV2`, for every product of the tenant
+ * with a Published version (public listings filter before pagination).
+ */
+export async function readEditorialTenantPublishedCoverageV2(
+  db: Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient,
+  tenantId: string,
+): Promise<Map<string, PublishedCoverageV2>> {
+  if (typeof tenantId !== 'string' || tenantId.trim().length === 0)
+    throw new TypeError('Invalid editorial published coverage scope');
+  return read(db, tenantId, Prisma.empty);
+}
+
+async function read(
+  db: Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient,
+  tenantId: string,
+  products: Prisma.Sql,
+): Promise<Map<string, PublishedCoverageV2>> {
   const rows = await db.$queryRaw<
     {
       productId: string;
@@ -28,7 +53,7 @@ export async function readEditorialPublishedCoverageV2(
     SELECT "productId", "publishedRevision", "publishedSubjects"
     FROM "catalog_editorial_states"
     WHERE "tenantId" = ${tenantId}
-      AND "productId" = ANY(CAST(${[...productIds]} AS TEXT[]))
+      ${products}
       AND "publishedRevision" IS NOT NULL
   `);
   return new Map(

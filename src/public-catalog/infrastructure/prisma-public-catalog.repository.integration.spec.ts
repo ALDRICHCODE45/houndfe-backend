@@ -811,6 +811,8 @@ describeIfDb('PrismaPublicCatalogRepository (Integration - Real DB)', () => {
         name: `pc-int-list-${listId.slice(0, 8)}-ctx-explicit`,
         isCatalogDefault: false,
         stockPresentationDefaults: defaultStockPresentation,
+        // P4 S2 — the published-editorial switch (default off) rides the lookup.
+        requiresPublishedEditorial: false,
       });
     });
 

@@ -7,6 +7,7 @@ import type {
   PersistedStockPresentationOverrides,
 } from '../mappers/public-product.mapper';
 import type { CatalogStockPresentationValue } from '../../../catalog-settings/domain/tenant-catalog-settings.aggregate';
+import type { PublicEditorialProjectionV2 } from '../../../catalog-editorial/domain/editorial-public-projection-v2';
 
 export interface ListProductsParams {
   q?: string;
@@ -41,6 +42,11 @@ export interface ResolvedPublicCatalogContext {
     catalogStockPresentationDefault: CatalogStockPresentationValue;
     catalogStockPresentationDefaultCustomQty: number | null;
   };
+  /**
+   * P4 S2 — the tenant's `catalogRequiresPublishedEditorial` switch, read by
+   * the same one-query lookup. Absent or false: today's catalog, no editorial.
+   */
+  requiresPublishedEditorial?: boolean;
 }
 
 /**
@@ -101,6 +107,8 @@ export interface PublicStockPresentationParticipant {
  */
 export interface PublicProductDetailProjection extends ProductDetailWithIncludes {
   stockPresentationParticipants: PublicStockPresentationParticipant[];
+  /** P4 S3 — Published projection; present only when the switch is on. */
+  editorial?: PublicEditorialProjectionV2;
 }
 
 /**
@@ -120,6 +128,8 @@ export interface PublicProductDetailProjection extends ProductDetailWithIncludes
 export interface PublicProductListProjection
   extends ProductWithIncludes, PersistedStockPresentationOverrides {
   stockPresentationParticipants: PublicStockPresentationParticipant[];
+  /** P4 S3 — Published projection; present only when the switch is on. */
+  editorial?: PublicEditorialProjectionV2;
 }
 
 export interface IPublicCatalogRepository {

@@ -1,8 +1,12 @@
-import type { PublicCatalogProductDetail, PublicVariantDto } from './public-product-detail.dto';
+import type {
+  PublicCatalogProductDetail,
+  PublicVariantDto,
+} from './public-product-detail.dto';
 import type { PublicCatalogProductCard } from './public-product-card.dto';
 import type { PublicCatalogCategoryFacet } from './public-category-facet.dto';
 import type { PublicStockPresentationDto } from './public-stock-presentation.dto';
 import type { PublicStockStatus } from '../../domain/types';
+import type { PublicProductAttributeDto } from './public-product-attribute.dto';
 
 /**
  * F2.WU6 slice 4b — exact public price-context metadata attached to a
@@ -35,10 +39,14 @@ export interface PublicContextualVariantAvailabilityDto {
  * F3.WU9 slice 7 — contextual variant row: the legacy public variant shape
  * plus its own presentation projection. Operational quantities stay absent.
  */
-export interface PublicContextualVariantDto
-  extends Omit<PublicVariantDto, 'availabilityByBranch'> {
+export interface PublicContextualVariantDto extends Omit<
+  PublicVariantDto,
+  'availabilityByBranch'
+> {
   availabilityByBranch: PublicContextualVariantAvailabilityDto[];
   stockPresentation: PublicStockPresentationDto;
+  /** P4 S3 — the variant's Published attributes; absent when the switch is off. */
+  attributes?: PublicProductAttributeDto[];
 }
 
 /**
@@ -47,11 +55,18 @@ export interface PublicContextualVariantDto
  * (null when hidden) and the product-level stock presentation. A distinct
  * shape — the legacy `PublicCatalogProductDetail` output is never widened.
  */
-export interface PublicCatalogContextualProductBody
-  extends Omit<PublicCatalogProductDetail, 'availability' | 'variants'> {
+export interface PublicCatalogContextualProductBody extends Omit<
+  PublicCatalogProductDetail,
+  'availability' | 'variants'
+> {
   availability: PublicStockStatus | null;
   stockPresentation: PublicStockPresentationDto;
   variants: PublicContextualVariantDto[];
+  /**
+   * P4 S3 — Published product/presentation attributes (detail only); absent
+   * when the switch is off.
+   */
+  attributes?: PublicProductAttributeDto[];
 }
 
 /**
@@ -63,8 +78,7 @@ export interface PublicCatalogContextualProductBody
  * this layer. F3.WU9 slice 7 activates the stock presentation on this
  * contextual shape only.
  */
-export interface PublicCatalogProductDetailWithContextDto
-  extends PublicCatalogContextualProductBody {
+export interface PublicCatalogProductDetailWithContextDto extends PublicCatalogContextualProductBody {
   priceContext: PublicPriceContextDto;
   excludedCount: 0;
 }
@@ -76,8 +90,10 @@ export interface PublicCatalogProductDetailWithContextDto
  * shape — the legacy `PublicCatalogProductCard` output is never widened, and
  * no variant rows or operational quantities are embedded.
  */
-export interface PublicCatalogContextualProductCard
-  extends Omit<PublicCatalogProductCard, 'availability'> {
+export interface PublicCatalogContextualProductCard extends Omit<
+  PublicCatalogProductCard,
+  'availability'
+> {
   availability: PublicStockStatus | null;
   stockPresentation: PublicStockPresentationDto;
 }
