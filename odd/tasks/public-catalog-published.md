@@ -1,0 +1,31 @@
+# Public catalog from published editorial (P4) + Unpublish (D6) + accessory defaults (D8)
+
+Branch `feat/public-catalog-published` (worktree `.tmp/public-published`, base main `6b8f99c`). Implements P4 of `docs/editorial-publication-design-proposal.md` with the human decisions of 2026-11-05 (Log L1, L2), plus «Despublicar» and the accessory per-type defaults.
+
+## Specs
+
+- **S1 Per-tenant switch (D3 a).** A per-tenant catalog setting, default **off**, that makes the public catalog show only products with a Published editorial. Off = today's behavior, unchanged. Admin reads/changes it through the existing tenant catalog settings endpoint with its existing permission. Additive migration (default false, no data rewrite).
+- **S2 Only published when on (S3).** With the switch on: public listings exclude products without a Published editorial; public product detail returns 404 for them. Existing eligibility (includeInOnlineCatalog, PRODUCT type, allowlist, prices, stock presentation) still applies on top.
+- **S3 Projection (D4 a).** With the switch on, the Published `commercialTitle` and `description` replace the operational name and description in public cards and detail. Attributes are projected by binding exposure: FACET → filters and detail, DETAIL → detail only, INTERNAL → never. Evidence, facts/declarations, care review, attestation and any private reference are never exposed. Labels come from the vocabulary (es-MX). Switch off: no editorial data in the public catalog.
+- **S4 Filters and search.** With the switch on: facet filters on FACET attributes, OR within a facet and AND between facets, facet counts that exclude the facet's own selection, unique products before pagination; search on published title and description (not on operational names). Accepted C3.3 scope: «No reduced title-only substitute.»
+- **S5 New offered variants after publish (D5 a).** Publishing records which offered subjects (variants / product presentation) the Published version covered. A variant that becomes offered after that publish is hidden from the public catalog until the product is republished; covered variants keep showing.
+- **S6 Unpublish (D6 a).** New `POST /products/:productId/editorial/published/unpublish` (same family as publish: `read` + `publish` permission, `Idempotency-Key`, `Editorial-Vocabulary-Revision`, closed body with the expected published revision/cycle as the contract requires), removes the Published version (the draft, if any, is kept), with receipt replay, CAS `409 CONFLICT`, and the same lock order as publish. With the switch on, an unpublished product disappears from the public catalog immediately.
+- **S7 Accessory defaults (D8 b).** For accessories whose `accessory.type` is collar, harness or leash (exact option codes from the vocabulary), an **unknown** `electricalApplies` / `capacityDeterminesChoice` declaration no longer blocks: the rule resolves as «not applicable» instead of UNRESOLVED. A **known** declaration always wins (editable: the user can still declare it true). Other accessory types unchanged. Readiness and publish stay in parity.
+- **S8 Docs + proof.** FE handoff `docs/frontend-handoff/07-public-catalog-published.md` (switch, public payload changes, filters, unpublish, accessory defaults) + index row; contract docs updated; PostgreSQL integration tests per spec; runtime probe over real HTTP on the dev DB with the switch on for Sucursal Centro, leaving the showcase in place.
+
+## Tasks
+
+| ID | Specs | Route | Commit |
+| --- | --- | --- | --- |
+| T1 storage + switch setting + published-subjects snapshot | S1 S5 | worker | |
+| T2 unpublish endpoint + publish records covered subjects | S5 S6 | worker | |
+| T3 public projection: only published, title/description, attributes in detail, variant hiding | S2 S3 S5 | worker | |
+| T4 facet filters + search on published content | S4 | worker | |
+| T5 accessory defaults rule | S7 | worker | |
+| T6 docs, FE handoff, runtime proof | S8 | worker | |
+
+## Log
+
+- L1 (human, 2026-11-05, «D. Publicación editorial … ¿Cómo seguimos?»): «Arrancar con tus recomendaciones» — recommendations of `docs/editorial-publication-design-proposal.md` §5: D3 (a) «Per-tenant switch, turned on after publishing the products»; D4 (a) «Title, description and FACET/DETAIL attributes, with editorial title and description replacing the operational ones»; D5 (a) «Hide that variant until republished»; D6 (a) «Yes, a simple unpublish»; D8 (b) «Per accessory type defaults (for example collar, arnés, correa → «No»), editable».
+- L2 (human, 2026-11-05): «Bien, perfecto, vamos haciendo eso por favor» and «adelante con lo recomendado».
+- L3 Context: Engram `editorial/publication-gaps` (public catalog never reads editorial; repository `src/public-catalog/infrastructure/prisma-public-catalog.repository.ts`, mappers `public-product.mapper.ts`; C3.3 notes in `docs/catalog-editorial-single-contract.md` §10), `odd/editorial-publish-v2/tasks`, `editorial/publish-v2-runtime-probe`. FE contract rules: Engram `contracts/fe-strict-decoders`.
