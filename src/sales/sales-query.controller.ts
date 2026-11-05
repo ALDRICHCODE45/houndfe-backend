@@ -19,6 +19,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { RequirePermissions } from '../auth/authorization/decorators/require-permissions.decorator';
+import { ParseCuidPipe } from '../shared/pipes/parse-cuid.pipe';
 import { SalesService } from './sales.service';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
 import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
@@ -64,13 +65,14 @@ export class SalesQueryController {
    * second one, while the service-owned request hash keeps the key
    * actor-scoped. Domain failures surface through DomainExceptionFilter:
    * REFUND_NOT_FOUND → 404, IDEMPOTENCY_KEY_CONFLICT / REFUND_ALREADY_SETTLED
-   * → 409, SETTLEMENT_EXCEEDS_REFUND → 422.
+   * → 409, SETTLEMENT_EXCEEDS_REFUND → 422. SaleRefund ids are Prisma
+   * `cuid()` values, so the param is validated as a cuid, not a UUID.
    */
   @Post('refunds/:refundId/settlements')
   @HttpCode(HttpStatus.OK)
   @RequirePermissions(['update', 'SaleRefund'])
   settleRefund(
-    @Param('refundId', new ParseUUIDPipe()) refundId: string,
+    @Param('refundId', new ParseCuidPipe()) refundId: string,
     @Body() dto: SettleRefundDto,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @CurrentUser() user: AuthenticatedUser,

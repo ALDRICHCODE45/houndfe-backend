@@ -712,7 +712,8 @@ describe('SalesQueryController HTTP integration', () => {
 
   // ── rfs-3b partial-refund settlement HTTP integration tests ─────────────
 
-  const settleRefundId = 'c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f';
+  // SaleRefund ids are Prisma `cuid()` values, not UUIDs (dev-showcase L4).
+  const settleRefundId = 'cmw2izrjw0002r965eh02ytw3';
   const settleBody = {
     amountCents: 500,
     method: 'cash',
@@ -765,14 +766,64 @@ describe('SalesQueryController HTTP integration', () => {
     expect(settleRefundMockOf(service)).not.toHaveBeenCalled();
   });
 
-  it('POST /sales/refunds/:refundId/settlements returns 400 for a non-UUID refundId', async () => {
+  it('POST /sales/refunds/:refundId/settlements lets a cuid refundId reach the service', async () => {
+    settleRefundMockOf(service).mockResolvedValue(settleResult);
+
     await request(app.getHttpServer())
-      .post('/sales/refunds/not-a-uuid/settlements')
+      .post('/sales/refunds/cmw2iu8ls0000r9mijx25om85/settlements')
       .set('Authorization', 'Bearer tenant-a-update-refund')
       .set('idempotency-key', 'key-1')
       .send(settleBody)
-      .expect(400);
+      .expect(200);
 
+    expect(settleRefundMockOf(service)).toHaveBeenCalledWith(
+      'cmw2iu8ls0000r9mijx25om85',
+      'user-a',
+      settleBody,
+      'key-1',
+    );
+  });
+
+  it.each([
+    ['a hyphenated non-cuid', 'not-a-uuid'],
+    ['a UUID', 'c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f'],
+    ['an over-long id', 'c'.repeat(33)],
+    ['a too-short id', 'cmw2iu8ls'],
+    ['an id with spaces', 'cmw2iu8ls0000%20r9mijx25om85'],
+    ['an id with an encoded slash', 'cmw2iu8ls0000%2Fr9mijx25om85'],
+    ['an uppercase id', 'CMW2IU8LS0000R9MIJX25OM85'],
+  ])(
+    'POST /sales/refunds/:refundId/settlements returns 400 for %s refundId',
+    async (_label, refundId) => {
+      await request(app.getHttpServer())
+        .post(`/sales/refunds/${refundId}/settlements`)
+        .set('Authorization', 'Bearer tenant-a-update-refund')
+        .set('idempotency-key', 'key-1')
+        .send(settleBody)
+        .expect(400)
+        .expect(({ body }: { body: unknown }) => {
+          expect(body).toEqual({
+            statusCode: 400,
+            message: 'Validation failed (cuid is expected)',
+            error: 'Bad Request',
+          });
+        });
+
+      expect(settleRefundMockOf(service)).not.toHaveBeenCalled();
+    },
+  );
+
+  it('POST /sales/refunds//settlements (empty refundId) never reaches the service', async () => {
+    // An empty segment cannot bind `:refundId`, so the router rejects it
+    // before the pipe; the contract is only that no settlement is attempted.
+    const res = await request(app.getHttpServer())
+      .post('/sales/refunds//settlements')
+      .set('Authorization', 'Bearer tenant-a-update-refund')
+      .set('idempotency-key', 'key-1')
+      .send(settleBody);
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
     expect(settleRefundMockOf(service)).not.toHaveBeenCalled();
   });
 
@@ -1004,7 +1055,7 @@ describe('SalesQueryController — GET /sales/refunds/pending wiring (prf-3)', (
 });
 
 describe('SalesQueryController — POST /sales/refunds/:refundId/settlements wiring (rfs-3b)', () => {
-  const refundId = 'c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f';
+  const refundId = 'cmw2izrjw0002r965eh02ytw3';
   const dto: SettleRefundDto = {
     amountCents: 500,
     method: 'cash',
