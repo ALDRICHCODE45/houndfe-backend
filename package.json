@@ -25,6 +25,7 @@
     "seed:sat": "ts-node prisma/seed-sat-run.ts",
     "seed:editorial-vocabulary": "ts-node prisma/editorial-vocabulary-seed.ts",
     "seed:editorial-labels": "ts-node prisma/editorial-vocabulary-labels-apply.ts",
+    "seed:editorial-descriptions": "ts-node prisma/editorial-vocabulary-descriptions-apply.ts",
     "seed:showcase": "node scripts/dev-showcase/seed.cjs"
   },
   "dependencies": {
