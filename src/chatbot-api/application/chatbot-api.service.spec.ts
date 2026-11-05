@@ -103,7 +103,13 @@ type MockTenantClient = {
   paymentDetail: {
     findFirst: jest.Mock<Promise<MockPaymentDetail | null>, [unknown?]>;
   };
+  // Lots read for the bot catalog's sellable stock.
+  lot: {
+    findMany: jest.Mock<Promise<MockLot[]>, [unknown?]>;
+  };
 };
+
+type MockLot = { productId: string; quantity: number; expirationDate: Date };
 
 type MockTenantPrisma = {
   getClient: jest.Mock<MockTenantClient, []>;
@@ -675,6 +681,11 @@ describe('ChatbotApiService', () => {
       paymentDetail: {
         findFirst: jest.fn<Promise<MockPaymentDetail | null>, [unknown?]>(),
       },
+      lot: {
+        findMany: jest
+          .fn<Promise<MockLot[]>, [unknown?]>()
+          .mockResolvedValue([]),
+      },
     };
     tenantPrisma = {
       getClient: jest.fn<MockTenantClient, []>(() => tenantClient),
@@ -858,6 +869,190 @@ describe('ChatbotApiService', () => {
     await expect(service.checkStock('missing-product')).rejects.toThrow(
       NotFoundException,
     );
+  });
+
+  describe('sellable stock (expired lots excluded)', () => {
+    // Far past/future dates keep these independent of the business clock;
+    // the calendar-date boundary is covered by the fefo-allocator spec.
+    const expiredLot = (productId: string, quantity: number): MockLot => ({
+      productId,
+      quantity,
+      expirationDate: new Date('2000-01-01T00:00:00.000Z'),
+    });
+    const freshLot = (productId: string, quantity: number): MockLot => ({
+      productId,
+      quantity,
+      expirationDate: new Date('2999-12-31T00:00:00.000Z'),
+    });
+    const lotFindMany = () => tenantPrisma.getClient().lot.findMany;
+
+    it('search reports quantity minus expired lots for a lots product', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            hasVariants: false,
+            quantity: 10,
+            minQuantity: 3,
+            variants: [],
+          }),
+        ],
+        total: 1,
+      });
+      lotFindMany().mockResolvedValue([
+        expiredLot('prod-1', 4),
+        freshLot('prod-1', 3),
+      ]);
+
+      const [item] = await service.searchCatalog({ q: 'royal' });
+
+      expect(item.stock).toEqual({ status: 'available', quantity: 6 });
+      expect(lotFindMany().mock.calls).toEqual([
+        [
+          {
+            where: {
+              tenantId: 'tenant-1',
+              productId: { in: ['prod-1'] },
+              quantity: { gt: 0 },
+            },
+            select: { productId: true, quantity: true, expirationDate: true },
+          },
+        ],
+      ]);
+    });
+
+    it('search derives low_stock from the sellable quantity', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            hasVariants: false,
+            quantity: 10,
+            minQuantity: 3,
+            variants: [],
+          }),
+        ],
+        total: 1,
+      });
+      lotFindMany().mockResolvedValue([expiredLot('prod-1', 7)]);
+
+      const [item] = await service.searchCatalog({ q: 'royal' });
+
+      expect(item.stock).toEqual({ status: 'low_stock', quantity: 3 });
+    });
+
+    it('search attributes expired lots to their own product only', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            id: 'prod-a',
+            hasVariants: false,
+            quantity: 8,
+            minQuantity: 1,
+            variants: [],
+          }),
+          makeCatalogProduct({
+            id: 'prod-b',
+            hasVariants: false,
+            quantity: 8,
+            minQuantity: 1,
+            variants: [],
+          }),
+        ],
+        total: 2,
+      });
+      lotFindMany().mockResolvedValue([
+        expiredLot('prod-a', 8),
+        freshLot('prod-b', 8),
+      ]);
+
+      const items = await service.searchCatalog({ q: 'royal' });
+
+      expect(items.map((item) => item.stock)).toEqual([
+        { status: 'out_of_stock', quantity: 0 },
+        { status: 'available', quantity: 8 },
+      ]);
+    });
+
+    it('stock check reports out_of_stock when only expired stock remains', async () => {
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({
+          hasVariants: false,
+          quantity: 5,
+          minQuantity: 1,
+          variants: [],
+        }),
+      );
+      lotFindMany().mockResolvedValue([expiredLot('prod-1', 5)]);
+
+      await expect(service.checkStock('prod-1')).resolves.toEqual({
+        productId: 'prod-1',
+        name: 'Royal Canin Mini Adult',
+        stock: { status: 'out_of_stock', quantity: 0 },
+        variants: [],
+      });
+    });
+
+    it('stock check never reports a negative sellable quantity', async () => {
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({
+          hasVariants: false,
+          quantity: 2,
+          minQuantity: 1,
+          variants: [],
+        }),
+      );
+      lotFindMany().mockResolvedValue([expiredLot('prod-1', 5)]);
+
+      const result = await service.checkStock('prod-1');
+
+      expect(result.stock).toEqual({ status: 'out_of_stock', quantity: 0 });
+    });
+
+    it('stock check keeps the quantity of a product without lots', async () => {
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({
+          hasVariants: false,
+          quantity: 8,
+          minQuantity: 2,
+          variants: [],
+        }),
+      );
+
+      const result = await service.checkStock('prod-1');
+
+      expect(result.stock).toEqual({ status: 'available', quantity: 8 });
+    });
+
+    it('leaves variant products unchanged without reading lots', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [makeCatalogProduct()],
+        total: 1,
+      });
+
+      const [item] = await service.searchCatalog({ q: 'royal' });
+
+      expect(item.stock).toEqual({ status: 'available', quantity: 12 });
+      expect(item.variants.map((variant) => variant.stock)).toEqual([
+        { status: 'low_stock', quantity: 2 },
+        { status: 'available', quantity: 7 },
+      ]);
+      expect(lotFindMany()).not.toHaveBeenCalled();
+    });
+
+    it('keeps not_managed stock for products that do not use stock', async () => {
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({
+          useStock: false,
+          hasVariants: false,
+          quantity: 5,
+          variants: [],
+        }),
+      );
+
+      const result = await service.checkStock('prod-1');
+
+      expect(result.stock).toEqual({ status: 'not_managed', quantity: null });
+      expect(lotFindMany()).not.toHaveBeenCalled();
+    });
   });
 
   it.each(['fully_evaluated', 'needs_human_review'] as const)(
