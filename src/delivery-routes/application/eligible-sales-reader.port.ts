@@ -11,6 +11,7 @@
  * and any permission-based redaction happens in the service.
  */
 import type { Prisma } from '@prisma/client';
+import type { SaleShippingAddressView } from '../../sales/domain/shipping-address-source-status';
 
 export const ELIGIBLE_SALES_READER = Symbol('ELIGIBLE_SALES_READER');
 
@@ -34,18 +35,8 @@ export interface EligibleSaleCustomerProjection {
   lastName: string | null;
 }
 
-export interface EligibleSaleAddressProjection {
-  id: string | null;
-  label: string | null;
-  street: string;
-  exteriorNumber: string | null;
-  interiorNumber: string | null;
-  neighborhood: string | null;
-  municipality: string | null;
-  city: string | null;
-  state: string | null;
-  zipCode: string | null;
-}
+/** Sale-time snapshot view shared with `/sales` and route stops. */
+export type EligibleSaleAddressProjection = SaleShippingAddressView;
 
 /**
  * Occupancy fact derived from the `DeliveryRouteStop.activeRouteId`

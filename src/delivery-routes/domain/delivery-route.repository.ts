@@ -24,6 +24,7 @@ import type {
   DeliveryRouteStatusValue,
 } from './delivery-route.entity';
 import type { DeliveryRouteStopStatusValue } from './delivery-route-stop.entity';
+import type { SaleShippingAddressView } from '../../sales/domain/shipping-address-source-status';
 
 export const DELIVERY_ROUTE_REPOSITORY = Symbol.for('IDeliveryRouteRepository');
 
@@ -106,20 +107,8 @@ export interface DeliveryRouteReadModel {
     checkedInAt: Date | null;
     completedAt: Date | null;
     customer: { id: string; name: string; email: string | null } | null;
-    shippingAddress: {
-      id: string | null;
-      street: string | null;
-      exteriorNumber: string | null;
-      interiorNumber: string | null;
-      zipCode: string | null;
-      neighborhood: string | null;
-      municipality: string | null;
-      city: string | null;
-      state: string | null;
-      label: string | null;
-      latitude: number | null;
-      longitude: number | null;
-    } | null;
+    /** Sale-time snapshot view shared with `/sales`; null without a snapshot. */
+    shippingAddress: SaleShippingAddressView | null;
   }>;
 }
 

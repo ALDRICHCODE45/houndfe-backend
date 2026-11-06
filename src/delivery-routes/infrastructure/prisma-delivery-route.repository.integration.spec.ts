@@ -261,12 +261,12 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
       driverUserId: driver.id,
       saleIds: seeded,
       notes,
-      checkSaleEligibility: async (
-        saleId,
-      ): Promise<SaleEligibilitySnapshot | null> =>
-        seeded.includes(saleId)
-          ? { deliveryStatus: 'PENDING', hasShippingAddress: true }
-          : null,
+      checkSaleEligibility: (saleId): Promise<SaleEligibilitySnapshot | null> =>
+        Promise.resolve(
+          seeded.includes(saleId)
+            ? { deliveryStatus: 'PENDING', hasShippingAddress: true }
+            : null,
+        ),
     });
     await repo.save(route);
     return {
@@ -371,7 +371,7 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
       expect(row?.driver).toMatchObject({
         id: driverId,
         name: 'Juan Driver',
-        email: expect.stringMatching(/^driver-/),
+        email: expect.stringMatching(/^driver-/) as unknown,
       });
 
       // Stops — ordered by sortOrder, with the read-model extras.
@@ -402,13 +402,45 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         municipality: 'Cuauhtémoc',
         city: 'CDMX',
         state: 'CDMX',
+        visualReferences: null,
+        carrierPhone: null,
         label: 'Oficina',
         latitude: null,
         longitude: null,
+        sourceStatus: 'UNCHANGED',
+        changedFields: [],
       });
 
       expect(row?.stops[1]?.saleFolio).toBe('A-202608-000002');
       expect(row?.stops[1]?.sortOrder).toBe(1);
+    });
+
+    it('marks the snapshot CHANGED after a live edit and DELETED after the source is removed, never rewriting it', async () => {
+      const { route, addressId } = await seedDraftRoute(1);
+
+      await prisma.customerAddress.update({
+        where: { id: addressId },
+        // The DB requires coordinates as a pair.
+        data: { street: 'Av. Insurgentes', latitude: 19.43, longitude: -99.13 },
+      });
+      const edited = await repo.findOneWithStops({ tenantId, id: route.id });
+      expect(edited?.stops[0]?.shippingAddress).toMatchObject({
+        id: addressId,
+        street: 'Av. Reforma',
+        latitude: null,
+        longitude: null,
+        sourceStatus: 'CHANGED',
+        changedFields: ['street', 'latitude', 'longitude'],
+      });
+
+      await prisma.customerAddress.delete({ where: { id: addressId } });
+      const deleted = await repo.findOneWithStops({ tenantId, id: route.id });
+      expect(deleted?.stops[0]?.shippingAddress).toMatchObject({
+        id: null,
+        street: 'Av. Reforma',
+        sourceStatus: 'DELETED',
+        changedFields: [],
+      });
     });
   });
 
@@ -488,10 +520,11 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
       // atomicity) and neither read model changes.
       await routeB.addStop({
         saleId: sharedSaleId,
-        checkSaleEligibility: async () => ({
-          deliveryStatus: 'PENDING' as const,
-          hasShippingAddress: true,
-        }),
+        checkSaleEligibility: () =>
+          Promise.resolve({
+            deliveryStatus: 'PENDING' as const,
+            hasShippingAddress: true,
+          }),
       });
 
       const error = await repo.save(routeB).catch((e: unknown) => e);
@@ -525,10 +558,11 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         tenantId,
         driverUserId: driverB.id,
         saleIds: [sharedSaleId],
-        checkSaleEligibility: async () => ({
-          deliveryStatus: 'PENDING' as const,
-          hasShippingAddress: true,
-        }),
+        checkSaleEligibility: () =>
+          Promise.resolve({
+            deliveryStatus: 'PENDING' as const,
+            hasShippingAddress: true,
+          }),
       });
 
       const error = await repo.save(routeB).catch((e: unknown) => e);
@@ -563,10 +597,11 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
       // prove.
       await route.addStop({
         saleId: saleIds[0],
-        checkSaleEligibility: async () => ({
-          deliveryStatus: 'PENDING' as const,
-          hasShippingAddress: true,
-        }),
+        checkSaleEligibility: () =>
+          Promise.resolve({
+            deliveryStatus: 'PENDING' as const,
+            hasShippingAddress: true,
+          }),
       });
 
       const error = await repo.save(route).catch((e: unknown) => e);

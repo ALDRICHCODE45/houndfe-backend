@@ -28,6 +28,8 @@
  *   INELIGIBLE { reason: 'MISSING_ADDRESS' | 'DELIVERY_STATUS' } → explainable
  *       rejection; those rows are intentionally kept in the page.
  */
+import type { SaleShippingAddressDto } from '../../sales/dto/sale-shipping-address.dto';
+
 export type EligibleSaleRouteStatusDto = 'DRAFT' | 'ACTIVE';
 
 export interface EligibleSaleOccupiedRouteDto {
@@ -48,18 +50,8 @@ export type EligibleSaleAvailabilityDto =
       reason: 'MISSING_ADDRESS' | 'DELIVERY_STATUS';
     };
 
-export interface EligibleSaleShippingAddressDto {
-  id: string | null;
-  label: string | null;
-  street: string;
-  exteriorNumber: string | null;
-  interiorNumber: string | null;
-  neighborhood: string | null;
-  municipality: string | null;
-  city: string | null;
-  state: string | null;
-  zipCode: string | null;
-}
+/** Same shape as `/sales` and route stops (one FE schema). */
+export type EligibleSaleShippingAddressDto = SaleShippingAddressDto;
 
 export interface EligibleSaleCustomerDto {
   id: string;

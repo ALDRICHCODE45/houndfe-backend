@@ -187,20 +187,7 @@ export class EligibleSalesService {
             name: this.formatCustomerName(row.customer),
           }
         : null,
-      shippingAddress: row.shippingAddress
-        ? {
-            id: row.shippingAddress.id,
-            label: row.shippingAddress.label,
-            street: row.shippingAddress.street,
-            exteriorNumber: row.shippingAddress.exteriorNumber,
-            interiorNumber: row.shippingAddress.interiorNumber,
-            neighborhood: row.shippingAddress.neighborhood,
-            municipality: row.shippingAddress.municipality,
-            city: row.shippingAddress.city,
-            state: row.shippingAddress.state,
-            zipCode: row.shippingAddress.zipCode,
-          }
-        : null,
+      shippingAddress: row.shippingAddress ? { ...row.shippingAddress } : null,
       productSummary: row.productNames.slice(0, 3),
       availability: this.inferAvailability(ability, row, currentRouteStops),
     };

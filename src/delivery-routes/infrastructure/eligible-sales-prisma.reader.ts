@@ -17,14 +17,15 @@
  */
 import { Injectable } from '@nestjs/common';
 import {
-  hydrateShippingAddress,
+  liveShippingAddressSourceSelect,
   shippingAddressSnapshotSelect,
+  toSaleShippingAddressView,
+  type LiveShippingAddressSourceRow,
   type SnapshotRow,
 } from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import type { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type {
-  EligibleSaleAddressProjection,
   EligibleSaleCustomerProjection,
   EligibleSaleOccupancyProjection,
   EligibleSaleRowProjection,
@@ -52,6 +53,7 @@ interface EligibleSalesQueryRow extends SnapshotRow {
     tenantId: string;
   } | null;
   shippingAddressId: string | null;
+  shippingAddress: LiveShippingAddressSourceRow;
   items: { productName: string }[];
   deliveryRouteStops: {
     tenantId: string;
@@ -119,6 +121,8 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
           },
           shippingAddressId: true,
           ...shippingAddressSnapshotSelect,
+          // Live source (with tenantId) only to compute `sourceStatus`.
+          ...liveShippingAddressSourceSelect,
           items: {
             select: { productName: true },
             orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -206,7 +210,7 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
       confirmedAt: row.confirmedAt,
       dueDate: row.dueDate,
       customer: this.mapCustomer(row.customer, tenantId),
-      shippingAddress: this.mapAddress(row),
+      shippingAddress: toSaleShippingAddressView(row, tenantId),
       productNames: row.items.map((item) => item.productName),
       occupancy: this.resolveOccupancy(row.deliveryRouteStops, tenantId),
     };
@@ -221,25 +225,6 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
       id: customer.id,
       firstName: customer.firstName,
       lastName: customer.lastName,
-    };
-  }
-
-  private mapAddress(
-    row: EligibleSalesQueryRow,
-  ): EligibleSaleAddressProjection | null {
-    const address = hydrateShippingAddress(row);
-    if (!address) return null;
-    return {
-      id: row.shippingAddressId,
-      label: address.label,
-      street: address.street,
-      exteriorNumber: address.exteriorNumber,
-      interiorNumber: address.interiorNumber,
-      neighborhood: address.neighborhood,
-      municipality: address.municipality,
-      city: address.city,
-      state: address.state,
-      zipCode: address.zipCode,
     };
   }
 

@@ -1878,6 +1878,7 @@ export class SalesService {
       customer: sale.customer,
       cashier: sale.cashier,
       seller: sale.seller,
+      shippingAddress: sale.shippingAddress ?? null,
       items: sale.items,
       // Custom Payment Methods (custom-payment-methods / WU2 — D10):
       // spread the three catalog fields only when non-null so legacy rows

@@ -1,5 +1,6 @@
 import type { SaleCancelReason } from '../domain/sale.entity';
 import type { SaleRefundMethod } from '../domain/sale.repository';
+import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
 
 export type SaleTimelineEventType =
   | 'SALE_REGISTERED'
@@ -149,6 +150,8 @@ export interface SaleDetailResponseDto {
   customer: { id: string; name: string } | null;
   cashier: { id: string; name: string };
   seller: { id: string; name: string } | null;
+  /** Sale-time shipping snapshot with its source status; null without one. */
+  shippingAddress: SaleShippingAddressDto | null;
   items: SaleDetailItemDto[];
   payments: SaleDetailPaymentDto[];
   timeline: SaleDetailTimelineEventDto[];
