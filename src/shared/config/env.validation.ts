@@ -72,6 +72,66 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
       .max(2_147_483_647)
       .optional(),
 
+    // shipping-zones / T3, T8 — quote engine (docs/shipping-quotes.md §6).
+    // Optional: absent keeps the default in `readShippingQuotesConfig`; a
+    // present but malformed or out-of-range value fails boot instead of
+    // silently falling back. Ranges mirror that reader.
+    SHIPPING_QUOTE_TTL_MINUTES: Joi.number()
+      .integer()
+      .min(1)
+      .max(1440)
+      .optional(),
+    SHIPPING_CARRIER_TIMEOUT_MS: Joi.number()
+      .integer()
+      .min(100)
+      .max(120000)
+      .optional(),
+    SHIPPING_CREDIT_PER_UNIT_CENTS: Joi.number()
+      .integer()
+      .min(0)
+      .max(100_000_000)
+      .optional(),
+    SHIPPING_CREDIT_UNIT_PRICE_THRESHOLD_CENTS: Joi.number()
+      .integer()
+      .min(0)
+      .max(100_000_000)
+      .optional(),
+    // POR CONFIRMAR by the owner (credit on own-zone surcharge).
+    SHIPPING_CREDIT_APPLIES_TO_SURCHARGE: Joi.boolean()
+      .truthy('1', 1)
+      .falsy('0', 0)
+      .optional(),
+    // Never honored when NODE_ENV=production (see shipping-quotes.module).
+    SHIPPING_FAKE_CARRIER_ENABLED: Joi.boolean()
+      .truthy('1', 1)
+      .falsy('0', 0)
+      .optional(),
+
+    // shipping-zones / T6 — Skydropx carrier (docs/shipping-quotes.md §6.1).
+    // All optional: without both credentials the carrier is not registered.
+    // Empty values are allowed so `KEY=` in a .env means "not configured".
+    SKYDROPX_CLIENT_ID: Joi.string().allow('').optional(),
+    SKYDROPX_CLIENT_SECRET: Joi.string().allow('').optional(),
+    SKYDROPX_BASE_URL: Joi.string()
+      .uri({ scheme: ['https'] })
+      .allow('')
+      .optional(),
+    SKYDROPX_REQUEST_TIMEOUT_MS: Joi.number()
+      .integer()
+      .min(500)
+      .max(60000)
+      .optional(),
+    SKYDROPX_POLL_INTERVAL_MS: Joi.number()
+      .integer()
+      .min(500)
+      .max(10000)
+      .optional(),
+    SKYDROPX_QUOTE_DEADLINE_MS: Joi.number()
+      .integer()
+      .min(1000)
+      .max(120000)
+      .optional(),
+
     // ─── D.4 — Inngest + Resend fail-closed posture ──────────────────────
     NODE_ENV: Joi.string()
       .valid('development', 'test', 'staging', 'production')

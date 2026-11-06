@@ -321,6 +321,106 @@ describe('buildEnvValidationSchema (D.4)', () => {
     });
   });
 
+  describe('SKYDROPX_* (shipping-zones / T6 — optional everywhere)', () => {
+    it('boots without any Skydropx key', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+      });
+      expect(error).toBeUndefined();
+    });
+
+    it('accepts credentials, an https base URL, timings and empty values', () => {
+      const { error, value } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        SKYDROPX_CLIENT_ID: 'id',
+        SKYDROPX_CLIENT_SECRET: '',
+        SKYDROPX_BASE_URL: 'https://sb-pro.skydropx.com',
+        SKYDROPX_REQUEST_TIMEOUT_MS: '5000',
+        SKYDROPX_POLL_INTERVAL_MS: '1000',
+        SKYDROPX_QUOTE_DEADLINE_MS: '12000',
+      });
+      expect(error).toBeUndefined();
+      expect(value.SKYDROPX_POLL_INTERVAL_MS).toBe(1000);
+    });
+
+    it('rejects a non-https base URL and out-of-range timings', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        SKYDROPX_BASE_URL: 'http://api-pro.skydropx.com',
+        SKYDROPX_POLL_INTERVAL_MS: '100',
+        SKYDROPX_QUOTE_DEADLINE_MS: 'soon',
+      });
+      const keys = (error?.details ?? []).map((d) => d.context?.key);
+      expect(keys).toEqual(
+        expect.arrayContaining([
+          'SKYDROPX_BASE_URL',
+          'SKYDROPX_POLL_INTERVAL_MS',
+          'SKYDROPX_QUOTE_DEADLINE_MS',
+        ]),
+      );
+    });
+  });
+
+  describe('SHIPPING_* (shipping-zones / T8 — optional, validated at boot)', () => {
+    const SHIPPING_KEYS = [
+      'SHIPPING_QUOTE_TTL_MINUTES',
+      'SHIPPING_CARRIER_TIMEOUT_MS',
+      'SHIPPING_CREDIT_PER_UNIT_CENTS',
+      'SHIPPING_CREDIT_UNIT_PRICE_THRESHOLD_CENTS',
+      'SHIPPING_CREDIT_APPLIES_TO_SURCHARGE',
+      'SHIPPING_FAKE_CARRIER_ENABLED',
+    ];
+
+    it('boots without them and leaves them absent (the quote config keeps its defaults)', () => {
+      const { error, value } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+      });
+      expect(error).toBeUndefined();
+      for (const key of SHIPPING_KEYS) expect(value[key]).toBeUndefined();
+    });
+
+    it('accepts in-range values, boolean words and 0/1 flags', () => {
+      const { error, value } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        SHIPPING_QUOTE_TTL_MINUTES: '1440',
+        SHIPPING_CARRIER_TIMEOUT_MS: '100',
+        SHIPPING_CREDIT_PER_UNIT_CENTS: '0',
+        SHIPPING_CREDIT_UNIT_PRICE_THRESHOLD_CENTS: '50000',
+        SHIPPING_CREDIT_APPLIES_TO_SURCHARGE: 'false',
+        SHIPPING_FAKE_CARRIER_ENABLED: '1',
+      });
+      expect(error).toBeUndefined();
+      expect(value).toMatchObject({
+        SHIPPING_QUOTE_TTL_MINUTES: 1440,
+        SHIPPING_CARRIER_TIMEOUT_MS: 100,
+        SHIPPING_CREDIT_PER_UNIT_CENTS: 0,
+        SHIPPING_CREDIT_UNIT_PRICE_THRESHOLD_CENTS: 50000,
+        SHIPPING_CREDIT_APPLIES_TO_SURCHARGE: false,
+        SHIPPING_FAKE_CARRIER_ENABLED: true,
+      });
+    });
+
+    it('fails boot on malformed or out-of-range values instead of defaulting', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        SHIPPING_QUOTE_TTL_MINUTES: '0',
+        SHIPPING_CARRIER_TIMEOUT_MS: '120001',
+        SHIPPING_CREDIT_PER_UNIT_CENTS: '-1',
+        SHIPPING_CREDIT_UNIT_PRICE_THRESHOLD_CENTS: '500.5',
+        SHIPPING_CREDIT_APPLIES_TO_SURCHARGE: 'yes',
+        SHIPPING_FAKE_CARRIER_ENABLED: 'on',
+      });
+      const keys = (error?.details ?? []).map((d) => d.context?.key);
+      expect(keys).toEqual(expect.arrayContaining(SHIPPING_KEYS));
+    });
+  });
+
   describe('fail-closed composition (D.4 — Triangulation)', () => {
     it('a prod env missing ALL production-only keys surfaces ALL of them in one shot (abortEarly:false)', () => {
       const { error } = validate({
