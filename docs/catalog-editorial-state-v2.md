@@ -17,6 +17,9 @@ Each present document must pass the existing current-contract structural/static-
 recognizer. Legacy, future, malformed and wrapped documents reject the whole
 composition with `TypeError('Expected an editorial document V2')`; nothing is
 converted, wrapped, omitted or downgraded. Unexpected failures propagate unchanged.
+Stored state never reaches this rejection: the recorded-state decoder runs first and
+rejects an undecodable slot as `EditorialStateUnreadableError` (HTTP `409
+EDITORIAL_STATE_UNREADABLE`, see catalog-editorial-recorded-state-v2.md).
 Recognized documents are recursively copied, not reconstructed from parsed output.
 Strings, negative zero and array order survive in detached trees; shared children
 are copied independently. Historical relational conflicts do not become fresh-policy

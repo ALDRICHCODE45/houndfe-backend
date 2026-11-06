@@ -12,7 +12,7 @@ The real authority rechecks active user, current membership, tenant-qualified Pr
 
 Success: HTTP 200 with `Cache-Control: no-store` and the core's `{cycle,draft,published,warnings?}` payload unchanged.
 No editorial state: `{cycle:null,draft:null,published:null}`. Read does not recompute warnings or validate persisted documents against current vocabulary.
-The localized Nest route/guard error envelope is `{statusCode,error}`: 400/MALFORMED, 401/UNAUTHORIZED, 403/FORBIDDEN, 404/NOT_FOUND, 409/CONFLICT, or sanitized 500/INTERNAL_ERROR. Raw exception messages are not returned.
+The localized Nest route/guard error envelope is `{statusCode,error}`: 400/MALFORMED, 401/UNAUTHORIZED, 403/FORBIDDEN, 404/NOT_FOUND, 409/CONFLICT, 409/EDITORIAL_STATE_UNREADABLE (a stored Draft or Published slot that does not decode as V2, for example a legacy document; never 500), or sanitized 500/INTERNAL_ERROR. Raw exception messages and stored document contents are not returned.
 An unavailable or foreign Product normally fails authority with 403; 404 can occur after authority if the Product disappears. No universal 404 promise. Framework parser/unmatched-route errors are outside this localized envelope.
 
 ## Wiring and proof
