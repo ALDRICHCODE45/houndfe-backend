@@ -61,6 +61,8 @@ $ pnpm run test:cov
 
 Varied, readable demo data so every screen of the frontend shows its main cases. It is for local/dev databases only.
 
+Owner guide in Spanish (logins by role, where to look for each feature, chatbot credential, Skydropx sandbox): [docs/dev-showcase-guide.md](docs/dev-showcase-guide.md).
+
 ```bash
 pnpm prisma migrate deploy   # migrated database
 pnpm seed                    # base seed: tenants, users, products, employees
@@ -70,7 +72,7 @@ pnpm seed:showcase           # demo data; safe to run again
 
 How it works:
 
-- `scripts/dev-showcase/seed.cjs` starts the built API on a free local port and runs the modules in order: `org` → `catalog` → `commerce` → `ops` → `shipping`. It stops the API when it ends (log: `.showcase-app.log`).
+- `scripts/dev-showcase/seed.cjs` starts the built API on a free local port and runs the modules in order: `org` → `catalog` → `commerce` → `ops` → `shipping` → `address-status`. It stops the API when it ends (log: `.showcase-app.log`).
 - Stateful flows (stock, sales, cancellations, purchase orders, routes, time off) go through the real endpoints, so the inventory kardex stays consistent. Prisma is used only where no endpoint exists (for example backdating sales across the month).
 - It is idempotent: running it again creates nothing new. Dates are relative to today, so a later run moves the demo forward in time.
 - It refuses to run with `NODE_ENV=production` or against a database host that is not local. Set `SHOWCASE_ALLOW=1` only for a disposable remote database.
@@ -106,7 +108,8 @@ Sucursal Sur has a single member (the super admin). The showcase adds demo permi
 | `catalog` | 38 products: high, low and zero stock; lots expired, expiring in under 7 days and valid; variants with one at 0; no stock control; services; with and without image; a 98-character name; 8 categories, many brands, 4 price lists. A kardex product («Alimento Premium para Perro Adulto 15 kg») with 30+ movements: opening, initial stock, every adjustment reason, a FEFO sale split across two lots and its cancellation. A variant removal on «Collar Ajustable de Nailon». Public catalog with «Disponible», «Pocas piezas» and «Agotado». |
 | `commerce` | 20 customers (several addresses, outstanding balances, a very long name, a business with billing data); ~57 sales over the last 28 days (paid by cash, card, transfer and mixed; credit, partial, overdue; cancelled with pending and partly settled refunds; delivered and pending delivery; «Público en general»); 9 quotations (draft, sent, expired, cancelled, no expiry, with promotion); 12 promotions (each type active, scheduled and ended; one nearly exhausted, unlimited ones); 5 cash registers (2 inactive), an open session, closed sessions (one with a shortfall) and a pending custody handover. |
 | `ops` | Human decisions pending and resolved (positive and negative); delivery routes draft, active today (delivered, skipped, current and pending stops), completed and cancelled; 5 suppliers (one archived) and 11 purchase orders with 0, 1, 2 and 4 checklist warnings, confirmed and cancelled; employee documents expired and expiring; time off pending (single and multi-day), approved and rejected; payment methods and bank accounts with one inactive each; notification settings with modules on and off; a published catalog with public price lists. |
-| `shipping` | Shipping settings screens (see [handoff 10](docs/frontend-handoff/10-shipping-settings-screens.md#8-seed-data-on-3003)): delivery zones of every type in CDMX (FREE 03100/03020/03810, SURCHARGE 06700/04000, CARRIER_ONLY 16000/14000, DENIED 12000, 03300 deactivated, 11000 approved through a resolved validation); PENDING zone validations 03900 (CRITICAL), 06600 (WARNING, 2 requesters) and 04510 (OK); boxes «Caja chica» and «Caja mediana»; the shipping origin (Av. Insurgentes Sur 1458, 03100); opening hours Mon–Fri 09:00–14:00 and 16:00–19:30, Sat 09:00–14:00, Sun closed; packaging on 5 products plus a «Grande» override on «Arnés Acolchado para Paseo». Adds the `DeliveryZone` and `ShippingSettings` grants of `prisma/seed.ts` to the Centro and Norte `Manager` roles. |
+| `shipping` | Shipping settings screens (see [handoff 10](docs/frontend-handoff/10-shipping-settings-screens.md#8-seed-data-on-3003)): delivery zones of every type in CDMX (FREE 03100/03020/03810, SURCHARGE 06700/04000, CARRIER_ONLY 16000/14000, DENIED 12000, 03300 deactivated, 11000 approved through a resolved validation); PENDING zone validations 03900 (CRITICAL), 06600 (WARNING, 2 requesters) and 04510 (OK); boxes «Caja chica», «Caja mediana» and «Caja grande»; the shipping origin (Av. Insurgentes Sur 1458, 03100); opening hours Mon–Fri 09:00–14:00 and 16:00–19:30, Sat 09:00–14:00, Sun closed; packaging on 6 products (including the 18 kg croquetas, which only fit «Caja grande») plus a «Grande» override on «Arnés Acolchado para Paseo». Adds the `DeliveryZone` and `ShippingSettings` grants of `prisma/seed.ts` to the Centro and Norte `Manager` roles. |
+| `address-status` | Customer «Irene Domínguez Ochoa» with three confirmed delivery sales whose shipping snapshots read `sourceStatus` UNCHANGED, CHANGED (the source street was edited) and DELETED (the source address was deleted); see [sale-shipping-snapshot-reads.md](docs/sale-shipping-snapshot-reads.md). The run summary lists each sale folio with its status. |
 
 ### Repairing legacy editorial documents
 
