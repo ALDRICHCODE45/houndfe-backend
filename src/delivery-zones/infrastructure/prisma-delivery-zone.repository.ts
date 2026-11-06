@@ -91,6 +91,7 @@ export class PrismaDeliveryZoneRepository implements IDeliveryZoneRepository {
         throw new DeliveryZoneError(
           'DELIVERY_ZONE_VALIDATION_PENDING',
           'Resolve the pending validation for this postal code instead',
+          { validationId: pending.id },
         );
       }
       const data = {

@@ -96,15 +96,28 @@ Creates or replaces the zone and (re)activates it. The approver is the caller, a
 | Status | `code` | When |
 | --- | --- | --- |
 | `400` | `INVALID_DELIVERY_ZONE` | Shape rule broken. |
-| `409` | `DELIVERY_ZONE_VALIDATION_PENDING` | A validation is open for that postal code. Resolve it instead, so the waiting customers get the answer. |
+| `409` | `DELIVERY_ZONE_VALIDATION_PENDING` | A validation is open for that postal code. Resolve it instead, so the waiting customers get the answer. The body adds `validationId`, the id of that PENDING validation (read under the same per-postal-code lock that detected it). |
+
+```json
+{
+  "statusCode": 409,
+  "code": "DELIVERY_ZONE_VALIDATION_PENDING",
+  "message": "A validation is pending for this postal code; resolve it instead",
+  "validationId": "8a2f1c3e-5b6d-4e7f-8a9b-0c1d2e3f4a5b"
+}
+```
 
 ### 3.4 `DELETE /delivery-zones/:zipCode` — `manage:DeliveryZone`
 
-Soft deactivation. `200` returns the zone with `isActive: false`. `404 DELIVERY_ZONE_NOT_FOUND` if missing or foreign.
+Soft deactivation. `200` returns the zone with `isActive: false`. `404 DELIVERY_ZONE_NOT_FOUND` if missing or foreign. It does not check for an open validation, so it never answers `409 DELIVERY_ZONE_VALIDATION_PENDING`.
 
 ### 3.5 `GET /delivery-zone-validations` — `validate:DeliveryZone`
 
-PENDING validations, **one per postal code**. They are sorted by the oldest pending requester's `lastCustomerMessageAt` ascending, so the earliest WhatsApp deadline comes first. Query: `page`, `limit`.
+PENDING validations, **one per postal code**. They are sorted by the oldest pending requester's `lastCustomerMessageAt` ascending, so the earliest WhatsApp deadline comes first. Query: `page`, `limit`, and optional `zipCode` (exactly 5 digits) that narrows the list to that postal code (0 or 1 item, since at most one is PENDING per postal code). Example: `GET /delivery-zone-validations?zipCode=06700`. A malformed `zipCode` is a validation-pipe `400`:
+
+```json
+{ "statusCode": 400, "error": "Bad Request", "message": [ { "property": "zipCode", "children": [], "constraints": { "matches": "zipCode must be exactly five digits" } } ] }
+```
 
 ```json
 {

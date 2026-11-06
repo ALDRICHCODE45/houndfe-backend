@@ -67,6 +67,8 @@ export interface DeliveryZoneValidationRecord {
 export interface ListPendingValidationsQuery {
   page: number;
   limit: number;
+  /** Exactly five digits; narrows the list to that postal code. */
+  zipCode?: string;
 }
 
 export interface DeliveryZoneValidationPage {

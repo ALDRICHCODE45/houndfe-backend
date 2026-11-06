@@ -35,7 +35,7 @@ export const CUSTOMER_REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WARNING_THRESHOLD_MS = 12 * 60 * 60 * 1000;
 const CRITICAL_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 
-const ZIP_CODE_PATTERN = /^[0-9]{5}$/;
+export const ZIP_CODE_PATTERN = /^[0-9]{5}$/;
 
 export interface ZoneSettingsInput {
   type: DeliveryZoneTypeValue;

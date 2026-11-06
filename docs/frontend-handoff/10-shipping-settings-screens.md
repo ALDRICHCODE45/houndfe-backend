@@ -159,11 +159,22 @@ Other errors:
 | --- | --- | --- |
 | `400` | D | `:zipCode` is not 5 digits |
 | `401` | B `{ "statusCode": 401, "code": "UNAUTHORIZED", "message": "Unauthorized" }` | The user is inactive or not a member of the sucursal |
-| `409` | B `DELIVERY_ZONE_VALIDATION_PENDING` — "A validation is pending for this postal code; resolve it instead" | A validation is open for that postal code. Send the user to the validation (§3), so the waiting customers get the answer |
+| `409` | B `DELIVERY_ZONE_VALIDATION_PENDING` — "A validation is pending for this postal code; resolve it instead", plus `validationId` | A validation is open for that postal code. Send the user to the validation (`GET /delivery-zone-validations/<validationId>`, §3.3), so the waiting customers get the answer |
+
+The PENDING `409` is envelope B with one extra key, `validationId` (the PENDING validation of that postal code):
+
+```json
+{
+  "statusCode": 409,
+  "code": "DELIVERY_ZONE_VALIDATION_PENDING",
+  "message": "A validation is pending for this postal code; resolve it instead",
+  "validationId": "8a2f1c3e-5b6d-4e7f-8a9b-0c1d2e3f4a5b"
+}
+```
 
 ### 2.4 `DELETE /delivery-zones/:zipCode` — deactivate (`manage:DeliveryZone`)
 
-Soft deactivation. `200` returns the zone with `isActive: false`. Deleting an inactive zone again is also `200`. To reactivate, `PUT` the zone again.
+Soft deactivation. `200` returns the zone with `isActive: false`. Deleting an inactive zone again is also `200`. To reactivate, `PUT` the zone again. `DELETE` does not check for an open validation: it never answers `409 DELIVERY_ZONE_VALIDATION_PENDING`.
 
 | Status | Body | When |
 | --- | --- | --- |
@@ -195,7 +206,13 @@ The values are computed when the server answers. To keep a live countdown, count
 
 ### 3.2 `GET /delivery-zone-validations` — list (`validate:DeliveryZone`)
 
-Only PENDING validations. They are sorted by `lastCustomerMessageAt` ascending, so the earliest deadline comes first. Query: `page` (`1..10000`, default 1) and `limit` (`1..100`, default 20). There are no filters. Pagination as in §2.1.
+Only PENDING validations. They are sorted by `lastCustomerMessageAt` ascending, so the earliest deadline comes first. Query: `page` (`1..10000`, default 1), `limit` (`1..100`, default 20) and optional `zipCode` (exactly 5 digits). `zipCode` narrows the list to that postal code: 0 or 1 item, since at most one validation is PENDING per postal code. Without it the list is unchanged. Pagination as in §2.1.
+
+Example: `GET /delivery-zone-validations?zipCode=06600` returns the item below, or `{ "data": [], "pagination": { "pageIndex": 0, "pageSize": 20, "totalCount": 0, "pageCount": 0 } }` when nothing is pending for that postal code. A malformed `zipCode` (`6700`, `067000`, `06a00`) is a `400` C:
+
+```json
+{ "statusCode": 400, "error": "Bad Request", "message": [ { "property": "zipCode", "children": [], "constraints": { "matches": "zipCode must be exactly five digits" } } ] }
+```
 
 ```json
 {
@@ -307,7 +324,7 @@ Errors:
 | `409` | B `ALREADY_RESOLVED` | Another reviewer resolved it first, with another `resolutionRequestId` | Reload: show who decided and what |
 | `409` | B `IDEMPOTENCY_CONFLICT` | The same `resolutionRequestId` was used with another body or by another user | Generate a new id only if the user really changed the decision; normally reload |
 
-While a validation is PENDING, a manual `PUT /delivery-zones/<its zipCode>` answers `409 DELIVERY_ZONE_VALIDATION_PENDING` (§2.3).
+While a validation is PENDING, a manual `PUT /delivery-zones/<its zipCode>` answers `409 DELIVERY_ZONE_VALIDATION_PENDING` with its `validationId` (§2.3).
 
 Email: when a validation opens, users with `validate:DeliveryZone` (or `manage`) can get an email «Validar zona de entrega: CP 06700». It is the notification action `DELIVERY_ZONE_VALIDATION_REQUESTED`, off until the sucursal enables it in `PUT /notification-config` (`enabledActions`). The showcase leaves it off.
 

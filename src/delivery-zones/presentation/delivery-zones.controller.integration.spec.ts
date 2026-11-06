@@ -168,7 +168,41 @@ describeIfDb('DeliveryZonesController (PostgreSQL)', () => {
     expect(zoneB.isActive).toBe(true);
   });
 
-  it('refuses a manual edit while a validation is pending (409)', async () => {
+  it('refuses a manual edit while a validation is pending (409 with its validationId)', async () => {
+    const validation = await worldPrisma().deliveryZoneValidation.create({
+      data: {
+        tenantId: tenantA,
+        zipCode: '06700',
+        state: 'CDMX',
+        municipality: 'Cuauhtémoc',
+        neighborhood: 'Roma Norte',
+      },
+    });
+    // Another tenant's pending validation for the same postal code is ignored.
+    await worldPrisma().deliveryZoneValidation.create({
+      data: {
+        tenantId: tenantB,
+        zipCode: '06700',
+        state: 'CDMX',
+        municipality: 'Cuauhtémoc',
+        neighborhood: 'Roma Norte',
+      },
+    });
+    const res = await put(managerA, '06700', { type: 'DENIED' }).expect(409);
+    expect(res.body).toEqual({
+      statusCode: 409,
+      code: 'DELIVERY_ZONE_VALIDATION_PENDING',
+      message:
+        'A validation is pending for this postal code; resolve it instead',
+      validationId: validation.id,
+    });
+    expect(
+      await worldPrisma().deliveryZone.count({ where: { tenantId: tenantA } }),
+    ).toBe(0);
+  });
+
+  it('deactivates even while a validation is pending (DELETE has no 409)', async () => {
+    await put(managerA, '06700', { type: 'CARRIER_ONLY' }).expect(200);
     await worldPrisma().deliveryZoneValidation.create({
       data: {
         tenantId: tenantA,
@@ -178,9 +212,10 @@ describeIfDb('DeliveryZonesController (PostgreSQL)', () => {
         neighborhood: 'Roma Norte',
       },
     });
-    const res = await put(managerA, '06700', { type: 'DENIED' }).expect(409);
-    expect((res.body as { code: string }).code).toBe(
-      'DELIVERY_ZONE_VALIDATION_PENDING',
-    );
+    const res = await request(server())
+      .delete('/delivery-zones/06700')
+      .set('Authorization', `Bearer ${managerA.token}`)
+      .expect(200);
+    expect(res.body).toMatchObject({ zipCode: '06700', isActive: false });
   });
 });
