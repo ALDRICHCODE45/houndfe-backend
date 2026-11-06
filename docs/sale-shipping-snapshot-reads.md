@@ -59,7 +59,7 @@ The change is additive: route stops gained `visualReferences` and `carrierPhone`
 **Dev reproduction.** Take a confirmed sale with a snapshot, its `customerId`, and `shippingAddress.id` from `GET /sales/:id`:
 
 1. UNCHANGED: `GET /sales/:id` shows `sourceStatus: "UNCHANGED"`, `changedFields: []`.
-2. CHANGED: `PATCH /customers/:customerId/addresses/:addressId` with `{ "street": "Otra calle 1" }`. `GET /sales/:id` (or the route/eligible-sales reads) now shows `sourceStatus: "CHANGED"`, `changedFields: ["street"]`, while `street` keeps the sale-time value. `{ "label": "Otro" }` alone gives `["label"]`.
+2. CHANGED: `PATCH /customers/:customerId/addresses/:addressId` with `{ "street": "Otra calle 1" }`. `GET /sales/:id` (or the route/eligible-sales reads) now shows `sourceStatus: "CHANGED"`, `changedFields: ["street"]`, while `street` keeps the sale-time value. `label`, `visualReferences` and `carrierPhone` are not editable through this endpoint (the request is rejected with 400); only the chatbot address writes change them.
 3. DELETED: `DELETE /customers/:customerId/addresses/:addressId`. The snapshot remains, `id` becomes `null`, and `sourceStatus: "DELETED"`.
 
 ## Frontend coordination (01a1417e)
@@ -76,7 +76,7 @@ No response keys were added or removed. Where an address object includes `id`, i
 | `POST /delivery-routes`, `PATCH /delivery-routes/:id`, `POST /delivery-routes/:id/start`, `POST /delivery-routes/:id/cancel`, `POST /delivery-routes/:id/stops`, `POST /delivery-routes/:id/stops/:stopId/check-in` | Responses reuse the same route projection and nullable address id. |
 | `PUT /delivery-routes/:id/stops/reorder` | Same route projection and nullable address id. |
 | `POST /delivery-routes/:routeId/stops/:stopId/transfer` | Both returned route projections use the same snapshot/nullability rule. |
-| `GET /delivery-routes/eligible-sales` | `rows[].shippingAddress` structure (since 01a1af7f the single shared shape, see *Source status*); `id` is nullable. Snapshot-less rows remain visible with null address and `INELIGIBLE/MISSING_ADDRESS`. |
+| `GET /delivery-routes/eligible-sales` | `data[].shippingAddress` structure (now the single shared shape, see *Source status*); `id` is nullable. Snapshot-less rows remain visible with null address and `INELIGIBLE/MISSING_ADDRESS`. |
 | `GET /chatbot-api/customers/by-phone/:phone/orders` | Same `shippingAddress: { street, zipCode } \| null`; no id exposed. A snapshot survives deletion; a legacy row without one is null even if its live address exists. |
 
 The confirmed POS `GET /sales` and `GET /sales/:id` gained a `shippingAddress` snapshot object in 01a1af7f (see *Source status*). The receipt PDF props still do not expose a shipping address. `GET /sales/drafts` exposes the address reference only through the aggregate response, not an address object. Existing `shippingAddressId` scalar nullability is unchanged.
