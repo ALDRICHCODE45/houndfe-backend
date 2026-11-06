@@ -4,9 +4,11 @@
  * Each bounded batch runs in its own checkpointed step, so a crash resumes
  * after the last completed batch; the purge itself is idempotent.
  *
- * The loop stops on a short batch (nothing more is due), on a full batch
- * that purged nothing (only rows whose delete keeps failing are left; they
- * retry tomorrow), or at `maxBatches`.
+ * The clock is read once, inside the `read-clock` step: Inngest re-runs the
+ * handler body on every step, so a reading outside a step would move the
+ * cutoff between batches. Rows that fail are stamped with that run time and
+ * skipped by the following batches, so the loop stops on a short batch
+ * (nothing more is due) or at `maxBatches`.
  */
 import type { Inngest } from 'inngest';
 import type {
@@ -45,8 +47,11 @@ export function buildReceiptRetentionFunctions(
       retries: 3,
     },
     async (ctx: CronContext) => {
-      // One clock reading per run keeps every batch on the same cutoff.
-      const runAt = now();
+      const runAt = new Date(
+        (await ctx.step.run('read-clock', () =>
+          Promise.resolve(now().toISOString()),
+        )) as string,
+      );
       let batches = 0;
       let purged = 0;
       let failed = 0;
@@ -58,7 +63,7 @@ export function buildReceiptRetentionFunctions(
         )) as ReceiptRetentionResult;
         purged += result.purged;
         failed += result.failed;
-        if (result.scanned < batchSize || result.purged === 0) break;
+        if (result.scanned < batchSize) break;
       }
 
       return { batches, purged, failed };

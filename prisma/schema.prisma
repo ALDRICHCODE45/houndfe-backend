@@ -1708,6 +1708,10 @@ model ReceiptEvidence {
   customerReason      String?
   // Set by the retention job once the stored objects were deleted.
   purgedAt            DateTime?
+  // Failed retention deletes; rows that keep failing are scanned after the
+  // ones never tried and at most once per run (lastPurgeErrorAt = run time).
+  purgeAttempts       Int                   @default(0)
+  lastPurgeErrorAt    DateTime?
   createdAt           DateTime              @default(now())
 
   sale        Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)

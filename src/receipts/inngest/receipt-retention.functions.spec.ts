@@ -25,24 +25,35 @@ function setup(
   >();
   for (const result of results) purgeBatch.mockResolvedValueOnce(result);
   purgeBatch.mockResolvedValue({ scanned: 0, purged: 0, failed: 0 });
+  const clockReads: Array<string | null> = [];
+  let currentStep: string | null = null;
   buildReceiptRetentionFunctions({
     inngestClient,
     retention: { purgeBatch },
     batchSize: 2,
     maxBatches: 5,
-    now: () => new Date('2031-11-06T09:00:00.000Z'),
+    now: () => {
+      clockReads.push(currentStep);
+      return new Date('2031-11-06T09:00:00.000Z');
+    },
   });
   const steps: string[] = [];
   const run = () =>
     captured[0].handler({
       step: {
-        run: (name, fn) => {
+        run: async (name, fn) => {
           steps.push(name);
-          return fn();
+          currentStep = name;
+          try {
+            // Step results are JSON-serialized, as Inngest memoizes them.
+            return JSON.parse(JSON.stringify(await fn())) as unknown;
+          } finally {
+            currentStep = null;
+          }
         },
       },
     });
-  return { captured, run, purgeBatch, steps };
+  return { captured, run, purgeBatch, steps, clockReads };
 }
 
 describe('receipt-retention-purge Inngest cron', () => {
@@ -63,18 +74,35 @@ describe('receipt-retention-purge Inngest cron', () => {
     ]);
 
     await expect(run()).resolves.toEqual({ batches: 2, purged: 3, failed: 0 });
-    expect(steps).toEqual(['purge-batch-1', 'purge-batch-2']);
+    expect(steps).toEqual(['read-clock', 'purge-batch-1', 'purge-batch-2']);
     expect(purgeBatch.mock.calls[0][0]).toEqual({
       now: new Date('2031-11-06T09:00:00.000Z'),
       batchSize: 2,
     });
   });
 
-  it('stops when a full batch purges nothing (only failing rows left)', async () => {
-    const { run, steps } = setup([{ scanned: 2, purged: 0, failed: 2 }]);
+  it('reads the clock once, inside a step, so replays keep the same cutoff', async () => {
+    const { run, purgeBatch, clockReads } = setup([
+      { scanned: 2, purged: 2, failed: 0 },
+      { scanned: 0, purged: 0, failed: 0 },
+    ]);
 
-    await expect(run()).resolves.toEqual({ batches: 1, purged: 0, failed: 2 });
-    expect(steps).toHaveLength(1);
+    await run();
+
+    expect(clockReads).toEqual(['read-clock']);
+    for (const [call] of purgeBatch.mock.calls) {
+      expect(call.now).toEqual(new Date('2031-11-06T09:00:00.000Z'));
+    }
+  });
+
+  it('keeps going after a full batch that purged nothing (failing rows are skipped)', async () => {
+    const { run, steps } = setup([
+      { scanned: 2, purged: 0, failed: 2 },
+      { scanned: 1, purged: 1, failed: 0 },
+    ]);
+
+    await expect(run()).resolves.toEqual({ batches: 2, purged: 1, failed: 2 });
+    expect(steps).toEqual(['read-clock', 'purge-batch-1', 'purge-batch-2']);
   });
 
   it('caps the number of batches per run', async () => {
@@ -83,6 +111,8 @@ describe('receipt-retention-purge Inngest cron', () => {
 
     await run();
 
-    expect(steps).toHaveLength(5);
+    expect(steps.filter((name) => name.startsWith('purge-batch'))).toHaveLength(
+      5,
+    );
   });
 });

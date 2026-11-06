@@ -260,6 +260,61 @@ describeIfDb('ReceiptRetentionService (Integration)', () => {
     expect(row.purgedAt).toBeNull();
   });
 
+  it('does not let a full batch of permanently failing rows starve newer due rows', async () => {
+    const failingA = await createReceipt({
+      tenant: 0,
+      createdAt: new Date('2020-01-01T00:00:00.000Z'),
+    });
+    const failingB = await createReceipt({
+      tenant: 1,
+      createdAt: new Date('2020-01-02T00:00:00.000Z'),
+      foreignKey: true,
+    });
+    const due = await createReceipt({ tenant: 0, createdAt: OLD, pdf: true });
+    storage.failing.add(failingA.storageKey as string);
+
+    // Same run (same `now`): failed rows are not scanned again.
+    const first = await service.purgeBatch({ now: NOW, batchSize: 2 });
+    const second = await service.purgeBatch({ now: NOW, batchSize: 2 });
+
+    expect(first).toMatchObject({ scanned: 2, purged: 0, failed: 2 });
+    expect(second.purged).toBeGreaterThanOrEqual(1);
+    const rows = new Map((await fixtureRows()).map((row) => [row.id, row]));
+    expect(rows.get(due.id)?.purgedAt).toEqual(NOW);
+    for (const id of [failingA.id, failingB.id]) {
+      expect(rows.get(id)).toMatchObject({
+        purgedAt: null,
+        purgeAttempts: 1,
+        lastPurgeErrorAt: NOW,
+      });
+    }
+
+    // Next day: rows that keep failing go after the ones never tried.
+    const fresh = await createReceipt({ tenant: 1, createdAt: OLD });
+    const tomorrow = new Date(NOW.getTime() + 24 * 3600 * 1000);
+    await service.purgeBatch({ now: tomorrow, batchSize: 1 });
+
+    const after = await prisma.receiptEvidence.findUniqueOrThrow({
+      where: { id: fresh.id },
+    });
+    expect(after.purgedAt).toEqual(tomorrow);
+  });
+
+  it('retries a previously failing row on a later run and purges it once it succeeds', async () => {
+    const receipt = await createReceipt({ tenant: 0, createdAt: OLD });
+    storage.failing.add(receipt.storageKey as string);
+    await service.purgeBatch({ now: NOW });
+    storage.failing.clear();
+
+    const tomorrow = new Date(NOW.getTime() + 24 * 3600 * 1000);
+    await service.purgeBatch({ now: tomorrow });
+
+    const row = await prisma.receiptEvidence.findUniqueOrThrow({
+      where: { id: receipt.id },
+    });
+    expect(row).toMatchObject({ purgedAt: tomorrow, storageKey: null });
+  });
+
   it('honours the batch size', async () => {
     for (let i = 0; i < 3; i += 1) {
       await createReceipt({ tenant: 0, createdAt: OLD });
