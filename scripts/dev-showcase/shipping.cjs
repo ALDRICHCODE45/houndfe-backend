@@ -1,7 +1,7 @@
 // Dev showcase › shipping settings (Sucursal Centro): delivery zones of every
 // type (one deactivated, one settled by a resolved validation), PENDING zone
-// validations with requesters at OK / WARNING / CRITICAL urgency, two standard
-// boxes, the shipping origin, the opening hours and packaging on five products
+// validations with requesters at OK / WARNING / CRITICAL urgency, three standard
+// boxes, the shipping origin, the opening hours and packaging on six products
 // plus one variant override.
 //
 // Everything goes through the real store API as manager@houndfe.com except
@@ -173,6 +173,15 @@ const BOXES = [
     weightG: 420,
     maxContentWeightG: 20000,
   },
+  // Fits the 18 kg croquetas bag, so a CARRIER_ONLY quote can be packed.
+  {
+    name: 'Caja grande',
+    innerLengthCm: 70,
+    innerWidthCm: 45,
+    innerHeightCm: 25,
+    weightG: 900,
+    maxContentWeightG: 40000,
+  },
 ];
 
 // Same street as the sucursal profile in org.cjs.
@@ -239,6 +248,14 @@ const PACKAGING = [
     lengthCm: 25,
     widthCm: 18,
     heightCm: 4.5,
+  },
+  {
+    product:
+      'Croquetas Naturales Sin Grano de Salmón y Camote para Perros Adultos de Raza Grande 18 kg Familiar',
+    weightG: 18000,
+    lengthCm: 68,
+    widthCm: 43,
+    heightCm: 12,
   },
 ];
 // Whole-record override: the other Arnés variants inherit the product record.

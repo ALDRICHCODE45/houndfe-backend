@@ -184,8 +184,35 @@ test('planZone creates only missing zones; existing ones are kept', () => {
 
 test('planBoxes creates only names not taken yet', () => {
   assert.deepEqual(planBoxes(BOXES, []), BOXES);
-  assert.deepEqual(planBoxes(BOXES, [{ name: 'Caja chica' }]), [BOXES[1]]);
+  assert.deepEqual(planBoxes(BOXES, [{ name: 'Caja chica' }]), BOXES.slice(1));
   assert.deepEqual(planBoxes(BOXES, BOXES), []);
+  // The hand-made «Caja grande» on dev is kept: a re-run adds nothing.
+  assert.deepEqual(planBoxes([BOXES[2]], [{ name: 'Caja grande' }]), []);
+});
+
+test('the 18 kg croquetas only fit the «Caja grande»', () => {
+  const croquetas = PACKAGING.find((p) => p.product.includes('18 kg'));
+  assert.equal(croquetas.weightG, 18000);
+  const sorted = (dims) => [...dims].sort((a, b) => b - a);
+  const item = sorted([
+    croquetas.lengthCm,
+    croquetas.widthCm,
+    croquetas.heightCm,
+  ]);
+  const fitting = BOXES.filter(
+    (box) =>
+      sorted([box.innerLengthCm, box.innerWidthCm, box.innerHeightCm]).every(
+        (n, i) => item[i] <= n,
+      ) && croquetas.weightG <= box.maxContentWeightG,
+  ).map((box) => box.name);
+  assert.deepEqual(fitting, ['Caja grande']);
+  const grande = BOXES.find((box) => box.name === 'Caja grande');
+  assert.deepEqual(
+    [grande.innerLengthCm, grande.innerWidthCm, grande.innerHeightCm],
+    [70, 45, 25],
+  );
+  assert.equal(grande.weightG, 900);
+  assert.equal(grande.maxContentWeightG, 40000);
 });
 
 test('planReanchor touches a PENDING validation only when its level drifted', () => {
@@ -237,7 +264,7 @@ test('boxes and packaging respect the API limits, and every item fits a box', ()
     });
     assert.ok(fits, `${item.product} fits no box`);
   }
-  assert.equal(new Set(PACKAGING.map((p) => p.product)).size, 5);
+  assert.equal(new Set(PACKAGING.map((p) => p.product)).size, 6);
   assert.ok(
     VARIANT_PACKAGING.every((v) =>
       PACKAGING.some((p) => p.product === v.product),
