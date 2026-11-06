@@ -10,6 +10,7 @@ Backend contracts for the frontend, **in implementation order**. Each file cover
 | 4 | Purchase orders: checklist issue summary (`issueSummary`, `checklistItemCount`) | Implemented, merged to local `main` | [03-po-issue-summary.md](03-po-issue-summary.md) |
 | 5 | Editorial readiness checklist and «Publicar» (V2 publish, `400` with `items`) | Implemented on `feat/editorial-publish-v2`, not merged | [05-editorial-publish-readiness.md](05-editorial-publish-readiness.md) |
 | 6 | Refund settlements: pending refunds list, partial and total returns, Idempotency-Key replay | Backend implemented; no FE screen yet | [06-refund-settlements.md](06-refund-settlements.md) |
+| 8 | Transfer receipts review: private file/preview routes, additive queue keys (`file`, `extracted`, `mismatch`, `declaredAmountProvided`), tenant-wide worklist, reject `customerReason`, `RECEIPT_REVIEW_REQUESTED` email | Implemented on `feat/transfer-receipts`, not merged | [08-transfer-receipts-review.md](08-transfer-receipts-review.md) |
 
 Operations: [deploy/inventory-journal-o1-rollout.md](../deploy/inventory-journal-o1-rollout.md) is the rollout runbook for the O1 migration (stop writers, pre-flight queries, rollback, permissions). It is for whoever deploys, not for the FE.
 

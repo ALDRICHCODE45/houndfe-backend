@@ -61,7 +61,8 @@ curl -X POST "$API/chatbot-api/sales/$SALE_ID/receipts" \
 
 `receiptId` and `status` are the contract. `mimeType`, `sizeBytes`, `sha256` and
 `previewStatus` (`READY` | `UNAVAILABLE`) are additive. `status` in this
-response is always `PENDING`; the review outcome is read elsewhere (T2).
+response is always `PENDING`; poll the outcome with
+`GET /chatbot-api/receipts/:receiptId` (below).
 
 ### Idempotency
 
@@ -111,6 +112,39 @@ still works until the chatbot confirms the multipart migration. It runs the
 same sale rules, does not use idempotency (as before) and answers
 `{ receiptId, status: "PENDING" }`. `declaredAmountCents` is now optional here
 too. Remove this path once the chatbot has migrated.
+
+## Review outcome poll
+
+`GET /chatbot-api/receipts/:receiptId`
+
+- Auth: service credential, scope **`sales:read`**. Scopes match exactly, so
+  `sales:write` alone answers `403`; add `sales:read` to the chatbot
+  credential.
+- `:receiptId` must be a UUID (`400` otherwise).
+- Tenant-scoped: a missing receipt or another tenant's answers
+  `404 RECEIPT_NOT_FOUND` (`{ statusCode, error, message, timestamp }`).
+- Audited as `receipts.status`.
+
+`200`:
+
+```json
+{
+  "status": "REJECTED",
+  "customerReason": "No pudimos validar la referencia de tu transferencia.",
+  "sale": { "debtCents": 10000, "paymentStatus": "CREDIT" }
+}
+```
+
+| Key | Notes |
+| --- | --- |
+| `status` | `PENDING` \| `CONFIRMED` \| `REJECTED` |
+| `customerReason` | Only when `REJECTED`. Customer-safe text written by staff (or a generic Spanish default when the reviewer gave none). Relay it as-is. |
+| `sale.debtCents` | Live sale debt (the source of truth for what is still owed). |
+| `sale.paymentStatus` | `PAID` \| `PARTIAL` \| `CREDIT` \| `null` |
+
+It never exposes the internal rejection reason, the reviewer, storage keys,
+`extracted`, `mismatch` or any file route. Poll with a backoff (the review is
+human); a `CONFIRMED` receipt with `debtCents > 0` means a partial payment.
 
 ## Storage
 
@@ -163,10 +197,46 @@ requires `mediaUrl` or `storageKey`. A unique index on
 `(tenantId, saleId, idempotencyKey)` backs idempotency; legacy rows have a NULL
 key and never collide. Rows created before this change keep working.
 
-Review compatibility: until T2 adds the permission-checked file route, the
-existing review responses keep their shape. A private upload appears with
-`mediaUrl: ""` (no public URL) and `declaredAmountCents: 0` when nothing was
-declared (real declared amounts are ≥ 1).
+Migration `20261106050000_receipt_review_retention` (T2, additive) adds
+`customerReason` and `purgedAt`, widens the CHECK to accept purged rows and
+indexes `createdAt`. `20261106050100_receipt_review_requested_action` adds the
+`RECEIPT_REVIEW_REQUESTED` notification action (single `ALTER TYPE`).
+
+## Staff review (T2)
+
+Staff contracts are in
+[frontend-handoff/08-transfer-receipts-review.md](frontend-handoff/08-transfer-receipts-review.md):
+
+- `GET /sales/:id/receipts/:receiptId/file` and `/preview` stream the private
+  objects through the backend (JWT + tenant + `read ReceiptEvidence`,
+  `Cache-Control: private, no-store`, inline, `nosniff`).
+- The review queue keeps every v1 key; private uploads still show
+  `mediaUrl: ""` and `declaredAmountCents: 0`, and the new
+  `declaredAmountProvided`, `file`, `extracted`, `mismatch`, `createdAt` keys
+  carry the truth. `GET /sales/receipts/pending` is the tenant-wide worklist.
+- Reject takes an optional `customerReason` (1–300 chars) next to the internal
+  `reason`.
+
+## Staff email
+
+`RECEIPT_REVIEW_REQUESTED` (off until a tenant enables it). A NEW receipt
+(multipart or legacy JSON; never an idempotent replay or a lost concurrent
+race) writes a `receipt.review_requested` outbox row in the same transaction.
+A dedicated poller/dispatcher (excluded from the generic poller) sends the
+Inngest event `receipts/review.requested`; the function
+`receipt-review-requested-email` re-checks the config and emails the
+configured recipients who can review receipts (`ReceiptEvidence`
+update/manage or `manage all`). The file is never attached.
+
+## Retention
+
+Stored files are kept **5 years** from upload. The Inngest cron
+`receipt-retention-purge` (daily 03:00 America/Mexico_City) deletes the
+original and the preview in bounded batches, then sets `purgedAt` and clears
+`storageKey`/`previewKey`; the row, amounts and outcome stay. It refuses keys
+outside `receipts/<tenantId>/`, keeps the keys when a delete fails (retried on
+the next run) and is idempotent. Legacy `mediaUrl` rows have nothing stored and
+are untouched.
 
 ## Environment
 
