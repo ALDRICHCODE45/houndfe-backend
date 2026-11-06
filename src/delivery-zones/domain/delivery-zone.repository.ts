@@ -22,9 +22,22 @@ export type DeliveryZoneErrorCode =
   | 'ALREADY_RESOLVED'
   | 'UNAUTHORIZED';
 
+/** Additive, value-safe context surfaced in the HTTP body. */
+export interface DeliveryZoneErrorDetails {
+  /** The PENDING validation behind `DELIVERY_ZONE_VALIDATION_PENDING`. */
+  validationId?: string;
+}
+
 export class DeliveryZoneError extends DomainError {
-  constructor(code: DeliveryZoneErrorCode, message: string) {
+  readonly details: DeliveryZoneErrorDetails;
+
+  constructor(
+    code: DeliveryZoneErrorCode,
+    message: string,
+    details: DeliveryZoneErrorDetails = {},
+  ) {
     super(message, code);
+    this.details = details;
   }
 }
 
@@ -75,8 +88,9 @@ export interface IDeliveryZoneRepository {
   /**
    * Create or replace the zone for one postal code and (re)activate it. Fails
    * with `DELIVERY_ZONE_VALIDATION_PENDING` while a validation is open for the
-   * same postal code: the store must resolve the validation instead, so every
-   * waiting requester is settled in the same transaction.
+   * same postal code (its id travels in `details.validationId`): the store
+   * must resolve the validation instead, so every waiting requester is
+   * settled in the same transaction.
    */
   upsert(command: UpsertDeliveryZoneCommand): Promise<DeliveryZoneRecord>;
   /** Soft-deactivate; the postal code becomes unknown to the bot again. */

@@ -3,7 +3,8 @@
  *
  *   GET  /delivery-zone-validations              validate:DeliveryZone
  *        PENDING validations, oldest pending requester message first, with
- *        requesterCount and the 24 h urgency block.
+ *        requesterCount and the 24 h urgency block. `?zipCode=NNNNN`
+ *        narrows the list to one postal code.
  *   GET  /delivery-zone-validations/:id          validate:DeliveryZone
  *   POST /delivery-zone-validations/:id/resolve  validate:DeliveryZone
  *        APPROVE_DELIVERY_ZONE | REJECT_DELIVERY_ZONE; returns the
@@ -90,7 +91,11 @@ export class DeliveryZoneValidationsController {
     requireTenantActor(request);
     const page = query.page ?? 1;
     const limit = query.limit ?? DEFAULT_PAGE_SIZE;
-    const result = await this.validations.listPending({ page, limit });
+    const result = await this.validations.listPending({
+      page,
+      limit,
+      ...(query.zipCode === undefined ? {} : { zipCode: query.zipCode }),
+    });
     const now = new Date();
     return {
       data: result.items.map((item) =>

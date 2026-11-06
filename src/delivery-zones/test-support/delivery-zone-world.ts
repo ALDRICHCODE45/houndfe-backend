@@ -7,11 +7,7 @@
  * and seeds isolated tenants/users with real role grants. Cleanup deletes only
  * the rows it created (tenant cascade + users), never truncates.
  */
-import {
-  type INestApplication,
-  type ModuleMetadata,
-  ValidationPipe,
-} from '@nestjs/common';
+import { type INestApplication, type ModuleMetadata } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -27,7 +23,7 @@ import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { JwtStrategy } from '../../auth/infrastructure/strategies/jwt.strategy';
 import { DomainExceptionFilter } from '../../shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from '../../shared/filters/prisma-exception.filter';
-import { createListingValidationExceptionFactory } from '../../shared/listing/listing-validation-exception.factory';
+import { createAppValidationPipe } from '../../shared/listing/app-validation.pipe';
 import { DatabaseModule } from '../../shared/prisma/prisma.module';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 
@@ -86,14 +82,8 @@ export async function createZoneTestApp(
     ],
   }).compile();
   const app = moduleRef.createNestApplication();
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-      exceptionFactory: createListingValidationExceptionFactory(),
-    }),
-  );
+  // Same pipe as main.ts, so 400 bodies match production.
+  app.useGlobalPipes(createAppValidationPipe());
   app.useGlobalFilters(
     new DomainExceptionFilter(),
     new PrismaExceptionFilter(),

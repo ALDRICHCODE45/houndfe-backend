@@ -127,7 +127,11 @@ export class PrismaDeliveryZoneValidationRepository implements IDeliveryZoneVali
     const tenantId = this.tenantPrisma.getTenantId();
     const db = this.tenantPrisma.getClient();
     const rows = await db.deliveryZoneValidation.findMany({
-      where: { tenantId, status: 'PENDING' },
+      where: {
+        tenantId,
+        status: 'PENDING',
+        ...(query.zipCode === undefined ? {} : { zipCode: query.zipCode }),
+      },
       select: VALIDATION_SELECT,
     });
     const stats = await this.statsFor(

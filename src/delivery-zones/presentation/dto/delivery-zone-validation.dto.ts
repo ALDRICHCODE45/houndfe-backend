@@ -4,11 +4,12 @@
  * Customer phone and conversation reference are never projected.
  */
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, Matches, Max, Min } from 'class-validator';
 import {
   computeValidationUrgency,
   type DeliveryZoneTypeValue,
   type ValidationUrgency,
+  ZIP_CODE_PATTERN,
 } from '../../domain/delivery-zone.policy';
 import type {
   DeliveryZoneResolutionActionValue,
@@ -29,6 +30,12 @@ export class ListDeliveryZoneValidationsQueryDto {
   @Min(1)
   @Max(100)
   limit?: number;
+
+  @IsOptional()
+  @Matches(ZIP_CODE_PATTERN, {
+    message: 'zipCode must be exactly five digits',
+  })
+  zipCode?: string;
 }
 
 export interface DeliveryZoneValidationResponse {

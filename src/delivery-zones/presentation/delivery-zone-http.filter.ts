@@ -3,6 +3,7 @@
  * routes. Only `DeliveryZoneError` and the zone-shape `InvalidArgumentError`
  * are caught; every other exception keeps the global filters. The body is the
  * fixed `{statusCode, code, message}` envelope; the message never echoes input.
+ * `DELIVERY_ZONE_VALIDATION_PENDING` adds the open `validationId`.
  */
 import {
   ArgumentsHost,
@@ -52,6 +53,9 @@ export class DeliveryZoneHttpFilter implements ExceptionFilter {
         statusCode,
         code,
         message: MESSAGES[code] ?? 'Internal server error',
+        ...(exception.details.validationId === undefined
+          ? {}
+          : { validationId: exception.details.validationId }),
       });
       return;
     }

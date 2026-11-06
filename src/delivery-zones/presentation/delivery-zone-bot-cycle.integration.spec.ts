@@ -319,6 +319,72 @@ describeIfDb('DELIVERY_ZONE bot cycle + store validation (PostgreSQL)', () => {
     expect(zips).toEqual(['03100', '06700']);
   });
 
+  it('filters pending validations by ?zipCode within the tenant', async () => {
+    const roma = (
+      await intake(botA, intakeBody({ zipCode: '06700' })).expect(201)
+    ).body as BotBody;
+    await intake(
+      botA,
+      intakeBody({ zipCode: '03100', lastCustomerMessageAt: minutesAgo(900) }),
+    ).expect(201);
+    await intake(botB, intakeBody({ zipCode: '06700' })).expect(201);
+
+    const filtered = await request(server())
+      .get('/delivery-zone-validations?zipCode=06700')
+      .set('Authorization', `Bearer ${validatorA.token}`)
+      .expect(200);
+    const body = filtered.body as {
+      data: ValidationBody[];
+      pagination: unknown;
+    };
+    expect(body.data.map((item) => item.id)).toEqual([roma.decisionId]);
+    expect(body.data[0]).toMatchObject({
+      zipCode: '06700',
+      status: 'PENDING',
+      requesterCount: 1,
+    });
+    expect(body.pagination).toEqual({
+      pageIndex: 0,
+      pageSize: 20,
+      totalCount: 1,
+      pageCount: 1,
+    });
+
+    const none = await request(server())
+      .get('/delivery-zone-validations?zipCode=11000')
+      .set('Authorization', `Bearer ${validatorA.token}`)
+      .expect(200);
+    expect(none.body).toEqual({
+      data: [],
+      pagination: { pageIndex: 0, pageSize: 20, totalCount: 0, pageCount: 0 },
+    });
+
+    const all = await pending(validatorA).expect(200);
+    expect(
+      (all.body as { data: ValidationBody[] }).data.map((item) => item.zipCode),
+    ).toEqual(['03100', '06700']);
+  });
+
+  it('rejects a malformed ?zipCode with the validation-pipe 400', async () => {
+    for (const zipCode of ['6700', '067000', '06a00']) {
+      const res = await request(server())
+        .get(`/delivery-zone-validations?zipCode=${zipCode}`)
+        .set('Authorization', `Bearer ${validatorA.token}`)
+        .expect(400);
+      expect(res.body).toEqual({
+        statusCode: 400,
+        error: 'Bad Request',
+        message: [
+          {
+            property: 'zipCode',
+            children: [],
+            constraints: { matches: 'zipCode must be exactly five digits' },
+          },
+        ],
+      });
+    }
+  });
+
   it('resolves atomically: creates the zone and settles every requester, then each requester ACKs on its own', async () => {
     const a = (await intake(botA, intakeBody()).expect(201)).body as BotBody;
     const b = (await intake(botA, intakeBody()).expect(201)).body as BotBody;
