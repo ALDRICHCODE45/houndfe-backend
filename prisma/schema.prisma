@@ -291,6 +291,10 @@ enum NotificationActionKey {
   // `NotificationConfig.recipients` stays the STAFF list — never the customer
   // address for this action.
   DELIVERY_THANK_YOU
+  // transfer-receipts / T2. Staff email when the chatbot uploads a new
+  // receipt (migration 20261106050100_receipt_review_requested_action).
+  // Dormant until a tenant enables it; no rows are seeded.
+  RECEIPT_REVIEW_REQUESTED
 }
 
 // ============================================================================
@@ -1679,6 +1683,11 @@ model ReceiptEvidence {
   confirmedByUserId   String?
   confirmedAt         DateTime?
   rejectionReason     String?
+  // Customer-safe rejection text the chatbot may relay (rejectionReason
+  // stays internal).
+  customerReason      String?
+  // Set by the retention job once the stored objects were deleted.
+  purgedAt            DateTime?
   createdAt           DateTime              @default(now())
 
   sale        Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
@@ -1688,6 +1697,7 @@ model ReceiptEvidence {
   @@unique([tenantId, saleId, idempotencyKey])
   @@index([tenantId, saleId])
   @@index([tenantId, status])
+  @@index([createdAt])
   @@map("receipt_evidences")
 }
 

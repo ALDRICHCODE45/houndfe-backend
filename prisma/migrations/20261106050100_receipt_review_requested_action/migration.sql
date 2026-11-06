@@ -1,0 +1,14 @@
+-- transfer-receipts / T2 — register RECEIPT_REVIEW_REQUESTED in the
+-- NotificationActionKey enum.
+--
+-- Standalone ALTER TYPE ADD VALUE, mirroring
+-- 20260924162000_delivery_thank_you_action. ADD VALUE cannot share a
+-- statement batch with other DDL/DML, so this migration stays a single
+-- statement.
+--
+-- Dormant: no rows are seeded, so the staff email stays off until a tenant
+-- enables the action through PUT /notification-config.
+--
+-- Rollback: PostgreSQL cannot remove an enum value in place; an unused value
+-- stays inert.
+ALTER TYPE "NotificationActionKey" ADD VALUE IF NOT EXISTS 'RECEIPT_REVIEW_REQUESTED';

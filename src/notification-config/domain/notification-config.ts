@@ -21,6 +21,11 @@
  * the key ships dormant, stays disabled for every tenant (no seed rows), and
  * `NotificationConfig.recipients` remains the STAFF list — it is never the
  * customer address for this action.
+ *
+ * transfer-receipts / T2 adds `RECEIPT_REVIEW_REQUESTED`: staff email when the
+ * chatbot uploads a NEW transfer receipt (a replay sends nothing). Dormant
+ * until a tenant enables it; recipients are the configured staff list,
+ * narrowed at send time to members who can review receipts.
  */
 export type NotificationActionKey =
   | 'LOW_STOCK'
@@ -28,7 +33,8 @@ export type NotificationActionKey =
   | 'DELIVERY_NEXT_STOP'
   | 'PROMOTION_EXPIRING'
   | 'PROMOTION_NEAR_CAPACITY'
-  | 'DELIVERY_THANK_YOU';
+  | 'DELIVERY_THANK_YOU'
+  | 'RECEIPT_REVIEW_REQUESTED';
 
 export const NOTIFICATION_ACTION_KEYS: readonly NotificationActionKey[] = [
   'LOW_STOCK',
@@ -37,6 +43,7 @@ export const NOTIFICATION_ACTION_KEYS: readonly NotificationActionKey[] = [
   'PROMOTION_EXPIRING',
   'PROMOTION_NEAR_CAPACITY',
   'DELIVERY_THANK_YOU',
+  'RECEIPT_REVIEW_REQUESTED',
 ] as const;
 
 export interface NotificationConfigView {
