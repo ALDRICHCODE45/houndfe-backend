@@ -14,6 +14,7 @@ import type {
 import { PUBLIC_CATALOG_REPOSITORY } from '../ports/public-catalog.repository';
 import { mapStockStatus } from '../../domain/value-objects/stock-status.vo';
 import { isEffectivelyPriceHidden } from '../../domain/value-objects/effective-price-hidden.vo';
+import { coversPublishedSubjectV2 } from '../../../catalog-editorial/domain/editorial-published-subjects-v2';
 
 interface CartInput {
   items: Array<{
@@ -101,10 +102,16 @@ export class ValidatePublicCartUseCase {
 
       // Steps 3–5: a missing product and a product failing the effective
       // publication gate share one uniform redacted membership miss.
+      // P4 S2/S5 — with the switch on, no Published version (or an uncovered
+      // simple presentation) is the same membership miss.
       if (
         !candidate ||
         candidate.type !== 'PRODUCT' ||
-        !candidate.includeInOnlineCatalog
+        !candidate.includeInOnlineCatalog ||
+        (context.requiresPublishedEditorial &&
+          (!candidate.publishedCoverage ||
+            (!candidate.hasVariants &&
+              !coversPublishedSubjectV2(candidate.publishedCoverage, null))))
       ) {
         items.push(this.contextualRedactedItem(item, ['NOT_IN_CATALOG']));
         globalWarnings.add('NOT_IN_CATALOG');
@@ -120,7 +127,12 @@ export class ValidatePublicCartUseCase {
           globalWarnings.add('VARIANT_NOT_FOUND');
           continue;
         }
-        if (variant.catalogPublishMode === 'OFF') {
+        // An uncovered variant is treated exactly like an OFF one (P4 S5).
+        if (
+          variant.catalogPublishMode === 'OFF' ||
+          (context.requiresPublishedEditorial &&
+            !coversPublishedSubjectV2(candidate.publishedCoverage, variant.id))
+        ) {
           items.push(
             this.contextualRedactedItem(item, ['VARIANT_NOT_IN_CATALOG']),
           );

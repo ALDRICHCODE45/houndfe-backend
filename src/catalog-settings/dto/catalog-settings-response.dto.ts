@@ -22,6 +22,7 @@ export interface CatalogSettingsPriceContextDto {
 export interface CatalogSettingsResponseDto {
   tenantId: string;
   catalogPublished: boolean;
+  catalogRequiresPublishedEditorial: boolean;
   effectivePublication: boolean;
   priceContexts: CatalogSettingsPriceContextDto[];
   stockPresentationDefault: {
@@ -64,6 +65,7 @@ export function toCatalogSettingsResponseDto(
   return {
     tenantId: result.tenantId,
     catalogPublished: result.catalogPublished,
+    catalogRequiresPublishedEditorial: result.catalogRequiresPublishedEditorial,
     effectivePublication: result.effectivePublication,
     priceContexts: result.priceContexts.map((context) => ({
       priceListId: context.priceListId,

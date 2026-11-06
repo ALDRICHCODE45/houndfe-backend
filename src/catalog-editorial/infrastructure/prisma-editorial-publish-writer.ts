@@ -72,22 +72,30 @@ export class PrismaEditorialPublishWriter implements EditorialPublishWriter {
           );
         }
         const states = await tx.$queryRaw<
-          (SavedDraftV2 & { publishedRevision: number | null })[]
+          (SavedDraftV2 & {
+            publishedRevision: number | null;
+            unpublishedRevision: number | null;
+          })[]
         >(Prisma.sql`
         SELECT "cycle", "draftRevision", "draftDocument", "publishedRevision",
-          "publishedDocument"
+          "publishedDocument", "unpublishedRevision"
         FROM "catalog_editorial_states"
         WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
         FOR UPDATE
       `);
         const state = states[0];
+        // Numbering continues past an unpublished revision: no pair is reused.
+        const lastRevision = Math.max(
+          state?.publishedRevision ?? 0,
+          state?.unpublishedRevision ?? 0,
+        );
         if (
           state?.cycle !== expectedCycle ||
           state.draftRevision !== expectedRevision ||
-          (state.publishedRevision ?? 0) >= 2147483647
+          lastRevision >= 2147483647
         )
           throw new Error('CONFLICT');
-        const publishedRevision = (state.publishedRevision ?? 0) + 1;
+        const publishedRevision = lastRevision + 1;
         // Families first matches the seed's lock order; see the discard writer.
         await tx.$executeRaw(Prisma.sql`
         LOCK TABLE "editorial_families", "editorial_definitions", "editorial_bindings",
@@ -143,10 +151,12 @@ export class PrismaEditorialPublishWriter implements EditorialPublishWriter {
           },
           careAttestation,
         });
-        // The stored Draft bytes become Published; only the latest Published is kept.
+        // The stored Draft bytes become Published; only the latest Published is
+        // kept, with the offered subjects E it covers (S5).
         const updated = await tx.$executeRaw(Prisma.sql`
         UPDATE "catalog_editorial_states" SET
           "publishedRevision" = ${publishedRevision}, "publishedDocument" = "draftDocument",
+          "publishedSubjects" = CAST(${JSON.stringify(offeredSubjects)} AS JSONB),
           "draftRevision" = NULL, "draftDocument" = NULL, "basePublishedRevision" = NULL
         WHERE "tenantId" = ${scope.tenantId} AND "productId" = ${scope.productId}
           AND "cycle" = ${expectedCycle} AND "draftRevision" = ${expectedRevision}

@@ -19,6 +19,14 @@ const presentations = {
   device: 'care.device',
   packaging: 'pack.form',
 };
+// D8 (b): for these accessory types an unknown capacity declaration defaults
+// to «No»; a known declaration always wins. Accessory electrical fields use
+// optional_equipment, which an unknown declaration already leaves optional.
+const declaredNoAccessoryTypes: ReadonlySet<string> = new Set([
+  'accessory.type.collar',
+  'accessory.type.harness',
+  'accessory.type.leash',
+]);
 
 function subset(
   code: string,
@@ -40,8 +48,18 @@ function flag(
     return axes?.length ? subset(code, axes, required) : 'U';
   return required ? 'U' : 'O';
 }
-function resolve(rule: FactRule, facts: Readonly<FactInputsV2>): Outcome {
+function resolve(
+  rule: FactRule,
+  facts: Readonly<FactInputsV2>,
+  accessoryTypes: readonly string[],
+): Outcome {
   const { family, parameter, ruleId } = rule;
+  const defaultsToNo =
+    family === 'accessory' &&
+    accessoryTypes.length > 0 &&
+    accessoryTypes.every((code) => declaredNoAccessoryTypes.has(code));
+  const declared = (value: boolean | null | undefined) =>
+    value ?? (defaultsToNo ? false : value);
   switch (ruleId) {
     case 'required':
       return 'R';
@@ -86,7 +104,7 @@ function resolve(rule: FactRule, facts: Readonly<FactInputsV2>): Outcome {
     case 'capacity':
       return flag(
         parameter,
-        facts.capacityDeterminesChoice,
+        declared(facts.capacityDeterminesChoice),
         facts.relevantCapacityCodes,
       );
     case 'equipment':
@@ -106,12 +124,16 @@ function resolve(rule: FactRule, facts: Readonly<FactInputsV2>): Outcome {
   }
 }
 
-/** Qualified known facts only; no raw capture validation or publication admission. */
+/**
+ * Qualified known facts only; no raw capture validation or publication admission.
+ * `accessoryTypes` are the subject's selected `accessory.type` option codes.
+ */
 export function evaluateFactRuleV2(
   rule: FactRule,
   facts: Readonly<FactInputsV2>,
+  accessoryTypes: readonly string[] = [],
 ): RuleResultV2 {
-  const outcome = resolve(rule, facts);
+  const outcome = resolve(rule, facts, accessoryTypes);
   return {
     applicability:
       outcome === 'N'

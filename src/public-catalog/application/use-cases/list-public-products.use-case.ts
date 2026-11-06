@@ -8,8 +8,12 @@ import {
   toPublicProductCardForContext,
 } from '../mappers/public-product.mapper';
 import type { PublicCatalogProductCard } from '../dto/public-product-card.dto';
-import type { PublicCatalogCategoryFacet } from '../dto/public-category-facet.dto';
+import type {
+  PublicAttributeFacetSelection,
+  PublicCatalogCategoryFacet,
+} from '../dto/public-category-facet.dto';
 import type { ResolvedPublicCatalogContext } from '../ports/public-catalog.repository';
+import { AttributeFacetNotAvailableError } from '../../domain/errors/attribute-facet-not-available.error';
 import type {
   PublicCatalogProductListWithContextDto,
   PublicPriceContextDto,
@@ -21,6 +25,8 @@ export interface ListProductsInput {
   sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
   page: number;
   limit: number;
+  /** P4 S4 — FACET choice selection; switch on only (contextual list). */
+  attributeFacets?: PublicAttributeFacetSelection[];
 }
 
 export interface ListProductsOutput {
@@ -120,7 +126,13 @@ export class ListPublicProductsUseCase {
       throw new NotFoundException('Not Found');
     }
 
-    const { items, total, excludedCount, categories } =
+    // P4 S4 — attribute facets exist only over Published editorial.
+    const [selected] = filters.attributeFacets ?? [];
+    if (selected && !context.requiresPublishedEditorial) {
+      throw new AttributeFacetNotAvailableError(selected.code);
+    }
+
+    const { items, total, excludedCount, categories, attributes } =
       await this.repo.listPublicProducts({
         tenantId: tenant.id,
         context,
@@ -130,6 +142,9 @@ export class ListPublicProductsUseCase {
           sort: filters.sort,
           page: filters.page,
           limit: filters.limit,
+          ...(filters.attributeFacets
+            ? { attributeFacets: filters.attributeFacets }
+            : {}),
         },
       });
 
@@ -155,7 +170,7 @@ export class ListPublicProductsUseCase {
         total,
         totalPages: Math.ceil(total / filters.limit) || 0,
       },
-      facets: { categories },
+      facets: attributes ? { categories, attributes } : { categories },
       excludedCount,
       priceContext,
     };

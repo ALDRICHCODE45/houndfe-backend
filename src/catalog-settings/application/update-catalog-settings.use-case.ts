@@ -185,6 +185,9 @@ export class UpdateCatalogSettingsUseCase {
       tenantId: current.tenantId,
       isActive: current.isActive,
       catalogPublished: data.catalogPublished ?? current.catalogPublished,
+      catalogRequiresPublishedEditorial:
+        data.catalogRequiresPublishedEditorial ??
+        current.catalogRequiresPublishedEditorial,
       catalogStockPresentationDefault: stockPresentation.mode,
       catalogStockPresentationDefaultCustomQty:
         stockPresentation.customQuantity ?? null,

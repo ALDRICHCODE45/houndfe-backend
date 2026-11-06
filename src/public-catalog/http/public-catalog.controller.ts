@@ -25,6 +25,18 @@ import { ListPublicProductsUseCase } from '../application/use-cases/list-public-
 import { GetPublicProductDetailUseCase } from '../application/use-cases/get-public-product-detail.use-case';
 import { ValidatePublicCartUseCase } from '../application/use-cases/validate-public-cart.use-case';
 import { ListProductsQueryDto } from './request-dto/list-products-query.dto';
+import type { PublicAttributeFacetSelection } from '../application/dto/public-category-facet.dto';
+
+/** P4 S4 — `definition:option` tokens grouped per definition, input order. */
+function toAttributeFacets(tokens: string[]): PublicAttributeFacetSelection[] {
+  const byCode = new Map<string, string[]>();
+  for (const token of tokens) {
+    const at = token.indexOf(':');
+    const code = token.slice(0, at);
+    byCode.set(code, [...(byCode.get(code) ?? []), token.slice(at + 1)]);
+  }
+  return [...byCode].map(([code, options]) => ({ code, options }));
+}
 import { ValidateCartBodyDto } from './request-dto/validate-cart-body.dto';
 import { PublicPriceContextQueryDto } from './request-dto/public-price-context-query.dto';
 import { PublicPriceContextResolver } from '../application/services/public-price-context-resolver';
@@ -87,6 +99,9 @@ export class PublicCatalogController {
             | 'rating_desc') ?? 'newest',
         page: query.page ?? 1,
         limit: query.limit ?? 20,
+        ...(query.facet
+          ? { attributeFacets: toAttributeFacets(query.facet) }
+          : {}),
       },
     });
   }

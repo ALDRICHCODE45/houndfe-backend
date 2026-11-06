@@ -35,6 +35,7 @@ export type PersistedStockPresentationOverrides = {
   onlineStockPresentation?: StockPresentationSource['onlineStockPresentation'];
   onlineStockPresentationCustomQty?: StockPresentationSource['onlineStockPresentationCustomQty'];
 };
+import type { PublicEditorialProjectionV2 } from '../../../catalog-editorial/domain/editorial-public-projection-v2';
 import {
   mapPublicAggregateVariantStockPresentation,
   mapPublicProductStockPresentation,
@@ -252,6 +253,8 @@ export interface PublicContextualDetailProjection extends ProductDetailWithInclu
     quantity: number;
     minQuantity: number;
   }>;
+  /** P4 S3 — Published projection; present only when the switch is on. */
+  editorial?: PublicEditorialProjectionV2;
 }
 
 /**
@@ -260,12 +263,31 @@ export interface PublicContextualDetailProjection extends ProductDetailWithInclu
  * its preserved participant snapshot.
  */
 export interface PublicContextualListProjection
-  extends ProductWithIncludes,
-    PersistedStockPresentationOverrides {
+  extends ProductWithIncludes, PersistedStockPresentationOverrides {
   stockPresentationParticipants: ReadonlyArray<{
     quantity: number;
     minQuantity: number;
   }>;
+  /** P4 S3 — Published projection; present only when the switch is on. */
+  editorial?: PublicEditorialProjectionV2;
+}
+
+/**
+ * P4 S3 — with a Published projection, its commercial title and description
+ * replace the operational name and description (a null Published description
+ * stays null). Without one, the operational values pass through unchanged.
+ */
+function publicText(product: {
+  name: string;
+  description: string | null;
+  editorial?: PublicEditorialProjectionV2;
+}): { name: string; description: string | null } {
+  if (!product.editorial)
+    return { name: product.name, description: product.description };
+  return {
+    name: product.editorial.commercialTitle ?? product.name,
+    description: product.editorial.description,
+  };
 }
 
 const contextualLogger = new Logger('PublicProductMapper');
@@ -298,7 +320,8 @@ function mappedCardStockOrThrow(
   if (result.kind === 'invalid-participants') {
     contextualLogger.error(
       JSON.stringify({
-        invariant: 'public_catalog_list_invalid_stock_presentation_participants',
+        invariant:
+          'public_catalog_list_invalid_stock_presentation_participants',
       }),
     );
     throw new InternalServerErrorException('Internal Server Error');
@@ -327,6 +350,7 @@ export function toPublicProductDetailForContext(
   tenant: { id: string; slug: string; name: string },
   stockDefaults: StockPresentationDefaults,
 ): PublicCatalogContextualProductBody {
+  const text = publicText(product);
   const priceHidden = isEffectivelyPriceHidden(product);
   const publicVariants = visibleVariants(product.variants);
 
@@ -396,14 +420,17 @@ export function toPublicProductDetailForContext(
         },
       ],
       stockPresentation: stock,
+      ...(product.editorial
+        ? { attributes: product.editorial.variantAttributes.get(v.id) ?? [] }
+        : {}),
     };
   });
 
   return {
     id: product.id,
-    name: product.name,
+    name: text.name,
     slug: null,
-    description: product.description,
+    description: text.description,
     category: product.category
       ? { id: product.category.id, name: product.category.name }
       : null,
@@ -425,6 +452,7 @@ export function toPublicProductDetailForContext(
     variants,
     rating: null,
     featuredLabel: null,
+    ...(product.editorial ? { attributes: product.editorial.attributes } : {}),
   };
 }
 
@@ -443,6 +471,7 @@ export function toPublicProductCardForContext(
   product: PublicContextualListProjection,
   stockDefaults: StockPresentationDefaults,
 ): PublicCatalogContextualProductCard {
+  const text = publicText(product);
   const priceHidden = isEffectivelyPriceHidden(product);
 
   // Persisted product override participates in the canonical resolution
@@ -473,9 +502,9 @@ export function toPublicProductCardForContext(
 
   return {
     id: product.id,
-    name: product.name,
+    name: text.name,
     slug: null,
-    description: product.description,
+    description: text.description,
     category: product.category
       ? { id: product.category.id, name: product.category.name }
       : null,

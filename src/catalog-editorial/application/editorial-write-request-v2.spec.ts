@@ -82,6 +82,7 @@ describe('editorial write request V2 (S2, contract §§3–4)', () => {
     ['save', { ...transition(), document: document() }],
     ['publish', transition()],
     ['discard', transition()],
+    ['unpublish', transition()],
   ] as const)('constructs exact %s wrapper and body', (operation, body) => {
     const h = headers();
     const result = create(operation, h, body);
@@ -154,7 +155,7 @@ describe('editorial write request V2 (S2, contract §§3–4)', () => {
     }
   });
 
-  it.each(['initialize', 'save', 'discard'] as const)(
+  it.each(['initialize', 'save', 'discard', 'unpublish'] as const)(
     'forbids confirmation on %s',
     (operation) => {
       reject(
@@ -202,6 +203,9 @@ describe('editorial write request V2 (S2, contract §§3–4)', () => {
     ['save', { ...transition(), document: document(), schemaVersion: 2 }],
     ['publish', { ...transition(), document: document() }],
     ['discard', { ...transition(), operation: 'discard' }],
+    ['unpublish', { ...transition(), document: document() }],
+    ['unpublish', { expectedCycle: 1 }],
+    ['unpublish', { expectedCycle: null, expectedRevision: 1 }],
     ['publish', { expectedCycle: 1 }],
     ['publish', null],
     ['publish', []],

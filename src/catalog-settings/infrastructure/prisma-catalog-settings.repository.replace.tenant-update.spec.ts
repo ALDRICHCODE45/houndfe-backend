@@ -41,6 +41,7 @@ interface TenantUpdateArgs {
   where: { id: string };
   data: {
     catalogPublished: boolean;
+    catalogRequiresPublishedEditorial: boolean;
     catalogStockPresentationDefault: StockMode;
     catalogStockPresentationDefaultCustomQty: number | null;
   };
@@ -50,6 +51,7 @@ interface ReloadTenant {
   id: string;
   isActive: boolean;
   catalogPublished: boolean;
+  catalogRequiresPublishedEditorial: boolean;
   catalogStockPresentationDefault: StockMode;
   catalogStockPresentationDefaultCustomQty: number | null;
   updatedAt: Date;
@@ -60,6 +62,7 @@ function tenantReloaded(o?: Partial<ReloadTenant>): ReloadTenant {
     id: T,
     isActive: true,
     catalogPublished: false,
+    catalogRequiresPublishedEditorial: false,
     catalogStockPresentationDefault: 'SYSTEM_STATUS',
     catalogStockPresentationDefaultCustomQty: null,
     updatedAt: new Date('2025-01-01T00:00:00Z'),
@@ -100,6 +103,7 @@ function makeAgg(
     tenantId: T,
     isActive: true,
     catalogPublished,
+    catalogRequiresPublishedEditorial: false,
     catalogStockPresentationDefault: mode,
     catalogStockPresentationDefaultCustomQty: customQty,
     updatedAt: new Date(),
@@ -197,6 +201,7 @@ describe('PrismaCatalogSettingsRepository — replace tenant.update', () => {
         mock,
         tenantReloaded({
           catalogPublished: true,
+          catalogRequiresPublishedEditorial: false,
           catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
           catalogStockPresentationDefaultCustomQty: 7,
         }),
@@ -211,6 +216,7 @@ describe('PrismaCatalogSettingsRepository — replace tenant.update', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0][0].data).toEqual({
         catalogPublished: true,
+        catalogRequiresPublishedEditorial: false,
         catalogStockPresentationDefault: 'CUSTOM_QUANTITY',
         catalogStockPresentationDefaultCustomQty: 7,
       });
@@ -227,6 +233,7 @@ describe('PrismaCatalogSettingsRepository — replace tenant.update', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0][0].data).toEqual({
         catalogPublished: false,
+        catalogRequiresPublishedEditorial: false,
         catalogStockPresentationDefault: 'HIDDEN',
         catalogStockPresentationDefaultCustomQty: null,
       });
