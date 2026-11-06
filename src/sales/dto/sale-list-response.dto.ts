@@ -1,3 +1,5 @@
+import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
+
 export interface SaleListRowDto {
   id: string;
   folio: string | null;
@@ -12,6 +14,8 @@ export interface SaleListRowDto {
   cashier: { id: string; name: string };
   seller: { id: string; name: string } | null;
   paymentMethods: string[];
+  /** Sale-time shipping snapshot with its source status; null without one. */
+  shippingAddress: SaleShippingAddressDto | null;
 }
 
 export interface SaleListResponseDto {

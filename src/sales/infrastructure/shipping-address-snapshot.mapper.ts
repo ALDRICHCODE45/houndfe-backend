@@ -3,6 +3,7 @@ import type { ShippingAddressSnapshot } from '../domain/shipping-address-snapsho
 import {
   compareShippingAddressSource,
   type LiveShippingAddressSource,
+  type SaleShippingAddressView,
   type ShippingAddressSourceComparison,
 } from '../domain/shipping-address-source-status';
 
@@ -110,5 +111,25 @@ export function hydrateShippingAddress(
     label: row.shippingLabel,
     latitude: row.shippingLatitude,
     longitude: row.shippingLongitude,
+  };
+}
+
+/**
+ * Full read view of a sale's shipping snapshot (id, 13 snapshot fields and
+ * source status), or null when the sale has no snapshot.
+ */
+export function toSaleShippingAddressView(
+  row: SnapshotRow & {
+    shippingAddressId: string | null;
+    shippingAddress?: LiveShippingAddressSourceRow;
+  },
+  tenantId: string,
+): SaleShippingAddressView | null {
+  const snapshot = hydrateShippingAddress(row);
+  if (!snapshot) return null;
+  return {
+    id: row.shippingAddressId,
+    ...snapshot,
+    ...resolveShippingAddressSource(snapshot, row.shippingAddress, tenantId),
   };
 }

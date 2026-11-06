@@ -51,3 +51,9 @@ export function compareShippingAddressSource(
     changedFields,
   };
 }
+
+/** Read view of a sale's shipping address: the snapshot, its nullable source id, and its source status. */
+export type SaleShippingAddressView = {
+  id: string | null;
+} & ShippingAddressSnapshot &
+  ShippingAddressSourceComparison;

@@ -405,10 +405,38 @@ describeIfDb('PrismaDeliveryRouteRepository (Integration - Real DB)', () => {
         label: 'Oficina',
         latitude: null,
         longitude: null,
+        sourceStatus: 'UNCHANGED',
+        changedFields: [],
       });
 
       expect(row?.stops[1]?.saleFolio).toBe('A-202608-000002');
       expect(row?.stops[1]?.sortOrder).toBe(1);
+    });
+
+    it('marks the snapshot CHANGED after a live edit and DELETED after the source is removed, never rewriting it', async () => {
+      const { route, addressId } = await seedDraftRoute(1);
+
+      await prisma.customerAddress.update({
+        where: { id: addressId },
+        data: { street: 'Av. Insurgentes', latitude: 19.43 },
+      });
+      const edited = await repo.findOneWithStops({ tenantId, id: route.id });
+      expect(edited?.stops[0]?.shippingAddress).toMatchObject({
+        id: addressId,
+        street: 'Av. Reforma',
+        latitude: null,
+        sourceStatus: 'CHANGED',
+        changedFields: ['street', 'latitude'],
+      });
+
+      await prisma.customerAddress.delete({ where: { id: addressId } });
+      const deleted = await repo.findOneWithStops({ tenantId, id: route.id });
+      expect(deleted?.stops[0]?.shippingAddress).toMatchObject({
+        id: null,
+        street: 'Av. Reforma',
+        sourceStatus: 'DELETED',
+        changedFields: [],
+      });
     });
   });
 

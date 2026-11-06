@@ -28,6 +28,8 @@ import type { ShippingAddressSnapshot } from '../domain/shipping-address-snapsho
 import {
   shippingAddressColumns,
   hydrateShippingAddress,
+  liveShippingAddressSourceSelect,
+  toSaleShippingAddressView,
 } from './shipping-address-snapshot.mapper';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -1802,6 +1804,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     },
   ) {
     const prisma = this.tenantPrisma.getClient();
+    const tenantId = this.requireTenantId();
     const where = this.buildExtendedWhere(input);
 
     const rows = await prisma.sale.findMany({
@@ -1811,6 +1814,8 @@ export class PrismaSaleRepository implements ISaleRepository {
         user: { select: { id: true, name: true } },
         seller: { select: { id: true, name: true } },
         payments: { select: { method: true }, orderBy: { createdAt: 'asc' } },
+        // Live source address, same query, only for `sourceStatus`.
+        ...liveShippingAddressSourceSelect,
       },
       orderBy: { [input.sortBy]: input.sortOrder },
       skip: (input.page - 1) * input.limit,
@@ -1838,6 +1843,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       cashier: row.user,
       seller: row.seller,
       paymentMethods: [...new Set(row.payments.map((p) => p.method))],
+      shippingAddress: toSaleShippingAddressView(row, tenantId),
     }));
   }
 
@@ -2088,6 +2094,8 @@ export class PrismaSaleRepository implements ISaleRepository {
         customer: { select: { id: true, firstName: true, lastName: true } },
         user: { select: { id: true, name: true } },
         seller: { select: { id: true, name: true } },
+        // Live source address, same query, only for `sourceStatus`.
+        ...liveShippingAddressSourceSelect,
         items: {
           select: {
             productName: true,
@@ -2196,6 +2204,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         : null,
       cashier: sale.user,
       seller: sale.seller,
+      shippingAddress: toSaleShippingAddressView(sale, tenantId),
       items: sale.items.map((item) => {
         // Column-derived BXGY discriminator (design.md Decision 6). Same
         // predicate the domain SaleItem.isBuyXGetYReward() reads — we
