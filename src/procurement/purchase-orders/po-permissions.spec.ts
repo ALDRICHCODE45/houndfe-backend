@@ -23,6 +23,8 @@ describe('purchase-order permission registry', () => {
           'ProcurementOrderCancellation',
           'InventoryJournal',
           'InventoryAdjustment',
+          'DeliveryZone',
+          'ShippingSettings',
         ].includes(p.subject),
     );
     expect(

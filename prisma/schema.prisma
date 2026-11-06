@@ -174,6 +174,13 @@ enum SaleDeliveryStatus {
   SHIPPED
 }
 
+// shipping-zones / T7 (S10) — how a bot sale reaches the customer. Null for
+// POS sales and bot sales registered without shipping (legacy).
+enum SaleFulfillmentMode {
+  DELIVERY
+  PICKUP
+}
+
 enum ReceiptEvidenceStatus {
   PENDING
   CONFIRMED
@@ -291,6 +298,10 @@ enum NotificationActionKey {
   // `NotificationConfig.recipients` stays the STAFF list — never the customer
   // address for this action.
   DELIVERY_THANK_YOU
+  // shipping-zones / T1 (S3). Staff email when the bot opens a delivery-zone
+  // validation for an unknown postal code. Disabled until a tenant opts in
+  // (no seed rows), like every action since PROMOTION_EXPIRING.
+  DELIVERY_ZONE_VALIDATION_REQUESTED
   // transfer-receipts / T2. Staff email when the chatbot uploads a new
   // receipt (migration 20261106050100_receipt_review_requested_action).
   // Dormant until a tenant enables it; no rows are seeded.
@@ -465,6 +476,15 @@ model Tenant {
   stockAlertStates          StockAlertState[]
   paymentDetails            PaymentDetail[]
   paymentMethods            PaymentMethod[]
+  // shipping-zones / T2 — packaging, standard boxes and shipping origin.
+  productPackagings         ProductPackaging[]
+  variantPackagings         VariantPackaging[]
+  shippingBoxes             ShippingBox[]
+  shippingOrigin            ShippingOrigin?
+  // shipping-zones / T3 — persisted shipping quotes.
+  shippingQuotes            ShippingQuote[]
+  // shipping-zones / T7 — weekly opening hours for store pickup.
+  openingHours              TenantOpeningHours?
       // delivery-routes / WU1 — tenant-scoped delivery routes + per-route stops.
       // Cascade delete from Tenant propagates to both tables (allowlist entry
       // in src/shared/tenant/tenant-scoped-models.constant.ts is the runtime
@@ -482,6 +502,13 @@ model Tenant {
   // src/shared/tenant/tenant-scoped-models.constant.ts; this back-relation only
   // keeps Prisma's relation graph complete.
   humanDecisions           HumanDecision[]
+
+  // shipping-zones / T1 — delivery zones, zone validations and bot requesters.
+  // Runtime gate: the three `DeliveryZone*` entries in
+  // src/shared/tenant/tenant-scoped-models.constant.ts.
+  deliveryZones           DeliveryZone[]
+  deliveryZoneValidations DeliveryZoneValidation[]
+  deliveryZoneRequests    DeliveryZoneRequest[]
 
   // cash-register-closing / T2 — tenant-scoped POS cash persistence. The
   // runtime gate is the seven `Cash*` entries in
@@ -614,6 +641,8 @@ model Product {
   catalogPriceLists ProductCatalogPriceList[]
   editorialState CatalogEditorialState?
   privateMediaAssets PrivateMediaAsset[]
+  // shipping-zones / T2 — packed-item weight/dimensions (not editorial net mass).
+  packaging      ProductPackaging?
 
   @@unique([tenantId, id])
   @@index([tenantId])
@@ -1113,6 +1142,8 @@ model Variant {
   variantPrices  VariantPrice[]
   saleItems      SaleItem[]
   quotationItems QuotationItem[]
+  // shipping-zones / T2 — whole-record packaging override of the product's.
+  packaging      VariantPackaging?
 
   @@index([tenantId])
   @@index([productId, catalogPublishMode])
@@ -1419,6 +1450,10 @@ model Sale {
   shippingChargeCents Int                @default(0)
   shippingApprovalId  String?
   shippingQuoteId     String?
+  // shipping-zones / T7 — the verified backend quote that fixed the charge.
+  // Unique: one quote backs at most one sale.
+  shippingQuoteRecordId String?             @unique
+  fulfillmentMode       SaleFulfillmentMode?
   status              SaleStatus         @default(DRAFT)
   channel             SaleChannel        @default(POS)
   register            String             @default("Principal")
@@ -1458,6 +1493,7 @@ model Sale {
   customer           Customer?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
   shippingAddress    CustomerAddress?      @relation(fields: [shippingAddressId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   globalPriceList    GlobalPriceList?      @relation(fields: [globalPriceListId], references: [id], onDelete: SetNull)
+  shippingQuote      ShippingQuote?        @relation(fields: [shippingQuoteRecordId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   items              SaleItem[]
   payments           SalePayment[]
   refunds            SaleRefund[]
@@ -3307,4 +3343,285 @@ model CashCommand {
   @@unique([tenantId, key])
   @@index([tenantId, createdAt])
   @@map("cash_commands")
+}
+
+// ============================================================================
+// DELIVERY ZONES — shipping-zones / T1 (S1, S2, S3)
+// ============================================================================
+// Self-contained block (docs/delivery-zones.md). A tenant is a sucursal, so
+// every zone, validation and requester is tenant-scoped and listed in
+// src/shared/tenant/tenant-scoped-models.constant.ts.
+//
+// `DeliveryZone`: one row per tenant + postal code. The type/surcharge/ETA
+// coupling (SURCHARGE carries surchargeCents; FREE/SURCHARGE carry etaDays;
+// CARRIER_ONLY/DENIED carry neither) is a migration CHECK. A deactivated zone
+// (`isActive = false`) behaves as an unknown postal code for the bot.
+//
+// `DeliveryZoneValidation`: the human decision for an unknown postal code. At
+// most one PENDING row per tenant + postal code (partial unique index in the
+// migration, Prisma cannot express it). Resolution is a versioned CAS
+// (1 -> 2) with the closed APPROVE/REJECT action union.
+//
+// `DeliveryZoneRequest`: one row per bot intake (`sourceRequestId`), the
+// requester. It owns its own PENDING -> RESOLVED -> ACK cycle so every waiting
+// customer is notified. The human-decision status and bot-outcome enums are
+// reused on purpose; the `human_decisions` table is not touched.
+
+enum DeliveryZoneType {
+  FREE
+  SURCHARGE
+  CARRIER_ONLY
+  DENIED
+}
+
+// APPROVE carries the zone type (FREE | SURCHARGE | CARRIER_ONLY) plus its
+// surcharge/ETA; REJECT always settles the zone as DENIED.
+enum DeliveryZoneResolutionAction {
+  APPROVE_DELIVERY_ZONE
+  REJECT_DELIVERY_ZONE
+}
+
+// How a requester was resolved: by a human validation, or immediately at
+// intake because an active zone already existed.
+enum DeliveryZoneRequestResolutionSource {
+  VALIDATION
+  EXISTING_ZONE
+}
+
+model DeliveryZone {
+  id                    String           @id @default(uuid())
+  tenantId              String
+  zipCode               String           @db.VarChar(5)
+  type                  DeliveryZoneType
+  surchargeCents        Int?
+  etaDays               Int?
+  state                 String?
+  municipality          String?
+  neighborhood          String?
+  isActive              Boolean          @default(true)
+  // Audit snapshots, server-derived from the JWT; no FK so a User deletion
+  // never erases who approved the zone.
+  approvedById          String
+  approvedByDisplayName String
+  approvedAt            DateTime
+  // The validation that last settled this zone; NULL for manual edits.
+  sourceValidationId    String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, zipCode])
+  @@index([tenantId, isActive, zipCode])
+  @@map("delivery_zones")
+}
+
+model DeliveryZoneValidation {
+  id                    String                        @id @default(uuid())
+  tenantId              String
+  zipCode               String                        @db.VarChar(5)
+  state                 String
+  municipality          String
+  neighborhood          String
+  branchName            String?
+  status                HumanDecisionStatus           @default(PENDING)
+  version               Int                           @default(1)
+  resolutionAction      DeliveryZoneResolutionAction?
+  zoneType              DeliveryZoneType?
+  surchargeCents        Int?
+  etaDays               Int?
+  resolutionRequestId   String?
+  resolvedAt            DateTime?
+  resolvedByActorId     String?
+  resolvedByDisplayName String?
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+
+  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  requests DeliveryZoneRequest[]
+
+  @@index([tenantId, status, createdAt, id])
+  @@map("delivery_zone_validations")
+}
+
+model DeliveryZoneRequest {
+  id                         String                               @id @default(uuid())
+  tenantId                   String
+  source                     String
+  sourceRequestId            String
+  canonicalRequestHash       String
+  // Audit-only intake credential (ServiceAuthGuard); no FK, excluded from the
+  // canonical hash, exactly like human_decisions.submittedCredentialId.
+  submittedCredentialId      String
+  validationId               String?
+  branchName                 String?
+  zipCode                    String                               @db.VarChar(5)
+  state                      String
+  municipality               String
+  neighborhood               String
+  customerPhoneCountryCode   String
+  customerPhone              String
+  conversationRef            String
+  lastCustomerMessageAt      DateTime
+  status                     HumanDecisionStatus                  @default(PENDING)
+  version                    Int                                  @default(1)
+  resolutionSource           DeliveryZoneRequestResolutionSource?
+  zoneType                   DeliveryZoneType?
+  surchargeCents             Int?
+  etaDays                    Int?
+  resolvedAt                 DateTime?
+  applicationOutcome         HumanDecisionBotOutcome?
+  applicationAttemptId       String?
+  applicationEvidenceHash    String?
+  providerMessageId          String?
+  providerAcceptedObservedAt DateTime?
+  applicationAttemptedAt     DateTime?
+  ackReceivedAt              DateTime?
+  createdAt                  DateTime                             @default(now())
+  updatedAt                  DateTime                             @updatedAt
+
+  tenant     Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  validation DeliveryZoneValidation? @relation(fields: [validationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, source, sourceRequestId])
+  @@index([validationId, status])
+  @@index([tenantId, status, lastCustomerMessageAt])
+  @@map("delivery_zone_requests")
+}
+
+// ============================================================================
+// SHIPPING PACKAGING (shipping-zones / T2 — S4, S5)
+// ============================================================================
+
+// Packed-item weight (g) and dimensions (cm, one decimal) per product. This is
+// the parcel as handed to a carrier, NOT the editorial net mass. Tenant
+// isolation is explicit `tenantId` filtering in the adapter.
+model ProductPackaging {
+  productId String   @id
+  tenantId  String
+  weightG   Int
+  lengthCm  Decimal  @db.Decimal(5, 1)
+  widthCm   Decimal  @db.Decimal(5, 1)
+  heightCm  Decimal  @db.Decimal(5, 1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("product_packagings")
+}
+
+// Whole-record override: when present it replaces the product packaging for
+// that variant (no per-field inheritance).
+model VariantPackaging {
+  variantId String   @id
+  tenantId  String
+  weightG   Int
+  lengthCm  Decimal  @db.Decimal(5, 1)
+  widthCm   Decimal  @db.Decimal(5, 1)
+  heightCm  Decimal  @db.Decimal(5, 1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  variant Variant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("variant_packagings")
+}
+
+// Standard boxes per sucursal (tenant). Inner dimensions in cm (one decimal).
+model ShippingBox {
+  id                String   @id @default(uuid())
+  tenantId          String
+  name              String
+  innerLengthCm     Decimal  @db.Decimal(5, 1)
+  innerWidthCm      Decimal  @db.Decimal(5, 1)
+  innerHeightCm     Decimal  @db.Decimal(5, 1)
+  weightG           Int
+  maxContentWeightG Int
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isActive])
+  @@map("shipping_boxes")
+}
+
+// Shipping origin of the sucursal. Independent from the free-text
+// `Tenant.address`, which keeps its meaning.
+model ShippingOrigin {
+  tenantId     String   @id
+  addressLine1 String
+  addressLine2 String?
+  neighborhood String
+  municipality String
+  state        String
+  postalCode   String   @db.Char(5)
+  contactPhone String
+  updatedById  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("shipping_origins")
+}
+
+// shipping-zones / T3 (S6-S9) — a persisted, expiring shipping quote. The
+// opaque quote id given to the bot is never stored, only its SHA-256
+// (`tokenHash`). The binding (customer phone, lines, destination) is what the
+// checkout verifies; `zone` and `box` are snapshots at quote time.
+model ShippingQuote {
+  id                  String           @id @default(uuid())
+  tenantId            String
+  tokenHash           String           @unique @db.Char(64)
+  customerId          String?
+  phoneCountryCode    String
+  phone               String
+  lines               Json
+  destination         Json
+  shippingAddressId   String?
+  zoneType            DeliveryZoneType
+  zone                Json
+  carrier             String?
+  service             String?
+  carrierRateId       String?
+  etaDays             Int?
+  etaReason           String?
+  box                 Json?
+  costCents           Int
+  creditCents         Int
+  customerChargeCents Int
+  currency            String           @default("MXN") @db.Char(3)
+  expiresAt           DateTime
+  createdAt           DateTime         @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale   Sale?
+
+  @@index([tenantId, createdAt])
+  @@map("shipping_quotes")
+}
+
+// shipping-zones / T7 (S10) — weekly opening hours of the sucursal, shown to
+// the bot for store pickup. `days` is the validated week
+// `[{ day: "MONDAY", ranges: [{ open: "09:00", close: "14:00" }] }, …]`
+// (seven entries, Monday first); `timeZone` is IANA.
+model TenantOpeningHours {
+  tenantId    String   @id
+  timeZone    String
+  days        Json
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_opening_hours")
 }

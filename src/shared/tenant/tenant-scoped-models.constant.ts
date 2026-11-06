@@ -114,4 +114,24 @@ export const TENANT_SCOPED_MODELS = new Set([
   // response could leak through TenantPrismaService.
   'StockMovement',
   'InventoryAdjustmentReceipt',
+  // shipping-zones / T1 — delivery zones, zone validations and bot
+  // requesters. Same fail-open allowlist semantics: without these entries a
+  // zone lookup by postal code, the one-PENDING-per-zip validation lookup or a
+  // requester replay by `sourceRequestId` could resolve another tenant's row.
+  'DeliveryZone',
+  'DeliveryZoneValidation',
+  'DeliveryZoneRequest',
+  // shipping-zones / T2 — packaging, standard boxes and shipping origin. Same
+  // fail-open allowlist semantics; the adapters also pass `tenantId` explicitly.
+  'ProductPackaging',
+  'VariantPackaging',
+  'ShippingBox',
+  'ShippingOrigin',
+  // shipping-zones / T3 — persisted shipping quotes. Same fail-open allowlist
+  // semantics; the repository also filters by `tenantId` explicitly, so a
+  // quote id from another sucursal resolves to NOT_FOUND.
+  'ShippingQuote',
+  // shipping-zones / T7 — sucursal opening hours for store pickup. Same
+  // fail-open allowlist semantics; the service also filters by `tenantId`.
+  'TenantOpeningHours',
 ]);
