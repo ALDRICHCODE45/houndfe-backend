@@ -159,8 +159,10 @@ human); a `CONFIRMED` receipt with `debtCents > 0` means a partial payment.
 - `receipt_evidences` stores `storageKey`, `mimeType` (from magic bytes),
   `sizeBytes`, `sha256`, `previewKey`, `previewMimeType`, `previewStatus`,
   `idempotencyKey`, `extracted` and `mismatch`.
-- If the database insert loses a concurrent race, the duplicate objects are
-  deleted (best effort).
+- If the database insert fails after the objects were stored, they are
+  deleted (best effort; a failed delete is logged and the original error is
+  returned). A lost concurrent race then answers like a replay of the winner;
+  any other failure is returned unchanged.
 
 ## Preview
 
@@ -169,11 +171,33 @@ human); a `CONFIRMED` receipt with `debtCents > 0` means a partial payment.
 - PDF: page 1 is rasterized in the backend with PDFium (WASM, `@hyzyla/pdfium`)
   and encoded as PNG (`pngjs`). The longest side is 1600 px. It is stored
   privately next to the original as `<…>.preview.png`.
-- Guards: the render runs in a short-lived worker thread with a 256 MB JS heap
-  cap and a 15 s timeout. On timeout the worker is terminated, so a hostile PDF
-  cannot block the event loop. The input is already capped at 10 MB.
-- Any rasterization or preview-upload failure keeps the original, sets
-  `previewStatus = UNAVAILABLE` and `previewKey = null`, and logs a warning.
+- Isolation: the render runs in a short-lived **child process**
+  (`child_process.fork` of `src/receipts/infrastructure/pdf-preview.child.ts`),
+  never inside the API process. A hostile PDF (decompression bomb, PDFium
+  crash, endless render) can only take down the child; the API keeps serving.
+  The child gets no API environment (only `NODE_ENV`), so it never sees
+  secrets.
+- Limits (defaults in `pdfium-preview-rasterizer.ts`):
+  - 15 s hard timeout, then `SIGKILL`.
+  - `--max-old-space-size=256` for the child's V8 heap. PDFium's WASM memory
+    lives outside that heap, so a Linux `/proc` RSS watchdog (polled every
+    100 ms) `SIGKILL`s the child above 512 MB resident. On other platforms only
+    the timeout and the process boundary apply.
+  - Concurrency 1 for the whole API process. Up to 3 uploads wait in order;
+    a 4th waiting upload gets `UNAVAILABLE` at once. The worst-case wait is
+    (1 + 3) × 15 s = 60 s.
+  - The input is already capped at 10 MB.
+- Child path: `nest build`/`tsc -p tsconfig.build.json` compiles the child to
+  `dist/receipts/infrastructure/pdf-preview.child.js` next to the rasterizer,
+  which forks that `.js` when it exists. Under ts-jest only the `.ts` source
+  exists, so it is forked with `--require ts-node/register/transpile-only` (a
+  devDependency, never used in production). The child resolves
+  `@hyzyla/pdfium`/`pngjs` from the app's `node_modules` (`/app/node_modules`
+  in the image).
+- Any child crash, OOM, kill, timeout, full queue or preview-upload failure
+  keeps the original, sets `previewStatus = UNAVAILABLE` and
+  `previewKey = null`, and logs a warning with the cause (exit code or signal
+  and the tail of the child's stderr).
 
 ## Mismatch
 
@@ -201,6 +225,9 @@ Migration `20261106050000_receipt_review_retention` (T2, additive) adds
 `customerReason` and `purgedAt`, widens the CHECK to accept purged rows and
 indexes `createdAt`. `20261106050100_receipt_review_requested_action` adds the
 `RECEIPT_REVIEW_REQUESTED` notification action (single `ALTER TYPE`).
+
+Migration `20261106070000_receipt_retention_purge_attempts` (T3, additive)
+adds `purgeAttempts` (default 0) and `lastPurgeErrorAt`.
 
 ## Staff review (T2)
 
@@ -237,6 +264,13 @@ original and the preview in bounded batches, then sets `purgedAt` and clears
 outside `receipts/<tenantId>/`, keeps the keys when a delete fails (retried on
 the next run) and is idempotent. Legacy `mediaUrl` rows have nothing stored and
 are untouched.
+
+A failed row (delete error or key outside its prefix) gets `purgeAttempts + 1`
+and `lastPurgeErrorAt` = the run time. The following batches of the same run
+skip it, and later runs scan rows by `purgeAttempts` first, so rows that keep
+failing can never block newer due rows. The run time is read once, inside the
+`read-clock` step, so every batch and every Inngest replay uses the same
+cutoff. A run stops on a short batch or after 50 batches.
 
 ## Environment
 
