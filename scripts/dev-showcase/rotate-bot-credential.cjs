@@ -96,23 +96,31 @@ async function main() {
       return;
     }
     const token = newToken();
-    const created = await prisma.$transaction(async (tx) => {
-      await tx.serviceCredential.updateMany({
-        where: { id: { in: plan.revoke } },
-        data: { isActive: false, revokedAt: now },
+    // Write the token before revoking: if the file cannot be written, the old
+    // credential stays active; if the transaction fails, the file is removed.
+    const tokenFile = path.resolve(ROOT, args.out);
+    writeSecret(tokenFile, token);
+    const created = await prisma
+      .$transaction(async (tx) => {
+        await tx.serviceCredential.updateMany({
+          where: { id: { in: plan.revoke } },
+          data: { isActive: false, revokedAt: now },
+        });
+        return tx.serviceCredential.create({
+          data: {
+            tenantId: tenant.id,
+            name,
+            hashedKey: hashToken(token),
+            scopes,
+            rateLimit: plan.create.rateLimit,
+          },
+          select: { id: true },
+        });
+      })
+      .catch((error) => {
+        fs.rmSync(tokenFile, { force: true });
+        throw error;
       });
-      return tx.serviceCredential.create({
-        data: {
-          tenantId: tenant.id,
-          name,
-          hashedKey: hashToken(token),
-          scopes,
-          rateLimit: plan.create.rateLimit,
-        },
-        select: { id: true },
-      });
-    });
-    writeSecret(path.resolve(ROOT, args.out), token);
     console.log(JSON.stringify({ ...plan, createdId: created.id }, null, 2));
   } finally {
     await prisma.$disconnect();
