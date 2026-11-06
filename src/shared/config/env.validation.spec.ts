@@ -345,6 +345,20 @@ describe('buildEnvValidationSchema (D.4)', () => {
       expect(value.SKYDROPX_POLL_INTERVAL_MS).toBe(1000);
     });
 
+    it('boots with every Skydropx key present but empty, as in .env.example', () => {
+      const { error } = validate({
+        ...baseValidEnv,
+        NODE_ENV: 'development',
+        SKYDROPX_CLIENT_ID: '',
+        SKYDROPX_CLIENT_SECRET: '',
+        SKYDROPX_BASE_URL: '',
+        SKYDROPX_REQUEST_TIMEOUT_MS: '',
+        SKYDROPX_POLL_INTERVAL_MS: '',
+        SKYDROPX_QUOTE_DEADLINE_MS: '',
+      });
+      expect(error).toBeUndefined();
+    });
+
     it('rejects a non-https base URL and out-of-range timings', () => {
       const { error } = validate({
         ...baseValidEnv,

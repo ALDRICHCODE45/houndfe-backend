@@ -120,16 +120,19 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
       .integer()
       .min(500)
       .max(60000)
+      .allow('')
       .optional(),
     SKYDROPX_POLL_INTERVAL_MS: Joi.number()
       .integer()
       .min(500)
       .max(10000)
+      .allow('')
       .optional(),
     SKYDROPX_QUOTE_DEADLINE_MS: Joi.number()
       .integer()
       .min(1000)
       .max(120000)
+      .allow('')
       .optional(),
 
     // ─── D.4 — Inngest + Resend fail-closed posture ──────────────────────
