@@ -11,6 +11,7 @@
  * and any permission-based redaction happens in the service.
  */
 import type { Prisma } from '@prisma/client';
+import type { ShippingAddressSourceComparison } from '../../sales/domain/shipping-address-source-status';
 
 export const ELIGIBLE_SALES_READER = Symbol('ELIGIBLE_SALES_READER');
 
@@ -34,7 +35,7 @@ export interface EligibleSaleCustomerProjection {
   lastName: string | null;
 }
 
-export interface EligibleSaleAddressProjection {
+export interface EligibleSaleAddressProjection extends ShippingAddressSourceComparison {
   id: string | null;
   label: string | null;
   street: string;

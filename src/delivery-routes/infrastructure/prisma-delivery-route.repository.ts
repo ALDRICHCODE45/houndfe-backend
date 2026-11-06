@@ -30,6 +30,8 @@
 import { Injectable } from '@nestjs/common';
 import {
   hydrateShippingAddress,
+  liveShippingAddressSourceSelect,
+  resolveShippingAddressSource,
   shippingAddressSnapshotSelect,
 } from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import { Prisma } from '@prisma/client';
@@ -120,7 +122,9 @@ export function isSaleReservationP2002(error: unknown): boolean {
  * ODD O1 — the single nested sale projection shared by the two route read
  * models. `tenantId` is selected on the sale and its customer because the
  * CLS tenant extension never recurses into a nested `select`. Address
- * fields belong to the sale snapshot and share its tenant boundary.
+ * fields belong to the sale snapshot and share its tenant boundary; the live
+ * source address is selected (with its `tenantId`) only to compute the
+ * snapshot's `sourceStatus`.
  */
 const STOP_SALE_SELECT = {
   id: true,
@@ -137,6 +141,7 @@ const STOP_SALE_SELECT = {
   },
   shippingAddressId: true,
   ...shippingAddressSnapshotSelect,
+  ...liveShippingAddressSourceSelect,
 } satisfies Prisma.SaleSelect;
 
 type StopSaleProjection = Prisma.SaleGetPayload<{
@@ -164,7 +169,8 @@ type RouteReadStopProjection = {
  * therefore treated as absent: the stop keeps its own `saleId` (a column
  * of the tenant's own stop row) while every nested field resolves to
  * `null`. The customer is checked independently; the address is hydrated
- * only from the tenant-owned sale's snapshot.
+ * only from the tenant-owned sale's snapshot, and a foreign-tenant live
+ * source address counts as DELETED.
  */
 function mapRouteStopReadModel(
   stop: RouteReadStopProjection,
@@ -211,6 +217,11 @@ function mapRouteStopReadModel(
           label: shippingAddress.label,
           latitude: shippingAddress.latitude,
           longitude: shippingAddress.longitude,
+          ...resolveShippingAddressSource(
+            shippingAddress,
+            sale?.shippingAddress,
+            routeTenantId,
+          ),
         }
       : null,
   };

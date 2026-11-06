@@ -18,7 +18,10 @@
 import { Injectable } from '@nestjs/common';
 import {
   hydrateShippingAddress,
+  liveShippingAddressSourceSelect,
+  resolveShippingAddressSource,
   shippingAddressSnapshotSelect,
+  type LiveShippingAddressSourceRow,
   type SnapshotRow,
 } from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import type { Prisma } from '@prisma/client';
@@ -52,6 +55,7 @@ interface EligibleSalesQueryRow extends SnapshotRow {
     tenantId: string;
   } | null;
   shippingAddressId: string | null;
+  shippingAddress: LiveShippingAddressSourceRow;
   items: { productName: string }[];
   deliveryRouteStops: {
     tenantId: string;
@@ -119,6 +123,8 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
           },
           shippingAddressId: true,
           ...shippingAddressSnapshotSelect,
+          // Live source (with tenantId) only to compute `sourceStatus`.
+          ...liveShippingAddressSourceSelect,
           items: {
             select: { productName: true },
             orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -206,7 +212,7 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
       confirmedAt: row.confirmedAt,
       dueDate: row.dueDate,
       customer: this.mapCustomer(row.customer, tenantId),
-      shippingAddress: this.mapAddress(row),
+      shippingAddress: this.mapAddress(row, tenantId),
       productNames: row.items.map((item) => item.productName),
       occupancy: this.resolveOccupancy(row.deliveryRouteStops, tenantId),
     };
@@ -226,6 +232,7 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
 
   private mapAddress(
     row: EligibleSalesQueryRow,
+    tenantId: string,
   ): EligibleSaleAddressProjection | null {
     const address = hydrateShippingAddress(row);
     if (!address) return null;
@@ -240,6 +247,7 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
       city: address.city,
       state: address.state,
       zipCode: address.zipCode,
+      ...resolveShippingAddressSource(address, row.shippingAddress, tenantId),
     };
   }
 

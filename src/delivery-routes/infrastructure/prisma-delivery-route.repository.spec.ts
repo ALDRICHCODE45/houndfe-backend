@@ -20,6 +20,7 @@
  */
 import { Prisma } from '@prisma/client';
 import {
+  liveShippingAddressSourceSelect,
   shippingAddressColumns,
   shippingAddressSnapshotSelect,
   type SnapshotRow,
@@ -786,6 +787,7 @@ const NESTED_SALE_SELECT = {
   },
   shippingAddressId: true,
   ...shippingAddressSnapshotSelect,
+  ...liveShippingAddressSourceSelect,
 };
 
 /** The projected address `seedSaleGraph` produces for `address-1`. */
@@ -802,6 +804,8 @@ const EXPECTED_ADDRESS = {
   label: 'Home',
   latitude: 0,
   longitude: 0,
+  sourceStatus: 'UNCHANGED',
+  changedFields: [],
 };
 
 /** Seed the nested to-one rows the double resolves for `stops.include.sale`.
@@ -1065,6 +1069,68 @@ describe.each(READ_METHODS)(
         email: 'ada@example.com',
       });
       expect(stop.shippingAddress).toEqual(EXPECTED_ADDRESS);
+    });
+
+    it('Given a live source address edited after the sale, when the route is read, then the snapshot is kept and marked CHANGED with the differing keys', async () => {
+      const route = await makeActiveRoute(['sale-1']);
+      const client = new FakePrismaTransactionClient();
+      seed(client, route);
+      seedSaleGraph(client, { saleId: 'sale-1', address: { id: 'address-1' } });
+      client.addresses = client.addresses.map((row) => ({
+        ...row,
+        street: 'Edited St',
+        longitude: 1,
+      }));
+
+      const read = await readSoleRoute(method, makeRepo(client), route.id);
+
+      expect(read.stops[0].shippingAddress).toEqual({
+        ...EXPECTED_ADDRESS,
+        sourceStatus: 'CHANGED',
+        changedFields: ['street', 'longitude'],
+      });
+    });
+
+    it('Given a source address deleted after the sale, when the route is read, then the snapshot is kept with a null id and marked DELETED', async () => {
+      const route = await makeActiveRoute(['sale-1']);
+      const client = new FakePrismaTransactionClient();
+      seed(client, route);
+      seedSaleGraph(client, { saleId: 'sale-1', address: { id: 'address-1' } });
+      client.addresses = [];
+      client.sales = client.sales.map((sale) => ({
+        ...sale,
+        shippingAddressId: null,
+      }));
+
+      const read = await readSoleRoute(method, makeRepo(client), route.id);
+
+      expect(read.stops[0].shippingAddress).toEqual({
+        ...EXPECTED_ADDRESS,
+        id: null,
+        sourceStatus: 'DELETED',
+        changedFields: [],
+      });
+    });
+
+    it('Given a snapshot whose live source row belongs to another tenant, when the route is read, then the foreign row counts as absent (DELETED) and none of its values leak', async () => {
+      const route = await makeActiveRoute(['sale-1']);
+      const client = new FakePrismaTransactionClient();
+      seed(client, route);
+      seedSaleGraph(client, { saleId: 'sale-1', address: { id: 'address-1' } });
+      client.addresses = client.addresses.map((row) => ({
+        ...row,
+        tenantId: OTHER_TENANT_ID,
+        street: 'Foreign Ave',
+      }));
+
+      const read = await readSoleRoute(method, makeRepo(client), route.id);
+
+      expect(read.stops[0].shippingAddress).toEqual({
+        ...EXPECTED_ADDRESS,
+        sourceStatus: 'DELETED',
+        changedFields: [],
+      });
+      expect(JSON.stringify(read)).not.toContain('Foreign Ave');
     });
   },
 );

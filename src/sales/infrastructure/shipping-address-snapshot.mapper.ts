@@ -1,5 +1,10 @@
 import type { Sale as PrismaSale } from '@prisma/client';
 import type { ShippingAddressSnapshot } from '../domain/shipping-address-snapshot';
+import {
+  compareShippingAddressSource,
+  type LiveShippingAddressSource,
+  type ShippingAddressSourceComparison,
+} from '../domain/shipping-address-source-status';
 
 export function shippingAddressColumns(
   snapshot: ShippingAddressSnapshot | null,
@@ -41,6 +46,51 @@ export type SnapshotRow = Pick<
   PrismaSale,
   keyof ReturnType<typeof shippingAddressColumns>
 >;
+
+/**
+ * Nested select of the live source address, loaded in the same sale query.
+ * `tenantId` is selected because the CLS tenant extension never rewrites a
+ * nested to-one relation, and to-one relations accept no `where`.
+ */
+export const liveShippingAddressSourceSelect = {
+  shippingAddress: {
+    select: {
+      tenantId: true,
+      street: true,
+      exteriorNumber: true,
+      interiorNumber: true,
+      zipCode: true,
+      neighborhood: true,
+      municipality: true,
+      city: true,
+      state: true,
+      visualReferences: true,
+      carrierPhone: true,
+      label: true,
+      latitude: true,
+      longitude: true,
+    },
+  },
+} as const;
+
+export type LiveShippingAddressSourceRow =
+  | (LiveShippingAddressSource & { tenantId: string })
+  | null;
+
+/**
+ * Source status of a hydrated snapshot. A live row owned by another tenant
+ * is treated as absent, so it yields DELETED and is never exposed.
+ */
+export function resolveShippingAddressSource(
+  snapshot: ShippingAddressSnapshot,
+  live: LiveShippingAddressSourceRow | undefined,
+  tenantId: string,
+): ShippingAddressSourceComparison {
+  return compareShippingAddressSource(
+    snapshot,
+    live != null && live.tenantId === tenantId ? live : null,
+  );
+}
 
 export function hydrateShippingAddress(
   row: SnapshotRow,

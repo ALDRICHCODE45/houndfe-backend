@@ -28,6 +28,8 @@
  *   INELIGIBLE { reason: 'MISSING_ADDRESS' | 'DELIVERY_STATUS' } → explainable
  *       rejection; those rows are intentionally kept in the page.
  */
+import type { ShippingAddressSourceStatus } from '../../sales/domain/shipping-address-source-status';
+
 export type EligibleSaleRouteStatusDto = 'DRAFT' | 'ACTIVE';
 
 export interface EligibleSaleOccupiedRouteDto {
@@ -59,6 +61,10 @@ export interface EligibleSaleShippingAddressDto {
   city: string | null;
   state: string | null;
   zipCode: string | null;
+  /** Live source vs this snapshot; DELETED when the source is gone. */
+  sourceStatus: ShippingAddressSourceStatus;
+  /** Snapshot keys that differ from the source; `[]` unless CHANGED. */
+  changedFields: string[];
 }
 
 export interface EligibleSaleCustomerDto {

@@ -24,6 +24,7 @@ import type {
   DeliveryRouteStatusValue,
 } from './delivery-route.entity';
 import type { DeliveryRouteStopStatusValue } from './delivery-route-stop.entity';
+import type { ShippingAddressSourceComparison } from '../../sales/domain/shipping-address-source-status';
 
 export const DELIVERY_ROUTE_REPOSITORY = Symbol.for('IDeliveryRouteRepository');
 
@@ -106,20 +107,22 @@ export interface DeliveryRouteReadModel {
     checkedInAt: Date | null;
     completedAt: Date | null;
     customer: { id: string; name: string; email: string | null } | null;
-    shippingAddress: {
-      id: string | null;
-      street: string | null;
-      exteriorNumber: string | null;
-      interiorNumber: string | null;
-      zipCode: string | null;
-      neighborhood: string | null;
-      municipality: string | null;
-      city: string | null;
-      state: string | null;
-      label: string | null;
-      latitude: number | null;
-      longitude: number | null;
-    } | null;
+    shippingAddress:
+      | ({
+          id: string | null;
+          street: string | null;
+          exteriorNumber: string | null;
+          interiorNumber: string | null;
+          zipCode: string | null;
+          neighborhood: string | null;
+          municipality: string | null;
+          city: string | null;
+          state: string | null;
+          label: string | null;
+          latitude: number | null;
+          longitude: number | null;
+        } & ShippingAddressSourceComparison)
+      | null;
   }>;
 }
 

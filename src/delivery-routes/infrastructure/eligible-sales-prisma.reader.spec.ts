@@ -239,3 +239,141 @@ describe('PrismaEligibleSalesReader — tenant defenses', () => {
     expect(count).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('PrismaEligibleSalesReader — shipping address source status', () => {
+  const snapshot = {
+    street: 'Main St',
+    exteriorNumber: '100',
+    interiorNumber: null,
+    zipCode: '06000',
+    neighborhood: 'Centro',
+    municipality: 'Cuauhtemoc',
+    city: 'CDMX',
+    state: 'CDMX',
+    visualReferences: 'Blue gate',
+    carrierPhone: null,
+    label: 'Home',
+    latitude: 19.4,
+    longitude: -99.1,
+  };
+  const columns = {
+    shippingStreet: snapshot.street,
+    shippingExteriorNumber: snapshot.exteriorNumber,
+    shippingInteriorNumber: snapshot.interiorNumber,
+    shippingZipCode: snapshot.zipCode,
+    shippingNeighborhood: snapshot.neighborhood,
+    shippingMunicipality: snapshot.municipality,
+    shippingCity: snapshot.city,
+    shippingState: snapshot.state,
+    shippingVisualReferences: snapshot.visualReferences,
+    shippingCarrierPhone: snapshot.carrierPhone,
+    shippingLabel: snapshot.label,
+    shippingLatitude: snapshot.latitude,
+    shippingLongitude: snapshot.longitude,
+  };
+  const row = (
+    shippingAddressId: string | null,
+    live: Record<string, unknown> | null,
+  ) => ({
+    id: 'sale-1',
+    folio: '000001',
+    status: 'CONFIRMED',
+    paymentStatus: 'PAID',
+    deliveryStatus: 'PENDING',
+    totalCents: 100,
+    debtCents: 0,
+    confirmedAt: null,
+    dueDate: null,
+    customer: null,
+    shippingAddressId,
+    ...columns,
+    shippingAddress: live,
+    items: [],
+    deliveryRouteStops: [],
+  });
+  const read = async (saleRow: Record<string, unknown>) => {
+    const { reader, findMany, count } = makeHarness();
+    findMany.mockResolvedValue([saleRow]);
+    count.mockResolvedValue(1);
+    const result = await reader.findEligibleSales({
+      tenantId: 't1',
+      page: 1,
+      limit: 20,
+      saleScope: null,
+    });
+    return { address: result.rows[0].shippingAddress, findMany };
+  };
+
+  it('selects the live source with its tenantId in the same page query', async () => {
+    const { findMany } = await read(
+      row('address-1', { tenantId: 't1', ...snapshot }),
+    );
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect((findMany.mock.calls as unknown[][])[0][0]).toMatchObject({
+      select: {
+        shippingAddress: { select: { tenantId: true, street: true } },
+      },
+    });
+  });
+
+  it('is UNCHANGED when the live source equals the snapshot', async () => {
+    const { address } = await read(
+      row('address-1', { tenantId: 't1', ...snapshot }),
+    );
+    expect(address).toMatchObject({
+      id: 'address-1',
+      street: 'Main St',
+      sourceStatus: 'UNCHANGED',
+      changedFields: [],
+    });
+  });
+
+  it('is CHANGED with ordered keys when the live source was edited', async () => {
+    const { address } = await read(
+      row('address-1', {
+        tenantId: 't1',
+        ...snapshot,
+        latitude: 19.41,
+        visualReferences: 'Red gate',
+        label: null,
+      }),
+    );
+    expect(address).toMatchObject({
+      street: 'Main St',
+      label: 'Home',
+      sourceStatus: 'CHANGED',
+      changedFields: ['visualReferences', 'label', 'latitude'],
+    });
+  });
+
+  it('is DELETED when the source FK was nulled', async () => {
+    const { address } = await read(row(null, null));
+    expect(address).toMatchObject({
+      id: null,
+      street: 'Main St',
+      sourceStatus: 'DELETED',
+      changedFields: [],
+    });
+  });
+
+  it('treats a foreign-tenant live row as absent (DELETED) without leaking it', async () => {
+    const { address } = await read(
+      row('address-1', { tenantId: 't2', ...snapshot, street: 'Foreign Ave' }),
+    );
+    expect(address).toMatchObject({
+      street: 'Main St',
+      sourceStatus: 'DELETED',
+      changedFields: [],
+    });
+    expect(JSON.stringify(address)).not.toContain('Foreign Ave');
+  });
+
+  it('keeps a snapshot-less sale address null with no status', async () => {
+    const legacy = {
+      ...row(null, null),
+      shippingStreet: null,
+    };
+    const { address } = await read(legacy);
+    expect(address).toBeNull();
+  });
+});

@@ -199,6 +199,8 @@ export class EligibleSalesService {
             city: row.shippingAddress.city,
             state: row.shippingAddress.state,
             zipCode: row.shippingAddress.zipCode,
+            sourceStatus: row.shippingAddress.sourceStatus,
+            changedFields: row.shippingAddress.changedFields,
           }
         : null,
       productSummary: row.productNames.slice(0, 3),
