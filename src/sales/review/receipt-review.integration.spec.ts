@@ -225,6 +225,15 @@ class InMemoryReceiptReviewRepository implements ReceiptReviewRepository {
     );
   }
 
+  findPendingForTenant(tenantId: string): Promise<ReceiptReviewRecord[]> {
+    return Promise.resolve(
+      [...this.receipts.values()].filter(
+        (receipt) =>
+          receipt.tenantId === tenantId && receipt.status === 'PENDING',
+      ),
+    );
+  }
+
   findById(
     receiptId: string,
     tenantId: string,
@@ -374,7 +383,12 @@ function makeReceipt(
     confirmedByUserId: null,
     confirmedAt: null,
     rejectionReason: null,
+    customerReason: null,
     createdAt: new Date('2026-06-13T10:01:00.000Z'),
+    declaredAmountProvided: true,
+    file: null,
+    extracted: null,
+    mismatch: null,
     sale: {
       id: sale.id,
       status: sale.status,
@@ -383,6 +397,8 @@ function makeReceipt(
       debtCents: sale.debtCents,
       totalCents: sale.totalCents,
       channel: sale.channel,
+      folio: sale.folio,
+      customerName: null,
     },
     ...overrides,
   };

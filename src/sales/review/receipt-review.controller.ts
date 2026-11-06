@@ -9,6 +9,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -19,12 +20,27 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import { ConfirmReceiptDto } from './dto/confirm-receipt.dto';
 import { RejectReceiptDto } from './dto/reject-receipt.dto';
+import { ListPendingReceiptsQueryDto } from './dto/list-pending-receipts-query.dto';
 import { ReceiptReviewService } from './receipt-review.service';
 
 @Controller('sales')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
 export class ReceiptReviewController {
   constructor(private readonly receiptReviewService: ReceiptReviewService) {}
+
+  /**
+   * GET /sales/receipts/pending — tenant-wide review worklist (oldest first,
+   * `{ items, nextCursor }`). Declared before the parameterized routes so
+   * `receipts` is never read as a sale id.
+   */
+  @Get('receipts/pending')
+  @RequirePermissions(['read', 'ReceiptEvidence'])
+  listPendingForTenant(@Query() query: ListPendingReceiptsQueryDto) {
+    return this.receiptReviewService.listPendingForTenant({
+      ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+    });
+  }
 
   @Get(':id/receipts')
   @RequirePermissions(['read', 'ReceiptEvidence'])

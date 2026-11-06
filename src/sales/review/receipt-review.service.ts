@@ -1,11 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { SalesService } from '../sales.service';
 import {
+  InvalidReceiptCursorError,
   ReceiptNotActionableError,
   SaleNotReviewableError,
 } from './domain/receipt-review.errors';
 import {
   RECEIPT_REVIEW_REPOSITORY,
+  type ReceiptQueuePosition,
   type ReceiptReviewRecord,
   type ReceiptReviewRepository,
 } from './domain/receipt-review.repository';
@@ -17,8 +19,10 @@ import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ConfirmReceiptDto } from './dto/confirm-receipt.dto';
 import type { RejectReceiptDto } from './dto/reject-receipt.dto';
 import type {
+  ReceiptReviewFileDto,
   ReceiptReviewQueueItemDto,
   ReceiptReviewQueueResponseDto,
+  TenantReceiptQueuePageDto,
 } from './dto/receipt-review-queue.dto';
 import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import {
@@ -42,6 +46,9 @@ type ReceiptConfirmedEventSeamInput = {
   paymentResult: ConfirmReceiptResult;
   confirmedAt: Date;
 };
+
+const DEFAULT_QUEUE_LIMIT = 25;
+const MAX_QUEUE_LIMIT = 100;
 
 type ReceiptRejectedEventSeamInput = {
   receipt: ReceiptReviewRecord;
@@ -75,6 +82,41 @@ export class ReceiptReviewService {
     );
 
     return receipts.map(mapQueueItem);
+  }
+
+  /**
+   * Tenant-wide review worklist: pending receipts of every confirmed sale,
+   * oldest first, keyset-paged with an opaque cursor. Each item is the
+   * per-sale queue item plus the sale folio and customer name.
+   */
+  async listPendingForTenant(query: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<TenantReceiptQueuePageDto> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    const limit = Math.min(
+      Math.max(query.limit ?? DEFAULT_QUEUE_LIMIT, 1),
+      MAX_QUEUE_LIMIT,
+    );
+    const after = query.cursor ? decodeCursor(query.cursor) : null;
+    const rows = await this.receiptReviewRepository.findPendingForTenant(
+      tenantId,
+      { limit: limit + 1, after },
+    );
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+
+    return {
+      items: page.map((receipt) => ({
+        ...mapQueueItem(receipt),
+        saleFolio: receipt.sale.folio,
+        customerName: receipt.sale.customerName,
+      })),
+      nextCursor:
+        rows.length > limit && last
+          ? encodeCursor({ createdAt: last.createdAt, id: last.id })
+          : null,
+    };
   }
 
   /**
@@ -261,5 +303,50 @@ function mapQueueItem(receipt: ReceiptReviewRecord): ReceiptReviewQueueItemDto {
     salePaidCents: receipt.sale.paidCents,
     saleDebtCents: receipt.sale.debtCents,
     saleTotalCents: receipt.sale.totalCents,
+    declaredAmountProvided: receipt.declaredAmountProvided,
+    file: mapFile(receipt),
+    extracted: receipt.extracted,
+    mismatch: receipt.mismatch,
+    createdAt: receipt.createdAt,
   };
+}
+
+function mapFile(receipt: ReceiptReviewRecord): ReceiptReviewFileDto | null {
+  if (!receipt.file) return null;
+  const base = `/sales/${receipt.saleId}/receipts/${receipt.id}`;
+  const { purged, ...file } = receipt.file;
+  return {
+    ...file,
+    originalUrl: purged ? null : `${base}/file`,
+    previewUrl:
+      purged || file.previewStatus !== 'READY' ? null : `${base}/preview`,
+  };
+}
+
+function encodeCursor(position: ReceiptQueuePosition): string {
+  return Buffer.from(
+    JSON.stringify([position.createdAt.toISOString(), position.id]),
+  ).toString('base64url');
+}
+
+function decodeCursor(cursor: string): ReceiptQueuePosition {
+  try {
+    const decoded: unknown = JSON.parse(
+      Buffer.from(cursor, 'base64url').toString('utf8'),
+    );
+    if (
+      Array.isArray(decoded) &&
+      decoded.length === 2 &&
+      typeof decoded[0] === 'string' &&
+      typeof decoded[1] === 'string'
+    ) {
+      const createdAt = new Date(decoded[0]);
+      if (!Number.isNaN(createdAt.getTime())) {
+        return { createdAt, id: decoded[1] };
+      }
+    }
+  } catch {
+    // fall through
+  }
+  throw new InvalidReceiptCursorError();
 }

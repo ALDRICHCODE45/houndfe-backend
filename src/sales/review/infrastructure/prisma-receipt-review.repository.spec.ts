@@ -12,6 +12,8 @@ const receiptSaleInclude = {
       debtCents: true,
       totalCents: true,
       channel: true,
+      folio: true,
+      customer: { select: { firstName: true, lastName: true } },
     },
   },
 };
@@ -123,9 +125,166 @@ describe('PrismaReceiptReviewRepository', () => {
 
     const result = await repository.findById('receipt-2', 'tenant-1');
 
-    // Strict FE decoders expect string/number until T2 adds the private read.
+    // Strict FE decoders keep string/number; the new keys carry the truth.
     expect(result?.mediaUrl).toBe('');
     expect(result?.declaredAmountCents).toBe(0);
+    expect(result?.declaredAmountProvided).toBe(false);
+  });
+
+  it('maps private file metadata, extracted, mismatch and the sale header', async () => {
+    const client = makeMockPrisma();
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(client),
+    } as unknown as TenantPrismaService;
+    const repository = new PrismaReceiptReviewRepository(tenantPrisma);
+    client.receiptEvidence.findFirst.mockResolvedValue({
+      id: 'receipt-3',
+      saleId: 'sale-1',
+      tenantId: 'tenant-1',
+      mediaUrl: null,
+      declaredAmountCents: 4000,
+      declaredDate: null,
+      declaredReference: null,
+      storageKey: 'receipts/tenant-1/sale-1/k.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 1234,
+      previewStatus: 'READY',
+      extracted: { amountCents: 10000, bank: 'BBVA' },
+      mismatch: { debtCents: 10000, declaredDiffCents: -6000, flagged: true },
+      purgedAt: null,
+      status: 'PENDING',
+      confirmedByUserId: null,
+      confirmedAt: null,
+      rejectionReason: null,
+      customerReason: null,
+      createdAt: new Date('2026-11-05T10:00:00.000Z'),
+      sale: {
+        id: 'sale-1',
+        status: 'CONFIRMED',
+        paymentStatus: 'CREDIT',
+        paidCents: 0,
+        debtCents: 10000,
+        totalCents: 10000,
+        channel: 'ONLINE',
+        folio: 'V-0042',
+        customer: { firstName: 'Ana', lastName: 'López' },
+      },
+    });
+
+    const result = await repository.findById('receipt-3', 'tenant-1');
+
+    expect(result).toMatchObject({
+      declaredAmountProvided: true,
+      file: {
+        mimeType: 'application/pdf',
+        sizeBytes: 1234,
+        previewStatus: 'READY',
+        purged: false,
+      },
+      extracted: { amountCents: 10000, bank: 'BBVA' },
+      mismatch: { debtCents: 10000, declaredDiffCents: -6000, flagged: true },
+      customerReason: null,
+      sale: { folio: 'V-0042', customerName: 'Ana López' },
+    });
+  });
+
+  it('keeps file metadata for purged rows and null for legacy URL rows', async () => {
+    const client = makeMockPrisma();
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(client),
+    } as unknown as TenantPrismaService;
+    const repository = new PrismaReceiptReviewRepository(tenantPrisma);
+    const base = {
+      saleId: 'sale-1',
+      tenantId: 'tenant-1',
+      declaredAmountCents: 100,
+      declaredDate: null,
+      declaredReference: null,
+      previewStatus: null,
+      extracted: null,
+      mismatch: null,
+      status: 'PENDING',
+      confirmedByUserId: null,
+      confirmedAt: null,
+      rejectionReason: null,
+      customerReason: null,
+      createdAt: new Date('2026-11-05T10:00:00.000Z'),
+      sale: {
+        id: 'sale-1',
+        status: 'CONFIRMED',
+        paymentStatus: 'CREDIT',
+        paidCents: 0,
+        debtCents: 100,
+        totalCents: 100,
+        channel: 'ONLINE',
+        folio: null,
+        customer: null,
+      },
+    };
+    client.receiptEvidence.findMany.mockResolvedValue([
+      {
+        ...base,
+        id: 'legacy',
+        mediaUrl: 'https://legacy/r.jpg',
+        storageKey: null,
+        mimeType: null,
+        sizeBytes: null,
+        purgedAt: null,
+      },
+      {
+        ...base,
+        id: 'purged',
+        mediaUrl: null,
+        storageKey: null,
+        mimeType: 'image/png',
+        sizeBytes: 10,
+        purgedAt: new Date('2031-11-06T00:00:00.000Z'),
+      },
+    ]);
+
+    const [legacy, purged] = await repository.findPendingForSale(
+      'sale-1',
+      'tenant-1',
+    );
+
+    expect(legacy.file).toBeNull();
+    expect(legacy.sale).toMatchObject({ folio: null, customerName: null });
+    expect(purged.file).toEqual({
+      mimeType: 'image/png',
+      sizeBytes: 10,
+      previewStatus: 'UNAVAILABLE',
+      purged: true,
+    });
+  });
+
+  it('lists the tenant-wide pending queue oldest first after a keyset position', async () => {
+    const client = makeMockPrisma();
+    const tenantPrisma = {
+      getClient: jest.fn().mockReturnValue(client),
+    } as unknown as TenantPrismaService;
+    const repository = new PrismaReceiptReviewRepository(tenantPrisma);
+    client.receiptEvidence.findMany.mockResolvedValue([]);
+    const createdAt = new Date('2026-11-05T10:00:00.000Z');
+
+    await repository.findPendingForTenant('tenant-1', {
+      limit: 26,
+      after: { createdAt, id: 'receipt-9' },
+    });
+
+    expect(client.receiptEvidence.findMany).toHaveBeenCalledWith({
+      where: {
+        tenantId: 'tenant-1',
+        status: 'PENDING',
+        sale: { status: 'CONFIRMED' },
+        OR: [
+          { createdAt: { gt: createdAt } },
+          { createdAt, id: { gt: 'receipt-9' } },
+        ],
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 26,
+      include: receiptSaleInclude,
+    });
   });
 
   it('loads one tenant-scoped receipt with sale state for actions', async () => {

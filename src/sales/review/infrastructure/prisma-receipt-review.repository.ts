@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { TenantPrismaService } from '../../../shared/prisma/tenant-prisma.service';
+import type { ReceiptExtracted } from '../../../receipts/domain/receipt-fields';
+import type { ReceiptMismatch } from '../../../receipts/domain/receipt-mismatch';
 import type {
+  ReceiptQueuePosition,
   ReceiptReviewRecord,
   ReceiptReviewRepository,
   ReceiptReviewStatus,
@@ -15,6 +18,8 @@ const receiptSaleInclude = {
     debtCents: true,
     totalCents: true,
     channel: true,
+    folio: true,
+    customer: { select: { firstName: true, lastName: true } },
   },
 };
 
@@ -26,6 +31,14 @@ type PersistedReceiptReview = {
   declaredAmountCents: number | null;
   declaredDate: Date | null;
   declaredReference: string | null;
+  storageKey?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+  previewStatus?: string | null;
+  extracted?: unknown;
+  mismatch?: unknown;
+  purgedAt?: Date | null;
+  customerReason?: string | null;
   status: string;
   confirmedByUserId: string | null;
   confirmedAt: Date | null;
@@ -39,6 +52,8 @@ type PersistedReceiptReview = {
     debtCents: number;
     totalCents: number;
     channel: string;
+    folio?: string | null;
+    customer?: { firstName: string; lastName: string | null } | null;
   };
 };
 
@@ -58,6 +73,33 @@ export class PrismaReceiptReviewRepository implements ReceiptReviewRepository {
         sale: { status: 'CONFIRMED' },
       },
       orderBy: { createdAt: 'asc' },
+      include: { sale: receiptSaleInclude },
+    });
+
+    return rows.map(mapReceiptReviewRecord);
+  }
+
+  async findPendingForTenant(
+    tenantId: string,
+    page: { limit: number; after: ReceiptQueuePosition | null },
+  ): Promise<ReceiptReviewRecord[]> {
+    const { after } = page;
+    const rows = await this.tenantPrisma.getClient().receiptEvidence.findMany({
+      where: {
+        tenantId,
+        status: 'PENDING',
+        sale: { status: 'CONFIRMED' },
+        ...(after
+          ? {
+              OR: [
+                { createdAt: { gt: after.createdAt } },
+                { createdAt: after.createdAt, id: { gt: after.id } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: page.limit,
       include: { sale: receiptSaleInclude },
     });
 
@@ -122,18 +164,22 @@ function mapReceiptReviewRecord(
     id: row.id,
     saleId: row.saleId,
     tenantId: row.tenantId,
-    // Private uploads (storageKey, optional declared amount) keep the strict
-    // review shape until T2 adds the permission-checked file route: '' means
-    // "no public URL" and 0 means "not declared" (declared amounts are >= 1).
+    // Private uploads keep the strict v1 shape: '' means "no public URL" (see
+    // `file`) and 0 means "not declared" (see `declaredAmountProvided`).
     mediaUrl: row.mediaUrl ?? '',
     declaredAmountCents: row.declaredAmountCents ?? 0,
+    declaredAmountProvided: row.declaredAmountCents !== null,
     declaredDate: row.declaredDate,
     declaredReference: row.declaredReference,
     status: row.status as ReceiptReviewStatus,
     confirmedByUserId: row.confirmedByUserId,
     confirmedAt: row.confirmedAt,
     rejectionReason: row.rejectionReason,
+    customerReason: row.customerReason ?? null,
     createdAt: row.createdAt,
+    file: mapFile(row),
+    extracted: (row.extracted ?? null) as ReceiptExtracted | null,
+    mismatch: (row.mismatch ?? null) as ReceiptMismatch | null,
     sale: {
       id: row.sale.id,
       status: row.sale.status as 'DRAFT' | 'CONFIRMED',
@@ -146,6 +192,23 @@ function mapReceiptReviewRecord(
       debtCents: row.sale.debtCents,
       totalCents: row.sale.totalCents,
       channel: row.sale.channel as 'POS' | 'ONLINE',
+      folio: row.sale.folio ?? null,
+      customerName: row.sale.customer
+        ? [row.sale.customer.firstName, row.sale.customer.lastName]
+            .filter(Boolean)
+            .join(' ')
+        : null,
     },
+  };
+}
+
+/** Private uploads always store mimeType; legacy URL rows never do. */
+function mapFile(row: PersistedReceiptReview): ReceiptReviewRecord['file'] {
+  if (!row.mimeType) return null;
+  return {
+    mimeType: row.mimeType,
+    sizeBytes: row.sizeBytes ?? null,
+    previewStatus: row.previewStatus === 'READY' ? 'READY' : 'UNAVAILABLE',
+    purged: row.purgedAt != null,
   };
 }

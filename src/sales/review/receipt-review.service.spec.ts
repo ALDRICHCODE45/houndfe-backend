@@ -27,7 +27,12 @@ function makeReceipt(
     confirmedByUserId: null,
     confirmedAt: null,
     rejectionReason: null,
+    customerReason: null,
     createdAt: new Date('2026-06-13T10:01:00.000Z'),
+    declaredAmountProvided: true,
+    file: null,
+    extracted: null,
+    mismatch: null,
     sale: {
       id: 'sale-1',
       status: 'CONFIRMED',
@@ -36,6 +41,8 @@ function makeReceipt(
       debtCents: 1500,
       totalCents: 2000,
       channel: 'ONLINE',
+      folio: 'V-0001',
+      customerName: 'Ana López',
     },
     ...overrides,
   };
@@ -44,6 +51,7 @@ function makeReceipt(
 function makeRepository() {
   return {
     findPendingForSale: jest.fn(),
+    findPendingForTenant: jest.fn(),
     findById: jest.fn(),
     markConfirmed: jest.fn().mockResolvedValue(true),
     markRejected: jest.fn().mockResolvedValue(true),
@@ -489,8 +497,188 @@ describe('ReceiptReviewService', () => {
           salePaidCents: 500,
           saleDebtCents: 1500,
           saleTotalCents: 2000,
+          declaredAmountProvided: true,
+          file: null,
+          extracted: null,
+          mismatch: null,
+          createdAt: new Date('2026-06-13T10:01:00.000Z'),
         },
       ]);
+    });
+
+    it('maps a private upload to relative file routes, extracted data and mismatch', async () => {
+      const { service, repository } = makeService();
+      repository.findPendingForSale.mockResolvedValue([
+        makeReceipt({
+          mediaUrl: '',
+          declaredAmountCents: 0,
+          declaredAmountProvided: false,
+          file: {
+            mimeType: 'application/pdf',
+            sizeBytes: 183422,
+            previewStatus: 'READY',
+            purged: false,
+          },
+          extracted: { amountCents: 1500, bank: 'BBVA', confidence: 0.9 },
+          mismatch: { debtCents: 1500, extractedDiffCents: 0, flagged: false },
+        }),
+      ]);
+
+      const [item] = await service.listPending('sale-1');
+
+      expect(item).toMatchObject({
+        mediaUrl: '',
+        declaredAmountCents: 0,
+        declaredAmountProvided: false,
+        file: {
+          mimeType: 'application/pdf',
+          sizeBytes: 183422,
+          previewStatus: 'READY',
+          originalUrl: '/sales/sale-1/receipts/receipt-1/file',
+          previewUrl: '/sales/sale-1/receipts/receipt-1/preview',
+        },
+        extracted: { amountCents: 1500, bank: 'BBVA', confidence: 0.9 },
+        mismatch: { debtCents: 1500, extractedDiffCents: 0, flagged: false },
+      });
+    });
+
+    it('drops the preview route when the preview is unavailable and both routes once purged', async () => {
+      const { service, repository } = makeService();
+      repository.findPendingForSale.mockResolvedValue([
+        makeReceipt({
+          file: {
+            mimeType: 'application/pdf',
+            sizeBytes: 10,
+            previewStatus: 'UNAVAILABLE',
+            purged: false,
+          },
+        }),
+        makeReceipt({
+          id: 'receipt-2',
+          file: {
+            mimeType: 'image/png',
+            sizeBytes: 10,
+            previewStatus: 'READY',
+            purged: true,
+          },
+        }),
+      ]);
+
+      const [unavailable, purged] = await service.listPending('sale-1');
+
+      expect(unavailable.file).toMatchObject({
+        originalUrl: '/sales/sale-1/receipts/receipt-1/file',
+        previewUrl: null,
+      });
+      expect(purged.file).toMatchObject({
+        originalUrl: null,
+        previewUrl: null,
+      });
+    });
+
+    it('changes the v1 queue shape only additively (FE strict decoders)', async () => {
+      const { service, repository } = makeService();
+      repository.findPendingForSale.mockResolvedValue([makeReceipt()]);
+
+      const [item] = await service.listPending('sale-1');
+
+      // Keys and types the FE decodes today: never renamed, removed or retyped.
+      const V1_KEYS: Record<string, string> = {
+        id: 'string',
+        saleId: 'string',
+        mediaUrl: 'string',
+        declaredAmountCents: 'number',
+        declaredDate: 'object',
+        declaredReference: 'string',
+        status: 'string',
+        salePaymentStatus: 'string',
+        salePaidCents: 'number',
+        saleDebtCents: 'number',
+        saleTotalCents: 'number',
+      };
+      for (const [key, type] of Object.entries(V1_KEYS)) {
+        expect([key, typeof (item as Record<string, unknown>)[key]]).toEqual([
+          key,
+          type,
+        ]);
+      }
+      expect(Object.keys(item).sort()).toEqual(
+        [
+          ...Object.keys(V1_KEYS),
+          'declaredAmountProvided',
+          'file',
+          'extracted',
+          'mismatch',
+          'createdAt',
+        ].sort(),
+      );
+    });
+  });
+
+  describe('listPendingForTenant', () => {
+    it('pages the tenant-wide queue oldest first with an opaque cursor', async () => {
+      const { service, repository } = makeService();
+      const first = makeReceipt({ id: 'receipt-1' });
+      const second = makeReceipt({
+        id: 'receipt-2',
+        createdAt: new Date('2026-06-13T10:02:00.000Z'),
+      });
+      const third = makeReceipt({
+        id: 'receipt-3',
+        createdAt: new Date('2026-06-13T10:03:00.000Z'),
+      });
+      repository.findPendingForTenant.mockResolvedValue([first, second, third]);
+
+      const page = await service.listPendingForTenant({ limit: 2 });
+
+      expect(repository.findPendingForTenant.mock.calls[0]).toEqual([
+        'tenant-1',
+        { limit: 3, after: null },
+      ]);
+      expect(page.items.map((item) => item.id)).toEqual([
+        'receipt-1',
+        'receipt-2',
+      ]);
+      expect(page.items[0]).toMatchObject({
+        saleFolio: 'V-0001',
+        customerName: 'Ana López',
+      });
+      expect(page.nextCursor).toEqual(expect.any(String));
+
+      repository.findPendingForTenant.mockResolvedValue([third]);
+      const next = await service.listPendingForTenant({
+        limit: 2,
+        cursor: page.nextCursor as string,
+      });
+
+      expect(repository.findPendingForTenant.mock.calls[1]).toEqual([
+        'tenant-1',
+        {
+          limit: 3,
+          after: {
+            createdAt: new Date('2026-06-13T10:02:00.000Z'),
+            id: 'receipt-2',
+          },
+        },
+      ]);
+      expect(next).toMatchObject({ nextCursor: null });
+    });
+
+    it('defaults the limit to 25 and rejects a malformed cursor', async () => {
+      const { service, repository } = makeService();
+      repository.findPendingForTenant.mockResolvedValue([]);
+
+      await expect(service.listPendingForTenant({})).resolves.toEqual({
+        items: [],
+        nextCursor: null,
+      });
+      expect(repository.findPendingForTenant.mock.calls[0]).toEqual([
+        'tenant-1',
+        { limit: 26, after: null },
+      ]);
+      await expect(
+        service.listPendingForTenant({ cursor: 'not-a-cursor' }),
+      ).rejects.toMatchObject({ code: 'INVALID_RECEIPT_CURSOR' });
     });
   });
 });
