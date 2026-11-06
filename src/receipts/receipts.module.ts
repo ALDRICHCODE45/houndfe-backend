@@ -15,6 +15,8 @@ import {
 } from './domain/receipt-storage.port';
 import { PdfiumPreviewRasterizer } from './infrastructure/pdfium-preview-rasterizer';
 import { SpacesReceiptStorageAdapter } from './infrastructure/spaces-receipt-storage.adapter';
+import { RECEIPT_REVIEWER_LOOKUP } from './domain/receipt-reviewer-lookup.port';
+import { PrismaReceiptReviewerLookup } from './infrastructure/prisma-receipt-reviewer.lookup';
 
 /**
  * Receipt evidence storage. Reuses the SPACES_* client configuration of
@@ -40,11 +42,16 @@ import { SpacesReceiptStorageAdapter } from './infrastructure/spaces-receipt-sto
         ),
       inject: [ConfigService],
     },
+    { provide: RECEIPT_REVIEWER_LOOKUP, useClass: PrismaReceiptReviewerLookup },
     {
       provide: RECEIPT_PREVIEW_RASTERIZER,
       useFactory: () => new PdfiumPreviewRasterizer(),
     },
   ],
-  exports: [ReceiptUploadService, ReceiptStatusService],
+  exports: [
+    ReceiptUploadService,
+    ReceiptStatusService,
+    RECEIPT_REVIEWER_LOOKUP,
+  ],
 })
 export class ReceiptsModule {}

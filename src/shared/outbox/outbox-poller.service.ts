@@ -71,7 +71,9 @@ export class OutboxPollerService {
       // thank-you row PENDING — never fire-and-forget published and never
       // misrouted. Claim + awaited dispatcher routing land together in
       // DTE-5b, at which point that dedicated spec pins the widened
-      // `"eventType" IN (...)` predicate. The literals stay literal (not
+      // `"eventType" IN (...)` predicate. transfer-receipts / T2 adds
+      // `receipt.review_requested` in the same change that registers its
+      // dedicated poller (ReceiptReviewOutboxModule). The literals stay literal (not
       // imported from the feature modules) to avoid a shared→feature
       // dependency; each dedicated poller's own spec pins the matching
       // `"eventType"` predicate.
@@ -82,7 +84,7 @@ export class OutboxPollerService {
           WHERE status = 'PENDING'
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
-            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected')
+            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected', 'receipt.review_requested')
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED

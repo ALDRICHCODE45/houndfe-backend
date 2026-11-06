@@ -84,6 +84,7 @@ import { HrTimeOffOutboxPoller } from '../hr-time-off/outbox/hr-time-off-outbox.
 import { PromotionCapacityOutboxPoller } from '../promotions/outbox/promotion-capacity-outbox.poller';
 import { PromotionExpiryOutboxPoller } from '../promotions/outbox/promotion-expiry-outbox.poller';
 import { PromotionExpiryScanner } from '../promotions/expiry/promotion-expiry.scanner';
+import { ReceiptReviewOutboxPoller } from '../receipts/outbox/receipt-review-outbox.poller';
 import { InngestService } from './inngest.service';
 import { MAILER, type IMailer } from '../notifications/email/mailer.port';
 
@@ -91,6 +92,8 @@ import { MAILER, type IMailer } from '../notifications/email/mailer.port';
 const NEAR_CAPACITY_FUNCTION_ID = 'promotion-near-capacity-email';
 const EXPIRING_FUNCTION_ID = 'promotion-expiring-email';
 const DELIVERY_THANK_YOU_FUNCTION_ID = 'delivery-thank-you-notify';
+/** transfer-receipts / T2 — staff email + 5-year retention purge. */
+const RECEIPT_REVIEW_FUNCTION_ID = 'receipt-review-requested-email';
 
 /**
  * A full `AppModule` boot instantiates a few hundred providers through
@@ -290,6 +293,8 @@ const ALLOWED_BOOT_HOOK_OWNERS: ReadonlyMap<string, 'inert-stub' | 'wiring'> =
     ['DeliveryThankYouInngestRegistrar', 'wiring'],
     ['PromotionCapacityInngestRegistrar', 'wiring'],
     ['PromotionExpiryInngestRegistrar', 'wiring'],
+    // transfer-receipts / T2: registers local SDK functions only.
+    ['ReceiptReviewInngestRegistrar', 'wiring'],
     ['DeliveryRouteSubjectResolverRegistrar', 'wiring'],
     // @nestjs/schedule: interval exploration + in-process timer mounting.
     ['ScheduleExplorer', 'wiring'],
@@ -457,6 +462,7 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         [PromotionCapacityOutboxPoller.name]: createInertPollerStub(),
         [PromotionExpiryOutboxPoller.name]: createInertPollerStub(),
         [PromotionExpiryScanner.name]: createInertPollerStub(),
+        [ReceiptReviewOutboxPoller.name]: createInertPollerStub(),
       };
 
       let moduleRef: TestingModule | undefined;
@@ -488,6 +494,8 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
           .useValue(pollerStubs[PromotionExpiryOutboxPoller.name])
           .overrideProvider(PromotionExpiryScanner)
           .useValue(pollerStubs[PromotionExpiryScanner.name])
+          .overrideProvider(ReceiptReviewOutboxPoller)
+          .useValue(pollerStubs[ReceiptReviewOutboxPoller.name])
           .compile();
 
         // 4. Fail-closed BEFORE any hook runs.
@@ -532,6 +540,9 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         expect(moduleRef.get(PromotionExpiryScanner, { strict: false })).toBe(
           pollerStubs[PromotionExpiryScanner.name],
         );
+        expect(
+          moduleRef.get(ReceiptReviewOutboxPoller, { strict: false }),
+        ).toBe(pollerStubs[ReceiptReviewOutboxPoller.name]);
 
         // 6. Outbound boundaries: spied with non-network implementations so
         //    an accidental dispatch cannot reach Inngest or Resend, and the
@@ -563,6 +574,9 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         expect(ids.filter((id) => id === EXPIRING_FUNCTION_ID)).toHaveLength(1);
         expect(
           ids.filter((id) => id === DELIVERY_THANK_YOU_FUNCTION_ID),
+        ).toHaveLength(1);
+        expect(
+          ids.filter((id) => id === RECEIPT_REVIEW_FUNCTION_ID),
         ).toHaveLength(1);
         expect(new Set(ids).size).toBe(ids.length);
         expect(captured.options.client).toBe(inngestService.getClient());
@@ -622,7 +636,8 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
               instance instanceof PromotionExpiryOutboxPoller ||
               instance instanceof LowStockOutboxPoller ||
               instance instanceof DeliveryRoutesOutboxPoller ||
-              instance instanceof HrTimeOffOutboxPoller,
+              instance instanceof HrTimeOffOutboxPoller ||
+              instance instanceof ReceiptReviewOutboxPoller,
           ),
         ).toHaveLength(0);
       } finally {

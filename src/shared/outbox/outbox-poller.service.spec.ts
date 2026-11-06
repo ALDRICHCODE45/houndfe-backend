@@ -144,7 +144,7 @@ describe('OutboxPollerService', () => {
       // thank-you type has no claiming poller yet (DTE-5b), those rows
       // simply remain PENDING instead.
       expect(claimSql).toContain(
-        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected')`,
+        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected', 'receipt.review_requested')`,
       );
       // TRIANGULATE — the exclusion is additive, not a replacement: the
       // pre-existing alert types, the delivery types and the promotion
@@ -155,6 +155,9 @@ describe('OutboxPollerService', () => {
       expect(claimSql).toContain(`'delivery.thank_you.notify'`);
       expect(claimSql).toContain(`'promotion.near_capacity.detected'`);
       expect(claimSql).toContain(`'promotion.expiring.detected'`);
+      // transfer-receipts / T2 — the staff receipt-review email has its own
+      // durable poller, so the generic one never claims it.
+      expect(claimSql).toContain(`'receipt.review_requested'`);
     });
 
     it('non-alert PENDING rows still get claimed by the generic poller (exclusion is scoped, not broad)', async () => {
