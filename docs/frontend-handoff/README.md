@@ -12,6 +12,7 @@ Backend contracts for the frontend, **in implementation order**. Each file cover
 | 6 | Refund settlements: pending refunds list, partial and total returns, Idempotency-Key replay | Backend implemented; no FE screen yet | [06-refund-settlements.md](06-refund-settlements.md) |
 | 7 | Public catalog from Published editorial: per-tenant switch, Published title/description, detail `attributes`, `facet` filters, Published-only search, cart scope, «Despublicar» | On `main` (merge fa39192); runtime-proven on the dev DB | [07-public-catalog-published.md](07-public-catalog-published.md) |
 | 8 | Transfer receipts review: private file/preview routes, additive queue keys (`file`, `extracted`, `mismatch`, `declaredAmountProvided`), tenant-wide worklist, reject `customerReason`, `RECEIPT_REVIEW_REQUESTED` email | Implemented on `feat/transfer-receipts`, not merged | [08-transfer-receipts-review.md](08-transfer-receipts-review.md) |
+| 9 | Cash display fields: session `openedAt`, `closedAt`, `cashierDisplayName` (list and detail); custody `senderDisplayName`, `sourceRegisterName`, `notes` | Implemented on `feat/fe-design-pass`, not merged | [09-cash-display-fields.md](09-cash-display-fields.md) |
 
 Operations: [deploy/inventory-journal-o1-rollout.md](../deploy/inventory-journal-o1-rollout.md) is the rollout runbook for the O1 migration (stop writers, pre-flight queries, rollback, permissions). It is for whoever deploys, not for the FE.
 
