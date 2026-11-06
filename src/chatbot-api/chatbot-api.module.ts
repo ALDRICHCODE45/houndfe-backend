@@ -19,22 +19,36 @@ import { PrismaServiceCredentialRepository } from './infrastructure/prisma-servi
 import { BotAuditInterceptor } from './presentation/interceptors/bot-audit.interceptor';
 import { SalesModule } from '../sales/sales.module';
 import { PromotionsModule } from '../promotions/promotions.module';
+import { ShippingQuotesModule } from '../shipping/quotes/shipping-quotes.module';
+import { ShippingPickupModule } from '../shipping/pickup/shipping-pickup.module';
+import { ShippingQuoteService } from './application/shipping-quote.service';
+import { ShippingQuotesController } from './presentation/shipping-quotes.controller';
 import { ReceiptsModule } from '../receipts/receipts.module';
 
 @Module({
   // PromotionsModule supplies the cart evaluator and the POS engine it shares
   // with bot sale confirmation, so preview and sale price identically.
+  // ShippingQuotesModule (T3) supplies carriers, zones, packaging and quote
+  // persistence; the bot quote flow composes them with the same repricing.
   imports: [
     ClsModule,
     DatabaseModule,
     SalesModule,
     PromotionsModule,
+    ShippingQuotesModule,
+    // T7 — pickup location (name, origin address, opening hours).
+    ShippingPickupModule,
     ReceiptsModule,
   ],
-  controllers: [ChatbotApiController, CheckoutController],
+  controllers: [
+    ChatbotApiController,
+    CheckoutController,
+    ShippingQuotesController,
+  ],
   providers: [
     ChatbotApiService,
     CheckoutService,
+    ShippingQuoteService,
     ServiceAuthGuard,
     BotAuditInterceptor,
     {
@@ -54,6 +68,11 @@ import { ReceiptsModule } from '../receipts/receipts.module';
       useClass: PrismaCustomerRepository,
     },
   ],
-  exports: [SERVICE_CREDENTIAL_REPOSITORY, ServiceAuthGuard, ChatbotApiService],
+  exports: [
+    SERVICE_CREDENTIAL_REPOSITORY,
+    ServiceAuthGuard,
+    ChatbotApiService,
+    ShippingQuotesModule,
+  ],
 })
 export class ChatbotApiModule {}

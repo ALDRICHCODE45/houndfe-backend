@@ -1,3 +1,5 @@
+import type { PickupLocation } from '../../../shipping/pickup/application/pickup-location.service';
+
 export interface BotSaleResponse {
   saleId: string;
   folio: string | null;
@@ -17,4 +19,12 @@ export interface BotSaleResponse {
   paidCents: number;
   debtCents: number;
   confirmedAt: string | null;
+  /**
+   * shipping-zones / T7 — additive, only for `shipping: { quoteId }`
+   * (`DELIVERY`) and `{ mode: "pickup" }` (`PICKUP`). Quote sales also carry
+   * `subtotalCents` + `shippingChargeCents` (0 for a FREE zone).
+   */
+  fulfillmentMode?: 'DELIVERY' | 'PICKUP';
+  /** POST /chatbot-api/sales pickup only (checkouts put it at the top level). */
+  pickupLocation?: PickupLocation;
 }

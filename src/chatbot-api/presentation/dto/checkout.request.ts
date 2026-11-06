@@ -18,7 +18,8 @@ import {
 import { CustomerDeliveryAddressDto } from './customer-upsert.request';
 import {
   BotSaleItemDto,
-  BotSaleShippingDto,
+  botSaleShippingType,
+  type BotSaleShipping,
 } from './register-bot-sale.request';
 
 class CustomerIntent {
@@ -86,8 +87,8 @@ export class CheckoutSaleDto {
   @ValidateIf((_, value: unknown) => value !== undefined)
   @IsObject()
   @ValidateNested()
-  @Type(() => BotSaleShippingDto)
-  shipping?: BotSaleShippingDto;
+  @Type(botSaleShippingType)
+  shipping?: BotSaleShipping;
 }
 export class CheckoutRequestDto {
   @IsString()
@@ -112,6 +113,9 @@ export class CheckoutRequestDto {
   })
   customer!: ExistingCheckoutCustomerDto | NewCheckoutCustomerDto;
 
+  // Optional only with `sale.shipping: { mode: "pickup" }`; the controller
+  // rejects a missing address for any other shipping (400).
+  @ValidateIf((_, value: unknown) => value !== undefined)
   @IsObject()
   @ValidateNested()
   @Type(() => AddressIntent, {
@@ -125,7 +129,7 @@ export class CheckoutRequestDto {
     },
     keepDiscriminatorProperty: true,
   })
-  deliveryAddress!:
+  deliveryAddress?:
     | ExistingCheckoutAddressDto
     | NewCheckoutAddressDto
     | ExistingUpdatedCheckoutAddressDto;

@@ -8,6 +8,12 @@ import {
   NewCheckoutAddressDto,
   NewCheckoutCustomerDto,
 } from './checkout.request';
+import {
+  BotSaleShippingDto,
+  PickupBotSaleShippingDto,
+  QuoteBotSaleShippingDto,
+  RegisterBotSaleRequestDto,
+} from './register-bot-sale.request';
 
 const id = '00000000-0000-4000-8000-000000000001';
 const input = () => ({
@@ -77,7 +83,7 @@ describe('Standalone checkout structural schema', () => {
       },
     });
     expect(errors).toEqual([]);
-    expect(dto.deliveryAddress.constructor.name).toBe(
+    expect(dto.deliveryAddress?.constructor.name).toBe(
       'ExistingUpdatedCheckoutAddressDto',
     );
   });
@@ -213,4 +219,92 @@ describe('Standalone checkout structural schema', () => {
       expect(check(value).errors.length).toBeGreaterThan(0);
     },
   );
+});
+
+// shipping-zones / T7 (S8, S10) — shipping { quoteId } | { mode: "pickup" },
+// legacy { chargeCents, approvalId, quoteId? } kept (deprecated).
+describe('Checkout shipping shapes', () => {
+  const QUOTE = `shq_${'A'.repeat(43)}`;
+  const withShipping = (shipping: unknown, extra: object = {}) => ({
+    ...input(),
+    ...extra,
+    sale: { ...input().sale, shipping },
+  });
+
+  it('selects the quote shape for { quoteId }', () => {
+    const { dto, errors } = check(withShipping({ quoteId: QUOTE }));
+    expect(errors).toEqual([]);
+    expect(dto.sale.shipping).toBeInstanceOf(QuoteBotSaleShippingDto);
+    expect(dto.sale.shipping).toEqual({ quoteId: QUOTE });
+  });
+
+  it('selects the pickup shape and lets the delivery address be omitted', () => {
+    const value = withShipping({ mode: 'pickup' });
+    delete (value as { deliveryAddress?: unknown }).deliveryAddress;
+    const { dto, errors } = check(value);
+    expect(errors).toEqual([]);
+    expect(dto.sale.shipping).toBeInstanceOf(PickupBotSaleShippingDto);
+    expect(dto.deliveryAddress).toBeUndefined();
+  });
+
+  it('keeps the legacy approved-charge shape', () => {
+    const { dto, errors } = check(
+      withShipping({ chargeCents: 500, approvalId: 'approved' }),
+    );
+    expect(errors).toEqual([]);
+    expect(dto.sale.shipping).toBeInstanceOf(BotSaleShippingDto);
+  });
+
+  it.each([
+    ['pickup plus a quote', { mode: 'pickup', quoteId: QUOTE }],
+    ['an unknown mode', { mode: 'delivery' }],
+    ['an empty quote id', { quoteId: ' ' }],
+    ['an empty object', {}],
+    [
+      'a quote plus a charge without approval',
+      { quoteId: QUOTE, chargeCents: 1 },
+    ],
+    ['an array', [{ quoteId: QUOTE }]],
+  ])('rejects %s', (_label, shipping) => {
+    expect(check(withShipping(shipping)).errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe('POST /chatbot-api/sales shipping shapes', () => {
+  const QUOTE = `shq_${'B'.repeat(43)}`;
+  const sale = (shipping: unknown) => ({
+    cashierUserId: id,
+    customerId: id,
+    items: [
+      { productId: id, productName: 'Item', quantity: 1, unitPriceCents: 1 },
+    ],
+    shipping,
+  });
+  const validate = (value: object) => {
+    const dto = plainToInstance(RegisterBotSaleRequestDto, value);
+    return {
+      dto,
+      errors: validateSync(dto, {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        forbidUnknownValues: true,
+      }),
+    };
+  };
+
+  it.each([
+    [{ quoteId: QUOTE }, QuoteBotSaleShippingDto],
+    [{ mode: 'pickup' }, PickupBotSaleShippingDto],
+    [{ chargeCents: 500, approvalId: 'approved' }, BotSaleShippingDto],
+  ])('selects the shape for %j', (shipping, type) => {
+    const { dto, errors } = validate(sale(shipping));
+    expect(errors).toEqual([]);
+    expect(dto.shipping).toBeInstanceOf(type);
+  });
+
+  it('rejects pickup mixed with a quote', () => {
+    expect(
+      validate(sale({ mode: 'pickup', quoteId: QUOTE })).errors.length,
+    ).toBeGreaterThan(0);
+  });
 });
