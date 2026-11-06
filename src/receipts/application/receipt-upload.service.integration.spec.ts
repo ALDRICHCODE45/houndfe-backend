@@ -47,6 +47,14 @@ class FakeStorage implements ReceiptStoragePort {
     this.objects.delete(key);
     return Promise.resolve();
   }
+
+  remove(key: string) {
+    return this.delete(key);
+  }
+
+  getPrivate() {
+    return Promise.resolve(null);
+  }
 }
 
 class FakeRasterizer implements ReceiptPreviewRasterizer {

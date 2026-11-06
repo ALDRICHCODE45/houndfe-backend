@@ -1,8 +1,11 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
+import { AuthModule } from '../auth/auth.module';
 import { createSpacesClient } from '../files/infrastructure/spaces-client.factory';
 import { ReceiptUploadService } from './application/receipt-upload.service';
+import { ReceiptFileService } from './application/receipt-file.service';
+import { ReceiptFileController } from './presentation/receipt-file.controller';
 import {
   RECEIPT_PREVIEW_RASTERIZER,
   RECEIPT_STORAGE,
@@ -14,12 +17,15 @@ import { SpacesReceiptStorageAdapter } from './infrastructure/spaces-receipt-sto
  * Receipt evidence storage. Reuses the SPACES_* client configuration of
  * `src/files`, but every object is written with a private ACL. Set
  * RECEIPTS_SPACES_BUCKET to keep receipts in a separate bucket; it defaults
- * to SPACES_BUCKET.
+ * to SPACES_BUCKET. Staff read the files only through ReceiptFileController
+ * (JWT + tenant + read ReceiptEvidence), streamed by the backend.
  */
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, AuthModule],
+  controllers: [ReceiptFileController],
   providers: [
     ReceiptUploadService,
+    ReceiptFileService,
     {
       provide: RECEIPT_STORAGE,
       useFactory: (configService: ConfigService) =>

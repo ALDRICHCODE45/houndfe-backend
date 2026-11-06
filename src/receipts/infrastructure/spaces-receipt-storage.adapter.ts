@@ -1,10 +1,16 @@
 import { Logger } from '@nestjs/common';
+import type { Readable } from 'node:stream';
 import {
   DeleteObjectCommand,
+  GetObjectCommand,
+  NoSuchKey,
   PutObjectCommand,
   type S3Client,
 } from '@aws-sdk/client-s3';
-import type { ReceiptStoragePort } from '../domain/receipt-storage.port';
+import type {
+  ReceiptStoragePort,
+  ReceiptStoredObject,
+} from '../domain/receipt-storage.port';
 
 /**
  * Receipt objects live in DigitalOcean Spaces with a PRIVATE ACL. Unlike
@@ -36,11 +42,30 @@ export class SpacesReceiptStorageAdapter implements ReceiptStoragePort {
     );
   }
 
+  async getPrivate(key: string): Promise<ReceiptStoredObject | null> {
+    try {
+      const output = await this.s3Client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      return {
+        body: output.Body as Readable,
+        contentLength: output.ContentLength ?? null,
+      };
+    } catch (error) {
+      if (error instanceof NoSuchKey) return null;
+      throw error;
+    }
+  }
+
+  async remove(key: string): Promise<void> {
+    await this.s3Client.send(
+      new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
+    );
+  }
+
   async delete(key: string): Promise<void> {
     try {
-      await this.s3Client.send(
-        new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
-      );
+      await this.remove(key);
     } catch (error) {
       this.logger.warn(
         `Failed to delete receipt object ${key}: ${(error as Error).message}`,

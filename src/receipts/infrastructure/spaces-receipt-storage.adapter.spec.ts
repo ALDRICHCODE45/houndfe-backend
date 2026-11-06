@@ -1,4 +1,10 @@
-import { DeleteObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { Readable } from 'node:stream';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  NoSuchKey,
+  PutObjectCommand,
+} from '@aws-sdk/client-s3';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { SpacesReceiptStorageAdapter } from './spaces-receipt-storage.adapter';
 
@@ -48,5 +54,40 @@ describe('SpacesReceiptStorageAdapter', () => {
     send.mockRejectedValue(new Error('gone'));
     await expect(adapter.delete('k')).resolves.toBeUndefined();
     expect(send.mock.calls[0][0]).toBeInstanceOf(DeleteObjectCommand);
+  });
+
+  it('reads a private object as a stream', async () => {
+    const body = Readable.from([Buffer.from('bytes')]);
+    send.mockResolvedValue({ Body: body, ContentLength: 5 });
+
+    const object = await adapter.getPrivate('receipts/t/s/k.png');
+
+    const command = send.mock.calls[0][0] as GetObjectCommand;
+    expect(command).toBeInstanceOf(GetObjectCommand);
+    expect(command.input).toEqual({
+      Bucket: 'bucket-1',
+      Key: 'receipts/t/s/k.png',
+    });
+    expect(object).toEqual({ body, contentLength: 5 });
+  });
+
+  it('answers null when the object does not exist', async () => {
+    send.mockRejectedValue(
+      new NoSuchKey({ message: 'missing', $metadata: {} }),
+    );
+    await expect(adapter.getPrivate('k')).resolves.toBeNull();
+  });
+
+  it('propagates other read failures', async () => {
+    send.mockRejectedValue(new Error('network'));
+    await expect(adapter.getPrivate('k')).rejects.toThrow('network');
+  });
+
+  it('removes strictly: a delete failure is thrown', async () => {
+    send.mockRejectedValue(new Error('denied'));
+    await expect(adapter.remove('k')).rejects.toThrow('denied');
+    const command = send.mock.calls[0][0] as DeleteObjectCommand;
+    expect(command).toBeInstanceOf(DeleteObjectCommand);
+    expect(command.input).toEqual({ Bucket: 'bucket-1', Key: 'k' });
   });
 });
