@@ -4,6 +4,7 @@
  * (no network). Fixture: one randomized tenant + user per run; deleting the
  * tenant cascades its sales and receipts.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import type { ClsService } from 'nestjs-cls';
@@ -15,6 +16,9 @@ import type {
 } from '../domain/receipt-storage.port';
 import { ReceiptUploadError } from '../domain/receipt-upload.errors';
 import { ReceiptUploadService } from './receipt-upload.service';
+import { PrismaNotificationConfigRepository } from '../../notification-config/infrastructure/prisma-notification-config.repository';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
+import { RECEIPT_REVIEW_REQUESTED_EVENT_TYPE } from '../domain/receipt-review-requested.event';
 
 const SKIP_INTEGRATION =
   process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL;
@@ -71,6 +75,13 @@ class FakeRasterizer implements ReceiptPreviewRasterizer {
   }
 }
 
+const requestContext = new AsyncLocalStorage<Map<string, unknown>>();
+
+/** Runs one call in its own request context, as the HTTP layer does. */
+function inRequest<T>(work: () => Promise<T>): Promise<T> {
+  return requestContext.run(new Map(), work);
+}
+
 async function rejection(promise: Promise<unknown>): Promise<string> {
   try {
     await promise;
@@ -96,12 +107,16 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
     tenantId = randomUUID();
     otherTenantId = randomUUID();
     userId = randomUUID();
+    // Per-request store like nestjs-cls: runInTransaction parks the ambient
+    // tx client in CLS, so concurrent calls must not share one store.
+    const store = () => requestContext.getStore() ?? new Map<string, unknown>();
     const cls = {
       get: (key: string) => {
         if (key === 'tenantId') return tenantId;
         if (key === 'isSuperAdmin') return false;
-        return undefined;
+        return store().get(key);
       },
+      set: (key: string, value: unknown) => store().set(key, value),
     } as unknown as ClsService<TenantClsStore>;
     const tenantPrisma = new TenantPrismaService(
       prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
@@ -109,7 +124,13 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
     );
     storage = new FakeStorage();
     rasterizer = new FakeRasterizer();
-    service = new ReceiptUploadService(tenantPrisma, storage, rasterizer);
+    service = new ReceiptUploadService(
+      tenantPrisma,
+      storage,
+      rasterizer,
+      new PrismaNotificationConfigRepository(tenantPrisma),
+      new OutboxWriterService(),
+    );
     for (const id of [tenantId, otherTenantId]) {
       await prisma.tenant.create({
         data: {
@@ -366,8 +387,8 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
     const input = { saleId, idempotencyKey: key, file: PNG_BYTES, fields: {} };
 
     const [a, b] = await Promise.all([
-      service.upload(input),
-      service.upload(input),
+      inRequest(() => service.upload(input)),
+      inRequest(() => service.upload(input)),
     ]);
 
     expect(a).toEqual(b);
@@ -479,5 +500,133 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
         data: { id: randomUUID(), saleId, tenantId, status: 'PENDING' },
       }),
     ).rejects.toThrow();
+  });
+
+  describe('RECEIPT_REVIEW_REQUESTED outbox row', () => {
+    async function openGate(
+      actions: Array<'RECEIPT_REVIEW_REQUESTED' | 'LOW_STOCK'>,
+    ) {
+      await prisma.notificationSettings.create({
+        data: { tenantId, enabled: true },
+      });
+      await prisma.notificationAction.createMany({
+        data: actions.map((action) => ({ tenantId, action })),
+      });
+    }
+
+    afterEach(async () => {
+      await prisma.notificationAction.deleteMany({ where: { tenantId } });
+      await prisma.notificationSettings.deleteMany({ where: { tenantId } });
+    });
+
+    function outboxRows(receiptId: string) {
+      return prisma.outboxEvent.findMany({
+        where: { tenantId, aggregateId: receiptId },
+      });
+    }
+
+    it('publishes one self-contained row for a new upload and none on replay', async () => {
+      await openGate(['RECEIPT_REVIEW_REQUESTED']);
+      const saleId = await createSale({ debtCents: 10_000 });
+      const customer = await prisma.customer.create({
+        data: { tenantId, firstName: 'Ana', lastName: 'López' },
+      });
+      await prisma.sale.update({
+        where: { id: saleId },
+        data: { folio: 'V-0042', customerId: customer.id },
+      });
+      const input = {
+        saleId,
+        idempotencyKey: `wamid-${randomUUID()}`,
+        file: PDF_BYTES,
+        fields: {
+          declaredAmountCents: '4000',
+          extracted: '{"amountCents":10000}',
+        },
+      };
+
+      const first = await service.upload(input);
+      await service.upload(input);
+
+      const rows = await outboxRows(first.receiptId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        aggregateType: 'ReceiptEvidence',
+        eventType: RECEIPT_REVIEW_REQUESTED_EVENT_TYPE,
+        status: 'PENDING',
+        payload: {
+          tenantId,
+          receiptId: first.receiptId,
+          saleId,
+          saleFolio: 'V-0042',
+          customerName: 'Ana López',
+          declaredAmountCents: 4000,
+          extractedAmountCents: 10_000,
+          debtCents: 10_000,
+          mismatchFlagged: true,
+          mimeType: 'application/pdf',
+        },
+      });
+      // Never the storage key or any file reference.
+      expect(JSON.stringify(rows[0].payload)).not.toContain('receipts/');
+    });
+
+    it('publishes for a legacy mediaUrl attachment too', async () => {
+      await openGate(['RECEIPT_REVIEW_REQUESTED']);
+      const saleId = await createSale();
+
+      const legacy = await service.attachLegacyUrl({
+        saleId,
+        mediaUrl: 'https://example.com/r.jpg',
+        declaredAmountCents: null,
+        declaredDate: null,
+        declaredReference: null,
+      });
+
+      const rows = await outboxRows(legacy.receiptId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].payload).toMatchObject({
+        declaredAmountCents: null,
+        extractedAmountCents: null,
+        mismatchFlagged: false,
+        mimeType: null,
+      });
+    });
+
+    it.each([
+      ['the tenant has no notification config', null],
+      ['the action is not enabled', ['LOW_STOCK'] as const],
+    ])('publishes nothing when %s', async (_label, actions) => {
+      if (actions) await openGate([...actions]);
+      const saleId = await createSale();
+
+      const response = await service.upload({
+        saleId,
+        idempotencyKey: `wamid-${randomUUID()}`,
+        file: PNG_BYTES,
+        fields: {},
+      });
+
+      expect(await outboxRows(response.receiptId)).toHaveLength(0);
+    });
+
+    it('settles concurrent uploads of one key into one receipt and one row', async () => {
+      await openGate(['RECEIPT_REVIEW_REQUESTED']);
+      const saleId = await createSale();
+      const input = {
+        saleId,
+        idempotencyKey: `wamid-${randomUUID()}`,
+        file: PNG_BYTES,
+        fields: {},
+      };
+
+      const [a, b] = await Promise.all([
+        service.upload(input),
+        service.upload(input),
+      ]);
+
+      expect(a).toEqual(b);
+      expect(await outboxRows(a.receiptId)).toHaveLength(1);
+    });
   });
 });

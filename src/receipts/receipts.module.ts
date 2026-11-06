@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
+import { NotificationConfigModule } from '../notification-config/notification-config.module';
+import { OutboxModule } from '../shared/outbox/outbox.module';
 import { createSpacesClient } from '../files/infrastructure/spaces-client.factory';
 import { ReceiptUploadService } from './application/receipt-upload.service';
 import { ReceiptFileService } from './application/receipt-file.service';
@@ -22,7 +24,7 @@ import { SpacesReceiptStorageAdapter } from './infrastructure/spaces-receipt-sto
  * (JWT + tenant + read ReceiptEvidence), streamed by the backend.
  */
 @Module({
-  imports: [DatabaseModule, AuthModule],
+  imports: [DatabaseModule, AuthModule, NotificationConfigModule, OutboxModule],
   controllers: [ReceiptFileController],
   providers: [
     ReceiptUploadService,

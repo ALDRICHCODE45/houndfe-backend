@@ -15,6 +15,16 @@ import {
   type ReceiptStoragePort,
 } from '../domain/receipt-storage.port';
 import { ReceiptUploadError } from '../domain/receipt-upload.errors';
+import {
+  RECEIPT_REVIEW_REQUESTED_EVENT_TYPE,
+  type ReceiptReviewRequestedPayload,
+} from '../domain/receipt-review-requested.event';
+import {
+  NOTIFICATION_CONFIG_REPOSITORY,
+  type INotificationConfigRepository,
+} from '../../notification-config/domain/notification-config.repository';
+import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
+import type { OutboxPayload } from '../../shared/outbox/outbox.types';
 
 export type ReceiptUploadResponse = {
   receiptId: string;
@@ -39,6 +49,12 @@ const EXTENSIONS: Record<ReceiptMimeType, string> = {
   'application/pdf': 'pdf',
 };
 
+type PayableSale = {
+  debtCents: number;
+  folio: string | null;
+  customerName: string | null;
+};
+
 type StoredReceipt = {
   id: string;
   mimeType: string | null;
@@ -61,6 +77,12 @@ export class ReceiptUploadService {
     @Inject(RECEIPT_STORAGE) private readonly storage: ReceiptStoragePort,
     @Inject(RECEIPT_PREVIEW_RASTERIZER)
     private readonly rasterizer: ReceiptPreviewRasterizer,
+    @Inject(NOTIFICATION_CONFIG_REPOSITORY)
+    private readonly notificationConfig: Pick<
+      INotificationConfigRepository,
+      'find'
+    >,
+    private readonly outboxWriter: OutboxWriterService,
   ) {}
 
   async upload(input: {
@@ -83,7 +105,7 @@ export class ReceiptUploadService {
     );
     if (existing) return this.replay(existing, sha256);
 
-    const debtCents = await this.assertPayableSale(tenantId, input.saleId);
+    const sale = await this.assertPayableSale(tenantId, input.saleId);
 
     const base = `receipts/${tenantId}/${input.saleId}/${randomUUID()}`;
     const storageKey = `${base}.${EXTENSIONS[mimeType]}`;
@@ -101,14 +123,14 @@ export class ReceiptUploadService {
 
     const preview = await this.storePreview(base, storageKey, mimeType, bytes);
     const mismatch = computeReceiptMismatch({
-      debtCents,
+      debtCents: sale.debtCents,
       declared: fields.declaredAmountCents,
       extracted: fields.extracted?.amountCents ?? null,
     });
 
     try {
-      const row = await this.tenantPrisma.getClient().receiptEvidence.create({
-        data: {
+      const row = await this.createWithReviewRequest(
+        {
           id: randomUUID(),
           saleId: input.saleId,
           tenantId,
@@ -127,7 +149,8 @@ export class ReceiptUploadService {
           mismatch,
           status: 'PENDING',
         },
-      });
+        sale,
+      );
       return toResponse(row);
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
@@ -155,9 +178,9 @@ export class ReceiptUploadService {
     input: LegacyReceiptInput,
   ): Promise<{ receiptId: string; status: 'PENDING' }> {
     const tenantId = this.tenantPrisma.getTenantId();
-    const debtCents = await this.assertPayableSale(tenantId, input.saleId);
-    const row = await this.tenantPrisma.getClient().receiptEvidence.create({
-      data: {
+    const sale = await this.assertPayableSale(tenantId, input.saleId);
+    const row = await this.createWithReviewRequest(
+      {
         id: randomUUID(),
         saleId: input.saleId,
         tenantId,
@@ -166,14 +189,63 @@ export class ReceiptUploadService {
         declaredDate: input.declaredDate,
         declaredReference: input.declaredReference,
         mismatch: computeReceiptMismatch({
-          debtCents,
+          debtCents: sale.debtCents,
           declared: input.declaredAmountCents,
           extracted: null,
         }),
         status: 'PENDING',
       },
-    });
+      sale,
+    );
     return { receiptId: row.id, status: 'PENDING' };
+  }
+
+  /**
+   * Inserts the receipt and, when the tenant enabled RECEIPT_REVIEW_REQUESTED,
+   * the staff-email outbox row in the same transaction. A unique violation
+   * rolls both back, so a lost concurrent race never emails twice.
+   */
+  private createWithReviewRequest(
+    data: Prisma.ReceiptEvidenceUncheckedCreateInput & {
+      id: string;
+      tenantId: string;
+    },
+    sale: PayableSale,
+  ) {
+    return this.tenantPrisma.runInTransaction(async () => {
+      const prisma = this.tenantPrisma.getClient();
+      const row = await prisma.receiptEvidence.create({ data });
+
+      const config = await this.notificationConfig.find();
+      if (
+        config.enabled &&
+        config.enabledActions.includes('RECEIPT_REVIEW_REQUESTED')
+      ) {
+        const extracted = data.extracted as { amountCents?: number } | null;
+        const mismatch = data.mismatch as { flagged?: boolean } | null;
+        const payload: ReceiptReviewRequestedPayload = {
+          tenantId: data.tenantId,
+          receiptId: row.id,
+          saleId: data.saleId,
+          saleFolio: sale.folio,
+          customerName: sale.customerName,
+          declaredAmountCents: data.declaredAmountCents ?? null,
+          extractedAmountCents: extracted?.amountCents ?? null,
+          debtCents: sale.debtCents,
+          mismatchFlagged: mismatch?.flagged ?? false,
+          mimeType: data.mimeType ?? null,
+        };
+        await this.outboxWriter.publish(
+          prisma as unknown as Parameters<OutboxWriterService['publish']>[0],
+          data.tenantId,
+          'ReceiptEvidence',
+          row.id,
+          RECEIPT_REVIEW_REQUESTED_EVENT_TYPE,
+          payload as unknown as OutboxPayload,
+        );
+      }
+      return row;
+    });
   }
 
   private findByKey(
@@ -206,14 +278,23 @@ export class ReceiptUploadService {
     return toResponse(existing);
   }
 
-  /** @returns the current sale debt (source of truth for the mismatch). */
+  /**
+   * @returns the current sale debt (source of truth for the mismatch) and
+   * the header the staff email shows.
+   */
   private async assertPayableSale(
     tenantId: string,
     saleId: string,
-  ): Promise<number> {
+  ): Promise<PayableSale> {
     const sale = await this.tenantPrisma.getClient().sale.findFirst({
       where: { id: saleId, tenantId },
-      select: { status: true, paymentStatus: true, debtCents: true },
+      select: {
+        status: true,
+        paymentStatus: true,
+        debtCents: true,
+        folio: true,
+        customer: { select: { firstName: true, lastName: true } },
+      },
     });
     if (!sale) {
       throw new ReceiptUploadError('SALE_NOT_FOUND', 'Sale not found');
@@ -227,7 +308,15 @@ export class ReceiptUploadService {
     if (sale.paymentStatus === 'PAID' || sale.debtCents <= 0) {
       throw new ReceiptUploadError('SALE_ALREADY_PAID', 'Sale is already paid');
     }
-    return sale.debtCents;
+    return {
+      debtCents: sale.debtCents,
+      folio: sale.folio,
+      customerName: sale.customer
+        ? [sale.customer.firstName, sale.customer.lastName]
+            .filter(Boolean)
+            .join(' ')
+        : null,
+    };
   }
 
   /**
