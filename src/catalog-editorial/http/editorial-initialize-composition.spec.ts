@@ -588,7 +588,7 @@ describe('registered V2 initialize composition', () => {
       draftRevision: null,
       published: { revision: 11, document },
     };
-    await reject(send({ expectedCycle: 3 }), 500, 'INTERNAL_ERROR');
+    await reject(send({ expectedCycle: 3 }), 409, 'EDITORIAL_STATE_UNREADABLE');
     expect(events).not.toContain('state-write');
   });
   it('observes selected media under the same qualified Product gate', async () => {

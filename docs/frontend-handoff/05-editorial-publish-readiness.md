@@ -200,9 +200,23 @@ Effect: the saved draft is copied to Published exactly as stored, `published.rev
 | 404 | `NOT_FOUND` | both | The product disappeared after authorization | Leave the editor |
 | 409 | `CONFLICT` | publish | Stale cycle/revision, no draft, or a reused key with a different body | Keep the edits, reload the editorial read, then let the user retry with a **new** key |
 | 409 | `VOCABULARY_CHANGED` | both | The vocabulary changed since you installed it | Reload the vocabulary, then retry **once** (see below) |
+| 409 | `EDITORIAL_STATE_UNREADABLE` | editorial read and writes | The stored editorial state is not V2 (legacy or damaged) | Show «Este producto tiene un contenido editorial antiguo que no se puede abrir»; do not retry (see below) |
 | 500 | `INTERNAL_ERROR` | both | Unexpected | Generic error |
 
 Every error has `Cache-Control: no-store` and `Editorial-Contract-Version: 2`, and no `Editorial-Vocabulary-Revision`.
+
+**`EDITORIAL_STATE_UNREADABLE` (new, replaces the old `500`).** `GET /products/:id/editorial` (and initialize, save, discard or unpublish when they must read that stored slot) answers:
+
+```http
+HTTP/1.1 409 Conflict
+Cache-Control: no-store
+Editorial-Contract-Version: 2
+Content-Type: application/json; charset=utf-8
+
+{ "statusCode": 409, "error": "EDITORIAL_STATE_UNREADABLE" }
+```
+
+There is no `Editorial-Vocabulary-Revision` header and no document contents. Retrying does not help: the stored state must be repaired on the backend (in dev, the showcase repair resets it so the editor can start a new V2 draft). Readiness does not answer this code: a legacy saved draft still shows as `DRAFT_INVALID`.
 
 **`VOCABULARY_CHANGED` pattern (readiness and publish):** reload `GET /catalog-editorial/vocabulary` and the editorial read pinned to the new R, install the pair, then retry once with the new R. For publish the retry is a new user attempt: use a **new** `Idempotency-Key` and the current `expectedCycle`/`expectedRevision`. If it fails again, stop and show the error.
 

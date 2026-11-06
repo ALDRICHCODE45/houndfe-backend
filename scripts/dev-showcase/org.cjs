@@ -8,8 +8,10 @@ const bcrypt = require('bcrypt');
 const { randomUUID } = require('node:crypto');
 
 const BCRYPT_SALT_ROUNDS = 10;
-// Login password of the demo users this module creates (existing users keep theirs).
+// Login password of the demo users this module creates. Existing users keep
+// theirs unless SHOWCASE_RESET_PASSWORDS=1 sets it again. Never printed.
 const DEMO_PASSWORD = process.env.SHOWCASE_DEMO_PASSWORD || 'Demo123!';
+const RESET_PASSWORDS = process.env.SHOWCASE_RESET_PASSWORDS === '1';
 
 const TENANT_PROFILES = {
   centro: {
@@ -141,9 +143,26 @@ async function grant(prisma, role, grants) {
   return created;
 }
 
-async function ensureUser(prisma, spec, tenant, role) {
+/** Returns `{ created, passwordReset }`; the reset applies only to existing users. */
+async function ensureUser(
+  prisma,
+  spec,
+  tenant,
+  role,
+  { resetPassword = RESET_PASSWORDS } = {},
+) {
   let user = await prisma.user.findUnique({ where: { email: spec.email } });
   let created = false;
+  let passwordReset = false;
+  if (user && resetPassword) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        hashedPassword: await bcrypt.hash(DEMO_PASSWORD, BCRYPT_SALT_ROUNDS),
+      },
+    });
+    passwordReset = true;
+  }
   if (!user) {
     user = await prisma.user.create({
       data: {
@@ -167,12 +186,17 @@ async function ensureUser(prisma, spec, tenant, role) {
     update: {},
     create: { userId: user.id, tenantId: tenant.id, roleId: role.id },
   });
-  return created;
+  return { created, passwordReset };
 }
 
 async function run(ctx) {
   const { prisma } = ctx;
-  const summary = { tenants: {}, roleGrantsCreated: 0, usersCreated: [] };
+  const summary = {
+    tenants: {},
+    roleGrantsCreated: 0,
+    usersCreated: [],
+    passwordsReset: [],
+  };
 
   const tenants = {};
   for (const slug of Object.keys(TENANT_PROFILES)) {
@@ -235,13 +259,14 @@ async function run(ctx) {
   );
 
   for (const spec of DEMO_USERS) {
-    const created = await ensureUser(
+    const { created, passwordReset } = await ensureUser(
       prisma,
       spec,
       tenants[spec.tenant],
       roles[spec.tenant][spec.role],
     );
     if (created) summary.usersCreated.push(spec.email);
+    if (passwordReset) summary.passwordsReset.push(spec.email);
   }
 
   for (const [slug, tenant] of Object.entries(tenants)) {
@@ -256,4 +281,4 @@ async function run(ctx) {
   return summary;
 }
 
-module.exports = { name: 'org', run, DEMO_PASSWORD, DEMO_USERS };
+module.exports = { name: 'org', run, ensureUser, DEMO_PASSWORD, DEMO_USERS };

@@ -125,7 +125,8 @@ validation, then reads qualified Product existence, complete metadata and state 
 one RepeatableRead transaction. Authority is a separate current observation, not
 part of that data snapshot. Actual canonical R must equal the single requested R.
 Stored documents/counters pass structural decoding only: legacy/future/malformed
-slots reject the whole response as INTERNAL_ERROR; recognizable historical conflicts
+slots reject the whole response as `409 EDITORIAL_STATE_UNREADABLE` (S4, 2026-11-06;
+was INTERNAL_ERROR), never echoing slot contents; recognizable historical conflicts
 remain unchanged for correction. No fresh qualification or fabricated warnings.
 The old writer provider remains separate; GET itself does not activate V2 writes/replay.
 Registered HTTP tests substitute JWT/Prisma I/O; transaction-client provenance is
@@ -854,12 +855,17 @@ same `items`/`bySection` as the readiness GET. The complete target error enum is
 | 404    | NOT_FOUND                            | Product lost after authorization                                 |
 | 409    | CONFLICT                             | CAS, absent/active draft, overflow, receipt intent mismatch/race |
 | 409    | VOCABULARY_CHANGED                   | Pinned R differs from current coherent snapshot                  |
+| 409    | EDITORIAL_STATE_UNREADABLE           | A stored Draft/Published slot or counter does not decode as V2   |
 | 500    | EDITORIAL_VOCABULARY_UNREPRESENTABLE | Whole metadata response cannot be represented; never omit/prune  |
 | 500    | INTERNAL_ERROR                       | Sanitized unexpected failure                                     |
 
 No 406, unsupported, adoption or upgrade errors. The registered editorial filter
-maps the original codes plus deliberate `VOCABULARY_CHANGED` and typed vocabulary
-representation failures; arbitrary same-message representation errors stay internal.
+maps the original codes plus deliberate `VOCABULARY_CHANGED`, typed vocabulary
+representation failures and `EditorialStateUnreadableError` (the recorded-state
+decoder's rejection) to `409 EDITORIAL_STATE_UNREADABLE`; arbitrary same-message
+errors stay internal. The read, and initialize/save/discard on a stored Published or
+unpublish on a stored Draft, answer it. Save and discard replace a legacy Draft
+without decoding it; readiness and publish keep reporting it as `DRAFT_INVALID`.
 Errors carry version2/no-store and remove any stale revision header. Framework
 invalid JSON/413/unmatched-route errors remain outside this local envelope; FE
 handles non-envelope failures generically.

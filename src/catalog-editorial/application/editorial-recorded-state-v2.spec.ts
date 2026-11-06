@@ -1,4 +1,7 @@
-import { decodeRecordedEditorialStateV2 as decode } from './editorial-recorded-state-v2';
+import {
+  decodeRecordedEditorialStateV2 as decode,
+  EditorialStateUnreadableError,
+} from './editorial-recorded-state-v2';
 
 const R = `ev2-sha256-${'a'.repeat(64)}`;
 const warning = {
@@ -47,6 +50,8 @@ function rejected(input: unknown) {
   expect(() => decode(input)).toThrow(
     new TypeError('Expected a recorded editorial state V2'),
   );
+  // S4: the typed rejection the HTTP filter answers as 409, still a TypeError.
+  expect(() => decode(input)).toThrow(EditorialStateUnreadableError);
 }
 
 describe('recorded editorial state V2 (S2, contract §§4–5)', () => {

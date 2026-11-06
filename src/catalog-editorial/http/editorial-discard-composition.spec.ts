@@ -508,7 +508,7 @@ describe('registered V2 discard composition', () => {
         state: { cycle: 3, draft: null, published: null },
       });
     else {
-      await rejected(send(), 500, 'INTERNAL_ERROR');
+      await rejected(send(), 409, 'EDITORIAL_STATE_UNREADABLE');
       expect(events).not.toContain('update');
     }
   });

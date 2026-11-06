@@ -8,7 +8,7 @@
  * own pre-submission projection never carries expected values or movements.
  */
 import { Prisma } from '@prisma/client';
-import type { CashCount } from '@prisma/client';
+import type { CashCount, CashSession } from '@prisma/client';
 import { expectedCashCents, projectCashSession } from '../domain';
 import {
   CASH_AUDIT_REQUIREMENT,
@@ -46,6 +46,7 @@ import {
   toDomainSession,
 } from './cash-adapter-mappers';
 import { normalizePage, parseRange } from './cash-adapter-paging';
+import { userNames } from './cash-adapter-storage';
 import { document, iso } from './cash-adapter-values';
 
 export async function queryRegisters(
@@ -150,6 +151,7 @@ export async function querySession(
   const register = await tx.cashRegister.findFirst({
     where: { tenantId, id: row.registerId },
   });
+  const names = await userNames(tx, [row.cashierUserId]);
   const blind = projection.blind === true;
   // S1 — additive blind discovery. A frozen COUNTING session owned by the
   // declarant hides `channelSnapshot`/`movements`, so the client cannot know
@@ -170,7 +172,7 @@ export async function querySession(
         }))
       : null;
   return document({
-    session: projection,
+    session: { ...projection, ...sessionDisplayFields(row, names) },
     register: register
       ? {
           id: register.id,
@@ -237,6 +239,10 @@ export async function querySessions(
   const ids = pageRows.map((row) => row.id);
   const movementsBySession = await movementsForSessions(tx, tenantId, ids);
   const countsBySession = await countsForSessions(tx, tenantId, ids);
+  const names = await userNames(
+    tx,
+    pageRows.map((row) => row.cashierUserId),
+  );
   const items = pageRows.map((row) => {
     const counts = countsBySession.get(row.id) ?? [];
     const declared = latestDeclaration(counts);
@@ -249,7 +255,7 @@ export async function querySessions(
           openingCents: row.openingCents,
           movements,
         });
-    return projectCashSession({
+    const projection = projectCashSession({
       session: toDomainSession(row),
       viewerUserId: actor.userId,
       expectedCashCents: expectedCash,
@@ -261,6 +267,7 @@ export async function querySessions(
       ),
       declarationSubmitted: submitted,
     });
+    return { ...projection, ...sessionDisplayFields(row, names) };
   });
   return document({ items, page, limit, total });
 }
@@ -353,6 +360,27 @@ export async function queryClosing(
 }
 
 // ── Shared query helpers ────────────────────────────────────────────
+
+/**
+ * fe-design-pass T1 (S1, S2) — additive display fields for session reads.
+ * Lifecycle timestamps and the cashier's visible name carry no expected
+ * values, so they are safe for a blind projection too. A missing user row
+ * yields `cashierDisplayName: null`.
+ */
+function sessionDisplayFields(
+  row: CashSession,
+  names: ReadonlyMap<string, string>,
+): {
+  openedAt: string;
+  closedAt: string | null;
+  cashierDisplayName: string | null;
+} {
+  return {
+    openedAt: row.openedAt.toISOString(),
+    closedAt: iso(row.closedAt),
+    cashierDisplayName: names.get(row.cashierUserId) ?? null,
+  };
+}
 
 async function movementsForSessions(
   tx: TenantClient,

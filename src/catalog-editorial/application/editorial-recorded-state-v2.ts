@@ -4,8 +4,18 @@ import { isRecognizableDocumentV2 } from '../domain/editorial-document-recogniti
 import type { DocumentShapeV2 } from '../domain/editorial-document-shape-v2';
 import type { EditorialStateV2, StateV2 } from './editorial-state-v2';
 
+/**
+ * S4: stored or recorded state that does not decode as V2 (a legacy or
+ * malformed slot). Still a TypeError; carries no document contents.
+ */
+export class EditorialStateUnreadableError extends TypeError {
+  constructor() {
+    super('Expected a recorded editorial state V2');
+    this.name = 'EditorialStateUnreadableError';
+  }
+}
 function invalid(): never {
-  throw new TypeError('Expected a recorded editorial state V2');
+  throw new EditorialStateUnreadableError();
 }
 function record(input: unknown): Record<string, unknown> {
   if (input === null || typeof input !== 'object' || Array.isArray(input))

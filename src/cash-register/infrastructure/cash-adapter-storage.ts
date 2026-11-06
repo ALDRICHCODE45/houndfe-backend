@@ -153,6 +153,27 @@ export async function userName(
   return user ? user.name : null;
 }
 
+/**
+ * fe-design-pass T1 — batch display-name load for a page of cash rows (never
+ * one query per row). Ids always come from tenant-scoped cash rows, and the
+ * name is kept for historical audit even after the user leaves the tenant. A
+ * missing user row maps to no entry, so callers render `null`.
+ */
+export async function userNames(
+  tx: TenantClient,
+  userIds: readonly string[],
+): Promise<Map<string, string>> {
+  const ids = [...new Set(userIds)];
+  if (ids.length === 0) {
+    return new Map();
+  }
+  const users = await tx.user.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, name: true },
+  });
+  return new Map(users.map((user) => [user.id, user.name]));
+}
+
 export function assertSessionOwner(session: CashSession, userId: string): void {
   if (session.cashierUserId !== userId) {
     throw cashAppError(

@@ -19,7 +19,10 @@ from S35 §§8–9. It is dormant and does not decode the complete receipt resul
   including an own `__proto__`, are invalid under the closed document shape.
   No canonical serialization, fresh limits or current membership checks run.
 
-Intentional rejection remains `TypeError('Expected a recorded editorial state V2')`;
+Intentional rejection is `EditorialStateUnreadableError`, a `TypeError` subclass with
+the message `Expected a recorded editorial state V2` and no document contents; the
+editorial HTTP filter answers it as `409 EDITORIAL_STATE_UNREADABLE` (S4). A corrupt
+recorded receipt body decodes through the same path and answers the same 409;
 unexpected reflection failures propagate by identity. This proves no authority,
 current references, receipt coherence, attestation, storage provenance or replay
 eligibility. Full receipt decoding and integration remain separate work.
