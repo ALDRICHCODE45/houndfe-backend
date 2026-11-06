@@ -33,6 +33,7 @@ class FakeStorage implements ReceiptStoragePort {
   readonly objects = new Map<string, { bytes: Buffer; mimeType: string }>();
   readonly deleted: string[] = [];
   failNext = false;
+  failDeletes = false;
 
   putPrivate(input: { key: string; bytes: Buffer; mimeType: string }) {
     if (this.failNext) {
@@ -47,6 +48,7 @@ class FakeStorage implements ReceiptStoragePort {
   }
 
   delete(key: string) {
+    if (this.failDeletes) return Promise.reject(new Error('delete denied'));
     this.deleted.push(key);
     this.objects.delete(key);
     return Promise.resolve();
@@ -162,6 +164,7 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
   beforeEach(() => {
     rasterizer.fail = false;
     rasterizer.calls = 0;
+    storage.failDeletes = false;
   });
 
   async function createSale(
@@ -393,6 +396,98 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
 
     expect(a).toEqual(b);
     expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(1);
+    // The loser drops only its own objects; the winner's stay stored.
+    const row = await prisma.receiptEvidence.findUniqueOrThrow({
+      where: { id: a.receiptId },
+    });
+    expect(storage.objects.has(row.storageKey!)).toBe(true);
+  });
+
+  describe('when the row cannot be recorded after the objects were stored', () => {
+    const dbDown = new Error('database unavailable');
+    let failing: ReceiptUploadService;
+
+    beforeEach(() => {
+      // Keeps the ambient tx client, so the failure rolls the insert back.
+      const store = new Map<string, unknown>();
+      const cls = {
+        get: (key: string) => {
+          if (key === 'tenantId') return tenantId;
+          if (key === 'isSuperAdmin') return false;
+          return store.get(key);
+        },
+        set: (key: string, value: unknown) => store.set(key, value),
+      } as unknown as ClsService<TenantClsStore>;
+      failing = new ReceiptUploadService(
+        new TenantPrismaService(
+          prisma as unknown as ConstructorParameters<
+            typeof TenantPrismaService
+          >[0],
+          cls,
+        ),
+        storage,
+        rasterizer,
+        // Fails inside the insert transaction, after the objects are stored.
+        { find: () => Promise.reject(dbDown) },
+        new OutboxWriterService(),
+      );
+    });
+
+    it('removes the stored original and preview and rethrows', async () => {
+      const saleId = await createSale();
+      const before = new Set(storage.objects.keys());
+
+      await expect(
+        failing.upload({
+          saleId,
+          idempotencyKey: `wamid-${randomUUID()}`,
+          file: PDF_BYTES,
+          fields: {},
+        }),
+      ).rejects.toBe(dbDown);
+
+      const stored = storage.deleted.filter((key) =>
+        key.startsWith(`receipts/${tenantId}/${saleId}/`),
+      );
+      expect(stored).toHaveLength(2);
+      expect(stored.some((key) => key.endsWith('.pdf'))).toBe(true);
+      expect(stored.some((key) => key.endsWith('.preview.png'))).toBe(true);
+      expect(new Set(storage.objects.keys())).toEqual(before);
+      expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(0);
+    });
+
+    it('removes an image once (it is its own preview)', async () => {
+      const saleId = await createSale();
+
+      await expect(
+        failing.upload({
+          saleId,
+          idempotencyKey: `wamid-${randomUUID()}`,
+          file: PNG_BYTES,
+          fields: {},
+        }),
+      ).rejects.toBe(dbDown);
+
+      expect(
+        storage.deleted.filter((key) =>
+          key.startsWith(`receipts/${tenantId}/${saleId}/`),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('never masks the original error when the cleanup fails', async () => {
+      const saleId = await createSale();
+      storage.failDeletes = true;
+
+      await expect(
+        failing.upload({
+          saleId,
+          idempotencyKey: `wamid-${randomUUID()}`,
+          file: PDF_BYTES,
+          fields: {},
+        }),
+      ).rejects.toBe(dbDown);
+    });
   });
 
   it.each([

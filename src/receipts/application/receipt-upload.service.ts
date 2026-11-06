@@ -153,13 +153,11 @@ export class ReceiptUploadService {
       );
       return toResponse(row);
     } catch (error) {
+      // No row points at our objects any more: drop them. A concurrent
+      // request with the same key that won the insert is answered like a
+      // replay of the winner; any other failure is rethrown unchanged.
+      await this.discardObjects(storageKey, preview.key);
       if (!isUniqueViolation(error)) throw error;
-      // A concurrent request with the same key won the insert: drop our
-      // objects and answer like a replay of the winner.
-      await this.storage.delete(storageKey);
-      if (preview.key && preview.key !== storageKey) {
-        await this.storage.delete(preview.key);
-      }
       const winner = await this.findByKey(
         tenantId,
         input.saleId,
@@ -167,6 +165,25 @@ export class ReceiptUploadService {
       );
       if (!winner) throw error;
       return this.replay(winner, sha256);
+    }
+  }
+
+  /** Best effort: a failed delete is logged and never masks the caller's error. */
+  private async discardObjects(
+    storageKey: string,
+    previewKey: string | null,
+  ): Promise<void> {
+    const keys = [...new Set([storageKey, previewKey])].filter(
+      (key): key is string => Boolean(key),
+    );
+    for (const key of keys) {
+      try {
+        await this.storage.delete(key);
+      } catch (error) {
+        this.logger.error(
+          `Orphaned receipt object ${key} could not be deleted: ${(error as Error).message}`,
+        );
+      }
     }
   }
 
