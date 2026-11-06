@@ -80,6 +80,12 @@ How it works:
 
 Passwords are not repeated here. Base-seed users use the passwords in `prisma/seed.ts`. Users created by the showcase use `SHOWCASE_DEMO_PASSWORD`, or the default in `scripts/dev-showcase/org.cjs`. In development the login skips the email OTP.
 
+An existing showcase user keeps their password. To set the demo password again for the four showcase users below (`repartidor@houndfe.com`, `vendedor@houndfe.com`, `gerente.norte@houndfe.com`, `cajero.norte@houndfe.com`), run with the flag. The run lists the emails it reset, never the password. Base-seed users (`admin`, `manager`, `cashier`) are not touched.
+
+```bash
+SHOWCASE_RESET_PASSWORDS=1 pnpm seed:showcase
+```
+
 | Email | Name | Sucursal | Role | Use it to see |
 | --- | --- | --- | --- | --- |
 | `admin@houndfe.com` | Super Admin | all | Super Admin | Everything; switch between sucursales |
@@ -100,6 +106,22 @@ Sucursal Sur has a single member (the super admin). The showcase adds demo permi
 | `catalog` | 38 products: high, low and zero stock; lots expired, expiring in under 7 days and valid; variants with one at 0; no stock control; services; with and without image; a 98-character name; 8 categories, many brands, 4 price lists. A kardex product («Alimento Premium para Perro Adulto 15 kg») with 30+ movements: opening, initial stock, every adjustment reason, a FEFO sale split across two lots and its cancellation. A variant removal on «Collar Ajustable de Nailon». Public catalog with «Disponible», «Pocas piezas» and «Agotado». |
 | `commerce` | 20 customers (several addresses, outstanding balances, a very long name, a business with billing data); ~57 sales over the last 28 days (paid by cash, card, transfer and mixed; credit, partial, overdue; cancelled with pending and partly settled refunds; delivered and pending delivery; «Público en general»); 9 quotations (draft, sent, expired, cancelled, no expiry, with promotion); 12 promotions (each type active, scheduled and ended; one nearly exhausted, unlimited ones); 5 cash registers (2 inactive), an open session, closed sessions (one with a shortfall) and a pending custody handover. |
 | `ops` | Human decisions pending and resolved (positive and negative); delivery routes draft, active today (delivered, skipped, current and pending stops), completed and cancelled; 5 suppliers (one archived) and 11 purchase orders with 0, 1, 2 and 4 checklist warnings, confirmed and cancelled; employee documents expired and expiring; time off pending (single and multi-day), approved and rejected; payment methods and bank accounts with one inactive each; notification settings with modules on and off; a published catalog with public price lists. |
+
+### Repairing legacy editorial documents
+
+Four Sucursal Centro products have editorial documents saved before editorial V2: «Collar ajustable Ruffwear Front Range», «Correa de nylon reforzada Kong 1.8 m», «Correa retráctil Flexi New Classic» and «Croqueta Diamond Naturals Cordero y Arroz 13.6 kg». The editor cannot open them (`409 EDITORIAL_STATE_UNREADABLE`). These rows exist only in the dev database. They came from the old dev catalog seed on the unmerged `chore/dev-catalog-seed` branch. No script on `main` writes editorial state.
+
+```bash
+pnpm build                                          # the repair uses the API's V2 decoder from dist/
+node scripts/dev-showcase/editorial-repair.cjs          # dry run: counts only
+node scripts/dev-showcase/editorial-repair.cjs --apply  # repair
+```
+
+- It only looks at those four products in Sucursal Centro. It has the same local-database guard as the showcase.
+- It clears only the Draft or Published slots that do not decode as V2. Valid slots stay. A cleared Published records its revision as unpublished, so revision numbers never repeat.
+- A row is deleted only when nothing valid is left and no editorial receipt references it. Receipts are never deleted. A referenced row stays with empty slots.
+- It prints `rowsMatched`, `slotsCleared`, `rowsDeleted`, `rowsKeptReferenced` and the product names, never document contents. A second run finds nothing to do.
+- Afterwards the editor reads the product with no draft and can start a new V2 draft.
 
 Cases the domain does not support are not faked: a «vencida» human decision, a route without driver or stops, a «convertida» quotation, and an inactive product flag (shown instead as hidden from POS and the online catalog). Product images are `placehold.co` URLs and need internet access.
 
