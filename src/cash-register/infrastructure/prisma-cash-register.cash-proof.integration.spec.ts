@@ -109,6 +109,8 @@ proof('cash register disposable PostgreSQL proof', () => {
       randomUUID(),
     );
     if (typeof register.id !== 'string') throw new Error('Missing register ID');
+    if (typeof register.name !== 'string')
+      throw new Error('Missing register name');
     const command = {
       kind: 'OPEN_SESSION' as const,
       registerId: register.id,
@@ -117,6 +119,7 @@ proof('cash register disposable PostgreSQL proof', () => {
     };
     return {
       tenantId: tenant.id,
+      registerName: register.name,
       actor,
       first,
       second: harness(tenant.id),
@@ -301,6 +304,9 @@ proof('cash register disposable PostgreSQL proof', () => {
         receiverUserId: recipient.userId,
         declaredAt: handover.declaredAt,
         receivedAt: null,
+        senderDisplayName: 'Proof cashier',
+        sourceRegisterName: f.registerName,
+        notes: null,
         sourceRegisterId: f.command.registerId,
         sourceDrawerReleasedAt: null,
       },

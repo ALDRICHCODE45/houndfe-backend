@@ -22,6 +22,7 @@ import {
   asItems,
   asJson,
   makeTenantHarness,
+  seedActors,
   type Host,
 } from './cash-adapter.test-support';
 
@@ -278,5 +279,132 @@ describe('cash-adapter-queries — direct module contract', () => {
     await expect(
       queryClosing(tx, host.tenantId, actor('u1'), 'missing'),
     ).rejects.toMatchObject({ code: 'CASH_CLOSING_NOT_FOUND' });
+  });
+
+  describe('display fields (fe-design-pass T1/S1, S2)', () => {
+    it('adds openedAt, closedAt and the cashier name to session list items', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1', 'u2']);
+      seedSession(host, {
+        id: 's-closed',
+        cashierUserId: 'u2',
+        status: 'CLOSED',
+        openedAt: new Date('2026-01-01T10:00:00Z'),
+        closedAt: new Date('2026-01-01T18:30:00Z'),
+      });
+      seedSession(host, {
+        id: 's-open',
+        cashierUserId: 'u1',
+        openedAt: new Date('2026-01-02T09:00:00Z'),
+      });
+      const users = jest.spyOn(tx.user, 'findMany');
+      const userFirst = jest.spyOn(tx.user, 'findFirst');
+
+      const items = asItems(
+        asJson(
+          await querySessions(tx, host.tenantId, actor('u1'), {
+            kind: 'SESSIONS',
+            page: { page: 1, limit: 25 },
+          }),
+        ).items,
+      );
+
+      expect(
+        items.map((item) => [
+          item.id,
+          item.openedAt,
+          item.closedAt,
+          item.cashierDisplayName,
+        ]),
+      ).toEqual([
+        ['s-open', '2026-01-02T09:00:00.000Z', null, 'Name u1'],
+        [
+          's-closed',
+          '2026-01-01T10:00:00.000Z',
+          '2026-01-01T18:30:00.000Z',
+          'Name u2',
+        ],
+      ]);
+      // One batched user load for the whole page, never one per row.
+      expect(users).toHaveBeenCalledTimes(1);
+      expect(userFirst).not.toHaveBeenCalled();
+    });
+
+    it('keeps every existing list key and stays blind for the declarant', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1']);
+      seedSession(host);
+
+      const [item] = asItems(
+        asJson(
+          await querySessions(tx, host.tenantId, actor('u1'), {
+            kind: 'SESSIONS',
+            page: { page: 1, limit: 25 },
+          }),
+        ).items,
+      );
+
+      expect(Object.keys(item).sort()).toEqual([
+        'blind',
+        'cashierDisplayName',
+        'cashierUserId',
+        'closedAt',
+        'drawerReleasedAt',
+        'frozenAt',
+        'id',
+        'openedAt',
+        'openingCents',
+        'registerId',
+        'status',
+        'tenantId',
+      ]);
+      expect(item.blind).toBe(true);
+    });
+
+    it('returns a null cashier name when the user row is missing', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedSession(host, { cashierUserId: 'u-gone' });
+
+      const listItem = asItems(
+        asJson(
+          await querySessions(tx, host.tenantId, actor('u1'), {
+            kind: 'SESSIONS',
+            page: { page: 1, limit: 25 },
+          }),
+        ).items,
+      )[0];
+      const detail = asJson(
+        (await querySession(tx, host.tenantId, actor('u1'), 's-1')).session,
+      );
+
+      expect(listItem.cashierDisplayName).toBeNull();
+      expect(detail.cashierDisplayName).toBeNull();
+    });
+
+    it('adds openedAt, closedAt and the cashier name to the session detail', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1', 'u2']);
+      seedSession(host, {
+        cashierUserId: 'u2',
+        status: 'CLOSED',
+        openedAt: new Date('2026-01-01T10:00:00Z'),
+        closedAt: new Date('2026-01-01T18:30:00Z'),
+      });
+
+      const session = asJson(
+        (await querySession(tx, host.tenantId, actor('u1'), 's-1')).session,
+      );
+
+      expect(session).toMatchObject({
+        cashierUserId: 'u2',
+        openedAt: '2026-01-01T10:00:00.000Z',
+        closedAt: '2026-01-01T18:30:00.000Z',
+        cashierDisplayName: 'Name u2',
+      });
+    });
   });
 });

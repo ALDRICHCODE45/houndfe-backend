@@ -11,8 +11,9 @@
  *     re-evaluates the CASL ability PER ROW against the tagged handover
  *     instance (recipient/sender/session/kind) BEFORE totals and pagination,
  *     so a conditional grant can never widen the total or leak a row;
- *   - reports only narrow custody identity/amounts/timestamps plus, for FLOAT,
- *     the source register id and drawer-release state needed to interpret the
+ *   - reports only narrow custody identity/amounts/timestamps, display fields
+ *     (sender name, source register name, sender notes) plus, for FLOAT, the
+ *     source register id and drawer-release state needed to interpret the
  *     same-register release rule — never source-session expected totals,
  *     movements or channel snapshots.
  *
@@ -39,6 +40,7 @@ import type {
 import type { TenantClient } from './cash-adapter-client';
 import { handoverInstance } from './cash-adapter-instances';
 import { normalizePage } from './cash-adapter-paging';
+import { userNames } from './cash-adapter-storage';
 import { document, iso } from './cash-adapter-values';
 
 export async function queryCustody(
@@ -111,43 +113,72 @@ export async function queryCustody(
     .filter((row) => !consumed.has(row.id))
     .sort((left, right) => byReceivedAtDesc(left, right));
 
-  // Batch-load the source session context for FLOAT items only: register id
-  // and drawer-release state, nothing else.
-  const sourceIds = [
-    ...new Set(
-      [...pending, ...eligible]
-        .filter((row) => row.kind === 'FLOAT')
-        .map((row) => row.sourceSessionId),
-    ),
-  ];
+  const pendingPage = pending.slice(skip, skip + limit);
+  const eligiblePage = eligible.slice(skip, skip + limit);
+  const context = await loadCustodyContext(tx, tenantId, [
+    ...pendingPage,
+    ...eligiblePage,
+  ]);
+
+  return document({
+    pendingHandovers: {
+      items: pendingPage.map((row) => custodyItem(row, context)),
+      page: pageNumber,
+      limit,
+      total: pending.length,
+    },
+    eligibleFloat: {
+      items: eligiblePage.map((row) => custodyItem(row, context)),
+      page: pageNumber,
+      limit,
+      total: eligible.length,
+    },
+  });
+}
+
+interface CustodyContext {
+  readonly sourceById: ReadonlyMap<string, CashSession>;
+  readonly registerNameById: ReadonlyMap<string, string>;
+  readonly senderNameById: ReadonlyMap<string, string>;
+}
+
+/**
+ * Batch-load the page's display context once: source sessions and their
+ * registers (tenant-scoped, every handover kind) and sender names. Only the
+ * source register id/name and drawer-release state are read from a session;
+ * never its expected totals, movements or snapshots.
+ */
+async function loadCustodyContext(
+  tx: TenantClient,
+  tenantId: string,
+  rows: readonly CashHandover[],
+): Promise<CustodyContext> {
+  const sourceIds = [...new Set(rows.map((row) => row.sourceSessionId))];
   const sourceSessions =
     sourceIds.length === 0
       ? []
       : await tx.cashSession.findMany({
           where: { tenantId, id: { in: sourceIds } },
         });
-  const sourceById = new Map(
-    sourceSessions.map((session) => [session.id, session]),
-  );
-
-  return document({
-    pendingHandovers: {
-      items: pending
-        .slice(skip, skip + limit)
-        .map((row) => custodyItem(row, sourceById.get(row.sourceSessionId))),
-      page: pageNumber,
-      limit,
-      total: pending.length,
-    },
-    eligibleFloat: {
-      items: eligible
-        .slice(skip, skip + limit)
-        .map((row) => custodyItem(row, sourceById.get(row.sourceSessionId))),
-      page: pageNumber,
-      limit,
-      total: eligible.length,
-    },
-  });
+  const registerIds = [
+    ...new Set(sourceSessions.map((session) => session.registerId)),
+  ];
+  const registers =
+    registerIds.length === 0
+      ? []
+      : await tx.cashRegister.findMany({
+          where: { tenantId, id: { in: registerIds } },
+        });
+  return {
+    sourceById: new Map(sourceSessions.map((session) => [session.id, session])),
+    registerNameById: new Map(
+      registers.map((register) => [register.id, register.name]),
+    ),
+    senderNameById: await userNames(
+      tx,
+      rows.map((row) => row.createdByUserId),
+    ),
+  };
 }
 
 /**
@@ -188,14 +219,17 @@ function hasReusableReceipt(row: CashHandover): boolean {
 
 /**
  * Narrow custody item: identity, declared/received amounts, kind, sender and
- * timestamps. A FLOAT additionally exposes the source register and its
- * drawer-release state so the same-register release rule is interpretable;
- * no source-session expected totals, movements or snapshots are included.
+ * timestamps, plus display fields for every kind (sender name, source
+ * register name, the sender's handover notes; `null` when missing). A FLOAT
+ * additionally exposes the source register id and its drawer-release state
+ * so the same-register release rule is interpretable; no source-session
+ * expected totals, movements or snapshots are included.
  */
 function custodyItem(
   row: CashHandover,
-  source: CashSession | undefined,
+  context: CustodyContext,
 ): Record<string, unknown> {
+  const source = context.sourceById.get(row.sourceSessionId);
   const base: Record<string, unknown> = {
     id: row.id,
     sessionId: row.sourceSessionId,
@@ -206,6 +240,11 @@ function custodyItem(
     receiverUserId: row.recipientUserId,
     declaredAt: iso(row.createdAt),
     receivedAt: iso(row.receivedAt),
+    senderDisplayName: context.senderNameById.get(row.createdByUserId) ?? null,
+    sourceRegisterName: source
+      ? (context.registerNameById.get(source.registerId) ?? null)
+      : null,
+    notes: row.notes,
   };
   if (row.kind !== 'FLOAT') {
     return base;

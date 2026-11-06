@@ -337,6 +337,15 @@ describe('cash custody discovery — eligible FLOAT (S2)', () => {
       notes: 'fondo',
     });
 
+    host.db.registers.push({
+      id: 'reg-src',
+      tenantId: host.tenantId,
+      name: 'Caja Mostrador 2',
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
     const doc = await custody(app, actor('u2', READ_CUSTODY));
 
     const items = floatItems(doc);
@@ -347,13 +356,16 @@ describe('cash custody discovery — eligible FLOAT (S2)', () => {
       'declaredCents',
       'id',
       'kind',
+      'notes',
       'receivedAt',
       'receivedCents',
       'receiverUserId',
+      'senderDisplayName',
       'senderUserId',
       'sessionId',
       'sourceDrawerReleasedAt',
       'sourceRegisterId',
+      'sourceRegisterName',
     ]);
     expect(items[0]).toMatchObject({
       id: 'h-received',
@@ -365,6 +377,9 @@ describe('cash custody discovery — eligible FLOAT (S2)', () => {
       receiverUserId: 'u2',
       sourceRegisterId: 'reg-src',
       sourceDrawerReleasedAt: null,
+      senderDisplayName: 'Name u1',
+      sourceRegisterName: 'Caja Mostrador 2',
+      notes: 'fondo',
     });
     expect(items[0].receivedAt).toBe(receivedAt.toISOString());
   });
@@ -547,6 +562,133 @@ describe('cash custody discovery — eligible FLOAT (S2)', () => {
     expect(serialized).not.toContain('channelSnapshot');
     expect(serialized).not.toContain('differenceCents');
     expect(serialized).not.toContain('sale-secret');
+  });
+});
+
+// ── Display fields (fe-design-pass T1/S3) ───────────────────────────────
+
+describe('cash custody discovery — display fields (S3)', () => {
+  function seedRegister(host: Host, id: string, name: string): void {
+    host.db.registers.push({
+      id,
+      tenantId: host.tenantId,
+      name,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+
+  it('adds sender name, source register name and notes to a pending WITHDRAWAL', async () => {
+    const { app, host } = makeApp();
+    seedActors(host, ['u1', 'u2']);
+    seedRegister(host, 'reg-w', 'Caja Mostrador 1');
+    seedSession(host, { id: 's-w', registerId: 'reg-w' });
+    seedHandover(host, {
+      id: 'h-withdrawal',
+      sourceSessionId: 's-w',
+      kind: 'WITHDRAWAL',
+      notes: 'Retiro de medio día',
+    });
+
+    const doc = await custody(app, actor('u2', READ_CUSTODY));
+
+    const [item] = pendingItems(doc);
+    expect(Object.keys(item).sort()).toEqual([
+      'declaredAt',
+      'declaredCents',
+      'id',
+      'kind',
+      'notes',
+      'receivedAt',
+      'receivedCents',
+      'receiverUserId',
+      'senderDisplayName',
+      'senderUserId',
+      'sessionId',
+      'sourceRegisterName',
+    ]);
+    expect(item).toMatchObject({
+      id: 'h-withdrawal',
+      senderDisplayName: 'Name u1',
+      sourceRegisterName: 'Caja Mostrador 1',
+      notes: 'Retiro de medio día',
+    });
+  });
+
+  it('returns null display fields when the sender, register or notes are missing', async () => {
+    const { app, host } = makeApp();
+    seedActors(host, ['u2']);
+    seedSession(host, { id: 's-orphan', registerId: 'reg-gone' });
+    seedHandover(host, {
+      id: 'h-orphan',
+      sourceSessionId: 's-orphan',
+      kind: 'FLOAT',
+      createdByUserId: 'u-gone',
+    });
+
+    const doc = await custody(app, actor('u2', READ_CUSTODY));
+
+    expect(pendingItems(doc)[0]).toMatchObject({
+      senderDisplayName: null,
+      sourceRegisterName: null,
+      notes: null,
+    });
+  });
+
+  it('never resolves a register name from another tenant', async () => {
+    const { app, host } = makeApp();
+    seedActors(host, ['u1', 'u2']);
+    host.db.registers.push({
+      id: 'reg-x',
+      tenantId: 'tenant-b',
+      name: 'Caja Ajena',
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    seedSession(host, { id: 's-x', registerId: 'reg-x' });
+    seedHandover(host, { id: 'h-x', sourceSessionId: 's-x' });
+
+    const doc = await custody(app, actor('u2', READ_CUSTODY));
+
+    expect(pendingItems(doc)[0].sourceRegisterName).toBeNull();
+  });
+
+  it('batch-loads senders, sessions and registers once per page', async () => {
+    const { app, host, tenantPrisma } = makeApp();
+    seedActors(host, ['u1', 'u2', 'u3']);
+    seedRegister(host, 'reg-a', 'Caja A');
+    seedRegister(host, 'reg-b', 'Caja B');
+    seedSession(host, { id: 's-a', registerId: 'reg-a' });
+    seedSession(host, { id: 's-b', registerId: 'reg-b' });
+    seedHandover(host, { id: 'h-1', sourceSessionId: 's-a', kind: 'FLOAT' });
+    seedHandover(host, {
+      id: 'h-2',
+      sourceSessionId: 's-b',
+      kind: 'WITHDRAWAL',
+      createdByUserId: 'u3',
+    });
+    const client = tenantPrisma.getClient();
+    const users = jest.spyOn(client.user, 'findMany');
+    const registers = jest.spyOn(client.cashRegister, 'findMany');
+    const userFirst = jest.spyOn(client.user, 'findFirst');
+
+    const doc = await custody(app, actor('u2', READ_CUSTODY));
+
+    expect(
+      pendingItems(doc).map((item) => [
+        item.senderDisplayName,
+        item.sourceRegisterName,
+      ]),
+    ).toEqual([
+      ['Name u1', 'Caja A'],
+      ['Name u3', 'Caja B'],
+    ]);
+    expect(users).toHaveBeenCalledTimes(1);
+    expect(registers).toHaveBeenCalledTimes(1);
+    // The facade's active-membership gate uses findFirst for the actor only.
+    expect(userFirst).toHaveBeenCalledTimes(1);
   });
 });
 
