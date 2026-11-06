@@ -253,6 +253,14 @@ export interface ISaleRepository {
     payload: unknown,
   ): Promise<void>;
 
+  /**
+   * shipping-zones / T7 — free a `bot_sale_register` slot that is still
+   * IN_FLIGHT after `confirmBotSale` rejected a shipping quote. That
+   * rejection rolled back the whole confirmation, so no sale exists and the
+   * same key may be retried with a fresh quote. Other failures keep D10.
+   */
+  releaseSaleRegistrationIdempotency(token: string): Promise<void>;
+
   /** rfs-2 — settlement idempotency; same union as the other acquires, keyed
    * by `refund:settle:<refundId>:<key>`; stale IN_FLIGHT reclaims post-lease. */
   acquireSettlementIdempotency(
@@ -347,6 +355,9 @@ export interface ISaleRepository {
     shippingChargeCents?: number;
     shippingApprovalId?: string;
     shippingQuoteId?: string | null;
+    /** shipping-zones / T7 — verified backend quote (unique: single use). */
+    shippingQuoteRecordId?: string;
+    fulfillmentMode?: 'DELIVERY' | 'PICKUP';
     customerId?: string | null;
     sellerUserId?: string | null;
     dueDate?: Date | null;
@@ -521,6 +532,8 @@ export interface ISaleRepository {
     discountCents: number;
     /** Additive confirmed-sale snapshot. Absent on older repository mocks. */
     shippingChargeCents?: number;
+    /** shipping-zones / T7 — bot DELIVERY/PICKUP; null for POS and legacy. */
+    fulfillmentMode?: 'DELIVERY' | 'PICKUP' | null;
     totalCents: number;
     paidCents: number;
     debtCents: number;

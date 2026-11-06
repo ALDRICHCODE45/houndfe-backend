@@ -1181,6 +1181,8 @@ export class PrismaSaleRepository implements ISaleRepository {
     shippingChargeCents?: number;
     shippingApprovalId?: string;
     shippingQuoteId?: string | null;
+    shippingQuoteRecordId?: string;
+    fulfillmentMode?: 'DELIVERY' | 'PICKUP';
     customerId?: string | null;
     sellerUserId?: string | null;
     dueDate?: Date | null;
@@ -1244,6 +1246,10 @@ export class PrismaSaleRepository implements ISaleRepository {
       data.shippingApprovalId = input.shippingApprovalId;
     if (input.shippingQuoteId !== undefined)
       data.shippingQuoteId = input.shippingQuoteId;
+    if (input.shippingQuoteRecordId !== undefined)
+      data.shippingQuoteRecordId = input.shippingQuoteRecordId;
+    if (input.fulfillmentMode !== undefined)
+      data.fulfillmentMode = input.fulfillmentMode;
     if ('customerId' in input) data.customerId = input.customerId ?? null;
     if ('sellerUserId' in input) data.sellerUserId = input.sellerUserId ?? null;
     if ('dueDate' in input) data.dueDate = input.dueDate ?? null;
@@ -1372,6 +1378,21 @@ export class PrismaSaleRepository implements ISaleRepository {
         throw new BusinessRuleViolationError(
           'Shipping approval was already used',
           'SHIPPING_APPROVAL_ALREADY_USED',
+        );
+      }
+      // shipping-zones / T7 — backstop of the quote row lock in
+      // `confirmBotSale`: a second sale for the same quote.
+      if (
+        input.shippingQuoteRecordId &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002' &&
+        (Array.isArray(target)
+          ? target.includes('shippingQuoteRecordId')
+          : target === 'sales_shippingQuoteRecordId_key')
+      ) {
+        throw new BusinessRuleViolationError(
+          'Shipping quote already backs a sale',
+          'SHIPPING_QUOTE_ALREADY_USED',
         );
       }
       throw error;
@@ -2158,6 +2179,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       subtotalCents: sale.subtotalCents,
       discountCents: sale.discountCents,
       shippingChargeCents: sale.shippingChargeCents ?? 0,
+      fulfillmentMode: sale.fulfillmentMode ?? null,
       totalCents: sale.totalCents,
       paidCents: sale.paidCents,
       debtCents: sale.debtCents,
@@ -2403,6 +2425,17 @@ export class PrismaSaleRepository implements ISaleRepository {
     payload: unknown,
   ): Promise<void> {
     return this.markIdempotencySucceeded(token, saleId, payload);
+  }
+
+  async releaseSaleRegistrationIdempotency(token: string): Promise<void> {
+    await this.tenantPrisma.getClient().saleIdempotency.deleteMany({
+      where: {
+        id: token,
+        tenantId: this.requireTenantId(),
+        operation: 'bot_sale_register',
+        status: 'IN_FLIGHT',
+      },
+    });
   }
 
   /**

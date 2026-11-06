@@ -4,6 +4,7 @@
  * Orchestrates domain logic and infrastructure for the Sale aggregate.
  * Handles: draft creation, item management, validation, and ownership enforcement.
  */
+import { Prisma } from '@prisma/client';
 import {
   BadRequestException,
   Inject,
@@ -165,6 +166,13 @@ type ConfirmBotSaleInput = {
   // Internal-only until the public bot request and receipts are reconciled.
   // The authenticated bot asserts human approval; this service does not verify it.
   shipping?: { chargeCents: number; approvalId: string; quoteId?: string };
+  // shipping-zones / T7 (S8) — a backend quote the caller already verified
+  // (tenant, customer, lines, destination, expiry). This service locks the
+  // quote row, refuses a quote that already backs a sale and charges
+  // `chargeCents` (the quote's customerChargeCents, may be 0).
+  shippingQuote?: { quoteRecordId: string; chargeCents: number };
+  // shipping-zones / T7 (S10) — PICKUP: no address, no shipping charge.
+  fulfillmentMode?: 'DELIVERY' | 'PICKUP';
 };
 
 type ConfirmBotSaleResult = {
@@ -176,6 +184,8 @@ type ConfirmBotSaleResult = {
   totalCents: number;
   subtotalCents?: number;
   shippingChargeCents?: number;
+  // shipping-zones / T7 — present only for quote-backed and pickup sales.
+  fulfillmentMode?: 'DELIVERY' | 'PICKUP';
   // Q2 / WU3 — engine-recomputed discount from
   // `sale.previewTotals()` (subtotalCents − totalCents). 0 when no
   // promotion applied. Additive field for the bot wire shape.
@@ -572,7 +582,7 @@ export class SalesService {
       ISaleCommentRepository,
       'findActiveBySale'
     > = {
-      findActiveBySale: async () => [],
+      findActiveBySale: () => Promise.resolve([]),
     },
     /**
      * Work Unit 4 — POS promotion engine port (Symbol-injected from
@@ -1855,6 +1865,9 @@ export class SalesService {
       discountCents: sale.discountCents,
       ...(sale.shippingChargeCents && sale.shippingChargeCents > 0
         ? { shippingChargeCents: sale.shippingChargeCents }
+        : {}),
+      ...(sale.fulfillmentMode
+        ? { fulfillmentMode: sale.fulfillmentMode }
         : {}),
       totalCents: sale.totalCents,
       paidCents: sale.paidCents,
@@ -3645,6 +3658,44 @@ export class SalesService {
     input: ConfirmBotSaleInput,
   ): Promise<ConfirmBotSaleResult> {
     const shipping = input.shipping;
+    const shippingQuote = input.shippingQuote;
+    const pickup = input.fulfillmentMode === 'PICKUP';
+    if (
+      (shipping && shippingQuote) ||
+      (pickup && (shipping || shippingQuote))
+    ) {
+      throw new BusinessRuleViolationError(
+        'INVALID_SHIPPING_QUOTE',
+        'INVALID_SHIPPING_QUOTE',
+      );
+    }
+    if (pickup && input.shippingAddressId) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_NOT_ALLOWED_FOR_PICKUP',
+        'SHIPPING_ADDRESS_NOT_ALLOWED_FOR_PICKUP',
+      );
+    }
+    if (shippingQuote) {
+      if (!input.shippingAddressId) {
+        throw new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_REQUIRED',
+          'SHIPPING_ADDRESS_REQUIRED',
+        );
+      }
+      if (
+        !Number.isSafeInteger(shippingQuote.chargeCents) ||
+        shippingQuote.chargeCents < 0 ||
+        shippingQuote.chargeCents > 2_147_483_647
+      ) {
+        throw new BusinessRuleViolationError(
+          'INVALID_SHIPPING_CHARGE',
+          'INVALID_SHIPPING_CHARGE',
+        );
+      }
+    }
+    // The charge actually added to the sale, whichever contract set it.
+    const shippingChargeCents =
+      shipping?.chargeCents ?? shippingQuote?.chargeCents;
     if (shipping) {
       if (!input.shippingAddressId) {
         throw new BusinessRuleViolationError(
@@ -3796,6 +3847,53 @@ export class SalesService {
         shippingAddress = address;
       }
 
+      // shipping-zones / T7 (S8) — single use. The row lock serializes two
+      // checkouts racing for the same quote; the unique
+      // `sales.shippingQuoteRecordId` index is the database backstop.
+      // T8 — expiry is re-checked under the lock: the caller verified the
+      // quote earlier, and it may have expired while this sale waited.
+      if (shippingQuote) {
+        // T8 — lock order customer → quote, the order a checkout takes (it
+        // locks the customer before verifying the quote). Otherwise a
+        // checkout holding the customer and this sale holding the quote
+        // deadlock once the sale insert needs its customer FK key share.
+        // Inside a checkout the customer is already locked: a no-op.
+        await prisma.$queryRaw(
+          Prisma.sql`SELECT id FROM customers WHERE id = ${input.customerId} AND "tenantId" = ${tenantId} FOR UPDATE`,
+        );
+        const locked = await prisma.$queryRaw<
+          Array<{ id: string; expiresAt: Date }>
+        >(
+          Prisma.sql`SELECT id, "expiresAt" FROM shipping_quotes WHERE id = ${shippingQuote.quoteRecordId} AND "tenantId" = ${tenantId} FOR UPDATE`,
+        );
+        if (locked.length === 0) {
+          throw new BusinessRuleViolationError(
+            'SHIPPING_QUOTE_NOT_FOUND',
+            'SHIPPING_QUOTE_NOT_FOUND',
+          );
+        }
+        // Same rule as the verifier: expired once now ≥ expiresAt.
+        if (Date.now() >= locked[0].expiresAt.getTime()) {
+          throw new BusinessRuleViolationError(
+            'Shipping quote expired',
+            'SHIPPING_QUOTE_EXPIRED',
+          );
+        }
+        const usedBy = await prisma.sale.findFirst({
+          where: {
+            tenantId,
+            shippingQuoteRecordId: shippingQuote.quoteRecordId,
+          },
+          select: { id: true },
+        });
+        if (usedBy) {
+          throw new BusinessRuleViolationError(
+            'Shipping quote already backs a sale',
+            'SHIPPING_QUOTE_ALREADY_USED',
+          );
+        }
+      }
+
       const { sale, promotionCapacityDemands } = await this.buildBotPricingSale(
         { ...input, shippingAddressId },
         customer.globalPriceListId ?? null,
@@ -3815,7 +3913,7 @@ export class SalesService {
         discountCents,
         totalCents: merchandiseTotalCents,
       } = sale.previewTotals();
-      const totalCents = merchandiseTotalCents + (shipping?.chargeCents ?? 0);
+      const totalCents = merchandiseTotalCents + (shippingChargeCents ?? 0);
       if (!Number.isSafeInteger(totalCents) || totalCents > 2_147_483_647) {
         throw new BusinessRuleViolationError(
           'INVALID_SHIPPING_CHARGE',
@@ -3840,7 +3938,9 @@ export class SalesService {
             recomputedTotalCents: totalCents,
             expectedTotalCents: input.expectedTotalCents,
             discountCents,
-            ...(shipping ? { shippingChargeCents: shipping.chargeCents } : {}),
+            ...(shippingChargeCents !== undefined
+              ? { shippingChargeCents }
+              : {}),
           },
         );
       }
@@ -3892,6 +3992,17 @@ export class SalesService {
               shippingQuoteId: shipping.quoteId?.trim(),
             }
           : {}),
+        ...(shippingQuote
+          ? {
+              shippingChargeCents: shippingQuote.chargeCents,
+              shippingQuoteRecordId: shippingQuote.quoteRecordId,
+            }
+          : {}),
+        // A legacy approved charge is a delivery too; the response keeps its
+        // pre-T7 shape (no `fulfillmentMode`).
+        ...(input.fulfillmentMode || shipping
+          ? { fulfillmentMode: input.fulfillmentMode ?? 'DELIVERY' }
+          : {}),
         changeDueCents: 0,
         paymentStatus: 'CREDIT',
         channel: 'ONLINE',
@@ -3913,7 +4024,7 @@ export class SalesService {
         folio,
         subtotalCents,
         discountCents,
-        ...(shipping ? { shippingChargeCents: shipping.chargeCents } : {}),
+        ...(shippingChargeCents !== undefined ? { shippingChargeCents } : {}),
         totalCents,
         paidCents,
         debtCents,
@@ -3929,8 +4040,11 @@ export class SalesService {
         deliveryStatus: 'PENDING',
         totalCents,
         discountCents,
-        ...(shipping
-          ? { subtotalCents, shippingChargeCents: shipping.chargeCents }
+        ...(shippingChargeCents !== undefined
+          ? { subtotalCents, shippingChargeCents }
+          : {}),
+        ...(input.fulfillmentMode
+          ? { fulfillmentMode: input.fulfillmentMode }
           : {}),
         paidCents,
         debtCents,
