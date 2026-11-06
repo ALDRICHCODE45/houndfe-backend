@@ -94,6 +94,7 @@ const EXPIRING_FUNCTION_ID = 'promotion-expiring-email';
 const DELIVERY_THANK_YOU_FUNCTION_ID = 'delivery-thank-you-notify';
 /** transfer-receipts / T2 — staff email + 5-year retention purge. */
 const RECEIPT_REVIEW_FUNCTION_ID = 'receipt-review-requested-email';
+const RECEIPT_RETENTION_FUNCTION_ID = 'receipt-retention-purge';
 
 /**
  * A full `AppModule` boot instantiates a few hundred providers through
@@ -577,6 +578,9 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         ).toHaveLength(1);
         expect(
           ids.filter((id) => id === RECEIPT_REVIEW_FUNCTION_ID),
+        ).toHaveLength(1);
+        expect(
+          ids.filter((id) => id === RECEIPT_RETENTION_FUNCTION_ID),
         ).toHaveLength(1);
         expect(new Set(ids).size).toBe(ids.length);
         expect(captured.options.client).toBe(inngestService.getClient());

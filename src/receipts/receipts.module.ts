@@ -8,6 +8,7 @@ import { createSpacesClient } from '../files/infrastructure/spaces-client.factor
 import { ReceiptUploadService } from './application/receipt-upload.service';
 import { ReceiptFileService } from './application/receipt-file.service';
 import { ReceiptStatusService } from './application/receipt-status.service';
+import { ReceiptRetentionService } from './application/receipt-retention.service';
 import { ReceiptFileController } from './presentation/receipt-file.controller';
 import {
   RECEIPT_PREVIEW_RASTERIZER,
@@ -32,6 +33,7 @@ import { PrismaReceiptReviewerLookup } from './infrastructure/prisma-receipt-rev
     ReceiptUploadService,
     ReceiptFileService,
     ReceiptStatusService,
+    ReceiptRetentionService,
     {
       provide: RECEIPT_STORAGE,
       useFactory: (configService: ConfigService) =>
@@ -51,6 +53,7 @@ import { PrismaReceiptReviewerLookup } from './infrastructure/prisma-receipt-rev
   exports: [
     ReceiptUploadService,
     ReceiptStatusService,
+    ReceiptRetentionService,
     RECEIPT_REVIEWER_LOOKUP,
   ],
 })
