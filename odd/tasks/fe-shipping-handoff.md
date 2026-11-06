@@ -8,7 +8,8 @@ Branch `docs/fe-shipping-handoff` (worktree `.tmp/fe-shipping-handoff`). Request
 ## Tasks
 | ID | Task | Specs | Route | Commit |
 | --- | --- | --- | --- | --- |
-| T1 | Showcase shipping data step + handoff 10 | S1 S2 | worker | |
+| T1 | Showcase shipping data step + handoff 10 | S1 S2 | worker | 10d47a0, 93e1589 |
 
 ## Log
 - L1 (FE): «sí, armá el handoff de zonas, empaque, cajas, origen y horario, que lo implementamos. Para que pueda planificar sin ida y vuelta, incluí por pantalla: endpoints con request/response exactos y errores (code + status), permisos CASL que aplican, qué edita quién, reglas de validación con ejemplos, si hay datos seed legibles para probar en :3003, y qué está en tu main local vs pendiente. Avisame la ruta del doc y el SHA cuando esté.»
+- L2 (T1 done): showcase shipping.cjs + handoff 10. Findings: error envelopes differ (zone errors use code; others error+timestamp); super admin gets 200 configured:false for unknown tenant ids on /tenants/:id/*. Follow-ups.
