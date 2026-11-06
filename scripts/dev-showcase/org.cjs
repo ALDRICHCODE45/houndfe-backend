@@ -281,4 +281,11 @@ async function run(ctx) {
   return summary;
 }
 
-module.exports = { name: 'org', run, ensureUser, DEMO_PASSWORD, DEMO_USERS };
+module.exports = {
+  name: 'org',
+  run,
+  ensureUser,
+  grant,
+  DEMO_PASSWORD,
+  DEMO_USERS,
+};
