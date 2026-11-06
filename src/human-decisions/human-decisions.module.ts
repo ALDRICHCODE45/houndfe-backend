@@ -34,10 +34,15 @@
  * `PrismaExpirationIntakeRepository` so the SAME `POST` intake route can also
  * serve an `EXPIRATION` body. No controller/route is added: EXPIRATION shares
  * the existing `BotRestockIntakeController` and its guard/filter.
+ *
+ * shipping-zones / T1 imports `DeliveryZonesModule` for its exported
+ * `DELIVERY_ZONE_BOT_REPOSITORY`, so the same bot intake/poll/ACK routes also
+ * serve DELIVERY_ZONE requesters (after the unchanged RESTOCK/EXPIRATION path).
  */
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
+import { DeliveryZonesModule } from '../delivery-zones/delivery-zones.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { BOT_APPLICATION_OUTCOME_REPOSITORY } from './domain/bot-application-outcome.repository';
 import { BOT_RESTOCK_POLL_REPOSITORY } from './domain/bot-restock-poll.repository';
@@ -59,7 +64,7 @@ import { HumanDecisionActiveReviewerGuard } from './presentation/guards/human-de
 import { HumanDecisionReviewController } from './presentation/human-decision-review.controller';
 
 @Module({
-  imports: [ChatbotApiModule, DatabaseModule, AuthModule],
+  imports: [ChatbotApiModule, DatabaseModule, AuthModule, DeliveryZonesModule],
   controllers: [
     BotRestockIntakeController,
     BotRestockPollController,

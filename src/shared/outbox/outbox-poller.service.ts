@@ -76,7 +76,9 @@ export class OutboxPollerService {
       // dedicated poller (ReceiptReviewOutboxModule). The literals stay literal (not
       // imported from the feature modules) to avoid a shared→feature
       // dependency; each dedicated poller's own spec pins the matching
-      // `"eventType"` predicate.
+      // `"eventType"` predicate. shipping-zones / T1 adds
+      // `delivery_zone.validation.requested` together with its dedicated
+      // DeliveryZoneOutboxModule.
       const pendingRows = (await tx.$queryRawUnsafe<{ id: string }[]>(
         `
           SELECT id
@@ -84,7 +86,7 @@ export class OutboxPollerService {
           WHERE status = 'PENDING'
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
-            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected', 'receipt.review_requested')
+            AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected', 'delivery_zone.validation.requested', 'receipt.review_requested')
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED

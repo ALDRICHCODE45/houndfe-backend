@@ -60,6 +60,7 @@ import {
   InvalidArgumentError,
   InsufficientPermissionsError,
 } from '../../../shared/domain/domain-error';
+import { DeliveryZoneIntakeError } from '../../../delivery-zones/domain/delivery-zone-bot.repository';
 import { BotApplicationOutcomeError } from '../../domain/bot-application-outcome.repository';
 import { ExpirationIntakeError } from '../../domain/expiration-intake.repository';
 import { HumanDecisionReviewResolveError } from '../../domain/human-decision-review-resolve.repository';
@@ -127,6 +128,11 @@ export class HumanDecisionHttpFilter implements ExceptionFilter {
 
     if (exception instanceof ExpirationIntakeError) {
       return this.fromExpirationIntakeError(exception);
+    }
+
+    // shipping-zones / T1 — DELIVERY_ZONE intake identity conflict.
+    if (exception instanceof DeliveryZoneIntakeError) {
+      return this.build(HttpStatus.CONFLICT, 'IDEMPOTENCY_CONFLICT');
     }
 
     if (exception instanceof BotApplicationOutcomeError) {

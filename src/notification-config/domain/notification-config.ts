@@ -22,6 +22,11 @@
  * `NotificationConfig.recipients` remains the STAFF list — it is never the
  * customer address for this action.
  *
+ * shipping-zones / T1 (S3) adds `DELIVERY_ZONE_VALIDATION_REQUESTED`: the staff
+ * email sent when the bot opens a delivery-zone validation for an unknown
+ * postal code. Like the promotion keys it ships disabled (no seed rows) until a
+ * tenant opts in through `replace()`.
+ *
  * transfer-receipts / T2 adds `RECEIPT_REVIEW_REQUESTED`: staff email when the
  * chatbot uploads a NEW transfer receipt (a replay sends nothing). Dormant
  * until a tenant enables it; recipients are the configured staff list,
@@ -34,6 +39,7 @@ export type NotificationActionKey =
   | 'PROMOTION_EXPIRING'
   | 'PROMOTION_NEAR_CAPACITY'
   | 'DELIVERY_THANK_YOU'
+  | 'DELIVERY_ZONE_VALIDATION_REQUESTED'
   | 'RECEIPT_REVIEW_REQUESTED';
 
 export const NOTIFICATION_ACTION_KEYS: readonly NotificationActionKey[] = [
@@ -43,6 +49,7 @@ export const NOTIFICATION_ACTION_KEYS: readonly NotificationActionKey[] = [
   'PROMOTION_EXPIRING',
   'PROMOTION_NEAR_CAPACITY',
   'DELIVERY_THANK_YOU',
+  'DELIVERY_ZONE_VALIDATION_REQUESTED',
   'RECEIPT_REVIEW_REQUESTED',
 ] as const;
 

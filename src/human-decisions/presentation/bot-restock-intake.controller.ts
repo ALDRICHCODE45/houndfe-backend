@@ -33,6 +33,14 @@
  * validation is byte-for-byte the previous global behavior. No other route,
  * query, poll, resolve or ACK behavior changes.
  *
+ * shipping-zones / T1 adds a third discriminant on the SAME route:
+ * `type: "DELIVERY_ZONE"` goes to the exact parser
+ * `parseDeliveryZoneIntakeRequest` and the optional
+ * `DELIVERY_ZONE_BOT_REPOSITORY` port (docs/delivery-zones.md). RESTOCK and
+ * EXPIRATION dispatch is unchanged; the port is `@Optional()` so graphs that do
+ * not wire delivery zones keep compiling, and a DELIVERY_ZONE body then fails
+ * closed as a sanitized 500.
+ *
  * `@UseFilters(HumanDecisionHttpFilter)` is controller-scoped so every thrown
  * value — guard, pipe, parser or repository — is reduced to the sanitized
  * `{statusCode, code, message}` envelope, overriding the global filters.
@@ -44,6 +52,7 @@ import {
   Headers,
   HttpStatus,
   Inject,
+  Optional,
   Post,
   Req,
   Res,
@@ -54,6 +63,18 @@ import {
 import type { Request, Response } from 'express';
 import { RequiredScopes } from '../../chatbot-api/presentation/decorators/required-scopes.decorator';
 import { ServiceAuthGuard } from '../../chatbot-api/presentation/guards/service-auth.guard';
+import {
+  DELIVERY_ZONE_BOT_REPOSITORY,
+  type IDeliveryZoneBotRepository,
+} from '../../delivery-zones/domain/delivery-zone-bot.repository';
+import {
+  DELIVERY_ZONE_TYPE,
+  parseDeliveryZoneIntakeRequest,
+} from '../../delivery-zones/domain/delivery-zone-intake.request';
+import {
+  toBotDeliveryZoneResponse,
+  type BotDeliveryZoneResponse,
+} from '../../delivery-zones/presentation/dto/bot-delivery-zone.response';
 import { createAppValidationPipe } from '../../shared/listing/app-validation.pipe';
 import {
   EXPIRATION_INTAKE_REPOSITORY,
@@ -125,6 +146,9 @@ export class BotRestockIntakeController {
     private readonly intakeRepository: IRestockIntakeRepository,
     @Inject(EXPIRATION_INTAKE_REPOSITORY)
     private readonly expirationIntakeRepository: IExpirationIntakeRepository,
+    @Optional()
+    @Inject(DELIVERY_ZONE_BOT_REPOSITORY)
+    private readonly deliveryZoneRepository?: IDeliveryZoneBotRepository,
   ) {}
 
   @Post()
@@ -134,7 +158,11 @@ export class BotRestockIntakeController {
     @Headers(IDEMPOTENCY_HEADER) idempotencyKey: string | undefined,
     @Req() request: ServiceAuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<BotRestockIntakeResponse | BotExpirationIntakeResponse> {
+  ): Promise<
+    | BotRestockIntakeResponse
+    | BotExpirationIntakeResponse
+    | BotDeliveryZoneResponse
+  > {
     const submittedCredentialId = request.serviceCredential?.id;
     if (!submittedCredentialId) {
       // The guard always sets this; a missing value means the trusted
@@ -143,7 +171,17 @@ export class BotRestockIntakeController {
       throw new UnauthorizedException('Service credential context required');
     }
 
-    if (readIntakeType(rawBody) === EXPIRATION_TYPE) {
+    const intakeType = readIntakeType(rawBody);
+    if (intakeType === DELIVERY_ZONE_TYPE) {
+      return this.createDeliveryZone(
+        rawBody,
+        idempotencyKey,
+        submittedCredentialId,
+        response,
+      );
+    }
+
+    if (intakeType === EXPIRATION_TYPE) {
       return this.createExpiration(
         rawBody,
         idempotencyKey,
@@ -231,6 +269,35 @@ export class BotRestockIntakeController {
     );
 
     return toBotExpirationIntakeResponse(result.request);
+  }
+
+  /**
+   * DELIVERY_ZONE path (shipping-zones / T1): exact parser, literal header
+   * match against the raw `sourceRequestId`, then the requester port. The
+   * body is the CURRENT requester projection (201 created / 200 replay).
+   */
+  private async createDeliveryZone(
+    rawBody: unknown,
+    idempotencyKey: string | undefined,
+    submittedCredentialId: string,
+    response: Response,
+  ): Promise<BotDeliveryZoneResponse> {
+    if (!this.deliveryZoneRepository) {
+      throw new Error('Delivery-zone intake is not wired');
+    }
+    const parsed = parseDeliveryZoneIntakeRequest(rawBody, new Date());
+    this.assertIdempotencyKeyMatches(
+      idempotencyKey,
+      parsed.originalSourceRequestId,
+    );
+    const result = await this.deliveryZoneRepository.submit({
+      request: parsed,
+      submittedCredentialId,
+    });
+    response.status(
+      result.status === 'created' ? HttpStatus.CREATED : HttpStatus.OK,
+    );
+    return toBotDeliveryZoneResponse(result.record);
   }
 
   /**

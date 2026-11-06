@@ -144,7 +144,7 @@ describe('OutboxPollerService', () => {
       // thank-you type has no claiming poller yet (DTE-5b), those rows
       // simply remain PENDING instead.
       expect(claimSql).toContain(
-        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected', 'receipt.review_requested')`,
+        `"eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected', 'delivery_zone.validation.requested', 'receipt.review_requested')`,
       );
       // TRIANGULATE — the exclusion is additive, not a replacement: the
       // pre-existing alert types, the delivery types and the promotion
