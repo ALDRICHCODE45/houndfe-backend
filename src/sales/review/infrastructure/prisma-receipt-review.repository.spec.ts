@@ -372,7 +372,12 @@ describe('PrismaReceiptReviewRepository', () => {
       ),
     ).resolves.toBe(false);
     await expect(
-      repository.markRejected('receipt-1', 'tenant-1', 'Unreadable receipt'),
+      repository.markRejected(
+        'receipt-1',
+        'tenant-1',
+        'Unreadable receipt',
+        'No pudimos leer tu comprobante.',
+      ),
     ).resolves.toBe(false);
 
     expect(client.receiptEvidence.updateMany).toHaveBeenLastCalledWith({
@@ -380,6 +385,7 @@ describe('PrismaReceiptReviewRepository', () => {
       data: {
         status: 'REJECTED',
         rejectionReason: 'Unreadable receipt',
+        customerReason: 'No pudimos leer tu comprobante.',
       },
     });
   });

@@ -142,6 +142,7 @@ export class PrismaReceiptReviewRepository implements ReceiptReviewRepository {
     receiptId: string,
     tenantId: string,
     reason: string,
+    customerReason: string,
   ): Promise<boolean> {
     const result = await this.tenantPrisma
       .getClient()
@@ -150,6 +151,7 @@ export class PrismaReceiptReviewRepository implements ReceiptReviewRepository {
         data: {
           status: 'REJECTED',
           rejectionReason: reason,
+          customerReason,
         },
       });
 

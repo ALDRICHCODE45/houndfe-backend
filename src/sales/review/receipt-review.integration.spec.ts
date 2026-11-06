@@ -261,12 +261,14 @@ class InMemoryReceiptReviewRepository implements ReceiptReviewRepository {
     receiptId: string,
     tenantId: string,
     reason: string,
+    customerReason: string,
   ): Promise<boolean> {
     const receipt = await this.findById(receiptId, tenantId);
     if (!receipt || receipt.status !== 'PENDING') return false;
 
     receipt.status = 'REJECTED';
     receipt.rejectionReason = reason;
+    receipt.customerReason = customerReason;
     return true;
   }
 }

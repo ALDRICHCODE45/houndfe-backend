@@ -13,7 +13,10 @@ import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import type { SalesService } from '../sales.service';
 import type { ISaleRepository } from '../domain/sale.repository';
 import { PrismaReceiptReviewRepository } from './infrastructure/prisma-receipt-review.repository';
-import { ReceiptReviewService } from './receipt-review.service';
+import {
+  DEFAULT_CUSTOMER_REJECTION_REASON,
+  ReceiptReviewService,
+} from './receipt-review.service';
 
 const SKIP_INTEGRATION =
   process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL;
@@ -31,12 +34,15 @@ describeIfDb('Receipt review queue (Integration)', () => {
   beforeAll(async () => {
     prisma = new PrismaClient();
     await prisma.$connect();
+    // Map-backed store: runInTransaction parks the ambient tx client in CLS.
+    const store = new Map<string, unknown>();
     const cls = {
       get: (key: string) => {
         if (key === 'tenantId') return currentTenantId;
         if (key === 'isSuperAdmin') return false;
-        return undefined;
+        return store.get(key);
       },
+      set: (key: string, value: unknown) => store.set(key, value),
     } as unknown as ClsService<TenantClsStore>;
     const tenantPrisma = new TenantPrismaService(
       prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
@@ -212,5 +218,53 @@ describeIfDb('Receipt review queue (Integration)', () => {
       saleFolio: null,
       customerName: null,
     });
+  });
+
+  it('stores the internal reason and the customer-safe reason on reject', async () => {
+    const withReason = await createPrivateReceipt(
+      saleId,
+      tenantId,
+      new Date('2026-11-05T12:00:00.000Z'),
+    );
+    const legacyBody = await createPrivateReceipt(
+      saleId,
+      tenantId,
+      new Date('2026-11-05T12:01:00.000Z'),
+    );
+
+    await service.reject(saleId, withReason, userId, {
+      reason: 'Referencia duplicada',
+      customerReason: 'No pudimos validar la referencia.',
+    });
+    await service.reject(saleId, legacyBody, userId, {
+      reason: 'Ilegible',
+    });
+
+    const rows = await prisma.receiptEvidence.findMany({
+      where: { id: { in: [withReason, legacyBody] } },
+      select: {
+        id: true,
+        status: true,
+        rejectionReason: true,
+        customerReason: true,
+      },
+    });
+    expect(rows.find((row) => row.id === withReason)).toEqual({
+      id: withReason,
+      status: 'REJECTED',
+      rejectionReason: 'Referencia duplicada',
+      customerReason: 'No pudimos validar la referencia.',
+    });
+    expect(rows.find((row) => row.id === legacyBody)).toMatchObject({
+      rejectionReason: 'Ilegible',
+      customerReason: DEFAULT_CUSTOMER_REJECTION_REASON,
+    });
+    const outbox = await prisma.outboxEvent.findMany({
+      where: { aggregateId: { in: [withReason, legacyBody] } },
+    });
+    expect(outbox.map((row) => row.eventType)).toEqual([
+      'receipt.rejected',
+      'receipt.rejected',
+    ]);
   });
 });

@@ -1,4 +1,7 @@
-import { ReceiptReviewService } from './receipt-review.service';
+import {
+  DEFAULT_CUSTOMER_REJECTION_REASON,
+  ReceiptReviewService,
+} from './receipt-review.service';
 import type {
   ReceiptReviewRecord,
   ReceiptReviewRepository,
@@ -353,8 +356,26 @@ describe('ReceiptReviewService', () => {
         'receipt-1',
         'tenant-1',
         'Unreadable receipt',
+        DEFAULT_CUSTOMER_REJECTION_REASON,
       ]);
       expect(salesService.addPayment.mock.calls).toHaveLength(0);
+    });
+
+    it('stores the customer-safe reason separately from the internal reason', async () => {
+      const { service, repository } = makeService();
+      repository.findById.mockResolvedValue(makeReceipt());
+
+      await service.reject('sale-1', 'receipt-1', 'reviewer-1', {
+        reason: 'Posible fraude, referencia repetida',
+        customerReason: 'No pudimos validar la referencia de tu transferencia.',
+      });
+
+      expect(repository.markRejected.mock.calls[0]).toEqual([
+        'receipt-1',
+        'tenant-1',
+        'Posible fraude, referencia repetida',
+        'No pudimos validar la referencia de tu transferencia.',
+      ]);
     });
 
     it('blocks a lost rejection claim before outbox publication', async () => {

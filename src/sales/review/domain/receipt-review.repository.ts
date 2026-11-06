@@ -73,6 +73,7 @@ export interface ReceiptReviewRepository {
     receiptId: string,
     tenantId: string,
     reason: string,
+    customerReason: string,
   ): Promise<boolean>;
 }
 

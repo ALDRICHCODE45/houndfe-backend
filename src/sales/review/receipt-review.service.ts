@@ -47,6 +47,14 @@ type ReceiptConfirmedEventSeamInput = {
   confirmedAt: Date;
 };
 
+/**
+ * Customer-safe text stored when a reviewer rejects with the v1 body (no
+ * `customerReason`). The chatbot relays it as-is; the internal reason never
+ * leaves the backend.
+ */
+export const DEFAULT_CUSTOMER_REJECTION_REASON =
+  'No pudimos validar tu comprobante. Por favor envíanos uno nuevo o contáctanos.';
+
 const DEFAULT_QUEUE_LIMIT = 25;
 const MAX_QUEUE_LIMIT = 100;
 
@@ -176,7 +184,8 @@ export class ReceiptReviewService {
   }
 
   /**
-   * Rejects a pending receipt with the reviewer-provided reason.
+   * Rejects a pending receipt with the reviewer-provided internal reason and
+   * a customer-safe reason (a generic default for the v1 body).
    * The controller enforces `ReceiptEvidence:update`; this method guards the
    * receipt state before a short transaction that stores the rejection reason
    * and emits the receipt rejection outbox event without touching sale payment.
@@ -199,6 +208,7 @@ export class ReceiptReviewService {
         receiptId,
         tenantId,
         dto.reason,
+        dto.customerReason ?? DEFAULT_CUSTOMER_REJECTION_REASON,
       );
       if (!claimed) throw new ReceiptNotActionableError();
 
