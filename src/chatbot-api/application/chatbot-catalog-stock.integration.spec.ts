@@ -59,6 +59,8 @@ describeIfDb('ChatbotApiService sellable catalog stock (Integration)', () => {
       new ConfigService({
         PROMOTIONS_BUSINESS_TIMEZONE: 'America/Mexico_City',
       }),
+      {} as Ports[7],
+      {} as Ports[8],
     );
     await prisma.tenant.create({
       data: {

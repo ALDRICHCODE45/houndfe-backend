@@ -79,6 +79,8 @@ describe('Chatbot customer-aware pricing', () => {
           getClient: () => ({ customer: { findMany } }),
         } as unknown as Dependencies[5],
         {} as Dependencies[6],
+        {} as Dependencies[7],
+        {} as Dependencies[8],
       );
       const input: {
         items: CartItemForEvaluation[];
@@ -171,6 +173,8 @@ describe('Chatbot customer-aware pricing', () => {
           }),
         } as unknown as Dependencies[5],
         {} as Dependencies[6],
+        {} as Dependencies[7],
+        {} as Dependencies[8],
       );
       await expect(
         service.evaluateCart({
@@ -212,6 +216,8 @@ describe('Chatbot cart line uniqueness', () => {
         {} as Dependencies[4],
         {} as Dependencies[5],
         {} as Dependencies[6],
+        {} as Dependencies[7],
+        {} as Dependencies[8],
       );
       await expect(
         service.evaluateCart({

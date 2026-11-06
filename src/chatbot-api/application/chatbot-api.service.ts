@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   Inject,
   Injectable,
   NotFoundException,
@@ -58,6 +59,15 @@ import type {
 import { SalesService } from '../../sales/sales.service';
 import { SALE_REPOSITORY } from '../../sales/domain/sale.repository';
 import type { ISaleRepository } from '../../sales/domain/sale.repository';
+import { ShippingQuoteVerifier } from '../../shipping/quotes/application/shipping-quote-verifier.service';
+import { PickupLocationService } from '../../shipping/pickup/application/pickup-location.service';
+import {
+  canonicalShipping,
+  classifyBotShipping,
+  quoteRejection,
+  shippingQuoteHttpError,
+  type BotShipping,
+} from './bot-shipping';
 
 // ── Bot Sale Input Types ────────────────────────────────────────────────────
 
@@ -81,7 +91,14 @@ export type RegisterBotSaleInput = {
   // omitted on a legacy sale, the server still runs the engine and
   // persists totals. Required whenever `shipping` is provided.
   expectedTotalCents?: number;
-  shipping?: { chargeCents: number; approvalId: string; quoteId?: string };
+  // shipping-zones / T7 — `{ quoteId }` | `{ mode: "pickup" }`, or the
+  // DEPRECATED `{ chargeCents, approvalId, quoteId? }`.
+  shipping?: {
+    mode?: string;
+    quoteId?: string;
+    chargeCents?: number;
+    approvalId?: string;
+  };
 };
 
 export type SetDeliveryMetadataInput = {
@@ -136,6 +153,8 @@ export class ChatbotApiService {
     private readonly saleRepository: ISaleRepository,
     private readonly tenantPrisma: TenantPrismaService,
     private readonly configService: ConfigService,
+    private readonly quoteVerifier: ShippingQuoteVerifier,
+    private readonly pickupLocations: PickupLocationService,
   ) {}
 
   async searchCatalog(
@@ -480,10 +499,36 @@ export class ChatbotApiService {
    * hash). Manual cleanup is the accepted mitigation.
    */
   async registerBotSale(input: RegisterBotSaleInput): Promise<BotSaleResponse> {
-    // The bot asserts human approval; we check charge policy and address,
-    // not the human decision or freshness of its cart/destination quote.
-    let shipping = input.shipping;
-    if (shipping !== undefined) {
+    const botShipping = classifyBotShipping(input.shipping);
+    // shipping-zones / T7 — a quote needs the address it was quoted for and
+    // the total the customer saw; a pickup carries no address at all.
+    if (botShipping.kind === 'quote') {
+      if (!input.shippingAddressId) {
+        throw new BusinessRuleViolationError(
+          'SHIPPING_ADDRESS_REQUIRED',
+          'SHIPPING_ADDRESS_REQUIRED',
+        );
+      }
+      if (input.expectedTotalCents === undefined) {
+        throw new BusinessRuleViolationError(
+          'Approved total is required when shipping is charged',
+          'SHIPPING_EXPECTED_TOTAL_REQUIRED',
+        );
+      }
+    }
+    if (botShipping.kind === 'pickup' && input.shippingAddressId) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_NOT_ALLOWED_FOR_PICKUP',
+        'SHIPPING_ADDRESS_NOT_ALLOWED_FOR_PICKUP',
+      );
+    }
+    // DEPRECATED legacy path: the bot asserts human approval; we check charge
+    // policy and address, not the human decision or its quote freshness.
+    let shipping:
+      | { chargeCents: number; approvalId: string; quoteId?: string }
+      | undefined;
+    if (botShipping.kind === 'legacy') {
+      shipping = botShipping;
       const maximum = this.configService.get<number>(
         'BOT_SHIPPING_CHARGE_MAX_CENTS',
       );
@@ -551,10 +596,7 @@ export class ChatbotApiService {
         ...(shipping.quoteId ? { quoteId: shipping.quoteId.trim() } : {}),
       };
     }
-    const requestHash = computeRegisterBotSaleRequestHash({
-      ...input,
-      shipping,
-    });
+    const requestHash = computeRegisterBotSaleRequestHash(input);
 
     const idempotency =
       await this.saleRepository.acquireSaleRegistrationIdempotency(
@@ -593,15 +635,22 @@ export class ChatbotApiService {
         deliveryStatus: cached.deliveryStatus ?? 'PENDING',
         totalCents: cached.totalCents ?? 0,
         discountCents: cached.discountCents ?? 0,
-        ...(cached.shippingChargeCents
+        ...(cached.shippingChargeCents !== undefined &&
+        (cached.shippingChargeCents || cached.fulfillmentMode)
           ? {
               subtotalCents: cached.subtotalCents,
               shippingChargeCents: cached.shippingChargeCents,
             }
           : {}),
+        ...(cached.fulfillmentMode
+          ? { fulfillmentMode: cached.fulfillmentMode }
+          : {}),
         paidCents: cached.paidCents ?? 0,
         debtCents: cached.debtCents ?? 0,
         confirmedAt: cached.confirmedAt ?? null,
+        ...(cached.pickupLocation
+          ? { pickupLocation: cached.pickupLocation }
+          : {}),
       };
     }
 
@@ -621,17 +670,40 @@ export class ChatbotApiService {
 
     // idempotency.kind === 'acquired'
     const token = idempotency.token;
-    const confirmedSale = await this.salesService.confirmBotSale({
-      cashierUserId: input.cashierUserId,
-      customerId: input.customerId,
-      shippingAddressId: input.shippingAddressId ?? null,
-      items: input.items,
-      // Q2 / WU3 — pass the optional re-quote guard through to the
-      // sales service. When omitted, the sales service skips the
-      // comparison but still runs the engine + persists totals.
-      expectedTotalCents: input.expectedTotalCents,
-      ...(shipping ? { shipping } : {}),
-    });
+    let confirmedSale: Awaited<ReturnType<SalesService['confirmBotSale']>>;
+    try {
+      const shippingQuote = await this.verifyBotSaleQuote(input, botShipping);
+      confirmedSale = await this.salesService.confirmBotSale({
+        cashierUserId: input.cashierUserId,
+        customerId: input.customerId,
+        shippingAddressId: input.shippingAddressId ?? null,
+        items: input.items,
+        // Q2 / WU3 — pass the optional re-quote guard through to the
+        // sales service. When omitted, the sales service skips the
+        // comparison but still runs the engine + persists totals.
+        expectedTotalCents: input.expectedTotalCents,
+        ...(shipping ? { shipping } : {}),
+        ...(shippingQuote
+          ? { shippingQuote, fulfillmentMode: 'DELIVERY' as const }
+          : {}),
+        ...(botShipping.kind === 'pickup'
+          ? { fulfillmentMode: 'PICKUP' as const }
+          : {}),
+      });
+    } catch (error) {
+      // shipping-zones / T7 — a rejected quote wrote nothing, so the key is
+      // freed: the bot requotes and may retry with the same Idempotency-Key.
+      const quoteError =
+        error instanceof HttpException &&
+        /^SHIPPING_QUOTE_/.test(this.errorCode(error) ?? '')
+          ? error
+          : shippingQuoteHttpError(error);
+      if (quoteError) {
+        await this.saleRepository.releaseSaleRegistrationIdempotency(token);
+        throw quoteError;
+      }
+      throw error;
+    }
 
     const response: BotSaleResponse = {
       saleId: confirmedSale.saleId,
@@ -643,15 +715,25 @@ export class ChatbotApiService {
       // Q2 / WU3 — engine-recomputed discount from
       // `sale.previewTotals()`. 0 when no promotion applied.
       discountCents: confirmedSale.discountCents,
-      ...(shipping
+      ...(confirmedSale.shippingChargeCents !== undefined
         ? {
             subtotalCents: confirmedSale.subtotalCents,
             shippingChargeCents: confirmedSale.shippingChargeCents,
           }
         : {}),
+      ...(confirmedSale.fulfillmentMode
+        ? { fulfillmentMode: confirmedSale.fulfillmentMode }
+        : {}),
       paidCents: confirmedSale.paidCents,
       debtCents: confirmedSale.debtCents,
       confirmedAt: confirmedSale.confirmedAt,
+      ...(botShipping.kind === 'pickup'
+        ? {
+            pickupLocation: await this.pickupLocations.resolve(
+              this.tenantPrisma.getTenantId(),
+            ),
+          }
+        : {}),
     };
 
     await this.saleRepository.markSaleRegistrationIdempotencySucceeded(
@@ -661,6 +743,80 @@ export class ChatbotApiService {
     );
 
     return response;
+  }
+
+  /**
+   * shipping-zones / T7 (S8) — verify `{ quoteId }` against this tenant, the
+   * customer's phone, the cart lines and the saved address being sold to.
+   * Returns the charge to fix on the sale, or undefined for other shapes.
+   */
+  private async verifyBotSaleQuote(
+    input: RegisterBotSaleInput,
+    shipping: BotShipping,
+  ): Promise<{ quoteRecordId: string; chargeCents: number } | undefined> {
+    if (shipping.kind !== 'quote') return undefined;
+    const tenantId = this.tenantPrisma.getTenantId();
+    const prisma = this.tenantPrisma.getClient();
+    const customer = await prisma.customer.findFirst({
+      where: { id: input.customerId, tenantId },
+      select: { phoneCountryCode: true, phone: true },
+    });
+    if (!customer) {
+      throw new BusinessRuleViolationError(
+        'CUSTOMER_NOT_FOUND',
+        'CUSTOMER_NOT_FOUND',
+      );
+    }
+    const address = await prisma.customerAddress.findFirst({
+      where: {
+        id: input.shippingAddressId ?? '',
+        tenantId,
+        customerId: input.customerId,
+      },
+      select: {
+        zipCode: true,
+        state: true,
+        municipality: true,
+        neighborhood: true,
+      },
+    });
+    if (!address) {
+      throw new BusinessRuleViolationError(
+        'SHIPPING_ADDRESS_NOT_FOUND',
+        'SHIPPING_ADDRESS_NOT_FOUND',
+      );
+    }
+    const verified = await this.quoteVerifier.verify(shipping.quoteId, {
+      tenantId,
+      customer: {
+        phoneCountryCode: customer.phoneCountryCode ?? '',
+        phone: customer.phone ?? '',
+      },
+      lines: input.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        quantity: item.quantity,
+      })),
+      destination: { ...address, zipCode: address.zipCode ?? '' },
+    });
+    const rejection = quoteRejection(verified);
+    if (rejection) throw rejection;
+    return verified.status === 'OK'
+      ? {
+          quoteRecordId: verified.quote.id,
+          chargeCents: verified.quote.customerChargeCents,
+        }
+      : undefined;
+  }
+
+  private errorCode(error: HttpException): string | null {
+    const body = error.getResponse();
+    return typeof body === 'object' &&
+      body !== null &&
+      'error' in body &&
+      typeof body.error === 'string'
+      ? body.error
+      : null;
   }
 
   /**
@@ -880,14 +1036,9 @@ export function computeRegisterBotSaleRequestHash(
     cashierUserId: input.cashierUserId,
     customerId: input.customerId,
     shippingAddressId: input.shippingAddressId ?? null,
+    // Legacy members hash exactly as before T7, so stored receipts replay.
     ...(input.shipping
-      ? {
-          shipping: {
-            chargeCents: input.shipping.chargeCents,
-            approvalId: input.shipping.approvalId.trim(),
-            quoteId: input.shipping.quoteId?.trim() ?? null,
-          },
-        }
+      ? { shipping: canonicalShipping(classifyBotShipping(input.shipping)) }
       : {}),
     items: [...input.items]
       .map((item) => ({
@@ -920,7 +1071,7 @@ function deriveStockState(
 }
 
 /** Units the product can sell: expired lots never are (S6), never below 0. */
-function sellableQuantity(quantity: number, expiredLotQuantity: number) {
+export function sellableQuantity(quantity: number, expiredLotQuantity: number) {
   return Math.max(quantity - expiredLotQuantity, 0);
 }
 
