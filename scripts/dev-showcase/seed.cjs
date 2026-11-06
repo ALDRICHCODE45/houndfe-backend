@@ -13,8 +13,17 @@ const ROOT = path.resolve(__dirname, '../..');
 const TZ = 'America/Mexico_City';
 // Run order matters: org creates people, catalog creates stock, commerce
 // sells it, ops builds routes/purchases on top, shipping puts zones, boxes,
-// origin, hours and packaging on the catalog. Missing modules are skipped.
-const MODULES = ['org', 'catalog', 'commerce', 'ops', 'shipping'];
+// origin, hours and packaging on the catalog, address-status sells to one
+// customer and then edits/deletes the sold addresses. Missing modules are
+// skipped.
+const MODULES = [
+  'org',
+  'catalog',
+  'commerce',
+  'ops',
+  'shipping',
+  'address-status',
+];
 // Leftovers from earlier runtime probes on the disposable dev DB.
 const GARBAGE_PRODUCT_PREFIXES = ['Prueba T8', 'zz sale probe'];
 const GARBAGE_PRICE_LIST_NAMES = ['Online (dev)'];
