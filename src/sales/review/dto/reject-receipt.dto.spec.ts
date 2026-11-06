@@ -30,4 +30,34 @@ describe('RejectReceiptDto', () => {
 
     expect(errors.length).toBeGreaterThan(0);
   });
+
+  it('keeps the v1 body valid: customerReason is optional', async () => {
+    const dto = toDto({ reason: 'Monto no coincide' });
+
+    expect(await validate(dto)).toHaveLength(0);
+    expect(dto.customerReason).toBeUndefined();
+  });
+
+  it('accepts and trims a customer-safe reason up to 300 chars', async () => {
+    const dto = toDto({
+      reason: 'internal',
+      customerReason: '  El monto no coincide con tu pedido.  ',
+    });
+
+    expect(await validate(dto)).toHaveLength(0);
+    expect(dto.customerReason).toBe('El monto no coincide con tu pedido.');
+    expect(
+      await validate(toDto({ reason: 'x', customerReason: 'a'.repeat(300) })),
+    ).toHaveLength(0);
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['too long', 'a'.repeat(301)],
+    ['not a string', 42],
+  ])('rejects a %s customerReason', async (_label, customerReason) => {
+    const errors = await validate(toDto({ reason: 'x', customerReason }));
+
+    expect(errors.length).toBeGreaterThan(0);
+  });
 });

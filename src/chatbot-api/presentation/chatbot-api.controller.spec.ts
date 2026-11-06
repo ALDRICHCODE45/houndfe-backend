@@ -19,6 +19,21 @@ import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
 import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import { DomainExceptionFilter } from '../../shared/filters/domain-exception.filter';
+import { ReceiptUploadService } from '../../receipts/application/receipt-upload.service';
+import { ReceiptUploadError } from '../../receipts/domain/receipt-upload.errors';
+import { ReceiptStatusService } from '../../receipts/application/receipt-status.service';
+import { ReceiptReadError } from '../../receipts/domain/receipt-read.errors';
+import { RECEIPT_MAX_BYTES } from '../../receipts/domain/receipt-file';
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const UPLOAD_RESPONSE = {
+  receiptId: 'receipt-2',
+  status: 'PENDING',
+  mimeType: 'image/png',
+  sizeBytes: 8,
+  sha256: 'abc',
+  previewStatus: 'READY',
+};
 
 function makeCredential(scopes: string[], rawToken = 'svc_valid-key') {
   return ServiceCredential.fromPersistence({
@@ -45,12 +60,13 @@ describe('ChatbotApiController', () => {
     upsertCustomerProfile: jest.Mock;
     evaluateCart: jest.Mock;
     registerBotSale: jest.Mock;
-    attachReceipt: jest.Mock;
     setDeliveryMetadata: jest.Mock;
     getOrderHistoryByPhone: jest.Mock;
     cancelBotSale: jest.Mock;
     getActivePaymentDetail: jest.Mock;
   };
+  let receiptUpload: { upload: jest.Mock; attachLegacyUrl: jest.Mock };
+  let receiptStatus: { getForBot: jest.Mock };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
   let auditLogs: { append: jest.Mock };
@@ -164,10 +180,6 @@ describe('ChatbotApiController', () => {
         debtCents: 519800,
         confirmedAt: '2026-06-11T00:00:00.000Z',
       }),
-      attachReceipt: jest.fn().mockResolvedValue({
-        receiptId: 'receipt-1',
-        status: 'PENDING',
-      }),
       setDeliveryMetadata: jest.fn().mockResolvedValue(undefined),
       cancelBotSale: jest.fn().mockResolvedValue({
         saleId: 'sale-bot-1',
@@ -211,7 +223,21 @@ describe('ChatbotApiController', () => {
         },
       ]),
     };
+    receiptUpload = {
+      upload: jest.fn().mockResolvedValue(UPLOAD_RESPONSE),
+      attachLegacyUrl: jest.fn().mockResolvedValue({
+        receiptId: 'receipt-1',
+        status: 'PENDING',
+      }),
+    };
     cls = { set: jest.fn() };
+    receiptStatus = {
+      getForBot: jest.fn().mockResolvedValue({
+        status: 'REJECTED',
+        customerReason: 'El monto no coincide con tu pedido.',
+        sale: { debtCents: 10000, paymentStatus: 'CREDIT' },
+      }),
+    };
     auditLogs = { append: jest.fn().mockResolvedValue(undefined) };
 
     repository = {
@@ -265,6 +291,15 @@ describe('ChatbotApiController', () => {
           );
         }
 
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_sales-read-key').digest('hex')
+        ) {
+          return Promise.resolve(
+            makeCredential(['sales:read'], 'svc_sales-read-key'),
+          );
+        }
+
         // Q1 / WU1 — credential with the bot's payment-details:read scope.
         if (
           hashedKey ===
@@ -290,6 +325,8 @@ describe('ChatbotApiController', () => {
         BotAuditInterceptor,
         { provide: ClsService, useValue: cls },
         { provide: ChatbotApiService, useValue: service },
+        { provide: ReceiptUploadService, useValue: receiptUpload },
+        { provide: ReceiptStatusService, useValue: receiptStatus },
         { provide: SERVICE_CREDENTIAL_REPOSITORY, useValue: repository },
         { provide: BOT_AUDIT_LOG_REPOSITORY, useValue: auditLogs },
       ],
@@ -1180,26 +1217,148 @@ describe('ChatbotApiController', () => {
       });
   });
 
-  it('POST /chatbot-api/sales/:saleId/receipts attaches a receipt and returns PENDING status', async () => {
-    await request(httpServer())
-      .post(`/chatbot-api/sales/${saleId}/receipts`)
-      .set('Authorization', 'Bearer svc_sales-key')
-      .send({
+  describe('POST /chatbot-api/sales/:saleId/receipts', () => {
+    const route = () => `/chatbot-api/sales/${saleId}/receipts`;
+
+    it('uploads a multipart receipt with the idempotency key and raw text fields', async () => {
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .set('X-Idempotency-Key', '  wamid.HBgM123  ')
+        .field('declaredAmountCents', '519800')
+        .field('extracted', '{"amountCents":519800}')
+        .attach('file', PNG_BYTES, {
+          filename: 'receipt.gif',
+          contentType: 'image/gif',
+        })
+        .expect(201)
+        .expect(({ body }: { body: unknown }) => {
+          expect(body).toEqual(UPLOAD_RESPONSE);
+        });
+
+      const call = receiptUpload.upload.mock.calls[0] as [
+        {
+          saleId: string;
+          idempotencyKey: string;
+          file: Buffer;
+          fields: unknown;
+        },
+      ];
+      expect(call[0].saleId).toBe(saleId);
+      expect(call[0].idempotencyKey).toBe('wamid.HBgM123');
+      expect(call[0].file.equals(PNG_BYTES)).toBe(true);
+      expect(call[0].fields).toEqual({
+        declaredAmountCents: '519800',
+        extracted: '{"amountCents":519800}',
+      });
+    });
+
+    it('requires X-Idempotency-Key for multipart uploads', async () => {
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .attach('file', PNG_BYTES, 'r.png')
+        .expect(400)
+        .expect(({ body }: { body: { error: string } }) => {
+          expect(body.error).toBe('INVALID_IDEMPOTENCY_KEY');
+        });
+      expect(receiptUpload.upload).not.toHaveBeenCalled();
+    });
+
+    it('rejects a multipart request without file as RECEIPT_FILE_REQUIRED', async () => {
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .set('X-Idempotency-Key', 'wamid-1')
+        .field('declaredAmountCents', '100')
+        .expect(400)
+        .expect(({ body }: { body: { error: string } }) => {
+          expect(body.error).toBe('RECEIPT_FILE_REQUIRED');
+        });
+      expect(receiptUpload.upload).not.toHaveBeenCalled();
+    });
+
+    it('rejects files over 10 MB with 413 RECEIPT_FILE_TOO_LARGE', async () => {
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .set('X-Idempotency-Key', 'wamid-1')
+        .attach('file', Buffer.alloc(RECEIPT_MAX_BYTES + 1), 'big.pdf')
+        .expect(413)
+        .expect(({ body }: { body: { error: string } }) => {
+          expect(body.error).toBe('RECEIPT_FILE_TOO_LARGE');
+        });
+      expect(receiptUpload.upload).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['SALE_ALREADY_PAID', 409],
+      ['SALE_NOT_PAYABLE', 409],
+      ['IDEMPOTENCY_KEY_REUSED', 409],
+      ['SALE_NOT_FOUND', 404],
+      ['RECEIPT_FILE_TYPE_NOT_ALLOWED', 415],
+      ['INVALID_RECEIPT_EXTRACTED', 400],
+    ] as const)('maps %s to HTTP %i', async (code, status) => {
+      receiptUpload.upload.mockRejectedValueOnce(
+        new ReceiptUploadError(code, 'nope'),
+      );
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .set('X-Idempotency-Key', 'wamid-1')
+        .attach('file', PNG_BYTES, 'r.png')
+        .expect(status)
+        .expect(({ body }: { body: { error: string; statusCode: number } }) => {
+          expect(body.error).toBe(code);
+          expect(body.statusCode).toBe(status);
+        });
+    });
+
+    it('requires the sales:write scope', async () => {
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_valid-key')
+        .set('X-Idempotency-Key', 'wamid-1')
+        .attach('file', PNG_BYTES, 'r.png')
+        .expect(403);
+      expect(receiptUpload.upload).not.toHaveBeenCalled();
+    });
+
+    it('keeps the legacy JSON mediaUrl body working without the header', async () => {
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .send({
+          mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
+          declaredAmountCents: 519800,
+          declaredReference: 'TRF-99887',
+        })
+        .expect(201)
+        .expect(({ body }: { body: unknown }) => {
+          expect(body).toEqual({ receiptId: 'receipt-1', status: 'PENDING' });
+        });
+      expect(receiptUpload.attachLegacyUrl).toHaveBeenCalledWith({
+        saleId,
         mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
         declaredAmountCents: 519800,
+        declaredDate: null,
         declaredReference: 'TRF-99887',
-      })
-      .expect(201)
-      .expect(({ body }: { body: unknown }) => {
-        expect(service.attachReceipt).toHaveBeenCalledWith(
-          expect.objectContaining({
-            saleId,
-            mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
-            declaredAmountCents: 519800,
-          }),
-        );
-        expect(body).toEqual({ receiptId: 'receipt-1', status: 'PENDING' });
       });
+    });
+
+    it('validates the legacy JSON body (mediaUrl required, no unknown keys)', async () => {
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .send({ declaredAmountCents: 100 })
+        .expect(400);
+      await request(httpServer())
+        .post(route())
+        .set('Authorization', 'Bearer svc_sales-key')
+        .send({ mediaUrl: 'https://cdn.example.com/r.jpg', extra: 1 })
+        .expect(400);
+      expect(receiptUpload.attachLegacyUrl).not.toHaveBeenCalled();
+    });
   });
 
   it('PATCH /chatbot-api/sales/:saleId/delivery updates delivery metadata', async () => {
@@ -1338,5 +1497,60 @@ describe('ChatbotApiController', () => {
       .get('/chatbot-api/payment-details')
       .set('Authorization', 'Bearer svc_payment-key')
       .expect(404);
+  });
+
+  // ── T2 — GET /chatbot-api/receipts/:receiptId (bot outcome poll) ────────
+
+  describe('GET /chatbot-api/receipts/:receiptId', () => {
+    const RECEIPT_ID = '11111111-1111-4111-8111-111111111111';
+
+    it('returns the outcome for a credential with sales:read and audits it', async () => {
+      const res = await request(httpServer())
+        .get(`/chatbot-api/receipts/${RECEIPT_ID}`)
+        .set('Authorization', 'Bearer svc_sales-read-key')
+        .expect(200);
+
+      expect(res.body).toEqual({
+        status: 'REJECTED',
+        customerReason: 'El monto no coincide con tu pedido.',
+        sale: { debtCents: 10000, paymentStatus: 'CREDIT' },
+      });
+      expect(receiptStatus.getForBot).toHaveBeenCalledWith(RECEIPT_ID);
+      expect(auditLogs.append).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'receipts.status',
+          resourceType: 'receipt',
+          resourceId: RECEIPT_ID,
+        }),
+      );
+    });
+
+    it('returns 403 without sales:read, even with sales:write (exact scopes)', async () => {
+      await request(httpServer())
+        .get(`/chatbot-api/receipts/${RECEIPT_ID}`)
+        .set('Authorization', 'Bearer svc_sales-key')
+        .expect(403);
+      expect(receiptStatus.getForBot).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 RECEIPT_NOT_FOUND for a missing or foreign receipt', async () => {
+      receiptStatus.getForBot.mockRejectedValueOnce(
+        new ReceiptReadError('RECEIPT_NOT_FOUND', 'Receipt not found'),
+      );
+
+      const res = await request(httpServer())
+        .get(`/chatbot-api/receipts/${RECEIPT_ID}`)
+        .set('Authorization', 'Bearer svc_sales-read-key')
+        .expect(404);
+
+      expect(res.body).toMatchObject({ error: 'RECEIPT_NOT_FOUND' });
+    });
+
+    it('returns 400 for a non-UUID receipt id', async () => {
+      await request(httpServer())
+        .get('/chatbot-api/receipts/not-a-uuid')
+        .set('Authorization', 'Bearer svc_sales-read-key')
+        .expect(400);
+    });
   });
 });

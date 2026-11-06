@@ -8,13 +8,19 @@ import {
   Min,
 } from 'class-validator';
 
+/**
+ * Legacy JSON body (`mediaUrl`), kept until the chatbot confirms the
+ * multipart migration. New uploads send the file as multipart (see
+ * docs/transfer-receipts.md).
+ */
 export class AttachReceiptRequestDto {
   @IsUrl()
   mediaUrl!: string;
 
   @IsInt()
   @Min(1)
-  declaredAmountCents!: number;
+  @IsOptional()
+  declaredAmountCents?: number | null;
 
   @IsISO8601()
   @IsOptional()
@@ -24,9 +30,4 @@ export class AttachReceiptRequestDto {
   @IsNotEmpty()
   @IsOptional()
   declaredReference?: string | null;
-}
-
-export interface AttachReceiptResponse {
-  receiptId: string;
-  status: 'PENDING';
 }

@@ -180,6 +180,11 @@ enum ReceiptEvidenceStatus {
   REJECTED
 }
 
+enum ReceiptPreviewStatus {
+  READY
+  UNAVAILABLE
+}
+
 enum SaleIdempotencyStatus {
   IN_FLIGHT
   SUCCEEDED
@@ -286,6 +291,10 @@ enum NotificationActionKey {
   // `NotificationConfig.recipients` stays the STAFF list — never the customer
   // address for this action.
   DELIVERY_THANK_YOU
+  // transfer-receipts / T2. Staff email when the chatbot uploads a new
+  // receipt (migration 20261106050100_receipt_review_requested_action).
+  // Dormant until a tenant enables it; no rows are seeded.
+  RECEIPT_REVIEW_REQUESTED
 }
 
 // ============================================================================
@@ -1669,26 +1678,50 @@ model SaleFolioCounter {
 // RECEIPT EVIDENCE — pending payment proof for bot-created transfer sales
 // ============================================================================
 
+// Legacy rows carry `mediaUrl`; private uploads carry `storageKey` (a CHECK in
+// the migration requires one of them). `mismatch` is the snapshot against the
+// sale debt at upload: { debtCents, declaredDiffCents?, extractedDiffCents?, flagged }.
 model ReceiptEvidence {
   id                  String                @id @default(uuid())
   saleId              String
   tenantId            String
-  mediaUrl            String
-  declaredAmountCents Int
+  mediaUrl            String?
+  declaredAmountCents Int?
   declaredDate        DateTime?
   declaredReference   String?
+  extracted           Json?
+  storageKey          String?
+  mimeType            String?
+  sizeBytes           Int?
+  sha256              String?
+  previewKey          String?
+  previewMimeType     String?
+  previewStatus       ReceiptPreviewStatus?
+  idempotencyKey      String?
+  mismatch            Json?
   status              ReceiptEvidenceStatus @default(PENDING)
   confirmedByUserId   String?
   confirmedAt         DateTime?
   rejectionReason     String?
+  // Customer-safe rejection text the chatbot may relay (rejectionReason
+  // stays internal).
+  customerReason      String?
+  // Set by the retention job once the stored objects were deleted.
+  purgedAt            DateTime?
+  // Failed retention deletes; rows that keep failing are scanned after the
+  // ones never tried and at most once per run (lastPurgeErrorAt = run time).
+  purgeAttempts       Int                   @default(0)
+  lastPurgeErrorAt    DateTime?
   createdAt           DateTime              @default(now())
 
   sale        Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   confirmedBy User?  @relation("ReceiptReviewer", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
 
+  @@unique([tenantId, saleId, idempotencyKey])
   @@index([tenantId, saleId])
   @@index([tenantId, status])
+  @@index([createdAt])
   @@map("receipt_evidences")
 }
 

@@ -74,6 +74,11 @@ const ROUTE_AUDIT_MAP: Record<string, RouteAuditDefinition> = {
     resourceType: 'sale',
     resourceIdParam: 'saleId',
   },
+  'GET receipts/:receiptId': {
+    action: 'receipts.status',
+    resourceType: 'receipt',
+    resourceIdParam: 'receiptId',
+  },
   'PATCH sales/:saleId/delivery': {
     action: 'sales.update_delivery',
     resourceType: 'sale',

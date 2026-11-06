@@ -7,6 +7,7 @@ describe('ReceiptReviewRepository port', () => {
   it('defines the review data access contract', () => {
     const repository: ReceiptReviewRepository = {
       findPendingForSale: jest.fn(),
+      findPendingForTenant: jest.fn(),
       findById: jest.fn(),
       markConfirmed: jest.fn(),
       markRejected: jest.fn(),
@@ -16,6 +17,7 @@ describe('ReceiptReviewRepository port', () => {
       Symbol.for('ReceiptReviewRepository'),
     );
     expect(typeof repository.findPendingForSale).toBe('function');
+    expect(typeof repository.findPendingForTenant).toBe('function');
     expect(typeof repository.findById).toBe('function');
     expect(typeof repository.markConfirmed).toBe('function');
     expect(typeof repository.markRejected).toBe('function');

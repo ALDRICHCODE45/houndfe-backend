@@ -19,11 +19,18 @@ import { PrismaServiceCredentialRepository } from './infrastructure/prisma-servi
 import { BotAuditInterceptor } from './presentation/interceptors/bot-audit.interceptor';
 import { SalesModule } from '../sales/sales.module';
 import { PromotionsModule } from '../promotions/promotions.module';
+import { ReceiptsModule } from '../receipts/receipts.module';
 
 @Module({
   // PromotionsModule supplies the cart evaluator and the POS engine it shares
   // with bot sale confirmation, so preview and sale price identically.
-  imports: [ClsModule, DatabaseModule, SalesModule, PromotionsModule],
+  imports: [
+    ClsModule,
+    DatabaseModule,
+    SalesModule,
+    PromotionsModule,
+    ReceiptsModule,
+  ],
   controllers: [ChatbotApiController, CheckoutController],
   providers: [
     ChatbotApiService,

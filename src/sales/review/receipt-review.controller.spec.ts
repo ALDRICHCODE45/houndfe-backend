@@ -51,8 +51,14 @@ function makeService() {
       paymentIds: ['payment-1'],
     }),
     reject: jest.fn().mockResolvedValue(undefined),
+    listPendingForTenant: jest
+      .fn()
+      .mockResolvedValue({ items: [], nextCursor: null }),
   } as jest.Mocked<
-    Pick<ReceiptReviewService, 'listPending' | 'confirm' | 'reject'>
+    Pick<
+      ReceiptReviewService,
+      'listPending' | 'confirm' | 'reject' | 'listPendingForTenant'
+    >
   >;
 }
 
@@ -219,5 +225,30 @@ describe('ReceiptReviewController', () => {
       .expect(403);
 
     expect(service.reject).not.toHaveBeenCalled();
+  });
+
+  it('GET /sales/receipts/pending requires ReceiptEvidence:read and pages the tenant queue', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/sales/receipts/pending?limit=10&cursor=abc')
+      .set('Authorization', 'Bearer receipt-reviewer')
+      .expect(200);
+
+    expect(response.body).toEqual({ items: [], nextCursor: null });
+    expect(service.listPendingForTenant.mock.calls[0]).toEqual([
+      { limit: 10, cursor: 'abc' },
+    ]);
+  });
+
+  it('GET /sales/receipts/pending validates the limit and the permission', async () => {
+    await request(app.getHttpServer())
+      .get('/sales/receipts/pending?limit=101')
+      .set('Authorization', 'Bearer receipt-reviewer')
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/sales/receipts/pending')
+      .set('Authorization', 'Bearer no-review-permissions')
+      .expect(403);
+
+    expect(service.listPendingForTenant).not.toHaveBeenCalled();
   });
 });

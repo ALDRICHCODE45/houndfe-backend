@@ -86,6 +86,9 @@ import { PromotionCapacityInngestRegistrar } from './promotions/inngest/promotio
 import { PromotionExpiryModule } from './promotions/expiry/promotion-expiry.module';
 import { PromotionExpiryOutboxModule } from './promotions/outbox/promotion-expiry-outbox.module';
 import { PromotionExpiryInngestRegistrar } from './promotions/inngest/promotion-expiry-inngest-registrar';
+import { ReceiptsModule } from './receipts/receipts.module';
+import { ReceiptReviewOutboxModule } from './receipts/outbox/receipt-review-outbox.module';
+import { ReceiptReviewInngestRegistrar } from './receipts/inngest/receipt-review-inngest-registrar';
 // branch-analytics-summary / bas-3a — read-only branch sales summary
 // bounded context. Imports DatabaseModule + AuthModule only.
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -188,6 +191,12 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     // consumer owns each row.
     PromotionExpiryModule,
     PromotionExpiryOutboxModule,
+    // transfer-receipts / T2 — receipt storage/review module (also imported
+    // by ChatbotApiModule) so the top-level registrar resolves the reviewer
+    // lookup, plus the dedicated receipt.review_requested poller/dispatcher.
+    // The generic poller excludes that eventType in the same change.
+    ReceiptsModule,
+    ReceiptReviewOutboxModule,
     // online-catalog-publishing / WU3A3 — catalog-settings bounded
     // context. Self-contained: imports DatabaseModule + AuthModule only.
     CatalogSettingsModule,
@@ -224,6 +233,8 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     // promotion.expiring.detected event. Same registration pattern as the
     // low-stock / hr-time-off / delivery-routes / capacity registrars.
     PromotionExpiryInngestRegistrar,
+    // transfer-receipts / T2 — RECEIPT_REVIEW_REQUESTED staff email.
+    ReceiptReviewInngestRegistrar,
   ],
 })
 export class AppModule {}

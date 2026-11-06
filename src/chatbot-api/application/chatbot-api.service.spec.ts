@@ -2020,38 +2020,6 @@ describe('ChatbotApiService', () => {
     });
   });
 
-  describe('attachReceipt', () => {
-    it('creates ReceiptEvidence with PENDING status and does not auto-mark the sale as paid', async () => {
-      const client = tenantPrisma.getClient();
-      client.receiptEvidence.create.mockResolvedValue({
-        id: 'receipt-1',
-        status: 'PENDING',
-      });
-
-      const result = await service.attachReceipt({
-        saleId: 'sale-bot-1',
-        mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
-        declaredAmountCents: 519800,
-        declaredDate: new Date('2026-06-11T10:00:00.000Z'),
-        declaredReference: 'TRF-99887',
-      });
-
-      expect(client.receiptEvidence.create).toHaveBeenCalledTimes(1);
-      expect(client.receiptEvidence.create.mock.calls[0]?.[0]).toMatchObject({
-        data: {
-          saleId: 'sale-bot-1',
-          mediaUrl: 'https://cdn.example.com/receipts/transfer.jpg',
-          declaredAmountCents: 519800,
-          status: 'PENDING',
-        },
-      });
-      // Sale must NOT be updated (no auto-mark-paid)
-      expect(client.sale.update).not.toHaveBeenCalled();
-      expect(result.receiptId).toBe('receipt-1');
-      expect(result.status).toBe('PENDING');
-    });
-  });
-
   describe('setDeliveryMetadata', () => {
     const deliveryInput = {
       saleId: 'sale-bot-1',

@@ -20,6 +20,7 @@ import { STORAGE_PORT } from './domain/storage.port';
 import { FILE_REPOSITORY } from './domain/file.repository';
 import { SpacesStorageAdapter } from './infrastructure/spaces-storage.adapter';
 import { PrismaFileRepository } from './infrastructure/prisma-file.repository';
+import { createSpacesClient } from './infrastructure/spaces-client.factory';
 
 @Module({
   imports: [AuthModule],
@@ -32,21 +33,8 @@ import { PrismaFileRepository } from './infrastructure/prisma-file.repository';
     },
     {
       provide: 'S3_CLIENT',
-      useFactory: (configService: ConfigService) => {
-        return new S3Client({
-          endpoint: configService.getOrThrow<string>('SPACES_ENDPOINT'),
-          region: configService.getOrThrow<string>('SPACES_REGION'),
-          credentials: {
-            accessKeyId: configService.getOrThrow<string>(
-              'SPACES_ACCESS_KEY_ID',
-            ),
-            secretAccessKey: configService.getOrThrow<string>(
-              'SPACES_SECRET_ACCESS_KEY',
-            ),
-          },
-          forcePathStyle: false,
-        });
-      },
+      useFactory: (configService: ConfigService) =>
+        createSpacesClient(configService),
       inject: [ConfigService],
     },
     {

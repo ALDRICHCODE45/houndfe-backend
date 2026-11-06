@@ -15,7 +15,12 @@ import {
   InternalServerErrorException,
   UseInterceptors,
   HttpStatus,
+  Req,
+  UploadedFile,
+  UseFilters,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Request } from 'express';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
 import { IdempotencyKey } from './decorators/idempotency-key.decorator';
@@ -32,6 +37,14 @@ import { AttachReceiptRequestDto } from './dto/attach-receipt.request';
 import { DeliveryMetadataRequestDto } from './dto/delivery-metadata.request';
 import { CancelBotSaleRequestDto } from './dto/cancel-bot-sale.request';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
+import { ReceiptUploadExceptionFilter } from './filters/receipt-upload-exception.filter';
+import { ParseIdempotencyKeyPipe } from './pipes/parse-idempotency-key.pipe';
+import { ReceiptUploadService } from '../../receipts/application/receipt-upload.service';
+import { ReceiptStatusService } from '../../receipts/application/receipt-status.service';
+import { ReceiptReadExceptionFilter } from '../../receipts/presentation/receipt-read-exception.filter';
+import { RECEIPT_MAX_BYTES } from '../../receipts/domain/receipt-file';
+import { ReceiptUploadError } from '../../receipts/domain/receipt-upload.errors';
+import { createAppValidationPipe } from '../../shared/listing/app-validation.pipe';
 
 /**
  * S6 privacy correction — the sole unexpected-failure code emitted by the
@@ -48,7 +61,11 @@ const CHECKOUT_CONTEXT_READ_FAILED = 'CHECKOUT_CONTEXT_READ_FAILED';
 @UseInterceptors(BotAuditInterceptor)
 @RequiredScopes('catalog:read')
 export class ChatbotApiController {
-  constructor(private readonly chatbotApiService: ChatbotApiService) {}
+  constructor(
+    private readonly chatbotApiService: ChatbotApiService,
+    private readonly receiptUploadService: ReceiptUploadService,
+    private readonly receiptStatusService: ReceiptStatusService,
+  ) {}
 
   @Get('catalog/search')
   searchCatalog(@Query() query: CatalogSearchQueryDto) {
@@ -158,19 +175,78 @@ export class ChatbotApiController {
     });
   }
 
+  /**
+   * Multipart upload (`file` + text fields, required `X-Idempotency-Key` =
+   * WhatsApp media id) stored privately. The legacy JSON `mediaUrl` body is
+   * still accepted, without idempotency, until the chatbot confirms the
+   * migration. Both paths enforce the same sale rules.
+   */
   @Post('sales/:saleId/receipts')
   @RequiredScopes('sales:write')
-  attachReceipt(
+  @UseFilters(ReceiptUploadExceptionFilter)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      // Multer aborts the stream once a part exceeds the limit.
+      limits: {
+        fileSize: RECEIPT_MAX_BYTES,
+        files: 1,
+        fields: 8,
+        fieldSize: 8 * 1024,
+      },
+    }),
+  )
+  async attachReceipt(
     @Param('saleId', ParseUUIDPipe) saleId: string,
-    @Body() body: AttachReceiptRequestDto,
+    @Req() request: Request,
+    // Untyped on purpose: the global ValidationPipe skips plain objects, and
+    // each path below validates its own body strictly.
+    @Body() body: Record<string, unknown>,
+    @UploadedFile() file: Express.Multer.File | undefined,
   ) {
-    return this.chatbotApiService.attachReceipt({
+    if (!request.is('multipart/form-data')) {
+      const legacy = (await createAppValidationPipe().transform(body, {
+        type: 'body',
+        metatype: AttachReceiptRequestDto,
+      })) as AttachReceiptRequestDto;
+      return this.receiptUploadService.attachLegacyUrl({
+        saleId,
+        mediaUrl: legacy.mediaUrl,
+        declaredAmountCents: legacy.declaredAmountCents ?? null,
+        declaredDate: legacy.declaredDate
+          ? new Date(legacy.declaredDate)
+          : null,
+        declaredReference: legacy.declaredReference ?? null,
+      });
+    }
+
+    const idempotencyKey = new ParseIdempotencyKeyPipe().transform(
+      request.headers['x-idempotency-key'],
+      { type: 'custom' },
+    );
+    if (!file) {
+      throw new ReceiptUploadError(
+        'RECEIPT_FILE_REQUIRED',
+        'A non-empty receipt file is required in the "file" field',
+      );
+    }
+    return this.receiptUploadService.upload({
       saleId,
-      mediaUrl: body.mediaUrl,
-      declaredAmountCents: body.declaredAmountCents,
-      declaredDate: body.declaredDate ? new Date(body.declaredDate) : null,
-      declaredReference: body.declaredReference ?? null,
+      idempotencyKey,
+      file: file.buffer,
+      fields: { ...body },
     });
+  }
+
+  /**
+   * Review outcome poll: { status, customerReason? (REJECTED only),
+   * sale: { debtCents, paymentStatus } }. Scope `sales:read` (exact match;
+   * `sales:write` does not imply it). Missing or foreign → 404.
+   */
+  @Get('receipts/:receiptId')
+  @RequiredScopes('sales:read')
+  @UseFilters(ReceiptReadExceptionFilter)
+  getReceiptOutcome(@Param('receiptId', ParseUUIDPipe) receiptId: string) {
+    return this.receiptStatusService.getForBot(receiptId);
   }
 
   @Patch('sales/:saleId/delivery')
