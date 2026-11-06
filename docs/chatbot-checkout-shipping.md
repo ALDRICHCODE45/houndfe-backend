@@ -71,6 +71,10 @@ The chatbot has not moved to the new shapes yet, so this shape is not rejected. 
 }
 ```
 
+`creditCents` is the credit **applied**, `min(earned credit, costCents)`, so `customerChargeCents` never goes below 0. For example, a cost of 6900 with 12000 earned gives `creditCents: 6900` and `customerChargeCents: 0` (see [shipping-quotes.md](shipping-quotes.md)).
+
+A carrier quote can take a while: Skydropx completes a quotation in about 15 s, and the backend waits up to `SKYDROPX_QUOTE_DEADLINE_MS`. Give the quote request a client timeout above `SHIPPING_CARRIER_TIMEOUT_MS`.
+
 ### 2.2 Checkout
 
 `POST /chatbot-api/checkouts`, header `X-Idempotency-Key`, scopes `customers:write` + `sales:create`.
