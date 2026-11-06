@@ -1062,7 +1062,7 @@ describe('registered V2 save composition', () => {
     { ...empty(), extra: true },
   ])('fails closed on malformed surviving Published %p', async (document) => {
     stored!.published = { revision: 11, document };
-    await reject(send(), 500, 'INTERNAL_ERROR');
+    await reject(send(), 409, 'EDITORIAL_STATE_UNREADABLE');
     expect(events).not.toContain('state-write');
   });
   it.each([undefined, [], warnings().reverse()])(

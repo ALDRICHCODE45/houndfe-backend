@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import type { Server } from 'node:http';
 import type { RequestHandler } from 'express';
 import request from 'supertest';
+import { EditorialStateUnreadableError } from '../application/editorial-recorded-state-v2';
 import { EditorialVocabularyUnrepresentableError } from '../application/editorial-vocabulary-read';
 import { editorialCors } from './editorial-cors';
 import { EditorialHttpFilter } from './editorial-http.filter';
@@ -188,6 +189,8 @@ describe.each([false, true])('editorial CORS configured=%s', (configured) => {
       'EDITORIAL_VOCABULARY_UNREPRESENTABLE',
     ],
     [new Error('EDITORIAL_VOCABULARY_UNREPRESENTABLE'), 500, 'INTERNAL_ERROR'],
+    [new EditorialStateUnreadableError(), 409, 'EDITORIAL_STATE_UNREADABLE'],
+    [new Error('EDITORIAL_STATE_UNREADABLE'), 500, 'INTERNAL_ERROR'],
     [new TypeError('private'), 500, 'INTERNAL_ERROR'],
     [new HttpException('private', 409), 409, 'CONFLICT'],
     [new HttpException('private', 500), 500, 'INTERNAL_ERROR'],

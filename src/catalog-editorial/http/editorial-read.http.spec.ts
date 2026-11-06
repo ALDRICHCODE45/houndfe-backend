@@ -396,7 +396,7 @@ describe('authenticated editorial read HTTP', () => {
         (states[0] as Record<string, { document: unknown }>)[slot].document =
           bad;
         const before = structuredClone(states);
-        await rejected(get(), 500, 'INTERNAL_ERROR');
+        await rejected(get(), 409, 'EDITORIAL_STATE_UNREADABLE');
         expect(states).toEqual(before);
       }
     },
@@ -405,7 +405,7 @@ describe('authenticated editorial read HTTP', () => {
     'rejects corrupt stored counter %s',
     async (cycle) => {
       states = [{ cycle, draft: null, published: null }];
-      await rejected(get(), 500, 'INTERNAL_ERROR');
+      await rejected(get(), 409, 'EDITORIAL_STATE_UNREADABLE');
     },
   );
   test('retains recognizable historical conflicts without fresh qualification', async () => {
@@ -434,7 +434,7 @@ describe('authenticated editorial read HTTP', () => {
   });
   test('does not treat a malformed present row as absent state', async () => {
     states = [null];
-    await rejected(get(), 500, 'INTERNAL_ERROR');
+    await rejected(get(), 409, 'EDITORIAL_STATE_UNREADABLE');
     expect(states).toEqual([null]);
   });
   test('transaction metadata failure stays sanitized and never reads state', async () => {
