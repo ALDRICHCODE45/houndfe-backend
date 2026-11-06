@@ -61,6 +61,10 @@ const ROUTE_AUDIT_MAP: Record<string, RouteAuditDefinition> = {
     action: 'customers.upsert_profile',
     resourceType: 'customer',
   },
+  'POST shipping/quotes': {
+    action: 'shipping.quote',
+    resourceType: 'shipping_quote',
+  },
   'POST pricing/evaluate-cart': {
     action: 'pricing.evaluate_cart',
     resourceType: 'cart',

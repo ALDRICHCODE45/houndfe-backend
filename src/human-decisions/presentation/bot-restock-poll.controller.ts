@@ -44,6 +44,11 @@
  *     rejections (401, 403, 429 and the 400 above, all of which throw before the
  *     header is set); this module makes NO caching guarantee for those.
  *
+ * shipping-zones / T1: when the RESTOCK/EXPIRATION port returns `null`, the
+ * id is looked up as a DELIVERY_ZONE requester through the optional
+ * `DELIVERY_ZONE_BOT_REPOSITORY` port. RESTOCK/EXPIRATION rows are always
+ * served first and unchanged; a miss in both is the same sanitized 404.
+ *
  * `@UseFilters(HumanDecisionHttpFilter)` is controller-scoped so every thrown
  * value — guard, pipe, `NotFoundException` or repository — is reduced to the
  * sanitized `{statusCode, code, message}` envelope, overriding the global
@@ -55,6 +60,7 @@ import {
   Get,
   Inject,
   NotFoundException,
+  Optional,
   Param,
   ParseUUIDPipe,
   Req,
@@ -66,6 +72,14 @@ import {
 import type { Request, Response } from 'express';
 import { RequiredScopes } from '../../chatbot-api/presentation/decorators/required-scopes.decorator';
 import { ServiceAuthGuard } from '../../chatbot-api/presentation/guards/service-auth.guard';
+import {
+  DELIVERY_ZONE_BOT_REPOSITORY,
+  type IDeliveryZoneBotRepository,
+} from '../../delivery-zones/domain/delivery-zone-bot.repository';
+import {
+  toBotDeliveryZoneResponse,
+  type BotDeliveryZoneResponse,
+} from '../../delivery-zones/presentation/dto/bot-delivery-zone.response';
 import {
   BOT_RESTOCK_POLL_REPOSITORY,
   type BotRestockPollRecord,
@@ -102,6 +116,9 @@ export class BotRestockPollController {
   constructor(
     @Inject(BOT_RESTOCK_POLL_REPOSITORY)
     private readonly pollRepository: IBotRestockPollRepository,
+    @Optional()
+    @Inject(DELIVERY_ZONE_BOT_REPOSITORY)
+    private readonly deliveryZoneRepository?: IDeliveryZoneBotRepository,
   ) {}
 
   /**
@@ -119,7 +136,9 @@ export class BotRestockPollController {
     @Param('id', ParseUUIDPipe) id: string,
     @Req() request: ServiceAuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<BotRestockPollResponse | BotExpirationPollResponse> {
+  ): Promise<
+    BotRestockPollResponse | BotExpirationPollResponse | BotDeliveryZoneResponse
+  > {
     if (!request.serviceCredential) {
       // The guard always sets this; a missing value means the trusted
       // credential context was lost, so deny rather than serve an
@@ -139,6 +158,10 @@ export class BotRestockPollController {
 
     const record = await this.pollRepository.findById(id);
     if (record === null) {
+      const requester = await this.deliveryZoneRepository?.findRequestById(id);
+      if (requester) {
+        return toBotDeliveryZoneResponse(requester);
+      }
       throw new NotFoundException('Human decision not found');
     }
 

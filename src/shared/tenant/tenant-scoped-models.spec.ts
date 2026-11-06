@@ -158,3 +158,19 @@ describe('TENANT_SCOPED_MODELS — inventory journal registration (O1 / T5)', ()
     },
   );
 });
+
+describe('TENANT_SCOPED_MODELS — shipping packaging registration (shipping T2)', () => {
+  const REQUIRED = [
+    'ProductPackaging',
+    'VariantPackaging',
+    'ShippingBox',
+    'ShippingOrigin',
+  ] as const;
+
+  it.each(REQUIRED)(
+    'registers %s so tenant-scoped reads inject where.tenantId',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+});

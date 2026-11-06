@@ -658,6 +658,8 @@ describe('ChatbotApiController', () => {
             getClient: () => readClient,
           } as never,
           {} as never,
+          {} as never,
+          {} as never,
         );
         service.getCheckoutContext.mockImplementation(
           (input: Parameters<ChatbotApiService['getCheckoutContext']>[0]) =>

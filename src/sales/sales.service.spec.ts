@@ -4,6 +4,7 @@
  * Tests for POS sales use cases: openDraft, addItem, updateItemQuantity,
  * clearItems, deleteDraft, getUserDrafts.
  */
+import type { Prisma } from '@prisma/client';
 import { SalesService } from './sales.service';
 import type {
   ISaleRepository,
@@ -5709,6 +5710,299 @@ describe('SalesService', () => {
       const persisted = saleRepo.save.mock.calls[0]?.[0];
       expect(persisted.shippingAddressId).toBeNull();
     });
+
+    // shipping-zones / T7 (S8, S10) — verified quote charge and store pickup.
+    describe('backend shipping quote and pickup', () => {
+      const QUOTE_ROW = 'quote-row-1';
+      const LIVE_QUOTE = {
+        id: QUOTE_ROW,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      };
+      const withQuoteClient = (
+        quoteRows: Array<{ id: string; expiresAt: Date }>,
+        usedBy: { id: string } | null,
+      ) => {
+        const mocks = setupConfirmBotSaleHappyPath();
+        const client = (tenantPrisma.getClient as jest.Mock)() as Record<
+          string,
+          unknown
+        >;
+        // Routes by table: the customer lock answers its row, the quote
+        // lock answers `quoteRows`.
+        const queryRaw = jest.fn<
+          Promise<Array<{ id: string; expiresAt?: Date }>>,
+          [Prisma.Sql]
+        >((query) =>
+          Promise.resolve(
+            query.sql.includes('FROM customers')
+              ? [{ id: 'customer-1' }]
+              : quoteRows,
+          ),
+        );
+        const saleFindFirst = jest
+          .fn<Promise<{ id: string } | null>, [unknown]>()
+          .mockResolvedValue(usedBy);
+        (tenantPrisma.getClient as jest.Mock).mockReturnValue({
+          ...client,
+          $queryRaw: queryRaw,
+          sale: { findFirst: saleFindFirst },
+        });
+        return { ...mocks, queryRaw, saleFindFirst };
+      };
+
+      it('charges the quote, adds it to total and debt, and records the quote and DELIVERY', async () => {
+        const { queryRaw, saleFindFirst } = withQuoteClient([LIVE_QUOTE], null);
+
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 3000 },
+          fulfillmentMode: 'DELIVERY',
+          expectedTotalCents: 5000,
+        });
+
+        // Customer first, then quote: the same order a checkout takes (it
+        // locks the customer up front), so a checkout and a sale racing for
+        // one quote cannot deadlock on the sale's customer FK.
+        expect(
+          queryRaw.mock.calls.map(([query]) => ({
+            sql: query.sql.replace(/\s+/g, ' '),
+            values: query.values,
+          })),
+        ).toEqual([
+          {
+            sql: 'SELECT id FROM customers WHERE id = ? AND "tenantId" = ? FOR UPDATE',
+            values: ['customer-1', 'tenant-1'],
+          },
+          {
+            sql: 'SELECT id, "expiresAt" FROM shipping_quotes WHERE id = ? AND "tenantId" = ? FOR UPDATE',
+            values: [QUOTE_ROW, 'tenant-1'],
+          },
+        ]);
+        expect(saleFindFirst.mock.calls[0]?.[0]).toEqual({
+          where: { tenantId: 'tenant-1', shippingQuoteRecordId: QUOTE_ROW },
+          select: { id: true },
+        });
+        expect(
+          saleRepo.persistChargeConfirmation.mock.calls[0]?.[0],
+        ).toMatchObject({
+          subtotalCents: 2000,
+          shippingChargeCents: 3000,
+          shippingQuoteRecordId: QUOTE_ROW,
+          fulfillmentMode: 'DELIVERY',
+          deliveryStatus: 'PENDING',
+          totalCents: 5000,
+          debtCents: 5000,
+        });
+        const persisted = saleRepo.persistChargeConfirmation.mock
+          .calls[0]?.[0] as Record<string, unknown>;
+        expect(persisted.shippingApprovalId).toBeUndefined();
+        expect(result).toMatchObject({
+          subtotalCents: 2000,
+          shippingChargeCents: 3000,
+          totalCents: 5000,
+          debtCents: 5000,
+          fulfillmentMode: 'DELIVERY',
+        });
+      });
+
+      it('reports a zero quote charge explicitly (FREE zone)', async () => {
+        withQuoteClient([LIVE_QUOTE], null);
+
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 0 },
+          fulfillmentMode: 'DELIVERY',
+        });
+
+        expect(result).toMatchObject({
+          subtotalCents: 2000,
+          shippingChargeCents: 0,
+          totalCents: 2000,
+        });
+      });
+
+      it('rejects a quote that already backs a sale before any write', async () => {
+        withQuoteClient([LIVE_QUOTE], { id: 'sale-earlier' });
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 3000 },
+            fulfillmentMode: 'DELIVERY',
+          }),
+        ).rejects.toMatchObject({ code: 'SHIPPING_QUOTE_ALREADY_USED' });
+        expect(saleRepo.save.mock.calls).toHaveLength(0);
+        expect(
+          (productsService as ProductsServiceMock).chargeStock.mock.calls,
+        ).toHaveLength(0);
+        expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(0);
+      });
+
+      it('re-checks expiry under the row lock: a quote expired since verification is rejected before any write', async () => {
+        const { saleFindFirst } = withQuoteClient(
+          [{ id: QUOTE_ROW, expiresAt: new Date(Date.now() - 1) }],
+          null,
+        );
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 3000 },
+            fulfillmentMode: 'DELIVERY',
+          }),
+        ).rejects.toMatchObject({ code: 'SHIPPING_QUOTE_EXPIRED' });
+        expect(saleFindFirst.mock.calls).toHaveLength(0);
+        expect(saleRepo.save.mock.calls).toHaveLength(0);
+        expect(saleRepo.persistChargeConfirmation.mock.calls).toHaveLength(0);
+      });
+
+      it('rejects a quote row that is not in this tenant as not found', async () => {
+        withQuoteClient([], null);
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 3000 },
+            fulfillmentMode: 'DELIVERY',
+          }),
+        ).rejects.toMatchObject({ code: 'SHIPPING_QUOTE_NOT_FOUND' });
+        expect(saleRepo.save.mock.calls).toHaveLength(0);
+      });
+
+      it('re-quotes against merchandise plus the quote charge', async () => {
+        withQuoteClient([LIVE_QUOTE], null);
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 3000 },
+            fulfillmentMode: 'DELIVERY',
+            expectedTotalCents: 2000,
+          }),
+        ).rejects.toMatchObject({
+          code: 'PROMO_RE_QUOTE',
+          details: {
+            recomputedTotalCents: 5000,
+            shippingChargeCents: 3000,
+          },
+        });
+        expect(saleRepo.save.mock.calls).toHaveLength(0);
+      });
+
+      it('requires a shipping address for a quote charge', async () => {
+        withQuoteClient([LIVE_QUOTE], null);
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            shippingAddressId: null,
+            shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 3000 },
+            fulfillmentMode: 'DELIVERY',
+          }),
+        ).rejects.toMatchObject({ code: 'SHIPPING_ADDRESS_REQUIRED' });
+        expect(saleRepo.runInTransaction.mock.calls).toHaveLength(0);
+      });
+
+      it('rejects a legacy charge and a quote together', async () => {
+        withQuoteClient([LIVE_QUOTE], null);
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            shipping: { chargeCents: 250, approvalId: 'approval-mixed' },
+            shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 3000 },
+            fulfillmentMode: 'DELIVERY',
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_SHIPPING_QUOTE' });
+        expect(saleRepo.runInTransaction.mock.calls).toHaveLength(0);
+      });
+
+      it('records a pickup sale without address or shipping charge, delivery PENDING', async () => {
+        const { customerAddressFindUnique } = setupConfirmBotSaleHappyPath();
+
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          shippingAddressId: null,
+          fulfillmentMode: 'PICKUP',
+        });
+
+        expect(customerAddressFindUnique.mock.calls).toHaveLength(0);
+        expect(
+          saleRepo.persistChargeConfirmation.mock.calls[0]?.[0],
+        ).toMatchObject({
+          fulfillmentMode: 'PICKUP',
+          deliveryStatus: 'PENDING',
+          totalCents: 2000,
+          debtCents: 2000,
+          shippingAddressSnapshot: null,
+        });
+        const persisted = saleRepo.persistChargeConfirmation.mock
+          .calls[0]?.[0] as Record<string, unknown>;
+        expect(persisted.shippingChargeCents).toBeUndefined();
+        expect(result).toMatchObject({
+          fulfillmentMode: 'PICKUP',
+          deliveryStatus: 'PENDING',
+          totalCents: 2000,
+        });
+        expect(result).not.toHaveProperty('shippingChargeCents');
+      });
+
+      it.each([
+        [
+          'a shipping address',
+          { shippingAddressId: 'shipping-1' },
+          'SHIPPING_ADDRESS_NOT_ALLOWED_FOR_PICKUP',
+        ],
+        [
+          'a legacy shipping charge',
+          {
+            shippingAddressId: null,
+            shipping: { chargeCents: 250, approvalId: 'approval-pickup' },
+          },
+          'INVALID_SHIPPING_QUOTE',
+        ],
+        [
+          'a quote',
+          {
+            shippingAddressId: null,
+            shippingQuote: { quoteRecordId: QUOTE_ROW, chargeCents: 0 },
+          },
+          'INVALID_SHIPPING_QUOTE',
+        ],
+      ])(
+        'rejects pickup with %s before writing',
+        async (_label, extra, code) => {
+          setupConfirmBotSaleHappyPath();
+
+          await expect(
+            service.confirmBotSale({
+              ...botSaleInput,
+              ...extra,
+              fulfillmentMode: 'PICKUP',
+            }),
+          ).rejects.toMatchObject({ code });
+          expect(saleRepo.runInTransaction.mock.calls).toHaveLength(0);
+        },
+      );
+
+      it('marks a legacy approved charge as DELIVERY without changing its response', async () => {
+        setupConfirmBotSaleHappyPath();
+
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          shipping: { chargeCents: 250, approvalId: 'approval-legacy' },
+          expectedTotalCents: 2250,
+        });
+
+        expect(
+          saleRepo.persistChargeConfirmation.mock.calls[0]?.[0],
+        ).toMatchObject({
+          fulfillmentMode: 'DELIVERY',
+          shippingApprovalId: 'approval-legacy',
+        });
+        expect(result).not.toHaveProperty('fulfillmentMode');
+      });
+    });
   });
 
   describe('item discount use-cases', () => {
@@ -7154,6 +7448,47 @@ describe('SalesService', () => {
           detail.discountCents +
           (detail.shippingChargeCents ?? 0),
       ).toBe(detail.totalCents);
+      expect(detail).not.toHaveProperty('fulfillmentMode');
+    });
+
+    // shipping-zones / T7 — additive: staff can see a store-pickup order.
+    it('surfaces the recorded fulfillment mode (PICKUP)', async () => {
+      saleRepo.findOneWithRelations = jest.fn().mockResolvedValue({
+        id: 'b5e2b8fd-bdfd-471f-b687-ec340d578886',
+        folio: 'BOT-2',
+        status: 'CONFIRMED',
+        channel: 'ONLINE',
+        register: 'Bot',
+        confirmedAt: new Date('2026-11-06T11:00:00.000Z'),
+        createdAt: new Date('2026-11-06T10:00:00.000Z'),
+        dueDate: null,
+        subtotalCents: 2000,
+        discountCents: 0,
+        shippingChargeCents: 0,
+        fulfillmentMode: 'PICKUP',
+        totalCents: 2000,
+        paidCents: 0,
+        debtCents: 2000,
+        changeDueCents: 0,
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'PENDING',
+        customer: { id: 'customer-1', name: 'Ana' },
+        cashier: { id: 'user-1', name: 'Bot' },
+        seller: null,
+        items: [],
+        payments: [],
+      });
+      saleCommentRepo.findActiveBySale.mockResolvedValue([]);
+
+      const detail = await service.getSaleDetail(
+        'b5e2b8fd-bdfd-471f-b687-ec340d578886',
+      );
+
+      expect(detail).toMatchObject({
+        fulfillmentMode: 'PICKUP',
+        deliveryStatus: 'PENDING',
+      });
+      expect(detail).not.toHaveProperty('shippingChargeCents');
     });
 
     it('interleaves COMMENT events in timeline order [REGISTERED, PAYMENT, COMMENT, DELIVERED]', async () => {

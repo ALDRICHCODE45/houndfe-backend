@@ -21,6 +21,8 @@ import { SERVICE_CREDENTIAL_REPOSITORY } from '../domain/service-credential.repo
 import { ServiceCredential } from '../domain/service-credential.entity';
 import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import { ShippingQuoteVerifier } from '../../shipping/quotes/application/shipping-quote-verifier.service';
+import { PickupLocationService } from '../../shipping/pickup/application/pickup-location.service';
 
 const CUSTOMER = '10000000-0000-4000-8000-000000000001';
 const ADDRESS = '20000000-0000-4000-8000-000000000001';
@@ -210,8 +212,16 @@ describe('Atomic checkout public HTTP contract', () => {
   let f: ReturnType<typeof fixture>;
   let scopes: string[];
   let audit: { append: jest.Mock };
+  let verify: jest.Mock;
+  let resolvePickup: jest.Mock;
   beforeEach(async () => {
     f = fixture();
+    verify = jest.fn();
+    resolvePickup = jest.fn(async () => ({
+      name: 'Sucursal Centro',
+      address: null,
+      hours: null,
+    }));
     scopes = [
       'customers:write',
       'sales:create',
@@ -231,6 +241,11 @@ describe('Atomic checkout public HTTP contract', () => {
         { provide: SalesService, useValue: f.sales },
         { provide: ConfigService, useValue: { get: () => 50000 } },
         { provide: ClsService, useValue: { set: jest.fn() } },
+        { provide: ShippingQuoteVerifier, useValue: { verify } },
+        {
+          provide: PickupLocationService,
+          useValue: { resolve: resolvePickup },
+        },
         {
           provide: SERVICE_CREDENTIAL_REPOSITORY,
           useValue: {
@@ -667,5 +682,75 @@ describe('Atomic checkout public HTTP contract', () => {
       status: 'not_observed',
       checkout: null,
     });
+  });
+
+  // shipping-zones / T7 (S8, S10)
+  describe('backend shipping', () => {
+    const QUOTE = `shq_${'Z'.repeat(43)}`;
+    it('returns 409 SHIPPING_QUOTE_MISMATCH with the mismatched parts and no sale', async () => {
+      verify.mockResolvedValue({
+        status: 'MISMATCH',
+        mismatches: ['DESTINATION'],
+      });
+      const body = input();
+      (body.sale as Row).shipping = { quoteId: QUOTE };
+      const result = await post(app, body);
+      expect(result.status).toBe(409);
+      expect(result.body).toEqual({
+        ...safe('SHIPPING_QUOTE_MISMATCH', 409),
+        mismatches: ['DESTINATION'],
+      });
+      expect(f.sales.confirmBotSale).not.toHaveBeenCalled();
+      expect((await status(app)).body).toEqual({
+        status: 'not_observed',
+        checkout: null,
+      });
+    });
+
+    it('returns 404 SHIPPING_QUOTE_NOT_FOUND for an unknown quote', async () => {
+      verify.mockResolvedValue({ status: 'NOT_FOUND' });
+      const body = input();
+      (body.sale as Row).shipping = { quoteId: 'shq_unknown' };
+      const result = await post(app, body);
+      expect(result.status).toBe(404);
+      expect(result.body).toEqual(safe('SHIPPING_QUOTE_NOT_FOUND', 404));
+    });
+
+    it('creates a pickup checkout without a delivery address', async () => {
+      const body: Row = input();
+      delete body.deliveryAddress;
+      body.sale.shipping = { mode: 'pickup' };
+      const result = await post(app, body);
+      expect(result.status).toBe(201);
+      expect(result.body.address).toBeNull();
+      expect(result.body.pickupLocation).toEqual({
+        name: 'Sucursal Centro',
+        address: null,
+        hours: null,
+      });
+      expect(f.sales.confirmBotSale.mock.calls[0][0]).toMatchObject({
+        shippingAddressId: null,
+        fulfillmentMode: 'PICKUP',
+      });
+      const replay = await post(app, body);
+      expect(replay.body).toEqual(result.body);
+      expect(f.sales.confirmBotSale).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['no shipping', undefined],
+      ['a quote', { quoteId: QUOTE }],
+    ])(
+      'rejects a missing delivery address with %s (400)',
+      async (_label, shipping) => {
+        const body: Row = input();
+        delete body.deliveryAddress;
+        if (shipping) body.sale.shipping = shipping;
+        const result = await post(app, body);
+        expect(result.status).toBe(400);
+        expect(result.body).toEqual(safe('INVALID_CHECKOUT_REQUEST', 400));
+        expect(verify).not.toHaveBeenCalled();
+      },
+    );
   });
 });

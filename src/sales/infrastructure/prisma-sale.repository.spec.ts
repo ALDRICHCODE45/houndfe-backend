@@ -3495,6 +3495,13 @@ describe('PrismaSaleRepository', () => {
   // These tests pin the four outcome semantics + the `saleId=null`
   // invariant at acquire time (D8).
   // -----------------------------------------------------------------
+  // shipping-zones / T7 — typed view of the shared mock client (it is `any`).
+  type T7Mocks = {
+    sale: { updateMany: jest.Mock };
+    saleIdempotency: { deleteMany: jest.Mock };
+  };
+  const t7Mocks = () => prisma as unknown as T7Mocks;
+
   describe('bot sale registration idempotency (Q3 / WU2)', () => {
     it('acquires the slot with operation=bot_sale_register and saleId=null on first attempt', async () => {
       prisma.saleIdempotency.create.mockResolvedValue({ id: 'idem-bot-1' });
@@ -3617,6 +3624,94 @@ describe('PrismaSaleRepository', () => {
       await expect(
         repo.acquireSaleRegistrationIdempotency('key', 'hash'),
       ).rejects.toThrow('TENANT_CONTEXT_REQUIRED');
+    });
+
+    // shipping-zones / T7 — a rejected quote frees its own IN_FLIGHT slot only.
+    it('releaseSaleRegistrationIdempotency deletes only this IN_FLIGHT bot slot in the tenant', async () => {
+      t7Mocks().saleIdempotency.deleteMany.mockResolvedValue({ count: 1 });
+
+      await repo.releaseSaleRegistrationIdempotency('idem-bot-quote');
+
+      expect(t7Mocks().saleIdempotency.deleteMany).toHaveBeenCalledWith({
+        where: {
+          id: 'idem-bot-quote',
+          tenantId: 'tenant-1',
+          operation: 'bot_sale_register',
+          status: 'IN_FLIGHT',
+        },
+      });
+    });
+  });
+
+  describe('persistChargeConfirmation — shipping quote and fulfillment (shipping T7)', () => {
+    const base = {
+      saleId: 'sale-quote',
+      userId: 'cashier-1',
+      payments: [],
+      subtotalCents: 2000,
+      discountCents: 0,
+      totalCents: 5000,
+      paidCents: 0,
+      debtCents: 5000,
+      changeDueCents: 0,
+      paymentStatus: 'CREDIT' as const,
+      confirmedAt: new Date('2026-11-06T00:00:00.000Z'),
+      folio: 'A-2611-000001',
+    };
+
+    it('writes shippingQuoteRecordId and fulfillmentMode', async () => {
+      t7Mocks().sale.updateMany.mockResolvedValue({ count: 1 });
+
+      await repo.persistChargeConfirmation({
+        ...base,
+        shippingChargeCents: 3000,
+        shippingQuoteRecordId: 'quote-row-1',
+        fulfillmentMode: 'DELIVERY',
+      });
+
+      expect(t7Mocks().sale.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            shippingChargeCents: 3000,
+            shippingQuoteRecordId: 'quote-row-1',
+            fulfillmentMode: 'DELIVERY',
+          }) as unknown,
+        }),
+      );
+    });
+
+    it('maps a unique violation on the quote column to SHIPPING_QUOTE_ALREADY_USED', async () => {
+      t7Mocks().sale.updateMany.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+          meta: { target: ['shippingQuoteRecordId'] },
+        }),
+      );
+
+      await expect(
+        repo.persistChargeConfirmation({
+          ...base,
+          shippingQuoteRecordId: 'quote-row-1',
+          fulfillmentMode: 'DELIVERY',
+        }),
+      ).rejects.toMatchObject({ code: 'SHIPPING_QUOTE_ALREADY_USED' });
+    });
+
+    it('leaves an unrelated unique violation untouched', async () => {
+      const error = new Prisma.PrismaClientKnownRequestError('dup', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['folio'] },
+      });
+      t7Mocks().sale.updateMany.mockRejectedValue(error);
+
+      await expect(
+        repo.persistChargeConfirmation({
+          ...base,
+          shippingQuoteRecordId: 'quote-row-1',
+        }),
+      ).rejects.toBe(error);
     });
   });
 

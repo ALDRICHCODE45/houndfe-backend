@@ -134,6 +134,12 @@ export interface SaleDetailResponseDto {
   discountCents: number;
   /** Positive shipping charge, omitted on legacy/POS sales without a charge. */
   shippingChargeCents?: number;
+  /**
+   * shipping-zones / T7 — additive. `PICKUP` = store pickup (no address, no
+   * shipping charge); `DELIVERY` = bot delivery. Omitted when not recorded
+   * (POS and legacy sales).
+   */
+  fulfillmentMode?: 'DELIVERY' | 'PICKUP';
   totalCents: number;
   paidCents: number;
   debtCents: number;

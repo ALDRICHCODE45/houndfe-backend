@@ -21,7 +21,9 @@ describe('supplier permission registry', () => {
         String(p.subject) !== 'ProcurementOrderConfirmation' &&
         String(p.subject) !== 'ProcurementOrderCancellation' &&
         String(p.subject) !== 'InventoryJournal' &&
-        String(p.subject) !== 'InventoryAdjustment',
+        String(p.subject) !== 'InventoryAdjustment' &&
+        String(p.subject) !== 'DeliveryZone' &&
+        String(p.subject) !== 'ShippingSettings',
     );
     expect(
       createHash('sha256').update(JSON.stringify(prior)).digest('hex'),

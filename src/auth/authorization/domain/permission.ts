@@ -21,6 +21,8 @@ export type AppActions =
   | 'publish'
   | 'delete'
   | 'batch_delete'
+  // shipping-zones / T1 (S3) — decide an unknown postal code's delivery zone.
+  | 'validate'
   | 'manage';
 
 /** All possible subjects (resources) in the application. */
@@ -61,8 +63,12 @@ export type AppSubjects =
   | 'PaymentMethod'
   | 'DeliveryRoute'
   | 'TenantCatalogSettings'
+  // shipping-zones / T2 — standard boxes and shipping origin per sucursal.
+  | 'ShippingSettings'
   | 'Analytics'
   | 'HumanDecision'
+  // shipping-zones / T1 — delivery zones per postal code and their validations.
+  | 'DeliveryZone'
   // cash-register-closing / T2 (S3) — granular POS cash duties. Kept as
   // separate subjects (never an action-per-kind on CashMovement) so roles can
   // be composed per duty without a broad `update:CashSession` grant.
@@ -708,6 +714,22 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     description: 'Publish or update tenant online catalog settings',
   },
 
+  // ShippingSettings permissions (shipping-zones / T2). Mirrors
+  // TenantCatalogSettings: exactly `read` + `update`, where `update` covers
+  // creating, editing and deleting standard boxes and replacing the shipping
+  // origin. Product packaging stays under read/update:Product. The seed grants
+  // both rows to the per-tenant Manager role; Cashier gets none.
+  {
+    subject: 'ShippingSettings',
+    action: 'read',
+    description: 'View standard shipping boxes and the shipping origin',
+  },
+  {
+    subject: 'ShippingSettings',
+    action: 'update',
+    description: 'Manage standard shipping boxes and the shipping origin',
+  },
+
   // Analytics permissions (branch-analytics-summary / bas-1).
   // Read-only reporting surface: exactly `read:Analytics`. `create`,
   // `update`, `delete`, `batch_delete`, and `manage` are intentionally
@@ -737,6 +759,30 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'HumanDecision',
     action: 'update',
     description: 'Resolve tenant human-decision requests',
+  },
+
+  // DeliveryZone permissions (shipping-zones / T1, S1 + S3).
+  //   read     — list/search zones and read one by postal code.
+  //   manage   — create/update/deactivate zones. CASL's `manage` is a
+  //              wildcard, so it also implies `validate`.
+  //   validate — list pending zone validations and approve/reject them.
+  // Seeded defaults (prisma/seed.ts): Manager gets all three, Cashier none,
+  // Super Admin keeps the global `manage:all`. PermissionSeeder auto-upserts
+  // the rows on boot.
+  {
+    subject: 'DeliveryZone',
+    action: 'read',
+    description: 'View tenant delivery zones',
+  },
+  {
+    subject: 'DeliveryZone',
+    action: 'manage',
+    description: 'Create, update and deactivate tenant delivery zones',
+  },
+  {
+    subject: 'DeliveryZone',
+    action: 'validate',
+    description: 'Approve or reject pending delivery-zone validations',
   },
 
   // Cash-register-closing / T2 (S1, S3) — granular POS cash permissions.

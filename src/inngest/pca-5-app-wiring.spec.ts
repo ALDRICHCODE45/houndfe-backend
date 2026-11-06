@@ -83,6 +83,7 @@ import { DeliveryRoutesOutboxPoller } from '../delivery-routes/outbox/delivery-r
 import { HrTimeOffOutboxPoller } from '../hr-time-off/outbox/hr-time-off-outbox.poller';
 import { PromotionCapacityOutboxPoller } from '../promotions/outbox/promotion-capacity-outbox.poller';
 import { PromotionExpiryOutboxPoller } from '../promotions/outbox/promotion-expiry-outbox.poller';
+import { DeliveryZoneOutboxPoller } from '../delivery-zones/outbox/delivery-zone-outbox.poller';
 import { PromotionExpiryScanner } from '../promotions/expiry/promotion-expiry.scanner';
 import { ReceiptReviewOutboxPoller } from '../receipts/outbox/receipt-review-outbox.poller';
 import { InngestService } from './inngest.service';
@@ -294,6 +295,9 @@ const ALLOWED_BOOT_HOOK_OWNERS: ReadonlyMap<string, 'inert-stub' | 'wiring'> =
     ['DeliveryThankYouInngestRegistrar', 'wiring'],
     ['PromotionCapacityInngestRegistrar', 'wiring'],
     ['PromotionExpiryInngestRegistrar', 'wiring'],
+    // shipping-zones / T1: registers a local SDK function only, like the
+    // hr-time-off registrar; no DB read, event or mail at boot.
+    ['DeliveryZoneInngestRegistrar', 'wiring'],
     // transfer-receipts / T2: registers local SDK functions only.
     ['ReceiptReviewInngestRegistrar', 'wiring'],
     ['DeliveryRouteSubjectResolverRegistrar', 'wiring'],
@@ -462,6 +466,7 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         [HrTimeOffOutboxPoller.name]: createInertPollerStub(),
         [PromotionCapacityOutboxPoller.name]: createInertPollerStub(),
         [PromotionExpiryOutboxPoller.name]: createInertPollerStub(),
+        [DeliveryZoneOutboxPoller.name]: createInertPollerStub(),
         [PromotionExpiryScanner.name]: createInertPollerStub(),
         [ReceiptReviewOutboxPoller.name]: createInertPollerStub(),
       };
@@ -493,6 +498,8 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
           .useValue(pollerStubs[PromotionCapacityOutboxPoller.name])
           .overrideProvider(PromotionExpiryOutboxPoller)
           .useValue(pollerStubs[PromotionExpiryOutboxPoller.name])
+          .overrideProvider(DeliveryZoneOutboxPoller)
+          .useValue(pollerStubs[DeliveryZoneOutboxPoller.name])
           .overrideProvider(PromotionExpiryScanner)
           .useValue(pollerStubs[PromotionExpiryScanner.name])
           .overrideProvider(ReceiptReviewOutboxPoller)
@@ -641,6 +648,7 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
               instance instanceof LowStockOutboxPoller ||
               instance instanceof DeliveryRoutesOutboxPoller ||
               instance instanceof HrTimeOffOutboxPoller ||
+              instance instanceof DeliveryZoneOutboxPoller ||
               instance instanceof ReceiptReviewOutboxPoller,
           ),
         ).toHaveLength(0);

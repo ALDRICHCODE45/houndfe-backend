@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { NotFoundException } from '@nestjs/common';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import { Customer } from '../../customers/domain/customer.entity';
@@ -368,6 +369,8 @@ describe('ChatbotApiService checkout context (business-data read-only)', () => {
       } as never,
       { getTenantId: () => 'tenant-1', getClient: () => client } as never,
       {} as never,
+      {} as never,
+      {} as never,
     );
     lookup = (input) => service.getCheckoutContext(input);
     stored = structuredClone(address);
@@ -700,6 +703,8 @@ describe('ChatbotApiService', () => {
       saleRepository as never,
       tenantPrisma as unknown as TenantPrismaService,
       shippingConfig as never,
+      {} as never,
+      {} as never,
     );
   });
 
@@ -2294,5 +2299,391 @@ describe('ChatbotApiService', () => {
         code: 'NO_ACTIVE_PAYMENT_DETAIL',
       });
     });
+  });
+});
+
+// shipping-zones / T7 (S8, S10) — POST /chatbot-api/sales with
+// shipping { quoteId } | { mode: "pickup" }.
+describe('ChatbotApiService.registerBotSale — backend shipping', () => {
+  const QUOTE = `shq_${'S'.repeat(43)}`;
+  const base = {
+    cashierUserId: 'user-cashier-1',
+    customerId: 'cust-1',
+    shippingAddressId: 'addr-1',
+    items: [
+      {
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Croquetas',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+      },
+    ],
+    idempotencyKey: 'bot-order-t7',
+    expectedTotalCents: 5000,
+  };
+  const confirmed = {
+    saleId: 'sale-t7',
+    folio: 'BOT-7',
+    paymentStatus: 'CREDIT',
+    channel: 'ONLINE',
+    deliveryStatus: 'PENDING',
+    totalCents: 5000,
+    discountCents: 0,
+    paidCents: 0,
+    debtCents: 5000,
+    confirmedAt: '2026-11-06T00:00:00.000Z',
+  };
+  const location = { name: 'Sucursal Centro', address: null, hours: null };
+
+  function harness() {
+    const acquire = jest
+      .fn<Promise<unknown>, [string, string]>()
+      .mockResolvedValue({ kind: 'acquired', token: 'slot-1' });
+    const stamp = jest
+      .fn<Promise<void>, [string, string, unknown]>()
+      .mockResolvedValue(undefined);
+    const release = jest
+      .fn<Promise<void>, [string]>()
+      .mockResolvedValue(undefined);
+    const confirmBotSale = jest
+      .fn<Promise<unknown>, [Record<string, unknown>]>()
+      .mockResolvedValue({
+        ...confirmed,
+        subtotalCents: 2000,
+        shippingChargeCents: 3000,
+        fulfillmentMode: 'DELIVERY',
+      });
+    const customerFindFirst = jest
+      .fn<Promise<unknown>, [unknown]>()
+      .mockResolvedValue({ phoneCountryCode: '52', phone: '5512345678' });
+    const addressFindFirst = jest
+      .fn<Promise<unknown>, [unknown]>()
+      .mockResolvedValue({
+        zipCode: '64000',
+        state: 'Nuevo León',
+        municipality: 'Monterrey',
+        neighborhood: 'Centro',
+      });
+    const verify = jest
+      .fn<Promise<unknown>, [string, unknown]>()
+      .mockResolvedValue({
+        status: 'OK',
+        quote: {
+          id: 'quote-row-1',
+          costCents: 3000,
+          creditCents: 0,
+          customerChargeCents: 3000,
+          currency: 'MXN',
+          expiresAt: new Date(),
+        },
+      });
+    const resolve = jest
+      .fn<Promise<unknown>, [string]>()
+      .mockResolvedValue(location);
+    const config = { get: jest.fn<unknown, [string]>() };
+    const service = new ChatbotApiService(
+      {} as never,
+      {} as never,
+      {} as never,
+      { confirmBotSale } as never,
+      {
+        acquireSaleRegistrationIdempotency: acquire,
+        markSaleRegistrationIdempotencySucceeded: stamp,
+        releaseSaleRegistrationIdempotency: release,
+      } as never,
+      {
+        getTenantId: () => 'tenant-1',
+        getClient: () => ({
+          customer: { findFirst: customerFindFirst },
+          customerAddress: { findFirst: addressFindFirst },
+        }),
+      } as never,
+      config as never,
+      { verify } as never,
+      { resolve } as never,
+    );
+    return {
+      service,
+      acquire,
+      stamp,
+      release,
+      confirmBotSale,
+      verify,
+      resolve,
+      config,
+      addressFindFirst,
+    };
+  }
+
+  it('verifies the quote with the customer phone and saved address, charges it, and never reads the legacy ceiling', async () => {
+    const h = harness();
+
+    const result = await h.service.registerBotSale({
+      ...base,
+      shipping: { quoteId: QUOTE },
+    });
+
+    expect(h.addressFindFirst.mock.calls[0]?.[0]).toEqual({
+      where: { id: 'addr-1', tenantId: 'tenant-1', customerId: 'cust-1' },
+      select: {
+        zipCode: true,
+        state: true,
+        municipality: true,
+        neighborhood: true,
+      },
+    });
+    expect(h.verify.mock.calls[0]).toEqual([
+      QUOTE,
+      {
+        tenantId: 'tenant-1',
+        customer: { phoneCountryCode: '52', phone: '5512345678' },
+        lines: [{ productId: 'prod-1', variantId: null, quantity: 2 }],
+        destination: {
+          zipCode: '64000',
+          state: 'Nuevo León',
+          municipality: 'Monterrey',
+          neighborhood: 'Centro',
+        },
+      },
+    ]);
+    expect(h.confirmBotSale.mock.calls[0]?.[0]).toMatchObject({
+      shippingAddressId: 'addr-1',
+      shippingQuote: { quoteRecordId: 'quote-row-1', chargeCents: 3000 },
+      fulfillmentMode: 'DELIVERY',
+    });
+    expect(h.confirmBotSale.mock.calls[0]?.[0].shipping).toBeUndefined();
+    expect(h.config.get.mock.calls).toHaveLength(0);
+    expect(result).toMatchObject({
+      subtotalCents: 2000,
+      shippingChargeCents: 3000,
+      totalCents: 5000,
+      debtCents: 5000,
+      fulfillmentMode: 'DELIVERY',
+    });
+    expect(h.stamp.mock.calls[0]?.[2]).toEqual(result);
+  });
+
+  it.each([
+    [{ status: 'NOT_FOUND' }, 404, 'SHIPPING_QUOTE_NOT_FOUND'],
+    [{ status: 'EXPIRED' }, 409, 'SHIPPING_QUOTE_EXPIRED'],
+    [
+      { status: 'MISMATCH', mismatches: ['DESTINATION'] },
+      409,
+      'SHIPPING_QUOTE_MISMATCH',
+    ],
+  ])(
+    'rejects %j, frees the idempotency slot and writes no sale',
+    async (outcome, status, code) => {
+      const h = harness();
+      h.verify.mockResolvedValue(outcome);
+
+      const error = (await h.service
+        .registerBotSale({ ...base, shipping: { quoteId: QUOTE } })
+        .catch((caught: unknown) => caught)) as {
+        getStatus: () => number;
+        getResponse: () => Record<string, unknown>;
+      };
+
+      expect(error.getStatus()).toBe(status);
+      expect(error.getResponse().error).toBe(code);
+      expect(h.release.mock.calls).toEqual([['slot-1']]);
+      expect(h.confirmBotSale.mock.calls).toHaveLength(0);
+      expect(h.stamp.mock.calls).toHaveLength(0);
+    },
+  );
+
+  it('maps a quote already backing a sale to 409 and frees the slot', async () => {
+    const h = harness();
+    h.confirmBotSale.mockRejectedValue(
+      new BusinessRuleViolationError(
+        'Shipping quote already backs a sale',
+        'SHIPPING_QUOTE_ALREADY_USED',
+      ),
+    );
+
+    const error = (await h.service
+      .registerBotSale({ ...base, shipping: { quoteId: QUOTE } })
+      .catch((caught: unknown) => caught)) as {
+      getStatus: () => number;
+      getResponse: () => Record<string, unknown>;
+    };
+
+    expect(error.getStatus()).toBe(409);
+    expect(error.getResponse().error).toBe('SHIPPING_QUOTE_ALREADY_USED');
+    expect(h.release.mock.calls).toEqual([['slot-1']]);
+  });
+
+  it('maps a quote expired under the sale lock to 409 SHIPPING_QUOTE_EXPIRED and frees the slot', async () => {
+    const h = harness();
+    h.confirmBotSale.mockRejectedValue(
+      new BusinessRuleViolationError(
+        'Shipping quote expired',
+        'SHIPPING_QUOTE_EXPIRED',
+      ),
+    );
+
+    const error = (await h.service
+      .registerBotSale({ ...base, shipping: { quoteId: QUOTE } })
+      .catch((caught: unknown) => caught)) as {
+      getStatus: () => number;
+      getResponse: () => Record<string, unknown>;
+    };
+
+    expect(error.getStatus()).toBe(409);
+    expect(error.getResponse().error).toBe('SHIPPING_QUOTE_EXPIRED');
+    expect(h.release.mock.calls).toEqual([['slot-1']]);
+    expect(h.stamp.mock.calls).toHaveLength(0);
+  });
+
+  it('keeps D10 for other failures (slot not released)', async () => {
+    const h = harness();
+    const failure = new BusinessRuleViolationError(
+      'PRICE_OUT_OF_DATE',
+      'PRICE_OUT_OF_DATE',
+    );
+    h.confirmBotSale.mockRejectedValue(failure);
+
+    await expect(
+      h.service.registerBotSale({ ...base, shipping: { quoteId: QUOTE } }),
+    ).rejects.toBe(failure);
+    expect(h.release.mock.calls).toHaveLength(0);
+  });
+
+  it.each([
+    [
+      'without a shipping address',
+      { shippingAddressId: null },
+      'SHIPPING_ADDRESS_REQUIRED',
+    ],
+    [
+      'without the expected total',
+      { expectedTotalCents: undefined },
+      'SHIPPING_EXPECTED_TOTAL_REQUIRED',
+    ],
+  ])(
+    'rejects a quote %s before acquiring the slot',
+    async (_label, change, code) => {
+      const h = harness();
+      await expect(
+        h.service.registerBotSale({
+          ...base,
+          ...change,
+          shipping: { quoteId: QUOTE },
+        }),
+      ).rejects.toMatchObject({ code });
+      expect(h.acquire.mock.calls).toHaveLength(0);
+    },
+  );
+
+  it('registers a pickup with customerId only and returns the pickup location', async () => {
+    const h = harness();
+    h.confirmBotSale.mockResolvedValue({
+      ...confirmed,
+      totalCents: 2000,
+      debtCents: 2000,
+      fulfillmentMode: 'PICKUP',
+    });
+
+    const result = await h.service.registerBotSale({
+      ...base,
+      shippingAddressId: null,
+      expectedTotalCents: undefined,
+      shipping: { mode: 'pickup' },
+    });
+
+    expect(h.verify.mock.calls).toHaveLength(0);
+    expect(h.confirmBotSale.mock.calls[0]?.[0]).toMatchObject({
+      shippingAddressId: null,
+      fulfillmentMode: 'PICKUP',
+    });
+    expect(result).toMatchObject({
+      fulfillmentMode: 'PICKUP',
+      deliveryStatus: 'PENDING',
+      pickupLocation: location,
+    });
+    expect(result).not.toHaveProperty('shippingChargeCents');
+  });
+
+  it('rejects a pickup with a shipping address before acquiring the slot', async () => {
+    const h = harness();
+    await expect(
+      h.service.registerBotSale({ ...base, shipping: { mode: 'pickup' } }),
+    ).rejects.toMatchObject({
+      code: 'SHIPPING_ADDRESS_NOT_ALLOWED_FOR_PICKUP',
+    });
+    expect(h.acquire.mock.calls).toHaveLength(0);
+  });
+
+  it('replays a cached quote or pickup response with its additive keys', async () => {
+    const h = harness();
+    const cached = {
+      ...confirmed,
+      totalCents: 2000,
+      debtCents: 2000,
+      subtotalCents: 2000,
+      shippingChargeCents: 0,
+      fulfillmentMode: 'DELIVERY',
+    };
+    h.acquire.mockResolvedValue({ kind: 'replay', payload: cached });
+
+    const result = await h.service.registerBotSale({
+      ...base,
+      expectedTotalCents: 2000,
+      shipping: { quoteId: QUOTE },
+    });
+
+    expect(result).toEqual(cached);
+    expect(h.verify.mock.calls).toHaveLength(0);
+
+    const pickupCached = {
+      ...confirmed,
+      fulfillmentMode: 'PICKUP',
+      pickupLocation: location,
+    };
+    h.acquire.mockResolvedValue({ kind: 'replay', payload: pickupCached });
+    expect(
+      await h.service.registerBotSale({
+        ...base,
+        shippingAddressId: null,
+        shipping: { mode: 'pickup' },
+      }),
+    ).toEqual(pickupCached);
+  });
+
+  it('hashes the legacy shape exactly as before T7 and the new shapes apart', () => {
+    const legacy = computeRegisterBotSaleRequestHash({
+      ...base,
+      shipping: { chargeCents: 500, approvalId: ' a-1 ' },
+    });
+    const frozen = createHash('sha256')
+      .update(
+        JSON.stringify({
+          cashierUserId: 'user-cashier-1',
+          customerId: 'cust-1',
+          shippingAddressId: 'addr-1',
+          shipping: { chargeCents: 500, approvalId: 'a-1', quoteId: null },
+          items: [
+            {
+              productId: 'prod-1',
+              variantId: null,
+              quantity: 2,
+              unitPriceCents: 1000,
+            },
+          ],
+        }),
+      )
+      .digest('hex');
+    expect(legacy).toBe(frozen);
+    const quote = computeRegisterBotSaleRequestHash({
+      ...base,
+      shipping: { quoteId: QUOTE },
+    });
+    const pickup = computeRegisterBotSaleRequestHash({
+      ...base,
+      shipping: { mode: 'pickup' },
+    });
+    expect(new Set([legacy, quote, pickup]).size).toBe(3);
   });
 });

@@ -23,6 +23,7 @@ import {
   CheckoutRequestDto,
   ExistingCheckoutAddressDto,
 } from './dto/checkout.request';
+import { PickupBotSaleShippingDto } from './dto/register-bot-sale.request';
 import { ParseIdempotencyKeyPipe } from './pipes/parse-idempotency-key.pipe';
 import { ServiceAuthGuard } from './guards/service-auth.guard';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
@@ -39,13 +40,19 @@ const CONFLICTS = new Set([
   'PROMO_CAPACITY_RE_QUOTE',
   'PROMOTION_CAPACITY_EXCEEDED',
   'PROMOTION_CAPACITY_CLAIM_MISMATCH',
+  // shipping-zones / T7 (S8)
+  'SHIPPING_QUOTE_EXPIRED',
+  'SHIPPING_QUOTE_MISMATCH',
+  'SHIPPING_QUOTE_ALREADY_USED',
 ]);
 const MISSING = new Set([
   'CUSTOMER_NOT_FOUND',
   'SHIPPING_ADDRESS_NOT_FOUND',
   'CASHIER_NOT_FOUND',
   'SELLER_NOT_FOUND',
+  'SHIPPING_QUOTE_NOT_FOUND',
 ]);
+const MISMATCH_PARTS = new Set(['CUSTOMER', 'LINES', 'DESTINATION']);
 
 /** New boundary only: never persist or return raw driver/domain message/details. */
 function safeError(error: unknown): HttpException {
@@ -70,6 +77,25 @@ function safeError(error: unknown): HttpException {
       typeof payload.error === 'string' &&
       /^[A-Z][A-Z_]{1,79}$/.test(payload.error)
     ) {
+      // The only detail kept: which quote binding parts mismatched.
+      const mismatches =
+        'mismatches' in payload && Array.isArray(payload.mismatches)
+          ? payload.mismatches.filter(
+              (part): part is string =>
+                typeof part === 'string' && MISMATCH_PARTS.has(part),
+            )
+          : [];
+      if (payload.error === 'SHIPPING_QUOTE_MISMATCH' && mismatches.length) {
+        return new HttpException(
+          {
+            statusCode: error.getStatus(),
+            error: payload.error,
+            message: payload.error,
+            mismatches,
+          },
+          error.getStatus(),
+        );
+      }
       return checkoutError(error.getStatus(), payload.error);
     }
   }
@@ -97,6 +123,12 @@ function parseRequest(value: unknown): CheckoutRequestDto {
           !Number.isSafeInteger(item.unitPriceCents) ||
           item.unitPriceCents > 2_147_483_647,
       )
+    )
+      throw new Error('invalid');
+    // The delivery address may be omitted only for store pickup.
+    if (
+      !dto.deliveryAddress &&
+      !(dto.sale.shipping instanceof PickupBotSaleShippingDto)
     )
       throw new Error('invalid');
     if (

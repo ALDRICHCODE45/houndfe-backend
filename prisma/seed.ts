@@ -1297,6 +1297,8 @@ async function main() {
       permissionKey('Product', 'read'),
       permissionKey('Product', 'update'),
       permissionKey('Product', 'delete'),
+      permissionKey('ShippingSettings', 'read'),
+      permissionKey('ShippingSettings', 'update'),
       permissionKey('Sale', 'create'),
       permissionKey('Sale', 'read'),
       permissionKey('Sale', 'update'),
@@ -1347,6 +1349,9 @@ async function main() {
       permissionKey('SatKey', 'read'),
       permissionKey('HumanDecision', 'read'),
       permissionKey('HumanDecision', 'update'),
+      permissionKey('DeliveryZone', 'read'),
+      permissionKey('DeliveryZone', 'validate'),
+      permissionKey('DeliveryZone', 'manage'),
     ];
 
     const cashierPermissionKeys: SeedPermissionKey[] = [

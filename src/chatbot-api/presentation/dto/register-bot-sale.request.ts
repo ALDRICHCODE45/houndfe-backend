@@ -1,6 +1,7 @@
 import {
   ArrayMinSize,
   IsArray,
+  IsIn,
   IsInt,
   IsNotEmpty,
   IsObject,
@@ -14,7 +15,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, type TypeHelpOptions } from 'class-transformer';
 
 export class BotSaleItemDto {
   @IsUUID()
@@ -41,6 +42,11 @@ export class BotSaleItemDto {
   unitPriceCents!: number;
 }
 
+/**
+ * DEPRECATED (shipping-zones / T7): per-charge human approval. Kept working,
+ * with the same validations, until the chatbot migrates to `{ quoteId }` /
+ * `{ mode: "pickup" }` (docs/chatbot-checkout-shipping.md).
+ */
 export class BotSaleShippingDto {
   @IsInt()
   @Min(1)
@@ -59,6 +65,43 @@ export class BotSaleShippingDto {
   @MaxLength(200)
   @Matches(/\S/)
   quoteId?: string;
+}
+
+/** shipping-zones / T7 (S8) — a backend quote from POST /chatbot-api/shipping/quotes. */
+export class QuoteBotSaleShippingDto {
+  @IsString()
+  @MaxLength(200)
+  @Matches(/\S/)
+  quoteId!: string;
+}
+
+/** shipping-zones / T7 (S10) — store pickup: no address, no shipping charge. */
+export class PickupBotSaleShippingDto {
+  @IsIn(['pickup'])
+  mode!: 'pickup';
+}
+
+export type BotSaleShipping =
+  | BotSaleShippingDto
+  | QuoteBotSaleShippingDto
+  | PickupBotSaleShippingDto;
+
+/**
+ * Picks the shipping shape by its keys: `mode` → pickup; `chargeCents` or
+ * `approvalId` → legacy approved charge; otherwise → quote. Unknown keys of
+ * the picked shape are then rejected by `forbidNonWhitelisted`, so mixed
+ * shapes (`{ mode: "pickup", quoteId }`) fail with 400.
+ */
+export function botSaleShippingType(options?: TypeHelpOptions) {
+  const raw: unknown =
+    options?.object && options.property
+      ? (options.object as Record<string, unknown>)[options.property]
+      : undefined;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    if ('mode' in raw) return PickupBotSaleShippingDto;
+    if ('chargeCents' in raw || 'approvalId' in raw) return BotSaleShippingDto;
+  }
+  return QuoteBotSaleShippingDto;
 }
 
 export class RegisterBotSaleRequestDto {
@@ -93,11 +136,11 @@ export class RegisterBotSaleRequestDto {
   @Min(0)
   expectedTotalCents?: number;
 
-  // Recognize and validate shipping, but reject it until receipt views
-  // reconcile and an owner-configured charge ceiling enables the feature.
+  // shipping-zones / T7 — `{ quoteId }` | `{ mode: "pickup" }`; the legacy
+  // `{ chargeCents, approvalId, quoteId? }` keeps its owner-configured ceiling.
   @ValidateIf((_, value: unknown) => value !== undefined)
   @IsObject()
   @ValidateNested()
-  @Type(() => BotSaleShippingDto)
-  shipping?: BotSaleShippingDto;
+  @Type(botSaleShippingType)
+  shipping?: BotSaleShipping;
 }

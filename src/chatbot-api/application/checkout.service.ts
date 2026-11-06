@@ -4,6 +4,8 @@ import { Prisma, type CustomerAddress } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { SalesService } from '../../sales/sales.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { PickupLocationService } from '../../shipping/pickup/application/pickup-location.service';
+import { ShippingQuoteVerifier } from '../../shipping/quotes/application/shipping-quote-verifier.service';
 import {
   CheckoutRequestDto,
   ExistingCheckoutAddressDto,
@@ -15,6 +17,11 @@ import type {
   CheckoutResponse,
   CheckoutStatusResponse,
 } from '../presentation/dto/checkout.response';
+import {
+  canonicalShipping,
+  classifyBotShipping,
+  quoteRejection,
+} from './bot-shipping';
 
 export const CHECKOUT_OPERATION = 'bot_checkout_create';
 const ADDRESS_FIELDS = [
@@ -58,8 +65,9 @@ export function computeCheckoutRequestHash(input: CheckoutRequestDto): string {
           firstName: input.customer.firstName,
           lastName: input.customer.lastName ?? null,
         };
-  const address =
-    input.deliveryAddress instanceof ExistingUpdatedCheckoutAddressDto
+  const address = !input.deliveryAddress
+    ? null
+    : input.deliveryAddress instanceof ExistingUpdatedCheckoutAddressDto
       ? {
           mode: 'existingUpdated',
           addressId: input.deliveryAddress.addressId,
@@ -94,13 +102,8 @@ export function computeCheckoutRequestHash(input: CheckoutRequestDto): string {
             unitPriceCents: item.unitPriceCents,
           })),
           expectedTotalCents: input.sale.expectedTotalCents,
-          shipping: input.sale.shipping
-            ? {
-                chargeCents: input.sale.shipping.chargeCents,
-                approvalId: input.sale.shipping.approvalId.trim(),
-                quoteId: input.sale.shipping.quoteId?.trim() ?? null,
-              }
-            : null,
+          // Legacy members hash exactly as before T7 (stored receipts replay).
+          shipping: canonicalShipping(classifyBotShipping(input.sale.shipping)),
         },
       }),
     )
@@ -126,7 +129,8 @@ function cachedResponse(value: Prisma.JsonValue | null): CheckoutResponse {
     Array.isArray(value) ||
     value.status !== 'created' ||
     !value.customer ||
-    !value.address ||
+    // Pickup checkouts without a delivery address cache `address: null`.
+    !('address' in value) ||
     !value.sale
   ) {
     throw checkoutError(500, 'CHECKOUT_CREATE_FAILED');
@@ -142,6 +146,8 @@ export class CheckoutService {
     private readonly tenantPrisma: TenantPrismaService,
     private readonly salesService: SalesService,
     private readonly config: ConfigService,
+    private readonly quoteVerifier: ShippingQuoteVerifier,
+    private readonly pickupLocations: PickupLocationService,
   ) {}
 
   async status(key: string): Promise<CheckoutStatusResponse> {
@@ -194,6 +200,7 @@ export class CheckoutService {
         }
 
         const shipping = this.validateShipping(input);
+        const botShipping = classifyBotShipping(input.sale.shipping);
         const membership = await tx.tenantMembership.findFirst({
           where: { tenantId, userId: input.sale.cashierUserId },
           select: { id: true },
@@ -248,12 +255,19 @@ export class CheckoutService {
           });
         }
 
-        let address: CustomerAddress | null;
-        let addressResolution: CheckoutResponse['address']['resolution'] =
+        let address: CustomerAddress | null = null;
+        let addressResolution: NonNullable<
+          CheckoutResponse['address']
+        >['resolution'] =
           input.deliveryAddress instanceof ExistingCheckoutAddressDto
             ? 'existing'
             : 'created';
-        if (input.deliveryAddress instanceof ExistingCheckoutAddressDto) {
+        if (!input.deliveryAddress) {
+          // Only a pickup reaches here (the controller requires the address
+          // otherwise): the sale carries no delivery address.
+        } else if (
+          input.deliveryAddress instanceof ExistingCheckoutAddressDto
+        ) {
           const addressId = input.deliveryAddress.addressId;
           await tx.$queryRaw(
             Prisma.sql`SELECT id FROM customer_addresses WHERE id = ${addressId} AND "tenantId" = ${tenantId} AND "customerId" = ${customer.id} FOR UPDATE`,
@@ -300,10 +314,49 @@ export class CheckoutService {
             },
           });
         }
+        // shipping-zones / T7 (S8) — the quote must match this tenant, the
+        // customer phone, the cart lines and the address being sold to.
+        let shippingQuote:
+          | { quoteRecordId: string; chargeCents: number }
+          | undefined;
+        if (botShipping.kind === 'quote') {
+          if (!address) throw checkoutError(400, 'INVALID_CHECKOUT_REQUEST');
+          const verified = await this.quoteVerifier.verify(
+            botShipping.quoteId,
+            {
+              tenantId,
+              customer: {
+                phoneCountryCode: input.phoneCountryCode,
+                phone: input.phone,
+              },
+              lines: input.sale.items.map((item) => ({
+                productId: item.productId,
+                variantId: item.variantId ?? null,
+                quantity: item.quantity,
+              })),
+              destination: {
+                zipCode: address.zipCode ?? '',
+                state: address.state,
+                municipality: address.municipality,
+                neighborhood: address.neighborhood,
+              },
+            },
+          );
+          const rejection = quoteRejection(verified);
+          if (rejection) throw rejection;
+          if (verified.status === 'OK') {
+            shippingQuote = {
+              quoteRecordId: verified.quote.id,
+              chargeCents: verified.quote.customerChargeCents,
+            };
+          }
+        }
+        const pickup = botShipping.kind === 'pickup';
         const sale = await this.salesService.confirmBotSale({
           cashierUserId: input.sale.cashierUserId,
           customerId: customer.id,
-          shippingAddressId: address.id,
+          // A pickup sale never carries an address (it would become routable).
+          shippingAddressId: pickup ? null : (address?.id ?? null),
           items: input.sale.items,
           expectedTotalCents: input.sale.expectedTotalCents,
           // Match the not_found quote even though the customer now has an ID.
@@ -311,6 +364,10 @@ export class CheckoutService {
             ? { excludeRegisteredOnlyPromotions: true }
             : {}),
           ...(shipping ? { shipping } : {}),
+          ...(shippingQuote
+            ? { shippingQuote, fulfillmentMode: 'DELIVERY' as const }
+            : {}),
+          ...(pickup ? { fulfillmentMode: 'PICKUP' as const } : {}),
         });
         const response: CheckoutResponse = {
           status: 'created',
@@ -320,12 +377,17 @@ export class CheckoutService {
             firstName: customer.firstName,
             lastName: customer.lastName,
           },
-          address: {
-            resolution: addressResolution,
-            id: address.id,
-            version: address.updatedAt.toISOString(),
-          },
+          address: address
+            ? {
+                resolution: addressResolution,
+                id: address.id,
+                version: address.updatedAt.toISOString(),
+              }
+            : null,
           sale,
+          ...(pickup
+            ? { pickupLocation: await this.pickupLocations.resolve(tenantId) }
+            : {}),
         };
         // No independently committed IN_FLIGHT and no post-commit success stamp.
         await tx.saleIdempotency.create({
@@ -365,9 +427,10 @@ export class CheckoutService {
     }
   }
 
+  /** DEPRECATED legacy `{ chargeCents, approvalId }` path, unchanged. */
   private validateShipping(input: CheckoutRequestDto) {
-    const shipping = input.sale.shipping;
-    if (!shipping) return undefined;
+    const shipping = classifyBotShipping(input.sale.shipping);
+    if (shipping.kind !== 'legacy') return undefined;
     const maximum = this.config.get<number>('BOT_SHIPPING_CHARGE_MAX_CENTS');
     if (!Number.isSafeInteger(maximum) || !maximum || maximum <= 0)
       throw checkoutError(422, 'SHIPPING_CHARGE_UNAVAILABLE');
@@ -377,10 +440,8 @@ export class CheckoutService {
       throw checkoutError(422, 'SHIPPING_EXPECTED_TOTAL_REQUIRED');
     return {
       chargeCents: shipping.chargeCents,
-      approvalId: shipping.approvalId.trim(),
-      ...(shipping.quoteId !== undefined
-        ? { quoteId: shipping.quoteId.trim() }
-        : {}),
+      approvalId: shipping.approvalId,
+      ...(shipping.quoteId !== undefined ? { quoteId: shipping.quoteId } : {}),
     };
   }
 }

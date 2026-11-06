@@ -38,6 +38,10 @@ import { SERVICE_CREDENTIAL_REPOSITORY } from '../domain/service-credential.repo
 import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
 import { ServiceAuthGuard } from './guards/service-auth.guard';
 import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
+import { ShippingQuoteVerifier } from '../../shipping/quotes/application/shipping-quote-verifier.service';
+import { PrismaShippingQuoteRepository } from '../../shipping/quotes/infrastructure/prisma-shipping-quote.repository';
+import { OpeningHoursService } from '../../shipping/pickup/application/opening-hours.service';
+import { PickupLocationService } from '../../shipping/pickup/application/pickup-location.service';
 
 const token = 'svc_disposable-checkout-test';
 const rotatedToken = 'svc_disposable-checkout-rotated';
@@ -213,6 +217,8 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
       repo,
       tenant,
       config,
+      {} as ReadPorts[7],
+      {} as ReadPorts[8],
     );
     audit = { append: jest.fn().mockResolvedValue(undefined) };
     const module = await Test.createTestingModule({
@@ -230,6 +236,21 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
         { provide: ReceiptStatusService, useValue: {} },
         { provide: ClsService, useValue: cls },
         { provide: BOT_AUDIT_LOG_REPOSITORY, useValue: audit },
+        // shipping-zones / T7 — real quote verifier and pickup location.
+        {
+          provide: ShippingQuoteVerifier,
+          useValue: new ShippingQuoteVerifier(
+            // SAFETY: the owned generated client supplies PrismaService's quote API.
+            new PrismaShippingQuoteRepository(db as unknown as PrismaService),
+          ),
+        },
+        {
+          provide: PickupLocationService,
+          useValue: new PickupLocationService(
+            tenant,
+            new OpeningHoursService(tenant),
+          ),
+        },
         {
           provide: SERVICE_CREDENTIAL_REPOSITORY,
           // SAFETY: the owned generated client supplies PrismaService's credential API.

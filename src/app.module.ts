@@ -37,6 +37,9 @@ import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 // /chatbot-api/human-decisions`). Self-contained: imports ChatbotApiModule
 // (exported ServiceAuthGuard + credentials provider) and DatabaseModule.
 import { HumanDecisionsModule } from './human-decisions/human-decisions.module';
+import { DeliveryZonesModule } from './delivery-zones/delivery-zones.module';
+import { DeliveryZoneOutboxModule } from './delivery-zones/outbox/delivery-zone-outbox.module';
+import { DeliveryZoneInngestRegistrar } from './delivery-zones/inngest/delivery-zone-inngest-registrar';
 import { PublicCatalogModule } from './public-catalog/public-catalog.module';
 import { SatCatalogModule } from './sat-catalog/sat-catalog.module';
 import { NotificationConfigModule } from './notification-config/notification-config.module';
@@ -72,6 +75,8 @@ import { DeliveryThankYouInngestRegistrar } from './delivery-routes/inngest/deli
 // (GET /tenants/:tenantId/catalog-settings). Hexagonal wiring mirrors
 // SatCatalogModule / NotificationConfigModule.
 import { CatalogSettingsModule } from './catalog-settings/catalog-settings.module';
+import { ShippingPackagingModule } from './shipping/packaging/shipping-packaging.module';
+import { ShippingPickupModule } from './shipping/pickup/shipping-pickup.module';
 // pca-3b3b - dedicated promotion-capacity outbox poller + dispatcher.
 // Own module so the Inngest dep graph doesn't pollute transitive chains
 // (mirrors the low-stock / hr-time-off / delivery-routes wiring).
@@ -136,6 +141,8 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     EmployeesModule,
     ChatbotApiModule,
     HumanDecisionsModule,
+    // shipping-zones / T1 — delivery zones per postal code (store routes).
+    DeliveryZonesModule,
     PublicCatalogModule,
     SatCatalogModule,
     NotificationConfigModule,
@@ -200,6 +207,8 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     // online-catalog-publishing / WU3A3 — catalog-settings bounded
     // context. Self-contained: imports DatabaseModule + AuthModule only.
     CatalogSettingsModule,
+    ShippingPackagingModule,
+    ShippingPickupModule,
     // branch-analytics-summary / bas-3a — read-only branch sales summary
     // (GET /analytics/sales/summary behind read:Analytics).
     AnalyticsModule,
@@ -208,6 +217,10 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     SuppliersModule,
     PurchaseOrdersModule,
     InventoryModule,
+    // shipping-zones / T1 (S3) — dedicated poller/dispatcher for the
+    // delivery_zone.validation.requested outbox rows. The generic poller
+    // excludes this eventType in the same change.
+    DeliveryZoneOutboxModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
@@ -233,6 +246,9 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     // promotion.expiring.detected event. Same registration pattern as the
     // low-stock / hr-time-off / delivery-routes / capacity registrars.
     PromotionExpiryInngestRegistrar,
+    // shipping-zones / T1 (S3) — Inngest registrar for the
+    // delivery-zones/validation.requested event (staff email).
+    DeliveryZoneInngestRegistrar,
     // transfer-receipts / T2 — RECEIPT_REVIEW_REQUESTED staff email.
     ReceiptReviewInngestRegistrar,
   ],

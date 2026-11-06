@@ -68,6 +68,7 @@ import {
   HttpCode,
   HttpStatus,
   Inject,
+  Optional,
   Param,
   ParseUUIDPipe,
   Post,
@@ -80,10 +81,17 @@ import {
 import type { Request, Response } from 'express';
 import { RequiredScopes } from '../../chatbot-api/presentation/decorators/required-scopes.decorator';
 import { ServiceAuthGuard } from '../../chatbot-api/presentation/guards/service-auth.guard';
+import {
+  DELIVERY_ZONE_BOT_REPOSITORY,
+  type IDeliveryZoneBotRepository,
+} from '../../delivery-zones/domain/delivery-zone-bot.repository';
 import { parseBotApplicationOutcomeRequest } from '../domain/bot-application-outcome.request';
 import {
   BOT_APPLICATION_OUTCOME_REPOSITORY,
+  BotApplicationOutcomeError,
+  type BotApplicationOutcomeResult,
   type IBotApplicationOutcomeRepository,
+  type RecordBotApplicationOutcomeCommand,
 } from '../domain/bot-application-outcome.repository';
 import {
   toBotApplicationOutcomeResponse,
@@ -112,6 +120,9 @@ export class BotApplicationOutcomeController {
   constructor(
     @Inject(BOT_APPLICATION_OUTCOME_REPOSITORY)
     private readonly outcomeRepository: IBotApplicationOutcomeRepository,
+    @Optional()
+    @Inject(DELIVERY_ZONE_BOT_REPOSITORY)
+    private readonly deliveryZoneRepository?: IDeliveryZoneBotRepository,
   ) {}
 
   /**
@@ -151,12 +162,31 @@ export class BotApplicationOutcomeController {
 
     const parsed = parseBotApplicationOutcomeRequest(body);
 
-    const result = await this.outcomeRepository.record({
-      decisionId: id,
-      request: parsed,
-    });
+    const result = await this.record({ decisionId: id, request: parsed });
 
     return toBotApplicationOutcomeResponse(result.acknowledgment);
+  }
+
+  /**
+   * RESTOCK/EXPIRATION first, unchanged. Only their sanitized `NOT_FOUND`
+   * falls through to a DELIVERY_ZONE requester (shipping-zones / T1), whose
+   * own miss raises the same `NOT_FOUND`.
+   */
+  private async record(
+    command: RecordBotApplicationOutcomeCommand,
+  ): Promise<BotApplicationOutcomeResult> {
+    try {
+      return await this.outcomeRepository.record(command);
+    } catch (error) {
+      if (
+        this.deliveryZoneRepository &&
+        error instanceof BotApplicationOutcomeError &&
+        error.code === 'NOT_FOUND'
+      ) {
+        return this.deliveryZoneRepository.recordOutcome(command);
+      }
+      throw error;
+    }
   }
 
   /**
