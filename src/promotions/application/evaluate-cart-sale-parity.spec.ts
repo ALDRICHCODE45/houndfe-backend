@@ -222,6 +222,8 @@ function quoteService(
       }),
     } as unknown as Ports[5],
     new ConfigService(),
+    {} as Ports[7],
+    {} as Ports[8],
   );
 }
 
@@ -1028,6 +1030,8 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
         tenant as unknown as ConstructorParameters<typeof CheckoutService>[0],
         h.service,
         new ConfigService(),
+        {} as ConstructorParameters<typeof CheckoutService>[3],
+        {} as ConstructorParameters<typeof CheckoutService>[4],
       );
       const confirm = jest.spyOn(h.service, 'confirmBotSale');
       const quotes = quoteService(h, () => (exists ? [customer] : []));
@@ -1451,6 +1455,77 @@ describe('Bot preview / confirmation parity through the same SalesService', () =
         expect.objectContaining({ botEligible: true }),
       );
     });
+
+    it.each([
+      {
+        name: 'local Monday ends between quote and checkout',
+        quotedAt: '2026-10-20T05:59:59.999Z',
+        confirmedAt: '2026-10-20T06:00:00.000Z',
+        day: 'MONDAY',
+        endDate: undefined,
+      },
+      {
+        name: 'date window expires between quote and checkout',
+        quotedAt: '2026-10-19T18:00:00.000Z',
+        confirmedAt: '2026-10-19T18:00:00.001Z',
+        day: undefined,
+        endDate: '2026-10-19T18:00:00.000Z',
+      },
+    ] as const)(
+      '$name: checkout rejects the stale quote with PROMO_RE_QUOTE',
+      async (testCase) => {
+        jest.setSystemTime(new Date(testCase.quotedAt));
+        const h = harness(null, 20, false, 'PRODUCTS', {
+          daysOfWeek: testCase.day ? [{ id: 'day-1', day: testCase.day }] : [],
+          startDate: null,
+          endDate: testCase.endDate ? new Date(testCase.endDate) : null,
+        });
+        const preview = await h.service.previewBotPricing({
+          customerId: 'customer',
+          items: [
+            { ...item, quantity: 2 },
+            { ...item, productId: 'prod-2' },
+          ],
+        });
+        const guard = new EvaluateCartPromotionsUseCase({
+          findActiveAutomaticSnapshot: jest.fn().mockResolvedValue({
+            promotions: [h.promo],
+            complete: true,
+          }),
+        } as unknown as IPromotionRepository);
+        const quote = await guard.execute(preview);
+        expect(quote.items.map((line) => line.discountAmountCents)).toEqual([
+          400, 0,
+        ]);
+        const expectedTotalCents = quote.items.reduce(
+          (sum, line) => sum + line.finalPriceCents,
+          0,
+        );
+        expect(expectedTotalCents).toBe(2600);
+
+        jest.setSystemTime(new Date(testCase.confirmedAt));
+        await expect(
+          h.service.confirmBotSale({
+            customerId: 'customer',
+            cashierUserId: 'cashier',
+            items: quote.items.map((line) => ({
+              ...line,
+              productName: 'Product',
+            })),
+            expectedTotalCents,
+          }),
+        ).rejects.toMatchObject({
+          code: 'PROMO_RE_QUOTE',
+          details: {
+            recomputedTotalCents: 3000,
+            expectedTotalCents: 2600,
+            discountCents: 0,
+          },
+        });
+        expect(h.saleRepo.save).not.toHaveBeenCalled();
+        expect(h.saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('rejects a vanished or foreign customer using the tenant-qualified lookup', async () => {
