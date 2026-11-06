@@ -40,6 +40,8 @@ import { BotAuditInterceptor } from './interceptors/bot-audit.interceptor';
 import { ReceiptUploadExceptionFilter } from './filters/receipt-upload-exception.filter';
 import { ParseIdempotencyKeyPipe } from './pipes/parse-idempotency-key.pipe';
 import { ReceiptUploadService } from '../../receipts/application/receipt-upload.service';
+import { ReceiptStatusService } from '../../receipts/application/receipt-status.service';
+import { ReceiptReadExceptionFilter } from '../../receipts/presentation/receipt-read-exception.filter';
 import { RECEIPT_MAX_BYTES } from '../../receipts/domain/receipt-file';
 import { ReceiptUploadError } from '../../receipts/domain/receipt-upload.errors';
 import { createAppValidationPipe } from '../../shared/listing/app-validation.pipe';
@@ -62,6 +64,7 @@ export class ChatbotApiController {
   constructor(
     private readonly chatbotApiService: ChatbotApiService,
     private readonly receiptUploadService: ReceiptUploadService,
+    private readonly receiptStatusService: ReceiptStatusService,
   ) {}
 
   @Get('catalog/search')
@@ -232,6 +235,18 @@ export class ChatbotApiController {
       file: file.buffer,
       fields: { ...body },
     });
+  }
+
+  /**
+   * Review outcome poll: { status, customerReason? (REJECTED only),
+   * sale: { debtCents, paymentStatus } }. Scope `sales:read` (exact match;
+   * `sales:write` does not imply it). Missing or foreign → 404.
+   */
+  @Get('receipts/:receiptId')
+  @RequiredScopes('sales:read')
+  @UseFilters(ReceiptReadExceptionFilter)
+  getReceiptOutcome(@Param('receiptId', ParseUUIDPipe) receiptId: string) {
+    return this.receiptStatusService.getForBot(receiptId);
   }
 
   @Patch('sales/:saleId/delivery')

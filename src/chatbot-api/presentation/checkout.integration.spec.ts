@@ -20,6 +20,7 @@ import { CheckoutController } from './checkout.controller';
 import { CheckoutService } from '../application/checkout.service';
 import { ChatbotApiController } from './chatbot-api.controller';
 import { ReceiptUploadService } from '../../receipts/application/receipt-upload.service';
+import { ReceiptStatusService } from '../../receipts/application/receipt-status.service';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import { CustomersService } from '../../customers/customers.service';
 import { PrismaCustomerRepository } from '../../customers/infrastructure/prisma-customer.repository';
@@ -226,6 +227,7 @@ describe('Checkout isolated PostgreSQL HTTP transaction proof', () => {
         { provide: ChatbotApiService, useValue: reads },
         // The receipt route is not exercised here.
         { provide: ReceiptUploadService, useValue: {} },
+        { provide: ReceiptStatusService, useValue: {} },
         { provide: ClsService, useValue: cls },
         { provide: BOT_AUDIT_LOG_REPOSITORY, useValue: audit },
         {

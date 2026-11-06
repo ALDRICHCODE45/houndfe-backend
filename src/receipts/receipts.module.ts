@@ -5,6 +5,7 @@ import { AuthModule } from '../auth/auth.module';
 import { createSpacesClient } from '../files/infrastructure/spaces-client.factory';
 import { ReceiptUploadService } from './application/receipt-upload.service';
 import { ReceiptFileService } from './application/receipt-file.service';
+import { ReceiptStatusService } from './application/receipt-status.service';
 import { ReceiptFileController } from './presentation/receipt-file.controller';
 import {
   RECEIPT_PREVIEW_RASTERIZER,
@@ -26,6 +27,7 @@ import { SpacesReceiptStorageAdapter } from './infrastructure/spaces-receipt-sto
   providers: [
     ReceiptUploadService,
     ReceiptFileService,
+    ReceiptStatusService,
     {
       provide: RECEIPT_STORAGE,
       useFactory: (configService: ConfigService) =>
@@ -41,6 +43,6 @@ import { SpacesReceiptStorageAdapter } from './infrastructure/spaces-receipt-sto
       useFactory: () => new PdfiumPreviewRasterizer(),
     },
   ],
-  exports: [ReceiptUploadService],
+  exports: [ReceiptUploadService, ReceiptStatusService],
 })
 export class ReceiptsModule {}

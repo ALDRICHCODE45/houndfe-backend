@@ -21,6 +21,8 @@ import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import { DomainExceptionFilter } from '../../shared/filters/domain-exception.filter';
 import { ReceiptUploadService } from '../../receipts/application/receipt-upload.service';
 import { ReceiptUploadError } from '../../receipts/domain/receipt-upload.errors';
+import { ReceiptStatusService } from '../../receipts/application/receipt-status.service';
+import { ReceiptReadError } from '../../receipts/domain/receipt-read.errors';
 import { RECEIPT_MAX_BYTES } from '../../receipts/domain/receipt-file';
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -64,6 +66,7 @@ describe('ChatbotApiController', () => {
     getActivePaymentDetail: jest.Mock;
   };
   let receiptUpload: { upload: jest.Mock; attachLegacyUrl: jest.Mock };
+  let receiptStatus: { getForBot: jest.Mock };
   let cls: { set: jest.Mock };
   let repository: jest.Mocked<IServiceCredentialRepository>;
   let auditLogs: { append: jest.Mock };
@@ -228,6 +231,13 @@ describe('ChatbotApiController', () => {
       }),
     };
     cls = { set: jest.fn() };
+    receiptStatus = {
+      getForBot: jest.fn().mockResolvedValue({
+        status: 'REJECTED',
+        customerReason: 'El monto no coincide con tu pedido.',
+        sale: { debtCents: 10000, paymentStatus: 'CREDIT' },
+      }),
+    };
     auditLogs = { append: jest.fn().mockResolvedValue(undefined) };
 
     repository = {
@@ -281,6 +291,15 @@ describe('ChatbotApiController', () => {
           );
         }
 
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_sales-read-key').digest('hex')
+        ) {
+          return Promise.resolve(
+            makeCredential(['sales:read'], 'svc_sales-read-key'),
+          );
+        }
+
         // Q1 / WU1 — credential with the bot's payment-details:read scope.
         if (
           hashedKey ===
@@ -307,6 +326,7 @@ describe('ChatbotApiController', () => {
         { provide: ClsService, useValue: cls },
         { provide: ChatbotApiService, useValue: service },
         { provide: ReceiptUploadService, useValue: receiptUpload },
+        { provide: ReceiptStatusService, useValue: receiptStatus },
         { provide: SERVICE_CREDENTIAL_REPOSITORY, useValue: repository },
         { provide: BOT_AUDIT_LOG_REPOSITORY, useValue: auditLogs },
       ],
@@ -1477,5 +1497,60 @@ describe('ChatbotApiController', () => {
       .get('/chatbot-api/payment-details')
       .set('Authorization', 'Bearer svc_payment-key')
       .expect(404);
+  });
+
+  // ── T2 — GET /chatbot-api/receipts/:receiptId (bot outcome poll) ────────
+
+  describe('GET /chatbot-api/receipts/:receiptId', () => {
+    const RECEIPT_ID = '11111111-1111-4111-8111-111111111111';
+
+    it('returns the outcome for a credential with sales:read and audits it', async () => {
+      const res = await request(httpServer())
+        .get(`/chatbot-api/receipts/${RECEIPT_ID}`)
+        .set('Authorization', 'Bearer svc_sales-read-key')
+        .expect(200);
+
+      expect(res.body).toEqual({
+        status: 'REJECTED',
+        customerReason: 'El monto no coincide con tu pedido.',
+        sale: { debtCents: 10000, paymentStatus: 'CREDIT' },
+      });
+      expect(receiptStatus.getForBot).toHaveBeenCalledWith(RECEIPT_ID);
+      expect(auditLogs.append).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'receipts.status',
+          resourceType: 'receipt',
+          resourceId: RECEIPT_ID,
+        }),
+      );
+    });
+
+    it('returns 403 without sales:read, even with sales:write (exact scopes)', async () => {
+      await request(httpServer())
+        .get(`/chatbot-api/receipts/${RECEIPT_ID}`)
+        .set('Authorization', 'Bearer svc_sales-key')
+        .expect(403);
+      expect(receiptStatus.getForBot).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 RECEIPT_NOT_FOUND for a missing or foreign receipt', async () => {
+      receiptStatus.getForBot.mockRejectedValueOnce(
+        new ReceiptReadError('RECEIPT_NOT_FOUND', 'Receipt not found'),
+      );
+
+      const res = await request(httpServer())
+        .get(`/chatbot-api/receipts/${RECEIPT_ID}`)
+        .set('Authorization', 'Bearer svc_sales-read-key')
+        .expect(404);
+
+      expect(res.body).toMatchObject({ error: 'RECEIPT_NOT_FOUND' });
+    });
+
+    it('returns 400 for a non-UUID receipt id', async () => {
+      await request(httpServer())
+        .get('/chatbot-api/receipts/not-a-uuid')
+        .set('Authorization', 'Bearer svc_sales-read-key')
+        .expect(400);
+    });
   });
 });
