@@ -5,6 +5,7 @@ import {
   shippingAddressColumns,
 } from './infrastructure/shipping-address-snapshot.mapper';
 import { SalesService } from './sales.service';
+import { SHIPPING_ADDRESS_SNAPSHOT_KEYS } from './domain/shipping-address-source-status';
 
 const snapshot = {
   street: 'Original Street',
@@ -110,6 +111,14 @@ const EXPECTED: Record<Kind, unknown> = {
 
 const KINDS = Object.keys(EXPECTED) as Kind[];
 
+/** The single `shippingAddress` key set shared with route stops and eligible sales. */
+const SHARED_KEYS = [
+  'id',
+  ...SHIPPING_ADDRESS_SNAPSHOT_KEYS,
+  'sourceStatus',
+  'changedFields',
+].sort();
+
 describe('GET /sales shipping address source status', () => {
   it('loads the live source with its tenantId in the same page query', async () => {
     const { client, repo } = fixture('unchanged');
@@ -138,6 +147,8 @@ describe('GET /sales shipping address source status', () => {
       sortOrder: 'desc',
     });
     expect(row.shippingAddress).toEqual(EXPECTED[kind]);
+    if (row.shippingAddress)
+      expect(Object.keys(row.shippingAddress).sort()).toEqual(SHARED_KEYS);
     expect(JSON.stringify(row)).not.toContain('Foreign Ave');
     expect(JSON.stringify(row)).not.toContain('Edited Street');
   });
@@ -167,6 +178,8 @@ describe('GET /sales/:id shipping address source status', () => {
       '11111111-1111-4111-8111-111111111111',
     );
     expect(detail.shippingAddress).toEqual(EXPECTED[kind]);
+    if (detail.shippingAddress)
+      expect(Object.keys(detail.shippingAddress).sort()).toEqual(SHARED_KEYS);
     expect(JSON.stringify(detail)).not.toContain('Foreign Ave');
   });
 

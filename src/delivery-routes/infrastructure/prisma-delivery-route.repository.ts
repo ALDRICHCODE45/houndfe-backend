@@ -29,10 +29,9 @@
  */
 import { Injectable } from '@nestjs/common';
 import {
-  hydrateShippingAddress,
   liveShippingAddressSourceSelect,
-  resolveShippingAddressSource,
   shippingAddressSnapshotSelect,
+  toSaleShippingAddressView,
 } from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
@@ -186,8 +185,6 @@ function mapRouteStopReadModel(
     sale.customer.tenantId === routeTenantId
       ? sale.customer
       : null;
-  const shippingAddress = sale ? hydrateShippingAddress(sale) : null;
-
   return {
     id: stop.id,
     saleId: stop.saleId,
@@ -203,26 +200,8 @@ function mapRouteStopReadModel(
           email: customer.email ?? null,
         }
       : null,
-    shippingAddress: shippingAddress
-      ? {
-          id: sale?.shippingAddressId ?? null,
-          street: shippingAddress.street,
-          exteriorNumber: shippingAddress.exteriorNumber,
-          interiorNumber: shippingAddress.interiorNumber,
-          zipCode: shippingAddress.zipCode,
-          neighborhood: shippingAddress.neighborhood,
-          municipality: shippingAddress.municipality,
-          city: shippingAddress.city,
-          state: shippingAddress.state,
-          label: shippingAddress.label,
-          latitude: shippingAddress.latitude,
-          longitude: shippingAddress.longitude,
-          ...resolveShippingAddressSource(
-            shippingAddress,
-            sale?.shippingAddress,
-            routeTenantId,
-          ),
-        }
+    shippingAddress: sale
+      ? toSaleShippingAddressView(sale, routeTenantId)
       : null,
   };
 }

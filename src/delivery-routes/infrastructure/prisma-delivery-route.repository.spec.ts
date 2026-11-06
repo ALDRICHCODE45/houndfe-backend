@@ -25,6 +25,7 @@ import {
   shippingAddressSnapshotSelect,
   type SnapshotRow,
 } from '../../sales/infrastructure/shipping-address-snapshot.mapper';
+import { SHIPPING_ADDRESS_SNAPSHOT_KEYS } from '../../sales/domain/shipping-address-source-status';
 import {
   PrismaDeliveryRouteRepository,
   isSaleReservationP2002,
@@ -801,12 +802,22 @@ const EXPECTED_ADDRESS = {
   municipality: 'Cuauhtemoc',
   city: 'CDMX',
   state: 'CDMX',
+  visualReferences: null,
+  carrierPhone: null,
   label: 'Home',
   latitude: 0,
   longitude: 0,
   sourceStatus: 'UNCHANGED',
   changedFields: [],
 };
+
+/** The single `shippingAddress` key set shared with `/sales` and eligible sales. */
+const SHARED_ADDRESS_KEYS = [
+  'id',
+  ...SHIPPING_ADDRESS_SNAPSHOT_KEYS,
+  'sourceStatus',
+  'changedFields',
+].sort();
 
 /** Seed the nested to-one rows the double resolves for `stops.include.sale`.
  *  `tenantId` is overridable per row so a spec can build a foreign child. */
@@ -1069,6 +1080,9 @@ describe.each(READ_METHODS)(
         email: 'ada@example.com',
       });
       expect(stop.shippingAddress).toEqual(EXPECTED_ADDRESS);
+      expect(Object.keys(stop.shippingAddress ?? {}).sort()).toEqual(
+        SHARED_ADDRESS_KEYS,
+      );
     });
 
     it('Given a live source address edited after the sale, when the route is read, then the snapshot is kept and marked CHANGED with the differing keys', async () => {

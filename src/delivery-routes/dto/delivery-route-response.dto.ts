@@ -14,7 +14,7 @@
  * DTO carries the `timeline` field with an empty array placeholder so
  * the FE contract is stable across the WU2 → WU3 transition.
  */
-import type { ShippingAddressSourceStatus } from '../../sales/domain/shipping-address-source-status';
+import type { SaleShippingAddressDto } from '../../sales/dto/sale-shipping-address.dto';
 
 export type DeliveryRouteStatusDto =
   | 'DRAFT'
@@ -79,24 +79,8 @@ export interface DeliveryRouteCustomerDto {
   email: string | null;
 }
 
-export interface DeliveryRouteShippingAddressDto {
-  id: string | null;
-  street: string | null;
-  exteriorNumber: string | null;
-  interiorNumber: string | null;
-  zipCode: string | null;
-  neighborhood: string | null;
-  municipality: string | null;
-  city: string | null;
-  state: string | null;
-  label: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  /** Live source vs this snapshot; DELETED when the source is gone. */
-  sourceStatus: ShippingAddressSourceStatus;
-  /** Snapshot keys that differ from the source; `[]` unless CHANGED. */
-  changedFields: string[];
-}
+/** Same shape as `/sales` and eligible sales (one FE schema). */
+export type DeliveryRouteShippingAddressDto = SaleShippingAddressDto;
 
 export interface DeliveryRouteStopDto {
   id: string;

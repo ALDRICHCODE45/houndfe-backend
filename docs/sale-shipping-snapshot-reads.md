@@ -19,16 +19,40 @@ A sale without a snapshot (`shippingStreet` null) keeps `shippingAddress: null`,
 - **CHANGED**: at least one of the 13 keys differs under strict equality (`undefined` is treated as `null`; no trimming, no case folding; `latitude`/`longitude` compared exactly, with no tolerance).
 - **UNCHANGED**: all 13 keys are equal. A bumped `updatedAt` with identical values is UNCHANGED.
 - A **label-only** edit is **CHANGED** with `changedFields: ["label"]`. The backend reports it; the frontend decides to ignore it (the label is a nickname, not a delivery fact).
-- `changedFields` can name keys that a given endpoint's projection does not expose (for example `visualReferences` on route stops). The key still differs on the live source.
+
+**One shape everywhere.** Every endpoint below returns the same object (one FE schema; `SaleShippingAddressDto` in `src/sales/dto/sale-shipping-address.dto.ts`, `SaleShippingAddressView` in the domain), or `null`:
+
+```ts
+{
+  id: string | null;            // source customer-address id; null once deleted
+  street: string;
+  exteriorNumber: string | null;
+  interiorNumber: string | null;
+  zipCode: string | null;
+  neighborhood: string | null;
+  municipality: string | null;
+  city: string | null;
+  state: string | null;
+  visualReferences: string | null;
+  carrierPhone: string | null;
+  label: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  sourceStatus: 'UNCHANGED' | 'CHANGED' | 'DELETED';
+  changedFields: string[];
+}
+```
+
+The change is additive: route stops gained `visualReferences` and `carrierPhone`, and eligible sales gained those two plus `latitude` and `longitude`. No key was removed or renamed. Object key order follows the shape above (eligible sales previously listed `label` first; JSON consumers are unaffected).
 
 **Endpoints.**
 
 | Endpoint | Object |
 | --- | --- |
-| `GET /delivery-routes`, `GET /delivery-routes/:id`, and every response reusing the route projection (see the table below) | `stops[].shippingAddress` (existing fields + nullable `id`) + `sourceStatus`, `changedFields` |
-| `GET /delivery-routes/eligible-sales` | `data[].shippingAddress` (existing fields + nullable `id`) + `sourceStatus`, `changedFields` |
-| `GET /sales` | **New** `data[].shippingAddress`: `id` (nullable), all 13 snapshot keys, `sourceStatus`, `changedFields`; or `null` |
-| `GET /sales/:id`, `PATCH /sales/:id/due-date`, `PUT /sales/:id/seller` and `DELETE /sales/:id/seller` (when they return the confirmed detail) | **New** `shippingAddress`, same shape as `GET /sales` |
+| `GET /delivery-routes`, `GET /delivery-routes/:id`, and every response reusing the route projection (see the table below) | `stops[].shippingAddress` |
+| `GET /delivery-routes/eligible-sales` | `data[].shippingAddress` |
+| `GET /sales` | **New** `data[].shippingAddress` |
+| `GET /sales/:id`, `PATCH /sales/:id/due-date`, `PUT /sales/:id/seller` and `DELETE /sales/:id/seller` (when they return the confirmed detail) | **New** `shippingAddress` |
 
 **Loading.** The live address is a nested select (`sale.shippingAddress { tenantId, …13 keys }`) in the same query as the page or detail, so no extra query per row. The CLS tenant extension does not rewrite nested to-one relations and Prisma accepts no `where` on them, so the mapper compares `tenantId` itself (`resolveShippingAddressSource` in `src/sales/infrastructure/shipping-address-snapshot.mapper.ts`). The pure comparator is `compareShippingAddressSource` in `src/sales/domain/shipping-address-source-status.ts`.
 
@@ -48,11 +72,11 @@ No response keys were added or removed. Where an address object includes `id`, i
 | `PUT /sales/drafts/:id/shipping-address` | Same rule, including the null-address request body. |
 | `PUT /sales/drafts/:id/price-list` | Same enriched draft projection and rule. |
 | `PUT /sales/:id/seller` (DRAFT) | Returns the same enriched draft projection; same nullable `shippingAddress.id` rule. |
-| `GET /delivery-routes`, `GET /delivery-routes/:id` | Same `stops[].shippingAddress` fields and coordinates; address `id` is nullable. No snapshot means a null address. |
+| `GET /delivery-routes`, `GET /delivery-routes/:id` | `stops[].shippingAddress` fields and coordinates; address `id` is nullable. No snapshot means a null address. Since 01a1af7f the object uses the single shared shape (see *Source status*). |
 | `POST /delivery-routes`, `PATCH /delivery-routes/:id`, `POST /delivery-routes/:id/start`, `POST /delivery-routes/:id/cancel`, `POST /delivery-routes/:id/stops`, `POST /delivery-routes/:id/stops/:stopId/check-in` | Responses reuse the same route projection and nullable address id. |
 | `PUT /delivery-routes/:id/stops/reorder` | Same route projection and nullable address id. |
 | `POST /delivery-routes/:routeId/stops/:stopId/transfer` | Both returned route projections use the same snapshot/nullability rule. |
-| `GET /delivery-routes/eligible-sales` | Same `rows[].shippingAddress` structure; `id` is nullable. Snapshot-less rows remain visible with null address and `INELIGIBLE/MISSING_ADDRESS`. |
+| `GET /delivery-routes/eligible-sales` | `rows[].shippingAddress` structure (since 01a1af7f the single shared shape, see *Source status*); `id` is nullable. Snapshot-less rows remain visible with null address and `INELIGIBLE/MISSING_ADDRESS`. |
 | `GET /chatbot-api/customers/by-phone/:phone/orders` | Same `shippingAddress: { street, zipCode } \| null`; no id exposed. A snapshot survives deletion; a legacy row without one is null even if its live address exists. |
 
 The confirmed POS `GET /sales` and `GET /sales/:id` gained a `shippingAddress` snapshot object in 01a1af7f (see *Source status*). The receipt PDF props still do not expose a shipping address. `GET /sales/drafts` exposes the address reference only through the aggregate response, not an address object. Existing `shippingAddressId` scalar nullability is unchanged.

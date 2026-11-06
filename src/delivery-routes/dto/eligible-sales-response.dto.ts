@@ -28,7 +28,7 @@
  *   INELIGIBLE { reason: 'MISSING_ADDRESS' | 'DELIVERY_STATUS' } → explainable
  *       rejection; those rows are intentionally kept in the page.
  */
-import type { ShippingAddressSourceStatus } from '../../sales/domain/shipping-address-source-status';
+import type { SaleShippingAddressDto } from '../../sales/dto/sale-shipping-address.dto';
 
 export type EligibleSaleRouteStatusDto = 'DRAFT' | 'ACTIVE';
 
@@ -50,22 +50,8 @@ export type EligibleSaleAvailabilityDto =
       reason: 'MISSING_ADDRESS' | 'DELIVERY_STATUS';
     };
 
-export interface EligibleSaleShippingAddressDto {
-  id: string | null;
-  label: string | null;
-  street: string;
-  exteriorNumber: string | null;
-  interiorNumber: string | null;
-  neighborhood: string | null;
-  municipality: string | null;
-  city: string | null;
-  state: string | null;
-  zipCode: string | null;
-  /** Live source vs this snapshot; DELETED when the source is gone. */
-  sourceStatus: ShippingAddressSourceStatus;
-  /** Snapshot keys that differ from the source; `[]` unless CHANGED. */
-  changedFields: string[];
-}
+/** Same shape as `/sales` and route stops (one FE schema). */
+export type EligibleSaleShippingAddressDto = SaleShippingAddressDto;
 
 export interface EligibleSaleCustomerDto {
   id: string;

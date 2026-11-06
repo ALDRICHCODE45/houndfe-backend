@@ -17,17 +17,15 @@
  */
 import { Injectable } from '@nestjs/common';
 import {
-  hydrateShippingAddress,
   liveShippingAddressSourceSelect,
-  resolveShippingAddressSource,
   shippingAddressSnapshotSelect,
+  toSaleShippingAddressView,
   type LiveShippingAddressSourceRow,
   type SnapshotRow,
 } from '../../sales/infrastructure/shipping-address-snapshot.mapper';
 import type { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type {
-  EligibleSaleAddressProjection,
   EligibleSaleCustomerProjection,
   EligibleSaleOccupancyProjection,
   EligibleSaleRowProjection,
@@ -212,7 +210,7 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
       confirmedAt: row.confirmedAt,
       dueDate: row.dueDate,
       customer: this.mapCustomer(row.customer, tenantId),
-      shippingAddress: this.mapAddress(row, tenantId),
+      shippingAddress: toSaleShippingAddressView(row, tenantId),
       productNames: row.items.map((item) => item.productName),
       occupancy: this.resolveOccupancy(row.deliveryRouteStops, tenantId),
     };
@@ -227,27 +225,6 @@ export class PrismaEligibleSalesReader implements IEligibleSalesReader {
       id: customer.id,
       firstName: customer.firstName,
       lastName: customer.lastName,
-    };
-  }
-
-  private mapAddress(
-    row: EligibleSalesQueryRow,
-    tenantId: string,
-  ): EligibleSaleAddressProjection | null {
-    const address = hydrateShippingAddress(row);
-    if (!address) return null;
-    return {
-      id: row.shippingAddressId,
-      label: address.label,
-      street: address.street,
-      exteriorNumber: address.exteriorNumber,
-      interiorNumber: address.interiorNumber,
-      neighborhood: address.neighborhood,
-      municipality: address.municipality,
-      city: address.city,
-      state: address.state,
-      zipCode: address.zipCode,
-      ...resolveShippingAddressSource(address, row.shippingAddress, tenantId),
     };
   }
 

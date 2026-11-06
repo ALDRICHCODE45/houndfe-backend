@@ -9,6 +9,7 @@
  */
 import type { Prisma } from '@prisma/client';
 import { PrismaEligibleSalesReader } from './eligible-sales-prisma.reader';
+import { SHIPPING_ADDRESS_SNAPSHOT_KEYS } from '../../sales/domain/shipping-address-source-status';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 
 const makeHarness = () => {
@@ -316,16 +317,24 @@ describe('PrismaEligibleSalesReader — shipping address source status', () => {
     });
   });
 
-  it('is UNCHANGED when the live source equals the snapshot', async () => {
+  it('is UNCHANGED when the live source equals the snapshot, with the shared /sales shape', async () => {
     const { address } = await read(
       row('address-1', { tenantId: 't1', ...snapshot }),
     );
-    expect(address).toMatchObject({
+    expect(address).toEqual({
       id: 'address-1',
-      street: 'Main St',
+      ...snapshot,
       sourceStatus: 'UNCHANGED',
       changedFields: [],
     });
+    expect(Object.keys(address ?? {}).sort()).toEqual(
+      [
+        'id',
+        ...SHIPPING_ADDRESS_SNAPSHOT_KEYS,
+        'sourceStatus',
+        'changedFields',
+      ].sort(),
+    );
   });
 
   it('is CHANGED with ordered keys when the live source was edited', async () => {
