@@ -1,4 +1,4 @@
-# Test-DB isolation: never interfere with the dev DB on 5432.
+# Test-DB isolation: never interfere with the dev DB on host port 5434.
 #
 # Notes:
 #   - Same user/password as dev (admin/secreto) — keeps the connection
@@ -22,13 +22,13 @@ services:
       POSTGRES_PASSWORD: secreto
       POSTGRES_DB: nest-practice
     ports:
-      - '5432:5432'
+      - '5434:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
   # Dedicated test DB — see PR description.
-  # Port 5433 on host (NOT 5432 — that is the dev DB above and must
+  # Port 5433 on host (NOT 5434 — that is the dev DB above and must
   # remain untouched by the test run).
   postgres-test:
     image: postgres:17
