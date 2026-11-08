@@ -62,4 +62,17 @@ export interface SaleListResponseDto {
     totalSoldCents: number;
     outstandingDebtCents: number;
   };
+  /**
+   * Totals over EVERY row matching the same filters as `data` (base +
+   * extended, same tenant/permission scope), not just the page.
+   * `count === pagination.total`. `totalCents` sums `totalCents` (canceled
+   * sales included when the status filter includes them). `debtCents` sums
+   * the open debt: canceled sales count as 0. Zeroed (not null) when no
+   * rows match. Unlike `summary`, extended filters DO move these values.
+   */
+  filterSummary: {
+    count: number;
+    totalCents: number;
+    debtCents: number;
+  };
 }

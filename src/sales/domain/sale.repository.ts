@@ -434,7 +434,11 @@ export interface ISaleRepository {
     input: SalesListExtendedFilter & {
       page: number;
       limit: number;
-      sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
+      /**
+       * Ties break by `confirmedAt`, then `id`, in the same direction.
+       * `debtCents` sorts by the open debt (canceled sales count as 0).
+       */
+      sortBy: 'confirmedAt' | 'totalCents' | 'createdAt' | 'debtCents';
       sortOrder: 'asc' | 'desc';
     },
   ): Promise<
@@ -458,10 +462,18 @@ export interface ISaleRepository {
   >;
 
   /**
-   * GET /sales `pagination.total`: number of rows `findManyConfirmed` can
-   * return for the same filters (same WHERE, no paging/sorting).
+   * GET /sales `pagination.total` + `filterSummary`: one aggregate over the
+   * rows `findManyConfirmed` can return for the same filters (same WHERE, no
+   * paging/sorting). `count` is the row count, `totalCents` sums
+   * `totalCents` (canceled included when the filter includes them) and
+   * `debtCents` sums the open debt (canceled sales count as 0). The adapter
+   * MUST normalize null sums (empty match) to 0.
    */
-  countManyConfirmed(input: SalesListExtendedFilter): Promise<number>;
+  aggregateManyConfirmed(input: SalesListExtendedFilter): Promise<{
+    count: number;
+    totalCents: number;
+    debtCents: number;
+  }>;
 
   countConfirmed(input: SalesListBaseFilter): Promise<number>;
 
@@ -474,7 +486,7 @@ export interface ISaleRepository {
    *
    * Same base filters as `countConfirmed` (confirmed-only, customerId
    * honored, etc.) so `summary.salesCount === counts.all` holds by
-   * construction. `pagination.total` uses `countManyConfirmed` instead.
+   * construction. `pagination.total` uses `aggregateManyConfirmed` instead.
    *
    * The adapter MUST normalize Prisma's null sums (empty match) to 0
    * before returning so the wire shape is `number` (never null).

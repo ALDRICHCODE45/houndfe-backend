@@ -1555,10 +1555,11 @@ export class SalesService {
     // `aggregate` returns `salesCount` + `totalSoldCents` +
     // `outstandingDebtCents`, and `summary.salesCount` doubles as
     // `counts.all` so the KPI blocks stay in sync by construction.
-    // `pagination.total` is NOT a KPI: it counts with the exact filters
-    // that drove the page (`countManyConfirmed`), so `?status=CANCELED&
-    // folio=…` reports the matching rows instead of the base total.
-    const [data, total, summary, groupedPaymentStatus, notDelivered] =
+    // `pagination.total` and `filterSummary` are NOT KPIs: one aggregate
+    // with the exact filters that drove the page (`aggregateManyConfirmed`),
+    // so `?status=CANCELED&folio=…` reports the matching rows instead of
+    // the base total.
+    const [data, filterSummary, summary, groupedPaymentStatus, notDelivered] =
       await Promise.all([
         this.saleRepo.findManyConfirmed({
           page,
@@ -1567,12 +1568,13 @@ export class SalesService {
           sortOrder: query.sortOrder ?? 'desc',
           ...extendedFilters,
         }),
-        this.saleRepo.countManyConfirmed(extendedFilters),
+        this.saleRepo.aggregateManyConfirmed(extendedFilters),
         this.saleRepo.aggregateSummaryConfirmed(baseFilters),
         this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
         this.saleRepo.countNotDeliveredConfirmed(baseFilters),
       ]);
 
+    const total = filterSummary.count;
     const kpiTotal = summary.salesCount;
     const paidCount = groupedPaymentStatus
       .filter((item) => item.paymentStatus === 'PAID')
@@ -1592,6 +1594,11 @@ export class SalesService {
         salesCount: summary.salesCount,
         totalSoldCents: summary.totalSoldCents,
         outstandingDebtCents: summary.outstandingDebtCents,
+      },
+      filterSummary: {
+        count: filterSummary.count,
+        totalCents: filterSummary.totalCents,
+        debtCents: filterSummary.debtCents,
       },
     };
   }
