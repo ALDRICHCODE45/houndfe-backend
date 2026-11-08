@@ -26,6 +26,17 @@ describe('ListSalesQueryDto', () => {
     expect(dto.sortOrder).toBe('desc');
   });
 
+  it('accepts sortBy=debtCents and rejects unknown sort keys', async () => {
+    const debt = makeDto({ sortBy: 'debtCents', sortOrder: 'asc' });
+    const unknown = makeDto({ sortBy: 'openDebtCents' });
+
+    expect(await validate(debt)).toHaveLength(0);
+    expect(debt.sortBy).toBe('debtCents');
+    expect(debt.sortOrder).toBe('asc');
+    const errors = await validate(unknown);
+    expect(errors.map((error) => error.property)).toEqual(['sortBy']);
+  });
+
   it('accepts valid filters and coercions', async () => {
     const dto = plainToInstance(ListSalesQueryDto, {
       page: '2',
@@ -242,9 +253,7 @@ describe('ListSalesQueryDto', () => {
       const errors = await validate(dto);
 
       expect(errors).toHaveLength(0);
-      expect(dto.deliveryStatus).toEqual([
-        ListSalesDeliveryStatus.SHIPPED,
-      ]);
+      expect(dto.deliveryStatus).toEqual([ListSalesDeliveryStatus.SHIPPED]);
     });
 
     it('accepts deliveryStatus multi-value csv including SHIPPED (route picker case)', async () => {

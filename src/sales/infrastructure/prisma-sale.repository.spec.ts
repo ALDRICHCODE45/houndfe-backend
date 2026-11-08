@@ -450,12 +450,46 @@ describe('PrismaSaleRepository', () => {
               { folio: { contains: 'ana', mode: 'insensitive' } },
             ]),
           }),
-          orderBy: { confirmedAt: 'desc' },
+          orderBy: [{ confirmedAt: 'desc' }, { id: 'desc' }],
           skip: 10,
           take: 10,
         }),
       );
     });
+
+    it.each([
+      [
+        'totalCents',
+        'asc',
+        [{ totalCents: 'asc' }, { confirmedAt: 'asc' }, { id: 'asc' }],
+      ],
+      [
+        'createdAt',
+        'desc',
+        [{ createdAt: 'desc' }, { confirmedAt: 'desc' }, { id: 'desc' }],
+      ],
+      [
+        'debtCents',
+        'desc',
+        [{ openDebtCents: 'desc' }, { confirmedAt: 'desc' }, { id: 'desc' }],
+      ],
+    ])(
+      'orders by %s %s with a stable confirmedAt then id tiebreak',
+      async (sortBy, sortOrder, expectedOrderBy) => {
+        prisma.sale.findMany.mockResolvedValue([]);
+
+        await repo.findManyConfirmed({
+          page: 1,
+          limit: 20,
+          sortBy,
+          sortOrder,
+        } as any);
+
+        expect(prisma.sale.findMany.mock.calls.at(-1)?.[0]?.orderBy).toEqual(
+          expectedOrderBy,
+        );
+      },
+    );
 
     it('uses endsWith padded sequence when q is numeric', async () => {
       prisma.sale.findMany.mockResolvedValue([]);
@@ -957,10 +991,13 @@ describe('PrismaSaleRepository', () => {
   // `pagination.total` for GET /sales must count exactly the rows the
   // page query can return: same WHERE (tenant client, status override,
   // folio, ranges, base filters), no paging or sorting.
-  describe('countManyConfirmed', () => {
+  describe('aggregateManyConfirmed', () => {
     const pageAndCountWhere = async (input: Record<string, unknown>) => {
       prisma.sale.findMany.mockResolvedValue([]);
-      prisma.sale.count.mockResolvedValue(1);
+      prisma.sale.aggregate.mockResolvedValue({
+        _count: { _all: 1 },
+        _sum: { totalCents: 500, openDebtCents: 200 },
+      });
 
       await repo.findManyConfirmed({
         page: 3,
@@ -969,10 +1006,10 @@ describe('PrismaSaleRepository', () => {
         sortOrder: 'asc',
         ...input,
       } as any);
-      const total = await repo.countManyConfirmed(input as any);
+      const total = await repo.aggregateManyConfirmed(input as any);
 
       const findManyArgs = prisma.sale.findMany.mock.calls.at(-1)?.[0];
-      const countArgs = prisma.sale.count.mock.calls.at(-1)?.[0];
+      const countArgs = prisma.sale.aggregate.mock.calls.at(-1)?.[0];
       return { total, findManyArgs, countArgs };
     };
 
@@ -1013,8 +1050,23 @@ describe('PrismaSaleRepository', () => {
     ])('uses the page WHERE for %s', async (_label, input) => {
       const { total, findManyArgs, countArgs } = await pageAndCountWhere(input);
 
-      expect(total).toBe(1);
-      expect(countArgs).toEqual({ where: findManyArgs.where });
+      expect(total).toEqual({ count: 1, totalCents: 500, debtCents: 200 });
+      expect(countArgs).toEqual({
+        where: findManyArgs.where,
+        _count: { _all: true },
+        _sum: { totalCents: true, openDebtCents: true },
+      });
+    });
+
+    it('normalizes null sums to zero when no rows match', async () => {
+      prisma.sale.aggregate.mockResolvedValue({
+        _count: { _all: 0 },
+        _sum: { totalCents: null, openDebtCents: null },
+      });
+
+      const result = await repo.aggregateManyConfirmed({} as any);
+
+      expect(result).toEqual({ count: 0, totalCents: 0, debtCents: 0 });
     });
 
     it('honors an explicit CANCELED status instead of the CONFIRMED default', async () => {
@@ -1041,10 +1093,13 @@ describe('PrismaSaleRepository', () => {
     });
 
     it('reads through the tenant-scoped client', async () => {
-      prisma.sale.count.mockResolvedValue(0);
+      prisma.sale.aggregate.mockResolvedValue({
+        _count: { _all: 0 },
+        _sum: { totalCents: null, openDebtCents: null },
+      });
       tenantPrisma.getClient.mockClear();
 
-      await repo.countManyConfirmed({ status: ['CANCELED'] } as any);
+      await repo.aggregateManyConfirmed({ status: ['CANCELED'] } as any);
 
       expect(tenantPrisma.getClient).toHaveBeenCalled();
     });

@@ -18,7 +18,7 @@ Se implementó y quedó bloqueado el nuevo contrato de filtros para `GET /sales`
 |---|---|---|---|---|---|
 | `page` | int | entero `>= 1` | — | `1` | Página a solicitar. |
 | `limit` | int | entero `>= 1` | `100` máx | `20` | Tamaño de página. |
-| `sortBy` | enum | `confirmedAt` \| `totalCents` \| `createdAt` | — | `confirmedAt` | Campo de ordenamiento. |
+| `sortBy` | enum | `confirmedAt` \| `totalCents` \| `createdAt` \| `debtCents` | — | `confirmedAt` | Campo de ordenamiento. `debtCents` ordena por la deuda **abierta**: una venta cancelada cuenta como `0` aunque conserve `debtCents` guardado. Desempate estable en el mismo sentido: `confirmedAt` y luego `id` (con `sortBy=confirmedAt`, solo `id`). Otro valor → `400`. |
 | `sortOrder` | enum | `asc` \| `desc` | — | `desc` | Dirección de ordenamiento. |
 | `q` | string | texto libre | — | — | Búsqueda libre (se mantiene). |
 | `folio` | CSV string | `folio1,folio2,...` | `200` valores | — | Lista de folios exactos (match por `IN`). |
@@ -180,9 +180,28 @@ El shape **no cambia** respecto al endpoint ya existente.
     "all": 3,
     "pendingPayments": 1,
     "notDelivered": 1
+  },
+  "filterSummary": {
+    "count": 1,
+    "totalCents": 4500,
+    "debtCents": 0
   }
 }
 ```
+
+(La respuesta también incluye el bloque `summary`, documentado en `docs/customer-sales-history-frontend.md`; no cambia.)
+
+### `filterSummary` (desde 2026-11-08)
+
+Totales sobre **todas** las filas que cumplen los filtros actuales (base + extendidos, mismo tenant y mismo alcance de permisos que `data`), no solo la página:
+
+| Campo | Significado |
+| --- | --- |
+| `count` | Filas que cumplen los filtros. Siempre `=== pagination.total`. |
+| `totalCents` | Suma de `totalCents`. Incluye canceladas cuando el filtro `status` las incluye. |
+| `debtCents` | Suma de la deuda abierta. Las canceladas cuentan como `0`. |
+
+Sin coincidencias devuelve ceros (nunca `null`). A diferencia de `counts` y `summary`, los filtros extendidos **sí** mueven `filterSummary`.
 
 ## 7. Comportamiento de los KPIs (CRÍTICO)
 

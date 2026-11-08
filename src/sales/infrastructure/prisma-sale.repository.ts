@@ -1799,13 +1799,26 @@ export class PrismaSaleRepository implements ISaleRepository {
     input: SalesListExtendedFilter & {
       page: number;
       limit: number;
-      sortBy: 'confirmedAt' | 'totalCents' | 'createdAt';
+      sortBy: 'confirmedAt' | 'totalCents' | 'createdAt' | 'debtCents';
       sortOrder: 'asc' | 'desc';
     },
   ) {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
     const where = this.buildExtendedWhere(input);
+    // Stable order: the sort column, then confirmedAt, then id, all in the
+    // requested direction. `debtCents` sorts by the generated open debt so
+    // canceled sales with a kept stored debt sort as 0.
+    const order = input.sortOrder;
+    const orderBy: Prisma.SaleOrderByWithRelationInput[] = [
+      { confirmedAt: order },
+      { id: order },
+    ];
+    if (input.sortBy === 'debtCents') {
+      orderBy.unshift({ openDebtCents: order });
+    } else if (input.sortBy !== 'confirmedAt') {
+      orderBy.unshift({ [input.sortBy]: order });
+    }
 
     const rows = await prisma.sale.findMany({
       where,
@@ -1817,7 +1830,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         // Live source address, same query, only for `sourceStatus`.
         ...liveShippingAddressSourceSelect,
       },
-      orderBy: { [input.sortBy]: input.sortOrder },
+      orderBy,
       skip: (input.page - 1) * input.limit,
       take: input.limit,
     });
@@ -1848,14 +1861,30 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   /**
-   * GET /sales `pagination.total` — counts with the exact WHERE that
-   * `findManyConfirmed` pages over (`buildExtendedWhere`: base filters,
-   * explicit status override, folio, ranges, payment method), through the
-   * same tenant-scoped client, so the total cannot drift from the rows.
+   * GET /sales `pagination.total` + `filterSummary` — one aggregate with the
+   * exact WHERE that `findManyConfirmed` pages over (`buildExtendedWhere`:
+   * base filters, explicit status override, folio, ranges, payment method),
+   * through the same tenant-scoped client, so the totals cannot drift from
+   * the rows. Debt sums `openDebtCents` (canceled sales count as 0).
    */
-  async countManyConfirmed(input: SalesListExtendedFilter): Promise<number> {
+  async aggregateManyConfirmed(input: SalesListExtendedFilter): Promise<{
+    count: number;
+    totalCents: number;
+    debtCents: number;
+  }> {
     const prisma = this.tenantPrisma.getClient();
-    return prisma.sale.count({ where: this.buildExtendedWhere(input) });
+    const result = await prisma.sale.aggregate({
+      where: this.buildExtendedWhere(input),
+      _count: { _all: true },
+      _sum: { totalCents: true, openDebtCents: true },
+    });
+
+    return {
+      count: result._count._all,
+      // Prisma sends `null`, not `0`, when zero rows match.
+      totalCents: result._sum.totalCents ?? 0,
+      debtCents: result._sum.openDebtCents ?? 0,
+    };
   }
 
   async countConfirmed(input: SalesListBaseFilter): Promise<number> {
@@ -1875,7 +1904,7 @@ export class PrismaSaleRepository implements ISaleRepository {
    * are intentionally NOT included so `summary.salesCount === counts.all`
    * keeps the KPI-count semantics (see the "ignores extended filters for
    * KPI count methods" regression guard). `pagination.total` is NOT this
-   * value: it comes from `countManyConfirmed` over the page filters.
+   * value: it comes from `aggregateManyConfirmed` over the page filters.
    *
    * Null normalization: Prisma returns `_sum: { totalCents: null,
    * debtCents: null }` (NOT zero) when zero rows match the WHERE.

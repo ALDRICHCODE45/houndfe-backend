@@ -4,10 +4,12 @@
  * `GET /sales?status=CANCELED&folio=…` once reported `pagination.total: 62`
  * for a single matching row because the total came from the base-filter
  * KPI count. This spec pins, against the real `nest-practice-test`
- * database (port 5433 — NEVER the dev DB), that `countManyConfirmed`
+ * database (port 5433 — NEVER the dev DB), that `aggregateManyConfirmed`
  * counts exactly the rows `findManyConfirmed` can return for several
  * filter combinations, and that a second tenant's sales never leak into
- * either query.
+ * either query. It also proves the generated `openDebtCents` column:
+ * `sortBy=debtCents` and `filterSummary.debtCents` treat canceled sales as
+ * zero debt, and every sort breaks ties by confirmedAt, then id.
  *
  * Mirrors the `prisma-sale.repository.refunds.integration.spec.ts` setup:
  * shared Prisma client + CLS shim + `resetAndSeedBaseline()` in
@@ -26,6 +28,7 @@ import {
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import { ListSalesStatus } from '../dto/list-sales-query.dto';
 import type { SalesListExtendedFilter } from '../dto/sales-list-filter.types';
 import { PrismaSaleRepository } from './prisma-sale.repository';
 
@@ -34,6 +37,7 @@ const SKIP_INTEGRATION =
 const describeIfDb = SKIP_INTEGRATION ? describe.skip : describe;
 
 type SeedSale = {
+  id?: string;
   folio: string;
   status: 'CONFIRMED' | 'CANCELED';
   paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT';
@@ -135,7 +139,7 @@ describeIfDb(
     ): Promise<void> {
       await prisma.sale.createMany({
         data: sales.map((sale) => ({
-          id: randomUUID(),
+          id: sale.id ?? randomUUID(),
           userId,
           tenantId: targetTenantId,
           channel: 'POS' as const,
@@ -165,8 +169,23 @@ describeIfDb(
         sortBy: 'confirmedAt',
         sortOrder: 'asc',
       });
-      const total = await repo.countManyConfirmed(filter);
+      const { count: total } = await repo.aggregateManyConfirmed(filter);
       return { folios: rows.map((row) => row.folio), total };
+    }
+
+    async function sortedFolios(
+      filter: SalesListExtendedFilter,
+      sortBy: 'confirmedAt' | 'totalCents' | 'createdAt' | 'debtCents',
+      sortOrder: 'asc' | 'desc',
+    ): Promise<Array<string | null>> {
+      const rows = await repo.findManyConfirmed({
+        ...filter,
+        page: 1,
+        limit: 100,
+        sortBy,
+        sortOrder,
+      });
+      return rows.map((row) => row.folio);
     }
 
     it.each<[string, SalesListExtendedFilter, string[]]>([
@@ -230,6 +249,99 @@ describeIfDb(
 
       expect(total).toBe(1);
       expect(kpi.salesCount).toBe(6);
+    });
+
+    describe('debt sort and filter summary (generated openDebtCents)', () => {
+      const ALL_STATUSES: SalesListExtendedFilter = {
+        status: [ListSalesStatus.CONFIRMED, ListSalesStatus.CANCELED],
+      };
+
+      it('sorts by open debt desc, canceled as 0, ties by confirmedAt desc', async () => {
+        const userId = await seedCashier();
+        await seedSales(tenantId, userId, OWN_SALES);
+        const foreignTenantId = await seedForeignTenant();
+        await seedSales(foreignTenantId, userId, OWN_SALES);
+
+        const folios = await sortedFolios(ALL_STATUSES, 'debtCents', 'desc');
+
+        // V-0008 is canceled with stored debt 7000: it sorts as 0 debt.
+        expect(folios).toEqual([
+          'V-0004',
+          'V-0003',
+          'V-0006',
+          'V-0005',
+          'V-0008',
+          'V-0007',
+          'V-0002',
+          'V-0001',
+        ]);
+      });
+
+      it('aggregates the whole filter: count, totalCents and open debt', async () => {
+        const userId = await seedCashier();
+        await seedSales(tenantId, userId, OWN_SALES);
+        const foreignTenantId = await seedForeignTenant();
+        await seedSales(foreignTenantId, userId, OWN_SALES);
+
+        const summary = await repo.aggregateManyConfirmed(ALL_STATUSES);
+        const stored = await prisma.sale.findFirst({
+          where: { tenantId, folio: 'V-0008' },
+          select: { debtCents: true, openDebtCents: true },
+        });
+
+        expect(summary).toEqual({
+          count: 8,
+          totalCents: 40500,
+          debtCents: 7500,
+        });
+        expect(stored).toEqual({ debtCents: 7000, openDebtCents: 0 });
+      });
+
+      it('returns zeroed sums when no row matches', async () => {
+        const summary = await repo.aggregateManyConfirmed({
+          folio: ['V-9999'],
+        });
+
+        expect(summary).toEqual({ count: 0, totalCents: 0, debtCents: 0 });
+      });
+
+      it.each(['asc', 'desc'] as const)(
+        'breaks identical confirmedAt + totalCents ties by id %s',
+        async (sortOrder) => {
+          const userId = await seedCashier();
+          const confirmedAt = new Date('2026-07-01T12:00:00.000Z');
+          const twin = {
+            status: 'CONFIRMED' as const,
+            paymentStatus: 'PAID' as const,
+            deliveryStatus: 'DELIVERED' as const,
+            totalCents: 5000,
+            debtCents: 0,
+            confirmedAt,
+          };
+          await seedSales(tenantId, userId, [
+            {
+              ...twin,
+              id: 'ffffffff-0000-4000-8000-000000000001',
+              folio: 'T-HIGH',
+            },
+            {
+              ...twin,
+              id: '00000000-0000-4000-8000-000000000001',
+              folio: 'T-LOW',
+            },
+          ]);
+          const expected =
+            sortOrder === 'asc' ? ['T-LOW', 'T-HIGH'] : ['T-HIGH', 'T-LOW'];
+
+          for (const sortBy of [
+            'confirmedAt',
+            'totalCents',
+            'debtCents',
+          ] as const) {
+            expect(await sortedFolios({}, sortBy, sortOrder)).toEqual(expected);
+          }
+        },
+      );
     });
   },
 );

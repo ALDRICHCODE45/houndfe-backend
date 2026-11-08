@@ -82,7 +82,11 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     persistCollectedPayments: jest.fn(),
     updatePaymentReference: jest.fn(),
     findManyConfirmed: jest.fn(),
-    countManyConfirmed: jest.fn(),
+    aggregateManyConfirmed: jest.fn().mockResolvedValue({
+      count: 0,
+      totalCents: 0,
+      debtCents: 0,
+    }),
     countConfirmed: jest.fn(),
     aggregateSummaryConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
@@ -7116,7 +7120,11 @@ describe('SalesService', () => {
         { paymentStatus: 'CREDIT', _count: { _all: 1 } },
       ] as any);
       saleRepo.countNotDeliveredConfirmed.mockResolvedValue(3);
-      saleRepo.countManyConfirmed.mockResolvedValue(4);
+      saleRepo.aggregateManyConfirmed.mockResolvedValue({
+        count: 4,
+        totalCents: 0,
+        debtCents: 0,
+      });
 
       const result = await service.listSales({
         page: 2,
@@ -7212,7 +7220,11 @@ describe('SalesService', () => {
     it('returns summary block with salesCount matching counts.all and pagination.total', async () => {
       saleRepo.findManyConfirmed.mockResolvedValue([] as any);
       // No extended filters: the filtered set IS the base set.
-      saleRepo.countManyConfirmed.mockResolvedValue(7);
+      saleRepo.aggregateManyConfirmed.mockResolvedValue({
+        count: 7,
+        totalCents: 0,
+        debtCents: 0,
+      });
       saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
         salesCount: 7,
         totalSoldCents: 12345,
@@ -7284,7 +7296,11 @@ describe('SalesService', () => {
       });
       saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([] as any);
       saleRepo.countNotDeliveredConfirmed.mockResolvedValue(0);
-      saleRepo.countManyConfirmed.mockResolvedValue(0);
+      saleRepo.aggregateManyConfirmed.mockResolvedValue({
+        count: 0,
+        totalCents: 0,
+        debtCents: 0,
+      });
 
       const result = await service.listSales({
         customerId: ['00000000-0000-4000-8000-000000000000'],
@@ -7350,7 +7366,11 @@ describe('SalesService', () => {
       ])(
         'counts the page filter set for %s',
         async (_label, filters, filteredCount) => {
-          saleRepo.countManyConfirmed.mockResolvedValue(filteredCount);
+          saleRepo.aggregateManyConfirmed.mockResolvedValue({
+            count: filteredCount,
+            totalCents: 0,
+            debtCents: 0,
+          });
 
           const result = await service.listSales({
             page: 1,
@@ -7367,8 +7387,10 @@ describe('SalesService', () => {
           for (const key of ['page', 'limit', 'sortBy', 'sortOrder']) {
             delete pageFilters[key];
           }
-          expect(saleRepo.countManyConfirmed).toHaveBeenCalledTimes(1);
-          expect(saleRepo.countManyConfirmed).toHaveBeenCalledWith(pageFilters);
+          expect(saleRepo.aggregateManyConfirmed).toHaveBeenCalledTimes(1);
+          expect(saleRepo.aggregateManyConfirmed).toHaveBeenCalledWith(
+            pageFilters,
+          );
 
           expect(result.pagination).toEqual({
             page: 1,
@@ -7387,7 +7409,11 @@ describe('SalesService', () => {
       );
 
       it('derives totalPages from the filtered count', async () => {
-        saleRepo.countManyConfirmed.mockResolvedValue(41);
+        saleRepo.aggregateManyConfirmed.mockResolvedValue({
+          count: 41,
+          totalCents: 0,
+          debtCents: 0,
+        });
 
         const result = await service.listSales({
           limit: 20,
@@ -7401,6 +7427,31 @@ describe('SalesService', () => {
           totalPages: 3,
         });
         expect(result.counts.all).toBe(62);
+      });
+
+      it('returns filterSummary from the page-filter aggregate, apart from summary', async () => {
+        saleRepo.aggregateManyConfirmed.mockResolvedValue({
+          count: 9,
+          totalCents: 48235,
+          debtCents: 9123,
+        });
+
+        const result = await service.listSales({
+          paymentStatus: 'PARTIAL',
+          sortBy: 'debtCents',
+          sortOrder: 'desc',
+        } as any);
+
+        expect(result.filterSummary).toEqual({
+          count: 9,
+          totalCents: 48235,
+          debtCents: 9123,
+        });
+        expect(result.filterSummary.count).toBe(result.pagination.total);
+        expect(result.summary).toEqual(KPI_SUMMARY);
+        expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
+          expect.objectContaining({ sortBy: 'debtCents', sortOrder: 'desc' }),
+        );
       });
     });
   });

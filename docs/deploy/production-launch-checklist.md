@@ -15,6 +15,7 @@ El contenedor corre `npx prisma migrate deploy` solo al arrancar (`docker-entryp
    - después corré los post-checks y dá los permisos nuevos (sección «Permissions» del runbook).
 3. **Teléfonos de clientes (`20261018000100_normalize_customer_phone_digits`).** Deja los teléfonos solo con dígitos y no une duplicados. Antes corré el reporte de duplicados que trae el comentario de la migración.
 4. Las demás migraciones nuevas (editorial, proveedores, compras, zonas, envíos, comprobantes) son aditivas o agregan valores a enums en migraciones separadas. No necesitan nada a mano.
+5. **Deuda abierta de ventas (`20261108090000_sales_open_debt_cents`).** Agrega a `sales` una columna generada; al aplicarse, Postgres reescribe toda la tabla y la bloquea (ni lecturas ni escrituras) hasta terminar. Con pocas ventas es instantáneo; mirá «Para tener siempre en mente».
 
 Después del deploy: **resincronizá Inngest Cloud** con `https://api.houndfe.com/api/inngest`, así registra las funciones nuevas (correos de validación de zona y de comprobantes, purga de comprobantes).
 
@@ -114,6 +115,13 @@ PUT /notification-config
 - **Reemplaza todo:** si ya tenías otras acciones activadas, incluilas en `enabledActions` o se apagan. Mirá antes con `GET /notification-config`.
 - Los destinatarios tienen que ser usuarios de esa sucursal. Además, solo reciben el correo de zonas los que tienen `validate:DeliveryZone`, `manage:DeliveryZone` o `manage:all`; el de comprobantes, los que tienen `update:ReceiptEvidence` (o manage).
 - Para que el correo salga hacen falta `RESEND_API_KEY`, `MAIL_FROM`, `APP_WEB_URL`, las claves de Inngest y Inngest Cloud resincronizado (sección 1).
+
+## Para tener siempre en mente
+
+No son pasos de este lanzamiento: valen para cada deploy y cada migración futura.
+
+- **Columnas generadas y tablas grandes.** El contenedor aplica las migraciones al arrancar y la app no responde hasta que terminan. Una migración que agrega una columna generada (`GENERATED ALWAYS … STORED`, como `sales.openDebtCents`) o que reescribe una tabla la bloquea por completo mientras dura. Hoy `sales` es chica y no se nota; cuando tenga muchas filas, hacé ese deploy en una ventana de mantenimiento (chatbot apagado, sin usar el POS) y con backup.
+- **Prisma no maneja columnas generadas.** `sales.openDebtCents` está en `schema.prisma` como `@default(dbgenerated(…))` y nunca se escribe desde el código (Postgres rechaza cualquier escritura). Si un `prisma migrate dev` genera un `ALTER COLUMN "openDebtCents" SET DEFAULT …` o algo parecido sobre esa columna, borrá esa línea de la migración antes de commitearla. Y nunca copies una venta completa (`...sale`) dentro de un `create`/`update`.
 
 ## Prueba rápida después del deploy
 

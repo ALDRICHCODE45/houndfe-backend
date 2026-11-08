@@ -22,6 +22,8 @@ export enum ListSalesSortBy {
   confirmedAt = 'confirmedAt',
   totalCents = 'totalCents',
   createdAt = 'createdAt',
+  /** Open debt: canceled sales sort as 0 (`Sale.openDebtCents`). */
+  debtCents = 'debtCents',
 }
 
 export enum ListSalesSortOrder {
