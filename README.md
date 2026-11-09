@@ -113,7 +113,7 @@ Sucursal Sur has a single member (the super admin). The showcase adds demo permi
 
 ### Repairing legacy editorial documents
 
-Four Sucursal Centro products have editorial documents saved before editorial V2: «Collar ajustable Ruffwear Front Range», «Correa de nylon reforzada Kong 1.8 m», «Correa retráctil Flexi New Classic» and «Croqueta Diamond Naturals Cordero y Arroz 13.6 kg». The editor cannot open them (`409 EDITORIAL_STATE_UNREADABLE`). These rows exist only in the dev database. They came from the old dev catalog seed on the unmerged `chore/dev-catalog-seed` branch. No script on `main` writes editorial state.
+Four Sucursal Centro products have editorial documents saved before editorial V2: «Collar ajustable Ruffwear Front Range», «Correa de nylon reforzada Kong 1.8 m», «Correa retráctil Flexi New Classic» and «Croqueta Diamond Naturals Cordero y Arroz 13.6 kg». The editor cannot open them (`409 EDITORIAL_STATE_UNREADABLE`). These rows exist only in the dev database. They were written by an earlier local dev experiment that was never committed. No script on `main` writes editorial state.
 
 ```bash
 pnpm build                                          # the repair uses the API's V2 decoder from dist/

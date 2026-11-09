@@ -1,7 +1,7 @@
 // Dev showcase › editorial repair (S5). Four Sucursal Centro products carry
 // editorial documents saved before editorial V2; the editor cannot open them
-// (409 EDITORIAL_STATE_UNREADABLE). They came from the old, unmerged
-// chore/dev-catalog-seed branch and exist only in the dev database.
+// (409 EDITORIAL_STATE_UNREADABLE). They were written by an earlier, never
+// committed local experiment and exist only in the dev database.
 //
 // Dry run by default (counts only). `--apply` clears just the slots that do not
 // decode as V2, with the API's own decoder from dist/ (run `pnpm build` first).
