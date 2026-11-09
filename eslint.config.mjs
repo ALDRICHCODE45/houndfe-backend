@@ -35,7 +35,7 @@ export default tseslint.config(
   {
     // Standalone supplier/PO runtime scripts are outside the TypeScript project.
     ...tseslint.configs.disableTypeChecked,
-    files: ['scripts/supplier-runtime/*.cjs', 'scripts/po-runtime/*.cjs', 'scripts/inventory-runtime/*.cjs', 'scripts/dev-showcase/*.cjs', 'scripts/editorial-publish-runtime/*.cjs'],
+    files: ['scripts/supplier-runtime/*.cjs', 'scripts/po-runtime/*.cjs', 'scripts/inventory-runtime/*.cjs', 'scripts/dev-showcase/*.cjs', 'scripts/editorial-publish-runtime/*.cjs', 'scripts/ops/*.cjs', 'scripts/ops/showcase-catalog/**/*.cjs'],
     languageOptions: {
       ...tseslint.configs.disableTypeChecked.languageOptions,
       globals: {
