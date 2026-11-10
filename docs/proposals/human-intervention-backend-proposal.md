@@ -903,3 +903,12 @@ Respuestas del coordinador del chatbot, basadas en su código. Ninguna parte imp
 | "Cerca del cierre" = 60 min configurables | Aceptado. | Sin cambios. |
 
 No quedan preguntas técnicas abiertas entre chatbot y backend. Falta solo la confirmación final de conciliación del chatbot.
+
+### 11.2 Conciliación confirmada por el chatbot (2026-11-10)
+
+El chatbot confirmó que §3.9, §4, §10, §10.1, §11 y §11.1 encajan con su lado. La unidad 0 queda cerrada y se puede abrir la implementación. Aclaraciones respondidas:
+
+1. **`409 CUSTOMER_OPEN_LIMIT`:** el tope es de 20 solicitudes abiertas por cliente **en total**, sumando todos los subtipos (§6.4). La respuesta trae `{limit, open}` para que el bot arme el texto.
+2. **Alcance del espejo:** se espeja todo el tráfico en las dos direcciones desde el corte, también los turnos en modo bot. `messages:batch` acepta los salientes del bot como `direction: OUT` + `author: BOT` (no hay un valor `OUTBOUND_BOT`). El lote **no lleva `epoch`**: la época solo viaja en `session-ack` y en los eventos del feed.
+3. **Scopes nuevos de la credencial de producción:** `requests:create`, `requests:read`, `requests:cancel`, `feed:read`, `feed:ack`, `conversation:write` y `media:write`, además de los que ya tiene. Van en el handoff de despliegue.
+4. **Detalle de payloads:** §3.2 a §3.5 son finales en v1. Se mandan ahora y se repiten en el handoff cuando empiece la unidad 5.
