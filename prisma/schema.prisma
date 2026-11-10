@@ -523,6 +523,11 @@ model Tenant {
   cashClosings  CashClosing[]
   cashCommands  CashCommand[]
 
+  // human-intervention / unit 2 — common chatbot request inbox.
+  chatbotRequests             ChatbotRequest[]
+  chatbotCustomerGroups       ChatbotCustomerGroup[]
+  chatbotRequestFolioCounter  ChatbotRequestFolioCounter?
+
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
 }
@@ -1757,6 +1762,7 @@ model ReceiptEvidence {
   sale        Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   confirmedBy User?  @relation("ReceiptReviewer", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
+  chatbotRequest ChatbotRequest?
 
   @@unique([tenantId, saleId, idempotencyKey])
   @@index([tenantId, saleId])
@@ -2045,6 +2051,7 @@ model Customer {
 
   addresses          CustomerAddress[]
   promotionCustomers PromotionCustomer[]
+  chatbotRequests    ChatbotRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3115,6 +3122,8 @@ model HumanDecision {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  chatbotRequest ChatbotRequest?
+
   @@unique([tenantId, source, sourceRequestId])
   @@unique([tenantId, source, supersedesDecisionId])
   @@index([tenantId, status, createdAt, id])
@@ -3486,6 +3495,7 @@ model DeliveryZoneRequest {
 
   tenant     Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   validation DeliveryZoneValidation? @relation(fields: [validationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  chatbotRequest ChatbotRequest?
 
   @@unique([tenantId, source, sourceRequestId])
   @@index([validationId, status])
@@ -3628,4 +3638,219 @@ model TenantOpeningHours {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_opening_hours")
+}
+
+// ============================================================================
+// CHATBOT REQUEST INBOX (human-intervention / unit 2 — contract §2, §6.2, §10.1)
+// ============================================================================
+// One row per human request coming from the bot. It owns *how* a request is
+// handled (inbox status, assignee, deadlines, audit); wrapped legacy tables
+// (`human_decisions`, `delivery_zone_requests`, `receipt_evidences`) stay the
+// source of truth of *what* was decided. Staff commands are a CAS on
+// `version` (R4: never the wrapped row's version). State consistency, the
+// subtype -> wrapped-link mapping, and the partial indexes (open-only sweep,
+// counters, open dedup) are migration-authoritative CHECKs/indexes because
+// Prisma's DSL cannot express them. Actor columns are copied names, not user
+// FKs, so the audit survives user deletion (§6.2). See
+// docs/chatbot-requests-model.md.
+
+enum ChatbotRequestKind {
+  DECISION
+  CLARIFICATION
+  CONVERSATION
+}
+
+enum ChatbotRequestSubtype {
+  RESTOCK
+  EXPIRATION
+  DELIVERY_ZONE
+  TRANSFER_RECEIPT
+  TALK_TO_HUMAN
+  COMPLAINT
+  UNKNOWN_QUESTION
+  DISCOUNT
+}
+
+enum ChatbotRequestStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+  CANCELLED
+}
+
+enum ChatbotRequestCancelReason {
+  CUSTOMER_WITHDREW
+  SUPERSEDED
+  AUTO_RESOLVED
+  STAFF
+}
+
+enum ChatbotRequestStaffCancelReason {
+  DUPLICATE
+  NOT_ACTIONABLE
+  CUSTOMER_UNREACHABLE
+  OTHER
+}
+
+enum ChatbotRequestEventType {
+  CREATED
+  MERGED
+  CLAIMED
+  RELEASED
+  AUTO_RELEASED
+  REASSIGNED
+  RESOLVED
+  REPLIED
+  TEMPLATE_SENT
+  FINISHED
+  CANCELLED
+  RESCHEDULED
+  CUSTOMER_LINKED
+  SLA_MILESTONE
+  DELIVERY_OUTCOME
+}
+
+enum ChatbotRequestActorKind {
+  USER
+  SERVICE
+  SYSTEM
+}
+
+model ChatbotRequest {
+  id       String @id @default(uuid())
+  tenantId String
+  // Per-tenant counter (`chatbot_request_folio_counters`), shown as S-000123.
+  folio    Int
+  version  Int    @default(1)
+
+  kind    ChatbotRequestKind
+  subtype ChatbotRequestSubtype
+  status  ChatbotRequestStatus @default(NEW)
+
+  // Customer: `customerKey` is the canonical E.164 grouping key (R1), or
+  // "unknown:<id>" for legacy rows without a customer. `ambiguousCustomer`
+  // marks a key that matched more than one Customer (customerId stays NULL).
+  customerId        String?
+  phoneCountryCode  String?
+  phone             String?
+  customerKey       String
+  ambiguousCustomer Boolean @default(false)
+  conversationRef   String?
+
+  assigneeUserId      String?
+  assigneeDisplayName String?
+  claimedAt           DateTime?
+
+  // Absolute, recomputable instants (§5.4). `nextSlaCheckAt` drives the sweep
+  // and is NULL once the request is closed.
+  claimDeadlineAt   DateTime?
+  resolveDeadlineAt DateTime?
+  overdueAt         DateTime?
+  slaPolicyVersion  Int?
+  nextSlaCheckAt    DateTime?
+
+  // `whatsappWindowClosesAt` = `lastCustomerMessageAt` + 24 h (CHECK).
+  lastCustomerMessageAt   DateTime?
+  whatsappWindowClosesAt  DateTime?
+  scheduledFor            DateTime?
+  requiresTemplateAtStart Boolean   @default(false)
+  needsReschedule         Boolean   @default(false)
+
+  // Bot-written, untrusted plain text (§6.1).
+  summary  String  @db.VarChar(140)
+  needs    String? @db.VarChar(1000)
+  context  Json?
+  dedupKey String?
+
+  // Exactly the link its subtype requires (CHECK `wrapped_link`).
+  humanDecisionId       String? @unique
+  deliveryZoneRequestId String? @unique
+  receiptEvidenceId     String? @unique
+
+  resolution            Json?
+  resolvedAt            DateTime?
+  resolvedByActorId     String?
+  resolvedByDisplayName String?
+  cancelledAt           DateTime?
+  cancelReason          ChatbotRequestCancelReason?
+  staffCancelReason     ChatbotRequestStaffCancelReason?
+  // `resolvedAt` or `cancelledAt` (CHECK), for the history list.
+  closedAt              DateTime?
+
+  // Idempotent intake (same pattern as human_decisions). Wrapper/backfill rows
+  // have no credential or bot hash.
+  source                String
+  sourceRequestId       String
+  canonicalRequestHash  String?
+  submittedCredentialId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  customer            Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  // NO ACTION: deleting a wrapped row alone must not erase the request and
+  // its audit, while a tenant cascade still removes both in one statement.
+  humanDecision       HumanDecision?       @relation(fields: [humanDecisionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  deliveryZoneRequest DeliveryZoneRequest? @relation(fields: [deliveryZoneRequestId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  receiptEvidence     ReceiptEvidence?     @relation(fields: [receiptEvidenceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  events              ChatbotRequestEvent[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, folio])
+  @@unique([tenantId, source, sourceRequestId])
+  @@index([tenantId, customerKey, status])
+  @@index([customerId])
+  @@map("chatbot_requests")
+}
+
+// Append-only audit (§6.2): no `updatedAt`. No trigger precedent exists in the
+// migrations, so immutability is enforced by the repository (insert-only).
+model ChatbotRequestEvent {
+  id               String                  @id @default(uuid())
+  tenantId         String
+  requestId        String
+  type             ChatbotRequestEventType
+  actorKind        ChatbotRequestActorKind
+  actorId          String?
+  actorDisplayName String?
+  fromStatus       ChatbotRequestStatus?
+  toStatus         ChatbotRequestStatus?
+  version          Int
+  // Small and never customer text (§12.6).
+  data             Json                    @default("{}")
+  createdAt        DateTime                @default(now())
+
+  request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([tenantId, requestId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("chatbot_request_events")
+}
+
+// Denormalized inbox group (§10.1): one row per customer with open requests,
+// written in the same transaction as every command so the grouped inbox reads
+// without GROUP BY. The row is deleted when `openCount` reaches 0 (CHECK > 0).
+model ChatbotCustomerGroup {
+  tenantId     String
+  customerKey  String
+  mostUrgentAt DateTime?
+  openCount    Int
+  hasOverdue   Boolean   @default(false)
+  updatedAt    DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([tenantId, customerKey])
+  @@index([tenantId, mostUrgentAt, customerKey])
+  @@map("chatbot_customer_groups")
+}
+
+model ChatbotRequestFolioCounter {
+  tenantId   String   @id
+  lastNumber Int      @default(0)
+  updatedAt  DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("chatbot_request_folio_counters")
 }

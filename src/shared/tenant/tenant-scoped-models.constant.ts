@@ -134,4 +134,12 @@ export const TENANT_SCOPED_MODELS = new Set([
   // shipping-zones / T7 — sucursal opening hours for store pickup. Same
   // fail-open allowlist semantics; the service also filters by `tenantId`.
   'TenantOpeningHours',
+  // human-intervention / unit 2 — chatbot request inbox. Same fail-open
+  // allowlist semantics: without these entries a request, its audit, a
+  // customer group or the folio counter of another sucursal could be read or
+  // rewritten through TenantPrismaService.
+  'ChatbotRequest',
+  'ChatbotRequestEvent',
+  'ChatbotCustomerGroup',
+  'ChatbotRequestFolioCounter',
 ]);
