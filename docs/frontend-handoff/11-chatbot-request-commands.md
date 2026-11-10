@@ -19,7 +19,7 @@ Every route uses `JWT → tenant context → active user → CASL`. The tenant a
 | `POST /chatbot-requests/:id/claim` | `read:ChatbotRequest` + `update:ChatbotRequest` | — |
 | `POST /chatbot-requests/:id/release` | `read:ChatbotRequest` + `update:ChatbotRequest` | Releasing **someone else's** request also needs `update:ChatbotRequestAssignment`; without it: `403 NOT_ASSIGNEE` |
 | `POST /chatbot-requests/:id/cancel` | `read:ChatbotRequest` + `update:ChatbotRequest` | Cancelling a request **held by someone else** also needs `update:ChatbotRequestAssignment`; without it: `403 NOT_ASSIGNEE` |
-| `POST /chatbot-requests/:id/reassign` | `read:ChatbotRequest` + `update:ChatbotRequestAssignment` | `toUserId` must be an active member of this sucursal with `update:ChatbotRequest` |
+| `POST /chatbot-requests/:id/reassign` | `read:ChatbotRequest` + `update:ChatbotRequestAssignment` | `toUserId` must be an active member of this sucursal with `read:ChatbotRequest` and `update:ChatbotRequest` |
 
 Initial grants (task log L2): Manager has all four; Cashier has `read`/`update:ChatbotRequest` only (claim, release own, cancel, no reassign). Super Admin acts through its tenant membership.
 
@@ -89,10 +89,17 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | 409 | `IDEMPOTENCY_CONFLICT` | Same `Idempotency-Key` already used with another body or route | — |
 | 422 | `ACTION_NOT_ALLOWED` | Release of a `NEW` request; reassign of a `NEW` request or to the current assignee | ✓ |
 | 422 | `CANCEL_NOT_ALLOWED` | Cancel of a `DECISION` (stock, expiry, zone, receipt: close it with its negative action instead), or of a conversation that already ended | ✓ |
-| 422 | `USER_NOT_ASSIGNABLE` | `toUserId` is not an active member with `update:ChatbotRequest` | — |
+| 422 | `USER_NOT_ASSIGNABLE` | `toUserId` is not an active member with `read:ChatbotRequest` and `update:ChatbotRequest` (an update-only user is refused) | — |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; retry with the **same** key | — |
 
-**Order of checks:** `REQUEST_CLOSED` first, then `REQUEST_CLAIMED_BY_OTHER` / `NOT_ASSIGNEE`, then `VERSION_CONFLICT`, then the action rules. So a stale tab that tries to claim someone else's request sees who has it, not a bare version conflict.
+**Order of checks.** The first failing check answers; later ones are not evaluated. A stale tab that tries to claim someone else's request therefore sees who has it, not a bare version conflict.
+
+| Route | Order |
+| --- | --- |
+| `claim` | `404 NOT_FOUND` → `REQUEST_CLOSED` → `REQUEST_CLAIMED_BY_OTHER` → `VERSION_CONFLICT` (stale version, or the request is not `NEW`) |
+| `release` | `404` → `REQUEST_CLOSED` → `403 NOT_ASSIGNEE` → `VERSION_CONFLICT` → `422 ACTION_NOT_ALLOWED` (not `IN_PROGRESS`) → `CANCEL`-style live-session refusal (from unit 11) |
+| `reassign` | `422 USER_NOT_ASSIGNABLE` (checked first, before the request is even looked up) → `404` → `REQUEST_CLOSED` → `VERSION_CONFLICT` → `422 ACTION_NOT_ALLOWED` (not `IN_PROGRESS`, or `toUserId` is already the assignee) |
+| `cancel` | `404` → `REQUEST_CLOSED` → `422 CANCEL_NOT_ALLOWED` for a `DECISION` → `400 VALIDATION_ERROR` for `OTHER` without `note` → `403 NOT_ASSIGNEE` → `VERSION_CONFLICT` → live-session `CANCEL_NOT_ALLOWED` (409 while it runs, 422 once ended; from unit 11) |
 
 **Failed commands store nothing.** Retrying the same key after a `409`/`422` evaluates the command again against the current request.
 
@@ -128,7 +135,7 @@ Body: `{ "expectedVersion": 2 }`. `IN_PROGRESS` → `NEW`, assignee cleared, `ve
 | --- | --- |
 | `reason` | `DUPLICATE` \| `NOT_ACTIONABLE` \| `CUSTOMER_UNREACHABLE` \| `OTHER` |
 | `note` | Internal, 1..500 chars. **Required** with `OTHER` |
-| `customerNote` | Optional, 1..500 chars. The bot sends it to the customer instead of its generic notice (§12.14). Not sent with `DUPLICATE` |
+| `customerNote` | Optional, 1..500 chars. Stored now. It reaches the bot **from unit 5, when the feed exists**; the bot then sends it instead of its generic notice (§12.14). Not sent with `DUPLICATE` |
 
 - Allowed for `CLARIFICATION`, and for `TALK_TO_HUMAN`/`COMPLAINT` while the conversation has not started. Never for `DECISION` (`422 CANCEL_NOT_ALLOWED`).
 - Result: `status: CANCELLED`, `closedAt` set, `version` + 1. The request leaves the open inbox.

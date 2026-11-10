@@ -45,7 +45,12 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
   );
   const tenantA = randomUUID();
   const tenantB = randomUUID();
-  const users = { ana: randomUUID(), luis: randomUUID(), eva: randomUUID() };
+  const users = {
+    ana: randomUUID(),
+    luis: randomUUID(),
+    eva: randomUUID(),
+    upd: randomUUID(),
+  };
   let customerSeq = 0;
 
   const inTenant = <T>(tenantId: string, work: () => Promise<T>) =>
@@ -135,18 +140,27 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
         },
       });
     }
-    const permission = await prisma.permission.upsert({
-      where: {
-        subject_action: { subject: 'ChatbotRequest', action: 'update' },
-      },
-      update: {},
-      create: { subject: 'ChatbotRequest', action: 'update' },
-    });
+    const grant = (action: string) =>
+      prisma.permission.upsert({
+        where: { subject_action: { subject: 'ChatbotRequest', action } },
+        update: {},
+        create: { subject: 'ChatbotRequest', action },
+      });
+    const [read, update] = [await grant('read'), await grant('update')];
     const role = await prisma.role.create({
       data: {
         tenantId: tenantA,
         name: `Atiende ${tenantA}`,
-        permissions: { create: { permissionId: permission.id } },
+        permissions: {
+          create: [{ permissionId: read.id }, { permissionId: update.id }],
+        },
+      },
+    });
+    const updateOnly = await prisma.role.create({
+      data: {
+        tenantId: tenantA,
+        name: `Solo actualiza ${tenantA}`,
+        permissions: { create: { permissionId: update.id } },
       },
     });
     const bare = await prisma.role.create({
@@ -157,6 +171,7 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
         { userId: users.ana, tenantId: tenantA, roleId: role.id },
         { userId: users.luis, tenantId: tenantA, roleId: role.id },
         { userId: users.eva, tenantId: tenantA, roleId: bare.id },
+        { userId: users.upd, tenantId: tenantA, roleId: updateOnly.id },
       ],
     });
   });
@@ -421,11 +436,11 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
     await expect(check(tenantB)).resolves.toBeUndefined();
   });
 
-  it('reassigns only to an active member with update:ChatbotRequest', async () => {
+  it('reassigns only to an active member with read and update:ChatbotRequest (an update-only user is not assignable)', async () => {
     const request = await createRequest(tenantA);
     await run(tenantA, request.id, users.ana, { kind: 'claim' });
 
-    for (const toUserId of [users.eva, randomUUID()]) {
+    for (const toUserId of [users.eva, users.upd, randomUUID()]) {
       await expect(
         outcome(
           run(
@@ -449,6 +464,69 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
       { expectedVersion: 2, actorCanReassign: true },
     );
     expect(view.assignee).toEqual({ id: users.luis, displayName: 'luis' });
+  });
+
+  it('uses its own advisory-lock namespace, apart from the cash (hashtext, hashtext) keys', async () => {
+    const request = await createRequest(tenantA);
+    const key = randomUUID();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+    // A cash-style key that equals what a shared namespace would use.
+    const cashStyle = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${tenantA}), hashtext(${`${users.ana}:${key}`}))::text`;
+      locked();
+      await held;
+    });
+    await lockTaken;
+    try {
+      const outcomeOrTimeout = await Promise.race([
+        run(
+          tenantA,
+          request.id,
+          users.ana,
+          { kind: 'claim' },
+          {
+            idempotencyKey: key,
+          },
+        ).then(() => 'DONE'),
+        new Promise<string>((resolve) => setTimeout(resolve, 3000, 'BLOCKED')),
+      ]);
+      expect(outcomeOrTimeout).toBe('DONE');
+    } finally {
+      release();
+      await cashStyle;
+    }
+  });
+
+  it('refuses to run above READ COMMITTED (the group refresh relies on it)', async () => {
+    const request = await createRequest(tenantA);
+
+    await expect(
+      inTenant(tenantA, () =>
+        tenantPrisma.runInTransaction(
+          () =>
+            service.execute({
+              requestId: request.id,
+              actorUserId: users.ana,
+              actorCanReassign: false,
+              idempotencyKey: randomUUID(),
+              expectedVersion: 1,
+              command: { kind: 'claim' },
+            }),
+          'RepeatableRead',
+        ),
+      ),
+    ).rejects.toThrow(/READ COMMITTED/);
+    expect(
+      await prisma.chatbotRequest.findUniqueOrThrow({
+        where: { id: request.id },
+      }),
+    ).toMatchObject({ status: 'NEW', version: 1 });
+    await expect(
+      run(tenantA, request.id, users.ana, { kind: 'claim' }),
+    ).resolves.toMatchObject({ status: 'IN_PROGRESS' });
   });
 
   it('20 parallel commands on one customer group finish without deadlock', async () => {

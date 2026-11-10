@@ -8,8 +8,17 @@ describe('canonicalPhone (R1)', () => {
     ['11-digit national number with the mobile 1', '52', '15512345678'],
     ['formatted input', '+52', '+52 1 (55) 1234-5678'],
     ['dotted input', '52', '55.1234.5678'],
+    ['country code 521 with 10 digits', '521', '5512345678'],
+    ['country code +521 with 10 digits', '+521', '5512345678'],
+    ['country code 521 with the wa_id', '521', '5215512345678'],
   ])('reduces %s to the Mexican customerKey', (_case, cc, phone) => {
     expect(canonicalPhone(cc, phone)).toBe('525512345678');
+  });
+
+  it('gives the same key for 521 and 52 country codes', () => {
+    expect(canonicalPhone('521', '5512345678')).toBe(
+      canonicalPhone('52', '5512345678'),
+    );
   });
 
   it('keeps a 10-digit Mexican number that starts with 52', () => {
@@ -35,6 +44,18 @@ describe('canonicalPhone (R1)', () => {
     ['country code with letters', 'MX', '5512345678'],
     ['more than 15 digits', '1', '1234567890123456'],
     ['too short for E.164', '1', '12345'],
+    ['521 + 9 digits', '52', '521551234567'],
+    ['country code 521 with 9 digits', '521', '551234567'],
+    ['Mexican national number starting with 0', '52', '0512345678'],
+    [
+      'Mexican national number starting with 1 after the mobile 1',
+      '52',
+      '11512345678',
+    ],
+    ['Mexican 10 digits starting with 1', '52', '1512345678'],
+    ['NANP number starting with 0', '1', '0155550123'],
+    ['NANP number starting with 1', '1', '1155550123'],
+    ['NANP 11 digits starting with 11', '1', '11155550123'],
   ])('rejects %s', (_case, cc, phone) => {
     expect(canonicalPhone(cc, phone)).toBeNull();
   });

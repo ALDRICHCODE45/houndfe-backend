@@ -34,11 +34,16 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     return this.tenantPrisma.runInTransaction(work);
   }
 
-  /** Serializes retries of one key, so a concurrent retry replays (§12.12). */
+  /**
+   * Serializes retries of one key, so a concurrent retry replays (§12.12).
+   * One bigint key (a different advisory key space from the cash
+   * `(int, int)` form) over a text carrying the `chatbot-staff:` namespace.
+   */
   async lockIdempotencyKey(actorId: string, key: string): Promise<void> {
+    const namespaced = `chatbot-staff:${this.tenantId}:${actorId}:${key}`;
     // Prisma cannot decode `void`; the cast keeps the transaction-scoped lock.
     await this.tx.$queryRaw(
-      Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${this.tenantId}), hashtext(${`${actorId}:${key}`}))::text`,
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${namespaced}, 0))::text`,
     );
   }
 
@@ -75,23 +80,29 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     return user ? { userId, displayName: user.name } : null;
   }
 
-  /** CASL `manage`/`all` grants count too, as in `CaslAbilityFactory`. */
+  /**
+   * An active member whose role grants both `read` and `update` on
+   * `ChatbotRequest` (§2.5: update needs read). As in `CaslAbilityFactory`,
+   * `manage` and subject `all` grants count too.
+   */
   async findAssignableUser(userId: string): Promise<StaffActor | null> {
+    const grants = (action: string) => ({
+      permissions: {
+        some: {
+          permission: {
+            action: { in: [action, 'manage'] },
+            subject: { in: ['ChatbotRequest', 'all'] },
+          },
+        },
+      },
+    });
     const membership = await this.tx.tenantMembership.findFirst({
       where: {
         userId,
         tenantId: this.tenantId,
         user: { isActive: true },
-        role: {
-          permissions: {
-            some: {
-              permission: {
-                action: { in: ['update', 'manage'] },
-                subject: { in: ['ChatbotRequest', 'all'] },
-              },
-            },
-          },
-        },
+        // A user can hold several memberships; each grant may come from any.
+        AND: [{ role: grants('read') }, { role: grants('update') }],
       },
       select: { user: { select: { name: true } } },
     });

@@ -25,6 +25,23 @@ export async function allocateFolio(
 }
 
 /**
+ * The group refresh needs a fresh snapshot per statement (READ COMMITTED).
+ * Under REPEATABLE READ or SERIALIZABLE the aggregate would read the snapshot
+ * taken before the group lock and lose a concurrent command's update, so any
+ * other level fails the command instead of writing a stale count.
+ */
+export async function assertReadCommitted(tx: TenantClient): Promise<void> {
+  const [row] = await tx.$queryRaw<{ transaction_isolation: string }[]>(
+    Prisma.sql`SHOW transaction_isolation`,
+  );
+  if (row?.transaction_isolation !== 'read committed') {
+    throw new Error(
+      'chatbot customer group refresh requires READ COMMITTED isolation',
+    );
+  }
+}
+
+/**
  * Recomputes the customer's inbox group (§10.1) after a request changed.
  *
  * The first statement locks (or creates) the group row. Only then does the
@@ -40,6 +57,7 @@ export async function refreshCustomerGroup(
   tenantId: string,
   customerKey: string,
 ): Promise<void> {
+  await assertReadCommitted(tx);
   await tx.$executeRaw(Prisma.sql`
     INSERT INTO "chatbot_customer_groups" ("tenantId", "customerKey", "openCount", "updatedAt")
     VALUES (${tenantId}, ${customerKey}, 1, now())
