@@ -12,6 +12,7 @@ const {
   analyzeCustomers,
   loadCanonicalPhone,
   maskPhone,
+  printReport,
   parseArgs,
   CANONICAL_PHONE_DIST,
 } = require('./count-duplicate-customer-phones.cjs');
@@ -76,8 +77,8 @@ test('prints masked examples only, never a full phone', () => {
     customer('c', null, '5512345678'),
   ]);
   const t1 = result.get('t1');
-  assert.deepEqual(t1.examples, [{ phone: '55****5678', customers: 2 }]);
-  assert.deepEqual(t1.nullCountryExamples, ['55****5678']);
+  assert.deepEqual(t1.examples, [{ phone: '55****78', customers: 2 }]);
+  assert.deepEqual(t1.nullCountryExamples, ['55****78']);
   assert.ok(!JSON.stringify([...result]).includes('5512345678'));
 });
 
@@ -94,11 +95,43 @@ test('limits the examples', () => {
   assert.equal(run(customers).get('t1').duplicateKeys, 5);
 });
 
-test('maskPhone keeps the area code and the last four digits', () => {
-  assert.equal(maskPhone('525512345678'), '55****5678');
-  assert.equal(maskPhone('5512345678'), '55****5678');
+test('maskPhone shows at most 4 digits in total, whatever the length', () => {
+  assert.equal(maskPhone('525512345678'), '55****78');
+  assert.equal(maskPhone('5512345678'), '55****78');
+  assert.equal(maskPhone('551234'), '55****34');
   assert.equal(maskPhone('12345'), '****');
   assert.equal(maskPhone(''), '****');
+  for (let length = 0; length <= 16; length += 1) {
+    const digits = '9876543210987654'.slice(0, length);
+    const shown = maskPhone(digits).replace(/\D/g, '');
+    assert.ok(shown.length <= 4, `${length} digits show ${shown.length}`);
+  }
+});
+
+test('the report says the counts are an upper bound and prints no full phone', () => {
+  const lines = [];
+  const counts = run([
+    customer('a', '52', '5512345678'),
+    customer('b', '521', '5512345678'),
+  ]);
+  printReport([{ id: 't1', slug: 'centro' }], counts, (line) =>
+    lines.push(line),
+  );
+  const text = lines.join('\n');
+  assert.match(text, /upper bound/i);
+  assert.match(text, /55\*\*\*\*78/);
+  assert.doesNotMatch(text, /5512345678|12345678/);
+});
+
+test('the script header documents the upper bound', () => {
+  const header = fs
+    .readFileSync(
+      path.join(__dirname, 'count-duplicate-customer-phones.cjs'),
+      'utf8',
+    )
+    .split("'use strict'")[0];
+  assert.match(header, /UPPER BOUND/);
+  assert.match(header, /phoneLookupVariants/);
 });
 
 test('parseArgs accepts --tenant and --help only (read-only: no --apply)', () => {

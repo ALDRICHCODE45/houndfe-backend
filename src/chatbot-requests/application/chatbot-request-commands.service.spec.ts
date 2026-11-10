@@ -565,6 +565,38 @@ describe('ChatbotRequestCommandsService', () => {
         },
       );
 
+      it.each([
+        ['CLARIFICATION', 'UNKNOWN_QUESTION'],
+        ['CONVERSATION', 'TALK_TO_HUMAN'],
+        ['CONVERSATION', 'COMPLAINT'],
+        ['DECISION', 'DISCOUNT'],
+      ] as const)(
+        'answers 422 ACTION_NOT_ALLOWED for %s/%s before asking for the permission, even to a caller that is denied',
+        async (kind, subtype) => {
+          const { store, calls } = fakeStore(decision({ kind, subtype }));
+          const asked = jest.fn(() => false);
+          const error = await failure(
+            new ChatbotRequestCommandsService(store, noResolver).execute(
+              input({
+                actorCanResolveSubtype: asked,
+                command: { kind: 'resolve', action: restockAction() },
+              }),
+            ),
+          );
+          expect(error).toMatchObject({
+            code: 'ACTION_NOT_ALLOWED',
+            httpStatus: 422,
+            current: { version: 1, status: 'NEW', claimedBy: null },
+          });
+          expect(asked).not.toHaveBeenCalled();
+          expect(calls).toContain('lockRequest');
+          expect(calls.some((call) => call.startsWith('applyPatch'))).toBe(
+            false,
+          );
+          expect(calls).not.toContain('saveReceipt');
+        },
+      );
+
       it('fails closed when the caller did not say what the actor can resolve', async () => {
         const { store } = fakeStore(decision());
         const error = await failure(

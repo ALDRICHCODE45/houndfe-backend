@@ -13,10 +13,17 @@
 //     how many of them would collide with a coded customer if they were given
 //     the tenant's country code(s) (intake never matches them today).
 //
+// The counts are an UPPER BOUND of the ambiguity intake will see. Here the
+// stored phones are compared by their canonical key, but intake looks customers
+// up by exact stored values (`phoneLookupVariants`: the `52`/`521` country
+// codes and the 10-13 digit forms it builds), so two customers that share a
+// canonical key but are stored in a form intake never queries do not make a
+// request ambiguous. Treat every number below as "at most".
+//
 // It uses the SAME canonicalPhone intake uses, loaded from the compiled app
 // (dist/chatbot-requests/domain/canonical-phone.js), so the counts cannot
-// drift from the function. Examples are masked (55****5678), never full
-// phones.
+// drift from the function. Examples are masked (55****78: the first two and
+// the last two digits, never more than four), never full phones.
 //
 // Run from the app root (the directory holding dist/, node_modules/ and
 // prisma/; /app inside the container):
@@ -59,10 +66,13 @@ function parseArgs(argv) {
   return args;
 }
 
-/** `55****5678`: area code and last four of the last ten digits. */
+/**
+ * `55****78`: the first two and the last two digits of the last ten, so never
+ * more than 4 digits in total; fewer than 6 digits show nothing.
+ */
 function maskPhone(digits) {
   const last = String(digits).replace(/\D/g, '').slice(-10);
-  return last.length < 7 ? '****' : `${last.slice(0, 2)}****${last.slice(-4)}`;
+  return last.length < 6 ? '****' : `${last.slice(0, 2)}****${last.slice(-2)}`;
 }
 
 const digitsOf = (value) => String(value ?? '').replace(/\D/g, '');
@@ -176,35 +186,38 @@ async function readCustomers(prisma, tenantIds) {
   }
 }
 
-function printReport(tenants, counts) {
+function printReport(tenants, counts, log = console.log) {
   let duplicateKeys = 0;
   let collisions = 0;
   for (const tenant of tenants) {
     const c = counts.get(tenant.id);
-    console.log(`tenant ${tenant.slug}`);
+    log(`tenant ${tenant.slug}`);
     if (!c) {
-      console.log('  no customers with a phone');
+      log('  no customers with a phone');
       continue;
     }
     duplicateKeys += c.duplicateKeys;
     collisions += c.nullCountryCollisions;
-    console.log(
+    log(
       `  customers with a phone: ${c.customers}, canonical keys: ${c.canonicalKeys}`,
     );
-    console.log(
+    log(
       `  keys shared by more than one customer: ${c.duplicateKeys} (${c.customersInDuplicateKeys} customers)`,
     );
     for (const example of c.examples) {
-      console.log(`    e.g. ${example.phone} ×${example.customers}`);
+      log(`    e.g. ${example.phone} ×${example.customers}`);
     }
-    console.log(
+    log(
       `  customers with a phone and no country code: ${c.nullCountryCode}, colliding with a coded one: ${c.nullCountryCollisions}`,
     );
     for (const example of c.nullCountryExamples) {
-      console.log(`    e.g. ${example}`);
+      log(`    e.g. ${example}`);
     }
   }
-  console.log(
+  log(
+    'Counts are an UPPER BOUND: intake matches stored values exactly (phoneLookupVariants), so it can see fewer ambiguous requests than this.',
+  );
+  log(
     `Total: ${duplicateKeys} duplicated key(s) and ${collisions} null-country-code collision(s) across ${tenants.length} tenant(s).`,
   );
 }
@@ -255,6 +268,7 @@ module.exports = {
   loadCanonicalPhone,
   maskPhone,
   parseArgs,
+  printReport,
 };
 
 if (require.main === module) {

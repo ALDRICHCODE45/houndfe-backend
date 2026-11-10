@@ -25,7 +25,7 @@ Shapes in this document come from the controller, the body parser, the scoped fi
 
 Owner decision: moving the screen to the common inbox must not give anybody a power they did not have. A Cashier (read and update `ChatbotRequest` only) can claim and release these requests but gets `403 INSUFFICIENT_PERMISSIONS` when resolving any of them; a Manager without `update:ReceiptEvidence` can resolve stock, expiry and zones but not receipts. `manage` and `all` grants count, as in the rest of the app.
 
-The check runs **once the request is loaded and before anything depends on its state**: a missing permission answers `403 INSUFFICIENT_PERMISSIONS` (no `current`, nothing written) even for a closed or claimed request, so it reveals nothing beyond what `read:ChatbotRequest` already shows. An unknown id is still `404`, because there is no subtype to check. The FE should not offer **Resolve** to a user without the permission for that request's `subtype` (unit 4's `allowedActions` will use the same rule, `canResolveSubtype`).
+The check runs **once the request is loaded and the not-a-decision check below has passed, and before anything depends on its state**: a missing permission answers `403 INSUFFICIENT_PERMISSIONS` (no `current`, nothing written) even for a closed or claimed request, so it reveals nothing beyond what `read:ChatbotRequest` already shows. An unknown id is still `404`, because there is no subtype to check. The FE should not offer **Resolve** to a user without the permission for that request's `subtype` (unit 4's `allowedActions` will use the same rule, `canResolveSubtype`).
 
 Same guards as handoff 11 (`JWT → tenant → active user → CASL`). The caller still needs a membership in the sucursal (`403 FORBIDDEN` otherwise).
 
@@ -95,12 +95,12 @@ Envelope and `current` as in handoff 11 §2 (`{statusCode, code, message, curren
 | 409 | `REQUEST_CLOSED` | Already `RESOLVED`/`CANCELLED`, resolved through the old route, resolved as a zone sibling, or the receipt is no longer pending | ✓ |
 | 409 | `ZONE_SET_CHANGED` | The customers of the postal code changed since the preview | ✓ + `zoneImpact` |
 | 409 | `IDEMPOTENCY_CONFLICT` | Same `Idempotency-Key` with another body or route | — |
-| 422 | `ACTION_NOT_ALLOWED` | The request is not a decision (`kind` ≠ `DECISION`), the action belongs to another subtype, or a receipt's sale is no longer payable | ✓ |
+| 422 | `ACTION_NOT_ALLOWED` | The request is not a wrapped decision (`kind` ≠ `DECISION`, or `DISCOUNT`), the action belongs to another subtype, or a receipt's sale is no longer payable | ✓ |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; retry with the **same** key | — |
 
 **`current` on errors from the old use cases.** Errors that come from the stock/zone/receipt use case (`401`, `403 FORBIDDEN`, `404`, `400`, `409 VERSION_CONFLICT`, `REQUEST_CLOSED`, `IDEMPOTENCY_CONFLICT`, `422 ACTION_NOT_ALLOWED`) are returned with the request's `current {version, status, claimedBy}` taken from the row as it was when the command started, so the FE can refresh without reloading. Errors raised before that point (body validation, `INSUFFICIENT_PERMISSIONS`, the request's own `404`) carry no `current` unless the table says so. Do not branch on its presence; branch on `code`.
 
-**Order of checks** (the first failing check answers): `400` (body) → replay of the key → `404` → `403 INSUFFICIENT_PERMISSIONS` (subtype permission) → `REQUEST_CLOSED` → `422` (not a decision) → `REQUEST_CLAIMED_BY_OTHER` → `VERSION_CONFLICT` → `422` (action of another subtype) → `ZONE_SET_CHANGED` (zones only) → the old use case's own refusals above.
+**Order of checks** (the first failing check answers): `400` (body) → replay of the key → `404` → `422 ACTION_NOT_ALLOWED` (not a wrapped decision: `kind` ≠ `DECISION`, or `DISCOUNT`; answered before the permission, so a caller without permission still gets 422 here) → `403 INSUFFICIENT_PERMISSIONS` (subtype permission) → `REQUEST_CLOSED` → `REQUEST_CLAIMED_BY_OTHER` → `VERSION_CONFLICT` → `422` (action of another subtype) → `ZONE_SET_CHANGED` (zones only) → the old use case's own refusals above.
 
 **Failed commands store nothing**, as in handoff 11.
 

@@ -42,6 +42,7 @@ import {
   type StaffActor,
   type StaffCancelReason,
 } from '../domain/chatbot-request.commands';
+import { legacyResolvePermission } from '../domain/resolve-permissions';
 
 export const CHATBOT_REQUEST_COMMAND_STORE = Symbol(
   'CHATBOT_REQUEST_COMMAND_STORE',
@@ -357,6 +358,21 @@ export class ChatbotRequestCommandsService {
       if (resolving) await this.store.lockZoneOf(input.requestId);
       const row = await this.store.lockRequest(input.requestId);
       if (!row) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+      // Only wrapped decisions resolve (§12.6): not clarifications, not
+      // conversations, and not DISCOUNT (a decision with no wrapped flow). That
+      // is a property of the subtype, not of the request's state, so it answers
+      // 422 before the permission gate, which applies to the wrapped subtypes.
+      if (
+        resolving &&
+        (row.kind !== 'DECISION' ||
+          legacyResolvePermission(row.subtype) === null)
+      ) {
+        throw new ChatbotRequestCommandError('ACTION_NOT_ALLOWED', 422, {
+          version: row.version,
+          status: row.status,
+          claimedBy: toView(row).assignee,
+        });
+      }
       // Before any state-dependent answer, so a caller who may not resolve
       // this subtype learns nothing beyond what `read` already shows. No
       // `current`: the 403 carries no request state.

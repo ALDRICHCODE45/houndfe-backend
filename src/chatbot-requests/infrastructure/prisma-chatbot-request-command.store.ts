@@ -6,6 +6,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { actorDisplayName } from '../domain/actor-display-name';
 import type {
   ChatbotRequestEventDraft,
   ChatbotRequestPatch,
@@ -84,9 +85,9 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
   async findActor(userId: string): Promise<StaffActor | null> {
     const user = await this.tx.user.findUnique({
       where: { id: userId },
-      select: { name: true },
+      select: { name: true, email: true },
     });
-    return user ? { userId, displayName: user.name } : null;
+    return user ? { userId, displayName: actorDisplayName(user) } : null;
   }
 
   /**
@@ -113,9 +114,11 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
         // A user can hold several memberships; each grant may come from any.
         AND: [{ role: grants('read') }, { role: grants('update') }],
       },
-      select: { user: { select: { name: true } } },
+      select: { user: { select: { name: true, email: true } } },
     });
-    return membership ? { userId, displayName: membership.user.name } : null;
+    return membership
+      ? { userId, displayName: actorDisplayName(membership.user) }
+      : null;
   }
 
   lockRequest(id: string): Promise<ChatbotRequestRow | null> {
