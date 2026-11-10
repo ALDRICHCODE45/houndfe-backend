@@ -32,6 +32,30 @@ export async function allocateFolio(
 }
 
 /**
+ * A block of `count` consecutive folios in one statement (the backfill wraps
+ * up to a batch at once). Returns the first; the block is `first..first+count-1`.
+ * Same counter row and lock as `allocateFolio`, so hooks and backfill never
+ * hand out the same number.
+ */
+export async function allocateFolios(
+  tx: TenantClient,
+  tenantId: string,
+  count: number,
+): Promise<number> {
+  if (!Number.isInteger(count) || count < 1) {
+    throw new Error('allocateFolios needs a positive integer count');
+  }
+  const [row] = await tx.$queryRaw<{ lastNumber: number }[]>(Prisma.sql`
+    INSERT INTO "chatbot_request_folio_counters" ("tenantId", "lastNumber", "updatedAt")
+    VALUES (${tenantId}, ${count}, now())
+    ON CONFLICT ("tenantId") DO UPDATE
+      SET "lastNumber" = "chatbot_request_folio_counters"."lastNumber" + ${count},
+          "updatedAt" = now()
+    RETURNING "lastNumber"`);
+  return row.lastNumber - count + 1;
+}
+
+/**
  * The group refresh needs a fresh snapshot per statement (READ COMMITTED).
  * Under REPEATABLE READ or SERIALIZABLE the aggregate would read the snapshot
  * taken before the group lock and lose a concurrent command's update, so any

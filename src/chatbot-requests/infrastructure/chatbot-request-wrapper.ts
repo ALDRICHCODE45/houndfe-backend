@@ -20,6 +20,7 @@
  * `sourceRequestId`; the bot's own intake (unit 5) uses its credential source.
  */
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { CUSTOMER_REPLY_WINDOW_MS } from '../../delivery-zones/domain/delivery-zone.policy';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
@@ -47,7 +48,7 @@ export const WRAP_SOURCE = {
 const SUMMARY_MAX = 140;
 const ASSERT_TX = 'ChatbotRequestWrapper must run inside a transaction';
 
-interface CustomerLink {
+export interface CustomerLink {
   customerKey: string | null;
   customerId: string | null;
   ambiguousCustomer: boolean;
@@ -55,7 +56,7 @@ interface CustomerLink {
   phone: string | null;
 }
 
-const NO_CUSTOMER: CustomerLink = {
+export const NO_CUSTOMER: CustomerLink = {
   customerKey: null,
   customerId: null,
   ambiguousCustomer: false,
@@ -63,7 +64,7 @@ const NO_CUSTOMER: CustomerLink = {
   phone: null,
 };
 
-interface NewWrappedRequest {
+export interface NewWrappedRequest {
   subtype: 'RESTOCK' | 'EXPIRATION' | 'DELIVERY_ZONE' | 'TRANSFER_RECEIPT';
   source: string;
   wrappedId: string;
@@ -78,6 +79,215 @@ interface NewWrappedRequest {
   };
   conversationRef?: string;
   lastCustomerMessageAt?: Date;
+}
+
+/** RESTOCK / EXPIRATION carry no customer (§2.3): one group per decision. */
+export function humanDecisionWrap(decision: {
+  id: string;
+  type: 'RESTOCK' | 'EXPIRATION';
+  productId: string;
+  productName: string;
+  variantId: string | null;
+}): NewWrappedRequest {
+  return {
+    subtype: decision.type,
+    source: WRAP_SOURCE.humanDecision,
+    wrappedId: decision.id,
+    fallbackKey: `unknown:${decision.id}`,
+    summary: `${decision.type === 'RESTOCK' ? 'Stock' : 'Caducidad'}: ${decision.productName}`,
+    context: { productId: decision.productId, variantId: decision.variantId },
+    link: NO_CUSTOMER,
+    wrapped: { humanDecisionId: decision.id },
+  };
+}
+
+/** The `link` comes from `linkByPhone`: R1, one lookup per requester. */
+export function zoneRequestWrap(
+  request: {
+    id: string;
+    zipCode: string;
+    conversationRef: string;
+    lastCustomerMessageAt: Date;
+  },
+  link: CustomerLink,
+): NewWrappedRequest {
+  return {
+    subtype: 'DELIVERY_ZONE',
+    source: WRAP_SOURCE.deliveryZoneRequest,
+    wrappedId: request.id,
+    fallbackKey: `unknown:${request.id}`,
+    summary: `Zona de entrega ${request.zipCode}`,
+    context: { zipCode: request.zipCode },
+    link,
+    wrapped: { deliveryZoneRequestId: request.id },
+    conversationRef: request.conversationRef,
+    lastCustomerMessageAt: request.lastCustomerMessageAt,
+  };
+}
+
+/** What a receipt takes from its sale: the folio and the customer. */
+export interface ReceiptSale {
+  folio: string | null;
+  customerId: string | null;
+  customer: { phoneCountryCode: string | null; phone: string | null } | null;
+}
+
+export function findReceiptSale(
+  tx: TenantClient,
+  tenantId: string,
+  saleId: string,
+): Promise<ReceiptSale | null> {
+  return tx.sale.findFirst({
+    where: { id: saleId, tenantId },
+    select: {
+      folio: true,
+      customerId: true,
+      customer: { select: { phoneCountryCode: true, phone: true } },
+    },
+  });
+}
+
+/** The customer comes from `Sale.customerId` and that customer's phone. */
+export function receiptWrap(
+  receipt: { id: string; saleId: string },
+  sale: ReceiptSale | null,
+): NewWrappedRequest {
+  const phoneKey =
+    sale?.customer?.phoneCountryCode && sale.customer.phone
+      ? normalizedPhone(sale.customer.phoneCountryCode, sale.customer.phone)
+      : null;
+  // The sale names its customer, so this is not a phone inference (R1).
+  const link: CustomerLink = {
+    ...NO_CUSTOMER,
+    ...(phoneKey ?? {}),
+    customerId: sale?.customerId ?? null,
+  };
+  return {
+    subtype: 'TRANSFER_RECEIPT',
+    source: WRAP_SOURCE.receiptEvidence,
+    wrappedId: receipt.id,
+    fallbackKey: `unknown:${receipt.id}`,
+    summary: `Comprobante de transferencia${sale?.folio ? ` ${sale.folio}` : ''}`,
+    context: { saleId: receipt.saleId },
+    link,
+    wrapped: { receiptEvidenceId: receipt.id },
+  };
+}
+
+function normalizedPhone(
+  countryCode: string,
+  phone: string,
+): Pick<CustomerLink, 'customerKey' | 'phoneCountryCode' | 'phone'> | null {
+  const key = canonicalPhone(countryCode, phone);
+  if (!key) return null;
+  const digits = countryCode.replace(/\D/g, '');
+  const cc = digits === '521' ? '52' : digits;
+  return {
+    customerKey: key,
+    phoneCountryCode: cc,
+    phone: key.slice(cc.length),
+  };
+}
+
+/**
+ * R1: the customer is linked only when the canonical key maps to exactly one
+ * `Customer`; with several the request stays unlinked and marked ambiguous,
+ * and staff links it by hand.
+ */
+export async function linkByPhone(
+  tx: TenantClient,
+  tenantId: string,
+  countryCode: string,
+  phone: string,
+): Promise<CustomerLink> {
+  const normalized = normalizedPhone(countryCode, phone);
+  if (!normalized?.customerKey) return NO_CUSTOMER;
+  const variants = phoneLookupVariants(countryCode, phone);
+  const hits = await tx.customer.findMany({
+    where: {
+      tenantId,
+      phoneCountryCode: { in: variants.countryCodes },
+      phone: { in: variants.phones },
+    },
+    select: { id: true, phoneCountryCode: true, phone: true },
+    take: 10,
+  });
+  const same = hits.filter(
+    (hit) =>
+      hit.phoneCountryCode !== null &&
+      hit.phone !== null &&
+      canonicalPhone(hit.phoneCountryCode, hit.phone) ===
+        normalized.customerKey,
+  );
+  return {
+    ...normalized,
+    customerId: same.length === 1 ? same[0].id : null,
+    ambiguousCustomer: same.length > 1,
+  };
+}
+
+/** How the backfill (slice 3b) writes a row the hooks never saw. */
+export interface RequestCreateExtras {
+  id?: string;
+  createdAt?: Date;
+  /** A wrapped row resolved before the backfill: the request is born closed. */
+  resolved?: {
+    resolvedAt: Date;
+    resolvedByActorId: string | null;
+    resolvedByDisplayName: string | null;
+    resolution: Prisma.InputJsonObject;
+  };
+}
+
+/**
+ * The `chatbot_requests` row of a wrapped flow. The hooks and the backfill
+ * both build it here, so the folio, `customerKey`, R1 flag, summary, window
+ * and source convention can never differ between them.
+ */
+export function requestCreateData(
+  tenantId: string,
+  folio: number,
+  input: NewWrappedRequest,
+  extras: RequestCreateExtras = {},
+): Prisma.ChatbotRequestCreateManyInput {
+  const { resolved } = extras;
+  return {
+    ...(extras.id ? { id: extras.id } : {}),
+    ...(extras.createdAt ? { createdAt: extras.createdAt } : {}),
+    tenantId,
+    folio,
+    kind: 'DECISION',
+    subtype: input.subtype,
+    customerKey: input.link.customerKey ?? input.fallbackKey,
+    customerId: input.link.customerId,
+    ambiguousCustomer: input.link.ambiguousCustomer,
+    phoneCountryCode: input.link.phoneCountryCode,
+    phone: input.link.phone,
+    conversationRef: input.conversationRef ?? null,
+    ...(input.lastCustomerMessageAt
+      ? {
+          lastCustomerMessageAt: input.lastCustomerMessageAt,
+          whatsappWindowClosesAt: new Date(
+            input.lastCustomerMessageAt.getTime() + CUSTOMER_REPLY_WINDOW_MS,
+          ),
+        }
+      : {}),
+    summary: input.summary.slice(0, SUMMARY_MAX),
+    context: input.context,
+    source: input.source,
+    sourceRequestId: input.wrappedId,
+    ...input.wrapped,
+    ...(resolved
+      ? {
+          status: 'RESOLVED',
+          resolvedAt: resolved.resolvedAt,
+          closedAt: resolved.resolvedAt,
+          resolvedByActorId: resolved.resolvedByActorId,
+          resolvedByDisplayName: resolved.resolvedByDisplayName,
+          resolution: resolved.resolution,
+        }
+      : {}),
+  };
 }
 
 @Injectable()
@@ -103,23 +313,10 @@ export class ChatbotRequestWrapper {
   // ---------------------------------------------------------------- creation
 
   /** RESTOCK / EXPIRATION carry no customer (§2.3): one group per decision. */
-  async wrapHumanDecision(decision: {
-    id: string;
-    type: 'RESTOCK' | 'EXPIRATION';
-    productId: string;
-    productName: string;
-    variantId: string | null;
-  }): Promise<void> {
-    await this.insert({
-      subtype: decision.type,
-      source: WRAP_SOURCE.humanDecision,
-      wrappedId: decision.id,
-      fallbackKey: `unknown:${decision.id}`,
-      summary: `${decision.type === 'RESTOCK' ? 'Stock' : 'Caducidad'}: ${decision.productName}`,
-      context: { productId: decision.productId, variantId: decision.variantId },
-      link: NO_CUSTOMER,
-      wrapped: { humanDecisionId: decision.id },
-    });
+  async wrapHumanDecision(
+    decision: Parameters<typeof humanDecisionWrap>[0],
+  ): Promise<void> {
+    await this.insert(humanDecisionWrap(decision));
   }
 
   /** Only requesters that wait for a human; an EXISTING_ZONE one is resolved. */
@@ -131,109 +328,27 @@ export class ChatbotRequestWrapper {
     customerPhone: string;
     lastCustomerMessageAt: Date;
   }): Promise<void> {
-    await this.insert({
-      subtype: 'DELIVERY_ZONE',
-      source: WRAP_SOURCE.deliveryZoneRequest,
-      wrappedId: request.id,
-      fallbackKey: `unknown:${request.id}`,
-      summary: `Zona de entrega ${request.zipCode}`,
-      context: { zipCode: request.zipCode },
-      link: await this.linkByPhone(
-        request.customerPhoneCountryCode,
-        request.customerPhone,
+    await this.insert(
+      zoneRequestWrap(
+        request,
+        await linkByPhone(
+          this.tx,
+          this.tenantPrisma.getTenantId(),
+          request.customerPhoneCountryCode,
+          request.customerPhone,
+        ),
       ),
-      wrapped: { deliveryZoneRequestId: request.id },
-      conversationRef: request.conversationRef,
-      lastCustomerMessageAt: request.lastCustomerMessageAt,
-    });
+    );
   }
 
   /** The customer comes from `Sale.customerId` and that customer's phone. */
   async wrapReceipt(receipt: { id: string; saleId: string }): Promise<void> {
-    const { tx } = this;
-    const tenantId = this.tenantPrisma.getTenantId();
-    const sale = await tx.sale.findFirst({
-      where: { id: receipt.saleId, tenantId },
-      select: {
-        folio: true,
-        customerId: true,
-        customer: { select: { phoneCountryCode: true, phone: true } },
-      },
-    });
-    const phoneKey =
-      sale?.customer?.phoneCountryCode && sale.customer.phone
-        ? this.normalizedPhone(
-            sale.customer.phoneCountryCode,
-            sale.customer.phone,
-          )
-        : null;
-    // The sale names its customer, so this is not a phone inference (R1).
-    const link: CustomerLink = {
-      ...NO_CUSTOMER,
-      ...(phoneKey ?? {}),
-      customerId: sale?.customerId ?? null,
-    };
-    await this.insert({
-      subtype: 'TRANSFER_RECEIPT',
-      source: WRAP_SOURCE.receiptEvidence,
-      wrappedId: receipt.id,
-      fallbackKey: `unknown:${receipt.id}`,
-      summary: `Comprobante de transferencia${sale?.folio ? ` ${sale.folio}` : ''}`,
-      context: { saleId: receipt.saleId },
-      link,
-      wrapped: { receiptEvidenceId: receipt.id },
-    });
-  }
-
-  private normalizedPhone(
-    countryCode: string,
-    phone: string,
-  ): Pick<CustomerLink, 'customerKey' | 'phoneCountryCode' | 'phone'> | null {
-    const key = canonicalPhone(countryCode, phone);
-    if (!key) return null;
-    const digits = countryCode.replace(/\D/g, '');
-    const cc = digits === '521' ? '52' : digits;
-    return {
-      customerKey: key,
-      phoneCountryCode: cc,
-      phone: key.slice(cc.length),
-    };
-  }
-
-  /**
-   * R1: the customer is linked only when the canonical key maps to exactly one
-   * `Customer`; with several the request stays unlinked and marked ambiguous,
-   * and staff links it by hand.
-   */
-  private async linkByPhone(
-    countryCode: string,
-    phone: string,
-  ): Promise<CustomerLink> {
-    const normalized = this.normalizedPhone(countryCode, phone);
-    if (!normalized?.customerKey) return NO_CUSTOMER;
-    const tenantId = this.tenantPrisma.getTenantId();
-    const variants = phoneLookupVariants(countryCode, phone);
-    const hits = await this.tx.customer.findMany({
-      where: {
-        tenantId,
-        phoneCountryCode: { in: variants.countryCodes },
-        phone: { in: variants.phones },
-      },
-      select: { id: true, phoneCountryCode: true, phone: true },
-      take: 10,
-    });
-    const same = hits.filter(
-      (hit) =>
-        hit.phoneCountryCode !== null &&
-        hit.phone !== null &&
-        canonicalPhone(hit.phoneCountryCode, hit.phone) ===
-          normalized.customerKey,
+    const sale = await findReceiptSale(
+      this.tx,
+      this.tenantPrisma.getTenantId(),
+      receipt.saleId,
     );
-    return {
-      ...normalized,
-      customerId: same.length === 1 ? same[0].id : null,
-      ambiguousCustomer: same.length > 1,
-    };
+    await this.insert(receiptWrap(receipt, sale));
   }
 
   /**
@@ -249,32 +364,11 @@ export class ChatbotRequestWrapper {
       ...input.wrapped,
     });
     const request = await tx.chatbotRequest.create({
-      data: {
+      data: requestCreateData(
         tenantId,
-        folio: await allocateFolio(tx, tenantId),
-        kind: 'DECISION',
-        subtype: input.subtype,
-        customerKey,
-        customerId: input.link.customerId,
-        ambiguousCustomer: input.link.ambiguousCustomer,
-        phoneCountryCode: input.link.phoneCountryCode,
-        phone: input.link.phone,
-        conversationRef: input.conversationRef ?? null,
-        ...(input.lastCustomerMessageAt
-          ? {
-              lastCustomerMessageAt: input.lastCustomerMessageAt,
-              whatsappWindowClosesAt: new Date(
-                input.lastCustomerMessageAt.getTime() +
-                  CUSTOMER_REPLY_WINDOW_MS,
-              ),
-            }
-          : {}),
-        summary: input.summary.slice(0, SUMMARY_MAX),
-        context: input.context,
-        source: input.source,
-        sourceRequestId: input.wrappedId,
-        ...input.wrapped,
-      },
+        await allocateFolio(tx, tenantId),
+        input,
+      ),
       select: { id: true },
     });
     await tx.chatbotRequestEvent.create({
