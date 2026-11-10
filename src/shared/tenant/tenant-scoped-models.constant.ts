@@ -146,4 +146,9 @@ export const TENANT_SCOPED_MODELS = new Set([
   'StaffCommandReceipt',
   // Slice 5a — bot idempotency receipts (merged creates, customer cancels).
   'ChatbotBotReceipt',
+  // Slice 5b — the bot feed and its retention watermark. Same fail-open
+  // allowlist semantics: without them one sucursal's bot could read another's
+  // items or acknowledge its deliveries.
+  'ChatbotFeedItem',
+  'ChatbotFeedRetention',
 ]);

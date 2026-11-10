@@ -529,6 +529,8 @@ model Tenant {
   chatbotRequestFolioCounter  ChatbotRequestFolioCounter?
   staffCommandReceipts        StaffCommandReceipt[]
   chatbotBotReceipts          ChatbotBotReceipt[]
+  chatbotFeedItems            ChatbotFeedItem[]
+  chatbotFeedRetention        ChatbotFeedRetention?
 
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
@@ -3818,6 +3820,7 @@ model ChatbotRequest {
   deliveryZoneRequest DeliveryZoneRequest? @relation(fields: [deliveryZoneRequestId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   receiptEvidence     ReceiptEvidence?     @relation(fields: [receiptEvidenceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   events              ChatbotRequestEvent[]
+  feedItems           ChatbotFeedItem[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, folio])
@@ -3920,4 +3923,47 @@ model ChatbotBotReceipt {
   @@id([tenantId, kind, idempotencyKey])
   @@index([tenantId, createdAt])
   @@map("chatbot_bot_receipts")
+}
+
+// Bot feed (unit 5, slice 5b; contract §3.3): what the chatbot pulls with a
+// cursor. `cursor` is a global bigserial, so it only orders within a tenant;
+// enqueuers hold a per-tenant advisory lock from the insert to the commit, so
+// within a tenant cursor order is commit order and a reader never skips an
+// item. `ackedAt` is set only by a terminal outcome: DEFERRED_WINDOW_CLOSED
+// records `outcome` and leaves the item pending. `attemptId` + `evidenceHash`
+// are the idempotency identity of the last outcome. Retention: 30 days.
+model ChatbotFeedItem {
+  cursor            BigInt    @id @default(autoincrement())
+  tenantId          String
+  deliveryId        String    @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requestId         String
+  type              String
+  conversationRef   String?
+  payload           Json
+  createdAt         DateTime  @default(now())
+  ackedAt           DateTime?
+  outcome           String?
+  attemptId         String?
+  evidenceHash      String?
+  attemptedAt       DateTime?
+  providerMessageId String?
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([tenantId, cursor])
+  @@index([tenantId, requestId])
+  @@index([createdAt])
+  @@map("chatbot_feed_items")
+}
+
+// Highest cursor the retention purge removed for a tenant: a cursor below it
+// may have skipped items, so the feed answers 410 CURSOR_EXPIRED.
+model ChatbotFeedRetention {
+  tenantId            String @id
+  purgedThroughCursor BigInt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("chatbot_feed_retention")
 }
