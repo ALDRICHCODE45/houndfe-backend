@@ -1,6 +1,6 @@
 # Intervención humana: contrato v1 del backend (2026-11-10)
 
-**Estado: contrato v1, cerrado con el dueño.** La implementación empieza cuando el coordinador del chatbot confirme que concilió su lado (§11). Este documento responde al diseño `houndfe-chatbot/docs/intervencion-humana-diseno.md` (commits `29c2b6f` y `7e298b4`; sus decisiones de §7 mandan sobre cualquier texto anterior) y a la propuesta del frontend `frontend-houndfe/docs/redesign/human-intervention-frontend-proposal.md` (§6, alineada). **Solo es diseño:** no hay código ni migraciones. Las citas `ruta:línea` apuntan al `main` actual. Lo que no se pudo comprobar en el código está marcado **[supuesto]**.
+**Estado: contrato v1, cerrado con el dueño; v1.1 agrega las aclaraciones del frontend (§12) y corrige el cuerpo para que coincida.** La implementación empieza cuando el coordinador del chatbot confirme que concilió su lado (§11). Este documento responde al diseño `houndfe-chatbot/docs/intervencion-humana-diseno.md` (commits `29c2b6f` y `7e298b4`; sus decisiones de §7 mandan sobre cualquier texto anterior) y a la propuesta del frontend `frontend-houndfe/docs/redesign/human-intervention-frontend-proposal.md` (§6, alineada). **Solo es diseño:** no hay código ni migraciones. Las citas `ruta:línea` apuntan al `main` actual. Lo que no se pudo comprobar en el código está marcado **[supuesto]**.
 
 ## Resumen
 
@@ -109,6 +109,7 @@ ChatbotRequest
   resolution Json?  (opción elegida / texto / nota + clasificación)
   resolvedAt?, resolvedByActorId?, resolvedByDisplayName?
   cancelledAt?, cancelReason  CUSTOMER_WITHDREW | SUPERSEDED | AUTO_RESOLVED | STAFF
+  staffCancelReason?  DUPLICATE | NOT_ACTIONABLE | CUSTOMER_UNREACHABLE | OTHER  (§12.11)
   closedAt?               -- resolvedAt o cancelledAt; historial, §3.8
   -- alta idempotente (patrón actual)
   source, sourceRequestId, canonicalRequestHash, submittedCredentialId
@@ -247,7 +248,7 @@ Respuesta `201` (creada) o `200` (repetición idéntica, o fusionada con otra, �
   "nextCursor": "000000001843" }
 ```
 
-- **Tipos de entrega:** `request.answered` (decisión con texto fijo según la opción, aclaración tal cual, rechazo de comprobante con `customerReason`), `request.overdue_notice` (una sola vez, §4 del diseño), `request.cancel_ack`, `conversation.started`, `conversation.staff_message`, `conversation.ended`, `conversation.scheduled_reminder`, `conversation.rescheduled` (§4.9) y `template.requested`. **Este último solo lo crea el comando del personal `POST /chatbot-requests/:id/template`, nunca el sistema por su cuenta** (§4.5). El bot manda la plantilla y responde con el ACK de siempre (`providerMessageId` o error).
+- **Tipos de entrega:** `request.answered` (decisión con texto fijo según la opción, aclaración tal cual, rechazo de comprobante con `customerReason`), `request.overdue_notice` (una sola vez, §4 del diseño), `request.cancel_ack`, `conversation.started`, `conversation.staff_message`, `conversation.ended`, `conversation.scheduled_reminder`, `conversation.rescheduled` (§4.9), `request.cancelled` (cancelación por el personal, sin mensaje al cliente, §12.11) y `template.requested`. **Este último solo lo crea el comando del personal `POST /chatbot-requests/:id/template`, nunca el sistema por su cuenta** (§4.5). El bot manda la plantilla y responde con el ACK de siempre (`providerMessageId` o error).
 - **El cursor sirve para leer; el ACK sirve para entregar.** Cada ítem tiene un `deliveryId` y el bot reporta el resultado con:
   `POST /chatbot-api/deliveries/:deliveryId/outcome` con body `{attemptId, outcome: PROVIDER_ACCEPTED | DELIVERY_UNKNOWN | DEFERRED_WINDOW_CLOSED | STALE, providerMessageId?, attemptedAt}`. Es la misma semántica que `HumanDecisionBotOutcome` (`schema.prisma:3012`): un ACK terminal por entrega y el `409` si llega un segundo resultado distinto. `DEFERRED_WINDOW_CLOSED` deja la entrega pendiente hasta que el cliente vuelva a escribir (§4.5).
 - **El cliente no recibe dos veces:** el bot guarda `deliveryId` como clave única antes de llamar a Meta. Si no sabe si se envió, reporta `DELIVERY_UNKNOWN` y no reintenta (es la regla actual). El backend marca la entrega como "por reconciliar" y la muestra en el detalle.
@@ -263,7 +264,7 @@ Respuesta `201` (creada) o `200` (repetición idéntica, o fusionada con otra, �
 ### 3.5 Preguntas repetidas: deduplicar y fusionar
 
 - El bot manda un `dedupKey` estable (por ejemplo `RESTOCK:variant:<id>` o `UNKNOWN_QUESTION:<hash normalizado>`). Si hay una solicitud **abierta** con el mismo `(tenantId, customerKey, dedupKey)`, el alta responde `200 outcome: MERGED` con el `mergedIntoId` y anexa a esa solicitud el mensaje nuevo (en `needs` o en la línea de tiempo). Para garantizarlo hay un índice único parcial `WHERE status IN ('NEW','IN_PROGRESS') AND dedupKey IS NOT NULL`.
-- **El backend no trata de adivinar con texto libre si dos preguntas son la misma.** Eso lo decide el bot con su modelo. El personal también puede fusionar a mano ("Unir con…", `update:ChatbotRequest`): la secundaria queda `CANCELLED/SUPERSEDED`, y cuando se resuelve la principal, salen entregas para las dos.
+- **El backend no trata de adivinar con texto libre si dos preguntas son la misma.** Eso lo decide el bot con su modelo. El personal también puede fusionar a mano ("Unir con…", `update:ChatbotRequest`, con las reglas de §12.11): la secundaria queda `CANCELLED/SUPERSEDED`, y cuando se resuelve la principal, salen entregas para las dos.
 
 ### 3.6 Espejo de la conversación (12 meses) y medios
 
@@ -273,16 +274,17 @@ ChatbotConversation  id, tenantId, conversationRef @unique(tenantId), customerKe
 ConversationMessage  id, tenantId, conversationId, seq (único por conversación),
                      direction IN|OUT, author CUSTOMER|BOT|STAFF|SYSTEM, staffUserId?,
                      waMessageId? @unique(tenantId), clientMessageId? @unique(tenantId),
-                     type TEXT|IMAGE|DOCUMENT|AUDIO|TEMPLATE|SYSTEM, text (<=4096),
+                     type TEXT|IMAGE|STICKER|DOCUMENT|AUDIO|TEMPLATE|SYSTEM|UNSUPPORTED, text (<=4096),
                      mediaId?, sentAt (reloj del bot), receivedAt (reloj del backend),
-                     deliveryStatus QUEUED|SENT|DELIVERED|READ|FAILED|UNKNOWN, purgeAfter
+                     deliveryStatus QUEUED|DEFERRED|SENT|DELIVERED|READ|FAILED|UNKNOWN, purgeAfter
+                     (forma que ve el frontend: §12.5)
 ConversationMedia    id, tenantId, storageKey, mimeType, sizeBytes, sha256, purgedAt?
 ```
 
 - **Ingesta por lotes:** `POST /chatbot-api/conversations/:conversationRef/messages:batch` (scope `conversation:write`), hasta 50 mensajes, cada uno con su `waMessageId` (entrantes y salientes del bot). Es idempotente por `waMessageId`: los que ya estaban se ignoran y se informan en `duplicates[]`. El backend asigna `seq` en orden de llegada y **no** según el reloj del bot, porque el reloj del bot solo sirve para mostrar.
 - **Medios:** `POST /chatbot-api/media` (multipart, scope `media:write`), aceptando `image/jpeg|png|webp` (incluye stickers), `application/pdf` y audio (`audio/ogg|mpeg|mp4|aac|amr`), hasta 10 MB, con el tipo detectado por los bytes mágicos (como en receipts). Devuelve `mediaId`. Se guardan en Spaces privado reutilizando el adaptador de receipts con otro prefijo. **Decisión del dueño: "Los audios del cliente se guardan para escucharlos en la bandeja: tope de 10 MB, se borran a los 12 meses con la conversación. Si llega un audio y no hay una persona atendiendo, el bot le pide al cliente que lo escriba."** El video y la ubicación no se guardan en v1 (decisión técnica): el espejo registra "video recibido" o "ubicación recibida", sin archivo. El bot sube el medio **antes** de espejar el mensaje (§11).
 - **Retención:** `purgeAfter = receivedAt + 12 meses`. Un cron de Inngest diario (mismo patrón que `receipt-retention.functions.ts:45`) borra por lotes los mensajes, los objetos de media y las filas de `ChatbotConversation` sin mensajes. **Decidido por el dueño: a los 12 meses se borra solo la conversación** (mensajes replicados y medios). Las solicitudes, su `resolution` (por ejemplo, el texto de una aclaración o la nota de cierre) y la auditoría se conservan. La auditoría no guarda el texto de los mensajes (§6.2). La copia de esa respuesta que quedó como mensaje saliente en el espejo sí se borra con la conversación.
-- **Lectura para el personal:** `GET /chatbot-requests/:id/conversation?before=<seq>&limit=50`, que requiere `read:ChatbotConversation`. Los medios se sirven por streaming autenticado `GET /chatbot-media/:id` (`private, no-store`, con miniatura generada al subir), como el visor de comprobantes.
+- **Lectura para el personal:** `GET /chatbot-requests/:id/conversation?before=<seq>&limit=50` (o `after=<seq>`), que requiere `read:ChatbotConversation`; quien atiende sin ese permiso ve solo los mensajes de su sesión (§2.5). Los medios se sirven por proxy autenticado `GET /chatbot-media/:id` y `?variant=thumb` (`private, no-store`, miniatura generada al subir), como el visor de comprobantes. No hay URL firmadas (§12.5).
 
 ### 3.7 Cambios para el bot frente a hoy
 
@@ -308,36 +310,40 @@ Autenticación: JWT + tenant + `ActiveUserGuard` + CASL. Los errores usan el sob
     "customer": { "id": "…", "displayName": "Juan Pérez", "phone": "55 **** 5678", "isTrusted": false },
     "mostUrgentAt": "2026-11-09T17:00:00Z", "openCount": 3,
     "requests": [ {
-      "id": "…", "kind": "DECISION", "subtype": "RESTOCK",
+      "id": "…", "folio": "S-000123", "customerKey": "525512345678",
+      "kind": "DECISION", "subtype": "RESTOCK",
       "status": "IN_PROGRESS", "displayStatus": "EXPIRED", "summary": "…",
       "assignee": { "id": "…", "displayName": "Ana" },
       "createdAt": "…", "claimDeadlineAt": "…", "resolveDeadlineAt": "…",
       "overdueAt": "…", "slaPaused": true, "slaResumesAt": "2026-11-10T15:00:00Z",
-      "whatsappWindowClosesAt": "…", "unreadCustomerMessages": 0, "version": 4 } ],
+      "whatsappWindowClosesAt": "…", "unreadCustomerMessages": 0,
+      "scheduledFor": null, "requiresTemplateAtStart": false, "needsReschedule": false,
+      "liveSession": null, "version": 4 } ],
     "moreRequests": 0 } ],
   "nextCursor": "…" }
 ```
 
-- **Orden de los grupos:** primero la solicitud más urgente del grupo (`mostUrgentAt` = el plazo vigente más cercano; las vencidas van primero) y después el id. El cursor es opaco y lleva `(mostUrgentAt, customerKey)`. Cada grupo trae hasta 10 solicitudes y avisa cuántas más hay en `moreRequests`.
+- **Orden de los grupos:** primero la solicitud más urgente del grupo (`mostUrgentAt` = el plazo vigente más cercano; las vencidas van primero) y después el id. El cursor es opaco y lleva `(mostUrgentAt, customerKey)`. Cada grupo trae hasta 10 solicitudes y avisa cuántas más hay en `moreRequests`; el resto se pide con `GET /chatbot-requests?customerKey=` (§12.3).
+- **`liveSession`** es `null` fuera de una conversación, o `{state, handoffEpoch, lastStaffActivityAt, lastCustomerMessageAt}` (§12.4, §12.10). El nombre de quien atiende es `assignee.displayName`. Esta misma fila es el payload de los eventos SSE de solicitud (§5.3).
 - `slaPaused` y `slaResumesAt` sirven para mostrar "En pausa hasta las 9:00" (hueco 7 del frontend).
 - **Las resueltas no salen en la vista abierta.** Por decisión del dueño, `status=resolved` muestra solo los últimos 7 días (también las canceladas con `status=cancelled`). `status=scheduled` es la pestaña "Agendadas" (§4.9).
 - **Historial (después de 7 días):** `GET /chatbot-requests/history?subtype=&resolvedBy=<userId>&from=&to=&customerKey=&q=&cursor=&limit=25` (`read:ChatbotRequest`). Es una lista plana sin agrupar y sin acciones: solicitudes `RESOLVED` o `CANCELLED` con `closedAt` anterior a ahora menos 7 días, en orden `closedAt DESC, id DESC` con cursor opaco `(closedAt, id)`. `closedAt` = `resolvedAt` o `cancelledAt`. Índice `(tenantId, closedAt DESC, id DESC) WHERE status IN ('RESOLVED','CANCELLED')`, más `(tenantId, subtype, closedAt DESC)` y `(tenantId, resolvedByActorId, closedAt DESC)` para los filtros. El rango `from/to` es como máximo de 92 días por consulta. El detalle se abre con el mismo `GET /chatbot-requests/:id`.
-- **Contadores:** `GET /chatbot-requests/counts` devuelve `{new, inProgress, mine, overdue, windowClosingSoon}` para las pestañas y el badge del menú. Se actualiza por SSE (`counts.changed`).
+- **Contadores:** `GET /chatbot-requests/counts` devuelve `{new, inProgress, mine, overdue, windowClosingSoon, scheduled, needsReschedule}` para las pestañas y el badge del menú. Se actualiza por SSE (`counts.changed`).
 
 **Detalle:** `GET /chatbot-requests/:id` devuelve lo mismo que una fila, más:
 - `needs` y `context`;
-- `customer {id?, displayName, phone, customerSince, isTrusted, priceList{id,name}, recentOrders[≤5]}`; si no hay cliente, `customer.id = null` y `allowedActions` incluye `LINK_CUSTOMER`;
+- `customer {id?, displayName, phone, customerSince, isTrusted, priceList{id,name}, recentOrders[≤5]}` (forma de `recentOrders` en §12.6); si no hay cliente, `customer.id = null` y `allowedActions` incluye `LINK_CUSTOMER`;
 - `otherOpenRequests[]` del mismo `customerKey`;
 - `decision`: la vista de la tabla envuelta (la misma proyección de hoy: producto y variante, código postal y colonias, archivo y `mismatch` del comprobante);
 - en zona, `zoneImpact {validationId, requests, customers, setVersion}`: lo que resolvería aprobar o rechazar (ver abajo);
-- `liveSession {state, handoffEpoch}`;
-- `deliveries[]` con su resultado (incluye "entrega dudosa");
-- `audit[]` paginado (ver `GET /chatbot-requests/:id/audit`);
+- `liveSession`, la misma de la fila (§12.4), y `templateCostText` cuando se puede mandar la plantilla (§12.7);
+- `deliveries[]` con su resultado (incluye "entrega dudosa"; forma en §12.6);
+- `audit[]`: las 20 más recientes y `auditNextCursor`; el resto con `GET /chatbot-requests/:id/audit` (forma en §12.6);
 - `allowedActions[]`, **calculado en el servidor** según los permisos, el estado y si la persona es el asignado: `CLAIM, RELEASE, REASSIGN, RESOLVE, REPLY, SEND_MESSAGE, SEND_TEMPLATE, FINISH, FINISH_IDLE, MERGE, LINK_CUSTOMER, CANCEL`.
 
-La conversación **no viene en el detalle**. Se pide aparte (§3.6) y solo con `read:ChatbotConversation`; sin ese permiso, la ruta responde `403` y el frontend no muestra el bloque.
+La conversación **no viene en el detalle**. Se pide aparte (§3.6) con `read:ChatbotConversation`. Quien atiende sin ese permiso recibe solo los mensajes de su sesión; cualquier otra persona sin el permiso recibe `403` y el frontend no muestra el bloque.
 
-**Comandos.** Todos reciben `{expectedVersion}` y el header `Idempotency-Key: <uuid>`, el mismo nombre que ya usan las ventas del POS (`src/sales/sales-query.controller.ts:77`, `src/cash-register/presentation/decorators/idempotency-key.decorator.ts:16`). Responden `200 {request}` con la versión nueva.
+**Comandos (regla única, §12.12).** Todo `POST` de comando del personal lleva el header `Idempotency-Key: <uuid>`, el mismo nombre que ya usan las ventas del POS (`src/sales/sales-query.controller.ts:77`, `src/cash-register/presentation/decorators/idempotency-key.decorator.ts:16`), y `{expectedVersion}` en el body. Dos excepciones fijas: `messages` lleva `expectedEpoch` en lugar de `expectedVersion` (y `Idempotency-Key = clientMessageId`), y la subida `media` no lleva versión. Responden `200 {request}` con la versión nueva.
 
 | Ruta `POST /chatbot-requests/:id/...` | Body extra |
 | --- | --- |
@@ -348,7 +354,8 @@ La conversación **no viene en el detalle**. Se pide aparte (§3.6) y solo con `
 | `messages` | §4.4. Con medios: `{clientMessageId, mediaId, caption?}`, donde el `mediaId` sale de `POST /chatbot-requests/:id/media` (multipart; imagen o PDF, 10 MB, bytes mágicos, la misma validación que los medios del bot) |
 | `reschedule` | `{scheduledFor}` (§4.9) |
 | `template` / `finish` | §4.5 / §4.8 |
-| `merge` | `{intoRequestId}` |
+| `merge` | `{intoRequestId}`. Candidatas en `GET /chatbot-requests/:id/merge-candidates` (§12.11) |
+| `cancel` | `{reason: DUPLICATE \| NOT_ACTIONABLE \| CUSTOMER_UNREACHABLE \| OTHER, note?}` (§12.11) |
 | `link-customer` | `{customerId}`. Vincula también las demás solicitudes del mismo `customerKey` |
 
 **`409` con tipo**, siempre con la versión actual para que el frontend se ponga al día sin volver a pedir el detalle:
@@ -387,32 +394,34 @@ Se mantienen sin cambios, durante la migración por subtipo: `POST/GET /chatbot-
 
 ### 3.10 Endpoints frontend ↔ backend (consolidado)
 
-Todas usan JWT + `TenantContextGuard` + `ActiveUserGuard`. Los comandos llevan `Idempotency-Key: <uuid>` y `expectedVersion`. Errores comunes: `401`, `403 INSUFFICIENT_PERMISSIONS`, `404`, `400`, `429 RATE_LIMITED`. El teléfono va enmascarado salvo con `read:CustomerPhone`.
+Todas usan JWT + `TenantContextGuard` + `ActiveUserGuard`. Todo `POST` de comando lleva `Idempotency-Key: <uuid>` y `expectedVersion` (excepciones: `messages` usa `expectedEpoch`; `media` no lleva versión; §12.12). Errores comunes: `401`, `403 INSUFFICIENT_PERMISSIONS`, `404`, `400`, `429 RATE_LIMITED`. El teléfono va enmascarado salvo con `read:CustomerPhone`.
 
 | Método y ruta | Permiso | Payload / respuesta | Errores con tipo |
 | --- | --- | --- | --- |
 | `GET /chatbot-requests/groups` | `read:ChatbotRequest` | Filtros y grupos (§3.8) | — |
-| `GET /chatbot-requests/counts` | `read:ChatbotRequest` | `{new, inProgress, mine, overdue, windowClosingSoon, scheduled}` | — |
+| `GET /chatbot-requests?customerKey=&status=&cursor=&limit=25` | `read:ChatbotRequest` | Filas planas de un cliente (§12.3) | `400 VALIDATION_ERROR` sin `customerKey` |
+| `GET /chatbot-requests/counts` | `read:ChatbotRequest` | `{new, inProgress, mine, overdue, windowClosingSoon, scheduled, needsReschedule}` | — |
 | `GET /chatbot-requests/history` | `read:ChatbotRequest` | Lista plana con cursor, después de 7 días (§3.8) | `400 RANGE_TOO_LARGE` |
 | `GET /chatbot-requests/:id`, `GET …/:id/audit` | `read:ChatbotRequest` | Detalle con `allowedActions` y `zoneImpact`; auditoría paginada | — |
 | `GET /chatbot-requests/:id/zone-impact` | `read:ChatbotRequest` | `{requests, customers, setVersion}` | — |
-| `GET /chatbot-requests/:id/conversation?before=&after=` | `read:ChatbotConversation` (o ser el asignado, solo para su sesión) | Mensajes por `seq` | — |
-| `GET /chatbot-media/:id` | Igual que la conversación | Streaming `private, no-store` | `410 MEDIA_PURGED` |
+| `GET /chatbot-requests/:id/merge-candidates` | `update:ChatbotRequest` | `{items: Row[]}` (§12.11) | — |
+| `GET /chatbot-requests/:id/conversation?before=&after=` | `read:ChatbotConversation` (o ser el asignado, solo para su sesión) | `{items: Message[], hasMoreBefore}` por `seq` (§12.5) | — |
+| `GET /chatbot-media/:id[?variant=thumb]` | Igual que la conversación | Proxy autenticado, `private, no-store` (§12.5) | `404 THUMB_UNAVAILABLE`, `410 MEDIA_PURGED` |
 | `GET /chatbot-requests/assignable-users` | `update:ChatbotRequestAssignment` | Miembros activos con `update:ChatbotRequest` | — |
 | `POST /chatbot-requests/:id/claim` \| `release` | `update:ChatbotRequest` (liberar la de otra persona pide `update:ChatbotRequestAssignment`) | `{expectedVersion}` | `409 REQUEST_CLAIMED_BY_OTHER`, `409 VERSION_CONFLICT`, `409 REQUEST_CLOSED` |
 | `POST …/:id/reassign` | `update:ChatbotRequestAssignment` | `{expectedVersion, toUserId, note?}` | `409 VERSION_CONFLICT`, `422 USER_NOT_ASSIGNABLE` |
-| `POST …/:id/resolve` | `update:ChatbotRequest` | `{expectedVersion, action, …, expectedZoneSetVersion?}` | `409 ZONE_SET_CHANGED`, `409 REQUEST_CLAIMED_BY_OTHER`, `409 VERSION_CONFLICT` |
+| `POST …/:id/resolve` | `update:ChatbotRequest` | `{expectedVersion, action, …, expectedZoneSetVersion?}`; solo `kind = DECISION` (§12.6) | `409 ZONE_SET_CHANGED`, `409 REQUEST_CLAIMED_BY_OTHER`, `409 VERSION_CONFLICT`, `422 ACTION_NOT_ALLOWED` |
 | `POST …/:id/reply` | `update:ChatbotRequest` (asignado) | `{expectedVersion, text}` | `403 NOT_ASSIGNEE` |
 | `POST …/:id/media` | `update:ChatbotRequest` (asignado) | multipart con imagen o PDF de hasta 10 MB → `{mediaId}` | `413`, `415` |
 | `POST …/:id/messages` | `update:ChatbotRequest` (asignado) | `{clientMessageId, expectedEpoch, text? \| mediaId + caption?}` | `403 NOT_ASSIGNEE`, `409 SESSION_NOT_ACTIVE`, `409 STALE_EPOCH`, `409 WINDOW_CLOSED` |
 | `POST …/:id/template` | `update:ChatbotRequest` (asignado) | `{expectedVersion}` | `409 TEMPLATE_ALREADY_SENT`, `422 TEMPLATE_NOT_CONFIGURED` |
 | `POST …/:id/finish` | `update:ChatbotRequest` (asignado) o `update:ChatbotRequestAssignment` | `{expectedVersion, note, complaintOutcome?}` | `409 VERSION_CONFLICT` |
 | `POST …/:id/reschedule` | `update:ChatbotRequest` | `{expectedVersion, scheduledFor}` | `409 SLOT_UNAVAILABLE` |
-| `POST …/:id/merge` \| `link-customer` \| `cancel` | `update:ChatbotRequest` | `{expectedVersion, intoRequestId \| customerId \| reason}` | `409 VERSION_CONFLICT` |
+| `POST …/:id/merge` \| `link-customer` \| `cancel` | `update:ChatbotRequest` | `{expectedVersion, intoRequestId \| customerId \| reason + note?}` | `409 VERSION_CONFLICT`, `422 MERGE_NOT_ALLOWED`, `422 CANCEL_NOT_ALLOWED` |
 | `GET /notifications`, `GET /notifications/unread-count` | Autenticado (solo las propias) | §5.2 | — |
 | `POST /notifications/:id/read`, `POST /notifications/read-all` | Autenticado | Idempotentes | — |
 | `GET` / `PATCH /me/notification-preferences` | Autenticado | `{emailEnabled, soundEnabled}` | — |
-| `GET` / `PUT /chatbot-settings` | `read` / `update:ChatbotSettings` | §5.5 | `400 OPENING_HOURS_INVALID` |
+| `GET` / `PUT /chatbot-settings` | `read` / `update:ChatbotSettings` | §5.5; el `GET` incluye `branchOpeningHours` para "Copiar el horario de la sucursal" (§12.9) | `400 OPENING_HOURS_INVALID`, `409 VERSION_CONFLICT` |
 | `POST /chatbot-settings/apply-to-all-tenants` | `update:ChatbotSettingsAllBranches` | `{expectedVersion, dryRun?}` → `{tenantsUpdated, tenantsSkipped}` (con `dryRun: true` solo cuenta, para la confirmación) | `409 VERSION_CONFLICT` |
 | `GET /realtime/stream` | Autenticado; los eventos se filtran por permiso | SSE (§5.3) | `401` al conectar |
 
@@ -519,7 +528,7 @@ Lo mueve el barrido de §5.4, no un temporizador en memoria:
 | … sin contestar en 15 min | Notificación a quienes tienen `update:ChatbotRequestAssignment` |
 | El cliente no contesta hace 30 min | El frontend habilita "Finalizar" sin confirmación extra (`allowedActions` incluye `FINISH_IDLE`) |
 | … hace 2 h | Pasa sola a `ENDING`, con nota automática; el bot avisa y vuelve |
-| Quien atiende se fue | Nada automático (lo pide el diseño). Se muestra cuánto lleva inactiva la persona según su última conexión SSE |
+| Quien atiende se fue | Nada automático (lo pide el diseño). La fila trae `liveSession.lastStaffActivityAt` (último mensaje o comando de quien atiende en esta sesión) y el frontend calcula cuánto lleva inactiva (§12.10) |
 
 **Estos relojes de la conversación no se pausan fuera de horario [supuesto: consecuencia de "el bot se calla solo cuando una persona la toma"].** Una conversación tomada fuera de horario significa que alguien está atendiendo.
 
@@ -621,7 +630,7 @@ NotificationEmail     id, notificationId, status (vía OutboxEvent, eventType pr
 
 - `GET /notifications?cursor=&limit=20&unread=true` → `{items:[{id, type, title, body, requestId, createdAt, readAt}], nextCursor}`
 - `GET /notifications/unread-count` → `{count}`
-- `POST /notifications/:id/read`, `POST /notifications/read-all` (idempotentes)
+- `POST /notifications/:id/read`, `POST /notifications/read-all` (idempotentes; avisan a las otras pestañas y equipos con SSE `notification.read`, §12.8)
 - `GET /me/notification-preferences` → `{emailEnabled, soundEnabled}` y `PATCH` con el mismo shape. **Decisión del dueño: "El sonido viene activado por defecto y cada persona lo puede apagar."** `soundEnabled` se guarda en el servidor junto al correo, para que siga a la persona entre equipos; el frontend lo usa y lo respeta entre pestañas. **Los avisos dentro del sistema no se pueden apagar** (diseño §3). El permiso de notificaciones del navegador sigue siendo local.
 - **Retención** de `Notification`: 90 días (decisión técnica), con el cron diario de §3.6.
 
@@ -643,8 +652,8 @@ El frontend pidió WebSocket o socket.io porque `EventSource` no manda `Authoriz
 - **Eventos guardados** en `RealtimeEvent {id bigserial, tenantId, userId|null (null = todos los que tienen read:ChatbotRequest), type, payload, createdAt}` con retención de 24 h. La conexión manda primero lo que hay después de `Last-Event-ID` y luego lo que entra en vivo. Si el id ya pasó la retención, manda `event: resync` y el frontend vuelve a pedir la lista. Así no se pierde nada aunque se caiga la red.
 - **Reparto:** después de insertar, `NOTIFY chatbot_rt, '<tenantId>'`. Cada réplica escucha (`LISTEN`) con **una conexión dedicada** y lee de la tabla los eventos nuevos para sus conexiones abiertas. El `NOTIFY` solo avisa que hay algo; el contenido sale de la tabla, filtrado por permisos.
 - **Permisos en vivo:** cada 5 min y en cada reconexión se vuelve a comprobar `User.isActive` y los permisos (`JwtStrategy` no lo hace, §1.1). Un evento solo se manda si quien lo recibe puede ver la solicitud. Los mensajes de la conversación solo van a quien atiende o tiene `read:ChatbotConversation`.
-- **Eventos:** `request.created|claimed|released|reassigned|resolved|cancelled|overdue|updated`, `session.starting|active|ending|ended`, `conversation.message` (cliente o personal, con `seq`), `message.status`, `notification.created`, `counts.changed`, `resync`. El payload es la fila de la lista (§3.8). El frontend no necesita volver a pedir el detalle salvo cuando recibe `resync`.
-- **Latido:** cada **25 s** el servidor manda `event: heartbeat` con `data: {"serverTime": "…"}` y sin `id`, para que no mueva `Last-Event-ID`. El valor queda por debajo de los timeouts de inactividad habituales de los proxies (60 s) **[supuesto: hay que verificar el de Traefik en la prueba R6]**. Si el frontend no recibe nada en 60 s, da la conexión por cortada y reconecta con `Last-Event-ID`.
+- **Eventos:** `request.created|claimed|released|reassigned|resolved|cancelled|overdue|updated`, `session.starting|active|ending|ended`, `conversation.message` (cliente o personal, con `seq`), `message.status`, `notification.created`, `notification.read`, `counts.changed`, `connection-replaced`, `resync`. Los eventos de solicitud llevan la fila completa de la lista con su `version`; `counts.changed` lleva el objeto de contadores completo (forma exacta en §12.8). El frontend no necesita volver a pedir la lista salvo con `resync`.
+- **Latido:** cada **15 s** el servidor manda `event: heartbeat` con `data: {"serverTime": "…"}` y sin `id`, para que no mueva `Last-Event-ID`. El valor queda muy por debajo de los timeouts de inactividad habituales de los proxies (30–60 s) **[supuesto: hay que verificar el de Traefik en la prueba R6]**. Si el frontend no recibe nada en 45 s (tres latidos), da la conexión por cortada y reconecta con `Last-Event-ID`.
 - **Cierre por autenticación:** con un token vencido o inválido, o un usuario desactivado, la conexión se rechaza con `401` al conectar. Si eso pasa a mitad del stream (expira el JWT, el barrido de 5 min ve `isActive = false` o pierde `read:ChatbotRequest`), el servidor manda `event: auth-expired` (o `event: access-revoked`) y cierra. El frontend refresca el token y reconecta con `Last-Event-ID`. Si el refresh falla, cierra la sesión. El servidor guarda la expiración del JWT al conectar y programa el cierre para esa hora.
 - **Mientras no exista:** polling, como propone el frontend (lista cada 30 s, conversación abierta cada 3–5 s con `GET …/conversation?after=<seq>`). El contrato REST no cambia cuando entra SSE.
 
@@ -661,9 +670,9 @@ El frontend pidió WebSocket o socket.io porque `EventSource` no manda `Authoriz
 ### 5.5 Configuración de horario y tiempos
 
 - `GET/PUT /chatbot-settings` (`read/update:ChatbotSettings`):
-  `{ openingHours: OpeningHoursBody, closedDates: ["2026-12-25"], slas: [{subtype, claimMinutes|null, resolveMinutes|null}], windowWarningMinutes, templateName, enabledSubtypes[], receiptCloseMarginMinutes: 60, scheduling: { enabled, slotMinutes: 30, slotsOffered: 3, maxScheduledPerSlot: 3 }, version }` (`closedDates` y `scheduling` vienen de §4.9). El `PUT` lleva `expectedVersion`.
+  `{ openingHours: OpeningHoursBody, closedDates: ["2026-12-25"], slas: [{subtype, claimMinutes|null, resolveMinutes|null}], windowWarningMinutes, templateName, templateCostText, enabledSubtypes[], receiptCloseMarginMinutes: 60, scheduling: { enabled, slotMinutes: 30, slotsOffered: 3, maxScheduledPerSlot: 3 }, version }` (`closedDates` y `scheduling` vienen de §4.9; `templateCostText` de §12.7). El `GET` agrega `branchOpeningHours: OpeningHoursBody | null`, solo lectura (§12.9). El `PUT` lleva `expectedVersion`.
 - **Se reutiliza tal cual el `OpeningHoursBody` del frontend** (`shipping-settings.types.ts:75`, `{timeZone, days}`) y el dominio de `src/shipping/pickup/domain/opening-hours.ts`, con las mismas validaciones (sin solapes y sin cruzar medianoche). Así el frontend reutiliza su `OpeningHoursEditor` sin cambios.
-- **Pero el horario se guarda aparte** (`ChatbotAttentionSettings`), no en `TenantOpeningHours`. Recoger en tienda y atender el chat son horarios distintos (por ejemplo, el chat podría cerrar antes). Hay un botón "Copiar el horario de la sucursal". Valor inicial: lunes a sábado de 9 a 19 h, zona `America/Mexico_City`, tiempos de la tabla del diseño (§4).
+- **Pero el horario se guarda aparte** (`ChatbotAttentionSettings`), no en `TenantOpeningHours`. Recoger en tienda y atender el chat son horarios distintos (por ejemplo, el chat podría cerrar antes). Hay un botón "Copiar el horario de la sucursal": el frontend carga `branchOpeningHours` en el editor y se guarda con el `PUT` normal (§12.9). Valor inicial: lunes a sábado de 9 a 19 h, zona `America/Mexico_City`, tiempos de la tabla del diseño (§4).
 - **Decidido por el dueño: un horario por sucursal, con la acción "aplicar a todas".** En este backend cada sucursal es un tenant (`X-Branch-Id` = `tenantId`, `service-auth.guard.ts:123-136`) y no hay ninguna entidad por encima. "Aplicar a todas" es `POST /chatbot-settings/apply-to-all-tenants`, con el permiso `update:ChatbotSettingsAllBranches`. Se aplica solo a las sucursales donde quien lo ejecuta tiene ese mismo permiso (las demás cuentan en `tenantsSkipped`); el super admin las alcanza todas. Antes de confirmar, el frontend llama con `dryRun: true` y muestra cuántas sucursales cambian. Copia horario, días cerrados, tiempos y configuración de agenda a cada tenant en su propia transacción, y deja un evento de auditoría por tenant. Las solicitudes abiertas de cada tenant se recalculan como en §5.4.
 
 ---
@@ -680,7 +689,7 @@ El frontend pidió WebSocket o socket.io porque `EventSource` no manda `Authoriz
 ### 6.2 Auditoría e inmutabilidad
 
 - **`ChatbotRequestEvent`** es una tabla solo de inserción: `{id, tenantId, requestId, type, actorKind USER|SERVICE|SYSTEM, actorId, actorDisplayName (copia), fromStatus, toStatus, version, data Json (sin texto del cliente), createdAt}`. Registra el alta, la fusión, la toma, la liberación, la reasignación (de y a quién), la resolución (la opción), la respuesta (el id del mensaje, no el texto), la plantilla, el cierre (nota y clasificación), la cancelación, los hitos de tiempo y los resultados de entrega.
-- **Inmutable en la base de datos:** un trigger rechaza `UPDATE` y `DELETE` en `chatbot_request_events`. En `conversation_messages` también, salvo dos casos: `deliveryStatus` solo puede avanzar (`QUEUED → SENT → DELIVERED → READ`, o `→ FAILED/UNKNOWN`) y el borrado solo lo hace el rol de retención con `purgeAfter < now()`. Una corrección es un mensaje nuevo; el frontend no tendrá editar ni borrar.
+- **Inmutable en la base de datos:** un trigger rechaza `UPDATE` y `DELETE` en `chatbot_request_events`. En `conversation_messages` también, salvo dos casos: `deliveryStatus` solo puede avanzar (`QUEUED → [DEFERRED →] SENT → DELIVERED → READ`, o `→ FAILED/UNKNOWN`) y el borrado solo lo hace el rol de retención con `purgeAfter < now()`. Una corrección es un mensaje nuevo; el frontend no tendrá editar ni borrar.
 - **Nombres copiados:** como en `HumanDecision.resolvedByDisplayName`, la auditoría sobrevive aunque se borre el usuario (sin FK con cascade).
 - **Retención (decidida por el dueño):** a los 12 meses se borra solo la conversación (mensajes replicados y medios, §3.6). Las solicitudes, su `resolution` y su auditoría se conservan sin vencimiento, porque no contienen el texto de la conversación.
 
@@ -702,7 +711,7 @@ El frontend pidió WebSocket o socket.io porque `EventSource` no manda `Authoriz
 | Lote de espejo | 50 mensajes por llamada | `messages:batch` |
 | Feed | long-poll de 25 s como máximo, con su propio presupuesto (no el de 60 por minuto) | `feed` |
 | Tráfico del bot por sucursal | Dimensionado para 60 entrantes por minuto por sucursal con margen: espejo y statuses 300 por minuto, salientes y ACKs 180 por minuto, todo configurable por credencial y por clase de presupuesto (§11.1) | `messages:batch`, `statuses`, `ack`, `session-ack` |
-| Conexiones SSE | 5 por usuario; la más vieja se cierra | `realtime` |
+| Conexiones SSE | 5 por usuario; la más vieja recibe `event: connection-replaced` y se cierra. Es protección: el frontend usa una sola conexión por navegador (§12.2) | `realtime` |
 
 **El rate limit del bot vive en memoria** (`service-auth.guard.ts:36-41`). Con más de una réplica, cada réplica cuenta por separado. Para las rutas nuevas propongo contar en PostgreSQL (`AuthRateBucket` ya existe para el login, `schema.prisma:1936`) o aceptar el límite por réplica de forma explícita.
 
@@ -785,7 +794,7 @@ Las fuentes son el diseño (§7, commit `7e298b4`) y las respuestas directas a l
 **Pendiente técnico** (lo resuelve el equipo en la implementación y no necesita al dueño):
 - **Texto y nombre de la plantilla:** se redactan y se mandan a Meta cuando el número real esté dado de alta (D18). Hasta entonces, el botón responde `422 TEMPLATE_NOT_CONFIGURED`.
 - **Fechas de feriados:** las carga cada sucursal desde la configuración (D10); no hay fechas fijas.
-- **Medir el timeout de inactividad de Traefik** para confirmar el latido de 25 s (R6).
+- **Medir el timeout de inactividad de Traefik** para confirmar el latido de 15 s (R6).
 - **Umbrales técnicos ya fijados**, ajustables en la configuración o en la etapa: "ventana por cerrar" a 2 h, escalamiento al 80 % del plazo, margen de 60 min del comprobante, retención de las notificaciones a 90 días.
 
 ---
@@ -912,3 +921,187 @@ El chatbot confirmó que §3.9, §4, §10, §10.1, §11 y §11.1 encajan con su 
 2. **Alcance del espejo:** se espeja todo el tráfico en las dos direcciones desde el corte, también los turnos en modo bot. `messages:batch` acepta los salientes del bot como `direction: OUT` + `author: BOT` (no hay un valor `OUTBOUND_BOT`). El lote **no lleva `epoch`**: la época solo viaja en `session-ack` y en los eventos del feed.
 3. **Scopes nuevos de la credencial de producción:** `requests:create`, `requests:read`, `requests:cancel`, `feed:read`, `feed:ack`, `conversation:write` y `media:write`, además de los que ya tiene. Van en el handoff de despliegue.
 4. **Detalle de payloads:** §3.2 a §3.5 son finales en v1. Se mandan ahora y se repiten en el handoff cuando empiece la unidad 5.
+
+---
+
+## 12. Aclaraciones para el frontend (v1.1, 2026-11-10)
+
+Respuestas a las 13 preguntas del frontend sobre el contrato v1. Cada una es una decisión; el cuerpo del documento ya está corregido para que diga lo mismo (se indica dónde). Todo es aditivo sobre v1 salvo el latido (§12.1) y la regla de comandos (§12.12), que unifican textos que se contradecían.
+
+### 12.1 Latido SSE: 15 s
+
+El latido es **cada 15 s** en todo el documento (§5.3, R6 y el pendiente técnico de §8). Queda por debajo de los timeouts de inactividad habituales de proxies y balanceadores (30–60 s). El frontend da la conexión por cortada si no recibe nada en **45 s** (tres latidos) y reconecta con `Last-Event-ID`. El latido no lleva `id`. La prueba R6 mide el timeout real de Traefik; si fuera menor de 30 s, se ajusta Traefik, no el latido.
+
+### 12.2 Una conexión SSE por navegador (pestaña líder)
+
+**Sí.** El frontend mantiene una sola conexión en una pestaña líder (por ejemplo con Web Locks o un lock en `BroadcastChannel`) y reparte los eventos a las demás pestañas por `BroadcastChannel`. Reglas:
+- Los eventos se arman por usuario y tenant, así que el canal de `BroadcastChannel` se nombra con `userId` y `tenantId`; al cambiar de sesión o de sucursal se cierra y se abre otro.
+- Si la líder se cierra, la nueva líder reconecta con el último `Last-Event-ID` que se compartió por el canal. No se pierde nada (§5.3, retención de 24 h).
+- El tope de **5 conexiones por usuario** se queda como protección (varios equipos o un error del frontend). Cuando se supera, el servidor manda `event: connection-replaced` a la conexión más vieja y la cierra. Con ese evento el frontend **no** reconecta automáticamente: muestra "Abierto en otra ventana" con un botón para reconectar. Así se evita un bucle entre dos pestañas que se expulsan.
+
+### 12.3 Grupos con más de 10 solicitudes: lista por cliente
+
+Se agrega una lista plana filtrada por cliente. `otherOpenRequests` del detalle no sirve para esto: no pagina y solo trae las abiertas.
+
+`GET /chatbot-requests?customerKey=<key>&status=open|resolved|cancelled|scheduled&cursor=&limit=25` (`read:ChatbotRequest`)
+
+```json
+{ "items": [ /* filas iguales a las de /groups (§3.8) */ ], "nextCursor": "…" }
+```
+
+- `customerKey` es **obligatorio** en v1 (sin él, `400 VALIDATION_ERROR`). No es una segunda bandeja; para eso está `/groups`.
+- `status` usa los mismos valores y ventanas que `/groups` (resueltas y canceladas: últimos 7 días). Por defecto, `open`.
+- Orden igual al de dentro de un grupo: el plazo vigente más cercano primero (vencidas antes), luego `createdAt` y `id`. Cursor opaco `(urgencyAt, id)`. `limit` máximo 50.
+- El frontend la usa en "Ver las N restantes" de un grupo con `moreRequests > 0`. Usa el índice `(tenantId, customerKey, status)` que ya está en §10.1.
+
+### 12.4 Campos nuevos en la fila y en el SSE
+
+La fila de la lista (§3.8) agrega estos campos. Como la fila es el payload de los eventos de solicitud (§12.8), aparecen también en SSE sin nada extra:
+
+```json
+{ "folio": "S-000123", "customerKey": "525512345678",
+  "scheduledFor": "2026-11-10T15:00:00Z", "requiresTemplateAtStart": true, "needsReschedule": false,
+  "liveSession": { "state": "ACTIVE", "handoffEpoch": 3,
+                   "lastStaffActivityAt": "…", "lastCustomerMessageAt": "…" } }
+```
+
+- `scheduledFor`, `requiresTemplateAtStart` y `needsReschedule` existen en todas las filas (`null` / `false` fuera de la agenda, §4.9).
+- `liveSession` es `null` si la solicitud no es una conversación o todavía no hubo sesión; `state` es `WAITING | STARTING | ACTIVE | ENDING | ENDED | CANCELLED` (§4.2).
+- **El nombre de quien atiende es `assignee.displayName`** (el nombre visible del compañero, copiado al tomar). No se duplica dentro de `liveSession`.
+- `counts` agrega `needsReschedule` para el aviso de citas por reagendar (§3.8, §3.10).
+
+### 12.5 Mensajes de la conversación y medios
+
+`GET /chatbot-requests/:id/conversation` devuelve `{items: Message[], hasMoreBefore}` ordenado por `seq` ascendente. Los valores de enum van en mayúsculas, como en todo el contrato (§3.6 ya está alineado):
+
+```json
+{ "id": "…", "seq": 17, "direction": "OUT", "author": "STAFF",
+  "staff": { "id": "…", "displayName": "Ana" },
+  "type": "IMAGE", "text": "Le comparto la foto",
+  "media": { "id": "…", "mimeType": "image/jpeg", "sizeBytes": 182344,
+             "durationSec": null, "hasThumb": true, "purged": false },
+  "deliveryStatus": "DELIVERED", "clientMessageId": "…",
+  "providerTimestamp": "2026-11-09T16:02:11.000Z", "createdAt": "2026-11-09T16:02:11.420Z" }
+```
+
+- `direction`: `IN | OUT`. `author`: `CUSTOMER | BOT | STAFF | SYSTEM`. `staff` solo con `author = STAFF` (si no, `null`).
+- `type`: `TEXT | IMAGE | STICKER | DOCUMENT | AUDIO | TEMPLATE | SYSTEM | UNSUPPORTED`. `DOCUMENT` es el PDF. `UNSUPPORTED` es "video recibido" o "ubicación recibida" (sin archivo, §3.6) y trae `text` fijo del backend. `SYSTEM` son marcas de la línea de tiempo ("Ana tomó la conversación", "Plantilla enviada").
+- `text`: el texto o el pie de foto; `null` si no hay. Siempre se muestra como texto, nunca como HTML (§6.1).
+- `media`: `null` si no hay archivo. `durationSec` solo en audio (puede ser `null` si no se pudo leer). `purged: true` después de la retención de 12 meses (la ruta responde `410`).
+- `deliveryStatus`: solo en mensajes `OUT`; en `IN` es `null`. Valores: `QUEUED | DEFERRED | SENT | DELIVERED | READ | FAILED | UNKNOWN`. `DEFERRED` = ventana cerrada, queda guardado hasta que el cliente escriba; `UNKNOWN` = "entrega dudosa" (§4.7). El cambio llega por SSE `message.status {messageId, seq, deliveryStatus}`.
+- `providerTimestamp` es la hora de Meta (puede ser `null` en salientes todavía no enviados); `createdAt` es la hora del backend. **El orden es siempre `seq`**, nunca una de las dos horas.
+- `clientMessageId` solo en los del personal, para que el frontend reconcilie su envío optimista.
+
+**Medios: proxy autenticado, sin URL firmadas.** `GET /chatbot-media/:id` sirve el original y `GET /chatbot-media/:id?variant=thumb` la miniatura (imagen y sticker; PDF y audio no tienen, `404 THUMB_UNAVAILABLE`). Responde con `Content-Type` real, `Cache-Control: private, no-store` y `Content-Disposition: inline` (PDF con nombre genérico). Permiso: el mismo que la conversación (`read:ChatbotConversation`, o ser quien atiende y el medio es de su sesión), comprobado **en cada petición**.
+- Por qué no URL firmadas de Spaces: una URL firmada sigue valiendo si a la persona le quitan el permiso o la desactivan, y se puede compartir o quedar en el historial. El proxy aplica permisos y `isActive` en cada lectura, como el visor de comprobantes (handoff 08 §5). El volumen es bajo (10 MB máximo por archivo).
+- Como el JWT va en `Authorization`, el frontend no puede usar la URL en `<img src>` ni en `<audio src>`: la pide con `fetch`, crea un `blob:` con `URL.createObjectURL` y lo libera al desmontar. El audio se descarga completo antes de reproducirse (10 MB como máximo).
+
+### 12.6 `resolve`, `decision`, `audit[]`, `recentOrders` y `deliveries[]`
+
+**Quién usa `resolve`.** Solo `kind = DECISION` (RESTOCK, EXPIRATION, DELIVERY_ZONE, TRANSFER_RECEIPT). Los demás se cierran con su propio comando y `resolve` responde `422 ACTION_NOT_ALLOWED`: la aclaración (`kind = CLARIFICATION`, subtipo `UNKNOWN_QUESTION`) con `reply {text}`, y `TALK_TO_HUMAN` y `COMPLAINT` con `finish` (§4.8). "CLARIFICATION" es un `kind`, no un subtipo.
+
+**Unión de `resolve.action` por subtipo.** Es exactamente el body que validan hoy los parsers, con dos cambios fijos para todos: `expectedVersion` es la de `ChatbotRequest` (R4; el backend llama al repositorio de abajo con su propia versión) y **no se manda `resolutionRequestId`**, que el backend deriva del `Idempotency-Key`. Cualquier clave de más se rechaza con `400`, como hoy.
+
+| Subtipo | `action` y campos | Fuente |
+| --- | --- | --- |
+| RESTOCK | `PROVIDE_RESTOCK_ESTIMATE {restockDays: 1..365}` \| `REPORT_RESTOCK_ESTIMATE_UNAVAILABLE {}` (sin `restockDays`, ni siquiera `null`) | `src/human-decisions/presentation/dto/resolve-human-decision.request.ts:57-100` |
+| EXPIRATION | `PROVIDE_EXPIRATION_TEXT {expirationText: 1..500}` \| `REPORT_EXPIRATION_UNAVAILABLE {}` | mismo archivo `:306-329` |
+| DELIVERY_ZONE | `APPROVE_DELIVERY_ZONE {zoneType: FREE \| SURCHARGE \| CARRIER_ONLY, surchargeCents?, etaDays?, expectedZoneSetVersion}` \| `REJECT_DELIVERY_ZONE {expectedZoneSetVersion}` | `src/delivery-zones/domain/delivery-zone-resolve.request.ts:5-7,26-46` (forma de la zona: `normalizeZoneSettings`) |
+| TRANSFER_RECEIPT | `CONFIRM_RECEIPT {amountCents: entero ≥ 1}` \| `REJECT_RECEIPT {reason, customerReason: 1..300}` | `src/sales/review/dto/confirm-receipt.dto.ts:3-6`, `reject-receipt.dto.ts:17-35` |
+
+En la API nueva, `customerReason` es **obligatorio** al rechazar (hoy es opcional solo por compatibilidad, `reject-receipt.dto.ts:23-27`), porque es el texto que el bot le manda al cliente. `reason` es interno. Los nombres `CONFIRM_RECEIPT` y `REJECT_RECEIPT` son nuevos (hoy son dos rutas, no un discriminante).
+
+**`decision` por subtipo** (discriminada por `subtype`; `null` en los kinds que no son `DECISION`). Es la proyección que ya sirven las pantallas de hoy, sin campos nuevos:
+
+| Subtipo | Forma | Fuente |
+| --- | --- | --- |
+| RESTOCK | `{subtype, snapshot {branchName, productId, productName, variantId, sku, requestedQuantity, observedStockAtRequest, stockObservedAt}, resolution}` | `src/human-decisions/presentation/dto/human-decision-review.response.ts:92-104,115` |
+| EXPIRATION | `{subtype, snapshot {productId, productName, unit, variantId, variantName, variantOption, variantValue, …}, resolution}` | mismo archivo `:176-190` |
+| DELIVERY_ZONE | `{subtype, validationId, zipCode, state, municipality, neighborhood, requesterCount, lastCustomerMessageAt, resolution}` | `src/delivery-zones/presentation/dto/delivery-zone-validation.dto.ts:41-54` |
+| TRANSFER_RECEIPT | `{subtype, receiptId, saleId, saleFolio, declaredAmountCents, declaredAmountProvided, declaredDate, declaredReference, saleTotalCents, salePaidCents, saleDebtCents, file {mimeType, sizeBytes, previewStatus, originalUrl, previewUrl}, extracted, mismatch}` | `src/sales/review/dto/receipt-review-queue.dto.ts:6-44` (sin `customerName`, que ya va en `customer`) |
+
+`resolution` es `null` mientras está abierta; después, la opción elegida con sus campos y `resolvedBy {id, displayName}`, `resolvedAt`.
+
+**`audit[]`** (fila de `ChatbotRequestEvent`, §6.2), más reciente primero:
+
+```json
+{ "id": "…", "type": "CLAIMED", "createdAt": "…",
+  "actor": { "kind": "USER", "id": "…", "displayName": "Ana" },
+  "fromStatus": "NEW", "toStatus": "IN_PROGRESS", "version": 2, "data": {} }
+```
+
+`type`: `CREATED | MERGED | CLAIMED | RELEASED | AUTO_RELEASED | REASSIGNED | RESOLVED | REPLIED | TEMPLATE_SENT | FINISHED | CANCELLED | RESCHEDULED | CUSTOMER_LINKED | SLA_MILESTONE | DELIVERY_OUTCOME`. `actor.kind`: `USER | SERVICE | SYSTEM` (con `SYSTEM`, `id` y `displayName` son `null`). `data` es chico y sin texto del cliente: `{toUser {id, displayName}, note?}` en `REASSIGNED`, `{action}` en `RESOLVED`, `{reason, note?}` en `CANCELLED`, `{milestone: HALF | ESCALATION | OVERDUE}` en `SLA_MILESTONE`, `{deliveryId, outcome}` en `DELIVERY_OUTCOME`, `{note, complaintOutcome?}` en `FINISHED`. `GET /chatbot-requests/:id/audit?cursor=&limit=50` devuelve `{items, nextCursor}`.
+
+**`customer.recentOrders[]`** (hasta 5, más reciente primero): `{saleId, folio, createdAt, totalCents, status, paymentStatus}`. Vacío si no hay `customer.id`.
+
+**`deliveries[]`** (entregas del feed de esta solicitud, §3.3):
+
+```json
+{ "deliveryId": "…", "type": "request.answered", "createdAt": "…",
+  "outcome": "PENDING", "attemptedAt": null, "providerStatus": null, "needsReconciliation": false }
+```
+
+`outcome`: `PENDING | PROVIDER_ACCEPTED | DELIVERY_UNKNOWN | DEFERRED_WINDOW_CLOSED | STALE`. `providerStatus`: `null | SENT | DELIVERED | READ | FAILED` (de los statuses de Meta). `needsReconciliation = true` con `DELIVERY_UNKNOWN`: es la "entrega dudosa" que el frontend resalta.
+
+### 12.7 Texto del costo de la plantilla: en la configuración
+
+El texto que avisa que la plantilla cuesta dinero vive en la configuración, no en el frontend: `templateCostText` (texto plano, 1..200) en `GET/PUT /chatbot-settings` (§5.5). Valor inicial: "Enviar la plantilla tiene un costo para el negocio." Así se cambia (por ejemplo, con el precio real que cobre Meta) sin desplegar. El frontend lo muestra tal cual en la confirmación del botón "Enviar plantilla" y no lo traduce ni lo arma. Como quien atiende puede no tener `read:ChatbotSettings`, el detalle de la solicitud trae también `templateCostText` cuando `allowedActions` incluye `SEND_TEMPLATE`. No hace falta una ruta nueva.
+
+### 12.8 Payload de los eventos SSE
+
+**Eventos de solicitud con la fila completa, no con un aviso para refetch.** Todos los eventos `request.*` y `session.*` llevan:
+
+```json
+{ "request": { /* fila de §3.8 con version */ }, "previousCustomerKey": null }
+```
+
+- El frontend reemplaza la fila en su caché **solo si `request.version` es mayor** que la que tiene; si es igual o menor, ignora el evento (puede llegar repetido al reconectar).
+- Como la fila viene completa, un salto de versión (de 4 a 7) no obliga a pedir la lista. Sí obliga a volver a pedir el **detalle** si está abierto, porque `audit[]` y `deliveries[]` no viajan en el evento.
+- El frontend recoloca la fila en su grupo con `customerKey` y `mostUrgentAt`. Si la fila deja de cumplir los filtros de la vista (por ejemplo, se resolvió y la vista es `open`), la quita. `previousCustomerKey` solo viene en `link-customer`, cuando la fila cambia de grupo.
+- La fila va enmascarada por destinatario (§3.8) y solo se manda a quien puede ver la solicitud.
+
+**`counts.changed` lleva el objeto completo** `{new, inProgress, mine, overdue, windowClosingSoon, scheduled, needsReschedule}`. Es chico, y `mine` es distinto para cada persona, así que el evento es por usuario. Se agrupa: como máximo uno cada 2 s por usuario.
+
+**Notificaciones:**
+- `notification.created {notification: {id, type, title, body, requestId, createdAt, readAt}, unreadCount}`.
+- `notification.read {ids: ["…"] | null, all: boolean, unreadCount}`: sale al marcar como leída (una o todas) desde cualquier pestaña o equipo de la misma persona.
+- `unreadCount` cambia **solo** con esos dos eventos (y con la retención de 90 días, que no avisa: el frontend vuelve a pedir `GET /notifications/unread-count` al reconectar o con `resync`).
+
+**Mensajes:** `conversation.message {requestId, message}` (la forma de §12.5) y `message.status {requestId, messageId, seq, deliveryStatus}`. Van solo a quien atiende o tiene `read:ChatbotConversation` (§5.3).
+
+### 12.9 "Copiar el horario de la sucursal": viene en el `GET` de la configuración
+
+La ruta `GET /tenants/:tenantId/opening-hours` existe (`src/shipping/pickup/presentation/opening-hours.controller.ts:41-42`), pero pide `read:ShippingSettings`, y quien configura el chatbot puede no tenerlo. Por eso el frontend **no** la llama. En su lugar, `GET /chatbot-settings` agrega un campo de solo lectura:
+
+```json
+{ "branchOpeningHours": { "timeZone": "America/Mexico_City", "days": [ … ] } }
+```
+
+Es el `OpeningHoursBody` de recoger en tienda del mismo tenant, o `null` si la sucursal no lo configuró (el botón se deshabilita). El botón solo carga esos valores en el editor; se guarda con el `PUT /chatbot-settings` normal (con `expectedVersion`). El `PUT` ignora `branchOpeningHours` si viene. No hay ruta nueva ni comando con `dryRun`: el editor ya es la vista previa.
+
+### 12.10 Inactividad de quien atiende
+
+Se expone en `liveSession` (fila, detalle y SSE): `lastStaffActivityAt` (último mensaje, plantilla o comando de quien atiende en esta sesión; al tomar, es la hora de la toma) y `lastCustomerMessageAt`. El frontend calcula el tiempo transcurrido con su reloj, corregido con el `serverTime` del latido. **No** se usa la conexión SSE para medir actividad (§4.6 ya está corregido): una pestaña abierta no significa que la persona esté atendiendo. Sigue sin haber ninguna acción automática por inactividad del personal; quien reasigna decide.
+
+### 12.11 Cancelar y unir (personal)
+
+**Cancelar:** `POST /chatbot-requests/:id/cancel {expectedVersion, reason, note?}` (`update:ChatbotRequest`).
+- `reason`: `DUPLICATE` (ya se atiende en otra), `NOT_ACTIONABLE` (no es algo que el equipo pueda responder), `CUSTOMER_UNREACHABLE` (el cliente dejó de contestar antes de tomarla) u `OTHER`. Con `OTHER`, `note` (1..500) es obligatoria; en los demás es opcional. Se guarda como `cancelReason = STAFF` + `staffCancelReason` (§2.1) y en la auditoría.
+- **Solo se permite** en `kind = CLARIFICATION`, y en `TALK_TO_HUMAN` / `COMPLAINT` mientras la sesión no empezó (`WAITING`, incluidas las agendadas, que liberan su cupo). Una decisión envuelta se cierra con su acción negativa (§12.6), no se cancela, porque su tabla de abajo quedaría pendiente para siempre. Una conversación empezada se cierra con `finish`. Fuera de esos casos: `422 CANCEL_NOT_ALLOWED`. `allowedActions` incluye `CANCEL` solo cuando se puede.
+- El bot recibe `request.cancelled {reason}` en el feed para dejar de esperar la respuesta. **No le manda nada al cliente**; si hay que avisarle, se responde antes con `reply`. Es un tipo de entrega aditivo, avisado al chatbot (§3.3).
+
+**Unir:** `POST /chatbot-requests/:id/merge {expectedVersion, intoRequestId}` (`update:ChatbotRequest`). La solicitud `:id` queda `CANCELLED/SUPERSEDED` y, al resolverse la principal, salen entregas para las dos (§3.5).
+- **Reglas:** mismo `customerKey`, mismo `subtype`, las dos abiertas, solo subtipos sin tabla envuelta (`UNKNOWN_QUESTION`, `TALK_TO_HUMAN`, `COMPLAINT`) y ninguna con sesión empezada. Las decisiones repetidas ya se fusionan solas por `dedupKey`. Si no se cumple: `422 MERGE_NOT_ALLOWED`. El backend bloquea las dos filas en orden de `id` para evitar deadlocks.
+- **Candidatas:** `GET /chatbot-requests/:id/merge-candidates` → `{items: Row[]}`, las solicitudes que cumplen las reglas (hasta 20, la más urgente primero). Lista vacía: el frontend oculta "Unir con…". `allowedActions` incluye `MERGE` solo si hay al menos una.
+
+### 12.12 Idempotencia: una sola regla para todos los comandos
+
+**Todo `POST` de comando del personal lleva `Idempotency-Key: <uuid>` y `expectedVersion`.** Incluye `claim`, `release`, `reassign`, `resolve`, `reply`, `template`, `finish`, `reschedule`, `merge`, `link-customer` y `cancel`, y también `apply-to-all-tenants`. Solo hay dos excepciones, fijas:
+- `messages`: `expectedEpoch` en lugar de `expectedVersion` (un mensaje no cambia la versión de la solicitud) e `Idempotency-Key = clientMessageId`.
+- `media` (subida): `Idempotency-Key`, sin versión; el archivo no cambia la solicitud hasta que se manda en `messages`.
+
+Sin el header, `400 VALIDATION_ERROR`. Misma clave y mismo body → la misma respuesta guardada, aunque la versión ya haya cambiado; misma clave con otro body → `409 IDEMPOTENCY_CONFLICT` (`StaffCommandReceipt`, §6.5). El frontend genera una clave por **intento del usuario** y la reutiliza en los reintentos de red de ese intento. Fuera de esta regla quedan `PUT /chatbot-settings` y `PATCH /me/notification-preferences` (solo `expectedVersion` o ninguna, porque son idempotentes por naturaleza) y `POST /notifications/:id/read` y `read-all` (idempotentes sin clave). §3.8 y §3.10 ya dicen lo mismo.
+
+### 12.13 Entrega de las unidades 1 a 4
+
+No damos fecha. Cada unidad se entrega con su documento de handoff en `docs/frontend-handoff/` en el mismo cambio que la implementa (la numeración sigue la actual, que termina en `10-shipping-settings-screens.md`). El documento trae rutas, payloads reales, códigos de error y lo que todavía no está. La unidad 1 (permisos) es la primera; el frontend puede trabajar con polling contra las unidades 2 a 4 en cuanto cada una tenga su handoff (§10).
