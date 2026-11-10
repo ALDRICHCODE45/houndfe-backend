@@ -18,6 +18,7 @@ describe('TENANT_SCOPED_MODELS — chatbot request inbox registration (human-int
     'ChatbotRequestEvent',
     'ChatbotCustomerGroup',
     'ChatbotRequestFolioCounter',
+    'StaffCommandReceipt',
   ])('scopes %s by tenant', (model) => {
     expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
   });

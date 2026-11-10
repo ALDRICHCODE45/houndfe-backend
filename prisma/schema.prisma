@@ -527,6 +527,7 @@ model Tenant {
   chatbotRequests             ChatbotRequest[]
   chatbotCustomerGroups       ChatbotCustomerGroup[]
   chatbotRequestFolioCounter  ChatbotRequestFolioCounter?
+  staffCommandReceipts        StaffCommandReceipt[]
 
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
@@ -3859,4 +3860,23 @@ model ChatbotRequestFolioCounter {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@map("chatbot_request_folio_counters")
+}
+
+// Staff command idempotency (§6.5, §12.12): one row per `(tenant, actor,
+// Idempotency-Key)`. Same `commandHash` replays `responseSnapshot`; another
+// hash is 409 IDEMPOTENCY_CONFLICT. Only successful commands are stored. Kept
+// like `CashCommand`; `(tenantId, createdAt)` serves a future purge.
+model StaffCommandReceipt {
+  tenantId         String
+  actorId          String
+  idempotencyKey   String
+  commandHash      String
+  responseSnapshot Json
+  createdAt        DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([tenantId, actorId, idempotencyKey])
+  @@index([tenantId, createdAt])
+  @@map("staff_command_receipts")
 }

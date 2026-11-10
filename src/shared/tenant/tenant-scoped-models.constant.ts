@@ -142,4 +142,6 @@ export const TENANT_SCOPED_MODELS = new Set([
   'ChatbotRequestEvent',
   'ChatbotCustomerGroup',
   'ChatbotRequestFolioCounter',
+  // Slice 2b — staff command idempotency receipts.
+  'StaffCommandReceipt',
 ]);
