@@ -41,6 +41,10 @@ const MESSAGES: Record<string, string> = {
   SUBTYPE_DISABLED: 'This subtype cannot be created through this route',
   SCHEDULING_DISABLED: 'Scheduled conversations are not available yet',
   RATE_LIMITED: 'Too many requests',
+  CURSOR_EXPIRED: 'The cursor is older than the feed retention',
+  OUTCOME_ALREADY_RECORDED:
+    'A different terminal outcome was already recorded for this delivery',
+  OUTCOME_NOT_ALLOWED: 'This outcome is not allowed for this delivery',
   REQUEST_ERROR: 'Request failed',
   INTERNAL_ERROR: 'Internal server error',
 };

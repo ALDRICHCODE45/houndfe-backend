@@ -104,6 +104,14 @@ function fakeStore(
       calls.push(`refreshGroups:${keys.join(',')}`);
       return Promise.resolve();
     },
+    enqueueAnswered: (ids) => {
+      calls.push(`enqueueAnswered:${ids.join(',')}`);
+      return Promise.resolve();
+    },
+    enqueueCancelled: (id, reason, customerNote) => {
+      calls.push(`enqueueCancelled:${id}:${reason}:${customerNote ?? ''}`);
+      return Promise.resolve();
+    },
     lockZoneOf: () => {
       calls.push('lockZoneOf');
       return Promise.resolve();
@@ -286,7 +294,7 @@ describe('ChatbotRequestCommandsService', () => {
   });
 
   it('cancels with the staff reason and closes the request', async () => {
-    const { store, applied } = fakeStore(row());
+    const { store, applied, calls } = fakeStore(row());
     const view = await new ChatbotRequestCommandsService(
       store,
       noResolver,
@@ -305,6 +313,22 @@ describe('ChatbotRequestCommandsService', () => {
       patch: { cancelReason: 'STAFF', staffCancelReason: 'NOT_ACTIONABLE' },
       event: { data: { customerNote: 'No podemos ayudar con eso.' } },
     });
+    // §12.14: the notice joins the transaction, before the group refresh.
+    const notice = calls.indexOf(
+      'enqueueCancelled:req-1:NOT_ACTIONABLE:No podemos ayudar con eso.',
+    );
+    expect(notice).toBeGreaterThan(-1);
+    expect(notice).toBeLessThan(
+      calls.findIndex((call) => call.startsWith('refreshGroups')),
+    );
+  });
+
+  it('enqueues no feed item for claim, release or reassign', async () => {
+    const { store, calls } = fakeStore(row());
+    await new ChatbotRequestCommandsService(store, noResolver).execute(
+      input({ command: { kind: 'claim' } }),
+    );
+    expect(calls.some((call) => call.startsWith('enqueue'))).toBe(false);
   });
 
   it('passes the reassign capability to release and cancel', async () => {
@@ -380,6 +404,8 @@ describe('ChatbotRequestCommandsService', () => {
         'lockZoneOf',
         'lockRequest',
         'applyPatch:req-1',
+        // After the state change and the wrapped write, before the group.
+        'enqueueAnswered:req-1',
         'refreshGroups:525512345678',
         'saveReceipt',
         'commit',
@@ -697,8 +723,10 @@ describe('ChatbotRequestCommandsService', () => {
           'applyPatch:req-1',
           'applyPatch:req-3',
         ]);
-        expect(calls).toContain(
-          'refreshGroups:5200000009,5200000005,5200000001',
+        // One answer per customer (R9): the acting request, then its siblings.
+        expect(calls).toContain('enqueueAnswered:req-2,req-1,req-3');
+        expect(calls.indexOf('enqueueAnswered:req-2,req-1,req-3')).toBeLessThan(
+          calls.indexOf('refreshGroups:5200000009,5200000005,5200000001'),
         );
         expect(applied[1]).toMatchObject({
           patch: {

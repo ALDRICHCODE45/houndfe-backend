@@ -11,12 +11,14 @@ import type {
   ChatbotRequestEventDraft,
   ChatbotRequestPatch,
   StaffActor,
+  StaffCancelReason,
 } from '../domain/chatbot-request.commands';
 import type {
   ChatbotRequestCommandStore,
   ChatbotRequestRow,
   ChatbotRequestView,
 } from '../application/chatbot-request-commands.service';
+import { enqueueAnswered, enqueueCancelled } from './chatbot-feed-writes';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import {
   applyRequestPatch,
@@ -144,6 +146,24 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
 
   refreshGroups(customerKeys: string[]): Promise<void> {
     return refreshCustomerGroups(this.tx, this.tenantId, customerKeys);
+  }
+
+  enqueueAnswered(requestIds: string[]): Promise<void> {
+    return enqueueAnswered(this.tx, this.tenantId, requestIds);
+  }
+
+  enqueueCancelled(
+    requestId: string,
+    reason: StaffCancelReason,
+    customerNote?: string,
+  ): Promise<void> {
+    return enqueueCancelled(
+      this.tx,
+      this.tenantId,
+      requestId,
+      reason,
+      customerNote,
+    );
   }
 
   async lockZoneOf(requestId: string): Promise<void> {

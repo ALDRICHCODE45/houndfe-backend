@@ -1,13 +1,13 @@
-# Chatbot ↔ backend: human requests (slice 5a)
+# Chatbot ↔ backend: human requests (slices 5a and 5b)
 
-What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §6.4, §10.1 R2. Implemented in this slice: **create**, **merge**, **customer cancel**, the **route budgets**. Not yet: the feed and delivery ACKs (slice 5b), `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`.
+What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below). Not yet: `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`, and the feed types of later units (`request.overdue_notice`, `request.cancel_ack`, `conversation.*`, `template.requested`).
 
 ## Common rules
 
 | Rule | Detail |
 | --- | --- |
 | Auth | `Authorization: Bearer svc_…`. `X-Branch-Id`, when sent, must equal the credential's tenant (else `403 FORBIDDEN`). The tenant, source and credential never go in a body. |
-| Scopes | `requests:create`, `requests:read`, `requests:cancel`, `feed:read`, `feed:ack`, `conversation:write`, `media:write`. They are free text on `ServiceCredential.scopes`; add the ones a credential needs. A missing scope is `403 INSUFFICIENT_SCOPE`. This slice's routes use `requests:create` and `requests:cancel`. |
+| Scopes | `requests:create`, `requests:read`, `requests:cancel`, `feed:read`, `feed:ack`, `conversation:write`, `media:write`. They are free text on `ServiceCredential.scopes`; add the ones a credential needs. A missing scope is `403 INSUFFICIENT_SCOPE`. The create and cancel routes use `requests:create` and `requests:cancel`; the feed and pending deliveries use `feed:read`; the delivery outcome uses `feed:ack`. |
 | Idempotency | Every write sends `X-Idempotency-Key: <uuid>`. Create: it must equal the body's `sourceRequestId` (compared literally, else `400`). Cancel: any UUID. Same key and same canonical hash → the same answer; same key and another body → `409 IDEMPOTENCY_CONFLICT`. Create keys are one namespace across all subtypes: a `sourceRequestId` already used for a `RESTOCK` and sent again as a `COMPLAINT` (or the other way round) is a conflict, never a second request. |
 | Errors | `{ "statusCode": 409, "code": "…", "message": "…" }` plus the extra fields listed per error. All responses, errors included, carry `Cache-Control: no-store`. |
 | Rate limit | `429 RATE_LIMITED` with `Retry-After` (seconds). See "Route budgets". |
@@ -117,9 +117,9 @@ Counters live in PostgreSQL (`service_rate_buckets`), so every replica shares th
 | --- | --- | --- | --- |
 | `default` | the other chatbot-api routes that existed before this contract (catalog, customers, checkout, shipping quotes, receipts…) | the credential's `rateLimit` (60) | `rateLimits.default`, else `rateLimit` |
 | `humanDecisions` | the stock, expiration and delivery-zone routes: `POST /chatbot-api/human-decisions`, `GET /chatbot-api/human-decisions/:id`, `POST …/:id/application-outcome` | the credential's `rateLimit` (60) | `rateLimits.humanDecisions`, else `rateLimit` |
-| `write` | `POST /chatbot-api/requests`, `…/:id/cancel` | 300 | `rateLimits.write` |
-| `read` | reserved for the read routes (slice 5b+) | 300 | `rateLimits.read` |
-| `feed` | reserved for the feed long-poll (slice 5b); never spends `write` or `read` | 120 | `rateLimits.feed` |
+| `write` | `POST /chatbot-api/requests`, `…/:id/cancel`, `POST /chatbot-api/deliveries/:id/outcome` | 300 | `rateLimits.write` |
+| `read` | `GET /chatbot-api/requests/pending-deliveries` (more read routes later) | 300 | `rateLimits.read` |
+| `feed` | `GET /chatbot-api/feed` (the long-poll); never spends `write` or `read` | 120 | `rateLimits.feed` |
 
 `humanDecisions` and `default` have the same budget but **separate counters**: spending one never uses the other (owner decision M1), so stock and expiration traffic cannot starve the catalog and checkout routes, nor the reverse.
 
@@ -128,3 +128,105 @@ Counters live in PostgreSQL (`service_rate_buckets`), so every replica shares th
 The window is measured by the database clock, not by the backend replica's, so replicas with skewed clocks cannot shorten each other's windows; `Retry-After` is the time left in the window, rounded up to whole seconds.
 
 Behavior note: the old in-memory limiter was a sliding window per process; the shared one is a fixed window anchored at the first request, so a burst across a window edge can reach up to twice the budget. The count and the limit per minute are unchanged.
+
+## The feed (slice 5b)
+
+How the backend hands answers to the bot: **pull only**, one consumer, at-least-once. Everything the bot used to poll per request (`GET /chatbot-api/human-decisions/:id`) now also arrives here. **Both paths exist until unit 13** (the old routes and their polls are unchanged; S4), and they describe the same state: a staff answer that goes through the new `resolve` command *and* one that goes through the old staff routes produce the same feed item. The bot can consume the feed and keep polling until it trusts it; it must not send the customer the same answer twice (see "No double delivery").
+
+### `GET /chatbot-api/feed?after=<cursor>&limit=50&waitSeconds=25`
+
+Scope `feed:read`, class `feed`. `after` is the `nextCursor` of the previous answer (omit it to start from the oldest retained item); `limit` 1..50 (default 50); `waitSeconds` 0..25 (default 25; `0` answers at once). Out-of-range values are `400 VALIDATION_ERROR`, not clamped.
+
+```json
+{
+  "items": [
+    {
+      "cursor": "000000001842",
+      "deliveryId": "b1c0…",
+      "type": "request.answered",
+      "requestId": "9a7e…",
+      "conversationRef": "wa:5215512345678",
+      "payload": { "kind": "DECISION", "subtype": "RESTOCK", "action": "PROVIDE_RESTOCK_ESTIMATE", "legacyId": "5d0c…", "text": "El producto «Croquetas 20 kg» estará disponible en aproximadamente 7 días.", "prefix": null, "productName": "Croquetas 20 kg", "restockDays": 7 },
+      "notBefore": null,
+      "expiresAt": null
+    }
+  ],
+  "nextCursor": "000000001842"
+}
+```
+
+- **Cursor rules.** Items arrive in ascending cursor order and **cursor order is commit order**: you never see cursor 6 before a cursor 5 that is still to come. Store `nextCursor` **after** you handled the page, and send it as `after`. An empty page returns the `after` you sent, so you can keep it. The cursor is per tenant (the branch of the credential) and is opaque: do not do arithmetic on it. A cursor is never a delivery receipt: reading does not acknowledge anything.
+- **Long-poll.** With no item after `after`, the request waits up to `waitSeconds` and answers `{items: [], nextCursor: <after>}` at the deadline, or as soon as an item commits (well under a second). Reconnect immediately. It spends the `feed` budget **once, when it opens**. At most **2 waiting long-polls per credential** (per replica); a third gets `429 RATE_LIMITED` with `Retry-After: 1`. A request that is answered at once never counts as waiting. Hang up whenever you like; the slot is freed.
+- **`410 CURSOR_EXPIRED`.** The feed keeps **30 days**. A cursor older than what was purged answers `410`; recover with `GET /chatbot-api/requests?status=open&updatedSince=` (not built yet; until then restart from the oldest retained item with no `after`, and de-duplicate by `deliveryId`).
+- **Retry.** The same `after` returns the same items again (plus newer ones), so a crash between "read" and "handled" only repeats work. De-duplicate by `deliveryId` (store it as a unique key **before** calling Meta).
+
+### Item types in this slice
+
+| `type` | When | `payload` |
+| --- | --- | --- |
+| `request.answered` | Staff resolved a wrapped decision (stock, expiration, delivery zone, transfer receipt), from the new `resolve` command or from the old staff routes | `{kind: "DECISION", subtype, action, legacyId, text, prefix, …fields}` below |
+| `request.cancelled` | Staff cancelled a request (§12.14); no message of its own | `{requestId, reason, cancelledBy: "STAFF", customerNote?}` |
+
+`conversationRef` is the request's (`null` when the request has none, e.g. a stock request created without one). `legacyId` is the id the bot already tracks from the create answer (`legacy.id`: the human decision, the zone requester or the receipt).
+
+`request.answered` per subtype (`text` is the fixed Spanish text of the option unless noted; `prefix` is `"Le comparto la respuesta del equipo:"` only when `text` is what staff wrote for the customer, else `null`):
+
+```json
+{ "kind": "DECISION", "subtype": "RESTOCK", "action": "REPORT_RESTOCK_ESTIMATE_UNAVAILABLE", "legacyId": "…", "text": "Por ahora no tenemos una fecha estimada de reposición para «Croquetas 20 kg».", "prefix": null, "productName": "Croquetas 20 kg" }
+{ "kind": "DECISION", "subtype": "EXPIRATION", "action": "PROVIDE_EXPIRATION_TEXT", "legacyId": "…", "text": "Caduca en marzo 2027", "prefix": "Le comparto la respuesta del equipo:", "productName": "Leche", "expirationText": "Caduca en marzo 2027" }
+{ "kind": "DECISION", "subtype": "DELIVERY_ZONE", "action": "APPROVE_DELIVERY_ZONE", "legacyId": "…", "text": "Sí entregamos en tu código postal (64000) con un cargo de envío de $50.00 MXN. Tiempo estimado: 3 días.", "prefix": null, "zipCode": "64000", "zoneType": "SURCHARGE", "surchargeCents": 5000, "etaDays": 3 }
+{ "kind": "DECISION", "subtype": "TRANSFER_RECEIPT", "action": "REJECT_RECEIPT", "legacyId": "…", "text": "El monto no coincide, envíanos otro comprobante.", "prefix": "Le comparto la respuesta del equipo:", "customerReason": "El monto no coincide, envíanos otro comprobante." }
+```
+
+- `action` is `PROVIDE_RESTOCK_ESTIMATE` / `REPORT_RESTOCK_ESTIMATE_UNAVAILABLE` (`restockDays` only for the first), `PROVIDE_EXPIRATION_TEXT` / `REPORT_EXPIRATION_UNAVAILABLE` (`expirationText` only for the first), `APPROVE_DELIVERY_ZONE` / `REJECT_DELIVERY_ZONE` (`zoneType` is `FREE`, `SURCHARGE`, `CARRIER_ONLY` or `DENIED`; `surchargeCents` and `etaDays` only when they apply) and `CONFIRM_RECEIPT` / `REJECT_RECEIPT` (a rejection carries `customerReason`).
+- The structured fields are what the old poll returns, so you can map them yourself and ignore `text`. The Spanish texts are fixed by the backend (one place, `src/chatbot-requests/domain/chatbot-feed.ts`); tell us if the owner wants other wording.
+- **A zone answer is one item per customer** (R9): resolving one request settles every customer waiting on that postal code, and each gets its own item, with its own `conversationRef` and `deliveryId`.
+- A customer who cancelled the request (`POST /requests/:id/cancel`) gets **no** item when staff later resolves the old row (the customer withdrew); drop your pending record, as the cancel section says.
+- **`request.cancelled` (§12.14).** `reason` is `DUPLICATE`, `NOT_ACTIONABLE`, `CUSTOMER_UNREACHABLE` or `OTHER`. Forget the pending state of that request. `DUPLICATE`: send nothing, ACK `STALE`. The other reasons: send a short notice (`customerNote`, when present and the 24 h window is open, goes as written with the team prefix instead of the generic notice) and ACK `PROVIDER_ACCEPTED` with the `providerMessageId`; with the window closed send nothing and ACK `STALE`. **Never `DEFERRED_WINDOW_CLOSED` for this type**: it is refused with `422 OUTCOME_NOT_ALLOWED`.
+
+### `POST /chatbot-api/deliveries/:deliveryId/outcome`
+
+Scope `feed:ack`, class `write`. Send it **after** the local effect (the message was accepted by Meta, or you decided not to send). One call per attempt:
+
+```json
+{ "attemptId": "0b8f5c0e-6d7a-4c1e-9a52-3f1d2b6a7c10", "outcome": "PROVIDER_ACCEPTED", "providerMessageId": "wamid.HBg…", "attemptedAt": "2026-11-10T16:20:00.000Z" }
+```
+
+| `outcome` | Meaning | Body |
+| --- | --- | --- |
+| `PROVIDER_ACCEPTED` | Meta accepted the message | `providerMessageId` required, `attemptedAt` required |
+| `DELIVERY_UNKNOWN` | You cannot tell whether it was sent; **do not retry** (the delivery is marked "to reconcile" for staff) | `attemptedAt` required, `providerMessageId` optional |
+| `DEFERRED_WINDOW_CLOSED` | The 24 h window is closed; the delivery stays **pending** (see below). Not allowed for `request.cancelled` | `attemptedAt` required |
+| `STALE` | Nothing was sent and nothing needs to be (duplicate, customer cancelled, window closed for a cancel notice) | only `attemptId` (`attemptedAt` optional) |
+
+Exactly those keys; an unknown key, a missing required key, a key an outcome forbids, `FAILED` or any other outcome is `400 VALIDATION_ERROR`. `attemptId` is a lowercase UUID, `attemptedAt` is canonical UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, `providerMessageId` is 1..512 characters, trimmed, no control characters.
+
+`200`: `{"deliveryId", "outcome", "attemptId", "ackReceivedAt"}` (`ackReceivedAt` is `null` for `DEFERRED_WINDOW_CLOSED`). One terminal outcome per delivery, the same semantics as the human-decision application outcome:
+
+| Status / code | When |
+| --- | --- |
+| `200` | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`) |
+| `409 IDEMPOTENCY_CONFLICT` | The same `attemptId` with other evidence |
+| `409 OUTCOME_ALREADY_RECORDED` | Another `attemptId` after a terminal outcome (any of the first three) |
+| `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` for a `request.cancelled` delivery |
+| `404 NOT_FOUND` | Unknown delivery, or one of another branch |
+| `400 VALIDATION_ERROR` | Body or `deliveryId` malformed |
+| `403 INSUFFICIENT_SCOPE`, `401`, `429 RATE_LIMITED` | Credential, scope, budget |
+
+Retry a lost ACK with the **same body**: it answers `200`. A new send attempt after `DEFERRED_WINDOW_CLOSED` uses a **new `attemptId`**. Every first outcome adds a `DELIVERY_OUTCOME` event to the request's audit (`needsReconciliation: true` for `DELIVERY_UNKNOWN`).
+
+### `GET /chatbot-api/requests/pending-deliveries?conversationRef=`
+
+Scope `feed:read`, class `read`. The deliveries of that conversation whose last outcome was `DEFERRED_WINDOW_CLOSED` and that have no terminal outcome yet (up to 50, ascending cursor), in the same item shape as the feed: `{ "items": [ … ] }`. Ask for it when the customer writes again (the window is open), deliver them, and ACK each with a new `attemptId`. `conversationRef` is required (`400` otherwise, up to 200 characters). This avoids walking the feed again.
+
+### No double delivery
+
+- The bot stores `deliveryId` as a unique key **before** calling Meta. If it cannot tell whether a send happened, it reports `DELIVERY_UNKNOWN` and does not retry.
+- An answer can reach you twice while both paths exist (the feed and the legacy poll of the same decision). Track the answer by the request's `legacyId`: whichever arrives first is delivered, and the other is ACKed `STALE` (feed) or ignored (poll).
+- Run **one consumer** per branch (an advisory lock on your side): two consumers would both see every item.
+
+### Deploy checklist for 5b
+
+- The credential needs `feed:read` and `feed:ack` (`ServiceCredential.scopes`).
+- The backend needs a direct PostgreSQL connection for `LISTEN` (no transaction-pooling proxy in front of `DATABASE_URL`); each replica opens one extra connection.
+- Migration `20261110050000_chatbot_feed` (additive; see `docs/chatbot-requests-model.md`, "Deploy safety").

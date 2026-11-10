@@ -220,6 +220,17 @@ export interface ChatbotRequestCommandStore {
   ): Promise<void>;
   refreshGroups(customerKeys: string[]): Promise<void>;
   /**
+   * Feed items (unit 5b), on this transaction and before the group refresh:
+   * `request.answered` for each resolved wrapped request (call it after the
+   * wrapped row was written), `request.cancelled` for a staff cancellation.
+   */
+  enqueueAnswered(requestIds: string[]): Promise<void>;
+  enqueueCancelled(
+    requestId: string,
+    reason: StaffCancelReason,
+    customerNote?: string,
+  ): Promise<void>;
+  /**
    * Takes the postal-code lock of a DELIVERY_ZONE request (a no-op for any
    * other id). It must run before `lockRequest`: the legacy zone resolve and
    * the bot intake take that lock first.
@@ -250,7 +261,12 @@ export type ChatbotRequestCommandErrorCode =
   | 'CUSTOMER_OPEN_LIMIT'
   | 'CUSTOMER_RATE_LIMITED'
   | 'SUBTYPE_DISABLED'
-  | 'SCHEDULING_DISABLED';
+  | 'SCHEDULING_DISABLED'
+  // Bot feed (unit 5, slice 5b).
+  | 'RATE_LIMITED'
+  | 'CURSOR_EXPIRED'
+  | 'OUTCOME_ALREADY_RECORDED'
+  | 'OUTCOME_NOT_ALLOWED';
 
 /** §3.8: `ZONE_SET_CHANGED` also carries the new `zoneImpact`. */
 export type ChatbotRequestCommandCurrent = ChatbotRequestError['current'] & {
@@ -265,7 +281,7 @@ export class ChatbotRequestCommandError extends Error {
    */
   constructor(
     readonly code: ChatbotRequestCommandErrorCode,
-    readonly httpStatus: 400 | 401 | 403 | 404 | 409 | 422 | 429,
+    readonly httpStatus: 400 | 401 | 403 | 404 | 409 | 410 | 422 | 429,
     readonly current?: ChatbotRequestCommandCurrent,
     readonly extra?: Record<string, unknown>,
   ) {
@@ -395,6 +411,16 @@ export class ChatbotRequestCommandsService {
 
       if (resolving) {
         await this.resolveWrapped(row, result, input, actor, resolving);
+      } else if (input.command.kind === 'cancel') {
+        // The staff cancellation notice joins the same transaction (§12.14),
+        // after the state change and before the group refresh.
+        await this.store.applyPatch(row, result.patch, result.event);
+        await this.store.enqueueCancelled(
+          row.id,
+          input.command.reason,
+          input.command.customerNote,
+        );
+        await this.store.refreshGroups([row.customerKey]);
       } else {
         await this.store.apply(row, result.patch, result.event);
       }
@@ -477,6 +503,11 @@ export class ChatbotRequestCommandsService {
       }
       throw error;
     }
+    // One answer per customer (R9), after the wrapped row was written.
+    await this.store.enqueueAnswered([
+      row.id,
+      ...siblings.map((sibling) => sibling.id),
+    ]);
     await this.store.refreshGroups([
       row.customerKey,
       ...siblings.map((sibling) => sibling.customerKey),

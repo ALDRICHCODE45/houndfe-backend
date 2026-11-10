@@ -47,6 +47,7 @@ import {
   lockCustomerIntake,
   type IntakeLimits,
 } from './chatbot-request-intake-writes';
+import { enqueueAnswered } from './chatbot-feed-writes';
 import {
   allocateFolio,
   applyRequestPatch,
@@ -595,6 +596,7 @@ export class ChatbotRequestWrapper {
     const displayName =
       actor.displayName?.trim() || (await this.nameOf(actor.userId));
     const now = new Date();
+    const closedIds: string[] = [];
     for (const row of rows) {
       const closed = closeWrapped(toState(row), {
         actor: { userId: actor.userId, displayName },
@@ -605,7 +607,11 @@ export class ChatbotRequestWrapper {
       });
       if (!closed.ok) continue;
       await applyRequestPatch(tx, tenantId, row, closed.patch, closed.event);
+      closedIds.push(row.id);
     }
+    // The legacy routes feed the bot too (one state, §2.1): same item as the
+    // staff `resolve`, read from the wrapped row the old code just wrote.
+    await enqueueAnswered(tx, tenantId, closedIds);
     await refreshCustomerGroups(
       tx,
       tenantId,
