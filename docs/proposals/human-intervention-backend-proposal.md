@@ -1105,3 +1105,17 @@ Sin el header, `400 VALIDATION_ERROR`. Misma clave y mismo body → la misma res
 ### 12.13 Entrega de las unidades 1 a 4
 
 No damos fecha. Cada unidad se entrega con su documento de handoff en `docs/frontend-handoff/` en el mismo cambio que la implementa (la numeración sigue la actual, que termina en `10-shipping-settings-screens.md`). El documento trae rutas, payloads reales, códigos de error y lo que todavía no está. La unidad 1 (permisos) es la primera; el frontend puede trabajar con polling contra las unidades 2 a 4 en cuanto cada una tenga su handoff (§10).
+
+### 12.14 Cancelación por el personal: acuerdo con el chatbot (2026-11-10)
+
+- El chatbot aceptó el ítem de feed `request.cancelled` `{requestId, reason, cancelledBy: STAFF, customerNote?}`, con ACK como cualquier entrega.
+- **Qué hace el bot:**
+  - borra el estado pendiente de esa solicitud;
+  - con `DUPLICATE`: no manda nada y responde ACK `STALE`;
+  - con `NOT_ACTIONABLE`, `CUSTOMER_UNREACHABLE` u `OTHER`: manda un aviso corto con el estilo del cliente y responde `PROVIDER_ACCEPTED` con el `providerMessageId`;
+  - con la ventana de 24 h cerrada: no manda nada y responde `STALE`. Nunca usa `DEFERRED_WINDOW_CLOSED`, porque un aviso de cierre días después solo molesta.
+- **`customerNote`:**
+  - es opcional en el comando de cancelación del personal: `POST /chatbot-requests/:id/cancel {expectedVersion, reason, note?, customerNote?}`, de hasta 500 caracteres;
+  - si viene y la ventana está abierta, el bot la manda tal cual con el prefijo de respuestas del equipo, en lugar del aviso genérico;
+  - `note` es interna; `customerNote` es lo que lee el cliente y queda en la auditoría.
+- **El servidor exige `WAITING`:** cancelar una `TALK_TO_HUMAN` o `COMPLAINT` con la sesión en `STARTING`, `ACTIVE` o `ENDING` responde `409 CANCEL_NOT_ALLOWED`. El chequeo corre dentro de la misma transacción que bloquea la solicitud (`FOR UPDATE`), así que una carrera con «Atender» no puede colarse.
