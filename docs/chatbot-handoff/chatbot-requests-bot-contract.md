@@ -1,6 +1,6 @@
 # Chatbot ↔ backend: human requests (slice 5a)
 
-What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §6.4, §10.1 R2. Implemented in this slice: **create**, **merge**, **customer cancel**, the **route budgets**. Not yet: the feed and delivery ACKs (slice 5b), `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state` (see "Not in this slice").
+What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §6.4, §10.1 R2. Implemented in this slice: **create**, **merge**, **customer cancel**, the **route budgets**. Not yet: the feed and delivery ACKs (slice 5b), `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`.
 
 ## Common rules
 
@@ -65,19 +65,19 @@ Unknown keys are `400`. Field rules:
 - `MERGED`: an open request of the same customer with the same `dedupKey` already exists. `id` and `mergedIntoId` are that request, `status` its current status (`NEW` or `IN_PROGRESS`). The repeated question is appended to its audit timeline (`MERGED` event) and a newer `lastCustomerMessageAt` reopens its 24 h window. The merge is stored by key: retrying it answers the same even after the request closed. A merge works at any open count (the open limit does not apply to it).
 - `status` of `CREATED`/`REPLAYED` is the status at creation (`NEW`), not the current one.
 - `businessHours` is `null` until unit 7 (the business calendar). Do not treat `null` as "closed".
-- Wrapped subtypes add `legacy`: what the old route answers (`POST /chatbot-api/human-decisions`), because the bot still polls those rows by id until the feed carries the answers. A `DELIVERY_ZONE` requester that an already-approved zone answers immediately has no request: `id` and `folio` are `null`, `status` is `RESOLVED`, and `legacy` holds the answer.
+- Wrapped subtypes add `legacy`: what the old route answers (`POST /chatbot-api/human-decisions`), because the bot still polls those rows by id until the feed carries the answers. A `DELIVERY_ZONE` requester that an already-approved zone answers immediately has no request: `id` and `folio` are `null`, `status` is `RESOLVED`, and `legacy` holds the answer. Its key is still idempotent: the same body replays (`200`, `outcome: REPLAYED`), another body is `409 IDEMPOTENCY_CONFLICT`.
 - A wrapped replay whose envelope differs from the first one (other `customer`, `summary`, …) is `409 IDEMPOTENCY_CONFLICT`.
 
 ### Errors
 
 | Status / code | When | Extra fields |
 | --- | --- | --- |
-| `400 VALIDATION_ERROR` | bad body, bad key, key ≠ `sourceRequestId` | — |
+| `400 VALIDATION_ERROR` | bad body, bad key, key ≠ `sourceRequestId` (cancel: also an `:id` that is not a UUID) | — |
 | `401`, `403 INSUFFICIENT_SCOPE`, `403 FORBIDDEN` | credential, scope, branch | — |
 | `404 NOT_FOUND` | a wrapped `detail` refers to a missing product (as the old route) | — |
 | `409 IDEMPOTENCY_CONFLICT` | same key, other body | — |
 | `409 CUSTOMER_OPEN_LIMIT` | the customer already has 20 open requests, all subtypes together | `limit: 20`, `open: 20` |
-| `429 CUSTOMER_RATE_LIMITED` | 10 requests created for this customer in the last hour (counted in the database; merges do not count) | `limit: 10`; `Retry-After` header |
+| `429 CUSTOMER_RATE_LIMITED` | 10 requests created for this customer in the last hour (counted in the database; merges do not count) | `limit: 10`; `Retry-After` header: seconds until the count is back under the limit |
 | `422 SUBTYPE_DISABLED` | `TRANSFER_RECEIPT`, `DISCOUNT` | — |
 | `422 SCHEDULING_DISABLED` | `scheduledFor` sent | — |
 | `409 VERSION_CONFLICT` | the open request kept opening and closing across three attempts (practically never); retry | — |
@@ -106,7 +106,7 @@ Scope `requests:cancel`, class `write`. Body `{ "reason": "CUSTOMER_WITHDREW" | 
 Notes:
 
 - Works on `NEW` and `IN_PROGRESS` requests, every kind, including a conversation that has not started (`WAITING`).
-- For a wrapped decision (`RESTOCK`, `EXPIRATION`, `DELIVERY_ZONE`) only the request closes; the legacy row stays `PENDING` and the old routes still work on it (see `docs/chatbot-requests-model.md`, "Customer cancel"). **After a successful cancel the bot must drop its own pending record of the legacy row for that decision and ignore any later outcome of `GET /chatbot-api/human-decisions/:id` for it.** Staff may still resolve the legacy row afterwards (a stock decision, or a zone resolved for other customers), and that poll then answers `RESOLVED`; the customer withdrew, so the bot sends nothing. Example: the customer asks for stock of croquetas, the bot creates the request (`legacy.id = "hd-1"`), the customer says "ya no", the bot cancels (`200`) and deletes its `hd-1` tracking; ten minutes later staff answers `hd-1` and the poll returns `RESOLVED`; the bot ignores it and does not call `application-outcome` for it.
+- For a wrapped decision (`RESTOCK`, `EXPIRATION`, `DELIVERY_ZONE`) only the request closes; the legacy row stays `PENDING` and the old routes still work on it (see `docs/chatbot-requests-model.md`, "Customer cancel of a wrapped decision"). **After a successful cancel the bot must drop its own pending record of the legacy row for that decision and ignore any later outcome of `GET /chatbot-api/human-decisions/:id` for it.** Staff may still resolve the legacy row afterwards (a stock decision, or a zone resolved for other customers), and that poll then answers `RESOLVED`; the customer withdrew, so the bot sends nothing. Example: the customer asks for stock of croquetas, the bot creates the request (`legacy.id = "hd-1"`), the customer says "ya no", the bot cancels (`200`) and deletes its `hd-1` tracking; ten minutes later staff answers `hd-1` and the poll returns `RESOLVED`; the bot ignores it and does not call `application-outcome` for it.
 - A cancelled request leaves the inbox group and sends no message to the customer.
 
 ## Route budgets (R2)

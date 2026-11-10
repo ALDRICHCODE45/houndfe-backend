@@ -18,6 +18,8 @@ const CRED = 'cred-1';
 
 /** Relative to the clock: the envelope bounds the timestamp (5 min ahead, 30 days back). */
 const RECENT = new Date(Date.now() - 3_600_000).toISOString();
+/** Always in the future, so the test never ages into a date in the past. */
+const NEXT_WEEK = new Date(Date.now() + 7 * 86_400_000).toISOString();
 
 const clarification = (over: Record<string, unknown> = {}) => ({
   sourceRequestId: ID,
@@ -96,7 +98,7 @@ describe('BotRequestIntakeService.create', () => {
     const { create } = build();
 
     await expect(
-      create(clarification({ scheduledFor: '2026-11-10T15:00:00Z' })),
+      create(clarification({ scheduledFor: NEXT_WEEK })),
     ).rejects.toMatchObject({ code: 'SCHEDULING_DISABLED', httpStatus: 422 });
   });
 
@@ -215,9 +217,11 @@ describe('BotRequestIntakeService.create', () => {
     store.createDirect.mockRejectedValue(new IntakeMergeSignal());
 
     await expect(create(clarification())).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
       httpStatus: 409,
     });
     expect(store.createDirect).toHaveBeenCalledTimes(3);
+    expect(store.saveReceipt).not.toHaveBeenCalled();
   });
 
   describe('wrapped subtypes', () => {
@@ -322,21 +326,106 @@ describe('BotRequestIntakeService.create', () => {
       });
     });
 
-    it('has no request for a zone requester resolved by an existing zone', async () => {
-      const { create, legacy } = build();
-      legacy.submit.mockResolvedValue({
-        status: 'created',
+    describe('a zone requester resolved by an existing zone', () => {
+      const zoneBody = (over: Record<string, unknown> = {}) => ({
+        sourceRequestId: ID,
+        subtype: 'DELIVERY_ZONE',
+        customer: { phoneCountryCode: '52', phone: '5512345678' },
+        detail: {
+          sourceRequestId: ID,
+          type: 'DELIVERY_ZONE',
+          zipCode: '64000',
+          phoneCountryCode: '52',
+          phone: '5512345678',
+        },
+        ...over,
+      });
+      const zoneHash = botEnvelopeHash(parseBotEnvelope(zoneBody()));
+      const resolved = (status: 'created' | 'replayed') => ({
+        status,
         wrappedId: 'z-1',
         projection: { id: 'z-1' },
       });
 
-      const result = await create(restock());
+      it('has no request, and stores the answer under the key lock', async () => {
+        const { create, legacy, store } = build();
+        legacy.submit.mockResolvedValue(resolved('created'));
 
-      expect(result.body).toMatchObject({
-        id: null,
-        folio: null,
-        status: 'RESOLVED',
-        outcome: 'CREATED',
+        const result = await create(zoneBody());
+
+        expect(result).toMatchObject({
+          httpStatus: 201,
+          body: {
+            id: null,
+            folio: null,
+            status: 'RESOLVED',
+            outcome: 'CREATED',
+            legacy: { id: 'z-1' },
+          },
+        });
+        expect(store.lockKey).toHaveBeenCalledWith('CREATE', ID);
+        // the stored snapshot holds only strings, numbers and nulls
+        expect(store.saveReceipt).toHaveBeenCalledWith(
+          'CREATE',
+          ID,
+          zoneHash,
+          null,
+          {
+            id: null,
+            folio: null,
+            status: 'RESOLVED',
+            outcome: 'CREATED',
+            mergedIntoId: null,
+            businessHours: null,
+          },
+        );
+      });
+
+      it('answers a replay with the same body as 200 REPLAYED without a second receipt', async () => {
+        const { create, legacy, store } = build();
+        legacy.submit.mockResolvedValue(resolved('replayed'));
+        store.findReceipt.mockResolvedValue({
+          commandHash: zoneHash,
+          responseSnapshot: { id: null, outcome: 'CREATED' },
+        });
+
+        await expect(create(zoneBody())).resolves.toMatchObject({
+          httpStatus: 200,
+          body: { id: null, status: 'RESOLVED', outcome: 'REPLAYED' },
+        });
+        expect(store.saveReceipt).not.toHaveBeenCalled();
+      });
+
+      it('conflicts when the key comes back with another body', async () => {
+        const { create, legacy, store } = build();
+        legacy.submit.mockResolvedValue(resolved('replayed'));
+        store.findReceipt.mockResolvedValue({
+          commandHash: zoneHash,
+          responseSnapshot: { id: null, outcome: 'CREATED' },
+        });
+
+        await expect(
+          create(zoneBody({ summary: 'otra pregunta' })),
+        ).rejects.toMatchObject({
+          code: 'IDEMPOTENCY_CONFLICT',
+          httpStatus: 409,
+        });
+        expect(store.saveReceipt).not.toHaveBeenCalled();
+      });
+
+      it('conflicts when a concurrent retry stored another body between the early check and the locked one', async () => {
+        const { create, legacy, store } = build();
+        legacy.submit.mockResolvedValue(resolved('replayed'));
+        // the early check sees nothing; the locked re-check sees the other body
+        store.findReceipt.mockResolvedValueOnce(null).mockResolvedValueOnce({
+          commandHash: 'another-body',
+          responseSnapshot: { id: null, outcome: 'CREATED' },
+        });
+
+        await expect(create(zoneBody())).rejects.toMatchObject({
+          code: 'IDEMPOTENCY_CONFLICT',
+        });
+        expect(store.saveReceipt).not.toHaveBeenCalled();
       });
     });
 
@@ -525,6 +614,24 @@ describe('BotRequestIntakeService.cancel', () => {
     });
     expect(replay.store.lockRequest).not.toHaveBeenCalled();
   });
+
+  it.each(['not-a-uuid', '', '123', `${REQ}-x`, "' OR 1=1 --"])(
+    'rejects the request id %j as a validation error before touching the store',
+    async (requestId) => {
+      const { service, store } = build();
+
+      await expect(
+        service.cancel({
+          credentialId: CRED,
+          idempotencyKey: OTHER,
+          requestId,
+          body: { reason: 'CUSTOMER_WITHDREW', triggerWaMessageId: 'w' },
+        }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+      expect(store.transaction).not.toHaveBeenCalled();
+      expect(store.lockRequest).not.toHaveBeenCalled();
+    },
+  );
 
   it('validates the body', async () => {
     const { service } = build();

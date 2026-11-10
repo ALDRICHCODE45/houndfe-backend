@@ -18,7 +18,6 @@ import type {
 } from '../application/bot-request-intake.service';
 import type { ChatbotRequestRow } from '../application/chatbot-request-commands.service';
 import type { WrappedSubtype } from '../domain/bot-request-envelope';
-import { canonicalPhone } from '../domain/canonical-phone';
 import type {
   ChatbotRequestEventDraft,
   ChatbotRequestPatch,
@@ -52,6 +51,19 @@ const WRAPPER_SOURCE: Record<WrappedSubtype, string> = {
   EXPIRATION: WRAP_SOURCE.humanDecision,
   DELIVERY_ZONE: WRAP_SOURCE.deliveryZoneRequest,
 };
+
+/** The phone a wrapped request's `customerKey` comes from at insert time. */
+function insertPhone(
+  envelope: DirectDraft['envelope'],
+): { phoneCountryCode: string; phone: string } | null {
+  if (envelope.subtype === 'DELIVERY_ZONE') {
+    const { phoneCountryCode, phone } = envelope.detail;
+    return typeof phoneCountryCode === 'string' && typeof phone === 'string'
+      ? { phoneCountryCode, phone }
+      : null;
+  }
+  return envelope.customer;
+}
 
 @Injectable()
 export class PrismaBotIntakeStore implements BotIntakeStore {
@@ -205,15 +217,32 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
     return { outcome: 'CREATED', id, folio, status: 'NEW' };
   }
 
+  /**
+   * Recovery after the hook signalled a merge. The key is derived exactly as
+   * the creator derived the one the partial unique index holds: `linkByPhone`
+   * (the same call `createDirect` and the hook make) on the phone the request
+   * is inserted under, which for a zone requester is the phone of its own
+   * detail (the envelope customer is only checked against it).
+   */
   async mergeOpen(draft: DirectDraft): Promise<IntakeOutcome | null> {
     const { tx, tenantId } = this;
-    const { customer, dedupKey } = draft.envelope;
-    const customerKey = customer
-      ? canonicalPhone(customer.phoneCountryCode, customer.phone)
-      : null;
-    if (!customerKey || !dedupKey) return null;
+    const { envelope } = draft;
+    const phone = insertPhone(envelope);
+    if (!phone || !envelope.dedupKey) return null;
+    const { customerKey } = await linkByPhone(
+      tx,
+      tenantId,
+      phone.phoneCountryCode,
+      phone.phone,
+    );
+    if (!customerKey) return null;
     await lockCustomerIntake(tx, tenantId, customerKey);
-    const open = await findOpenDedup(tx, tenantId, customerKey, dedupKey);
+    const open = await findOpenDedup(
+      tx,
+      tenantId,
+      customerKey,
+      envelope.dedupKey,
+    );
     return open ? this.merge(open, draft) : null;
   }
 

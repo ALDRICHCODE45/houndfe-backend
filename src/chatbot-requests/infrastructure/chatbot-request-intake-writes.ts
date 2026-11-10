@@ -16,6 +16,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import { CUSTOMER_REPLY_WINDOW_MS } from '../../delivery-zones/domain/delivery-zone.policy';
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import type { TenantClient } from './chatbot-request-writes';
 
@@ -34,7 +35,8 @@ export const DEFAULT_INTAKE_LIMITS: IntakeLimits = {
   creationsPerHour: CUSTOMER_CREATIONS_PER_HOUR,
 };
 
-const HOUR_MS = 3_600_000;
+/** The window of the per-customer creation limit (§6.4). */
+export const CREATION_WINDOW_MS = 3_600_000;
 
 /**
  * Thrown inside a legacy intake transaction when the request the hook was about
@@ -105,6 +107,11 @@ export async function findOpenDedup(
  * §6.4: at most `openLimit` open requests and `creationsPerHour` creations an
  * hour per customer, both counted in the database. Run it under the customer
  * lock, after the dedup lookup: a repeated question merges even at the limit.
+ *
+ * `Retry-After` is the time until the count drops back under the limit. A
+ * customer at the limit needs the oldest creation of the window to leave; one
+ * over it (rows created outside this check, or a lowered limit) needs one
+ * more per excess row, so the wait ends with that many creations expired.
  */
 export async function assertIntakeLimits(
   tx: TenantClient,
@@ -113,13 +120,12 @@ export async function assertIntakeLimits(
   limits: IntakeLimits,
   now: Date = new Date(),
 ): Promise<void> {
-  const since = new Date(now.getTime() - HOUR_MS);
+  const since = new Date(now.getTime() - CREATION_WINDOW_MS);
   const [row] = await tx.$queryRaw<
-    { open: number; recent: number; oldest: Date | null }[]
+    { open: number; recent: number }[]
   >(Prisma.sql`
     SELECT (count(*) FILTER (WHERE "status" IN ('NEW', 'IN_PROGRESS')))::int AS "open",
-           (count(*) FILTER (WHERE "createdAt" > ${since}))::int AS "recent",
-           min("createdAt") FILTER (WHERE "createdAt" > ${since}) AS "oldest"
+           (count(*) FILTER (WHERE "createdAt" > ${since}))::int AS "recent"
     FROM "chatbot_requests"
     WHERE "tenantId" = ${tenantId} AND "customerKey" = ${customerKey}`);
   if (row.open >= limits.openLimit) {
@@ -130,7 +136,17 @@ export async function assertIntakeLimits(
       { limit: limits.openLimit, open: row.open },
     );
   }
-  if (row.recent >= limits.creationsPerHour && row.oldest) {
+  if (row.recent >= limits.creationsPerHour) {
+    // Only on the rejection path: the creation whose expiry frees a slot.
+    const [expiring] = await tx.$queryRaw<{ createdAt: Date }[]>(Prisma.sql`
+      SELECT "createdAt" FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId} AND "customerKey" = ${customerKey}
+        AND "createdAt" > ${since}
+      ORDER BY "createdAt" ASC
+      OFFSET ${row.recent - limits.creationsPerHour} LIMIT 1`);
+    const freedAt = expiring
+      ? expiring.createdAt.getTime() + CREATION_WINDOW_MS
+      : now.getTime() + CREATION_WINDOW_MS;
     throw new ChatbotRequestCommandError(
       'CUSTOMER_RATE_LIMITED',
       429,
@@ -139,7 +155,7 @@ export async function assertIntakeLimits(
         limit: limits.creationsPerHour,
         retryAfterSeconds: Math.max(
           1,
-          Math.ceil((row.oldest.getTime() + HOUR_MS - now.getTime()) / 1000),
+          Math.ceil((freedAt - now.getTime()) / 1000),
         ),
       },
     );
@@ -226,7 +242,7 @@ export async function recordMerge(
     await tx.$executeRaw(Prisma.sql`
       UPDATE "chatbot_requests"
       SET "lastCustomerMessageAt" = ${last},
-          "whatsappWindowClosesAt" = ${new Date(last.getTime() + 24 * HOUR_MS)},
+          "whatsappWindowClosesAt" = ${new Date(last.getTime() + CUSTOMER_REPLY_WINDOW_MS)},
           "updatedAt" = now()
       WHERE "tenantId" = ${tenantId} AND "id" = ${target.id}
         AND ("lastCustomerMessageAt" IS NULL OR "lastCustomerMessageAt" < ${last})`);

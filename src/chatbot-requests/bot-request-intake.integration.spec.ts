@@ -32,6 +32,7 @@ import type { IntakeLimits } from './infrastructure/chatbot-request-intake-write
 import { ChatbotRequestWrapper } from './infrastructure/chatbot-request-wrapper';
 import { LegacyIntakeAdapter } from './infrastructure/legacy-intake.adapter';
 import { PrismaBotIntakeStore } from './infrastructure/prisma-bot-intake.store';
+import { readZoneImpact } from './infrastructure/chatbot-request-writes';
 
 const describeIfDb =
   process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL
@@ -99,6 +100,48 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
     ...over,
   });
 
+  const zoneEnvelope = (
+    sourceRequestId: string,
+    over: {
+      zipCode?: string;
+      dedupKey?: string;
+      customer?: { phoneCountryCode: string; phone: string };
+      detailPhone?: { phoneCountryCode: string; phone: string };
+      summary?: string;
+    } = {},
+  ) => ({
+    sourceRequestId,
+    subtype: 'DELIVERY_ZONE',
+    customer: over.customer ?? PHONE,
+    ...(over.dedupKey ? { dedupKey: over.dedupKey } : {}),
+    ...(over.summary ? { summary: over.summary } : {}),
+    detail: {
+      sourceRequestId,
+      type: 'DELIVERY_ZONE',
+      zipCode: over.zipCode ?? '64000',
+      state: 'Nuevo León',
+      municipality: 'Monterrey',
+      neighborhood: 'Centro',
+      ...(over.detailPhone ?? PHONE),
+      conversationRef: 'wa:5215512345678',
+      // fixed: the legacy intake compares the whole detail on a replay
+      lastCustomerMessageAt: MSG_AT.toISOString(),
+    },
+  });
+
+  const approveZone = (tenantId: string, zipCode: string) =>
+    prisma.deliveryZone.create({
+      data: {
+        tenantId,
+        zipCode,
+        type: 'FREE',
+        etaDays: 2,
+        approvedById: 'u',
+        approvedByDisplayName: 'U',
+        approvedAt: new Date(),
+      },
+    });
+
   const create = (
     tenantId: string,
     body: { sourceRequestId: string; [key: string]: unknown },
@@ -164,7 +207,10 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       where: { tenantId_customerKey: { tenantId, customerKey } },
     });
 
-  /** Open requests seeded straight into the table, like earlier intakes. */
+  /**
+   * Open requests seeded straight into the table, like earlier intakes. One
+   * call per tenant: the folios are fixed, so a second call would collide.
+   */
   async function seedRequests(
     tenantId: string,
     count: number,
@@ -173,7 +219,8 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
     await prisma.chatbotRequest.createMany({
       data: Array.from({ length: count }, (_, i) => ({
         tenantId,
-        folio: 1000 + i + Math.floor(Math.random() * 1e6),
+        // above every folio the service allocates in these tests (1..20)
+        folio: 1000 + i,
         kind: 'CLARIFICATION' as const,
         subtype: 'UNKNOWN_QUESTION' as const,
         customerKey: KEY,
@@ -302,7 +349,11 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
           await failure(
             create(
               tenantId,
-              direct({ scheduledFor: '2026-11-12T15:00:00.000Z' }),
+              direct({
+                scheduledFor: new Date(
+                  Date.now() + 2 * 86_400_000,
+                ).toISOString(),
+              }),
             ),
           )
         )?.code,
@@ -486,6 +537,76 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       });
       expect(await requestsOf(tenantId)).toHaveLength(1);
     });
+
+    describe('a zone requester resolved by an existing zone', () => {
+      const receiptsOf = (tenantId: string, key: string) =>
+        prisma.chatbotBotReceipt.findMany({
+          where: { tenantId, kind: 'CREATE', idempotencyKey: key },
+        });
+
+      it('replays with the same body and conflicts with another, writing no request', async () => {
+        const tenantId = await newTenant();
+        await approveZone(tenantId, '66000');
+        const id = randomUUID();
+        const body = zoneEnvelope(id, { zipCode: '66000' });
+
+        const first = await create(tenantId, body);
+        const replay = await create(tenantId, body);
+        const changed = await failure(
+          create(
+            tenantId,
+            zoneEnvelope(id, { zipCode: '66000', summary: 'x' }),
+          ),
+        );
+
+        expect(first).toMatchObject({
+          httpStatus: 201,
+          body: { id: null, status: 'RESOLVED', outcome: 'CREATED' },
+        });
+        expect(replay).toMatchObject({
+          httpStatus: 200,
+          body: { id: null, status: 'RESOLVED', outcome: 'REPLAYED' },
+        });
+        expect(changed).toMatchObject({
+          code: 'IDEMPOTENCY_CONFLICT',
+          httpStatus: 409,
+        });
+        expect(await requestsOf(tenantId)).toEqual([]);
+        expect(
+          await prisma.deliveryZoneRequest.count({ where: { tenantId } }),
+        ).toBe(1);
+        const receipts = await receiptsOf(tenantId, id);
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0].requestId).toBeNull();
+      });
+
+      it('conflicts the other side when two bodies share the key at once', async () => {
+        const tenantId = await newTenant();
+        await approveZone(tenantId, '66000');
+        const id = randomUUID();
+
+        const results = await guarded(
+          Promise.all([
+            failure(create(tenantId, zoneEnvelope(id, { zipCode: '66000' }))),
+            failure(
+              create(
+                tenantId,
+                zoneEnvelope(id, { zipCode: '66000', summary: 'otro' }),
+              ),
+            ),
+          ]),
+        );
+
+        expect(results.filter((error) => error === null)).toHaveLength(1);
+        expect(
+          results.filter((error) => error?.code === 'IDEMPOTENCY_CONFLICT'),
+        ).toHaveLength(1);
+        expect(await receiptsOf(tenantId, id)).toHaveLength(1);
+        expect(
+          await prisma.deliveryZoneRequest.count({ where: { tenantId } }),
+        ).toBe(1);
+      });
+    });
   });
 
   // ------------------------------------------------------------- merge
@@ -623,6 +744,110 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       expect(await requestsOf(tenantId)).toHaveLength(1);
       expect(await prisma.humanDecision.count({ where: { tenantId } })).toBe(1);
       expect((await create(tenantId, second)).body).toEqual(merged.body);
+    });
+  });
+
+  describe('merge recovery uses the key of the partial unique index', () => {
+    // The hook inserts under the key `linkByPhone` derives; the recovery after
+    // `IntakeMergeSignal` must look the open request up under that same key,
+    // however the phone is written, or it never finds it and the create
+    // exhausts its attempts with VERSION_CONFLICT.
+    const restockFor = (customer: {
+      phoneCountryCode: string;
+      phone: string;
+    }) => {
+      const id = randomUUID();
+      return {
+        sourceRequestId: id,
+        subtype: 'RESTOCK',
+        customer,
+        dedupKey: 'RESTOCK:variant:keys',
+        detail: {
+          sourceRequestId: id,
+          type: 'RESTOCK',
+          productId: randomUUID(),
+          productName: 'Arena',
+        },
+      };
+    };
+
+    it.each([
+      ['mobile prefix 521', { phoneCountryCode: '521', phone: '5512345678' }],
+      ['plus and prefix 52', { phoneCountryCode: '+52', phone: '5512345678' }],
+      [
+        'spaced national number',
+        { phoneCountryCode: '52', phone: '55 1234 5678' },
+      ],
+    ])('merges a wrapped RESTOCK sent with %s', async (_label, variant) => {
+      const tenantId = await newTenant();
+      const first = await create(tenantId, restockFor(PHONE));
+
+      const merged = await create(tenantId, restockFor(variant));
+
+      expect(merged.body).toMatchObject({
+        outcome: 'MERGED',
+        id: first.body.id,
+      });
+      expect(await requestsOf(tenantId)).toHaveLength(1);
+      expect(await prisma.humanDecision.count({ where: { tenantId } })).toBe(1);
+    });
+
+    it('merges a zone requester whose detail phone and envelope customer are written differently', async () => {
+      const tenantId = await newTenant();
+      const first = await create(
+        tenantId,
+        zoneEnvelope(randomUUID(), { dedupKey: 'DELIVERY_ZONE:64000' }),
+      );
+      const variant = { phoneCountryCode: '521', phone: '5512345678' };
+
+      const merged = await create(
+        tenantId,
+        zoneEnvelope(randomUUID(), {
+          dedupKey: 'DELIVERY_ZONE:64000',
+          customer: variant,
+          detailPhone: variant,
+        }),
+      );
+
+      expect(merged.body).toMatchObject({
+        outcome: 'MERGED',
+        id: first.body.id,
+      });
+      expect(await requestsOf(tenantId)).toHaveLength(1);
+      expect(
+        await prisma.deliveryZoneRequest.count({ where: { tenantId } }),
+      ).toBe(1);
+    });
+
+    it('answers two bodies on one key at once: the merge is stored once, the other side conflicts', async () => {
+      const tenantId = await newTenant();
+      await create(tenantId, restockFor(PHONE));
+      const shared = restockFor(PHONE);
+
+      const results = await guarded(
+        Promise.all([
+          failure(create(tenantId, shared)),
+          failure(create(tenantId, { ...shared, summary: 'otro' })),
+        ]),
+      );
+
+      expect(results.filter((error) => error === null)).toHaveLength(1);
+      expect(
+        results.filter((error) => error?.code === 'IDEMPOTENCY_CONFLICT'),
+      ).toHaveLength(1);
+      const [request] = await requestsOf(tenantId);
+      expect(
+        (await eventsOf(request.id)).filter((event) => event.type === 'MERGED'),
+      ).toHaveLength(1);
+      expect(
+        await prisma.chatbotBotReceipt.count({
+          where: {
+            tenantId,
+            kind: 'CREATE',
+            idempotencyKey: shared.sourceRequestId,
+          },
+        }),
+      ).toBe(1);
     });
   });
 
@@ -852,7 +1077,21 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
           .filter((error) => error !== null)
           .map((error) => error?.httpStatus),
       ).toEqual([409]);
+      const [request] = await requestsOf(tenantId);
       expect(await requestsOf(tenantId)).toHaveLength(1);
+      // The loser rolled back whole: a decision survives only as the one the
+      // winning wrapped request points at, never as an orphan.
+      const decisions = await prisma.humanDecision.findMany({
+        where: { tenantId },
+      });
+      expect(decisions.map((decision) => decision.id)).toEqual(
+        request.humanDecisionId ? [request.humanDecisionId] : [],
+      );
+      expect(
+        await prisma.chatbotBotReceipt.count({
+          where: { tenantId, kind: 'CREATE', idempotencyKey: id },
+        }),
+      ).toBe(1);
     });
   });
 
@@ -904,12 +1143,15 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
         kind: 'CONVERSATION',
       });
 
-      expect((await failure(create(tenantId, direct())))?.code).toBe(
+      // the hourly limit is out of the way: only the open count can answer
+      const roomy = serviceWith({ openLimit: 20, creationsPerHour: 1000 });
+      expect((await failure(create(tenantId, direct(), roomy)))?.code).toBe(
         'CUSTOMER_OPEN_LIMIT',
       );
       const other = await create(
         tenantId,
         direct({ customer: { phoneCountryCode: '52', phone: '5587654321' } }),
+        roomy,
       );
       expect(other.body.outcome).toBe('CREATED');
     });
@@ -942,27 +1184,79 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       expect((await create(tenantId, direct())).body.outcome).toBe('CREATED');
     });
 
-    it('rolls a wrapped create back when the limit trips: no decision, no folio', async () => {
+    it('answers Retry-After from the creation whose expiry frees a slot', async () => {
+      const tenantId = await newTenant();
+      // 12 creations at 55, 52, … 22 minutes ago, all closed: two over the
+      // limit of 10, so the third oldest (49 min ago) must leave the window
+      await prisma.chatbotRequest.createMany({
+        data: Array.from({ length: 12 }, (_, i) => ({
+          tenantId,
+          folio: 1000 + i,
+          kind: 'CLARIFICATION' as const,
+          subtype: 'UNKNOWN_QUESTION' as const,
+          status: 'CANCELLED' as const,
+          cancelledAt: new Date(),
+          closedAt: new Date(),
+          cancelReason: 'CUSTOMER_WITHDREW' as const,
+          customerKey: KEY,
+          summary: `seed ${i}`,
+          source: 'seed',
+          sourceRequestId: randomUUID(),
+          createdAt: new Date(Date.now() - (55 - 3 * i) * 60_000),
+        })),
+      });
+
+      const error = await failure(create(tenantId, direct()));
+
+      expect(error?.code).toBe('CUSTOMER_RATE_LIMITED');
+      // 60 − 49 = 11 minutes (660 s), minus the seconds this test took
+      const wait = error?.extra?.retryAfterSeconds as number;
+      expect(wait).toBeGreaterThan(640);
+      expect(wait).toBeLessThanOrEqual(660);
+    });
+
+    it('rolls a wrapped create back when the limit trips: no decision, no request, no folio, no receipt', async () => {
       const tenantId = await newTenant();
       await seedRequests(tenantId, 20);
       const id = randomUUID();
+      // hourly limit out of the way: the open count answers
+      const roomy = serviceWith({ openLimit: 20, creationsPerHour: 1000 });
 
       const error = await failure(
-        create(tenantId, {
-          sourceRequestId: id,
-          subtype: 'RESTOCK',
-          customer: PHONE,
-          detail: {
+        create(
+          tenantId,
+          {
             sourceRequestId: id,
-            type: 'RESTOCK',
-            productId: randomUUID(),
-            productName: 'Arena',
+            subtype: 'RESTOCK',
+            customer: PHONE,
+            detail: {
+              sourceRequestId: id,
+              type: 'RESTOCK',
+              productId: randomUUID(),
+              productName: 'Arena',
+            },
           },
-        }),
+          roomy,
+        ),
       );
 
       expect(error?.code).toBe('CUSTOMER_OPEN_LIMIT');
       expect(await prisma.humanDecision.count({ where: { tenantId } })).toBe(0);
+      // only the 20 seeded rows: the wrapper request rolled back with it
+      expect(await prisma.chatbotRequest.count({ where: { tenantId } })).toBe(
+        20,
+      );
+      // the rolled-back transaction burned no folio, and left no receipt
+      expect(
+        await prisma.chatbotRequestFolioCounter.findUnique({
+          where: { tenantId },
+        }),
+      ).toBeNull();
+      expect(
+        await prisma.chatbotBotReceipt.count({
+          where: { tenantId, idempotencyKey: id },
+        }),
+      ).toBe(0);
     });
   });
 
@@ -1073,13 +1367,52 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
         where: { id: made.body.id as string },
       });
 
-      await guarded(cancel(tenantId, made.body.id as string));
+      const zoneRequest = await prisma.deliveryZoneRequest.findFirstOrThrow({
+        where: { tenantId },
+      });
+      const impactOf = () =>
+        inTenant(tenantId, () =>
+          tenantPrisma.runInTransaction(() =>
+            readZoneImpact(
+              tenantPrisma.getClient(),
+              tenantId,
+              zoneRequest.validationId as string,
+            ),
+          ),
+        );
+      const impactBefore = await impactOf();
+      expect(impactBefore).toMatchObject({ requests: 1, customers: 1 });
 
+      const result = await guarded(cancel(tenantId, made.body.id as string));
+
+      expect(result).toMatchObject({
+        id: made.body.id,
+        status: 'CANCELLED',
+        reason: 'CUSTOMER_WITHDREW',
+      });
+      // the common request closes; the wrapped requester stays PENDING
+      const after = await prisma.chatbotRequest.findUniqueOrThrow({
+        where: { id: made.body.id as string },
+      });
+      expect(after).toMatchObject({
+        status: 'CANCELLED',
+        cancelReason: 'CUSTOMER_WITHDREW',
+        version: before.version + 1,
+      });
       expect(
         await prisma.deliveryZoneRequest.findFirstOrThrow({
           where: { tenantId },
         }),
       ).toMatchObject({ status: 'PENDING' });
+      expect((await eventsOf(after.id)).map((event) => event.type)).toEqual([
+        'CREATED',
+        'CANCELLED',
+      ]);
+      // leaves the zone set and bumps its version, so a staff preview goes stale
+      const impactAfter = await impactOf();
+      expect(impactAfter).toMatchObject({ requests: 0, customers: 0 });
+      expect(impactAfter.setVersion).toBe(impactBefore.setVersion + 1);
+      expect(await group(tenantId, KEY)).toBeNull();
       expect(before.customerKey).toBe(KEY);
       const [check] = (await checkInvariant(prisma, { tenantIds: [tenantId] }))
         .tenants;

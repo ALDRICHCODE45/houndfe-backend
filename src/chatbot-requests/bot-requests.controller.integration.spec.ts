@@ -337,8 +337,9 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
           summary: 'seed',
           source: 'seed',
           sourceRequestId: randomUUID(),
-          // spread over two hours so the hourly limit stays out of the way
-          createdAt: new Date(Date.now() - (i + 1) * 360_000),
+          // every row at least two hours old, so none can fall inside the
+          // hourly window however long the test takes (no hour-edge race)
+          createdAt: new Date(Date.now() - 2 * 3_600_000 - i * 60_000),
         })),
       });
 
@@ -382,6 +383,19 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
       });
       expect(response.body).not.toHaveProperty('retryAfterSeconds');
       expect(Number(response.headers['retry-after'])).toBeGreaterThan(0);
+    });
+
+    it('answers 400 VALIDATION_ERROR for a request id that is not a UUID', async () => {
+      const b = await bot();
+
+      const response = await cancel(b, 'not-a-uuid');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid request',
+      });
     });
 
     it('cancels 200, replays the same answer, 404s another branch, 409s a resolved one', async () => {

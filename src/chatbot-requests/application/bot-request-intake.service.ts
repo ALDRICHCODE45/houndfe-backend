@@ -303,6 +303,10 @@ export class BotRequestIntakeService {
     subtype: WrappedSubtype,
   ): Promise<BotCreateResult> {
     const { envelope } = draft;
+    // Unlocked on purpose, only to skip the legacy call for a stored merge.
+    // Every other race is decided under the key lock: the hook's
+    // `assertKeyFree` (a created wrapper), `mergeAfterSignal` and
+    // `finishResolved`, or by the hash compared on the replayed wrapper.
     const early = await this.store.transaction(() => this.replayOfMerge(draft));
     if (early) return early;
 
@@ -312,20 +316,7 @@ export class BotRequestIntakeService {
     );
     const wrapper = await this.store.findWrapper(subtype, legacy.wrappedId);
     // A requester resolved by an existing zone is never wrapped (§2.3).
-    if (!wrapper) {
-      return {
-        httpStatus: legacy.status === 'created' ? 201 : 200,
-        body: {
-          id: null,
-          folio: null,
-          status: 'RESOLVED',
-          outcome: legacy.status === 'created' ? 'CREATED' : 'REPLAYED',
-          mergedIntoId: null,
-          businessHours: null,
-          legacy: legacy.projection,
-        },
-      };
-    }
+    if (!wrapper) return this.finishResolved(draft, legacy);
     if (legacy.status === 'replayed') {
       // Created through the old route, the wrapper has no bot hash to compare.
       if (
@@ -340,6 +331,47 @@ export class BotRequestIntakeService {
       httpStatus: created ? 201 : 200,
       body: {
         ...view(wrapper, created ? 'CREATED' : 'REPLAYED'),
+        legacy: legacy.projection,
+      },
+    };
+  }
+
+  /**
+   * No request row exists to hold the bot's hash, so the answer is stored as
+   * a receipt, under the key lock: another body on the same key conflicts,
+   * like on every other path. Called after the legacy transaction committed;
+   * a retry that dies before this write replays through the legacy identity
+   * and writes it then.
+   */
+  private async finishResolved(
+    draft: DirectDraft,
+    legacy: LegacyIntakeResult,
+  ): Promise<BotCreateResult> {
+    const created = legacy.status === 'created';
+    const snapshot: BotCreateResponse = {
+      id: null,
+      folio: null,
+      status: 'RESOLVED',
+      outcome: 'CREATED',
+      mergedIntoId: null,
+      businessHours: null,
+    };
+    await this.store.transaction(async () => {
+      await this.store.lockKey('CREATE', draft.envelope.sourceRequestId);
+      if (await this.storedAnswer(draft)) return;
+      await this.store.saveReceipt(
+        'CREATE',
+        draft.envelope.sourceRequestId,
+        draft.hash,
+        null,
+        snapshot,
+      );
+    });
+    return {
+      httpStatus: created ? 201 : 200,
+      body: {
+        ...snapshot,
+        outcome: created ? 'CREATED' : 'REPLAYED',
         legacy: legacy.projection,
       },
     };
@@ -399,6 +431,7 @@ export class BotRequestIntakeService {
     requestId: string;
     body: unknown;
   }): Promise<BotCancelResponse> {
+    if (!isUuid(input.requestId)) throw invalid();
     const { key, reason, triggerWaMessageId } = parseCancel(
       input.idempotencyKey,
       input.body,
