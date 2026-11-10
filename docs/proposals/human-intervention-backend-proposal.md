@@ -1119,3 +1119,10 @@ No damos fecha. Cada unidad se entrega con su documento de handoff en `docs/fron
   - si viene y la ventana está abierta, el bot la manda tal cual con el prefijo de respuestas del equipo, en lugar del aviso genérico;
   - `note` es interna; `customerNote` es lo que lee el cliente y queda en la auditoría.
 - **El servidor exige `WAITING`:** cancelar una `TALK_TO_HUMAN` o `COMPLAINT` con la sesión en `STARTING`, `ACTIVE` o `ENDING` responde `409 CANCEL_NOT_ALLOWED`. El chequeo corre dentro de la misma transacción que bloquea la solicitud (`FOR UPDATE`), así que una carrera con «Atender» no puede colarse.
+
+### 12.15 Época y reversión de `STARTING` (acuerdo con el chatbot, 2026-11-10)
+
+- **Cada toma sube la época.** Toda transición `WAITING → STARTING` incrementa `handoffEpoch` (N → N+1), también un nuevo intento después de una reversión, de una liberación o de un fin. Nunca se reusa una época: el bot rechaza `HUMAN` en una época que ya terminó.
+- **Fin y reversión mantienen la época.** `HUMAN → BOT` ocurre en la misma época N, tanto al finalizar como al revertir.
+- **La reversión avisa al bot.** Si `STARTING` no recibe `session-ack STARTED` en 60 s, el backend vuelve a `WAITING`. En la misma transacción agrega al feed `conversation.ended {requestId, handoffEpoch: N, reason: START_TIMEOUT}`. Así, si el bot sí vio `conversation.started` en N pero su ACK se perdió, sale del modo callado sin esperar la conciliación de 5 min.
+- **ACK tardío.** Si después llega `session-ack STARTED` de la época N, responde `409 STALE_EPOCH`. El bot ya recibió el `conversation.ended` de N y queda en `BOT`.
