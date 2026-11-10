@@ -6,7 +6,10 @@
  *   POST /chatbot-requests/:id/cancel    read + update:ChatbotRequest
  *   POST /chatbot-requests/:id/reassign  read:ChatbotRequest +
  *                                        update:ChatbotRequestAssignment
- *   POST /chatbot-requests/:id/resolve   read + update:ChatbotRequest
+ *   POST /chatbot-requests/:id/resolve   read + update:ChatbotRequest, and the
+ *                                        legacy permission of the subtype
+ *                                        (checked by the service once the row
+ *                                        is loaded: domain/resolve-permissions)
  *   GET  /chatbot-requests/:id/zone-impact  read:ChatbotRequest
  *
  * Releasing or cancelling someone else's request also needs
@@ -50,6 +53,7 @@ import {
   ReassignDto,
 } from './chatbot-request-commands.dto';
 import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
+import { canResolveSubtype } from '../domain/resolve-permissions';
 import { parseResolveBody } from './chatbot-request-resolve.body';
 
 type StaffRequest = Request & {
@@ -162,11 +166,13 @@ export class ChatbotRequestCommandsController {
   ): Promise<{ request: ChatbotRequestView }> {
     // Fail closed if a guard was bypassed: no ability, no command.
     if (!req.user || !req.ability) throw new ForbiddenException();
+    const { ability } = req;
     const request = await this.commands.execute({
       requestId,
       actorUserId: req.user.userId,
-      actorCanReassign: req.ability.can('update', 'ChatbotRequestAssignment'),
+      actorCanReassign: ability.can('update', 'ChatbotRequestAssignment'),
       actorIsSuperAdmin: req.user.isSuperAdmin === true,
+      actorCanResolveSubtype: (subtype) => canResolveSubtype(ability, subtype),
       idempotencyKey,
       expectedVersion,
       command,

@@ -6,7 +6,7 @@ Shapes in this document come from the controller, DTOs, scoped filter and their 
 
 **Not in this slice:**
 - The read routes (`GET /chatbot-requests/groups`, `/counts`, `/:id`, `/history`, `/assignable-users`) arrive with unit 4. Until then the FE has no `version` to send unless it comes from a command response.
-- `resolve` arrives with unit 3 (it needs the wrapped stock, expiry, zone and receipt repositories).
+- `resolve` is documented in `12-chatbot-request-resolve.md` (unit 3). It needs one more permission per subtype on top of `read`/`update:ChatbotRequest`.
 - `reply`, `messages`, `template`, `finish`, `merge`, `link-customer` and `reschedule` arrive in later units.
 - Phone masking (`toStaffPhone`) arrives with unit 4. The command response carries no phone and no `customerKey`.
 

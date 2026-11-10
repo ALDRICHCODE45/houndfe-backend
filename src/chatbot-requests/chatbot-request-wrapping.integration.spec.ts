@@ -14,9 +14,15 @@
  */
 import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
+import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { integrationPrisma } from '../../test/integration/reset-db';
+import type {
+  AppAbility,
+  AppActions,
+  AppSubjects,
+} from '../auth/authorization/domain/permission';
 import { PrismaDeliveryZoneBotRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-bot.repository';
 import { PrismaDeliveryZoneValidationRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-validation.repository';
 import { DELIVERY_ZONE_TYPE } from '../delivery-zones/domain/delivery-zone-intake.request';
@@ -38,6 +44,7 @@ import {
   type ResolveAction,
 } from './application/chatbot-request-commands.service';
 import { ChatbotRequestWrapper } from './infrastructure/chatbot-request-wrapper';
+import { canResolveSubtype } from './domain/resolve-permissions';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 import { WrappedRequestResolver } from './infrastructure/wrapped-request-resolver';
 
@@ -211,12 +218,24 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
       where: { tenantId_customerKey: { tenantId, customerKey } },
     });
 
+  const abilityOf = (grants: [AppActions, AppSubjects][]): AppAbility => {
+    const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+    for (const [action, subject] of grants) can(action, subject);
+    return build();
+  };
+  const ALL_RESOLVE: [AppActions, AppSubjects][] = [
+    ['update', 'HumanDecision'],
+    ['validate', 'DeliveryZone'],
+    ['update', 'ReceiptEvidence'],
+  ];
+
   /** The new staff command, at the request's current version. */
   async function resolveNew(
     tenantId: string,
     requestId: string,
     action: ResolveAction,
     actor = users.ana,
+    ability: AppAbility = abilityOf(ALL_RESOLVE),
   ) {
     const row = await prisma.chatbotRequest.findUniqueOrThrow({
       where: { id: requestId },
@@ -226,6 +245,8 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
         requestId,
         actorUserId: actor,
         actorCanReassign: false,
+        actorCanResolveSubtype: (subtype) =>
+          canResolveSubtype(ability, subtype),
         idempotencyKey: randomUUID(),
         expectedVersion: row.version,
         command: { kind: 'resolve', action },
@@ -790,6 +811,150 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
     });
   });
 
+  // ------------------------------------------------- legacy permission gate
+
+  describe('legacy permission per subtype (owner decision)', () => {
+    const cashier = () => abilityOf([]);
+    const managerNoReceipts = () =>
+      abilityOf([
+        ['update', 'HumanDecision'],
+        ['validate', 'DeliveryZone'],
+      ]);
+
+    async function oneOfEach(tenantId: string) {
+      const restock = await requestOf({
+        humanDecisionId: await submitRestock(tenantId),
+      });
+      const zone = await requestOf({
+        deliveryZoneRequestId: (
+          await submitZone(tenantId, { cc: '52', phone: '5511111111' })
+        ).id,
+      });
+      const sale = await createSale(tenantId, null);
+      const receipt = await requestOf({
+        receiptEvidenceId: await submitReceipt(tenantId, sale.id),
+      });
+      const { setVersion } = await inTenant(tenantId, () =>
+        service.zoneImpact(zone.id),
+      );
+      const actions: [string, string, ResolveAction][] = [
+        ['RESTOCK', restock.id, restockAction],
+        [
+          'DELIVERY_ZONE',
+          zone.id,
+          { type: 'REJECT_DELIVERY_ZONE', expectedZoneSetVersion: setVersion },
+        ],
+        [
+          'TRANSFER_RECEIPT',
+          receipt.id,
+          { type: 'CONFIRM_RECEIPT', amountCents: 10_000 },
+        ],
+      ];
+      return { actions, restock, zone, receipt };
+    }
+
+    it('gives a Cashier-like ability 403 on every subtype and writes nothing', async () => {
+      const tenantId = await newTenant();
+      const { actions } = await oneOfEach(tenantId);
+      for (const [, id, action] of actions) {
+        await expect(
+          outcome(resolveNew(tenantId, id, action, users.ana, cashier())),
+        ).resolves.toBe('INSUFFICIENT_PERMISSIONS');
+      }
+      const rows = await prisma.chatbotRequest.findMany({
+        where: { tenantId },
+      });
+      expect(rows.map((row) => [row.status, row.version])).toEqual(
+        rows.map(() => ['NEW', 1]),
+      );
+      expect(
+        await prisma.chatbotRequestEvent.count({
+          where: { tenantId, type: { not: 'CREATED' } },
+        }),
+      ).toBe(0);
+      expect(
+        await prisma.deliveryZoneValidation.count({
+          where: { tenantId, status: 'RESOLVED' },
+        }),
+      ).toBe(0);
+      expect(
+        await prisma.receiptEvidence.count({
+          where: { tenantId, status: { not: 'PENDING' } },
+        }),
+      ).toBe(0);
+    });
+
+    it('denies receipts to a Manager without update:ReceiptEvidence, allows the rest', async () => {
+      const tenantId = await newTenant();
+      const { actions } = await oneOfEach(tenantId);
+      const [restock, zone, receipt] = actions;
+
+      await expect(
+        outcome(
+          resolveNew(
+            tenantId,
+            receipt[1],
+            receipt[2],
+            users.ana,
+            managerNoReceipts(),
+          ),
+        ),
+      ).resolves.toBe('INSUFFICIENT_PERMISSIONS');
+      await expect(
+        outcome(
+          resolveNew(
+            tenantId,
+            restock[1],
+            restock[2],
+            users.ana,
+            managerNoReceipts(),
+          ),
+        ),
+      ).resolves.toBe('OK');
+      await expect(
+        outcome(
+          resolveNew(
+            tenantId,
+            zone[1],
+            zone[2],
+            users.ana,
+            managerNoReceipts(),
+          ),
+        ),
+      ).resolves.toBe('OK');
+      expect(
+        await prisma.receiptEvidence.count({
+          where: { tenantId, status: 'PENDING' },
+        }),
+      ).toBe(1);
+    });
+
+    it('resolves a receipt once the Manager also holds update:ReceiptEvidence', async () => {
+      const tenantId = await newTenant();
+      const { actions } = await oneOfEach(tenantId);
+      const receipt = actions[2];
+      const full = abilityOf([...ALL_RESOLVE]);
+      await expect(
+        outcome(resolveNew(tenantId, receipt[1], receipt[2], users.ana, full)),
+      ).resolves.toBe('OK');
+      expect(await requestOf({ id: receipt[1] })).toMatchObject({
+        status: 'RESOLVED',
+      });
+    });
+
+    it('answers 403 before state: a closed request gives the same 403', async () => {
+      const tenantId = await newTenant();
+      const decisionId = await submitRestock(tenantId);
+      const request = await requestOf({ humanDecisionId: decisionId });
+      await resolveNew(tenantId, request.id, restockAction);
+      await expect(
+        outcome(
+          resolveNew(tenantId, request.id, restockAction, users.ana, cashier()),
+        ),
+      ).resolves.toBe('INSUFFICIENT_PERMISSIONS');
+    });
+  });
+
   // ------------------------------------------------------------ zone fan-out
 
   describe('zone fan-out (R9, D15)', () => {
@@ -1039,6 +1204,51 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
       await expectInvariant(tenantId);
     });
 
+    it('RESTOCK: an exact legacy replay writes nothing to the common request', async () => {
+      const tenantId = await newTenant();
+      const decisionId = await submitRestock(tenantId);
+      const request = await requestOf({ humanDecisionId: decisionId });
+      // The decision was resolved behind the request's back (a row wrapped
+      // late, or drift). A replay must report it and leave the request alone.
+      const resolutionRequestId = randomUUID();
+      await prisma.humanDecision.update({
+        where: { id: decisionId },
+        data: {
+          status: 'RESOLVED',
+          version: 2,
+          resolutionAction: 'PROVIDE_RESTOCK_ESTIMATE',
+          restockDays: 3,
+          resolutionRequestId,
+          resolvedAt: new Date(),
+          resolvedById: users.rev,
+          resolvedByActorId: users.rev,
+          resolvedByDisplayName: 'rev',
+        },
+      });
+      const before = await eventsOf(request.id);
+
+      const result = await inTenant(tenantId, () =>
+        decisions.resolve({
+          decisionId,
+          expectedVersion: 1,
+          resolutionRequestId,
+          action: 'PROVIDE_RESTOCK_ESTIMATE',
+          restockDays: 3,
+          actorUserId: users.rev,
+          actorIsSuperAdmin: false,
+        }),
+      );
+      expect(result.status).toBe('replayed');
+      expect(await eventsOf(request.id)).toEqual(before);
+      expect(await requestOf({ id: request.id })).toMatchObject({
+        status: 'NEW',
+        version: 1,
+      });
+      expect(await group(tenantId, request.customerKey)).toMatchObject({
+        openCount: 1,
+      });
+    });
+
     it('DELIVERY_ZONE: the legacy validation resolve closes every wrapping request', async () => {
       const tenantId = await newTenant();
       const record = await submitZone(tenantId, {
@@ -1110,6 +1320,58 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
         resolution: { action: 'REJECT_RECEIPT', via: 'LEGACY_ROUTE' },
       });
       await expectInvariant(tenantId);
+    });
+
+    it('TRANSFER_RECEIPT: a legacy reviewer with an empty name does not break confirm or reject', async () => {
+      const tenantId = await newTenant();
+      const nameless = randomUUID();
+      await prisma.user.create({
+        data: {
+          id: nameless,
+          email: `caja.noche-${nameless}@wrap.test`,
+          hashedPassword: 'x',
+          name: '',
+        },
+      });
+      try {
+        const sale = await createSale(tenantId, null);
+        const confirmed = await submitReceipt(tenantId, sale.id);
+        await inTenant(tenantId, () =>
+          receipts.confirm(
+            sale.id,
+            confirmed,
+            nameless,
+            { amountCents: 10_000 },
+            randomUUID(),
+          ),
+        );
+        const otherSale = await createSale(tenantId, null);
+        const rejected = await submitReceipt(tenantId, otherSale.id);
+        await inTenant(tenantId, () =>
+          receipts.reject(otherSale.id, rejected, nameless, {
+            reason: 'ilegible',
+          }),
+        );
+
+        for (const receiptEvidenceId of [confirmed, rejected]) {
+          const request = await requestOf({ receiptEvidenceId });
+          expect(request).toMatchObject({
+            status: 'RESOLVED',
+            resolvedByActorId: nameless,
+            resolvedByDisplayName: 'caja.noche-' + nameless,
+          });
+          const events = await eventsOf(request.id);
+          expect(events[events.length - 1]).toMatchObject({
+            type: 'RESOLVED',
+            actorKind: 'USER',
+            actorDisplayName: 'caja.noche-' + nameless,
+          });
+        }
+      } finally {
+        await prisma.tenant.delete({ where: { id: tenantId } });
+        await prisma.user.delete({ where: { id: nameless } });
+        tenants.splice(tenants.indexOf(tenantId), 1);
+      }
     });
 
     it('does not close the request when the legacy resolve fails', async () => {

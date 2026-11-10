@@ -15,6 +15,7 @@
  * two-reviewer race. HD-04c3 owns the dedicated local PostgreSQL integration
  * proof against the isolated RESTOCK database.
  */
+import type { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
   RESTOCK_SOURCE,
@@ -490,6 +491,43 @@ describe('PrismaHumanDecisionReviewResolveRepository', () => {
       expect(result).toEqual({ status: 'replayed', decision: projection });
       expect(result.decision.resolvedAt).toBe(FIXED_NOW);
       expect(client.humanDecision.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('performs no chatbot-request write on a replay, only on the first resolve', async () => {
+      const wrapper = {
+        lockLegacy: jest.fn().mockResolvedValue(undefined),
+        closeLegacy: jest.fn().mockResolvedValue(undefined),
+      };
+      const build = (client: ClientMock) => {
+        const { tenantPrisma } = makeRepo(client);
+        return new PrismaHumanDecisionReviewResolveRepository(
+          tenantPrisma as unknown as TenantPrismaService,
+          () => FIXED_NOW,
+          wrapper as unknown as ChatbotRequestWrapper,
+        );
+      };
+
+      const replayClient = makeClient();
+      arrangeReviewer(replayClient);
+      replayClient.humanDecision.findFirst
+        .mockResolvedValueOnce(resolvedState())
+        .mockResolvedValueOnce(resolvedRecord());
+      await expect(
+        build(replayClient).resolve(positiveCommand()),
+      ).resolves.toMatchObject({ status: 'replayed' });
+      expect(wrapper.lockLegacy).toHaveBeenCalledTimes(1);
+      expect(wrapper.closeLegacy).not.toHaveBeenCalled();
+
+      const firstClient = makeClient();
+      arrangeReviewer(firstClient);
+      firstClient.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState())
+        .mockResolvedValueOnce(resolvedRecord());
+      firstClient.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      await expect(
+        build(firstClient).resolve(positiveCommand()),
+      ).resolves.toMatchObject({ status: 'resolved' });
+      expect(wrapper.closeLegacy).toHaveBeenCalledTimes(1);
     });
 
     it('replays an exact negative resolution without mutating', async () => {

@@ -15,7 +15,11 @@ import { Test } from '@nestjs/testing';
 import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import request from 'supertest';
 import { PERMISSIONS_KEY } from '../../auth/authorization/decorators/require-permissions.decorator';
-import type { AppAbility } from '../../auth/authorization/domain/permission';
+import type {
+  AppAbility,
+  AppActions,
+  AppSubjects,
+} from '../../auth/authorization/domain/permission';
 import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
 import { ActiveUserGuard } from '../../auth/guards/active-user.guard';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -46,6 +50,7 @@ const VIEW: ChatbotRequestView = {
 };
 
 let canReassign = false;
+let legacyGrants: [AppActions, AppSubjects][] = [];
 let denyPermissions = false;
 
 class StubGuard implements CanActivate {
@@ -57,6 +62,7 @@ class StubGuard implements CanActivate {
     const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
     can('update', 'ChatbotRequest');
     if (canReassign) can('update', 'ChatbotRequestAssignment');
+    for (const [action, subject] of legacyGrants) can(action, subject);
     req.user = { userId: 'u-ana', tenantId: 't-1', isSuperAdmin: false };
     req.ability = build();
     return true;
@@ -98,6 +104,7 @@ describe('ChatbotRequestCommandsController', () => {
     execute.mockReset().mockResolvedValue(VIEW);
     zoneImpact.mockReset();
     canReassign = false;
+    legacyGrants = [];
     denyPermissions = false;
   });
 
@@ -171,6 +178,7 @@ describe('ChatbotRequestCommandsController', () => {
       actorUserId: 'u-ana',
       actorCanReassign: false,
       actorIsSuperAdmin: false,
+      actorCanResolveSubtype: expect.any(Function) as unknown,
       idempotencyKey: KEY,
       expectedVersion: 1,
       command: { kind: 'claim' },
@@ -443,6 +451,53 @@ describe('ChatbotRequestCommandsController', () => {
         null,
       ).expect(400);
       expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('tells the service what the JWT ability may resolve, per subtype', async () => {
+      const resolvable = async () => {
+        await post('resolve', {
+          expectedVersion: 1,
+          action: 'REPORT_EXPIRATION_UNAVAILABLE',
+        }).expect(200);
+        const call = (
+          execute.mock.lastCall as [
+            { actorCanResolveSubtype: (subtype: string) => boolean },
+          ]
+        )[0];
+        return [
+          'RESTOCK',
+          'EXPIRATION',
+          'DELIVERY_ZONE',
+          'TRANSFER_RECEIPT',
+        ].map((subtype) => call.actorCanResolveSubtype(subtype));
+      };
+
+      // Cashier-like: read + update:ChatbotRequest only.
+      expect(await resolvable()).toEqual([false, false, false, false]);
+
+      legacyGrants = [
+        ['update', 'HumanDecision'],
+        ['validate', 'DeliveryZone'],
+      ];
+      expect(await resolvable()).toEqual([true, true, true, false]);
+
+      legacyGrants.push(['update', 'ReceiptEvidence']);
+      expect(await resolvable()).toEqual([true, true, true, true]);
+    });
+
+    it('maps INSUFFICIENT_PERMISSIONS from the service to 403 with no current', async () => {
+      execute.mockRejectedValue(
+        new ChatbotRequestCommandError('INSUFFICIENT_PERMISSIONS', 403),
+      );
+      const response = await post('resolve', {
+        expectedVersion: 1,
+        action: 'REPORT_EXPIRATION_UNAVAILABLE',
+      }).expect(403);
+      expect(response.body).toEqual({
+        statusCode: 403,
+        code: 'INSUFFICIENT_PERMISSIONS',
+        message: expect.any(String) as string,
+      });
     });
 
     it('answers 409 ZONE_SET_CHANGED with the new zoneImpact', async () => {

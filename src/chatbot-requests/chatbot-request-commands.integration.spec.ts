@@ -399,6 +399,7 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
           },
           {
             expectedVersion: 3,
+            actorCanResolveSubtype: () => true,
           },
         ),
       ),

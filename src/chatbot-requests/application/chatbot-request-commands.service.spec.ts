@@ -5,6 +5,7 @@ import {
   type ChatbotRequestResolver,
   type ChatbotRequestRow,
   type ChatbotRequestView,
+  type ResolveAction,
   type StaffCommandInput,
 } from './chatbot-request-commands.service';
 
@@ -345,6 +346,7 @@ describe('ChatbotRequestCommandsService', () => {
       });
     const restock = (over: Partial<StaffCommandInput> = {}) =>
       input({
+        actorCanResolveSubtype: () => true,
         command: {
           kind: 'resolve',
           action: { type: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 7 },
@@ -425,6 +427,7 @@ describe('ChatbotRequestCommandsService', () => {
           noResolver,
         ).execute(
           input({
+            actorCanResolveSubtype: () => true,
             command: {
               kind: 'resolve',
               action: { type: 'CONFIRM_RECEIPT', amountCents: 100 },
@@ -481,6 +484,128 @@ describe('ChatbotRequestCommandsService', () => {
       });
     });
 
+    it.each([
+      ['UNAUTHORIZED', 401],
+      ['FORBIDDEN', 403],
+      ['NOT_FOUND', 404],
+      ['VALIDATION_ERROR', 400],
+    ] as const)(
+      'attaches current to a %s raised by the wrapped use case',
+      async (code, status) => {
+        const { store } = fakeStore(decision());
+        const resolver: ChatbotRequestResolver = {
+          resolve: () =>
+            Promise.reject(new ChatbotRequestCommandError(code, status)),
+        };
+        const error = await failure(
+          new ChatbotRequestCommandsService(store, resolver).execute(restock()),
+        );
+        expect(error).toMatchObject({
+          code,
+          httpStatus: status,
+          current: { version: 1, status: 'NEW', claimedBy: null },
+        });
+      },
+    );
+
+    describe('legacy permission per subtype', () => {
+      const subtypes = [
+        ['RESTOCK', restockAction()],
+        [
+          'EXPIRATION',
+          { type: 'REPORT_EXPIRATION_UNAVAILABLE' } as ResolveAction,
+        ],
+        [
+          'DELIVERY_ZONE',
+          {
+            type: 'REJECT_DELIVERY_ZONE',
+            expectedZoneSetVersion: 1,
+          } as ResolveAction,
+        ],
+        [
+          'TRANSFER_RECEIPT',
+          { type: 'CONFIRM_RECEIPT', amountCents: 100 } as ResolveAction,
+        ],
+      ] as const;
+
+      function restockAction(): ResolveAction {
+        return { type: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 7 };
+      }
+
+      it.each(subtypes)(
+        'answers 403 INSUFFICIENT_PERMISSIONS for %s without writing, after loading the row',
+        async (subtype, action) => {
+          const { store, calls } = fakeStore(decision({ subtype }));
+          const seen: string[] = [];
+          const error = await failure(
+            new ChatbotRequestCommandsService(store, noResolver).execute(
+              input({
+                actorCanResolveSubtype: (asked) => {
+                  seen.push(asked);
+                  return false;
+                },
+                command: { kind: 'resolve', action },
+              }),
+            ),
+          );
+          expect(error).toMatchObject({
+            code: 'INSUFFICIENT_PERMISSIONS',
+            httpStatus: 403,
+          });
+          expect(error.current).toBeUndefined();
+          expect(seen).toEqual([subtype]);
+          expect(calls).toContain('lockRequest');
+          expect(calls.some((call) => call.startsWith('applyPatch'))).toBe(
+            false,
+          );
+          expect(calls).not.toContain('saveReceipt');
+          expect(calls.some((call) => call.startsWith('refreshGroups'))).toBe(
+            false,
+          );
+        },
+      );
+
+      it('fails closed when the caller did not say what the actor can resolve', async () => {
+        const { store } = fakeStore(decision());
+        const error = await failure(
+          new ChatbotRequestCommandsService(store, noResolver).execute(
+            input({
+              command: { kind: 'resolve', action: restockAction() },
+            }),
+          ),
+        );
+        expect(error).toMatchObject({ code: 'INSUFFICIENT_PERMISSIONS' });
+      });
+
+      it('answers 404 for a missing row before asking for the permission', async () => {
+        const { store } = fakeStore(null);
+        const asked = jest.fn(() => false);
+        const error = await failure(
+          new ChatbotRequestCommandsService(store, noResolver).execute(
+            input({
+              actorCanResolveSubtype: asked,
+              command: { kind: 'resolve', action: restockAction() },
+            }),
+          ),
+        );
+        expect(error).toMatchObject({ code: 'NOT_FOUND', httpStatus: 404 });
+        expect(asked).not.toHaveBeenCalled();
+      });
+
+      it('does not decide on state first: a closed request still answers 403', async () => {
+        const { store } = fakeStore(decision({ status: 'RESOLVED' }));
+        const error = await failure(
+          new ChatbotRequestCommandsService(store, noResolver).execute(
+            input({
+              actorCanResolveSubtype: () => false,
+              command: { kind: 'resolve', action: restockAction() },
+            }),
+          ),
+        );
+        expect(error).toMatchObject({ code: 'INSUFFICIENT_PERMISSIONS' });
+      });
+    });
+
     describe('delivery zone', () => {
       const zoneRow = (id: string, key: string, over = {}) =>
         row({
@@ -494,6 +619,7 @@ describe('ChatbotRequestCommandsService', () => {
       const impact = { requests: 3, customers: 3, setVersion: 7 };
       const approve = (expectedZoneSetVersion: number) =>
         input({
+          actorCanResolveSubtype: () => true,
           command: {
             kind: 'resolve',
             action: {
@@ -529,12 +655,10 @@ describe('ChatbotRequestCommandsService', () => {
         ];
         const { store, calls, applied } = fakeStore(main, { siblings, impact });
         const { resolver } = okResolver();
-        await new ChatbotRequestCommandsService(store, resolver).execute(
-          input({
-            requestId: 'req-2',
-            command: approve(7).command,
-          }),
-        );
+        await new ChatbotRequestCommandsService(store, resolver).execute({
+          ...approve(7),
+          requestId: 'req-2',
+        });
 
         expect(calls.filter((call) => call.startsWith('applyPatch'))).toEqual([
           'applyPatch:req-2',

@@ -14,10 +14,20 @@ Shapes in this document come from the controller, the body parser, the scoped fi
 
 | Route | CASL required |
 | --- | --- |
-| `POST /chatbot-requests/:id/resolve` | `read:ChatbotRequest` + `update:ChatbotRequest` |
+| `POST /chatbot-requests/:id/resolve` | `read:ChatbotRequest` + `update:ChatbotRequest`, **and** the permission the old route of that subtype always required (table below) |
 | `GET /chatbot-requests/:id/zone-impact` | `read:ChatbotRequest` |
 
-Same guards as handoff 11 (`JWT → tenant → active user → CASL`). The old permissions (`update:HumanDecision`, `validate:DeliveryZone`, `update:ReceiptEvidence`) are **not** needed here and do not grant these routes. The caller still needs a membership in the sucursal (`403 FORBIDDEN` otherwise).
+| `subtype` of the request | Extra permission to resolve it |
+| --- | --- |
+| `RESTOCK`, `EXPIRATION` | `update:HumanDecision` |
+| `DELIVERY_ZONE` | `validate:DeliveryZone` |
+| `TRANSFER_RECEIPT` | `update:ReceiptEvidence` |
+
+Owner decision: moving the screen to the common inbox must not give anybody a power they did not have. A Cashier (read and update `ChatbotRequest` only) can claim and release these requests but gets `403 INSUFFICIENT_PERMISSIONS` when resolving any of them; a Manager without `update:ReceiptEvidence` can resolve stock, expiry and zones but not receipts. `manage` and `all` grants count, as in the rest of the app.
+
+The check runs **once the request is loaded and before anything depends on its state**: a missing permission answers `403 INSUFFICIENT_PERMISSIONS` (no `current`, nothing written) even for a closed or claimed request, so it reveals nothing beyond what `read:ChatbotRequest` already shows. An unknown id is still `404`, because there is no subtype to check. The FE should not offer **Resolve** to a user without the permission for that request's `subtype` (unit 4's `allowedActions` will use the same rule, `canResolveSubtype`).
+
+Same guards as handoff 11 (`JWT → tenant → active user → CASL`). The caller still needs a membership in the sucursal (`403 FORBIDDEN` otherwise).
 
 ## 2. `POST /chatbot-requests/:id/resolve`
 
@@ -75,11 +85,11 @@ Envelope and `current` as in handoff 11 §2 (`{statusCode, code, message, curren
 
 | Status | `code` | When | `current` |
 | --- | --- | --- | --- |
-| 400 | `VALIDATION_ERROR` | Missing/invalid `Idempotency-Key`, bad `:id`, unknown or missing action, extra field (including `resolutionRequestId`), out-of-range value, `REJECT_RECEIPT` without `customerReason`, zone action without `expectedZoneSetVersion` | — |
-| 401 | `UNAUTHORIZED` | No or expired JWT, inactive user | — |
-| 403 | `INSUFFICIENT_PERMISSIONS` | Missing `read`/`update:ChatbotRequest` | — |
-| 403 | `FORBIDDEN` | No membership in the sucursal | — |
-| 404 | `NOT_FOUND` | No such request in this sucursal | — |
+| 400 | `VALIDATION_ERROR` | Missing/invalid `Idempotency-Key`, bad `:id`, unknown or missing action, extra field (including `resolutionRequestId`), out-of-range value, `REJECT_RECEIPT` without `customerReason`, zone action without `expectedZoneSetVersion`, or a value the old use case refuses | ✓ only when the old use case raised it |
+| 401 | `UNAUTHORIZED` | No or expired JWT, inactive user (also raised by the old use case when the account is unusable) | ✓ when the old use case raised it |
+| 403 | `INSUFFICIENT_PERMISSIONS` | Missing `read`/`update:ChatbotRequest`, or missing the legacy permission of the request's subtype (§1) | — |
+| 403 | `FORBIDDEN` | No membership in the sucursal | ✓ (from the old use case) |
+| 404 | `NOT_FOUND` | No such request in this sucursal, or the wrapped stock/zone/receipt row is gone | ✓ when the old use case raised it |
 | 409 | `VERSION_CONFLICT` | `expectedVersion` is stale | ✓ |
 | 409 | `REQUEST_CLAIMED_BY_OTHER` | Someone else holds the request | ✓ |
 | 409 | `REQUEST_CLOSED` | Already `RESOLVED`/`CANCELLED`, resolved through the old route, resolved as a zone sibling, or the receipt is no longer pending | ✓ |
@@ -88,7 +98,9 @@ Envelope and `current` as in handoff 11 §2 (`{statusCode, code, message, curren
 | 422 | `ACTION_NOT_ALLOWED` | The request is not a decision (`kind` ≠ `DECISION`), the action belongs to another subtype, or a receipt's sale is no longer payable | ✓ |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; retry with the **same** key | — |
 
-**Order of checks** (the first failing check answers): `400` → replay of the key → `404` → `REQUEST_CLOSED` → `422` (not a decision) → `REQUEST_CLAIMED_BY_OTHER` → `VERSION_CONFLICT` → `422` (action of another subtype) → `ZONE_SET_CHANGED` (zones only) → the old use case's own refusals above.
+**`current` on errors from the old use cases.** Errors that come from the stock/zone/receipt use case (`401`, `403 FORBIDDEN`, `404`, `400`, `409 VERSION_CONFLICT`, `REQUEST_CLOSED`, `IDEMPOTENCY_CONFLICT`, `422 ACTION_NOT_ALLOWED`) are returned with the request's `current {version, status, claimedBy}` taken from the row as it was when the command started, so the FE can refresh without reloading. Errors raised before that point (body validation, `INSUFFICIENT_PERMISSIONS`, the request's own `404`) carry no `current` unless the table says so. Do not branch on its presence; branch on `code`.
+
+**Order of checks** (the first failing check answers): `400` (body) → replay of the key → `404` → `403 INSUFFICIENT_PERMISSIONS` (subtype permission) → `REQUEST_CLOSED` → `422` (not a decision) → `REQUEST_CLAIMED_BY_OTHER` → `VERSION_CONFLICT` → `422` (action of another subtype) → `ZONE_SET_CHANGED` (zones only) → the old use case's own refusals above.
 
 **Failed commands store nothing**, as in handoff 11.
 

@@ -25,6 +25,7 @@ import { CUSTOMER_REPLY_WINDOW_MS } from '../../delivery-zones/domain/delivery-z
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { toState } from '../application/chatbot-request-commands.service';
 import { canonicalPhone, phoneLookupVariants } from '../domain/canonical-phone';
+import { actorDisplayName } from '../domain/actor-display-name';
 import { closeWrapped } from '../domain/chatbot-request.commands';
 import {
   allocateFolio,
@@ -292,6 +293,16 @@ export class ChatbotRequestWrapper {
 
   // ----------------------------------------------------------- legacy routes
 
+  /** The legacy receipt routes only know the id; the name may be empty. */
+  private async nameOf(userId: string): Promise<string> {
+    const user = await this.tx.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
+    if (!user) throw new Error('legacy resolve by an unknown user');
+    return actorDisplayName(user);
+  }
+
   /** Call before the legacy code writes the wrapped row (lock order). */
   async lockLegacy(link: WrappedLink): Promise<void> {
     if (this.hooksOff) return;
@@ -315,14 +326,7 @@ export class ChatbotRequestWrapper {
     const rows = await lockOpenWrapping(tx, tenantId, link);
     if (rows.length === 0) return;
     const displayName =
-      actor.displayName ??
-      (
-        await tx.user.findUnique({
-          where: { id: actor.userId },
-          select: { name: true },
-        })
-      )?.name;
-    if (!displayName) throw new Error('legacy resolve without a named actor');
+      actor.displayName?.trim() || (await this.nameOf(actor.userId));
     const now = new Date();
     for (const row of rows) {
       const closed = closeWrapped(toState(row), {

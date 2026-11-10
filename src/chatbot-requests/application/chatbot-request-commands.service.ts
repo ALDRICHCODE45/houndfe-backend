@@ -144,6 +144,11 @@ export interface StaffCommandInput {
   actorCanReassign: boolean;
   /** JWT `isSuperAdmin`; the wrapped resolve use cases skip membership for it. */
   actorIsSuperAdmin?: boolean;
+  /**
+   * `resolve` only: whether the caller's ability holds the legacy permission
+   * of that subtype (`canResolveSubtype`). Missing means denied.
+   */
+  actorCanResolveSubtype?: (subtype: ChatbotRequestSubtype) => boolean;
   idempotencyKey: string;
   expectedVersion: number;
   command: StaffCommand;
@@ -238,6 +243,7 @@ export type ChatbotRequestCommandErrorCode =
   | 'IDEMPOTENCY_CONFLICT'
   | 'USER_NOT_ASSIGNABLE'
   | 'FORBIDDEN'
+  | 'INSUFFICIENT_PERMISSIONS'
   | 'ZONE_SET_CHANGED';
 
 /** §3.8: `ZONE_SET_CHANGED` also carries the new `zoneImpact`. */
@@ -351,6 +357,12 @@ export class ChatbotRequestCommandsService {
       if (resolving) await this.store.lockZoneOf(input.requestId);
       const row = await this.store.lockRequest(input.requestId);
       if (!row) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+      // Before any state-dependent answer, so a caller who may not resolve
+      // this subtype learns nothing beyond what `read` already shows. No
+      // `current`: the 403 carries no request state.
+      if (resolving && !input.actorCanResolveSubtype?.(row.subtype)) {
+        throw new ChatbotRequestCommandError('INSUFFICIENT_PERMISSIONS', 403);
+      }
       const result = this.decide(toState(row), input, actor, toUser);
       if (!result.ok) throw rejected(result.error);
 

@@ -280,8 +280,9 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
       }
 
       if (current.status === 'RESOLVED') {
+        // A replay performs no write at all, also none on the wrapping
+        // request: it reports the committed state and nothing else.
         this.assertExactReplay(current, command);
-        await this.closeWrapping(command, actor);
         return {
           status: 'replayed',
           decision: await this.readProjection(
