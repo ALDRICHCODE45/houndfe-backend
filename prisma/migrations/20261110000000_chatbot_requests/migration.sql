@@ -10,8 +10,17 @@
 -- for milliseconds, but it waits behind (and queues writers behind) any open
 -- transaction on those tables. No referenced table gains a column or index.
 --
--- Immutability of chatbot_request_events (§6.2): the trigger at the end
--- rejects every UPDATE and every direct DELETE.
+-- Lock safety: `SET LOCAL lock_timeout` bounds every lock wait to 5 s. Prisma
+-- runs this file as one transaction, so on timeout nothing is applied.
+-- Deploy note: deploy at low traffic. If it fails on lock timeout, run
+--   prisma migrate resolve --rolled-back 20261110000000_chatbot_requests
+-- and redeploy.
+--
+-- Retention (D4, §6.2): triggers at the end keep chatbot_requests forever
+-- (direct DELETE rejected) and make chatbot_request_events append-only
+-- (UPDATE and direct DELETE rejected). Only a tenant deletion cascades.
+
+SET LOCAL lock_timeout = '5s';
 
 -- CreateEnum
 CREATE TYPE "ChatbotRequestKind" AS ENUM ('DECISION', 'CLARIFICATION', 'CONVERSATION');
@@ -142,6 +151,12 @@ CREATE INDEX "chatbot_requests_tenantId_customerKey_status_idx" ON "chatbot_requ
 CREATE INDEX "chatbot_requests_customerId_idx" ON "chatbot_requests"("customerId");
 
 -- CreateIndex
+CREATE INDEX "chatbot_requests_tenantId_subtype_closedAt_idx" ON "chatbot_requests"("tenantId", "subtype", "closedAt" DESC);
+
+-- CreateIndex
+CREATE INDEX "chatbot_requests_tenantId_resolvedByActorId_closedAt_idx" ON "chatbot_requests"("tenantId", "resolvedByActorId", "closedAt" DESC);
+
+-- CreateIndex
 CREATE UNIQUE INDEX "chatbot_requests_tenantId_id_key" ON "chatbot_requests"("tenantId", "id");
 
 -- CreateIndex
@@ -182,7 +197,11 @@ ALTER TABLE "chatbot_request_folio_counters" ADD CONSTRAINT "chatbot_request_fol
 
 -- Partial indexes (Prisma's DSL cannot express them).
 -- SLA sweep: `WHERE nextSlaCheckAt <= now() … FOR UPDATE SKIP LOCKED LIMIT 100`.
-CREATE INDEX "chatbot_requests_sla_sweep_idx" ON "chatbot_requests"("nextSlaCheckAt") WHERE "status" IN ('NEW', 'IN_PROGRESS');
+-- `<=` implies NOT NULL, so the planner uses this index without the query
+-- repeating the predicate; sla_sweep_open_chk keeps it open-only.
+CREATE INDEX "chatbot_requests_sla_sweep_idx" ON "chatbot_requests"("nextSlaCheckAt") WHERE "nextSlaCheckAt" IS NOT NULL;
+-- History (§3.8): closed rows newest first, cursor (closedAt, id).
+CREATE INDEX "chatbot_requests_history_idx" ON "chatbot_requests"("tenantId", "closedAt" DESC, "id" DESC) WHERE "status" IN ('RESOLVED', 'CANCELLED');
 -- Counters (§3.8): new / inProgress.
 CREATE INDEX "chatbot_requests_open_status_idx" ON "chatbot_requests"("tenantId", "status") WHERE "status" IN ('NEW', 'IN_PROGRESS');
 -- Counter: mine.
@@ -212,6 +231,10 @@ ALTER TABLE "chatbot_requests"
   ),
   ADD CONSTRAINT "chatbot_requests_positive_chk" CHECK ("version" >= 1 AND "folio" >= 1 AND length("customerKey") > 0),
   ADD CONSTRAINT "chatbot_requests_phone_pair_chk" CHECK (("phoneCountryCode" IS NULL) = ("phone" IS NULL)),
+  -- An ambiguous key never links a customer (staff links it by hand, R1).
+  ADD CONSTRAINT "chatbot_requests_ambiguous_customer_chk" CHECK (NOT "ambiguousCustomer" OR "customerId" IS NULL),
+  -- Every path sets or clears the assignee and claimedAt together.
+  ADD CONSTRAINT "chatbot_requests_assignee_claimed_at_chk" CHECK (("assigneeUserId" IS NULL) = ("claimedAt" IS NULL)),
   -- IN_PROGRESS has an assignee; NEW has none; closed rows keep the last one.
   ADD CONSTRAINT "chatbot_requests_assignee_state_chk" CHECK (
     ("assigneeUserId" IS NULL) = ("assigneeDisplayName" IS NULL)
@@ -239,8 +262,10 @@ ALTER TABLE "chatbot_requests"
   ADD CONSTRAINT "chatbot_requests_sla_sweep_open_chk" CHECK (
     "nextSlaCheckAt" IS NULL OR "status" IN ('NEW', 'IN_PROGRESS')
   ),
+  -- The window is normally message + 24 h, but whatever Meta reports is
+  -- stored (§4.5); only both-or-neither is enforced.
   ADD CONSTRAINT "chatbot_requests_whatsapp_window_chk" CHECK (
-    "whatsappWindowClosesAt" IS NOT DISTINCT FROM "lastCustomerMessageAt" + INTERVAL '24 hours'
+    ("whatsappWindowClosesAt" IS NULL) = ("lastCustomerMessageAt" IS NULL)
   ),
   -- Scheduling exists only on conversations; its flags need a scheduledFor.
   ADD CONSTRAINT "chatbot_requests_scheduling_chk" CHECK (
@@ -252,6 +277,7 @@ ALTER TABLE "chatbot_request_events"
   ADD CONSTRAINT "chatbot_request_events_actor_chk" CHECK (
     ("actorKind" = 'SYSTEM') = ("actorId" IS NULL)
     AND ("actorKind" <> 'SYSTEM' OR "actorDisplayName" IS NULL)
+    AND ("actorKind" <> 'USER' OR "actorDisplayName" IS NOT NULL)
     AND "version" >= 1
   );
 
@@ -284,3 +310,21 @@ $$;
 CREATE TRIGGER "chatbot_request_events_append_only"
   BEFORE UPDATE OR DELETE ON "chatbot_request_events"
   FOR EACH ROW EXECUTE FUNCTION "chatbot_request_events_append_only"();
+
+-- D4: requests are kept forever. A direct DELETE (depth 1) is rejected; the
+-- tenant cascade runs inside the RI trigger, so this trigger sees depth > 1
+-- there and lets it through. Rejecting the parent also protects its audit.
+CREATE FUNCTION "chatbot_requests_keep_forever"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF pg_trigger_depth() > 1 THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'chatbot_requests rows are kept forever (DELETE rejected)'
+    USING ERRCODE = 'restrict_violation';
+END;
+$$;
+
+CREATE TRIGGER "chatbot_requests_keep_forever"
+  BEFORE DELETE ON "chatbot_requests"
+  FOR EACH ROW EXECUTE FUNCTION "chatbot_requests_keep_forever"();

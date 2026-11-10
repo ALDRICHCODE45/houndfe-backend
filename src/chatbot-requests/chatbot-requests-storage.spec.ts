@@ -55,7 +55,9 @@ describe('chatbot requests storage (human-intervention unit 2)', () => {
     expect(sql).toContain(
       'ON "chatbot_requests"("tenantId", "customerKey", "status")',
     );
-    expect(sql).toContain(`ON "chatbot_requests"("nextSlaCheckAt") ${OPEN}`);
+    expect(sql).toContain(
+      'ON "chatbot_requests"("nextSlaCheckAt") WHERE "nextSlaCheckAt" IS NOT NULL;',
+    );
     expect(sql).toContain(
       'ON "chatbot_customer_groups"("tenantId", "mostUrgentAt", "customerKey")',
     );
@@ -80,6 +82,8 @@ describe('chatbot requests storage (human-intervention unit 2)', () => {
     'chatbot_requests_sla_sweep_open_chk',
     'chatbot_requests_whatsapp_window_chk',
     'chatbot_requests_scheduling_chk',
+    'chatbot_requests_assignee_claimed_at_chk',
+    'chatbot_requests_ambiguous_customer_chk',
     'chatbot_request_events_actor_chk',
     'chatbot_customer_groups_open_count_chk',
   ])('declares the %s CHECK', (name) => {
@@ -92,6 +96,40 @@ describe('chatbot requests storage (human-intervention unit 2)', () => {
       'fields: [tenantId, requestId], references: [tenantId, id]',
     );
     expect(model('ChatbotRequestEvent')).not.toContain('updatedAt');
+  });
+
+  it('serves the §3.8 history list and its filters from indexes (M2)', () => {
+    expect(sql).toContain(
+      `ON "chatbot_requests"("tenantId", "closedAt" DESC, "id" DESC) WHERE "status" IN ('RESOLVED', 'CANCELLED')`,
+    );
+    expect(model('ChatbotRequest')).toContain(
+      '@@index([tenantId, subtype, closedAt(sort: Desc)])',
+    );
+    expect(model('ChatbotRequest')).toContain(
+      '@@index([tenantId, resolvedByActorId, closedAt(sort: Desc)])',
+    );
+    expect(sql).toContain(
+      'ON "chatbot_requests"("tenantId", "subtype", "closedAt" DESC)',
+    );
+    expect(sql).toContain(
+      'ON "chatbot_requests"("tenantId", "resolvedByActorId", "closedAt" DESC)',
+    );
+  });
+
+  it('bounds lock waits and documents the recovery (lock safety)', () => {
+    const firstStatement = sql
+      .split('\n')
+      .find((line) => line.trim() && !line.startsWith('--'));
+    expect(firstStatement).toBe("SET LOCAL lock_timeout = '5s';");
+    expect(sql).toContain(
+      'prisma migrate resolve --rolled-back 20261110000000_chatbot_requests',
+    );
+  });
+
+  it('keeps requests forever: a direct DELETE is rejected, the tenant cascade is not (M4)', () => {
+    expect(sql).toMatch(
+      /CREATE TRIGGER "chatbot_requests_keep_forever"\s+BEFORE DELETE ON "chatbot_requests"\s+FOR EACH ROW/,
+    );
   });
 
   it('makes the audit append-only while letting the tenant cascade delete it', () => {

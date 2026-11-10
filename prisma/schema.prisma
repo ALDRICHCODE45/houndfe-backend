@@ -3649,7 +3649,8 @@ model TenantOpeningHours {
 // source of truth of *what* was decided. Staff commands are a CAS on
 // `version` (R4: never the wrapped row's version). State consistency, the
 // subtype -> wrapped-link mapping, and the partial indexes (open-only sweep,
-// counters, open dedup) are migration-authoritative CHECKs/indexes because
+// counters, open dedup, closed history) and the keep-forever/append-only
+// triggers are migration-authoritative because
 // Prisma's DSL cannot express them. Actor columns are copied names, not user
 // FKs, so the audit survives user deletion (§6.2). See
 // docs/chatbot-requests-model.md.
@@ -3749,7 +3750,8 @@ model ChatbotRequest {
   slaPolicyVersion  Int?
   nextSlaCheckAt    DateTime?
 
-  // `whatsappWindowClosesAt` = `lastCustomerMessageAt` + 24 h (CHECK).
+  // `whatsappWindowClosesAt` is normally `lastCustomerMessageAt` + 24 h but
+  // stores whatever Meta reports; the CHECK only keeps both NULL or both set.
   lastCustomerMessageAt   DateTime?
   whatsappWindowClosesAt  DateTime?
   scheduledFor            DateTime?
@@ -3801,11 +3803,15 @@ model ChatbotRequest {
   @@unique([tenantId, source, sourceRequestId])
   @@index([tenantId, customerKey, status])
   @@index([customerId])
+  // §3.8 history filters; the main history order index is partial (migration).
+  @@index([tenantId, subtype, closedAt(sort: Desc)])
+  @@index([tenantId, resolvedByActorId, closedAt(sort: Desc)])
   @@map("chatbot_requests")
 }
 
-// Append-only audit (§6.2): no `updatedAt`. No trigger precedent exists in the
-// migrations, so immutability is enforced by the repository (insert-only).
+// Append-only audit (§6.2): no `updatedAt`. The migration trigger
+// `chatbot_request_events_append_only` rejects UPDATE and direct DELETE; only
+// the tenant cascade removes rows.
 model ChatbotRequestEvent {
   id               String                  @id @default(uuid())
   tenantId         String

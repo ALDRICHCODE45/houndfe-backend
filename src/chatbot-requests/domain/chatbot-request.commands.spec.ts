@@ -118,11 +118,12 @@ describe('claim', () => {
     },
   );
 
-  it('rejects re-claiming your own request with 422 ACTION_NOT_ALLOWED', () => {
+  it('answers 409 VERSION_CONFLICT when a second tab re-claims your own request', () => {
     const error = fail(claim(taken(), { actor: ana, expectedVersion: 3, now }));
     expect(error).toMatchObject({
-      code: 'ACTION_NOT_ALLOWED',
-      httpStatus: 422,
+      code: 'VERSION_CONFLICT',
+      httpStatus: 409,
+      current: { claimedBy: { id: 'u-ana', displayName: 'Ana' } },
     });
   });
 });
@@ -133,7 +134,7 @@ describe('release', () => {
       release(taken(), {
         actor: ana,
         expectedVersion: 3,
-        canManageAssignments: false,
+        actorCanReassign: false,
       }),
     );
     expect(patch).toEqual({
@@ -156,7 +157,7 @@ describe('release', () => {
       release(taken(), {
         actor: juan,
         expectedVersion: 3,
-        canManageAssignments: true,
+        actorCanReassign: true,
       }),
     );
   });
@@ -166,10 +167,21 @@ describe('release', () => {
       release(taken(), {
         actor: juan,
         expectedVersion: 3,
-        canManageAssignments: false,
+        actorCanReassign: false,
       }),
     );
     expect(error).toMatchObject({ code: 'NOT_ASSIGNEE', httpStatus: 403 });
+  });
+
+  it('answers 403 NOT_ASSIGNEE before checking the version', () => {
+    const error = fail(
+      release(taken({ version: 5 }), {
+        actor: juan,
+        expectedVersion: 3,
+        actorCanReassign: false,
+      }),
+    );
+    expect(error.code).toBe('NOT_ASSIGNEE');
   });
 
   it('answers VERSION_CONFLICT when someone else already released it', () => {
@@ -177,14 +189,14 @@ describe('release', () => {
       release(request({ version: 4 }), {
         actor: ana,
         expectedVersion: 3,
-        canManageAssignments: false,
+        actorCanReassign: false,
       }),
     );
     expect(error.code).toBe('VERSION_CONFLICT');
   });
 
   it('rejects releasing a NEW request and a live conversation (return-to-bot is unit 11)', () => {
-    const args = { actor: ana, expectedVersion: 3, canManageAssignments: true };
+    const args = { actor: ana, expectedVersion: 3, actorCanReassign: true };
     expect(fail(release(request(), args)).code).toBe('ACTION_NOT_ALLOWED');
     const live = taken({
       kind: 'CONVERSATION',
@@ -242,7 +254,7 @@ describe('R4: claim, release and reassign only write chatbot_requests columns', 
     release(taken(), {
       actor: ana,
       expectedVersion: 3,
-      canManageAssignments: false,
+      actorCanReassign: false,
     }),
     reassign(taken(), { actor: juan, expectedVersion: 3, toUser: juan, now }),
   ])('patch %#', (result) => {
@@ -327,6 +339,7 @@ describe('cancelByStaff (§12.11, §12.14)', () => {
     const { patch, event } = ok(
       cancelByStaff(clarification, {
         actor: ana,
+        actorCanReassign: false,
         expectedVersion: 3,
         reason: 'NOT_ACTIONABLE',
         customerNote: 'Lo vemos en tienda',
@@ -355,6 +368,7 @@ describe('cancelByStaff (§12.11, §12.14)', () => {
       ok(
         cancelByStaff(conversation(state), {
           actor: ana,
+          actorCanReassign: false,
           expectedVersion: 3,
           reason: 'DUPLICATE',
           now,
@@ -369,6 +383,7 @@ describe('cancelByStaff (§12.11, §12.14)', () => {
       const error = fail(
         cancelByStaff(conversation(state), {
           actor: ana,
+          actorCanReassign: false,
           expectedVersion: 3,
           reason: 'DUPLICATE',
           now,
@@ -385,6 +400,7 @@ describe('cancelByStaff (§12.11, §12.14)', () => {
     const error = fail(
       cancelByStaff(request(), {
         actor: ana,
+        actorCanReassign: false,
         expectedVersion: 3,
         reason: 'DUPLICATE',
         now,
@@ -396,10 +412,51 @@ describe('cancelByStaff (§12.11, §12.14)', () => {
     });
   });
 
+  it.each(['ENDED', 'CANCELLED'] as const)(
+    'answers 422 CANCEL_NOT_ALLOWED once the session is %s',
+    (state) => {
+      const error = fail(
+        cancelByStaff(conversation(state), {
+          actor: ana,
+          actorCanReassign: false,
+          expectedVersion: 3,
+          reason: 'DUPLICATE',
+          now,
+        }),
+      );
+      expect(error).toMatchObject({
+        code: 'CANCEL_NOT_ALLOWED',
+        httpStatus: 422,
+      });
+    },
+  );
+
+  it("needs to be the claimer or hold update:ChatbotRequestAssignment to cancel another person's request (M5)", () => {
+    const held = taken({ kind: 'CLARIFICATION', subtype: 'UNKNOWN_QUESTION' });
+    const cmd = { expectedVersion: 3, reason: 'DUPLICATE' as const, now };
+    const error = fail(
+      cancelByStaff(held, { ...cmd, actor: juan, actorCanReassign: false }),
+    );
+    expect(error).toMatchObject({ code: 'NOT_ASSIGNEE', httpStatus: 403 });
+    expect(
+      fail(
+        cancelByStaff(held, {
+          ...cmd,
+          expectedVersion: 1,
+          actor: juan,
+          actorCanReassign: false,
+        }),
+      ).code,
+    ).toBe('NOT_ASSIGNEE');
+    ok(cancelByStaff(held, { ...cmd, actor: juan, actorCanReassign: true }));
+    ok(cancelByStaff(held, { ...cmd, actor: ana, actorCanReassign: false }));
+  });
+
   it('requires a note with OTHER', () => {
     const error = fail(
       cancelByStaff(clarification, {
         actor: ana,
+        actorCanReassign: false,
         expectedVersion: 3,
         reason: 'OTHER',
         now,
@@ -412,6 +469,7 @@ describe('cancelByStaff (§12.11, §12.14)', () => {
     const error = fail(
       cancelByStaff(clarification, {
         actor: ana,
+        actorCanReassign: false,
         expectedVersion: 1,
         reason: 'DUPLICATE',
         now,

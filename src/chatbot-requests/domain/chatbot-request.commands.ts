@@ -173,7 +173,11 @@ const userEvent = (actor: StaffActor) => ({
   actorDisplayName: actor.displayName,
 });
 
-/** §4.3: a concurrent claimer gets REQUEST_CLAIMED_BY_OTHER, not a bare version conflict. */
+/**
+ * §4.3: a concurrent claimer gets REQUEST_CLAIMED_BY_OTHER, not a bare version
+ * conflict. Re-claiming your own request (a second tab) is a stale view:
+ * VERSION_CONFLICT with `current.claimedBy` lets that tab catch up.
+ */
 export function claim(
   state: ChatbotRequestState,
   cmd: { actor: StaffActor; expectedVersion: number; now: Date },
@@ -181,9 +185,8 @@ export function claim(
   if (isClosed(state)) return reject(state, 'REQUEST_CLOSED', 409);
   if (heldByOther(state, cmd.actor))
     return reject(state, 'REQUEST_CLAIMED_BY_OTHER', 409);
-  if (state.version !== cmd.expectedVersion)
+  if (state.version !== cmd.expectedVersion || state.status !== 'NEW')
     return reject(state, 'VERSION_CONFLICT', 409);
-  if (state.status !== 'NEW') return reject(state, 'ACTION_NOT_ALLOWED', 422);
   return accept(
     state,
     {
@@ -206,17 +209,17 @@ export function release(
   cmd: {
     actor: StaffActor;
     expectedVersion: number;
-    canManageAssignments: boolean;
+    actorCanReassign: boolean;
   },
 ): CommandResult {
   if (isClosed(state)) return reject(state, 'REQUEST_CLOSED', 409);
+  if (heldByOther(state, cmd.actor) && !cmd.actorCanReassign) {
+    return reject(state, 'NOT_ASSIGNEE', 403);
+  }
   if (state.version !== cmd.expectedVersion)
     return reject(state, 'VERSION_CONFLICT', 409);
   if (state.status !== 'IN_PROGRESS' || !state.assignee) {
     return reject(state, 'ACTION_NOT_ALLOWED', 422);
-  }
-  if (heldByOther(state, cmd.actor) && !cmd.canManageAssignments) {
-    return reject(state, 'NOT_ASSIGNEE', 403);
   }
   if (state.liveSessionState && LIVE_SESSION.includes(state.liveSessionState)) {
     return reject(state, 'ACTION_NOT_ALLOWED', 422);
@@ -323,14 +326,17 @@ export function resolve(
 
 /**
  * §12.11: wrapped decisions close with their negative action (422); a
- * TALK_TO_HUMAN/COMPLAINT cancels only while its session is WAITING (§12.14,
- * 409 once STARTING/ACTIVE/ENDING). `note` is internal; `customerNote` is what
- * the bot relays.
+ * TALK_TO_HUMAN/COMPLAINT cancels only while its session is WAITING (§12.14:
+ * 409 while STARTING/ACTIVE/ENDING, 422 once ENDED/CANCELLED). Like release,
+ * cancelling a request held by someone else needs
+ * `update:ChatbotRequestAssignment` (`actorCanReassign`). `note` is internal;
+ * `customerNote` is what the bot relays.
  */
 export function cancelByStaff(
   state: ChatbotRequestState,
   cmd: {
     actor: StaffActor;
+    actorCanReassign: boolean;
     expectedVersion: number;
     reason: StaffCancelReason;
     note?: string;
@@ -344,14 +350,16 @@ export function cancelByStaff(
   if (cmd.reason === 'OTHER' && !cmd.note?.trim()) {
     return reject(state, 'VALIDATION_ERROR', 400);
   }
+  if (heldByOther(state, cmd.actor) && !cmd.actorCanReassign) {
+    return reject(state, 'NOT_ASSIGNEE', 403);
+  }
   if (state.version !== cmd.expectedVersion)
     return reject(state, 'VERSION_CONFLICT', 409);
-  if (
-    state.kind === 'CONVERSATION' &&
-    state.liveSessionState &&
-    state.liveSessionState !== 'WAITING'
-  ) {
+  if (state.liveSessionState && LIVE_SESSION.includes(state.liveSessionState)) {
     return reject(state, 'CANCEL_NOT_ALLOWED', 409);
+  }
+  if (state.liveSessionState && state.liveSessionState !== 'WAITING') {
+    return reject(state, 'CANCEL_NOT_ALLOWED', 422);
   }
   return accept(
     state,
