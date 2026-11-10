@@ -83,20 +83,24 @@ export class BotFeedController {
     });
   }
 
-  /** `GET /chatbot-api/requests/pending-deliveries?conversationRef=` (§4.5) */
+  /**
+   * `GET /chatbot-api/requests/pending-deliveries?conversationRef=` (§4.5), or
+   * `?requestId=` for a request that has no conversationRef (one of the two).
+   */
   @Get('requests/pending-deliveries')
   @BotRouteClass('read')
   @RequiredScopes(BOT_SCOPES.feedRead)
   pending(
-    @Query('conversationRef') conversationRef: unknown,
+    @Query() query: Record<string, unknown>,
     @Req() request: ServiceAuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
   ): Promise<{ items: FeedItemView[] }> {
     this.credential(request);
     response.setHeader('Cache-Control', 'no-store');
-    return this.feed.pending(
-      typeof conversationRef === 'string' ? conversationRef : undefined,
-    );
+    return this.feed.pending({
+      conversationRef: query.conversationRef,
+      requestId: query.requestId,
+    });
   }
 
   /** `POST /chatbot-api/deliveries/:deliveryId/outcome` (§3.3) */

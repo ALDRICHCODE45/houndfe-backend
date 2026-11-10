@@ -1,3 +1,4 @@
+import { DEFAULT_CUSTOMER_REJECTION_REASON } from '../../sales/review/receipt-review.service';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import {
   buildAnswerPayload,
@@ -5,6 +6,7 @@ import {
   classifyOutcome,
   FEED_LIMITS,
   FEED_TYPE,
+  LEGACY_DEFAULT_REJECTION_TEXT,
   formatCursor,
   hashFeedOutcome,
   parseCursor,
@@ -275,8 +277,8 @@ describe('classifyOutcome: one terminal ACK per delivery (HumanDecisionBotOutcom
   });
 });
 
-describe('request.answered payload (§3.3: kind, text, prefix + structured fields)', () => {
-  it('tells a restock estimate with the days and the legacy id', () => {
+describe('request.answered payload (the bot composes from the fields; text is an usted fallback)', () => {
+  it('tells a restock estimate with the structured fields the bot needs', () => {
     expect(
       buildAnswerPayload({
         subtype: 'RESTOCK',
@@ -314,106 +316,204 @@ describe('request.answered payload (§3.3: kind, text, prefix + structured field
       restockDays: null,
     });
     expect(none).not.toHaveProperty('restockDays');
-    expect(none.text).toContain('Por ahora no tenemos una fecha estimada');
+    expect(none).toMatchObject({ productName: 'X', subtype: 'RESTOCK' });
+    expect(none.text).toBe(
+      'Por ahora no tenemos una fecha estimada de reposición para «X».',
+    );
   });
 
-  it('relays the staff expiration text with the team prefix', () => {
-    const payload = buildAnswerPayload({
-      subtype: 'EXPIRATION',
-      legacyId: 'hd-2',
+  it('relays the staff expiration text as staffText with the team prefix', () => {
+    expect(
+      buildAnswerPayload({
+        subtype: 'EXPIRATION',
+        legacyId: 'hd-2',
+        productName: 'Leche',
+        action: 'PROVIDE_EXPIRATION_TEXT',
+        expirationText: 'Caduca en marzo 2027',
+      }),
+    ).toMatchObject({
+      action: 'PROVIDE_EXPIRATION_TEXT',
       productName: 'Leche',
-      action: 'PROVIDE_EXPIRATION_TEXT',
-      expirationText: 'Caduca en marzo 2027',
-    });
-    expect(payload).toMatchObject({
-      action: 'PROVIDE_EXPIRATION_TEXT',
       text: 'Caduca en marzo 2027',
       prefix: TEAM_REPLY_PREFIX,
       expirationText: 'Caduca en marzo 2027',
+      staffText: 'Caduca en marzo 2027',
     });
+    const none = buildAnswerPayload({
+      subtype: 'EXPIRATION',
+      legacyId: 'hd-2',
+      productName: 'Leche',
+      action: 'REPORT_EXPIRATION_UNAVAILABLE',
+      expirationText: null,
+    });
+    expect(none.text).toBe(
+      'Por ahora no tenemos la fecha de caducidad de «Leche».',
+    );
+    expect(none).not.toHaveProperty('staffText');
   });
 
-  it('answers each delivery zone type with its fixed text and fields', () => {
+  describe('delivery zone', () => {
     const base = {
       subtype: 'DELIVERY_ZONE' as const,
       legacyId: 'dzr-1',
       zipCode: '06600',
     };
-    expect(
-      buildAnswerPayload({
-        ...base,
+
+    it('FREE, with the ETA', () => {
+      expect(
+        buildAnswerPayload({
+          ...base,
+          zoneType: 'FREE',
+          surchargeCents: null,
+          etaDays: 2,
+        }),
+      ).toMatchObject({
+        action: 'APPROVE_DELIVERY_ZONE',
         zoneType: 'FREE',
-        surchargeCents: null,
+        zipCode: '06600',
         etaDays: 2,
-      }),
-    ).toMatchObject({
-      action: 'APPROVE_DELIVERY_ZONE',
-      zoneType: 'FREE',
-      etaDays: 2,
-      text: 'Sí entregamos en tu código postal (06600), sin costo de envío. Tiempo estimado: 2 días.',
+        text: 'Sí entregamos en su código postal (06600), sin costo de envío. Tiempo estimado: 2 días.',
+      });
     });
-    const surcharge = buildAnswerPayload({
-      ...base,
-      zoneType: 'SURCHARGE',
-      surchargeCents: 5000,
-      etaDays: null,
-    });
-    expect(surcharge).toMatchObject({ surchargeCents: 5000 });
-    expect(surcharge.text).toContain('$50.00 MXN');
-    expect(
-      buildAnswerPayload({
+
+    it('SURCHARGE renders the amount es-MX with a thousands separator', () => {
+      const payload = buildAnswerPayload({
         ...base,
-        zoneType: 'CARRIER_ONLY',
-        surchargeCents: null,
+        zoneType: 'SURCHARGE',
+        surchargeCents: 125_000,
         etaDays: null,
-      }).text,
-    ).toContain('solo por paquetería');
-    expect(
-      buildAnswerPayload({
-        ...base,
+      });
+      expect(payload).toMatchObject({ surchargeCents: 125_000 });
+      expect(payload.text).toBe(
+        'Sí entregamos en su código postal (06600) con un cargo de envío de $1,250.00 MXN.',
+      );
+      expect(
+        buildAnswerPayload({
+          ...base,
+          zoneType: 'SURCHARGE',
+          surchargeCents: 5_000,
+          etaDays: null,
+        }).text,
+      ).toContain('$50.00 MXN');
+      expect(
+        buildAnswerPayload({
+          ...base,
+          zoneType: 'SURCHARGE',
+          surchargeCents: 123_456_789,
+          etaDays: null,
+        }).text,
+      ).toContain('$1,234,567.89 MXN');
+    });
+
+    it.each([null, 0])(
+      'SURCHARGE with no amount (%p) never renders $0.00',
+      (surchargeCents) => {
+        const payload = buildAnswerPayload({
+          ...base,
+          zoneType: 'SURCHARGE',
+          surchargeCents,
+          etaDays: 3,
+        });
+        expect(payload.text).toBe(
+          'Sí entregamos en su código postal (06600) con un cargo de envío adicional. Tiempo estimado: 3 días.',
+        );
+        expect(payload.text).not.toContain('$');
+      },
+    );
+
+    it('CARRIER_ONLY includes the surcharge when it is set', () => {
+      expect(
+        buildAnswerPayload({
+          ...base,
+          zoneType: 'CARRIER_ONLY',
+          surchargeCents: 9_900,
+          etaDays: 4,
+        }).text,
+      ).toBe(
+        'En su código postal (06600) el envío es solo por paquetería. El cargo de envío es de $99.00 MXN. Tiempo estimado: 4 días.',
+      );
+      expect(
+        buildAnswerPayload({
+          ...base,
+          zoneType: 'CARRIER_ONLY',
+          surchargeCents: null,
+          etaDays: null,
+        }).text,
+      ).toBe('En su código postal (06600) el envío es solo por paquetería.');
+    });
+
+    it('DENIED rejects', () => {
+      expect(
+        buildAnswerPayload({
+          ...base,
+          zoneType: 'DENIED',
+          surchargeCents: null,
+          etaDays: null,
+        }),
+      ).toMatchObject({
+        action: 'REJECT_DELIVERY_ZONE',
         zoneType: 'DENIED',
-        surchargeCents: null,
-        etaDays: null,
-      }),
-    ).toMatchObject({
-      action: 'REJECT_DELIVERY_ZONE',
-      text: 'Por ahora no entregamos en tu código postal (06600).',
+        text: 'Por ahora no entregamos en su código postal (06600).',
+      });
     });
   });
 
-  it('carries the customerReason of a rejected receipt', () => {
-    expect(
+  describe('transfer receipt', () => {
+    const receipt = (
+      status: 'CONFIRMED' | 'REJECTED',
+      customerReason: string | null,
+    ) =>
       buildAnswerPayload({
         subtype: 'TRANSFER_RECEIPT',
         legacyId: 'r-1',
-        status: 'REJECTED',
+        status,
+        customerReason,
+      });
+
+    it('confirms in usted with no prefix', () => {
+      expect(receipt('CONFIRMED', null)).toMatchObject({
+        action: 'CONFIRM_RECEIPT',
+        text: 'Le confirmamos la recepción de su comprobante de pago. ¡Gracias!',
+        prefix: null,
+      });
+    });
+
+    it('a staff reason is staffText with the team prefix and reasonSource STAFF', () => {
+      expect(receipt('REJECTED', 'La imagen no se ve')).toMatchObject({
+        action: 'REJECT_RECEIPT',
         customerReason: 'La imagen no se ve',
-      }),
-    ).toMatchObject({
-      action: 'REJECT_RECEIPT',
-      customerReason: 'La imagen no se ve',
-      text: 'La imagen no se ve',
-      prefix: TEAM_REPLY_PREFIX,
+        staffText: 'La imagen no se ve',
+        reasonSource: 'STAFF',
+        text: 'La imagen no se ve',
+        prefix: TEAM_REPLY_PREFIX,
+      });
     });
-    expect(
-      buildAnswerPayload({
-        subtype: 'TRANSFER_RECEIPT',
-        legacyId: 'r-1',
-        status: 'CONFIRMED',
-        customerReason: null,
-      }),
-    ).toMatchObject({ action: 'CONFIRM_RECEIPT', prefix: null });
-  });
 
-  it('falls back to a generic text when a rejection has no customerReason', () => {
-    const payload = buildAnswerPayload({
-      subtype: 'TRANSFER_RECEIPT',
-      legacyId: 'r-1',
-      status: 'REJECTED',
-      customerReason: null,
+    it('L1: the legacy default reason is not staff text: DEFAULT, no prefix, no staffText', () => {
+      const payload = receipt('REJECTED', LEGACY_DEFAULT_REJECTION_TEXT);
+      expect(payload).toMatchObject({
+        reasonSource: 'DEFAULT',
+        customerReason: LEGACY_DEFAULT_REJECTION_TEXT,
+        text: LEGACY_DEFAULT_REJECTION_TEXT,
+        prefix: null,
+      });
+      expect(payload).not.toHaveProperty('staffText');
     });
-    expect(payload.text).toContain('No pudimos validar tu comprobante');
-    expect(payload.prefix).toBeNull();
+
+    it('a missing reason falls back to the same legacy text, verbatim', () => {
+      expect(receipt('REJECTED', null)).toMatchObject({
+        reasonSource: 'DEFAULT',
+        customerReason: LEGACY_DEFAULT_REJECTION_TEXT,
+        text: LEGACY_DEFAULT_REJECTION_TEXT,
+        prefix: null,
+      });
+    });
+
+    it('keeps the copy of the legacy default identical to the sales module constant', () => {
+      expect(LEGACY_DEFAULT_REJECTION_TEXT).toBe(
+        DEFAULT_CUSTOMER_REJECTION_REASON,
+      );
+    });
   });
 });
 

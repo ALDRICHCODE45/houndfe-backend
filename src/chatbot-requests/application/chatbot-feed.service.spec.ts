@@ -12,6 +12,7 @@ const TENANT = 't-1';
 const CRED = 'cred-1';
 const DELIVERY = '7f3e9d2c-1a4b-4c8e-8f6d-0a1b2c3d4e5f';
 const ATTEMPT = '0b8f5c0e-6d7a-4c1e-9a52-3f1d2b6a7c10';
+const REQUEST = '9a7e1d4c-2b3f-4a5e-8c6d-7e8f9a0b1c2d';
 
 const row = (cursor: bigint): FeedItemRow => ({
   cursor,
@@ -27,6 +28,7 @@ function setup(initial: FeedItemRow[] = []) {
   const events: string[] = [];
   let clock = 0;
   let wakeNext: (() => void) | null = null;
+  let closing = false;
   const assertCursorRetained = jest.fn(() => Promise.resolve());
   const readAfter = jest.fn((after: bigint, limit: number) => {
     events.push('read');
@@ -51,38 +53,53 @@ function setup(initial: FeedItemRow[] = []) {
     pendingDeferred,
     recordOutcome,
   };
+  const arm = jest.fn(() => {
+    events.push('arm');
+    let signaled = false;
+    let release: (() => void) | null = null;
+    const fire = () => {
+      signaled = true;
+      release?.();
+    };
+    wakeNext = fire;
+    const waiter: FeedWaiter = {
+      wait: (timeoutMs: number, signal?: AbortSignal) => {
+        events.push('wait');
+        if (signaled) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          release = resolve;
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+          // The fake clock jumps to the timeout unless a wake-up comes first.
+          setTimeout(() => {
+            clock += timeoutMs;
+            resolve();
+          }, 1);
+        });
+      },
+      dispose: () => events.push('dispose'),
+    };
+    return Promise.resolve(waiter);
+  });
   const wakeup: FeedWakeupPort = {
-    arm: jest.fn(() => {
-      events.push('arm');
-      let signaled = false;
-      let release: (() => void) | null = null;
-      const fire = () => {
-        signaled = true;
-        release?.();
-      };
-      wakeNext = fire;
-      const waiter: FeedWaiter = {
-        wait: (timeoutMs: number) => {
-          events.push('wait');
-          if (signaled) return Promise.resolve();
-          return new Promise<void>((resolve) => {
-            release = resolve;
-            // The fake clock jumps to the timeout unless a wake-up comes first.
-            setTimeout(() => {
-              clock += timeoutMs;
-              resolve();
-            }, 1);
-          });
-        },
-        dispose: () => events.push('dispose'),
-      };
-      return Promise.resolve(waiter);
-    }),
+    arm,
+    get closing() {
+      return closing;
+    },
   };
   const service = new ChatbotFeedService(store, wakeup, () => clock);
   return {
     service,
-    mocks: { assertCursorRetained, readAfter, pendingDeferred, recordOutcome },
+    mocks: {
+      assertCursorRetained,
+      readAfter,
+      pendingDeferred,
+      recordOutcome,
+      arm,
+    },
+    shutDown: () => {
+      closing = true;
+      wakeNext?.();
+    },
     rows,
     events,
     wake: () => wakeNext?.(),
@@ -280,24 +297,82 @@ describe('ChatbotFeedService.outcome', () => {
 });
 
 describe('ChatbotFeedService.pending (§4.5)', () => {
-  it('requires a conversationRef', async () => {
+  it('requires exactly one of conversationRef and requestId', async () => {
     const { service } = setup();
-    await expect(service.pending(undefined)).rejects.toBeInstanceOf(
-      InvalidArgumentError,
-    );
-    await expect(service.pending('')).rejects.toBeInstanceOf(
-      InvalidArgumentError,
-    );
+    for (const query of [
+      {},
+      { conversationRef: '' },
+      { requestId: 'nope' },
+      { conversationRef: 'wa:1', requestId: REQUEST },
+      { conversationRef: 'x'.repeat(201) },
+    ]) {
+      await expect(service.pending(query)).rejects.toBeInstanceOf(
+        InvalidArgumentError,
+      );
+    }
   });
 
   it('returns the deferred deliveries of the conversation, shaped as feed items', async () => {
     const { service, mocks } = setup();
     mocks.pendingDeferred.mockResolvedValueOnce([row(3n)]);
-    const { items } = await service.pending('wa:1');
-    expect(mocks.pendingDeferred).toHaveBeenCalledWith('wa:1', 50);
+    const { items } = await service.pending({ conversationRef: 'wa:1' });
+    expect(mocks.pendingDeferred).toHaveBeenCalledWith(
+      { conversationRef: 'wa:1' },
+      50,
+    );
     expect(items[0]).toMatchObject({
       cursor: '000000000003',
       deliveryId: 'd-3',
     });
+  });
+
+  it('L2: reaches a delivery by requestId (a request with no conversationRef)', async () => {
+    const { service, mocks } = setup();
+    mocks.pendingDeferred.mockResolvedValueOnce([row(4n)]);
+    await service.pending({ requestId: REQUEST });
+    expect(mocks.pendingDeferred).toHaveBeenCalledWith(
+      { requestId: REQUEST },
+      50,
+    );
+  });
+});
+
+describe('ChatbotFeedService.poll: aborts and shutdown', () => {
+  it('after an abort the loop neither arms another waiter nor reads again', async () => {
+    const { service, mocks } = setup();
+    const controller = new AbortController();
+    const pending = poll(service, { signal: controller.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mocks.arm).toHaveBeenCalledTimes(1);
+    expect(mocks.readAfter).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await expect(pending).resolves.toEqual({
+      items: [],
+      nextCursor: '000000000000',
+    });
+    expect(mocks.arm).toHaveBeenCalledTimes(1);
+    expect(mocks.readAfter).toHaveBeenCalledTimes(1);
+  });
+
+  it('an already aborted request does not even read', async () => {
+    const { service, mocks } = setup();
+    const controller = new AbortController();
+    controller.abort();
+    await poll(service, { signal: controller.signal });
+    expect(mocks.arm).not.toHaveBeenCalled();
+    expect(mocks.readAfter).not.toHaveBeenCalled();
+  });
+
+  it('on shutdown a waiting poll answers empty at once instead of re-arming', async () => {
+    const { service, mocks, shutDown } = setup();
+    const pending = poll(service);
+    await new Promise((resolve) => setImmediate(resolve));
+    shutDown();
+    await expect(pending).resolves.toEqual({
+      items: [],
+      nextCursor: '000000000000',
+    });
+    expect(mocks.arm).toHaveBeenCalledTimes(1);
+    expect(mocks.readAfter).toHaveBeenCalledTimes(1);
   });
 });

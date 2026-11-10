@@ -17,6 +17,7 @@ import type {
 export class PgFeedWakeup implements FeedWakeupPort, OnModuleDestroy {
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly unsubscribe: Array<() => void>;
+  private shuttingDown = false;
 
   constructor(private readonly listener: PgNotificationListener) {
     this.unsubscribe = [
@@ -27,14 +28,25 @@ export class PgFeedWakeup implements FeedWakeupPort, OnModuleDestroy {
     ];
   }
 
+  get closing(): boolean {
+    return this.shuttingDown;
+  }
+
+  /**
+   * Shutdown: wake every waiter so its long-poll answers now instead of
+   * holding the server open for up to 25 s, and mark the wake-up closed so the
+   * woken polls do not arm again.
+   */
   onModuleDestroy(): void {
+    this.shuttingDown = true;
     this.unsubscribe.forEach((off) => off());
+    for (const tenantId of [...this.waiters.keys()]) this.wake(tenantId);
   }
 
   /** Resolves once the LISTEN connection was attempted, then registers. */
   async arm(tenantId: string): Promise<FeedWaiter> {
     await this.listener.start();
-    let signaled = false;
+    let signaled = this.shuttingDown;
     let release: (() => void) | null = null;
     const fire = () => {
       signaled = true;

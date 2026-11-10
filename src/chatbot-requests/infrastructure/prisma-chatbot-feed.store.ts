@@ -81,13 +81,13 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
   }
 
   pendingDeferred(
-    conversationRef: string,
+    filter: { conversationRef: string } | { requestId: string },
     limit: number,
   ): Promise<FeedItemRow[]> {
     return this.db.chatbotFeedItem.findMany({
       where: {
         tenantId: this.tenantId,
-        conversationRef,
+        ...filter,
         outcome: 'DEFERRED_WINDOW_CLOSED',
         ackedAt: null,
       },
@@ -111,7 +111,34 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
         FROM "chatbot_feed_items"
         WHERE "tenantId" = ${tenantId} AND "deliveryId" = ${deliveryId}::uuid
         FOR UPDATE`);
-      if (!row) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+      if (!row) {
+        // The filter merges `extra` over the generic message of the code.
+        throw new ChatbotRequestCommandError('NOT_FOUND', 404, undefined, {
+          message: 'Delivery not found',
+        });
+      }
+
+      // L4: an attempt this delivery already applied (an older deferral, after
+      // a later attempt) is a replay, answered from its audit event with the
+      // state it had; it never overwrites the current state.
+      if (row.attemptId !== null && row.attemptId !== input.attemptId) {
+        const prior = await this.findAppliedAttempt(
+          row.requestId,
+          deliveryId,
+          input.attemptId,
+        );
+        if (prior) {
+          if (prior.evidenceHash !== hash) {
+            throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
+          }
+          return this.toAck(
+            deliveryId,
+            prior.outcome,
+            input.attemptId,
+            prior.ackReceivedAt ? new Date(prior.ackReceivedAt) : null,
+          );
+        }
+      }
 
       const decision = classifyOutcome(row, input, hash);
       if (decision === 'REPLAY') {
@@ -159,6 +186,9 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
             feedType: row.type,
             outcome: input.outcome,
             attemptId: input.attemptId,
+            // Enough to replay this attempt later (L4).
+            evidenceHash: hash,
+            ackReceivedAt: ackedAt ? ackedAt.toISOString() : null,
             // DELIVERY_UNKNOWN: the bot does not retry; staff reconcile (§3.3).
             needsReconciliation: input.outcome === 'DELIVERY_UNKNOWN',
           },
@@ -166,6 +196,38 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
       });
       return this.toAck(deliveryId, input.outcome, input.attemptId, ackedAt);
     });
+  }
+
+  /** The audit event of an applied attempt of this delivery, if any. */
+  private async findAppliedAttempt(
+    requestId: string,
+    deliveryId: string,
+    attemptId: string,
+  ): Promise<{
+    outcome: FeedOutcome;
+    evidenceHash: string;
+    ackReceivedAt: string | null;
+  } | null> {
+    const event = await this.db.chatbotRequestEvent.findFirst({
+      where: {
+        tenantId: this.tenantId,
+        requestId,
+        type: 'DELIVERY_OUTCOME',
+        AND: [
+          { data: { path: ['deliveryId'], equals: deliveryId } },
+          { data: { path: ['attemptId'], equals: attemptId } },
+        ],
+      },
+      select: { data: true },
+    });
+    const data = event?.data as Record<string, unknown> | null | undefined;
+    if (!data || typeof data.evidenceHash !== 'string') return null;
+    return {
+      outcome: data.outcome as FeedOutcome,
+      evidenceHash: data.evidenceHash,
+      ackReceivedAt:
+        typeof data.ackReceivedAt === 'string' ? data.ackReceivedAt : null,
+    };
   }
 
   /**

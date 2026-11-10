@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import {
   PgNotificationListener,
+  pgClientConfig,
   type PgListenClient,
 } from './pg-notification-listener';
 
@@ -8,6 +9,9 @@ class FakeClient extends EventEmitter implements PgListenClient {
   processID = 4242;
   queries: string[] = [];
   ended = false;
+  heartbeats = 0;
+  /** What `SELECT 1` does: answer, fail, or never answer (half-open socket). */
+  heartbeat: 'ok' | 'fail' | 'hang' = 'ok';
   constructor(private readonly failConnect = false) {
     super();
   }
@@ -17,6 +21,12 @@ class FakeClient extends EventEmitter implements PgListenClient {
       : Promise.resolve();
   }
   query(sql: string) {
+    if (sql === 'SELECT 1') {
+      this.heartbeats++;
+      if (this.heartbeat === 'fail') return Promise.reject(new Error('reset'));
+      if (this.heartbeat === 'hang') return new Promise<void>(() => undefined);
+      return Promise.resolve();
+    }
     this.queries.push(sql);
     return Promise.resolve();
   }
@@ -38,6 +48,8 @@ function build(clients: FakeClient[]) {
   const listener = new PgNotificationListener({
     initialBackoffMs: 1,
     maxBackoffMs: 4,
+    heartbeatMs: 5,
+    heartbeatTimeoutMs: 20,
     createClient: () => {
       const client = clients[created.length] ?? new FakeClient();
       created.push(client);
@@ -127,5 +139,65 @@ describe('PgNotificationListener (R7)', () => {
     expect(() =>
       listener.subscribe('x"; DROP TABLE y', () => undefined),
     ).toThrow();
+  });
+
+  describe('heartbeat (M2: a half-open socket raises no error)', () => {
+    it('keeps probing a healthy connection without reconnecting', async () => {
+      const first = new FakeClient();
+      const { listener, created } = build([first]);
+      listener.subscribe('chatbot_feed', () => undefined);
+      await listener.start();
+      await until(() => first.heartbeats >= 3);
+      expect(created).toHaveLength(1);
+      await listener.close();
+    });
+
+    it('reconnects, re-LISTENs and announces it when the heartbeat fails', async () => {
+      const first = new FakeClient();
+      first.heartbeat = 'fail';
+      const second = new FakeClient();
+      const { listener, created } = build([first, second]);
+      let connected = 0;
+      listener.onConnected(() => connected++);
+      listener.subscribe('chatbot_feed', () => undefined);
+      await listener.start();
+      await until(() => created.length === 2 && connected === 2);
+      expect(first.ended).toBe(true);
+      expect(second.queries).toEqual(['LISTEN "chatbot_feed"']);
+      await listener.close();
+    });
+
+    it('treats a heartbeat that never answers as lost (timeout)', async () => {
+      const first = new FakeClient();
+      first.heartbeat = 'hang';
+      const { listener, created } = build([first, new FakeClient()]);
+      listener.subscribe('chatbot_feed', () => undefined);
+      await listener.start();
+      await until(() => created.length === 2);
+      expect(first.ended).toBe(true);
+      await listener.close();
+    });
+
+    it('stops probing after close', async () => {
+      const first = new FakeClient();
+      const { listener } = build([first]);
+      listener.subscribe('chatbot_feed', () => undefined);
+      await listener.start();
+      await listener.close();
+      const seen = first.heartbeats;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(first.heartbeats).toBe(seen);
+    });
+  });
+});
+
+describe('pgClientConfig', () => {
+  it('turns keepAlive on with a 10 s initial delay and bounds the connect', () => {
+    expect(pgClientConfig('postgres://u:p@db:5432/app')).toEqual({
+      connectionString: 'postgres://u:p@db:5432/app',
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
+      connectionTimeoutMillis: 10_000,
+    });
   });
 });

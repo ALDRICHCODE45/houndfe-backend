@@ -271,14 +271,36 @@ export interface AnswerPayload {
 }
 
 const days = (n: number) => `${n} ${n === 1 ? 'día' : 'días'}`;
-const money = (cents: number) => `$${(cents / 100).toFixed(2)} MXN`;
+
+/** es-MX amount: `$1,250.00 MXN`. */
+function money(cents: number): string {
+  const pesos = Math.trunc(cents / 100)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `$${pesos}.${String(cents % 100).padStart(2, '0')} MXN`;
+}
 
 /**
- * `request.answered` payload of a wrapped decision: `{kind, text, prefix}` as
- * the §3.3 example, the structured fields the legacy poll gives (so the bot can
- * map them), and `legacyId`, the id the bot already tracks from the create
- * answer. `text` is the fixed Spanish text of the chosen option, or what staff
- * wrote for the customer (then `prefix` is the team prefix).
+ * The text `ReceiptReviewService` stores as `customerReason` when staff reject
+ * without one (the v1 body). It is the legacy text, verbatim (tú, as stored):
+ * the one default for a rejection, so a legacy rejection and a missing reason
+ * read the same. A spec pins this copy to the sales module's constant; it is
+ * copied, not imported, to keep the domain free of the sales module.
+ */
+export const LEGACY_DEFAULT_REJECTION_TEXT =
+  'No pudimos validar tu comprobante. Por favor envíanos uno nuevo o contáctanos.';
+
+/**
+ * `request.answered` payload of a wrapped decision.
+ *
+ * The chatbot composes the customer message itself, with each customer's
+ * tú/usted register (owner decision), **from the structured fields**:
+ * `subtype`, `action`, `legacyId` (the id the bot tracks from the create
+ * answer) and, per subtype, `productName`, `restockDays`, `zipCode`,
+ * `zoneType`, `surchargeCents`, `etaDays`, `customerReason` and `staffText`
+ * (text staff wrote for the customer, when there is one). `text` and `prefix`
+ * are only a fallback, written in usted: `prefix` is the team prefix when
+ * `text` is what staff wrote, else `null`.
  */
 export function buildAnswerPayload(source: AnswerSource): AnswerPayload {
   const base = { kind: 'DECISION' as const, legacyId: source.legacyId };
@@ -311,17 +333,19 @@ export function buildAnswerPayload(source: AnswerSource): AnswerPayload {
           text || `Por ahora no tenemos la fecha de caducidad de «${name}».`,
         prefix: text ? TEAM_REPLY_PREFIX : null,
         productName: name,
-        ...(text ? { expirationText: text } : {}),
+        ...(text ? { expirationText: text, staffText: text } : {}),
       };
     }
     case 'DELIVERY_ZONE': {
       const { zipCode: zip, zoneType, surchargeCents, etaDays } = source;
       const eta = etaDays ? ` Tiempo estimado: ${days(etaDays)}.` : '';
-      const where = `en tu código postal (${zip})`;
+      const where = `en su código postal (${zip})`;
+      // A surcharge of null or 0 is "no amount": never render $0.00.
+      const amount = surchargeCents ? money(surchargeCents) : null;
       const text = {
         FREE: `Sí entregamos ${where}, sin costo de envío.${eta}`,
-        SURCHARGE: `Sí entregamos ${where} con un cargo de envío de ${money(surchargeCents ?? 0)}.${eta}`,
-        CARRIER_ONLY: `En tu código postal (${zip}) el envío es solo por paquetería.${eta}`,
+        SURCHARGE: `Sí entregamos ${where} con un cargo de envío ${amount ? `de ${amount}` : 'adicional'}.${eta}`,
+        CARRIER_ONLY: `En su código postal (${zip}) el envío es solo por paquetería.${amount ? ` El cargo de envío es de ${amount}.` : ''}${eta}`,
         DENIED: `Por ahora no entregamos ${where}.`,
       }[zoneType];
       return {
@@ -345,20 +369,23 @@ export function buildAnswerPayload(source: AnswerSource): AnswerPayload {
           ...base,
           subtype: 'TRANSFER_RECEIPT',
           action: 'CONFIRM_RECEIPT',
-          text: 'Recibimos y confirmamos tu comprobante de pago. ¡Gracias!',
+          text: 'Le confirmamos la recepción de su comprobante de pago. ¡Gracias!',
           prefix: null,
         };
       }
-      const reason = source.customerReason;
+      // The legacy route stores its default when staff gave no reason: that is
+      // not something staff wrote, so no team prefix and no `staffText`.
+      const reason = source.customerReason || LEGACY_DEFAULT_REJECTION_TEXT;
+      const fromStaff = reason !== LEGACY_DEFAULT_REJECTION_TEXT;
       return {
         ...base,
         subtype: 'TRANSFER_RECEIPT',
         action: 'REJECT_RECEIPT',
-        text:
-          reason ||
-          'No pudimos validar tu comprobante. Por favor envíalo de nuevo o contáctanos.',
-        prefix: reason ? TEAM_REPLY_PREFIX : null,
-        ...(reason ? { customerReason: reason } : {}),
+        text: reason,
+        prefix: fromStaff ? TEAM_REPLY_PREFIX : null,
+        customerReason: reason,
+        reasonSource: fromStaff ? 'STAFF' : 'DEFAULT',
+        ...(fromStaff ? { staffText: reason } : {}),
       };
     }
   }

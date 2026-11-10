@@ -59,7 +59,7 @@ export interface ChatbotFeedStore {
   assertCursorRetained(after: bigint): Promise<void>;
   readAfter(after: bigint, limit: number): Promise<FeedItemRow[]>;
   pendingDeferred(
-    conversationRef: string,
+    filter: { conversationRef: string } | { requestId: string },
     limit: number,
   ): Promise<FeedItemRow[]>;
   /** Locks the delivery, classifies, writes the outcome and its audit event. */
@@ -79,6 +79,8 @@ export interface FeedWaiter {
 
 export interface FeedWakeupPort {
   arm(tenantId: string): Promise<FeedWaiter>;
+  /** The replica is shutting down: waiters were woken and none will wait. */
+  readonly closing: boolean;
 }
 
 const UUID =
@@ -122,6 +124,11 @@ export class ChatbotFeedService {
     let holdsSlot = false;
     try {
       for (;;) {
+        // A hung-up client or a replica shutting down ends the poll here: no
+        // new waiter and no new read.
+        if (signal?.aborted || this.wakeup.closing) {
+          return { items: [], nextCursor: formatCursor(after) };
+        }
         const waiter = await this.wakeup.arm(tenantId);
         try {
           const rows = await this.store.readAfter(after, limit);
@@ -146,20 +153,38 @@ export class ChatbotFeedService {
     }
   }
 
-  /** Deliveries a bot deferred because the 24 h window was closed (§4.5). */
-  async pending(
-    conversationRef: string | undefined,
-  ): Promise<{ items: FeedItemView[] }> {
-    if (!conversationRef || conversationRef.length > 200) {
-      throw new InvalidArgumentError(
-        'Invalid feed request',
-        'INVALID_FEED_REQUEST',
-      );
+  /**
+   * Deliveries a bot deferred because the 24 h window was closed (§4.5), by
+   * `conversationRef` or, for a request that has none (L2), by `requestId`.
+   * Exactly one of the two.
+   */
+  async pending(query: {
+    conversationRef?: unknown;
+    requestId?: unknown;
+  }): Promise<{ items: FeedItemView[] }> {
+    const { conversationRef, requestId } = query;
+    const invalid = () =>
+      new InvalidArgumentError('Invalid feed request', 'INVALID_FEED_REQUEST');
+    if ((conversationRef === undefined) === (requestId === undefined)) {
+      throw invalid();
     }
-    const rows = await this.store.pendingDeferred(
-      conversationRef,
-      FEED_LIMITS.maxLimit,
-    );
+    let filter: { conversationRef: string } | { requestId: string };
+    if (conversationRef !== undefined) {
+      if (
+        typeof conversationRef !== 'string' ||
+        conversationRef.length === 0 ||
+        conversationRef.length > 200
+      ) {
+        throw invalid();
+      }
+      filter = { conversationRef };
+    } else {
+      if (typeof requestId !== 'string' || !UUID.test(requestId)) {
+        throw invalid();
+      }
+      filter = { requestId };
+    }
+    const rows = await this.store.pendingDeferred(filter, FEED_LIMITS.maxLimit);
     return { items: rows.map(toView) };
   }
 

@@ -169,17 +169,32 @@ Scope `feed:read`, class `feed`. `after` is the `nextCursor` of the previous ans
 
 `conversationRef` is the request's (`null` when the request has none, e.g. a stock request created without one). `legacyId` is the id the bot already tracks from the create answer (`legacy.id`: the human decision, the zone requester or the receipt).
 
-`request.answered` per subtype (`text` is the fixed Spanish text of the option unless noted; `prefix` is `"Le comparto la respuesta del equipo:"` only when `text` is what staff wrote for the customer, else `null`):
+**The bot composes the message; `text` is only a fallback.** Owner decision: the bot writes the wording with each customer's tú/usted register, **from the structured fields** of the payload. The backend `text`/`prefix` are an **usted fallback** for a bot that cannot compose (written in usted throughout, with the one exception noted below). `prefix` is `"Le comparto la respuesta del equipo:"` only when `text` is what staff wrote for the customer, else `null`.
+
+Structured fields (always present unless marked): `kind`, `subtype`, `action`, `legacyId`, and per subtype:
+
+| `subtype` | `action` | Fields |
+| --- | --- | --- |
+| `RESTOCK` | `PROVIDE_RESTOCK_ESTIMATE` / `REPORT_RESTOCK_ESTIMATE_UNAVAILABLE` | `productName`; `restockDays` only for the first |
+| `EXPIRATION` | `PROVIDE_EXPIRATION_TEXT` / `REPORT_EXPIRATION_UNAVAILABLE` | `productName`; `expirationText` and `staffText` (the same staff-written string) only for the first |
+| `DELIVERY_ZONE` | `APPROVE_DELIVERY_ZONE` / `REJECT_DELIVERY_ZONE` | `zipCode`, `zoneType` (`FREE`, `SURCHARGE`, `CARRIER_ONLY`, `DENIED`); `surchargeCents` and `etaDays` only when they apply |
+| `TRANSFER_RECEIPT` | `CONFIRM_RECEIPT` / `REJECT_RECEIPT` | a rejection carries `customerReason`, `reasonSource` and, only for `STAFF`, `staffText` |
 
 ```json
 { "kind": "DECISION", "subtype": "RESTOCK", "action": "REPORT_RESTOCK_ESTIMATE_UNAVAILABLE", "legacyId": "…", "text": "Por ahora no tenemos una fecha estimada de reposición para «Croquetas 20 kg».", "prefix": null, "productName": "Croquetas 20 kg" }
-{ "kind": "DECISION", "subtype": "EXPIRATION", "action": "PROVIDE_EXPIRATION_TEXT", "legacyId": "…", "text": "Caduca en marzo 2027", "prefix": "Le comparto la respuesta del equipo:", "productName": "Leche", "expirationText": "Caduca en marzo 2027" }
-{ "kind": "DECISION", "subtype": "DELIVERY_ZONE", "action": "APPROVE_DELIVERY_ZONE", "legacyId": "…", "text": "Sí entregamos en tu código postal (64000) con un cargo de envío de $50.00 MXN. Tiempo estimado: 3 días.", "prefix": null, "zipCode": "64000", "zoneType": "SURCHARGE", "surchargeCents": 5000, "etaDays": 3 }
-{ "kind": "DECISION", "subtype": "TRANSFER_RECEIPT", "action": "REJECT_RECEIPT", "legacyId": "…", "text": "El monto no coincide, envíanos otro comprobante.", "prefix": "Le comparto la respuesta del equipo:", "customerReason": "El monto no coincide, envíanos otro comprobante." }
+{ "kind": "DECISION", "subtype": "EXPIRATION", "action": "PROVIDE_EXPIRATION_TEXT", "legacyId": "…", "text": "Caduca en marzo 2027", "prefix": "Le comparto la respuesta del equipo:", "productName": "Leche", "expirationText": "Caduca en marzo 2027", "staffText": "Caduca en marzo 2027" }
+{ "kind": "DECISION", "subtype": "DELIVERY_ZONE", "action": "APPROVE_DELIVERY_ZONE", "legacyId": "…", "text": "Sí entregamos en su código postal (64000) con un cargo de envío de $1,250.00 MXN. Tiempo estimado: 3 días.", "prefix": null, "zipCode": "64000", "zoneType": "SURCHARGE", "surchargeCents": 125000, "etaDays": 3 }
+{ "kind": "DECISION", "subtype": "TRANSFER_RECEIPT", "action": "REJECT_RECEIPT", "legacyId": "…", "text": "El monto no coincide, envíenos otro comprobante.", "prefix": "Le comparto la respuesta del equipo:", "customerReason": "El monto no coincide, envíenos otro comprobante.", "reasonSource": "STAFF", "staffText": "El monto no coincide, envíenos otro comprobante." }
 ```
 
-- `action` is `PROVIDE_RESTOCK_ESTIMATE` / `REPORT_RESTOCK_ESTIMATE_UNAVAILABLE` (`restockDays` only for the first), `PROVIDE_EXPIRATION_TEXT` / `REPORT_EXPIRATION_UNAVAILABLE` (`expirationText` only for the first), `APPROVE_DELIVERY_ZONE` / `REJECT_DELIVERY_ZONE` (`zoneType` is `FREE`, `SURCHARGE`, `CARRIER_ONLY` or `DENIED`; `surchargeCents` and `etaDays` only when they apply) and `CONFIRM_RECEIPT` / `REJECT_RECEIPT` (a rejection carries `customerReason`).
-- The structured fields are what the old poll returns, so you can map them yourself and ignore `text`. The Spanish texts are fixed by the backend (one place, `src/chatbot-requests/domain/chatbot-feed.ts`); tell us if the owner wants other wording.
+- **`reasonSource` (receipt rejection).** `STAFF`: a person typed the reason for the customer; relay `staffText` as written (the fallback `prefix` marks it as the team's). `DEFAULT`: staff rejected without a customer reason, and the old route stored its default text; that is **not** staff wording, so there is no `staffText` and `prefix` is `null`: compose your own "we could not validate your receipt, please send it again" in the customer's register. A staff reason that happens to equal the default text is reported as `DEFAULT`.
+- **Fallback texts** (the full list, verbatim; `«…»` is `productName`, `N` the days, `$X` an es-MX amount such as `$1,250.00 MXN`, `Z` the postal code):
+  - `RESTOCK` with estimate: `El producto «…» estará disponible en aproximadamente N días.` (`1 día` for one day); without: `Por ahora no tenemos una fecha estimada de reposición para «…».`
+  - `EXPIRATION` with text: the staff text itself (with the team prefix); without: `Por ahora no tenemos la fecha de caducidad de «…».`
+  - `FREE`: `Sí entregamos en su código postal (Z), sin costo de envío.` · `SURCHARGE`: `Sí entregamos en su código postal (Z) con un cargo de envío de $X.` (with no amount, or an amount of 0: `… con un cargo de envío adicional.`, never `$0.00`) · `CARRIER_ONLY`: `En su código postal (Z) el envío es solo por paquetería.` plus ` El cargo de envío es de $X.` when a surcharge is set · `DENIED`: `Por ahora no entregamos en su código postal (Z).` Every approval ends with ` Tiempo estimado: N días.` when `etaDays` is set.
+  - `CONFIRM_RECEIPT`: `Le confirmamos la recepción de su comprobante de pago. ¡Gracias!`
+  - `REJECT_RECEIPT` with a staff reason: that reason; by default: `No pudimos validar tu comprobante. Por favor envíanos uno nuevo o contáctanos.` (the old route's own default, kept **verbatim**, so it is in **tú**: the one fallback that is not usted).
+- The structured fields are what the old poll returns, so you can map them yourself and ignore `text`. The fallback texts live in one place, `src/chatbot-requests/domain/chatbot-feed.ts`.
 - **A zone answer is one item per customer** (R9): resolving one request settles every customer waiting on that postal code, and each gets its own item, with its own `conversationRef` and `deliveryId`.
 - A customer who cancelled the request (`POST /requests/:id/cancel`) gets **no** item when staff later resolves the old row (the customer withdrew); drop your pending record, as the cancel section says.
 - **`request.cancelled` (§12.14).** `reason` is `DUPLICATE`, `NOT_ACTIONABLE`, `CUSTOMER_UNREACHABLE` or `OTHER`. Forget the pending state of that request. `DUPLICATE`: send nothing, ACK `STALE`. The other reasons: send a short notice (`customerNote`, when present and the 24 h window is open, goes as written with the team prefix instead of the generic notice) and ACK `PROVIDER_ACCEPTED` with the `providerMessageId`; with the window closed send nothing and ACK `STALE`. **Never `DEFERRED_WINDOW_CLOSED` for this type**: it is refused with `422 OUTCOME_NOT_ALLOWED`.
@@ -197,7 +212,7 @@ Scope `feed:ack`, class `write`. Send it **after** the local effect (the message
 | `PROVIDER_ACCEPTED` | Meta accepted the message | `providerMessageId` required, `attemptedAt` required |
 | `DELIVERY_UNKNOWN` | You cannot tell whether it was sent; **do not retry** (the delivery is marked "to reconcile" for staff) | `attemptedAt` required, `providerMessageId` optional |
 | `DEFERRED_WINDOW_CLOSED` | The 24 h window is closed; the delivery stays **pending** (see below). Not allowed for `request.cancelled` | `attemptedAt` required |
-| `STALE` | Nothing was sent and nothing needs to be (duplicate, customer cancelled, window closed for a cancel notice) | only `attemptId` (`attemptedAt` optional) |
+| `STALE` | Nothing was sent and nothing needs to be (duplicate, customer cancelled, window closed for a cancel notice) | only `attemptId` (`attemptedAt` optional, no `providerMessageId`) |
 
 Exactly those keys; an unknown key, a missing required key, a key an outcome forbids, `FAILED` or any other outcome is `400 VALIDATION_ERROR`. `attemptId` is a lowercase UUID, `attemptedAt` is canonical UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, `providerMessageId` is 1..512 characters, trimmed, no control characters.
 
@@ -205,25 +220,44 @@ Exactly those keys; an unknown key, a missing required key, a key an outcome for
 
 | Status / code | When |
 | --- | --- |
-| `200` | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`) |
-| `409 IDEMPOTENCY_CONFLICT` | The same `attemptId` with other evidence |
-| `409 OUTCOME_ALREADY_RECORDED` | Another `attemptId` after a terminal outcome (any of the first three) |
+| `200` | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`). A replay of **any attempt this delivery already applied** answers `200` with that attempt's own stored state, even after a later attempt (for example an old `DEFERRED_WINDOW_CLOSED` replayed after the delivery was accepted): it changes nothing |
+| `409 IDEMPOTENCY_CONFLICT` | An `attemptId` this delivery already applied, sent with other evidence |
+| `409 OUTCOME_ALREADY_RECORDED` | A **new** `attemptId` after a terminal outcome (any of the first three) |
 | `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` for a `request.cancelled` delivery |
-| `404 NOT_FOUND` | Unknown delivery, or one of another branch |
+| `404 NOT_FOUND` (`message: "Delivery not found"`) | Unknown delivery, or one of another branch |
 | `400 VALIDATION_ERROR` | Body or `deliveryId` malformed |
 | `403 INSUFFICIENT_SCOPE`, `401`, `429 RATE_LIMITED` | Credential, scope, budget |
 
 Retry a lost ACK with the **same body**: it answers `200`. A new send attempt after `DEFERRED_WINDOW_CLOSED` uses a **new `attemptId`**. Every first outcome adds a `DELIVERY_OUTCOME` event to the request's audit (`needsReconciliation: true` for `DELIVERY_UNKNOWN`).
 
-### `GET /chatbot-api/requests/pending-deliveries?conversationRef=`
+### `GET /chatbot-api/requests/pending-deliveries?conversationRef=` (or `?requestId=`)
 
-Scope `feed:read`, class `read`. The deliveries of that conversation whose last outcome was `DEFERRED_WINDOW_CLOSED` and that have no terminal outcome yet (up to 50, ascending cursor), in the same item shape as the feed: `{ "items": [ … ] }`. Ask for it when the customer writes again (the window is open), deliver them, and ACK each with a new `attemptId`. `conversationRef` is required (`400` otherwise, up to 200 characters). This avoids walking the feed again.
+Scope `feed:read`, class `read`. The deliveries whose last outcome was `DEFERRED_WINDOW_CLOSED` and that have no terminal outcome yet (up to 50, ascending cursor), in the same item shape as the feed: `{ "items": [ … ] }`. Ask for it when the customer writes again (the window is open), deliver them, and ACK each with a new `attemptId`. This avoids walking the feed again.
+
+Send **exactly one** filter (both or neither is `400`):
+
+- `conversationRef` (1..200 characters): the deliveries of that conversation.
+- `requestId` (a request UUID, the `id` of the create answer): the deliveries of that request. **Use this for a request that has no `conversationRef`** (a stock or expiration request created without one, or one created by the old routes): its items carry `conversationRef: null` and could never be found by conversation. Chosen over deriving a `wa:` reference because those requests have no customer phone to derive it from.
 
 ### No double delivery
 
 - The bot stores `deliveryId` as a unique key **before** calling Meta. If it cannot tell whether a send happened, it reports `DELIVERY_UNKNOWN` and does not retry.
 - An answer can reach you twice while both paths exist (the feed and the legacy poll of the same decision). Track the answer by the request's `legacyId`: whichever arrives first is delivered, and the other is ACKed `STALE` (feed) or ignored (poll).
 - Run **one consumer** per branch (an advisory lock on your side): two consumers would both see every item.
+
+### v1 clarifications of the contract (§3.3 and §12.14)
+
+The proposal leaves these open; this is what the backend does, and the bot should rely on it:
+
+1. **`attemptedAt` is optional only for `STALE`.** §3.3 lists it for every outcome. `STALE` is a definite "nothing was sent", so there is no attempt time to report; every other outcome requires it.
+2. **`providerMessageId` is rejected (`400`) for `DEFERRED_WINDOW_CLOSED` and `STALE`.** No message was accepted in those cases. It is required for `PROVIDER_ACCEPTED` and optional for `DELIVERY_UNKNOWN` (audit only).
+3. **`422 OUTCOME_NOT_ALLOWED`: `DEFERRED_WINDOW_CLOSED` for a `request.cancelled` delivery.** §12.14 says the bot never defers a cancellation notice (a closure notice days later only annoys the customer); the backend enforces it so such an item cannot sit pending forever. Answer `STALE` instead.
+
+Also: `FAILED` is not an outcome; the 404 of the outcome route says `Delivery not found`; the backend sends the long-poll answers `Cache-Control: no-store`.
+
+### Shutdown and restarts
+
+On a deploy or restart the backend wakes its waiting long-polls, which answer `{items: [], nextCursor: <after>}` at once. Reconnect and keep your cursor: nothing is lost, and the next poll reads from it.
 
 ### Deploy checklist for 5b
 

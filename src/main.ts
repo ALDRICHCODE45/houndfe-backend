@@ -25,6 +25,11 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('Bootstrap');
 
+  // SIGTERM/SIGINT run the modules' destroy hooks (Prisma disconnect, the bot
+  // feed's long-polls and its LISTEN connection) instead of killing the process
+  // with 25 s long-polls open. Only `PrismaService` and the feed have hooks.
+  app.enableShutdownHooks();
+
   // Global validation pipe — validates all incoming DTOs
   app.useGlobalPipes(createAppValidationPipe());
 

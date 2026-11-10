@@ -40,7 +40,10 @@ import { PrismaHumanDecisionReviewResolveRepository } from '../human-decisions/i
 import { PrismaRestockIntakeRepository } from '../human-decisions/infrastructure/prisma-restock-intake.repository';
 import { ReceiptUploadService } from '../receipts/application/receipt-upload.service';
 import { PrismaReceiptReviewRepository } from '../sales/review/infrastructure/prisma-receipt-review.repository';
-import { ReceiptReviewService } from '../sales/review/receipt-review.service';
+import {
+  DEFAULT_CUSTOMER_REJECTION_REASON,
+  ReceiptReviewService,
+} from '../sales/review/receipt-review.service';
 import type { ISaleRepository } from '../sales/domain/sale.repository';
 import type { SalesService } from '../sales/sales.service';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
@@ -275,13 +278,24 @@ describeIfDb('chatbot feed (PostgreSQL)', () => {
         `/chatbot-api/deliveries/${deliveryId}/outcome`,
       ),
     ).send(body);
-  const pending = (b: Bot, ref: string) =>
-    auth(
+  /** By conversationRef (default), by `requestId`, or with both (to see the 400). */
+  const pending = (
+    b: Bot,
+    ref: string,
+    by: 'conversationRef' | 'requestId' | 'both' = 'conversationRef',
+    requestId?: string,
+  ) => {
+    const query = new URLSearchParams();
+    if (by !== 'requestId') query.set('conversationRef', ref);
+    if (by !== 'conversationRef' && requestId)
+      query.set('requestId', requestId);
+    return auth(
       b,
       request(app.getHttpServer()).get(
-        `/chatbot-api/requests/pending-deliveries?conversationRef=${encodeURIComponent(ref)}`,
+        `/chatbot-api/requests/pending-deliveries?${query.toString()}`,
       ),
     );
+  };
 
   let seq = 0;
   /** An open clarification the staff can cancel (the way intake will create it). */
@@ -724,15 +738,22 @@ describeIfDb('chatbot feed (PostgreSQL)', () => {
       expect(staffItem.payload).toMatchObject({
         action: 'REJECT_RECEIPT',
         customerReason: 'El monto no coincide, envíanos otro comprobante.',
+        staffText: 'El monto no coincide, envíanos otro comprobante.',
+        reasonSource: 'STAFF',
         text: 'El monto no coincide, envíanos otro comprobante.',
+        prefix: 'Le comparto la respuesta del equipo:',
       });
       // The legacy route defaults the customer-safe reason itself; the item
       // relays whatever the wrapped row holds.
+      // L1: the default is not staff text: no team prefix, no staffText.
       expect(legacyItem.payload).toMatchObject({
         action: 'REJECT_RECEIPT',
-        customerReason: expect.stringContaining('No pudimos validar'),
-        text: expect.stringContaining('No pudimos validar'),
+        customerReason: DEFAULT_CUSTOMER_REJECTION_REASON,
+        text: DEFAULT_CUSTOMER_REJECTION_REASON,
+        reasonSource: 'DEFAULT',
+        prefix: null,
       });
+      expect(legacyItem.payload).not.toHaveProperty('staffText');
     });
   });
 
@@ -1029,6 +1050,128 @@ describeIfDb('chatbot feed (PostgreSQL)', () => {
       expect(
         (await pending(b, 'wa:5215599990000').expect(200)).body.items,
       ).toEqual([]);
+    });
+  });
+
+  describe('outcome history and pending-deliveries by requestId', () => {
+    const attempt = (attemptId: string, extra: object = {}) => ({
+      attemptId,
+      outcome: 'DEFERRED_WINDOW_CLOSED',
+      attemptedAt: AT,
+      ...extra,
+    });
+
+    async function answered(b: Bot, conversationRef: string | null) {
+      const decisionId = await submitRestock(b.tenantId);
+      const req = await prisma.chatbotRequest.findFirstOrThrow({
+        where: { humanDecisionId: decisionId },
+      });
+      await prisma.chatbotRequest.update({
+        where: { id: req.id },
+        data: { conversationRef },
+      });
+      await resolveNew(b.tenantId, req.id, {
+        type: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE',
+      });
+      const [item] = await items(b.tenantId);
+      return { requestId: req.id, deliveryId: item.deliveryId };
+    }
+
+    it('L4: an older deferred attempt replays 200 after a later terminal outcome, with its own stored state', async () => {
+      const b = await bot();
+      const { deliveryId } = await answered(b, 'wa:5215500001111');
+      const first = ATTEMPT();
+      const second = ATTEMPT();
+      await outcome(b, deliveryId, attempt(first)).expect(200);
+      await outcome(b, deliveryId, {
+        attemptId: second,
+        outcome: 'PROVIDER_ACCEPTED',
+        attemptedAt: AT,
+        providerMessageId: 'wamid.late',
+      }).expect(200);
+
+      const replay = await outcome(b, deliveryId, attempt(first)).expect(200);
+      expect(replay.body).toEqual({
+        deliveryId,
+        outcome: 'DEFERRED_WINDOW_CLOSED',
+        attemptId: first,
+        ackReceivedAt: null,
+      });
+      // The replay changed nothing: the terminal outcome is still the state.
+      expect(
+        await prisma.chatbotFeedItem.findUniqueOrThrow({
+          where: { deliveryId },
+        }),
+      ).toMatchObject({ outcome: 'PROVIDER_ACCEPTED', attemptId: second });
+      // The same old attempt with other evidence is a conflict, and a
+      // never-seen attempt is still refused.
+      const conflict = await outcome(
+        b,
+        deliveryId,
+        attempt(first, { attemptedAt: '2026-11-10T17:00:00.000Z' }),
+      ).expect(409);
+      expect(conflict.body).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+      const unseen = await outcome(b, deliveryId, attempt(ATTEMPT())).expect(
+        409,
+      );
+      expect(unseen.body).toMatchObject({ code: 'OUTCOME_ALREADY_RECORDED' });
+    });
+
+    it('an older deferral replayed after a newer deferral does not overwrite it', async () => {
+      const b = await bot();
+      const { deliveryId } = await answered(b, 'wa:5215500002222');
+      const first = ATTEMPT();
+      const second = ATTEMPT();
+      await outcome(b, deliveryId, attempt(first)).expect(200);
+      await outcome(b, deliveryId, attempt(second)).expect(200);
+      const replay = await outcome(b, deliveryId, attempt(first)).expect(200);
+      expect(replay.body).toMatchObject({ attemptId: first });
+      expect(
+        await prisma.chatbotFeedItem.findUniqueOrThrow({
+          where: { deliveryId },
+        }),
+      ).toMatchObject({ outcome: 'DEFERRED_WINDOW_CLOSED', attemptId: second });
+      // Still pending; each applied attempt wrote exactly one event.
+      expect(
+        await prisma.chatbotRequestEvent.count({
+          where: {
+            type: 'DELIVERY_OUTCOME',
+            data: { path: ['deliveryId'], equals: deliveryId },
+          },
+        }),
+      ).toBe(2);
+    });
+
+    it('L2: a deferred delivery of a request with no conversationRef is reachable by requestId', async () => {
+      const b = await bot();
+      const { requestId, deliveryId } = await answered(b, null);
+      await outcome(b, deliveryId, attempt(ATTEMPT())).expect(200);
+
+      const listed = await pending(b, 'x', 'requestId', requestId);
+      expect(listed.status).toBe(200);
+      expect(pluck(listed.body, 'deliveryId')).toEqual([deliveryId]);
+      // No conversationRef to ask by, and exactly one filter is required.
+      expect(listed.body.items[0].conversationRef).toBeNull();
+      await pending(b, 'wa:1', 'both', requestId).expect(400);
+      await pending(b, 'x', 'requestId', 'not-a-uuid').expect(400);
+      const other = await bot();
+      expect(
+        (await pending(other, 'x', 'requestId', requestId).expect(200)).body
+          .items,
+      ).toEqual([]);
+    });
+
+    it('answers 404 "Delivery not found" for an unknown or foreign delivery', async () => {
+      const b = await bot();
+      const response = await outcome(b, randomUUID(), {
+        attemptId: ATTEMPT(),
+        outcome: 'STALE',
+      }).expect(404);
+      expect(response.body).toEqual({
+        statusCode: 404,
+        code: 'NOT_FOUND',
+        message: 'Delivery not found',
+      });
     });
   });
 
