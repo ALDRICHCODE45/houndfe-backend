@@ -555,9 +555,10 @@ Es viable y aprovecha la misma máquina de §4.2: una conversación agendada es 
    ```json
    { "timeZone": "America/Mexico_City",
      "whatsappWindowClosesAt": "2026-11-10T03:10:00Z",
-     "slots": [ { "startsAt": "2026-11-10T15:00:00Z", "label": "mañana 9:00", "withinWindow": true, "available": true },
-                { "startsAt": "2026-11-10T16:30:00Z", "label": "mañana 10:30", "withinWindow": true, "available": true } ] }
+     "slots": [ { "startsAt": "2026-11-10T15:00:00Z", "withinWindow": true, "available": true },
+                { "startsAt": "2026-11-10T16:30:00Z", "withinWindow": true, "available": true } ] }
    ```
+   `timeZone` es la zona IANA de la sucursal y siempre viene. No hay campo `label`: el bot arma el texto desde `startsAt` y `timeZone`, con el tuteo o ustedeo del cliente (§11.1).
 3. El cliente elige y el bot llama a `POST /chatbot-api/requests` con `subtype: TALK_TO_HUMAN` y `scheduledFor` igual a un `startsAt` que ofreció el backend. El backend vuelve a validar el horario dentro de la transacción (que siga libre y que el cupo no esté lleno); si no, responde `409 SLOT_UNAVAILABLE` y la lista nueva.
 4. **Los tiempos arrancan en `scheduledFor`, no al crear la solicitud.** `claimDeadlineAt` se calcula desde `scheduledFor` con los minutos de "para tomarla" del subtipo (§5.4), y el barrido no la marca como vencida antes de esa hora.
 5. **Avisos:** el aviso "solicitud nueva" sale **a la hora `scheduledFor`**, no al agendar. Opcionalmente sale un resumen al abrir ("Hoy hay 3 conversaciones agendadas"). En la bandeja aparece la pestaña **"Agendadas"**, y la fila muestra la hora y si va a necesitar plantilla.
@@ -700,6 +701,7 @@ El frontend pidió WebSocket o socket.io porque `EventSource` no manda `Authoriz
 | Medios | 10 MB, tipo por bytes mágicos, 20 por conversación por hora | `media` |
 | Lote de espejo | 50 mensajes por llamada | `messages:batch` |
 | Feed | long-poll de 25 s como máximo, con su propio presupuesto (no el de 60 por minuto) | `feed` |
+| Tráfico del bot por sucursal | Dimensionado para 60 entrantes por minuto por sucursal con margen: espejo y statuses 300 por minuto, salientes y ACKs 180 por minuto, todo configurable por credencial y por clase de presupuesto (§11.1) | `messages:batch`, `statuses`, `ack`, `session-ack` |
 | Conexiones SSE | 5 por usuario; la más vieja se cierra | `realtime` |
 
 **El rate limit del bot vive en memoria** (`service-auth.guard.ts:36-41`). Con más de una réplica, cada réplica cuenta por separado. Para las rutas nuevas propongo contar en PostgreSQL (`AuthRateBucket` ya existe para el login, `schema.prisma:1936`) o aceptar el límite por réplica de forma explícita.
@@ -790,12 +792,7 @@ Las fuentes son el diseño (§7, commit `7e298b4`) y las respuestas directas a l
 
 ## 9. Preguntas técnicas para el chatbot
 
-Las 15 preguntas de la versión anterior quedaron contestadas en §11 (feed, outbox, statuses, modo y época, identidad, wamid, medios, sin backfill, `dedupKey`, cancelación, migración, plantilla, textos, hora y agenda), y lo que contestaron ya está incorporado en §3, §4 y §10. Quedan solo estas, que hay que cerrar en la conciliación:
-
-1. **Cuándo se manda `session-ack STARTED`.** El backend propone mandarlo apenas el bot guarda el modo callado (CAS sobre `conversation_state`), sin esperar a que Meta acepte el saludo "Le atiende…". El `providerMessageId` del saludo llegaría después, por `messages:batch`. Así, una falla al mandar el saludo no deja la sesión en `STARTING` hasta que venza. ¿Están de acuerdo?
-2. **Audio sin una persona atendiendo (D13).** El bot le pide al cliente que lo escriba. ¿Igual sube el audio y lo espeja, para que el personal lo pueda escuchar después? El backend propone que sí: el espejo guarda todo lo que el cliente manda.
-3. **Volumen esperado** para fijar los presupuestos de rate limit por clase (R2): ¿cuántos mensajes por minuto por sucursal esperan en el pico, entrantes, statuses y salientes?
-4. **Etiqueta de los horarios** (§4.9). El backend manda `startsAt` y un `label` neutro. ¿El bot arma su propio texto a partir de `startsAt` (con tuteo o ustedeo), y entonces sobra `label`?
+Las 15 preguntas de la versión anterior quedaron contestadas en §11 (feed, outbox, statuses, modo y época, identidad, wamid, medios, sin backfill, `dedupKey`, cancelación, migración, plantilla, textos, hora y agenda), y lo que contestaron ya está incorporado en §3, §4 y §10. Las cuatro preguntas de la segunda ronda (cuándo se manda `session-ack STARTED`, audio sin nadie atendiendo, volumen pico y texto de los horarios) quedaron cerradas en §11.1. No quedan preguntas técnicas abiertas.
 
 ---
 
@@ -893,3 +890,16 @@ Respuestas del coordinador del chatbot, basadas en su código. Ninguna parte imp
 **Requisitos previos del lado del bot** (se suman a §10.1): transcripción durable, compuertas de conversación durables (hoy las de 5 min viven en memoria), reemplazo del índice de una sola reserva activa, y arreglo de `processed_webhook_messages`, que nunca se purga y se escribe recién después de responder.
 
 **Nuevo para el dueño:** si el bot acepta mensajes de audio del cliente. **Resuelto (D13):** se guardan y el personal los escucha; sin una persona atendiendo, el bot pide que los escriban.
+
+### 11.1 Segunda ronda del chatbot (2026-11-10): preguntas cerradas
+
+| Pregunta | Respuesta del chatbot | Efecto en el contrato |
+| --- | --- | --- |
+| Cuándo manda `session-ack STARTED` | En cuanto guarda de forma durable el modo callado, sin esperar a Meta. Un saludo que falla se reporta aparte (fila saliente y status `failed` de Meta), nunca reteniendo el ACK. | Queda como §4.3. |
+| Audio sin nadie atendiendo | Se sube y se espeja igual, y el bot además le pide al cliente que lo escriba. | §3.6: el audio se espeja siempre. |
+| Volumen pico | No hay tráfico real todavía (un negocio, número de prueba, piloto pendiente). Estimado por sucursal: 10 a 20 entrantes por minuto, salientes igual, statuses 2 a 3 veces los salientes. Piden dimensionar para 60 entrantes por minuto por sucursal con margen y que sea configurable; se mide en el piloto. | §6.4: presupuestos por clase, configurables. |
+| Texto de los horarios | El bot lo arma desde `startsAt` con su tuteo o ustedeo. | §4.9: se quita `label`; `timeZone` IANA de la sucursal siempre viene. |
+| Video y ubicación | Aceptan no guardarlos en v1: el bot le pide al cliente que lo describa por texto. Lo suman a su segunda versión. | Sin cambios. |
+| "Cerca del cierre" = 60 min configurables | Aceptado. | Sin cambios. |
+
+No quedan preguntas técnicas abiertas entre chatbot y backend. Falta solo la confirmación final de conciliación del chatbot.
