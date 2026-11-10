@@ -781,3 +781,37 @@ El dueño pidió tener estos riesgos "bien en cuenta y muy presentes", porque el
 | Agenda | p95 < 100 ms para los horarios disponibles | `ScheduledSlotCounter (tenantId, startsAt)` como PK, y una función pura de calendario con caché de la configuración por tenant |
 
 **Cómo se demuestra:** cada etapa con metas trae una prueba de carga reproducible (script con datos sintéticos en la base de pruebas) y el `EXPLAIN ANALYZE` de sus consultas en el PR. Si no se alcanza una meta, se informa con los números medidos; no se da por cumplida.
+
+## 11. Respuestas del chatbot a §9 (2026-11-10) y conciliación
+
+Respuestas del coordinador del chatbot, basadas en su código. Ninguna parte implementó nada.
+
+**Hechos del bot que cambian el diseño**
+
+- No guarda una transcripción durable: los últimos 12 turnos viven en memoria y se pierden al reiniciar. El espejo arranca con los mensajes nuevos; no hay backfill posible.
+- Los `statuses` de Meta se leen y se descartan. También se descartan audio, video, stickers y ubicación.
+- El bot asume una sola instancia. Solo los workers de medios de comprobantes usan `SKIP LOCKED` con lease.
+- Un índice único parcial permite una sola reserva humana ACTIVE por remitente. Hay que reemplazarlo para tener varias solicitudes abiertas por cliente.
+
+**Lo que acuerdan (sin cambios a este diseño)**
+
+| Tema | Postura del chatbot |
+| --- | --- |
+| Feed (§3.3) | Pull con long-poll de 25 s, timeout de 35 s. Un solo consumidor con `pg_try_advisory_lock`, cursor en una tabla del bot y ACK por `deliveryId` después del efecto local. No quieren push. |
+| Outbox del bot | Nueva `backend_outbox` con `seq` por conversación, reclamo del menor `seq` pendiente con `SKIP LOCKED`, clave de idempotencia por fila y reintentos indefinidos con backoff. Lleva el espejo, los wamid salientes, statuses, creaciones, cancelaciones y ACKs de sesión. |
+| Statuses | Se agrega un normalizador que los manda por el outbox, por wamid. |
+| Modo y `handoffEpoch` | `conversation_state.data.handoff = {mode, epoch, requestId}` con escrituras CAS. El chequeo corre en el dispatcher, antes del LLM. Aceptan la regla de seguridad: tras 10 min sin feed, un aviso y siguen callados. |
+| `conversationRef` | `wa:<wa_id crudo>` (México llega como 521 + 10 dígitos), igual que el intake de zonas. Además mandan `phoneCountryCode` "52" y `phone` de 10 dígitos por separado. Nunca se usa la forma normalizada como clave. |
+| wamid | Entrante siempre presente; los salientes se van a persistir en el outbox y en el espejo. |
+| Medios | Amplían a audio, video y sticker (audio pendiente de decisión del dueño). Suben por `POST /chatbot-api/media` antes de espejar el mensaje, con tope de 10 MB. **Endpoint nuevo del backend.** |
+| `dedupKey` | `RESTOCK:variant:<id>`, `EXPIRATION:...` por tema; `sourceRequestId` (UUIDv5 por mensaje entrante) como clave por intento. |
+| Cancelación | `POST cancel` por `requestId`. Con varias abiertas, el bot muestra una lista interactiva. `cancel-batch` es opcional. |
+| Migración | Subtipo por subtipo, manteniendo las rutas de human-decisions. Las filas abiertas de `human_handoff_requests` se cierran localmente en el corte; `OPS_CHANNEL_PHONE` se retira al final. |
+| Plantillas | El backend manda el nombre, el bot la envía y responde `{deliveryId, wamid \| error}` y después el status. Las plantillas se aprueban por WABA, así que primero va el número real. |
+| Textos | El bot los arma con `staffFirstName`, porque ya aplica el tuteo o ustedeo del cliente. |
+| Hora | ISO-8601 UTC con ms y Z; el timestamp de Meta va separado de la hora de observación del bot. |
+| Agendadas (§4.9) | No existe nada hoy; lo construyen completo, pero proponen dejarlo para **después** de feed + outbox + modo en vivo. El backend está de acuerdo: la unidad 11b pasa al final del orden. |
+
+**Requisitos previos del lado del bot** (se suman a §10.1): transcripción durable, compuertas de conversación durables (hoy las de 5 min viven en memoria), reemplazo del índice de una sola reserva activa, y arreglo de `processed_webhook_messages`, que nunca se purga y se escribe recién después de responder.
+
+**Nuevo para el dueño:** si el bot acepta mensajes de audio del cliente (se guardan, el personal los escucha; el bot no los entiende).
