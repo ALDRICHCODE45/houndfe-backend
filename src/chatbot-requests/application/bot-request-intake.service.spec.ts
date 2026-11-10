@@ -16,12 +16,15 @@ const REQ = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
 const CRED = 'cred-1';
 
+/** Relative to the clock: the envelope bounds the timestamp (5 min ahead, 30 days back). */
+const RECENT = new Date(Date.now() - 3_600_000).toISOString();
+
 const clarification = (over: Record<string, unknown> = {}) => ({
   sourceRequestId: ID,
   subtype: 'UNKNOWN_QUESTION',
   customer: { phoneCountryCode: '52', phone: '5512345678' },
   conversationRef: 'wa:5215512345678',
-  lastCustomerMessageAt: '2026-11-09T16:02:11Z',
+  lastCustomerMessageAt: RECENT,
   summary: '¿Sirve para cachorros?',
   dedupKey: 'UNKNOWN_QUESTION:p1',
   ...over,
@@ -123,7 +126,14 @@ describe('BotRequestIntakeService.create', () => {
       },
     });
     expect(store.lockKey).toHaveBeenCalledWith('CREATE', ID);
-    expect(store.saveReceipt).not.toHaveBeenCalled();
+    // every create stores its answer, so the key conflicts on the other path
+    expect(store.saveReceipt).toHaveBeenCalledWith(
+      'CREATE',
+      ID,
+      botEnvelopeHash(parseBotEnvelope(clarification())),
+      REQ,
+      result.body,
+    );
   });
 
   it('merges into the open request: 200 MERGED, stored for replay', async () => {

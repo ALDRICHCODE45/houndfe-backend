@@ -6,6 +6,8 @@ import {
 } from './bot-request-envelope';
 import { BOT_SCOPE_LIST, BOT_SCOPES } from './bot-scopes';
 
+/** Fixed clock: `lastCustomerMessageAt` is bounded around it. */
+const NOW = new Date('2026-11-10T12:00:00.000Z');
 const ID = '5d0c4c3e-8a43-4d52-9f6a-2c1b7e9a1f10';
 
 const direct = (over: Record<string, unknown> = {}) => ({
@@ -28,11 +30,11 @@ const direct = (over: Record<string, unknown> = {}) => ({
 });
 
 const bad = (body: unknown) =>
-  expect(() => parseBotEnvelope(body)).toThrow(InvalidArgumentError);
+  expect(() => parseBotEnvelope(body, NOW)).toThrow(InvalidArgumentError);
 
 describe('parseBotEnvelope', () => {
   it('parses a full clarification envelope', () => {
-    const envelope = parseBotEnvelope(direct());
+    const envelope = parseBotEnvelope(direct(), NOW);
 
     expect(envelope).toMatchObject({
       sourceRequestId: ID,
@@ -49,11 +51,14 @@ describe('parseBotEnvelope', () => {
   });
 
   it('accepts a wrapped subtype with only its detail', () => {
-    const envelope = parseBotEnvelope({
-      sourceRequestId: ID,
-      subtype: 'RESTOCK',
-      detail: { sourceRequestId: ID, type: 'RESTOCK' },
-    });
+    const envelope = parseBotEnvelope(
+      {
+        sourceRequestId: ID,
+        subtype: 'RESTOCK',
+        detail: { sourceRequestId: ID, type: 'RESTOCK' },
+      },
+      NOW,
+    );
 
     expect(envelope.customer).toBeNull();
     expect(envelope.summary).toBeNull();
@@ -63,9 +68,29 @@ describe('parseBotEnvelope', () => {
 
   it('keeps scheduledFor so the service can refuse it until unit 14', () => {
     expect(
-      parseBotEnvelope(direct({ scheduledFor: '2026-11-10T15:00:00Z' }))
+      parseBotEnvelope(direct({ scheduledFor: '2026-11-10T15:00:00Z' }), NOW)
         .scheduledFor,
     ).toEqual(new Date('2026-11-10T15:00:00Z'));
+  });
+
+  it('bounds lastCustomerMessageAt: at most 5 minutes ahead, at most 30 days old', () => {
+    const at = (ms: number) => new Date(NOW.getTime() + ms).toISOString();
+    const MIN = 60_000;
+    const DAY = 86_400_000;
+
+    for (const ok of [at(5 * MIN), at(-30 * DAY), at(0)]) {
+      expect(
+        parseBotEnvelope(
+          direct({ lastCustomerMessageAt: ok }),
+          NOW,
+        ).lastCustomerMessageAt?.toISOString(),
+      ).toBe(ok);
+    }
+    for (const bad of [at(5 * MIN + 1000), at(-30 * DAY - 1000), at(DAY)]) {
+      expect(() =>
+        parseBotEnvelope(direct({ lastCustomerMessageAt: bad }), NOW),
+      ).toThrow(InvalidArgumentError);
+    }
   });
 
   it.each([
@@ -110,17 +135,20 @@ describe('parseBotEnvelope', () => {
 
 describe('botEnvelopeHash', () => {
   it('ignores key order and display-only fields, and tracks real changes', () => {
-    const a = parseBotEnvelope(direct());
-    const reordered = parseBotEnvelope({
-      ...direct(),
-      context: { quantity: 2, productIds: ['p1'], cartRef: 'cart-1' },
-      customer: {
-        displayName: 'Otro',
-        phone: '5512345678',
-        phoneCountryCode: '52',
+    const a = parseBotEnvelope(direct(), NOW);
+    const reordered = parseBotEnvelope(
+      {
+        ...direct(),
+        context: { quantity: 2, productIds: ['p1'], cartRef: 'cart-1' },
+        customer: {
+          displayName: 'Otro',
+          phone: '5512345678',
+          phoneCountryCode: '52',
+        },
       },
-    });
-    const changed = parseBotEnvelope(direct({ summary: 'otra pregunta' }));
+      NOW,
+    );
+    const changed = parseBotEnvelope(direct({ summary: 'otra pregunta' }), NOW);
 
     expect(botEnvelopeHash(reordered)).toBe(botEnvelopeHash(a));
     expect(botEnvelopeHash(changed)).not.toBe(botEnvelopeHash(a));

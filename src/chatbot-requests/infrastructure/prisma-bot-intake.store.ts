@@ -28,6 +28,7 @@ import {
   findOpenDedup,
   insertRequestOnDedup,
   IntakeMergeSignal,
+  lockBotKey,
   lockCustomerIntake,
   recordMerge,
   type OpenRequestRef,
@@ -68,12 +69,8 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
     return this.tenantPrisma.runInTransaction(work);
   }
 
-  /** Same key space idea as the staff lock, with its own `chatbot-bot:` text. */
-  async lockKey(kind: 'CREATE' | 'CANCEL', key: string): Promise<void> {
-    const namespaced = `chatbot-bot:${this.tenantId}:${kind}:${key}`;
-    await this.tx.$queryRaw(
-      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${namespaced}, 0))::text`,
-    );
+  lockKey(kind: 'CREATE' | 'CANCEL', key: string): Promise<void> {
+    return lockBotKey(this.tx, this.tenantId, kind, key);
   }
 
   findReceipt(kind: 'CREATE' | 'CANCEL', idempotencyKey: string) {

@@ -59,17 +59,47 @@ describeIfDb('chatbot request wiring (real application graph)', () => {
         strict: false,
       });
       expect(shared).toBeInstanceOf(PostgresRouteRateLimiter);
-      for (const module of [
-        ChatbotApiModule,
-        HumanDecisionsModule,
-        ChatbotRequestsModule,
-      ]) {
-        const guard = moduleRef
-          .select(module)
-          .get(ServiceAuthGuard, { strict: false });
-        expect(
-          (guard as unknown as { sharedLimiter?: unknown }).sharedLimiter,
-        ).toBe(shared);
+      // Every guard instance Nest built for a controller, per host module
+      // (the one that actually runs on a request), not just one of them.
+      const container = (
+        moduleRef as unknown as {
+          container: {
+            getModules(): Map<
+              string,
+              {
+                metatype: { name: string };
+                injectables: Map<
+                  unknown,
+                  { metatype: unknown; instance: unknown }
+                >;
+              }
+            >;
+          };
+        }
+      ).container;
+      const hostsOfGuard = new Map<string, unknown[]>();
+      for (const host of container.getModules().values()) {
+        for (const wrapper of host.injectables.values()) {
+          if (wrapper.metatype === ServiceAuthGuard) {
+            const list = hostsOfGuard.get(host.metatype.name) ?? [];
+            list.push(wrapper.instance);
+            hostsOfGuard.set(host.metatype.name, list);
+          }
+        }
+      }
+      expect([...hostsOfGuard.keys()]).toEqual(
+        expect.arrayContaining([
+          HumanDecisionsModule.name,
+          ChatbotApiModule.name,
+          ChatbotRequestsModule.name,
+        ]),
+      );
+      for (const guards of hostsOfGuard.values()) {
+        for (const guard of guards) {
+          expect((guard as { sharedLimiter?: unknown }).sharedLimiter).toBe(
+            shared,
+          );
+        }
       }
       expect(
         moduleRef.get(BotRequestsController, { strict: false }),

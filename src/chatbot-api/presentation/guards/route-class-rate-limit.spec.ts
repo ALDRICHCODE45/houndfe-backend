@@ -11,7 +11,10 @@ import type { ClsService } from 'nestjs-cls';
 import type { TenantClsStore } from '../../../shared/tenant/tenant-cls-store.interface';
 import { ServiceCredential } from '../../domain/service-credential.entity';
 import type { IServiceCredentialRepository } from '../../domain/service-credential.repository';
-import { BotRouteClass } from './route-class';
+import { BotApplicationOutcomeController } from '../../../human-decisions/presentation/bot-application-outcome.controller';
+import { BotRestockIntakeController } from '../../../human-decisions/presentation/bot-restock-intake.controller';
+import { BotRestockPollController } from '../../../human-decisions/presentation/bot-restock-poll.controller';
+import { BotRouteClass, ROUTE_CLASS_KEY } from './route-class';
 import {
   DEFAULT_CLASS_LIMITS,
   type RouteRateLimiter,
@@ -39,6 +42,9 @@ class Routes {
 
   @BotRouteClass('feed')
   feed(this: void) {}
+
+  @BotRouteClass('humanDecisions')
+  humanDecisions(this: void) {}
 
   plain(this: void) {}
 }
@@ -102,6 +108,26 @@ describe('ServiceAuthGuard route classes', () => {
       });
     },
   );
+
+  it('charges the human-decision routes to their own class with the credential rateLimit', async () => {
+    await guard.canActivate(context(handlerOf('humanDecisions')));
+
+    expect(check).toHaveBeenCalledWith({
+      credentialId: 'cred-1',
+      routeClass: 'humanDecisions',
+      defaultLimit: 45,
+    });
+  });
+
+  it.each([
+    BotRestockIntakeController,
+    BotRestockPollController,
+    BotApplicationOutcomeController,
+  ])('declares `humanDecisions` on %p', (controller) => {
+    expect(Reflect.getMetadata(ROUTE_CLASS_KEY, controller)).toBe(
+      'humanDecisions',
+    );
+  });
 
   it('answers 429 with Retry-After rounded up when the class budget is spent', async () => {
     check.mockResolvedValue({ allowed: false, retryAfterMs: 1_200 });

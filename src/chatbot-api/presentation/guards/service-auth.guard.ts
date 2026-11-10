@@ -22,7 +22,11 @@ import {
   REQUIRED_SCOPES_KEY,
 } from '../decorators/required-scopes.decorator';
 import { CredentialRateLimiter } from './credential-rate-limiter';
-import { ROUTE_CLASS_KEY, type BotRouteClassName } from './route-class';
+import {
+  CREDENTIAL_LIMIT_CLASSES,
+  ROUTE_CLASS_KEY,
+  type BotRouteClassName,
+} from './route-class';
 import {
   DEFAULT_CLASS_LIMITS,
   ROUTE_RATE_LIMITER,
@@ -94,16 +98,16 @@ export class ServiceAuthGuard implements CanActivate {
       throw new ForbiddenException('Insufficient service scope');
     }
 
-    // Routes without a class keep the credential's own budget (`default`).
+    // Routes without a class keep the credential's own budget (`default`);
+    // the human-decision routes have the same budget in their own bucket.
     const routeClass =
       this.reflector.getAllAndOverride<BotRouteClassName>(ROUTE_CLASS_KEY, [
         context.getHandler(),
         context.getClass(),
       ]) ?? 'default';
-    const defaultLimit =
-      routeClass === 'default'
-        ? credential.rateLimit
-        : DEFAULT_CLASS_LIMITS[routeClass];
+    const defaultLimit = CREDENTIAL_LIMIT_CLASSES.includes(routeClass)
+      ? credential.rateLimit
+      : DEFAULT_CLASS_LIMITS[routeClass as keyof typeof DEFAULT_CLASS_LIMITS];
     const decision = this.sharedLimiter
       ? await this.sharedLimiter.check({
           credentialId: credential.id,

@@ -153,7 +153,19 @@ function parseContext(value: unknown): BotEnvelope['context'] {
   return out;
 }
 
-export function parseBotEnvelope(body: unknown): BotEnvelope {
+/** A customer message may not be dated further ahead than this clock skew. */
+const MAX_FUTURE_MS = 5 * 60_000;
+/** Older than the WhatsApp window and the mirror make any sense for (§4.5). */
+const MAX_AGE_MS = 30 * 86_400_000;
+
+/**
+ * `now` is a parameter so the bounds on `lastCustomerMessageAt` are testable;
+ * it also bounds a merge, which reuses the parsed envelope.
+ */
+export function parseBotEnvelope(
+  body: unknown,
+  now: Date = new Date(),
+): BotEnvelope {
   if (!isObject(body)) return fail();
   if (Object.keys(body).some((key) => !KEYS.has(key))) return fail();
 
@@ -174,6 +186,12 @@ export function parseBotEnvelope(body: unknown): BotEnvelope {
   const required = <T>(key: string, parse: (value: unknown) => T): T => {
     const value = optional(key, parse);
     return value === null ? fail() : value;
+  };
+
+  const recent = (value: unknown): Date => {
+    const date = instant(value);
+    const skew = date.getTime() - now.getTime();
+    return skew > MAX_FUTURE_MS || -skew > MAX_AGE_MS ? fail() : date;
   };
 
   const customer = optional('customer', parseCustomer);
@@ -203,8 +221,8 @@ export function parseBotEnvelope(body: unknown): BotEnvelope {
       ? required('conversationRef', (v) => text(v, 200))
       : optional('conversationRef', (v) => text(v, 200)),
     lastCustomerMessageAt: direct
-      ? required('lastCustomerMessageAt', instant)
-      : optional('lastCustomerMessageAt', instant),
+      ? required('lastCustomerMessageAt', recent)
+      : optional('lastCustomerMessageAt', recent),
     summary: direct
       ? required('summary', (v) => text(v, 140))
       : optional('summary', (v) => text(v, 140)),

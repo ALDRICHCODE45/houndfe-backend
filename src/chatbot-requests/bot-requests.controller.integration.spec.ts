@@ -21,6 +21,8 @@ import { SERVICE_CREDENTIAL_REPOSITORY } from '../chatbot-api/domain/service-cre
 import { RequiredScopes } from '../chatbot-api/presentation/decorators/required-scopes.decorator';
 import { BotRateLimitModule } from '../chatbot-api/presentation/guards/bot-rate-limit.module';
 import { ServiceAuthGuard } from '../chatbot-api/presentation/guards/service-auth.guard';
+import { BotRestockIntakeController } from '../human-decisions/presentation/bot-restock-intake.controller';
+import { HumanDecisionHttpFilter } from '../human-decisions/presentation/filters/human-decision-http.filter';
 import { DELIVERY_ZONE_BOT_REPOSITORY } from '../delivery-zones/domain/delivery-zone-bot.repository';
 import { PrismaDeliveryZoneBotRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-bot.repository';
 import { EXPIRATION_INTAKE_REPOSITORY } from '../human-decisions/domain/expiration-intake.repository';
@@ -68,10 +70,15 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
         DatabaseModule,
         BotRateLimitModule,
       ],
-      controllers: [BotRequestsController, ProbeController],
+      controllers: [
+        BotRequestsController,
+        ProbeController,
+        BotRestockIntakeController,
+      ],
       providers: [
         ServiceAuthGuard,
         ChatbotRequestHttpFilter,
+        HumanDecisionHttpFilter,
         ChatbotRequestWrapper,
         BotRequestIntakeService,
         { provide: BOT_INTAKE_STORE, useClass: PrismaBotIntakeStore },
@@ -136,12 +143,13 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
     return { tenantId, token, credentialId: credential.id };
   }
 
+  const RECENT = new Date(Date.now() - 3_600_000).toISOString();
   const envelope = (over: Record<string, unknown> = {}) => ({
     sourceRequestId: randomUUID(),
     subtype: 'UNKNOWN_QUESTION',
     customer: PHONE,
     conversationRef: 'wa:5215512345678',
-    lastCustomerMessageAt: '2026-11-09T16:02:11.000Z',
+    lastCustomerMessageAt: RECENT,
     summary: '¿Sirve para cachorros?',
     ...over,
   });
@@ -486,6 +494,72 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
         ['default', 3],
         ['write', 3],
       ]);
+    });
+
+    describe('human-decision routes have their own bucket (owner decision M1)', () => {
+      const intake = (b: { token: string; tenantId: string }) => {
+        const id = randomUUID();
+        return request(app.getHttpServer())
+          .post('/chatbot-api/human-decisions')
+          .set('Authorization', `Bearer ${b.token}`)
+          .set('X-Idempotency-Key', id)
+          .send({
+            sourceRequestId: id,
+            type: 'RESTOCK',
+            productId: randomUUID(),
+            productName: 'Croquetas',
+          });
+      };
+      const probe = (b: { token: string }) =>
+        request(app.getHttpServer())
+          .get('/probe')
+          .set('Authorization', `Bearer ${b.token}`);
+      const scopes = ['human-decisions:create', 'requests:read'];
+
+      it('exhausting the stock route leaves the other chatbot-api routes untouched', async () => {
+        const b = await bot({ scopes, rateLimit: 2 });
+
+        const stock = [
+          (await intake(b)).status,
+          (await intake(b)).status,
+          (await intake(b)).status,
+        ];
+        const other = [
+          (await probe(b)).status,
+          (await probe(b)).status,
+          (await probe(b)).status,
+        ];
+
+        expect(stock).toEqual([201, 201, 429]);
+        expect(other).toEqual([200, 200, 429]);
+        const buckets = await prisma.serviceRateBucket.findMany({
+          where: { credentialId: b.credentialId },
+          orderBy: { routeClass: 'asc' },
+        });
+        expect(
+          buckets.map((bucket) => [bucket.routeClass, bucket.count]),
+        ).toEqual([
+          ['default', 3],
+          ['humanDecisions', 3],
+        ]);
+      });
+
+      it('and the other way round, honoring a per-class override', async () => {
+        const b = await bot({
+          scopes,
+          rateLimit: 2,
+          rateLimits: { humanDecisions: 4 },
+        });
+
+        expect([
+          (await probe(b)).status,
+          (await probe(b)).status,
+          (await probe(b)).status,
+        ]).toEqual([200, 200, 429]);
+        const stock: number[] = [];
+        for (let i = 0; i < 5; i++) stock.push((await intake(b)).status);
+        expect(stock).toEqual([201, 201, 201, 201, 429]);
+      });
     });
   });
 });

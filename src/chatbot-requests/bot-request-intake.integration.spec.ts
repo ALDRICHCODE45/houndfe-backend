@@ -25,6 +25,7 @@ import {
   BotRequestIntakeService,
   type BotCreateResult,
 } from './application/bot-request-intake.service';
+import { InvalidArgumentError } from '../shared/domain/domain-error';
 import { ChatbotRequestCommandError } from './application/chatbot-request-commands.service';
 import { checkInvariant } from './infrastructure/chatbot-request-backfill';
 import type { IntakeLimits } from './infrastructure/chatbot-request-intake-writes';
@@ -79,12 +80,18 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
     await prisma.tenant.deleteMany({ where: { id: { in: tenants } } });
   });
 
+  // Relative to the clock: the envelope bounds the timestamp.
+  const MSG_AT = new Date(Date.now() - 3_600_000);
+  const LATER_AT = new Date(Date.now() - 1_800_000);
+  const plus24h = (date: Date) =>
+    new Date(date.getTime() + 86_400_000).toISOString();
+
   const direct = (over: Record<string, unknown> = {}) => ({
     sourceRequestId: randomUUID(),
     subtype: 'UNKNOWN_QUESTION',
     customer: PHONE,
     conversationRef: 'wa:5215512345678',
-    lastCustomerMessageAt: '2026-11-09T16:02:11.000Z',
+    lastCustomerMessageAt: MSG_AT.toISOString(),
     summary: '¿El shampoo X sirve para cachorros?',
     needs: 'Pregunta si es apto.',
     context: { productIds: ['p1'] },
@@ -227,7 +234,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       expect(request.canonicalRequestHash).toHaveLength(64);
       expect(request.context).toEqual({ productIds: ['p1'] });
       expect(request.whatsappWindowClosesAt?.toISOString()).toBe(
-        '2026-11-10T16:02:11.000Z',
+        plus24h(MSG_AT),
       );
       expect(await eventsOf(request.id)).toEqual([
         expect.objectContaining({
@@ -489,7 +496,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       const first = await create(tenantId, direct({ dedupKey: 'UQ:p1' }));
       const repeat = direct({
         dedupKey: 'UQ:p1',
-        lastCustomerMessageAt: '2026-11-09T18:00:00.000Z',
+        lastCustomerMessageAt: LATER_AT.toISOString(),
       });
 
       const merged = await create(tenantId, repeat);
@@ -510,7 +517,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       });
       const [request] = await requestsOf(tenantId);
       expect(request.whatsappWindowClosesAt?.toISOString()).toBe(
-        '2026-11-10T18:00:00.000Z',
+        plus24h(LATER_AT),
       );
       expect(request.version).toBe(1);
 
@@ -531,6 +538,29 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
         (await failure(create(tenantId, { ...repeat, summary: 'otro' })))?.code,
       ).toBe('IDEMPOTENCY_CONFLICT');
       expect(await requestsOf(tenantId)).toHaveLength(1);
+    });
+
+    it('refuses a merge dated in the future or too old, writing nothing', async () => {
+      const tenantId = await newTenant();
+      const first = await create(tenantId, direct({ dedupKey: 'UQ:bound' }));
+      const stamp = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+      for (const bad of [stamp(3_600_000), stamp(-31 * 86_400_000)]) {
+        await expect(
+          create(
+            tenantId,
+            direct({ dedupKey: 'UQ:bound', lastCustomerMessageAt: bad }),
+          ),
+        ).rejects.toBeInstanceOf(InvalidArgumentError);
+      }
+      await expect(
+        create(tenantId, direct({ lastCustomerMessageAt: stamp(3_600_000) })),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+
+      expect(await requestsOf(tenantId)).toHaveLength(1);
+      expect(
+        (await eventsOf(first.body.id as string)).map((event) => event.type),
+      ).toEqual(['CREATED']);
     });
 
     it('does not merge across customers, tenants or closed requests', async () => {
@@ -743,6 +773,86 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       });
       expect(open).toBe(3);
       expect(await group(tenantId, KEY)).toMatchObject({ openCount: 3 });
+    });
+  });
+
+  describe('one idempotency key across the direct and the wrapped path', () => {
+    const wrappedWith = (id: string) => ({
+      sourceRequestId: id,
+      subtype: 'RESTOCK',
+      customer: PHONE,
+      detail: {
+        sourceRequestId: id,
+        type: 'RESTOCK',
+        productId: randomUUID(),
+        productName: 'Croquetas',
+      },
+    });
+
+    it('direct then wrapped: 409, never a second request; each path still replays', async () => {
+      const tenantId = await newTenant();
+      const id = randomUUID();
+      const first = direct({ sourceRequestId: id });
+      const created = await create(tenantId, first);
+
+      const error = await failure(create(tenantId, wrappedWith(id)));
+
+      expect(error).toMatchObject({
+        code: 'IDEMPOTENCY_CONFLICT',
+        httpStatus: 409,
+      });
+      expect(await requestsOf(tenantId)).toHaveLength(1);
+      expect(await prisma.humanDecision.count({ where: { tenantId } })).toBe(0);
+      const replay = await create(tenantId, first);
+      expect(replay.httpStatus).toBe(200);
+      expect(replay.body).toMatchObject({
+        id: created.body.id,
+        outcome: 'REPLAYED',
+      });
+    });
+
+    it('wrapped then direct: 409, never a second request; each path still replays', async () => {
+      const tenantId = await newTenant();
+      const id = randomUUID();
+      const first = wrappedWith(id);
+      const created = await create(tenantId, first);
+
+      const error = await failure(
+        create(tenantId, direct({ sourceRequestId: id })),
+      );
+
+      expect(error).toMatchObject({
+        code: 'IDEMPOTENCY_CONFLICT',
+        httpStatus: 409,
+      });
+      expect(await requestsOf(tenantId)).toHaveLength(1);
+      expect(await prisma.humanDecision.count({ where: { tenantId } })).toBe(1);
+      const replay = await create(tenantId, first);
+      expect(replay.httpStatus).toBe(200);
+      expect(replay.body).toMatchObject({
+        id: created.body.id,
+        outcome: 'REPLAYED',
+      });
+    });
+
+    it('both at once: one request, the other side conflicts', async () => {
+      const tenantId = await newTenant();
+      const id = randomUUID();
+
+      const results = await guarded(
+        Promise.all([
+          failure(create(tenantId, direct({ sourceRequestId: id }))),
+          failure(create(tenantId, wrappedWith(id))),
+        ]),
+      );
+
+      expect(results.filter((error) => error === null)).toHaveLength(1);
+      expect(
+        results
+          .filter((error) => error !== null)
+          .map((error) => error?.httpStatus),
+      ).toEqual([409]);
+      expect(await requestsOf(tenantId)).toHaveLength(1);
     });
   });
 

@@ -30,7 +30,11 @@ import { Prisma } from '@prisma/client';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { CUSTOMER_REPLY_WINDOW_MS } from '../../delivery-zones/domain/delivery-zone.policy';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
-import { toState } from '../application/chatbot-request-commands.service';
+import {
+  ChatbotRequestCommandError,
+  formatFolio,
+  toState,
+} from '../application/chatbot-request-commands.service';
 import { canonicalPhone, phoneLookupVariants } from '../domain/canonical-phone';
 import { actorDisplayName } from '../domain/actor-display-name';
 import { closeWrapped } from '../domain/chatbot-request.commands';
@@ -39,6 +43,7 @@ import {
   findOpenDedup,
   insertRequestOnDedup,
   IntakeMergeSignal,
+  lockBotKey,
   lockCustomerIntake,
   type IntakeLimits,
 } from './chatbot-request-intake-writes';
@@ -410,6 +415,7 @@ export class ChatbotRequestWrapper {
     const input = envelope
       ? await this.withEnvelopeData(plain, envelope)
       : plain;
+    if (envelope) await this.assertKeyFree(tx, tenantId, envelope);
     const customerKey = input.link.customerKey ?? input.fallbackKey;
     await assertTenantLinks(tx, tenantId, {
       customerId: input.link.customerId,
@@ -443,6 +449,15 @@ export class ChatbotRequestWrapper {
       ? await insertRequestOnDedup(tx, data)
       : (await tx.chatbotRequest.create({ data, select: { id: true } })).id;
     if (!requestId) throw new IntakeMergeSignal();
+    if (envelope) {
+      await this.saveCreateReceipt(
+        tx,
+        tenantId,
+        envelope,
+        requestId,
+        data.folio,
+      );
+    }
     await tx.chatbotRequestEvent.create({
       data: {
         tenantId,
@@ -463,6 +478,56 @@ export class ChatbotRequestWrapper {
       },
     });
     await refreshCustomerGroup(tx, tenantId, customerKey);
+  }
+
+  /**
+   * The key's advisory lock, then its receipt. A legacy replay of this very
+   * key never reaches the hook (the old identity answers first), so a receipt
+   * found here was written by the direct path or by another body: conflict.
+   */
+  private async assertKeyFree(
+    tx: TenantClient,
+    tenantId: string,
+    envelope: BotIntakeEnvelope,
+  ): Promise<void> {
+    await lockBotKey(tx, tenantId, 'CREATE', envelope.sourceRequestId);
+    const taken = await tx.chatbotBotReceipt.count({
+      where: {
+        tenantId,
+        kind: 'CREATE',
+        idempotencyKey: envelope.sourceRequestId,
+      },
+    });
+    if (taken > 0) {
+      throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
+    }
+  }
+
+  /** Same answer the direct path stores, in the legacy transaction. */
+  private async saveCreateReceipt(
+    tx: TenantClient,
+    tenantId: string,
+    envelope: BotIntakeEnvelope,
+    requestId: string,
+    folio: number,
+  ): Promise<void> {
+    await tx.chatbotBotReceipt.create({
+      data: {
+        tenantId,
+        kind: 'CREATE',
+        idempotencyKey: envelope.sourceRequestId,
+        commandHash: envelope.hash,
+        requestId,
+        responseSnapshot: {
+          id: requestId,
+          folio: formatFolio(folio),
+          status: 'NEW',
+          outcome: 'CREATED',
+          mergedIntoId: null,
+          businessHours: null,
+        },
+      },
+    });
   }
 
   /** The envelope's customer, summary, context and window go on the request. */

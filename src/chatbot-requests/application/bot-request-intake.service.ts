@@ -242,32 +242,52 @@ export class BotRequestIntakeService {
     });
   }
 
-  /** Receipt of a stored merge, else the request this key already created. */
+  /**
+   * The answer stored for this key, if any. Every successful create stores one
+   * (direct, merged or wrapped), so a key reused with another body, or on the
+   * other path, is a conflict instead of a second request.
+   */
+  private async storedAnswer(
+    draft: DirectDraft,
+  ): Promise<BotCreateResponse | null> {
+    const receipt = await this.store.findReceipt(
+      'CREATE',
+      draft.envelope.sourceRequestId,
+    );
+    if (!receipt) return null;
+    if (receipt.commandHash !== draft.hash) throw conflict();
+    return receipt.responseSnapshot as BotCreateResponse;
+  }
+
+  /** The stored answer (a created one replays), else the row this key made. */
   private async replayOf(draft: DirectDraft): Promise<BotCreateResult | null> {
-    const { sourceRequestId } = draft.envelope;
-    const receipt = await this.store.findReceipt('CREATE', sourceRequestId);
-    if (receipt) {
-      if (receipt.commandHash !== draft.hash) throw conflict();
+    const stored = await this.storedAnswer(draft);
+    if (stored) {
       return {
         httpStatus: 200,
-        body: receipt.responseSnapshot as BotCreateResponse,
+        body:
+          stored.outcome === 'MERGED'
+            ? stored
+            : { ...stored, outcome: 'REPLAYED' },
       };
     }
-    const created = await this.store.findCreated(sourceRequestId);
+    const created = await this.store.findCreated(
+      draft.envelope.sourceRequestId,
+    );
     if (!created) return null;
     if (created.canonicalRequestHash !== draft.hash) throw conflict();
     return { httpStatus: 200, body: view(created, 'REPLAYED') };
   }
 
-  /** A merge is stored so a retry of its key answers the same. */
+  /** The answer is stored, so a retry of its key answers the same. */
   private async finish(
     draft: DirectDraft,
     made: IntakeOutcome,
   ): Promise<BotCreateResult> {
-    if (made.outcome === 'CREATED') {
-      return { httpStatus: 201, body: view(made, 'CREATED') };
-    }
-    const body = view(made, 'MERGED', made.status);
+    const merged = made.outcome === 'MERGED';
+    const body = merged
+      ? view(made, 'MERGED', made.status)
+      : view(made, 'CREATED');
     await this.store.saveReceipt(
       'CREATE',
       draft.envelope.sourceRequestId,
@@ -275,7 +295,7 @@ export class BotRequestIntakeService {
       made.id,
       body,
     );
-    return { httpStatus: 200, body };
+    return { httpStatus: merged ? 200 : 201, body };
   }
 
   private async createWrapped(
@@ -325,19 +345,19 @@ export class BotRequestIntakeService {
     };
   }
 
+  /**
+   * Wrapped path: a stored merge replays as is; another hash (this key was
+   * used with another body or by the direct path) conflicts; a stored create
+   * of the same hash is replayed by the legacy intake, which has the wrapped
+   * row to answer with.
+   */
   private async replayOfMerge(
     draft: DirectDraft,
   ): Promise<BotCreateResult | null> {
-    const receipt = await this.store.findReceipt(
-      'CREATE',
-      draft.envelope.sourceRequestId,
-    );
-    if (!receipt) return null;
-    if (receipt.commandHash !== draft.hash) throw conflict();
-    return {
-      httpStatus: 200,
-      body: receipt.responseSnapshot as BotCreateResponse,
-    };
+    const stored = await this.storedAnswer(draft);
+    return stored?.outcome === 'MERGED'
+      ? { httpStatus: 200, body: stored }
+      : null;
   }
 
   /** After the legacy transaction rolled back: merge, or let the loop retry. */

@@ -50,6 +50,22 @@ export class IntakeMergeSignal extends Error {
   }
 }
 
+/**
+ * Serializes the retries of one bot idempotency key (create or cancel), so a
+ * concurrent retry waits and replays. Text-namespaced like the staff lock.
+ */
+export async function lockBotKey(
+  tx: TenantClient,
+  tenantId: string,
+  kind: 'CREATE' | 'CANCEL',
+  key: string,
+): Promise<void> {
+  const namespaced = `chatbot-bot:${tenantId}:${kind}:${key}`;
+  await tx.$queryRaw(
+    Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${namespaced}, 0))::text`,
+  );
+}
+
 /** Serializes the creators of one customer; namespaced like the staff lock. */
 export async function lockCustomerIntake(
   tx: TenantClient,

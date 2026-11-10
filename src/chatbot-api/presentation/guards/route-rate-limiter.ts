@@ -6,7 +6,7 @@ import type { RateLimitDecision } from './credential-rate-limiter';
 
 export const ROUTE_RATE_LIMITER = Symbol('ROUTE_RATE_LIMITER');
 
-const WINDOW_MS = 60_000;
+/** The window is `interval '60 seconds'` in the statement below. */
 
 /**
  * Per-minute budget of each new route class when the credential has no
@@ -19,7 +19,7 @@ const WINDOW_MS = 60_000;
  * the credential's `rateLimit`.
  */
 export const DEFAULT_CLASS_LIMITS: Record<
-  Exclude<BotRouteClassName, 'default'>,
+  Exclude<BotRouteClassName, 'default' | 'humanDecisions'>,
   number
 > = { write: 300, read: 300, feed: 120 };
 
@@ -28,7 +28,6 @@ export interface RouteRateCheck {
   routeClass: BotRouteClassName;
   /** The budget when the credential has no override for this class. */
   defaultLimit: number;
-  now?: Date;
 }
 
 export interface RouteRateLimiter {
@@ -42,6 +41,11 @@ export interface RouteRateLimiter {
  * exact. The count is capped at `limit + 1` so a flood cannot overflow it. The
  * window opens at its first request and lasts one minute; `Retry-After` is the
  * time left in it.
+ *
+ * Every instant comes from the database clock (`now()` inside the statement,
+ * as UTC wall time to match the `timestamp` column), never from the replica,
+ * so replicas with skewed clocks cannot open, expire or shorten each other's
+ * windows. The time left is computed in the same statement.
  */
 @Injectable()
 export class PostgresRouteRateLimiter implements RouteRateLimiter {
@@ -49,10 +53,8 @@ export class PostgresRouteRateLimiter implements RouteRateLimiter {
 
   async check(input: RouteRateCheck): Promise<RateLimitDecision> {
     const { credentialId, routeClass } = input;
-    const now = input.now ?? new Date();
-    const cutoff = new Date(now.getTime() - WINDOW_MS);
     const rows = await this.prisma.$queryRaw<
-      { count: number; windowStart: Date; limit: number }[]
+      { count: number; limit: number; retryAfterMs: number }[]
     >(Prisma.sql`
       WITH cfg AS (
         SELECT CASE WHEN ("rateLimits" ->> ${routeClass}) ~ '^[1-9][0-9]{0,6}$'
@@ -62,23 +64,19 @@ export class PostgresRouteRateLimiter implements RouteRateLimiter {
         SELECT COALESCE((SELECT "override" FROM cfg), ${input.defaultLimit}::int) AS "limit"
       )
       INSERT INTO "service_rate_buckets" AS b ("credentialId", "routeClass", "count", "windowStart")
-      VALUES (${credentialId}, ${routeClass}, 1, ${now})
+      VALUES (${credentialId}, ${routeClass}, 1, now() AT TIME ZONE 'UTC')
       ON CONFLICT ("credentialId", "routeClass") DO UPDATE SET
-        "count" = CASE WHEN b."windowStart" <= ${cutoff} THEN 1
+        "count" = CASE WHEN b."windowStart" <= (now() AT TIME ZONE 'UTC') - interval '60 seconds' THEN 1
                        ELSE LEAST(b."count" + 1, (SELECT "limit" FROM lim) + 1) END,
-        "windowStart" = CASE WHEN b."windowStart" <= ${cutoff} THEN ${now}
+        "windowStart" = CASE WHEN b."windowStart" <= (now() AT TIME ZONE 'UTC') - interval '60 seconds' THEN now() AT TIME ZONE 'UTC'
                              ELSE b."windowStart" END
-      RETURNING b."count", b."windowStart", (SELECT "limit" FROM lim) AS "limit"
+      RETURNING b."count", (SELECT "limit" FROM lim) AS "limit",
+        GREATEST(0, (EXTRACT(EPOCH FROM (b."windowStart" + interval '60 seconds' - (now() AT TIME ZONE 'UTC'))) * 1000))::float8 AS "retryAfterMs"
     `);
     const row = rows[0];
     if (!row) throw new Error('Route rate bucket unavailable');
-    if (row.count <= row.limit) return { allowed: true, retryAfterMs: 0 };
-    return {
-      allowed: false,
-      retryAfterMs: Math.max(
-        0,
-        row.windowStart.getTime() + WINDOW_MS - now.getTime(),
-      ),
-    };
+    return row.count <= row.limit
+      ? { allowed: true, retryAfterMs: 0 }
+      : { allowed: false, retryAfterMs: row.retryAfterMs };
   }
 }

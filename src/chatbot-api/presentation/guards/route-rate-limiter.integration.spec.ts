@@ -1,12 +1,14 @@
 /**
  * R2 against real PostgreSQL: the counters live in `service_rate_buckets`, so
  * two limiter instances (two replicas) share one budget per
- * (credential, route class).
+ * (credential, route class), and the window is measured by the database clock
+ * (a replica's clock never enters the decision).
  */
 import { randomUUID } from 'crypto';
 import { integrationPrisma } from '../../../../test/integration/reset-db';
 import type { PrismaService } from '../../../shared/prisma/prisma.service';
 import type { RateLimitDecision } from './credential-rate-limiter';
+import type { BotRouteClassName } from './route-class';
 import {
   DEFAULT_CLASS_LIMITS,
   PostgresRouteRateLimiter,
@@ -26,14 +28,12 @@ describeIfDb('PostgresRouteRateLimiter (PostgreSQL)', () => {
     prisma as unknown as PrismaService,
   );
   const tenantId = randomUUID();
-  const credentialId = randomUUID();
-  const t0 = new Date('2026-11-10T12:00:00.000Z');
-  const at = (seconds: number) => new Date(t0.getTime() + seconds * 1000);
+  let credentialId: string;
+  const used: string[] = [];
 
-  beforeAll(async () => {
-    await prisma.tenant.create({
-      data: { id: tenantId, name: 'Rate', slug: `rate-${tenantId}` },
-    });
+  beforeEach(async () => {
+    credentialId = randomUUID();
+    used.push(credentialId);
     await prisma.serviceCredential.create({
       data: {
         id: credentialId,
@@ -45,26 +45,48 @@ describeIfDb('PostgresRouteRateLimiter (PostgreSQL)', () => {
     });
   });
 
+  beforeAll(async () => {
+    await prisma.tenant.create({
+      data: { id: tenantId, name: 'Rate', slug: `rate-${tenantId}` },
+    });
+  });
+
   afterAll(async () => {
-    await prisma.serviceRateBucket.deleteMany({ where: { credentialId } });
+    await prisma.tenant.deleteMany({ where: { id: tenantId } });
+    await prisma.serviceRateBucket.deleteMany({
+      where: { credentialId: { in: used } },
+    });
   });
 
   const spend = (
     limiter: PostgresRouteRateLimiter,
-    routeClass: 'default' | 'write' | 'read' | 'feed',
-    over: { defaultLimit?: number; now?: Date } = {},
-  ) =>
-    limiter.check({
-      credentialId,
-      routeClass,
-      defaultLimit: over.defaultLimit ?? 5,
-      now: over.now,
-    });
+    routeClass: BotRouteClassName,
+    defaultLimit = 5,
+  ) => limiter.check({ credentialId, routeClass, defaultLimit });
+
+  /** Moves a bucket's window start back, as if it opened `seconds` ago. */
+  const openedAgo = (routeClass: BotRouteClassName, seconds: number) =>
+    prisma.$executeRaw`
+      UPDATE "service_rate_buckets"
+      SET "windowStart" = (now() AT TIME ZONE 'UTC') - make_interval(secs => ${seconds})
+      WHERE "credentialId" = ${credentialId} AND "routeClass" = ${routeClass}`;
+
+  const exhaust = async (
+    limiter: PostgresRouteRateLimiter,
+    routeClass: BotRouteClassName,
+    limit: number,
+  ) => {
+    const decisions: RateLimitDecision[] = [];
+    for (let i = 0; i < limit + 1; i++) {
+      decisions.push(await spend(limiter, routeClass, limit));
+    }
+    return decisions;
+  };
 
   it('shares one budget between two instances under concurrency', async () => {
     const results = await Promise.all(
       Array.from({ length: 24 }, (_, i) =>
-        spend(i % 2 ? replicaA : replicaB, 'default', { now: at(0) }),
+        spend(i % 2 ? replicaA : replicaB, 'default'),
       ),
     );
 
@@ -72,46 +94,132 @@ describeIfDb('PostgresRouteRateLimiter (PostgreSQL)', () => {
     expect(results.filter((r) => !r.allowed)).toHaveLength(19);
   });
 
-  it('answers Retry-After from the window start and resets after the window', async () => {
-    const blocked = await spend(replicaA, 'default', { now: at(20) });
-    expect(blocked).toEqual({ allowed: false, retryAfterMs: 40_000 });
+  it('answers Retry-After from the database clock and resets after the window', async () => {
+    await exhaust(replicaA, 'default', 5);
+    await openedAgo('default', 20);
 
-    const next = await spend(replicaB, 'default', { now: at(61) });
-    expect(next).toEqual({ allowed: true, retryAfterMs: 0 });
+    const blocked = await spend(replicaB, 'default');
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterMs).toBeGreaterThan(39_000);
+    expect(blocked.retryAfterMs).toBeLessThanOrEqual(40_000);
+
+    await openedAgo('default', 61);
+    expect(await spend(replicaB, 'default')).toEqual({
+      allowed: true,
+      retryAfterMs: 0,
+    });
   });
 
-  it('keeps a bucket per route class', async () => {
-    for (let i = 0; i < 5; i++) {
-      expect((await spend(replicaA, 'feed', { now: at(100) })).allowed).toBe(
+  it('ignores the replica clock: a skewed process decides the same', async () => {
+    jest.useFakeTimers({
+      now: new Date('2035-01-01T00:00:00.000Z'),
+      doNotFake: [
+        'nextTick',
+        'setImmediate',
+        'clearImmediate',
+        'setInterval',
+        'clearInterval',
+        'setTimeout',
+        'clearTimeout',
+        'queueMicrotask',
+        'performance',
+        'hrtime',
+      ],
+    });
+    try {
+      const decisions = await exhaust(replicaA, 'write', 3);
+      expect(decisions.map((d) => d.allowed)).toEqual([
         true,
-      );
+        true,
+        true,
+        false,
+      ]);
+      expect(decisions[3].retryAfterMs).toBeGreaterThan(0);
+      expect(decisions[3].retryAfterMs).toBeLessThanOrEqual(60_000);
+
+      await openedAgo('write', 61);
+      expect((await spend(replicaB, 'write', 3)).allowed).toBe(true);
+    } finally {
+      jest.useRealTimers();
     }
-    expect((await spend(replicaA, 'feed', { now: at(100) })).allowed).toBe(
-      false,
-    );
-    expect((await spend(replicaA, 'write', { now: at(100) })).allowed).toBe(
-      true,
-    );
   });
 
-  it('uses the class default of the caller unless the credential overrides it', async () => {
+  it('keeps an independent bucket per route class', async () => {
+    const feed = await exhaust(replicaA, 'feed', 5);
+    expect(feed.map((d) => d.allowed)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+    ]);
+
+    expect((await spend(replicaA, 'write')).allowed).toBe(true);
+    expect((await spend(replicaB, 'default')).allowed).toBe(true);
+  });
+
+  it('keeps the human-decision routes and the other chatbot-api routes apart', async () => {
+    const hd = await exhaust(replicaA, 'humanDecisions', 4);
+    expect(hd.map((d) => d.allowed)).toEqual([true, true, true, true, false]);
+    // exhausted `humanDecisions` does not touch `default` ...
+    const other = await exhaust(replicaB, 'default', 4);
+    expect(other.map((d) => d.allowed)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      false,
+    ]);
+
+    // ... and the other way round: a fresh credential spends `default` first
+    credentialId = randomUUID();
+    used.push(credentialId);
+    await prisma.serviceCredential.create({
+      data: {
+        id: credentialId,
+        tenantId,
+        name: 'bot2',
+        hashedKey: randomUUID(),
+        scopes: ['requests:create'],
+      },
+    });
+    await exhaust(replicaA, 'default', 4);
+    const hdAfter = await exhaust(replicaB, 'humanDecisions', 4);
+    expect(hdAfter.map((d) => d.allowed)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      false,
+    ]);
+  });
+
+  it('honors per-credential overrides of any class, `default` and `humanDecisions` included', async () => {
     expect(DEFAULT_CLASS_LIMITS.write).toBeGreaterThanOrEqual(300);
     await prisma.serviceCredential.update({
       where: { id: credentialId },
-      data: { rateLimits: { read: 2, write: 'abc', feed: -4 } },
+      data: {
+        rateLimits: {
+          read: 2,
+          write: 'abc',
+          feed: -4,
+          default: 3,
+          humanDecisions: 1,
+        },
+      },
     });
 
-    const reads: RateLimitDecision[] = [];
-    for (let i = 0; i < 3; i++) {
-      reads.push(await spend(replicaA, 'read', { now: at(200) }));
-    }
-    expect(reads.map((r) => r.allowed)).toEqual([true, true, false]);
-
+    const reads = await exhaust(replicaA, 'read', 5);
+    expect(reads.filter((r) => r.allowed)).toHaveLength(2);
     // garbage overrides fall back to the caller's default
-    const writes: RateLimitDecision[] = [];
-    for (let i = 0; i < 6; i++) {
-      writes.push(await spend(replicaA, 'write', { now: at(200) }));
-    }
+    const writes = await exhaust(replicaA, 'write', 5);
     expect(writes.filter((r) => r.allowed)).toHaveLength(5);
+    const feed = await exhaust(replicaA, 'feed', 5);
+    expect(feed.filter((r) => r.allowed)).toHaveLength(5);
+    const defaults = await exhaust(replicaA, 'default', 60);
+    expect(defaults.filter((r) => r.allowed)).toHaveLength(3);
+    const hd = await exhaust(replicaB, 'humanDecisions', 60);
+    expect(hd.filter((r) => r.allowed)).toHaveLength(1);
   });
 });

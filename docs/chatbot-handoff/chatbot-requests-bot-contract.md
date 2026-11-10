@@ -8,7 +8,7 @@ What the chatbot session consumes. Contract source: `docs/proposals/human-interv
 | --- | --- |
 | Auth | `Authorization: Bearer svc_…`. `X-Branch-Id`, when sent, must equal the credential's tenant (else `403 FORBIDDEN`). The tenant, source and credential never go in a body. |
 | Scopes | `requests:create`, `requests:read`, `requests:cancel`, `feed:read`, `feed:ack`, `conversation:write`, `media:write`. They are free text on `ServiceCredential.scopes`; add the ones a credential needs. A missing scope is `403 INSUFFICIENT_SCOPE`. This slice's routes use `requests:create` and `requests:cancel`. |
-| Idempotency | Every write sends `X-Idempotency-Key: <uuid>`. Create: it must equal the body's `sourceRequestId` (compared literally, else `400`). Cancel: any UUID. Same key and same canonical hash → the same answer; same key and another body → `409 IDEMPOTENCY_CONFLICT`. |
+| Idempotency | Every write sends `X-Idempotency-Key: <uuid>`. Create: it must equal the body's `sourceRequestId` (compared literally, else `400`). Cancel: any UUID. Same key and same canonical hash → the same answer; same key and another body → `409 IDEMPOTENCY_CONFLICT`. Create keys are one namespace across all subtypes: a `sourceRequestId` already used for a `RESTOCK` and sent again as a `COMPLAINT` (or the other way round) is a conflict, never a second request. |
 | Errors | `{ "statusCode": 409, "code": "…", "message": "…" }` plus the extra fields listed per error. All responses, errors included, carry `Cache-Control: no-store`. |
 | Rate limit | `429 RATE_LIMITED` with `Retry-After` (seconds). See "Route budgets". |
 
@@ -39,7 +39,7 @@ Unknown keys are `400`. Field rules:
 | `sourceRequestId` | UUID. |
 | `subtype` | `UNKNOWN_QUESTION`, `TALK_TO_HUMAN`, `COMPLAINT` (created directly) or `RESTOCK`, `EXPIRATION`, `DELIVERY_ZONE` (legacy intake). `TRANSFER_RECEIPT` and `DISCOUNT` → `422 SUBTYPE_DISABLED` (receipts keep entering through `POST /chatbot-api/sales/:id/receipts`). |
 | `customer` | `{phoneCountryCode, phone, displayName?}`. The backend computes `customerKey` with `canonicalPhone` (R1): Mexico's `521` + 10 digits and `52` + 10 digits are the same person. `displayName` is validated and **not stored**. A number with no canonical form is `400`. Required for the three direct subtypes; optional for the wrapped ones. |
-| `conversationRef`, `lastCustomerMessageAt` | Required for the direct subtypes (≤ 200 chars; ISO-8601 with `Z` or an offset). The 24 h window closes at `lastCustomerMessageAt + 24 h`. |
+| `conversationRef`, `lastCustomerMessageAt` | Required for the direct subtypes (≤ 200 chars; ISO-8601 with `Z` or an offset). The 24 h window closes at `lastCustomerMessageAt + 24 h`. `lastCustomerMessageAt` must be at most 5 minutes in the future and at most 30 days old, else `400 VALIDATION_ERROR` (also when the request merges). |
 | `summary` | 1..140 chars, no control characters. Required for the direct subtypes; wrapped ones default to a short Spanish label. |
 | `needs` | ≤ 1000 chars, plain text. |
 | `context` | Only these keys: `cartRef`, `saleId`, `orderId` (id strings ≤ 100), `productIds`, `variantIds` (≤ 20 ids), `quantity` (integer 0..100000). Never prices. |
@@ -98,7 +98,7 @@ Scope `requests:cancel`, class `write`. Body `{ "reason": "CUSTOMER_WITHDREW" | 
 | Status / code | When |
 | --- | --- |
 | `404 NOT_FOUND` | unknown id, or an id of another branch |
-| `409 ALREADY_RESOLVED` | the request is `RESOLVED`; the body carries `resolution` (the staff answer, e.g. `{"action":"REPLY","text":"…"}`) so the bot delivers it instead of saying "cancelled" |
+| `409 ALREADY_RESOLVED` | the request is `RESOLVED`; the body carries `resolution` (what staff decided, e.g. `{"action":"PROVIDE_RESTOCK_ESTIMATE","restockDays":7,"via":"LEGACY_ROUTE"}` for a stock decision) so the bot delivers it instead of saying "cancelled". Clarification replies (`resolution` with text) arrive with unit 10; until then only decisions have a `resolution` |
 | `409 REQUEST_CLOSED` | already `CANCELLED` (with another key) |
 | `409 CANCEL_NOT_ALLOWED` | a live conversation (`STARTING`/`ACTIVE`/`ENDING`); the customer's words go to the attendant (§4). Live sessions arrive with unit 11, so no request is live yet |
 | `409 IDEMPOTENCY_CONFLICT`, `400 VALIDATION_ERROR` | as above |
@@ -106,7 +106,7 @@ Scope `requests:cancel`, class `write`. Body `{ "reason": "CUSTOMER_WITHDREW" | 
 Notes:
 
 - Works on `NEW` and `IN_PROGRESS` requests, every kind, including a conversation that has not started (`WAITING`).
-- For a wrapped decision (`RESTOCK`, `EXPIRATION`, `DELIVERY_ZONE`) only the request closes; the legacy row stays `PENDING` and the old routes still work on it (see `docs/chatbot-requests-model.md`, "Customer cancel").
+- For a wrapped decision (`RESTOCK`, `EXPIRATION`, `DELIVERY_ZONE`) only the request closes; the legacy row stays `PENDING` and the old routes still work on it (see `docs/chatbot-requests-model.md`, "Customer cancel"). **After a successful cancel the bot must drop its own pending record of the legacy row for that decision and ignore any later outcome of `GET /chatbot-api/human-decisions/:id` for it.** Staff may still resolve the legacy row afterwards (a stock decision, or a zone resolved for other customers), and that poll then answers `RESOLVED`; the customer withdrew, so the bot sends nothing. Example: the customer asks for stock of croquetas, the bot creates the request (`legacy.id = "hd-1"`), the customer says "ya no", the bot cancels (`200`) and deletes its `hd-1` tracking; ten minutes later staff answers `hd-1` and the poll returns `RESOLVED`; the bot ignores it and does not call `application-outcome` for it.
 - A cancelled request leaves the inbox group and sends no message to the customer.
 
 ## Route budgets (R2)
@@ -115,11 +115,16 @@ Counters live in PostgreSQL (`service_rate_buckets`), so every replica shares th
 
 | Class | Used by | Default per minute | Override |
 | --- | --- | --- | --- |
-| `default` | every route that existed before this contract (catalog, checkout, human-decisions, receipts…) | the credential's `rateLimit` (60) | `rateLimit` column |
+| `default` | the other chatbot-api routes that existed before this contract (catalog, customers, checkout, shipping quotes, receipts…) | the credential's `rateLimit` (60) | `rateLimits.default`, else `rateLimit` |
+| `humanDecisions` | the stock, expiration and delivery-zone routes: `POST /chatbot-api/human-decisions`, `GET /chatbot-api/human-decisions/:id`, `POST …/:id/application-outcome` | the credential's `rateLimit` (60) | `rateLimits.humanDecisions`, else `rateLimit` |
 | `write` | `POST /chatbot-api/requests`, `…/:id/cancel` | 300 | `rateLimits.write` |
 | `read` | reserved for the read routes (slice 5b+) | 300 | `rateLimits.read` |
 | `feed` | reserved for the feed long-poll (slice 5b); never spends `write` or `read` | 120 | `rateLimits.feed` |
 
-`ServiceCredential.rateLimits` is optional JSON, e.g. `{"write": 600}`; a missing or invalid class uses its default. The defaults are sized for 60 inbound messages per minute per branch with headroom (proposal §6.4, §11.1) and are measured in the pilot.
+`humanDecisions` and `default` have the same budget but **separate counters**: spending one never uses the other (owner decision M1), so stock and expiration traffic cannot starve the catalog and checkout routes, nor the reverse.
+
+`ServiceCredential.rateLimits` is optional JSON mapping a class name to a per-minute budget, e.g. `{"write": 600, "humanDecisions": 120}`. Any class can be overridden, `default` and `humanDecisions` included; a missing, non-numeric or non-positive value (valid: integers 1..9,999,999) falls back to the class default above. The defaults are sized for 60 inbound messages per minute per branch with headroom (proposal §6.4, §11.1) and are measured in the pilot.
+
+The window is measured by the database clock, not by the backend replica's, so replicas with skewed clocks cannot shorten each other's windows; `Retry-After` is the time left in the window, rounded up to whole seconds.
 
 Behavior note: the old in-memory limiter was a sliding window per process; the shared one is a fixed window anchored at the first request, so a burst across a window edge can reach up to twice the budget. The count and the limit per minute are unchanged.
