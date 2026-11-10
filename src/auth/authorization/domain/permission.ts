@@ -81,6 +81,16 @@ export type AppSubjects =
   | 'CashHandover'
   | 'CashClosing'
   | 'CashSessionAudit'
+  // human-intervention / T1 (contract v1 §2.5) — chatbot requests. Like the
+  // cash subjects, several are capabilities rather than tables so the
+  // frontend's mirrored action list never grows.
+  | 'ChatbotRequest'
+  | 'ChatbotRequestAssignment'
+  | 'ChatbotConversation'
+  | 'ChatbotEscalation'
+  | 'CustomerPhone'
+  | 'ChatbotSettings'
+  | 'ChatbotSettingsAllBranches'
   | 'all';
 
 /**
@@ -868,5 +878,65 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'CashSessionAudit',
     action: 'read',
     description: 'View wider cash-session audit visibility',
+  },
+
+  // human-intervention / T1 (contract v1 §2.5) — chatbot requests. One row
+  // per capability agreed with the frontend, which registers the same codes.
+  // Only existing `AppActions` verbs are used (cash-register precedent) and
+  // `manage` is never registered here: it is a CASL wildcard, so only the
+  // super admin's `manage:all` implies these. Seeded defaults (prisma/seed.ts,
+  // owner choice L2): Manager all but `update:ChatbotSettingsAllBranches`,
+  // Cashier `read`/`update:ChatbotRequest` + `read:ChatbotConversation`.
+  // Existing databases: scripts/ops/grant-chatbot-request-permissions.cjs.
+  {
+    subject: 'ChatbotRequest',
+    action: 'read',
+    description:
+      'View the chatbot request inbox, history, details and counters',
+  },
+  {
+    subject: 'ChatbotRequest',
+    action: 'update',
+    description:
+      'Claim, release own, resolve, reply and chat on chatbot requests',
+  },
+  {
+    subject: 'ChatbotRequestAssignment',
+    action: 'update',
+    description:
+      "Reassign or release another person's chatbot requests and hand them back to the bot",
+  },
+  {
+    subject: 'ChatbotConversation',
+    action: 'read',
+    description: 'View the bot conversation history, media and audio',
+  },
+  {
+    subject: 'ChatbotEscalation',
+    action: 'read',
+    description: 'Receive chatbot request escalation notifications',
+  },
+  {
+    subject: 'CustomerPhone',
+    action: 'read',
+    description: 'View unmasked customer phone numbers',
+  },
+  {
+    subject: 'ChatbotSettings',
+    action: 'read',
+    description:
+      'View chatbot business hours, closed days, timeouts and scheduling',
+  },
+  {
+    subject: 'ChatbotSettings',
+    action: 'update',
+    description:
+      'Edit chatbot business hours, closed days, timeouts and scheduling',
+  },
+  {
+    subject: 'ChatbotSettingsAllBranches',
+    action: 'update',
+    description:
+      'Copy chatbot settings to every branch where the user holds this permission',
   },
 ];
