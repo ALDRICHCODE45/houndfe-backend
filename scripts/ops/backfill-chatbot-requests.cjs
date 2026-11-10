@@ -17,9 +17,15 @@
 // Run it right after deploying the 3a code and before announcing the inbox, from
 // the app root (the directory holding dist/, node_modules/ and prisma/; /app
 // inside the container). docs/chatbot-requests-backfill.md is the runbook.
-// The output has counts and ids only: no phone numbers, no customer text.
+// The output has counts and ids only: no phone numbers, no customer text. A
+// crash prints the error class and its Prisma/PostgreSQL code (P2002, 40P01),
+// never the raw message, and any run of 6+ digits is redacted.
+//
+// Exit codes: 0 clean (or a dry run / apply that finished), 1 --check found a
+// mismatch, 2 the script crashed (bad arguments, missing build, database error).
 'use strict';
 
+const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 
@@ -33,10 +39,12 @@ const RECENT_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SUBTYPES = ['RESTOCK', 'EXPIRATION', 'DELIVERY_ZONE', 'TRANSFER_RECEIPT'];
 const EXAMPLE_LIMIT = 5;
+const EXIT = Object.freeze({ CLEAN: 0, MISMATCH: 1, CRASH: 2 });
 
 class OpsError extends Error {
   constructor(code, message) {
     super(message);
+    this.name = 'OpsError';
     this.code = code;
   }
 }
@@ -87,6 +95,17 @@ function recentCutoff(now, days = RECENT_DAYS) {
   return new Date(now.getTime() - days * DAY_MS);
 }
 
+/** `RESTOCK 41 d, DELIVERY_ZONE 3 d`: whole days since the oldest row was created. */
+function oldestPending(report, tenant) {
+  const parts = SUBTYPES.flatMap((subtype) => {
+    const at = tenant.oldestOpenAt?.[subtype];
+    if (!at) return [];
+    const days = Math.max(0, Math.floor((report.now - at) / DAY_MS));
+    return [`${subtype} ${days} d`];
+  });
+  return parts.length === 0 ? 'none' : parts.join(', ');
+}
+
 const slugOf = (slugs, tenantId) => slugs.get(tenantId) ?? tenantId;
 
 function formatReport(report, slugs, log) {
@@ -111,6 +130,7 @@ function formatReport(report, slugs, log) {
     ambiguous += tenant.ambiguousCustomers;
     wrapped += tenant.alreadyWrapped;
     log(`  ambiguous customers: ${tenant.ambiguousCustomers}`);
+    log(`  oldest pending row to wrap: ${oldestPending(report, tenant)}`);
     log(`  skipped, already wrapped: ${tenant.alreadyWrapped}`);
     if (tenant.changedUnderLock > 0) {
       log(
@@ -160,19 +180,53 @@ function formatCheck(report, slugs, log) {
   log(
     mismatches === 0
       ? `OK: 0 mismatches across ${report.tenants.length} tenant(s).`
-      : `MISMATCH: ${mismatches} across ${report.tenants.length} tenant(s). Re-run --apply for MISSING_REQUEST; a lone result under live traffic may be transient, so re-check first.`,
+      : `MISMATCH: ${mismatches} across ${report.tenants.length} tenant(s). Re-run --apply for MISSING_REQUEST or RESOLVED_UNWRAPPED; a lone result under live traffic may be transient, so re-check first.`,
   );
   return mismatches;
 }
 
+const redact = (text) => String(text).replace(/\d{6,}/g, '[redacted]');
+
+/** The error class and the Prisma/PostgreSQL code(s): never the raw message. */
+function errorCodes(err) {
+  const codes = [err?.code, err?.meta?.code, err?.cause?.code].filter(
+    (code) => typeof code === 'string' && /^[A-Za-z0-9_]{3,40}$/.test(code),
+  );
+  return [...new Set(codes)];
+}
+
+/**
+ * The single line printed when the script crashes. Our own `OpsError`s carry a
+ * message we wrote (digit runs redacted); anything else (Prisma, pg, Node) can
+ * echo customer values in its message, so only its class and code are shown.
+ */
+function formatFailure(err) {
+  const isError = err !== null && typeof err === 'object';
+  if (isError && err.name === 'OpsError') {
+    return `FAILED ${err.code ?? 'ERROR'}: ${redact(err.message).slice(0, 1000)}`;
+  }
+  const name =
+    isError && typeof err.name === 'string' && /^\w+$/.test(err.name)
+      ? err.name
+      : 'UnknownError';
+  return ['FAILED', name, ...(isError ? errorCodes(err) : [])].join(' ');
+}
+
 function loadCore(appRoot) {
   const file = path.join(appRoot, CORE_DIST);
-  try {
-    return createRequire(file)(file);
-  } catch {
+  if (!fs.existsSync(file)) {
     throw new OpsError(
       'BUILD_MISSING',
-      `${CORE_DIST} not found; run from the app root of a built release`,
+      `${CORE_DIST} not found; run from the app root of a release built from the backfill commit or later`,
+    );
+  }
+  try {
+    return createRequire(file)(file);
+  } catch (err) {
+    const detail = ['', ...errorCodes(err)].join(' ');
+    throw new OpsError(
+      'LOAD_FAILED',
+      `${CORE_DIST} exists but failed to load (${err?.name ?? 'error'}${detail})`,
     );
   }
 }
@@ -207,7 +261,7 @@ async function run({ args, prisma, core, log, now = new Date() }) {
 
   if (args.check) {
     const report = await core.checkInvariant(prisma, { tenantIds });
-    return formatCheck(report, slugs, log) === 0 ? 0 : 1;
+    return formatCheck(report, slugs, log) === 0 ? EXIT.CLEAN : EXIT.MISMATCH;
   }
   const report = await core.runBackfill(prisma, {
     apply: args.apply,
@@ -216,7 +270,7 @@ async function run({ args, prisma, core, log, now = new Date() }) {
     now,
   });
   formatReport(report, slugs, log);
-  return 0;
+  return EXIT.CLEAN;
 }
 
 async function main() {
@@ -260,8 +314,10 @@ async function main() {
 module.exports = {
   BATCH_SIZE,
   CORE_DIST,
+  EXIT,
   RECENT_DAYS,
   formatCheck,
+  formatFailure,
   formatReport,
   loadCore,
   parseArgs,
@@ -271,13 +327,10 @@ module.exports = {
 
 if (require.main === module) {
   main().then(
-    () => process.exit(process.exitCode ?? 0),
+    () => process.exit(process.exitCode ?? EXIT.CLEAN),
     (err) => {
-      const code = err?.code ?? err?.name ?? 'ERROR';
-      console.error(
-        `FAILED ${code}: ${String(err?.message ?? err).slice(0, 4000)}`,
-      );
-      process.exit(1);
+      console.error(formatFailure(err));
+      process.exit(EXIT.CRASH);
     },
   );
 }

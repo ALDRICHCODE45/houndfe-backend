@@ -16,6 +16,7 @@
  */
 import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { integrationPrisma } from '../../test/integration/reset-db';
 import { PrismaDeliveryZoneBotRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-bot.repository';
@@ -25,10 +26,22 @@ import { APPROVE_DELIVERY_ZONE } from '../delivery-zones/domain/delivery-zone-va
 import { PrismaHumanDecisionReviewResolveRepository } from '../human-decisions/infrastructure/prisma-human-decision-review-resolve.repository';
 import { PrismaRestockIntakeRepository } from '../human-decisions/infrastructure/prisma-restock-intake.repository';
 import { ReceiptUploadService } from '../receipts/application/receipt-upload.service';
+import { PrismaReceiptReviewRepository } from '../sales/review/infrastructure/prisma-receipt-review.repository';
+import { ReceiptReviewService } from '../sales/review/receipt-review.service';
+import type { SalesService } from '../sales/sales.service';
+import type { ISaleRepository } from '../sales/domain/sale.repository';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
-import { ChatbotRequestWrapper } from './infrastructure/chatbot-request-wrapper';
+import {
+  ChatbotRequestWrapper,
+  humanDecisionWrap,
+  requestCreateData,
+} from './infrastructure/chatbot-request-wrapper';
+import {
+  allocateFolio,
+  refreshCustomerGroup,
+} from './infrastructure/chatbot-request-writes';
 import {
   checkInvariant,
   runBackfill,
@@ -77,6 +90,42 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
     {
       find: () => Promise.resolve({ enabled: false, enabledActions: [] }),
     } as never,
+    new OutboxWriterService(),
+    wrapper,
+  );
+
+  // Only the payment write is faked: it locks and settles the sale like the
+  // real one, so the lock order request -> receipt -> sale is exercised.
+  const salesService = {
+    addPayment: async (
+      saleId: string,
+      _actor: string,
+      dto: { amountCents: number },
+    ) => {
+      const db = tenantPrisma.getClient();
+      await db.$queryRaw(
+        Prisma.sql`SELECT "id" FROM "sales" WHERE "id" = ${saleId} FOR UPDATE`,
+      );
+      const sale = await db.sale.update({
+        where: { id: saleId },
+        data: {
+          paidCents: { increment: dto.amountCents },
+          debtCents: { decrement: dto.amountCents },
+          paymentStatus: 'PAID',
+        },
+        select: { totalCents: true, paidCents: true, debtCents: true },
+      });
+      return { saleId, ...sale, paymentStatus: 'PAID', paymentIds: [] };
+    },
+  } as unknown as SalesService;
+  const receipts = new ReceiptReviewService(
+    new PrismaReceiptReviewRepository(tenantPrisma),
+    salesService,
+    {
+      runInTransaction: <T>(work: () => Promise<T>) =>
+        tenantPrisma.runInTransaction(work),
+    } as unknown as ISaleRepository,
+    tenantPrisma,
     new OutboxWriterService(),
     wrapper,
   );
@@ -578,6 +627,34 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
       expect(tenant.undatedRejectedReceipts).toBe(1);
       expect(tenant.changedUnderLock).toBe(0);
 
+      // Age of the oldest PENDING row to wrap, per subtype (unit 7 sizes the
+      // SLA burst from it). The pre-wrapped decision is not "to create".
+      const created = async (
+        table: 'humanDecision' | 'deliveryZoneRequest' | 'receiptEvidence',
+        ids: string[],
+      ) => {
+        const delegate = prisma[table] as unknown as {
+          findMany: (args: unknown) => Promise<{ createdAt: Date }[]>;
+        };
+        const rows = await delegate.findMany({ where: { id: { in: ids } } });
+        return new Date(Math.min(...rows.map((r) => r.createdAt.getTime())));
+      };
+      expect(tenant.oldestOpenAt).toEqual({
+        RESTOCK: await created('humanDecision', fx.restockOpen),
+        EXPIRATION: await created('humanDecision', [fx.expirationOpen]),
+        DELIVERY_ZONE: await created(
+          'deliveryZoneRequest',
+          Object.values(fx.zoneOpen),
+        ),
+        TRANSFER_RECEIPT: await created('receiptEvidence', [
+          fx.receiptOpen,
+          fx.receiptOpenNoCustomer,
+        ]),
+      });
+      expect(tenant.oldestOpenAt.RESTOCK?.getTime()).toBeLessThan(
+        report.now.getTime() - 39 * DAY_MS,
+      );
+
       expect(await requestsOf(fx.tenantId)).toEqual(before);
       expect(
         await prisma.chatbotRequestFolioCounter.findUnique({
@@ -845,7 +922,13 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
           (m) => m.kind === 'MISSING_REQUEST',
         ),
       ).toHaveLength(8);
-      expect(before.tenants[0].mismatches.length).toBe(8);
+      // The 4 rows resolved in the last 7 days have no wrapper either.
+      expect(
+        before.tenants[0].mismatches.filter(
+          (m) => m.kind === 'RESOLVED_UNWRAPPED',
+        ),
+      ).toHaveLength(4);
+      expect(before.tenants[0].mismatches.length).toBe(12);
 
       await runBackfill(prisma, { apply: true, tenantIds: [fx.tenantId] });
       const check = await expectClean(fx.tenantId);
@@ -897,6 +980,57 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
       expect(totalCreated(tenantReport(all, b.tenantId))).toBe(12);
       // Folios are per tenant: each starts over.
       expect((await requestsOf(b.tenantId))[0].folio).toBe(1);
+    });
+
+    it('wraps only the chatbot source, like the legacy tray: other sources are never wrapped, counted or flagged', async () => {
+      const tenantId = await newTenant();
+      const own = await seedDecision(tenantId, { type: 'RESTOCK' });
+      const foreign = await prisma.humanDecision.create({
+        data: {
+          tenantId,
+          source: 'another-bot',
+          sourceRequestId: randomUUID(),
+          type: 'RESTOCK',
+          canonicalRequestHash: 'hash',
+          submittedCredentialId: 'cred',
+          branchId: 'branch',
+          productId: randomUUID(),
+          productName: 'Otro origen',
+        },
+      });
+      const dry = tenantReport(
+        await runBackfill(prisma, { apply: false, tenantIds: [tenantId] }),
+        tenantId,
+      );
+      expect(dry.create.RESTOCK).toEqual({ open: 1, resolved: 0 });
+      const report = tenantReport(
+        await runBackfill(prisma, { apply: true, tenantIds: [tenantId] }),
+        tenantId,
+      );
+      expect(report.create.RESTOCK).toEqual({ open: 1, resolved: 0 });
+      expect(await requestOf(tenantId, own)).not.toBeNull();
+      expect(await requestOf(tenantId, foreign.id)).toBeNull();
+      // Neither a second run nor --check sees the foreign row as a gap.
+      const again = tenantReport(
+        await runBackfill(prisma, { apply: false, tenantIds: [tenantId] }),
+        tenantId,
+      );
+      expect(totalCreated(again)).toBe(0);
+      expect(again.alreadyWrapped).toBe(1);
+      await expectClean(tenantId);
+    });
+
+    it('reports no oldest pending row for a subtype with nothing to wrap', async () => {
+      const tenantId = await newTenant();
+      await seedDecision(tenantId, { type: 'RESTOCK', createdDaysAgo: 3 });
+      const tenant = tenantReport(
+        await runBackfill(prisma, { apply: false, tenantIds: [tenantId] }),
+        tenantId,
+      );
+      expect(tenant.oldestOpenAt.RESTOCK).toBeInstanceOf(Date);
+      expect(tenant.oldestOpenAt.EXPIRATION).toBeNull();
+      expect(tenant.oldestOpenAt.DELIVERY_ZONE).toBeNull();
+      expect(tenant.oldestOpenAt.TRANSFER_RECEIPT).toBeNull();
     });
   });
 
@@ -953,6 +1087,8 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
       expect(JSON.stringify(byKind('GROUP_MISMATCH'))).not.toContain(
         '525511111111',
       );
+      expect(byKind('GROUP_MISMATCH')[0].id).toBe('55****11');
+      expect(byKind('GROUP_MISMATCH')[0].id.replace(/\D/g, '')).toHaveLength(4);
       expect(check.mismatches).toHaveLength(3);
 
       // The backfill repairs the missing wrapper and leaves the rest alone.
@@ -964,6 +1100,47 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
         'GROUP_MISMATCH',
         'STATE_DISAGREES',
       ]);
+    });
+
+    it('flags a request RESOLVED while its wrapped row is still PENDING', async () => {
+      const fx = await seedLegacy();
+      await runBackfill(prisma, { apply: true, tenantIds: [fx.tenantId] });
+      const request = await requestOf(fx.tenantId, fx.expirationOpen);
+      await prisma.$executeRaw`
+        UPDATE "chatbot_requests"
+        SET "status" = 'RESOLVED', "resolvedAt" = now(), "closedAt" = now()
+        WHERE "id" = ${request?.id}`;
+      const [check] = (
+        await checkInvariant(prisma, { tenantIds: [fx.tenantId] })
+      ).tenants;
+      expect(
+        check.mismatches.filter((m) => m.kind === 'STATE_DISAGREES'),
+      ).toEqual([
+        expect.objectContaining({
+          subtype: 'EXPIRATION',
+          id: fx.expirationOpen,
+        }),
+      ]);
+    });
+
+    it('flags a row resolved in the last 7 days that has no wrapper, and ignores older ones', async () => {
+      const tenantId = await newTenant();
+      const recent = await seedDecision(tenantId, {
+        type: 'RESTOCK',
+        resolvedDaysAgo: 2,
+      });
+      await seedDecision(tenantId, { type: 'RESTOCK', resolvedDaysAgo: 9 });
+      const before = (await checkInvariant(prisma, { tenantIds: [tenantId] }))
+        .tenants[0];
+      expect(before.mismatches).toEqual([
+        expect.objectContaining({
+          kind: 'RESOLVED_UNWRAPPED',
+          subtype: 'RESTOCK',
+          id: recent,
+        }),
+      ]);
+      await runBackfill(prisma, { apply: true, tenantIds: [tenantId] });
+      await expectClean(tenantId);
     });
 
     it('ignores cancelled requests (a customer cancel leaves the wrapped row pending)', async () => {
@@ -1187,6 +1364,94 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
         });
       }
       expect(await group(fx.tenantId, '525511111111')).toBeNull();
+    });
+  });
+
+  describe('races (seam and receipts)', () => {
+    it('a wrapper inserted inside the batch transaction hits ON CONFLICT DO NOTHING: skipped, no duplicate, no event, groups consistent', async () => {
+      const fx = await seedLegacy();
+      const planted = fx.restockOpen[0];
+      let plantedOnce = false;
+      const report = await runBackfill(prisma, {
+        apply: true,
+        tenantIds: [fx.tenantId],
+        beforeInsert: async (tx, batch) => {
+          if (plantedOnce || !batch.ids.includes(planted)) return;
+          plantedOnce = true;
+          const created = await tx.chatbotRequest.create({
+            data: requestCreateData(
+              fx.tenantId,
+              await allocateFolio(tx, fx.tenantId),
+              humanDecisionWrap({
+                id: planted,
+                type: 'RESTOCK',
+                productId: randomUUID(),
+                productName: 'Croquetas 20 kg',
+                variantId: null,
+              }),
+            ),
+            select: { id: true },
+          });
+          await tx.chatbotRequestEvent.create({
+            data: {
+              tenantId: fx.tenantId,
+              requestId: created.id,
+              type: 'CREATED',
+              actorKind: 'SYSTEM',
+              toStatus: 'NEW',
+              version: 1,
+              data: { wrapped: true },
+            },
+          });
+          await refreshCustomerGroup(tx, fx.tenantId, `unknown:${planted}`);
+        },
+      });
+      const tenant = tenantReport(report, fx.tenantId);
+      expect(plantedOnce).toBe(true);
+      expect(tenant.changedUnderLock).toBe(1);
+      expect(totalCreated(tenant)).toBe(11);
+      const requests = await expectWrappedOnce(fx.tenantId);
+      expect(requests).toHaveLength(13);
+      const winner = await requestOf(fx.tenantId, planted);
+      const events = await prisma.chatbotRequestEvent.findMany({
+        where: { requestId: winner?.id },
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0].data).not.toMatchObject({ backfilled: true });
+      await expectClean(fx.tenantId);
+    });
+
+    it('a receipt confirm racing the backfill ends consistent either way', async () => {
+      const fx = await seedLegacy();
+      const receipt = await prisma.receiptEvidence.findUniqueOrThrow({
+        where: { id: fx.receiptOpen },
+        select: { saleId: true },
+      });
+      await guarded(
+        Promise.all([
+          runBackfill(prisma, {
+            apply: true,
+            tenantIds: [fx.tenantId],
+            batchSize: 2,
+          }),
+          inTenant(fx.tenantId, () =>
+            receipts.confirm(
+              receipt.saleId,
+              fx.receiptOpen,
+              reviewer,
+              { amountCents: 10_000 },
+              randomUUID(),
+            ),
+          ),
+        ]),
+      );
+      await expectWrappedOnce(fx.tenantId);
+      await expectClean(fx.tenantId);
+      expect(await requestOf(fx.tenantId, fx.receiptOpen)).toMatchObject({
+        status: 'RESOLVED',
+        resolvedByActorId: reviewer,
+      });
+      expect(await group(fx.tenantId, '525577777777')).toBeNull();
     });
   });
 

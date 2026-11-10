@@ -14,7 +14,9 @@ const {
   BATCH_SIZE,
   RECENT_DAYS,
   CORE_DIST,
+  EXIT,
   formatCheck,
+  formatFailure,
   formatReport,
   loadCore,
   parseArgs,
@@ -32,11 +34,14 @@ const tenantReport = (tenantId, overrides = {}) => ({
   ambiguousCustomers: 0,
   changedUnderLock: 0,
   undatedRejectedReceipts: 0,
+  oldestOpenAt: Object.fromEntries(SUBTYPES.map((s) => [s, null])),
   batches: 0,
   ...overrides,
 });
+const NOW_FIXED = new Date('2026-11-10T12:00:00.000Z');
 const report = (applied, tenants) => ({
   applied,
+  now: NOW_FIXED,
   cutoff: new Date('2026-11-03T12:00:00.000Z'),
   tenants,
 });
@@ -356,5 +361,99 @@ test('loadCore explains a missing build instead of a stack trace', () => {
     );
   } finally {
     fs.rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test('the report gives the age of the oldest pending row per subtype', () => {
+  const day = 24 * 60 * 60 * 1000;
+  const { lines, log } = capture();
+  formatReport(
+    report(false, [
+      tenantReport('t1', {
+        oldestOpenAt: {
+          RESTOCK: new Date(NOW_FIXED.getTime() - 41.5 * day),
+          EXPIRATION: null,
+          DELIVERY_ZONE: new Date(NOW_FIXED.getTime() - 3 * day),
+          TRANSFER_RECEIPT: null,
+        },
+      }),
+    ]),
+    new Map([['t1', 'centro']]),
+    log,
+  );
+  const text = lines.join('\n');
+  assert.match(
+    text,
+    /oldest pending row to wrap: RESTOCK 41 d, DELIVERY_ZONE 3 d\b/,
+  );
+  assert.doesNotMatch(text, /EXPIRATION \d+ d/);
+  const none = capture();
+  formatReport(
+    report(false, [tenantReport('t1')]),
+    new Map([['t1', 'centro']]),
+    none.log,
+  );
+  assert.match(none.lines.join('\n'), /oldest pending row to wrap: none/);
+});
+
+// ----------------------------------------------------- failure and exit codes
+
+test('exit codes: clean 0, mismatch 1, crash 2', () => {
+  assert.deepEqual(EXIT, { CLEAN: 0, MISMATCH: 1, CRASH: 2 });
+});
+
+test('a failure prints the error class and the Prisma/PostgreSQL code, never the raw message', () => {
+  class PrismaClientKnownRequestError extends Error {
+    constructor(message, code) {
+      super(message);
+      this.name = 'PrismaClientKnownRequestError';
+      this.code = code;
+    }
+  }
+  const unique = new PrismaClientKnownRequestError(
+    'Unique constraint failed on (phone)=(5512345678) for ana@example.com',
+    'P2002',
+  );
+  const line = formatFailure(unique);
+  assert.equal(line, 'FAILED PrismaClientKnownRequestError P2002');
+  assert.doesNotMatch(line, /5512345678|example\.com|Unique/);
+
+  const deadlock = new Error('deadlock detected on 525512345678');
+  deadlock.cause = { code: '40P01' };
+  assert.equal(formatFailure(deadlock), 'FAILED Error 40P01');
+
+  assert.equal(
+    formatFailure(new TypeError('boom 123456789')),
+    'FAILED TypeError',
+  );
+  assert.equal(formatFailure('weird 5512345678'), 'FAILED UnknownError');
+});
+
+test('our own ops errors keep their authored message, with long digit runs redacted', () => {
+  const err = Object.assign(new Error('tenant "t-5512345678" and 12345'), {
+    code: 'TENANT_NOT_FOUND',
+  });
+  Object.defineProperty(err, 'name', { value: 'OpsError' });
+  const line = formatFailure(err);
+  assert.match(line, /^FAILED TENANT_NOT_FOUND: /);
+  assert.doesNotMatch(line, /\d{6,}/);
+  assert.match(line, /12345/);
+});
+
+test('loadCore tells a missing file (BUILD_MISSING) from a file that fails to load (LOAD_FAILED)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backfill-core-'));
+  try {
+    const file = path.join(dir, CORE_DIST);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "throw new Error('cannot read 5512345678 secret');");
+    assert.throws(
+      () => loadCore(dir),
+      (err) =>
+        err.code === 'LOAD_FAILED' &&
+        err.message.includes(CORE_DIST) &&
+        !/5512345678|secret/.test(err.message),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

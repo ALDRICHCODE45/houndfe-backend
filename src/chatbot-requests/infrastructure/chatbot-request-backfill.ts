@@ -36,6 +36,7 @@ import { ClsService } from 'nestjs-cls';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import { createTenantScopedPrisma } from '../../shared/prisma/tenant-prisma.factory';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
+import { RESTOCK_SOURCE } from '../../human-decisions/domain/restock-request-canonicalizer';
 import { actorDisplayName } from '../domain/actor-display-name';
 import {
   allocateFolios,
@@ -92,11 +93,18 @@ export interface TenantBackfillReport {
   changedUnderLock: number;
   /** Rejected receipts of the window: they keep no resolution date. */
   undatedRejectedReceipts: number;
+  /**
+   * Creation date of the oldest PENDING row to wrap (or wrapped), per subtype;
+   * `null` when there is none. Unit 7 sizes the SLA burst from the age.
+   */
+  oldestOpenAt: Record<BackfillSubtype, Date | null>;
   batches: number;
 }
 
 export interface BackfillReport {
   applied: boolean;
+  /** The clock of this run: ages are measured against it. */
+  now: Date;
   cutoff: Date;
   tenants: TenantBackfillReport[];
 }
@@ -112,6 +120,15 @@ export interface BackfillOptions {
   tenantIds?: string[];
   batchSize?: number;
   now?: Date;
+  /**
+   * Test seam: called inside the batch transaction after the folio block and
+   * before the request insert, with the batch's transaction client (lets a
+   * test plant a wrapper to reach the `ON CONFLICT DO NOTHING` branch).
+   */
+  beforeInsert?: (
+    tx: TenantClient,
+    batch: { tenantId: string; family: FamilyName; ids: string[] },
+  ) => Promise<void>;
   /** Test seam: called after a batch is planned and before its transaction. */
   onBatchPlanned?: (batch: {
     tenantId: string;
@@ -146,6 +163,8 @@ interface Family {
   table: Prisma.Sql;
   /** The request column that wraps this table, aliased `cr`. */
   wrappedRef: Prisma.Sql;
+  /** The request subtype of a row, as text. */
+  subtype: Prisma.Sql;
   /** Pending, or resolved on/after `cutoff` (and wrappable). */
   qualifies: (cutoff: Date) => Prisma.Sql;
   zip: Prisma.Sql;
@@ -185,10 +204,14 @@ const decisionFamily: Family = {
   name: 'HUMAN_DECISION',
   table: Prisma.sql`"human_decisions" w`,
   wrappedRef: Prisma.sql`cr."humanDecisionId"`,
+  subtype: Prisma.sql`w."type"::text`,
   zip: Prisma.sql`NULL::text`,
+  // Only the chatbot's decisions, like the legacy tray (`RESTOCK_SOURCE`):
+  // another source is never wrapped.
   qualifies: (cutoff) => Prisma.sql`(
-    w."status" = 'PENDING'
-    OR (w."status" = 'RESOLVED' AND w."resolvedAt" >= ${cutoff}))`,
+    w."source" = ${RESTOCK_SOURCE}
+    AND (w."status" = 'PENDING'
+      OR (w."status" = 'RESOLVED' AND w."resolvedAt" >= ${cutoff})))`,
   load: async (db, tenantId, ids, cutoff, forUpdate) => {
     const rows = await db.$queryRaw<DecisionRow[]>(Prisma.sql`
       SELECT w."id", w."createdAt", w."type"::text AS "type", w."productId",
@@ -256,6 +279,7 @@ const zoneFamily: Family = {
   name: 'DELIVERY_ZONE_REQUEST',
   table: Prisma.sql`"delivery_zone_requests" w`,
   wrappedRef: Prisma.sql`cr."deliveryZoneRequestId"`,
+  subtype: Prisma.sql`'DELIVERY_ZONE'::text`,
   zip: Prisma.sql`w."zipCode"`,
   // A requester born RESOLVED by an existing zone never waited for a human
   // and has no validation: the 3a hook does not wrap it either.
@@ -347,6 +371,7 @@ const receiptFamily: Family = {
   name: 'RECEIPT_EVIDENCE',
   table: Prisma.sql`"receipt_evidences" w`,
   wrappedRef: Prisma.sql`cr."receiptEvidenceId"`,
+  subtype: Prisma.sql`'TRANSFER_RECEIPT'::text`,
   zip: Prisma.sql`NULL::text`,
   // A rejection stores no date (`markRejected` writes none), so a rejected
   // receipt cannot be placed in the window and is reported, not wrapped.
@@ -535,6 +560,10 @@ async function wrappedAmong(
 function tally(report: TenantBackfillReport, prepared: Prepared[]): void {
   for (const item of prepared) {
     report.create[item.subtype][item.resolved ? 'resolved' : 'open'] += 1;
+    const oldest = report.oldestOpenAt[item.subtype];
+    if (!item.resolved && (oldest === null || item.createdAt < oldest)) {
+      report.oldestOpenAt[item.subtype] = item.createdAt;
+    }
     if (item.wrap.link.ambiguousCustomer) report.ambiguousCustomers += 1;
   }
 }
@@ -549,6 +578,7 @@ async function applyBatch(
   family: Family,
   candidates: Candidate[],
   cutoff: Date,
+  beforeInsert: BackfillOptions['beforeInsert'],
 ): Promise<{ created: Prepared[]; changed: number }> {
   // 1. Postal-code locks first, sorted (lock-order rule 5).
   const zips = [
@@ -576,6 +606,11 @@ async function applyBatch(
   // unique wrapped FK is the net under the checks above.
   const firstFolio = await allocateFolios(tx, tenantId, prepared.length);
   const requestIds: string[] = prepared.map(() => randomUUID());
+  await beforeInsert?.(tx, {
+    tenantId,
+    family: family.name,
+    ids: prepared.map((item) => item.id),
+  });
   const { count } = await tx.chatbotRequest.createMany({
     data: prepared.map((item, index) =>
       requestCreateData(tenantId, firstFolio + index, item.wrap, {
@@ -643,7 +678,7 @@ async function applyBatch(
 }
 
 type RunOptions = Required<Pick<BackfillOptions, 'apply' | 'batchSize'>> &
-  Pick<BackfillOptions, 'onBatchPlanned'>;
+  Pick<BackfillOptions, 'onBatchPlanned' | 'beforeInsert'>;
 
 async function runTenant(
   scoped: TenantClient,
@@ -662,6 +697,12 @@ async function runTenant(
       tenantId,
       cutoff,
     ),
+    oldestOpenAt: {
+      RESTOCK: null,
+      EXPIRATION: null,
+      DELIVERY_ZONE: null,
+      TRANSFER_RECEIPT: null,
+    },
     batches: 0,
   };
   for (const family of FAMILIES) {
@@ -704,6 +745,7 @@ async function runTenant(
               family,
               candidates,
               cutoff,
+              options.beforeInsert,
             ),
           TX_OPTIONS,
         );
@@ -734,7 +776,8 @@ export async function runBackfill(
   prisma: PrismaClient,
   options: BackfillOptions,
 ): Promise<BackfillReport> {
-  const cutoff = recentCutoff(options.now ?? new Date());
+  const now = options.now ?? new Date();
+  const cutoff = recentCutoff(now);
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   if (!Number.isInteger(batchSize) || batchSize < 1) {
     throw new Error('batchSize must be a positive integer');
@@ -758,13 +801,14 @@ export async function runBackfill(
               apply: options.apply,
               batchSize,
               onBatchPlanned: options.onBatchPlanned,
+              beforeInsert: options.beforeInsert,
             },
             cutoff,
           ),
       ),
     );
   }
-  return { applied: options.apply, cutoff, tenants };
+  return { applied: options.apply, now, cutoff, tenants };
 }
 
 async function allTenantIds(prisma: PrismaClient): Promise<string[]> {
@@ -779,6 +823,7 @@ async function allTenantIds(prisma: PrismaClient): Promise<string[]> {
 
 export type MismatchKind =
   | 'MISSING_REQUEST'
+  | 'RESOLVED_UNWRAPPED'
   | 'STATE_DISAGREES'
   | 'GROUP_MISMATCH';
 
@@ -802,11 +847,16 @@ export interface InvariantReport {
   tenants: TenantInvariantReport[];
 }
 
-/** `55****5678`: area code and last four of the last ten digits. */
+/**
+ * `55****78`: the first two and the last two digits of the last ten, never more
+ * than 4 digits in total (the rule of `count-duplicate-customer-phones.cjs`);
+ * fewer than 6 digits show nothing. An `unknown:<id>` key holds a row id, not a
+ * phone, and is kept.
+ */
 export function maskCustomerKey(key: string): string {
   if (key.startsWith('unknown:')) return key;
   const last = key.replace(/\D/g, '').slice(-10);
-  return last.length < 7 ? '****' : `${last.slice(0, 2)}****${last.slice(-4)}`;
+  return last.length < 6 ? '****' : `${last.slice(0, 2)}****${last.slice(-2)}`;
 }
 
 interface OpenWrappedRow {
@@ -817,17 +867,19 @@ interface OpenWrappedRow {
 
 /**
  * §2.1 invariant, read-only: every open wrapped row has exactly one open
- * request (the unique FK gives "one") and the states agree, and the customer
- * groups match the open requests. A request CANCELLED by the customer leaves
+ * request (the unique FK gives "one") and the states agree, a row resolved in
+ * the last 7 days has a request (`RESOLVED_UNWRAPPED`; older ones are not
+ * wrapped by design), and the customer groups match the open requests. A request CANCELLED by the customer leaves
  * its wrapped row PENDING by design, so it is not a mismatch. Runs in one
  * REPEATABLE READ snapshot; under live traffic, re-run before trusting a
  * single stray mismatch.
  */
 export async function checkInvariant(
   prisma: PrismaClient,
-  options: { tenantIds?: string[] } = {},
+  options: { tenantIds?: string[]; now?: Date } = {},
 ): Promise<InvariantReport> {
   const tenantIds = options.tenantIds ?? (await allTenantIds(prisma));
+  const cutoff = recentCutoff(options.now ?? new Date());
 
   return prisma.$transaction(
     async (tx) => {
@@ -839,6 +891,7 @@ export async function checkInvariant(
           FROM "human_decisions" w
           LEFT JOIN "chatbot_requests" cr ON cr."humanDecisionId" = w."id"
           WHERE w."tenantId" = ${tenantId} AND w."status" = 'PENDING'
+            AND w."source" = ${RESTOCK_SOURCE}
           UNION ALL
           SELECT w."id", 'DELIVERY_ZONE', cr."status"::text
           FROM "delivery_zone_requests" w
@@ -872,6 +925,21 @@ export async function checkInvariant(
           WHERE cr."tenantId" = ${tenantId}
             AND cr."status" IN ('NEW', 'IN_PROGRESS') AND w."status" <> 'PENDING'`,
         );
+        const unwrappedResolved: { id: string; subtype: string }[] = [];
+        for (const family of FAMILIES) {
+          unwrappedResolved.push(
+            ...(await tx.$queryRaw<
+              { id: string; subtype: string }[]
+            >(Prisma.sql`
+              SELECT w."id", ${family.subtype} AS "subtype"
+              FROM ${family.table}
+              WHERE w."tenantId" = ${tenantId} AND ${family.qualifies(cutoff)}
+                AND w."status"::text <> 'PENDING'
+                AND NOT EXISTS (SELECT 1 FROM "chatbot_requests" cr
+                                WHERE ${family.wrappedRef} = w."id")
+              ORDER BY w."id"`)),
+          );
+        }
         const [{ openRequests }] = await tx.$queryRaw<
           { openRequests: number }[]
         >(
@@ -910,6 +978,13 @@ export async function checkInvariant(
               id: row.id,
             });
           }
+        }
+        for (const row of unwrappedResolved) {
+          mismatches.push({
+            kind: 'RESOLVED_UNWRAPPED',
+            subtype: row.subtype,
+            id: row.id,
+          });
         }
         for (const row of resolvedOpen) {
           mismatches.push({

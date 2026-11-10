@@ -25,7 +25,11 @@ Requests keep the wrapped row's `createdAt`, get a folio from the tenant counter
 
 ## When to run it
 
-Right after deploying the 3a code (so every new row is already wrapped by the hooks) and **before** announcing the inbox to staff. Running it earlier than the deploy leaves a gap: rows created between the run and the deploy would have no wrapper (a later run fixes it, because it is idempotent).
+Right after deploying the 3a code (so every new row is already wrapped by the hooks) and **before** the inbox is announced or used by staff.
+
+**Hard precondition: run the backfill to completion before anyone resolves requests through the common inbox route.** While wrappers are missing, a legacy resolve of an unwrapped row racing the backfill and a staff resolve of the request the backfill just created can form a lock cycle, and PostgreSQL aborts one of them (40P01). The aborted transaction rolls back cleanly and nothing is corrupted, but a staff member would see an error and have to retry (details: `docs/chatbot-requests-model.md`, lock rule 5). Once the backfill finished and `--check` is clean, the window is closed.
+
+Running it before the 3a deploy leaves a gap: rows created between the run and the deploy would have no wrapper (a later run fixes it, because it is idempotent).
 
 ## How to run it in production
 
@@ -33,23 +37,29 @@ The script runs against the compiled app, from `/app` inside the API container. 
 
 ```sh
 # 1. Find the container (Docker Swarm task name starts with the service name)
-CID=$(docker ps -q -f name=houndfe-system-backend)
+C=$(sudo docker ps -q -f name=houndfe-system-backend)
 
-# 2. Copy the script in (the image does not ship scripts/ops)
-docker exec "$CID" mkdir -p /app/scripts/ops
-docker cp scripts/ops/backfill-chatbot-requests.cjs "$CID":/app/scripts/ops/
+# 2. Pre-check: the image must be built from the backfill commit (b0ebd3a7) or
+#    later and contain the compiled core. `ls` must print the path, not an error.
+sudo docker exec "$C" ls /app/dist/chatbot-requests/infrastructure/chatbot-request-backfill.js
 
-# 3. Dry run (default): reads only
-docker exec -w /app "$CID" node scripts/ops/backfill-chatbot-requests.cjs
+# 3. Copy the script in (the image does not ship scripts/ops)
+sudo docker exec "$C" mkdir -p /app/scripts/ops
+sudo docker cp scripts/ops/backfill-chatbot-requests.cjs "$C":/app/scripts/ops/
 
-# 4. Apply
-docker exec -w /app "$CID" node scripts/ops/backfill-chatbot-requests.cjs --apply
+# 4. Dry run (default): reads only
+sudo docker exec -w /app "$C" node scripts/ops/backfill-chatbot-requests.cjs
 
-# 5. Check the invariant (exit code 1 on any mismatch)
-docker exec -w /app "$CID" node scripts/ops/backfill-chatbot-requests.cjs --check
+# 5. Apply
+sudo docker exec -w /app "$C" node scripts/ops/backfill-chatbot-requests.cjs --apply
+
+# 6. Check the invariant (exit code 1 on any mismatch)
+sudo docker exec -w /app "$C" node scripts/ops/backfill-chatbot-requests.cjs --check
 ```
 
-If `docker ps -q` prints more than one id, use the one that is running on this node, or limit the run with `--tenant <slug>`.
+If the pre-check fails, or the script stops with `FAILED OpsError`/`BUILD_MISSING`, the running image is older than the backfill commit: deploy a newer image first. `LOAD_FAILED` means the file exists but could not be loaded (a broken build).
+
+**Exit codes:** `0` clean (a dry run or apply that finished, or `--check` with no mismatch), `1` `--check` found a mismatch, `2` the script crashed (bad arguments, missing or broken build, database error). A crash prints one line with the error class and the Prisma/PostgreSQL code (for example `FAILED PrismaClientKnownRequestError P2002` or `... 40P01`), never the raw message, and long digit runs are redacted. A 40P01 deadlock aborted one batch: re-run `--apply`; rows already committed are kept.
 
 | Flag | Effect |
 | --- | --- |
@@ -61,16 +71,16 @@ If `docker ps -q` prints more than one id, use the one that is running on this n
 
 ### Sequence: dry run → apply → check
 
-1. **Dry run.** Per tenant and subtype it prints `would create N (open, resolved)`, the ambiguous customers, the rows skipped because they already have a wrapper, and the rejected receipts left out. Read it. Output has counts and ids only: no phone numbers, no customer text.
+1. **Dry run.** Per tenant and subtype it prints `would create N (open, resolved)`, the ambiguous customers, the rows skipped because they already have a wrapper, the rejected receipts left out, and the age in days of the oldest pending row per subtype (so unit 7 can size the SLA burst). Read it. Output has counts and ids only: no phone numbers, no customer text.
 2. **Apply.** Same report with `created`. It is safe while the API is live (see below).
-3. **Check.** `OK: 0 mismatches` is the target. It reports `MISSING_REQUEST` (an open legacy row without a request: run `--apply` again), `STATE_DISAGREES` (a request and its wrapped row disagree on open/resolved) and `GROUP_MISMATCH` (customer group count differs from the open requests; the customer key is masked). A single stray result under heavy traffic can be transient: re-run `--check` first.
+3. **Check.** `OK: 0 mismatches` is the target. It reports `MISSING_REQUEST` (an open legacy row without a request: run `--apply` again), `RESOLVED_UNWRAPPED` (a row resolved in the last 7 days without a request: run `--apply` again), `STATE_DISAGREES` (a request and its wrapped row disagree on open/resolved) and `GROUP_MISMATCH` (customer group count differs from the open requests; a phone key is masked to at most 4 digits). A single stray result under heavy traffic can be transient: re-run `--check` first.
 4. **Re-run `--apply` or a dry run:** it must report `0 request(s) to create`. That is the idempotency proof.
 
 Ambiguous customers (R1) are requests whose phone matched more than one `Customer`. They stay unlinked, flagged `ambiguousCustomer`, and staff links them by hand.
 
 ## Safe while the API is live
 
-- One READ COMMITTED transaction per batch of 100, per tenant. No long locks.
+- One READ COMMITTED transaction per batch of 100, per tenant. No long locks. Only decisions of the chatbot source (`houndfe-chatbot`, as the legacy tray shows) are wrapped.
 - Lock order follows `docs/chatbot-requests-model.md`: postal-code advisory locks first (zones), then the wrapped rows `FOR UPDATE` (id order), then the folio block, then the request rows, then the customer groups. The wrapped row is re-read and re-checked under the lock, so a legacy resolve or a 3a hook that got there first is respected.
 - `ON CONFLICT DO NOTHING` on the unique wrapped FK is the last net: a concurrent hook, legacy route or second backfill can never produce two wrappers for one row. A row skipped this way is printed as "skipped under lock".
 - A batch holds the postal-code lock of its zone rows for its duration (tens of milliseconds), so a bot intake for that postal code waits briefly.
@@ -87,4 +97,4 @@ If something is wrong with the data a wrapper holds, fix it with the normal comm
 
 ## Expected runtime
 
-Measured on a local test database (300 pending decisions, three batches of 100): about 0.5 s, roughly 1.5 ms per row. Zone requesters cost one extra customer lookup each and receipts one sale lookup each, and a production database adds network latency per statement (about 10 statements per row). Plan for a few minutes at most for tens of thousands of rows; a tenant with a few hundred pending rows finishes in seconds. The dry run reads in the same batches, so it takes about as long as the apply. Each batch has a 60 s transaction timeout; if a slow database trips it, re-run with a smaller `--batch-size`, and the rows already written are kept.
+Measured on a local test database (300 pending decisions, three batches of 100): about 0.5 s in total. That is a local measurement; production was not measured. Cost scales with round trips: a batch runs a fixed handful of statements (zip locks, row lock, wrapper re-check, folio block, bulk insert of requests and events) plus a few statements per row: about 4 for the customer-group refresh of each open request, one customer lookup per zone requester and one sale lookup per receipt. At an assumed 2-5 ms per round trip that is on the order of seconds per batch of 100, so a tenant with a few hundred pending rows should finish in seconds and tens of thousands of rows in minutes; treat these as estimates and watch the first batches. The dry run reads in the same batches, so it takes a similar time. Each batch has a 60 s transaction timeout; if a slow database trips it, re-run with a smaller `--batch-size`, and the rows already written are kept.
